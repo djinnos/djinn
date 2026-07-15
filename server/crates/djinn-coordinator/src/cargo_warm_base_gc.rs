@@ -11,6 +11,7 @@
 //! reports what it observes, and it never calls removal APIs or interprets a
 //! newest fingerprint mtime as a last-use signal.
 
+use std::collections::HashSet;
 use std::fs::File;
 use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
@@ -23,10 +24,479 @@ use time::OffsetDateTime;
 use uuid::Uuid;
 
 mod fingerprint_inventory;
+mod three_rung_plan;
 
 pub use fingerprint_inventory::{
     FINGERPRINT_DIR, FingerprintUnitEntry, FingerprintUnitInventory, inventory_fingerprint_units,
 };
+pub use three_rung_plan::{
+    PressureBaseSnapshot, PressurePlanDisposition, PressurePlanRetainReason, PressurePlanUnit,
+    PressureRung, ThreeRungPressurePlan, build_three_rung_pressure_plan,
+};
+
+/// Capture the DB-derived activity facts needed by the immutable three-rung
+/// planner. Profile staleness is project activity only: this intentionally
+/// never consults artifact or directory mtimes.
+///
+/// This adapter does not open locks, probe capacity, or mutate the filesystem.
+pub async fn snapshot_three_rung_pressure_bases(
+    inventory: WarmBaseInventory,
+    activity: &dyn ActivityGuard,
+) -> Vec<PressureBaseSnapshot> {
+    let mut snapshots = Vec::with_capacity(inventory.entries.len());
+    for entry in inventory.entries {
+        let effective_latest_activity = activity
+            .activity(&entry.project_id)
+            .await
+            .ok()
+            .and_then(|snapshot| snapshot.latest_activity)
+            .and_then(|value| parse_iso8601(&value).ok())
+            .map(system_time_from_offset);
+        snapshots.push(PressureBaseSnapshot {
+            project_id: entry.project_id,
+            canonical_base: std::fs::canonicalize(&entry.path).unwrap_or(entry.path),
+            effective_latest_activity,
+        });
+    }
+    snapshots
+}
+
+/// The lock shared with warm jobs.  Pressure deletion must use this rather
+/// than the legacy in-base GC lock, so deletion and warm writes serialize even
+/// when a base is being removed.
+pub struct SharedWarmBaseLock;
+
+impl BaseLock for SharedWarmBaseLock {
+    fn try_lock(&self, path: &Path) -> Result<Option<Box<dyn LockGuard>>, String> {
+        let project_id = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or("invalid project id")?;
+        let parsed = Uuid::parse_str(project_id).map_err(|_| "invalid project id")?;
+        if parsed.to_string() != project_id {
+            return Err("invalid project id".into());
+        }
+        let root = path.parent().ok_or("base has no warm root")?;
+        let lock_dir = root.join(".warm-locks");
+        std::fs::create_dir_all(&lock_dir)
+            .map_err(|error| format!("failed to create warm lock directory: {error}"))?;
+        let lock_path = lock_dir.join(format!("{project_id}.lock"));
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&lock_path)
+            .map_err(|error| {
+                format!("failed to open warm lock {}: {error}", lock_path.display())
+            })?;
+        let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+        if rc == 0 {
+            Ok(Some(Box::new(FlockGuard { _file: file })))
+        } else {
+            let error = std::io::Error::last_os_error();
+            if error.kind() == std::io::ErrorKind::WouldBlock {
+                Ok(None)
+            } else {
+                Err(error.to_string())
+            }
+        }
+    }
+}
+
+/// Consume the immutable three-rung plan in delete mode. Every operation after
+/// planning is performed under the shared warmer lock for that project.
+#[allow(clippy::too_many_arguments)]
+pub async fn execute_three_rung_pressure_plan(
+    plan: &ThreeRungPressurePlan,
+    activity: &dyn ActivityGuard,
+    warm_jobs: &dyn WarmJobGuard,
+    locks: &dyn BaseLock,
+    capacity: &dyn FilesystemCapacity,
+    config: &crate::context::CacheCleanupConfig,
+    clock: &dyn Clock,
+    root: &Path,
+) -> ThreeRungPressureResult {
+    use djinn_telemetry::cache_cleanup::{
+        self as metrics, PressureMode, PressureOutcome, PressureTermination,
+    };
+    let mut result = ThreeRungPressureResult {
+        planned: plan.units.clone(),
+        projected_allocated_bytes: plan
+            .units
+            .iter()
+            .map(|unit| unit.projected_allocated_bytes)
+            .sum(),
+        ..ThreeRungPressureResult::default()
+    };
+    for unit in &plan.units {
+        metrics::increment_pressure_unit(
+            PressureMode::Delete,
+            pressure_metric_rung(unit),
+            PressureOutcome::Planned,
+        );
+        metrics::record_pressure_projected_allocated_bytes(
+            PressureMode::Delete,
+            pressure_metric_rung(unit),
+            unit.projected_allocated_bytes,
+        );
+    }
+    let mut blocked = HashSet::new();
+    for (index, unit) in plan.units.iter().enumerate() {
+        if blocked.contains(&unit.project_id)
+            || !matches!(unit.disposition, PressurePlanDisposition::Eligible)
+        {
+            blocked.insert(unit.project_id.clone());
+            result.retained.push(unit.clone());
+            continue;
+        }
+        let guard = match locks.try_lock(&unit.canonical_base) {
+            Ok(Some(guard)) => guard,
+            Ok(None) | Err(_) => {
+                blocked.insert(unit.project_id.clone());
+                result.retained.push(unit.clone());
+                continue;
+            }
+        };
+        if recheck_three_rung_unit(unit, activity, warm_jobs, config, clock.now())
+            .await
+            .is_err()
+        {
+            blocked.insert(unit.project_id.clone());
+            result.retained.push(unit.clone());
+            drop(guard);
+            continue;
+        }
+        // `NotFound` from a concurrent safe remover is idempotent; it does
+        // not make the broader rung eligible for escalation in this pass.
+        if !unit.canonical_target.exists() {
+            blocked.insert(unit.project_id.clone());
+            drop(guard);
+            continue;
+        }
+        if !execution_target_is_still_canonical_directory(unit) {
+            blocked.insert(unit.project_id.clone());
+            result.retained.push(unit.clone());
+            drop(guard);
+            continue;
+        }
+        let bytes = match allocated_tree_bytes_for_execution(&unit.canonical_target) {
+            Ok(bytes) => bytes,
+            Err(()) => {
+                blocked.insert(unit.project_id.clone());
+                result.retained.push(unit.clone());
+                drop(guard);
+                continue;
+            }
+        };
+        // It is intentionally immediately before every removal, including the first.
+        let pre = match capacity.capacity(root) {
+            Ok(value) => value,
+            Err(_) => {
+                result.remeasurement_failed = true;
+                result.failed.push(unit.clone());
+                metrics::increment_pressure_unit(
+                    PressureMode::Delete,
+                    pressure_metric_rung(unit),
+                    PressureOutcome::Failed,
+                );
+                result.retained.extend(plan.units[index..].iter().cloned());
+                metrics::increment_pressure_termination(
+                    PressureMode::Delete,
+                    PressureTermination::RemeasureFailed,
+                );
+                break;
+            }
+        };
+        if !available_below_ratio(
+            pre.available_bytes,
+            pre.total_bytes,
+            config.warm_base_high_free_ratio,
+        ) {
+            result.reached_high_watermark = true;
+            result.retained.extend(plan.units[index..].iter().cloned());
+            metrics::increment_pressure_termination(
+                PressureMode::Delete,
+                PressureTermination::ReachedHigh,
+            );
+            break;
+        }
+        result.post_lock_eligible.push(unit.clone());
+        metrics::increment_pressure_unit(
+            PressureMode::Delete,
+            pressure_metric_rung(unit),
+            PressureOutcome::PostLockEligible,
+        );
+        result.attempted.push(unit.clone());
+        metrics::increment_pressure_unit(
+            PressureMode::Delete,
+            pressure_metric_rung(unit),
+            PressureOutcome::Attempted,
+        );
+        match remove_three_rung_target(unit, root) {
+            Ok(Removal::Removed) => {
+                result.reclaimed_bytes = result.reclaimed_bytes.saturating_add(bytes);
+                result.deleted.push(unit.clone());
+                metrics::increment_pressure_unit(
+                    PressureMode::Delete,
+                    pressure_metric_rung(unit),
+                    PressureOutcome::Deleted,
+                );
+                metrics::record_pressure_reclaimed_allocated_bytes(
+                    PressureMode::Delete,
+                    pressure_metric_rung(unit),
+                    bytes,
+                );
+                match capacity.capacity(root) {
+                    Ok(post)
+                        if available_below_ratio(
+                            post.available_bytes,
+                            post.total_bytes,
+                            config.warm_base_high_free_ratio,
+                        ) => {}
+                    Ok(_) => {
+                        result.reached_high_watermark = true;
+                        result
+                            .retained
+                            .extend(plan.units[index + 1..].iter().cloned());
+                        metrics::increment_pressure_termination(
+                            PressureMode::Delete,
+                            PressureTermination::ReachedHigh,
+                        );
+                        break;
+                    }
+                    Err(_) => {
+                        result.remeasurement_failed = true;
+                        result.failed.push(unit.clone());
+                        metrics::increment_pressure_unit(
+                            PressureMode::Delete,
+                            pressure_metric_rung(unit),
+                            PressureOutcome::Failed,
+                        );
+                        result
+                            .retained
+                            .extend(plan.units[index + 1..].iter().cloned());
+                        metrics::increment_pressure_termination(
+                            PressureMode::Delete,
+                            PressureTermination::RemeasureFailed,
+                        );
+                        break;
+                    }
+                }
+            }
+            // A concurrent remover may win after the guarded existence check.
+            // That no-op is idempotent, but it still makes this base's planned
+            // state stale, so never escalate to a broader rung this pass.
+            Ok(Removal::Absent) => {
+                blocked.insert(unit.project_id.clone());
+            }
+            Err(()) => {
+                blocked.insert(unit.project_id.clone());
+                result.retained.push(unit.clone());
+                result.failed.push(unit.clone());
+                metrics::increment_pressure_unit(
+                    PressureMode::Delete,
+                    pressure_metric_rung(unit),
+                    PressureOutcome::Failed,
+                );
+            }
+        }
+        drop(guard);
+    }
+    for unit in &result.retained {
+        metrics::increment_pressure_unit(
+            PressureMode::Delete,
+            pressure_metric_rung(unit),
+            PressureOutcome::Retained,
+        );
+    }
+    if !result.reached_high_watermark && !result.remeasurement_failed {
+        metrics::increment_pressure_termination(
+            PressureMode::Delete,
+            PressureTermination::Completed,
+        );
+    }
+    result
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct ThreeRungPressureResult {
+    pub planned: Vec<PressurePlanUnit>,
+    pub post_lock_eligible: Vec<PressurePlanUnit>,
+    pub attempted: Vec<PressurePlanUnit>,
+    pub deleted: Vec<PressurePlanUnit>,
+    pub retained: Vec<PressurePlanUnit>,
+    pub failed: Vec<PressurePlanUnit>,
+    pub projected_allocated_bytes: u64,
+    pub reclaimed_bytes: u64,
+    pub reached_high_watermark: bool,
+    pub remeasurement_failed: bool,
+}
+
+async fn recheck_three_rung_unit(
+    unit: &PressurePlanUnit,
+    activity: &dyn ActivityGuard,
+    warm_jobs: &dyn WarmJobGuard,
+    config: &crate::context::CacheCleanupConfig,
+    now: SystemTime,
+) -> Result<(), ()> {
+    let base = std::fs::symlink_metadata(&unit.canonical_base).map_err(|_| ())?;
+    if base.file_type().is_symlink()
+        || !base.is_dir()
+        || std::fs::canonicalize(&unit.canonical_base).map_err(|_| ())? != unit.canonical_base
+    {
+        return Err(());
+    }
+    match std::fs::symlink_metadata(&unit.canonical_target) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(_) => return Err(()),
+        Ok(meta) if meta.file_type().is_symlink() || !meta.is_dir() => return Err(()),
+        Ok(_) => {}
+    }
+    if std::fs::canonicalize(&unit.canonical_target).map_err(|_| ())? != unit.canonical_target
+        || !unit.canonical_target.starts_with(&unit.canonical_base)
+    {
+        return Err(());
+    }
+    let snapshot = activity.activity(&unit.project_id).await.map_err(|_| ())?;
+    if snapshot.has_active_task_run
+        || warm_jobs
+            .has_in_flight_warm(&unit.project_id)
+            .await
+            .map_err(|_| ())?
+    {
+        return Err(());
+    }
+    let last = match snapshot.latest_activity.as_deref() {
+        Some(value) => system_time_from_offset(parse_iso8601(value).map_err(|_| ())?),
+        None => base.modified().map_err(|_| ())?,
+    };
+    if now < last.checked_add(config.warm_base_grace_period).ok_or(())? {
+        return Err(());
+    }
+    if unit.rung == PressureRung::StaleProfile
+        && (snapshot.latest_activity.is_none()
+            || now.duration_since(last).unwrap_or_default()
+                < Duration::from_secs(config.warm_profile_min_idle_hours.saturating_mul(3600)))
+    {
+        return Err(());
+    }
+    Ok(())
+}
+
+fn execution_target_is_still_canonical_directory(unit: &PressurePlanUnit) -> bool {
+    matches!(
+        std::fs::symlink_metadata(&unit.canonical_target),
+        Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink()
+    ) && std::fs::canonicalize(&unit.canonical_target).is_ok_and(|target| {
+        target == unit.canonical_target && target.starts_with(&unit.canonical_base)
+    })
+}
+
+fn allocated_tree_bytes_for_execution(root: &Path) -> Result<u64, ()> {
+    let mut total: u64 = 0;
+    let mut pending = vec![root.to_path_buf()];
+    while let Some(path) = pending.pop() {
+        for child in std::fs::read_dir(path).map_err(|_| ())? {
+            let child = child.map_err(|_| ())?;
+            let metadata = std::fs::symlink_metadata(child.path()).map_err(|_| ())?;
+            if metadata.file_type().is_symlink() {
+                return Err(());
+            }
+            if metadata.is_dir() {
+                pending.push(child.path());
+            } else if metadata.is_file() {
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::MetadataExt;
+                    total = total.saturating_add(metadata.blocks().saturating_mul(512));
+                }
+                #[cfg(not(unix))]
+                {
+                    total = total.saturating_add(metadata.len());
+                }
+            } else {
+                return Err(());
+            }
+        }
+    }
+    Ok(total)
+}
+
+enum Removal {
+    Removed,
+    Absent,
+}
+
+// Keep the destructive syscall behind this small seam so the executor's
+// fail-closed behavior can be exercised for a real, mid-removal filesystem
+// error. Production always uses `remove_dir_all`; the hook only exists in
+// unit-test builds and is thread-local so parallel tests cannot affect one
+// another.
+#[cfg(test)]
+thread_local! {
+    static REMOVE_DIR_ALL_HOOK: std::cell::RefCell<Option<Box<dyn Fn(&Path) -> std::io::Result<()>>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+fn set_remove_dir_all_hook(hook: Option<Box<dyn Fn(&Path) -> std::io::Result<()>>>) {
+    REMOVE_DIR_ALL_HOOK.with(|slot| *slot.borrow_mut() = hook);
+}
+
+fn remove_dir_all_for_three_rung_target(path: &Path) -> std::io::Result<()> {
+    #[cfg(test)]
+    if let Some(result) =
+        REMOVE_DIR_ALL_HOOK.with(|slot| slot.borrow().as_ref().map(|hook| hook(path)))
+    {
+        return result;
+    }
+    std::fs::remove_dir_all(path)
+}
+
+fn remove_three_rung_target(unit: &PressurePlanUnit, root: &Path) -> Result<Removal, ()> {
+    let root = std::fs::canonicalize(root).map_err(|_| ())?;
+    if !unit.canonical_base.starts_with(&root)
+        || !unit.canonical_target.starts_with(&unit.canonical_base)
+    {
+        return Err(());
+    }
+    match remove_dir_all_for_three_rung_target(&unit.canonical_target) {
+        Ok(()) => Ok(Removal::Removed),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Removal::Absent),
+        Err(_) => Err(()),
+    }
+}
+
+/// Consume an immutable plan in dry-run mode. Returning cloned units preserves
+/// the captured plan for diagnostics while guaranteeing no lock, guard,
+/// capacity, or filesystem operation occurs during consumption.
+pub fn consume_three_rung_pressure_plan_dry_run(
+    plan: &ThreeRungPressurePlan,
+) -> Vec<PressurePlanUnit> {
+    use djinn_telemetry::cache_cleanup::{self as metrics, PressureMode, PressureOutcome};
+    for unit in &plan.units {
+        metrics::increment_pressure_unit(
+            PressureMode::DryRun,
+            pressure_metric_rung(unit),
+            PressureOutcome::Planned,
+        );
+        metrics::record_pressure_projected_allocated_bytes(
+            PressureMode::DryRun,
+            pressure_metric_rung(unit),
+            unit.projected_allocated_bytes,
+        );
+    }
+    plan.units.clone()
+}
+
+fn pressure_metric_rung(unit: &PressurePlanUnit) -> djinn_telemetry::cache_cleanup::PressureRung {
+    match unit.rung {
+        PressureRung::Incremental => djinn_telemetry::cache_cleanup::PressureRung::Incremental,
+        PressureRung::StaleProfile => djinn_telemetry::cache_cleanup::PressureRung::Profile,
+        PressureRung::WholeBase => djinn_telemetry::cache_cleanup::PressureRung::Base,
+    }
+}
 
 pub const CARGO_WARM_BASE_ROOT: &str = "/cache/cargo-target";
 pub const WARM_BASE_GC_LOCK_FILE: &str = ".djinn-gc.lock";
@@ -480,6 +950,13 @@ pub struct PressureEvictionResult {
 /// Emit the pressure sweep completion event without exposing per-project
 /// identifiers. Retention reasons are enums, preserving bounded diagnostics
 /// while callers retain the detailed result for control flow.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "legacy pressure eviction remains additive while health consumes the three-rung executor"
+    )
+)]
 pub(crate) fn log_pressure_eviction_completion(
     pressure: &PressureEvictionResult,
     mode: crate::context::CacheCleanupMode,

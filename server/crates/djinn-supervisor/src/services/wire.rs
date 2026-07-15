@@ -283,9 +283,13 @@ pub struct AuthResultMsg {
 pub struct AttributedPlannerRequest {
     pub project_id: String,
     pub task_id: String,
-    pub task_run_id: Option<String>,
-    pub session_id: Option<String>,
-    pub created_by_user_id: Option<String>,
+    /// Required real task-run identity. This operation deliberately has no
+    /// anonymous or unattributed mode.
+    pub task_run_id: String,
+    /// Required real role-session identity.
+    pub session_id: String,
+    /// Required creator identity used for caller-scoped credential resolution.
+    pub created_by_user_id: String,
     pub operation: String,
     pub prompt_id: String,
     pub conversation: String,
@@ -663,6 +667,14 @@ mod tests {
             ci_github_head_sha: None,
             ci_heads_diverged: None,
             ci_head_observation_error: None,
+            ci_mq_state: None,
+            ci_mq_run_id: None,
+            ci_mq_head_sha: None,
+            ci_mq_failed_check_names: None,
+            ci_mq_failure_fingerprint: None,
+            ci_mq_same_signature_count: None,
+            ci_mq_first_seen_at: None,
+            ci_mq_last_seen_at: None,
             unresolved_blocker_count: 0,
         }
     }

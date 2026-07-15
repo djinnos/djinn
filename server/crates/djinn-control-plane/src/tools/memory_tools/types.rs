@@ -540,6 +540,40 @@ pub struct MemoryDeleteResponse {
 }
 
 #[derive(Serialize, schemars::JsonSchema)]
+pub struct RetrievalEntryPointHealthSummary {
+    pub entry_point: String,
+    pub total_queries: i64,
+    pub zero_result_queries: i64,
+    pub error_queries: i64,
+    pub candidate_count: i64,
+    pub injected_count: i64,
+    pub skipped_count: i64,
+}
+
+/// A retrieval source remains present when it is unavailable. Stable error
+/// codes are `project_required`, `project_unresolved`, `rollup_unavailable`,
+/// and `process_snapshot_unavailable`.
+#[derive(Serialize, schemars::JsonSchema)]
+pub struct RetrievalHealthScope {
+    pub status: String,
+    pub error_code: Option<String>,
+    /// Inclusive start and exclusive end of the persisted half-open window.
+    pub window_start: Option<String>,
+    pub window_end: Option<String>,
+    /// Process construction time; only applicable to the process scope.
+    pub started_at: Option<String>,
+    /// Fixed, bounded entry-point evidence (four workload entry points).
+    pub summaries: Vec<RetrievalEntryPointHealthSummary>,
+}
+
+#[derive(Serialize, schemars::JsonSchema)]
+pub struct RetrievalHealthResponse {
+    pub config_window_hours: i64,
+    pub persisted: RetrievalHealthScope,
+    pub process: RetrievalHealthScope,
+}
+
+#[derive(Serialize, schemars::JsonSchema)]
 pub struct MemoryHealthResponse {
     pub total_notes: Option<i64>,
     pub broken_link_count: Option<i64>,
@@ -561,6 +595,8 @@ pub struct MemoryHealthResponse {
     pub stale_notes_by_folder: Option<Vec<djinn_memory::StaleFolder>>,
     pub lifecycle: Option<djinn_memory::LifecycleHealth>,
     pub recent_sweep: Option<djinn_memory::RecentSweepMetrics>,
+    /// Required even when the top-level note-health operation returns an error.
+    pub retrieval: RetrievalHealthResponse,
     pub error: Option<String>,
 }
 

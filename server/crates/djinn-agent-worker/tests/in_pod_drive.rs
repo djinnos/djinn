@@ -110,6 +110,14 @@ fn fixture_task(task_id: &str, project_id: &str) -> Task {
         ci_github_head_sha: None,
         ci_heads_diverged: None,
         ci_head_observation_error: None,
+        ci_mq_state: None,
+        ci_mq_run_id: None,
+        ci_mq_head_sha: None,
+        ci_mq_failed_check_names: None,
+        ci_mq_failure_fingerprint: None,
+        ci_mq_same_signature_count: None,
+        ci_mq_first_seen_at: None,
+        ci_mq_last_seen_at: None,
         unresolved_blocker_count: 0,
     }
 }
@@ -371,6 +379,12 @@ async fn handle_rpc(
             audit.lock().await.invoke_llm_attempts += 1;
             panic!(
                 "worker must call the provider locally; invoke_llm RPC is a Phase 7b regression"
+            );
+        }
+        ServiceRpcRequest::PlanMemoryIntents { .. } => {
+            panic!(
+                "worker dispatched memory planning in the in-pod path — \
+                 planning must remain disabled before stage execution"
             );
         }
         ServiceRpcRequest::OpenPr { .. } => {

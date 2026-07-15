@@ -2184,6 +2184,14 @@
             "type": "string"
           },
           "default": null
+        },
+        "project": {
+          "description": "Project UUID or exact `owner/repo` slug used only by the explicitly\nselected extension diagnostics probe; this is never a filesystem path.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
         }
       },
       "type": "object"
@@ -2231,6 +2239,13 @@
               "items": {
                 "$ref": "#/$defs/DoctorRunFindingEntry"
               }
+            },
+            "extension_diagnostics": {
+              "description": "Persisted V1 diagnostics from the explicit project probe. Empty and\nskipped for ordinary global checks.",
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/DoctorExtensionDiagnosticFinding"
+              }
             }
           },
           "required": [
@@ -2276,6 +2291,51 @@
             "check_name",
             "severity",
             "detail"
+          ]
+        },
+        "DoctorExtensionDiagnosticFinding": {
+          "description": "Direct projection of a persisted V1 extension diagnostic.\n\nThe project probe never creates a duplicate `doctor_findings` row.",
+          "type": "object",
+          "properties": {
+            "diagnostic_id": {
+              "type": "string"
+            },
+            "source_kind": {
+              "type": "string"
+            },
+            "source_key": {
+              "type": "string"
+            },
+            "phase": {
+              "type": "string"
+            },
+            "summary": {
+              "type": "string"
+            },
+            "remedy_code": {
+              "type": "string"
+            },
+            "remedy": {
+              "type": "string"
+            },
+            "severity": {
+              "type": "string"
+            },
+            "occurrence_count": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          "required": [
+            "diagnostic_id",
+            "source_kind",
+            "source_key",
+            "phase",
+            "summary",
+            "remedy_code",
+            "remedy",
+            "severity",
+            "occurrence_count"
           ]
         }
       },
@@ -8139,6 +8199,113 @@
             "last_archived_count",
             "last_superseded_source_count"
           ]
+        },
+        "RetrievalHealthResponse": {
+          "type": "object",
+          "properties": {
+            "config_window_hours": {
+              "type": "integer",
+              "format": "int64"
+            },
+            "persisted": {
+              "$ref": "#/$defs/RetrievalHealthScope"
+            },
+            "process": {
+              "$ref": "#/$defs/RetrievalHealthScope"
+            }
+          },
+          "required": [
+            "config_window_hours",
+            "persisted",
+            "process"
+          ]
+        },
+        "RetrievalHealthScope": {
+          "description": "A retrieval source remains present when it is unavailable. Stable error\ncodes are `project_required`, `project_unresolved`, `rollup_unavailable`,\nand `process_snapshot_unavailable`.",
+          "type": "object",
+          "properties": {
+            "status": {
+              "type": "string"
+            },
+            "error_code": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "window_start": {
+              "description": "Inclusive start and exclusive end of the persisted half-open window.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "window_end": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "started_at": {
+              "description": "Process construction time; only applicable to the process scope.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "summaries": {
+              "description": "Fixed, bounded entry-point evidence (four workload entry points).",
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/RetrievalEntryPointHealthSummary"
+              }
+            }
+          },
+          "required": [
+            "status",
+            "summaries"
+          ]
+        },
+        "RetrievalEntryPointHealthSummary": {
+          "type": "object",
+          "properties": {
+            "entry_point": {
+              "type": "string"
+            },
+            "total_queries": {
+              "type": "integer",
+              "format": "int64"
+            },
+            "zero_result_queries": {
+              "type": "integer",
+              "format": "int64"
+            },
+            "error_queries": {
+              "type": "integer",
+              "format": "int64"
+            },
+            "candidate_count": {
+              "type": "integer",
+              "format": "int64"
+            },
+            "injected_count": {
+              "type": "integer",
+              "format": "int64"
+            },
+            "skipped_count": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          "required": [
+            "entry_point",
+            "total_queries",
+            "zero_result_queries",
+            "error_queries",
+            "candidate_count",
+            "injected_count",
+            "skipped_count"
+          ]
         }
       },
       "type": "object",
@@ -8239,13 +8406,20 @@
             }
           ]
         },
+        "retrieval": {
+          "description": "Required even when the top-level note-health operation returns an error.",
+          "$ref": "#/$defs/RetrievalHealthResponse"
+        },
         "error": {
           "type": [
             "string",
             "null"
           ]
         }
-      }
+      },
+      "required": [
+        "retrieval"
+      ]
     },
     "readOnly": false,
     "destructive": true,
@@ -20868,7 +21042,7 @@
   },
   {
     "name": "session_show",
-    "description": "session_show(id) returns session details: id, task_id, model_id, agent_type, started_at, ended_at, status, tokens_in, tokens_out, cache_read_tokens, cache_write_tokens",
+    "description": "session_show(id) returns session details and canonical session-associated extension_load_diagnostics: id, task_id, model_id, agent_type, started_at, ended_at, status, tokens_in, tokens_out, cache_read_tokens, cache_write_tokens",
     "inputSchema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "required": [
@@ -20889,6 +21063,10 @@
     },
     "outputSchema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "$defs": {
+        "AnyJson": {}
+      },
+      "type": "object",
       "properties": {
         "id": {
           "type": "string"
@@ -20955,14 +21133,23 @@
             "null"
           ]
         },
+        "extension_load_diagnostics": {
+          "description": "Canonical extension-load failures associated with this session. Present\non successful lookups, including as an empty array.",
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "$ref": "#/$defs/AnyJson"
+          }
+        },
         "error": {
           "type": [
             "string",
             "null"
           ]
         }
-      },
-      "type": "object"
+      }
     },
     "readOnly": false,
     "destructive": true,
@@ -22147,6 +22334,17 @@
                 "string",
                 "null"
               ]
+            },
+            "merge_queue": {
+              "description": "Merge-queue (`merge_group`) failure lane for the current PR head.\n\nPresent only when GitHub's merge queue rejected the PR at dequeue time\n(a PR head whose own required checks are green can still be dequeued if\nthe heavy `merge_group` stages fail). Populated from the `mq_*` columns\nof `task_pr_ci_snapshots`; omitted entirely when no merge-queue failure\nhas been recorded for the current head.",
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/CiMergeQueueLane"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             }
           },
           "required": [
@@ -22202,6 +22400,69 @@
               "type": "string",
               "const": "awaiting_ci"
             }
+          ]
+        },
+        "CiMergeQueueLane": {
+          "description": "The merge-queue (`merge_group`) failure lane surfaced in a\n[`CiGateSnapshot`].\n\nMirrors `djinn_core::models::MergeQueueLane` in serialized form. GitHub's\nmerge queue runs the heavy CI stages on the ephemeral `merge_group` ref, so\na PR whose own head checks pass can still be rejected by the queue. This\nlane records that queue verdict with its own failure fingerprint and\nsame-signature counting, independent of the PR-head lane.",
+          "type": "object",
+          "properties": {
+            "state": {
+              "description": "Lane state, e.g. `\"dequeued_failure\"`.",
+              "type": "string"
+            },
+            "run_id": {
+              "description": "The `merge_group` Actions run id that failed, when known.",
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "int64"
+            },
+            "head_sha": {
+              "description": "The `head_sha` of the failed merge-group run (the ephemeral queue ref\nhead), when known.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "failed_check_names": {
+              "description": "Names of the merge-group check runs that failed.",
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "failure_fingerprint": {
+              "description": "Stable fingerprint of the merge-group failure signature.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "same_signature_count": {
+              "description": "How many consecutive dequeue observations carried the same\n`failure_fingerprint` in this lane.",
+              "type": "integer",
+              "format": "int64"
+            },
+            "first_seen_at": {
+              "description": "ISO-8601 timestamp when this merge-queue lane state was first observed.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "last_seen_at": {
+              "description": "ISO-8601 timestamp when this merge-queue lane state was last observed.",
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "state",
+            "failed_check_names",
+            "same_signature_count"
           ]
         }
       },
@@ -22551,6 +22812,31 @@
             "payload",
             "timestamp"
           ]
+        },
+        "TimelineExtensionLoadDiagnosticEvent": {
+          "description": "A canonical extension-load diagnostic placed on a task timeline.\n\nThe diagnostic remains the shared V1 wire object rather than a timeline-\nspecific copy of its fields. `session_id` and `timestamp` provide the\nplacement metadata needed by timeline renderers.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "description": "Fixed discriminator for extension-load diagnostic timeline events.",
+              "type": "string"
+            },
+            "session_id": {
+              "type": "string"
+            },
+            "timestamp": {
+              "type": "string"
+            },
+            "diagnostic": {
+              "$ref": "#/$defs/AnyJson"
+            }
+          },
+          "required": [
+            "kind",
+            "session_id",
+            "timestamp",
+            "diagnostic"
+          ]
         }
       },
       "type": "object",
@@ -22580,6 +22866,16 @@
           ],
           "items": {
             "$ref": "#/$defs/TimelineActivity"
+          }
+        },
+        "extension_load_diagnostic_events": {
+          "description": "Canonical session-associated extension-load diagnostics, including as\nan empty array on successful timeline lookups.",
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "$ref": "#/$defs/TimelineExtensionLoadDiagnosticEvent"
           }
         },
         "error": {

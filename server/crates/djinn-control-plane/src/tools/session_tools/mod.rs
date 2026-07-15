@@ -2,8 +2,10 @@ use rmcp::{Json, handler::server::wrapper::Parameters, schemars, tool, tool_rout
 use serde::{Deserialize, Serialize};
 
 use crate::server::DjinnMcpServer;
+use djinn_core::extension_diagnostics::ExtensionLoadDiagnosticV1;
 use djinn_core::models::SessionRecord;
 use djinn_db::ActivityQuery;
+use djinn_db::ExtensionLoadDiagnosticRepository;
 use djinn_db::SessionMessageRepository;
 use djinn_db::SessionRepository;
 use djinn_db::TaskRepository;
@@ -170,6 +172,11 @@ pub struct SessionActiveResponse {
 pub struct SessionShowResponse {
     #[serde(flatten)]
     pub session: Option<SessionToolSession>,
+    /// Canonical extension-load failures associated with this session. Present
+    /// on successful lookups, including as an empty array.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(with = "Option<Vec<super::json_object::AnyJson>>")]
+    pub extension_load_diagnostics: Option<Vec<ExtensionLoadDiagnosticV1>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 }
@@ -211,6 +218,21 @@ pub struct TimelineActivity {
     pub timestamp: String,
 }
 
+/// A canonical extension-load diagnostic placed on a task timeline.
+///
+/// The diagnostic remains the shared V1 wire object rather than a timeline-
+/// specific copy of its fields. `session_id` and `timestamp` provide the
+/// placement metadata needed by timeline renderers.
+#[derive(Serialize, schemars::JsonSchema)]
+pub struct TimelineExtensionLoadDiagnosticEvent {
+    /// Fixed discriminator for extension-load diagnostic timeline events.
+    pub kind: String,
+    pub session_id: String,
+    pub timestamp: String,
+    #[schemars(with = "super::json_object::AnyJson")]
+    pub diagnostic: ExtensionLoadDiagnosticV1,
+}
+
 fn render_timeline_activity(e: &djinn_core::models::ActivityEntry) -> TimelineActivity {
     let payload_value: serde_json::Value =
         serde_json::from_str(&e.payload).unwrap_or_else(|_| serde_json::json!({}));
@@ -236,6 +258,10 @@ pub struct TaskTimelineResponse {
     pub messages: Option<Vec<TimelineMessage>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub activity: Option<Vec<TimelineActivity>>,
+    /// Canonical session-associated extension-load diagnostics, including as
+    /// an empty array on successful timeline lookups.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub extension_load_diagnostic_events: Option<Vec<TimelineExtensionLoadDiagnosticEvent>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 }
@@ -476,7 +502,7 @@ impl DjinnMcpServer {
 
     /// Get a single session by id.
     #[tool(
-        description = "session_show(id) returns session details: id, task_id, model_id, agent_type, started_at, ended_at, status, tokens_in, tokens_out, cache_read_tokens, cache_write_tokens"
+        description = "session_show(id) returns session details and canonical session-associated extension_load_diagnostics: id, task_id, model_id, agent_type, started_at, ended_at, status, tokens_in, tokens_out, cache_read_tokens, cache_write_tokens"
     )]
     pub async fn session_show(
         &self,
@@ -487,6 +513,7 @@ impl DjinnMcpServer {
             Err(e) => {
                 return Json(SessionShowResponse {
                     session: None,
+                    extension_load_diagnostics: None,
                     error: Some(e),
                 });
             }
@@ -495,18 +522,36 @@ impl DjinnMcpServer {
         let task_run_repo =
             djinn_db::repositories::task_run::TaskRunRepository::new(self.state.db().clone());
         match repo.get_in_project(&project_id, &p.id).await {
-            Ok(Some(session)) => Json(SessionShowResponse {
-                session: Some(
-                    SessionToolSession::from_session_with_run(session, &task_run_repo).await,
-                ),
-                error: None,
-            }),
+            Ok(Some(session)) => {
+                let diagnostic_repo =
+                    ExtensionLoadDiagnosticRepository::new(self.state.db().clone());
+                match diagnostic_repo
+                    .list_for_session(&project_id, &session.id)
+                    .await
+                {
+                    Ok(extension_load_diagnostics) => Json(SessionShowResponse {
+                        session: Some(
+                            SessionToolSession::from_session_with_run(session, &task_run_repo)
+                                .await,
+                        ),
+                        extension_load_diagnostics: Some(extension_load_diagnostics),
+                        error: None,
+                    }),
+                    Err(e) => Json(SessionShowResponse {
+                        session: None,
+                        extension_load_diagnostics: None,
+                        error: Some(e.to_string()),
+                    }),
+                }
+            }
             Ok(None) => Json(SessionShowResponse {
                 session: None,
+                extension_load_diagnostics: None,
                 error: Some(format!("session not found: {}", p.id)),
             }),
             Err(e) => Json(SessionShowResponse {
                 session: None,
+                extension_load_diagnostics: None,
                 error: Some(e.to_string()),
             }),
         }
@@ -600,6 +645,7 @@ impl DjinnMcpServer {
                 sessions: None,
                 messages: None,
                 activity: None,
+                extension_load_diagnostic_events: None,
                 error: Some(e),
             })
         };
@@ -635,6 +681,30 @@ impl DjinnMcpServer {
         };
 
         let session_ids: Vec<String> = sessions.iter().map(|s| s.id.clone()).collect();
+
+        // Diagnostics are task-owned and must be read under the task's owning
+        // project. Keep only rows associated with one of the sessions already
+        // returned by this timeline: this excludes doctor-only rows and stale
+        // or otherwise unrelated session associations.
+        let diagnostic_repo = ExtensionLoadDiagnosticRepository::new(self.state.db().clone());
+        let extension_load_diagnostic_events =
+            match diagnostic_repo.list_for_task(&project_id, &task.id).await {
+                Ok(diagnostics) => diagnostics
+                    .into_iter()
+                    .filter_map(|diagnostic| {
+                        let session_id = diagnostic.session_id.clone()?;
+                        session_ids.contains(&session_id).then(|| {
+                            TimelineExtensionLoadDiagnosticEvent {
+                                kind: "extension_load_diagnostic".to_owned(),
+                                session_id,
+                                timestamp: diagnostic.last_seen_at.clone(),
+                                diagnostic,
+                            }
+                        })
+                    })
+                    .collect(),
+                Err(e) => return err(e.to_string()),
+            };
 
         // Build a lookup map: session_id → (agent_type, model_id)
         let session_info: std::collections::HashMap<String, (&str, &str)> = sessions
@@ -696,6 +766,7 @@ impl DjinnMcpServer {
             sessions: Some(sessions_out),
             messages: Some(messages),
             activity: Some(activity),
+            extension_load_diagnostic_events: Some(extension_load_diagnostic_events),
             error: None,
         })
     }

@@ -485,7 +485,10 @@ pub struct SkipReasonCounts {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RetrievalTraceHealthEvidence {
     pub trace_count: i64,
-    pub zero_result_count: i64,
+    /// Traces which produced no injected candidate. This is deliberately a
+    /// trace-level count rather than derived from the aggregate injected
+    /// candidate count: one trace can inject multiple candidates.
+    pub zero_result_trace_count: i64,
     pub candidate_count: i64,
     pub injected_count: i64,
     pub skipped_count: i64,
@@ -685,6 +688,21 @@ impl RetrievalTraceRepository {
         Ok(())
     }
 
+    /// Update a trace timestamp for controlled historical-data setup.
+    ///
+    /// Retrieval traces are normally immutable after insertion. This narrow
+    /// repository operation keeps test and maintenance callers from bypassing
+    /// the database boundary when they need a deterministic rollup window.
+    pub async fn update_created_at(&self, id: &str, created_at: &str) -> Result<()> {
+        self.db.ensure_initialized().await?;
+        sqlx::query("UPDATE retrieval_traces SET created_at = $2 WHERE id = $1")
+            .bind(id)
+            .bind(created_at)
+            .execute(self.db.pool())
+            .await?;
+        Ok(())
+    }
+
     /// Aggregate health evidence for workload retrieval traces in a project
     /// over a half-open `[from, until)` UTC time window.
     ///
@@ -808,7 +826,7 @@ const RETRIEVAL_TRACE_SELECT_BY_ID: &str = r#"
 struct TraceCandidateStatsRow {
     entry_point: String,
     trace_count: i64,
-    zero_result_count: i64,
+    zero_result_trace_count: i64,
     cap_exceeded_count: i64,
     estimated_injected_tokens_sum: i64,
     candidate_count: i64,
@@ -829,7 +847,7 @@ struct TraceCandidateStatsRow {
 #[derive(sqlx::FromRow)]
 struct TraceCandidateStatsCombinedRow {
     trace_count: i64,
-    zero_result_count: i64,
+    zero_result_trace_count: i64,
     cap_exceeded_count: i64,
     estimated_injected_tokens_sum: i64,
     candidate_count: i64,
@@ -880,7 +898,7 @@ fn build_evidence(
 
     RetrievalTraceHealthEvidence {
         trace_count: stats.trace_count,
-        zero_result_count: stats.zero_result_count,
+        zero_result_trace_count: stats.zero_result_trace_count,
         candidate_count: stats.candidate_count,
         injected_count: stats.injected_count,
         skipped_count: stats.skipped_count,
@@ -928,7 +946,7 @@ fn build_evidence_combined(
 
     RetrievalTraceHealthEvidence {
         trace_count: stats.trace_count,
-        zero_result_count: stats.zero_result_count,
+        zero_result_trace_count: stats.zero_result_trace_count,
         candidate_count: stats.candidate_count,
         injected_count: stats.injected_count,
         skipped_count: stats.skipped_count,
@@ -982,7 +1000,15 @@ const HEALTH_ROLLUP_TRACE_CANDIDATE_PER_EP_SQL: &str = r#"
         SELECT
             entry_point,
             count(*)::bigint AS trace_count,
-            count(*) FILTER (WHERE jsonb_typeof(candidates) != 'array' OR jsonb_array_length(candidates) = 0)::bigint AS zero_result_count,
+            count(*) FILTER (
+                WHERE NOT EXISTS (
+                    SELECT 1
+                    FROM jsonb_array_elements(
+                        CASE WHEN jsonb_typeof(candidates) = 'array' THEN candidates ELSE '[]'::jsonb END
+                    ) candidate
+                    WHERE candidate->>'outcome' = 'injected'
+                )
+            )::bigint AS zero_result_trace_count,
             coalesce(sum((candidate_cap_exceeded)::int), 0)::bigint AS cap_exceeded_count,
             coalesce(sum(estimated_injected_tokens), 0)::bigint AS estimated_injected_tokens_sum
         FROM filtered
@@ -1013,7 +1039,7 @@ const HEALTH_ROLLUP_TRACE_CANDIDATE_PER_EP_SQL: &str = r#"
     SELECT
         ts.entry_point,
         ts.trace_count,
-        ts.zero_result_count,
+        ts.zero_result_trace_count,
         ts.cap_exceeded_count,
         ts.estimated_injected_tokens_sum,
         cs.candidate_count,
@@ -1049,7 +1075,15 @@ const HEALTH_ROLLUP_TRACE_CANDIDATE_COMBINED_SQL: &str = r#"
     trace_stats AS (
         SELECT
             count(*)::bigint AS trace_count,
-            count(*) FILTER (WHERE jsonb_typeof(candidates) != 'array' OR jsonb_array_length(candidates) = 0)::bigint AS zero_result_count,
+            count(*) FILTER (
+                WHERE NOT EXISTS (
+                    SELECT 1
+                    FROM jsonb_array_elements(
+                        CASE WHEN jsonb_typeof(candidates) = 'array' THEN candidates ELSE '[]'::jsonb END
+                    ) candidate
+                    WHERE candidate->>'outcome' = 'injected'
+                )
+            )::bigint AS zero_result_trace_count,
             coalesce(sum((candidate_cap_exceeded)::int), 0)::bigint AS cap_exceeded_count,
             coalesce(sum(estimated_injected_tokens), 0)::bigint AS estimated_injected_tokens_sum
         FROM filtered
@@ -1076,7 +1110,7 @@ const HEALTH_ROLLUP_TRACE_CANDIDATE_COMBINED_SQL: &str = r#"
     )
     SELECT
         ts.trace_count,
-        ts.zero_result_count,
+        ts.zero_result_trace_count,
         ts.cap_exceeded_count,
         ts.estimated_injected_tokens_sum,
         cs.candidate_count,

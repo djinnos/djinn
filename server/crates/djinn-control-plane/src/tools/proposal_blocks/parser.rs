@@ -315,25 +315,31 @@ pub fn validate_mdx_blocks(body: &str) -> Result<(), BlockError> {
 
 /// Enforce the MDX proposal question form placement contract.
 ///
-/// MDX proposals must contain exactly one registered `question-form` block, and
-/// that block must be the final parsed proposal block in the body.
+/// The `question-form` block is OPTIONAL: an MDX proposal may contain zero or
+/// more of them. Many proposals have no open questions, and requiring a
+/// question form on every proposal made no sense.
+///
+/// No downstream flow reads the question-form block as a data source — it is a
+/// read-only rendering construct (the UI simply renders each present block as an
+/// "Open Questions" section, and renders nothing when none are present), so its
+/// absence is safe. The refinement/debate/feedback flows operate on separate
+/// concepts (e.g. the evidence-spike feasibility *question*), not this block.
+///
+/// The only remaining constraint is placement: when one or more question-form
+/// blocks are present, the FINAL parsed proposal block must be a question-form,
+/// so open questions render at the end of the proposal body.
 pub fn validate_question_form_placement(body: &str) -> Result<(), String> {
     let blocks = parse_mdx_blocks(body).map_err(|e| e.to_string())?;
-    let question_form_count = blocks
+    let has_question_form = blocks
         .iter()
-        .filter(|block| block.block_type == "question-form")
-        .count();
+        .any(|block| block.block_type == "question-form");
 
-    if question_form_count != 1 {
-        return Err(format!(
-            "Exactly one question-form block is required in MDX proposals (found {question_form_count})"
-        ));
-    }
-
-    if !matches!(
-        blocks.last(),
-        Some(block) if block.block_type == "question-form"
-    ) {
+    if has_question_form
+        && !matches!(
+            blocks.last(),
+            Some(block) if block.block_type == "question-form"
+        )
+    {
         return Err(
             "The question-form block must be the last block in the proposal body".to_string(),
         );

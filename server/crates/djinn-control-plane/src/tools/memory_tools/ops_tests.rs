@@ -5,7 +5,9 @@ mod tests {
     use std::sync::Arc;
 
     use djinn_core::events::{DjinnEventEnvelope, EventBus};
-    use djinn_db::{Database, NoteRepository, ProjectRepository};
+    use djinn_db::{
+        Database, NoteRepository, ProjectRepository, test_support::drop_table_for_test,
+    };
     use djinn_telemetry::memory_retrieval::{
         RetrievalEntryPoint, RetrievalOutcome, RetrievalStage,
     };
@@ -1017,6 +1019,10 @@ mod tests {
         assert!(response.isolated_count.is_some());
         assert!(response.isolated_pct.is_some());
         assert!(response.machine_connected_orphan_count.is_some());
+        assert_eq!(response.retrieval.persisted.status, "available");
+        assert_eq!(response.retrieval.process.status, "available");
+        assert_eq!(response.retrieval.persisted.summaries.len(), 4);
+        assert_eq!(response.retrieval.process.summaries.len(), 4);
 
         // orphan_note_count is a backward-compatible alias
         assert_eq!(response.orphan_note_count, response.authored_orphan_count);
@@ -1043,6 +1049,12 @@ mod tests {
         assert!(no_project.isolated_count.is_none());
         assert!(no_project.isolated_pct.is_none());
         assert!(no_project.machine_connected_orphan_count.is_none());
+        assert_eq!(no_project.retrieval.persisted.status, "unavailable");
+        assert_eq!(
+            no_project.retrieval.persisted.error_code.as_deref(),
+            Some("project_required")
+        );
+        assert!(no_project.retrieval.process.started_at.is_some());
 
         // Unknown project
         let bad_project = ops::memory_health(
@@ -1057,6 +1069,74 @@ mod tests {
         assert!(bad_project.isolated_count.is_none());
         assert!(bad_project.isolated_pct.is_none());
         assert!(bad_project.machine_connected_orphan_count.is_none());
+        assert_eq!(bad_project.retrieval.persisted.status, "unavailable");
+        assert_eq!(
+            bad_project.retrieval.persisted.error_code.as_deref(),
+            Some("project_unresolved")
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn memory_health_reports_unavailable_process_snapshot_with_required_retrieval() {
+        let setup = setup_server().await;
+        setup.server.state.retrieval_metrics().poison_for_testing();
+
+        let response = ops::memory_health(
+            &setup.server,
+            HealthParams {
+                project: Some(setup.project),
+            },
+        )
+        .await;
+
+        assert!(response.error.is_none(), "{:?}", response.error);
+        assert!(
+            serde_json::to_value(&response)
+                .expect("serialize health response")
+                .get("retrieval")
+                .is_some()
+        );
+        assert_eq!(response.retrieval.persisted.status, "available");
+        assert_eq!(response.retrieval.process.status, "unavailable");
+        assert_eq!(
+            response.retrieval.process.error_code.as_deref(),
+            Some("process_snapshot_unavailable")
+        );
+        assert!(response.retrieval.process.started_at.is_some());
+        assert!(response.retrieval.process.window_start.is_some());
+        assert!(response.retrieval.process.window_end.is_some());
+        assert!(response.retrieval.process.summaries.is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn memory_health_reports_unavailable_rollup_with_required_retrieval() {
+        let setup = setup_server().await;
+        drop_table_for_test(setup.server.state.db(), "retrieval_traces").await;
+
+        let response = ops::memory_health(
+            &setup.server,
+            HealthParams {
+                project: Some(setup.project),
+            },
+        )
+        .await;
+
+        assert!(response.error.is_none(), "{:?}", response.error);
+        assert!(
+            serde_json::to_value(&response)
+                .expect("serialize health response")
+                .get("retrieval")
+                .is_some()
+        );
+        assert_eq!(response.retrieval.persisted.status, "unavailable");
+        assert_eq!(
+            response.retrieval.persisted.error_code.as_deref(),
+            Some("rollup_unavailable")
+        );
+        assert!(response.retrieval.persisted.window_start.is_some());
+        assert!(response.retrieval.persisted.window_end.is_some());
+        assert!(response.retrieval.persisted.summaries.is_empty());
+        assert_eq!(response.retrieval.process.status, "available");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

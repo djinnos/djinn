@@ -11,6 +11,47 @@ struct EventRecordingLayer {
     events: Arc<Mutex<Vec<HashMap<String, String>>>>,
 }
 
+const PRESSURE_METRICS_FIXTURE: &str =
+    include_str!("../../../../djinn-telemetry/tests/fixtures/cache_cleanup/expected_metrics.json");
+
+fn rendered_counter(rendered: &str, metric: &str, labels: &[(&str, &str)]) -> u64 {
+    rendered
+        .lines()
+        .find_map(|line| {
+            let (sample, value) = line.rsplit_once(' ')?;
+            let (name, rendered_labels) = sample.split_once('{')?;
+            let rendered_labels = rendered_labels.strip_suffix('}')?;
+            (name == metric
+                && labels.iter().all(|(key, value)| {
+                    rendered_labels
+                        .split(',')
+                        .any(|label| label == format!("{key}=\"{value}\""))
+                }))
+            .then(|| value.parse().unwrap())
+        })
+        .unwrap_or(0)
+}
+
+fn pressure_counter(rendered: &str, mode: &str, rung: &str, outcome: &str) -> u64 {
+    rendered_counter(
+        rendered,
+        "djinn_cache_pressure_units_total",
+        &[("mode", mode), ("rung", rung), ("outcome", outcome)],
+    )
+}
+
+fn pressure_bytes(rendered: &str, metric: &str, mode: &str, rung: &str) -> u64 {
+    rendered_counter(rendered, metric, &[("mode", mode), ("rung", rung)])
+}
+
+fn pressure_termination(rendered: &str, mode: &str, termination: &str) -> u64 {
+    rendered_counter(
+        rendered,
+        "djinn_cache_pressure_terminations_total",
+        &[("mode", mode), ("termination", termination)],
+    )
+}
+
 impl EventRecordingLayer {
     fn events(&self) -> Vec<HashMap<String, String>> {
         self.events.lock().unwrap().clone()
@@ -111,6 +152,128 @@ fn executable_pressure_config() -> crate::context::CacheCleanupConfig {
     let mut config = pressure_config(0.15, 0.25);
     config.warm_base_grace_period = Duration::ZERO;
     config
+}
+
+fn eligible_three_rung_unit(base: &Path, target: &Path, rung: PressureRung) -> PressurePlanUnit {
+    PressurePlanUnit {
+        rung,
+        project_id: base.file_name().unwrap().to_str().unwrap().into(),
+        canonical_base: base.to_path_buf(),
+        canonical_target: target.to_path_buf(),
+        projected_allocated_bytes: 0,
+        disposition: PressurePlanDisposition::Eligible,
+    }
+}
+
+fn three_rung_clock() -> TestClock {
+    TestClock::new(
+        SystemTime::now() + Duration::from_secs(1),
+        std::time::Instant::now(),
+    )
+}
+
+#[tokio::test]
+async fn three_rung_executor_retains_terminal_precheck_suffix() {
+    let temp = tempfile::tempdir().unwrap();
+    let first = old_base(&temp, "018f8b9a-0d70-7f0a-8000-000000000020");
+    let second = old_base(&temp, "018f8b9a-0d70-7f0a-8000-000000000021");
+    let first_unit = eligible_three_rung_unit(&first, &first, PressureRung::WholeBase);
+    let second_unit = eligible_three_rung_unit(&second, &second, PressureRung::WholeBase);
+    let capacity = SequenceCapacity(std::sync::Mutex::new(std::collections::VecDeque::from([
+        Err("external capacity probe failed".into()),
+    ])));
+
+    let result = execute_three_rung_pressure_plan(
+        &ThreeRungPressurePlan {
+            units: vec![first_unit.clone(), second_unit.clone()],
+        },
+        &Activity(Ok(snapshot())),
+        &Warm(Ok(false)),
+        &NoopBaseLock,
+        &capacity,
+        &executable_pressure_config(),
+        &three_rung_clock(),
+        temp.path(),
+    )
+    .await;
+
+    assert!(result.remeasurement_failed);
+    assert!(result.attempted.is_empty());
+    assert_eq!(result.retained, vec![first_unit, second_unit]);
+    assert!(first.exists() && second.exists());
+}
+
+#[tokio::test]
+async fn three_rung_executor_keeps_success_and_retains_postcheck_suffix() {
+    let temp = tempfile::tempdir().unwrap();
+    let first = old_base(&temp, "018f8b9a-0d70-7f0a-8000-000000000022");
+    let second = old_base(&temp, "018f8b9a-0d70-7f0a-8000-000000000023");
+    std::fs::write(first.join("reclaim"), b"bytes").unwrap();
+    let first_unit = eligible_three_rung_unit(&first, &first, PressureRung::WholeBase);
+    let second_unit = eligible_three_rung_unit(&second, &second, PressureRung::WholeBase);
+    let capacity = SequenceCapacity(std::sync::Mutex::new(std::collections::VecDeque::from([
+        Ok(CapacitySnapshot {
+            total_bytes: 1000,
+            available_bytes: 100,
+        }),
+        Err("post-removal probe failed".into()),
+    ])));
+
+    let result = execute_three_rung_pressure_plan(
+        &ThreeRungPressurePlan {
+            units: vec![first_unit.clone(), second_unit.clone()],
+        },
+        &Activity(Ok(snapshot())),
+        &Warm(Ok(false)),
+        &NoopBaseLock,
+        &capacity,
+        &executable_pressure_config(),
+        &three_rung_clock(),
+        temp.path(),
+    )
+    .await;
+
+    assert!(result.remeasurement_failed);
+    assert_eq!(result.attempted, vec![first_unit.clone()]);
+    assert_eq!(result.deleted, vec![first_unit]);
+    assert_eq!(result.retained, vec![second_unit]);
+    assert!(!first.exists() && second.exists());
+}
+
+#[tokio::test]
+async fn three_rung_executor_absent_unit_blocks_same_base_escalation() {
+    let temp = tempfile::tempdir().unwrap();
+    let base = old_base(&temp, "018f8b9a-0d70-7f0a-8000-000000000024");
+    let absent = eligible_three_rung_unit(
+        &base,
+        &base.join("debug").join("incremental"),
+        PressureRung::Incremental,
+    );
+    let broader = eligible_three_rung_unit(&base, &base, PressureRung::WholeBase);
+    let locks = RecordingBaseLock {
+        attempts: std::sync::Mutex::new(Vec::new()),
+        succeed: true,
+    };
+    let capacity = SequenceCapacity(std::sync::Mutex::new(std::collections::VecDeque::new()));
+
+    let result = execute_three_rung_pressure_plan(
+        &ThreeRungPressurePlan {
+            units: vec![absent, broader.clone()],
+        },
+        &Activity(Ok(snapshot())),
+        &Warm(Ok(false)),
+        &locks,
+        &capacity,
+        &executable_pressure_config(),
+        &three_rung_clock(),
+        temp.path(),
+    )
+    .await;
+
+    assert!(result.attempted.is_empty());
+    assert_eq!(result.retained, vec![broader]);
+    assert_eq!(locks.attempts.lock().unwrap().len(), 1);
+    assert!(base.exists());
 }
 
 #[test]
@@ -375,4 +538,571 @@ async fn pressure_failure_telemetry_and_completion_log_are_bounded() {
         Some("[MeasurementError]")
     );
     assert!(event.values().all(|value| !value.contains(PROJECT_ID)));
+}
+
+struct RemovingCapacity {
+    target: PathBuf,
+    values: Mutex<std::collections::VecDeque<Result<CapacitySnapshot, String>>>,
+}
+impl FilesystemCapacity for RemovingCapacity {
+    fn capacity(&self, _: &Path) -> Result<CapacitySnapshot, String> {
+        std::fs::remove_dir_all(&self.target).unwrap();
+        self.values.lock().unwrap().pop_front().unwrap()
+    }
+}
+
+#[tokio::test]
+async fn three_rung_executor_external_reclamation_before_first_retains_suffix() {
+    let temp = tempfile::tempdir().unwrap();
+    let first = old_base(&temp, "018f8b9a-0d70-7f0a-8000-000000000030");
+    let second = old_base(&temp, "018f8b9a-0d70-7f0a-8000-000000000031");
+    let first_unit = eligible_three_rung_unit(&first, &first, PressureRung::WholeBase);
+    let second_unit = eligible_three_rung_unit(&second, &second, PressureRung::WholeBase);
+    let locks = RecordingBaseLock {
+        attempts: Mutex::new(Vec::new()),
+        succeed: true,
+    };
+    let capacity = SequenceCapacity(Mutex::new(std::collections::VecDeque::from([Ok(
+        CapacitySnapshot {
+            total_bytes: 100,
+            available_bytes: 25,
+        },
+    )])));
+
+    let result = execute_three_rung_pressure_plan(
+        &ThreeRungPressurePlan {
+            units: vec![first_unit.clone(), second_unit.clone()],
+        },
+        &Activity(Ok(snapshot())),
+        &Warm(Ok(false)),
+        &locks,
+        &capacity,
+        &executable_pressure_config(),
+        &three_rung_clock(),
+        temp.path(),
+    )
+    .await;
+
+    assert!(result.reached_high_watermark);
+    assert!(result.attempted.is_empty());
+    assert_eq!(result.retained, vec![first_unit, second_unit]);
+    assert_eq!(locks.attempts.lock().unwrap().len(), 1);
+    assert!(first.exists() && second.exists());
+}
+
+#[tokio::test]
+async fn three_rung_executor_external_reclamation_between_attempts_stops_before_next_remove() {
+    let temp = tempfile::tempdir().unwrap();
+    let first = old_base(&temp, "018f8b9a-0d70-7f0a-8000-000000000032");
+    let second = old_base(&temp, "018f8b9a-0d70-7f0a-8000-000000000033");
+    std::fs::write(first.join("bytes"), b"bytes").unwrap();
+    let first_unit = eligible_three_rung_unit(&first, &first, PressureRung::WholeBase);
+    let second_unit = eligible_three_rung_unit(&second, &second, PressureRung::WholeBase);
+    let capacity = SequenceCapacity(Mutex::new(std::collections::VecDeque::from([
+        Ok(CapacitySnapshot {
+            total_bytes: 100,
+            available_bytes: 10,
+        }),
+        Ok(CapacitySnapshot {
+            total_bytes: 100,
+            available_bytes: 10,
+        }),
+        Ok(CapacitySnapshot {
+            total_bytes: 100,
+            available_bytes: 25,
+        }),
+    ])));
+
+    let result = execute_three_rung_pressure_plan(
+        &ThreeRungPressurePlan {
+            units: vec![first_unit.clone(), second_unit.clone()],
+        },
+        &Activity(Ok(snapshot())),
+        &Warm(Ok(false)),
+        &NoopBaseLock,
+        &capacity,
+        &executable_pressure_config(),
+        &three_rung_clock(),
+        temp.path(),
+    )
+    .await;
+
+    assert_eq!(result.deleted, vec![first_unit]);
+    assert_eq!(result.retained, vec![second_unit]);
+    assert!(result.reached_high_watermark);
+    assert!(!first.exists() && second.exists());
+}
+
+struct HeldLock(Arc<std::sync::atomic::AtomicBool>);
+struct HeldGuard(Arc<std::sync::atomic::AtomicBool>);
+impl Drop for HeldGuard {
+    fn drop(&mut self) {
+        self.0.store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+impl LockGuard for HeldGuard {}
+impl BaseLock for HeldLock {
+    fn try_lock(&self, _: &Path) -> Result<Option<Box<dyn LockGuard>>, String> {
+        self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+        Ok(Some(Box::new(HeldGuard(self.0.clone()))))
+    }
+}
+struct LockAssertingCapacity(Arc<std::sync::atomic::AtomicBool>);
+impl FilesystemCapacity for LockAssertingCapacity {
+    fn capacity(&self, _: &Path) -> Result<CapacitySnapshot, String> {
+        assert!(
+            self.0.load(std::sync::atomic::Ordering::SeqCst),
+            "capacity must run under lock"
+        );
+        Ok(CapacitySnapshot {
+            total_bytes: 100,
+            available_bytes: 25,
+        })
+    }
+}
+
+#[tokio::test]
+async fn three_rung_executor_measures_immediately_under_held_lock() {
+    let temp = tempfile::tempdir().unwrap();
+    let base = old_base(&temp, "018f8b9a-0d70-7f0a-8000-000000000034");
+    let unit = eligible_three_rung_unit(&base, &base, PressureRung::WholeBase);
+    let held = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let result = execute_three_rung_pressure_plan(
+        &ThreeRungPressurePlan {
+            units: vec![unit.clone()],
+        },
+        &Activity(Ok(snapshot())),
+        &Warm(Ok(false)),
+        &HeldLock(held.clone()),
+        &LockAssertingCapacity(held.clone()),
+        &executable_pressure_config(),
+        &three_rung_clock(),
+        temp.path(),
+    )
+    .await;
+    assert!(result.reached_high_watermark);
+    assert_eq!(result.retained, vec![unit]);
+    assert!(!held.load(std::sync::atomic::Ordering::SeqCst));
+    assert!(base.exists());
+}
+
+#[tokio::test]
+async fn three_rung_executor_absent_during_removal_blocks_same_base_escalation() {
+    let temp = tempfile::tempdir().unwrap();
+    let base = old_base(&temp, "018f8b9a-0d70-7f0a-8000-000000000035");
+    let target = base.join("debug").join("incremental");
+    std::fs::create_dir_all(&target).unwrap();
+    let unit = eligible_three_rung_unit(&base, &target, PressureRung::Incremental);
+    let broader = eligible_three_rung_unit(&base, &base, PressureRung::WholeBase);
+    let locks = RecordingBaseLock {
+        attempts: Mutex::new(Vec::new()),
+        succeed: true,
+    };
+    let capacity = RemovingCapacity {
+        target: target.clone(),
+        values: Mutex::new(std::collections::VecDeque::from([Ok(CapacitySnapshot {
+            total_bytes: 100,
+            available_bytes: 10,
+        })])),
+    };
+
+    let result = execute_three_rung_pressure_plan(
+        &ThreeRungPressurePlan {
+            units: vec![unit.clone(), broader.clone()],
+        },
+        &Activity(Ok(snapshot())),
+        &Warm(Ok(false)),
+        &locks,
+        &capacity,
+        &executable_pressure_config(),
+        &three_rung_clock(),
+        temp.path(),
+    )
+    .await;
+    assert_eq!(result.attempted, vec![unit]);
+    assert!(result.deleted.is_empty());
+    assert_eq!(result.retained, vec![broader]);
+    assert_eq!(locks.attempts.lock().unwrap().len(), 1);
+    assert!(base.exists());
+}
+
+#[tokio::test]
+async fn three_rung_executor_removal_failure_blocks_same_base_escalation() {
+    let temp = tempfile::tempdir().unwrap();
+    let base = old_base(&temp, "018f8b9a-0d70-7f0a-8000-000000000036");
+    let target = base.join("debug").join("incremental");
+    std::fs::create_dir_all(&target).unwrap();
+    let already_removed = target.join("already-removed");
+    std::fs::write(&already_removed, b"partial").unwrap();
+    std::fs::write(target.join("must-remain"), b"preserve").unwrap();
+    let unit = eligible_three_rung_unit(&base, &target, PressureRung::Incremental);
+    let broader = eligible_three_rung_unit(&base, &base, PressureRung::WholeBase);
+    let capacity = SequenceCapacity(Mutex::new(std::collections::VecDeque::from([Ok(
+        CapacitySnapshot {
+            total_bytes: 100,
+            available_bytes: 10,
+        },
+    )])));
+
+    // The production executor still calls its removal path; this deterministic
+    // filesystem seam removes one child then reports the error that a real
+    // `remove_dir_all` can return after it has already made progress.
+    set_remove_dir_all_hook(Some(Box::new({
+        let already_removed = already_removed.clone();
+        move |_| {
+            std::fs::remove_file(&already_removed)?;
+            Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "simulated remove_dir_all failure after partial deletion",
+            ))
+        }
+    })));
+    let result = execute_three_rung_pressure_plan(
+        &ThreeRungPressurePlan {
+            units: vec![unit.clone(), broader.clone()],
+        },
+        &Activity(Ok(snapshot())),
+        &Warm(Ok(false)),
+        &NoopBaseLock,
+        &capacity,
+        &executable_pressure_config(),
+        &three_rung_clock(),
+        temp.path(),
+    )
+    .await;
+    set_remove_dir_all_hook(None);
+    assert_eq!(result.attempted, vec![unit.clone()]);
+    assert_eq!(result.retained, vec![unit, broader]);
+    assert!(base.exists());
+    assert!(target.exists());
+    assert!(!already_removed.exists());
+    assert!(target.join("must-remain").exists());
+}
+
+#[cfg(unix)]
+struct SwappingActivity {
+    target: PathBuf,
+    replacement: PathBuf,
+}
+#[cfg(unix)]
+#[async_trait]
+impl ActivityGuard for SwappingActivity {
+    async fn activity(&self, _: &str) -> Result<ActivitySnapshot, String> {
+        std::fs::remove_dir_all(&self.target).unwrap();
+        std::os::unix::fs::symlink(&self.replacement, &self.target).unwrap();
+        Ok(snapshot())
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn three_rung_executor_path_swap_to_symlink_is_retained_without_mutation() {
+    let temp = tempfile::tempdir().unwrap();
+    let base = old_base(&temp, "018f8b9a-0d70-7f0a-8000-000000000037");
+    let target = base.join("debug").join("incremental");
+    std::fs::create_dir_all(&target).unwrap();
+    let outside = temp.path().join("outside");
+    std::fs::create_dir(&outside).unwrap();
+    std::fs::write(outside.join("preserve"), b"safe").unwrap();
+    let unit = eligible_three_rung_unit(&base, &target, PressureRung::Incremental);
+    let capacity = SequenceCapacity(Mutex::new(std::collections::VecDeque::new()));
+
+    let result = execute_three_rung_pressure_plan(
+        &ThreeRungPressurePlan {
+            units: vec![unit.clone()],
+        },
+        &SwappingActivity {
+            target: target.clone(),
+            replacement: outside.clone(),
+        },
+        &Warm(Ok(false)),
+        &NoopBaseLock,
+        &capacity,
+        &executable_pressure_config(),
+        &three_rung_clock(),
+        temp.path(),
+    )
+    .await;
+    assert!(result.attempted.is_empty());
+    assert_eq!(result.retained, vec![unit]);
+    assert!(target.is_symlink());
+    assert_eq!(std::fs::read(outside.join("preserve")).unwrap(), b"safe");
+}
+
+#[tokio::test]
+async fn pressure_metrics_match_the_bounded_fixture_for_execution_boundaries() {
+    let fixture: serde_json::Value = serde_json::from_str(PRESSURE_METRICS_FIXTURE).unwrap();
+    let case = |name: &str| &fixture["cases"][name];
+    let value = |case: &serde_json::Value, field: &str| case[field].as_u64().unwrap();
+    let assert_execution_metrics =
+        |before: &str, after: &str, case: &serde_json::Value, rung: &str| {
+            for outcome in fixture["outcomes"].as_array().unwrap() {
+                let outcome = outcome.as_str().unwrap();
+                assert_eq!(
+                    pressure_counter(after, "delete", rung, outcome)
+                        - pressure_counter(before, "delete", rung, outcome),
+                    case[outcome].as_u64().unwrap_or(0),
+                    "unexpected {outcome} delta for {rung}"
+                );
+            }
+            for field in ["projected", "reclaimed"] {
+                let metric = fixture["byte_metrics"][field].as_str().unwrap();
+                assert_eq!(
+                    pressure_bytes(after, metric, "delete", rung)
+                        - pressure_bytes(before, metric, "delete", rung),
+                    value(case, field),
+                    "unexpected {field} byte delta for {rung}"
+                );
+            }
+            let expected = case["termination"].as_str().unwrap();
+            for termination in fixture["terminations"].as_array().unwrap() {
+                let termination = termination.as_str().unwrap();
+                assert_eq!(
+                    pressure_termination(after, "delete", termination)
+                        - pressure_termination(before, "delete", termination),
+                    u64::from(termination == expected),
+                    "unexpected {termination} termination delta"
+                );
+            }
+        };
+    assert_eq!(fixture["metric"], "djinn_cache_pressure_units_total");
+    assert_eq!(
+        fixture["rungs"],
+        serde_json::json!(["incremental", "profile", "base"])
+    );
+    assert_eq!(
+        fixture["outcomes"],
+        serde_json::json!([
+            "planned",
+            "post_lock_eligible",
+            "retained",
+            "attempted",
+            "deleted",
+            "failed"
+        ])
+    );
+
+    djinn_telemetry::init().unwrap();
+    let temp = tempfile::tempdir().unwrap();
+    let config = executable_pressure_config();
+    let clock = three_rung_clock();
+    let capacity_low = || CapacitySnapshot {
+        total_bytes: 100,
+        available_bytes: 10,
+    };
+    let unit = |id: &str, rung: PressureRung| {
+        let base = old_base(&temp, id);
+        let mut unit = eligible_three_rung_unit(&base, &base, rung);
+        unit.projected_allocated_bytes = 4096;
+        (base, unit)
+    };
+
+    let (_, incremental) = unit(
+        "018f8b9a-0d70-7f0a-8000-000000000101",
+        PressureRung::Incremental,
+    );
+    let (_, profile) = unit(
+        "018f8b9a-0d70-7f0a-8000-000000000102",
+        PressureRung::StaleProfile,
+    );
+    let (_, base) = unit(
+        "018f8b9a-0d70-7f0a-8000-000000000103",
+        PressureRung::WholeBase,
+    );
+    let before = djinn_telemetry::render().unwrap();
+    let dry_run = consume_three_rung_pressure_plan_dry_run(&ThreeRungPressurePlan {
+        units: vec![incremental, profile, base],
+    });
+    let after = djinn_telemetry::render().unwrap();
+    let dry = case("dry_run");
+    assert_eq!(dry_run.len() as u64, value(dry, "planned"));
+    for rung in ["incremental", "profile", "base"] {
+        for outcome in fixture["outcomes"].as_array().unwrap() {
+            let outcome = outcome.as_str().unwrap();
+            assert_eq!(
+                pressure_counter(&after, "dry_run", rung, outcome)
+                    - pressure_counter(&before, "dry_run", rung, outcome),
+                u64::from(outcome == "planned")
+            );
+        }
+        assert_eq!(
+            pressure_bytes(
+                &after,
+                fixture["byte_metrics"]["projected"].as_str().unwrap(),
+                "dry_run",
+                rung
+            ) - pressure_bytes(
+                &before,
+                fixture["byte_metrics"]["projected"].as_str().unwrap(),
+                "dry_run",
+                rung
+            ),
+            4096
+        );
+        assert_eq!(
+            pressure_bytes(
+                &after,
+                fixture["byte_metrics"]["reclaimed"].as_str().unwrap(),
+                "dry_run",
+                rung
+            ) - pressure_bytes(
+                &before,
+                fixture["byte_metrics"]["reclaimed"].as_str().unwrap(),
+                "dry_run",
+                rung
+            ),
+            0
+        );
+    }
+    assert!(dry["termination"].is_null());
+    for termination in fixture["terminations"].as_array().unwrap() {
+        let termination = termination.as_str().unwrap();
+        assert_eq!(
+            pressure_termination(&after, "dry_run", termination)
+                - pressure_termination(&before, "dry_run", termination),
+            0,
+            "dry-run unexpectedly emitted {termination} termination telemetry"
+        );
+    }
+    assert_eq!(value(dry, "projected"), 3 * 4096);
+    assert_eq!(value(dry, "reclaimed"), 0);
+
+    let (pre_base, pre) = unit(
+        "018f8b9a-0d70-7f0a-8000-000000000104",
+        PressureRung::WholeBase,
+    );
+    std::fs::write(pre_base.join("bytes"), vec![0; 4096]).unwrap();
+    let before = djinn_telemetry::render().unwrap();
+    let pre_result = execute_three_rung_pressure_plan(
+        &ThreeRungPressurePlan { units: vec![pre] },
+        &Activity(Ok(snapshot())),
+        &Warm(Ok(false)),
+        &NoopBaseLock,
+        &SequenceCapacity(Mutex::new(std::collections::VecDeque::from([Err(
+            "probe".into()
+        )]))),
+        &config,
+        &clock,
+        temp.path(),
+    )
+    .await;
+    let after = djinn_telemetry::render().unwrap();
+    let pre_case = case("pre_attempt_measurement_failure");
+    assert!(pre_result.attempted.is_empty() && pre_result.deleted.is_empty());
+    assert_execution_metrics(&before, &after, pre_case, "base");
+
+    let (high_base, high) = unit(
+        "018f8b9a-0d70-7f0a-8000-000000000108",
+        PressureRung::StaleProfile,
+    );
+    std::fs::write(high_base.join("bytes"), vec![0; 4096]).unwrap();
+    let before = djinn_telemetry::render().unwrap();
+    let high_result = execute_three_rung_pressure_plan(
+        &ThreeRungPressurePlan { units: vec![high] },
+        &Activity(Ok(ActivitySnapshot {
+            latest_activity: Some("2020-01-01T00:00:00Z".into()),
+            ..snapshot()
+        })),
+        &Warm(Ok(false)),
+        &NoopBaseLock,
+        &SequenceCapacity(Mutex::new(std::collections::VecDeque::from([Ok(
+            CapacitySnapshot {
+                total_bytes: 100,
+                available_bytes: 25,
+            },
+        )]))),
+        &config,
+        &clock,
+        temp.path(),
+    )
+    .await;
+    let after = djinn_telemetry::render().unwrap();
+    let high_case = case("pre_attempt_reached_high");
+    assert!(high_result.reached_high_watermark && high_result.attempted.is_empty());
+    assert_execution_metrics(&before, &after, high_case, "profile");
+
+    let (failed_base, failed) = unit(
+        "018f8b9a-0d70-7f0a-8000-000000000105",
+        PressureRung::Incremental,
+    );
+    std::fs::write(failed_base.join("bytes"), vec![0; 4096]).unwrap();
+    let before = djinn_telemetry::render().unwrap();
+    set_remove_dir_all_hook(Some(Box::new(|_| {
+        Err(std::io::Error::other("remove failed"))
+    })));
+    let failed_result = execute_three_rung_pressure_plan(
+        &ThreeRungPressurePlan {
+            units: vec![failed],
+        },
+        &Activity(Ok(snapshot())),
+        &Warm(Ok(false)),
+        &NoopBaseLock,
+        &SequenceCapacity(Mutex::new(std::collections::VecDeque::from([Ok(
+            capacity_low(),
+        )]))),
+        &config,
+        &clock,
+        temp.path(),
+    )
+    .await;
+    set_remove_dir_all_hook(None);
+    let after = djinn_telemetry::render().unwrap();
+    let removal = case("removal_failure");
+    assert!(failed_result.deleted.is_empty());
+    assert_execution_metrics(&before, &after, removal, "incremental");
+
+    let (success_base, success) = unit(
+        "018f8b9a-0d70-7f0a-8000-000000000106",
+        PressureRung::WholeBase,
+    );
+    std::fs::write(success_base.join("bytes"), vec![0; 4096]).unwrap();
+    let before = djinn_telemetry::render().unwrap();
+    let success_result = execute_three_rung_pressure_plan(
+        &ThreeRungPressurePlan {
+            units: vec![success],
+        },
+        &Activity(Ok(snapshot())),
+        &Warm(Ok(false)),
+        &NoopBaseLock,
+        &SequenceCapacity(Mutex::new(std::collections::VecDeque::from([
+            Ok(capacity_low()),
+            Ok(capacity_low()),
+        ]))),
+        &config,
+        &clock,
+        temp.path(),
+    )
+    .await;
+    let after = djinn_telemetry::render().unwrap();
+    let success_case = case("successful_deletion");
+    assert_eq!(
+        success_result.reclaimed_bytes,
+        value(success_case, "reclaimed")
+    );
+    assert_execution_metrics(&before, &after, success_case, "base");
+
+    let (post_base, post) = unit(
+        "018f8b9a-0d70-7f0a-8000-000000000107",
+        PressureRung::WholeBase,
+    );
+    std::fs::write(post_base.join("bytes"), vec![0; 4096]).unwrap();
+    let before = djinn_telemetry::render().unwrap();
+    let post_result = execute_three_rung_pressure_plan(
+        &ThreeRungPressurePlan { units: vec![post] },
+        &Activity(Ok(snapshot())),
+        &Warm(Ok(false)),
+        &NoopBaseLock,
+        &SequenceCapacity(Mutex::new(std::collections::VecDeque::from([
+            Ok(capacity_low()),
+            Err("post probe".into()),
+        ]))),
+        &config,
+        &clock,
+        temp.path(),
+    )
+    .await;
+    let after = djinn_telemetry::render().unwrap();
+    let post_case = case("post_success_remeasurement_failure");
+    assert!(post_result.remeasurement_failed && post_result.deleted.len() == 1);
+    assert_execution_metrics(&before, &after, post_case, "base");
 }

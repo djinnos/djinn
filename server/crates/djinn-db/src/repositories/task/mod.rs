@@ -50,7 +50,8 @@ mod tests {
 
     use djinn_core::events::{DjinnEventEnvelope, EventBus};
     use djinn_core::models::{
-        CiStatus, Project, Task, TaskPrCiSnapshotInput, TaskStatus, TransitionAction,
+        CiStatus, Project, Task, TaskPrCiSnapshotInput, TaskPrCiSnapshotMqLaneInput, TaskStatus,
+        TransitionAction,
     };
 
     use crate::database::Database;
@@ -1237,6 +1238,294 @@ mod tests {
         assert_eq!(new_head.head_sha, "sha-new");
     }
 
+    // ── Merge-queue lane tests (PR A) ────────────────────────────────────
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn mq_lane_upsert_creates_row_and_sets_fields() {
+        let db = Database::open_in_memory().unwrap();
+        let (bus, _captured) = capturing_bus();
+        let repo = TaskRepository::new(db.clone(), bus);
+        let project = make_project(&db).await;
+        let epic_id = make_epic(&db, &project.id).await;
+        let task = make_task(&repo, &epic_id, "task", Some(r#"[{"title":"ac"}]"#)).await;
+
+        // No PR-head observation yet: the mq lane upsert must create the row.
+        let snap = repo
+            .upsert_ci_snapshot_mq_lane(TaskPrCiSnapshotMqLaneInput {
+                task_id: task.id.clone(),
+                pr_number: 42,
+                state: "dequeued_failure".to_string(),
+                run_id: Some(9001),
+                head_sha: Some("mq-head-1".to_string()),
+                failed_check_names: vec!["Server Test".to_string(), "Server Clippy".to_string()],
+                failure_fingerprint: Some("mq-fp-1".to_string()),
+            })
+            .await
+            .unwrap();
+
+        // PR-head lane stays at its unknown defaults (mq observation preceded
+        // any PR-head observation).
+        assert_eq!(snap.ci_status, CiStatus::Unknown);
+        assert!(snap.head_sha.is_empty());
+        assert!(snap.blocking_required_check_names.is_empty());
+
+        let lane = snap.merge_queue.expect("merge-queue lane present");
+        assert_eq!(lane.state, "dequeued_failure");
+        assert_eq!(lane.run_id, Some(9001));
+        assert_eq!(lane.head_sha.as_deref(), Some("mq-head-1"));
+        assert_eq!(lane.failed_check_names, ["Server Test", "Server Clippy"]);
+        assert_eq!(lane.failure_fingerprint.as_deref(), Some("mq-fp-1"));
+        assert_eq!(lane.same_signature_count, 1);
+        assert!(lane.first_seen_at.is_some());
+        assert!(lane.last_seen_at.is_some());
+
+        // A fresh read returns the same lane.
+        let read = repo
+            .get_ci_snapshot_for_task_pr(&task.id, 42)
+            .await
+            .unwrap()
+            .unwrap();
+        let read_lane = read.merge_queue.expect("lane persisted");
+        assert_eq!(read_lane.state, "dequeued_failure");
+        assert_eq!(read_lane.same_signature_count, 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn mq_lane_same_fingerprint_increments_and_keeps_first_seen() {
+        let db = Database::open_in_memory().unwrap();
+        let (bus, _captured) = capturing_bus();
+        let repo = TaskRepository::new(db.clone(), bus);
+        let project = make_project(&db).await;
+        let epic_id = make_epic(&db, &project.id).await;
+        let task = make_task(&repo, &epic_id, "task", Some(r#"[{"title":"ac"}]"#)).await;
+
+        let first = repo
+            .upsert_ci_snapshot_mq_lane(TaskPrCiSnapshotMqLaneInput {
+                task_id: task.id.clone(),
+                pr_number: 7,
+                state: "dequeued_failure".to_string(),
+                run_id: Some(1),
+                head_sha: Some("h1".to_string()),
+                failed_check_names: vec!["Server Test".to_string()],
+                failure_fingerprint: Some("same-fp".to_string()),
+            })
+            .await
+            .unwrap();
+        let first_lane = first.merge_queue.unwrap();
+        assert_eq!(first_lane.same_signature_count, 1);
+        let original_first_seen = first_lane.first_seen_at.clone();
+
+        // Same fingerprint again → increment count, keep first_seen.
+        let second = repo
+            .upsert_ci_snapshot_mq_lane(TaskPrCiSnapshotMqLaneInput {
+                task_id: task.id.clone(),
+                pr_number: 7,
+                state: "dequeued_failure".to_string(),
+                run_id: Some(2),
+                head_sha: Some("h2".to_string()),
+                failed_check_names: vec!["Server Test".to_string()],
+                failure_fingerprint: Some("same-fp".to_string()),
+            })
+            .await
+            .unwrap();
+        let second_lane = second.merge_queue.unwrap();
+        assert_eq!(second_lane.same_signature_count, 2);
+        assert_eq!(
+            second_lane.first_seen_at, original_first_seen,
+            "same fingerprint must keep the original first_seen_at"
+        );
+        // Latest observed run/head are updated.
+        assert_eq!(second_lane.run_id, Some(2));
+        assert_eq!(second_lane.head_sha.as_deref(), Some("h2"));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn mq_lane_different_fingerprint_resets_count_and_first_seen() {
+        let db = Database::open_in_memory().unwrap();
+        let (bus, _captured) = capturing_bus();
+        let repo = TaskRepository::new(db.clone(), bus);
+        let project = make_project(&db).await;
+        let epic_id = make_epic(&db, &project.id).await;
+        let task = make_task(&repo, &epic_id, "task", Some(r#"[{"title":"ac"}]"#)).await;
+
+        // Build the count up to 2 on one fingerprint.
+        for run in [1_i64, 2] {
+            repo.upsert_ci_snapshot_mq_lane(TaskPrCiSnapshotMqLaneInput {
+                task_id: task.id.clone(),
+                pr_number: 9,
+                state: "dequeued_failure".to_string(),
+                run_id: Some(run),
+                head_sha: Some("h".to_string()),
+                failed_check_names: vec!["A".to_string()],
+                failure_fingerprint: Some("fp-a".to_string()),
+            })
+            .await
+            .unwrap();
+        }
+        let before = repo
+            .get_ci_snapshot_for_task_pr(&task.id, 9)
+            .await
+            .unwrap()
+            .unwrap()
+            .merge_queue
+            .unwrap();
+        assert_eq!(before.same_signature_count, 2);
+
+        // Different fingerprint → reset count to 1 and reset first_seen.
+        let changed = repo
+            .upsert_ci_snapshot_mq_lane(TaskPrCiSnapshotMqLaneInput {
+                task_id: task.id.clone(),
+                pr_number: 9,
+                state: "dequeued_failure".to_string(),
+                run_id: Some(3),
+                head_sha: Some("h".to_string()),
+                failed_check_names: vec!["B".to_string()],
+                failure_fingerprint: Some("fp-b".to_string()),
+            })
+            .await
+            .unwrap();
+        let lane = changed.merge_queue.unwrap();
+        assert_eq!(lane.same_signature_count, 1, "new fingerprint resets count");
+        assert_eq!(lane.failure_fingerprint.as_deref(), Some("fp-b"));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn pr_head_upsert_same_sha_preserves_mq_lane() {
+        let db = Database::open_in_memory().unwrap();
+        let (bus, _captured) = capturing_bus();
+        let repo = TaskRepository::new(db.clone(), bus);
+        let project = make_project(&db).await;
+        let epic_id = make_epic(&db, &project.id).await;
+        let task = make_task(&repo, &epic_id, "task", Some(r#"[{"title":"ac"}]"#)).await;
+
+        // Establish a PR-head snapshot on head `sha-x`.
+        repo.upsert_ci_snapshot(TaskPrCiSnapshotInput {
+            task_id: task.id.clone(),
+            pr_number: 11,
+            head_sha: "sha-x".to_string(),
+            ci_status: CiStatus::Passing,
+            blocking_required_check_names: vec![],
+            failure_fingerprint: None,
+            same_signature_count: 0,
+            last_remediation_base_sha: None,
+        })
+        .await
+        .unwrap();
+
+        // Record a merge-queue failure lane.
+        repo.upsert_ci_snapshot_mq_lane(TaskPrCiSnapshotMqLaneInput {
+            task_id: task.id.clone(),
+            pr_number: 11,
+            state: "dequeued_failure".to_string(),
+            run_id: Some(55),
+            head_sha: Some("mq-x".to_string()),
+            failed_check_names: vec!["Server Test".to_string()],
+            failure_fingerprint: Some("mq-fp".to_string()),
+        })
+        .await
+        .unwrap();
+
+        // A subsequent PR-head observation on the SAME head must NOT clobber
+        // the mq lane.
+        let after = repo
+            .upsert_ci_snapshot(TaskPrCiSnapshotInput {
+                task_id: task.id.clone(),
+                pr_number: 11,
+                head_sha: "sha-x".to_string(),
+                ci_status: CiStatus::Passing,
+                blocking_required_check_names: vec![],
+                failure_fingerprint: None,
+                same_signature_count: 0,
+                last_remediation_base_sha: None,
+            })
+            .await
+            .unwrap();
+        let lane = after
+            .merge_queue
+            .expect("mq lane preserved on same-head PR-head observation");
+        assert_eq!(lane.state, "dequeued_failure");
+        assert_eq!(lane.run_id, Some(55));
+        assert_eq!(lane.failure_fingerprint.as_deref(), Some("mq-fp"));
+        assert_eq!(lane.same_signature_count, 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn pr_head_upsert_new_sha_clears_mq_lane() {
+        let db = Database::open_in_memory().unwrap();
+        let (bus, _captured) = capturing_bus();
+        let repo = TaskRepository::new(db.clone(), bus);
+        let project = make_project(&db).await;
+        let epic_id = make_epic(&db, &project.id).await;
+        let task = make_task(&repo, &epic_id, "task", Some(r#"[{"title":"ac"}]"#)).await;
+
+        repo.upsert_ci_snapshot(TaskPrCiSnapshotInput {
+            task_id: task.id.clone(),
+            pr_number: 12,
+            head_sha: "old-sha".to_string(),
+            ci_status: CiStatus::Passing,
+            blocking_required_check_names: vec![],
+            failure_fingerprint: None,
+            same_signature_count: 0,
+            last_remediation_base_sha: None,
+        })
+        .await
+        .unwrap();
+        repo.upsert_ci_snapshot_mq_lane(TaskPrCiSnapshotMqLaneInput {
+            task_id: task.id.clone(),
+            pr_number: 12,
+            state: "dequeued_failure".to_string(),
+            run_id: Some(77),
+            head_sha: Some("mq-old".to_string()),
+            failed_check_names: vec!["Server Test".to_string()],
+            failure_fingerprint: Some("mq-fp".to_string()),
+        })
+        .await
+        .unwrap();
+
+        // A PR-head observation on a NEW head invalidates the queue verdict:
+        // the mq lane must be cleared.
+        let after = repo
+            .upsert_ci_snapshot(TaskPrCiSnapshotInput {
+                task_id: task.id.clone(),
+                pr_number: 12,
+                head_sha: "new-sha".to_string(),
+                ci_status: CiStatus::Pending,
+                blocking_required_check_names: vec![],
+                failure_fingerprint: None,
+                same_signature_count: 0,
+                last_remediation_base_sha: None,
+            })
+            .await
+            .unwrap();
+        assert_eq!(after.head_sha, "new-sha");
+        assert!(
+            after.merge_queue.is_none(),
+            "a new PR head must clear the merge-queue lane"
+        );
+
+        // `reset_ci_snapshot_for_head` (the head-change path used by the
+        // watcher) must also clear the lane.
+        repo.upsert_ci_snapshot_mq_lane(TaskPrCiSnapshotMqLaneInput {
+            task_id: task.id.clone(),
+            pr_number: 12,
+            state: "dequeued_failure".to_string(),
+            run_id: Some(78),
+            head_sha: Some("mq-new".to_string()),
+            failed_check_names: vec!["Server Test".to_string()],
+            failure_fingerprint: Some("mq-fp2".to_string()),
+        })
+        .await
+        .unwrap();
+        let reset = repo
+            .reset_ci_snapshot_for_head(&task.id, 12, "newer-sha")
+            .await
+            .unwrap();
+        assert!(
+            reset.merge_queue.is_none(),
+            "reset_ci_snapshot_for_head must clear the merge-queue lane"
+        );
+    }
+
     // ── CI head reconciliation tests (m116) ─────────────────────────────
 
     /// Helper: create a task attempt row with optional head SHAs and
@@ -2405,6 +2694,14 @@ macro_rules! task_select_where_id {
                 (SELECT s.last_seen_at FROM task_pr_ci_snapshots s WHERE s.task_id = tasks.id ORDER BY s.last_seen_at DESC LIMIT 1) AS ci_last_seen_at,
                 COALESCE((SELECT s.same_signature_count FROM task_pr_ci_snapshots s WHERE s.task_id = tasks.id ORDER BY s.last_seen_at DESC LIMIT 1), 0) AS ci_same_signature_count,
                 (SELECT s.last_remediation_base_sha FROM task_pr_ci_snapshots s WHERE s.task_id = tasks.id ORDER BY s.last_seen_at DESC LIMIT 1) AS ci_last_remediation_base_sha,
+                (SELECT s.mq_state FROM task_pr_ci_snapshots s WHERE s.task_id = tasks.id ORDER BY s.last_seen_at DESC LIMIT 1) AS ci_mq_state,
+                (SELECT s.mq_run_id FROM task_pr_ci_snapshots s WHERE s.task_id = tasks.id ORDER BY s.last_seen_at DESC LIMIT 1) AS ci_mq_run_id,
+                (SELECT s.mq_head_sha FROM task_pr_ci_snapshots s WHERE s.task_id = tasks.id ORDER BY s.last_seen_at DESC LIMIT 1) AS ci_mq_head_sha,
+                (SELECT s.mq_failed_check_names::text FROM task_pr_ci_snapshots s WHERE s.task_id = tasks.id ORDER BY s.last_seen_at DESC LIMIT 1) AS ci_mq_failed_check_names,
+                (SELECT s.mq_failure_fingerprint FROM task_pr_ci_snapshots s WHERE s.task_id = tasks.id ORDER BY s.last_seen_at DESC LIMIT 1) AS ci_mq_failure_fingerprint,
+                (SELECT s.mq_same_signature_count FROM task_pr_ci_snapshots s WHERE s.task_id = tasks.id ORDER BY s.last_seen_at DESC LIMIT 1) AS ci_mq_same_signature_count,
+                (SELECT s.mq_first_seen_at FROM task_pr_ci_snapshots s WHERE s.task_id = tasks.id ORDER BY s.last_seen_at DESC LIMIT 1) AS ci_mq_first_seen_at,
+                (SELECT s.mq_last_seen_at FROM task_pr_ci_snapshots s WHERE s.task_id = tasks.id ORDER BY s.last_seen_at DESC LIMIT 1) AS ci_mq_last_seen_at,
                     (SELECT ta.mirror_head_sha FROM task_attempts ta WHERE ta.task_id = tasks.id AND (ta.mirror_head_sha IS NOT NULL OR ta.github_head_sha IS NOT NULL OR ta.github_publication_error IS NOT NULL) ORDER BY ta.created_at DESC LIMIT 1) AS ci_mirror_head_sha,
                     (SELECT ta.github_head_sha FROM task_attempts ta WHERE ta.task_id = tasks.id AND (ta.mirror_head_sha IS NOT NULL OR ta.github_head_sha IS NOT NULL OR ta.github_publication_error IS NOT NULL) ORDER BY ta.created_at DESC LIMIT 1) AS ci_github_head_sha,
                     (SELECT CASE WHEN ta.mirror_head_sha IS NOT NULL AND ta.github_head_sha IS NOT NULL THEN ta.mirror_head_sha != ta.github_head_sha END FROM task_attempts ta WHERE ta.task_id = tasks.id AND (ta.mirror_head_sha IS NOT NULL OR ta.github_head_sha IS NOT NULL OR ta.github_publication_error IS NOT NULL) ORDER BY ta.created_at DESC LIMIT 1) AS ci_heads_diverged,

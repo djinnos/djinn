@@ -13,15 +13,23 @@ use crate::actors::slot::helpers::{
     format_attempt_history, pack_knowledge_notes, recent_feedback,
 };
 use crate::actors::slot::lifecycle::attempt_context;
-use crate::actors::slot::lifecycle::memory_intent_planner::{PlannedNoteType, PlannedQuery};
 use crate::context::AgentContext;
 use crate::prompts::{TaskContext, apply_role_extensions, apply_skills};
 use crate::skills::ResolvedSkill;
 use djinn_db::{NoteRepository, ProposalRepository, TaskRepository};
 use tracing::Instrument;
 
+mod ci_directive;
 mod diagnostics;
+mod planner_enrichment;
 mod types;
+use ci_directive::build_ci_blocking_directive;
+use planner_enrichment::merge_planned_knowledge;
+#[allow(unused_imports)] // Lifecycle seams are consumed by stage wiring and test modules.
+pub(crate) use types::{
+    MemoryIntentPlannerHost, MemoryIntentPlannerInvocation, PlannedNoteSearch, PromptContext,
+    PromptContextInputs, ReadSourceInfo, SupervisorPlannerHost,
+};
 // Re-export for `use super::*` in test modules.
 #[allow(unused_imports)]
 pub(super) use diagnostics::{
@@ -29,9 +37,7 @@ pub(super) use diagnostics::{
     MAX_EXTENSION_DIAGNOSTIC_SECTION_BYTES, insert_diagnostics_before_task,
     render_extension_diagnostics,
 };
-pub(crate) use types::{
-    KnowledgeContextIdentity, PromptContext, PromptContextInputs, ReadSourceInfo,
-};
+
 /// Append read-only sibling repo section to prompt. No-op when no read sources.
 fn append_read_sources_prompt(prompt: &str, read_sources: &[ReadSourceInfo]) -> String {
     if read_sources.is_empty() {
@@ -300,8 +306,6 @@ async fn load_epic_context(
     task: &Task,
     needs_epic_context: bool,
     app_state: &AgentContext,
-    _identity: Option<KnowledgeContextIdentity<'_>>,
-    planned_queries: Option<&[PlannedQuery]>,
 ) -> Option<String> {
     if !needs_epic_context {
         return None;
@@ -337,79 +341,6 @@ const KNOWLEDGE_BUDGET_CHARS: usize = 2000;
 
 /// Note types queried for knowledge-context injection.
 const KNOWLEDGE_NOTE_TYPES: &[&str] = &["pattern", "pitfall", "case"];
-const PLANNER_NOTES_PER_QUERY: usize = 2;
-const PLANNER_NOTES_GLOBAL: usize = 6;
-
-fn planned_note_type_name(kind: PlannedNoteType) -> &'static str {
-    match kind {
-        PlannedNoteType::Pitfall => "pitfall",
-        PlannedNoteType::Pattern => "pattern",
-        PlannedNoteType::Case => "case",
-        PlannedNoteType::Reference => "reference",
-    }
-}
-
-async fn load_planned_knowledge(
-    note_repo: &NoteRepository,
-    task: &Task,
-    queries: &[PlannedQuery],
-    scope_notes: &[djinn_memory::Note],
-    scope_used: usize,
-) -> Option<String> {
-    if scope_used >= KNOWLEDGE_BUDGET_CHARS {
-        return None;
-    }
-    let entities = vec!["note".to_string()];
-    let buckets = futures::future::join_all(queries.iter().map(|q| {
-        note_repo.search(djinn_db::NoteSearchParams {
-            project_id: &task.project_id,
-            query: &q.query,
-            task_id: Some(&task.id),
-            folder: None,
-            note_type: Some(planned_note_type_name(q.note_type)),
-            limit: PLANNER_NOTES_PER_QUERY,
-            semantic_scores: None,
-            edge_kinds: None,
-            entity_types: Some(&entities),
-        })
-    }))
-    .await;
-    if buckets.iter().any(Result::is_err) {
-        return None;
-    }
-    let mut ids: std::collections::HashSet<String> =
-        scope_notes.iter().map(|n| n.id.clone()).collect();
-    let mut links: std::collections::HashSet<String> =
-        scope_notes.iter().map(|n| n.permalink.clone()).collect();
-    let (mut used, mut lines) = (scope_used, Vec::new());
-    for bucket in buckets {
-        for row in bucket.ok()?.into_iter().take(PLANNER_NOTES_PER_QUERY) {
-            if !ids.insert(row.id.clone()) || !links.insert(row.permalink.clone()) {
-                continue;
-            }
-            if lines.len() == PLANNER_NOTES_GLOBAL {
-                return Some(lines.join("\n"));
-            }
-            let label = match row.note_type.as_str() {
-                "pitfall" => "Pitfall",
-                "pattern" => "Pattern",
-                "case" => "Case",
-                "reference" => "Reference",
-                _ => "Note",
-            };
-            let line = format!(
-                "- **[{}] {}**: {} (permalink: {})",
-                label, row.title, row.snippet, row.permalink
-            );
-            if used + line.len() > KNOWLEDGE_BUDGET_CHARS {
-                return Some(lines.join("\n"));
-            }
-            used += line.len() + 1;
-            lines.push(line);
-        }
-    }
-    Some(lines.join("\n"))
-}
 
 /// Load knowledge context from scope-matched notes. Returns None on error/empty.
 ///
@@ -429,10 +360,20 @@ async fn load_planned_knowledge(
 ///   `exceeded`=`len>=cap`.
 /// - **Fail-open:** trace errors are logged and swallowed; the rendered context
 ///   is produced from the production query alone.
+#[allow(dead_code)] // Scope-only entry point remains available to focused lifecycle tests.
 pub(crate) async fn load_knowledge_context(
     task: &Task,
     epic_context: Option<&str>,
     app_state: &AgentContext,
+) -> Option<String> {
+    load_knowledge_context_with_planner(task, epic_context, app_state, None).await
+}
+
+async fn load_knowledge_context_with_planner(
+    task: &Task,
+    epic_context: Option<&str>,
+    app_state: &AgentContext,
+    planner: Option<&MemoryIntentPlannerInvocation<'_>>,
 ) -> Option<String> {
     let note_repo = NoteRepository::new(app_state.db.clone(), app_state.event_bus.clone());
     let task_paths = derive_task_scope_paths(task, epic_context);
@@ -487,6 +428,7 @@ pub(crate) async fn load_knowledge_context(
                     },
                     cap_exceeded,
                     &app_state.db,
+                    planner.map(|p| (p.session_id, p.task_run_id)),
                 )
                 .await;
             }
@@ -517,11 +459,12 @@ pub(crate) async fn load_knowledge_context(
     let trace_candidates_final = apply_budget_outcomes(classified, &packed, &notes);
     let estimated_injected_tokens = packed.total_injected_tokens as i32;
 
-    let scope_rendered = if notes.is_empty() {
+    let rendered = if notes.is_empty() {
         None
     } else {
         Some(packed.rendered)
     };
+    let rendered = merge_planned_knowledge(rendered, &notes, &note_repo, task, planner).await;
 
     // Persist the trace (fail-open). Measure the persist phase separately.
     let persist_start = tokio::time::Instant::now();
@@ -538,27 +481,11 @@ pub(crate) async fn load_knowledge_context(
         },
         candidate_cap_exceeded,
         &app_state.db,
+        planner.map(|p| (p.session_id, p.task_run_id)),
     )
     .await;
 
-    match planned_queries {
-        None => scope_rendered,
-        Some(queries) => match load_planned_knowledge(
-            &note_repo,
-            task,
-            queries,
-            &notes,
-            packed.total_injected_chars,
-        )
-        .await
-        {
-            Some(extra) if !extra.is_empty() => Some(match scope_rendered {
-                Some(scope) => format!("{scope}\n{extra}"),
-                None => extra,
-            }),
-            _ => scope_rendered,
-        },
-    }
+    rendered
 }
 
 /// Classify trace candidates into `TraceCandidate` DTOs with deterministic outcomes.
@@ -710,6 +637,7 @@ struct KnowledgeTraceDurations {
 
 /// Persist a `LoadKnowledgeContext` retrieval trace row. Fail-open: logs and
 /// swallows all errors, never propagating them to the caller.
+#[allow(clippy::too_many_arguments)] // Trace fields stay explicit at this boundary.
 async fn persist_knowledge_trace(
     task: &Task,
     task_paths: &[String],
@@ -718,6 +646,7 @@ async fn persist_knowledge_trace(
     durations: KnowledgeTraceDurations,
     candidate_cap_exceeded: bool,
     db: &djinn_db::Database,
+    attribution: Option<(&str, &str)>,
 ) {
     use djinn_db::repositories::retrieval_trace::{
         CreateRetrievalTraceParams, RetrievalTraceEntryPoint, RetrievalTraceRepository,
@@ -766,8 +695,8 @@ async fn persist_knowledge_trace(
     let repo = RetrievalTraceRepository::new(db.clone());
     let params = CreateRetrievalTraceParams {
         project_id: &task.project_id,
-        session_id: None,
-        task_run_id: None,
+        session_id: attribution.map(|(session_id, _)| session_id),
+        task_run_id: attribution.map(|(_, task_run_id)| task_run_id),
         task_id: Some(&task.id),
         entry_point: RetrievalTraceEntryPoint::LoadKnowledgeContext,
         trigger: Some(&trigger),
@@ -812,13 +741,12 @@ pub(crate) async fn assemble_prompt_context(inputs: PromptContextInputs<'_>) -> 
         system_prompt_extensions,
         resolved_skills,
         app_state,
-        knowledge_identity,
-        planned_queries,
         read_sources,
         worker_resume_note,
         arbiter_directive,
         mcp_server_instructions,
         extension_diagnostics,
+        memory_intent_planner,
     } = inputs;
 
     // ── Phase 0: synchronous work with no data dependencies ──
@@ -898,20 +826,11 @@ pub(crate) async fn assemble_prompt_context(inputs: PromptContextInputs<'_>) -> 
             );
             async move {
                 let child_start = tokio::time::Instant::now();
-                let result = load_knowledge_context(
+                let result = load_knowledge_context_with_planner(
                     task,
                     epic_context_ref,
                     app_state,
-                    knowledge_identity,
-                    planned_queries,
-                )
-                .await;
-                let result = load_knowledge_context(
-                    task,
-                    epic_context_ref,
-                    app_state,
-                    knowledge_identity,
-                    planned_queries,
+                    memory_intent_planner.as_ref(),
                 )
                 .await;
                 (result, child_start.elapsed())
@@ -1098,38 +1017,6 @@ pub(crate) async fn assemble_prompt_context(inputs: PromptContextInputs<'_>) -> 
         prompt_setup_commands,
         extension_diagnostics: extension_diagnostics.to_vec(),
     }
-}
-
-/// Build BLOCKING directive for red required CI. Returns None for passing/advisory states.
-fn build_ci_blocking_directive(task: &Task) -> Option<String> {
-    if task.ci_status != "failing" {
-        return None;
-    }
-    let base_sha = task.ci_last_remediation_base_sha.as_deref()?;
-    let head_sha = task.ci_head_sha.as_deref().unwrap_or("unknown");
-    let pr_number = task.ci_pr_number.unwrap_or(0);
-    let check_names: Vec<String> =
-        serde_json::from_str(&task.ci_blocking_required_check_names).unwrap_or_default();
-    let checks_display = if check_names.is_empty() {
-        "unknown".to_string()
-    } else {
-        check_names.join(", ")
-    };
-    let fingerprint_line = match &task.ci_failure_fingerprint {
-        Some(fp) => format!("**Failure fingerprint:** `{fp}`\n"),
-        None => String::new(),
-    };
-    Some(format!(
-        "**PR:** #{pr_number}\\\n\
-         **Failing head SHA:** `{head_sha}`\\\n\
-         **Blocking checks:** {checks_display}\\\n\
-         {fingerprint_line}\
-         **Remediation baseline SHA:** `{base_sha}`\n\n\
-         > REQUIRED CI is failing on the current PR head. You MUST fix the \
-         failing required checks listed above before this task can proceed. \
-         The task will remain in remediation until all blocking checks pass \
-         on a new commit pushed to the PR branch."
-    ))
 }
 
 /// Resolve (from_sha, to_sha) for reviewer diff context via git. Best-effort.

@@ -109,6 +109,19 @@ pub async fn seed_session_row_with_id(
     .expect("failed to seed session row");
 }
 
+/// Delete a session row for integration tests that must verify FK cascade
+/// behavior without bypassing the database repository boundary.
+///
+/// **Not for production use.** Panics on SQL errors.
+pub async fn delete_session_row(db: &Database, session_id: &str) {
+    db.ensure_initialized().await.unwrap();
+    sqlx::query("DELETE FROM sessions WHERE id = $1")
+        .bind(session_id)
+        .execute(db.pool())
+        .await
+        .expect("failed to delete session row");
+}
+
 /// Seed a projectless global-chat session row for boundary/compaction tests.
 ///
 /// Global chat sessions (`agent_type = 'chat'`) are user-scoped and exist

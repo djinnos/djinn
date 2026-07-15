@@ -119,13 +119,12 @@ pub(crate) async fn assemble_for_role_with_extension_diagnostics(
         system_prompt_extensions,
         resolved_skills,
         app_state: &app_state,
-        knowledge_identity: None,
-        planned_queries: None,
         read_sources,
         worker_resume_note: None,
         arbiter_directive: None,
         mcp_server_instructions: &std::collections::BTreeMap::new(),
         extension_diagnostics,
+        memory_intent_planner: None,
     })
     .await
 }
@@ -153,13 +152,12 @@ pub(crate) async fn assemble_for_role_with_mcp_instructions(
         system_prompt_extensions: "",
         resolved_skills: &[],
         app_state: &app_state,
-        knowledge_identity: None,
-        planned_queries: None,
         read_sources: &[],
         worker_resume_note: None,
         arbiter_directive: None,
         mcp_server_instructions,
         extension_diagnostics: &[],
+        memory_intent_planner: None,
     })
     .await
 }
@@ -186,13 +184,12 @@ pub(crate) async fn assemble_for_role_with_resume(
         system_prompt_extensions: "",
         resolved_skills: &[],
         app_state: &app_state,
-        knowledge_identity: None,
-        planned_queries: None,
         read_sources: &[],
         worker_resume_note,
         arbiter_directive: None,
         mcp_server_instructions: &std::collections::BTreeMap::new(),
         extension_diagnostics: &[],
+        memory_intent_planner: None,
     })
     .await
 }
@@ -247,6 +244,14 @@ pub(crate) fn task_with_ci(
         ci_github_head_sha: None,
         ci_heads_diverged: None,
         ci_head_observation_error: None,
+        ci_mq_state: None,
+        ci_mq_run_id: None,
+        ci_mq_head_sha: None,
+        ci_mq_failed_check_names: None,
+        ci_mq_failure_fingerprint: None,
+        ci_mq_same_signature_count: None,
+        ci_mq_first_seen_at: None,
+        ci_mq_last_seen_at: None,
         unresolved_blocker_count: 0,
     }
 }

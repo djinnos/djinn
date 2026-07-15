@@ -499,6 +499,14 @@ fn task(id: &str, status: &str) -> Task {
         ci_github_head_sha: None,
         ci_heads_diverged: None,
         ci_head_observation_error: None,
+        ci_mq_state: None,
+        ci_mq_run_id: None,
+        ci_mq_head_sha: None,
+        ci_mq_failed_check_names: None,
+        ci_mq_failure_fingerprint: None,
+        ci_mq_same_signature_count: None,
+        ci_mq_first_seen_at: None,
+        ci_mq_last_seen_at: None,
         unresolved_blocker_count: 0,
     }
 }
@@ -2958,6 +2966,7 @@ fn gate_snapshot(task_id: &str, head_sha: &str, ci_status: CiStatus) -> TaskPrCi
         last_seen_at: "2026-01-01T00:00:00.000Z".to_owned(),
         same_signature_count: 0,
         last_remediation_base_sha: None,
+        merge_queue: None,
     }
 }
 
@@ -3996,6 +4005,7 @@ fn durable_snapshot(
         last_seen_at: "2026-07-01T00:00:00.000Z".to_owned(),
         same_signature_count,
         last_remediation_base_sha: Some(head_sha.to_owned()),
+        merge_queue: None,
     }
 }
 
@@ -4649,4 +4659,119 @@ fn llvt_no_evidence_no_prior_snapshot_holds_at_one() {
     assert!(!suppressed);
     assert_eq!(total, 1);
     assert!(total < super::SAME_CI_SIGNATURE_THRESHOLD as i64);
+}
+
+// ── Merge-queue same-signature park threshold ─────────────────────────────────
+
+#[test]
+fn mq_rejection_park_threshold_boundary() {
+    // Below the threshold: keep the historical reopen-per-dequeue behavior.
+    for below in 0..(super::MQ_SAME_SIGNATURE_THRESHOLD as i64) {
+        assert!(
+            !super::mq_rejection_requires_park(below),
+            "count {below} is below MQ_SAME_SIGNATURE_THRESHOLD → must reopen, not park"
+        );
+    }
+    // At and above the threshold: park + escalate instead of reopening.
+    assert!(
+        super::mq_rejection_requires_park(super::MQ_SAME_SIGNATURE_THRESHOLD as i64),
+        "count == MQ_SAME_SIGNATURE_THRESHOLD must park+escalate"
+    );
+    assert!(super::mq_rejection_requires_park(
+        super::MQ_SAME_SIGNATURE_THRESHOLD as i64 + 5
+    ));
+    // Degenerate/absent counts never escalate.
+    assert!(!super::mq_rejection_requires_park(0));
+    assert!(!super::mq_rejection_requires_park(-1));
+}
+
+#[test]
+fn mq_rejection_park_threshold_is_the_documented_three() {
+    // Guards the PR-C-facing contract: the merge-queue park threshold is 3.
+    assert_eq!(super::MQ_SAME_SIGNATURE_THRESHOLD, 3);
+}
+
+fn mq_section_task() -> djinn_core::models::Task {
+    djinn_core::models::Task {
+        id: "task-uuid".to_string(),
+        project_id: String::new(),
+        short_id: "t-mq".to_string(),
+        epic_id: None,
+        title: String::new(),
+        description: String::new(),
+        design: String::new(),
+        issue_type: "task".to_string(),
+        status: "open".to_string(),
+        priority: 0,
+        owner: String::new(),
+        labels: "[]".to_string(),
+        acceptance_criteria: "[]".to_string(),
+        reopen_count: 0,
+        continuation_count: 0,
+        total_reopen_count: 0,
+        intervention_count: 0,
+        last_intervention_at: None,
+        created_at: String::new(),
+        updated_at: String::new(),
+        closed_at: None,
+        close_reason: None,
+        merge_commit_sha: None,
+        pr_url: None,
+        merge_conflict_metadata: None,
+        memory_refs: "[]".to_string(),
+        agent_type: None,
+        created_by_user_id: None,
+        ci_status: "unknown".to_string(),
+        ci_head_sha: None,
+        ci_pr_number: None,
+        ci_blocking_required_check_names: "[]".to_string(),
+        ci_failure_fingerprint: None,
+        ci_first_seen_at: None,
+        ci_last_seen_at: None,
+        ci_same_signature_count: 0,
+        ci_last_remediation_base_sha: None,
+        ci_mirror_head_sha: None,
+        ci_github_head_sha: None,
+        ci_heads_diverged: None,
+        ci_head_observation_error: None,
+        ci_mq_state: None,
+        ci_mq_run_id: None,
+        ci_mq_head_sha: None,
+        ci_mq_failed_check_names: None,
+        ci_mq_failure_fingerprint: None,
+        ci_mq_same_signature_count: None,
+        ci_mq_first_seen_at: None,
+        ci_mq_last_seen_at: None,
+        unresolved_blocker_count: 0,
+    }
+}
+
+#[test]
+fn merge_queue_lane_escalation_section_absent_without_lane() {
+    let task = mq_section_task();
+    assert!(super::merge_queue_lane_escalation_section(&task).is_none());
+}
+
+#[test]
+fn merge_queue_lane_escalation_section_renders_lane_facts() {
+    let mut task = mq_section_task();
+    task.ci_mq_state = Some("dequeued_failure".into());
+    task.ci_mq_run_id = Some(556677);
+    task.ci_mq_failed_check_names = Some(r#"["Integration Tests","Server Tests"]"#.into());
+    task.ci_mq_same_signature_count = Some(3);
+    let section =
+        super::merge_queue_lane_escalation_section(&task).expect("lane present → section rendered");
+    for needle in [
+        "Merge-queue rejection",
+        "dequeued_failure",
+        "556677",
+        "Integration Tests",
+        "Server Tests",
+        "3 consecutive same-signature",
+    ] {
+        assert!(
+            section.contains(needle),
+            "section missing {needle:?}: {section}"
+        );
+    }
 }

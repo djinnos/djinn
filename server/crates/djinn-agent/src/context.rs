@@ -232,6 +232,10 @@ pub struct AgentContext {
     /// surface + multi-project planners) where the caller IS expected to
     /// disambiguate.
     pub default_project_id: Option<String>,
+    /// Runtime-owned configuration for the optional session-start memory
+    /// planner. Composition roots may inject an enabled value; ordinary
+    /// construction keeps the feature disabled.
+    pub memory_intent_planner: MemoryIntentPlannerConfig,
     /// Configuration for the periodic reconciliation sweep (stale PRs,
     /// branches, and orphan worker sessions).  Read from environment
     /// variables at `AgentContext` construction time via
@@ -241,7 +245,6 @@ pub struct AgentContext {
     /// intent planner. It remains disabled by default, but keeping it on the
     /// dispatch context makes an enabled deployment reachable without a local
     /// stage-level replacement of the configured value.
-    pub memory_intent_planner: MemoryIntentPlannerConfig,
     /// Shared compaction critical section for the active slot lifecycle/run.
     ///
     /// This is normally owned by the slot actor and threaded into the reply

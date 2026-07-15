@@ -1,22 +1,29 @@
-//! Checked-in, network-free replay corpus for the session-start planner seam.
+//! Checked-in, network-free replays through the production prompt-assembly boundary.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
+use std::sync::Mutex;
 
 use async_trait::async_trait;
+use djinn_core::events::EventBus;
+use djinn_db::{Database, NoteRepository};
 use serde::Deserialize;
-use tokio::sync::Mutex;
+use tokio_util::sync::CancellationToken;
 
-use super::memory_intent_planner::{
-    FakeMemoryIntentPlanner, PlannedContextNote, PlannedNoteSearch, PlannedQuery,
-    PlannerCallOutcome, PlannerError, PlannerInput, PlannerLedger, SessionStartPlannerResult,
-    run_session_start_memory_planner,
+use super::prompt_context::test_support::create_project_epic_task;
+use super::prompt_context::{
+    MemoryIntentPlannerHost, MemoryIntentPlannerInvocation, PlannedNoteSearch, PromptContext,
+    PromptContextInputs, assemble_prompt_context,
 };
-use crate::context::MemoryIntentPlannerConfig;
+use crate::context::{AgentContext, MemoryIntentPlannerConfig};
+use crate::roles::LeadRole;
+use crate::test_helpers::{agent_context_from_db, test_tempdir};
+use djinn_supervisor::services::wire::{
+    AttributedPlannerRequest, PlannerAttemptResult, PlannerOutcome,
+};
 
 const FIXTURES: &str =
     include_str!("../../../../tests/fixtures/memory_intent_planner/replay_cases.json");
-const SCOPE_ONLY: &str = "scope-only";
-const AVAILABLE_ATTEMPTED_USAGE: u32 = 17;
+const AVAILABLE_ATTEMPTED_USAGE: i64 = 17;
 
 #[derive(Debug, Deserialize)]
 struct ReplayCase {
@@ -34,311 +41,388 @@ struct ReplayCase {
     #[serde(default)]
     resume_compaction_summary: Option<String>,
     expected_outcome: String,
-    expected_context: String,
     expected_available_usage: u32,
     expected_accounting_finalized: bool,
-    #[serde(default)]
-    expected_ledger_outcome: Option<String>,
 }
 
-#[derive(Default)]
-struct ReplayLedger {
-    records: Mutex<Vec<(PlannerCallOutcome, u32)>>,
-    finalization_fails: bool,
+struct ReplayHost {
+    result: PlannerAttemptResult,
+    requests: Mutex<Vec<AttributedPlannerRequest>>,
 }
 
 #[async_trait]
-impl PlannerLedger for ReplayLedger {
-    async fn record(
+impl MemoryIntentPlannerHost for ReplayHost {
+    async fn plan_memory_intents(
         &self,
-        outcome: PlannerCallOutcome,
-        available_usage: u32,
-    ) -> Result<(), PlannerError> {
-        self.records.lock().await.push((outcome, available_usage));
-        if self.finalization_fails {
-            return Err(PlannerError::Invocation(
-                "ledger finalization failed".into(),
-            ));
-        }
-        Ok(())
-    }
-}
-impl ReplayLedger {
-    async fn records(&self) -> Vec<(PlannerCallOutcome, u32)> {
-        self.records.lock().await.clone()
+        request: AttributedPlannerRequest,
+    ) -> Result<PlannerAttemptResult, String> {
+        self.requests.lock().expect("host requests").push(request);
+        Ok(self.result.clone())
     }
 }
 
-/// Query-keyed fake exercises the final `PlannedNoteSearch` seam without a database.
 #[derive(Default)]
 struct ReplaySearch {
-    buckets: HashMap<String, Vec<PlannedContextNote>>,
-    calls: Mutex<Vec<PlannedQuery>>,
+    buckets: HashMap<String, Vec<djinn_memory::MemorySearchEntityRow>>,
+    requests: Mutex<Vec<(String, String)>>,
 }
+
 #[async_trait]
 impl PlannedNoteSearch for ReplaySearch {
-    type Note = PlannedContextNote;
-    async fn search(&self, query: PlannedQuery) -> Result<Vec<Self::Note>, PlannerError> {
-        let notes = self.buckets.get(&query.query).cloned().unwrap_or_default();
-        self.calls.lock().await.push(query);
-        Ok(notes)
-    }
-}
-impl ReplaySearch {
-    async fn calls(&self) -> Vec<PlannedQuery> {
-        self.calls.lock().await.clone()
+    async fn search_planned_notes(
+        &self,
+        _project_id: &str,
+        _task_id: &str,
+        query: &str,
+        note_type: &str,
+    ) -> Result<Vec<djinn_memory::MemorySearchEntityRow>, String> {
+        self.requests
+            .lock()
+            .expect("search requests")
+            .push((query.to_owned(), note_type.to_owned()));
+        Ok(self.buckets.get(query).cloned().unwrap_or_default())
     }
 }
 
-fn input(case: &ReplayCase) -> PlannerInput {
-    PlannerInput {
-        title: "Replay task".into(),
-        description: "Network-free deterministic replay validation".into(),
-        acceptance_criteria: vec!["Planner output remains scope-first".into()],
-        resume_compaction_summary: case.resume_compaction_summary.clone(),
+fn row(
+    id: &str,
+    title: &str,
+    permalink: &str,
+    snippet: &str,
+) -> djinn_memory::MemorySearchEntityRow {
+    djinn_memory::MemorySearchEntityRow {
+        entity: "note".into(),
+        id: id.into(),
+        title: title.into(),
+        folder: "replay".into(),
+        note_type: "pattern".into(),
+        permalink: permalink.into(),
+        snippet: snippet.into(),
+        score: 1.0,
     }
 }
-fn provider_result(case: &ReplayCase) -> Result<String, PlannerError> {
-    match case.provider.as_str() {
-        "success" => Ok(case.payload.clone().unwrap_or_default()),
-        "timeout" => Err(PlannerError::Invocation("timeout".into())),
-        "provider_error" => Err(PlannerError::Invocation("provider error".into())),
-        other => panic!("unknown fixture provider {other}"),
+
+fn outcome(name: &str) -> PlannerOutcome {
+    match name {
+        "success" => PlannerOutcome::Success,
+        "timeout" => PlannerOutcome::Timeout,
+        "provider_error" => PlannerOutcome::ProviderError,
+        "invalid_payload" => PlannerOutcome::InvalidPayload,
+        other => panic!("unknown replay outcome {other}"),
     }
 }
-fn note(id: impl Into<String>, rendered: impl Into<String>) -> PlannedContextNote {
-    let id = id.into();
-    PlannedContextNote {
-        permalink: format!("memory/{id}"),
-        id,
-        rendered: rendered.into(),
+
+fn host(case: &ReplayCase) -> ReplayHost {
+    let terminal = if case.expected_outcome == "disabled" {
+        PlannerOutcome::Success
+    } else {
+        outcome(&case.expected_outcome)
+    };
+    ReplayHost {
+        result: PlannerAttemptResult {
+            outcome: if case.finalization_fails {
+                PlannerOutcome::ProviderError
+            } else {
+                terminal
+            },
+            // Completed provider calls retain their raw payload so the production
+            // parser/style validator is replayed even when durable accounting has
+            // already classified the completion as invalid_payload.
+            content: (case.provider == "success" && !case.finalization_fails)
+                .then(|| case.payload.clone())
+                .flatten(),
+            tokens_in: 10,
+            tokens_out: 7,
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
+            cost_usd: Some(0.001),
+            diagnostic: case
+                .finalization_fails
+                .then(|| "ledger finalization failed: fixture".into()),
+        },
+        requests: Mutex::new(Vec::new()),
     }
 }
-fn normal_buckets() -> HashMap<String, Vec<PlannedContextNote>> {
+
+fn normal_buckets() -> HashMap<String, Vec<djinn_memory::MemorySearchEntityRow>> {
     HashMap::from([
         (
             "Database migration timeout E_CONNRESET".into(),
-            vec![note(
-                "planner-first",
-                "- **[Pitfall] first**: ranked one (permalink: pitfall/first)",
-            )],
+            vec![row("planner-first", "First", "pitfall/first", "ranked one")],
         ),
         (
             "Memory planner configuration injection".into(),
-            vec![note(
+            vec![row(
                 "planner-second",
-                "- **[Pattern] second**: ranked two (permalink: pattern/second)",
+                "Second",
+                "pattern/second",
+                "ranked two",
             )],
         ),
     ])
 }
-fn buckets(case: &ReplayCase) -> HashMap<String, Vec<PlannedContextNote>> {
+
+fn buckets(
+    case: &ReplayCase,
+    scope_id: &str,
+    scope_permalink: &str,
+) -> HashMap<String, Vec<djinn_memory::MemorySearchEntityRow>> {
     match case.bucket_mode.as_str() {
-        "duplicates" => HashMap::from([
-            (
-                "Database migration timeout E_CONNRESET".into(),
-                vec![note("scope-note", "planner duplicate by id")],
-            ),
-            (
-                "Memory planner configuration injection".into(),
-                vec![PlannedContextNote {
-                    id: "other-id".into(),
-                    permalink: "memory/scope-note".into(),
-                    rendered: "planner duplicate by permalink".into(),
-                }],
-            ),
-        ]),
+        "duplicates" => {
+            let shared = row("shared-planned", "Shared planned", "pattern/shared", "once");
+            HashMap::from([
+                (
+                    "Database migration timeout E_CONNRESET".into(),
+                    vec![
+                        row(scope_id, "Scope ID duplicate", "other/link", "skip"),
+                        shared.clone(),
+                    ],
+                ),
+                (
+                    "Memory planner configuration injection".into(),
+                    vec![
+                        row(
+                            "other-id",
+                            "Scope permalink duplicate",
+                            scope_permalink,
+                            "skip",
+                        ),
+                        shared,
+                        row("after-shared", "After shared", "pattern/after", "unique"),
+                    ],
+                ),
+            ])
+        }
         "caps" => (1..=4)
             .map(|query| {
                 (
                     format!("Replay cap query {query}"),
                     (1..=3)
-                        .map(|rank| note(format!("q{query}-r{rank}"), format!("q{query}-r{rank}")))
+                        .map(|rank| {
+                            let key = format!("q{query}-r{rank}");
+                            row(&key, &key, &format!("pattern/{key}"), &key)
+                        })
                         .collect(),
+                )
+            })
+            .collect(),
+        _ if case.full_scope_budget => normal_buckets()
+            .into_keys()
+            .map(|query| {
+                (
+                    query,
+                    vec![row(
+                        "oversized-planned",
+                        "Oversized planned",
+                        "pattern/oversized",
+                        &"p".repeat(2_100),
+                    )],
                 )
             })
             .collect(),
         _ => normal_buckets(),
     }
 }
-fn scope_context(case: &ReplayCase) -> String {
-    if case.full_scope_budget {
-        "x".repeat(2_000)
-    } else {
-        SCOPE_ONLY.into()
-    }
-}
-fn outcome_name(outcome: Option<PlannerCallOutcome>) -> String {
-    match outcome {
-        None => "disabled".into(),
-        Some(PlannerCallOutcome::Success) => "success".into(),
-        Some(PlannerCallOutcome::Timeout) => "timeout".into(),
-        Some(PlannerCallOutcome::ProviderError) => "provider_error".into(),
-        Some(PlannerCallOutcome::InvalidPayload) => "invalid_payload".into(),
-    }
-}
-fn expected_outcome(name: &str) -> PlannerCallOutcome {
-    match name {
-        "success" => PlannerCallOutcome::Success,
-        "timeout" => PlannerCallOutcome::Timeout,
-        "provider_error" => PlannerCallOutcome::ProviderError,
-        "invalid_payload" => PlannerCallOutcome::InvalidPayload,
-        other => panic!("unknown expected ledger outcome {other}"),
-    }
-}
-struct ReplayResult {
-    result: SessionStartPlannerResult,
-    planner_calls: usize,
-    planner_inputs: Vec<PlannerInput>,
-    search_calls: Vec<PlannedQuery>,
-    ledger_records: Vec<(PlannerCallOutcome, u32)>,
-}
 
-async fn replay(case: &ReplayCase) -> ReplayResult {
-    let config = MemoryIntentPlannerConfig {
-        enabled: case.enabled,
-        ..Default::default()
-    };
-    let planner = FakeMemoryIntentPlanner::new(provider_result(case));
-    let search = ReplaySearch {
-        buckets: buckets(case),
-        ..Default::default()
-    };
-    let ledger = ReplayLedger {
-        finalization_fails: case.finalization_fails,
-        ..Default::default()
-    };
-    let (scope_ids, scope_permalinks) = if case.bucket_mode == "duplicates" {
-        (vec!["scope-note".into()], vec!["memory/scope-note".into()])
-    } else {
-        (Vec::new(), Vec::new())
-    };
-    let result = run_session_start_memory_planner(
-        &config,
-        input(case),
-        scope_context(case),
-        &scope_ids,
-        &scope_permalinks,
-        &planner,
-        &search,
-        &ledger,
-        AVAILABLE_ATTEMPTED_USAGE,
-    )
-    .await;
-    let planner_inputs = planner.calls().await;
-    ReplayResult {
-        result,
-        planner_calls: planner_inputs.len(),
-        planner_inputs,
-        search_calls: search.calls().await,
-        ledger_records: ledger.records().await,
-    }
+async fn assemble(
+    task: &djinn_core::models::Task,
+    state: &AgentContext,
+    planner: Option<MemoryIntentPlannerInvocation<'_>>,
+) -> PromptContext {
+    let role = LeadRole;
+    let worktree = test_tempdir("memory-planner-replay-");
+    assemble_prompt_context(PromptContextInputs {
+        task,
+        runtime_role: &role,
+        role_for_epic_check: &role,
+        project_path: "/workspace/replay",
+        worktree_path: worktree.path(),
+        conflict_ctx: None,
+        merge_validation_ctx: None,
+        prompt_setup_commands: None,
+        system_prompt_extensions: "",
+        resolved_skills: &[],
+        app_state: state,
+        read_sources: &[],
+        worker_resume_note: None,
+        arbiter_directive: None,
+        mcp_server_instructions: &BTreeMap::new(),
+        extension_diagnostics: &[],
+        memory_intent_planner: planner,
+    })
+    .await
 }
 
 #[tokio::test]
-async fn checked_in_memory_intent_planner_replays_use_final_injected_seams() {
+async fn checked_in_replays_enter_the_production_assemble_prompt_context_boundary() {
     let cases: Vec<ReplayCase> = serde_json::from_str(FIXTURES).expect("checked-in replay corpus");
     assert_eq!(cases.len(), 13, "keep the rollout matrix exhaustive");
+
     for case in &cases {
-        let first = replay(case).await;
-        let second = replay(case).await;
-        assert_eq!(
-            first.result.context, case.expected_context,
-            "{} context",
-            case.name
-        );
-        assert_eq!(
-            outcome_name(first.result.outcome),
-            case.expected_outcome,
-            "{} outcome",
-            case.name
-        );
-        assert_eq!(
-            first.result.available_usage, case.expected_available_usage,
-            "{} usage",
-            case.name
-        );
-        assert_eq!(
-            first.result.accounting_finalized, case.expected_accounting_finalized,
-            "{} accounting finalization",
-            case.name
-        );
-        assert_eq!(
-            first.result, second.result,
-            "{} replay bytes/outcome drifted",
-            case.name
-        );
-        assert_eq!(
-            first.ledger_records, second.ledger_records,
-            "{} durable accounting drifted",
-            case.name
-        );
-        if let Some(expected) = &case.expected_ledger_outcome {
-            assert_eq!(
-                first.ledger_records,
-                vec![(expected_outcome(expected), case.expected_available_usage)],
-                "{} durable ledger outcome/usage",
-                case.name
-            );
+        let db = Database::ephemeral().await.expect("ephemeral replay db");
+        let events = EventBus::noop();
+        let mut task = create_project_epic_task(&db, &events, "Replay epic", "Replay task").await;
+        task.description = "Network-free deterministic replay validation".into();
+        task.created_by_user_id = Some("replay-creator".into());
+
+        let note_repo = NoteRepository::new(db.clone(), events);
+        let scope_body = if case.full_scope_budget {
+            "scope ".repeat(250)
         } else {
-            assert!(
-                first.ledger_records.is_empty(),
-                "{} must not record",
-                case.name
-            );
-        }
+            "scope baseline".into()
+        };
+        let scope = note_repo
+            .create(&task.project_id, "Scope Only", &scope_body, "pattern", "[]")
+            .await
+            .expect("seed scope note");
+        note_repo
+            .set_confidence(&scope.id, 0.95)
+            .await
+            .expect("scope confidence");
+
+        let state = agent_context_from_db(db, CancellationToken::new());
+        let baseline = assemble(&task, &state, None).await;
+        let host = host(case);
+        let search = ReplaySearch {
+            buckets: buckets(case, &scope.id, &scope.permalink),
+            ..Default::default()
+        };
+        let config = MemoryIntentPlannerConfig {
+            enabled: case.enabled,
+            ..Default::default()
+        };
+        let run = || {
+            assemble(
+                &task,
+                &state,
+                Some(MemoryIntentPlannerInvocation {
+                    config: &config,
+                    host: &host,
+                    session_id: "replay-session",
+                    task_run_id: "replay-run",
+                    creator_id: task.created_by_user_id.as_deref(),
+                    acceptance_criteria: vec!["Planner output remains scope-first".into()],
+                    resume_compaction_summary: case.resume_compaction_summary.as_deref(),
+                    planned_note_search: Some(&search),
+                }),
+            )
+        };
+        let first = run().await;
+        let second = run().await;
+
+        assert_eq!(
+            first.knowledge_context, second.knowledge_context,
+            "{} context drift",
+            case.name
+        );
+        assert_eq!(
+            first.system_prompt, second.system_prompt,
+            "{} prompt drift",
+            case.name
+        );
+
+        let requests = host.requests.lock().expect("host requests");
         if !case.enabled {
-            assert_eq!(
-                first.planner_calls, 0,
-                "disabled mode must not attempt planning"
-            );
-            assert!(
-                first.search_calls.is_empty(),
-                "disabled mode must not search"
-            );
-        } else {
-            assert_eq!(first.planner_calls, 1, "{} planner attempt", case.name);
+            assert!(requests.is_empty(), "disabled mode records no attempt");
+            assert_eq!(first.knowledge_context, baseline.knowledge_context);
+            assert_eq!(first.system_prompt, baseline.system_prompt);
+            assert!(search.requests.lock().expect("search requests").is_empty());
+            continue;
         }
-        if matches!(
-            case.expected_outcome.as_str(),
-            "timeout" | "provider_error" | "invalid_payload"
-        ) || case.finalization_fails
-        {
+        assert_eq!(requests.len(), 2, "{} host attempts", case.name);
+        let attempted = &host.result;
+        assert_eq!(
+            attempted.outcome,
+            if case.finalization_fails {
+                PlannerOutcome::ProviderError
+            } else {
+                outcome(&case.expected_outcome)
+            },
+            "{} durable outcome",
+            case.name
+        );
+        assert_eq!(
+            attempted.tokens_in + attempted.tokens_out,
+            case.expected_available_usage as i64
+        );
+        assert_eq!(
+            attempted.tokens_in + attempted.tokens_out,
+            AVAILABLE_ATTEMPTED_USAGE
+        );
+        assert_eq!(
+            !attempted
+                .diagnostic
+                .as_deref()
+                .is_some_and(|d| d.starts_with("ledger finalization failed")),
+            case.expected_accounting_finalized,
+            "{} finalization",
+            case.name
+        );
+
+        let failure = case.expected_outcome != "success" || case.finalization_fails;
+        if failure || case.full_scope_budget {
             assert_eq!(
-                first.result.context, SCOPE_ONLY,
-                "{} must fail open",
+                first.knowledge_context, baseline.knowledge_context,
+                "{} scope-only fallback",
                 case.name
             );
+        }
+        if failure {
             assert!(
-                first.search_calls.is_empty(),
+                search.requests.lock().expect("search requests").is_empty(),
                 "{} must not search",
                 case.name
             );
         }
-        if case.full_scope_budget {
+        if case.bucket_mode == "duplicates" {
+            let rendered = first
+                .knowledge_context
+                .as_deref()
+                .expect("knowledge context");
             assert_eq!(
-                first.result.context.len(),
-                2_000,
-                "scope consumes full budget"
+                rendered.matches("Shared planned").count(),
+                1,
+                "cross-query duplicate"
             );
-            assert_eq!(
-                first.search_calls.len(),
-                2,
-                "merge must calculate zero remainder after search"
-            );
+            assert!(rendered.contains("After shared"));
+            assert!(!rendered.contains("Scope ID duplicate"));
+            assert!(!rendered.contains("Scope permalink duplicate"));
         }
         if case.bucket_mode == "caps" {
-            assert_eq!(
-                first.result.context,
-                "scope-only\nq1-r1\nq1-r2\nq2-r1\nq2-r2\nq3-r1\nq3-r2"
+            let rendered = first
+                .knowledge_context
+                .as_deref()
+                .expect("knowledge context");
+            assert_eq!(rendered.matches("**[Note]").count(), 6);
+            for kept in ["q1-r1", "q1-r2", "q2-r1", "q2-r2", "q3-r1", "q3-r2"] {
+                assert!(rendered.contains(kept), "missing {kept}");
+            }
+            for omitted in ["q1-r3", "q2-r3", "q3-r3", "q4-r1"] {
+                assert!(!rendered.contains(omitted), "unexpected {omitted}");
+            }
+        }
+        if case.full_scope_budget {
+            assert!(
+                baseline
+                    .knowledge_context
+                    .as_deref()
+                    .is_some_and(|v| v.len() <= 2_000)
             );
-            assert_eq!(first.search_calls.len(), 4, "all ordered query buckets run");
+            assert_eq!(search.requests.lock().expect("search requests").len(), 4);
         }
         if let Some(summary) = &case.resume_compaction_summary {
-            assert_eq!(
-                first.planner_inputs[0].resume_compaction_summary.as_deref(),
-                Some(summary.as_str())
+            assert!(
+                requests
+                    .iter()
+                    .all(|request| request.conversation.contains(summary))
             );
+        }
+        match attempted.outcome {
+            PlannerOutcome::Timeout => assert_eq!(case.provider, "timeout"),
+            PlannerOutcome::ProviderError if !case.finalization_fails => {
+                assert_eq!(case.provider, "provider_error")
+            }
+            _ => {}
         }
     }
 }

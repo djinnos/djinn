@@ -389,6 +389,14 @@ async fn sweep_stale_prs(db: &djinn_db::Database, app_state: &crate::context::Co
                         ci_github_head_sha: None,
                         ci_heads_diverged: None,
                         ci_head_observation_error: None,
+                        ci_mq_state: None,
+                        ci_mq_run_id: None,
+                        ci_mq_head_sha: None,
+                        ci_mq_failed_check_names: None,
+                        ci_mq_failure_fingerprint: None,
+                        ci_mq_same_signature_count: None,
+                        ci_mq_first_seen_at: None,
+                        ci_mq_last_seen_at: None,
                         unresolved_blocker_count: 0,
                     }
                 }
@@ -3627,43 +3635,67 @@ async fn sweep_cargo_warm_base_guard(
             return;
         }
     };
-    let planning_locks = gc::BaseLockPlanningAdapter::new(gc::FlockBaseLock);
-    let dry_run_planning_locks = gc::NoopLockGuard;
-    // Flock creates a lock file, so a dry-run must use the non-mutating
-    // availability policy and leave base mtimes untouched.
-    let planning_locks: &dyn gc::BaseLockGuard = match config.mode {
-        crate::context::CacheCleanupMode::DryRun => &dry_run_planning_locks,
-        crate::context::CacheCleanupMode::Delete => &planning_locks,
-    };
-    let capacity = gc::StatvfsFilesystemCapacity;
-    let plan = gc::plan_pressure_eviction(
-        pressure_inventory,
-        &activity,
-        guard.as_ref(),
-        planning_locks,
-        &capacity,
-        config,
-        &clock,
-    )
-    .await;
-    if !plan.candidates.is_empty() {
+    if config.mode == crate::context::CacheCleanupMode::DryRun {
+        let snapshots = gc::snapshot_three_rung_pressure_bases(pressure_inventory, &activity).await;
+        let plan = gc::build_three_rung_pressure_plan(
+            snapshots,
+            clock.now(),
+            Duration::from_secs(config.warm_profile_min_idle_hours.saturating_mul(60 * 60)),
+        );
+        let units = gc::consume_three_rung_pressure_plan_dry_run(&plan);
+        if !units.is_empty() {
+            metrics::increment_candidates(
+                metrics::COMPONENT_CARGO_WARM_BASE,
+                config.mode.as_metric_label(),
+                units.len() as u64,
+            );
+        }
+        tracing::info!(
+            component = metrics::COMPONENT_CARGO_WARM_BASE,
+            mode = config.mode.as_metric_label(),
+            planned_units = units.len(),
+            "warm-base three-rung pressure GC dry-run completed"
+        );
+        return;
+    }
+
+    // Delete consumes the same immutable plan as dry-run. There is no
+    // planning-time lock probe: each unit takes the shared warmer lock and
+    // revalidates mutable facts while that guard is held.
+    let snapshots = gc::snapshot_three_rung_pressure_bases(pressure_inventory, &activity).await;
+    let plan = gc::build_three_rung_pressure_plan(
+        snapshots,
+        clock.now(),
+        Duration::from_secs(config.warm_profile_min_idle_hours.saturating_mul(60 * 60)),
+    );
+    if !plan.units.is_empty() {
         metrics::increment_candidates(
             metrics::COMPONENT_CARGO_WARM_BASE,
             config.mode.as_metric_label(),
-            plan.candidates.len() as u64,
+            plan.units.len() as u64,
         );
     }
-    let pressure = gc::execute_pressure_eviction(
-        plan,
+    let capacity = gc::StatvfsFilesystemCapacity;
+    let pressure = gc::execute_three_rung_pressure_plan(
+        &plan,
         &activity,
         guard.as_ref(),
-        &locks,
+        &gc::SharedWarmBaseLock,
         &capacity,
         config,
         &clock,
-        config.mode,
         Path::new(gc::CARGO_WARM_BASE_ROOT),
     )
     .await;
-    gc::log_pressure_eviction_completion(&pressure, config.mode);
+    tracing::info!(
+        component = metrics::COMPONENT_CARGO_WARM_BASE,
+        mode = config.mode.as_metric_label(),
+        attempted = pressure.attempted.len(),
+        deleted = pressure.deleted.len(),
+        retained = pressure.retained.len(),
+        reclaimed_bytes = pressure.reclaimed_bytes,
+        reached_high_watermark = pressure.reached_high_watermark,
+        remeasurement_failed = pressure.remeasurement_failed,
+        "warm-base three-rung pressure GC completed"
+    );
 }

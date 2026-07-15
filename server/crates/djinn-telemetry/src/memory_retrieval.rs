@@ -286,6 +286,21 @@ impl MemoryRetrievalMetrics {
             .map(|snapshot| snapshot.clone())
             .map_err(|_| MemoryRetrievalMetricsError::Poisoned)
     }
+
+    /// Deliberately poison the snapshot lock for consumer integration tests.
+    #[doc(hidden)]
+    pub fn poison_for_testing(&self) {
+        std::thread::scope(|scope| {
+            let handle = scope.spawn(|| {
+                let _guard = self
+                    .snapshot
+                    .lock()
+                    .expect("metrics snapshot lock available");
+                panic!("poison memory retrieval metrics lock for test");
+            });
+            let _ = handle.join();
+        });
+    }
 }
 
 pub(crate) fn register_metrics() {

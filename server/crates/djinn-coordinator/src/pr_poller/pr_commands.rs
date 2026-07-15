@@ -1,4 +1,5 @@
 use super::*;
+use djinn_core::models::TaskPrCiSnapshotMqLaneInput;
 
 impl CoordinatorActor {
     #[allow(clippy::too_many_arguments)]
@@ -278,6 +279,12 @@ impl CoordinatorActor {
         // `actor_role="verification"` (CI failure logging) surfaced to the
         // worker via `recent_feedback`, naming the failed
         // workflow/job/step plus `ci_job_log` hints to read the real log.
+        //
+        // Captured from the mq-lane upsert below so the queue-loop strike can
+        // decide (after this enrichment) whether to park+escalate instead of
+        // reopening for another blind rework round.
+        let mut mq_strike_count: i64 = 0;
+        let mut mq_escalation_checks: Vec<String> = Vec::new();
         let pr_marker = format!("pr-{pull_number}-");
         match gh_client
             .list_workflow_runs_for_event(owner, repo, "merge_group", 50)
@@ -330,6 +337,58 @@ impl CoordinatorActor {
                                     repo,
                                 )
                                 .await;
+
+                                // Durably record the merge-queue failure lane on
+                                // the CI snapshot. Without this the snapshot's
+                                // PR-head lane still reads `passing` (the PR
+                                // head's own checks are green — the heavy stages
+                                // run only on `merge_group`), so same-signature
+                                // counting / 3-strike escalation was blind to
+                                // merge-queue rejections. The fingerprint is
+                                // computed from the failing merge-group check
+                                // names (empty sections — the check-run names are
+                                // the stable signal we have in hand here), mirror-
+                                // ing the PR-head lane's fingerprinting. Non-fatal
+                                // on error (warn + continue), matching
+                                // `persist_ci_snapshot`'s posture.
+                                let mq_fingerprint = compute_ci_failure_fingerprint(&failed, &[]);
+                                let mq_failed_names: Vec<String> =
+                                    failed.iter().map(|cr| cr.name.clone()).collect();
+                                match self
+                                    .task_repo()
+                                    .upsert_ci_snapshot_mq_lane(TaskPrCiSnapshotMqLaneInput {
+                                        task_id: task_id.to_owned(),
+                                        pr_number: pull_number as i64,
+                                        state: "dequeued_failure".to_owned(),
+                                        run_id: i64::try_from(run.id).ok(),
+                                        head_sha: Some(run.head_sha.clone()),
+                                        failed_check_names: mq_failed_names,
+                                        failure_fingerprint: Some(mq_fingerprint.clone()),
+                                    })
+                                    .await
+                                {
+                                    Ok(snap) => {
+                                        if let Some(lane) = snap.merge_queue.as_ref() {
+                                            mq_strike_count = lane.same_signature_count;
+                                            mq_escalation_checks = lane.failed_check_names.clone();
+                                        }
+                                        tracing::info!(
+                                            task_id = %task_short_id,
+                                            pr = pull_number,
+                                            run_id = run.id,
+                                            fingerprint = %mq_fingerprint,
+                                            mq_same_signature_count = mq_strike_count,
+                                            "PR poller: recorded merge-queue failure lane on CI snapshot"
+                                        );
+                                    }
+                                    Err(e) => tracing::warn!(
+                                        task_id = %task_short_id,
+                                        pr = pull_number,
+                                        run_id = run.id,
+                                        error = %e,
+                                        "PR poller: failed to record merge-queue failure lane on CI snapshot (non-fatal)"
+                                    ),
+                                }
                             }
                         }
                         Err(e) => tracing::warn!(
@@ -352,6 +411,50 @@ impl CoordinatorActor {
                 error = %e,
                 "PR poller: failed to list merge_group runs for feedback enrichment"
             ),
+        }
+
+        // Queue-loop strike: once the SAME merge-group failure signature has
+        // been observed `MQ_SAME_SIGNATURE_THRESHOLD` times in a row, reopening
+        // for yet another blind rework round is demonstrably not clearing the
+        // queue rejection. Park the source and hand it to the Planner remediation
+        // ladder instead. Below the threshold the historical reopen behavior is
+        // unchanged. The Task is re-read AFTER the mq-lane upsert so its
+        // `ci_mq_*` projection carries the fresh lane facts that
+        // `escalate_ci_failure_and_park` surfaces in the escalation text.
+        if mq_rejection_requires_park(mq_strike_count) {
+            match self.task_repo().get(task_id).await {
+                Ok(Some(task)) => {
+                    let checks_display = if mq_escalation_checks.is_empty() {
+                        "unknown".to_string()
+                    } else {
+                        mq_escalation_checks.join(", ")
+                    };
+                    let escalation_reason = format!(
+                        "Merge queue repeatedly rejected PR #{pull_number}: \
+                         {mq_strike_count} consecutive same-signature queue rejections \
+                         (merge-group failing checks: {checks_display}). Parking for \
+                         Planner remediation instead of another blind reopen."
+                    );
+                    tracing::warn!(
+                        task_id = %task_short_id,
+                        pr = pull_number,
+                        mq_same_signature_count = mq_strike_count,
+                        "PR poller: merge-queue same-signature threshold reached → parking + escalating instead of reopening"
+                    );
+                    self.escalate_ci_failure_and_park(&task, pr_url, &escalation_reason, &[])
+                        .await;
+                    return;
+                }
+                Ok(None) => tracing::warn!(
+                    task_id = %task_short_id,
+                    "PR poller: task vanished before merge-queue escalation; falling back to reopen"
+                ),
+                Err(e) => tracing::warn!(
+                    task_id = %task_short_id,
+                    error = %e,
+                    "PR poller: failed to load task for merge-queue escalation; falling back to reopen"
+                ),
+            }
         }
 
         let transition_reason =

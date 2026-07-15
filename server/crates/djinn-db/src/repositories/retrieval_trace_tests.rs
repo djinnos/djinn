@@ -1314,6 +1314,9 @@ async fn health_rollup_aggregates_mixed_outcomes_and_skip_reasons() {
         .execute(db.pool())
         .await
         .unwrap();
+    // A second trace with no candidates proves this is a trace-level count,
+    // rather than a derivation from aggregate injected candidates.
+    wl!(&repo, &db, project_id, Dispatch, "2026-07-01T00:30:00.000Z");
 
     let rollup = repo
         .health_rollup(
@@ -1324,7 +1327,8 @@ async fn health_rollup_aggregates_mixed_outcomes_and_skip_reasons() {
         .await
         .unwrap();
 
-    assert_eq!(rollup.combined.trace_count, 1);
+    assert_eq!(rollup.combined.trace_count, 2);
+    assert_eq!(rollup.combined.zero_result_trace_count, 1);
     assert_eq!(rollup.combined.candidate_count, 3);
     assert_eq!(rollup.combined.injected_count, 1);
     assert_eq!(rollup.combined.skipped_count, 2);
@@ -1332,7 +1336,7 @@ async fn health_rollup_aggregates_mixed_outcomes_and_skip_reasons() {
     assert_eq!(rollup.combined.skip_reason_counts.min_confidence, 1);
     assert_eq!(rollup.combined.skip_reason_counts.budget_pruned, 0);
     assert_eq!(rollup.combined.estimated_injected_tokens_sum, 100);
-    assert_eq!(rollup.combined.estimated_injected_tokens_avg, Some(100.0));
+    assert_eq!(rollup.combined.estimated_injected_tokens_avg, Some(50.0));
 
     let score = &rollup.combined.candidate_score_summary;
     assert_eq!(score.count, 3);
@@ -1344,6 +1348,8 @@ async fn health_rollup_aggregates_mixed_outcomes_and_skip_reasons() {
         .per_entry_point
         .get(&Dispatch)
         .expect("dispatch evidence present");
+    assert_eq!(ep.trace_count, 2);
+    assert_eq!(ep.zero_result_trace_count, 1);
     assert_eq!(ep.candidate_count, 3);
     assert_eq!(ep.injected_count, 1);
 }

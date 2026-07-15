@@ -7,14 +7,7 @@
 //! score-union contract is target-specific, while memory planning needs typed,
 //! async queries and must preserve the existing memory-search scoring pipeline.
 
-use std::collections::HashSet;
-use std::sync::Arc;
-use std::time::Duration;
-
-use async_trait::async_trait;
-use futures::future::join_all;
 use serde::Deserialize;
-use tokio::sync::Mutex;
 
 use crate::context::MemoryIntentPlannerConfig;
 
@@ -34,8 +27,6 @@ pub struct PlannerInput {
     /// Intentionally untruncated: the caller owns any compaction policy.
     pub resume_compaction_summary: Option<String>,
 }
-
-type FakeSearchResults<N> = Vec<Result<Vec<N>, PlannerError>>;
 
 /// The closed set of note categories safe for planner-directed retrieval.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deserialize)]
@@ -111,8 +102,6 @@ pub enum PlannerError {
     WrongQueryCount(usize),
     #[error("planner query {index} is invalid: {reason}")]
     InvalidQuery { index: usize, reason: &'static str },
-    #[error("planner invocation failed: {0}")]
-    Invocation(String),
 }
 
 #[derive(Deserialize)]
@@ -272,239 +261,6 @@ fn is_boundary(text: &str, start: usize, end: usize) -> bool {
     let after = text[end..].chars().next();
     before.is_none_or(|c| !c.is_ascii_alphanumeric() && c != '_')
         && after.is_none_or(|c| !c.is_ascii_alphanumeric() && c != '_')
-}
-
-/// Async provider seam. Production provider/cost wiring belongs to a later task.
-#[async_trait]
-pub trait MemoryIntentPlanner: Send + Sync {
-    async fn plan(&self, input: PlannerInput) -> Result<String, PlannerError>;
-}
-
-/// Async existing-search seam. It deliberately accepts a typed query rather
-/// than implementing ranking, so the repository's scoring remains unchanged.
-#[async_trait]
-pub trait PlannedNoteSearch: Send + Sync {
-    type Note: Send + Sync;
-    async fn search(&self, query: PlannedQuery) -> Result<Vec<Self::Note>, PlannerError>;
-}
-/// Terminal durable status for one planner attempt.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PlannerCallOutcome {
-    Success,
-    Timeout,
-    ProviderError,
-    InvalidPayload,
-}
-
-/// Repository-adapted planner result; ranking/rendering remain owned by search.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PlannedContextNote {
-    pub id: String,
-    pub permalink: String,
-    pub rendered: String,
-}
-
-/// Durable finalization seam. Finalization failure suppresses injection while preserving independently available attempted usage.
-#[async_trait]
-pub trait PlannerLedger: Send + Sync {
-    async fn record(
-        &self,
-        outcome: PlannerCallOutcome,
-        available_usage: u32,
-    ) -> Result<(), PlannerError>;
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SessionStartPlannerResult {
-    pub context: String,
-    pub outcome: Option<PlannerCallOutcome>,
-    pub accounting_finalized: bool,
-    pub available_usage: u32,
-}
-
-/// Final session-start planner orchestration shared by the injected fake seams.
-#[allow(clippy::too_many_arguments)]
-pub async fn run_session_start_memory_planner<S, L>(
-    config: &MemoryIntentPlannerConfig,
-    input: PlannerInput,
-    scope_context: String,
-    scope_ids: &[String],
-    scope_permalinks: &[String],
-    planner: &dyn MemoryIntentPlanner,
-    search: &S,
-    ledger: &L,
-    available_usage: u32,
-) -> SessionStartPlannerResult
-where
-    S: PlannedNoteSearch<Note = PlannedContextNote>,
-    L: PlannerLedger,
-{
-    let Some(request) = prepare_planner_request(config, input) else {
-        return SessionStartPlannerResult {
-            context: scope_context,
-            outcome: None,
-            accounting_finalized: false,
-            available_usage: 0,
-        };
-    };
-    let (outcome, queries) = match planner.plan(request.input).await {
-        Err(PlannerError::Invocation(message)) if message == "timeout" => {
-            (PlannerCallOutcome::Timeout, None)
-        }
-        Err(_) => (PlannerCallOutcome::ProviderError, None),
-        Ok(raw) => match parse_planned_queries(&raw) {
-            Ok(q) => (PlannerCallOutcome::Success, Some(q)),
-            Err(_) => (PlannerCallOutcome::InvalidPayload, None),
-        },
-    };
-    if ledger.record(outcome, available_usage).await.is_err() {
-        return SessionStartPlannerResult {
-            context: scope_context,
-            outcome: Some(outcome),
-            accounting_finalized: false,
-            available_usage,
-        };
-    }
-    let Some(queries) = queries else {
-        return SessionStartPlannerResult {
-            context: scope_context,
-            outcome: Some(outcome),
-            accounting_finalized: true,
-            available_usage,
-        };
-    };
-    let results = join_all(queries.into_iter().map(|query| search.search(query))).await;
-    let Ok(buckets) = results.into_iter().collect::<Result<Vec<_>, _>>() else {
-        return SessionStartPlannerResult {
-            context: scope_context,
-            outcome: Some(PlannerCallOutcome::ProviderError),
-            accounting_finalized: true,
-            available_usage,
-        };
-    };
-    let added = merge_planned_context(&buckets, scope_context.len(), scope_ids, scope_permalinks);
-    let context = if added.is_empty() {
-        scope_context
-    } else {
-        format!("{scope_context}\n{added}")
-    };
-    SessionStartPlannerResult {
-        context,
-        outcome: Some(outcome),
-        accounting_finalized: true,
-        available_usage,
-    }
-}
-
-/// Scope-first deterministic caps/dedupe; scope bytes consume the same budget.
-pub fn merge_planned_context(
-    buckets: &[Vec<PlannedContextNote>],
-    scope_used: usize,
-    scope_ids: &[String],
-    scope_permalinks: &[String],
-) -> String {
-    let mut ids: HashSet<&str> = scope_ids.iter().map(String::as_str).collect();
-    let mut permalinks: HashSet<&str> = scope_permalinks.iter().map(String::as_str).collect();
-    let mut used = scope_used;
-    let mut lines = Vec::new();
-    for bucket in buckets {
-        for note in bucket.iter().take(2) {
-            if ids.contains(note.id.as_str()) || permalinks.contains(note.permalink.as_str()) {
-                continue;
-            }
-            if lines.len() == 6 || used + 1 + note.rendered.len() > 2_000 {
-                return lines.join("\n");
-            }
-            ids.insert(&note.id);
-            permalinks.insert(&note.permalink);
-            used += 1 + note.rendered.len();
-            lines.push(note.rendered.clone());
-        }
-    }
-    lines.join("\n")
-}
-
-/// Deterministic test planner that records calls and can delay its response.
-#[derive(Clone)]
-pub struct FakeMemoryIntentPlanner {
-    result: Result<String, PlannerError>,
-    delay: Duration,
-    calls: Arc<Mutex<Vec<PlannerInput>>>,
-}
-
-impl FakeMemoryIntentPlanner {
-    pub fn new(result: Result<String, PlannerError>) -> Self {
-        Self {
-            result,
-            delay: Duration::ZERO,
-            calls: Arc::new(Mutex::new(Vec::new())),
-        }
-    }
-
-    pub fn with_delay(mut self, delay: Duration) -> Self {
-        self.delay = delay;
-        self
-    }
-
-    pub async fn calls(&self) -> Vec<PlannerInput> {
-        self.calls.lock().await.clone()
-    }
-}
-
-#[async_trait]
-impl MemoryIntentPlanner for FakeMemoryIntentPlanner {
-    async fn plan(&self, input: PlannerInput) -> Result<String, PlannerError> {
-        self.calls.lock().await.push(input);
-        if !self.delay.is_zero() {
-            tokio::time::sleep(self.delay).await;
-        }
-        self.result.clone()
-    }
-}
-
-/// Deterministic search fake with one result bucket per call, useful for testing
-/// ordering and delayed parallel consumers without a database.
-#[derive(Clone)]
-pub struct FakePlannedNoteSearch<N: Clone + Send + Sync> {
-    results: Arc<Mutex<FakeSearchResults<N>>>,
-    delay: Duration,
-    calls: Arc<Mutex<Vec<PlannedQuery>>>,
-}
-
-impl<N: Clone + Send + Sync> FakePlannedNoteSearch<N> {
-    pub fn new(results: Vec<Result<Vec<N>, PlannerError>>) -> Self {
-        Self {
-            results: Arc::new(Mutex::new(results)),
-            delay: Duration::ZERO,
-            calls: Arc::new(Mutex::new(Vec::new())),
-        }
-    }
-
-    pub fn with_delay(mut self, delay: Duration) -> Self {
-        self.delay = delay;
-        self
-    }
-    pub async fn calls(&self) -> Vec<PlannedQuery> {
-        self.calls.lock().await.clone()
-    }
-}
-
-#[async_trait]
-impl<N: Clone + Send + Sync + 'static> PlannedNoteSearch for FakePlannedNoteSearch<N> {
-    type Note = N;
-
-    async fn search(&self, query: PlannedQuery) -> Result<Vec<N>, PlannerError> {
-        self.calls.lock().await.push(query);
-        if !self.delay.is_zero() {
-            tokio::time::sleep(self.delay).await;
-        }
-        let mut results = self.results.lock().await;
-        if results.is_empty() {
-            Ok(Vec::new())
-        } else {
-            results.remove(0)
-        }
-    }
 }
 
 #[cfg(test)]
@@ -743,24 +499,6 @@ mod tests {
                 "delimiter should be rejected: {delimiter:?}"
             );
         }
-    }
-
-    #[tokio::test]
-    async fn fakes_record_inputs_and_support_delays() {
-        let planner =
-            FakeMemoryIntentPlanner::new(Ok(valid().into())).with_delay(Duration::from_millis(1));
-        assert_eq!(planner.plan(input()).await.unwrap(), valid());
-        assert_eq!(planner.calls().await.len(), 1);
-        let search =
-            FakePlannedNoteSearch::new(vec![Ok(vec!["note"])]).with_delay(Duration::from_millis(1));
-        assert_eq!(
-            search
-                .search(parse_planned_queries(valid()).unwrap().remove(0))
-                .await
-                .unwrap(),
-            vec!["note"]
-        );
-        assert_eq!(search.calls().await.len(), 1);
     }
 
     /// Source-parity tests against the Phase 1 memory_search contract in
