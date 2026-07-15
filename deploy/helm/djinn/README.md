@@ -4,6 +4,18 @@ Installs djinn-server (controller), Postgres 16 (SQL state, JSONB), qdrant
 (vector store), and the Phase 3 image pipeline (BuildKit + Zot + image
 controller).
 
+## Cache cleanup mode
+
+The shipped production value is `cacheCleanup.mode: delete`, rendered as the
+literal `DJINN_CACHE_CLEANUP_MODE` environment variable on `djinn-server`.
+For kind/local development, `values.local.yaml` explicitly selects `dry_run`.
+An operator can make the same non-destructive override with
+`--set-string cacheCleanup.mode=dry_run`. The chart accepts only the exact
+`delete` and `dry_run` strings.
+
+This Helm contract does not change direct-binary behavior: an unset or invalid
+`DJINN_CACHE_CLEANUP_MODE` remains fail-safe `dry_run` there.
+
 ## Node prerequisites
 
 The image pipeline runs BuildKit **rootless** via user namespaces. Every
