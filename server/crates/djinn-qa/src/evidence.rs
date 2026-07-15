@@ -6,6 +6,7 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
 use crate::{Profile, Scenario, ScenarioInventory, Taxonomy};
 
@@ -132,20 +133,28 @@ impl EvidenceSet {
                 }
             }
             if record.scenario_id.is_empty()
-                || record.evidence_sha.is_empty()
                 || record.runner.name.is_empty()
                 || record.runner.version.is_empty()
             {
                 errors.push(format!(
-                    "{prefix}: scenario id, SHA, and runner identity must not be empty"
+                    "{prefix}: scenario id and runner identity must not be empty"
+                ));
+            }
+            if !is_git_sha(&record.evidence_sha) {
+                errors.push(format!(
+                    "{prefix}: evidence SHA must be a 40- or 64-character hexadecimal Git object ID"
                 ));
             }
             if record.scenario_version == 0 || record.taxonomy_version == 0 {
                 errors.push(format!("{prefix}: versions must be greater than zero"));
             }
-            if !rfc3339_like(&record.started_at)
-                || !rfc3339_like(&record.finished_at)
-                || record.started_at > record.finished_at
+            let started_at = parse_rfc3339(&record.started_at);
+            let finished_at = parse_rfc3339(&record.finished_at);
+            if started_at.is_none()
+                || finished_at.is_none()
+                || started_at
+                    .zip(finished_at)
+                    .is_some_and(|(start, finish)| start > finish)
             {
                 errors.push(format!(
                     "{prefix}: timestamps must be ordered RFC3339 values"
@@ -234,12 +243,10 @@ pub fn classify_coverage(
                     .iter()
                     .enumerate()
                     .filter(|(_, item)| item.scenario_id == scenario.id)
-                    .max_by(|left, right| {
-                        left.1
-                            .finished_at
-                            .cmp(&right.1.finished_at)
-                            .then_with(|| left.0.cmp(&right.0))
-                    });
+                    // Compare normalized instants, not timestamp strings. For equal instants
+                    // (and malformed evidence, which validation rejects), the higher file index
+                    // wins so input ordering remains the documented deterministic tie-breaker.
+                    .max_by_key(|(index, item)| (parse_rfc3339(&item.finished_at), *index));
                 let Some((index, item)) = candidate else {
                     continue;
                 };
@@ -341,10 +348,12 @@ fn same_ids(left: &[String], right: &[String]) -> bool {
     left.dedup();
     left == right
 }
-fn rfc3339_like(value: &str) -> bool {
-    value.len() >= 20
-        && value.as_bytes().get(10) == Some(&b'T')
-        && (value.ends_with('Z') || value.rfind(['+', '-']).is_some_and(|at| at > 10))
+fn parse_rfc3339(value: &str) -> Option<OffsetDateTime> {
+    OffsetDateTime::parse(value, &Rfc3339).ok()
+}
+
+fn is_git_sha(value: &str) -> bool {
+    matches!(value.len(), 40 | 64) && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
 #[derive(Debug, Error)]
@@ -372,6 +381,8 @@ impl std::error::Error for EvidenceValidationErrors {}
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const SHA: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     fn taxonomy() -> Taxonomy {
         Taxonomy::from_yaml(include_str!("../tests/fixtures/valid-taxonomy.yaml")).unwrap()
     }
@@ -388,7 +399,7 @@ mod tests {
             covered_ids: vec!["reaper.slow-vs-crashed-discrimination".into()],
             profile: Profile::SmokeCi,
             status,
-            evidence_sha: "current".into(),
+            evidence_sha: SHA.into(),
             started_at: "2026-01-01T00:00:00Z".into(),
             finished_at: "2026-01-01T00:00:01Z".into(),
             runner: RunnerIdentity {
@@ -406,7 +417,7 @@ mod tests {
     #[test]
     fn classifies_all_four_states_and_never_registration_as_proof() {
         let base = CoverageContext {
-            current_sha: "current".into(),
+            current_sha: SHA.into(),
             ..Default::default()
         };
         assert_eq!(
@@ -451,7 +462,7 @@ mod tests {
                     evidence: vec![stale]
                 },
                 CoverageContext {
-                    current_sha: "current".into(),
+                    current_sha: SHA.into(),
                     ..Default::default()
                 }
             )
@@ -465,7 +476,7 @@ mod tests {
         stale.finished_at = "2026-01-01T00:00:02Z".into();
         stale.scenario_version = 2;
         let context = CoverageContext {
-            current_sha: "other".into(),
+            current_sha: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
             ..Default::default()
         };
         let outcome = result(
@@ -484,7 +495,7 @@ mod tests {
                 evidence: vec![stale],
             },
             CoverageContext {
-                current_sha: "other".into(),
+                current_sha: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
                 ..Default::default()
             },
         );
@@ -492,5 +503,51 @@ mod tests {
             outcome.stale_reasons,
             vec!["scenario-version-mismatch", "evidence-sha-not-current"]
         );
+    }
+
+    #[test]
+    fn rejects_invalid_rfc3339_timestamps_and_git_shas() {
+        let mut invalid_timestamp = record(EvidenceStatus::Passed);
+        invalid_timestamp.started_at = "0000000000TaaaaaaaaaZ".into();
+        invalid_timestamp.finished_at = "0000000000TbbbbbbbbbZ".into();
+        invalid_timestamp.evidence_sha = "not-a-sha".into();
+        let errors = EvidenceSet {
+            version: 1,
+            evidence: vec![invalid_timestamp],
+        }
+        .validate(&taxonomy(), &inventory())
+        .unwrap_err();
+        assert!(
+            errors
+                .0
+                .iter()
+                .any(|error| error.contains("timestamps must be ordered RFC3339 values"))
+        );
+        assert!(
+            errors
+                .0
+                .iter()
+                .any(|error| error.contains("evidence SHA must be a 40- or 64-character"))
+        );
+    }
+
+    #[test]
+    fn selects_latest_evidence_by_normalized_rfc3339_instant() {
+        let mut earlier_failure = record(EvidenceStatus::Failed);
+        earlier_failure.finished_at = "2026-01-01T06:00:00+12:00".into();
+        let mut later_pass = record(EvidenceStatus::Passed);
+        later_pass.finished_at = "2026-01-01T00:00:00-12:00".into();
+        let outcome = result(
+            EvidenceSet {
+                version: 1,
+                evidence: vec![earlier_failure, later_pass],
+            },
+            CoverageContext {
+                current_sha: SHA.into(),
+                ..Default::default()
+            },
+        );
+        assert_eq!(outcome.state, CoverageState::Proven);
+        assert_eq!(outcome.evidence_index, Some(1));
     }
 }
