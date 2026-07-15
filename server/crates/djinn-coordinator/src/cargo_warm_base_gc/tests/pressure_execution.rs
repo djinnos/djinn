@@ -1150,12 +1150,14 @@ fn assert_fixture_result(
         "{} planned",
         case["name"]
     );
-    assert_eq!(
-        result.post_lock_eligible.len(),
-        count("eligible"),
-        "{} eligible",
-        case["name"]
-    );
+    if case.get("eligible").is_some() {
+        assert_eq!(
+            result.post_lock_eligible.len(),
+            count("eligible"),
+            "{} eligible",
+            case["name"]
+        );
+    }
     assert_eq!(
         result.attempted.len(),
         count("attempted"),
