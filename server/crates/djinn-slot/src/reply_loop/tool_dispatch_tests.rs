@@ -101,21 +101,24 @@ impl crate::host::SlotToolDispatcher for PhaseScriptedDispatcher {
         _: &'a str,
         _: &'a str,
     ) -> std::pin::Pin<
-        Box<dyn std::future::Future<Output = Result<serde_json::Value, String>> + Send + 'a>,
+        Box<dyn std::future::Future<Output = djinn_core::tool_call::ToolCallOutcome> + Send + 'a>,
     > {
         match name {
-            "extension_ok" | "extension_err" => self.json_future(name),
+            "extension_ok" | "extension_err" => {
+                let result = self.route(name).map(|()| serde_json::json!({"ok": true}));
+                Box::pin(async move { djinn_core::tool_call::ToolCallOutcome::from_result(result) })
+            }
             "retry" => {
                 self.advance(1);
                 let attempt = self
                     .retry_attempts
                     .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 Box::pin(async move {
-                    if attempt == 0 {
+                    djinn_core::tool_call::ToolCallOutcome::from_result(if attempt == 0 {
                         Err("database is locked".into())
                     } else {
                         Ok(serde_json::json!({"retried": true}))
-                    }
+                    })
                 })
             }
             "pending" => Box::pin(std::future::pending()),

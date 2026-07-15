@@ -8,6 +8,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 use crate::host::{SlotContext, SlotToolDispatcher};
+use djinn_core::tool_call::{ToolCallFailure, ToolCallOutcome};
 use djinn_provider::message::ContentBlock;
 use djinn_provider::provider::telemetry;
 
@@ -377,7 +378,9 @@ pub(super) async fn dispatch_single_tool<'a>(
         let mut retries = 0u32;
         while retries < 5 {
             match &result {
-                Err(e) if e.contains("database is locked") && retry_safe => {
+                ToolCallOutcome::Failure(ToolCallFailure::Message(e))
+                    if e.contains("database is locked") && retry_safe =>
+                {
                     retries += 1;
                     let backoff = std::time::Duration::from_millis(100 * (1 << retries.min(4)));
                     tracing::warn!(
@@ -406,20 +409,40 @@ pub(super) async fn dispatch_single_tool<'a>(
         }
     }
     let (content, is_error) = match result {
-        Ok(value) => {
+        ToolCallOutcome::Success { value, warnings } if warnings.is_empty() => {
             let text = ctx.tool_dispatcher.render_result(&id, &name, &value);
             if let Some(ts) = &tool_span {
                 ts.record_output(&text, false);
             }
             (vec![ContentBlock::Text { text }], false)
         }
-        Err(err) => {
+        ToolCallOutcome::Success { value, warnings } => {
+            let text = serde_json::json!({ "result": value, "warnings": warnings }).to_string();
+            if let Some(ts) = &tool_span {
+                ts.record_output(&text, false);
+            }
+            (vec![ContentBlock::Text { text }], false)
+        }
+        ToolCallOutcome::Failure(ToolCallFailure::Message(err)) => {
             tracing::warn!(task_id = %ctx.task_id, tool = %name, error = %err, "ReplyLoop: tool call returned error");
             let err_text = format!("error: {err}");
             if let Some(ts) = &tool_span {
                 ts.record_output(&err_text, true);
             }
             (vec![ContentBlock::Text { text: err_text }], true)
+        }
+        ToolCallOutcome::Failure(ToolCallFailure::Structured {
+            code,
+            message,
+            data,
+        }) => {
+            let text =
+                serde_json::json!({ "code": code, "message": message, "data": data }).to_string();
+            tracing::warn!(task_id = %ctx.task_id, tool = %name, error = %text, "ReplyLoop: tool call returned compatibility error");
+            if let Some(ts) = &tool_span {
+                ts.record_output(&text, true);
+            }
+            (vec![ContentBlock::Text { text }], true)
         }
     };
     if let Some(ts) = tool_span {
