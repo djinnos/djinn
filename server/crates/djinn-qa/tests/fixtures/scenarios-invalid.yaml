@@ -1,0 +1,38 @@
+version: 1
+scenarios:
+  - id: qa.bad
+    version: 1
+    enabled: true
+    profiles: [smoke-ci]
+    sources: []
+    primary_coverage: unknown.coverage
+    secondary_coverage: [also.unknown]
+    execution:
+      kind: cargo-package
+      package: missing-package
+    isolation:
+      database: isolated
+      providers: isolated
+      channel: isolated
+      live_credentials: true
+      live_providers: true
+      kubernetes: true
+      external_network: true
+      wall_clock_sleep: true
+    watch_paths: [server/crates/djinn-qa/src/scenario.rs]
+  - id: qa.bad
+    version: 1
+    enabled: true
+    profiles: [smoke-ci]
+    sources:
+      - kind: memory
+        id: duplicate-primary
+    primary_coverage: unknown.coverage
+    execution:
+      kind: cargo-package
+      package: djinn-qa
+    isolation:
+      database: isolated
+      providers: isolated
+      channel: isolated
+    watch_paths: [server/crates/djinn-qa/src/scenario.rs]
