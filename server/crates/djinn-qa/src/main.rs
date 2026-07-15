@@ -97,7 +97,7 @@ fn run(args: Vec<String>) -> Result<ExitCode, String> {
         &evidence_set,
         profile,
         &CoverageContext {
-            current_sha: current_sha.unwrap_or_else(|| git_sha(&root).unwrap_or_default()),
+            current_sha: current_sha.unwrap_or_else(|| local_git_sha(&root).unwrap_or_default()),
             accepted_baseline_shas: baselines,
             ..Default::default()
         },
@@ -122,14 +122,8 @@ fn run(args: Vec<String>) -> Result<ExitCode, String> {
         ExitCode::SUCCESS
     })
 }
-fn git_sha(root: &std::path::Path) -> Option<String> {
-    std::process::Command::new("git")
-        .args(["-C", root.to_str()?, "rev-parse", "HEAD"])
-        .output()
-        .ok()
-        .filter(|output| output.status.success())
-        .and_then(|output| String::from_utf8(output.stdout).ok())
-        .map(|sha| sha.trim().to_owned())
+fn local_git_sha(root: &std::path::Path) -> Option<String> {
+    djinn_git::head_sha(root).ok()
 }
 fn table(rows: &[djinn_qa::CoverageReportRow]) -> String {
     let mut text = String::from(
@@ -137,11 +131,11 @@ fn table(rows: &[djinn_qa::CoverageReportRow]) -> String {
     );
     for row in rows {
         text.push_str(&format!(
-            "{}\t{}\t{}\t{:?}\t{}\t{}\t{}\t{}\t{}\t{}\n",
+            "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
             row.coverage_id,
             row.subsystem,
             row.required_profiles.join(","),
-            row.state,
+            state_name(row.state),
             row.scenario_ids.join(","),
             row.evidence_path.as_deref().unwrap_or(""),
             row.last_passed_at.as_deref().unwrap_or(""),
@@ -151,4 +145,13 @@ fn table(rows: &[djinn_qa::CoverageReportRow]) -> String {
         ));
     }
     text
+}
+
+fn state_name(state: djinn_qa::CoverageState) -> &'static str {
+    match state {
+        djinn_qa::CoverageState::Unproven => "unproven",
+        djinn_qa::CoverageState::Proven => "proven",
+        djinn_qa::CoverageState::Stale => "stale",
+        djinn_qa::CoverageState::Failing => "failing",
+    }
 }

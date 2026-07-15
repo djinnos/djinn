@@ -69,11 +69,9 @@ fn table_json_output_and_exit_states_are_contractual() {
             assert!(row.get(key).is_some(), "missing {key}");
         }
         let table = coverage(repo.path(), "table");
-        assert!(
-            String::from_utf8(table.stdout)
-                .unwrap()
-                .starts_with("coverage_id\tsubsystem\t")
-        );
+        let table = String::from_utf8(table.stdout).unwrap();
+        assert!(table.starts_with("coverage_id\tsubsystem\t"));
+        assert!(table.contains(&format!("\t{expected}\t")));
     }
 }
 
