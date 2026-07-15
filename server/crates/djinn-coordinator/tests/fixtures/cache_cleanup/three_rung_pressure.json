@@ -1,0 +1,10 @@
+{
+  "contract": "frozen coordinator three-rung pressure schedule",
+  "rung_order": ["incremental", "stale_profile", "whole_base"],
+  "dry_run": {"locks": 0, "rechecks": 0, "removals": 0},
+  "delete": {"lock": "shared .warm-locks/<project-id>.lock", "fail_closed": true},
+  "cold_rebuild": ["incremental", "stale_profile", "whole_base"],
+  "preserves": ["profile siblings after incremental", "base siblings after profile"],
+  "capacity_termination": ["reached_high", "remeasure_failed"],
+  "two_actor": ["no overlap", "loser non-mutation", "death releases lock", "retry succeeds"]
+}

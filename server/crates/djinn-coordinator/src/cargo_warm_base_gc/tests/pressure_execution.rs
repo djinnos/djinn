@@ -1106,3 +1106,25 @@ async fn pressure_metrics_match_the_bounded_fixture_for_execution_boundaries() {
     assert!(post_result.remeasurement_failed && post_result.deleted.len() == 1);
     assert_execution_metrics(&before, &after, post_case, "base");
 }
+
+#[test]
+fn frozen_coordinator_fixture_records_the_three_rung_contract() {
+    let fixture: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../tests/fixtures/cache_cleanup/three_rung_pressure.json"
+    ))
+    .expect("valid frozen coordinator fixture");
+    assert_eq!(
+        fixture["rung_order"],
+        serde_json::json!(["incremental", "stale_profile", "whole_base"])
+    );
+    assert_eq!(fixture["dry_run"]["locks"], 0);
+    assert_eq!(fixture["dry_run"]["rechecks"], 0);
+    assert_eq!(fixture["dry_run"]["removals"], 0);
+    assert_eq!(
+        fixture["delete"]["lock"],
+        "shared .warm-locks/<project-id>.lock"
+    );
+    assert_eq!(fixture["cold_rebuild"].as_array().unwrap().len(), 3);
+    assert_eq!(fixture["capacity_termination"].as_array().unwrap().len(), 2);
+    assert_eq!(fixture["two_actor"].as_array().unwrap().len(), 4);
+}
