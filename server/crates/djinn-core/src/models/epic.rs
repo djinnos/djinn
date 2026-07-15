@@ -34,3 +34,37 @@ pub struct Epic {
     #[serde(default)]
     pub proposal_id: Option<String>,
 }
+
+/// Payload for `epic.created` / `epic.updated` events: the epic row plus the
+/// proposal swimlane labels the board needs to group live epics, mirroring
+/// the `epic_list` enrichment. Emit through `EpicRepository::emit_created` /
+/// `emit_updated`, which hydrate the labels; [`EpicEventPayload::bare`] is
+/// for epics with no proposal linkage, lookup-failure fallbacks, and tests.
+#[derive(Debug, serde::Serialize)]
+pub struct EpicEventPayload<'a> {
+    #[serde(flatten)]
+    pub epic: &'a Epic,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub proposal_short_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub proposal_title: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub proposal_status: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub proposal_build_owner_user_id: Option<String>,
+}
+
+impl<'a> EpicEventPayload<'a> {
+    /// Payload without proposal labels. Consumers treat missing labels as
+    /// "linkage unknown", so only use this when the epic has no
+    /// `proposal_id` or the label lookup failed.
+    pub fn bare(epic: &'a Epic) -> Self {
+        Self {
+            epic,
+            proposal_short_id: None,
+            proposal_title: None,
+            proposal_status: None,
+            proposal_build_owner_user_id: None,
+        }
+    }
+}

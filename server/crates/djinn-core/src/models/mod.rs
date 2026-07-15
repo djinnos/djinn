@@ -19,7 +19,7 @@ pub mod verify_run;
 pub use agent::Agent;
 pub use credential::Credential;
 pub use dispatch_state::DispatchStateRecord;
-pub use epic::Epic;
+pub use epic::{Epic, EpicEventPayload};
 pub use git_settings::GitSettings;
 pub use org_ai_policy::{LockLevel, OrgAiPolicy, OrgDefaultLanes};
 pub use project::Project;

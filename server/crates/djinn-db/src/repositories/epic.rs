@@ -1,6 +1,6 @@
 // djinn:allow-oversize — legacy module over size-guard threshold; split when touched substantively.
 use djinn_core::events::{DjinnEventEnvelope, EventBus};
-use djinn_core::models::Epic;
+use djinn_core::models::{Epic, EpicEventPayload};
 
 use crate::database::Database;
 use crate::repositories::task::{DispositionScope, TaskRepository, apply_parent_disposition_tx};
@@ -101,6 +101,55 @@ pub struct EpicRepository {
 impl EpicRepository {
     pub fn new(db: Database, events: EventBus) -> Self {
         Self { db, events }
+    }
+
+    /// Hydrate the proposal swimlane labels (short_id/title/status/build
+    /// owner) for an epic's event payload, mirroring the `epic_list`
+    /// enrichment so live SSE payloads match snapshot rows. Fail-open: a
+    /// lookup failure logs and falls back to a bare payload — the event must
+    /// still go out so live boards hear about the change.
+    async fn event_payload<'a>(&self, epic: &'a Epic) -> EpicEventPayload<'a> {
+        let Some(proposal_id) = epic.proposal_id.clone() else {
+            return EpicEventPayload::bare(epic);
+        };
+        let proposals = crate::repositories::proposal::ProposalRepository::new(
+            self.db.clone(),
+            self.events.clone(),
+        );
+        match proposals.refs_by_ids(&[proposal_id]).await {
+            Ok(refs) => match refs.into_iter().next() {
+                Some(r) => EpicEventPayload {
+                    epic,
+                    proposal_short_id: Some(r.short_id),
+                    proposal_title: Some(r.title),
+                    proposal_status: Some(r.status),
+                    proposal_build_owner_user_id: r.build_owner_user_id,
+                },
+                None => EpicEventPayload::bare(epic),
+            },
+            Err(e) => {
+                tracing::warn!(
+                    epic_id = %epic.id,
+                    error = %e,
+                    "failed to hydrate proposal labels for epic event; sending bare payload"
+                );
+                EpicEventPayload::bare(epic)
+            }
+        }
+    }
+
+    /// Emit `epic.created` with hydrated proposal swimlane labels.
+    pub async fn emit_created(&self, epic: &Epic) {
+        self.events.send(DjinnEventEnvelope::epic_created(
+            &self.event_payload(epic).await,
+        ));
+    }
+
+    /// Emit `epic.updated` with hydrated proposal swimlane labels.
+    pub async fn emit_updated(&self, epic: &Epic) {
+        self.events.send(DjinnEventEnvelope::epic_updated(
+            &self.event_payload(epic).await,
+        ));
     }
 
     /// Close a set of epics inside an existing lifecycle transaction.
@@ -270,7 +319,7 @@ impl EpicRepository {
             }
         }
 
-        self.events.send(DjinnEventEnvelope::epic_created(&epic));
+        self.emit_created(&epic).await;
         Ok(epic)
     }
 
@@ -310,7 +359,7 @@ impl EpicRepository {
         .fetch_one(self.db.pool())
         .await?;
 
-        self.events.send(DjinnEventEnvelope::epic_updated(&epic));
+        self.emit_updated(&epic).await;
         Ok(epic)
     }
 
@@ -361,7 +410,7 @@ impl EpicRepository {
             }
         }
 
-        self.events.send(DjinnEventEnvelope::epic_updated(&epic));
+        self.emit_updated(&epic).await;
         // Re-drive wave-1 for any epics that were blocked by this one and are
         // now fully unblocked (mirror of task `emit_unblocked_tasks`).
         self.emit_unblocked_epics(id).await?;
@@ -419,7 +468,7 @@ impl EpicRepository {
         .fetch_one(self.db.pool())
         .await?;
 
-        self.events.send(DjinnEventEnvelope::epic_updated(&epic));
+        self.emit_updated(&epic).await;
         Ok(epic)
     }
 
@@ -454,7 +503,7 @@ impl EpicRepository {
         .execute(self.db.pool())
         .await?;
         if let Some(epic) = self.get(epic_id).await? {
-            self.events.send(DjinnEventEnvelope::epic_updated(&epic));
+            self.emit_updated(&epic).await;
         }
         Ok(())
     }
@@ -470,7 +519,7 @@ impl EpicRepository {
         .execute(self.db.pool())
         .await?;
         if let Some(epic) = self.get(epic_id).await? {
-            self.events.send(DjinnEventEnvelope::epic_updated(&epic));
+            self.emit_updated(&epic).await;
         }
         Ok(())
     }
@@ -546,10 +595,10 @@ impl EpicRepository {
         .await?;
 
         if let Some(epic) = self.get(epic_id).await? {
-            self.events.send(DjinnEventEnvelope::epic_updated(&epic));
+            self.emit_updated(&epic).await;
         }
         if let Some(epic) = self.get(blocking_id).await? {
-            self.events.send(DjinnEventEnvelope::epic_updated(&epic));
+            self.emit_updated(&epic).await;
         }
         Ok(())
     }
@@ -566,10 +615,10 @@ impl EpicRepository {
         .await?;
 
         if let Some(epic) = self.get(epic_id).await? {
-            self.events.send(DjinnEventEnvelope::epic_updated(&epic));
+            self.emit_updated(&epic).await;
         }
         if let Some(epic) = self.get(blocking_id).await? {
-            self.events.send(DjinnEventEnvelope::epic_updated(&epic));
+            self.emit_updated(&epic).await;
         }
         Ok(())
     }
@@ -651,7 +700,7 @@ impl EpicRepository {
         }
         for id in &notified {
             if let Some(epic) = self.get(id).await? {
-                self.events.send(DjinnEventEnvelope::epic_updated(&epic));
+                self.emit_updated(&epic).await;
             }
         }
         Ok(())
@@ -731,7 +780,7 @@ impl EpicRepository {
         .await?;
 
         for epic in unblocked {
-            self.events.send(DjinnEventEnvelope::epic_updated(&epic));
+            self.emit_updated(&epic).await;
         }
         Ok(())
     }
@@ -808,7 +857,7 @@ impl EpicRepository {
         .fetch_one(self.db.pool())
         .await?;
 
-        self.events.send(DjinnEventEnvelope::epic_updated(&epic));
+        self.emit_updated(&epic).await;
         Ok(epic)
     }
 
@@ -846,7 +895,7 @@ impl EpicRepository {
         .fetch_one(self.db.pool())
         .await?;
 
-        self.events.send(DjinnEventEnvelope::epic_updated(&epic));
+        self.emit_updated(&epic).await;
         Ok(epic)
     }
 
@@ -1628,6 +1677,55 @@ mod tests {
         assert_eq!(e.id, epic.id);
         assert_eq!(e.status, "open");
         assert!(e.closed_at.is_none());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn epic_events_carry_proposal_swimlane_labels() {
+        let (bus, captured) = capturing_bus();
+        let db = test_db();
+        let repo = EpicRepository::new(db.clone(), bus);
+
+        let epic = repo.create("Linked", "", "", "", "", None).await.unwrap();
+        let proposal_id = insert_proposal_link(&db, &epic, "building").await;
+        sqlx::query("UPDATE epics SET proposal_id = $1 WHERE id = $2")
+            .bind(&proposal_id)
+            .bind(&epic.id)
+            .execute(db.pool())
+            .await
+            .unwrap();
+        captured.lock().unwrap().clear();
+
+        repo.update_memory_refs(&epic.id, r#"["design/roadmap"]"#)
+            .await
+            .unwrap();
+
+        let events = captured.lock().unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].entity_type, "epic");
+        assert_eq!(events[0].action, "updated");
+        // Live SSE payloads must match the epic_list enrichment: without
+        // these labels the board drops freshly created/linked epics into the
+        // "No proposal" swimlane until a full page reload.
+        let payload = &events[0].payload;
+        assert_eq!(payload["proposal_id"].as_str().unwrap(), proposal_id);
+        assert_eq!(payload["proposal_status"], "building");
+        assert_eq!(payload["proposal_title"], "Proposal");
+        assert!(payload["proposal_short_id"].is_string());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn epic_event_without_proposal_omits_labels() {
+        let (bus, captured) = capturing_bus();
+        let repo = EpicRepository::new(test_db(), bus);
+
+        repo.create("Unlinked", "", "", "", "", None).await.unwrap();
+
+        let events = captured.lock().unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].entity_type, "epic");
+        assert_eq!(events[0].action, "created");
+        assert!(events[0].payload.get("proposal_status").is_none());
+        assert!(events[0].payload.get("proposal_short_id").is_none());
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
