@@ -63,7 +63,7 @@ impl FromStr for Subsystem {
 }
 
 /// A CI profile for which the behavior is required.
-#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Profile {
     SmokeCi,
