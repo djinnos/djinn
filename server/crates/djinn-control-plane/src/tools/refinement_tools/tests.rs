@@ -8,7 +8,7 @@ use crate::tools::refinement_helpers::{
     build_refinement_status, check_needs_evidence_cap, validate_demand_evidence,
 };
 use djinn_core::events::EventBus;
-use djinn_db::{Database, ProposalCreateInput, ProposalRepository};
+use djinn_db::{Database, EffectiveCreatorProvenance, ProposalCreateInput, ProposalRepository};
 use std::sync::Arc;
 
 include!("tests_part1.inc");

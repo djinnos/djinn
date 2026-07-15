@@ -177,8 +177,8 @@ mod composed_gate_tests {
     use crate::state::stubs::test_mcp_state;
     use djinn_core::events::EventBus;
     use djinn_db::{
-        Database, ProjectRepository, ProposalCreateInput, ProposalDebateTrailCreateInput,
-        ProposalRepository, TaskRepository, UserRepository,
+        Database, EffectiveCreatorProvenance, ProjectRepository, ProposalCreateInput,
+        ProposalDebateTrailCreateInput, ProposalRepository, TaskRepository, UserRepository,
     };
 
     /// A well-formed body that passes all deterministic readiness checks.
@@ -516,9 +516,14 @@ What happens if D fails?
         let targets = repo.targets(&proposal.id).await.unwrap();
         let target_project_id = &targets[0].project_id;
         let spike = task_repo
-            .create_in_project(
+            .create_in_project_with_provenance(
                 target_project_id,
                 None,
+                EffectiveCreatorProvenance {
+                    explicit_user_id: Some(&user_id),
+                    source_task_id: None,
+                    proposal_id: Some(&proposal.id),
+                },
                 "Spike: feasibility of X",
                 "Research whether X is feasible",
                 "Research whether X is feasible",
@@ -1150,7 +1155,6 @@ What happens if D fails?
         );
     }
 }
-
 
 // P4 tribunal regression tests — extracted to `tribunal_tests.rs`
 // to meet the 1500-line file-size guard.
