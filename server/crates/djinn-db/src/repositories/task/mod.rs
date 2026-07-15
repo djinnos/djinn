@@ -2802,7 +2802,9 @@ pub(super) async fn maybe_reopen_epic(
     .fetch_optional(db.pool())
     .await?
     {
-        events.send(DjinnEventEnvelope::epic_updated(&epic));
+        crate::repositories::epic::EpicRepository::new(db.clone(), events.clone())
+            .emit_updated(&epic)
+            .await;
     }
 
     Ok(())

@@ -39,9 +39,11 @@ export const epicStore = createStore<EpicState>()(
         if (!existingEpic) return state;
 
         const newEpics = new Map(state.epics);
-        // SSE epic payloads carry `proposal_id` but not the list-only
-        // proposal label enrichment (short_id/title/status); preserve the
-        // known labels unless the linkage itself changed.
+        // SSE epic payloads carry the proposal label enrichment
+        // (short_id/title/status) just like epic_list rows. The server's
+        // label hydration is fail-open, though: on a lookup failure it sends
+        // the epic bare, so preserve the known labels unless the linkage
+        // itself changed.
         const sameProposal = payload.proposal_id === existingEpic.proposal_id;
         newEpics.set(payload.id, {
           ...payload,
