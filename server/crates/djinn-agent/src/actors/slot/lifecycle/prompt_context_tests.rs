@@ -8,6 +8,9 @@ use djinn_core::extension_diagnostics::{
     ExtensionLoadSourceKind,
 };
 use djinn_core::models::ActivityEntry;
+use djinn_db::repositories::retrieval_trace::{
+    RetrievalTraceEntryPoint, RetrievalTraceListFilter, RetrievalTraceRepository,
+};
 use djinn_db::{Database, EpicRepository, ProposalCreateInput, ProposalRepository};
 use tokio_util::sync::CancellationToken;
 
@@ -25,8 +28,58 @@ async fn lead_prompt_context(db: Database, task: &Task) -> PromptContext {
 }
 
 #[derive(Default)]
+struct RecordingPlannedNoteSearch {
+    requests: std::sync::Mutex<Vec<(String, String)>>,
+    rows: Vec<djinn_memory::MemorySearchEntityRow>,
+}
+
+#[async_trait::async_trait]
+impl PlannedNoteSearch for RecordingPlannedNoteSearch {
+    async fn search_planned_notes(
+        &self,
+        _project_id: &str,
+        _task_id: &str,
+        query: &str,
+        note_type: &str,
+    ) -> Result<Vec<djinn_memory::MemorySearchEntityRow>, String> {
+        self.requests
+            .lock()
+            .expect("record planned search")
+            .push((query.into(), note_type.into()));
+        Ok(self.rows.clone())
+    }
+}
+
+fn valid_planner_payload() -> &'static str {
+    r#"{"queries":[{"type":"pitfall","query":"Database migration timeout E_CONNRESET"},{"type":"pattern","query":"Memory planner configuration injection"}]}"#
+}
+
+fn planned_note() -> djinn_memory::MemorySearchEntityRow {
+    djinn_memory::MemorySearchEntityRow {
+        entity: "note".into(),
+        id: "planned-note-real".into(),
+        title: "Planned Note".into(),
+        folder: "patterns".into(),
+        note_type: "pattern".into(),
+        permalink: "patterns/planned-note".into(),
+        snippet: "planned note body".into(),
+        score: 1.0,
+    }
+}
+
+#[derive(Default)]
 struct RecordingPlannerHost {
     requests: std::sync::Mutex<Vec<djinn_supervisor::services::wire::AttributedPlannerRequest>>,
+    content: Option<String>,
+}
+
+impl RecordingPlannerHost {
+    fn with_content(content: &str) -> Self {
+        Self {
+            requests: std::sync::Mutex::new(Vec::new()),
+            content: Some(content.to_owned()),
+        }
+    }
 }
 
 #[async_trait::async_trait]
@@ -38,7 +91,7 @@ impl MemoryIntentPlannerHost for RecordingPlannerHost {
         self.requests.lock().expect("record request").push(request);
         Ok(djinn_supervisor::services::wire::PlannerAttemptResult {
             outcome: djinn_supervisor::services::wire::PlannerOutcome::Success,
-            content: None,
+            content: self.content.clone(),
             tokens_in: 0,
             tokens_out: 0,
             cache_read_tokens: 0,
@@ -47,87 +100,6 @@ impl MemoryIntentPlannerHost for RecordingPlannerHost {
             diagnostic: None,
         })
     }
-}
-
-#[tokio::test]
-async fn planner_production_boundary_enabled_request_carries_raw_attribution() {
-    let db = Database::ephemeral().await.expect("create ephemeral db");
-    let events = EventBus::noop();
-    let mut task = create_project_epic_task(&db, &events, "Planner epic", "Planner title").await;
-    task.description = "real planner description".into();
-    task.created_by_user_id = Some("creator-real".into());
-    let app_state = agent_context_from_db(db, CancellationToken::new());
-    let host = RecordingPlannerHost::default();
-    let config = crate::context::MemoryIntentPlannerConfig {
-        enabled: true,
-        ..Default::default()
-    };
-    let raw_resume = "raw-compaction-summary-".repeat(8);
-    assert!(raw_resume.len() > 117);
-    let baseline = load_knowledge_context(&task, None, &app_state).await;
-    let result = load_knowledge_context_with_planner(
-        &task,
-        None,
-        &app_state,
-        Some(&MemoryIntentPlannerInvocation {
-            config: &config,
-            host: &host,
-            session_id: "session-real",
-            task_run_id: "task-run-real",
-            creator_id: task.created_by_user_id.as_deref(),
-            acceptance_criteria: vec!["parsed criterion".into()],
-            resume_compaction_summary: Some(&raw_resume),
-            planned_note_search: None,
-        }),
-    )
-    .await;
-    assert_eq!(result, baseline);
-    let requests = host.requests.lock().expect("recorded requests");
-    assert_eq!(requests.len(), 1);
-    let request = &requests[0];
-    assert_eq!(request.project_id, task.project_id);
-    assert_eq!(request.task_id, task.id);
-    assert_eq!(request.session_id, "session-real");
-    assert_eq!(request.task_run_id, "task-run-real");
-    assert_eq!(request.created_by_user_id, "creator-real");
-    for expected in [
-        "Planner title",
-        "real planner description",
-        "parsed criterion",
-        &raw_resume,
-    ] {
-        assert!(request.conversation.contains(expected));
-    }
-}
-
-#[tokio::test]
-async fn planner_production_boundary_disabled_is_byte_identical_and_does_no_host_work() {
-    let db = Database::ephemeral().await.expect("create ephemeral db");
-    let events = EventBus::noop();
-    let mut task = create_project_epic_task(&db, &events, "Planner epic", "Planner task").await;
-    task.created_by_user_id = Some("creator-real".into());
-    let app_state = agent_context_from_db(db, CancellationToken::new());
-    let host = RecordingPlannerHost::default();
-    let config = crate::context::MemoryIntentPlannerConfig::default();
-    let baseline = load_knowledge_context(&task, None, &app_state).await;
-    let result = load_knowledge_context_with_planner(
-        &task,
-        None,
-        &app_state,
-        Some(&MemoryIntentPlannerInvocation {
-            config: &config,
-            host: &host,
-            session_id: "session-real",
-            task_run_id: "task-run-real",
-            creator_id: task.created_by_user_id.as_deref(),
-            acceptance_criteria: vec![],
-            resume_compaction_summary: Some("raw but unused"),
-            planned_note_search: None,
-        }),
-    )
-    .await;
-    assert_eq!(result, baseline);
-    assert!(host.requests.lock().expect("recorded requests").is_empty());
 }
 
 fn diagnostic(
@@ -1997,4 +1969,203 @@ fn oversized_diagnostics_leave_platform_and_task_bytes_identical() {
     assert_eq!(wt, dt);
     assert_eq!(wp, format!("{platform}\n\nTrusted extension."));
     assert!(dp.starts_with(wp) && dp.contains(EXTENSION_DIAGNOSTICS_HEADING));
+}
+
+macro_rules! planner_assembly_inputs {
+    ($task:expr, $role:expr, $worktree:expr, $state:expr, $planner:expr) => {
+        PromptContextInputs {
+            task: $task,
+            runtime_role: $role,
+            role_for_epic_check: $role,
+            project_path: "/workspace/test-project",
+            worktree_path: $worktree.path(),
+            conflict_ctx: None,
+            merge_validation_ctx: None,
+            prompt_setup_commands: None,
+            system_prompt_extensions: "",
+            resolved_skills: &[],
+            app_state: $state,
+            read_sources: &[],
+            worker_resume_note: None,
+            arbiter_directive: None,
+            mcp_server_instructions: &std::collections::BTreeMap::new(),
+            extension_diagnostics: &[],
+            memory_intent_planner: $planner,
+        }
+    };
+}
+
+#[tokio::test]
+async fn planner_production_boundary_enabled_assembly_injects_and_attributes_trace() {
+    let db = Database::ephemeral().await.expect("ephemeral db");
+    let events = EventBus::noop();
+    let mut task = create_project_epic_task(&db, &events, "Planner epic", "Planner title").await;
+    task.description = "real planner description".into();
+    task.created_by_user_id = Some("creator-real".into());
+    let app_state = agent_context_from_db(db.clone(), CancellationToken::new());
+    let host = RecordingPlannerHost::with_content(valid_planner_payload());
+    let search = RecordingPlannedNoteSearch {
+        rows: vec![planned_note()],
+        ..Default::default()
+    };
+    let config = crate::context::MemoryIntentPlannerConfig {
+        enabled: true,
+        ..Default::default()
+    };
+    let raw_resume = "raw-compaction-summary-".repeat(8);
+    assert!(raw_resume.len() > 117);
+    let role = LeadRole;
+    let worktree = test_tempdir("planner-production-boundary-");
+    let context = assemble_prompt_context(planner_assembly_inputs!(
+        &task,
+        &role,
+        worktree,
+        &app_state,
+        Some(MemoryIntentPlannerInvocation {
+            config: &config,
+            host: &host,
+            session_id: "session-real",
+            task_run_id: "task-run-real",
+            creator_id: task.created_by_user_id.as_deref(),
+            acceptance_criteria: vec!["parsed criterion".into()],
+            resume_compaction_summary: Some(&raw_resume),
+            planned_note_search: Some(&search),
+        })
+    ))
+    .await;
+    assert!(
+        context
+            .knowledge_context
+            .as_deref()
+            .is_some_and(|text| text.contains("Planned Note"))
+    );
+    assert_eq!(search.requests.lock().expect("searches").len(), 2);
+    let requests = host.requests.lock().expect("requests");
+    assert_eq!(requests.len(), 1);
+    let request = &requests[0];
+    assert_eq!(
+        (
+            &request.project_id,
+            &request.task_id,
+            request.session_id.as_str(),
+            request.task_run_id.as_str(),
+            request.created_by_user_id.as_str()
+        ),
+        (
+            &task.project_id,
+            &task.id,
+            "session-real",
+            "task-run-real",
+            "creator-real"
+        )
+    );
+    for expected in [
+        "Planner title",
+        "real planner description",
+        "parsed criterion",
+        &raw_resume,
+    ] {
+        assert!(request.conversation.contains(expected));
+    }
+    drop(requests);
+    let trace = RetrievalTraceRepository::new(db)
+        .list_by_project(
+            &task.project_id,
+            RetrievalTraceListFilter {
+                entry_point: Some(RetrievalTraceEntryPoint::LoadKnowledgeContext),
+                limit: Some(1),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("list traces")
+        .into_iter()
+        .next()
+        .expect("persisted trace");
+    assert_eq!(trace.session_id.as_deref(), Some("session-real"));
+    assert_eq!(trace.task_run_id.as_deref(), Some("task-run-real"));
+}
+
+#[tokio::test]
+async fn planner_production_boundary_disabled_is_byte_identical_and_does_no_host_or_search_work() {
+    let db = Database::ephemeral().await.expect("ephemeral db");
+    let events = EventBus::noop();
+    let mut task = create_project_epic_task(&db, &events, "Planner epic", "Planner task").await;
+    task.created_by_user_id = Some("creator-real".into());
+    let app_state = agent_context_from_db(db, CancellationToken::new());
+    let host = RecordingPlannerHost::with_content(valid_planner_payload());
+    let search = RecordingPlannedNoteSearch {
+        rows: vec![planned_note()],
+        ..Default::default()
+    };
+    let config = crate::context::MemoryIntentPlannerConfig::default();
+    let role = LeadRole;
+    let worktree = test_tempdir("planner-production-boundary-");
+    let baseline = assemble_prompt_context(planner_assembly_inputs!(
+        &task, &role, worktree, &app_state, None
+    ))
+    .await;
+    let result = assemble_prompt_context(planner_assembly_inputs!(
+        &task,
+        &role,
+        worktree,
+        &app_state,
+        Some(MemoryIntentPlannerInvocation {
+            config: &config,
+            host: &host,
+            session_id: "session-real",
+            task_run_id: "task-run-real",
+            creator_id: task.created_by_user_id.as_deref(),
+            acceptance_criteria: vec![],
+            resume_compaction_summary: Some("raw but unused"),
+            planned_note_search: Some(&search)
+        })
+    ))
+    .await;
+    assert_eq!(result.knowledge_context, baseline.knowledge_context);
+    assert_eq!(result.system_prompt, baseline.system_prompt);
+    assert!(host.requests.lock().expect("requests").is_empty());
+    assert!(search.requests.lock().expect("searches").is_empty());
+}
+
+#[tokio::test]
+async fn planner_production_boundary_empty_host_payload_is_scope_only_without_search() {
+    let db = Database::ephemeral().await.expect("ephemeral db");
+    let events = EventBus::noop();
+    let mut task = create_project_epic_task(&db, &events, "Planner epic", "Planner task").await;
+    task.created_by_user_id = Some("creator-real".into());
+    let app_state = agent_context_from_db(db, CancellationToken::new());
+    let host = RecordingPlannerHost::default();
+    let search = RecordingPlannedNoteSearch::default();
+    let config = crate::context::MemoryIntentPlannerConfig {
+        enabled: true,
+        ..Default::default()
+    };
+    let role = LeadRole;
+    let worktree = test_tempdir("planner-production-boundary-");
+    let baseline = assemble_prompt_context(planner_assembly_inputs!(
+        &task, &role, worktree, &app_state, None
+    ))
+    .await;
+    let result = assemble_prompt_context(planner_assembly_inputs!(
+        &task,
+        &role,
+        worktree,
+        &app_state,
+        Some(MemoryIntentPlannerInvocation {
+            config: &config,
+            host: &host,
+            session_id: "session-real",
+            task_run_id: "task-run-real",
+            creator_id: task.created_by_user_id.as_deref(),
+            acceptance_criteria: vec![],
+            resume_compaction_summary: None,
+            planned_note_search: Some(&search)
+        })
+    ))
+    .await;
+    assert_eq!(result.knowledge_context, baseline.knowledge_context);
+    assert_eq!(result.system_prompt, baseline.system_prompt);
+    assert_eq!(host.requests.lock().expect("requests").len(), 1);
+    assert!(search.requests.lock().expect("searches").is_empty());
 }
