@@ -237,4 +237,80 @@ impl DjinnMcpServer {
             error: None,
         })
     }
+
+    /// Query immutable ledger-backed revision rows for a project or a single
+    /// note. Rows are scoped to the resolved project so a foreign permalink
+    /// yields the same not-found shape as a genuinely absent identifier.
+    #[tool(
+        description = "Query immutable ledger-backed revision rows for a project, optionally filtered to a single note by permalink. Returns actor attribution, event kind, content snapshots, provenance, and reason for each revision."
+    )]
+    pub async fn memory_revisions(
+        &self,
+        Parameters(p): Parameters<RevisionsParams>,
+    ) -> Json<MemoryRevisionsResponse> {
+        let Some(project_id) = self.project_id_for_path(&p.project).await else {
+            return Json(MemoryRevisionsResponse {
+                revisions: vec![],
+                error: Some(format!("project not found: {}", p.project)),
+            });
+        };
+
+        let repo = NoteRepository::new(self.state.db().clone(), self.state.event_bus());
+
+        // When a permalink filter is given, verify the note exists in the
+        // caller's project before querying revisions. A foreign or absent
+        // permalink yields the same not-found shape without disclosing revision
+        // existence, count, or provenance.
+        if let Some(permalink) = p.permalink.as_deref() {
+            match repo.get_by_permalink(&project_id, permalink).await {
+                Ok(Some(_)) => {}
+                _ => {
+                    return Json(MemoryRevisionsResponse {
+                        revisions: vec![],
+                        error: Some(format!("note not found: {permalink}")),
+                    });
+                }
+            }
+        }
+
+        let rows = if let Some(permalink) = p.permalink.as_deref() {
+            repo.revision_events_for_note(&project_id, permalink).await
+        } else {
+            repo.revision_events(&project_id).await
+        };
+
+        match rows {
+            Ok(events) => {
+                let revisions = events
+                    .into_iter()
+                    .map(|e| MemoryRevisionEvent {
+                        id: e.id,
+                        note_id: e.note_id,
+                        note_seq: e.note_seq,
+                        actor_kind: e.actor_kind,
+                        actor_id: e.actor_id,
+                        subsystem: e.subsystem,
+                        event_kind: e.event_kind,
+                        content_before: e.content_before,
+                        content_after: e.content_after,
+                        confidence_before: e.confidence_before,
+                        confidence_after: e.confidence_after,
+                        session_id: e.session_id,
+                        task_id: e.task_id,
+                        task_run_id: e.task_run_id,
+                        reason: e.reason,
+                        created_at: e.created_at,
+                    })
+                    .collect();
+                Json(MemoryRevisionsResponse {
+                    revisions,
+                    error: None,
+                })
+            }
+            Err(e) => Json(MemoryRevisionsResponse {
+                revisions: vec![],
+                error: Some(e.to_string()),
+            }),
+        }
+    }
 }

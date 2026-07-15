@@ -1770,7 +1770,7 @@ mod tests {
         assert!(claim_created);
 
         let revisions = note_repo
-            .revision_events_for_test(&project.id)
+            .revision_events(&project.id)
             .await
             .expect("load enrichment revisions");
         assert_eq!(revisions.len(), 2);
@@ -1820,7 +1820,7 @@ mod tests {
         assert!(!claim_changed);
         assert_eq!(
             note_repo
-                .revision_events_for_test(&project.id)
+                .revision_events(&project.id)
                 .await
                 .expect("count enrichment revisions")
                 .len(),
@@ -1850,7 +1850,7 @@ mod tests {
         );
         assert!(
             note_repo
-                .revision_events_for_test(&project.id)
+                .revision_events(&project.id)
                 .await
                 .expect("count failed entity revisions")
                 .is_empty()

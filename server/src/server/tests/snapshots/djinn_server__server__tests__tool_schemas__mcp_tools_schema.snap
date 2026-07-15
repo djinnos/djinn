@@ -9627,6 +9627,153 @@ expression: signatures
     }
   },
   {
+    "name": "memory_revisions",
+    "read_only": false,
+    "destructive": true,
+    "idempotent": false,
+    "open_world": false,
+    "concurrent_safe": false,
+    "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "permalink": {
+          "description": "Permalink to filter to a single note. Omit to list all revisions for the\nproject.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "project": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "project"
+      ],
+      "type": "object"
+    },
+    "output_schema": {
+      "$defs": {
+        "MemoryRevisionEvent": {
+          "description": "Immutable revision row projected from the ledger.",
+          "properties": {
+            "actor_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "actor_kind": {
+              "type": "string"
+            },
+            "confidence_after": {
+              "format": "double",
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "confidence_before": {
+              "format": "double",
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "content_after": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "content_before": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "created_at": {
+              "type": "string"
+            },
+            "event_kind": {
+              "type": "string"
+            },
+            "id": {
+              "type": "string"
+            },
+            "note_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "note_seq": {
+              "format": "int64",
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "reason": {
+              "type": "string"
+            },
+            "session_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "subsystem": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "task_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "task_run_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "id",
+            "actor_kind",
+            "event_kind",
+            "reason",
+            "created_at"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "error": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "revisions": {
+          "items": {
+            "$ref": "#/$defs/MemoryRevisionEvent"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "revisions"
+      ],
+      "type": "object"
+    }
+  },
+  {
     "name": "memory_run_enrichment",
     "read_only": false,
     "destructive": true,

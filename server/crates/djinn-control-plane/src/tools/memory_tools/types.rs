@@ -649,6 +649,41 @@ pub struct MemoryDiffResponse {
     pub error: Option<String>,
 }
 
+#[derive(Deserialize, schemars::JsonSchema)]
+pub struct RevisionsParams {
+    pub project: String,
+    /// Permalink to filter to a single note. Omit to list all revisions for the
+    /// project.
+    pub permalink: Option<String>,
+}
+
+/// Immutable revision row projected from the ledger.
+#[derive(Serialize, schemars::JsonSchema)]
+pub struct MemoryRevisionEvent {
+    pub id: String,
+    pub note_id: Option<String>,
+    pub note_seq: Option<i64>,
+    pub actor_kind: String,
+    pub actor_id: Option<String>,
+    pub subsystem: Option<String>,
+    pub event_kind: String,
+    pub content_before: Option<String>,
+    pub content_after: Option<String>,
+    pub confidence_before: Option<f64>,
+    pub confidence_after: Option<f64>,
+    pub session_id: Option<String>,
+    pub task_id: Option<String>,
+    pub task_run_id: Option<String>,
+    pub reason: String,
+    pub created_at: String,
+}
+
+#[derive(Serialize, schemars::JsonSchema)]
+pub struct MemoryRevisionsResponse {
+    pub revisions: Vec<MemoryRevisionEvent>,
+    pub error: Option<String>,
+}
+
 #[derive(Serialize, schemars::JsonSchema)]
 pub struct MemoryBuildContextResponse {
     pub primary: Vec<MemoryNoteView>,

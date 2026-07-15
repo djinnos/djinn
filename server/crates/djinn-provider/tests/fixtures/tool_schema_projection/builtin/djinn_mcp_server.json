@@ -9699,6 +9699,154 @@
     "concurrent_safe": false
   },
   {
+    "name": "memory_revisions",
+    "description": "Query immutable ledger-backed revision rows for a project, optionally filtered to a single note by permalink. Returns actor attribution, event kind, content snapshots, provenance, and reason for each revision.",
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "required": [
+        "project"
+      ],
+      "type": "object",
+      "properties": {
+        "project": {
+          "type": "string"
+        },
+        "permalink": {
+          "description": "Permalink to filter to a single note. Omit to list all revisions for the\nproject.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "outputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "$defs": {
+        "MemoryRevisionEvent": {
+          "description": "Immutable revision row projected from the ledger.",
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "note_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "note_seq": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "int64"
+            },
+            "actor_kind": {
+              "type": "string"
+            },
+            "actor_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "subsystem": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "event_kind": {
+              "type": "string"
+            },
+            "content_before": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "content_after": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "confidence_before": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "format": "double"
+            },
+            "confidence_after": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "format": "double"
+            },
+            "session_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "task_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "task_run_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "reason": {
+              "type": "string"
+            },
+            "created_at": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "actor_kind",
+            "event_kind",
+            "reason",
+            "created_at"
+          ]
+        }
+      },
+      "type": "object",
+      "properties": {
+        "revisions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/MemoryRevisionEvent"
+          }
+        },
+        "error": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "revisions"
+      ]
+    },
+    "readOnly": false,
+    "destructive": true,
+    "idempotent": false,
+    "openWorld": false,
+    "concurrent_safe": false
+  },
+  {
     "name": "memory_run_enrichment",
     "description": "Run the best-effort LLM memory enrichment pass for a project. Persists claim/entity nodes and typed implicit edges (builds_on / contradicts / supersedes / exemplifies) through the widened note_associations substrate. Proposal-aware: also includes proposals targeting the project as first-class graph entities and persists note↔proposal / proposal↔proposal edges through the heterogeneous memory_entity_associations substrate. All persistence is best-effort: provider or parse failures are surfaced as warnings, never as blocking errors. Set background=true to fire-and-forget on a tokio task; the response then returns immediately with status=queued. Concurrency: the pass yields cooperatively so memory_graph stays responsive while enrichment runs.",
     "inputSchema": {

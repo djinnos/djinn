@@ -37,7 +37,7 @@ async fn cross_project_mutations_and_revision_history_do_not_disclose_foreign_no
     let other = TrustedRevisionCallerContext::authenticated_human("other-user").unwrap();
 
     let created = dispatch_as(
-        owner,
+        owner.clone(),
         &harness,
         "memory_write",
         json!({
@@ -181,32 +181,60 @@ async fn cross_project_mutations_and_revision_history_do_not_disclose_foreign_no
         format!("note not found: {absent_permalink}")
     );
 
-    let foreign_history = dispatch_as(
+    // Cross-tenant immutable revision query/history through the production MCP
+    // surface. The handler resolves the caller's project, so a foreign permalink
+    // is indistinguishable from a genuinely absent one.
+    let foreign_revisions = dispatch_as(
         other.clone(),
         &harness,
-        "memory_history",
+        "memory_revisions",
         json!({"project": other_project_ref, "permalink": owner_permalink}),
     )
     .await;
-    let absent_history = dispatch_as(
+    let absent_revisions = dispatch_as(
         other,
         &harness,
-        "memory_history",
+        "memory_revisions",
         json!({"project": other_project_ref, "permalink": absent_permalink}),
     )
     .await;
     assert_eq!(
-        foreign_history.as_object().unwrap().len(),
-        absent_history.as_object().unwrap().len()
+        foreign_revisions.as_object().unwrap().len(),
+        absent_revisions.as_object().unwrap().len()
     );
-    assert_eq!(foreign_history["history"], json!([]));
+    assert_eq!(foreign_revisions["revisions"], json!([]));
     assert_eq!(
-        foreign_history["error"],
+        foreign_revisions["error"],
         format!("note not found: {owner_permalink}")
     );
     assert_eq!(
-        absent_history["error"],
+        absent_revisions["error"],
         format!("note not found: {absent_permalink}")
+    );
+
+    // The authorized tenant can query the exact owned immutable rows through the
+    // same production MCP surface.
+    let owner_revisions_dispatch = dispatch_as(
+        owner,
+        &harness,
+        "memory_revisions",
+        json!({"project": owner_project_ref, "permalink": owner_permalink}),
+    )
+    .await;
+    assert!(
+        owner_revisions_dispatch.get("error").is_none()
+            || owner_revisions_dispatch["error"].is_null(),
+        "authorized revision query failed: {owner_revisions_dispatch}"
+    );
+    let owner_dispatched = owner_revisions_dispatch["revisions"]
+        .as_array()
+        .expect("authorized revisions array");
+    assert_eq!(owner_dispatched.len(), 1);
+    assert_eq!(owner_dispatched[0]["note_id"], owner_note_id);
+    assert_eq!(owner_dispatched[0]["event_kind"], "created");
+    assert_eq!(
+        owner_dispatched[0]["reason"],
+        "create owner-only revision fixture"
     );
 
     // Rejected calls cannot append a revision or mutate either note state. The
