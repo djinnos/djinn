@@ -28,6 +28,7 @@
 
 pub mod command_classifier;
 pub mod command_validator;
+pub mod compatibility;
 pub mod context;
 pub mod dispatch;
 pub mod finalize_tools;
