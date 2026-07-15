@@ -1115,6 +1115,100 @@ fn frozen_coordinator_fixture() -> serde_json::Value {
         .expect("valid frozen coordinator fixture")
 }
 
+struct FixtureCapacity {
+    values: Mutex<std::collections::VecDeque<Result<CapacitySnapshot, String>>>,
+    calls: Arc<std::sync::atomic::AtomicUsize>,
+}
+impl FilesystemCapacity for FixtureCapacity {
+    fn capacity(&self, _: &Path) -> Result<CapacitySnapshot, String> {
+        self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.values.lock().unwrap().pop_front().expect("fixture capacity call")
+    }
+}
+fn fixture_capacity(high: bool) -> CapacitySnapshot {
+    CapacitySnapshot { total_bytes: 100, available_bytes: if high { 25 } else { 10 } }
+}
+fn assert_fixture_result(case: &serde_json::Value, result: &ThreeRungPressureResult, removals: usize) {
+    let count = |name: &str| case[name].as_u64().unwrap() as usize;
+    assert_eq!(result.planned.len(), count("planned"), "{} planned", case["name"]);
+    assert_eq!(result.post_lock_eligible.len(), count("eligible"), "{} eligible", case["name"]);
+    assert_eq!(result.attempted.len(), count("attempted"), "{} attempted", case["name"]);
+    assert_eq!(result.deleted.len(), count("deleted"), "{} deleted", case["name"]);
+    assert_eq!(result.retained.len(), count("retained"), "{} retained", case["name"]);
+    assert_eq!(result.failed.len(), count("failed"), "{} failed", case["name"]);
+    assert_eq!(removals, count("removal_calls"), "{} removal calls", case["name"]);
+}
+
+#[tokio::test]
+async fn frozen_race_cases_execute_post_plan_guards_and_removal_seam() {
+    let fixture = frozen_coordinator_fixture();
+    let temp = tempfile::tempdir().unwrap();
+    for (index, case) in fixture["race_cases"].as_array().unwrap().iter().enumerate() {
+        let base = old_base(&temp, &format!("018f8b9a-0d70-7f0a-8000-0000000004{index:02}"));
+        let target = base.join("debug/incremental");
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::write(target.join("artifact"), b"reclaim").unwrap();
+        let rung = if case["name"] == "staleness_changed" { PressureRung::StaleProfile } else { PressureRung::Incremental };
+        let first = eligible_three_rung_unit(&base, &target, rung);
+        let broader = eligible_three_rung_unit(&base, &base, PressureRung::WholeBase);
+        let mut activity = Activity(Ok(snapshot()));
+        let mut warm = Warm(Ok(false));
+        let mut config = executable_pressure_config();
+        match case["name"].as_str().unwrap() {
+            "activity_changed" => activity = Activity(Ok(ActivitySnapshot { has_active_task_run: true, ..snapshot() })),
+            "warm_changed" => warm = Warm(Ok(true)),
+            "grace_changed" => config.warm_base_grace_period = Duration::from_secs(u64::MAX / 2),
+            "existence_changed" => std::fs::remove_dir_all(&target).unwrap(),
+            "containment_symlink_swap" => { #[cfg(unix)] { let outside = temp.path().join(format!("outside-{index}")); std::fs::create_dir(&outside).unwrap(); std::fs::remove_dir_all(&target).unwrap(); std::os::unix::fs::symlink(outside, &target).unwrap(); } }
+            "traversal_error" => { #[cfg(unix)] std::os::unix::fs::symlink(base.join("outside"), target.join("unsafe-link")).unwrap(); }
+            "staleness_changed" | "partial_removal_failure" => {}
+            name => panic!("unknown race case {name}"),
+        }
+        let removal_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        if case["name"] == "partial_removal_failure" {
+            let calls = removal_calls.clone();
+            set_remove_dir_all_hook(Some(Box::new(move |_| { calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst); Err(std::io::Error::other("fixture remove failure")) })));
+        }
+        let result = execute_three_rung_pressure_plan(
+            &ThreeRungPressurePlan { units: vec![first, broader] }, &activity, &warm, &NoopBaseLock,
+            &FixtureCapacity { values: Mutex::new(std::collections::VecDeque::from([Ok(fixture_capacity(false))])), calls: Arc::new(std::sync::atomic::AtomicUsize::new(0)) },
+            &config, &three_rung_clock(), temp.path(),
+        ).await;
+        set_remove_dir_all_hook(None);
+        assert_fixture_result(case, &result, removal_calls.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(base.exists(), "{} must block broader same-base escalation", case["name"]);
+    }
+}
+
+#[tokio::test]
+async fn frozen_capacity_cases_execute_external_reclamation_and_probe_failures() {
+    let fixture = frozen_coordinator_fixture();
+    let temp = tempfile::tempdir().unwrap();
+    for (index, case) in fixture["capacity_cases"].as_array().unwrap().iter().enumerate() {
+        let first = old_base(&temp, &format!("018f8b9a-0d70-7f0a-8000-0000000005{index:02}"));
+        let second = old_base(&temp, &format!("018f8b9a-0d70-7f0a-8000-0000000006{index:02}"));
+        std::fs::write(first.join("bytes"), b"reclaim").unwrap();
+        let values = match case["name"].as_str().unwrap() {
+            "external_before_first" => vec![Ok(fixture_capacity(true))],
+            "external_between_attempts" => vec![Ok(fixture_capacity(false)), Ok(fixture_capacity(false)), Ok(fixture_capacity(true))],
+            "pre_measurement_failure" => vec![Err("pre probe".into())],
+            "post_measurement_failure" => vec![Ok(fixture_capacity(false)), Err("post probe".into())],
+            name => panic!("unknown capacity case {name}"),
+        };
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let result = execute_three_rung_pressure_plan(
+            &ThreeRungPressurePlan { units: vec![eligible_three_rung_unit(&first, &first, PressureRung::WholeBase), eligible_three_rung_unit(&second, &second, PressureRung::WholeBase)] },
+            &Activity(Ok(snapshot())), &Warm(Ok(false)), &NoopBaseLock,
+            &FixtureCapacity { values: Mutex::new(values.into()), calls: calls.clone() },
+            &executable_pressure_config(), &three_rung_clock(), temp.path(),
+        ).await;
+        assert_fixture_result(case, &result, result.attempted.len());
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), case["capacity_calls"].as_u64().unwrap() as usize);
+        assert_eq!(result.reached_high_watermark, case["termination"] == "reached_high");
+        assert_eq!(result.remeasurement_failed, case["termination"] == "remeasure_failed");
+    }
+}
+
 #[test]
 fn frozen_coordinator_fixture_records_exact_three_rung_cases() {
     let fixture = frozen_coordinator_fixture();
@@ -1134,21 +1228,18 @@ fn frozen_coordinator_fixture_records_exact_three_rung_cases() {
         {"name": "stale_profile", "removed": "debug", "preserved": ["release/artifact", "base-sibling"], "rebuild": "debug/rebuilt"},
         {"name": "whole_base", "removed": ".", "preserved": [], "rebuild": "debug/incremental/rebuilt"}
     ]));
-    assert_eq!(fixture["race_cases"], serde_json::json!([
-        {"name": "activity_changed", "removals": 0, "retained": 1},
-        {"name": "warm_changed", "removals": 0, "retained": 1},
-        {"name": "grace_changed", "removals": 0, "retained": 1},
-        {"name": "staleness_changed", "removals": 0, "retained": 1},
-        {"name": "existence_changed", "removals": 0, "retained": 1},
-        {"name": "symlink_swap", "removals": 0, "retained": 1},
-        {"name": "partial_removal_failure", "removals": 1, "retained": 2, "failed": 1, "blocks_broader_same_base": true}
-    ]));
-    assert_eq!(fixture["capacity_cases"], serde_json::json!([
-        {"name": "external_before_first", "capacity_calls": 1, "removals": 0, "termination": "reached_high", "retained": 2},
-        {"name": "external_between_attempts", "capacity_calls": 3, "removals": 1, "termination": "reached_high", "retained": 1},
-        {"name": "pre_measurement_failure", "capacity_calls": 1, "removals": 0, "termination": "remeasure_failed", "retained": 2, "failed": 1},
-        {"name": "post_measurement_failure", "capacity_calls": 2, "removals": 1, "termination": "remeasure_failed", "retained": 1, "failed": 1}
-    ]));
+    for case in fixture["race_cases"].as_array().unwrap() {
+        for field in ["planned", "eligible", "attempted", "deleted", "retained", "failed", "removal_calls"] {
+            assert!(case[field].is_u64(), "{} must provide {field}", case["name"]);
+        }
+        assert_eq!(case["blocks_broader_same_base"], true);
+    }
+    for case in fixture["capacity_cases"].as_array().unwrap() {
+        for field in ["capacity_calls", "planned", "attempted", "deleted", "retained", "failed", "removal_calls"] {
+            assert!(case[field].is_u64(), "{} must provide {field}", case["name"]);
+        }
+        assert!(matches!(case["termination"].as_str(), Some("reached_high" | "remeasure_failed")));
+    }
     assert_eq!(fixture["two_actor"]["timeline"], serde_json::json!(["warm_lock", "warm_traverse", "warm_compile", "pressure_busy", "warm_process_death", "pressure_lock", "pressure_traverse", "pressure_remove", "pressure_retry_complete"]));
     assert_eq!(fixture["two_actor"]["overlap"], serde_json::json!({"traversal": 0, "removal": 0, "compilation": 0}));
     assert_eq!(fixture["two_actor"]["loser_removals"], 0);
@@ -1231,12 +1322,26 @@ async fn frozen_two_actor_schedule_serializes_warm_work_and_pressure_retry() {
     assert!(traversal.exists() && compilation.exists(), "warm actor reached traversal and compilation");
 
     let lock = SharedWarmBaseLock;
-    assert!(lock.try_lock(&base).unwrap().is_none(), "pressure loser must not enter traversal or removal");
+    let unit = eligible_three_rung_unit(&base, &base, PressureRung::WholeBase);
+    let loser_removals = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let calls = loser_removals.clone();
+    set_remove_dir_all_hook(Some(Box::new(move |_| {
+        calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(())
+    })));
+    let loser = execute_three_rung_pressure_plan(
+        &ThreeRungPressurePlan { units: vec![unit.clone()] },
+        &Activity(Ok(snapshot())), &Warm(Ok(false)), &lock,
+        &SequenceCapacity(Mutex::new(std::collections::VecDeque::new())),
+        &executable_pressure_config(), &three_rung_clock(), temp.path(),
+    ).await;
+    set_remove_dir_all_hook(None);
+    assert!(loser.attempted.is_empty() && loser.deleted.is_empty());
+    assert_eq!(loser_removals.load(std::sync::atomic::Ordering::SeqCst), 0, "pressure loser must not traverse or remove");
     assert!(base.exists(), "busy pressure actor must not mutate the base");
     warm.kill().unwrap();
     warm.wait().unwrap();
 
-    let unit = eligible_three_rung_unit(&base, &base, PressureRung::WholeBase);
     let result = execute_three_rung_pressure_plan(
         &ThreeRungPressurePlan { units: vec![unit.clone()] }, &Activity(Ok(snapshot())), &Warm(Ok(false)), &lock,
         &SequenceCapacity(Mutex::new(std::collections::VecDeque::from([
