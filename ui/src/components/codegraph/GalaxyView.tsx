@@ -6,9 +6,8 @@
  * the force layout in a Web Worker so the main thread never freezes, and
  * renders `GalaxyCanvas` with:
  *
- *   - top-left: project chip + workspace picker (mirrors the old page
- *     affordances; project switching lives in the shared chrome),
- *   - top-right: color mode (crate / complexity) + hide-tests toggle,
+ *   - top-left: project selector + workspace picker,
+ *   - top-right: color mode (communities / complexity) + hide-tests toggle,
  *   - Cmd-K integration: search hits / AI citations from the shared
  *     codeGraphStore fly the camera to the matching stars.
  *
@@ -37,7 +36,11 @@ import {
 } from "@/lib/codeGraphGalaxyAdapter";
 import { parseSnapshotResponse } from "@/lib/codeGraphAdapter";
 import { useCodeGraphStore } from "@/stores/codeGraphStore";
-import { useSelectedProject } from "@/stores/useProjectStore";
+import {
+  useProjects,
+  useProjectStore,
+  useSelectedProject,
+} from "@/stores/useProjectStore";
 import { cn } from "@/lib/utils";
 
 /** Ask for everything; the server enforces its own ceiling. */
@@ -49,16 +52,20 @@ type GalaxyState =
   | { phase: "ready"; data: GalaxyData };
 
 const COLOR_MODES: Array<{ value: GalaxyColorMode; label: string }> = [
-  { value: "group", label: "Crates" },
+  { value: "group", label: "Communities" },
   { value: "heat", label: "Complexity" },
 ];
 
-/** One chip voice for every HUD control (chips, selects, toggles). */
+/** One chip voice for every HUD control (chips, selects, toggles). The
+ * dark-variant background mirrors what SelectTrigger's base classes
+ * resolve to, so buttons and selects read as the same chip. */
 const HUD_CHIP =
-  "border-slate-700/60 bg-slate-900/80 font-mono text-[11px] text-slate-300 backdrop-blur-sm";
+  "border-slate-700/60 bg-slate-900/80 font-mono text-[11px] text-slate-300 backdrop-blur-sm dark:bg-input/30 dark:hover:bg-input/50";
 
 export function GalaxyView({ projectId }: { projectId: string }) {
   const project = useSelectedProject();
+  const projects = useProjects();
+  const setSelectedProjectId = useProjectStore((s) => s.setSelectedProjectId);
   const [state, setState] = useState<GalaxyState>({
     phase: "loading",
     message: "Fetching graph…",
@@ -170,14 +177,27 @@ export function GalaxyView({ projectId }: { projectId: string }) {
       focusIds={focusIds}
       headerPrimary={
         <>
-          <span
-            className={cn(
-              "rounded-lg border px-2.5 py-1 font-semibold tracking-wide text-slate-200",
-              HUD_CHIP,
-            )}
+          <Select
+            value={projectId}
+            onValueChange={(value) => {
+              if (typeof value === "string" && value) {
+                setSelectedProjectId(value);
+              }
+            }}
           >
-            {project?.name ?? projectId}
-          </span>
+            <SelectTrigger size="sm" aria-label="Project" className={HUD_CHIP}>
+              <span className="font-semibold tracking-wide text-slate-200">
+                {project?.name ?? projectId}
+              </span>
+            </SelectTrigger>
+            <SelectContent className="max-h-80 min-w-56">
+              {projects.map((p) => (
+                <SelectItem key={p.id} value={p.id}>
+                  {p.name}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
           {workspaces.length > 1 && (
             <Select
               value={workspaceSlug ?? "__all__"}
@@ -214,7 +234,7 @@ export function GalaxyView({ projectId }: { projectId: string }) {
             aria-pressed={hideTests}
             onClick={() => setHideTests((v) => !v)}
             className={cn(
-              "rounded-lg border px-2 py-1 transition-colors",
+              "h-7 rounded-lg border px-2.5 transition-colors",
               HUD_CHIP,
               hideTests ? "text-sky-300" : "hover:text-slate-100",
             )}
@@ -231,7 +251,8 @@ export function GalaxyView({ projectId }: { projectId: string }) {
           >
             <SelectTrigger size="sm" aria-label="Color mode" className={HUD_CHIP}>
               <span>
-                {COLOR_MODES.find((m) => m.value === colorMode)?.label ?? "Crates"}
+                {COLOR_MODES.find((m) => m.value === colorMode)?.label ??
+                  "Communities"}
               </span>
             </SelectTrigger>
             <SelectContent className="min-w-40">

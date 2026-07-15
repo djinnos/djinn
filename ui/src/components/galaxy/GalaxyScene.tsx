@@ -1,10 +1,13 @@
 /**
  * GalaxyScene — the react-three-fiber internals of the galaxy view.
  *
- * One InstancedMesh for all nodes (LOD tessellation), one LineSegments
- * buffer for all edges (additive blending, same-cluster 0.25 /
- * cross-cluster 0.06 intensity), channel-dominance glow boost feeding a
- * luminance-thresholded Bloom, density compensation from galaxyColors.
+ * One InstancedMesh for all nodes (LOD tessellation; whole-repo clouds
+ * past POINT_MODE_THRESHOLD switch to point sprites — one vertex per node
+ * — so sustained GPU load stays below driver-reset territory), one
+ * LineSegments buffer for all edges (additive blending, same-cluster
+ * 0.25 / cross-cluster 0.06 intensity), channel-dominance glow boost
+ * feeding a luminance-thresholded Bloom, density compensation from
+ * galaxyColors.
  * Positions are precomputed (layoutGalaxy / server warm) — nothing here
  * simulates forces; buffers rebuild only when data or highlight changes.
  */
@@ -18,7 +21,6 @@ import * as THREE from "three";
 import {
   bloomIntensityScale,
   edgeIntensityScale,
-  edgeKindColor,
   groupColor,
   heatColor,
   HEAT_MUTED,
@@ -30,6 +32,14 @@ import type { GalaxyColorMode, GalaxyData, GalaxyDisplay } from "./galaxyTypes";
 
 /** At most this many labels render, picked by visual weight. */
 const MAX_LABELS = 70;
+/** Above this count instanced spheres stop paying off — ~90 vertices per
+ * node pins the GPU on whole-repo graphs (sustained load is what makes
+ * drivers reset and drop the WebGL context) — so the cloud switches to
+ * point sprites: one vertex per node. */
+const POINT_MODE_THRESHOLD = 40_000;
+/** Point-mode pick radius as a fraction of camera→cloud distance — world
+ * units per pixel ≈ distance/1000 at fov 50, so 0.004 ≈ a 4px hit circle. */
+const POINT_PICK_DISTANCE_FRACTION = 0.004;
 /** Hover raycasts are throttled to this interval — a full-graph ray-sphere
  * sweep (~65k instances) costs a few ms, fine at ~14Hz, jank at 120Hz. */
 const HOVER_THROTTLE_MS = 70;
@@ -58,6 +68,9 @@ interface SceneProps {
   /** Fired when the GPU drops the WebGL context (three keeps silently not
    * drawing — the owner must offer a remount). */
   onContextLost?: () => void;
+  /** Fired when the browser hands the context back after a loss — the
+   * owner should remount for a clean GPU-resource rebuild. */
+  onContextRestored?: () => void;
 }
 
 function baseColorOf(data: GalaxyData, index: number, colorMode: GalaxyColorMode): Rgb {
@@ -76,24 +89,53 @@ function sphereDetail(count: number): [number, number, number] {
   return [1, 10, 7];
 }
 
-function GalaxyNodes({
-  data,
-  colorMode,
-  highlight,
-  boost,
-  onNodePointer,
-  onNodeClick,
-}: {
+interface NodeModeProps {
   data: GalaxyData;
   colorMode: GalaxyColorMode;
   highlight: Set<string> | null;
   /** nodeBoostScale(count) × user nodeGlow — 1 = full glow, 0 = flat. */
   boost: number;
-  onNodePointer: SceneProps["onNodePointer"];
-  onNodeClick: SceneProps["onNodeClick"];
-}) {
-  const meshRef = useRef<THREE.InstancedMesh>(null);
-  const { camera, gl } = useThree();
+  /** Shared pick target — GalaxyNodes raycasts whichever mode is mounted. */
+  objectRef: React.RefObject<THREE.InstancedMesh | THREE.Points | null>;
+}
+
+// Point-mode shader: per-star world-space size (PointsMaterial only does a
+// uniform size) and a sub-pixel energy fade — a GL point never rasterizes
+// below 1px, so without the fade every distant star in a dense core writes
+// a full-brightness pixel and clusters saturate into white blobs.
+const POINT_VERTEX = /* glsl */ `
+  attribute float starSize;
+  attribute vec3 starColor;
+  uniform float uPixelFactor;
+  varying vec3 vColor;
+  varying float vFade;
+  void main() {
+    vec4 mvPosition = modelViewMatrix * vec4(position, 1.0);
+    float px = starSize * uPixelFactor / -mvPosition.z;
+    gl_PointSize = max(px, 1.0);
+    vFade = clamp(px, 0.0, 1.0);
+    vColor = starColor;
+    gl_Position = projectionMatrix * mvPosition;
+  }
+`;
+const POINT_FRAGMENT = /* glsl */ `
+  varying vec3 vColor;
+  varying float vFade;
+  void main() {
+    float d = length(gl_PointCoord - 0.5) * 2.0;
+    float alpha = 1.0 - smoothstep(0.45, 1.0, d);
+    if (alpha < 0.35) discard;
+    gl_FragColor = vec4(vColor * (vFade * vFade), alpha);
+  }
+`;
+
+function GalaxyNodeSpheres({
+  data,
+  colorMode,
+  highlight,
+  boost,
+  objectRef,
+}: NodeModeProps) {
   const count = data.nodes.length;
   const detail = useMemo(() => sphereDetail(count), [count]);
   // Whole-repo clouds: shrink stars as density grows (gated: 1.0 at ≤20k)
@@ -101,7 +143,7 @@ function GalaxyNodes({
   const sizeDamp = 1 / Math.pow(Math.max(1, count / 20_000), 1 / 6);
 
   useEffect(() => {
-    const mesh = meshRef.current;
+    const mesh = objectRef.current as THREE.InstancedMesh | null;
     if (!mesh) return;
     const tempObj = new THREE.Object3D();
     const color = new THREE.Color();
@@ -131,7 +173,113 @@ function GalaxyNodes({
     mesh.instanceMatrix.needsUpdate = true;
     if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
     mesh.computeBoundingSphere();
+  }, [data, colorMode, highlight, boost, count, sizeDamp, objectRef]);
+
+  return (
+    <instancedMesh
+      key={count}
+      ref={objectRef as React.RefObject<THREE.InstancedMesh>}
+      args={[undefined, undefined, count]}
+      frustumCulled={false}
+    >
+      <sphereGeometry args={detail} />
+      <meshBasicMaterial toneMapped={false} />
+    </instancedMesh>
+  );
+}
+
+/** Whole-repo mode: one vertex per node instead of a tessellated sphere,
+ * with per-star sizes and sub-pixel fading via the custom point shader. */
+function GalaxyNodePoints({
+  data,
+  colorMode,
+  highlight,
+  boost,
+  objectRef,
+}: NodeModeProps) {
+  const count = data.nodes.length;
+  const sizeDamp = 1 / Math.pow(Math.max(1, count / 20_000), 1 / 6);
+  const materialRef = useRef<THREE.ShaderMaterial>(null);
+  const uniforms = useMemo(() => ({ uPixelFactor: { value: 1 } }), []);
+
+  // Perspective size factor: worldSize × uPixelFactor / depth = pixels.
+  // Tracked per frame so window resizes and dpr changes stay correct.
+  useFrame(({ camera, size, viewport }) => {
+    const material = materialRef.current;
+    if (!material) return;
+    const fov = (camera as THREE.PerspectiveCamera).fov ?? 50;
+    material.uniforms.uPixelFactor.value =
+      (size.height * viewport.dpr) /
+      (2 * Math.tan(THREE.MathUtils.degToRad(fov) / 2));
+  });
+
+  const { positions, colors, sizes } = useMemo(() => {
+    const positions = new Float32Array(count * 3);
+    const colors = new Float32Array(count * 3);
+    const sizes = new Float32Array(count);
+    const hasHighlight = highlight !== null && highlight.size > 0;
+    for (let i = 0; i < count; i++) {
+      const node = data.nodes[i];
+      positions[i * 3] = node.x;
+      positions[i * 3 + 1] = node.y;
+      positions[i * 3 + 2] = node.z;
+      const [r, g, b] = baseColorOf(data, i, colorMode);
+      const isLit = !hasHighlight || highlight.has(node.id);
+      // Same scale voice as sphere mode (diameter = size × damp, dimmed
+      // stars shrink to 40%).
+      sizes[i] = node.size * sizeDamp * (isLit ? 1 : 0.4);
+      if (!isLit) {
+        colors[i * 3] = r * NODE_DIM;
+        colors[i * 3 + 1] = g * NODE_DIM;
+        colors[i * 3 + 2] = b * NODE_DIM;
+      } else {
+        const fullBoost = nodeGlowBoost(r, g, b);
+        const applied = 1 + (fullBoost - 1) * boost;
+        colors[i * 3] = r * applied;
+        colors[i * 3 + 1] = g * applied;
+        colors[i * 3 + 2] = b * applied;
+      }
+    }
+    return { positions, colors, sizes };
   }, [data, colorMode, highlight, boost, count, sizeDamp]);
+
+  return (
+    <points
+      key={count}
+      ref={objectRef as React.RefObject<THREE.Points>}
+      frustumCulled={false}
+    >
+      <bufferGeometry>
+        <bufferAttribute attach="attributes-position" args={[positions, 3]} />
+        <bufferAttribute attach="attributes-starColor" args={[colors, 3]} />
+        <bufferAttribute attach="attributes-starSize" args={[sizes, 1]} />
+      </bufferGeometry>
+      <shaderMaterial
+        ref={materialRef}
+        vertexShader={POINT_VERTEX}
+        fragmentShader={POINT_FRAGMENT}
+        uniforms={uniforms}
+        transparent
+        toneMapped={false}
+      />
+    </points>
+  );
+}
+
+function GalaxyNodes({
+  data,
+  colorMode,
+  highlight,
+  boost,
+  onNodePointer,
+  onNodeClick,
+}: Omit<NodeModeProps, "objectRef"> & {
+  onNodePointer: SceneProps["onNodePointer"];
+  onNodeClick: SceneProps["onNodeClick"];
+}) {
+  const objectRef = useRef<THREE.InstancedMesh | THREE.Points>(null);
+  const { camera, gl } = useThree();
+  const pointMode = data.nodes.length > POINT_MODE_THRESHOLD;
 
   // Manual picking instead of R3F event raycasting: R3F would ray-sweep
   // every instance on EVERY pointer event; throttling the sweep ourselves
@@ -146,16 +294,27 @@ function GalaxyNodes({
     let downY = 0;
 
     const pick = (event: PointerEvent): number | null => {
-      const mesh = meshRef.current;
-      if (!mesh) return null;
+      const object = objectRef.current;
+      if (!object) return null;
       const rect = canvas.getBoundingClientRect();
       pointer.set(
         ((event.clientX - rect.left) / rect.width) * 2 - 1,
         -((event.clientY - rect.top) / rect.height) * 2 + 1,
       );
       raycaster.setFromCamera(pointer, camera);
-      const hits = raycaster.intersectObject(mesh, false);
-      return hits.length > 0 ? (hits[0].instanceId ?? null) : null;
+      // Point-mode threshold tracks camera distance so the hit circle
+      // stays a few PIXELS wide at any zoom (fixed world units would be
+      // sub-pixel zoomed out and hundreds of pixels zoomed in).
+      const bounds = (object as THREE.Points).geometry?.boundingSphere;
+      const distance = bounds
+        ? camera.position.distanceTo(bounds.center)
+        : camera.position.length();
+      raycaster.params.Points = {
+        threshold: Math.max(1, distance * POINT_PICK_DISTANCE_FRACTION),
+      };
+      const hits = raycaster.intersectObject(object, false);
+      // InstancedMesh hits carry instanceId; Points hits carry index.
+      return hits.length > 0 ? (hits[0].instanceId ?? hits[0].index ?? null) : null;
     };
 
     const onMove = (event: PointerEvent) => {
@@ -190,27 +349,34 @@ function GalaxyNodes({
     };
   }, [camera, gl, onNodePointer, onNodeClick]);
 
+  const Mode = pointMode ? GalaxyNodePoints : GalaxyNodeSpheres;
   return (
-    <instancedMesh
-      key={count}
-      ref={meshRef}
-      args={[undefined, undefined, count]}
-      frustumCulled={false}
-    >
-      <sphereGeometry args={detail} />
-      <meshBasicMaterial toneMapped={false} />
-    </instancedMesh>
+    <Mode
+      data={data}
+      colorMode={colorMode}
+      highlight={highlight}
+      boost={boost}
+      objectRef={objectRef}
+    />
   );
 }
 
 // ── Edges ───────────────────────────────────────────────────────────────────
 
+// Heat mode exists to make hot code pop — community-colored strands fight
+// that, so edges collapse to this dim neutral at a fraction of their
+// group-mode strength (structure stays visible, color belongs to stars).
+const HEAT_EDGE_NEUTRAL: Rgb = [0.45, 0.55, 0.7];
+const HEAT_EDGE_DAMP = 0.3;
+
 function GalaxyEdges({
   data,
+  colorMode,
   highlight,
   brightness,
 }: {
   data: GalaxyData;
+  colorMode: GalaxyColorMode;
   highlight: Set<string> | null;
   brightness: number;
 }) {
@@ -218,6 +384,7 @@ function GalaxyEdges({
     const indexById = new Map<string, number>();
     data.nodes.forEach((node, i) => indexById.set(node.id, i));
 
+    const heatMode = colorMode === "heat";
     const densityScale = edgeIntensityScale(data.edges.length) * brightness;
     // 0 at ≤50k edges (approved look untouched), full strength at ≥250k.
     const hubCoefficient =
@@ -258,7 +425,19 @@ function GalaxyEdges({
         }
       }
 
-      const [r, g, b] = edgeKindColor(edge.kind);
+      // Community-colored edges: each end takes its own group's color, so
+      // an import strand fades importer-hue → imported-hue instead of
+      // stacking into one uniform blue glare across the whole galaxy.
+      // Heat mode neutralizes them instead — see HEAT_EDGE_NEUTRAL.
+      let sr: number, sg: number, sb: number, tr: number, tg: number, tb: number;
+      if (heatMode) {
+        [sr, sg, sb] = HEAT_EDGE_NEUTRAL;
+        [tr, tg, tb] = HEAT_EDGE_NEUTRAL;
+        intensity *= HEAT_EDGE_DAMP;
+      } else {
+        [sr, sg, sb] = groupColor(s.group);
+        [tr, tg, tb] = groupColor(t.group);
+      }
       const off = valid * 6;
       positions[off] = s.x;
       positions[off + 1] = s.y;
@@ -266,19 +445,19 @@ function GalaxyEdges({
       positions[off + 3] = t.x;
       positions[off + 4] = t.y;
       positions[off + 5] = t.z;
-      colors[off] = r * intensity;
-      colors[off + 1] = g * intensity;
-      colors[off + 2] = b * intensity;
-      colors[off + 3] = r * intensity;
-      colors[off + 4] = g * intensity;
-      colors[off + 5] = b * intensity;
+      colors[off] = sr * intensity;
+      colors[off + 1] = sg * intensity;
+      colors[off + 2] = sb * intensity;
+      colors[off + 3] = tr * intensity;
+      colors[off + 4] = tg * intensity;
+      colors[off + 5] = tb * intensity;
       valid++;
     }
     return {
       positions: positions.slice(0, valid * 6),
       colors: colors.slice(0, valid * 6),
     };
-  }, [data, highlight, brightness]);
+  }, [data, colorMode, highlight, brightness]);
 
   return (
     <lineSegments key={positions.length} frustumCulled={false}>
@@ -383,18 +562,30 @@ function GalaxyLabels({
 // and the scene goes silently blank (heavy graphs on weak GPUs are the
 // usual trigger). Surface it so the owner can offer a remount.
 
-function ContextLossSentinel({ onLost }: { onLost?: () => void }) {
+function ContextLossSentinel({
+  onLost,
+  onRestored,
+}: {
+  onLost?: () => void;
+  onRestored?: () => void;
+}) {
   const gl = useThree((s) => s.gl);
   useEffect(() => {
-    if (!onLost) return;
     const canvas = gl.domElement;
-    const handle = (event: Event) => {
+    const lost = (event: Event) => {
+      // preventDefault opts in to restoration — without it the browser
+      // never fires webglcontextrestored for this canvas.
       event.preventDefault();
-      onLost();
+      onLost?.();
     };
-    canvas.addEventListener("webglcontextlost", handle);
-    return () => canvas.removeEventListener("webglcontextlost", handle);
-  }, [gl, onLost]);
+    const restored = () => onRestored?.();
+    canvas.addEventListener("webglcontextlost", lost);
+    canvas.addEventListener("webglcontextrestored", restored);
+    return () => {
+      canvas.removeEventListener("webglcontextlost", lost);
+      canvas.removeEventListener("webglcontextrestored", restored);
+    };
+  }, [gl, onLost, onRestored]);
   return null;
 }
 
@@ -506,6 +697,7 @@ export function GalaxyScene({
   onNodePointer,
   onNodeClick,
   onContextLost,
+  onContextRestored,
 }: SceneProps) {
   const nodeCount = data.nodes.length;
   const boost = nodeBoostScale(nodeCount) * display.nodeGlow;
@@ -519,7 +711,7 @@ export function GalaxyScene({
     >
       <color attach="background" args={["#06090f"]} />
       <ContextJanitor />
-      <ContextLossSentinel onLost={onContextLost} />
+      <ContextLossSentinel onLost={onContextLost} onRestored={onContextRestored} />
 
       <GalaxyNodes
         data={data}
@@ -529,7 +721,12 @@ export function GalaxyScene({
         onNodePointer={onNodePointer}
         onNodeClick={onNodeClick}
       />
-      <GalaxyEdges data={data} highlight={highlight} brightness={display.edgeBrightness} />
+      <GalaxyEdges
+        data={data}
+        colorMode={colorMode}
+        highlight={highlight}
+        brightness={display.edgeBrightness}
+      />
       {showLabels && <GalaxyLabels data={data} highlight={highlight} />}
 
       <CameraRig flyTarget={flyTarget} />
