@@ -1,25 +1,29 @@
 /**
- * Galaxy — real djinn data.
+ * Galaxy — real djinn data, full graph.
  *
- * Renders an actual `code_graph snapshot` of djinnos/djinn through the
- * production adapter (`snapshotToGalaxy`). The snapshot JSON lives in
- * `__fixtures__/djinn-code-graph.snapshot.json`, which is **gitignored**
- * (see `__fixtures__/.gitignore`) — it is a local preview artifact, not
- * repo content. Refresh it with:
+ * Renders an actual local `dump_full_galaxy_snapshot` dump (every node,
+ * every edge — no server caps) through the production adapter. The
+ * snapshot JSON lives in `__fixtures__/djinn-code-graph.snapshot.json`,
+ * which is **gitignored** (see `__fixtures__/.gitignore`) — a local
+ * preview artifact, not repo content. Refresh it with the ignored dev
+ * test documented in `server/crates/djinn-graph/src/dev_fixture_dump.rs`.
  *
- *   code_graph { operation: "snapshot", project: "djinnos/djinn",
- *                level: "symbol", tests: "include", limit: 15000 }
- *
- * and drop the `.snapshot` object into that path. When the fixture is
- * absent the story renders a short how-to note instead of failing — so
- * this file is safe to commit while the data stays local.
+ * The layout runs in the shared Web Worker (a whole-repo graph takes a
+ * while — the story shows progress instead of freezing the tab). When
+ * the fixture is absent the story renders a how-to note instead of
+ * failing, so this file is safe to commit while the data stays local.
  */
 
+import { useEffect, useState } from "react";
 import type { Meta, StoryObj } from "@storybook/react-vite";
 
 import { GalaxyCanvas } from "./GalaxyCanvas";
+import { layoutInWorker } from "./galaxyLayoutClient";
 import type { GalaxyData } from "./galaxyTypes";
-import { snapshotToGalaxy } from "@/lib/codeGraphGalaxyAdapter";
+import {
+  galaxyLayoutSeed,
+  snapshotToGalaxy,
+} from "@/lib/codeGraphGalaxyAdapter";
 import type { SnapshotPayload } from "@/lib/codeGraphAdapter";
 
 // Optional import: eager glob resolves to {} when the fixture is deleted.
@@ -29,36 +33,89 @@ const fixtureModules = import.meta.glob<{ default: SnapshotPayload }>(
 );
 
 const snapshot = Object.values(fixtureModules)[0]?.default ?? null;
-const galaxy: GalaxyData | null = snapshot ? snapshotToGalaxy(snapshot) : null;
+
+// Adapt once (cheap), lay out once per session (expensive, in the worker),
+// then cache for every story/args change.
+let galaxyPromise: Promise<GalaxyData> | null = null;
+function loadGalaxy(): Promise<GalaxyData> {
+  if (!snapshot) return Promise.reject(new Error("no fixture"));
+  galaxyPromise ??= (async () => {
+    const data = snapshotToGalaxy(snapshot, { layout: false });
+    const nodes = await layoutInWorker(
+      data.nodes,
+      data.edges,
+      galaxyLayoutSeed(snapshot.project_id),
+    );
+    return { ...data, nodes };
+  })();
+  return galaxyPromise;
+}
 
 function RealDataHarness({
   colorMode,
   showLabels,
 }: {
-  colorMode: "stellar" | "heat";
+  colorMode: "group" | "heat";
   showLabels: boolean;
 }) {
-  if (!galaxy) {
+  const [galaxy, setGalaxy] = useState<GalaxyData | null>(null);
+  const [failed, setFailed] = useState(false);
+
+  useEffect(() => {
+    if (!snapshot) return;
+    let cancelled = false;
+    loadGalaxy()
+      .then((data) => {
+        if (!cancelled) setGalaxy(data);
+      })
+      .catch(() => {
+        if (!cancelled) setFailed(true);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  if (!snapshot || failed) {
     return (
-      <div className="flex h-screen w-full items-center justify-center bg-[#04060c] font-mono text-sm text-slate-400">
+      <div className="flex h-screen w-full items-center justify-center bg-[#06090f] font-mono text-sm text-slate-400">
         <div className="max-w-md space-y-2 text-center">
           <p className="text-slate-200">No local snapshot fixture.</p>
           <p>
-            Fetch a `code_graph snapshot` of a project and save it as
+            Run the `dump_full_galaxy_snapshot` dev test (see
+            `server/crates/djinn-graph/src/dev_fixture_dump.rs`) to write
             `src/components/galaxy/__fixtures__/djinn-code-graph.snapshot.json`
-            (gitignored) to preview the galaxy on real data.
+            (gitignored) and preview the galaxy on the full real graph.
           </p>
         </div>
       </div>
     );
   }
+
+  if (!galaxy) {
+    return (
+      <div className="flex h-screen w-full items-center justify-center bg-[#06090f] font-mono text-sm text-slate-400">
+        <div className="space-y-2 text-center">
+          <span
+            className="mx-auto block h-5 w-5 animate-spin rounded-full border-2 border-slate-600 border-t-slate-200"
+            role="status"
+            aria-label="Computing layout"
+          />
+          <p>
+            Computing layout for {snapshot.nodes.length.toLocaleString()} nodes…
+          </p>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="h-screen w-full">
       <GalaxyCanvas
         data={galaxy}
         colorMode={colorMode}
         showLabels={showLabels}
-        title="djinnos/djinn — real snapshot"
+        title="djinnos/djinn — full local dump"
       />
     </div>
   );
@@ -68,16 +125,16 @@ const meta = {
   title: "CodeGraph/GalaxyRealData",
   component: RealDataHarness,
   parameters: { layout: "fullscreen" },
-  args: { colorMode: "stellar" as const, showLabels: false },
+  args: { colorMode: "group" as const, showLabels: false },
   argTypes: {
-    colorMode: { control: "radio", options: ["stellar", "heat"] },
+    colorMode: { control: "radio", options: ["group", "heat"] },
   },
 } satisfies Meta<typeof RealDataHarness>;
 
 export default meta;
 type Story = StoryObj<typeof meta>;
 
-/** The djinn codebase as a galaxy — degree-colored stellar scale. */
+/** The djinn codebase as a galaxy — per-crate colors, whole graph. */
 export const Djinn: Story = {};
 
 /** Cognitive-complexity heat over the real graph. */

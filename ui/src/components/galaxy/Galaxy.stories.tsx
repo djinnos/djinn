@@ -34,7 +34,7 @@ function xlarge() {
 
 interface GalaxyArgs {
   fixture: "small" | "medium" | "large" | "xlarge";
-  colorMode: "stellar" | "heat";
+  colorMode: "group" | "heat";
   showLabels: boolean;
   edgeBrightness: number;
   nodeGlow: number;
@@ -75,7 +75,7 @@ const meta = {
   parameters: { layout: "fullscreen" },
   args: {
     fixture: "medium",
-    colorMode: "stellar",
+    colorMode: "group",
     showLabels: false,
     edgeBrightness: DEFAULT_GALAXY_DISPLAY.edgeBrightness,
     nodeGlow: DEFAULT_GALAXY_DISPLAY.nodeGlow,
@@ -83,7 +83,7 @@ const meta = {
   },
   argTypes: {
     fixture: { control: "radio", options: ["small", "medium", "large", "xlarge"] },
-    colorMode: { control: "radio", options: ["stellar", "heat"] },
+    colorMode: { control: "radio", options: ["group", "heat"] },
     edgeBrightness: { control: { type: "range", min: 0.1, max: 3, step: 0.05 } },
     nodeGlow: { control: { type: "range", min: 0, max: 2, step: 0.05 } },
     bloom: { control: { type: "range", min: 0, max: 2, step: 0.05 } },
@@ -93,7 +93,7 @@ const meta = {
 export default meta;
 type Story = StoryObj<typeof meta>;
 
-/** The default look: ~3–4k nodes, stellar degree coloring. */
+/** The default look: ~3–4k nodes, per-crate colors. */
 export const Medium: Story = {};
 
 /** Density compensation at scale: ~20k nodes / ~45k edges, no white blob. */

@@ -399,8 +399,13 @@ pub(crate) fn build_snapshot_payload(
     }
 
     // Cap the cappable remainder to the budget left after the always-kept
-    // cross-workspace edges, keeping the highest-salience edges.
-    let intra_budget = SNAPSHOT_DRAWABLE_EDGE_CAP.saturating_sub(cross_workspace_edges.len());
+    // cross-workspace edges, keeping the highest-salience edges. The edge
+    // budget scales with the requested node budget: a caller that asked
+    // for a whole-graph snapshot (galaxy renderer, lmkv) gets the whole
+    // edge set too, while default-budget UI snapshots keep the small
+    // cold-load payload.
+    let drawable_edge_cap = SNAPSHOT_DRAWABLE_EDGE_CAP.max(node_cap);
+    let intra_budget = drawable_edge_cap.saturating_sub(cross_workspace_edges.len());
     if drawable_edges.len() > intra_budget {
         drawable_edges.select_nth_unstable_by(intra_budget, |a, b| {
             b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal)

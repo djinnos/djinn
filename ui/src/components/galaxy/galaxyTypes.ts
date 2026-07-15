@@ -38,9 +38,13 @@ export interface GalaxyNode {
   /**
    * Whether this node participates in the heat color mode. Ineligible
    * nodes (files, folders, non-function symbols) render muted so they
-   * don't dominate the eye — same convention as the Sigma heatmap.
+   * don't dominate the eye.
    */
   heatEligible?: boolean;
+  /** Test file/symbol — drives the hide-tests toggle. */
+  isTest?: boolean;
+  /** Workspace slug (multi-workspace projects) — drives the workspace filter. */
+  workspace?: string;
 }
 
 export interface GalaxyEdge {
@@ -58,7 +62,7 @@ export interface GalaxyData {
   totalEdges?: number;
 }
 
-export type GalaxyColorMode = "stellar" | "heat";
+export type GalaxyColorMode = "group" | "heat";
 
 /**
  * User display multipliers layered on top of the automatic density

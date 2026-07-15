@@ -1,28 +1,25 @@
 /**
  * galaxyLayout — deterministic 3D layout for galaxy data.
  *
- * A TypeScript port of codebase-memory-mcp's `src/ui/layout3d.c` (MIT,
- * © 2025 DeusData), which is the algorithm behind their "code galaxy":
- *
- *   1. Seed each node on a ring position hashed from its cluster key
- *      (djinn: the `group` — crate/top-level dir), with small jitter, and
- *      z from call depth (entry points at top, callees below).
+ *   1. Seed each node near a sphere position hashed from its cluster key
+ *      (the `group` — crate/top-level dir), with small jitter, and a z
+ *      offset from call depth (entry points at top, callees below).
  *   2. Gentle ForceAtlas2-style local optimization: Barnes-Hut octree
  *      repulsion + linear edge attraction + an anchor spring back to the
  *      seed position, displacement-capped per iteration.
  *
  * The cluster blobs, trunk bundles, and globe silhouette all EMERGE from
  * this pass — same-group nodes start coincident and repel into blobs,
- * edges pull related blobs together, anchors keep the ring silhouette.
+ * edges pull related blobs together, anchors keep the globe silhouette.
  *
  * This is the client-side stand-in for the warm-time server layout
  * (proposal lmkv ships the same algorithm in Rust and puts x/y/z in the
- * snapshot payload); in Storybook it runs once per fixture at build time.
+ * snapshot payload). Runs synchronously — call it from a Web Worker for
+ * live-page use (see galaxyLayout.worker.ts).
  */
 
 import type { GalaxyEdge, GalaxyNode } from "./galaxyTypes";
 
-// Their layout3d.c constants, verbatim.
 const LOCAL_REPULSION = 8.0;
 const LOCAL_ATTRACTION = 1.0;
 const LOCAL_ANCHOR_K = 0.25;
@@ -57,11 +54,10 @@ function fnv1a(input: string): number {
   return h >>> 0;
 }
 
-// ── Call depth via BFS (their compute_call_depth, generalized) ──────────────
+// ── Call depth via BFS ──────────────────────────────────────────────────────
 //
-// Entry points = nodes with outgoing edges but no incoming ones (their C
-// uses is_entry_point flags; a degree-based definition is the generic
-// equivalent). Unreached nodes settle at depth 0.
+// Entry points = nodes with outgoing edges but no incoming ones. Unreached
+// nodes settle at depth 0.
 
 function computeDepths(
   nodes: GalaxyNode[],
@@ -101,7 +97,7 @@ function computeDepths(
   return depth;
 }
 
-// ── Barnes-Hut octree (faithful port of their octree_*) ─────────────────────
+// ── Barnes-Hut octree ───────────────────────────────────────────────────────
 //
 // Each leaf holds exactly ONE body (identified by index, so a query can
 // exclude itself); inserting into an occupied leaf splits it and re-inserts
@@ -263,9 +259,9 @@ function octreeRepulse(
 
 /**
  * Positions `nodes` in place. Deterministic for a given (data, seed).
- * Iteration count scales down with size, mirroring their C (which drops
- * from 40 → 20 → 10 as graphs grow; JS pays ~an order of magnitude more
- * per iteration, so the thresholds sit lower).
+ * Iteration count scales down with size — past ~15k bodies the anchor
+ * seeding already dominates the visible structure, and each iteration is
+ * O(n log n) octree work.
  */
 export function layoutGalaxy(
   nodes: GalaxyNode[],
@@ -288,18 +284,22 @@ export function layoutGalaxy(
   const az = new Float32Array(n);
   const mass = new Float32Array(n);
 
+  // Bigger graphs get a bigger shell: constant volume-per-node keeps the
+  // globe readable instead of compressing 60k stars into a 20k-node shell.
+  const shellScale = Math.max(1, Math.cbrt(n / 20_000));
+
   for (let i = 0; i < n; i++) {
     const node = nodes[i];
     const clusterKey = node.group ?? "";
     const h = fnv1a(clusterKey);
-    // Departure from the C original: cluster centers sit on a hashed
-    // SPHERE, not a 2D ring — the ring + depth-only-z reads as a flat
-    // pancake once you orbit it. Same emergent behavior (same-group
-    // nodes coincide, the force pass inflates them into blobs), true
-    // globe silhouette.
+    // Cluster centers sit on a hashed SPHERE, not a 2D ring — a ring with
+    // depth-only-z reads as a flat pancake once you orbit it. Same
+    // emergent behavior (same-group nodes coincide, the force pass
+    // inflates them into blobs), true globe silhouette.
     const theta = ((h & 0xffff) / 65535) * Math.PI * 2;
     const phi = Math.acos(2 * (((h >> 16) & 0xff) / 255) - 1);
-    const radius = RING_BASE_RADIUS + (((h >> 24) & 0xff) / 255) * RING_RADIUS_SPREAD;
+    const radius =
+      (RING_BASE_RADIUS + (((h >> 24) & 0xff) / 255) * RING_RADIUS_SPREAD) * shellScale;
 
     const rng = mulberry32(fnv1a(node.id) ^ seed);
     const px = radius * Math.sin(phi) * Math.cos(theta) + (rng() * 2 - 1) * SEED_JITTER;
@@ -359,7 +359,7 @@ export function layoutGalaxy(
     const tree = octreeNew((mnx + mxx) * 0.5, (mny + mxy) * 0.5, (mnz + mxz) * 0.5, half);
     for (let i = 0; i < n; i++) octreeInsert(tree, i, x[i], y[i], z[i], mass[i]);
 
-    // Repulsion (self excluded by body index, as in the C original).
+    // Repulsion (self excluded by body index).
     for (let i = 0; i < n; i++) {
       force.fx = 0;
       force.fy = 0;

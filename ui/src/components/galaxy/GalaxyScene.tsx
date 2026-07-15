@@ -1,11 +1,10 @@
 /**
  * GalaxyScene — the react-three-fiber internals of the galaxy view.
  *
- * Rendering model ported from codebase-memory-mcp's graph-ui (MIT, © 2025
- * DeusData): one InstancedMesh for all nodes (LOD tessellation), one
- * LineSegments buffer for all edges (additive blending, same-cluster 0.25 /
+ * One InstancedMesh for all nodes (LOD tessellation), one LineSegments
+ * buffer for all edges (additive blending, same-cluster 0.25 /
  * cross-cluster 0.06 intensity), channel-dominance glow boost feeding a
- * luminance-thresholded Bloom, density compensation from density.ts.
+ * luminance-thresholded Bloom, density compensation from galaxyColors.
  * Positions are precomputed (layoutGalaxy / server warm) — nothing here
  * simulates forces; buffers rebuild only when data or highlight changes.
  */
@@ -20,11 +19,11 @@ import {
   bloomIntensityScale,
   edgeIntensityScale,
   edgeKindColor,
+  groupColor,
   heatColor,
   HEAT_MUTED,
   nodeBoostScale,
   nodeGlowBoost,
-  stellarColor,
   type Rgb,
 } from "./galaxyColors";
 import type { GalaxyColorMode, GalaxyData, GalaxyDisplay } from "./galaxyTypes";
@@ -35,7 +34,7 @@ export const GALAXY_INTERACTION_LIMIT = 30_000;
 const MAX_LABELS = 70;
 const IDLE_ROTATE_DELAY_MS = 20_000;
 const BASE_BLOOM_INTENSITY = 1.45;
-/** Their NodeCloud dim factor for non-highlighted nodes. */
+/** Dim factor for non-highlighted nodes while a selection is active. */
 const NODE_DIM = 0.15;
 
 export interface FlyTarget {
@@ -62,10 +61,10 @@ function baseColorOf(data: GalaxyData, index: number, colorMode: GalaxyColorMode
   if (colorMode === "heat") {
     return node.heatEligible ? heatColor(node.heat ?? 0) : HEAT_MUTED;
   }
-  return stellarColor(node.degree);
+  return groupColor(node.group);
 }
 
-// ── Nodes (their NodeCloud sphere mode) ─────────────────────────────────────
+// ── Nodes ───────────────────────────────────────────────────────────────────
 
 function sphereDetail(count: number): [number, number, number] {
   if (count <= 8_000) return [1, 32, 24];
@@ -106,7 +105,6 @@ function GalaxyNodes({
       const node = data.nodes[i];
       const isLit = !hasHighlight || highlight.has(node.id);
 
-      // Their scale semantics: size × 0.5 lit, × 0.2 dimmed.
       const s = node.size * (isLit ? 0.5 : 0.2);
       tempObj.position.set(node.x, node.y, node.z);
       tempObj.scale.set(s, s, s);
@@ -159,7 +157,7 @@ function GalaxyNodes({
   );
 }
 
-// ── Edges (their EdgeLines intensity model) ─────────────────────────────────
+// ── Edges ───────────────────────────────────────────────────────────────────
 
 function GalaxyEdges({
   data,
@@ -322,6 +320,32 @@ function GalaxyLabels({
   );
 }
 
+// ── GL context janitor ──────────────────────────────────────────────────────
+//
+// Browsers cap live WebGL contexts (~16) and reclaim dead ones lazily, so
+// canvas churn (Storybook story switches, HMR) can exhaust the pool and
+// the next mount fails with "context could not be created". Force-release
+// the context on unmount so churn never accumulates.
+
+function ContextJanitor() {
+  const gl = useThree((s) => s.gl);
+  useEffect(() => {
+    const canvas = gl.domElement;
+    return () => {
+      // Deferred + connectivity-checked: StrictMode (and HMR) unmount and
+      // immediately remount the same tree — releasing synchronously would
+      // kill the context of a canvas that's about to be reused. Only a
+      // canvas that actually left the DOM gets its context reclaimed.
+      setTimeout(() => {
+        if (!canvas.isConnected) {
+          gl.getContext()?.getExtension("WEBGL_lose_context")?.loseContext();
+        }
+      }, 250);
+    };
+  }, [gl]);
+  return null;
+}
+
 // ── Camera rig: fly-to + idle auto-rotate ───────────────────────────────────
 
 type OrbitControlsImpl = ComponentRef<typeof OrbitControls>;
@@ -417,6 +441,7 @@ export function GalaxyScene({
       onPointerMissed={() => onNodeClick(null)}
     >
       <color attach="background" args={["#06090f"]} />
+      <ContextJanitor />
 
       <GalaxyNodes
         data={data}

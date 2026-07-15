@@ -23,6 +23,8 @@ pub mod cluster_doc;
 pub mod communities;
 pub mod complexity;
 pub mod coupling_index;
+#[cfg(test)]
+mod dev_fixture_dump;
 pub mod db_access;
 pub mod entry_points;
 pub mod git_diff;

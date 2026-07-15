@@ -30,7 +30,11 @@ function displayLabel(label: string, kind: string): string {
   return segments[segments.length - 1] || label;
 }
 
-/** Crate-aware grouping: `server/crates/djinn-graph/...` → `djinn-graph`. */
+/**
+ * Crate-aware grouping: `server/crates/djinn-graph/...` → `djinn-graph`;
+ * everything else groups by its first three path segments (finer than
+ * two — more clusters spread the galaxy shell better on big graphs).
+ */
 export function deriveGalaxyGroup(
   filePath: string | undefined,
   workspace: string | undefined,
@@ -41,10 +45,27 @@ export function deriveGalaxyGroup(
   if (crateMatch) return `${prefix}${crateMatch[1]}`;
   const segments = filePath.split("/").filter(Boolean);
   if (segments.length <= 1) return `${prefix}${segments[0] ?? "root"}`;
-  return `${prefix}${segments.slice(0, 2).join("/")}`;
+  return `${prefix}${segments.slice(0, Math.min(3, segments.length - 1) || 1).join("/")}`;
 }
 
-export function snapshotToGalaxy(snapshot: SnapshotPayload): GalaxyData {
+export interface SnapshotToGalaxyOptions {
+  /**
+   * Run the (synchronous, potentially seconds-long) force layout inline.
+   * Default true — right for module-scope Storybook fixtures. The live
+   * page passes false and runs `layoutGalaxy` in the worker instead.
+   */
+  layout?: boolean;
+}
+
+/** Deterministic layout seed for a project id (shared with the worker path). */
+export function galaxyLayoutSeed(projectId: string | undefined): number {
+  return hashSeed(projectId ?? "galaxy");
+}
+
+export function snapshotToGalaxy(
+  snapshot: SnapshotPayload,
+  options: SnapshotToGalaxyOptions = {},
+): GalaxyData {
   const kept = snapshot.nodes.filter((n) => n.kind !== "community");
   const keptIds = new Set(kept.map((n) => n.id));
 
@@ -97,8 +118,8 @@ export function snapshotToGalaxy(snapshot: SnapshotPayload): GalaxyData {
     const typeLike =
       n.symbol_kind !== undefined &&
       TYPE_LIKE_SYMBOL_KINDS.has(n.symbol_kind.toLowerCase());
-    // Their size_for_label scheme: Folder 12, File 8, type-like 6, other
-    // symbols 4 — plus the degree boost for hubs (min(deg*0.3, 10) past 5).
+    // Size scheme: Folder 12, File 8, type-like 6, other symbols 4 — plus
+    // the degree boost for hubs (min(deg*0.3, 10) past 5).
     const baseSize =
       n.kind === "folder" ? 12 : n.kind === "file" ? 8 : typeLike ? 6 : 4;
     const degreeBoost = degree > 5 ? Math.min(degree * 0.3, 10) : 0;
@@ -115,10 +136,14 @@ export function snapshotToGalaxy(snapshot: SnapshotPayload): GalaxyData {
       parent: parentById.get(n.id),
       heat: hasCognitive ? percentile(n.cognitive as number) : undefined,
       heatEligible: hasCognitive,
+      isTest: n.is_test === true,
+      workspace: n.workspace,
     };
   });
 
-  layoutGalaxy(nodes, edges, hashSeed(snapshot.project_id ?? "galaxy"));
+  if (options.layout !== false) {
+    layoutGalaxy(nodes, edges, galaxyLayoutSeed(snapshot.project_id));
+  }
 
   return {
     nodes,

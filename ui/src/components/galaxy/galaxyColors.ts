@@ -1,52 +1,20 @@
 /**
  * galaxyColors — color scales and density compensation for the galaxy view.
  *
- * Ported from codebase-memory-mcp's graph-ui (MIT, © 2025 DeusData):
- * `src/ui/layout3d.c` (stellar scale) and `graph-ui/src/lib/density.ts`
- * (density compensation + glow boost). Kept numerically identical to their
- * shipped baseline — it is the proven look; resist re-tuning constants here.
- *
- * The heat scale (cognitive-complexity mode) is djinn's own addition.
+ * The constants form one calibrated system — spectral stops, density
+ * scales, glow gains, and the Bloom settings in GalaxyScene are tuned
+ * against each other, so re-tune them together or not at all. Density
+ * compensation + glow-boost approach adapted from the MIT-licensed
+ * graph-ui of codebase-memory-mcp.
  */
 
 export type Rgb = [number, number, number];
-
-// ── Stellar spectral scale (degree → color) ─────────────────────────────────
-//
-// Hertzsprung–Russell intuition: dim red dwarfs = leaves, blue giants =
-// mega-hubs. Color IS the importance encoding.
-
-const STELLAR_STOPS: Array<{ maxDegree: number; hex: number }> = [
-  { maxDegree: 1, hex: 0xff6050 }, // M — red dwarf
-  { maxDegree: 3, hex: 0xff8855 }, // late K — orange-red
-  { maxDegree: 5, hex: 0xffa060 }, // K — orange
-  { maxDegree: 8, hex: 0xffc070 }, // early K — warm orange
-  { maxDegree: 12, hex: 0xffe080 }, // G — yellow (Sun-like)
-  { maxDegree: 18, hex: 0xfff0c0 }, // F — yellow-white
-  { maxDegree: 25, hex: 0xfff8e8 }, // late A — warm white
-  { maxDegree: 35, hex: 0xe8e8ff }, // A — white-blue
-  { maxDegree: 50, hex: 0xc0d0ff }, // B — blue-white
-];
-const STELLAR_TOP = 0x80a0ff; // O — blue giant
 
 function hexToRgb(hex: number): Rgb {
   return [((hex >> 16) & 0xff) / 255, ((hex >> 8) & 0xff) / 255, (hex & 0xff) / 255];
 }
 
-const STELLAR_RGB = STELLAR_STOPS.map((s) => ({
-  maxDegree: s.maxDegree,
-  color: hexToRgb(s.hex),
-}));
-const STELLAR_TOP_RGB = hexToRgb(STELLAR_TOP);
-
-export function stellarColor(degree: number): Rgb {
-  for (const stop of STELLAR_RGB) {
-    if (degree <= stop.maxDegree) return stop.color;
-  }
-  return STELLAR_TOP_RGB;
-}
-
-// ── Heat scale (djinn cognitive-complexity mode) ────────────────────────────
+// ── Heat scale (cognitive-complexity mode) ──────────────────────────────────
 
 const HEAT_LOW: Rgb = [0.204, 0.827, 0.6]; // emerald-400
 const HEAT_MID: Rgb = [0.918, 0.702, 0.031]; // yellow-500
@@ -63,11 +31,68 @@ export function heatColor(heat: number): Rgb {
   return t < 0.5 ? mix(HEAT_LOW, HEAT_MID, t * 2) : mix(HEAT_MID, HEAT_HIGH, (t - 0.5) * 2);
 }
 
+// ── Group (crate/community) colors ──────────────────────────────────────────
+//
+// Generated, not palette-indexed: a fixed 12-hue palette collides badly
+// past a dozen groups (60 crates → ~5 crates per color). Instead the hue
+// comes from the group-name hash (continuous, so 100+ communities spread
+// over the whole wheel) while saturation/lightness stay pinned to the
+// Tailwind-500 band the rest of the UI speaks — dynamic hues, consistent
+// voice. Hash-derived means a crate keeps its color everywhere, always,
+// regardless of which other crates are visible.
+
+function fnv1a(input: string): number {
+  let h = 2166136261;
+  for (let i = 0; i < input.length; i++) {
+    h ^= input.charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }
+  return h >>> 0;
+}
+
+function hslToRgb(h: number, s: number, l: number): Rgb {
+  const chroma = (1 - Math.abs(2 * l - 1)) * s;
+  const hp = (((h % 360) + 360) % 360) / 60;
+  const x = chroma * (1 - Math.abs((hp % 2) - 1));
+  let r = 0;
+  let g = 0;
+  let b = 0;
+  if (hp < 1) [r, g, b] = [chroma, x, 0];
+  else if (hp < 2) [r, g, b] = [x, chroma, 0];
+  else if (hp < 3) [r, g, b] = [0, chroma, x];
+  else if (hp < 4) [r, g, b] = [0, x, chroma];
+  else if (hp < 5) [r, g, b] = [x, 0, chroma];
+  else [r, g, b] = [chroma, 0, x];
+  const m = l - chroma / 2;
+  return [r + m, g + m, b + m];
+}
+
+function groupHsl(group: string): [number, number, number] {
+  const h = fnv1a(group);
+  const hue = (h & 0xffff) / 65535 * 360;
+  // Small hash-driven wiggle inside the Tailwind-500 band so near-hue
+  // groups still separate slightly, without leaving the family.
+  const saturation = 0.72 + (((h >> 16) & 0xff) / 255) * 0.14; // 0.72–0.86
+  const lightness = 0.55 + (((h >> 24) & 0xff) / 255) * 0.08; // 0.55–0.63
+  return [hue, saturation, lightness];
+}
+
+export function groupColor(group: string | undefined): Rgb {
+  if (!group) return HEAT_MUTED;
+  const [h, s, l] = groupHsl(group);
+  return hslToRgb(h, s, l);
+}
+
+/** CSS color for the group dots/legend chips (same hash, same color). */
+export function groupColorCss(group: string): string {
+  const [h, s, l] = groupHsl(group);
+  return `hsl(${h.toFixed(1)} ${(s * 100).toFixed(0)}% ${(l * 100).toFixed(0)}%)`;
+}
+
 // ── Edge kind palette ───────────────────────────────────────────────────────
 //
-// Their EDGE_TYPE_COLORS, re-keyed onto djinn snapshot edge kinds. Pure kind
-// color — endpoint colors are NOT mixed in; per-edge brightness comes from
-// the same-cluster/cross-cluster intensity model in GalaxyScene.
+// Pure kind color — endpoint colors are NOT mixed in; per-edge brightness
+// comes from the same-cluster/cross-cluster intensity model in GalaxyScene.
 
 const EDGE_KIND_COLORS: Record<string, Rgb> = {
   SymbolReference: hexToRgb(0x1da27e), // their CALLS green
@@ -92,7 +117,12 @@ export function edgeKindColor(kind: string | undefined): Rgb {
   return (kind && EDGE_KIND_COLORS[kind]) || EDGE_DEFAULT;
 }
 
-// ── Density compensation (their density.ts, verbatim constants) ────────────
+// ── Density compensation ────────────────────────────────────────────────────
+//
+// Edges blend additively, so glow is linear in edge count — without
+// compensation a big graph saturates into a white blob. Edge intensity
+// scales ~1/sqrt(n) past the reference; node glow and bloom ease toward
+// floors only on very large clouds.
 
 export const EDGE_REFERENCE_COUNT = 2500;
 const EDGE_MIN_SCALE = 0.05;
@@ -123,7 +153,7 @@ export function nodeBoostScale(nodeCount: number): number {
   return 1 - fadeFactor(nodeCount) * (1 - NODE_BOOST_FLOOR);
 }
 
-// ── Channel-dominance glow multiplier (their nodeGlowBoost) ─────────────────
+// ── Channel-dominance glow multiplier ───────────────────────────────────────
 //
 // Bloom is luminance-thresholded and blue has a tiny luminance weight, so a
 // naive brightness boost blows out white/yellow while blue stays flat.
