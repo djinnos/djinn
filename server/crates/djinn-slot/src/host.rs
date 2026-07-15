@@ -225,7 +225,7 @@ pub trait SlotToolDispatcher: Send + Sync + 'static {
         worktree_path: &'a std::path::Path,
         task_id: &'a str,
         role_name: &'a str,
-    ) -> Pin<Box<dyn Future<Output = Result<serde_json::Value, String>> + Send + 'a>>;
+    ) -> Pin<Box<dyn Future<Output = djinn_core::tool_call::ToolCallOutcome> + Send + 'a>>;
     /// Check if a tool name is registered as an MCP tool.
     fn is_mcp_tool(&self, tool_name: &str) -> bool;
     /// Dispatch an MCP tool call.

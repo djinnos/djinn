@@ -1,4 +1,3 @@
-use serde::Serialize;
 use std::collections::HashSet;
 use std::path::Path;
 use std::process::Stdio;
@@ -118,23 +117,19 @@ pub(super) use task_epic::call_request_lead;
 // Central tool-call dispatch: each arg is a distinct collaborator/context the
 // handlers need; a bag struct would only relocate the same fields.
 #[allow(clippy::too_many_arguments)]
-pub(super) async fn dispatch_tool_call<T>(
+pub(super) async fn dispatch_tool_call(
     state: &AgentContext,
     _services: &dyn djinn_supervisor::SupervisorServices,
-    tool_call: &T,
+    prepared: djinn_mcp_extension::compatibility::PreparedToolCall,
     worktree_path: &Path,
     allowed_schemas: Option<&[serde_json::Value]>,
     session_task_id: Option<&str>,
     session_role: Option<&str>,
     mcp_registry: Option<&McpToolRegistry>,
     cancel: &super::ToolCancellation,
-) -> Result<serde_json::Value, String>
-where
-    T: Serialize,
-{
-    let call: IncomingToolCall =
-        from_value(serde_json::to_value(tool_call).map_err(|e| e.to_string())?)
-            .map_err(|e| format!("invalid frontend tool payload: {e}"))?;
+) -> djinn_core::tool_call::ToolCallOutcome {
+    let call = IncomingToolCall { name: prepared.name, arguments: prepared.arguments };
+    let warnings = prepared.compatibility_warnings;
 
     let project = {
         let repo = djinn_db::ProjectRepository::new(state.db.clone(), state.event_bus.clone());
@@ -168,15 +163,6 @@ where
         .map(|project| project.slug())
         .unwrap_or_else(|| worktree_path.display().to_string());
     let worktree_project_path = worktree_path.display().to_string();
-
-    if let Some(schemas) = allowed_schemas
-        && !is_tool_allowed_for_schemas(schemas, &call.name)
-    {
-        return Err(format!(
-            "tool `{}` is not in the allowed schema list",
-            call.name
-        ));
-    }
 
     // ── Fail-closed: reject dynamic MCP registry tools when an allowlist is
     // active.  MCP registry tools are registered at runtime from external
@@ -212,7 +198,7 @@ where
         ));
     }
 
-    match call.name.as_str() {
+    let result = match call.name.as_str() {
         // ── Agent-local task admin tools ─────────────────────────────────
         // These require djinn-agent internals (task_merge, knowledge_promotion)
         // and are NOT handled by djinn-mcp-extension.
@@ -296,6 +282,10 @@ where
                 Err(format!("unknown djinn frontend tool: {other}"))
             }
         }
+    };
+    match djinn_core::tool_call::ToolCallOutcome::from_result(result) {
+        djinn_core::tool_call::ToolCallOutcome::Success { value, .. } => djinn_core::tool_call::ToolCallOutcome::Success { value, warnings },
+        failure => failure,
     }
 }
 

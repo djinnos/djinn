@@ -99,7 +99,7 @@ pub(crate) async fn call_tool(
     mcp_registry: Option<&McpToolRegistry>,
     allowed_schemas: Option<&[serde_json::Value]>,
     cancel: &ToolCancellation,
-) -> Result<serde_json::Value, String> {
+) -> djinn_core::tool_call::ToolCallOutcome {
     let synthetic = serde_json::json!({ "name": name, "arguments": arguments });
 
     // Try the extension dispatch first. It handles most tools through
@@ -117,15 +117,15 @@ pub(crate) async fn call_tool(
     .await;
 
     match ext_result {
-        djinn_mcp_extension::DispatchResult::Handled(result) => result,
-        djinn_mcp_extension::DispatchResult::Unhandled => {
+        djinn_mcp_extension::DispatchResult::Handled(outcome) => outcome,
+        djinn_mcp_extension::DispatchResult::Unhandled(prepared) => {
             // Fall back to the local handler for tools that need djinn-agent
             // internals (workspace ops, task_merge, coordinator, code_graph,
             // skill_read).
             handlers::dispatch_tool_call(
                 state,
                 services,
-                &synthetic,
+                prepared,
                 worktree_path,
                 allowed_schemas,
                 session_task_id,
