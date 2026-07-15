@@ -1,11 +1,43 @@
 # Shared-cache cleanup rollout and rollback runbook
 
-This is the canonical operator runbook for proposal `0nt2` closeout. It is a
+This is the canonical operator runbook for shared-cache cleanup. It is a
 **dry-run-first** procedure for the shared cache PVC. It describes repository
-behavior, not a record of a production rollout. The companion
+behavior, not a record of a production rollout. The focused
+[shared-cache cleanup diagnosis runbook](SHARED_CACHE_CLEANUP_RUNBOOK.md)
+defines the operative Helm/default, cap, pressure, and lock diagnoses. The companion
 [`CARGO_TARGET_RUN_DIR_VALIDATION.md`](CARGO_TARGET_RUN_DIR_VALIDATION.md)
 covers the per-task-run directory lifecycle and lock-contention check in more
 detail.
+
+> ## ⚠ Destructive Helm default — stop and read before installing or upgrading
+>
+> Shipped Helm **installs and upgrades default to
+> `cacheCleanup.mode=delete`**. That value authorizes destructive coordinator
+> cleanup; it is not a dry-run-first chart default. Before the first Helm
+> install/upgrade in an observation rollout, explicitly override it to
+> `dry_run`:
+>
+> ```bash
+> export NS=djinn
+> export RELEASE=djinn
+> helm upgrade --install "$RELEASE" deploy/helm/djinn --namespace "$NS" \
+>   --create-namespace --set cacheCleanup.mode=dry_run --wait
+> ```
+>
+> To return a release to observation mode after an unsafe result, use the same
+> explicit override (including `--reuse-values` for an existing release):
+>
+> ```bash
+> helm upgrade "$RELEASE" deploy/helm/djinn --namespace "$NS" \
+>   --reuse-values --set cacheCleanup.mode=dry_run --wait
+> # Or restore the previously recorded Helm revision:
+> helm rollback "$RELEASE" <previous-revision> --namespace "$NS" --wait
+> ```
+>
+> A direct `djinn-server` binary is different: an unset or invalid
+> `DJINN_CACHE_CLEANUP_MODE` fails safe to `dry_run`. Helm deliberately sets
+> the shipped chart value, so do not infer the binary fallback from a rendered
+> release.
 
 ## Required rollout order
 
@@ -50,8 +82,10 @@ warm base or run directory manually as a substitute for these guarded paths.
 ## Repository-defined controls and bounded evidence
 
 The coordinator reads these environment variables at process construction.
-`DJINN_CACHE_CLEANUP_MODE` accepts only `dry_run` (default) and `delete`;
-unknown values fall back to `dry_run`.
+For a direct binary, `DJINN_CACHE_CLEANUP_MODE` accepts `dry_run` and `delete`;
+an unset or invalid value falls back to `dry_run`. In the shipped Helm chart,
+the separately rendered `cacheCleanup.mode` default is `delete`; use the
+warning's explicit Helm override for a dry-run observation rollout.
 
 | Control | Default | Purpose |
 | --- | --- | --- |
@@ -64,14 +98,21 @@ unknown values fall back to `dry_run`.
 | `DJINN_CACHE_CLEANUP_WARM_BASE_GRACE_PERIOD_SECS` | `300` | Fresh-activity/grace protection for a warm base. |
 | `DJINN_CACHE_CLEANUP_WARM_BASE_LOW_FREE_RATIO` | `0.15` | Free-space ratio below which pressure planning starts. |
 | `DJINN_CACHE_CLEANUP_WARM_BASE_HIGH_FREE_RATIO` | `0.25` | Free-space ratio at which pressure deletion stops. |
+| `DJINN_CACHE_CLEANUP_WARM_PROFILE_MIN_IDLE_HOURS` | `24` | Profile-idle minimum for pressure planning; `0` makes a profile immediately eligible. |
+| `DJINN_CARGO_TARGET_RUNS_MAX_DIRS` | `64` | Per-run target-directory count cap; `0` disables the count cap only. |
+| `DJINN_CARGO_TARGET_RUNS_MAX_BYTES` | `8589934592` | Per-run allocated-byte cap (8 GiB); `0` disables the byte cap only. |
 
 `low_free_ratio` and `high_free_ratio` must be in `[0, 1)` and low must not
 exceed high. Invalid values use defaults; a low value above high is capped to
 high. Use the actual `djinn-server` Deployment name in the commands below.
-The chart currently exposes Zot retention values but does not define Helm
-values for the coordinator cleanup variables, so use the release's approved
-deployment overlay or explicit `kubectl set env` command and record that
-change.
+The chart exposes `cacheCleanup.mode` for the coordinator mode. Use Helm for
+that mode (including the explicit dry-run override above), not a post-render
+`kubectl set env` mutation that an upgrade can overwrite. The remaining
+direct-binary tuning variables may be supplied through the approved chart/env
+configuration mechanism and must be recorded. See the focused
+[diagnosis runbook](SHARED_CACHE_CLEANUP_RUNBOOK.md) for strict unsigned-decimal
+fallback, independent cap-disable semantics, pressure outcomes, and lock/PVC
+capability gates.
 
 ```bash
 export NS=djinn
