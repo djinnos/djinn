@@ -10,7 +10,9 @@ doctest = false
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_yaml = "0.9"
+serde_json = "1"
 thiserror = "2"
+time = { version = "0.3", features = ["parsing"] }
 workspace-hack.workspace = true
 
 [lints]
