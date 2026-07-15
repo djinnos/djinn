@@ -75,6 +75,16 @@ resources:
     limits:
       cpu: "1"
       memory: "2Gi"
+  # The default 2-CPU request cannot schedule on the single-node local cluster
+  # once the control plane and observability stack are running. Keep the burst
+  # limit high, but request only the capacity the laptop can reliably reserve.
+  warm:
+    requests:
+      cpu: "500m"
+      memory: "1Gi"
+    limits:
+      cpu: "6"
+      memory: "16Gi"
 
 # Local-dev Postgres footprint — shared_buffers + connections tuned down
 # so the whole stack still fits on a laptop. Defaults from the chart

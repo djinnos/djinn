@@ -9,6 +9,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io;
 use std::os::fd::AsRawFd;
 use std::path::{Component, Path, PathBuf};
+use std::process::Command;
 
 use thiserror::Error;
 
@@ -517,6 +518,7 @@ impl WarmBaseLock {
                     .read(true)
                     .write(true)
                     .create(true)
+                    .truncate(false)
                     .open(path)
             },
             || {},
@@ -526,6 +528,7 @@ impl WarmBaseLock {
 
     /// Acquire through the warm flow's terminal recorder boundary. The callback
     /// runs only after a returned lock failure, never while an attempt blocks.
+    #[allow(dead_code)]
     pub(crate) fn acquire_and_record_failure<Record>(
         project_id: &str,
         record_failure: Record,
@@ -564,6 +567,7 @@ impl WarmBaseLock {
                     .read(true)
                     .write(true)
                     .create(true)
+                    .truncate(false)
                     .open(path)
             },
             observe_attempt,
@@ -579,6 +583,7 @@ impl WarmBaseLock {
     /// It retains the production lock derivation and only substitutes the
     /// requested probe or acquisition operation.
     #[cfg(test)]
+    #[allow(dead_code)] // Exercised by binary tests, but not the library test target.
     pub(crate) fn acquire_with_operation_failure_and_record<Record>(
         project_id: &str,
         failure: WarmLockOperationFailure,
@@ -602,6 +607,7 @@ impl WarmBaseLock {
                     .read(true)
                     .write(true)
                     .create(true)
+                    .truncate(false)
                     .open(path)
             },
             || {},
@@ -649,9 +655,71 @@ impl WarmBaseLock {
         Ok(Self { _file: file })
     }
 }
+/// Operation boundaries exposed by the worker-owned warm-work test seam.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WarmWorkPhase {
+    TraversalEnter,
+    TraversalExit,
+    CompilationEnter,
+    CompilationExit,
+}
+
+/// Guard returned by [`run_warm_work_at_root`]. Keeping it alive retains the
+/// worker's actual advisory lock, including kernel release on process death.
+pub struct WarmWorkGuard {
+    _lock: WarmBaseLock,
+}
+
+/// Run the worker lock → checked incremental-prune → Cargo compilation path at
+/// an isolated warm root, exposing deterministic operation boundaries.
+pub fn run_warm_work_at_root<F>(
+    project_id: &str,
+    warm_root: &Path,
+    workspace: &Path,
+    observe: F,
+) -> Result<WarmWorkGuard, String>
+where
+    F: Fn(WarmWorkPhase),
+{
+    let lock = WarmBaseLock::acquire_with_operations(
+        project_id,
+        warm_root,
+        |lock_dir| fs::create_dir_all(lock_dir),
+        probe_advisory_lock,
+        |path| {
+            OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .truncate(false)
+                .open(path)
+        },
+        || {},
+        flock_exclusive,
+    )
+    .map_err(|error| error.to_string())?;
+    let base = warm_root.join(project_id);
+    observe(WarmWorkPhase::TraversalEnter);
+    let prune = prune_warm_incremental_for_root(project_id, &base, warm_root);
+    observe(WarmWorkPhase::TraversalExit);
+    prune.map_err(|error| error.to_string())?;
+    observe(WarmWorkPhase::CompilationEnter);
+    let status = Command::new("cargo")
+        .args(["check", "--quiet"])
+        .current_dir(workspace)
+        .env(CARGO_TARGET_DIR, &base)
+        .status()
+        .map_err(|error| format!("warm Cargo invocation failed: {error}"))?;
+    observe(WarmWorkPhase::CompilationExit);
+    if !status.success() {
+        return Err(format!("warm Cargo compilation exited with {status}"));
+    }
+    Ok(WarmWorkGuard { _lock: lock })
+}
 
 /// The operation failures injected by the warm-flow ordering test.
 #[cfg(test)]
+#[allow(dead_code)] // Exercised by binary tests, but not the library test target.
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum WarmLockOperationFailure {
     Probe,
@@ -691,8 +759,7 @@ pub(crate) fn prune_warm_incremental_for_target(
     prune_derived_base(&base, Path::new(WARM_BASE_ROOT))
 }
 
-#[cfg(test)]
-pub(crate) fn prune_warm_incremental_for_root(
+pub fn prune_warm_incremental_for_root(
     project_id: &str,
     configured_target: &Path,
     warm_root: &Path,
