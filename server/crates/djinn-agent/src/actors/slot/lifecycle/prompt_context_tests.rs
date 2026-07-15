@@ -11,7 +11,7 @@ use djinn_core::models::ActivityEntry;
 use djinn_db::repositories::retrieval_trace::{
     RetrievalTraceEntryPoint, RetrievalTraceListFilter, RetrievalTraceRepository,
 };
-use djinn_db::{Database, EpicRepository, ProposalCreateInput, ProposalRepository};
+use djinn_db::{Database, EpicRepository, NoteRepository, ProposalCreateInput, ProposalRepository};
 use tokio_util::sync::CancellationToken;
 
 use crate::roles::{AgentRole, LeadRole, WorkerRole};
@@ -2002,6 +2002,21 @@ async fn planner_production_boundary_enabled_assembly_injects_and_attributes_tra
     let mut task = create_project_epic_task(&db, &events, "Planner epic", "Planner title").await;
     task.description = "real planner description".into();
     task.created_by_user_id = Some("creator-real".into());
+
+    // Seed a global note so that `query_by_scope_overlap_trace_candidates` returns
+    // candidates and `persist_knowledge_trace` actually writes a trace row.
+    let note_repo = NoteRepository::new(db.clone(), EventBus::noop());
+    note_repo
+        .create(
+            &task.project_id,
+            "Global Pattern",
+            "content",
+            "pattern",
+            "[]",
+        )
+        .await
+        .expect("seed note");
+
     let app_state = agent_context_from_db(db.clone(), CancellationToken::new());
     let host = RecordingPlannerHost::with_content(valid_planner_payload());
     let search = RecordingPlannedNoteSearch {
