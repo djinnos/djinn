@@ -9,10 +9,13 @@ SERVER_DIR := $(CURDIR)/server
 # Postgres (docker-compose.yml → `postgres-test` service at :5433) plus the
 # test harness targets that depend on it.
 
-.PHONY: help dev test-db-migrate test-db-postgres-template test-vault test-db-reset sqlx-prepare sqlx-check sqlx-verify skills-manifest-generate skills-manifest-check test test-all validate-taskrun-backstop check-boundaries
+.PHONY: help dev test-db-migrate test-db-postgres-template test-vault test-db-reset sqlx-prepare sqlx-check sqlx-verify skills-manifest-generate skills-manifest-check test test-all validate-taskrun-backstop check-boundaries verify-cache-cleanup
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*##' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*##"}; {printf "  \033[36m%-15s\033[0m %s\n", $$1, $$2}'
+
+verify-cache-cleanup: ## Run the read-only cache-cleanup acceptance verifier
+	@./scripts/verify-cache-cleanup.sh
 
 test-db-migrate: ## Ensure schema is applied to the test Postgres (:5433)
 	@command -v sqlx >/dev/null 2>&1 || { echo "Install sqlx-cli: cargo install sqlx-cli --no-default-features --features postgres,rustls"; exit 1; }
