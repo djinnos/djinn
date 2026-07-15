@@ -25,8 +25,24 @@ async fn pruning_protects_boundary_and_retained_disabled_outcomes() {
         SkippedReason::NotTopK
     )]);
 
-    let older = insert_trace(&repo, project_id, &json!([]), DEFAULT_CANDIDATE_CAP, false, None).await;
-    let boundary = insert_trace(&repo, project_id, &json!([]), DEFAULT_CANDIDATE_CAP, false, None).await;
+    let older = insert_trace(
+        &repo,
+        project_id,
+        &json!([]),
+        DEFAULT_CANDIDATE_CAP,
+        false,
+        None,
+    )
+    .await;
+    let boundary = insert_trace(
+        &repo,
+        project_id,
+        &json!([]),
+        DEFAULT_CANDIDATE_CAP,
+        false,
+        None,
+    )
+    .await;
     let disabled_off = repo
         .insert_with_semantics(CreateRetrievalTraceWithSemanticsParams {
             trace: CreateRetrievalTraceParams {
@@ -69,7 +85,15 @@ async fn pruning_protects_boundary_and_retained_disabled_outcomes() {
         })
         .await
         .unwrap();
-    let other_old = insert_trace(&repo, other_project, &json!([]), DEFAULT_CANDIDATE_CAP, false, None).await;
+    let other_old = insert_trace(
+        &repo,
+        other_project,
+        &json!([]),
+        DEFAULT_CANDIDATE_CAP,
+        false,
+        None,
+    )
+    .await;
 
     backdate_created_at(&db, &older.id, "2026-07-31T23:59:59.999Z").await;
     backdate_created_at(&db, &boundary.id, "2026-08-01T00:00:00.000Z").await;
@@ -88,11 +112,7 @@ async fn pruning_protects_boundary_and_retained_disabled_outcomes() {
     assert!(format!("{protected}").contains("protected retrieval-trace retention window"));
 
     let malformed_cutoff = repo
-        .prune_older_than(
-            project_id,
-            "not-a-timestamp",
-            "2026-08-31T00:00:00.000Z",
-        )
+        .prune_older_than(project_id, "not-a-timestamp", "2026-08-31T00:00:00.000Z")
         .await
         .unwrap_err();
     assert!(format!("{malformed_cutoff}").contains("before_cutoff must be a valid"));
@@ -114,10 +134,19 @@ async fn pruning_protects_boundary_and_retained_disabled_outcomes() {
         )
         .await
         .unwrap();
-    assert_eq!(pruned, 1, "only rows strictly older than the boundary are eligible");
+    assert_eq!(
+        pruned, 1,
+        "only rows strictly older than the boundary are eligible"
+    );
     assert!(repo.get_by_id(&older.id).await.unwrap().is_none());
-    assert!(repo.get_by_id(&boundary.id).await.unwrap().is_some(), "cutoff is strict");
-    assert!(repo.get_by_id(&other_old.id).await.unwrap().is_some(), "pruning is project-scoped");
+    assert!(
+        repo.get_by_id(&boundary.id).await.unwrap().is_some(),
+        "cutoff is strict"
+    );
+    assert!(
+        repo.get_by_id(&other_old.id).await.unwrap().is_some(),
+        "pruning is project-scoped"
+    );
 
     let off = repo
         .list_by_project(

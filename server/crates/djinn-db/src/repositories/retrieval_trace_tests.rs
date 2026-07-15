@@ -8,10 +8,11 @@ use crate::repositories::retrieval_trace::{
     CANDIDATE_OUTCOME_VALUES, CandidateOutcome, CreateRetrievalTraceParams,
     CreateRetrievalTraceWithSemanticsParams, DEFAULT_CANDIDATE_CAP, DEFAULT_RETRIEVAL_TRACE_LIMIT,
     DurationStageSummary, ENTRY_POINT_VALUES, MAX_RETRIEVAL_TRACE_OFFSET,
-    RETRIEVAL_TRACE_OUTCOME_VALUES, RETRIEVAL_TRACE_SCHEMA_VERSION, RetrievalTraceEntryPoint,
-    RetrievalTraceListFilter, RetrievalTraceOutcome, RetrievalTraceRepository, RetrievalTraceRow,
-    MINIMUM_RETRIEVAL_TRACE_RETENTION_WINDOW, SKIPPED_REASON_VALUES, SkippedReason, TraceCandidate,
-    WORKLOAD_ENTRY_POINTS, classify_legacy_trace_outcome, validate_candidates,
+    MINIMUM_RETRIEVAL_TRACE_RETENTION_WINDOW, RETRIEVAL_TRACE_OUTCOME_VALUES,
+    RETRIEVAL_TRACE_SCHEMA_VERSION, RetrievalTraceEntryPoint, RetrievalTraceListFilter,
+    RetrievalTraceOutcome, RetrievalTraceRepository, RetrievalTraceRow, SKIPPED_REASON_VALUES,
+    SkippedReason, TraceCandidate, WORKLOAD_ENTRY_POINTS, classify_legacy_trace_outcome,
+    validate_candidates,
 };
 
 #[cfg(test)]

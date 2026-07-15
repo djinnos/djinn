@@ -1,7 +1,7 @@
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sqlx::postgres::{PgTypeInfo, PgValueRef};
 use sqlx::{Decode, Postgres, Type};
-use chrono::{DateTime, Utc};
 
 use crate::Result;
 use crate::database::Database;
@@ -31,7 +31,7 @@ pub const MINIMUM_RETRIEVAL_TRACE_RETENTION_WINDOW: std::time::Duration =
 fn parse_retrieval_trace_utc_timestamp(value: &str, field: &str) -> Result<DateTime<Utc>> {
     if !value.ends_with('Z') {
         return Err(DbError::InvalidData(format!(
-            "{field} must be an ISO-8601 UTC timestamp ending in Z: {value}"
+            "{field} must be a valid ISO-8601 UTC timestamp ending in Z: {value}"
         )));
     }
 
@@ -1014,8 +1014,9 @@ impl RetrievalTraceRepository {
 
         let before_cutoff = parse_retrieval_trace_utc_timestamp(before_cutoff, "before_cutoff")?;
         let reference_time = parse_retrieval_trace_utc_timestamp(reference_time, "reference_time")?;
-        let minimum_window = chrono::Duration::from_std(MINIMUM_RETRIEVAL_TRACE_RETENTION_WINDOW)
-            .map_err(|err| DbError::InvalidData(format!("invalid retention window: {err}")))?;
+        let minimum_window =
+            chrono::Duration::from_std(MINIMUM_RETRIEVAL_TRACE_RETENTION_WINDOW)
+                .map_err(|err| DbError::InvalidData(format!("invalid retention window: {err}")))?;
         let protected_boundary = reference_time - minimum_window;
         if before_cutoff > protected_boundary {
             return Err(DbError::InvalidData(format!(
