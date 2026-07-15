@@ -228,6 +228,7 @@ export function GalaxyView({ projectId }: { projectId: string }) {
     <GalaxyCanvas
       data={visibleData}
       focusIds={focusIds}
+      focusPrimaryId={hotspotSelection?.fileId ?? null}
       banner={<CoverageGapBanner coverage={coverage} />}
       sidePanel={
         showHotspots ? (
@@ -314,7 +315,9 @@ export function GalaxyView({ projectId }: { projectId: string }) {
             className={cn(
               "h-7 rounded-lg border px-2.5 transition-colors",
               HUD_CHIP,
-              showHotspots ? "text-sky-300" : "hover:text-slate-100",
+              showHotspots
+                ? "bg-slate-600/40 text-slate-100 dark:bg-slate-600/40"
+                : "hover:text-slate-100",
             )}
           >
             Hotspots

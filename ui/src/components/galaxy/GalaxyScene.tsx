@@ -45,6 +45,11 @@ const IDLE_ROTATE_DELAY_MS = 20_000;
 const BASE_BLOOM_INTENSITY = 1.45;
 /** Dim factor for non-highlighted nodes while a selection is active. */
 const NODE_DIM = 0.15;
+/** The primary node of a focus (the clicked star / hotspot file) pops out
+ * of its own highlight set: scaled up and glow-boosted past the bloom
+ * threshold so "which one am I looking at" is never ambiguous. */
+const PRIMARY_SIZE = 1.7;
+const PRIMARY_GLOW = 2.4;
 
 export interface FlyTarget {
   center: [number, number, number];
@@ -57,6 +62,9 @@ interface SceneProps {
   data: GalaxyData;
   /** Node ids to spotlight; everything else dims. Null = no highlight. */
   highlight: Set<string> | null;
+  /** The focus's anchor node (clicked star, hotspot file) — rendered
+   * bigger and brighter than the rest of the highlight set. */
+  primaryId: string | null;
   display: GalaxyDisplay;
   showLabels: boolean;
   flyTarget: FlyTarget;
@@ -81,6 +89,7 @@ function sphereDetail(count: number): [number, number, number] {
 interface NodeModeProps {
   data: GalaxyData;
   highlight: Set<string> | null;
+  primaryId: string | null;
   /** nodeBoostScale(count) × user nodeGlow — 1 = full glow, 0 = flat. */
   boost: number;
   /** Shared pick target — GalaxyNodes raycasts whichever mode is mounted. */
@@ -120,6 +129,7 @@ const POINT_FRAGMENT = /* glsl */ `
 function GalaxyNodeSpheres({
   data,
   highlight,
+  primaryId,
   boost,
   objectRef,
 }: NodeModeProps) {
@@ -139,8 +149,10 @@ function GalaxyNodeSpheres({
     for (let i = 0; i < count; i++) {
       const node = data.nodes[i];
       const isLit = !hasHighlight || highlight.has(node.id);
+      const isPrimary = hasHighlight && node.id === primaryId;
 
-      const s = node.size * sizeDamp * (isLit ? 0.5 : 0.2);
+      const s =
+        node.size * sizeDamp * (isLit ? 0.5 : 0.2) * (isPrimary ? PRIMARY_SIZE : 1);
       tempObj.position.set(node.x, node.y, node.z);
       tempObj.scale.set(s, s, s);
       tempObj.updateMatrix();
@@ -152,7 +164,8 @@ function GalaxyNodeSpheres({
       } else {
         // Boost above 1.0 so bloom picks up the excess as glow corona.
         const fullBoost = nodeGlowBoost(r, g, b);
-        const applied = 1 + (fullBoost - 1) * boost;
+        const applied =
+          (1 + (fullBoost - 1) * boost) * (isPrimary ? PRIMARY_GLOW : 1);
         color.setRGB(r * applied, g * applied, b * applied);
       }
       mesh.setColorAt(i, color);
@@ -160,7 +173,7 @@ function GalaxyNodeSpheres({
     mesh.instanceMatrix.needsUpdate = true;
     if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
     mesh.computeBoundingSphere();
-  }, [data, highlight, boost, count, sizeDamp, objectRef]);
+  }, [data, highlight, primaryId, boost, count, sizeDamp, objectRef]);
 
   return (
     <instancedMesh
@@ -180,6 +193,7 @@ function GalaxyNodeSpheres({
 function GalaxyNodePoints({
   data,
   highlight,
+  primaryId,
   boost,
   objectRef,
 }: NodeModeProps) {
@@ -211,23 +225,26 @@ function GalaxyNodePoints({
       positions[i * 3 + 2] = node.z;
       const [r, g, b] = groupColor(node.group);
       const isLit = !hasHighlight || highlight.has(node.id);
+      const isPrimary = hasHighlight && node.id === primaryId;
       // Same scale voice as sphere mode (diameter = size × damp, dimmed
       // stars shrink to 40%).
-      sizes[i] = node.size * sizeDamp * (isLit ? 1 : 0.4);
+      sizes[i] =
+        node.size * sizeDamp * (isLit ? 1 : 0.4) * (isPrimary ? PRIMARY_SIZE : 1);
       if (!isLit) {
         colors[i * 3] = r * NODE_DIM;
         colors[i * 3 + 1] = g * NODE_DIM;
         colors[i * 3 + 2] = b * NODE_DIM;
       } else {
         const fullBoost = nodeGlowBoost(r, g, b);
-        const applied = 1 + (fullBoost - 1) * boost;
+        const applied =
+          (1 + (fullBoost - 1) * boost) * (isPrimary ? PRIMARY_GLOW : 1);
         colors[i * 3] = r * applied;
         colors[i * 3 + 1] = g * applied;
         colors[i * 3 + 2] = b * applied;
       }
     }
     return { positions, colors, sizes };
-  }, [data, highlight, boost, count, sizeDamp]);
+  }, [data, highlight, primaryId, boost, count, sizeDamp]);
 
   return (
     <points
@@ -255,6 +272,7 @@ function GalaxyNodePoints({
 function GalaxyNodes({
   data,
   highlight,
+  primaryId,
   boost,
   onNodePointer,
   onNodeClick,
@@ -336,7 +354,13 @@ function GalaxyNodes({
 
   const Mode = pointMode ? GalaxyNodePoints : GalaxyNodeSpheres;
   return (
-    <Mode data={data} highlight={highlight} boost={boost} objectRef={objectRef} />
+    <Mode
+      data={data}
+      highlight={highlight}
+      primaryId={primaryId}
+      boost={boost}
+      objectRef={objectRef}
+    />
   );
 }
 
@@ -675,6 +699,7 @@ function CameraRig({ flyTarget }: { flyTarget: FlyTarget }) {
 export function GalaxyScene({
   data,
   highlight,
+  primaryId,
   display,
   showLabels,
   flyTarget,
@@ -700,6 +725,7 @@ export function GalaxyScene({
       <GalaxyNodes
         data={data}
         highlight={highlight}
+        primaryId={primaryId}
         boost={boost}
         onNodePointer={onNodePointer}
         onNodeClick={onNodeClick}
