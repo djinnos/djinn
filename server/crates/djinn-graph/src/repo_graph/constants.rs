@@ -157,6 +157,13 @@ pub(crate) const EDGE_CONFIDENCE_FETCHES: f64 = 0.75;
 // radius results unless the caller explicitly lowers the threshold.
 // See `docs/TRAIT_DISPATCH_VALIDATION.md` for the full semantics.
 pub(crate) const EDGE_CONFIDENCE_TRAIT_DISPATCH_CALL: f64 = 0.70;
+// Proposal qoxm: commit co-change coupling edges. Confidence carries the
+// coupling *score* (a saturating function of the co-change count), never
+// SCIP proof — co-change is circumstantial evidence, so the tier is capped at
+// `Inferred`. This floor is the Inferred/Ambiguous band boundary: edges whose
+// coupling score lands below it classify as `Ambiguous`; at or above it they
+// are `Inferred` (and NEVER `Extracted`). See `edge_confidence_tier`.
+pub(crate) const EDGE_CONFIDENCE_CO_CHANGED_WITH: f64 = 0.5;
 pub(crate) const EDGE_CONFIDENCE_LOCAL_PENALTY: f64 = 0.15;
 pub(crate) const EDGE_WEIGHT_DEFINITION_TO_FILE: f64 = 4.0;
 pub(crate) const EDGE_WEIGHT_FILE_TO_DEFINITION: f64 = 1.5;
@@ -192,6 +199,12 @@ pub(crate) const EDGE_WEIGHT_FETCHES: f64 = 1.0;
 // edges (`EntryPointOf`, `MemberOf`) but below primary SCIP evidence
 // (`Implements`, `SymbolReference`) so they don't dominate PageRank.
 pub(crate) const EDGE_WEIGHT_TRAIT_DISPATCH_CALL: f64 = 1.5;
+// Proposal qoxm: co-change edges live in a dedicated sidecar *outside* the
+// PageRank/traversal petgraph, so this weight never actually perturbs ranking
+// or shortest-path scoring. It exists only to satisfy the exhaustive
+// `edge_weight` table; keep it light to reflect that co-change is a
+// side-channel signal, not primary call-graph evidence.
+pub(crate) const EDGE_WEIGHT_CO_CHANGED_WITH: f64 = 0.5;
 // ── Trait-dispatch reason constants (proposal t16t) ───────────────────────
 //
 // Stable reason strings stamped on synthesized trait-dispatch edges so

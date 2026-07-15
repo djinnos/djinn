@@ -59,14 +59,15 @@ pub(crate) fn resolve_search_mode(caller: Option<&str>) -> Result<SearchMode, St
 }
 
 /// PR A3: validator for the `neighbors` op's edge-kind filter. Currently
-/// accepts `reads` / `writes`; future PRs may extend this with `calls` etc.
-/// once the `EdgeCategory` enum lands (PR C1).
+/// accepts `reads` / `writes`, plus `co_changed_with` (proposal qoxm) to
+/// opt in to the commit co-change coupling sidecar; future PRs may extend
+/// this with `calls` etc. once the `EdgeCategory` enum lands (PR C1).
 pub(crate) fn validate_edge_kind_filter(kind_filter: Option<&str>) -> Result<(), String> {
     if let Some(k) = kind_filter {
         match k {
-            "reads" | "writes" => Ok(()),
+            "reads" | "writes" | "co_changed_with" => Ok(()),
             _ => Err(format!(
-                "invalid kind_filter '{k}' for neighbors: expected 'reads' or 'writes'"
+                "invalid kind_filter '{k}' for neighbors: expected 'reads', 'writes', or 'co_changed_with'"
             )),
         }
     } else {

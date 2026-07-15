@@ -864,6 +864,10 @@ impl RepoDependencyGraphBuilder {
             layout_positions: BTreeMap::new(),
             galaxy_positions: BTreeMap::new(),
             galaxy_degrees: BTreeMap::new(),
+            // Proposal qoxm: co-change edges are materialized post-build during
+            // warm (they need the coupling index / git history), so a freshly
+            // built graph starts with an empty sidecar.
+            cochange_edges: Vec::new(),
         };
 
         // PR F3: run modularity-based community detection unless the

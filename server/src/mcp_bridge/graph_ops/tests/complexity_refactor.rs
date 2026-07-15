@@ -201,6 +201,7 @@ fn refactor_input(
         cognitive,
         cyclomatic,
         page_rank,
+        cross_module_cochange: 0.0,
     }
 }
 
@@ -232,6 +233,74 @@ fn refactor_candidates_composite_ranks_top_function_iter29() {
     // Score is the mean of three z-scores; with B at the top of
     // every axis the composite must be strictly positive.
     assert!(out[0].composite_score > 0.0, "B composite should be > 0");
+}
+
+#[test]
+fn refactor_candidates_cross_module_cochange_raises_rank_qoxm() {
+    // Proposal qoxm: two functions identical on complexity / churn /
+    // pagerank, but one lives in a config file that co-changes with a source
+    // file in ANOTHER crate. The cross-module co-change axis must break the tie
+    // in favor of the coupled config file — the exact hidden-coupling signal
+    // static analysis misses.
+    use std::collections::HashMap;
+    let config = super::refactor::RefactorCandidateInput {
+        key: "symbol:config".to_string(),
+        display_name: "load_config".to_string(),
+        file: "crates/app_config/src/settings.rs".to_string(),
+        start_line: 1,
+        end_line: 10,
+        cognitive: 5,
+        cyclomatic: 3,
+        page_rank: 0.2,
+        // Strongly co-changes with a source file in a different crate.
+        cross_module_cochange: 0.8,
+    };
+    let plain = super::refactor::RefactorCandidateInput {
+        key: "symbol:plain".to_string(),
+        display_name: "plain_helper".to_string(),
+        file: "crates/app_core/src/util.rs".to_string(),
+        start_line: 1,
+        end_line: 10,
+        cognitive: 5,
+        cyclomatic: 3,
+        page_rank: 0.2,
+        cross_module_cochange: 0.0,
+    };
+    let candidates = vec![plain, config];
+    let mut churn_map: HashMap<std::path::PathBuf, u32> = HashMap::new();
+    churn_map.insert(
+        std::path::PathBuf::from("crates/app_config/src/settings.rs"),
+        4,
+    );
+    churn_map.insert(std::path::PathBuf::from("crates/app_core/src/util.rs"), 4);
+
+    let out = super::refactor::compute_refactor_candidates(&candidates, &churn_map, 30);
+    assert_eq!(out.len(), 2);
+    assert_eq!(
+        out[0].display_name, "load_config",
+        "the cross-module co-changed config file must rank first"
+    );
+    assert!(
+        out[0].composite_score > out[1].composite_score,
+        "co-change pressure must raise the composite above the identical-but-uncoupled peer"
+    );
+}
+
+#[test]
+fn module_key_distinguishes_crates_qoxm() {
+    assert_eq!(
+        super::refactor::module_key("crates/app_config/src/settings.rs"),
+        "app_config"
+    );
+    assert_eq!(
+        super::refactor::module_key("server/crates/djinn-graph/src/lib.rs"),
+        "djinn-graph"
+    );
+    assert_eq!(super::refactor::module_key("ui/src/main.ts"), "ui");
+    assert_ne!(
+        super::refactor::module_key("crates/a/src/x.rs"),
+        super::refactor::module_key("crates/b/src/y.rs")
+    );
 }
 
 #[test]

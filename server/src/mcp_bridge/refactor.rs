@@ -152,6 +152,8 @@ pub(crate) fn compute_refactor_candidates(
         / n;
     let mean_churn: f64 = churn_for.iter().map(|c| f64::from(*c)).sum::<f64>() / n;
     let mean_pr: f64 = candidates.iter().map(|c| c.page_rank).sum::<f64>() / n;
+    // Proposal qoxm: fourth axis — cross-module co-change pressure.
+    let mean_cc: f64 = candidates.iter().map(|c| c.cross_module_cochange).sum::<f64>() / n;
 
     // Population stddev (divide by N) — a sample stddev would need
     // N>=2 and special-case 1-element sets; population stays correct
@@ -171,9 +173,15 @@ pub(crate) fn compute_refactor_candidates(
         .map(|c| (c.page_rank - mean_pr).powi(2))
         .sum::<f64>()
         / n;
+    let var_cc: f64 = candidates
+        .iter()
+        .map(|c| (c.cross_module_cochange - mean_cc).powi(2))
+        .sum::<f64>()
+        / n;
     let std_cog = var_cog.sqrt();
     let std_churn = var_churn.sqrt();
     let std_pr = var_pr.sqrt();
+    let std_cc = var_cc.sqrt();
 
     let z =
         |x: f64, mean: f64, std: f64| -> f64 { if std > 1e-9 { (x - mean) / std } else { 0.0 } };
@@ -185,7 +193,10 @@ pub(crate) fn compute_refactor_candidates(
             let z_cog = z(f64::from(c.cognitive), mean_cog, std_cog);
             let z_churn = z(f64::from(*churn), mean_churn, std_churn);
             let z_pr = z(c.page_rank, mean_pr, std_pr);
-            let composite = (z_cog + z_churn + z_pr) / 3.0;
+            // Proposal qoxm: fold cross-module co-change in as a fourth axis so
+            // files that change lockstep with other crates/modules rank higher.
+            let z_cc = z(c.cross_module_cochange, mean_cc, std_cc);
+            let composite = (z_cog + z_churn + z_pr + z_cc) / 4.0;
             RefactorCandidate {
                 key: c.key.clone(),
                 uid: c.key.clone(),
@@ -221,6 +232,29 @@ pub(crate) fn compute_refactor_candidates(
     out
 }
 
+/// Proposal qoxm: coarse module/crate identity for a file path, used to decide
+/// whether a co-change partner counts as *cross-module*. Prefers a Cargo-style
+/// `crates/<name>/` segment (matching the djinn workspace layout and the galaxy
+/// crate coloring); otherwise falls back to the top-level path component. Two
+/// files are "cross-module" when their keys differ.
+pub(crate) fn module_key(path: &str) -> &str {
+    let bytes = path.as_bytes();
+    let mut search_from = 0usize;
+    while let Some(rel) = path[search_from..].find("crates/") {
+        let at = search_from + rel;
+        let anchored = at == 0 || bytes[at - 1] == b'/';
+        if anchored {
+            let after = &path[at + "crates/".len()..];
+            let name = after.split('/').next().unwrap_or("");
+            if !name.is_empty() {
+                return name;
+            }
+        }
+        search_from = at + "crates/".len();
+    }
+    path.split('/').next().unwrap_or("")
+}
+
 /// Per-candidate input row for [`compute_refactor_candidates`]. Plain
 /// data so the helper stays decoupled from `RepoDependencyGraph` /
 /// canonical-graph types and can be exercised by unit tests directly.
@@ -234,6 +268,14 @@ pub(crate) struct RefactorCandidateInput {
     pub(crate) cognitive: u16,
     pub(crate) cyclomatic: u16,
     pub(crate) page_rank: f64,
+    /// Proposal qoxm: cross-module commit co-change pressure for this
+    /// candidate's file — the summed coupling score of every co-change partner
+    /// that lives in a *different* crate/module. A config file that keeps
+    /// changing lockstep with a source file in another crate is a hidden-
+    /// coupling refactor target that static complexity/churn/pagerank miss, so
+    /// this feeds the composite as a fourth z-scored axis. `0.0` when the file
+    /// has no cross-module co-change (or when the coupling index is empty).
+    pub(crate) cross_module_cochange: f64,
 }
 
 /// Iter 29: stamp a `tier` label on each entry of an already-sorted

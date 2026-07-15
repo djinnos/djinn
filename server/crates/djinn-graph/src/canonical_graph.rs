@@ -855,6 +855,13 @@ pub async fn ensure_canonical_graph<C: WarmContext>(
     // Proposal lmkv: the galaxy layout seed is derived from the project id
     // (FNV-1a) so warm runs and cache reloads reproduce the same 3D galaxy.
     let project_id_for_galaxy = project_id.to_string();
+    // Proposal qoxm: pull the aggregated commit co-change file pairs from the
+    // coupling index (freshly ingested above by `ingest_coupling_best_effort`)
+    // in this async scope, then move the plain-data rows into the blocking
+    // build closure so it can materialize `CoChangedWith` sidecar edges before
+    // serialization. Best-effort — a stale/empty coupling table just yields no
+    // co-change edges, never a warm failure.
+    let cochange_inputs = load_cochange_inputs_best_effort(ctx, project_id).await;
     // Capture recovery flag for the blocking thread — when a stale sentinel
     // was detected, disable parse cache reuse to force a clean rebuild.
     let effective_cache_reuse = resolve_canonical_warm_cache_reuse(force_full_rebuild);
@@ -996,6 +1003,22 @@ pub async fn ensure_canonical_graph<C: WarmContext>(
             // and bincode serialization so Route/HandlesRoute/Fetches metadata
             // is installed both in memory and in repo_graph_cache.
             let _ = run_route_extraction_post_processor(&mut graph, &project_root_for_blocking)?;
+            // Proposal qoxm: materialize commit co-change coupling into the
+            // graph's dedicated sidecar (never the petgraph — see
+            // `crate::cochange`). Resolves the DB-fetched file pairs against
+            // the just-built file nodes, applies the score floor + per-file
+            // top-K cap, and stashes the result so `to_artifact` persists it in
+            // the shared edges vec. Runs before cache derivation / galaxy
+            // layout / serialization; those all ignore the co-change sidecar so
+            // ordering is immaterial.
+            let cochange = crate::cochange::derive_cochange_edges(&graph, &cochange_inputs);
+            tracing::info!(
+                project_id = %project_id_for_galaxy,
+                cochange_edges = cochange.len(),
+                cochange_pairs_considered = cochange_inputs.len(),
+                "ensure_canonical_graph: materialized co-change coupling edges"
+            );
+            graph.set_cochange_edges(cochange);
             let build_ms = t_build.elapsed().as_millis() as u64;
             let node_count = graph.node_count();
             let edge_count = graph.edge_count();
@@ -1347,6 +1370,52 @@ async fn ingest_coupling_best_effort<C: WarmContext>(
             error = %e,
             "ensure_canonical_graph: coupling ingest failed"
         );
+    }
+}
+
+/// Proposal qoxm: read the aggregated commit co-change file pairs from the
+/// coupling index so the build closure can turn them into `CoChangedWith`
+/// sidecar edges. Best-effort — any DB error (or an unavailable coupling
+/// table) yields an empty vec and simply produces no co-change edges this warm.
+///
+/// The `max_files_per_commit` cap is already enforced at ingest time, so the
+/// argument is passed only to satisfy the repository signature. Pairs are
+/// fetched all-time (`since = None`); the per-file top-K and score-floor caps
+/// applied downstream in [`crate::cochange::derive_cochange_edges`] bound the
+/// materialized edge count.
+async fn load_cochange_inputs_best_effort<C: WarmContext>(
+    ctx: &C,
+    project_id: &str,
+) -> Vec<crate::cochange::CoChangeInput> {
+    use djinn_db::CommitFileChangeRepository;
+
+    let repo = CommitFileChangeRepository::new(ctx.db().clone());
+    match repo
+        .top_coupled_pairs(
+            project_id,
+            crate::cochange::COCHANGE_MAX_PAIRS,
+            None,
+            djinn_db::MAX_FILES_PER_COMMIT_FOR_PAIRS,
+        )
+        .await
+    {
+        Ok(pairs) => pairs
+            .into_iter()
+            .map(|p| crate::cochange::CoChangeInput {
+                file_a: p.file_a,
+                file_b: p.file_b,
+                co_changes: p.co_edits.max(0) as usize,
+                last_co_change_iso: p.last_co_edit,
+            })
+            .collect(),
+        Err(e) => {
+            tracing::warn!(
+                project_id = %project_id,
+                error = %e,
+                "ensure_canonical_graph: co-change pair fetch failed; skipping co-change edges"
+            );
+            Vec::new()
+        }
     }
 }
 

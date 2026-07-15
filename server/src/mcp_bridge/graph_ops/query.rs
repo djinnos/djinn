@@ -139,6 +139,60 @@ impl RepoGraphBridge {
         };
 
         let mut neighbors = Vec::new();
+
+        // Proposal qoxm: explicit opt-in to the commit co-change sidecar via
+        // `kind_filter=co_changed_with`. Co-change edges live OUTSIDE the
+        // petgraph (see `djinn_graph::cochange`), so the default walk below
+        // never emits them — this branch is the only way they enter a
+        // `neighbors` response, keeping the default-exclude contract intact.
+        // The relationship is undirected (stored once, `file_a < file_b`), so
+        // the caller's `direction` filter is ignored here and each partner is
+        // labeled "undirected"; the coupling score rides in `edge_weight` and
+        // the kind string matches the `edges`/`snapshot` channel.
+        if kind_filter == Some("co_changed_with") {
+            for cc in graph.cochange_edges() {
+                let other_index = if cc.source == node_index {
+                    cc.target
+                } else if cc.target == node_index {
+                    cc.source
+                } else {
+                    continue;
+                };
+                let other_node = graph.node(other_index);
+                let other_key = format_node_key(&other_node.id);
+                let other_file = other_node
+                    .file_path
+                    .as_ref()
+                    .map(|p| p.display().to_string());
+                if exclusions.excludes(&other_key, other_file.as_deref(), &other_node.display_name)
+                {
+                    continue;
+                }
+                neighbors.push((
+                    other_node,
+                    GraphNeighbor {
+                        uid: other_key.clone(),
+                        key: other_key,
+                        kind: format!("{:?}", other_node.kind).to_lowercase(),
+                        display_name: other_node.display_name.clone(),
+                        edge_kind: format!("{:?}", RepoGraphEdgeKind::CoChangedWith),
+                        edge_weight: cc.confidence,
+                        direction: "undirected".to_string(),
+                    },
+                ));
+            }
+            return match group_by {
+                None => Ok(NeighborsResult::Detailed(
+                    neighbors.into_iter().map(|(_, n)| n).collect(),
+                )),
+                Some("file") => Ok(NeighborsResult::Grouped(group_neighbors_by_file(
+                    &neighbors,
+                ))),
+                Some(other) => Err(format!(
+                    "invalid group_by '{other}': only 'file' is supported"
+                )),
+            };
+        }
         for dir in directions {
             let dir_label = match dir {
                 Direction::Incoming => "incoming",
@@ -785,6 +839,16 @@ impl RepoGraphBridge {
         Ok(out)
     }
 
+    /// Proposal qoxm note: `path` (like `impact`) deliberately has NO opt-in
+    /// for `CoChangedWith` edges — a deviation from the "include via edge-kind
+    /// filters" clause chosen on purpose. Threading co-change into a multi-hop
+    /// shortest-path walk would let circumstantial commit history bridge
+    /// structurally unconnected code and masquerade as a dependency chain.
+    /// Single-hop consumption is served by `neighbors`
+    /// (`kind_filter=co_changed_with`) and `edges`
+    /// (`edge_kind=CoChangedWith`); `impact`'s exclusion lives in
+    /// `shared::edge_propagates`. The sidecar never enters the petgraph this
+    /// walk runs on, so exclusion here is structural, not a filter.
     pub(super) async fn path(
         &self,
         ctx: &ProjectCtx,
@@ -914,6 +978,64 @@ impl RepoGraphBridge {
             });
             if out.len() >= limit {
                 break;
+            }
+        }
+
+        // Proposal qoxm: commit co-change edges live in a sidecar OUTSIDE the
+        // petgraph, so the loop above never emits them — traversal/edge ops
+        // exclude co-change by default and never inflate their result set.
+        // Opt in explicitly via the edge-kind filter (`edge_kind=CoChangedWith`):
+        // when requested, append the file↔file co-change edges whose endpoints
+        // match the globs, carrying the coupling score as confidence and the
+        // temporal `last_co_change` in the reason.
+        {
+            use djinn_graph::repo_graph::{RepoGraphEdgeKind, edge_confidence_tier};
+            let cochange_label = format!("{:?}", RepoGraphEdgeKind::CoChangedWith);
+            let cochange_requested = edge_kind
+                .map(|f| f.eq_ignore_ascii_case(&cochange_label))
+                .unwrap_or(false);
+            if cochange_requested {
+                for cc in graph.cochange_edges() {
+                    if out.len() >= limit {
+                        break;
+                    }
+                    let src_node = graph.node(cc.source);
+                    let dst_node = graph.node(cc.target);
+                    let src_target = src_node
+                        .file_path
+                        .as_ref()
+                        .map(|p| p.display().to_string())
+                        .unwrap_or_else(|| src_node.display_name.clone());
+                    let dst_target = dst_node
+                        .file_path
+                        .as_ref()
+                        .map(|p| p.display().to_string())
+                        .unwrap_or_else(|| dst_node.display_name.clone());
+                    if !from_matcher.is_match(&src_target) || !to_matcher.is_match(&dst_target) {
+                        continue;
+                    }
+                    let reason = djinn_graph::cochange::encode_reason(cc.last_co_change);
+                    out.push(EdgeEntry {
+                        from: format_node_key(&src_node.id),
+                        to: format_node_key(&dst_node.id),
+                        edge_kind: cochange_label.clone(),
+                        // Co-change edges carry the coupling score as their soft
+                        // weight (they have no structural SCIP evidence weight).
+                        edge_weight: cc.confidence,
+                        confidence: cc.confidence,
+                        confidence_tier: format!(
+                            "{:?}",
+                            edge_confidence_tier(
+                                RepoGraphEdgeKind::CoChangedWith,
+                                cc.confidence,
+                                Some(&reason),
+                            )
+                        )
+                        .to_ascii_lowercase(),
+                        reason: Some(reason),
+                        exclusion_reason: None,
+                    });
+                }
             }
         }
         Ok(out)

@@ -4,13 +4,15 @@
 use serde::{Deserialize, Serialize};
 
 use super::constants::{
-    EDGE_CONFIDENCE_CONTAINS_DEFINITION, EDGE_CONFIDENCE_DECLARED_IN_FILE, EDGE_CONFIDENCE_DEFINES,
+    EDGE_CONFIDENCE_CO_CHANGED_WITH, EDGE_CONFIDENCE_CONTAINS_DEFINITION,
+    EDGE_CONFIDENCE_DECLARED_IN_FILE, EDGE_CONFIDENCE_DEFINES,
     EDGE_CONFIDENCE_ENTRY_POINT_OF, EDGE_CONFIDENCE_EXTENDS, EDGE_CONFIDENCE_FETCHES,
     EDGE_CONFIDENCE_FILE_REFERENCE, EDGE_CONFIDENCE_HANDLES_ROUTE, EDGE_CONFIDENCE_IMPLEMENTS,
     EDGE_CONFIDENCE_MEMBER_OF, EDGE_CONFIDENCE_READS, EDGE_CONFIDENCE_ROUTE,
     EDGE_CONFIDENCE_STEP_IN_PROCESS, EDGE_CONFIDENCE_SYMBOL_REFERENCE,
     EDGE_CONFIDENCE_TRAIT_DISPATCH_CALL, EDGE_CONFIDENCE_TYPE_DEFINES, EDGE_CONFIDENCE_WRITES,
-    EDGE_WEIGHT_DEFINES, EDGE_WEIGHT_DEFINITION_TO_FILE, EDGE_WEIGHT_ENTRY_POINT_OF,
+    EDGE_WEIGHT_CO_CHANGED_WITH, EDGE_WEIGHT_DEFINES, EDGE_WEIGHT_DEFINITION_TO_FILE,
+    EDGE_WEIGHT_ENTRY_POINT_OF,
     EDGE_WEIGHT_EXTENDS, EDGE_WEIGHT_FETCHES, EDGE_WEIGHT_FILE_REFERENCE,
     EDGE_WEIGHT_FILE_TO_DEFINITION, EDGE_WEIGHT_HANDLES_ROUTE, EDGE_WEIGHT_IMPLEMENTS,
     EDGE_WEIGHT_MEMBER_OF, EDGE_WEIGHT_ROUTE, EDGE_WEIGHT_STEP_IN_PROCESS,
@@ -113,6 +115,23 @@ pub enum RepoGraphEdgeKind {
     /// Appended after the v10 `Route` variant to preserve bincode
     /// discriminants for all pre-v11 variants. New in artifact v11.
     TraitDispatchCall,
+    /// Proposal qoxm: commit co-change coupling. An undirected file↔file
+    /// relationship (stored one direction, `file_a < file_b`) asserting the
+    /// two files have historically changed together across commits. The edge
+    /// carries `evidence_count` = distinct co-change commit count and
+    /// `confidence` = the coupling *score* (a saturating function of the
+    /// count); the temporal `last_co_change` epoch day rides in the `reason`
+    /// (`"cochange;last_day=<n>"`). Because co-change is circumstantial
+    /// evidence rather than SCIP proof, [`edge_confidence_tier`] never
+    /// classifies it above [`EdgeConfidenceTier::Inferred`].
+    ///
+    /// These edges are materialized during warm into a dedicated sidecar
+    /// (`RepoDependencyGraph::cochange_edges`) that lives OUTSIDE the
+    /// PageRank/traversal petgraph, so they never silently inflate impact
+    /// blast radii, degree, or rank. They round-trip through the artifact via
+    /// the existing `edges` vec (partitioned back out on load). Appended last
+    /// to preserve bincode discriminants for all earlier variants.
+    CoChangedWith,
 }
 
 /// Model-level confidence tier for graph edges.
@@ -183,6 +202,7 @@ pub fn edge_confidence_floor(kind: RepoGraphEdgeKind) -> f64 {
         RepoGraphEdgeKind::Fetches => EDGE_CONFIDENCE_FETCHES,
         RepoGraphEdgeKind::Route => EDGE_CONFIDENCE_ROUTE,
         RepoGraphEdgeKind::TraitDispatchCall => EDGE_CONFIDENCE_TRAIT_DISPATCH_CALL,
+        RepoGraphEdgeKind::CoChangedWith => EDGE_CONFIDENCE_CO_CHANGED_WITH,
     }
 }
 
@@ -210,6 +230,12 @@ pub fn edge_confidence_tier(
         RepoGraphEdgeKind::Route
         | RepoGraphEdgeKind::Fetches
         | RepoGraphEdgeKind::TraitDispatchCall => EdgeConfidenceTier::Inferred,
+        // Proposal qoxm: co-change is circumstantial history, never SCIP
+        // proof — cap it at `Inferred`. The generic below-floor check above
+        // already downgrades weak-score co-change edges to `Ambiguous`, so a
+        // qualifying edge lands here as `Inferred` and can NEVER be
+        // `Extracted`.
+        RepoGraphEdgeKind::CoChangedWith => EdgeConfidenceTier::Inferred,
         RepoGraphEdgeKind::ContainsDefinition
         | RepoGraphEdgeKind::DeclaredInFile
         | RepoGraphEdgeKind::SymbolReference
@@ -283,6 +309,7 @@ pub(crate) fn edge_weight(kind: RepoGraphEdgeKind) -> f64 {
         RepoGraphEdgeKind::Fetches => EDGE_WEIGHT_FETCHES,
         RepoGraphEdgeKind::Route => EDGE_WEIGHT_ROUTE,
         RepoGraphEdgeKind::TraitDispatchCall => EDGE_WEIGHT_TRAIT_DISPATCH_CALL,
+        RepoGraphEdgeKind::CoChangedWith => EDGE_WEIGHT_CO_CHANGED_WITH,
     }
 }
 
@@ -396,6 +423,50 @@ mod tests {
                 EDGE_CONFIDENCE_TRAIT_DISPATCH_CALL,
                 Some("below-floor-reason")
             ),
+            EdgeConfidenceTier::Ambiguous
+        );
+    }
+
+    #[test]
+    fn co_changed_with_serde_name_and_tables_are_pinned() {
+        assert_eq!(
+            serde_json::to_string(&RepoGraphEdgeKind::CoChangedWith).expect("serialize kind"),
+            "\"co_changed_with\""
+        );
+        // Confidence floor is the Inferred/Ambiguous band boundary.
+        assert!(
+            (edge_confidence_floor(RepoGraphEdgeKind::CoChangedWith)
+                - EDGE_CONFIDENCE_CO_CHANGED_WITH)
+                .abs()
+                < f64::EPSILON
+        );
+        assert!(
+            (edge_weight(RepoGraphEdgeKind::CoChangedWith) - EDGE_WEIGHT_CO_CHANGED_WITH).abs()
+                < f64::EPSILON
+        );
+    }
+
+    #[test]
+    fn co_changed_with_is_inferred_or_ambiguous_never_extracted() {
+        let reason = Some("cochange;last_day=20000");
+        // At/above the score band → Inferred.
+        assert_eq!(
+            edge_confidence_tier(RepoGraphEdgeKind::CoChangedWith, 0.5, reason),
+            EdgeConfidenceTier::Inferred
+        );
+        assert_eq!(
+            edge_confidence_tier(RepoGraphEdgeKind::CoChangedWith, 0.95, reason),
+            EdgeConfidenceTier::Inferred
+        );
+        // A very high score still never promotes to Extracted — co-change is
+        // evidence, not proof.
+        assert_ne!(
+            edge_confidence_tier(RepoGraphEdgeKind::CoChangedWith, 1.0, reason),
+            EdgeConfidenceTier::Extracted
+        );
+        // Below the band → Ambiguous.
+        assert_eq!(
+            edge_confidence_tier(RepoGraphEdgeKind::CoChangedWith, 0.3, reason),
             EdgeConfidenceTier::Ambiguous
         );
     }

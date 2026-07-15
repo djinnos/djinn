@@ -428,6 +428,28 @@ pub(crate) fn build_snapshot_payload(
     snapshot_edges.append(&mut cross_workspace_edges);
     snapshot_edges.extend(drawable_edges.into_iter().map(|(_, edge)| edge));
 
+    // Proposal qoxm: surface commit co-change coupling as its own edge
+    // channel. These live in a sidecar outside the petgraph (so they never
+    // inflated the pagerank/degree used above); emit one `CoChangedWith` edge
+    // per file pair whose BOTH endpoints survived the node cap. Not counted in
+    // `total_edges` (a structural-graph measure) and not subject to the
+    // drawable salience cap — the per-file top-K cap was already applied at
+    // warm time. The galaxy renderer draws them at lower intensity.
+    for cc in graph.cochange_edges() {
+        if !surviving.contains(&cc.source) || !surviving.contains(&cc.target) {
+            continue;
+        }
+        let from_node = graph.node(cc.source);
+        let to_node = graph.node(cc.target);
+        snapshot_edges.push(SnapshotEdge {
+            from: format_node_key(&from_node.id),
+            to: format_node_key(&to_node.id),
+            kind: format!("{:?}", RepoGraphEdgeKind::CoChangedWith),
+            confidence: cc.confidence,
+            reason: Some(djinn_graph::cochange::encode_reason(cc.last_co_change)),
+        });
+    }
+
     // Sort edges deterministically (kind > from > to) so test snapshots
     // stay stable across runs.
     snapshot_edges.sort_by(|a, b| {
