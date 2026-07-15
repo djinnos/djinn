@@ -136,6 +136,11 @@ pub use repositories::{
         DispatchImage, ProjectConfig, ProjectDispatchReadiness, ProjectImage, ProjectImageStatus,
         ProjectRepository,
     },
+    project_workspace_coverage::{
+        COVERAGE_STATUS_EXCLUDED, COVERAGE_STATUS_INDEXED, COVERAGE_STATUS_INDEXER_FAILED,
+        COVERAGE_STATUS_TIMED_OUT, COVERAGE_STATUS_UNSUPPORTED_LANGUAGE, ProjectWorkspaceCoverage,
+        ProjectWorkspaceCoverageRepository, ProjectWorkspaceCoverageUpsert, coverage_status_is_gap,
+    },
     project_workspace_graph::{
         CODELESS_WORKSPACE_SLUG, ProjectWorkspaceGraph, ProjectWorkspaceGraphLatest,
         ProjectWorkspaceGraphRepository, ProjectWorkspaceGraphUpsert,

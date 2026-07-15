@@ -192,6 +192,52 @@ fn worker_prompt_contains_task_fields() {
     assert!(!prompt.contains("{{"));
 }
 
+/// glqk: the worker prompt must instruct consulting index coverage before
+/// asserting an absence (no callers / unused / safe to remove) from the graph,
+/// and falling back to grep for an unindexed workspace.
+#[test]
+fn worker_prompt_carries_coverage_fallback_guidance() {
+    ensure_registry();
+    let task = make_task();
+    let ctx = make_ctx();
+    let prompt = render_prompt(AgentType::Worker, &task, &ctx);
+
+    assert!(
+        prompt.contains("coverage"),
+        "worker prompt must reference the coverage advisory/op"
+    );
+    assert!(
+        prompt.contains("safe to remove"),
+        "worker prompt must name the absence-assertion it guards"
+    );
+    assert!(
+        prompt.contains("false negative") && prompt.to_lowercase().contains("grep"),
+        "worker prompt must instruct the grep fallback for an unindexed workspace"
+    );
+    assert!(!prompt.contains("{{"));
+}
+
+/// glqk: the planner prompt must steer scoping of graph-based removal/rename
+/// tasks through index coverage (honor `needs_spike`, spike the uncovered
+/// workspace).
+#[test]
+fn planner_prompt_carries_coverage_scoping_guidance() {
+    ensure_registry();
+    let task = make_task();
+    let ctx = make_ctx();
+    let prompt = render_prompt(AgentType::Planner, &task, &ctx);
+
+    assert!(
+        prompt.contains("coverage"),
+        "planner prompt must reference the coverage advisory/op"
+    );
+    assert!(
+        prompt.contains("needs_spike"),
+        "planner prompt must tie the uncovered-workspace case to needs_spike"
+    );
+    assert!(!prompt.contains("{{"));
+}
+
 #[test]
 fn task_reviewer_prompt_contains_task_fields() {
     ensure_registry();

@@ -148,6 +148,8 @@ fn build_trait_dispatch_impact_fixture() -> (
         processes: vec![],
         route_exclusion_config: Default::default(),
         layout_positions: std::collections::BTreeMap::new(),
+        galaxy_positions: std::collections::BTreeMap::new(),
+        galaxy_degrees: std::collections::BTreeMap::new(),
     };
     let graph = RepoDependencyGraph::from_artifact(&artifact);
 

@@ -13,3 +13,4 @@ include!("tests_part3.inc");
 include!("tests_df6s_pagination.inc");
 include!("tests_crate_graph.inc");
 include!("tests_registry_dispatch.inc");
+include!("tests_coverage.inc");

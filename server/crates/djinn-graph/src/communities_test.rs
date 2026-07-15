@@ -99,6 +99,8 @@ fn multi_crate_fixture() -> (RepoDependencyGraph, CrateMap) {
         processes: Vec::new(),
         route_exclusion_config: Default::default(),
         layout_positions: BTreeMap::new(),
+        galaxy_positions: BTreeMap::new(),
+        galaxy_degrees: BTreeMap::new(),
     };
     let graph = RepoDependencyGraph::from_artifact(&artifact);
 
@@ -325,6 +327,8 @@ fn two_cluster_graph() -> RepoDependencyGraph {
         processes: Vec::new(),
         route_exclusion_config: Default::default(),
         layout_positions: BTreeMap::new(),
+        galaxy_positions: BTreeMap::new(),
+        galaxy_degrees: BTreeMap::new(),
     };
     RepoDependencyGraph::from_artifact(&artifact)
 }
@@ -341,6 +345,8 @@ fn detect_communities_empty_graph_returns_empty() {
         processes: Vec::new(),
         route_exclusion_config: Default::default(),
         layout_positions: BTreeMap::new(),
+        galaxy_positions: BTreeMap::new(),
+        galaxy_degrees: BTreeMap::new(),
     };
     let graph = RepoDependencyGraph::from_artifact(&artifact);
     assert!(detect_communities(&graph).is_empty());
@@ -620,6 +626,8 @@ fn monorepo_cluster_graph() -> RepoDependencyGraph {
         processes: Vec::new(),
         route_exclusion_config: Default::default(),
         layout_positions: BTreeMap::new(),
+        galaxy_positions: BTreeMap::new(),
+        galaxy_degrees: BTreeMap::new(),
     };
     RepoDependencyGraph::from_artifact(&artifact)
 }
@@ -710,6 +718,8 @@ fn label_falls_back_to_keywords_when_paths_are_not_distinguishing() {
         processes: Vec::new(),
         route_exclusion_config: Default::default(),
         layout_positions: BTreeMap::new(),
+        galaxy_positions: BTreeMap::new(),
+        galaxy_degrees: BTreeMap::new(),
     };
     let graph = RepoDependencyGraph::from_artifact(&artifact);
 

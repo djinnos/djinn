@@ -233,14 +233,16 @@ impl DjinnMcpServer {
         params: &CodeGraphParams,
     ) -> Result<CodeGraphResponse, String> {
         // Default 2000 nodes — plan §"Risks & mitigations" calls out
-        // this as the Sigma WebGL ceiling. Clamp to [1, 10_000] to keep
-        // the wire payload bounded; callers that want a wider view can
-        // request up to 10k explicitly.
+        // this as the Sigma WebGL ceiling. Explicit `limit` is honored up
+        // to 1M (an anti-DoS bound, not a product ceiling): the galaxy
+        // renderer (lmkv) draws the whole graph in one instanced draw
+        // call, so "show me everything" is a legitimate request and the
+        // old 10k clamp silently under-delivered it.
         let node_cap = params
             .limit
             .map(|l| l.max(1) as usize)
             .unwrap_or(2_000)
-            .clamp(1, 10_000);
+            .clamp(1, 1_000_000);
         let level = SnapshotLevel::parse(params.level.as_deref())?;
         let exclusions = self.load_graph_exclusions(&params.project_id).await;
         // pb94: route workspace resolution through the shared helper so

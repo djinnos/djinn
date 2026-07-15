@@ -852,6 +852,16 @@ pub async fn ensure_canonical_graph<C: WarmContext>(
     let artifacts = run.artifacts;
     let workspace_statuses = run.workspace_statuses;
     let project_root_for_blocking = handle.path().to_path_buf();
+    // Proposal lmkv: the galaxy layout seed is derived from the project id
+    // (FNV-1a) so warm runs and cache reloads reproduce the same 3D galaxy.
+    let project_id_for_galaxy = project_id.to_string();
+    // Proposal qoxm: pull the aggregated commit co-change file pairs from the
+    // coupling index (freshly ingested above by `ingest_coupling_best_effort`)
+    // in this async scope, then move the plain-data rows into the blocking
+    // build closure so it can materialize `CoChangedWith` sidecar edges before
+    // serialization. Best-effort — a stale/empty coupling table just yields no
+    // co-change edges, never a warm failure.
+    let cochange_inputs = load_cochange_inputs_best_effort(ctx, project_id).await;
     // Capture recovery flag for the blocking thread — when a stale sentinel
     // was detected, disable parse cache reuse to force a clean rebuild.
     let effective_cache_reuse = resolve_canonical_warm_cache_reuse(force_full_rebuild);
@@ -993,6 +1003,22 @@ pub async fn ensure_canonical_graph<C: WarmContext>(
             // and bincode serialization so Route/HandlesRoute/Fetches metadata
             // is installed both in memory and in repo_graph_cache.
             let _ = run_route_extraction_post_processor(&mut graph, &project_root_for_blocking)?;
+            // Proposal qoxm: materialize commit co-change coupling into the
+            // graph's dedicated sidecar (never the petgraph — see
+            // `crate::cochange`). Resolves the DB-fetched file pairs against
+            // the just-built file nodes, applies the score floor + per-file
+            // top-K cap, and stashes the result so `to_artifact` persists it in
+            // the shared edges vec. Runs before cache derivation / galaxy
+            // layout / serialization; those all ignore the co-change sidecar so
+            // ordering is immaterial.
+            let cochange = crate::cochange::derive_cochange_edges(&graph, &cochange_inputs);
+            tracing::info!(
+                project_id = %project_id_for_galaxy,
+                cochange_edges = cochange.len(),
+                cochange_pairs_considered = cochange_inputs.len(),
+                "ensure_canonical_graph: materialized co-change coupling edges"
+            );
+            graph.set_cochange_edges(cochange);
             let build_ms = t_build.elapsed().as_millis() as u64;
             let node_count = graph.node_count();
             let edge_count = graph.edge_count();
@@ -1001,6 +1027,14 @@ pub async fn ensure_canonical_graph<C: WarmContext>(
             let (pagerank, sccs, layout_positions, crate_map) =
                 derive_graph_caches_with_crate_map(&graph, crate_map_for_build);
             graph.set_layout_positions((*layout_positions).clone());
+            // Proposal lmkv: compute the deterministic 3D galaxy layout once,
+            // here at warm time, so the `code_graph snapshot` payload can ship
+            // positions + degree and the browser skips its worker layout. The
+            // iteration budget inside `derive_galaxy_layout` scales down as the
+            // node count grows, keeping warm time bounded on big repos.
+            let galaxy_seed = crate::galaxy_layout::galaxy_layout_seed(&project_id_for_galaxy);
+            let galaxy = crate::galaxy_layout::derive_galaxy_layout(&graph, galaxy_seed);
+            graph.set_galaxy_layout(galaxy);
             let derive_ms = t_derive.elapsed().as_millis() as u64;
 
             let t_serial = clock.now_instant();
@@ -1177,6 +1211,21 @@ pub async fn ensure_canonical_graph<C: WarmContext>(
                 &workspace_statuses,
             )
             .await;
+            // Proposal glqk: alongside the bare freshness rows, persist the
+            // richer per-(workspace, language) coverage contract — outcome +
+            // extent — so agents and the UI can name exactly which workspaces
+            // are NOT indexed. Failed/timed-out workspaces are already present
+            // in `workspace_statuses`, so their coverage rows are written on
+            // this same (partial-success) path.
+            persist_coverage_best_effort(
+                ctx,
+                project_id,
+                &commit_sha,
+                handle.path(),
+                &graph,
+                &workspace_statuses,
+            )
+            .await;
         }
         Err(e) => {
             tracing::warn!(error = %e, "ensure_canonical_graph: failed to persist graph cache row");
@@ -1336,6 +1385,52 @@ async fn ingest_coupling_best_effort<C: WarmContext>(
             error = %e,
             "ensure_canonical_graph: coupling ingest failed"
         );
+    }
+}
+
+/// Proposal qoxm: read the aggregated commit co-change file pairs from the
+/// coupling index so the build closure can turn them into `CoChangedWith`
+/// sidecar edges. Best-effort — any DB error (or an unavailable coupling
+/// table) yields an empty vec and simply produces no co-change edges this warm.
+///
+/// The `max_files_per_commit` cap is already enforced at ingest time, so the
+/// argument is passed only to satisfy the repository signature. Pairs are
+/// fetched all-time (`since = None`); the per-file top-K and score-floor caps
+/// applied downstream in [`crate::cochange::derive_cochange_edges`] bound the
+/// materialized edge count.
+async fn load_cochange_inputs_best_effort<C: WarmContext>(
+    ctx: &C,
+    project_id: &str,
+) -> Vec<crate::cochange::CoChangeInput> {
+    use djinn_db::CommitFileChangeRepository;
+
+    let repo = CommitFileChangeRepository::new(ctx.db().clone());
+    match repo
+        .top_coupled_pairs(
+            project_id,
+            crate::cochange::COCHANGE_MAX_PAIRS,
+            None,
+            djinn_db::MAX_FILES_PER_COMMIT_FOR_PAIRS,
+        )
+        .await
+    {
+        Ok(pairs) => pairs
+            .into_iter()
+            .map(|p| crate::cochange::CoChangeInput {
+                file_a: p.file_a,
+                file_b: p.file_b,
+                co_changes: p.co_edits.max(0) as usize,
+                last_co_change_iso: p.last_co_edit,
+            })
+            .collect(),
+        Err(e) => {
+            tracing::warn!(
+                project_id = %project_id,
+                error = %e,
+                "ensure_canonical_graph: co-change pair fetch failed; skipping co-change edges"
+            );
+            Vec::new()
+        }
     }
 }
 
@@ -1508,6 +1603,191 @@ async fn persist_workspace_graph_freshness_best_effort<C: WarmContext>(
             workspace_count,
             error = %e,
             "ensure_canonical_graph: failed to persist project_workspace_graph freshness rows"
+        );
+    }
+}
+
+/// Map a warm-status string (post `apply_artifact_statuses`) to the coverage
+/// enum stored in `project_workspace_coverage.status`. Returns `None` for
+/// synthetic / transient rows (`warning` graph-cache notices, a leftover
+/// `artifact_pending`) that are not a per-workspace coverage outcome.
+fn coverage_status_for_warm_status(status: &str) -> Option<&'static str> {
+    match status {
+        "ready" | "ready_with_quarantine" => Some(djinn_db::COVERAGE_STATUS_INDEXED),
+        "failed" => Some(djinn_db::COVERAGE_STATUS_INDEXER_FAILED),
+        "timed_out" => Some(djinn_db::COVERAGE_STATUS_TIMED_OUT),
+        _ => None,
+    }
+}
+
+/// Count candidate source files under `root` whose extension is in `exts`.
+/// Bounded, best-effort: prunes the usual heavyweight/vendor directories and
+/// returns `None` if the root can't be walked. Used for the coverage contract's
+/// "discovered" extent — a superset is acceptable.
+fn count_source_files(root: &Path, exts: &[&str]) -> Option<i64> {
+    const IGNORED: &[&str] = &[
+        ".git",
+        "node_modules",
+        "target",
+        "dist",
+        "build",
+        "vendor",
+        ".venv",
+        "venv",
+        "__pycache__",
+        ".mypy_cache",
+        ".pnpm",
+        "bin",
+        "obj",
+    ];
+    if !root.is_dir() {
+        return None;
+    }
+    let mut count: i64 = 0;
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let entries = std::fs::read_dir(&dir).ok()?;
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let file_type = match entry.file_type() {
+                Ok(ft) => ft,
+                Err(_) => continue,
+            };
+            if file_type.is_dir() {
+                let name = entry.file_name();
+                let name = name.to_string_lossy();
+                if name.starts_with('.') && name != "." || IGNORED.contains(&name.as_ref()) {
+                    continue;
+                }
+                stack.push(path);
+            } else if file_type.is_file()
+                && let Some(ext) = path.extension().and_then(|e| e.to_str())
+                && exts.contains(&ext)
+            {
+                count += 1;
+            }
+        }
+    }
+    Some(count)
+}
+
+/// Proposal glqk: persist the per-(workspace, language) index-coverage contract.
+///
+/// Best-effort, mirroring [`persist_workspace_graph_freshness_best_effort`]: it
+/// runs on the partial-success path (after the merged graph blob is cached), so
+/// every workspace the warm attempted — indexed, `failed`, or `timed_out` — gets
+/// a coverage row carrying its outcome and extent. The op / advisory read these
+/// rows without touching the graph blob.
+async fn persist_coverage_best_effort<C: WarmContext>(
+    ctx: &C,
+    project_id: &str,
+    commit_sha: &str,
+    project_root: &Path,
+    graph: &crate::repo_graph::RepoDependencyGraph,
+    workspace_statuses: &[crate::scip_indexer::WorkspaceWarmStatus],
+) {
+    use djinn_db::{ProjectWorkspaceCoverageRepository, ProjectWorkspaceCoverageUpsert};
+
+    // Distinct indexed file paths per workspace slug, from the merged graph —
+    // the "indexed" extent. Nodes without workspace metadata (pre-v10 / synthetic)
+    // simply don't contribute, leaving `indexed_files` unknown rather than a lie.
+    let mut indexed_by_slug: std::collections::HashMap<&str, std::collections::HashSet<&Path>> =
+        std::collections::HashMap::new();
+    for node in graph.graph().node_weights() {
+        let (Some(slug), Some(file_path)) = (node.workspace.as_deref(), node.file_path.as_deref())
+        else {
+            continue;
+        };
+        let slug = slug.trim();
+        if slug.is_empty() {
+            continue;
+        }
+        indexed_by_slug.entry(slug).or_default().insert(file_path);
+    }
+
+    // Owned strings first so the borrow of `ProjectWorkspaceCoverageUpsert`
+    // (which holds &str) stays valid across the async call.
+    struct Owned {
+        workspace_slug: String,
+        language: String,
+        status: &'static str,
+        detail: Option<String>,
+        workspace_root: String,
+        marker_evidence: String,
+        discovered_files: Option<i64>,
+        indexed_files: Option<i64>,
+    }
+    let mut owned: Vec<Owned> = Vec::with_capacity(workspace_statuses.len());
+    let mut seen: std::collections::HashSet<(String, String)> = std::collections::HashSet::new();
+    for status in workspace_statuses {
+        let Some(coverage_status) = coverage_status_for_warm_status(status.status.as_str()) else {
+            continue;
+        };
+        let language = status.indexer.language().to_string();
+        if !seen.insert((status.workspace_slug.clone(), language.clone())) {
+            continue;
+        }
+
+        let indexed_files = match coverage_status {
+            // A wiped-out workspace definitively indexed nothing.
+            djinn_db::COVERAGE_STATUS_INDEXER_FAILED | djinn_db::COVERAGE_STATUS_TIMED_OUT => {
+                Some(0)
+            }
+            // Indexed: report the distinct file count if the graph carries
+            // workspace tags for it; otherwise leave the extent unknown.
+            _ => indexed_by_slug
+                .get(status.workspace_slug.as_str())
+                .map(|files| files.len() as i64),
+        };
+
+        let workspace_abs = if status.workspace_rel_root.is_empty() {
+            project_root.to_path_buf()
+        } else {
+            project_root.join(&status.workspace_rel_root)
+        };
+        let discovered_files =
+            count_source_files(&workspace_abs, status.indexer.source_extensions());
+
+        owned.push(Owned {
+            workspace_slug: status.workspace_slug.clone(),
+            language,
+            status: coverage_status,
+            detail: status.detail.clone(),
+            workspace_root: status.workspace_rel_root.clone(),
+            marker_evidence: status.indexer.marker_files().join(", "),
+            discovered_files,
+            indexed_files,
+        });
+    }
+
+    if owned.is_empty() {
+        return;
+    }
+
+    let rows: Vec<ProjectWorkspaceCoverageUpsert<'_>> = owned
+        .iter()
+        .map(|o| ProjectWorkspaceCoverageUpsert {
+            project_id,
+            workspace_slug: &o.workspace_slug,
+            language: &o.language,
+            status: o.status,
+            detail: o.detail.as_deref(),
+            workspace_root: &o.workspace_root,
+            marker_evidence: Some(o.marker_evidence.as_str()),
+            discovered_files: o.discovered_files,
+            indexed_files: o.indexed_files,
+            commit_sha,
+        })
+        .collect();
+
+    let repo = ProjectWorkspaceCoverageRepository::new(ctx.db().clone());
+    if let Err(e) = repo.replace_for_project(project_id, &rows).await {
+        tracing::warn!(
+            project_id = %project_id,
+            commit_sha = %commit_sha,
+            row_count = rows.len(),
+            error = %e,
+            "ensure_canonical_graph: failed to persist project_workspace_coverage rows"
         );
     }
 }
@@ -2489,6 +2769,7 @@ edition = "2024"
             indexer: crate::scip_indexer::SupportedIndexer::RustAnalyzer,
             status: status.to_string(),
             detail: None,
+            workspace_rel_root: String::new(),
         }
     }
 
@@ -2625,12 +2906,14 @@ edition = "2024"
                 indexer: crate::scip_indexer::SupportedIndexer::TypeScript,
                 status: "ready".to_string(),
                 detail: None,
+                workspace_rel_root: "ui".to_string(),
             },
             crate::scip_indexer::WorkspaceWarmStatus {
                 workspace_slug: "server".to_string(),
                 indexer: crate::scip_indexer::SupportedIndexer::RustAnalyzer,
                 status: "timed_out".to_string(),
                 detail: Some("indexer timed out".to_string()),
+                workspace_rel_root: "server".to_string(),
             },
         ];
 
@@ -2655,6 +2938,86 @@ edition = "2024"
                 .unwrap()
                 .is_none()
         );
+    }
+
+    #[tokio::test]
+    async fn persist_coverage_records_outcome_and_extent_per_workspace() {
+        use djinn_db::ProjectWorkspaceCoverageRepository;
+
+        let db = create_test_db();
+        db.ensure_initialized().await.unwrap();
+        ProjectRepository::new(db.clone(), EventBus::noop())
+            .create_with_id("p1", "p1", "test", "p1")
+            .await
+            .unwrap();
+
+        // Two-workspace project: `ui` (TypeScript) indexed cleanly; `server`
+        // (Rust) indexer timed out — the deliberately-broken workspace.
+        let tmp = workspace_tempdir("coverage-persist-");
+        let project_root = tmp.path();
+        std::fs::create_dir_all(project_root.join("ui")).unwrap();
+        std::fs::write(project_root.join("ui/a.ts"), "export const a = 1;").unwrap();
+        std::fs::write(project_root.join("ui/b.ts"), "export const b = 2;").unwrap();
+        std::fs::create_dir_all(project_root.join("server")).unwrap();
+        std::fs::write(project_root.join("server/lib.rs"), "pub fn x() {}").unwrap();
+
+        // Graph carries `ui` nodes (indexed) but none for the timed-out `server`.
+        let mut graph = build_test_graph_fixture();
+        for (i, node) in graph.graph_mut_unchecked().node_weights_mut().enumerate() {
+            node.workspace = Some("ui".to_string());
+            node.file_path = Some(std::path::PathBuf::from(format!("ui/a{i}.ts")));
+        }
+
+        let statuses = vec![
+            crate::scip_indexer::WorkspaceWarmStatus {
+                workspace_slug: "ui".to_string(),
+                indexer: crate::scip_indexer::SupportedIndexer::TypeScript,
+                status: "ready".to_string(),
+                detail: None,
+                workspace_rel_root: "ui".to_string(),
+            },
+            crate::scip_indexer::WorkspaceWarmStatus {
+                workspace_slug: "server".to_string(),
+                indexer: crate::scip_indexer::SupportedIndexer::RustAnalyzer,
+                status: "timed_out".to_string(),
+                detail: Some("indexer timed out at 1200s".to_string()),
+                workspace_rel_root: "server".to_string(),
+            },
+        ];
+
+        let ctx = TestWarmContext::new(db.clone());
+        persist_coverage_best_effort(&ctx, "p1", "new-commit", project_root, &graph, &statuses)
+            .await;
+
+        let rows = ProjectWorkspaceCoverageRepository::new(db)
+            .list_for_project("p1")
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 2, "one coverage row per (workspace, language)");
+
+        let server = rows
+            .iter()
+            .find(|r| r.workspace_slug == "server")
+            .expect("server coverage row");
+        assert_eq!(server.status, djinn_db::COVERAGE_STATUS_TIMED_OUT);
+        assert_eq!(server.language, "rust");
+        assert_eq!(server.detail.as_deref(), Some("indexer timed out at 1200s"));
+        assert_eq!(
+            server.indexed_files,
+            Some(0),
+            "timed-out workspace indexed nothing"
+        );
+        assert_eq!(server.discovered_files, Some(1), "one .rs under server/");
+        assert_eq!(server.marker_evidence.as_deref(), Some("Cargo.toml"));
+
+        let ui = rows
+            .iter()
+            .find(|r| r.workspace_slug == "ui")
+            .expect("ui coverage row");
+        assert_eq!(ui.status, djinn_db::COVERAGE_STATUS_INDEXED);
+        assert_eq!(ui.language, "typescript");
+        assert_eq!(ui.discovered_files, Some(2), "two .ts under ui/");
+        assert!(ui.indexed_files.unwrap_or(0) > 0, "ui indexed some files");
     }
 
     #[test]

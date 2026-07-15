@@ -689,6 +689,8 @@
     fn validates_edge_kind_filter_pr_a3() {
         assert!(validate_edge_kind_filter(Some("reads")).is_ok());
         assert!(validate_edge_kind_filter(Some("writes")).is_ok());
+        // Proposal qoxm: explicit opt-in to the commit co-change sidecar.
+        assert!(validate_edge_kind_filter(Some("co_changed_with")).is_ok());
         assert!(validate_edge_kind_filter(None).is_ok());
         // Node-kind labels are NOT valid for the neighbors op — they
         // belong to the other ops' validator.

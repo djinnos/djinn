@@ -882,6 +882,10 @@ impl RepoGraphBridge {
             pagerank_for.insert(ranked.node_index, ranked.page_rank);
         }
 
+        // Proposal qoxm: per-file cross-module co-change pressure — the
+        // fourth refactor-ranking axis (see refactor.rs for the derivation).
+        let cross_module_cc = super::refactor::cross_module_cochange_pressure(&graph);
+
         // Walk every function-like node carrying complexity. Skip the
         // same node-classes the iter-28 `complexity` op skips, plus
         // the test/external flags (the spec calls out filtering tests
@@ -931,6 +935,10 @@ impl RepoGraphBridge {
                 cognitive: metrics.cognitive,
                 cyclomatic: metrics.cyclomatic,
                 page_rank,
+                cross_module_cochange: cross_module_cc
+                    .get(file_path)
+                    .copied()
+                    .unwrap_or(0.0),
             });
         }
 

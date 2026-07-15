@@ -139,6 +139,60 @@ impl RepoGraphBridge {
         };
 
         let mut neighbors = Vec::new();
+
+        // Proposal qoxm: explicit opt-in to the commit co-change sidecar via
+        // `kind_filter=co_changed_with`. Co-change edges live OUTSIDE the
+        // petgraph (see `djinn_graph::cochange`), so the default walk below
+        // never emits them — this branch is the only way they enter a
+        // `neighbors` response, keeping the default-exclude contract intact.
+        // The relationship is undirected (stored once, `file_a < file_b`), so
+        // the caller's `direction` filter is ignored here and each partner is
+        // labeled "undirected"; the coupling score rides in `edge_weight` and
+        // the kind string matches the `edges`/`snapshot` channel.
+        if kind_filter == Some("co_changed_with") {
+            for cc in graph.cochange_edges() {
+                let other_index = if cc.source == node_index {
+                    cc.target
+                } else if cc.target == node_index {
+                    cc.source
+                } else {
+                    continue;
+                };
+                let other_node = graph.node(other_index);
+                let other_key = format_node_key(&other_node.id);
+                let other_file = other_node
+                    .file_path
+                    .as_ref()
+                    .map(|p| p.display().to_string());
+                if exclusions.excludes(&other_key, other_file.as_deref(), &other_node.display_name)
+                {
+                    continue;
+                }
+                neighbors.push((
+                    other_node,
+                    GraphNeighbor {
+                        uid: other_key.clone(),
+                        key: other_key,
+                        kind: format!("{:?}", other_node.kind).to_lowercase(),
+                        display_name: other_node.display_name.clone(),
+                        edge_kind: format!("{:?}", RepoGraphEdgeKind::CoChangedWith),
+                        edge_weight: cc.confidence,
+                        direction: "undirected".to_string(),
+                    },
+                ));
+            }
+            return match group_by {
+                None => Ok(NeighborsResult::Detailed(
+                    neighbors.into_iter().map(|(_, n)| n).collect(),
+                )),
+                Some("file") => Ok(NeighborsResult::Grouped(group_neighbors_by_file(
+                    &neighbors,
+                ))),
+                Some(other) => Err(format!(
+                    "invalid group_by '{other}': only 'file' is supported"
+                )),
+            };
+        }
         for dir in directions {
             let dir_label = match dir {
                 Direction::Incoming => "incoming",
@@ -777,140 +831,6 @@ impl RepoGraphBridge {
                     .visibility
                     .map(|v| v.as_str().to_string())
                     .unwrap_or_else(|| "unknown".to_string()),
-            });
-            if out.len() >= limit {
-                break;
-            }
-        }
-        Ok(out)
-    }
-
-    pub(super) async fn path(
-        &self,
-        ctx: &ProjectCtx,
-        workspace: Option<&str>,
-        from: &str,
-        to: &str,
-        max_depth: Option<usize>,
-    ) -> Result<Option<PathResult>, String> {
-        let graph = djinn_graph::canonical_graph::load_canonical_graph_only(
-            &self.state,
-            &ctx.id,
-            &ctx.clone_path,
-        )
-        .await?;
-        let from_idx = shared::resolve_node_or_err_for_workspace_seed(&graph, from, workspace)?;
-        let to_idx = shared::resolve_node_or_err_for_workspace_seed(&graph, to, workspace)?;
-        let path = match graph.shortest_path(from_idx, to_idx, max_depth) {
-            Some(p) => p,
-            None => return Ok(None),
-        };
-        let mut hops = Vec::with_capacity(path.len());
-        for window in path.windows(2) {
-            let (src, dst) = (window[0], window[1]);
-            let edge_kind = graph
-                .graph()
-                .edges_directed(src, petgraph::Direction::Outgoing)
-                .find(|edge| edge.target() == dst)
-                .map(|edge| format!("{:?}", edge.weight().kind))
-                .unwrap_or_else(|| "unknown".to_string());
-            let dst_node = graph.node(dst);
-            hops.push(PathHop {
-                key: format_node_key(&dst_node.id),
-                uid: format_node_key(&dst_node.id),
-                edge_kind,
-            });
-        }
-        Ok(Some(PathResult {
-            from: format_node_key(&graph.node(from_idx).id),
-            to: format_node_key(&graph.node(to_idx).id),
-            length: hops.len(),
-            hops,
-        }))
-    }
-
-    pub(super) async fn edges(
-        &self,
-        ctx: &ProjectCtx,
-        from_glob: &str,
-        to_glob: &str,
-        edge_kind: Option<&str>,
-        limit: usize,
-    ) -> Result<Vec<EdgeEntry>, String> {
-        use globset::Glob;
-        let graph = djinn_graph::canonical_graph::load_canonical_graph_only(
-            &self.state,
-            &ctx.id,
-            &ctx.clone_path,
-        )
-        .await?;
-        let from_matcher = Glob::new(from_glob)
-            .map_err(|e| format!("invalid from_glob '{from_glob}': {e}"))?
-            .compile_matcher();
-        let to_matcher = Glob::new(to_glob)
-            .map_err(|e| format!("invalid to_glob '{to_glob}': {e}"))?
-            .compile_matcher();
-        let mut out = Vec::new();
-        for edge_ref in graph.graph().edge_references() {
-            let src_node = graph.node(edge_ref.source());
-            let dst_node = graph.node(edge_ref.target());
-            let src_key = format_node_key(&src_node.id);
-            let dst_key = format_node_key(&dst_node.id);
-            let src_match_target = src_node
-                .file_path
-                .as_ref()
-                .map(|p| p.display().to_string())
-                .unwrap_or_else(|| src_node.display_name.clone());
-            let dst_match_target = dst_node
-                .file_path
-                .as_ref()
-                .map(|p| p.display().to_string())
-                .unwrap_or_else(|| dst_node.display_name.clone());
-            if !from_matcher.is_match(&src_match_target) {
-                continue;
-            }
-            if !to_matcher.is_match(&dst_match_target) {
-                continue;
-            }
-            let kind_label = format!("{:?}", edge_ref.weight().kind);
-            if let Some(filter) = edge_kind
-                && !kind_label.eq_ignore_ascii_case(filter)
-            {
-                continue;
-            }
-            // PR s6ch / 92z7: stamp the route-exclusion policy reason
-            // on `Fetches` edges the active project policy downgrades
-            // to a suggestion. The target node is the route the caller
-            // is fetching — we pull its path from the graph layer and
-            // run the same helpers `impact_bfs_with_policy` uses.
-            let exclusion_reason: Option<String> = {
-                use djinn_graph::repo_graph::{RepoGraphEdgeKind, RepoGraphNodeKind};
-                if djinn_graph::route_extraction::route_parity_enabled()
-                    && edge_ref.weight().kind == RepoGraphEdgeKind::Fetches
-                    && dst_node.kind == RepoGraphNodeKind::Route
-                {
-                    let route_path = super::shared::route_node_path(dst_node);
-                    let cfg = graph.route_exclusion_config();
-                    super::shared::first_exclusion_reason(
-                        edge_ref.weight(),
-                        route_path.as_deref(),
-                        cfg,
-                    )
-                    .map(|s| s.to_string())
-                } else {
-                    None
-                }
-            };
-            out.push(EdgeEntry {
-                from: src_key,
-                to: dst_key,
-                edge_kind: kind_label,
-                edge_weight: edge_ref.weight().weight,
-                confidence: edge_ref.weight().confidence,
-                confidence_tier: format!("{:?}", edge_ref.weight().confidence_tier())
-                    .to_ascii_lowercase(),
-                reason: edge_ref.weight().reason.clone(),
-                exclusion_reason,
             });
             if out.len() >= limit {
                 break;

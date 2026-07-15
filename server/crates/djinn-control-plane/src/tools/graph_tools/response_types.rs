@@ -275,6 +275,8 @@ pub struct ImpactResponse {
     pub next_step: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub graph_staleness: Option<crate::tools::graph_tools::GraphStaleness>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub coverage: Option<crate::tools::graph_tools::CoverageAdvisory>,
 }
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
@@ -292,6 +294,8 @@ pub struct SearchResponse {
     pub next_step: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub graph_staleness: Option<crate::tools::graph_tools::GraphStaleness>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub coverage: Option<crate::tools::graph_tools::CoverageAdvisory>,
 }
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
@@ -319,6 +323,8 @@ pub struct OrphansResponse {
     pub next_step: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub graph_staleness: Option<crate::tools::graph_tools::GraphStaleness>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub coverage: Option<crate::tools::graph_tools::CoverageAdvisory>,
 }
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
@@ -442,6 +448,8 @@ pub struct ApiSurfaceResponse {
     pub next_step: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub graph_staleness: Option<crate::tools::graph_tools::GraphStaleness>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub coverage: Option<crate::tools::graph_tools::CoverageAdvisory>,
 }
 
 /// Response for the `boundary_check` op.
@@ -510,6 +518,8 @@ pub struct DeadSymbolsResponse {
     pub next_step: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub graph_staleness: Option<crate::tools::graph_tools::GraphStaleness>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub coverage: Option<crate::tools::graph_tools::CoverageAdvisory>,
 }
 
 /// Response for the `deprecated_callers` op.
@@ -749,6 +759,8 @@ pub struct ImpactCheckResponse {
     pub next_step: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub graph_staleness: Option<crate::tools::graph_tools::GraphStaleness>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub coverage: Option<crate::tools::graph_tools::CoverageAdvisory>,
 }
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
@@ -808,4 +820,102 @@ pub enum CodeGraphResponse {
     /// break if proposed removals/renames land, and whether the
     /// proposed slice is safe to ship independently.
     ImpactCheck(ImpactCheckResponse),
+    /// glqk: index-coverage table — per-(workspace, language) outcome +
+    /// extent, per-language rollup, and discovered-but-unindexed source
+    /// roots. Read from `project_workspace_coverage` WITHOUT loading the
+    /// graph blob. Discriminator field `coverage`.
+    Coverage(CoverageResponse),
+}
+
+// ── glqk: index-coverage contract ────────────────────────────────────────────
+
+/// One row of the coverage table: the outcome + extent of one indexer against
+/// one workspace. Mirrors a `project_workspace_coverage` row.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct CoverageWorkspaceEntry {
+    pub workspace_slug: String,
+    /// Stable language key (rust/typescript/python/…).
+    pub language: String,
+    /// Coverage enum: indexed | indexer_failed | timed_out |
+    /// unsupported_language | excluded.
+    pub status: String,
+    /// `true` when `status` is a genuine gap (not `indexed`/`excluded`).
+    pub is_gap: bool,
+    /// Indexer exit detail (stderr tail / exit code / timeout reason).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+    /// Workspace root relative to the project root (empty for the repo root).
+    pub workspace_root: String,
+    /// Marker file(s) whose presence caused workspace detection.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub marker_evidence: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub discovered_files: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub indexed_files: Option<i64>,
+    pub commit_sha: String,
+    pub warmed_at: String,
+}
+
+/// Per-language rollup across all workspaces.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct CoverageLanguageRollup {
+    pub language: String,
+    pub workspaces_total: usize,
+    pub workspaces_indexed: usize,
+    pub workspaces_gap: usize,
+    /// Sum of `discovered_files` across this language's workspaces (when known).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub discovered_files: Option<i64>,
+    /// Sum of `indexed_files` across this language's workspaces (when known).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub indexed_files: Option<i64>,
+}
+
+/// A workspace root that was discovered but produced no index (the coverage gap
+/// stated as a source root, for direct UI/agent consumption).
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct UnindexedSourceRoot {
+    pub workspace_slug: String,
+    pub language: String,
+    pub workspace_root: String,
+    pub status: String,
+}
+
+/// Response for the `coverage` op. Cheap — never loads the graph blob.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct CoverageResponse {
+    /// Discriminator so the untagged enum resolves to this variant.
+    pub coverage: bool,
+    /// `true` when at least one in-scope workspace is a genuine coverage gap.
+    pub has_gaps: bool,
+    pub workspaces: Vec<CoverageWorkspaceEntry>,
+    pub language_rollup: Vec<CoverageLanguageRollup>,
+    pub unindexed_source_roots: Vec<UnindexedSourceRoot>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_step: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub graph_staleness: Option<crate::tools::graph_tools::GraphStaleness>,
+}
+
+/// glqk: compact coverage advisory attached to `dead_symbols`, `orphans`,
+/// `impact`, `impact_check`, `search`, and `api_surface` when a genuine gap
+/// exists — mirroring how `graph_staleness` rides along. Absent when coverage
+/// is clean or every non-indexed workspace is intentionally `excluded`.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct CoverageAdvisory {
+    /// Human-readable one-liner naming the gap, safe to lift into a prompt.
+    pub message: String,
+    /// The workspaces that are not indexed (gaps only).
+    pub unindexed_workspaces: Vec<CoverageAdvisoryWorkspace>,
+}
+
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct CoverageAdvisoryWorkspace {
+    pub workspace_slug: String,
+    pub language: String,
+    /// indexer_failed | timed_out | unsupported_language.
+    pub status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
 }

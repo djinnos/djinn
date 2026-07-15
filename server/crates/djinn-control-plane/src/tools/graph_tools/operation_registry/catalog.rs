@@ -23,7 +23,7 @@ pub const CODE_GRAPH_REGISTRY: &[OpEntry] = &[
     // Bridge   : RepoGraphOps::neighbors
     // Pre-res  : single_key — `params.key` resolved via `RepoGraphOps::resolve`
     // Validation: require_key + validate_direction + validate_group_by
-    //            + validate_edge_kind_filter (reads/writes)
+    //            + validate_edge_kind_filter (reads/writes/co_changed_with)
     // Workspace: ignored — neighbors are not workspace-scoped
     OpEntry {
         name: "neighbors",
@@ -943,6 +943,34 @@ pub const CODE_GRAPH_REGISTRY: &[OpEntry] = &[
             from: None,
             to: None,
             note: "advisory impact preflight for proposed removals/renames",
+        },
+    },
+    // ── coverage (glqk) ──────────────────────────────────────────────────
+    //
+    // Handler  : code_graph_coverage  (handler_basic_ops.rs)
+    // Bridge   : none — reads `project_workspace_coverage` from the DB. The
+    //            `bridge_method` is a formality to satisfy the compile-time
+    //            KNOWN_BRIDGE_METHODS guard; `workspaces` is the closest read
+    //            (both are cheap, no-blob per-workspace status surfaces).
+    // Pre-res  : none
+    // Validation: none
+    // Workspace: ignored
+    OpEntry {
+        name: "coverage",
+        aliases: &[],
+        pre_resolve: PreResolveCategory::None,
+        validation: ValidationCategory::None,
+        handler_fn: "code_graph_coverage",
+        bridge_method: "workspaces", // DB-only; reuses a known bridge key
+        workspace: WorkspaceBehavior::Ignored,
+        smoke: SmokeExemplar {
+            operation: "coverage",
+            key: None,
+            query: None,
+            file: None,
+            from: None,
+            to: None,
+            note: "per-workspace/per-language index coverage table + gaps",
         },
     },
 ];

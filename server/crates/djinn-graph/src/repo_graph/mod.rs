@@ -163,6 +163,28 @@ impl RepoDependencyGraph {
             });
         }
 
+        // Proposal qoxm: co-change edges live in a sidecar (never in the
+        // petgraph), but persist alongside the real edges in the shared vec so
+        // no additive artifact field is needed. The temporal `last_co_change`
+        // rides in `reason`; `from_artifact` partitions these back out by kind.
+        for cc in &self.cochange_edges {
+            let (Some(&source), Some(&target)) =
+                (index_map.get(&cc.source), index_map.get(&cc.target))
+            else {
+                continue;
+            };
+            edges.push(RepoGraphArtifactEdge {
+                source,
+                target,
+                kind: RepoGraphEdgeKind::CoChangedWith,
+                weight: edge_weight_for(RepoGraphEdgeKind::CoChangedWith),
+                evidence_count: cc.evidence_count,
+                confidence: cc.confidence,
+                reason: Some(crate::cochange::encode_reason(cc.last_co_change)),
+                step: None,
+            });
+        }
+
         let mut symbol_ranges: BTreeMap<PathBuf, Vec<RepoGraphArtifactSymbolRange>> =
             BTreeMap::new();
         for (file, ranges) in &self.symbol_ranges {
@@ -231,6 +253,8 @@ impl RepoDependencyGraph {
             processes: processes_out,
             route_exclusion_config: self.route_exclusion_config.clone(),
             layout_positions: self.layout_positions.clone(),
+            galaxy_positions: self.galaxy_positions.clone(),
+            galaxy_degrees: self.galaxy_degrees.clone(),
         }
     }
 
@@ -246,7 +270,22 @@ impl RepoDependencyGraph {
             index_map.push(node_index);
         }
 
+        // Proposal qoxm: co-change edges ride in the shared `edges` vec on
+        // disk but must NOT enter the petgraph (that would pollute PageRank /
+        // traversal). Partition them out into the sidecar; everything else
+        // becomes a real petgraph edge as before.
+        let mut cochange_edges: Vec<crate::cochange::CoChangeEdge> = Vec::new();
         for edge in &artifact.edges {
+            if edge.kind == RepoGraphEdgeKind::CoChangedWith {
+                cochange_edges.push(crate::cochange::CoChangeEdge {
+                    source: index_map[edge.source],
+                    target: index_map[edge.target],
+                    evidence_count: edge.evidence_count,
+                    confidence: edge.confidence,
+                    last_co_change: crate::cochange::decode_last_co_change(edge.reason.as_deref()),
+                });
+                continue;
+            }
             graph.add_edge(
                 index_map[edge.source],
                 index_map[edge.target],
@@ -347,6 +386,9 @@ impl RepoDependencyGraph {
             } else {
                 artifact.layout_positions.clone()
             },
+            galaxy_positions: artifact.galaxy_positions.clone(),
+            galaxy_degrees: artifact.galaxy_degrees.clone(),
+            cochange_edges,
         };
         // PR F3: rehydrate the community sidecar verbatim — node
         // positions in the artifact match `NodeIndex` 0..n thanks to the
@@ -471,6 +513,8 @@ impl RepoDependencyGraph {
             processes: Vec::new(),
             route_exclusion_config: artifact.route_exclusion_config,
             layout_positions: BTreeMap::new(),
+            galaxy_positions: BTreeMap::new(),
+            galaxy_degrees: BTreeMap::new(),
         };
 
         // Step 2: Rebuild the base graph from the filtered artifact.

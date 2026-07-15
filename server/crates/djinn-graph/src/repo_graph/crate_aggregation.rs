@@ -353,6 +353,8 @@ mod tests {
             processes: vec![],
             route_exclusion_config: crate::repo_graph::RouteExclusionConfig::default(),
             layout_positions: BTreeMap::new(),
+            galaxy_positions: BTreeMap::new(),
+            galaxy_degrees: BTreeMap::new(),
         };
 
         RepoDependencyGraph::from_artifact(&artifact)

@@ -32,7 +32,11 @@ pub fn tool_code_graph() -> RmcpTool {
          centrality; complexity/refactor_candidates = budget-conscious discovery of \
          code that may be costly to maintain; crate_graph = workspace dependency graph with crates as \
          nodes and aggregated cross-crate edges, including per-crate rollups (LOC, node \
-         count, fan-in/out, edge weights). AFTER THIS: after capabilities call the chosen op with only \
+         count, fan-in/out, edge weights); coverage = per-(workspace, language) INDEX COVERAGE \
+         table + per-language rollup + discovered-but-unindexed source roots — the graph is \
+         best-effort and this op names exactly which workspaces are NOT indexed so you do not \
+         read a silent false negative (dead_symbols/impact/search under-report for an unindexed \
+         workspace). AFTER THIS: after capabilities call the chosen op with only \
          required fields; after query_subgraph inspect returned seeds/budget/truncation and \
          retry with context_filter, file_filter, edge_filters, max_depth/max_seeds, or \
          token_budget if too broad; after search pass a returned key to describe, neighbors, \
@@ -55,9 +59,9 @@ pub fn tool_code_graph() -> RmcpTool {
                         "blast_radius", "hotspots", "complexity", "refactor_candidates", "cochange",
                         "churn", "coupling_hubs", "metrics_at", "dead_symbols",
                         "deprecated_callers", "touches_hot_path", "status",
-                        "snapshot", "workspaces", "capabilities", "crate_graph"
+                        "snapshot", "workspaces", "capabilities", "crate_graph", "coverage"
                     ],
-                    "description": "Graph query to perform. Start with capabilities for cheap supported-op discovery; use query_subgraph with natural-language query for a focused token-budgeted subgraph; use search when you need a key, describe/context for one key, neighbors for direct edges, and impact for bounded transitive dependents."
+                    "description": "Graph query to perform. Start with capabilities for cheap supported-op discovery; use query_subgraph with natural-language query for a focused token-budgeted subgraph; use search when you need a key, describe/context for one key, neighbors for direct edges, and impact for bounded transitive dependents. Use coverage to see which workspaces/languages are NOT indexed before trusting a 'no callers / unused / safe to remove' result."
                 },
                 "project": {
                     "type": "string",
