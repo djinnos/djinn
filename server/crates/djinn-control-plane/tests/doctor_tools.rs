@@ -20,12 +20,17 @@ mod common;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
-use djinn_control_plane::test_support::McpTestHarness;
+use djinn_control_plane::test_support::{McpTestHarness, RecordingExtensionDiagnosticsProbe};
 use djinn_core::auth_context::SESSION_USER_ID;
 use djinn_core::doctor::{
     DoctorCheck, DoctorCheckCadence, DoctorError, DoctorResult, Finding, FindingSeverity,
     ResolverSnapshot, registry,
 };
+use djinn_core::extension_diagnostics::{
+    ExtensionLoadDiagnosticV1, ExtensionLoadPhase, ExtensionLoadRemedyCode, ExtensionLoadSeverity,
+    ExtensionLoadSourceKind,
+};
+use djinn_core::paths::project_dir;
 use djinn_db::DoctorFindingRepository;
 use djinn_db::repositories::user::UserRepository;
 use serde_json::json;
@@ -183,6 +188,42 @@ async fn doctor_test_harness() -> McpTestHarness {
     let harness = McpTestHarness::new().await;
     djinn_db::test_support::ensure_doctor_findings_schema(harness.db()).await;
     harness
+}
+
+/// Build the normal dispatch harness with a recording implementation of the
+/// optional project extension probe installed.
+async fn extension_probe_harness(
+    diagnostics: Vec<ExtensionLoadDiagnosticV1>,
+) -> (McpTestHarness, Arc<RecordingExtensionDiagnosticsProbe>) {
+    let base = doctor_test_harness().await;
+    let probe = Arc::new(RecordingExtensionDiagnosticsProbe::new(diagnostics));
+    let state = base
+        .state()
+        .clone()
+        .with_extension_diagnostics_probe(probe.clone());
+    (McpTestHarness::from_state(state), probe)
+}
+
+fn probe_diagnostic(project_id: &str) -> ExtensionLoadDiagnosticV1 {
+    let mut diagnostic = ExtensionLoadDiagnosticV1::new_v1(
+        "019f6166-baec-7732-b18a-abfeb123bd55".to_owned(),
+        project_id.to_owned(),
+        None,
+        None,
+        "019f6166-baec-7732-b18a-abfeb123bd56".to_owned(),
+        ExtensionLoadSourceKind::ProjectMcp,
+        "project-search".to_owned(),
+        ExtensionLoadPhase::ToolsList,
+        ExtensionLoadSeverity::Error,
+        "tools/list returned malformed JSON".to_owned(),
+        ExtensionLoadRemedyCode::CheckServer,
+        "Check the project MCP server health.".to_owned(),
+        "2026-07-14T00:00:00Z".to_owned(),
+        "2026-07-14T00:00:01Z".to_owned(),
+        "2026-07-14T00:00:02Z".to_owned(),
+    );
+    diagnostic.occurrence_count = 3;
+    diagnostic
 }
 
 /// Create a non-admin user in the test DB and return their id.
@@ -798,4 +839,220 @@ async fn doctor_run_persists_jk7v_aligned_classifier_evidence() {
     assert_eq!(snapshot["resolver"], "resolve_liveness");
     assert_eq!(snapshot["outputs"]["verdict"], "dead");
     assert_eq!(snapshot["outputs"]["outcome"], "dead_reclaimed");
+}
+
+// ---------------------------------------------------------------------------
+// extension_load.project_probe — explicit, authorized project dispatch
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn doctor_project_probe_invokes_once_and_projects_canonical_rows() {
+    let harness = doctor_test_harness().await;
+    let project = common::create_test_project(harness.db()).await;
+    let workspace = project_dir(&project.github_owner, &project.github_repo);
+    std::fs::create_dir_all(&workspace).expect("create canonical project workspace");
+    let probe = Arc::new(RecordingExtensionDiagnosticsProbe::new(vec![
+        probe_diagnostic(&project.id),
+    ]));
+    let harness = McpTestHarness::from_state(
+        harness
+            .state()
+            .clone()
+            .with_extension_diagnostics_probe(probe.clone()),
+    );
+
+    let response = harness
+        .call_tool(
+            "doctor_run",
+            json!({
+                "check_names": ["extension_load.project_probe"],
+                "project": project.slug(),
+            }),
+        )
+        .await
+        .expect("dispatch selected project probe");
+    std::fs::remove_dir_all(&workspace).expect("remove canonical project workspace");
+
+    assert_eq!(response["ok"], true);
+    assert_eq!(response["total_findings"], 1);
+    let results = response["results"].as_array().expect("results");
+    assert_eq!(results.len(), 1, "only the explicitly selected probe runs");
+    let result = &results[0];
+    assert_eq!(result["check"]["name"], "extension_load.project_probe");
+    assert_eq!(result["ran"], true);
+    assert_eq!(
+        result["findings"],
+        json!([]),
+        "probe never creates doctor findings"
+    );
+    assert_eq!(result["extension_diagnostics"].as_array().unwrap().len(), 1);
+    let finding = &result["extension_diagnostics"][0];
+    assert_eq!(
+        finding["diagnostic_id"],
+        "019f6166-baec-7732-b18a-abfeb123bd55"
+    );
+    assert_eq!(finding["source_kind"], "project_mcp");
+    assert_eq!(finding["source_key"], "project-search");
+    assert_eq!(finding["phase"], "tools_list");
+    assert_eq!(finding["summary"], "tools/list returned malformed JSON");
+    assert_eq!(finding["remedy_code"], "check_server");
+    assert_eq!(finding["remedy"], "Check the project MCP server health.");
+    assert_eq!(finding["severity"], "error");
+    assert_eq!(finding["occurrence_count"], 3);
+    assert_eq!(
+        probe.calls(),
+        vec![
+            djinn_control_plane::test_support::ExtensionDiagnosticsProbeCall {
+                project_id: project.id,
+                canonical_workspace: workspace,
+            }
+        ],
+        "the selected project is the sole bridge invocation"
+    );
+}
+
+#[tokio::test]
+async fn doctor_project_probe_requires_admin_before_project_resolution() {
+    let (harness, probe) = extension_probe_harness(Vec::new()).await;
+    let user_id = create_non_admin_user(harness.db()).await;
+
+    let response = SESSION_USER_ID
+        .scope(Some(user_id), async {
+            harness
+                .call_tool(
+                    "doctor_run",
+                    json!({
+                        "check_names": ["extension_load.project_probe"],
+                        "project": "private-owner/does-not-exist",
+                    }),
+                )
+                .await
+        })
+        .await
+        .expect("dispatch rejected project probe");
+
+    assert_eq!(response["ok"], false);
+    assert!(response["error"].as_str().unwrap().contains("admin"));
+    assert!(
+        probe.calls().is_empty(),
+        "authorization precedes project resolution"
+    );
+}
+
+#[tokio::test]
+async fn doctor_global_runs_never_fan_out_to_project_probe() {
+    let (harness, probe) = extension_probe_harness(Vec::new()).await;
+    let project = common::create_test_project(harness.db()).await;
+
+    for args in [
+        json!({ "project": project.slug() }),
+        json!({
+            "check_names": [],
+            "project": project.slug(),
+        }),
+    ] {
+        let response = harness
+            .call_tool("doctor_run", args)
+            .await
+            .expect("global run");
+        assert_eq!(response["ok"], true);
+        assert!(
+            response["results"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|result| result["check"]["name"] != "extension_load.project_probe"),
+            "global runs do not select the project probe"
+        );
+    }
+    assert!(
+        probe.calls().is_empty(),
+        "global runs never probe any project"
+    );
+}
+
+#[tokio::test]
+async fn doctor_project_probe_reports_missing_bridge() {
+    let harness = doctor_test_harness().await;
+    let project = common::create_test_project(harness.db()).await;
+    let workspace = project_dir(&project.github_owner, &project.github_repo);
+    std::fs::create_dir_all(&workspace).expect("create canonical project workspace");
+
+    let response = harness
+        .call_tool(
+            "doctor_run",
+            json!({
+                "check_names": ["extension_load.project_probe"],
+                "project": project.id,
+            }),
+        )
+        .await
+        .expect("dispatch missing bridge");
+    std::fs::remove_dir_all(&workspace).expect("remove canonical project workspace");
+
+    assert_eq!(response["ok"], true);
+    assert_eq!(response["results"][0]["ran"], false);
+    assert!(
+        response["results"][0]["error"]
+            .as_str()
+            .unwrap()
+            .contains("not configured")
+    );
+}
+
+#[tokio::test]
+async fn doctor_project_probe_reports_missing_project() {
+    let (harness, probe) = extension_probe_harness(Vec::new()).await;
+    let response = harness
+        .call_tool(
+            "doctor_run",
+            json!({
+                "check_names": ["extension_load.project_probe"],
+                "project": "missing-owner/missing-repo",
+            }),
+        )
+        .await
+        .expect("dispatch missing project");
+
+    assert_eq!(response["ok"], true);
+    assert_eq!(response["results"][0]["ran"], false);
+    assert!(
+        response["results"][0]["error"]
+            .as_str()
+            .unwrap()
+            .contains("not found")
+    );
+    assert!(probe.calls().is_empty());
+}
+
+#[tokio::test]
+async fn doctor_project_probe_reports_missing_workspace_without_invoking_bridge() {
+    let (harness, probe) = extension_probe_harness(Vec::new()).await;
+    let project = common::create_test_project(harness.db()).await;
+    let workspace = project_dir(&project.github_owner, &project.github_repo);
+    assert!(
+        !workspace.exists(),
+        "test project workspace must not be created"
+    );
+
+    let response = harness
+        .call_tool(
+            "doctor_run",
+            json!({
+                "check_names": ["extension_load.project_probe"],
+                "project": project.id,
+            }),
+        )
+        .await
+        .expect("dispatch missing workspace");
+
+    assert_eq!(response["ok"], true);
+    assert_eq!(response["results"][0]["ran"], false);
+    assert!(
+        response["results"][0]["error"]
+            .as_str()
+            .unwrap()
+            .contains("not an existing directory")
+    );
+    assert!(probe.calls().is_empty());
 }

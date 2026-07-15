@@ -117,7 +117,30 @@ pub async fn execute_three_rung_pressure_plan(
     clock: &dyn Clock,
     root: &Path,
 ) -> ThreeRungPressureResult {
-    let mut result = ThreeRungPressureResult::default();
+    use djinn_telemetry::cache_cleanup::{
+        self as metrics, PressureMode, PressureOutcome, PressureTermination,
+    };
+    let mut result = ThreeRungPressureResult {
+        planned: plan.units.clone(),
+        projected_allocated_bytes: plan
+            .units
+            .iter()
+            .map(|unit| unit.projected_allocated_bytes)
+            .sum(),
+        ..ThreeRungPressureResult::default()
+    };
+    for unit in &plan.units {
+        metrics::increment_pressure_unit(
+            PressureMode::Delete,
+            pressure_metric_rung(unit),
+            PressureOutcome::Planned,
+        );
+        metrics::record_pressure_projected_allocated_bytes(
+            PressureMode::Delete,
+            pressure_metric_rung(unit),
+            unit.projected_allocated_bytes,
+        );
+    }
     let mut blocked = HashSet::new();
     for (index, unit) in plan.units.iter().enumerate() {
         if blocked.contains(&unit.project_id)
@@ -171,7 +194,17 @@ pub async fn execute_three_rung_pressure_plan(
             Ok(value) => value,
             Err(_) => {
                 result.remeasurement_failed = true;
+                result.failed.push(unit.clone());
+                metrics::increment_pressure_unit(
+                    PressureMode::Delete,
+                    pressure_metric_rung(unit),
+                    PressureOutcome::Failed,
+                );
                 result.retained.extend(plan.units[index..].iter().cloned());
+                metrics::increment_pressure_termination(
+                    PressureMode::Delete,
+                    PressureTermination::RemeasureFailed,
+                );
                 break;
             }
         };
@@ -182,13 +215,38 @@ pub async fn execute_three_rung_pressure_plan(
         ) {
             result.reached_high_watermark = true;
             result.retained.extend(plan.units[index..].iter().cloned());
+            metrics::increment_pressure_termination(
+                PressureMode::Delete,
+                PressureTermination::ReachedHigh,
+            );
             break;
         }
+        result.post_lock_eligible.push(unit.clone());
+        metrics::increment_pressure_unit(
+            PressureMode::Delete,
+            pressure_metric_rung(unit),
+            PressureOutcome::PostLockEligible,
+        );
         result.attempted.push(unit.clone());
+        metrics::increment_pressure_unit(
+            PressureMode::Delete,
+            pressure_metric_rung(unit),
+            PressureOutcome::Attempted,
+        );
         match remove_three_rung_target(unit, root) {
             Ok(Removal::Removed) => {
                 result.reclaimed_bytes = result.reclaimed_bytes.saturating_add(bytes);
                 result.deleted.push(unit.clone());
+                metrics::increment_pressure_unit(
+                    PressureMode::Delete,
+                    pressure_metric_rung(unit),
+                    PressureOutcome::Deleted,
+                );
+                metrics::record_pressure_reclaimed_allocated_bytes(
+                    PressureMode::Delete,
+                    pressure_metric_rung(unit),
+                    bytes,
+                );
                 match capacity.capacity(root) {
                     Ok(post)
                         if available_below_ratio(
@@ -201,13 +259,27 @@ pub async fn execute_three_rung_pressure_plan(
                         result
                             .retained
                             .extend(plan.units[index + 1..].iter().cloned());
+                        metrics::increment_pressure_termination(
+                            PressureMode::Delete,
+                            PressureTermination::ReachedHigh,
+                        );
                         break;
                     }
                     Err(_) => {
                         result.remeasurement_failed = true;
+                        result.failed.push(unit.clone());
+                        metrics::increment_pressure_unit(
+                            PressureMode::Delete,
+                            pressure_metric_rung(unit),
+                            PressureOutcome::Failed,
+                        );
                         result
                             .retained
                             .extend(plan.units[index + 1..].iter().cloned());
+                        metrics::increment_pressure_termination(
+                            PressureMode::Delete,
+                            PressureTermination::RemeasureFailed,
+                        );
                         break;
                     }
                 }
@@ -221,18 +293,41 @@ pub async fn execute_three_rung_pressure_plan(
             Err(()) => {
                 blocked.insert(unit.project_id.clone());
                 result.retained.push(unit.clone());
+                result.failed.push(unit.clone());
+                metrics::increment_pressure_unit(
+                    PressureMode::Delete,
+                    pressure_metric_rung(unit),
+                    PressureOutcome::Failed,
+                );
             }
         }
         drop(guard);
+    }
+    for unit in &result.retained {
+        metrics::increment_pressure_unit(
+            PressureMode::Delete,
+            pressure_metric_rung(unit),
+            PressureOutcome::Retained,
+        );
+    }
+    if !result.reached_high_watermark && !result.remeasurement_failed {
+        metrics::increment_pressure_termination(
+            PressureMode::Delete,
+            PressureTermination::Completed,
+        );
     }
     result
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct ThreeRungPressureResult {
+    pub planned: Vec<PressurePlanUnit>,
+    pub post_lock_eligible: Vec<PressurePlanUnit>,
     pub attempted: Vec<PressurePlanUnit>,
     pub deleted: Vec<PressurePlanUnit>,
     pub retained: Vec<PressurePlanUnit>,
+    pub failed: Vec<PressurePlanUnit>,
+    pub projected_allocated_bytes: u64,
     pub reclaimed_bytes: u64,
     pub reached_high_watermark: bool,
     pub remeasurement_failed: bool,
@@ -379,7 +474,28 @@ fn remove_three_rung_target(unit: &PressurePlanUnit, root: &Path) -> Result<Remo
 pub fn consume_three_rung_pressure_plan_dry_run(
     plan: &ThreeRungPressurePlan,
 ) -> Vec<PressurePlanUnit> {
+    use djinn_telemetry::cache_cleanup::{self as metrics, PressureMode, PressureOutcome};
+    for unit in &plan.units {
+        metrics::increment_pressure_unit(
+            PressureMode::DryRun,
+            pressure_metric_rung(unit),
+            PressureOutcome::Planned,
+        );
+        metrics::record_pressure_projected_allocated_bytes(
+            PressureMode::DryRun,
+            pressure_metric_rung(unit),
+            unit.projected_allocated_bytes,
+        );
+    }
     plan.units.clone()
+}
+
+fn pressure_metric_rung(unit: &PressurePlanUnit) -> djinn_telemetry::cache_cleanup::PressureRung {
+    match unit.rung {
+        PressureRung::Incremental => djinn_telemetry::cache_cleanup::PressureRung::Incremental,
+        PressureRung::StaleProfile => djinn_telemetry::cache_cleanup::PressureRung::Profile,
+        PressureRung::WholeBase => djinn_telemetry::cache_cleanup::PressureRung::Base,
+    }
 }
 
 pub const CARGO_WARM_BASE_ROOT: &str = "/cache/cargo-target";
