@@ -1,6 +1,7 @@
 //! Deterministic retention-boundary tests for retrieval traces.
 
 use super::*;
+use crate::error::DbError;
 
 #[test]
 fn minimum_retrieval_trace_retention_window_is_thirty_days() {
@@ -124,7 +125,13 @@ async fn pruning_protects_boundary_and_retained_disabled_outcomes() {
         )
         .await
         .unwrap_err();
-    assert!(format!("{malformed_reference}").contains("reference_time must be an ISO-8601 UTC"));
+    match malformed_reference {
+        DbError::InvalidData(message) => assert!(
+            message.contains("reference_time must be a valid ISO-8601 UTC timestamp ending in Z"),
+            "unexpected diagnostic: {message}"
+        ),
+        other => panic!("expected invalid-data error, got {other:?}"),
+    }
 
     let pruned = repo
         .prune_older_than(
