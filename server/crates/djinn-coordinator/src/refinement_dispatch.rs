@@ -613,9 +613,26 @@ impl CoordinatorActor {
             );
         }
 
-        let (agent_type, model_id) = self
+        let Some((agent_type, model_id)) = self
             .resolve_refinement_dispatch_params(phase, diverse_refinement, Some(user_id))
+            .await
+        else {
+            tracing::warn!(
+                proposal_id = %proposal_id,
+                phase = ?phase,
+                user_id = %user_id,
+                "Refinement dispatch FAIL-CLOSED: durable owner has no eligible credential-backed model; no task or spawn will be created"
+            );
+            self.terminate_refinement(
+                proposal_id,
+                StopReason::AgentFailure {
+                    role: format!("{:?}", phase),
+                    error: "no eligible credential-backed model for refinement owner".into(),
+                },
+            )
             .await;
+            return;
+        };
 
         // ── Step 2: Per-user/model cap admission (check + reserve atomically) ──
         //

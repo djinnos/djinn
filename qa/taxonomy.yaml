@@ -36,3 +36,39 @@ coverage:
   - id: reaper.slow-vs-crashed-discrimination
     subsystem: reaper
     required_profiles: [smoke-ci]
+  - id: agent-loop.empty-turn-detection
+    subsystem: provider
+    required_profiles: [smoke-ci]
+  - id: agent-loop.loop-metadata-freshness
+    subsystem: provider
+    required_profiles: [smoke-ci]
+  - id: task-lifecycle.park-reason-attribution
+    subsystem: task-state-machine
+    required_profiles: [smoke-ci]
+  - id: task-lifecycle.park-event-causality
+    subsystem: task-state-machine
+    required_profiles: [smoke-ci]
+  - id: dispatch.race-test-non-vacuous
+    subsystem: dispatch
+    required_profiles: [smoke-ci]
+  - id: dispatch.exhaustion-terminality
+    subsystem: dispatch
+    required_profiles: [smoke-ci]
+  - id: dispatch.deferred-health
+    subsystem: dispatch
+    required_profiles: [smoke-ci]
+  - id: task-lifecycle.terminal-side-effects
+    subsystem: task-state-machine
+    required_profiles: [smoke-ci]
+  - id: telemetry.actor-metrics-export
+    subsystem: liveness
+    required_profiles: [smoke-ci]
+  - id: agent-loop.metrics-integration
+    subsystem: provider
+    required_profiles: [smoke-ci]
+  - id: test-infra.db-template-clone-lock
+    subsystem: reaper
+    required_profiles: [smoke-ci]
+  - id: test-infra.deterministic-db-isolation
+    subsystem: reaper
+    required_profiles: [smoke-ci]

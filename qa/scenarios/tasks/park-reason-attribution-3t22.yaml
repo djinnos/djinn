@@ -1,0 +1,12 @@
+version: 1
+scenarios:
+  - id: tasks.park_reason_attribution_3t22
+    version: 1
+    enabled: true
+    profiles: [smoke-ci]
+    sources: [{kind: incident, id: "Park misattribution 3t22"}]
+    primary_coverage: task-lifecycle.park-reason-attribution
+    secondary_coverage: [task-lifecycle.park-event-causality]
+    execution: {kind: cargo-package, package: djinn-coordinator}
+    isolation: {database: isolated, providers: isolated, channel: isolated}
+    watch_paths: [server/crates/djinn-coordinator/src/dispatch/park_reason_tests.rs]
