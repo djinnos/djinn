@@ -1,3 +1,4 @@
+// djinn:allow-oversize — outcome processing and durable-owner recovery share this module.
 // Outcome processing, lifecycle management, and helper methods for the
 // refinement tribunal dispatch loop. Split from `refinement_dispatch.rs`.
 
