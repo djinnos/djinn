@@ -24,8 +24,6 @@ pub mod cochange;
 pub mod communities;
 pub mod complexity;
 pub mod coupling_index;
-#[cfg(test)]
-mod dev_fixture_dump;
 pub mod db_access;
 pub mod entry_points;
 pub mod galaxy_layout;
