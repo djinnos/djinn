@@ -1142,6 +1142,9 @@ fn terminal_extraction_context(report: &TaskRunReport) -> TerminalExtractionCont
         | TaskRunOutcome::Closed { .. }
         | TaskRunOutcome::WorkerSubmitted => TerminalExtractionOutcome::Completed,
         TaskRunOutcome::Parked { reason, .. } => TerminalExtractionOutcome::Parked {
+            // Park reasons are already terminal classifications (for example,
+            // `ci_failure` versus `acceptance_criteria`), so preserve them
+            // verbatim rather than collapsing distinct failures.
             classification: reason.clone(),
             reason: Some(reason.clone()),
         },
@@ -1170,6 +1173,10 @@ fn terminal_extraction_context(report: &TaskRunReport) -> TerminalExtractionCont
             reason: Some(reason.clone()),
         },
     };
+
+    // TaskRunReport has no typed review-decision field. In particular, a park
+    // reason such as `acceptance_criteria` must not be promoted to a synthetic
+    // reviewer rejection; only a future explicit terminal verdict may do so.
     TerminalExtractionContext {
         outcome,
         review_decision: None,
@@ -1591,6 +1598,65 @@ mod tests {
             outcome,
             stages_completed: stages,
         }
+    }
+
+    #[test]
+    fn terminal_extraction_context_distinguishes_completion_ci_and_ac_rejection() {
+        let completed = terminal_extraction_context(&report(
+            "completed-run",
+            vec![RoleKind::Worker],
+            TaskRunOutcome::PrOpened {
+                url: "https://example.test/pr/1".into(),
+                sha: "deadbeef".into(),
+            },
+        ));
+        assert_eq!(completed.outcome, TerminalExtractionOutcome::Completed);
+        assert_eq!(completed.review_decision, None);
+
+        let ci_failure = terminal_extraction_context(&report(
+            "ci-run",
+            vec![RoleKind::Worker],
+            TaskRunOutcome::Failed {
+                stage: "ci".into(),
+                reason: "tests failed".into(),
+                provider_failure: None,
+                error_class: None,
+                hint: None,
+                body_excerpt: None,
+            },
+        ));
+        assert_eq!(
+            ci_failure.outcome,
+            TerminalExtractionOutcome::Failed {
+                classification: "ci".to_string(),
+                reason: Some("tests failed".to_string()),
+            }
+        );
+        assert_eq!(ci_failure.review_decision, None);
+
+        let ac_rejection = terminal_extraction_context(&report(
+            "ac-run",
+            vec![RoleKind::Reviewer],
+            TaskRunOutcome::Parked {
+                reason: "acceptance_criteria".into(),
+                wind_down_ignored: false,
+                session_id: "review-session".into(),
+                tokens_in: 100,
+                tokens_out: 10,
+            },
+        ));
+        assert_eq!(
+            ac_rejection.outcome,
+            TerminalExtractionOutcome::Parked {
+                classification: "acceptance_criteria".to_string(),
+                reason: Some("acceptance_criteria".to_string()),
+            }
+        );
+        assert_eq!(
+            ac_rejection.review_decision, None,
+            "the report does not carry a review verdict, so mapping must not invent one"
+        );
+        assert_ne!(ci_failure.outcome, ac_rejection.outcome);
     }
     #[test]
     fn terminal_extraction_context_preserves_park_reason_without_review_inference() {
