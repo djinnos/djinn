@@ -1119,31 +1119,13 @@ pub async fn capture_llm_extraction_replay(
     let mut observations = Vec::with_capacity(notes.len());
     for (note_type, note) in notes {
         let quality_passed = !assess_note_quality(note_type, &note.content).is_underspecified;
-        let duplicate_of = if quality_passed && !candidates.is_empty() {
-            let candidate_abstract = summarize_candidate_note(&note);
-            let response = complete(
-                provider,
-                CompletionRequest {
-                    system: NOVELTY_SYSTEM_PROMPT.to_string(),
-                    prompt: build_novelty_prompt(note_type, &note, &candidate_abstract, candidates),
-                    max_tokens: 300,
-                },
+        let duplicate_of = if quality_passed {
+            // Replay takes the same malformed-novelty fallback as persisted
+            // extraction while stopping before all note mutations.
+            novelty_with_unknown_fallback(
+                novelty_decision_for_candidates(provider, note_type, &note, candidates).await,
             )
-            .await
-            .map_err(|error| format!("semantic compare failed: {error}"))?;
-            let decision: NoveltyDecision = serde_json::from_str(response.text.trim())
-                .map_err(|error| format!("invalid novelty decision json: {error}"))?;
-            match decision.decision {
-                NoveltyDecisionKind::Novel => None,
-                NoveltyDecisionKind::AlreadyKnown => Some(
-                    decision
-                        .existing_note_id
-                        .filter(|id| candidates.iter().any(|candidate| candidate.id == *id))
-                        .ok_or_else(|| {
-                            "already_known decision missing valid existing_note_id".to_string()
-                        })?,
-                ),
-            }
+            .existing_note_id
         } else {
             None
         };
@@ -1817,11 +1799,7 @@ async fn process_extracted_note(
                 error = %e,
                 "llm_extraction: novelty check failed; evaluating with unknown novelty"
             );
-            NoveltyCheckResult {
-                assessment: NoveltyAssessment::Unknown,
-                existing_note_id: None,
-                selected_candidate: None,
-            }
+            novelty_with_unknown_fallback(Err(e))
         }
     };
     let assessment = assess_quality_gate(note_type, note, &novelty);
@@ -2135,18 +2113,38 @@ async fn novelty_decision(
     let candidates = lookup_candidates(extraction_context, folder, note_type, &candidate_abstract)
         .await
         .map_err(|e| format!("candidate lookup failed: {e}"))?;
-    if candidates.is_empty() {
-        return Ok(NoveltyCheckResult {
-            assessment: NoveltyAssessment::Novel,
-            existing_note_id: None,
-            selected_candidate: None,
-        });
+    let result =
+        novelty_decision_for_candidates(extraction_context.provider, note_type, note, &candidates).await?;
+    if let Some(existing_note_id) = result.existing_note_id.as_deref() {
+        tracing::debug!(
+            session_id = %extraction_context.session_id,
+            note_type = %note_type,
+            title = %note.title,
+            existing_note_id = %existing_note_id,
+            "llm_extraction: semantic duplicate decision returned already_known"
+        );
     }
+    Ok(result)
+}
+
+/// Execute the production novelty request and validate its response against the
+/// bounded candidate set. Persisted extraction and replay share this decision
+/// path so their prompt, JSON handling, and candidate-ID validation match.
+async fn novelty_decision_for_candidates(
+    provider: &dyn LlmProvider,
+    note_type: &str,
+    note: &ExtractedNote,
+    candidates: &[djinn_db::NoteDedupCandidate],
+) -> Result<NoveltyCheckResult, String> {
+    if candidates.is_empty() {
+        return Ok(novelty_result(NoveltyAssessment::Novel));
+    }
+    let candidate_abstract = summarize_candidate_note(note);
     let response = complete(
-        extraction_context.provider,
+        provider,
         CompletionRequest {
             system: NOVELTY_SYSTEM_PROMPT.to_string(),
-            prompt: build_novelty_prompt(note_type, note, &candidate_abstract, &candidates),
+            prompt: build_novelty_prompt(note_type, note, &candidate_abstract, candidates),
             max_tokens: 300,
         },
     )
@@ -2155,34 +2153,36 @@ async fn novelty_decision(
     let decision: NoveltyDecision = serde_json::from_str(response.text.trim())
         .map_err(|e| format!("invalid novelty decision json: {e}"))?;
     match decision.decision {
-        NoveltyDecisionKind::Novel => Ok(NoveltyCheckResult {
-            assessment: NoveltyAssessment::Novel,
-            existing_note_id: None,
-            selected_candidate: None,
-        }),
+        NoveltyDecisionKind::Novel => Ok(novelty_result(NoveltyAssessment::Novel)),
         NoveltyDecisionKind::AlreadyKnown => {
             let existing_note_id = decision
                 .existing_note_id
                 .filter(|id| candidates.iter().any(|candidate| candidate.id == *id))
-                .ok_or_else(|| {
-                    "already_known decision missing valid existing_note_id".to_string()
-                })?;
-            tracing::debug!(
-                session_id = %extraction_context.session_id,
-                note_type = %note_type,
-                title = %note.title,
-                existing_note_id = %existing_note_id,
-                "llm_extraction: semantic duplicate decision returned already_known"
-            );
+                .ok_or_else(|| "already_known decision missing valid existing_note_id".to_string())?;
             Ok(NoveltyCheckResult {
                 assessment: NoveltyAssessment::Duplicate,
                 existing_note_id: Some(existing_note_id.clone()),
                 selected_candidate: candidates
-                    .into_iter()
-                    .find(|candidate| candidate.id == existing_note_id),
+                    .iter()
+                    .find(|candidate| candidate.id == existing_note_id)
+                    .cloned(),
             })
         }
     }
+}
+
+fn novelty_result(assessment: NoveltyAssessment) -> NoveltyCheckResult {
+    NoveltyCheckResult {
+        assessment,
+        existing_note_id: None,
+        selected_candidate: None,
+    }
+}
+
+/// Preserve the production outcome for unavailable or invalid novelty results:
+/// continue quality/outcome evaluation with unknown novelty.
+fn novelty_with_unknown_fallback(result: Result<NoveltyCheckResult, String>) -> NoveltyCheckResult {
+    result.unwrap_or_else(|_| novelty_result(NoveltyAssessment::Unknown))
 }
 
 fn assess_quality_gate(
@@ -4540,5 +4540,58 @@ mod evidence_merge_regression_tests {
                 .iter()
                 .any(|op| op.mutation.event_kind == NoteRevisionEventKind::Updated)
         );
+    }
+
+    #[tokio::test]
+    async fn replay_capture_uses_production_quality_dedup_and_unknown_fallback_without_sink() {
+        let extracted = serde_json::json!({
+            "cases": [{
+                "title": test_extracted_case().title,
+                "content": test_extracted_case().content,
+            }],
+            "patterns": [],
+            "pitfalls": [],
+        })
+        .to_string();
+
+        let duplicate_provider = ScriptedProvider::new(vec![
+            r#"{"decision":"already_known","existing_note_id":"existing-note-1"}"#.to_string(),
+        ]);
+        let duplicate = capture_llm_extraction_replay(
+            "duplicate".to_string(),
+            &extracted,
+            &duplicate_provider,
+            &[test_candidate()],
+        )
+        .await
+        .expect("capture duplicate replay");
+        assert!(duplicate[0].adr_054_quality_passed);
+        assert_eq!(duplicate[0].duplicate_of.as_deref(), Some("existing-note-1"));
+
+        // Invalid novelty JSON has the same Unknown => non-duplicate fallback
+        // as `process_extracted_note`; capture has no repository/sink argument,
+        // so this assertion also exercises the non-persisting seam.
+        let malformed_provider = ScriptedProvider::new(vec!["not-json".to_string()]);
+        let malformed = capture_llm_extraction_replay(
+            "malformed".to_string(),
+            &extracted,
+            &malformed_provider,
+            &[test_candidate()],
+        )
+        .await
+        .expect("capture malformed novelty replay");
+        assert!(malformed[0].adr_054_quality_passed);
+        assert_eq!(malformed[0].duplicate_of, None);
+
+        let underspecified = r#"{"cases":[{"title":"temporary","content":"temporary task note"}],"patterns":[],"pitfalls":[]}"#;
+        let quality = capture_llm_extraction_replay(
+            "quality".to_string(),
+            underspecified,
+            &ScriptedProvider::new(vec![]),
+            &[],
+        )
+        .await
+        .expect("capture quality replay");
+        assert!(!quality[0].adr_054_quality_passed);
     }
 }
