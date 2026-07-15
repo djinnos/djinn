@@ -85,7 +85,7 @@ pub(super) async fn create_note(
         .unwrap_or_else(|| "[]".to_string());
 
     let Some((attribution, provenance)) = trusted_revision_context() else {
-        return MemoryNoteResponse::error("authenticated revision caller required");
+        return MemoryNoteResponse::error("authenticated revision caller required".to_owned());
     };
     let create_result = repo
         .mutate_with_revision(NoteRevisionMutation {

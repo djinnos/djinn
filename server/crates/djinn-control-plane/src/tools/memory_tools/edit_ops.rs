@@ -1,5 +1,8 @@
 use super::*;
 
+use djinn_db::{
+    NoteRevisionDesiredState, NoteRevisionEventKind, NoteRevisionMutation, NoteRevisionReason,
+};
 use rmcp::{Json, handler::server::wrapper::Parameters};
 
 pub(super) async fn memory_edit(
@@ -16,6 +19,12 @@ pub(super) async fn memory_edit(
     let repo = NoteRepository::new(server.state.db().clone(), server.state.event_bus())
         .with_embedding_provider(server.state.embedding_provider())
         .with_vector_store(server.state.vector_store());
+
+    let Some((attribution, provenance)) = super::write_services::trusted_revision_context() else {
+        return Json(MemoryNoteResponse::error(
+            "authenticated revision caller required".to_owned(),
+        ));
+    };
 
     let note = match resolve_note_by_identifier(&repo, &project_id, &p.identifier).await {
         Some(n) => n,
@@ -55,10 +64,22 @@ pub(super) async fn memory_edit(
     };
 
     match repo
-        .update(&note.id, &note.title, &new_content, &note.tags)
+        .mutate_with_revision(NoteRevisionMutation {
+            project_id,
+            note_id: Some(note.id.clone()),
+            event_kind: NoteRevisionEventKind::Updated,
+            desired: NoteRevisionDesiredState::Existing {
+                content: new_content,
+                confidence: note.confidence,
+            },
+            attribution,
+            provenance,
+            reason: NoteRevisionReason::new(p.reason).expect("validated MCP mutation reason"),
+        })
         .await
     {
-        Ok(updated) => {
+        Ok(result) => {
+            let updated = result.note.expect("existing mutation returns note");
             let updated = match p.retrieval_anchor.as_deref() {
                 Some(anchor) => match repo
                     .update_retrieval_anchor(&updated.id, Some(anchor))
