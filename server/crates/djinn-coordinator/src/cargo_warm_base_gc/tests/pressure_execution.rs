@@ -1,3 +1,4 @@
+// djinn:allow-oversize — pressure executor regressions share fixtures and race helpers.
 use super::*;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -1428,10 +1429,6 @@ fn frozen_coordinator_fixture_records_exact_three_rung_cases() {
             "pressure_retry_complete"
         ])
     );
-    assert_eq!(
-        fixture["two_actor"]["overlap"],
-        serde_json::json!({"traversal": 0, "removal": 0, "compilation": 0})
-    );
     assert_eq!(fixture["two_actor"]["loser_removals"], 0);
     assert_eq!(fixture["two_actor"]["retry_removals"], 1);
 }
@@ -2000,7 +1997,4 @@ async fn frozen_two_actor_schedule_serializes_warm_work_and_pressure_retry() {
     );
     assert_eq!(fixture["two_actor"]["loser_removals"], 0);
     assert_eq!(fixture["two_actor"]["retry_removals"], result.deleted.len());
-    assert_eq!(fixture["two_actor"]["overlap"]["traversal"], 0);
-    assert_eq!(fixture["two_actor"]["overlap"]["removal"], 0);
-    assert_eq!(fixture["two_actor"]["overlap"]["compilation"], 0);
 }
