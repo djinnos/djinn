@@ -67,19 +67,38 @@ run_check() {
     "$@"
 }
 
+run_cargo_filtered_check() {
+    # Cargo treats a filter that selects no tests as success. Every focused
+    # Rust subcheck must prove it ran at least one test, not merely built.
+    local cargo_log="$scratch/cargo-filtered-$RANDOM.log"
+    local status
+    set +e
+    (cd server && cargo test "$@") >"$cargo_log" 2>&1
+    status=$?
+    set -e
+    cat "$cargo_log"
+    if [[ $status -ne 0 ]]; then
+        return "$status"
+    fi
+    grep -Eq 'test result: ok\. [1-9][0-9]* passed;' "$cargo_log" || {
+        printf 'FAIL: focused Cargo test selected no passing tests: %s\n' "$*" >&2
+        return 1
+    }
+}
+
 run_check "exact Helm cache-cleanup render contract" bash deploy/helm/djinn/tests/cache-cleanup-render.sh
 run_check "three-rung planner/executor guard, path, capacity, and cold-rebuild fixtures" \
-    bash -c 'cd server && cargo test -p djinn-coordinator --lib frozen_'
+    run_cargo_filtered_check -p djinn-coordinator --lib frozen_
 run_check "exact pressure telemetry fixture" \
-    bash -c 'cd server && cargo test -p djinn-coordinator --lib pressure_metrics_match_the_bounded_fixture_for_execution_boundaries'
+    run_cargo_filtered_check -p djinn-coordinator --lib pressure_metrics_match_the_bounded_fixture_for_execution_boundaries
 run_check "real warm/pressure shared-lock two-actor schedule" \
-    bash -c 'cd server && cargo test -p djinn-coordinator --lib frozen_two_actor_schedule_serializes_warm_work_and_pressure_retry'
+    run_cargo_filtered_check -p djinn-coordinator --lib frozen_two_actor_schedule_serializes_warm_work_and_pressure_retry
 run_check "cargo-target-runs accounting and conjunctive joint-cap fixtures" \
-    bash -c 'cd server && cargo test -p djinn-core --test cargo_target_runs_fixtures cargo_target_runs_fixture_contract'
+    run_cargo_filtered_check -p djinn-core --test cargo_target_runs_fixtures cargo_target_runs_fixture_contract
 run_check "cargo-target-runs Linux lstat fixture requirement" \
-    bash -c 'cd server && cargo test -p djinn-core --test cargo_target_runs_linux_required cargo_target_runs_fixture_contract_requires_linux_lstat_semantics'
+    run_cargo_filtered_check -p djinn-core --test cargo_target_runs_linux_required cargo_target_runs_fixture_contract_requires_linux_lstat_semantics
 run_check "direct-binary unset and invalid mode fail-safe" \
-    bash -c 'cd server && cargo test -p djinn-coordinator --lib cache_cleanup_mode_from_env_value_dry_run_fallback'
+    run_cargo_filtered_check -p djinn-coordinator --lib cache_cleanup_mode_from_env_value_dry_run_fallback
 
 run_check "deterministic rollout and runbook contract" python3 - <<'PY'
 from pathlib import Path
