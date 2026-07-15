@@ -5,8 +5,9 @@
  * Sigma canvas, lens toolbar, and symbol detail panel were removed with
  * it (cutover over strangler); Cmd-K hybrid search stays and flies the
  * galaxy camera to its hits via the shared codeGraphStore citation /
- * tool-highlight sets. Project selection lives in the shared chrome;
- * workspace + test filters live inside the galaxy HUD.
+ * tool-highlight sets. Project selection, workspace + test filters, and
+ * the hotspot panel all live inside the galaxy HUD (the chrome selector
+ * is suppressed for this route — see routeScopes.ts).
  */
 
 import { HugeiconsIcon } from "@hugeicons/react";

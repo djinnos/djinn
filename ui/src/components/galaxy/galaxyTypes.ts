@@ -3,9 +3,8 @@
  *
  * Deliberately generic: nothing here knows about SCIP, symbols, or memory
  * notes. The code graph feeds it through an adapter (positions from the
- * warm-time server layout, degree from edge counts, heat from cognitive-
- * complexity percentiles); the memory graph can feed the same shape with
- * heat = recency/confidence. Keeping the model this small is what lets one
+ * warm-time server layout, degree from edge counts); the memory graph can
+ * feed the same shape. Keeping the model this small is what lets one
  * renderer serve both.
  */
 
@@ -30,17 +29,6 @@ export interface GalaxyNode {
    * clusters their grape-bunch texture instead of a uniform cloud.
    */
   parent?: string;
-  /**
-   * 0..1 heat for the alternate color mode — cognitive-complexity
-   * percentile for code, recency/decay for memories.
-   */
-  heat?: number;
-  /**
-   * Whether this node participates in the heat color mode. Ineligible
-   * nodes (files, folders, non-function symbols) render muted so they
-   * don't dominate the eye.
-   */
-  heatEligible?: boolean;
   /** Test file/symbol — drives the hide-tests toggle. */
   isTest?: boolean;
   /** Workspace slug (multi-workspace projects) — drives the workspace filter. */
@@ -68,8 +56,6 @@ export interface GalaxyData {
    */
   serverPositioned?: boolean;
 }
-
-export type GalaxyColorMode = "group" | "heat";
 
 /**
  * User display multipliers layered on top of the automatic density
