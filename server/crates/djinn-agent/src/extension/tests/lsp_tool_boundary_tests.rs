@@ -26,6 +26,7 @@ async fn lsp_tool(
         &crate::extension::ToolCancellation::never(),
     )
     .await
+    .into_test_result()
 }
 
 #[tokio::test]

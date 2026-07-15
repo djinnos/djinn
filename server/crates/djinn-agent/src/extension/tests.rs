@@ -14,7 +14,49 @@ use djinn_db::NoteRepository;
 use std::path::{Path, PathBuf};
 use tokio_util::sync::CancellationToken;
 
+/// Test-only adapter for legacy assertions while production dispatch carries
+/// typed outcomes to the slot renderer.
+pub(crate) trait ToolCallOutcomeTestExt {
+    fn into_test_result(self) -> Result<serde_json::Value, String>;
+
+    fn expect(self, message: &str) -> serde_json::Value
+    where
+        Self: Sized,
+    {
+        self.into_test_result().expect(message)
+    }
+
+    fn expect_err(self, message: &str) -> String
+    where
+        Self: Sized,
+    {
+        self.into_test_result().expect_err(message)
+    }
+}
+
+impl ToolCallOutcomeTestExt for djinn_core::tool_call::ToolCallOutcome {
+    fn into_test_result(self) -> Result<serde_json::Value, String> {
+        match self {
+            djinn_core::tool_call::ToolCallOutcome::Success { value, .. } => Ok(value),
+            djinn_core::tool_call::ToolCallOutcome::Failure(
+                djinn_core::tool_call::ToolCallFailure::Message(message),
+            ) => Err(message),
+            djinn_core::tool_call::ToolCallOutcome::Failure(
+                djinn_core::tool_call::ToolCallFailure::Structured {
+                    code,
+                    message,
+                    data,
+                },
+            ) => Err(format!(
+                "{code:?}: {message}: {}",
+                serde_json::to_string(&data).expect("compatibility metadata serializes")
+            )),
+        }
+    }
+}
+
 mod code_graph_tests;
+mod compatibility_fallback_tests;
 mod edit_dispatch_tests;
 mod epic_extension_tests;
 mod evidence_spike_dispatch_tests;
