@@ -29,6 +29,7 @@ use std::collections::{HashMap, HashSet};
 use djinn_core::message::{ContentBlock, Message, Role};
 use serde::{Deserialize, Serialize};
 
+use crate::TerminalExtractionContext;
 use crate::host::SlotContext;
 
 /// Server-side post-task-run knowledge extraction (Phase 2.2 wiring).
@@ -43,6 +44,7 @@ use crate::host::SlotContext;
 pub async fn run_post_session_extraction(
     task_id: String,
     task_run_id: String,
+    terminal_context: TerminalExtractionContext,
     app_state: SlotContext,
 ) {
     let session_repo =
@@ -90,8 +92,13 @@ pub async fn run_post_session_extraction(
         if let Some(taxonomy) =
             run_structural_extraction(session.id.clone(), messages, app_state.clone()).await
         {
-            super::llm_extraction::run_llm_extraction(session.id, taxonomy, app_state.clone())
-                .await;
+            super::llm_extraction::run_llm_extraction_with_terminal_context(
+                session.id,
+                taxonomy,
+                app_state.clone(),
+                terminal_context.clone(),
+            )
+            .await;
         }
     }
 }
@@ -136,10 +143,23 @@ pub async fn run_extraction_backfill(app_state: SlotContext) {
             progress = format!("{}/{}", idx + 1, total),
             "extraction_backfill: extracting task-run"
         );
-        run_post_session_extraction(candidate.task_id, candidate.task_run_id, app_state.clone())
-            .await;
+        // A completed-row selector proves only that this historical database
+        // record was completed; it is not the authoritative terminal report.
+        // Preserve that uncertainty instead of inventing a success verdict.
+        run_post_session_extraction(
+            candidate.task_id,
+            candidate.task_run_id,
+            backfill_terminal_context(),
+            app_state.clone(),
+        )
+        .await;
     }
     tracing::info!(task_runs = total, "extraction_backfill: sweep complete");
+}
+
+/// Compatibility policy for backfilled runs that lack an authoritative terminal report.
+fn backfill_terminal_context() -> TerminalExtractionContext {
+    TerminalExtractionContext::unknown_historical()
 }
 
 /// Aggregated event counts extracted from a completed session's tool log.
@@ -967,6 +987,7 @@ pub fn derive_scope_paths(file_paths: &[String], project_root: &str) -> Vec<Stri
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::TerminalExtractionOutcome;
     use djinn_core::message::{ContentBlock, Message};
     use djinn_db::{
         CreateSessionParams, EpicCreateInput, EpicRepository, MemoryEntityKind, MemoryEntityRef,
@@ -974,6 +995,15 @@ mod tests {
         SessionRepository, TaskRepository,
     };
     use tokio_util::sync::CancellationToken;
+
+    #[test]
+    fn backfill_uses_unknown_historical_terminal_context() {
+        assert_eq!(
+            backfill_terminal_context().outcome,
+            TerminalExtractionOutcome::UnknownHistorical
+        );
+    }
+
     fn tool_use(name: &str, input: serde_json::Value) -> Message {
         Message {
             role: Role::Assistant,
