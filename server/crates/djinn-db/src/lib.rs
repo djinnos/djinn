@@ -12,7 +12,7 @@ mod template_bootstrap;
 pub mod test_support {
     pub use crate::repositories::test_support::{
         HousekeepingFixture, HousekeepingFixtureExpectedCounts, HousekeepingFixtureProject,
-        UsageTestSessionSeed, UsageTestTaskSeed, add_blocker_edge,
+        UsageTestSessionSeed, UsageTestTaskSeed, add_blocker_edge, delete_session_row,
         backdate_task_attempt_created_at, backdate_task_updated_at,
         build_multi_project_housekeeping_fixture, close_task_at,
         corrupt_credential_encrypted_value, drop_table_cascade_for_test, drop_table_for_test,
