@@ -1157,10 +1157,15 @@ impl CoordinatorActor {
             CoordinatorMessage::DemandProposalRefinementRound {
                 proposal_id,
                 current_revision_seq,
+                owner_user_id,
                 reply,
             } => {
                 let result = self
-                    .handle_demand_proposal_refinement_round(&proposal_id, current_revision_seq)
+                    .handle_demand_proposal_refinement_round(
+                        &proposal_id,
+                        current_revision_seq,
+                        owner_user_id,
+                    )
                     .await;
                 let _ = reply.send(result);
             }
@@ -1196,15 +1201,18 @@ impl CoordinatorActor {
             ));
         }
 
+        let owner_user_id = owner_user_id.filter(|id| !id.trim().is_empty()).ok_or_else(|| {
+            "effective_creator_unavailable: refinement owner could not be resolved".to_string()
+        })?;
         let state = RefinementLoopState::new(proposal_id, current_revision_seq)
-            .with_attributed_user(owner_user_id.clone());
+            .with_attributed_user(Some(owner_user_id.clone()));
         self.active_refinements
             .insert(proposal_id.to_string(), state);
 
         tracing::info!(
             proposal_id = %proposal_id,
             current_revision_seq,
-            owner_user_id = ?owner_user_id,
+            owner_user_id = %owner_user_id,
             "CoordinatorActor: started proposal refinement"
         );
 
@@ -1219,6 +1227,7 @@ impl CoordinatorActor {
         &mut self,
         proposal_id: &str,
         current_revision_seq: i32,
+        owner_user_id: Option<String>,
     ) -> Result<(), String> {
         use super::refinement::RefinementLoopState;
 
@@ -1231,13 +1240,18 @@ impl CoordinatorActor {
             ));
         }
 
-        let state = RefinementLoopState::new(proposal_id, current_revision_seq);
+        let owner_user_id = owner_user_id.filter(|id| !id.trim().is_empty()).ok_or_else(|| {
+            "effective_creator_unavailable: refinement owner could not be resolved".to_string()
+        })?;
+        let state = RefinementLoopState::new(proposal_id, current_revision_seq)
+            .with_attributed_user(Some(owner_user_id.clone()));
         self.active_refinements
             .insert(proposal_id.to_string(), state);
 
         tracing::info!(
             proposal_id = %proposal_id,
             current_revision_seq,
+            owner_user_id = %owner_user_id,
             "CoordinatorActor: demanded another refinement round"
         );
 
@@ -2180,7 +2194,7 @@ mod tests {
             .handle_message(CoordinatorMessage::StartProposalRefinement {
                 proposal_id: "p-1".to_string(),
                 current_revision_seq: 0,
-                owner_user_id: None,
+                owner_user_id: Some("test-owner".to_string()),
                 reply: reply_tx,
             })
             .await;
@@ -2200,7 +2214,7 @@ mod tests {
             .handle_message(CoordinatorMessage::StartProposalRefinement {
                 proposal_id: "p-dup".to_string(),
                 current_revision_seq: 1,
-                owner_user_id: None,
+                owner_user_id: Some("test-owner".to_string()),
                 reply: tx1,
             })
             .await;
@@ -2212,7 +2226,7 @@ mod tests {
             .handle_message(CoordinatorMessage::StartProposalRefinement {
                 proposal_id: "p-dup".to_string(),
                 current_revision_seq: 1,
-                owner_user_id: None,
+                owner_user_id: Some("test-owner".to_string()),
                 reply: tx2,
             })
             .await;
@@ -2235,7 +2249,7 @@ mod tests {
             .handle_message(CoordinatorMessage::StartProposalRefinement {
                 proposal_id: "p-a".to_string(),
                 current_revision_seq: 0,
-                owner_user_id: None,
+                owner_user_id: Some("test-owner".to_string()),
                 reply: tx1,
             })
             .await;
@@ -2246,7 +2260,7 @@ mod tests {
             .handle_message(CoordinatorMessage::StartProposalRefinement {
                 proposal_id: "p-b".to_string(),
                 current_revision_seq: 2,
-                owner_user_id: None,
+                owner_user_id: Some("test-owner".to_string()),
                 reply: tx2,
             })
             .await;

@@ -74,6 +74,8 @@ pub(super) enum CoordinatorMessage {
     DemandProposalRefinementRound {
         proposal_id: String,
         current_revision_seq: i32,
+        /// Durable refinement owner resolved before the demand lifecycle start.
+        owner_user_id: Option<String>,
         reply: tokio::sync::oneshot::Sender<Result<(), String>>,
     },
     /// Resolve the human's single accept/reject review of a converged

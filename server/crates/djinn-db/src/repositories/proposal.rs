@@ -1568,7 +1568,7 @@ impl ProposalRepository {
             .bind(owner_user_id).bind(proposal_id).fetch_optional(&mut *tx).await?
             .ok_or_else(|| Error::InvalidData(format!("proposal not found: {proposal_id}")))?;
         let seq: i32 = row.try_get("latest_revision_seq")?;
-        sqlx::query(r#"INSERT INTO proposal_revisions (id, proposal_id, seq, title, body, body_format, acceptance_criteria, edited_by_user_id, event_kind, event_metadata) VALUES ($1, $2, $3, ', ', 'markdown', '[]', NULL, 'refinement_start', $4)"#)
+        sqlx::query(r#"INSERT INTO proposal_revisions (id, proposal_id, seq, title, body, body_format, acceptance_criteria, edited_by_user_id, event_kind, event_metadata) VALUES ($1, $2, $3, '', '', 'markdown', '[]', NULL, 'refinement_start', $4)"#)
             .bind(uuid::Uuid::now_v7().to_string()).bind(proposal_id).bind(seq).bind(event_metadata).execute(&mut *tx).await?;
         tx.commit().await?;
         Ok(())

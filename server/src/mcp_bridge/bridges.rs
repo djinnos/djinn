@@ -59,7 +59,11 @@ impl CoordinatorOps for CoordinatorBridge {
         request: ProposalRefinementStartRequest,
     ) -> Result<(), String> {
         self.handle
-            .demand_proposal_refinement_round(request.proposal_id, request.current_revision_seq)
+            .demand_proposal_refinement_round(
+                request.proposal_id,
+                request.current_revision_seq,
+                request.owner_user_id,
+            )
             .await
             .map_err(|e| e.to_string())
     }

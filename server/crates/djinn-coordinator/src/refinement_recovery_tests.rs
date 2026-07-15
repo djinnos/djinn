@@ -15,9 +15,13 @@ use djinn_db::{ProposalDebateTrailCreateInput, ProposalRepository, TaskRepositor
 /// Record a `refinement_start` boundary, then sleep so subsequent debate/task
 /// `created_at` timestamps strictly advance past it (current-run scoping uses a
 /// strict `>` comparison).
-async fn seed_refinement_start(db: &djinn_db::Database, proposal_id: &str) {
+async fn seed_refinement_start(
+    db: &djinn_db::Database,
+    proposal_id: &str,
+    owner_user_id: &str,
+) {
     ProposalRepository::new(db.clone(), EventBus::noop())
-        .record_refinement_lifecycle(proposal_id, "refinement_start", None)
+        .start_refinement_with_owner(proposal_id, owner_user_id, None)
         .await
         .expect("record refinement_start");
     tokio::time::sleep(std::time::Duration::from_millis(20)).await;
@@ -92,12 +96,13 @@ async fn head_seq(db: &djinn_db::Database, proposal_id: &str) -> i32 {
 async fn seed_awaiting_review_park(
     db: &djinn_db::Database,
     proposal_id: &str,
+    owner_user_id: &str,
     refined_seq: i32,
     snapshot_seq: i32,
     stop_reason: Option<&str>,
 ) {
     let repo = ProposalRepository::new(db.clone(), EventBus::noop());
-    repo.record_refinement_lifecycle(proposal_id, "refinement_start", None)
+    repo.start_refinement_with_owner(proposal_id, owner_user_id, None)
         .await
         .expect("record refinement_start");
     // Small delay so created_at strictly advances (lifecycle rows use now()).
@@ -158,7 +163,7 @@ async fn recover_restores_awaiting_review_park_and_does_not_stamp_interrupted() 
         .unwrap()
         .latest_revision_seq;
     // Parked on the current head — nobody edited the spec since convergence.
-    seed_awaiting_review_park(&db, &fixture.proposal_id, head, head, Some("round_cap")).await;
+    seed_awaiting_review_park(&db, &fixture.proposal_id, &fixture.user_id, head, head, Some("round_cap")).await;
 
     actor.recover_interrupted_refinements().await;
 
@@ -194,7 +199,7 @@ async fn recover_resumes_bare_started_refinement_at_round_one_adversary() {
     let pool = spawn_test_pool(&db, 4);
     let mut actor = build_refinement_actor(&db, &events_tx, pool.clone());
 
-    seed_refinement_start(&db, &fixture.proposal_id).await;
+    seed_refinement_start(&db, &fixture.proposal_id, &fixture.user_id).await;
 
     actor.recover_interrupted_refinements().await;
 
@@ -204,6 +209,11 @@ async fn recover_resumes_bare_started_refinement_at_round_one_adversary() {
         .expect("bare-started refinement must resume, not be stamped interrupted");
     assert_eq!(resumed.phase, RefinementPhase::AdversaryAttack);
     assert_eq!(resumed.current_round, 1);
+    assert_eq!(
+        resumed.attributed_user_id.as_deref(),
+        Some(fixture.user_id.as_str()),
+        "durable owner resumes even when this run has no tribunal task rows"
+    );
     assert_eq!(
         interrupted_stop_count(&db, &fixture.proposal_id).await,
         0,
@@ -223,7 +233,7 @@ async fn recover_resumes_mid_round_at_advocate_after_blocking_objections() {
     let mut actor = build_refinement_actor(&db, &events_tx, pool.clone());
 
     let seq = head_seq(&db, &fixture.proposal_id).await;
-    seed_refinement_start(&db, &fixture.proposal_id).await;
+    seed_refinement_start(&db, &fixture.proposal_id, &fixture.user_id).await;
     add_objection(&db, &fixture.proposal_id, 1, true, seq).await;
     add_objection(&db, &fixture.proposal_id, 1, true, seq).await;
 
@@ -253,7 +263,7 @@ async fn recover_resumes_after_blocking_verdict_at_next_round_adversary() {
     let mut actor = build_refinement_actor(&db, &events_tx, pool.clone());
 
     let seq = head_seq(&db, &fixture.proposal_id).await;
-    seed_refinement_start(&db, &fixture.proposal_id).await;
+    seed_refinement_start(&db, &fixture.proposal_id, &fixture.user_id).await;
     add_objection(&db, &fixture.proposal_id, 1, true, seq).await;
     // Judge ruled round 1 not-ready (blocking) → the loop had advanced to round 2.
     add_verdict(&db, &fixture.proposal_id, 1, true, seq).await;
@@ -283,7 +293,7 @@ async fn recover_closes_orphaned_open_task_and_redispatches_same_round() {
     let mut actor = build_refinement_actor(&db, &events_tx, pool.clone());
 
     let seq = head_seq(&db, &fixture.proposal_id).await;
-    seed_refinement_start(&db, &fixture.proposal_id).await;
+    seed_refinement_start(&db, &fixture.proposal_id, &fixture.user_id).await;
     // Round-1 Adversary filed blocking objections → resume phase is Advocate.
     add_objection(&db, &fixture.proposal_id, 1, true, seq).await;
 
@@ -356,7 +366,7 @@ async fn recover_stamps_interrupted_for_ready_verdict_without_park() {
     let mut actor = build_refinement_actor(&db, &events_tx, pool.clone());
 
     let seq = head_seq(&db, &fixture.proposal_id).await;
-    seed_refinement_start(&db, &fixture.proposal_id).await;
+    seed_refinement_start(&db, &fixture.proposal_id, &fixture.user_id).await;
     add_objection(&db, &fixture.proposal_id, 1, false, seq).await;
     // Ready verdict, but no `refinement_awaiting_review` park was written.
     add_verdict(&db, &fixture.proposal_id, 1, false, seq).await;
@@ -385,7 +395,7 @@ async fn recover_reconstructs_spawn_budget_from_run_tasks() {
     let mut actor = build_refinement_actor(&db, &events_tx, pool.clone());
 
     let seq = head_seq(&db, &fixture.proposal_id).await;
-    seed_refinement_start(&db, &fixture.proposal_id).await;
+    seed_refinement_start(&db, &fixture.proposal_id, &fixture.user_id).await;
     add_objection(&db, &fixture.proposal_id, 1, true, seq).await;
 
     // Three pre-restart refinement tasks for this run — two already closed, one
@@ -420,11 +430,11 @@ async fn recover_reconstructs_spawn_budget_from_run_tasks() {
         resumed.total_spawns, 3,
         "all three this-run refinement tasks count against the reconstructed spawn budget"
     );
-    // Attribution was reconstructed from the run's task rows.
+    // Attribution is reconstructed from the durable proposal owner, not task rows.
     assert_eq!(
         resumed.attributed_user_id.as_deref(),
         Some(fixture.user_id.as_str()),
-        "attribution is reconstructed from this run's refinement task rows"
+        "attribution is reconstructed from the persisted refinement owner"
     );
 }
 
@@ -445,7 +455,7 @@ async fn recover_stamps_interrupted_when_parked_spec_moved_on() {
 
     // Park on the original head, then edit the spec so the head advances past
     // the parked revision — simulating a human/agent change after convergence.
-    seed_awaiting_review_park(&db, &fixture.proposal_id, parked_seq, parked_seq, None).await;
+    seed_awaiting_review_park(&db, &fixture.proposal_id, &fixture.user_id, parked_seq, parked_seq, None).await;
     repo.update(
         &fixture.proposal_id,
         djinn_db::ProposalUpdateInput {
