@@ -1,0 +1,12 @@
+version: 1
+scenarios:
+  - id: agents.empty_turn_loop_stale_metadata
+    version: 1
+    enabled: true
+    profiles: [smoke-ci]
+    sources: [{kind: memory, id: pitfalls/acting-on-stale-loop-detection-metadata}]
+    primary_coverage: agent-loop.empty-turn-detection
+    secondary_coverage: [agent-loop.loop-metadata-freshness]
+    execution: {kind: cargo-package, package: djinn-slot}
+    isolation: {database: isolated, providers: isolated, channel: isolated}
+    watch_paths: [server/crates/djinn-slot/src/reply_loop]

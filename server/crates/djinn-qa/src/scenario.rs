@@ -16,6 +16,26 @@ pub struct ScenarioInventory {
     pub scenarios: Vec<Scenario>,
 }
 
+fn scenario_yaml_files(dir: &Path, files: &mut Vec<PathBuf>) -> Result<(), ScenarioError> {
+    let entries = fs::read_dir(dir).map_err(|source| ScenarioError::Read {
+        path: dir.display().to_string(),
+        source,
+    })?;
+    for entry in entries {
+        let entry = entry.map_err(|source| ScenarioError::Read {
+            path: dir.display().to_string(),
+            source,
+        })?;
+        let path = entry.path();
+        if path.is_dir() {
+            scenario_yaml_files(&path, files)?;
+        } else if matches!(path.extension().and_then(|value| value.to_str()), Some("yaml" | "yml")) {
+            files.push(path);
+        }
+    }
+    Ok(())
+}
+
 /// Metadata consumed by the deterministic QA runner.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct Scenario {
@@ -127,11 +147,27 @@ impl ScenarioInventory {
 
     pub fn load(path: impl AsRef<Path>) -> Result<Self, ScenarioError> {
         let path = path.as_ref();
+        if path.is_dir() {
+            return Self::load_directory(path);
+        }
         let yaml = fs::read_to_string(path).map_err(|source| ScenarioError::Read {
             path: path.display().to_string(),
             source,
         })?;
         Self::from_yaml(&yaml)
+    }
+
+    /// Merge version-one scenario files from a theme directory deterministically.
+    fn load_directory(path: &Path) -> Result<Self, ScenarioError> {
+        let mut files = Vec::new();
+        scenario_yaml_files(path, &mut files)?;
+        files.sort();
+        let mut scenarios = Vec::new();
+        for file in files {
+            scenarios.extend(Self::load(file)?.scenarios);
+        }
+        scenarios.sort_by(|left, right| left.id.cmp(&right.id));
+        Ok(Self { version: 1, scenarios })
     }
 
     /// Validate cross-inventory invariants and local targets against an explicit repository root.

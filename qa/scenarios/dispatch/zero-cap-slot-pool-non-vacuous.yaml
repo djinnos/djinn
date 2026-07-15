@@ -1,0 +1,12 @@
+version: 1
+scenarios:
+  - id: dispatch.zero_cap_slot_pool_non_vacuous
+    version: 1
+    enabled: true
+    profiles: [smoke-ci]
+    sources: [{kind: memory, id: pitfalls/zero-cap-fake-slot-pool-makes-dispatcher-race-tests-pass-vacuously}]
+    primary_coverage: dispatch.slot-pool-capacity
+    secondary_coverage: [dispatch.race-non-vacuity]
+    execution: {kind: cargo-package, package: djinn-coordinator}
+    isolation: {database: isolated, providers: isolated, channel: isolated}
+    watch_paths: [server/crates/djinn-coordinator/src/dispatch/task_dispatch.rs]
