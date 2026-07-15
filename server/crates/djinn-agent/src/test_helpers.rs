@@ -13,7 +13,10 @@ use tokio_util::sync::CancellationToken;
 use djinn_core::events::EventBus;
 use djinn_core::models::Project;
 use djinn_core::models::{Epic, Task};
-use djinn_db::{Database, EpicCreateInput, EpicRepository, ProjectRepository, TaskRepository};
+use djinn_db::{
+    Database, EffectiveCreatorProvenance, EpicCreateInput, EpicRepository, ProjectRepository,
+    TaskRepository, UserRepository,
+};
 use djinn_provider::catalog::{CatalogService, HealthTracker};
 use djinn_provider::message::{ContentBlock, Conversation};
 use djinn_provider::provider::{LlmProvider, StreamEvent, ToolChoice};
@@ -231,12 +234,25 @@ pub async fn create_test_epic(db: &Database, project_id: &str) -> Epic {
     .expect("failed to create test epic")
 }
 
+pub async fn create_test_user(db: &Database) -> String {
+    UserRepository::new(db.clone())
+        .upsert_from_github(999_700, "agent-test-user", None, None)
+        .await
+        .expect("failed to create test user")
+        .id
+}
+
 pub async fn create_test_task(db: &Database, project_id: &str, epic_id: &str) -> Task {
     let repo = TaskRepository::new(db.clone(), test_events());
+    let creator_id = create_test_user(db).await;
     let task = repo
-        .create_in_project(
+        .create_in_project_with_provenance(
             project_id,
             Some(epic_id),
+            EffectiveCreatorProvenance {
+                explicit_user_id: Some(&creator_id),
+                ..Default::default()
+            },
             "test-task",
             "test task description",
             "test task design",

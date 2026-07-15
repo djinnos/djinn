@@ -272,13 +272,18 @@ async fn skill_read_serves_native_visual_spec_for_authoring_planner_session() {
     let services = crate::test_helpers::test_services();
     let project = create_test_project(&db).await;
     let epic = create_test_epic(&db, &project.id).await;
+    let creator_id = crate::test_helpers::create_test_user(&db).await;
 
     // Create an epic_breakdown task (proposal authoring session).
     let task_repo = djinn_db::TaskRepository::new(db.clone(), djinn_core::events::EventBus::noop());
     let task = task_repo
-        .create_in_project(
+        .create_in_project_with_provenance(
             &project.id,
             Some(&epic.id),
+            djinn_db::repositories::task::EffectiveCreatorProvenance {
+                explicit_user_id: Some(&creator_id),
+                ..Default::default()
+            },
             "Decompose proposal into epics",
             "proposal decomposition task",
             "",
@@ -343,13 +348,18 @@ async fn skill_read_rejects_visual_spec_in_non_authoring_planner_session() {
     let services = crate::test_helpers::test_services();
     let project = create_test_project(&db).await;
     let epic = create_test_epic(&db, &project.id).await;
+    let creator_id = crate::test_helpers::create_test_user(&db).await;
 
     // Create a planning task (non-authoring session).
     let task_repo = djinn_db::TaskRepository::new(db.clone(), djinn_core::events::EventBus::noop());
     let task = task_repo
-        .create_in_project(
+        .create_in_project_with_provenance(
             &project.id,
             Some(&epic.id),
+            djinn_db::repositories::task::EffectiveCreatorProvenance {
+                explicit_user_id: Some(&creator_id),
+                ..Default::default()
+            },
             "Plan next wave",
             "wave planning task",
             "",
@@ -401,12 +411,17 @@ async fn skill_read_serves_native_visual_spec_for_advocate_refinement_session() 
     let services = crate::test_helpers::test_services();
     let project = create_test_project(&db).await;
     let epic = create_test_epic(&db, &project.id).await;
+    let creator_id = crate::test_helpers::create_test_user(&db).await;
 
     let task_repo = djinn_db::TaskRepository::new(db.clone(), djinn_core::events::EventBus::noop());
     let task = task_repo
-        .create_in_project(
+        .create_in_project_with_provenance(
             &project.id,
             Some(&epic.id),
+            djinn_db::repositories::task::EffectiveCreatorProvenance {
+                explicit_user_id: Some(&creator_id),
+                ..Default::default()
+            },
             "Refinement advocate — revise proposal spec",
             "advocate refinement task",
             "",
@@ -457,12 +472,17 @@ async fn skill_read_rejects_visual_spec_for_non_planner_role() {
     let services = crate::test_helpers::test_services();
     let project = create_test_project(&db).await;
     let epic = create_test_epic(&db, &project.id).await;
+    let creator_id = crate::test_helpers::create_test_user(&db).await;
 
     let task_repo = djinn_db::TaskRepository::new(db.clone(), djinn_core::events::EventBus::noop());
     let task = task_repo
-        .create_in_project(
+        .create_in_project_with_provenance(
             &project.id,
             Some(&epic.id),
+            djinn_db::repositories::task::EffectiveCreatorProvenance {
+                explicit_user_id: Some(&creator_id),
+                ..Default::default()
+            },
             "Some worker task",
             "worker task description",
             "",
@@ -512,12 +532,17 @@ async fn skill_read_native_body_not_from_worktree() {
     let services = crate::test_helpers::test_services();
     let project = create_test_project(&db).await;
     let epic = create_test_epic(&db, &project.id).await;
+    let creator_id = crate::test_helpers::create_test_user(&db).await;
 
     let task_repo = djinn_db::TaskRepository::new(db.clone(), djinn_core::events::EventBus::noop());
     let task = task_repo
-        .create_in_project(
+        .create_in_project_with_provenance(
             &project.id,
             Some(&epic.id),
+            djinn_db::repositories::task::EffectiveCreatorProvenance {
+                explicit_user_id: Some(&creator_id),
+                ..Default::default()
+            },
             "Decompose proposal",
             "proposal decomposition",
             "",

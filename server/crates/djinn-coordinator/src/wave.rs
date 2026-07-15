@@ -17,6 +17,7 @@
 use super::reentrance::{DispatchEvent, should_auto_dispatch_planner};
 use super::*;
 use djinn_core::models::task::PRIORITY_CRITICAL;
+use djinn_db::EffectiveCreatorProvenance;
 
 impl CoordinatorActor {
     /// Called when an epic is created.  Creates the first planning task
@@ -165,8 +166,14 @@ impl CoordinatorActor {
         ]).to_string();
 
         match task_repo
-            .create_with_ac(
-                &epic.id,
+            .create_in_project_with_provenance(
+                &epic.project_id,
+                Some(&epic.id),
+                EffectiveCreatorProvenance {
+                    explicit_user_id: None,
+                    source_task_id: None,
+                    proposal_id: None,
+                },
                 &title,
                 &description,
                 &design,

@@ -200,10 +200,15 @@ mod tests {
     }
     async fn make_task(db: &Database, project_id: &str, agent_type: Option<&str>) -> Task {
         let repo = TaskRepository::new(db.clone(), EventBus::noop());
+        let creator_id = crate::test_helpers::create_test_user(db).await;
         let task = repo
-            .create_in_project(
+            .create_in_project_with_provenance(
                 project_id,
                 None,
+                djinn_db::repositories::task::EffectiveCreatorProvenance {
+                    explicit_user_id: Some(&creator_id),
+                    ..Default::default()
+                },
                 "role-overrides-test",
                 "test",
                 "test",

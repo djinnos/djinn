@@ -163,12 +163,12 @@ pub use repositories::{
     },
     session_message::SessionMessageRepository,
     settings::SettingsRepository,
-    task::TaskRepository,
     task::{
         ActivityQuery, BlockerRef, ChildDisposition, CountQuery, CreateTaskInProjectParams,
         CreateTaskParams, DispositionCounts, DispositionFinding, DispositionPlan, DispositionScope,
         ListQuery, ListResult, ReadyQuery, UpdateTaskParams,
     },
+    task::{EffectiveCreatorProvenance, TaskRepository},
     task_arbitration::{
         ArbitrationState, CreateArbitrationParams, TaskArbitrationRecord,
         TaskArbitrationRepository, TryCreateResult, UpdateDispatchLedgerParams,

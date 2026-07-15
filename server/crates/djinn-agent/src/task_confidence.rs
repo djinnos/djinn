@@ -336,10 +336,15 @@ mod tests {
         let _ = project_path;
         let before = note_repo.get(&note.id).await.unwrap().unwrap().confidence;
 
+        let creator_id = crate::test_helpers::create_test_user(&harness.db).await;
         let task = task_repo
-            .create_in_project(
+            .create_in_project_with_provenance(
                 &project.id,
                 None,
+                djinn_db::repositories::task::EffectiveCreatorProvenance {
+                    explicit_user_id: Some(&creator_id),
+                    ..Default::default()
+                },
                 "Confidence task",
                 "Close applies confidence",
                 "",
@@ -417,10 +422,15 @@ mod tests {
         .await
         .unwrap();
 
+        let creator_id = crate::test_helpers::create_test_user(&harness.db).await;
         let task = task_repo
-            .create_in_project(
+            .create_in_project_with_provenance(
                 &project.id,
                 None,
+                djinn_db::repositories::task::EffectiveCreatorProvenance {
+                    explicit_user_id: Some(&creator_id),
+                    ..Default::default()
+                },
                 "Empty Memory Task",
                 "No refs",
                 "",
@@ -479,10 +489,15 @@ mod tests {
         .await
         .unwrap();
 
+        let creator_id = crate::test_helpers::create_test_user(&harness.db).await;
         let task = task_repo
-            .create_in_project(
+            .create_in_project_with_provenance(
                 &project.id,
                 None,
+                djinn_db::repositories::task::EffectiveCreatorProvenance {
+                    explicit_user_id: Some(&creator_id),
+                    ..Default::default()
+                },
                 "Missing Memory Task",
                 "Has missing refs",
                 "",
@@ -569,10 +584,15 @@ mod tests {
             .unwrap();
         let _ = project_path;
 
+        let creator_id = crate::test_helpers::create_test_user(&harness.db).await;
         let task = task_repo
-            .create_in_project(
+            .create_in_project_with_provenance(
                 &project.id,
                 None,
+                djinn_db::repositories::task::EffectiveCreatorProvenance {
+                    explicit_user_id: Some(&creator_id),
+                    ..Default::default()
+                },
                 "Duplicate Delivery Task",
                 "Emit duplicate events",
                 "",

@@ -394,10 +394,15 @@ mod tests {
             )
             .await
             .unwrap();
+        let creator_id = crate::test_helpers::create_test_user(&db).await;
         let task = TaskRepository::new(db.clone(), events.clone())
-            .create_in_project(
+            .create_in_project_with_provenance(
                 &project.id,
                 None,
+                djinn_db::repositories::task::EffectiveCreatorProvenance {
+                    explicit_user_id: Some(&creator_id),
+                    ..Default::default()
+                },
                 "diagnostic correlation",
                 "",
                 "",
