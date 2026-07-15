@@ -180,15 +180,18 @@ pub async fn execute_three_rung_pressure_plan(
             drop(guard);
             continue;
         }
+        observe_pressure_operation(PressureOperation::TraversalEnter);
         let bytes = match allocated_tree_bytes_for_execution(&unit.canonical_target) {
             Ok(bytes) => bytes,
             Err(()) => {
+                observe_pressure_operation(PressureOperation::TraversalExit);
                 blocked.insert(unit.project_id.clone());
                 result.retained.push(unit.clone());
                 drop(guard);
                 continue;
             }
         };
+        observe_pressure_operation(PressureOperation::TraversalExit);
         // It is intentionally immediately before every removal, including the first.
         let pre = match capacity.capacity(root) {
             Ok(value) => value,
@@ -233,6 +236,7 @@ pub async fn execute_three_rung_pressure_plan(
             pressure_metric_rung(unit),
             PressureOutcome::Attempted,
         );
+        observe_pressure_operation(PressureOperation::RemovalEnter);
         match remove_three_rung_target(unit, root) {
             Ok(Removal::Removed) => {
                 result.reclaimed_bytes = result.reclaimed_bytes.saturating_add(bytes);
@@ -301,6 +305,7 @@ pub async fn execute_three_rung_pressure_plan(
                 );
             }
         }
+        observe_pressure_operation(PressureOperation::RemovalExit);
         drop(guard);
     }
     for unit in &result.retained {
@@ -428,6 +433,24 @@ enum Removal {
     Absent,
 }
 
+/// Operation boundaries observed by the executor's test-injectable observer.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PressureOperation {
+    TraversalEnter,
+    TraversalExit,
+    RemovalEnter,
+    RemovalExit,
+}
+
+pub trait PressureOperationObserver: Send + Sync {
+    fn observe(&self, operation: PressureOperation);
+}
+
+struct NoopPressureOperationObserver;
+impl PressureOperationObserver for NoopPressureOperationObserver {
+    fn observe(&self, _: PressureOperation) {}
+}
+
 // Keep the destructive syscall behind this small seam so the executor's
 // fail-closed behavior can be exercised for a real, mid-removal filesystem
 // error. Production always uses `remove_dir_all`; the hook only exists in
@@ -437,11 +460,32 @@ enum Removal {
 thread_local! {
     static REMOVE_DIR_ALL_HOOK: std::cell::RefCell<Option<Box<dyn Fn(&Path) -> std::io::Result<()>>>> =
         const { std::cell::RefCell::new(None) };
+    static PRESSURE_OPERATION_OBSERVER:
+        std::cell::RefCell<Option<Box<dyn PressureOperationObserver>>> =
+        const { std::cell::RefCell::new(None) };
 }
 
 #[cfg(test)]
 fn set_remove_dir_all_hook(hook: Option<Box<dyn Fn(&Path) -> std::io::Result<()>>>) {
     REMOVE_DIR_ALL_HOOK.with(|slot| *slot.borrow_mut() = hook);
+}
+
+/// Install a test-only operation observer that captures enter/exit events at
+/// the executor's real traversal and removal boundaries. Production always
+/// runs through a no-op observer, so this is purely additive test plumbing.
+#[cfg(test)]
+pub fn set_pressure_operation_observer(observer: Option<Box<dyn PressureOperationObserver>>) {
+    PRESSURE_OPERATION_OBSERVER.with(|slot| *slot.borrow_mut() = observer);
+}
+
+fn observe_pressure_operation(operation: PressureOperation) {
+    #[cfg(test)]
+    if PRESSURE_OPERATION_OBSERVER.with(|slot| slot.borrow().is_some()) {
+        PRESSURE_OPERATION_OBSERVER
+            .with(|slot| slot.borrow().as_ref().expect("checked").observe(operation));
+        return;
+    }
+    NoopPressureOperationObserver.observe(operation);
 }
 
 fn remove_dir_all_for_three_rung_target(path: &Path) -> std::io::Result<()> {
