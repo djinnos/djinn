@@ -4,9 +4,16 @@
 //! fixture annotations, captured production decisions, and rubric scoring.
 
 use std::collections::BTreeMap;
+use std::path::Path;
 
 use djinn_db::assess_note_quality;
 use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ReplayTranscriptMessage {
+    pub role: String,
+    pub content: String,
+}
 
 /// Annotation supplied by an archived-transcript replay fixture.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -22,6 +29,131 @@ pub struct ExtractionReplayFixture {
     /// Optional positive duplicate expectation, used when evaluating dedup precision.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expected_duplicate_target: Option<String>,
+    #[serde(default)]
+    pub provenance: String,
+    #[serde(default)]
+    pub messages: Vec<ReplayTranscriptMessage>,
+    #[serde(default)]
+    pub terminal_context: crate::llm_extraction::TerminalExtractionContext,
+    #[serde(default)]
+    pub injected_provider_response: String,
+}
+
+/// Load the committed corpus in stable filename order and reject unsafe rows.
+pub fn load_extraction_replay_fixtures(
+    directory: impl AsRef<Path>,
+) -> Result<Vec<ExtractionReplayFixture>, String> {
+    let mut paths = std::fs::read_dir(directory.as_ref())
+        .map_err(|error| error.to_string())?
+        .map(|entry| entry.map(|entry| entry.path()))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())?;
+    paths.sort();
+    let fixtures = paths
+        .into_iter()
+        .filter(|path| {
+            path.extension()
+                .is_some_and(|extension| extension == "json")
+        })
+        .map(|path| {
+            serde_json::from_str(
+                &std::fs::read_to_string(&path).map_err(|error| error.to_string())?,
+            )
+            .map_err(|error| format!("{}: {error}", path.display()))
+        })
+        .collect::<Result<Vec<ExtractionReplayFixture>, String>>()?;
+    validate_extraction_replay_fixtures(&fixtures)?;
+    Ok(fixtures)
+}
+
+/// Enforce typed replay, dedup-target, ADR-054, and repository-safety contracts.
+pub fn validate_extraction_replay_fixtures(
+    fixtures: &[ExtractionReplayFixture],
+) -> Result<(), String> {
+    if !(20..=50).contains(&fixtures.len()) {
+        return Err(format!(
+            "fixture count {} is outside 20..=50",
+            fixtures.len()
+        ));
+    }
+    let mut ids = std::collections::BTreeSet::new();
+    for fixture in fixtures {
+        if fixture.id.trim().is_empty() || !ids.insert(fixture.id.as_str()) {
+            return Err(format!("missing or duplicate ID: {}", fixture.id));
+        }
+        if fixture.required_discriminative_text.trim().is_empty() {
+            return Err(format!("{} has empty discriminative fact", fixture.id));
+        }
+        if !matches!(
+            fixture.expected_note_type.as_str(),
+            "case" | "pattern" | "pitfall"
+        ) {
+            return Err(format!("{} has unsupported note type", fixture.id));
+        }
+        if fixture.messages.is_empty()
+            || fixture.messages.iter().any(|message| {
+                !matches!(
+                    message.role.as_str(),
+                    "system" | "user" | "assistant" | "tool"
+                ) || message.content.trim().is_empty()
+            })
+        {
+            return Err(format!("{} has malformed messages", fixture.id));
+        }
+        if fixture.provenance != "sanitized_archived_transcript_derived" {
+            return Err(format!("{} has unsafe provenance", fixture.id));
+        }
+        let serialized = serde_json::to_string(fixture).map_err(|error| error.to_string())?;
+        let lower = serialized.to_ascii_lowercase();
+        if [
+            "api_key",
+            "password",
+            "secret",
+            "bearer ",
+            "sk-",
+            "session-",
+            "postgres://",
+            "production",
+        ]
+        .iter()
+        .any(|needle| lower.contains(needle))
+            || serialized.contains("T00:")
+        {
+            return Err(format!("{} contains prohibited data", fixture.id));
+        }
+        let response: serde_json::Value = serde_json::from_str(&fixture.injected_provider_response)
+            .map_err(|_| format!("{} has malformed response", fixture.id))?;
+        let response_key = match fixture.expected_note_type.as_str() {
+            "case" => "cases",
+            "pattern" => "patterns",
+            "pitfall" => "pitfalls",
+            _ => unreachable!("note type was validated above"),
+        };
+        let content = response
+            .get(response_key)
+            .and_then(serde_json::Value::as_array)
+            .and_then(|notes| notes.first())
+            .and_then(|note| note.get("content"))
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| format!("{} response lacks accepted note", fixture.id))?;
+        if !content.contains(&fixture.required_discriminative_text)
+            || (!assess_note_quality(&fixture.expected_note_type, content).is_underspecified)
+                != fixture.expect_adr_054_quality
+        {
+            return Err(format!("{} response cannot satisfy rubric", fixture.id));
+        }
+        for target in [
+            &fixture.must_not_duplicate_target,
+            &fixture.expected_duplicate_target,
+        ] {
+            if let Some(target) = target {
+                if target.trim().is_empty() || !target.starts_with("candidate-") {
+                    return Err(format!("{} has unresolved dedup target", fixture.id));
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 /// A non-persisted decision captured from the extraction path.
@@ -222,12 +354,46 @@ mod tests {
             expect_adr_054_quality: false,
             must_not_duplicate_target: None,
             expected_duplicate_target: None,
+            provenance: String::new(),
+            messages: Vec::new(),
+            terminal_context: crate::llm_extraction::TerminalExtractionContext::default(),
+            injected_provider_response: String::new(),
         }
     }
 
     #[test]
     fn zero_predicted_duplicates_has_zero_precision() {
         assert_eq!(DedupConfusionCounts::default().precision(), 0.0);
+    }
+
+    #[test]
+    fn committed_sanitized_corpus_is_valid() {
+        let fixtures = load_extraction_replay_fixtures(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/extraction_replay"
+        ))
+        .expect("committed replay corpus must validate");
+        assert_eq!(fixtures.len(), 24);
+        assert!(
+            fixtures
+                .iter()
+                .any(|fixture| fixture.expect_adr_054_quality)
+        );
+        assert!(
+            fixtures
+                .iter()
+                .any(|fixture| !fixture.expect_adr_054_quality)
+        );
+        assert!(
+            fixtures
+                .iter()
+                .any(|fixture| fixture.expected_duplicate_target.is_some())
+        );
+        assert!(
+            fixtures
+                .iter()
+                .any(|fixture| fixture.must_not_duplicate_target.is_some())
+        );
     }
 
     #[test]
