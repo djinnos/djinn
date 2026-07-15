@@ -1659,6 +1659,32 @@ mod tests {
         assert_ne!(ci_failure.outcome, ac_rejection.outcome);
     }
     #[test]
+    fn terminal_extraction_context_preserves_park_reason_without_review_inference() {
+        let report = report(
+            "parked-run",
+            vec![RoleKind::Worker],
+            TaskRunOutcome::Parked {
+                reason: "acceptance_criteria".into(),
+                wind_down_ignored: false,
+                session_id: "session-parked".into(),
+                tokens_in: 100,
+                tokens_out: 10,
+            },
+        );
+        assert_eq!(
+            terminal_extraction_context(&report),
+            TerminalExtractionContext {
+                outcome: TerminalExtractionOutcome::Parked {
+                    classification: "acceptance_criteria".to_string(),
+                    reason: Some("acceptance_criteria".to_string()),
+                },
+                review_decision: None,
+            },
+            "a runtime report must preserve its park reason and never invent a review verdict"
+        );
+    }
+
+    #[test]
     fn planned_terminal_outcomes_have_no_provider_breaker_signal() {
         let guard_report = report(
             "guard-run",
