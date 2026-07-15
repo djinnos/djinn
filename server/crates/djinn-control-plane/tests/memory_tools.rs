@@ -1,3 +1,4 @@
+// djinn:allow-oversize — memory tool integration contracts share one database harness.
 //! Contract tests for `memory_*` MCP tools (worktree-free).
 //!
 //! Migrated from `server/src/mcp_contract_tests/memory_tools/contract_tests.rs`.

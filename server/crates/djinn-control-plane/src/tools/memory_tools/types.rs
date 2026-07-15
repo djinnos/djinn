@@ -6,7 +6,7 @@ use crate::tools::json_object::AnyJson;
 // ── Param structs ─────────────────────────────────────────────────────────────
 
 /// Deserialize required mutation reasons before tool dispatch or transaction setup.
-fn deserialize_reason<'de, D>(deserializer: D) -> Result<String, D::Error>
+pub fn deserialize_reason<'de, D>(deserializer: D) -> Result<String, D::Error>
 where
     D: Deserializer<'de>,
 {
