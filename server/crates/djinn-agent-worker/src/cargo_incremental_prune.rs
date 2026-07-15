@@ -583,6 +583,7 @@ impl WarmBaseLock {
     /// It retains the production lock derivation and only substitutes the
     /// requested probe or acquisition operation.
     #[cfg(test)]
+    #[allow(dead_code)] // Exercised by binary tests, but not the library test target.
     pub(crate) fn acquire_with_operation_failure_and_record<Record>(
         project_id: &str,
         failure: WarmLockOperationFailure,
@@ -718,6 +719,7 @@ where
 
 /// The operation failures injected by the warm-flow ordering test.
 #[cfg(test)]
+#[allow(dead_code)] // Exercised by binary tests, but not the library test target.
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum WarmLockOperationFailure {
     Probe,
