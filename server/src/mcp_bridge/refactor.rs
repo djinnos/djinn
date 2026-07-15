@@ -180,7 +180,11 @@ pub(crate) fn compute_refactor_candidates(
     let mean_churn: f64 = churn_for.iter().map(|c| f64::from(*c)).sum::<f64>() / n;
     let mean_pr: f64 = candidates.iter().map(|c| c.page_rank).sum::<f64>() / n;
     // Proposal qoxm: fourth axis — cross-module co-change pressure.
-    let mean_cc: f64 = candidates.iter().map(|c| c.cross_module_cochange).sum::<f64>() / n;
+    let mean_cc: f64 = candidates
+        .iter()
+        .map(|c| c.cross_module_cochange)
+        .sum::<f64>()
+        / n;
 
     // Population stddev (divide by N) — a sample stddev would need
     // N>=2 and special-case 1-element sets; population stays correct

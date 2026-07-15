@@ -1,0 +1,8 @@
+version: 1
+coverage:
+  - id: reaper.slow-vs-crashed-discrimination
+    subsystem: reaper
+    required_profiles: [smoke-ci]
+  - id: task.state-machine.legal-transitions
+    subsystem: task-state-machine
+    required_profiles: [smoke-ci]

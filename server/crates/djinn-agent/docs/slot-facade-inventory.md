@@ -244,6 +244,10 @@ This slice thinned the extraction/enrichment-facing agent modules as follows:
 | `llm_extraction.rs` | Thin compatibility wrapper: the former 2k+ line duplicate implementation was removed; remaining code is test-only `AgentContext`→`SlotContext` adapters around `djinn_slot::llm_extraction` entry points. | `djinn_slot::llm_extraction` |
 | `memory_enrichment.rs` | Empty compatibility module retained only so `mod memory_enrichment;` resolves; public surface is re-exported from `djinn_slot` in `mod.rs`. | `djinn_slot::memory_enrichment` |
 
+For the Phase 1 terminal-context boundary and the deferred merge-queue verdict
+path, see
+[`server/docs/knowledge-extraction/merge-queue-verdict.md`](../../../docs/knowledge-extraction/merge-queue-verdict.md).
+
 No independent extraction, enrichment, prompt, deduplication, admission-gate,
 finalization, or command-activity behavior remains in these agent files.
 
