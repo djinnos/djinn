@@ -41,6 +41,8 @@ struct ReplayCase {
     #[serde(default)]
     resume_compaction_summary: Option<String>,
     expected_outcome: String,
+    expected_context: String,
+    expected_ledger_outcome: String,
     expected_available_usage: u32,
     expected_accounting_finalized: bool,
 }
@@ -113,7 +115,7 @@ fn outcome(name: &str) -> PlannerOutcome {
 }
 
 fn host(case: &ReplayCase) -> ReplayHost {
-    let terminal = if case.expected_outcome == "disabled" {
+    let provider_outcome = if case.expected_outcome == "disabled" {
         PlannerOutcome::Success
     } else {
         outcome(&case.expected_outcome)
@@ -123,7 +125,7 @@ fn host(case: &ReplayCase) -> ReplayHost {
             outcome: if case.finalization_fails {
                 PlannerOutcome::ProviderError
             } else {
-                terminal
+                provider_outcome
             },
             // Completed provider calls retain their raw payload so the production
             // parser/style validator is replayed even when durable accounting has
@@ -212,10 +214,10 @@ fn buckets(
                 (
                     query,
                     vec![row(
-                        "oversized-planned",
-                        "Oversized planned",
-                        "pattern/oversized",
-                        &"p".repeat(2_100),
+                        "short-planned",
+                        "Short planned",
+                        "pattern/short",
+                        "this short row fits with a larger remainder",
                     )],
                 )
             })
@@ -266,15 +268,22 @@ async fn checked_in_replays_enter_the_production_assemble_prompt_context_boundar
         task.created_by_user_id = Some("replay-creator".into());
 
         let note_repo = NoteRepository::new(db.clone(), events);
-        let scope_body = if case.full_scope_budget {
-            "scope ".repeat(250)
-        } else {
-            "scope baseline".into()
-        };
         let scope = note_repo
-            .create(&task.project_id, "Scope Only", &scope_body, "pattern", "[]")
+            .create(
+                &task.project_id,
+                "Scope Only",
+                "scope baseline",
+                "pattern",
+                "[]",
+            )
             .await
             .expect("seed scope note");
+        if case.full_scope_budget {
+            note_repo
+                .update_summaries(&scope.id, None, Some(&"x".repeat(1_900)))
+                .await
+                .expect("seed near-full scope overview");
+        }
         note_repo
             .set_confidence(&scope.id, 0.95)
             .await
@@ -320,10 +329,17 @@ async fn checked_in_replays_enter_the_production_assemble_prompt_context_boundar
             "{} prompt drift",
             case.name
         );
+        assert_eq!(
+            first.knowledge_context.as_deref(),
+            Some(case.expected_context.as_str()),
+            "{} exact production-rendered context",
+            case.name
+        );
 
         let requests = host.requests.lock().expect("host requests");
         if !case.enabled {
             assert!(requests.is_empty(), "disabled mode records no attempt");
+            assert_eq!(case.expected_ledger_outcome, "disabled");
             assert_eq!(first.knowledge_context, baseline.knowledge_context);
             assert_eq!(first.system_prompt, baseline.system_prompt);
             assert!(search.requests.lock().expect("search requests").is_empty());
@@ -333,11 +349,7 @@ async fn checked_in_replays_enter_the_production_assemble_prompt_context_boundar
         let attempted = &host.result;
         assert_eq!(
             attempted.outcome,
-            if case.finalization_fails {
-                PlannerOutcome::ProviderError
-            } else {
-                outcome(&case.expected_outcome)
-            },
+            outcome(&case.expected_ledger_outcome),
             "{} durable outcome",
             case.name
         );
@@ -402,12 +414,16 @@ async fn checked_in_replays_enter_the_production_assemble_prompt_context_boundar
             }
         }
         if case.full_scope_budget {
+            let rendered_baseline = baseline
+                .knowledge_context
+                .as_deref()
+                .expect("near-full scope baseline");
             assert!(
-                baseline
-                    .knowledge_context
-                    .as_deref()
-                    .is_some_and(|v| v.len() <= 2_000)
+                (1_900..=2_000).contains(&rendered_baseline.len()),
+                "scope baseline must materially consume the production budget"
             );
+            assert_eq!(first.knowledge_context.as_deref(), Some(rendered_baseline));
+            assert!(first.knowledge_context.as_deref().unwrap().len() <= 2_000);
             assert_eq!(search.requests.lock().expect("search requests").len(), 4);
         }
         if let Some(summary) = &case.resume_compaction_summary {
