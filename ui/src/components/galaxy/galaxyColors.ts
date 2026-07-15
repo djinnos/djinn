@@ -14,22 +14,8 @@ function hexToRgb(hex: number): Rgb {
   return [((hex >> 16) & 0xff) / 255, ((hex >> 8) & 0xff) / 255, (hex & 0xff) / 255];
 }
 
-// ── Heat scale (cognitive-complexity mode) ──────────────────────────────────
-
-const HEAT_LOW: Rgb = [0.204, 0.827, 0.6]; // emerald-400
-const HEAT_MID: Rgb = [0.918, 0.702, 0.031]; // yellow-500
-const HEAT_HIGH: Rgb = [0.937, 0.267, 0.267]; // red-500
-/** Muted slate for nodes that don't participate in the heat mode. */
-export const HEAT_MUTED: Rgb = [0.24, 0.29, 0.36];
-
-function mix(a: Rgb, b: Rgb, t: number): Rgb {
-  return [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t];
-}
-
-export function heatColor(heat: number): Rgb {
-  const t = Math.min(1, Math.max(0, heat));
-  return t < 0.5 ? mix(HEAT_LOW, HEAT_MID, t * 2) : mix(HEAT_MID, HEAT_HIGH, (t - 0.5) * 2);
-}
+/** Muted slate for nodes with no group. */
+const GROUP_MUTED: Rgb = [0.24, 0.29, 0.36];
 
 // ── Group (crate/community) colors ──────────────────────────────────────────
 //
@@ -78,7 +64,7 @@ function groupHsl(group: string): [number, number, number] {
 }
 
 export function groupColor(group: string | undefined): Rgb {
-  if (!group) return HEAT_MUTED;
+  if (!group) return GROUP_MUTED;
   const [h, s, l] = groupHsl(group);
   return hslToRgb(h, s, l);
 }
