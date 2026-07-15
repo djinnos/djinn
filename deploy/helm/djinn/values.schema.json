@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "title": "djinn chart values",
+  "type": "object",
+  "properties": {
+    "cacheCleanup": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mode"],
+      "properties": {
+        "mode": { "type": "string", "enum": ["delete", "dry_run"] }
+      }
+    }
+  }
+}
