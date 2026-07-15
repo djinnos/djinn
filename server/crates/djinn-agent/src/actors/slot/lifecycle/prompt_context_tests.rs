@@ -2054,7 +2054,19 @@ async fn planner_production_boundary_enabled_assembly_injects_and_attributes_tra
             .as_deref()
             .is_some_and(|text| text.contains("Planned Note"))
     );
-    assert_eq!(search.requests.lock().expect("searches").len(), 2);
+    assert_eq!(
+        *search.requests.lock().expect("searches"),
+        vec![
+            (
+                "Database migration timeout E_CONNRESET".into(),
+                "pitfall".into()
+            ),
+            (
+                "Memory planner configuration injection".into(),
+                "pattern".into()
+            ),
+        ]
+    );
     let requests = host.requests.lock().expect("requests");
     assert_eq!(requests.len(), 1);
     let request = &requests[0];
