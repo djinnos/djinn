@@ -399,6 +399,7 @@ mod tests {
             "primary coverage `unknown.coverage`",
             "already primary-registered",
             "smoke-ci scenario may not request live credentials",
+            "smoke-ci scenario may not request live providers",
             "smoke-ci scenario may not request Kubernetes",
             "smoke-ci scenario may not request external network access",
             "smoke-ci scenario may not request wall-clock sleep dependency",
