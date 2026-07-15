@@ -168,12 +168,11 @@ async fn refinement_task_owner_is_attributed_user_login_not_system() {
     );
 }
 
-/// The owner resolution fails closed to the prior "system" behavior when the
-/// attributed user id cannot be resolved to a row (e.g. a deleted user), rather
-/// than failing task creation. `created_by_user_id` is still stamped with the
-/// supplied id — the fallback only affects the legacy display `owner` column.
+/// An unresolvable durable owner fails closed before task creation. This direct
+/// task-builder regression also proves no session/spawn bookkeeping is created
+/// by the rejection; the dispatch path performs the same owner gate earlier.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn refinement_task_owner_falls_back_to_system_when_user_unresolvable() {
+async fn refinement_task_missing_owner_creates_no_task_or_spawn() {
     let db = crate::test_helpers::create_test_db();
     let fixture = seed_refinement_fixture(&db).await;
     let (events_tx, _events_rx) = tokio::sync::broadcast::channel::<DjinnEventEnvelope>(256);
@@ -191,17 +190,22 @@ async fn refinement_task_owner_falls_back_to_system_when_user_unresolvable() {
             None,
             Some(missing_user_id),
         )
-        .await
-        .expect("task creation must not fail when the user row is unresolvable");
+        .await;
 
-    let task = TaskRepository::new(db.clone(), EventBus::noop())
-        .get(&task_id)
-        .await
-        .expect("read task")
-        .expect("task exists");
-
-    assert_eq!(
-        task.owner, "system",
-        "owner must fall back to \"system\" when the attributed user cannot be resolved"
+    assert!(
+        task_id.is_none(),
+        "missing owner must prevent task insertion"
+    );
+    assert!(
+        actor.refinement_sessions.is_empty(),
+        "no agent spawn was recorded"
+    );
+    assert!(
+        TaskRepository::new(db.clone(), EventBus::noop())
+            .list_by_project(&fixture.project_id)
+            .await
+            .expect("list project tasks")
+            .into_iter()
+            .all(|task| task.issue_type != "refinement")
     );
 }

@@ -43,6 +43,13 @@
             refinement.get("current_round").and_then(|v| v.as_i64()),
             Some(1)
         );
+        let persisted = repo.get(&proposal.id).await.unwrap().unwrap();
+        assert_eq!(
+            refinement.get("owner_user_id").and_then(|v| v.as_str()),
+            persisted.refinement_owner_user_id.as_deref(),
+            "refinement status must project the owner atomically persisted at start"
+        );
+        assert!(persisted.refinement_owner_user_id.is_some());
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

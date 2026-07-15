@@ -10,7 +10,9 @@ use super::refinement_cap_tests::{
 };
 use crate::refinement::{RefinementPhase, StopReason};
 use djinn_core::events::{DjinnEventEnvelope, EventBus};
-use djinn_db::{ProposalDebateTrailCreateInput, ProposalRepository, TaskRepository};
+use djinn_db::{
+    ProposalDebateTrailCreateInput, ProposalRepository, TaskRepository, UserRepository,
+};
 
 /// Record a `refinement_start` boundary, then sleep so subsequent debate/task
 /// `created_at` timestamps strictly advance past it (current-run scoping uses a
@@ -403,7 +405,13 @@ async fn recover_reconstructs_spawn_budget_from_run_tasks() {
     add_objection(&db, &fixture.proposal_id, 1, true, seq).await;
 
     // Three pre-restart refinement tasks for this run — two already closed, one
-    // still open (orphaned). All three count toward the spawn budget.
+    // still open (orphaned). All three count toward the spawn budget. One row
+    // deliberately has another valid creator: recovery may inspect task rows
+    // for spawn count, but must never derive refinement attribution from them.
+    let misleading_owner = UserRepository::new(db.clone())
+        .upsert_from_github(777_101, "misleading-tribunal-owner", None, None)
+        .await
+        .expect("create distinct misleading task owner");
     for agent_type in ["adversary", "advocate", "judge"] {
         let task_id = actor
             .create_refinement_task_with_context(
@@ -413,7 +421,11 @@ async fn recover_reconstructs_spawn_budget_from_run_tasks() {
                 seq,
                 "Proposal currently meets all DoR checks.",
                 None,
-                Some(&fixture.user_id),
+                if agent_type == "adversary" {
+                    Some(&misleading_owner.id)
+                } else {
+                    Some(&fixture.user_id)
+                },
             )
             .await
             .expect("create run refinement task");
