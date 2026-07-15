@@ -120,13 +120,15 @@ pub async fn execute_three_rung_pressure_plan(
     use djinn_telemetry::cache_cleanup::{
         self as metrics, PressureMode, PressureOutcome, PressureTermination,
     };
-    let mut result = ThreeRungPressureResult::default();
-    result.planned = plan.units.clone();
-    result.projected_allocated_bytes = plan
-        .units
-        .iter()
-        .map(|unit| unit.projected_allocated_bytes)
-        .sum();
+    let mut result = ThreeRungPressureResult {
+        planned: plan.units.clone(),
+        projected_allocated_bytes: plan
+            .units
+            .iter()
+            .map(|unit| unit.projected_allocated_bytes)
+            .sum(),
+        ..ThreeRungPressureResult::default()
+    };
     for unit in &plan.units {
         metrics::increment_pressure_unit(
             PressureMode::Delete,
