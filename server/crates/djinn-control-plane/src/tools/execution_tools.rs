@@ -575,12 +575,22 @@ mod tests {
             .await
             .expect("create project");
 
+        let creator = djinn_db::UserRepository::new(db.clone())
+            .upsert_from_github(900_001, "kill-test-creator", None, None)
+            .await
+            .expect("create task creator");
+
         // Create an in-progress task.
         let task_repo = djinn_db::TaskRepository::new(db.clone(), events.clone());
         let task = task_repo
-            .create_in_project(
+            .create_in_project_with_provenance(
                 &project.id,
                 None,
+                djinn_db::EffectiveCreatorProvenance {
+                    explicit_user_id: Some(&creator.id),
+                    source_task_id: None,
+                    proposal_id: None,
+                },
                 "Kill test task",
                 "desc",
                 "",
@@ -681,11 +691,20 @@ mod tests {
             .create("test-proj-noop", "test-owner", "test-repo")
             .await
             .expect("create project");
+        let creator = djinn_db::UserRepository::new(db.clone())
+            .upsert_from_github(900_002, "kill-noop-test-creator", None, None)
+            .await
+            .expect("create task creator");
         let task_repo = djinn_db::TaskRepository::new(db.clone(), events.clone());
         let task = task_repo
-            .create_in_project(
+            .create_in_project_with_provenance(
                 &project.id,
                 None,
+                djinn_db::EffectiveCreatorProvenance {
+                    explicit_user_id: Some(&creator.id),
+                    source_task_id: None,
+                    proposal_id: None,
+                },
                 "Terminal kill noop task",
                 "desc",
                 "",

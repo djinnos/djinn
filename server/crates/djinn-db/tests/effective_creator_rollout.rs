@@ -74,7 +74,7 @@ fn production_task_writers_match_the_callsite_inventory_and_provenance_boundary(
                     call.symbol
                 );
                 assert!(
-                    !call.enclosing_function.contains("set_created_by_user_id"),
+                    !has_post_insert_attribution(&call),
                     "post-insert attribution at {}:{} ({})",
                     relative,
                     call.line,
@@ -143,6 +143,14 @@ fn calls(source: &str) -> Vec<Invocation> {
         }
     }
     result
+}
+
+/// A create invocation owns its enclosing function body for this gate. The
+/// legacy patch consumes a task returned by the create, so it follows the
+/// balanced invocation text that identifies this callsite. Checking this body
+/// prevents a valid call in another function from masking an adjacent patch.
+fn has_post_insert_attribution(call: &Invocation) -> bool {
+    call.enclosing_function.contains("set_created_by_user_id")
 }
 
 fn function_has_test_attribute(code: &str, offset: usize) -> bool {
@@ -319,7 +327,7 @@ fn strip_comments_and_strings(source: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::calls;
+    use super::{calls, has_post_insert_attribution};
 
     #[test]
     fn post_insert_attribution_is_detected_per_enclosing_function() {
@@ -348,11 +356,7 @@ async fn patched_writer() {
             .find(|call| call.symbol == "patched_writer")
             .expect("patched call discovered");
 
-        assert!(!valid.enclosing_function.contains("set_created_by_user_id"));
-        assert!(
-            patched
-                .enclosing_function
-                .contains("set_created_by_user_id")
-        );
+        assert!(!has_post_insert_attribution(valid));
+        assert!(has_post_insert_attribution(patched));
     }
 }
