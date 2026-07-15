@@ -384,6 +384,26 @@ async fn extension_diagnostics_doctor_auth_retention() {
         .expect("project B probe returned persisted rows")
         .clone();
     let project_b_attempt = &project_b_rows[0].load_attempt_id;
+    assert_ne!(
+        project_b_attempt, &fresh,
+        "project B invocation creates its own fresh attempt"
+    );
+    assert_ne!(
+        project_b_attempt, &historical_attempt,
+        "project B invocation cannot reuse the historical session attempt"
+    );
+    assert_eq!(
+        uuid::Uuid::parse_str(project_b_attempt)
+            .expect("project B UUIDv7 attempt")
+            .get_version_num(),
+        7
+    );
+    assert!(
+        project_b_rows
+            .iter()
+            .all(|row| row.task_id.is_none() && row.session_id.is_none()),
+        "project B doctor rows remain task- and session-independent"
+    );
     let project_b_canonical = repository
         .list_for_load_attempt(&project_b.id, &project_b_attempt)
         .await
