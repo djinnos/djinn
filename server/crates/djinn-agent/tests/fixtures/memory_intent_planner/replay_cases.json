@@ -1,0 +1,147 @@
+[
+   {
+      "enabled" : true,
+      "expected_accounting_finalized" : true,
+      "expected_available_usage" : 17,
+      "expected_context" : "- **[Pattern] Scope Only**: scope baseline (permalink: patterns/scope-only)\n- **[Note] First**: ranked one (permalink: pitfall/first)\n- **[Note] Second**: ranked two (permalink: pattern/second)",
+      "expected_ledger_outcome" : "success",
+      "expected_outcome" : "success",
+      "name" : "enabled_success",
+      "payload" : "{\"queries\":[{\"type\":\"pitfall\",\"query\":\"Database migration timeout E_CONNRESET\"},{\"type\":\"pattern\",\"query\":\"Memory planner configuration injection\"}]}",
+      "provider" : "success"
+   },
+   {
+      "enabled" : false,
+      "expected_accounting_finalized" : false,
+      "expected_available_usage" : 0,
+      "expected_context" : "- **[Pattern] Scope Only**: scope baseline (permalink: patterns/scope-only)",
+      "expected_ledger_outcome" : "disabled",
+      "expected_outcome" : "disabled",
+      "name" : "disabled_no_work",
+      "provider" : "success"
+   },
+   {
+      "enabled" : true,
+      "expected_accounting_finalized" : true,
+      "expected_available_usage" : 17,
+      "expected_context" : "- **[Pattern] Scope Only**: scope baseline (permalink: patterns/scope-only)",
+      "expected_ledger_outcome" : "timeout",
+      "expected_outcome" : "timeout",
+      "name" : "timeout",
+      "provider" : "timeout"
+   },
+   {
+      "enabled" : true,
+      "expected_accounting_finalized" : true,
+      "expected_available_usage" : 17,
+      "expected_context" : "- **[Pattern] Scope Only**: scope baseline (permalink: patterns/scope-only)",
+      "expected_ledger_outcome" : "provider_error",
+      "expected_outcome" : "provider_error",
+      "name" : "provider_error",
+      "provider" : "provider_error"
+   },
+   {
+      "enabled" : true,
+      "expected_accounting_finalized" : true,
+      "expected_available_usage" : 17,
+      "expected_context" : "- **[Pattern] Scope Only**: scope baseline (permalink: patterns/scope-only)",
+      "expected_ledger_outcome" : "invalid_payload",
+      "expected_outcome" : "invalid_payload",
+      "name" : "malformed_json",
+      "payload" : "not json",
+      "provider" : "success"
+   },
+   {
+      "enabled" : true,
+      "expected_accounting_finalized" : true,
+      "expected_available_usage" : 17,
+      "expected_context" : "- **[Pattern] Scope Only**: scope baseline (permalink: patterns/scope-only)",
+      "expected_ledger_outcome" : "invalid_payload",
+      "expected_outcome" : "invalid_payload",
+      "name" : "unknown_type",
+      "payload" : "{\"queries\":[{\"type\":\"unknown\",\"query\":\"Database migration timeout E_CONNRESET\"},{\"type\":\"case\",\"query\":\"Memory planner configuration injection\"}]}",
+      "provider" : "success"
+   },
+   {
+      "enabled" : true,
+      "expected_accounting_finalized" : true,
+      "expected_available_usage" : 17,
+      "expected_context" : "- **[Pattern] Scope Only**: scope baseline (permalink: patterns/scope-only)",
+      "expected_ledger_outcome" : "invalid_payload",
+      "expected_outcome" : "invalid_payload",
+      "name" : "wrong_query_count",
+      "payload" : "{\"queries\":[{\"type\":\"case\",\"query\":\"Only one query\"}]}",
+      "provider" : "success"
+   },
+   {
+      "enabled" : true,
+      "expected_accounting_finalized" : true,
+      "expected_available_usage" : 17,
+      "expected_context" : "- **[Pattern] Scope Only**: scope baseline (permalink: patterns/scope-only)",
+      "expected_ledger_outcome" : "invalid_payload",
+      "expected_outcome" : "invalid_payload",
+      "name" : "query_style_invalid",
+      "payload" : "{\"queries\":[{\"query\":\"Find migration failures\",\"type\":\"case\"},{\"type\":\"pattern\",\"query\":\"Memory planner configuration injection\"}]}",
+      "provider" : "success"
+   },
+   {
+      "enabled" : true,
+      "expected_accounting_finalized" : false,
+      "expected_available_usage" : 17,
+      "expected_context" : "- **[Pattern] Scope Only**: scope baseline (permalink: patterns/scope-only)",
+      "expected_ledger_outcome" : "provider_error",
+      "expected_outcome" : "success",
+      "finalization_fails" : true,
+      "name" : "accounting_finalization_failure",
+      "payload" : "{\"queries\":[{\"type\":\"pitfall\",\"query\":\"Database migration timeout E_CONNRESET\"},{\"type\":\"pattern\",\"query\":\"Memory planner configuration injection\"}]}",
+      "provider" : "success"
+   },
+   {
+      "bucket_mode" : "duplicates",
+      "enabled" : true,
+      "expected_accounting_finalized" : true,
+      "expected_available_usage" : 17,
+      "expected_context" : "- **[Pattern] Scope Only**: scope baseline (permalink: patterns/scope-only)\n- **[Note] Shared planned**: once (permalink: pattern/shared)\n- **[Note] After shared**: unique (permalink: pattern/after)",
+      "expected_ledger_outcome" : "success",
+      "expected_outcome" : "success",
+      "name" : "duplicate_collapse",
+      "payload" : "{\"queries\":[{\"type\":\"pitfall\",\"query\":\"Database migration timeout E_CONNRESET\"},{\"type\":\"pattern\",\"query\":\"Memory planner configuration injection\"}]}",
+      "provider" : "success"
+   },
+   {
+      "enabled" : true,
+      "expected_accounting_finalized" : true,
+      "expected_available_usage" : 17,
+      "expected_context" : "- **[Pattern] Scope Only**: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx (permalink: patterns/scope-only)",
+      "expected_ledger_outcome" : "success",
+      "expected_outcome" : "success",
+      "full_scope_budget" : true,
+      "name" : "full_scope_budget",
+      "payload" : "{\"queries\":[{\"type\":\"pitfall\",\"query\":\"Database migration timeout E_CONNRESET\"},{\"type\":\"pattern\",\"query\":\"Memory planner configuration injection\"}]}",
+      "provider" : "success"
+   },
+   {
+      "bucket_mode" : "caps",
+      "enabled" : true,
+      "expected_accounting_finalized" : true,
+      "expected_available_usage" : 17,
+      "expected_context" : "- **[Pattern] Scope Only**: scope baseline (permalink: patterns/scope-only)\n- **[Note] q1-r1**: q1-r1 (permalink: pattern/q1-r1)\n- **[Note] q1-r2**: q1-r2 (permalink: pattern/q1-r2)\n- **[Note] q2-r1**: q2-r1 (permalink: pattern/q2-r1)\n- **[Note] q2-r2**: q2-r2 (permalink: pattern/q2-r2)\n- **[Note] q3-r1**: q3-r1 (permalink: pattern/q3-r1)\n- **[Note] q3-r2**: q3-r2 (permalink: pattern/q3-r2)",
+      "expected_ledger_outcome" : "success",
+      "expected_outcome" : "success",
+      "name" : "cap_limits",
+      "payload" : "{\"queries\":[{\"type\":\"pitfall\",\"query\":\"Replay cap query 1\"},{\"query\":\"Replay cap query 2\",\"type\":\"pitfall\"},{\"query\":\"Replay cap query 3\",\"type\":\"pitfall\"},{\"query\":\"Replay cap query 4\",\"type\":\"pitfall\"}]}",
+      "provider" : "success"
+   },
+   {
+      "enabled" : true,
+      "expected_accounting_finalized" : true,
+      "expected_available_usage" : 17,
+      "expected_context" : "- **[Pattern] Scope Only**: scope baseline (permalink: patterns/scope-only)\n- **[Note] First**: ranked one (permalink: pitfall/first)\n- **[Note] Second**: ranked two (permalink: pattern/second)",
+      "expected_ledger_outcome" : "success",
+      "expected_outcome" : "success",
+      "name" : "resume_compaction_input",
+      "payload" : "{\"queries\":[{\"type\":\"pitfall\",\"query\":\"Database migration timeout E_CONNRESET\"},{\"type\":\"pattern\",\"query\":\"Memory planner configuration injection\"}]}",
+      "provider" : "success",
+      "resume_compaction_summary" : "UNTRUNCATED-RESUME-COMPACTION-SUMMARY: exact retained text"
+   }
+]

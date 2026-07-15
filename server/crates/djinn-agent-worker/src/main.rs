@@ -2337,8 +2337,8 @@ fn build_worker_agent_context(
         // retrying past the "project is required when multiple projects
         // are configured" error from helpers::resolve_project_id_for_agent_tools.
         default_project_id: Some(project_id),
-        memory_intent_planner: djinn_agent::context::MemoryIntentPlannerConfig::default(),
         reconciliation_sweep: ReconciliationSweepConfig::default(),
+        memory_intent_planner: djinn_agent::context::MemoryIntentPlannerConfig::from_env(),
         compaction_cs: djinn_slot::reply_loop::CompactionCriticalSection::default(),
     }
 }

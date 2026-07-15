@@ -7,12 +7,7 @@
 //! score-union contract is target-specific, while memory planning needs typed,
 //! async queries and must preserve the existing memory-search scoring pipeline.
 
-use std::sync::Arc;
-use std::time::Duration;
-
-use async_trait::async_trait;
 use serde::Deserialize;
-use tokio::sync::Mutex;
 
 use crate::context::MemoryIntentPlannerConfig;
 
@@ -32,8 +27,6 @@ pub struct PlannerInput {
     /// Intentionally untruncated: the caller owns any compaction policy.
     pub resume_compaction_summary: Option<String>,
 }
-
-type FakeSearchResults<N> = Vec<Result<Vec<N>, PlannerError>>;
 
 /// The closed set of note categories safe for planner-directed retrieval.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deserialize)]
@@ -109,8 +102,6 @@ pub enum PlannerError {
     WrongQueryCount(usize),
     #[error("planner query {index} is invalid: {reason}")]
     InvalidQuery { index: usize, reason: &'static str },
-    #[error("planner invocation failed: {0}")]
-    Invocation(String),
 }
 
 #[derive(Deserialize)]
@@ -270,103 +261,6 @@ fn is_boundary(text: &str, start: usize, end: usize) -> bool {
     let after = text[end..].chars().next();
     before.is_none_or(|c| !c.is_ascii_alphanumeric() && c != '_')
         && after.is_none_or(|c| !c.is_ascii_alphanumeric() && c != '_')
-}
-
-/// Async provider seam. Production provider/cost wiring belongs to a later task.
-#[async_trait]
-pub trait MemoryIntentPlanner: Send + Sync {
-    async fn plan(&self, input: PlannerInput) -> Result<String, PlannerError>;
-}
-
-/// Async existing-search seam. It deliberately accepts a typed query rather
-/// than implementing ranking, so the repository's scoring remains unchanged.
-#[async_trait]
-pub trait PlannedNoteSearch: Send + Sync {
-    type Note: Send + Sync;
-    async fn search(&self, query: PlannedQuery) -> Result<Vec<Self::Note>, PlannerError>;
-}
-
-/// Deterministic test planner that records calls and can delay its response.
-#[derive(Clone)]
-pub struct FakeMemoryIntentPlanner {
-    result: Result<String, PlannerError>,
-    delay: Duration,
-    calls: Arc<Mutex<Vec<PlannerInput>>>,
-}
-
-impl FakeMemoryIntentPlanner {
-    pub fn new(result: Result<String, PlannerError>) -> Self {
-        Self {
-            result,
-            delay: Duration::ZERO,
-            calls: Arc::new(Mutex::new(Vec::new())),
-        }
-    }
-
-    pub fn with_delay(mut self, delay: Duration) -> Self {
-        self.delay = delay;
-        self
-    }
-
-    pub async fn calls(&self) -> Vec<PlannerInput> {
-        self.calls.lock().await.clone()
-    }
-}
-
-#[async_trait]
-impl MemoryIntentPlanner for FakeMemoryIntentPlanner {
-    async fn plan(&self, input: PlannerInput) -> Result<String, PlannerError> {
-        self.calls.lock().await.push(input);
-        if !self.delay.is_zero() {
-            tokio::time::sleep(self.delay).await;
-        }
-        self.result.clone()
-    }
-}
-
-/// Deterministic search fake with one result bucket per call, useful for testing
-/// ordering and delayed parallel consumers without a database.
-#[derive(Clone)]
-pub struct FakePlannedNoteSearch<N: Clone + Send + Sync> {
-    results: Arc<Mutex<FakeSearchResults<N>>>,
-    delay: Duration,
-    calls: Arc<Mutex<Vec<PlannedQuery>>>,
-}
-
-impl<N: Clone + Send + Sync> FakePlannedNoteSearch<N> {
-    pub fn new(results: Vec<Result<Vec<N>, PlannerError>>) -> Self {
-        Self {
-            results: Arc::new(Mutex::new(results)),
-            delay: Duration::ZERO,
-            calls: Arc::new(Mutex::new(Vec::new())),
-        }
-    }
-
-    pub fn with_delay(mut self, delay: Duration) -> Self {
-        self.delay = delay;
-        self
-    }
-    pub async fn calls(&self) -> Vec<PlannedQuery> {
-        self.calls.lock().await.clone()
-    }
-}
-
-#[async_trait]
-impl<N: Clone + Send + Sync + 'static> PlannedNoteSearch for FakePlannedNoteSearch<N> {
-    type Note = N;
-
-    async fn search(&self, query: PlannedQuery) -> Result<Vec<N>, PlannerError> {
-        self.calls.lock().await.push(query);
-        if !self.delay.is_zero() {
-            tokio::time::sleep(self.delay).await;
-        }
-        let mut results = self.results.lock().await;
-        if results.is_empty() {
-            Ok(Vec::new())
-        } else {
-            results.remove(0)
-        }
-    }
 }
 
 #[cfg(test)]
@@ -605,24 +499,6 @@ mod tests {
                 "delimiter should be rejected: {delimiter:?}"
             );
         }
-    }
-
-    #[tokio::test]
-    async fn fakes_record_inputs_and_support_delays() {
-        let planner =
-            FakeMemoryIntentPlanner::new(Ok(valid().into())).with_delay(Duration::from_millis(1));
-        assert_eq!(planner.plan(input()).await.unwrap(), valid());
-        assert_eq!(planner.calls().await.len(), 1);
-        let search =
-            FakePlannedNoteSearch::new(vec![Ok(vec!["note"])]).with_delay(Duration::from_millis(1));
-        assert_eq!(
-            search
-                .search(parse_planned_queries(valid()).unwrap().remove(0))
-                .await
-                .unwrap(),
-            vec!["note"]
-        );
-        assert_eq!(search.calls().await.len(), 1);
     }
 
     /// Source-parity tests against the Phase 1 memory_search contract in
