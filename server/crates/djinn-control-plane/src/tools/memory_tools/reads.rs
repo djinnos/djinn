@@ -260,10 +260,12 @@ impl DjinnMcpServer {
         // When a permalink filter is given, verify the note exists in the
         // caller's project before querying revisions. A foreign or absent
         // permalink yields the same not-found shape without disclosing revision
-        // existence, count, or provenance.
-        if let Some(permalink) = p.permalink.as_deref() {
+        // existence, count, or provenance. The resolved note UUID must be passed
+        // to the ledger query because note_revision_events.note_id is the note
+        // UUID, not the permalink.
+        let resolved_note_id = if let Some(permalink) = p.permalink.as_deref() {
             match repo.get_by_permalink(&project_id, permalink).await {
-                Ok(Some(_)) => {}
+                Ok(Some(note)) => Some(note.id),
                 _ => {
                     return Json(MemoryRevisionsResponse {
                         revisions: vec![],
@@ -271,10 +273,12 @@ impl DjinnMcpServer {
                     });
                 }
             }
-        }
+        } else {
+            None
+        };
 
-        let rows = if let Some(permalink) = p.permalink.as_deref() {
-            repo.revision_events_for_note(&project_id, permalink).await
+        let rows = if let Some(note_id) = resolved_note_id.as_deref() {
+            repo.revision_events_for_note(&project_id, note_id).await
         } else {
             repo.revision_events(&project_id).await
         };
