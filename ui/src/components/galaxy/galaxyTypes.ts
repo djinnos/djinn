@@ -60,6 +60,13 @@ export interface GalaxyData {
   /** Full pre-budget totals for the "showing N of M" honesty line. */
   totalNodes?: number;
   totalEdges?: number;
+  /**
+   * Proposal lmkv: true when every node's x/y/z came straight from the server's
+   * warm-time galaxy layout (shipped in the snapshot), so the caller can render
+   * as-is and MUST NOT run the client force layout. False/undefined means
+   * positions still need the worker/inline layout (legacy blobs, fixtures).
+   */
+  serverPositioned?: boolean;
 }
 
 export type GalaxyColorMode = "group" | "heat";

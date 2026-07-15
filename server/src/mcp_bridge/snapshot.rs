@@ -338,6 +338,14 @@ pub(crate) fn build_snapshot_payload(
                 // nodes that never had a position computed.
                 x: graph.layout_position(idx).map(|p| p.x).unwrap_or_default(),
                 y: graph.layout_position(idx).map(|p| p.y).unwrap_or_default(),
+                // lmkv: warm-time 3D galaxy coordinates + collapsed-edge
+                // degree from the djinn-graph galaxy sidecar. `None` (skipped
+                // on the wire) for legacy artifacts / synthetic nodes without
+                // a galaxy position, so the galaxy UI falls back to its worker.
+                gx: graph.galaxy_position(idx).map(|p| p.x),
+                gy: graph.galaxy_position(idx).map(|p| p.y),
+                gz: graph.galaxy_position(idx).map(|p| p.z),
+                degree: graph.galaxy_degree(idx),
                 keywords: Vec::new(),
             }
         })
@@ -593,6 +601,12 @@ fn build_community_snapshot_payload(
                 is_test: false,
                 x,
                 y,
+                // Community super-nodes are not part of the galaxy view; the
+                // galaxy renderer consumes the symbol-level snapshot.
+                gx: None,
+                gy: None,
+                gz: None,
+                degree: None,
                 keywords: agg.keywords,
             }
         })

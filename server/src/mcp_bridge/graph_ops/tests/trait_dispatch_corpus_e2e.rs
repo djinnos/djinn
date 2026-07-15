@@ -369,6 +369,8 @@ fn build_corpus_fixture(spec: &CorpusFixtureSpec) -> RepoDependencyGraph {
         processes: vec![],
         route_exclusion_config: Default::default(),
         layout_positions: std::collections::BTreeMap::new(),
+        galaxy_positions: std::collections::BTreeMap::new(),
+        galaxy_degrees: std::collections::BTreeMap::new(),
     })
 }
 

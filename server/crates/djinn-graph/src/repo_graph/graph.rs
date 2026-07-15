@@ -20,6 +20,7 @@ use petgraph::graph::{DiGraph, NodeIndex};
 use petgraph::visit::EdgeRef;
 
 use crate::complexity::ComplexityWalker;
+use crate::galaxy_layout::GalaxyLayoutPosition;
 use crate::layout::GraphLayoutPosition;
 use crate::scip_parser::{ParsedScipIndex, ScipFile, ScipSymbol, ScipSymbolKind, ScipVisibility};
 
@@ -133,6 +134,13 @@ pub struct RepoDependencyGraph {
     pub(super) route_exclusion_config: RouteExclusionConfig,
     /// Warm-time deterministic layout positions keyed by stable node UID.
     pub(super) layout_positions: BTreeMap<String, GraphLayoutPosition>,
+    /// Proposal lmkv: warm-time 3D galaxy layout positions keyed by stable
+    /// node UID. Populated during warm (and lazily backfilled on legacy
+    /// artifact load); round-trips through the artifact.
+    pub(super) galaxy_positions: BTreeMap<String, GalaxyLayoutPosition>,
+    /// Proposal lmkv: per-node collapsed-edge degree keyed by stable node UID,
+    /// computed alongside [`Self::galaxy_positions`].
+    pub(super) galaxy_degrees: BTreeMap<String, u32>,
 }
 
 /// A single SCIP definition range pinned to a graph node.
@@ -268,6 +276,29 @@ impl RepoDependencyGraph {
         layout_positions: BTreeMap<String, GraphLayoutPosition>,
     ) {
         self.layout_positions = layout_positions;
+    }
+
+    /// Return all precomputed galaxy positions keyed by stable node UID.
+    pub fn galaxy_positions(&self) -> &BTreeMap<String, GalaxyLayoutPosition> {
+        &self.galaxy_positions
+    }
+
+    /// Look up a precomputed galaxy coordinate by graph node identity.
+    pub fn galaxy_position(&self, node: NodeIndex) -> Option<GalaxyLayoutPosition> {
+        let uid = self.graph.node_weight(node)?.stable_uid();
+        self.galaxy_positions.get(&uid).copied()
+    }
+
+    /// Look up a precomputed collapsed-edge galaxy degree by node identity.
+    pub fn galaxy_degree(&self, node: NodeIndex) -> Option<u32> {
+        let uid = self.graph.node_weight(node)?.stable_uid();
+        self.galaxy_degrees.get(&uid).copied()
+    }
+
+    /// Replace the precomputed galaxy layout sidecar (positions + degrees).
+    pub fn set_galaxy_layout(&mut self, layout: crate::galaxy_layout::GalaxyLayout) {
+        self.galaxy_positions = layout.positions;
+        self.galaxy_degrees = layout.degrees;
     }
 
     /// Compute compat-safe language-chain audit metadata for a route edge.

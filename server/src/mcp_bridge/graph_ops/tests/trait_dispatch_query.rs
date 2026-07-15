@@ -132,6 +132,8 @@ fn trait_dispatch_fixture() -> djinn_graph::repo_graph::RepoDependencyGraph {
         processes: vec![],
         route_exclusion_config: Default::default(),
         layout_positions: std::collections::BTreeMap::new(),
+        galaxy_positions: std::collections::BTreeMap::new(),
+        galaxy_degrees: std::collections::BTreeMap::new(),
     })
 }
 
@@ -194,6 +196,8 @@ fn trait_dispatch_no_fanout_fixture() -> djinn_graph::repo_graph::RepoDependency
         processes: vec![],
         route_exclusion_config: Default::default(),
         layout_positions: std::collections::BTreeMap::new(),
+        galaxy_positions: std::collections::BTreeMap::new(),
+        galaxy_degrees: std::collections::BTreeMap::new(),
     })
 }
 

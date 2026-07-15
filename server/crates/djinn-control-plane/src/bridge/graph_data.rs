@@ -408,6 +408,25 @@ pub struct SnapshotNode {
     /// Warm-time layout coordinate (y axis). See [`SnapshotNode::x`].
     #[serde(default)]
     pub y: f64,
+    /// Proposal lmkv: warm-time 3D galaxy layout coordinates. Populated from
+    /// the djinn-graph galaxy sidecar (computed once at warm time). `None` on
+    /// legacy artifacts that predate the sidecar and for synthetic nodes that
+    /// never got a galaxy position — the galaxy UI then falls back to its
+    /// client-side worker layout. Skipped on the wire when absent so the Sigma
+    /// view and every other snapshot consumer are unaffected.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gx: Option<f64>,
+    /// Galaxy Y coordinate. See [`SnapshotNode::gx`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gy: Option<f64>,
+    /// Galaxy Z coordinate. See [`SnapshotNode::gx`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gz: Option<f64>,
+    /// Proposal lmkv: per-node degree from the collapsed galaxy edge view,
+    /// computed alongside the galaxy positions. Lets the galaxy UI reuse the
+    /// server degree instead of recomputing it; `None` on legacy artifacts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub degree: Option<u32>,
     /// Keywords extracted from community member names. Populated for
     /// community nodes; empty or omitted for symbol/file nodes.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

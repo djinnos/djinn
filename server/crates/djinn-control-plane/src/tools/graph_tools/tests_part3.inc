@@ -796,6 +796,10 @@
             is_test: false,
             x: 0.0,
             y: 0.0,
+            gx: None,
+            gy: None,
+            gz: None,
+            degree: None,
             keywords: Vec::new(),
         });
         response.snapshot.edges.push(crate::bridge::SnapshotEdge {
@@ -918,6 +922,10 @@
             is_test: false,
             x: 0.0,
             y: 0.0,
+            gx: None,
+            gy: None,
+            gz: None,
+            degree: None,
             keywords: Vec::new(),
         };
         let json = serde_json::to_value(node).expect("serialize node");

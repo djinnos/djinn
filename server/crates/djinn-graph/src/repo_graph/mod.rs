@@ -231,6 +231,8 @@ impl RepoDependencyGraph {
             processes: processes_out,
             route_exclusion_config: self.route_exclusion_config.clone(),
             layout_positions: self.layout_positions.clone(),
+            galaxy_positions: self.galaxy_positions.clone(),
+            galaxy_degrees: self.galaxy_degrees.clone(),
         }
     }
 
@@ -347,6 +349,8 @@ impl RepoDependencyGraph {
             } else {
                 artifact.layout_positions.clone()
             },
+            galaxy_positions: artifact.galaxy_positions.clone(),
+            galaxy_degrees: artifact.galaxy_degrees.clone(),
         };
         // PR F3: rehydrate the community sidecar verbatim — node
         // positions in the artifact match `NodeIndex` 0..n thanks to the
@@ -471,6 +475,8 @@ impl RepoDependencyGraph {
             processes: Vec::new(),
             route_exclusion_config: artifact.route_exclusion_config,
             layout_positions: BTreeMap::new(),
+            galaxy_positions: BTreeMap::new(),
+            galaxy_degrees: BTreeMap::new(),
         };
 
         // Step 2: Rebuild the base graph from the filtered artifact.
