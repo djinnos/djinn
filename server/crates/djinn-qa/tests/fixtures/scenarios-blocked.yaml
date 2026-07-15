@@ -1,0 +1,19 @@
+version: 1
+scenarios:
+  - id: qa.deferred-runner
+    version: 1
+    enabled: true
+    profiles: [smoke-ci]
+    sources:
+      - kind: incident
+        id: incident-qa-runner-pending
+    primary_coverage: reaper.slow-vs-crashed-discrimination
+    execution:
+      kind: cargo-package
+      package: unavailable-runner-package
+    isolation:
+      database: isolated
+      providers: isolated
+      channel: isolated
+    watch_paths: [server/crates/djinn-qa/src/scenario.rs]
+    blocked_dependency: qa-runner-not-yet-implemented
