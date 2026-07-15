@@ -31,7 +31,8 @@ async fn mcp_memory_write_success_shape_and_duplicate_permalink_error() {
                 "project": project,
                 "title": "Write Contract Note",
                 "content": "body",
-                "reason": "exercise memory write contract", "type": "adr"
+                "reason": "create note for memory write contract",
+                "type": "adr"
             }),
         )
         .await
@@ -64,7 +65,8 @@ async fn mcp_memory_write_success_shape_and_duplicate_permalink_error() {
                 "project": project,
                 "title": "Write Contract Note",
                 "content": "body-2",
-                "reason": "exercise memory write contract", "type": "adr"
+                "reason": "verify duplicate permalink rejection",
+                "type": "adr"
             }),
         )
         .await
