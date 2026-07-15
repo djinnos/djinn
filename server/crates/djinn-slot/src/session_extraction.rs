@@ -47,7 +47,8 @@ pub async fn run_post_session_extraction(
     terminal_context: TerminalExtractionContext,
     app_state: SlotContext,
 ) {
-    run_post_session_extraction_inner(task_id, task_run_id, terminal_context, app_state, None).await;
+    run_post_session_extraction_inner(task_id, task_run_id, terminal_context, app_state, None)
+        .await;
 }
 
 /// Shared implementation with a test-only LLM provider seam. Production always
@@ -107,6 +108,8 @@ async fn run_post_session_extraction_inner(
         {
             #[cfg(any(test, feature = "test-support"))]
             if let Some(provider) = provider_override.clone() {
+                // Keep the injected-provider path behaviorally identical to production:
+                // in particular, forward the caller's terminal context unchanged.
                 super::llm_extraction::run_llm_extraction_with_terminal_context_and_provider(
                     session.id,
                     taxonomy,
@@ -1041,15 +1044,15 @@ mod tests {
     use super::*;
     use crate::{TerminalExtractionOutcome, TerminalReviewDecision};
     use djinn_core::message::{ContentBlock, Conversation, Message};
-    use djinn_provider::provider::{LlmProvider, StreamEvent, ToolChoice};
-    use futures::{Future, Stream};
-    use std::pin::Pin;
-    use std::sync::{Arc, Mutex};
     use djinn_db::{
         CreateSessionParams, EpicCreateInput, EpicRepository, MemoryEntityKind, MemoryEntityRef,
         MemoryEntityType, NoteRepository, ProposalCreateInput, ProposalRepository,
         SessionRepository, TaskRepository,
     };
+    use djinn_provider::provider::{LlmProvider, StreamEvent, ToolChoice};
+    use futures::{Future, Stream};
+    use std::pin::Pin;
+    use std::sync::{Arc, Mutex};
     use tokio_util::sync::CancellationToken;
 
     #[test]
@@ -1096,7 +1099,10 @@ mod tests {
                 .last()
                 .map(Message::text_content)
                 .unwrap_or_default();
-            self.prompts.lock().expect("prompt recorder mutex").push(prompt);
+            self.prompts
+                .lock()
+                .expect("prompt recorder mutex")
+                .push(prompt);
             let stream = futures::stream::iter(vec![
                 Ok(StreamEvent::Delta(ContentBlock::text(
                     r#"{"cases":[],"patterns":[],"pitfalls":[]}"#,
@@ -1123,10 +1129,8 @@ mod tests {
             })
             .await
             .expect("create task run");
-        let sessions = SessionRepository::new(
-            fixture.db.clone(),
-            djinn_core::events::EventBus::noop(),
-        );
+        let sessions =
+            SessionRepository::new(fixture.db.clone(), djinn_core::events::EventBus::noop());
         let session = sessions
             .create(CreateSessionParams {
                 project_id: &fixture.project.id,
