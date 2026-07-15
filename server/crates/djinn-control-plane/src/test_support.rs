@@ -30,6 +30,7 @@ use std::sync::{Arc, Mutex};
 
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
+use djinn_core::doctor::checks::retrieval::RetrievalHealthConfig;
 use djinn_core::events::EventBus;
 use djinn_core::extension_diagnostics::ExtensionLoadDiagnosticV1;
 use djinn_core::models::DjinnSettings;
@@ -44,6 +45,7 @@ use djinn_db::{
 };
 use djinn_git::{GitActorHandle, GitError};
 use djinn_provider::catalog::{CatalogService, HealthTracker};
+use djinn_telemetry::memory_retrieval::MemoryRetrievalMetrics;
 use serde_json::Value;
 
 use crate::bridge::{
@@ -702,6 +704,32 @@ impl McpTestHarness {
             runtime,
             Arc::new(StubGit),
             Arc::new(StubRepoGraph),
+        );
+        let server = DjinnMcpServer::new(state.clone());
+        Self { state, db, server }
+    }
+
+    /// Build the normal strict-stub harness with an explicitly injected
+    /// retrieval-health configuration. This follows production composition:
+    /// the value is stored once in [`McpState`] and every MCP surface reads it
+    /// through `McpState::retrieval_config`.
+    pub fn from_db_with_retrieval_config(db: Database, config: RetrievalHealthConfig) -> Self {
+        let state = McpState::with_enrichment(
+            db.clone(),
+            EventBus::noop(),
+            CatalogService::new(),
+            HealthTracker::new(),
+            config,
+            Arc::new(MemoryRetrievalMetrics::new()),
+            Some(Arc::new(StubCoordinator) as Arc<dyn CoordinatorOps>),
+            Some(Arc::new(StubSlotPool) as Arc<dyn SlotPoolOps>),
+            Some(Arc::new(StubNoteEmbedding) as Arc<dyn NoteEmbeddingProvider>),
+            Some(Arc::new(StubNoteVectorStore) as Arc<dyn NoteVectorStore>),
+            Arc::new(StubLsp),
+            Arc::new(StubRuntime::default()),
+            Arc::new(StubGit),
+            Arc::new(StubRepoGraph),
+            None,
         );
         let server = DjinnMcpServer::new(state.clone());
         Self { state, db, server }

@@ -688,6 +688,21 @@ impl RetrievalTraceRepository {
         Ok(())
     }
 
+    /// Update a trace timestamp for controlled historical-data setup.
+    ///
+    /// Retrieval traces are normally immutable after insertion. This narrow
+    /// repository operation keeps test and maintenance callers from bypassing
+    /// the database boundary when they need a deterministic rollup window.
+    pub async fn update_created_at(&self, id: &str, created_at: &str) -> Result<()> {
+        self.db.ensure_initialized().await?;
+        sqlx::query("UPDATE retrieval_traces SET created_at = $2 WHERE id = $1")
+            .bind(id)
+            .bind(created_at)
+            .execute(self.db.pool())
+            .await?;
+        Ok(())
+    }
+
     /// Aggregate health evidence for workload retrieval traces in a project
     /// over a half-open `[from, until)` UTC time window.
     ///
