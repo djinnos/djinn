@@ -10,13 +10,17 @@ use crate::repositories::retrieval_trace::{
     DurationStageSummary, ENTRY_POINT_VALUES, MAX_RETRIEVAL_TRACE_OFFSET,
     RETRIEVAL_TRACE_OUTCOME_VALUES, RETRIEVAL_TRACE_SCHEMA_VERSION, RetrievalTraceEntryPoint,
     RetrievalTraceListFilter, RetrievalTraceOutcome, RetrievalTraceRepository, RetrievalTraceRow,
-    SKIPPED_REASON_VALUES, SkippedReason, TraceCandidate, WORKLOAD_ENTRY_POINTS,
-    classify_legacy_trace_outcome, validate_candidates,
+    MINIMUM_RETRIEVAL_TRACE_RETENTION_WINDOW, SKIPPED_REASON_VALUES, SkippedReason, TraceCandidate,
+    WORKLOAD_ENTRY_POINTS, classify_legacy_trace_outcome, validate_candidates,
 };
 
 #[cfg(test)]
 #[path = "retrieval_trace_semantics_tests.rs"]
 mod retrieval_trace_semantics_tests;
+
+#[cfg(test)]
+#[path = "retrieval_trace_retention_tests.rs"]
+mod retrieval_trace_retention_tests;
 
 fn test_db() -> Database {
     Database::open_in_memory().unwrap()
@@ -868,7 +872,11 @@ async fn prune_older_than_deletes_old_rows_and_reports_count() {
 
     // Cutoff: prune everything strictly before 2026-07-01.
     let pruned = repo
-        .prune_older_than(project_id, "2026-07-01T00:00:00.000Z")
+        .prune_older_than(
+            project_id,
+            "2026-07-01T00:00:00.000Z",
+            "2026-08-01T00:00:00.000Z",
+        )
         .await
         .unwrap();
 
@@ -921,7 +929,11 @@ async fn prune_older_than_deletes_nothing_when_all_newer() {
     backdate_created_at(&db, &r2.id, "2026-12-01T00:00:00.000Z").await;
 
     let pruned = repo
-        .prune_older_than(project_id, "2026-01-01T00:00:00.000Z")
+        .prune_older_than(
+            project_id,
+            "2026-01-01T00:00:00.000Z",
+            "2026-02-01T00:00:00.000Z",
+        )
         .await
         .unwrap();
     assert_eq!(pruned, 0);
@@ -941,7 +953,11 @@ async fn prune_older_than_empty_project_prunes_zero() {
     let repo = RetrievalTraceRepository::new(db);
 
     let pruned = repo
-        .prune_older_than(project_id, "2026-07-01T00:00:00.000Z")
+        .prune_older_than(
+            project_id,
+            "2026-07-01T00:00:00.000Z",
+            "2026-08-01T00:00:00.000Z",
+        )
         .await
         .unwrap();
     assert_eq!(pruned, 0);

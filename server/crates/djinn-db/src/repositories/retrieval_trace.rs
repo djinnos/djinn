@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 use sqlx::postgres::{PgTypeInfo, PgValueRef};
 use sqlx::{Decode, Postgres, Type};
+use chrono::{DateTime, Utc};
 
 use crate::Result;
 use crate::database::Database;
@@ -15,6 +16,37 @@ pub const DEFAULT_RETRIEVAL_TRACE_LIMIT: i32 = 100;
 /// query cheap. Larger offsets are rejected with a validation error rather than
 /// being silently truncated, which is safer for operator tooling.
 pub const MAX_RETRIEVAL_TRACE_OFFSET: i32 = 10_000;
+
+/// Minimum time that retrieval traces must remain available after their
+/// timestamp. This is the maximum supported lookback for the task-run outcomes
+/// report owned by sibling epic `fv7a`.
+///
+/// The control-plane/server maintenance caller owns scheduling pruning. It must
+/// supply an explicit reference time to [`RetrievalTraceRepository::prune_older_than`]
+/// rather than relying on database time, so the retention boundary is
+/// deterministic and testable.
+pub const MINIMUM_RETRIEVAL_TRACE_RETENTION_WINDOW: std::time::Duration =
+    std::time::Duration::from_secs(30 * 24 * 60 * 60);
+
+fn parse_retrieval_trace_utc_timestamp(value: &str, field: &str) -> Result<DateTime<Utc>> {
+    if !value.ends_with('Z') {
+        return Err(DbError::InvalidData(format!(
+            "{field} must be an ISO-8601 UTC timestamp ending in Z: {value}"
+        )));
+    }
+
+    DateTime::parse_from_rfc3339(value)
+        .map(|timestamp| timestamp.with_timezone(&Utc))
+        .map_err(|err| {
+            DbError::InvalidData(format!(
+                "{field} must be a valid ISO-8601 UTC timestamp: {err}"
+            ))
+        })
+}
+
+fn format_retrieval_trace_utc_timestamp(timestamp: DateTime<Utc>) -> String {
+    timestamp.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string()
+}
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -954,20 +986,45 @@ impl RetrievalTraceRepository {
         })
     }
 
-    /// Prune (delete) trace rows older than a configurable retention cutoff for
-    /// a project.
+    /// Prune trace rows older than an eligible retention cutoff for one project.
     ///
-    /// `before_cutoff` is an ISO-8601 UTC timestamp string (the same format used
-    /// by the `created_at` column, e.g. `2026-07-01T00:00:00.000Z`). Rows whose
-    /// `created_at` is strictly less than this value are deleted. Because
-    /// `created_at` is stored as a lexicographically-sortable UTC ISO-8601
-    /// string, a simple string comparison (`<`) correctly orders timestamps.
+    /// The control-plane/server maintenance caller owns invoking this method.
+    /// `before_cutoff` and `reference_time` must be valid ISO-8601 UTC timestamp
+    /// strings (for example `2026-07-01T00:00:00.000Z`). The explicit reference
+    /// time avoids database `now()` and makes the protected boundary deterministic.
     ///
-    /// Returns the number of rows deleted. Errors are returned as `Result` so
-    /// callers can log and continue fail-open without changing injection
-    /// output.
-    pub async fn prune_older_than(&self, project_id: &str, before_cutoff: &str) -> Result<u64> {
+    /// A cutoff later than `reference_time -
+    /// MINIMUM_RETRIEVAL_TRACE_RETENTION_WINDOW` is rejected with
+    /// [`DbError::InvalidData`]; it cannot delete report-supported traces.
+    /// Eligible deletion remains project-scoped and strictly `created_at <
+    /// before_cutoff`. Retained explicit outcomes, including `disabled_off` and
+    /// `disabled_kill_switch`, are not modified or reclassified. The minimum
+    /// window is the maximum lookback supported for the sibling `fv7a` outcomes
+    /// report; a request beyond that coverage needs a truthful diagnostic.
+    ///
+    /// Returns the number of rows deleted. Errors are returned without imposing
+    /// caller logging or fail-open policy.
+    pub async fn prune_older_than(
+        &self,
+        project_id: &str,
+        before_cutoff: &str,
+        reference_time: &str,
+    ) -> Result<u64> {
         self.db.ensure_initialized().await?;
+
+        let before_cutoff = parse_retrieval_trace_utc_timestamp(before_cutoff, "before_cutoff")?;
+        let reference_time = parse_retrieval_trace_utc_timestamp(reference_time, "reference_time")?;
+        let minimum_window = chrono::Duration::from_std(MINIMUM_RETRIEVAL_TRACE_RETENTION_WINDOW)
+            .map_err(|err| DbError::InvalidData(format!("invalid retention window: {err}")))?;
+        let protected_boundary = reference_time - minimum_window;
+        if before_cutoff > protected_boundary {
+            return Err(DbError::InvalidData(format!(
+                "before_cutoff {} is inside the protected retrieval-trace retention window; latest eligible cutoff is {}",
+                format_retrieval_trace_utc_timestamp(before_cutoff),
+                format_retrieval_trace_utc_timestamp(protected_boundary),
+            )));
+        }
+        let before_cutoff = format_retrieval_trace_utc_timestamp(before_cutoff);
 
         let result = sqlx::query(
             r#"DELETE FROM retrieval_traces
