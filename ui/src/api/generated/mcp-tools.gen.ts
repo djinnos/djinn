@@ -1100,6 +1100,11 @@ export namespace DoctorRunInputSchema {
    * listing the valid check names so the caller can self-correct.
    */
   check_names?: string[]
+  /**
+   * Project UUID or exact `owner/repo` slug used only by the explicitly
+   * selected extension diagnostics probe; this is never a filesystem path.
+   */
+  project?: string
   [k: string]: any
   }
 
@@ -1146,6 +1151,11 @@ export namespace DoctorRunOutputSchema {
    */
   error?: string
   /**
+   * Persisted V1 diagnostics from the explicit project probe. Empty and
+   * skipped for ordinary global checks.
+   */
+  extension_diagnostics?: DoctorExtensionDiagnosticFinding[]
+  /**
    * Findings emitted by this check, with their persisted ids filled in.
    */
   findings: DoctorRunFindingEntry[]
@@ -1154,6 +1164,23 @@ export namespace DoctorRunOutputSchema {
    * findings). `false` when the check itself returned an error.
    */
   ran: boolean
+  [k: string]: any
+  }
+  /**
+   * Direct projection of a persisted V1 extension diagnostic.
+   * 
+   * The project probe never creates a duplicate `doctor_findings` row.
+   */
+  export interface DoctorExtensionDiagnosticFinding {
+  diagnostic_id: string
+  occurrence_count: number
+  phase: string
+  remedy: string
+  remedy_code: string
+  severity: string
+  source_key: string
+  source_kind: string
+  summary: string
   [k: string]: any
   }
   /**
