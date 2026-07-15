@@ -587,12 +587,20 @@ pub fn validate_registry(
         {
             return Err("replacement tool is not current".into());
         }
-        if let Some(parameter) = replacement_parameter {
+        if matches!(
+            trap,
+            CompatibilityTrap::RenamedParameter(_) | CompatibilityTrap::RemovedParameter(_)
+        ) {
             let surface = current_surface
                 .iter()
                 .find(|s| s.name == tool)
                 .ok_or("parameter tool is not current")?;
-            if !surface.parameters.contains(parameter) {
+            if surface.parameters.contains(old) {
+                return Err("obsolete parameter is advertised".into());
+            }
+            if let Some(parameter) = replacement_parameter
+                && !surface.parameters.contains(parameter)
+            {
                 return Err("replacement parameter is not current".into());
             }
         }
