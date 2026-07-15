@@ -172,6 +172,96 @@ async fn live_memory_mutations_persist_trusted_attribution_and_snapshots() {
 }
 
 #[tokio::test]
+async fn live_singleton_rewrite_uses_trusted_revision_context() {
+    let harness = McpTestHarness::new().await;
+    let (project, _dir) = common::create_test_project_with_dir(harness.db()).await;
+    let project_ref = project.slug();
+    let created = dispatch_as(
+        TrustedRevisionCallerContext::authenticated_human("singleton-human").unwrap(),
+        &harness,
+        "memory_write",
+        json!({"project": project_ref, "title": "Ignored", "content": "singleton before", "type": "brief", "reason": "create singleton"}),
+    )
+    .await;
+    assert!(
+        created.get("error").is_none(),
+        "singleton create error: {created}"
+    );
+    let note_id = created["id"].as_str().expect("singleton id").to_owned();
+
+    let rewritten = dispatch_as(
+        TrustedRevisionCallerContext::authenticated_agent("singleton-agent")
+            .unwrap()
+            .with_execution_provenance(
+                Some("singleton-session".to_owned()),
+                Some("singleton-task".to_owned()),
+                Some("singleton-run".to_owned()),
+            ),
+        &harness,
+        "memory_write",
+        json!({"project": project_ref, "title": "Ignored", "content": "singleton after", "type": "brief", "reason": "\u{2003} rewrite singleton through live dispatch \u{2003}"}),
+    )
+    .await;
+    assert!(
+        rewritten.get("error").is_none(),
+        "singleton rewrite error: {rewritten}"
+    );
+    assert_eq!(rewritten["id"].as_str(), Some(note_id.as_str()));
+
+    let repo = revision_repo(&harness);
+    let revisions = repo
+        .revision_events(&project.id)
+        .await
+        .expect("singleton revisions");
+    assert_eq!(revisions.len(), 2);
+    let revision = &revisions[1];
+    assert_eq!(revision.note_id.as_deref(), Some(note_id.as_str()));
+    assert_eq!(revision.event_kind, "updated");
+    assert_eq!(revision.reason, "rewrite singleton through live dispatch");
+    assert_eq!(revision.actor_kind, "agent");
+    assert_eq!(revision.actor_id.as_deref(), Some("singleton-agent"));
+    assert_eq!(revision.subsystem, None);
+    assert_eq!(revision.content_before.as_deref(), Some("singleton before"));
+    assert_eq!(revision.content_after.as_deref(), Some("singleton after"));
+    assert_eq!(
+        (
+            revision.session_id.as_deref(),
+            revision.task_id.as_deref(),
+            revision.task_run_id.as_deref()
+        ),
+        (
+            Some("singleton-session"),
+            Some("singleton-task"),
+            Some("singleton-run")
+        ),
+    );
+
+    let untrusted = harness
+        .call_tool(
+            "memory_write",
+            json!({"project": project_ref, "title": "Ignored", "content": "must not persist", "type": "brief", "reason": "untrusted singleton overwrite"}),
+        )
+        .await
+        .expect("untrusted dispatch returns tool response");
+    assert_eq!(untrusted["error"], "authenticated revision caller required");
+    assert_eq!(
+        repo.revision_events(&project.id)
+            .await
+            .expect("revisions after rejection")
+            .len(),
+        2
+    );
+    assert_eq!(
+        repo.get(&note_id)
+            .await
+            .expect("singleton after rejection")
+            .expect("singleton survives")
+            .content,
+        "singleton after",
+    );
+}
+
+#[tokio::test]
 async fn invalid_reasons_and_spoofed_attribution_do_not_mutate_notes_or_revisions() {
     let harness = McpTestHarness::new().await;
     let (project, _dir) = common::create_test_project_with_dir(harness.db()).await;

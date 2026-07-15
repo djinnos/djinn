@@ -33,8 +33,17 @@ pub(super) async fn maybe_update_singleton_note(
     repo: &NoteRepository,
     project_id: &str,
     params: &WriteParams,
-    tags_json: &str,
+    _tags_json: &str,
 ) -> Option<MemoryNoteResponse> {
+    // Singleton overwrite is still a live memory_write mutation. Acquire the
+    // server-owned caller values before looking up or changing the existing
+    // row so this early path cannot bypass the revision boundary.
+    let Some((attribution, provenance)) = trusted_revision_context() else {
+        return Some(MemoryNoteResponse::error(
+            "authenticated revision caller required".to_owned(),
+        ));
+    };
+
     if is_singleton(&params.note_type)
         && let Some(existing) = repo
             .get_by_permalink(project_id, &params.note_type)
@@ -44,10 +53,23 @@ pub(super) async fn maybe_update_singleton_note(
     {
         return Some(
             match repo
-                .update(&existing.id, &params.title, &params.content, tags_json)
+                .mutate_with_revision(NoteRevisionMutation {
+                    project_id: project_id.to_owned(),
+                    note_id: Some(existing.id.clone()),
+                    event_kind: NoteRevisionEventKind::Updated,
+                    desired: NoteRevisionDesiredState::Existing {
+                        content: params.content.clone(),
+                        confidence: existing.confidence,
+                    },
+                    attribution,
+                    provenance,
+                    reason: NoteRevisionReason::new(params.reason.clone())
+                        .expect("validated MCP mutation reason"),
+                })
                 .await
             {
-                Ok(note) => {
+                Ok(result) => {
+                    let note = result.note.expect("existing mutation returns note");
                     let note = match params.retrieval_anchor.as_deref() {
                         Some(anchor) => {
                             match repo.update_retrieval_anchor(&note.id, Some(anchor)).await {
