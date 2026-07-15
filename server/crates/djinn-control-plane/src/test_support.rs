@@ -84,7 +84,10 @@ impl RecordingExtensionDiagnosticsProbe {
     }
 
     pub fn calls(&self) -> Vec<ExtensionDiagnosticsProbeCall> {
-        self.calls.lock().expect("recording probe calls mutex").clone()
+        self.calls
+            .lock()
+            .expect("recording probe calls mutex")
+            .clone()
     }
 }
 
