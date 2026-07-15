@@ -456,6 +456,7 @@ impl RealPoolKillHarness {
             mirror: None,
             rpc_registry: None,
             default_project_id: None,
+            memory_intent_planner: Default::default(),
             reconciliation_sweep: ReconciliationSweepConfig::default(),
             compaction_cs: djinn_slot::reply_loop::CompactionCriticalSection::default(),
         };
