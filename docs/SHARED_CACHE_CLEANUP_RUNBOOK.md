@@ -64,10 +64,12 @@ overage; see [Cargo-target-runs overage](#cargo-target-runs-overage).
 `WARM_PROFILE_MIN_IDLE_HOURS`, `MAX_DIRS`, and `MAX_BYTES` use strict unsigned
 decimal parsing: only nonempty ASCII decimal digits are valid. Whitespace,
 signs (including `+1`), suffixes, and overflow are invalid. Invalid values fall
-back to their respective normative defaults and emit bounded invalid-resolution
-diagnostics; do not treat an invalid string as zero, disablement, or proof that
-a production configuration was exercised. Zero is valid only with the exact
-semantics in the table.
+back to their respective normative defaults. `WARM_PROFILE_MIN_IDLE_HOURS`
+silently falls back to `24`; it does not emit an invalid-resolution diagnostic.
+The cargo-target-runs caps (`MAX_DIRS` and `MAX_BYTES`) instead emit bounded
+invalid-resolution diagnostics. Do not treat an invalid string as zero,
+disablement, or proof that a production configuration was exercised. Zero is
+valid only with the exact semantics in the table.
 
 ## Pressure reclamation: order, bounds, and stop outcomes
 
