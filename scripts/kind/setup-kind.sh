@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # Bring up a kind cluster named `${CLUSTER_NAME:-djinn}` backed by a local
-# containerd registry at 127.0.0.1:5001. Mirrors the inner-loop pattern used
+# containerd registry at 127.0.0.1:${REG_PORT:-5001}. Mirrors the inner-loop pattern used
 # by upstream kagent — see scripts/kind/setup-kind.sh in kagent for the
 # reference implementation.
 #
 # Prerequisites: docker, kind, kubectl.
 #
-# Idempotent: if the cluster or registry already exist, they're left alone.
+# Idempotent: existing clusters are reused and a stopped registry is restarted.
 
 set -euo pipefail
 
@@ -22,15 +22,30 @@ REG_PORT="${REG_PORT:-5001}"
 KUBECTL=(kubectl --context "kind-${CLUSTER_NAME}")
 
 # --- 1. Ensure local registry is running ------------------------------------
-if [ "$(docker inspect -f '{{.State.Running}}' "${REG_NAME}" 2>/dev/null || echo false)" != 'true' ]; then
+if docker inspect "${REG_NAME}" >/dev/null 2>&1; then
+  REG_BINDINGS="$(docker port "${REG_NAME}" 5000/tcp 2>/dev/null || true)"
+  EXPECTED_BINDING="127.0.0.1:${REG_PORT}"
+  if ! printf '%s\n' "${REG_BINDINGS}" | grep -Fqx "${EXPECTED_BINDING}"; then
+    echo "error: registry ${REG_NAME} exists but does not publish 5000/tcp at ${EXPECTED_BINDING}" >&2
+    echo "actual binding(s): ${REG_BINDINGS:-<none>}" >&2
+    echo "use a different REG_NAME or recreate the registry with the requested REG_PORT" >&2
+    exit 1
+  fi
+  if [ "$(docker inspect -f '{{.State.Running}}' "${REG_NAME}")" = 'true' ]; then
+    echo ">>> registry ${REG_NAME} already running"
+  else
+    # `docker run --name` cannot reuse a stopped container. Restart the
+    # existing registry so repeated bootstrap remains genuinely idempotent.
+    echo ">>> restarting existing local registry ${REG_NAME}"
+    docker start "${REG_NAME}" >/dev/null
+  fi
+else
   echo ">>> starting local registry ${REG_NAME} at 127.0.0.1:${REG_PORT}"
   docker run -d --restart=always \
     -p "127.0.0.1:${REG_PORT}:5000" \
     --network bridge \
     --name "${REG_NAME}" \
     registry:2
-else
-  echo ">>> registry ${REG_NAME} already running"
 fi
 
 # --- 2. Create kind cluster -------------------------------------------------
@@ -56,6 +71,18 @@ for node in $(kind get nodes --name "${CLUSTER_NAME}"); do
   docker exec "${node}" mkdir -p "${REGISTRY_DIR}"
   cat <<EOF | docker exec -i "${node}" cp /dev/stdin "${REGISTRY_DIR}/hosts.toml"
 [host."http://${REG_NAME}:5000"]
+  capabilities = ["pull", "resolve"]
+EOF
+
+  # The chart's task-run and image-builder PodSpecs use `${REG_NAME}:5000`
+  # directly. Docker DNS resolves that name from a kind node, but containerd
+  # otherwise assumes HTTPS and rejects the registry's plain-HTTP response.
+  # Configure the direct in-cluster name as well as the localhost mirror.
+  IN_CLUSTER_REGISTRY_DIR="/etc/containerd/certs.d/${REG_NAME}:5000"
+  docker exec "${node}" mkdir -p "${IN_CLUSTER_REGISTRY_DIR}"
+  cat <<EOF | docker exec -i "${node}" cp /dev/stdin "${IN_CLUSTER_REGISTRY_DIR}/hosts.toml"
+[host."http://${REG_NAME}:5000"]
+  capabilities = ["pull", "resolve"]
 EOF
 done
 

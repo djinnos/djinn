@@ -2086,34 +2086,35 @@ async fn planner_production_boundary_enabled_assembly_injects_and_attributes_tra
             ),
         ]
     );
-    let requests = host.requests.lock().expect("requests");
-    assert_eq!(requests.len(), 1);
-    let request = &requests[0];
-    assert_eq!(
-        (
-            &request.project_id,
-            &request.task_id,
-            request.session_id.as_str(),
-            request.task_run_id.as_str(),
-            request.created_by_user_id.as_str()
-        ),
-        (
-            &task.project_id,
-            &task.id,
-            "session-real",
-            "task-run-real",
-            "creator-real"
-        )
-    );
-    for expected in [
-        "Planner title",
-        "real planner description",
-        "parsed criterion",
-        &raw_resume,
-    ] {
-        assert!(request.conversation.contains(expected));
+    {
+        let requests = host.requests.lock().expect("requests");
+        assert_eq!(requests.len(), 1);
+        let request = &requests[0];
+        assert_eq!(
+            (
+                &request.project_id,
+                &request.task_id,
+                request.session_id.as_str(),
+                request.task_run_id.as_str(),
+                request.created_by_user_id.as_str()
+            ),
+            (
+                &task.project_id,
+                &task.id,
+                "session-real",
+                "task-run-real",
+                "creator-real"
+            )
+        );
+        for expected in [
+            "Planner title",
+            "real planner description",
+            "parsed criterion",
+            &raw_resume,
+        ] {
+            assert!(request.conversation.contains(expected));
+        }
     }
-    drop(requests);
     let trace = RetrievalTraceRepository::new(db)
         .list_by_project(
             &task.project_id,

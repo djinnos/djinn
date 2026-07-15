@@ -19,6 +19,14 @@ image:
   # pullSecrets: []
 
 # -----------------------------------------------------------------------------
+# Cache cleanup
+# -----------------------------------------------------------------------------
+# The chart is the production activation surface. Local development explicitly
+# overrides this destructive mode in values.local.yaml.
+cacheCleanup:
+  mode: delete
+
+# -----------------------------------------------------------------------------
 # Namespace
 # -----------------------------------------------------------------------------
 namespace:
