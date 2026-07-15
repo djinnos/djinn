@@ -746,6 +746,15 @@ pub async fn rev_parse(repo_root: &Path, rev: &str) -> Result<String, GitError> 
     Ok(out.stdout.trim().to_string())
 }
 
+/// Resolve the checked-out local HEAD without invoking the git executable.
+///
+/// This is intentionally limited to the repository already present on disk;
+/// callers that need another revision must use the async command helpers.
+pub fn head_sha(repo_root: &Path) -> Result<String, GitError> {
+    let repository = git2::Repository::open(repo_root)?;
+    Ok(repository.head()?.peel_to_commit()?.id().to_string())
+}
+
 /// `git merge-base <a> <b>` against `repo_root`. Returns the trimmed merge-base
 /// SHA on stdout. Used by callers that need the common ancestor of two commits
 /// without manually parsing `CommandOutput`.
