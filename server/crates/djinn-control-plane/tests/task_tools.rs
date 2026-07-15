@@ -448,7 +448,8 @@ async fn task_list_status_merged() {
             .unwrap();
         assert_eq!(
             task.created_by_user_id.as_deref(),
-            Some(creator_id.as_str())
+            Some(creator_id.as_str()),
+            "fixture task {title:?} must retain its explicit creator"
         );
         task
     };
