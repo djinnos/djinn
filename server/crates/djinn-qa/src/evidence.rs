@@ -252,10 +252,21 @@ pub fn classify_coverage(
                 };
                 let reasons =
                     stale_reasons(item, scenario, taxonomy, &coverage_id, profile, context);
-                if !reasons.is_empty() {
-                    stale.get_or_insert((index, reasons));
-                } else if item.status == EvidenceStatus::Failed {
+                // A current, identity-matching failure remains a failure even if the target
+                // has subsequently become unavailable. Resolution prevents a pass from
+                // proving coverage, but must not mask the observed failed outcome.
+                let only_availability_reasons = reasons.iter().all(|reason| {
+                    matches!(
+                        reason.as_str(),
+                        "blocked-dependency" | "executable-unresolved"
+                    )
+                });
+                if item.status == EvidenceStatus::Failed
+                    && (reasons.is_empty() || only_availability_reasons)
+                {
                     failing.get_or_insert(index);
+                } else if !reasons.is_empty() {
+                    stale.get_or_insert((index, reasons));
                 } else {
                     proven.get_or_insert(index);
                 }
@@ -408,6 +419,15 @@ mod tests {
             },
         }
     }
+    fn secondary_record(status: EvidenceStatus) -> Evidence {
+        let mut item = record(status);
+        item.scenario_id = "qa.taxonomy-valid".into();
+        item.covered_ids = vec![
+            "reaper.slow-vs-crashed-discrimination".into(),
+            "task.state-machine.legal-transitions".into(),
+        ];
+        item
+    }
     fn result(set: EvidenceSet, context: CoverageContext) -> CoverageResult {
         classify_coverage(&taxonomy(), &inventory(), &set, Profile::SmokeCi, &context)
             .into_iter()
@@ -472,11 +492,15 @@ mod tests {
     }
     #[test]
     fn failed_current_evidence_precedes_stale_and_reasons_are_stable() {
-        let mut stale = record(EvidenceStatus::Passed);
+        // The secondary covering scenario is stale, while the primary scenario has a
+        // current, identity-matching failure. `failing` wins across scenarios.
+        let mut stale = secondary_record(EvidenceStatus::Passed);
         stale.finished_at = "2026-01-01T00:00:02Z".into();
-        stale.scenario_version = 2;
+        let mut changed_sources = BTreeSet::new();
+        changed_sources.insert(stale.scenario_id.clone());
         let context = CoverageContext {
-            current_sha: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
+            current_sha: SHA.into(),
+            changed_sources,
             ..Default::default()
         };
         let outcome = result(
@@ -486,7 +510,8 @@ mod tests {
             },
             context,
         );
-        assert_eq!(outcome.state, CoverageState::Stale);
+        assert_eq!(outcome.state, CoverageState::Failing);
+        assert_eq!(outcome.evidence_index, Some(1));
         let mut stale = record(EvidenceStatus::Passed);
         stale.scenario_version = 2;
         let outcome = result(
@@ -503,6 +528,37 @@ mod tests {
             outcome.stale_reasons,
             vec!["scenario-version-mismatch", "evidence-sha-not-current"]
         );
+    }
+
+    #[test]
+    fn unresolved_executable_stales_passes_but_does_not_mask_current_failures() {
+        let mut unresolved_executables = BTreeSet::new();
+        unresolved_executables.insert("qa.cargo-test-target".into());
+        let context = CoverageContext {
+            current_sha: SHA.into(),
+            unresolved_executables,
+            ..Default::default()
+        };
+
+        let pass = result(
+            EvidenceSet {
+                version: 1,
+                evidence: vec![record(EvidenceStatus::Passed)],
+            },
+            context.clone(),
+        );
+        assert_eq!(pass.state, CoverageState::Stale);
+        assert_eq!(pass.stale_reasons, vec!["executable-unresolved"]);
+
+        let failure = result(
+            EvidenceSet {
+                version: 1,
+                evidence: vec![record(EvidenceStatus::Failed)],
+            },
+            context,
+        );
+        assert_eq!(failure.state, CoverageState::Failing);
+        assert_eq!(failure.evidence_index, Some(0));
     }
 
     #[test]
