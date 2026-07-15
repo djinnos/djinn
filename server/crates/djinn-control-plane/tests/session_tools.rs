@@ -49,6 +49,29 @@ async fn session_list_returns_empty_for_task_without_sessions() {
 }
 
 #[tokio::test]
+async fn task_timeline_returns_no_diagnostic_events_for_empty_task() {
+    let harness = McpTestHarness::new().await;
+    let project = common::create_test_project(harness.db()).await;
+    let epic = common::create_test_epic(harness.db(), &project.id).await;
+    let task = common::create_test_task(harness.db(), &project.id, &epic.id).await;
+
+    let payload = harness
+        .call_tool(
+            "task_timeline",
+            json!({ "task_id": task.id, "project": project.slug() }),
+        )
+        .await
+        .expect("task_timeline should dispatch");
+
+    assert_eq!(payload.get("error"), None);
+    assert_eq!(
+        payload.get("extension_load_diagnostic_events"),
+        Some(&json!([])),
+        "successful timelines without diagnostics must expose no diagnostic events"
+    );
+}
+
+#[tokio::test]
 async fn session_list_filters_by_project_and_task() {
     let harness = McpTestHarness::new().await;
     let db = harness.db();
@@ -98,7 +121,16 @@ async fn timeline_and_list_resolve_task_across_projects_regardless_of_project_ar
     let project_a = common::create_test_project(db).await;
     let epic_a = common::create_test_epic(db, &project_a.id).await;
     let task_a = common::create_test_task(db, &project_a.id, &epic_a.id).await;
-    let _s = common::create_test_session(db, &project_a.id, &task_a.id).await;
+    let session_a = common::create_test_session(db, &project_a.id, &task_a.id).await;
+    let owner_diagnostic = ExtensionLoadDiagnosticRepository::new(db.clone())
+        .insert_or_increment(extension_diagnostic_input(
+            &project_a.id,
+            Some(&task_a.id),
+            Some(&session_a.id),
+            "owner-project-search",
+        ))
+        .await
+        .expect("insert owning-project diagnostic");
     // A second, unrelated project the UI might have "selected".
     let project_b = common::create_test_project(db).await;
 
@@ -121,6 +153,17 @@ async fn timeline_and_list_resolve_task_across_projects_regardless_of_project_ar
             .and_then(|v| v.as_array())
             .map(|a| a.len()),
         Some(1)
+    );
+    assert_eq!(
+        payload.get("extension_load_diagnostic_events"),
+        Some(&json!([{
+            "kind": "extension_load_diagnostic",
+            "session_id": session_a.id.clone(),
+            "timestamp": owner_diagnostic.last_seen_at.clone(),
+            "diagnostic": serde_json::to_value(&owner_diagnostic)
+                .expect("serialize canonical owner row"),
+        }])),
+        "wrong project hint must still read diagnostics from the task owner"
     );
 
     // task_timeline with NO project → still resolves by global UUID.
@@ -256,6 +299,111 @@ async fn session_show_exposes_canonical_session_diagnostics_not_doctor_rows() {
         ])),
         "session_show must serialize the canonical repository row unchanged"
     );
+}
+
+#[tokio::test]
+async fn task_timeline_projects_canonical_session_diagnostics_once_per_identity() {
+    let harness = McpTestHarness::new().await;
+    let db = harness.db();
+    let project = common::create_test_project(db).await;
+    let epic = common::create_test_epic(db, &project.id).await;
+    let task = common::create_test_task(db, &project.id, &epic.id).await;
+    let session_one = common::create_test_session(db, &project.id, &task.id).await;
+    let session_two = common::create_test_session(db, &project.id, &task.id).await;
+    let unrelated_task = common::create_test_task(db, &project.id, &epic.id).await;
+    let unrelated_session = common::create_test_session(db, &project.id, &unrelated_task.id).await;
+    let diagnostics = ExtensionLoadDiagnosticRepository::new(db.clone());
+
+    let retry_input = extension_diagnostic_input(
+        &project.id,
+        Some(&task.id),
+        Some(&session_one.id),
+        "retrying-search",
+    );
+    let first = diagnostics
+        .insert_or_increment(retry_input.clone())
+        .await
+        .expect("insert first diagnostic observation");
+    let retried = diagnostics
+        .insert_or_increment(retry_input)
+        .await
+        .expect("increment diagnostic occurrence");
+    assert_eq!(first.diagnostic_id, retried.diagnostic_id);
+    assert_eq!(retried.occurrence_count, 2);
+    let distinct = diagnostics
+        .insert_or_increment(extension_diagnostic_input(
+            &project.id,
+            Some(&task.id),
+            Some(&session_two.id),
+            "other-search",
+        ))
+        .await
+        .expect("insert distinct diagnostic identity");
+    diagnostics
+        .insert_or_increment(extension_diagnostic_input(
+            &project.id,
+            Some(&task.id),
+            Some(&unrelated_session.id),
+            "unrelated-session",
+        ))
+        .await
+        .expect("insert unrelated-session diagnostic");
+    diagnostics
+        .insert_or_increment(extension_diagnostic_input(
+            &project.id,
+            None,
+            None,
+            "doctor-only",
+        ))
+        .await
+        .expect("insert doctor-only diagnostic");
+
+    let payload = harness
+        .call_tool(
+            "task_timeline",
+            json!({ "task_id": task.id, "project": project.slug() }),
+        )
+        .await
+        .expect("task_timeline should dispatch");
+
+    assert_eq!(payload.get("error"), None);
+    let events = payload
+        .get("extension_load_diagnostic_events")
+        .and_then(|value| value.as_array())
+        .expect("successful timeline must expose diagnostic event array");
+    assert_eq!(
+        events.len(),
+        2,
+        "only returned-session identities belong on the timeline"
+    );
+    assert!(events.iter().all(|event| {
+        event.get("kind").and_then(|value| value.as_str()) == Some("extension_load_diagnostic")
+    }));
+    for diagnostic in [&retried, &distinct] {
+        let event = events
+            .iter()
+            .find(|event| {
+                event
+                    .get("diagnostic")
+                    .and_then(|value| value.get("diagnostic_id"))
+                    .and_then(|value| value.as_str())
+                    == Some(diagnostic.diagnostic_id.as_str())
+            })
+            .expect("each persisted diagnostic identity must have one event");
+        assert_eq!(
+            event.get("diagnostic"),
+            Some(&serde_json::to_value(diagnostic).expect("serialize canonical row")),
+            "timeline event must preserve the canonical V1 payload"
+        );
+        assert_eq!(
+            event.get("session_id").and_then(|value| value.as_str()),
+            diagnostic.session_id.as_deref()
+        );
+        assert_eq!(
+            event.get("timestamp").and_then(|value| value.as_str()),
+            Some(diagnostic.last_seen_at.as_str())
+        );
+    }
 }
 
 #[tokio::test]
@@ -403,6 +551,11 @@ async fn task_timeline_returns_chronological_session_and_message_history() {
     let messages = payload.get("messages").and_then(|v| v.as_array()).unwrap();
     assert_eq!(sessions.len(), 2);
     assert_eq!(messages.len(), 2);
+    assert_eq!(
+        payload.get("extension_load_diagnostic_events"),
+        Some(&json!([])),
+        "successful timeline without diagnostics must expose an empty event array"
+    );
     let ts0 = messages[0]
         .get("timestamp")
         .and_then(|v| v.as_str())
