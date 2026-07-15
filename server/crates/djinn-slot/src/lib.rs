@@ -76,7 +76,10 @@ pub use finalize_handlers::{apply_ac_verdicts, handle_budget_park, process_final
 pub use helpers::*;
 pub use pool::*;
 
-pub use llm_extraction::run_llm_extraction;
+pub use llm_extraction::{
+    TerminalExtractionContext, TerminalExtractionOutcome, TerminalReviewDecision,
+    run_llm_extraction, run_llm_extraction_with_terminal_context,
+};
 #[cfg(any(test, feature = "test-support"))]
 pub use llm_extraction::{
     run_llm_extraction_with_provider, run_llm_extraction_with_provider_and_candidate_lookup,
