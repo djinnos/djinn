@@ -568,6 +568,8 @@ fn empty_artifact_round_trip() {
         processes: vec![],
         route_exclusion_config: RouteExclusionConfig::default(),
         layout_positions: BTreeMap::new(),
+        galaxy_positions: BTreeMap::new(),
+        galaxy_degrees: BTreeMap::new(),
     };
     let json = serde_json::to_string(&empty).expect("serialize empty");
     let restored = RepoDependencyGraph::deserialize_artifact(&json).expect("deserialize empty");
@@ -605,6 +607,8 @@ fn from_artifact_round_trips_route_exclusion_config() {
         processes: vec![],
         route_exclusion_config: config.clone(),
         layout_positions: BTreeMap::new(),
+        galaxy_positions: BTreeMap::new(),
+        galaxy_degrees: BTreeMap::new(),
     };
     let graph = RepoDependencyGraph::from_artifact(&artifact);
     assert_eq!(graph.route_exclusion_config(), &config);
@@ -1011,6 +1015,50 @@ fn current_bincode_artifact_without_layout_positions_backfills_on_load() {
         assert!(position.x.is_finite());
         assert!(position.y.is_finite());
     }
+}
+
+#[test]
+fn current_bincode_artifact_without_galaxy_layout_loads_empty() {
+    // Proposal lmkv: blobs written before the galaxy sidecar end at
+    // `layout_positions`. They must still deserialize; galaxy fields hydrate
+    // empty so a `code_graph snapshot` omits galaxy coordinates and the UI
+    // falls back to its worker layout.
+    #[derive(Serialize)]
+    struct V10RepoGraphArtifactWithoutGalaxyLayout {
+        version: u32,
+        nodes: Vec<RepoGraphNode>,
+        edges: Vec<RepoGraphArtifactEdge>,
+        symbol_ranges: BTreeMap<PathBuf, Vec<RepoGraphArtifactSymbolRange>>,
+        communities: Vec<crate::communities::Community>,
+        processes: Vec<RepoGraphArtifactProcess>,
+        route_exclusion_config: RouteExclusionConfig,
+        layout_positions: BTreeMap<String, crate::layout::GraphLayoutPosition>,
+    }
+
+    let graph = RepoDependencyGraph::build(&[fixture_index()]);
+    let artifact = graph.to_artifact();
+    let old_artifact = V10RepoGraphArtifactWithoutGalaxyLayout {
+        version: artifact.version,
+        nodes: artifact.nodes.clone(),
+        edges: artifact.edges.clone(),
+        symbol_ranges: artifact.symbol_ranges.clone(),
+        communities: artifact.communities.clone(),
+        processes: artifact.processes.clone(),
+        route_exclusion_config: artifact.route_exclusion_config.clone(),
+        layout_positions: artifact.layout_positions.clone(),
+    };
+
+    let encoded =
+        bincode::serialize(&old_artifact).expect("serialize artifact without galaxy layout");
+    let decoded = deserialize_repo_graph_artifact_bincode(&encoded)
+        .expect("deserialize artifact without galaxy layout");
+    // 2D layout survives; galaxy sidecar is empty (no forced recompute on load).
+    assert_eq!(decoded.layout_positions, artifact.layout_positions);
+    assert!(decoded.galaxy_positions.is_empty());
+    assert!(decoded.galaxy_degrees.is_empty());
+
+    let restored = RepoDependencyGraph::from_artifact(&decoded);
+    assert!(restored.galaxy_positions().is_empty());
 }
 
 #[test]

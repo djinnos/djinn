@@ -852,6 +852,9 @@ pub async fn ensure_canonical_graph<C: WarmContext>(
     let artifacts = run.artifacts;
     let workspace_statuses = run.workspace_statuses;
     let project_root_for_blocking = handle.path().to_path_buf();
+    // Proposal lmkv: the galaxy layout seed is derived from the project id
+    // (FNV-1a) so warm runs and cache reloads reproduce the same 3D galaxy.
+    let project_id_for_galaxy = project_id.to_string();
     // Capture recovery flag for the blocking thread — when a stale sentinel
     // was detected, disable parse cache reuse to force a clean rebuild.
     let effective_cache_reuse = resolve_canonical_warm_cache_reuse(force_full_rebuild);
@@ -1001,6 +1004,14 @@ pub async fn ensure_canonical_graph<C: WarmContext>(
             let (pagerank, sccs, layout_positions, crate_map) =
                 derive_graph_caches_with_crate_map(&graph, crate_map_for_build);
             graph.set_layout_positions((*layout_positions).clone());
+            // Proposal lmkv: compute the deterministic 3D galaxy layout once,
+            // here at warm time, so the `code_graph snapshot` payload can ship
+            // positions + degree and the browser skips its worker layout. The
+            // iteration budget inside `derive_galaxy_layout` scales down as the
+            // node count grows, keeping warm time bounded on big repos.
+            let galaxy_seed = crate::galaxy_layout::galaxy_layout_seed(&project_id_for_galaxy);
+            let galaxy = crate::galaxy_layout::derive_galaxy_layout(&graph, galaxy_seed);
+            graph.set_galaxy_layout(galaxy);
             let derive_ms = t_derive.elapsed().as_millis() as u64;
 
             let t_serial = clock.now_instant();

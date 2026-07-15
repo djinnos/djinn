@@ -46,6 +46,10 @@ const USAGE_EDGE_KINDS = new Set([
   "EntryPointOf",
 ]);
 
+/** Pair-dedupe key separator: node ids can contain spaces, so the separator
+ * must be a character that can never appear in an id. */
+const PAIR_SEP = "\u0000";
+
 /** File labels arrive as full repo paths — sprites want the basename. */
 function displayLabel(label: string, kind: string): string {
   if (kind !== "file" && kind !== "folder") return label;
@@ -116,9 +120,6 @@ export function snapshotToGalaxy(
   const fileOf = (id: string): string | undefined =>
     kindById.get(id) === "symbol" ? parentById.get(id) : id;
 
-  // Node ids can contain spaces, so the pair-key separator must be a
-  // character that can never appear in an id.
-  const PAIR_SEP = "\u0000";
   const edges: GalaxyData["edges"] = [];
   const seenPairs = new Set<string>();
   for (const e of snapshot.edges) {
@@ -139,10 +140,38 @@ export function snapshotToGalaxy(
     edges.push({ source: e.from, target: e.to, kind: e.kind });
   }
 
+  // Proposal lmkv: the server ships a warm-time galaxy layout + degree per node
+  // in the snapshot. When EVERY rendered (kept) node carries finite server
+  // coordinates, we render them directly and skip the client force layout;
+  // otherwise (legacy blobs, the gitignored Storybook fixture) we fall back to
+  // the worker/inline path below, exactly as before.
+  const serverById = new Map<
+    string,
+    { gx: number; gy: number; gz: number }
+  >();
+  for (const n of snapshot.nodes) {
+    if (!keptIds.has(n.id)) continue;
+    if (
+      typeof n.gx === "number" &&
+      typeof n.gy === "number" &&
+      typeof n.gz === "number"
+    ) {
+      serverById.set(n.id, { gx: n.gx, gy: n.gy, gz: n.gz });
+    }
+  }
+  const serverPositioned = kept.length > 0 && serverById.size === kept.length;
+
+  // Prefer the server-shipped degree; fall back to the collapsed-edge count.
   const degreeById = new Map<string, number>();
   for (const edge of edges) {
     degreeById.set(edge.source, (degreeById.get(edge.source) ?? 0) + 1);
     degreeById.set(edge.target, (degreeById.get(edge.target) ?? 0) + 1);
+  }
+  const serverDegreeById = new Map<string, number>();
+  for (const n of snapshot.nodes) {
+    if (keptIds.has(n.id) && typeof n.degree === "number") {
+      serverDegreeById.set(n.id, n.degree);
+    }
   }
 
   // Cognitive complexity → heat on an ABSOLUTE Sonar-style scale, not a
@@ -153,7 +182,8 @@ export function snapshotToGalaxy(
     Math.min(1, Math.max(0, value) / HEAT_CEILING);
 
   const nodes: GalaxyNode[] = kept.map((n) => {
-    const degree = degreeById.get(n.id) ?? 0;
+    const degree = serverDegreeById.get(n.id) ?? degreeById.get(n.id) ?? 0;
+    const server = serverById.get(n.id);
     const typeLike =
       n.symbol_kind !== undefined &&
       TYPE_LIKE_SYMBOL_KINDS.has(n.symbol_kind.toLowerCase());
@@ -166,9 +196,9 @@ export function snapshotToGalaxy(
     return {
       id: n.id,
       label: displayLabel(n.label, n.kind),
-      x: 0,
-      y: 0,
-      z: 0,
+      x: server?.gx ?? 0,
+      y: server?.gy ?? 0,
+      z: server?.gz ?? 0,
       degree,
       size: baseSize + degreeBoost,
       group: deriveGalaxyGroup(n.file_path, n.workspace),
@@ -180,7 +210,11 @@ export function snapshotToGalaxy(
     };
   });
 
-  if (options.layout !== false) {
+  // Fast path: server already positioned every node — never run the layout,
+  // regardless of the `layout` option. Otherwise honor the option (Storybook
+  // fixtures pass the default `true`; GalaxyView passes `false` and runs the
+  // worker itself).
+  if (!serverPositioned && options.layout !== false) {
     layoutGalaxy(nodes, edges, galaxyLayoutSeed(snapshot.project_id));
   }
 
@@ -195,6 +229,7 @@ export function snapshotToGalaxy(
     edges,
     totalNodes: serverTruncated ? snapshot.total_nodes : undefined,
     totalEdges: serverTruncated ? snapshot.total_edges : undefined,
+    serverPositioned,
   };
 }
 

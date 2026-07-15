@@ -242,6 +242,8 @@ fn multi_workspace_graph() -> RepoDependencyGraph {
         processes: vec![],
         route_exclusion_config: Default::default(),
         layout_positions: std::collections::BTreeMap::new(),
+        galaxy_positions: std::collections::BTreeMap::new(),
+        galaxy_degrees: std::collections::BTreeMap::new(),
     };
     RepoDependencyGraph::from_artifact(&artifact)
 }
@@ -1020,6 +1022,8 @@ async fn impact_bfs_skips_structural_anchors_but_walks_behavioral_edges() {
         processes: vec![],
         route_exclusion_config: Default::default(),
         layout_positions: std::collections::BTreeMap::new(),
+        galaxy_positions: std::collections::BTreeMap::new(),
+        galaxy_degrees: std::collections::BTreeMap::new(),
     };
     let graph = RepoDependencyGraph::from_artifact(&artifact);
     let target_idx = graph

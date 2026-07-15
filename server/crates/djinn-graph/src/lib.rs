@@ -27,6 +27,7 @@ pub mod coupling_index;
 mod dev_fixture_dump;
 pub mod db_access;
 pub mod entry_points;
+pub mod galaxy_layout;
 pub mod git_diff;
 pub mod graph_parity;
 pub mod index_tree;

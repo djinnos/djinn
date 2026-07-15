@@ -109,11 +109,19 @@ export function GalaxyView({ projectId }: { projectId: string }) {
           });
           return;
         }
+        const data = snapshotToGalaxy(snapshot, { layout: false });
+        // lmkv fast path: the server already shipped a warm-time galaxy layout
+        // for every node — render immediately, no worker, no seconds-long
+        // main-thread-free-but-still-slow force pass.
+        if (data.serverPositioned) {
+          if (cancelled) return;
+          setState({ phase: "ready", data });
+          return;
+        }
         setState({
           phase: "loading",
           message: `Computing layout for ${snapshot.nodes.length.toLocaleString()} nodes…`,
         });
-        const data = snapshotToGalaxy(snapshot, { layout: false });
         const positioned = await layoutInWorker(
           data.nodes,
           data.edges,

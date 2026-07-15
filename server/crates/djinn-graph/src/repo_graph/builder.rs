@@ -862,6 +862,8 @@ impl RepoDependencyGraphBuilder {
             // round-trips through the artifact.
             route_exclusion_config: RouteExclusionConfig::default(),
             layout_positions: BTreeMap::new(),
+            galaxy_positions: BTreeMap::new(),
+            galaxy_degrees: BTreeMap::new(),
         };
 
         // PR F3: run modularity-based community detection unless the
