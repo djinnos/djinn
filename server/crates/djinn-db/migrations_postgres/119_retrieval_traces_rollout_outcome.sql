@@ -98,15 +98,31 @@ FROM (
             -- empty: reliable, well-formed zero-injection evidence. The row
             -- must prove zero injected candidates AND zero estimated injected
             -- tokens. A well-formed empty array is reliable zero-injection
-            -- evidence; a non-array value is NOT reliable (it may be a
-            -- truncated/malformed payload) and falls through to
-            -- legacy_unknown below.
+            -- evidence. For a non-empty array, every element must be a
+            -- well-formed skipped-candidate object: note_id is a string,
+            -- outcome is 'skipped', and skipped_reason is a known non-null
+            -- drop reason. This rejects strings, scalars, partial objects,
+            -- injected candidates, and unknown candidate vocabulary rather
+            -- than treating insufficient evidence as empty. A non-array value
+            -- is also NOT reliable (it may be a truncated/malformed payload)
+            -- and falls through to legacy_unknown below.
             WHEN rt.estimated_injected_tokens = 0
                  AND jsonb_typeof(rt.candidates) = 'array'
                  AND NOT EXISTS (
                      SELECT 1
                      FROM jsonb_array_elements(rt.candidates) AS cand
-                     WHERE (cand -> 'skipped_reason') = 'null'::jsonb
+                     WHERE jsonb_typeof(cand) <> 'object'
+                        OR jsonb_typeof(cand -> 'note_id') <> 'string'
+                        OR (cand ->> 'outcome') IS DISTINCT FROM 'skipped'
+                        OR jsonb_typeof(cand -> 'skipped_reason') <> 'string'
+                        OR (cand ->> 'skipped_reason') NOT IN (
+                            'not_top_k',
+                            'min_confidence',
+                            'budget_pruned',
+                            'superseded_pruned',
+                            'dedupe',
+                            'search_error'
+                        )
                  )
             THEN 'empty'
 

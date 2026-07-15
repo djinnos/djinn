@@ -363,11 +363,21 @@ const HISTORICAL_FIXTURES: &[(&str, &str, i32, &str)] = &[
         "legacy_unknown",
     ),
     // ── legacy_unknown: candidate is not a JSON object (it's a string inside
-    //    the array). The predicate filters on jsonb_typeof = 'object'. ───────
+    //    the array). Even with zero tokens this is malformed evidence, not
+    //    reliable proof that injection was empty. ────────────────────────────
     (
-        "rt-malformed-elem-string",
+        "rt-zero-tokens-malformed-elem-string",
         r#"["not-an-object"]"#,
-        120,
+        0,
+        "legacy_unknown",
+    ),
+    // ── legacy_unknown: a candidate object without its required
+    //    classification evidence cannot reliably prove zero injection. In
+    //    particular, a bare note_id must not be treated as an empty result. ──
+    (
+        "rt-zero-tokens-candidate-missing-evidence",
+        r#"[{"note_id":"n1"}]"#,
+        0,
         "legacy_unknown",
     ),
     // ── legacy_unknown: zero tokens but candidates is an object (non-array),
