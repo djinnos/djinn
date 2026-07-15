@@ -67,8 +67,14 @@ fn mutation_decoders_require_nonblank_unicode_trimmed_reason() {
     assert!(serde_json::from_value::<MemoryEditParams>(edit_missing).is_err());
 
     for reason in ["", "   ", "\u{2003}\u{00a0}\u{3000}"] {
-        assert!(serde_json::from_value::<MemoryWriteParams>(write_args(reason.into())).is_err());
-        assert!(serde_json::from_value::<MemoryEditParams>(edit_args(reason.into())).is_err());
+        let write_error = serde_json::from_value::<MemoryWriteParams>(write_args(reason.into()))
+            .err()
+            .expect("blank write reason must be rejected");
+        let edit_error = serde_json::from_value::<MemoryEditParams>(edit_args(reason.into()))
+            .err()
+            .expect("blank edit reason must be rejected");
+        assert!(write_error.to_string().contains("reason must be non-blank"));
+        assert!(edit_error.to_string().contains("reason must be non-blank"));
     }
 
     let write: MemoryWriteParams =
