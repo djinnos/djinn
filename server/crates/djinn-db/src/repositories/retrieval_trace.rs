@@ -1,4 +1,6 @@
 use serde::{Deserialize, Serialize};
+use sqlx::postgres::{PgTypeInfo, PgValueRef};
+use sqlx::{Decode, Postgres, Type};
 
 use crate::Result;
 use crate::database::Database;
@@ -41,6 +43,109 @@ pub enum RetrievalTraceEntryPoint {
     FormatKnowledgeNotes,
     /// The `memory_recall_trace` MCP tool.
     MemoryRecallTrace,
+}
+
+/// Conservatively classify evidence written through the legacy insertion API.
+/// This mirrors migration 119's invariant: an injected trace needs positive
+/// token evidence and an injected candidate; reliable empty evidence needs a
+/// non-empty, valid all-skipped candidate set and zero tokens. Everything else
+/// is intentionally `legacy_unknown`.
+pub fn classify_legacy_trace_outcome(
+    candidates: &serde_json::Value,
+    estimated_injected_tokens: i32,
+) -> RetrievalTraceOutcome {
+    let Ok(candidates) = serde_json::from_value::<Vec<TraceCandidate>>(candidates.clone()) else {
+        return RetrievalTraceOutcome::LegacyUnknown;
+    };
+    if validate_candidates(&candidates).is_err() {
+        return RetrievalTraceOutcome::LegacyUnknown;
+    }
+
+    if estimated_injected_tokens > 0
+        && candidates
+            .iter()
+            .any(|candidate| candidate.outcome == CandidateOutcome::Injected)
+    {
+        RetrievalTraceOutcome::Injected
+    } else if estimated_injected_tokens == 0
+        && !candidates.is_empty()
+        && candidates
+            .iter()
+            .all(|candidate| candidate.outcome == CandidateOutcome::Skipped)
+    {
+        RetrievalTraceOutcome::Empty
+    } else {
+        RetrievalTraceOutcome::LegacyUnknown
+    }
+}
+
+fn validate_explicit_trace_semantics(
+    candidates_json: &serde_json::Value,
+    estimated_injected_tokens: i32,
+    outcome: RetrievalTraceOutcome,
+) -> Result<()> {
+    let candidates: Vec<TraceCandidate> =
+        serde_json::from_value(candidates_json.clone()).map_err(|err| {
+            DbError::InvalidData(format!(
+                "explicit retrieval trace candidates must be a valid array: {err}"
+            ))
+        })?;
+    validate_candidates(&candidates)?;
+    let has_injected_candidate = candidates
+        .iter()
+        .any(|candidate| candidate.outcome == CandidateOutcome::Injected);
+
+    if outcome == RetrievalTraceOutcome::Injected
+        && (estimated_injected_tokens <= 0 || !has_injected_candidate)
+    {
+        return Err(DbError::InvalidData(
+            "trace outcome 'injected' requires positive estimated_injected_tokens and at least one injected candidate".to_owned(),
+        ));
+    }
+    if matches!(
+        outcome,
+        RetrievalTraceOutcome::DisabledOff
+            | RetrievalTraceOutcome::DisabledKillSwitch
+            | RetrievalTraceOutcome::DisabledLegacy
+    ) && (estimated_injected_tokens != 0 || has_injected_candidate)
+    {
+        return Err(DbError::InvalidData(
+            "disabled trace outcomes require zero estimated_injected_tokens and no injected candidate"
+                .to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+impl Type<Postgres> for RetrievalTraceOutcome {
+    fn type_info() -> PgTypeInfo {
+        <String as Type<Postgres>>::type_info()
+    }
+
+    fn compatible(ty: &PgTypeInfo) -> bool {
+        <String as Type<Postgres>>::compatible(ty)
+    }
+}
+
+impl<'r> Decode<'r, Postgres> for RetrievalTraceOutcome {
+    fn decode(value: PgValueRef<'r>) -> std::result::Result<Self, sqlx::error::BoxDynError> {
+        let value = <String as Decode<Postgres>>::decode(value)?;
+        Self::parse(&value).ok_or_else(|| {
+            Box::new(DbError::InvalidData(format!(
+                "unknown persisted retrieval trace outcome: {value}"
+            ))) as sqlx::error::BoxDynError
+        })
+    }
+}
+
+/// Additive write input for callers that know rollout and trace outcome
+/// semantics. The nested legacy parameters preserve every existing
+/// `CreateRetrievalTraceParams` struct literal unchanged.
+pub struct CreateRetrievalTraceWithSemanticsParams<'a> {
+    pub trace: CreateRetrievalTraceParams<'a>,
+    /// Persisted verbatim (for example `cohort:canary`).
+    pub rollout_label: &'a str,
+    pub outcome: RetrievalTraceOutcome,
 }
 
 impl RetrievalTraceEntryPoint {
@@ -117,6 +222,75 @@ impl CandidateOutcome {
 
 /// All valid outcome string constants.
 pub const CANDIDATE_OUTCOME_VALUES: &[&str] = &["injected", "skipped"];
+
+// ── Trace outcome ────────────────────────────────────────────────────────────
+
+/// The persisted outcome of a retrieval trace as a whole.
+///
+/// This deliberately has a different name from [`CandidateOutcome`]: candidate
+/// outcomes describe individual JSONB candidates, while this enum records the
+/// result of the trace/injection attempt.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RetrievalTraceOutcome {
+    Injected,
+    Empty,
+    Error,
+    LegacyUnknown,
+    DisabledOff,
+    DisabledKillSwitch,
+    DisabledLegacy,
+}
+
+impl RetrievalTraceOutcome {
+    pub const ALL_VARIANTS: [Self; 7] = [
+        Self::Injected,
+        Self::Empty,
+        Self::Error,
+        Self::LegacyUnknown,
+        Self::DisabledOff,
+        Self::DisabledKillSwitch,
+        Self::DisabledLegacy,
+    ];
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Injected => "injected",
+            Self::Empty => "empty",
+            Self::Error => "error",
+            Self::LegacyUnknown => "legacy_unknown",
+            Self::DisabledOff => "disabled_off",
+            Self::DisabledKillSwitch => "disabled_kill_switch",
+            Self::DisabledLegacy => "disabled_legacy",
+        }
+    }
+
+    /// Parse a persisted outcome. Unknown values are intentionally rejected
+    /// rather than silently converted to `LegacyUnknown`.
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "injected" => Some(Self::Injected),
+            "empty" => Some(Self::Empty),
+            "error" => Some(Self::Error),
+            "legacy_unknown" => Some(Self::LegacyUnknown),
+            "disabled_off" => Some(Self::DisabledOff),
+            "disabled_kill_switch" => Some(Self::DisabledKillSwitch),
+            "disabled_legacy" => Some(Self::DisabledLegacy),
+            _ => None,
+        }
+    }
+}
+
+/// All valid trace-level outcome string constants, matching migration 119.
+pub const RETRIEVAL_TRACE_OUTCOME_VALUES: &[&str] = &[
+    "injected",
+    "empty",
+    "error",
+    "legacy_unknown",
+    "disabled_off",
+    "disabled_kill_switch",
+    "disabled_legacy",
+];
 
 // ── Skipped-reason vocabulary ─────────────────────────────────────────────────
 
@@ -342,6 +516,11 @@ pub struct RetrievalTraceRow {
     pub task_run_id: Option<String>,
     pub task_id: Option<String>,
     pub entry_point: String,
+    /// Verbatim rollout cohort/flag label; unlike outcome this is intentionally
+    /// not constrained to a closed vocabulary.
+    pub rollout_label: String,
+    /// Typed trace-level result, distinct from per-candidate outcomes.
+    pub outcome: RetrievalTraceOutcome,
     /// Opaque trigger context.
     pub trigger: Option<serde_json::Value>,
     /// JSONB array of [`TraceCandidate`] DTOs.
@@ -403,6 +582,11 @@ pub struct RetrievalTraceListFilter<'a> {
     pub task_id: Option<&'a str>,
     /// Filter by entry point.
     pub entry_point: Option<RetrievalTraceEntryPoint>,
+    /// Filter by the verbatim rollout label.
+    pub rollout_label: Option<&'a str>,
+    /// Filter by the trace-level outcome. This is independent from the
+    /// candidate-level `outcome` filter below.
+    pub trace_outcome: Option<RetrievalTraceOutcome>,
     /// Filter by candidate outcome (matches any candidate in the row's JSONB
     /// array with this `outcome` value).
     pub outcome: Option<CandidateOutcome>,
@@ -445,67 +629,14 @@ impl<'a> RetrievalTraceListFilter<'a> {
     }
 }
 
-// ── Health rollup result types ────────────────────────────────────────────────
+// ── Health rollup support ───────────────────────────────────────────────────
 
-/// Summary of candidate confidence scores across one or more traces.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct CandidateScoreSummary {
-    pub count: i64,
-    pub min: Option<f64>,
-    pub max: Option<f64>,
-    pub sum: Option<f64>,
-    pub avg: Option<f64>,
-}
-
-/// Summary of a single duration stage (e.g. `retrieval_ms`) across one or more
-/// traces.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct DurationStageSummary {
-    pub stage_name: String,
-    pub count: i64,
-    pub min: Option<f64>,
-    pub max: Option<f64>,
-    pub sum: Option<f64>,
-    pub avg: Option<f64>,
-}
-
-/// Counts of skipped candidates by reason.
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
-pub struct SkipReasonCounts {
-    pub not_top_k: i64,
-    pub min_confidence: i64,
-    pub budget_pruned: i64,
-    pub superseded_pruned: i64,
-    pub dedupe: i64,
-    pub search_error: i64,
-}
-
-/// Aggregate health evidence for a single scope (combined project or one entry
-/// point).
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct RetrievalTraceHealthEvidence {
-    pub trace_count: i64,
-    /// Traces which produced no injected candidate. This is deliberately a
-    /// trace-level count rather than derived from the aggregate injected
-    /// candidate count: one trace can inject multiple candidates.
-    pub zero_result_trace_count: i64,
-    pub candidate_count: i64,
-    pub injected_count: i64,
-    pub skipped_count: i64,
-    pub skip_reason_counts: SkipReasonCounts,
-    pub candidate_score_summary: CandidateScoreSummary,
-    pub duration_stage_summaries: Vec<DurationStageSummary>,
-    pub cap_exceeded_count: i64,
-    pub estimated_injected_tokens_sum: i64,
-    pub estimated_injected_tokens_avg: Option<f64>,
-}
-
-/// Health rollup result for a project over a half-open time window.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct RetrievalTraceHealthRollup {
-    pub combined: RetrievalTraceHealthEvidence,
-    pub per_entry_point: HashMap<RetrievalTraceEntryPoint, RetrievalTraceHealthEvidence>,
-}
+mod retrieval_trace_health;
+use retrieval_trace_health::*;
+pub use retrieval_trace_health::{
+    CandidateScoreSummary, DurationStageSummary, RetrievalTraceHealthEvidence,
+    RetrievalTraceHealthRollup, SkipReasonCounts,
+};
 
 // ── Repository ────────────────────────────────────────────────────────────────
 
@@ -523,6 +654,33 @@ impl RetrievalTraceRepository {
         &self,
         params: CreateRetrievalTraceParams<'_>,
     ) -> Result<RetrievalTraceRow> {
+        let outcome =
+            classify_legacy_trace_outcome(params.candidates, params.estimated_injected_tokens);
+        self.insert_with_values(params, "enabled", outcome).await
+    }
+
+    /// Insert a trace with rollout/outcome semantics supplied by an informed
+    /// caller. Validation occurs before SQL so fail-open callers receive an
+    /// ordinary `Result` instead of a durable contradictory trace.
+    pub async fn insert_with_semantics(
+        &self,
+        params: CreateRetrievalTraceWithSemanticsParams<'_>,
+    ) -> Result<RetrievalTraceRow> {
+        validate_explicit_trace_semantics(
+            params.trace.candidates,
+            params.trace.estimated_injected_tokens,
+            params.outcome,
+        )?;
+        self.insert_with_values(params.trace, params.rollout_label, params.outcome)
+            .await
+    }
+
+    async fn insert_with_values(
+        &self,
+        params: CreateRetrievalTraceParams<'_>,
+        rollout_label: &str,
+        outcome: RetrievalTraceOutcome,
+    ) -> Result<RetrievalTraceRow> {
         self.db.ensure_initialized().await?;
         let id = uuid::Uuid::now_v7().to_string();
         sqlx::query(
@@ -530,8 +688,8 @@ impl RetrievalTraceRepository {
                     id, schema_version, project_id, session_id, task_run_id, task_id,
                     entry_point, trigger, candidates,
                     candidate_cap, candidate_cap_exceeded, sampling_metadata,
-                    durations_ms, estimated_injected_tokens
-                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)"#,
+                    durations_ms, estimated_injected_tokens, rollout_label, outcome
+                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)"#,
         )
         .bind(&id)
         .bind(RETRIEVAL_TRACE_SCHEMA_VERSION)
@@ -547,6 +705,8 @@ impl RetrievalTraceRepository {
         .bind(params.sampling_metadata)
         .bind(params.durations_ms)
         .bind(params.estimated_injected_tokens)
+        .bind(rollout_label)
+        .bind(outcome.as_str())
         .execute(self.db.pool())
         .await?;
 
@@ -590,6 +750,14 @@ impl RetrievalTraceRepository {
             conditions.push(format!("entry_point = ${bind_pos}"));
             bind_pos += 1;
         }
+        if filter.rollout_label.is_some() {
+            conditions.push(format!("rollout_label = ${bind_pos}"));
+            bind_pos += 1;
+        }
+        if filter.trace_outcome.is_some() {
+            conditions.push(format!("outcome = ${bind_pos}"));
+            bind_pos += 1;
+        }
         // JSONB candidate predicates: because there is no GIN index on the
         // `candidates` array, these predicates are applied only inside the
         // mandatory project-scoped, bounded list query. The query remains a
@@ -622,7 +790,7 @@ impl RetrievalTraceRepository {
         let sql = format!(
             r#"SELECT
                 id, schema_version, project_id, session_id, task_run_id, task_id,
-                entry_point, trigger, candidates,
+                entry_point, rollout_label, outcome, trigger, candidates,
                 candidate_cap, candidate_cap_exceeded, sampling_metadata,
                 durations_ms, estimated_injected_tokens, created_at
             FROM retrieval_traces
@@ -645,6 +813,12 @@ impl RetrievalTraceRepository {
         }
         if let Some(ep) = filter.entry_point {
             query = query.bind(ep.as_str());
+        }
+        if let Some(rollout_label) = filter.rollout_label {
+            query = query.bind(rollout_label);
+        }
+        if let Some(outcome) = filter.trace_outcome {
+            query = query.bind(outcome.as_str());
         }
         if let Some(outcome) = filter.outcome {
             query = query.bind(outcome.as_str());
@@ -813,360 +987,9 @@ impl RetrievalTraceRepository {
 const RETRIEVAL_TRACE_SELECT_BY_ID: &str = r#"
     SELECT
         id, schema_version, project_id, session_id, task_run_id, task_id,
-        entry_point, trigger, candidates,
+        entry_point, rollout_label, outcome, trigger, candidates,
         candidate_cap, candidate_cap_exceeded, sampling_metadata,
         durations_ms, estimated_injected_tokens, created_at
     FROM retrieval_traces
     WHERE id = $1
-"#;
-
-// ── Health rollup helpers ───────────────────────────────────────────────────
-
-#[derive(sqlx::FromRow)]
-struct TraceCandidateStatsRow {
-    entry_point: String,
-    trace_count: i64,
-    zero_result_trace_count: i64,
-    cap_exceeded_count: i64,
-    estimated_injected_tokens_sum: i64,
-    candidate_count: i64,
-    injected_count: i64,
-    skipped_count: i64,
-    not_top_k_count: i64,
-    min_confidence_count: i64,
-    budget_pruned_count: i64,
-    superseded_pruned_count: i64,
-    dedupe_count: i64,
-    search_error_count: i64,
-    min_confidence: Option<f64>,
-    max_confidence: Option<f64>,
-    avg_confidence: Option<f64>,
-    sum_confidence: Option<f64>,
-}
-
-#[derive(sqlx::FromRow)]
-struct TraceCandidateStatsCombinedRow {
-    trace_count: i64,
-    zero_result_trace_count: i64,
-    cap_exceeded_count: i64,
-    estimated_injected_tokens_sum: i64,
-    candidate_count: i64,
-    injected_count: i64,
-    skipped_count: i64,
-    not_top_k_count: i64,
-    min_confidence_count: i64,
-    budget_pruned_count: i64,
-    superseded_pruned_count: i64,
-    dedupe_count: i64,
-    search_error_count: i64,
-    min_confidence: Option<f64>,
-    max_confidence: Option<f64>,
-    avg_confidence: Option<f64>,
-    sum_confidence: Option<f64>,
-}
-
-#[derive(sqlx::FromRow, Clone)]
-struct DurationStageStatsRow {
-    entry_point: String,
-    stage_name: String,
-    count: i64,
-    min_ms: Option<f64>,
-    max_ms: Option<f64>,
-    avg_ms: Option<f64>,
-    sum_ms: Option<f64>,
-}
-
-#[derive(sqlx::FromRow, Clone)]
-struct DurationStageStatsCombinedRow {
-    stage_name: String,
-    count: i64,
-    min_ms: Option<f64>,
-    max_ms: Option<f64>,
-    avg_ms: Option<f64>,
-    sum_ms: Option<f64>,
-}
-
-fn build_evidence(
-    stats: &TraceCandidateStatsRow,
-    durations: &[DurationStageStatsRow],
-) -> RetrievalTraceHealthEvidence {
-    let estimated_injected_tokens_avg = if stats.trace_count > 0 {
-        Some(stats.estimated_injected_tokens_sum as f64 / stats.trace_count as f64)
-    } else {
-        None
-    };
-
-    RetrievalTraceHealthEvidence {
-        trace_count: stats.trace_count,
-        zero_result_trace_count: stats.zero_result_trace_count,
-        candidate_count: stats.candidate_count,
-        injected_count: stats.injected_count,
-        skipped_count: stats.skipped_count,
-        skip_reason_counts: SkipReasonCounts {
-            not_top_k: stats.not_top_k_count,
-            min_confidence: stats.min_confidence_count,
-            budget_pruned: stats.budget_pruned_count,
-            superseded_pruned: stats.superseded_pruned_count,
-            dedupe: stats.dedupe_count,
-            search_error: stats.search_error_count,
-        },
-        candidate_score_summary: CandidateScoreSummary {
-            count: stats.candidate_count,
-            min: stats.min_confidence,
-            max: stats.max_confidence,
-            sum: stats.sum_confidence,
-            avg: stats.avg_confidence,
-        },
-        duration_stage_summaries: durations
-            .iter()
-            .map(|d| DurationStageSummary {
-                stage_name: d.stage_name.clone(),
-                count: d.count,
-                min: d.min_ms,
-                max: d.max_ms,
-                sum: d.sum_ms,
-                avg: d.avg_ms,
-            })
-            .collect(),
-        cap_exceeded_count: stats.cap_exceeded_count,
-        estimated_injected_tokens_sum: stats.estimated_injected_tokens_sum,
-        estimated_injected_tokens_avg,
-    }
-}
-
-fn build_evidence_combined(
-    stats: &TraceCandidateStatsCombinedRow,
-    durations: &[DurationStageStatsCombinedRow],
-) -> RetrievalTraceHealthEvidence {
-    let estimated_injected_tokens_avg = if stats.trace_count > 0 {
-        Some(stats.estimated_injected_tokens_sum as f64 / stats.trace_count as f64)
-    } else {
-        None
-    };
-
-    RetrievalTraceHealthEvidence {
-        trace_count: stats.trace_count,
-        zero_result_trace_count: stats.zero_result_trace_count,
-        candidate_count: stats.candidate_count,
-        injected_count: stats.injected_count,
-        skipped_count: stats.skipped_count,
-        skip_reason_counts: SkipReasonCounts {
-            not_top_k: stats.not_top_k_count,
-            min_confidence: stats.min_confidence_count,
-            budget_pruned: stats.budget_pruned_count,
-            superseded_pruned: stats.superseded_pruned_count,
-            dedupe: stats.dedupe_count,
-            search_error: stats.search_error_count,
-        },
-        candidate_score_summary: CandidateScoreSummary {
-            count: stats.candidate_count,
-            min: stats.min_confidence,
-            max: stats.max_confidence,
-            sum: stats.sum_confidence,
-            avg: stats.avg_confidence,
-        },
-        duration_stage_summaries: durations
-            .iter()
-            .map(|d| DurationStageSummary {
-                stage_name: d.stage_name.clone(),
-                count: d.count,
-                min: d.min_ms,
-                max: d.max_ms,
-                sum: d.sum_ms,
-                avg: d.avg_ms,
-            })
-            .collect(),
-        cap_exceeded_count: stats.cap_exceeded_count,
-        estimated_injected_tokens_sum: stats.estimated_injected_tokens_sum,
-        estimated_injected_tokens_avg,
-    }
-}
-
-const HEALTH_ROLLUP_TRACE_CANDIDATE_PER_EP_SQL: &str = r#"
-    WITH filtered AS (
-        SELECT
-            id,
-            entry_point,
-            candidate_cap_exceeded,
-            estimated_injected_tokens,
-            candidates
-        FROM retrieval_traces
-        WHERE project_id = $1
-          AND created_at >= $2
-          AND created_at < $3
-          AND entry_point IN ('dispatch', 'jit_pitfalls', 'load_knowledge_context', 'format_knowledge_notes')
-    ),
-    trace_stats AS (
-        SELECT
-            entry_point,
-            count(*)::bigint AS trace_count,
-            count(*) FILTER (
-                WHERE NOT EXISTS (
-                    SELECT 1
-                    FROM jsonb_array_elements(
-                        CASE WHEN jsonb_typeof(candidates) = 'array' THEN candidates ELSE '[]'::jsonb END
-                    ) candidate
-                    WHERE candidate->>'outcome' = 'injected'
-                )
-            )::bigint AS zero_result_trace_count,
-            coalesce(sum((candidate_cap_exceeded)::int), 0)::bigint AS cap_exceeded_count,
-            coalesce(sum(estimated_injected_tokens), 0)::bigint AS estimated_injected_tokens_sum
-        FROM filtered
-        GROUP BY entry_point
-    ),
-    candidate_stats AS (
-        SELECT
-            f.entry_point,
-            count(c.value)::bigint AS candidate_count,
-            count(*) FILTER (WHERE c.value->>'outcome' = 'injected')::bigint AS injected_count,
-            count(*) FILTER (WHERE c.value->>'outcome' = 'skipped')::bigint AS skipped_count,
-            count(*) FILTER (WHERE c.value->>'skipped_reason' = 'not_top_k')::bigint AS not_top_k_count,
-            count(*) FILTER (WHERE c.value->>'skipped_reason' = 'min_confidence')::bigint AS min_confidence_count,
-            count(*) FILTER (WHERE c.value->>'skipped_reason' = 'budget_pruned')::bigint AS budget_pruned_count,
-            count(*) FILTER (WHERE c.value->>'skipped_reason' = 'superseded_pruned')::bigint AS superseded_pruned_count,
-            count(*) FILTER (WHERE c.value->>'skipped_reason' = 'dedupe')::bigint AS dedupe_count,
-            count(*) FILTER (WHERE c.value->>'skipped_reason' = 'search_error')::bigint AS search_error_count,
-            min((c.value->>'confidence')::double precision) AS min_confidence,
-            max((c.value->>'confidence')::double precision) AS max_confidence,
-            avg((c.value->>'confidence')::double precision) AS avg_confidence,
-            sum((c.value->>'confidence')::double precision) AS sum_confidence
-        FROM filtered f
-        LEFT JOIN LATERAL jsonb_array_elements(
-            CASE WHEN jsonb_typeof(f.candidates) = 'array' THEN f.candidates ELSE '[]'::jsonb END
-        ) c ON true
-        GROUP BY f.entry_point
-    )
-    SELECT
-        ts.entry_point,
-        ts.trace_count,
-        ts.zero_result_trace_count,
-        ts.cap_exceeded_count,
-        ts.estimated_injected_tokens_sum,
-        cs.candidate_count,
-        cs.injected_count,
-        cs.skipped_count,
-        cs.not_top_k_count,
-        cs.min_confidence_count,
-        cs.budget_pruned_count,
-        cs.superseded_pruned_count,
-        cs.dedupe_count,
-        cs.search_error_count,
-        cs.min_confidence,
-        cs.max_confidence,
-        cs.avg_confidence,
-        cs.sum_confidence
-    FROM trace_stats ts
-    LEFT JOIN candidate_stats cs ON ts.entry_point = cs.entry_point
-"#;
-
-const HEALTH_ROLLUP_TRACE_CANDIDATE_COMBINED_SQL: &str = r#"
-    WITH filtered AS (
-        SELECT
-            id,
-            candidate_cap_exceeded,
-            estimated_injected_tokens,
-            candidates
-        FROM retrieval_traces
-        WHERE project_id = $1
-          AND created_at >= $2
-          AND created_at < $3
-          AND entry_point IN ('dispatch', 'jit_pitfalls', 'load_knowledge_context', 'format_knowledge_notes')
-    ),
-    trace_stats AS (
-        SELECT
-            count(*)::bigint AS trace_count,
-            count(*) FILTER (
-                WHERE NOT EXISTS (
-                    SELECT 1
-                    FROM jsonb_array_elements(
-                        CASE WHEN jsonb_typeof(candidates) = 'array' THEN candidates ELSE '[]'::jsonb END
-                    ) candidate
-                    WHERE candidate->>'outcome' = 'injected'
-                )
-            )::bigint AS zero_result_trace_count,
-            coalesce(sum((candidate_cap_exceeded)::int), 0)::bigint AS cap_exceeded_count,
-            coalesce(sum(estimated_injected_tokens), 0)::bigint AS estimated_injected_tokens_sum
-        FROM filtered
-    ),
-    candidate_stats AS (
-        SELECT
-            count(c.value)::bigint AS candidate_count,
-            count(*) FILTER (WHERE c.value->>'outcome' = 'injected')::bigint AS injected_count,
-            count(*) FILTER (WHERE c.value->>'outcome' = 'skipped')::bigint AS skipped_count,
-            count(*) FILTER (WHERE c.value->>'skipped_reason' = 'not_top_k')::bigint AS not_top_k_count,
-            count(*) FILTER (WHERE c.value->>'skipped_reason' = 'min_confidence')::bigint AS min_confidence_count,
-            count(*) FILTER (WHERE c.value->>'skipped_reason' = 'budget_pruned')::bigint AS budget_pruned_count,
-            count(*) FILTER (WHERE c.value->>'skipped_reason' = 'superseded_pruned')::bigint AS superseded_pruned_count,
-            count(*) FILTER (WHERE c.value->>'skipped_reason' = 'dedupe')::bigint AS dedupe_count,
-            count(*) FILTER (WHERE c.value->>'skipped_reason' = 'search_error')::bigint AS search_error_count,
-            min((c.value->>'confidence')::double precision) AS min_confidence,
-            max((c.value->>'confidence')::double precision) AS max_confidence,
-            avg((c.value->>'confidence')::double precision) AS avg_confidence,
-            sum((c.value->>'confidence')::double precision) AS sum_confidence
-        FROM filtered f
-        LEFT JOIN LATERAL jsonb_array_elements(
-            CASE WHEN jsonb_typeof(f.candidates) = 'array' THEN f.candidates ELSE '[]'::jsonb END
-        ) c ON true
-    )
-    SELECT
-        ts.trace_count,
-        ts.zero_result_trace_count,
-        ts.cap_exceeded_count,
-        ts.estimated_injected_tokens_sum,
-        cs.candidate_count,
-        cs.injected_count,
-        cs.skipped_count,
-        cs.not_top_k_count,
-        cs.min_confidence_count,
-        cs.budget_pruned_count,
-        cs.superseded_pruned_count,
-        cs.dedupe_count,
-        cs.search_error_count,
-        cs.min_confidence,
-        cs.max_confidence,
-        cs.avg_confidence,
-        cs.sum_confidence
-    FROM trace_stats ts
-    CROSS JOIN candidate_stats cs
-"#;
-
-const HEALTH_ROLLUP_DURATION_PER_EP_SQL: &str = r#"
-    SELECT
-        f.entry_point,
-        d.key AS stage_name,
-        count(*)::bigint AS count,
-        min(d.value::double precision) AS min_ms,
-        max(d.value::double precision) AS max_ms,
-        avg(d.value::double precision) AS avg_ms,
-        sum(d.value::double precision) AS sum_ms
-    FROM retrieval_traces f
-    CROSS JOIN LATERAL jsonb_each(
-        CASE WHEN jsonb_typeof(f.durations_ms) = 'object' THEN f.durations_ms ELSE '{}'::jsonb END
-    ) d
-    WHERE f.project_id = $1
-      AND f.created_at >= $2
-      AND f.created_at < $3
-      AND f.entry_point IN ('dispatch', 'jit_pitfalls', 'load_knowledge_context', 'format_knowledge_notes')
-      AND jsonb_typeof(d.value) = 'number'
-    GROUP BY f.entry_point, d.key
-"#;
-
-const HEALTH_ROLLUP_DURATION_COMBINED_SQL: &str = r#"
-    SELECT
-        d.key AS stage_name,
-        count(*)::bigint AS count,
-        min(d.value::double precision) AS min_ms,
-        max(d.value::double precision) AS max_ms,
-        avg(d.value::double precision) AS avg_ms,
-        sum(d.value::double precision) AS sum_ms
-    FROM retrieval_traces f
-    CROSS JOIN LATERAL jsonb_each(
-        CASE WHEN jsonb_typeof(f.durations_ms) = 'object' THEN f.durations_ms ELSE '{}'::jsonb END
-    ) d
-    WHERE f.project_id = $1
-      AND f.created_at >= $2
-      AND f.created_at < $3
-      AND f.entry_point IN ('dispatch', 'jit_pitfalls', 'load_knowledge_context', 'format_knowledge_notes')
-      AND jsonb_typeof(d.value) = 'number'
-    GROUP BY d.key
 "#;
