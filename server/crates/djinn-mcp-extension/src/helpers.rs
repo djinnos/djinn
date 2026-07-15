@@ -241,6 +241,27 @@ where
     serde_json::from_value(serde_json::Value::Object(args)).map_err(|e| e.to_string())
 }
 
+/// Parse tool arguments after stripping dispatch-level fields that the caller
+/// may include for project resolution but are not part of the typed params.
+///
+/// The dispatch layer extracts `project` (and similar routing hints) from the
+/// raw arguments for project resolution, then passes the full argument map to
+/// the handler.  Params structs that use `#[serde(deny_unknown_fields)]` reject
+/// these dispatch-level keys, so they must be removed before deserialization.
+pub(crate) fn parse_args_stripping<T>(
+    arguments: &Option<serde_json::Map<String, serde_json::Value>>,
+    strip_keys: &[&str],
+) -> Result<T, String>
+where
+    T: for<'de> Deserialize<'de>,
+{
+    let mut args = arguments.clone().unwrap_or_default();
+    for key in strip_keys {
+        args.remove(*key);
+    }
+    serde_json::from_value(serde_json::Value::Object(args)).map_err(|e| e.to_string())
+}
+
 /// Merge incoming AC objects with existing stored criteria.
 ///
 /// Stored entries can be either `{criterion, met}` objects or bare strings
