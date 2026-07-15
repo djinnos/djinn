@@ -49,6 +49,29 @@ async fn session_list_returns_empty_for_task_without_sessions() {
 }
 
 #[tokio::test]
+async fn task_timeline_returns_no_diagnostic_events_for_empty_task() {
+    let harness = McpTestHarness::new().await;
+    let project = common::create_test_project(harness.db()).await;
+    let epic = common::create_test_epic(harness.db(), &project.id).await;
+    let task = common::create_test_task(harness.db(), &project.id, &epic.id).await;
+
+    let payload = harness
+        .call_tool(
+            "task_timeline",
+            json!({ "task_id": task.id, "project": project.slug() }),
+        )
+        .await
+        .expect("task_timeline should dispatch");
+
+    assert_eq!(payload.get("error"), None);
+    assert_eq!(
+        payload.get("extension_load_diagnostic_events"),
+        Some(&json!([])),
+        "successful timelines without diagnostics must expose no diagnostic events"
+    );
+}
+
+#[tokio::test]
 async fn session_list_filters_by_project_and_task() {
     let harness = McpTestHarness::new().await;
     let db = harness.db();
