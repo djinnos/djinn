@@ -39,6 +39,12 @@ fn project_fs_path(project: &djinn_core::models::Project) -> PathBuf {
     djinn_core::paths::project_dir(&project.github_owner, &project.github_repo)
 }
 
+/// Trusted identity for direct memory mutation dispatches that bypass the
+/// production stage wrapper in extension tests.
+fn planner_revision_context() -> Option<djinn_core::auth_context::TrustedRevisionCallerContext> {
+    djinn_core::auth_context::TrustedRevisionCallerContext::authenticated_agent("planner")
+}
+
 fn tool_names(schemas: &[serde_json::Value]) -> Vec<&str> {
     schemas
         .iter()

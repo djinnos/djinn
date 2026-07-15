@@ -402,7 +402,7 @@ async fn call_tool_memory_singletons_target_canonical_project_root_from_worktree
 
     let created = djinn_core::auth_context::REVISION_CALLER_CONTEXT
         .scope(
-            djinn_core::auth_context::TrustedRevisionCallerContext::authenticated_agent("planner"),
+            crate::extension::tests::planner_revision_context(),
             call_tool(
                 &state,
                 &crate::test_helpers::test_services(),
@@ -437,7 +437,7 @@ async fn call_tool_memory_singletons_target_canonical_project_root_from_worktree
 
     let edited = djinn_core::auth_context::REVISION_CALLER_CONTEXT
         .scope(
-            djinn_core::auth_context::TrustedRevisionCallerContext::authenticated_agent("planner"),
+            crate::extension::tests::planner_revision_context(),
             call_tool(
                 &state,
                 &crate::test_helpers::test_services(),
@@ -513,7 +513,7 @@ async fn call_tool_memory_brief_singleton_targets_canonical_project_root_from_wo
 
     let created = djinn_core::auth_context::REVISION_CALLER_CONTEXT
         .scope(
-            djinn_core::auth_context::TrustedRevisionCallerContext::authenticated_agent("planner"),
+            crate::extension::tests::planner_revision_context(),
             call_tool(
                 &state,
                 &crate::test_helpers::test_services(),
@@ -548,7 +548,7 @@ async fn call_tool_memory_brief_singleton_targets_canonical_project_root_from_wo
 
     let edited = djinn_core::auth_context::REVISION_CALLER_CONTEXT
         .scope(
-            djinn_core::auth_context::TrustedRevisionCallerContext::authenticated_agent("planner"),
+            crate::extension::tests::planner_revision_context(),
             call_tool(
                 &state,
                 &crate::test_helpers::test_services(),
@@ -690,7 +690,7 @@ async fn call_tool_memory_current_requirement_targets_canonical_project_root_fro
 
     let edited = djinn_core::auth_context::REVISION_CALLER_CONTEXT
         .scope(
-            djinn_core::auth_context::TrustedRevisionCallerContext::authenticated_agent("planner"),
+            crate::extension::tests::planner_revision_context(),
             call_tool(
                 &state,
                 &crate::test_helpers::test_services(),
