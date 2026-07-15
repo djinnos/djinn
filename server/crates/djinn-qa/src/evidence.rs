@@ -606,4 +606,30 @@ mod tests {
         assert_eq!(outcome.state, CoverageState::Proven);
         assert_eq!(outcome.evidence_index, Some(1));
     }
+    #[test]
+    fn blocked_dependency_cannot_turn_passing_evidence_into_proof() {
+        let inventory =
+            ScenarioInventory::from_yaml(include_str!("../tests/fixtures/scenarios-blocked.yaml"))
+                .unwrap();
+        let mut evidence = record(EvidenceStatus::Passed);
+        evidence.scenario_id = "qa.deferred-runner".into();
+        let result = classify_coverage(
+            &taxonomy(),
+            &inventory,
+            &EvidenceSet {
+                version: 1,
+                evidence: vec![evidence],
+            },
+            Profile::SmokeCi,
+            &CoverageContext {
+                current_sha: SHA.into(),
+                ..Default::default()
+            },
+        )
+        .into_iter()
+        .find(|result| result.coverage_id == "reaper.slow-vs-crashed-discrimination")
+        .unwrap();
+        assert_eq!(result.state, CoverageState::Stale);
+        assert_eq!(result.stale_reasons, vec!["blocked-dependency"]);
+    }
 }

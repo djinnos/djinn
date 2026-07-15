@@ -5,7 +5,7 @@ scenarios:
     enabled: true
     profiles: [smoke-ci]
     sources: [{kind: incident, id: "dispatch failover chain exhaustion terminal effects"}]
-    primary_coverage: dispatch.failover-chain-exhaustion
+    primary_coverage: dispatch.exhaustion-terminality
     secondary_coverage: [task-lifecycle.terminal-side-effects]
     execution: {kind: cargo-package, package: djinn-coordinator}
     isolation: {database: isolated, providers: isolated, channel: isolated}

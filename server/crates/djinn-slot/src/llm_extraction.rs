@@ -2114,7 +2114,8 @@ async fn novelty_decision(
         .await
         .map_err(|e| format!("candidate lookup failed: {e}"))?;
     let result =
-        novelty_decision_for_candidates(extraction_context.provider, note_type, note, &candidates).await?;
+        novelty_decision_for_candidates(extraction_context.provider, note_type, note, &candidates)
+            .await?;
     if let Some(existing_note_id) = result.existing_note_id.as_deref() {
         tracing::debug!(
             session_id = %extraction_context.session_id,
@@ -2158,7 +2159,9 @@ async fn novelty_decision_for_candidates(
             let existing_note_id = decision
                 .existing_note_id
                 .filter(|id| candidates.iter().any(|candidate| candidate.id == *id))
-                .ok_or_else(|| "already_known decision missing valid existing_note_id".to_string())?;
+                .ok_or_else(|| {
+                    "already_known decision missing valid existing_note_id".to_string()
+                })?;
             Ok(NoveltyCheckResult {
                 assessment: NoveltyAssessment::Duplicate,
                 existing_note_id: Some(existing_note_id.clone()),
@@ -4566,7 +4569,10 @@ mod evidence_merge_regression_tests {
         .await
         .expect("capture duplicate replay");
         assert!(duplicate[0].adr_054_quality_passed);
-        assert_eq!(duplicate[0].duplicate_of.as_deref(), Some("existing-note-1"));
+        assert_eq!(
+            duplicate[0].duplicate_of.as_deref(),
+            Some("existing-note-1")
+        );
 
         // Invalid novelty JSON has the same Unknown => non-duplicate fallback
         // as `process_extracted_note`; capture has no repository/sink argument,

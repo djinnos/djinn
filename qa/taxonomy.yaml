@@ -51,7 +51,13 @@ coverage:
   - id: dispatch.race-non-vacuity
     subsystem: dispatch
     required_profiles: [smoke-ci]
+  - id: dispatch.race-test-non-vacuous
+    subsystem: dispatch
+    required_profiles: [smoke-ci]
   - id: dispatch.failover-chain-exhaustion
+    subsystem: dispatch
+    required_profiles: [smoke-ci]
+  - id: dispatch.exhaustion-terminality
     subsystem: dispatch
     required_profiles: [smoke-ci]
   - id: dispatch.deferred-health
