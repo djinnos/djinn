@@ -81,16 +81,55 @@ FROM (
         rt.id,
         CASE
             -- injected: positive tokens AND a well-formed candidates array
-            -- containing at least one candidate object whose skipped_reason
-            -- is JSON-null. jsonb_typeof guards ensure malformed JSON shapes
-            -- (object, scalar, SQL NULL) short-circuit to legacy_unknown
-            -- instead of raising from jsonb_array_elements.
+            -- containing at least one valid injected-candidate object. Every
+            -- array element must have the core TraceCandidate identity and
+            -- classification shape; otherwise even a superficially matching
+            -- object is malformed historical evidence. jsonb_typeof guards
+            -- ensure malformed JSON shapes (object, scalar, SQL NULL)
+            -- short-circuit to legacy_unknown instead of raising from
+            -- jsonb_array_elements.
             WHEN rt.estimated_injected_tokens > 0
                  AND jsonb_typeof(rt.candidates) = 'array'
+                 AND NOT EXISTS (
+                     SELECT 1
+                     FROM jsonb_array_elements(
+                         CASE WHEN jsonb_typeof(rt.candidates) = 'array'
+                              THEN rt.candidates ELSE '[]'::jsonb END
+                     ) AS cand
+                     WHERE jsonb_typeof(cand) <> 'object'
+                        OR jsonb_typeof(cand -> 'note_id') IS DISTINCT FROM 'string'
+                        OR (
+                            (cand ->> 'outcome') IS DISTINCT FROM 'injected'
+                            AND (cand ->> 'outcome') IS DISTINCT FROM 'skipped'
+                        )
+                        OR (
+                            (cand ->> 'outcome') = 'injected'
+                            AND (cand -> 'skipped_reason') IS DISTINCT FROM 'null'::jsonb
+                        )
+                        OR (
+                            (cand ->> 'outcome') = 'skipped'
+                            AND (
+                                jsonb_typeof(cand -> 'skipped_reason') IS DISTINCT FROM 'string'
+                                OR (cand ->> 'skipped_reason') NOT IN (
+                                    'not_top_k',
+                                    'min_confidence',
+                                    'budget_pruned',
+                                    'superseded_pruned',
+                                    'dedupe',
+                                    'search_error'
+                                )
+                            )
+                        )
+                 )
                  AND EXISTS (
                      SELECT 1
-                     FROM jsonb_array_elements(rt.candidates) AS cand
+                     FROM jsonb_array_elements(
+                         CASE WHEN jsonb_typeof(rt.candidates) = 'array'
+                              THEN rt.candidates ELSE '[]'::jsonb END
+                     ) AS cand
                      WHERE jsonb_typeof(cand) = 'object'
+                       AND jsonb_typeof(cand -> 'note_id') = 'string'
+                       AND (cand ->> 'outcome') = 'injected'
                        AND (cand -> 'skipped_reason') = 'null'::jsonb
                  )
             THEN 'injected'
@@ -110,11 +149,14 @@ FROM (
                  AND jsonb_typeof(rt.candidates) = 'array'
                  AND NOT EXISTS (
                      SELECT 1
-                     FROM jsonb_array_elements(rt.candidates) AS cand
+                     FROM jsonb_array_elements(
+                         CASE WHEN jsonb_typeof(rt.candidates) = 'array'
+                              THEN rt.candidates ELSE '[]'::jsonb END
+                     ) AS cand
                      WHERE jsonb_typeof(cand) <> 'object'
-                        OR jsonb_typeof(cand -> 'note_id') <> 'string'
+                        OR jsonb_typeof(cand -> 'note_id') IS DISTINCT FROM 'string'
                         OR (cand ->> 'outcome') IS DISTINCT FROM 'skipped'
-                        OR jsonb_typeof(cand -> 'skipped_reason') <> 'string'
+                        OR jsonb_typeof(cand -> 'skipped_reason') IS DISTINCT FROM 'string'
                         OR (cand ->> 'skipped_reason') NOT IN (
                             'not_top_k',
                             'min_confidence',

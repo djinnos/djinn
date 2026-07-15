@@ -407,6 +407,15 @@ const HISTORICAL_FIXTURES: &[(&str, &str, i32, &str)] = &[
         120,
         "legacy_unknown",
     ),
+    // ── legacy_unknown: positive tokens plus a superficially matching object
+    //    without required TraceCandidate identity/classification shape. A
+    //    JSON-null skipped_reason alone cannot prove injection. ──────────────
+    (
+        "rt-positive-tokens-missing-candidate-shape",
+        r#"[{"skipped_reason":null}]"#,
+        120,
+        "legacy_unknown",
+    ),
 ];
 
 /// Assert every historical fixture row received its expected outcome after the
