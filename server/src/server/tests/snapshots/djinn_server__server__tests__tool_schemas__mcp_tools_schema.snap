@@ -7398,15 +7398,21 @@ expression: signatures
     "concurrent_safe": false,
     "input_schema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
       "properties": {
         "identifier": {
           "type": "string"
         },
         "project": {
           "type": "string"
+        },
+        "reason": {
+          "description": "Caller-supplied audit reason. Unicode whitespace is trimmed and blank values are rejected.",
+          "type": "string"
         }
       },
       "required": [
+        "reason",
         "project",
         "identifier"
       ],
@@ -7489,6 +7495,7 @@ expression: signatures
     "concurrent_safe": false,
     "input_schema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
       "properties": {
         "content": {
           "type": "string"
@@ -7509,6 +7516,10 @@ expression: signatures
           "type": "string"
         },
         "project": {
+          "type": "string"
+        },
+        "reason": {
+          "description": "Caller-supplied audit reason. Unicode whitespace is trimmed and blank values are rejected.",
           "type": "string"
         },
         "retrieval_anchor": {
@@ -7535,6 +7546,7 @@ expression: signatures
         }
       },
       "required": [
+        "reason",
         "project",
         "identifier",
         "operation",
@@ -10056,12 +10068,17 @@ expression: signatures
     "concurrent_safe": false,
     "input_schema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
       "properties": {
         "content": {
           "type": "string"
         },
         "project": {
           "description": "Absolute path to the project directory.",
+          "type": "string"
+        },
+        "reason": {
+          "description": "Caller-supplied audit reason. Unicode whitespace is trimmed and blank values are rejected.",
           "type": "string"
         },
         "retrieval_anchor": {
@@ -10107,6 +10124,7 @@ expression: signatures
         }
       },
       "required": [
+        "reason",
         "project",
         "title",
         "content",

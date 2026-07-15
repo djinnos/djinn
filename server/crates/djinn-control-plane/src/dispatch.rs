@@ -82,6 +82,13 @@ use crate::tools::user_settings_tools::{UserSettingsGetParams, UserSettingsSetPa
 fn decode_args<T: DeserializeOwned>(tool: &str, args: Value) -> Result<T, String> {
     serde_json::from_value(args).map_err(|e| {
         let msg = e.to_string();
+        if matches!(tool, "memory_write" | "memory_edit" | "memory_delete")
+            && (msg.contains("missing field `reason`")
+                || msg.contains("invalid type: null")
+                || msg.contains("reason must be non-blank"))
+        {
+            return "invalid parameters: field: reason, message: reason must be non-blank".into();
+        }
         // Surface a clearer hint when acceptance_criteria deserialization fails
         if (tool == "task_create" || tool == "task_update") && msg.contains("acceptance_criter") {
             format!(

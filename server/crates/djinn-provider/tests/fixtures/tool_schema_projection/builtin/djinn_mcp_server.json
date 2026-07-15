@@ -7453,18 +7453,24 @@
     "inputSchema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "required": [
+        "reason",
         "project",
         "identifier"
       ],
       "type": "object",
       "properties": {
+        "reason": {
+          "description": "Caller-supplied audit reason. Unicode whitespace is trimmed and blank values are rejected.",
+          "type": "string"
+        },
         "project": {
           "type": "string"
         },
         "identifier": {
           "type": "string"
         }
-      }
+      },
+      "additionalProperties": false
     },
     "outputSchema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -7546,6 +7552,7 @@
     "inputSchema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "required": [
+        "reason",
         "project",
         "identifier",
         "operation",
@@ -7553,6 +7560,10 @@
       ],
       "type": "object",
       "properties": {
+        "reason": {
+          "description": "Caller-supplied audit reason. Unicode whitespace is trimmed and blank values are rejected.",
+          "type": "string"
+        },
         "project": {
           "type": "string"
         },
@@ -7596,7 +7607,8 @@
           ],
           "default": null
         }
-      }
+      },
+      "additionalProperties": false
     },
     "outputSchema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -10128,6 +10140,7 @@
     "inputSchema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "required": [
+        "reason",
         "project",
         "title",
         "content",
@@ -10135,6 +10148,10 @@
       ],
       "type": "object",
       "properties": {
+        "reason": {
+          "description": "Caller-supplied audit reason. Unicode whitespace is trimmed and blank values are rejected.",
+          "type": "string"
+        },
         "project": {
           "description": "Absolute path to the project directory.",
           "type": "string"
@@ -10183,7 +10200,8 @@
           ],
           "default": null
         }
-      }
+      },
+      "additionalProperties": false
     },
     "outputSchema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",

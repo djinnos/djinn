@@ -3708,7 +3708,10 @@ export namespace MemoryDeleteInputSchema {
   export interface MemoryDeleteInput {
   identifier: string
   project: string
-  [k: string]: any
+  /**
+   * Caller-supplied audit reason. Unicode whitespace is trimmed and blank values are rejected.
+   */
+  reason: string
   }
 
 }
@@ -3761,6 +3764,10 @@ export namespace MemoryEditInputSchema {
   operation: string
   project: string
   /**
+   * Caller-supplied audit reason. Unicode whitespace is trimmed and blank values are rejected.
+   */
+  reason: string
+  /**
    * Replace the note's retrieval anchor without modifying the note body.
    * Also accepted as `applies_when`.
    */
@@ -3774,7 +3781,6 @@ export namespace MemoryEditInputSchema {
    * type's folder. Allowed values same as memory_write type.
    */
   type?: string
-  [k: string]: any
   }
 
 }
@@ -4720,6 +4726,10 @@ export namespace MemoryWriteInputSchema {
    */
   project: string
   /**
+   * Caller-supplied audit reason. Unicode whitespace is trimmed and blank values are rejected.
+   */
+  reason: string
+  /**
    * Objective situation where this note should be retrieved. Also accepted as
    * `applies_when` for prompt/API language compatibility.
    */
@@ -4741,7 +4751,6 @@ export namespace MemoryWriteInputSchema {
    * competitive, tech_spike, brief (singleton), roadmap (singleton).
    */
   type: string
-  [k: string]: any
   }
 
 }

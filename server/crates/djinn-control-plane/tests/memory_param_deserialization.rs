@@ -16,20 +16,21 @@ use djinn_control_plane::tools::memory_tools::{
 #[test]
 fn write_params_deserialize() {
     let p: WriteParams = serde_json::from_value(
-        serde_json::json!({"project":"/tmp/p","title":"T","content":"C","type":"adr"}),
+        serde_json::json!({"project":"/tmp/p","reason":" test reason ","title":"T","content":"C","type":"adr"}),
     )
     .unwrap();
     assert_eq!(p.project, "/tmp/p");
     assert_eq!(p.title, "T");
     assert_eq!(p.content, "C");
     assert_eq!(p.note_type, "adr");
+    assert_eq!(p.reason, "test reason");
     assert!(p.tags.is_none());
 }
 
 #[test]
 fn write_and_move_params_accept_mergeable_case_and_pitfall_types() {
     let write: WriteParams = serde_json::from_value(
-        serde_json::json!({"project":"/tmp/p","title":"T","content":"C","type":"case"}),
+        serde_json::json!({"project":"/tmp/p","reason":" test reason ","title":"T","content":"C","type":"case"}),
     )
     .unwrap();
     assert_eq!(write.note_type, "case");
@@ -63,13 +64,14 @@ fn search_params_deserialize() {
 #[test]
 fn edit_params_deserialize() {
     let p: EditParams = serde_json::from_value(
-        serde_json::json!({"project":"/tmp/p","identifier":"a","operation":"append","content":"x"}),
+        serde_json::json!({"project":"/tmp/p","reason":" test reason ","identifier":"a","operation":"append","content":"x"}),
     )
     .unwrap();
     assert_eq!(p.project, "/tmp/p");
     assert_eq!(p.identifier, "a");
     assert_eq!(p.operation, "append");
     assert_eq!(p.content, "x");
+    assert_eq!(p.reason, "test reason");
 }
 
 #[test]
@@ -86,10 +88,13 @@ fn move_params_deserialize() {
 
 #[test]
 fn delete_params_deserialize() {
-    let p: DeleteParams =
-        serde_json::from_value(serde_json::json!({"project":"/tmp/p","identifier":"a"})).unwrap();
+    let p: DeleteParams = serde_json::from_value(
+        serde_json::json!({"project":"/tmp/p","reason":"  delete obsolete note  ","identifier":"a"}),
+    )
+    .unwrap();
     assert_eq!(p.project, "/tmp/p");
     assert_eq!(p.identifier, "a");
+    assert_eq!(p.reason, "delete obsolete note");
 }
 
 #[test]

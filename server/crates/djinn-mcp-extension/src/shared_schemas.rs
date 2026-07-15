@@ -693,8 +693,10 @@ pub fn tool_memory_write() -> RmcpTool {
         "Create a new memory note via the memory_* MCP tools. Do not attempt filesystem writes; .djinn/memory/ paths are not readable from the worker filesystem. `type` is required and routes the note (adr, pattern, case, pitfall, research, requirement, reference, design, tech_spike, session, brief, roadmap). Use [[wikilinks]] in content to connect notes.".to_string(),
         object!({
             "type": "object",
-            "required": ["title", "content", "type"],
+            "additionalProperties": false,
+            "required": ["reason", "title", "content", "type"],
             "properties": {
+                "reason": {"type": "string", "description": "Required audit reason. Unicode whitespace is trimmed and blank values are rejected."},
                 "title": {"type": "string", "description": "Note title"},
                 "content": {"type": "string", "description": "Markdown content of the note. Use [[wikilinks]] to connect to other notes."},
                 "type": {"type": "string", "description": "Note type: adr, pattern, case, pitfall, research, requirement, reference, design, tech_spike, session, brief (singleton), roadmap (singleton)"},
@@ -711,8 +713,10 @@ pub fn tool_memory_edit() -> RmcpTool {
         "Edit an existing memory note in-place via memory_* MCP tools. Do not assume .djinn/memory/ paths are readable from the worker filesystem. Operations: append, prepend, find_replace (requires find_text), replace_section (requires section).".to_string(),
         object!({
             "type": "object",
-            "required": ["identifier", "operation", "content"],
+            "additionalProperties": false,
+            "required": ["reason", "identifier", "operation", "content"],
             "properties": {
+                "reason": {"type": "string", "description": "Required audit reason. Unicode whitespace is trimmed and blank values are rejected."},
                 "identifier": {"type": "string", "description": "Note permalink or title"},
                 "operation": {"type": "string", "description": "Edit operation: append, prepend, find_replace, replace_section"},
                 "content": {"type": "string", "description": "New content to insert or replace with"},
