@@ -81,8 +81,8 @@ use crate::actors::slot::lifecycle::model_resolution::{
     ModelResolutionError, attempt_resume_model_rotation, resolve_model_and_credential,
 };
 use crate::actors::slot::lifecycle::prompt_context::{
-    PromptContext, PromptContextInputs, ReadSourceInfo, assemble_prompt_context,
-    build_worker_resume_note,
+    MemoryIntentPlannerInvocation, PromptContext, PromptContextInputs, ReadSourceInfo,
+    assemble_prompt_context, build_worker_resume_note,
 };
 use crate::actors::slot::lifecycle::role_overrides::{
     ResolvedRoleOverrides, resolve_role_overrides,
@@ -1012,6 +1012,8 @@ pub(crate) async fn execute_stage(
     let _ = services
         .report_stage_step(djinn_runtime::stage_step::CONTEXT_BUILD)
         .await;
+    let planner_host =
+        crate::actors::slot::lifecycle::prompt_context::SupervisorPlannerHost(services);
     let PromptContext {
         system_prompt,
         system_prompt_hash,
@@ -1033,6 +1035,33 @@ pub(crate) async fn execute_stage(
         arbiter_directive: arbiter_directive.as_deref(),
         mcp_server_instructions: &mcp_server_instructions,
         extension_diagnostics: &extension_diagnostics,
+        memory_intent_planner: Some(MemoryIntentPlannerInvocation {
+            config: &agent_context.memory_intent_planner,
+            host: &planner_host,
+            session_id: &session_id,
+            task_run_id,
+            creator_id: task.created_by_user_id.as_deref(),
+            acceptance_criteria: serde_json::from_str::<Vec<serde_json::Value>>(
+                &task.acceptance_criteria,
+            )
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|v| {
+                v.as_str().map(str::to_owned).or_else(|| {
+                    v.get("criterion")
+                        .and_then(|v| v.as_str())
+                        .map(str::to_owned)
+                })
+            })
+            .collect(),
+            // The display note is intentionally concise. Planner input uses
+            // the typed, untruncated durable summary from runtime metadata.
+            resume_compaction_summary: spec
+                .resume_lifecycle_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.last_durable_progress_summary.as_deref()),
+            planned_note_search: None,
+        }),
     })
     .await;
 

@@ -1,9 +1,11 @@
 //! Role-specific prompt-context assembly: conflict, activity, epic, knowledge,
 //! code-graph, and CI directives → rendered system prompt with extensions + skills.
 
+use std::collections::HashSet;
 use std::path::Path;
 
 use djinn_core::extension_diagnostics::ExtensionLoadDiagnosticV1;
+use djinn_core::message::{Conversation, Message};
 use djinn_core::models::Task;
 
 use crate::actors::slot::MergeConflictMetadata;
@@ -19,11 +21,18 @@ use crate::skills::ResolvedSkill;
 use djinn_db::{NoteRepository, ProposalRepository, TaskRepository};
 use tracing::Instrument;
 
+use crate::actors::slot::lifecycle::memory_intent_planner::{
+    MEMORY_INTENT_PLANNER_PROMPT_ID, PlannerInput, parse_planned_queries, prepare_planner_request,
+};
+
 mod ci_directive;
 mod diagnostics;
 mod types;
 use ci_directive::build_ci_blocking_directive;
-pub(crate) use types::{PromptContext, PromptContextInputs, ReadSourceInfo};
+pub(crate) use types::{
+    MemoryIntentPlannerHost, MemoryIntentPlannerInvocation, PlannedNoteSearch, PromptContext,
+    PromptContextInputs, ReadSourceInfo, SupervisorPlannerHost,
+};
 // Re-export for `use super::*` in test modules.
 #[allow(unused_imports)]
 pub(super) use diagnostics::{
@@ -359,6 +368,15 @@ pub(crate) async fn load_knowledge_context(
     epic_context: Option<&str>,
     app_state: &AgentContext,
 ) -> Option<String> {
+    load_knowledge_context_with_planner(task, epic_context, app_state, None).await
+}
+
+async fn load_knowledge_context_with_planner(
+    task: &Task,
+    epic_context: Option<&str>,
+    app_state: &AgentContext,
+    planner: Option<&MemoryIntentPlannerInvocation<'_>>,
+) -> Option<String> {
     let note_repo = NoteRepository::new(app_state.db.clone(), app_state.event_bus.clone());
     let task_paths = derive_task_scope_paths(task, epic_context);
 
@@ -412,6 +430,7 @@ pub(crate) async fn load_knowledge_context(
                     },
                     cap_exceeded,
                     &app_state.db,
+                    planner.map(|p| (p.session_id, p.task_run_id)),
                 )
                 .await;
             }
@@ -447,6 +466,7 @@ pub(crate) async fn load_knowledge_context(
     } else {
         Some(packed.rendered)
     };
+    let rendered = merge_planned_knowledge(rendered, &notes, &note_repo, task, planner).await;
 
     // Persist the trace (fail-open). Measure the persist phase separately.
     let persist_start = tokio::time::Instant::now();
@@ -463,6 +483,7 @@ pub(crate) async fn load_knowledge_context(
         },
         candidate_cap_exceeded,
         &app_state.db,
+        planner.map(|p| (p.session_id, p.task_run_id)),
     )
     .await;
 
@@ -626,6 +647,7 @@ async fn persist_knowledge_trace(
     durations: KnowledgeTraceDurations,
     candidate_cap_exceeded: bool,
     db: &djinn_db::Database,
+    attribution: Option<(&str, &str)>,
 ) {
     use djinn_db::repositories::retrieval_trace::{
         CreateRetrievalTraceParams, RetrievalTraceEntryPoint, RetrievalTraceRepository,
@@ -674,8 +696,8 @@ async fn persist_knowledge_trace(
     let repo = RetrievalTraceRepository::new(db.clone());
     let params = CreateRetrievalTraceParams {
         project_id: &task.project_id,
-        session_id: None,
-        task_run_id: None,
+        session_id: attribution.map(|(session_id, _)| session_id),
+        task_run_id: attribution.map(|(_, task_run_id)| task_run_id),
         task_id: Some(&task.id),
         entry_point: RetrievalTraceEntryPoint::LoadKnowledgeContext,
         trigger: Some(&trigger),
@@ -725,6 +747,7 @@ pub(crate) async fn assemble_prompt_context(inputs: PromptContextInputs<'_>) -> 
         arbiter_directive,
         mcp_server_instructions,
         extension_diagnostics,
+        memory_intent_planner,
     } = inputs;
 
     // ── Phase 0: synchronous work with no data dependencies ──
@@ -804,7 +827,13 @@ pub(crate) async fn assemble_prompt_context(inputs: PromptContextInputs<'_>) -> 
             );
             async move {
                 let child_start = tokio::time::Instant::now();
-                let result = load_knowledge_context(task, epic_context_ref, app_state).await;
+                let result = load_knowledge_context_with_planner(
+                    task,
+                    epic_context_ref,
+                    app_state,
+                    memory_intent_planner.as_ref(),
+                )
+                .await;
                 (result, child_start.elapsed())
             }
             .instrument(span)
@@ -1213,3 +1242,109 @@ mod ci_directive_tests;
 #[cfg(test)]
 #[path = "knowledge_trace_tests.rs"]
 mod knowledge_trace_tests;
+
+/// Gated attributed planner enrichment for the real prompt-assembly path.
+async fn merge_planned_knowledge(
+    scope: Option<String>,
+    scope_notes: &[djinn_memory::Note],
+    note_repo: &NoteRepository,
+    task: &Task,
+    planner: Option<&MemoryIntentPlannerInvocation<'_>>,
+) -> Option<String> {
+    let Some(invocation) = planner.filter(|p| p.config.is_enabled()) else {
+        return scope;
+    };
+    let Some(creator_id) = invocation.creator_id.filter(|id| !id.is_empty()) else {
+        return scope;
+    };
+    let input = PlannerInput {
+        title: task.title.clone(),
+        description: task.description.clone(),
+        acceptance_criteria: invocation.acceptance_criteria.clone(),
+        resume_compaction_summary: invocation.resume_compaction_summary.map(str::to_owned),
+    };
+    let Some(prepared) = prepare_planner_request(invocation.config, input) else {
+        return scope;
+    };
+    let mut conversation = Conversation::new();
+    conversation.push(Message::user(prepared.prompt));
+    let request = djinn_supervisor::services::wire::AttributedPlannerRequest {
+        project_id: task.project_id.clone(),
+        task_id: task.id.clone(),
+        task_run_id: invocation.task_run_id.into(),
+        session_id: invocation.session_id.into(),
+        created_by_user_id: creator_id.into(),
+        operation: "memory_intent_planner".into(),
+        prompt_id: MEMORY_INTENT_PLANNER_PROMPT_ID.into(),
+        conversation: match serde_json::to_string(&conversation) {
+            Ok(v) => v,
+            Err(_) => return scope,
+        },
+        tools: "[]".into(),
+        tool_choice: None,
+        max_tokens: invocation.config.max_output.min(u32::MAX as usize) as u32,
+        timeout_ms: invocation.config.timeout.as_millis().min(u64::MAX as u128) as u64,
+    };
+    let Ok(attempt) = invocation.host.plan_memory_intents(request).await else {
+        return scope;
+    };
+    let Some(payload) = attempt.content else {
+        return scope;
+    };
+    let Ok(queries) = parse_planned_queries(&payload) else {
+        return scope;
+    };
+    let search: &dyn PlannedNoteSearch = invocation.planned_note_search.unwrap_or(note_repo);
+    let searches = queries.iter().map(|q| {
+        let note_type = match q.note_type {
+            crate::actors::slot::lifecycle::memory_intent_planner::PlannedNoteType::Pitfall => {
+                "pitfall"
+            }
+            crate::actors::slot::lifecycle::memory_intent_planner::PlannedNoteType::Pattern => {
+                "pattern"
+            }
+            crate::actors::slot::lifecycle::memory_intent_planner::PlannedNoteType::Case => "case",
+            crate::actors::slot::lifecycle::memory_intent_planner::PlannedNoteType::Reference => {
+                "reference"
+            }
+        };
+        search.search_planned_notes(&task.project_id, &task.id, &q.query, note_type)
+    });
+    let buckets = futures::future::join_all(searches).await;
+    if buckets.iter().any(Result::is_err) {
+        return scope;
+    }
+    let mut output = scope.unwrap_or_default();
+    let mut ids: HashSet<String> = scope_notes.iter().map(|n| n.id.clone()).collect();
+    let mut links: HashSet<String> = scope_notes.iter().map(|n| n.permalink.clone()).collect();
+    let mut count = 0;
+    for bucket in buckets {
+        // The per-query cap is on successfully rendered *unique* notes, not
+        // the first two repository rows. A duplicate first row must not
+        // suppress the next unique, ranked row.
+        let mut rendered_for_query = 0;
+        for row in bucket.expect("checked") {
+            if rendered_for_query == 2 {
+                break;
+            }
+            if count == 6 || !ids.insert(row.id.clone()) || !links.insert(row.permalink.clone()) {
+                continue;
+            }
+            let line = format!(
+                "- **[Note] {}**: {} (permalink: {})",
+                row.title, row.snippet, row.permalink
+            );
+            if output.len() + usize::from(!output.is_empty()) + line.len() > KNOWLEDGE_BUDGET_CHARS
+            {
+                return (!output.is_empty()).then_some(output);
+            }
+            if !output.is_empty() {
+                output.push('\n')
+            }
+            output.push_str(&line);
+            count += 1;
+            rendered_for_query += 1;
+        }
+    }
+    (!output.is_empty()).then_some(output)
+}

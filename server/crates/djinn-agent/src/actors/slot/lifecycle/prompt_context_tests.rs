@@ -24,6 +24,112 @@ async fn lead_prompt_context(db: Database, task: &Task) -> PromptContext {
     assemble_for_role(db, task, &role, None, "", &[], &[]).await
 }
 
+#[derive(Default)]
+struct RecordingPlannerHost {
+    requests: std::sync::Mutex<Vec<djinn_supervisor::services::wire::AttributedPlannerRequest>>,
+}
+
+#[async_trait::async_trait]
+impl MemoryIntentPlannerHost for RecordingPlannerHost {
+    async fn plan_memory_intents(
+        &self,
+        request: djinn_supervisor::services::wire::AttributedPlannerRequest,
+    ) -> Result<djinn_supervisor::services::wire::PlannerAttemptResult, String> {
+        self.requests.lock().expect("record request").push(request);
+        Ok(djinn_supervisor::services::wire::PlannerAttemptResult {
+            outcome: djinn_supervisor::services::wire::PlannerOutcome::Success,
+            content: None,
+            tokens_in: 0,
+            tokens_out: 0,
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
+            cost_usd: None,
+            diagnostic: None,
+        })
+    }
+}
+
+#[tokio::test]
+async fn planner_production_boundary_enabled_request_carries_raw_attribution() {
+    let db = Database::ephemeral().await.expect("create ephemeral db");
+    let events = EventBus::noop();
+    let mut task = create_project_epic_task(&db, &events, "Planner epic", "Planner title").await;
+    task.description = "real planner description".into();
+    task.created_by_user_id = Some("creator-real".into());
+    let app_state = agent_context_from_db(db, CancellationToken::new());
+    let host = RecordingPlannerHost::default();
+    let config = crate::context::MemoryIntentPlannerConfig {
+        enabled: true,
+        ..Default::default()
+    };
+    let raw_resume = "raw-compaction-summary-".repeat(8);
+    assert!(raw_resume.len() > 117);
+    let baseline = load_knowledge_context(&task, None, &app_state).await;
+    let result = load_knowledge_context_with_planner(
+        &task,
+        None,
+        &app_state,
+        Some(&MemoryIntentPlannerInvocation {
+            config: &config,
+            host: &host,
+            session_id: "session-real",
+            task_run_id: "task-run-real",
+            creator_id: task.created_by_user_id.as_deref(),
+            acceptance_criteria: vec!["parsed criterion".into()],
+            resume_compaction_summary: Some(&raw_resume),
+            planned_note_search: None,
+        }),
+    )
+    .await;
+    assert_eq!(result, baseline);
+    let requests = host.requests.lock().expect("recorded requests");
+    assert_eq!(requests.len(), 1);
+    let request = &requests[0];
+    assert_eq!(request.project_id, task.project_id);
+    assert_eq!(request.task_id, task.id);
+    assert_eq!(request.session_id, "session-real");
+    assert_eq!(request.task_run_id, "task-run-real");
+    assert_eq!(request.created_by_user_id, "creator-real");
+    for expected in [
+        "Planner title",
+        "real planner description",
+        "parsed criterion",
+        &raw_resume,
+    ] {
+        assert!(request.conversation.contains(expected));
+    }
+}
+
+#[tokio::test]
+async fn planner_production_boundary_disabled_is_byte_identical_and_does_no_host_work() {
+    let db = Database::ephemeral().await.expect("create ephemeral db");
+    let events = EventBus::noop();
+    let mut task = create_project_epic_task(&db, &events, "Planner epic", "Planner task").await;
+    task.created_by_user_id = Some("creator-real".into());
+    let app_state = agent_context_from_db(db, CancellationToken::new());
+    let host = RecordingPlannerHost::default();
+    let config = crate::context::MemoryIntentPlannerConfig::default();
+    let baseline = load_knowledge_context(&task, None, &app_state).await;
+    let result = load_knowledge_context_with_planner(
+        &task,
+        None,
+        &app_state,
+        Some(&MemoryIntentPlannerInvocation {
+            config: &config,
+            host: &host,
+            session_id: "session-real",
+            task_run_id: "task-run-real",
+            creator_id: task.created_by_user_id.as_deref(),
+            acceptance_criteria: vec![],
+            resume_compaction_summary: Some("raw but unused"),
+            planned_note_search: None,
+        }),
+    )
+    .await;
+    assert_eq!(result, baseline);
+    assert!(host.requests.lock().expect("recorded requests").is_empty());
+}
+
 fn diagnostic(
     diagnostic_id: &str,
     severity: ExtensionLoadSeverity,
@@ -929,6 +1035,7 @@ async fn concurrent_assembly_is_deterministic() {
         arbiter_directive: None,
         mcp_server_instructions: &empty_instructions,
         extension_diagnostics: &[],
+        memory_intent_planner: None,
     })
     .await;
 
@@ -949,6 +1056,7 @@ async fn concurrent_assembly_is_deterministic() {
         arbiter_directive: None,
         mcp_server_instructions: &empty_instructions,
         extension_diagnostics: &[],
+        memory_intent_planner: None,
     })
     .await;
 
@@ -1270,6 +1378,7 @@ async fn ci_blocking_appears_before_resume_context_in_prompt() {
         arbiter_directive: None,
         mcp_server_instructions: &std::collections::BTreeMap::new(),
         extension_diagnostics: &[],
+        memory_intent_planner: None,
     })
     .await;
 
@@ -1416,6 +1525,7 @@ async fn resume_context_section_in_canonical_order_with_skills_and_sources() {
         arbiter_directive: None,
         mcp_server_instructions: &std::collections::BTreeMap::new(),
         extension_diagnostics: &[],
+        memory_intent_planner: None,
     })
     .await;
 
@@ -1673,6 +1783,7 @@ async fn resume_context_deterministic_with_discontinuity_metadata() {
         arbiter_directive: None,
         mcp_server_instructions: &empty_instructions,
         extension_diagnostics: &[],
+        memory_intent_planner: None,
     })
     .await;
 
@@ -1693,6 +1804,7 @@ async fn resume_context_deterministic_with_discontinuity_metadata() {
         arbiter_directive: None,
         mcp_server_instructions: &empty_instructions,
         extension_diagnostics: &[],
+        memory_intent_planner: None,
     })
     .await;
 
