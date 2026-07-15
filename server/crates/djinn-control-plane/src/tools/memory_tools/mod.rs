@@ -162,6 +162,7 @@ mod param_tests {
     fn write_params_deserializes_type_field() {
         let json = serde_json::json!({
             "project": "/tmp/test",
+            "reason": "test reason",
             "title": "Test Note",
             "content": "hello",
             "type": "adr"
@@ -174,6 +175,7 @@ mod param_tests {
     fn mergeable_write_and_edit_params_deserialize_case_and_pitfall_types() {
         let write_params: WriteParams = serde_json::from_value(serde_json::json!({
             "project": "/tmp/test",
+            "reason": "test reason",
             "title": "Recovered Incident",
             "content": "details",
             "type": "case"
@@ -183,6 +185,7 @@ mod param_tests {
 
         let edit_params: EditParams = serde_json::from_value(serde_json::json!({
             "project": "/tmp/test",
+            "reason": "test reason",
             "identifier": "reference/test",
             "operation": "append",
             "content": "details",
@@ -196,6 +199,7 @@ mod param_tests {
     fn edit_params_deserializes_type_field() {
         let json = serde_json::json!({
             "project": "/tmp/test",
+            "reason": "test reason",
             "identifier": "decisions/test",
             "operation": "append",
             "content": "new content",

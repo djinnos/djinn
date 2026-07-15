@@ -52,6 +52,7 @@ mod tests {
         // Create first note
         let Json(created1) = server
             .memory_write(Parameters(WriteParams {
+                reason: "test mutation".to_string(),
                 project: project.slug(),
                 title: "Research Topic".to_string(),
                 content: "This is a research note about async Rust patterns.".to_string(),
@@ -70,6 +71,7 @@ mod tests {
         // Use a slightly different title to avoid permalink collision
         let Json(created2) = server
             .memory_write(Parameters(WriteParams {
+                reason: "test mutation".to_string(),
                 project: project.slug(),
                 title: "Research Topic Two".to_string(),
                 content: "This is a research note about async Rust patterns.".to_string(),
@@ -102,6 +104,7 @@ mod tests {
         // Create first pattern note
         let Json(created1) = server
             .memory_write(Parameters(WriteParams {
+                reason: "test mutation".to_string(),
                 project: project.slug(),
                 title: "Async Pattern".to_string(),
                 content: "Use tokio::spawn for concurrent task execution in Rust async code."
@@ -150,6 +153,7 @@ mod tests {
         // Create a pattern note
         let Json(pattern) = server
             .memory_write(Parameters(WriteParams {
+                reason: "test mutation".to_string(),
                 project: project.slug(),
                 title: "Error Handling Pattern".to_string(),
                 content: "Use Result types for explicit error handling in Rust.".to_string(),
@@ -166,6 +170,7 @@ mod tests {
         // Create an ADR in decisions folder with similar content
         let Json(adr) = server
             .memory_write(Parameters(WriteParams {
+                reason: "test mutation".to_string(),
                 project: project.slug(),
                 title: "Error Handling ADR".to_string(),
                 content: "Use Result types for explicit error handling in Rust.".to_string(),
@@ -228,6 +233,7 @@ mod tests {
         // Create a pattern note with unique content
         let Json(created) = server
             .memory_write(Parameters(WriteParams {
+                reason: "test mutation".to_string(),
                 project: project.slug(),
                 title: "Unique Pattern XYZ123".to_string(),
                 content:
@@ -257,6 +263,7 @@ mod tests {
 
         let Json(created) = server
             .memory_write(Parameters(WriteParams {
+                reason: "test mutation".to_string(),
                 project: project.slug(),
                 title: "Canonical Pattern".to_string(),
                 content: "Alpha\r\nBeta\n".to_string(),
@@ -282,6 +289,7 @@ mod tests {
 
         let Json(reused) = server
             .memory_write(Parameters(WriteParams {
+                reason: "test mutation".to_string(),
                 project: project.slug(),
                 title: "Canonical Pattern Copy".to_string(),
                 content: "  Alpha\nBeta  ".to_string(),
@@ -357,6 +365,7 @@ mod tests {
         // Write first note
         let Json(r1) = server
             .memory_write(Parameters(WriteParams {
+                reason: "test mutation".to_string(),
                 project: project.slug(),
                 title: "Auth Token Validation Pattern".to_string(),
                 content: shared.to_string(),
@@ -373,6 +382,7 @@ mod tests {
         // Write second note with same content to trigger detection
         let Json(r2) = server
             .memory_write(Parameters(WriteParams {
+                reason: "test mutation".to_string(),
                 project: project.slug(),
                 title: "JWT Bearer Auth Validation".to_string(),
                 content: shared.to_string(),
@@ -426,6 +436,7 @@ mod tests {
 
         let Json(initial_brief) = server
             .memory_write(Parameters(WriteParams {
+                reason: "test mutation".to_string(),
                 project: project_path.clone(),
                 title: "Project Brief".to_string(),
                 content: "Broken [[Missing ADR]]. Broken [[Roadmap]].".to_string(),
@@ -440,6 +451,7 @@ mod tests {
 
         let Json(initial_roadmap) = server
             .memory_write(Parameters(WriteParams {
+                reason: "test mutation".to_string(),
                 project: project_path.clone(),
                 title: "Project Roadmap".to_string(),
                 content: "Broken [[Missing ADR-043]].".to_string(),
@@ -472,6 +484,7 @@ mod tests {
 
         let Json(updated_roadmap) = server
             .memory_write(Parameters(WriteParams {
+                reason: "test mutation".to_string(),
                 project: project_path.clone(),
                 title: "Project Roadmap".to_string(),
                 content: "References [[ADR-043 Repo Graph]].".to_string(),
@@ -490,6 +503,7 @@ mod tests {
 
         let Json(updated_brief) = server
             .memory_write(Parameters(WriteParams {
+                reason: "test mutation".to_string(),
                 project: project_path.clone(),
                 title: "Project Brief".to_string(),
                 content: "Links [[ADR-008 Example]] and [[roadmap]].".to_string(),
@@ -559,6 +573,7 @@ mod tests {
 
         let Json(created) = server
             .memory_write(Parameters(WriteParams {
+                reason: "test mutation".to_string(),
                 project: project.slug(),
                 title: title.to_string(),
                 content: content.to_string(),
@@ -638,6 +653,7 @@ mod tests {
 
         let Json(edited) = server
             .memory_edit(Parameters(EditParams {
+                reason: "test mutation".to_string(),
                 project: project.slug(),
                 identifier: "requirements/v1-requirements".to_string(),
                 operation: "find_replace".to_string(),
@@ -669,6 +685,7 @@ mod tests {
 
         let Json(created) = server
             .memory_write(Parameters(WriteParams {
+                reason: "test mutation".to_string(),
                 project: project.slug(),
                 title: "ADR-300 Empty Scope".to_string(),
                 content: "body for ADR-300".to_string(),
@@ -703,6 +720,7 @@ mod tests {
 
         let Json(created) = server
             .memory_write(Parameters(WriteParams {
+                reason: "test mutation".to_string(),
                 project: project.slug(),
                 title: "ADR-301 Scoped".to_string(),
                 content: "scoped body".to_string(),
@@ -735,6 +753,7 @@ mod tests {
 
         let Json(created) = server
             .memory_write(Parameters(WriteParams {
+                reason: "test mutation".to_string(),
                 project: project.slug(),
                 title: "ADR-303 Editable".to_string(),
                 content: "The quick brown fox".to_string(),
@@ -751,6 +770,7 @@ mod tests {
 
         let Json(edited) = server
             .memory_edit(Parameters(EditParams {
+                reason: "test mutation".to_string(),
                 project: project.slug(),
                 identifier: permalink,
                 operation: "find_replace".to_string(),
@@ -788,6 +808,7 @@ mod tests {
 
         let Json(created) = server
             .memory_write(Parameters(WriteParams {
+                reason: "test mutation".to_string(),
                 project: project.slug(),
                 title: "ADR-304 NoopEdit".to_string(),
                 content: "hello world".to_string(),
@@ -809,6 +830,7 @@ mod tests {
 
         let Json(edited) = server
             .memory_edit(Parameters(EditParams {
+                reason: "test mutation".to_string(),
                 project: project.slug(),
                 identifier: created.permalink.clone().unwrap(),
                 operation: "find_replace".to_string(),
@@ -865,6 +887,7 @@ mod tests {
 
         let Json(first) = server
             .memory_write(Parameters(WriteParams {
+                reason: "test mutation".to_string(),
                 project: project.slug(),
                 title: "Telemetry Reuse Pattern".to_string(),
                 content: "apple banana cherry date elderberry".to_string(),
@@ -882,6 +905,7 @@ mod tests {
         // records a single Success observation.
         let Json(second) = server
             .memory_write(Parameters(WriteParams {
+                reason: "test mutation".to_string(),
                 project: project.slug(),
                 title: "Telemetry Reuse Pattern".to_string(),
                 content: "apple banana cherry date elderberry".to_string(),
@@ -919,6 +943,7 @@ mod tests {
 
         let Json(created) = server
             .memory_write(Parameters(WriteParams {
+                reason: "test mutation".to_string(),
                 project: project.slug(),
                 title: "Unique Pattern".to_string(),
                 content: "A completely unique pattern that has no dedup candidates.".to_string(),
@@ -951,6 +976,7 @@ mod tests {
 
         let Json(first) = server
             .memory_write(Parameters(WriteParams {
+                reason: "test mutation".to_string(),
                 project: project.slug(),
                 title: "Telemetry Error Pattern".to_string(),
                 content: "apple banana cherry date elderberry".to_string(),
@@ -976,6 +1002,7 @@ mod tests {
         let Json(second) = server
             .memory_write_with_decider(
                 Parameters(WriteParams {
+                    reason: "test mutation".to_string(),
                     project: project.slug(),
                     title: "Telemetry Error Pattern".to_string(),
                     content: "apple banana cherry date".to_string(),

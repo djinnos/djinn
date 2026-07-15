@@ -209,6 +209,7 @@ async fn fixture_drives_all_repository_event_kinds_and_exact_values() {
     let primary = ids["notes"]["primary"].as_str().unwrap();
     let known = ids["notes"]["already_known"].as_str().unwrap();
     let target = ids["notes"]["merge_target"].as_str().unwrap();
+    let unscoped = ids["notes"]["unscoped"].as_str().unwrap();
     repo.mutate_with_revision(create(
         &project,
         primary,
@@ -246,6 +247,40 @@ async fn fixture_drives_all_repository_event_kinds_and_exact_values() {
     ))
     .await
     .unwrap();
+    let events_before_unchanged_content: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM note_revision_events WHERE project_id = $1")
+            .bind(&project)
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
+    assert!(
+        !repo
+            .mutate_with_revision(update(
+                &project,
+                primary,
+                NoteRevisionEventKind::Updated,
+                content["primary_updated"].as_str().unwrap(),
+                0.75,
+                attribution(&rows[2]),
+                provenance(&rows[2]),
+                " unchanged content ",
+            ))
+            .await
+            .unwrap()
+            .changed,
+        "an unchanged content mutation is a semantic no-op"
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM note_revision_events WHERE project_id = $1",
+        )
+        .bind(&project)
+        .fetch_one(db.pool())
+        .await
+        .unwrap(),
+        events_before_unchanged_content,
+        "unchanged content must not append a revision"
+    );
     repo.mutate_with_revision(create(
         &project,
         known,
@@ -337,6 +372,19 @@ async fn fixture_drives_all_repository_event_kinds_and_exact_values() {
         provenance: provenance(&rows[8]),
         reason: reason(rows[8]["reason_input"].as_str().unwrap()),
     })
+    .await
+    .unwrap();
+    repo.mutate_with_revision(create(
+        &project,
+        unscoped,
+        "Unscoped memory mutation",
+        "reference/unscoped-memory-mutation",
+        content["unscoped"].as_str().unwrap(),
+        0.5,
+        attribution(&rows[9]),
+        provenance(&rows[9]),
+        rows[9]["reason_input"].as_str().unwrap(),
+    ))
     .await
     .unwrap();
     let persisted: Vec<PersistedRow> = sqlx::query_as("SELECT id, project_id, note_id, note_seq, event_kind, content_before, content_after, confidence_before, confidence_after, actor_kind, actor_id, subsystem, session_id, task_id, task_run_id, reason, created_at FROM note_revision_events WHERE project_id = $1 ORDER BY created_at, id").bind(&project).fetch_all(db.pool()).await.unwrap();

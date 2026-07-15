@@ -65,6 +65,7 @@ mod jit_trace_tests;
 mod lsp_dispatch_tests;
 mod lsp_tool_boundary_tests;
 mod memory_dispatch_tests;
+mod memory_mutation_param_tests;
 mod phase_1_surface_guard_tests;
 mod planner_routing_tests;
 mod proposal_dispatch_tests;

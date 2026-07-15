@@ -227,7 +227,10 @@ pub(super) struct MemoryBuildContextParams {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(super) struct MemoryWriteParams {
+    #[serde(deserialize_with = "djinn_control_plane::tools::memory_tools::deserialize_reason")]
+    pub reason: String,
     pub title: String,
     pub content: String,
     #[serde(rename = "type")]
@@ -248,7 +251,10 @@ pub(super) struct MemoryMoveParams {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(super) struct MemoryEditParams {
+    #[serde(deserialize_with = "djinn_control_plane::tools::memory_tools::deserialize_reason")]
+    pub reason: String,
     pub identifier: String,
     pub operation: String,
     pub content: String,

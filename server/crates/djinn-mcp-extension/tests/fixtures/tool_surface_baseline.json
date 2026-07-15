@@ -884,6 +884,7 @@
     "destructive": false,
     "idempotent": false,
     "inputSchema": {
+      "additionalProperties": false,
       "properties": {
         "content": {
           "description": "New content to insert or replace with",
@@ -901,6 +902,10 @@
           "description": "Edit operation: append, prepend, find_replace, replace_section",
           "type": "string"
         },
+        "reason": {
+          "description": "Required audit reason. Unicode whitespace is trimmed and blank values are rejected.",
+          "type": "string"
+        },
         "section": {
           "description": "Required for replace_section: heading text identifying the section",
           "type": "string"
@@ -911,6 +916,7 @@
         }
       },
       "required": [
+        "reason",
         "identifier",
         "operation",
         "content"
@@ -1255,9 +1261,14 @@
     "destructive": false,
     "idempotent": false,
     "inputSchema": {
+      "additionalProperties": false,
       "properties": {
         "content": {
           "description": "Markdown content of the note. Use [[wikilinks]] to connect to other notes.",
+          "type": "string"
+        },
+        "reason": {
+          "description": "Required audit reason. Unicode whitespace is trimmed and blank values are rejected.",
           "type": "string"
         },
         "status": {
@@ -1281,6 +1292,7 @@
         }
       },
       "required": [
+        "reason",
         "title",
         "content",
         "type"
