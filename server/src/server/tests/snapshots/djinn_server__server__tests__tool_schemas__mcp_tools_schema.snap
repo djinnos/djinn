@@ -22560,6 +22560,31 @@ expression: signatures
           ],
           "type": "object"
         },
+        "TimelineExtensionLoadDiagnosticEvent": {
+          "description": "A canonical extension-load diagnostic placed on a task timeline.\n\nThe diagnostic remains the shared V1 wire object rather than a timeline-\nspecific copy of its fields. `session_id` and `timestamp` provide the\nplacement metadata needed by timeline renderers.",
+          "properties": {
+            "diagnostic": {
+              "$ref": "#/$defs/AnyJson"
+            },
+            "kind": {
+              "description": "Fixed discriminator for extension-load diagnostic timeline events.",
+              "type": "string"
+            },
+            "session_id": {
+              "type": "string"
+            },
+            "timestamp": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "session_id",
+            "timestamp",
+            "diagnostic"
+          ],
+          "type": "object"
+        },
         "TimelineMessage": {
           "properties": {
             "agent_type": {
@@ -22609,6 +22634,16 @@ expression: signatures
         "error": {
           "type": [
             "string",
+            "null"
+          ]
+        },
+        "extension_load_diagnostic_events": {
+          "description": "Canonical session-associated extension-load diagnostics, including as\nan empty array on successful timeline lookups.",
+          "items": {
+            "$ref": "#/$defs/TimelineExtensionLoadDiagnosticEvent"
+          },
+          "type": [
+            "array",
             "null"
           ]
         },

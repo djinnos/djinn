@@ -11037,6 +11037,11 @@ export namespace TaskTimelineOutputSchema {
   export interface TaskTimelineOutput {
   activity?: TimelineActivity[]
   error?: string
+  /**
+   * Canonical session-associated extension-load diagnostics, including as
+   * an empty array on successful timeline lookups.
+   */
+  extension_load_diagnostic_events?: TimelineExtensionLoadDiagnosticEvent[]
   messages?: TimelineMessage[]
   sessions?: SessionToolSession[]
   [k: string]: any
@@ -11052,6 +11057,23 @@ export namespace TaskTimelineOutputSchema {
   kind: string
   payload: AnyJson
   summary?: string
+  timestamp: string
+  [k: string]: any
+  }
+  /**
+   * A canonical extension-load diagnostic placed on a task timeline.
+   * 
+   * The diagnostic remains the shared V1 wire object rather than a timeline-
+   * specific copy of its fields. `session_id` and `timestamp` provide the
+   * placement metadata needed by timeline renderers.
+   */
+  export interface TimelineExtensionLoadDiagnosticEvent {
+  diagnostic: AnyJson
+  /**
+   * Fixed discriminator for extension-load diagnostic timeline events.
+   */
+  kind: string
+  session_id: string
   timestamp: string
   [k: string]: any
   }
