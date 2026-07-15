@@ -207,7 +207,10 @@ pub fn derive_galaxy_layout(graph: &RepoDependencyGraph, seed: u32) -> GalaxyLay
             continue;
         }
         let group = derive_group(
-            node.file_path.as_ref().map(|p| p.display().to_string()).as_deref(),
+            node.file_path
+                .as_ref()
+                .map(|p| p.display().to_string())
+                .as_deref(),
             node.workspace.as_deref(),
         );
         is_symbol_by_uid.insert(uid.clone(), is_symbol);
@@ -237,7 +240,8 @@ pub fn derive_galaxy_layout(graph: &RepoDependencyGraph, seed: u32) -> GalaxyLay
 
     let mut es: Vec<usize> = Vec::new();
     let mut ed: Vec<usize> = Vec::new();
-    let mut seen_pairs: std::collections::HashSet<(usize, usize)> = std::collections::HashSet::new();
+    let mut seen_pairs: std::collections::HashSet<(usize, usize)> =
+        std::collections::HashSet::new();
     for edge in pg.edge_references() {
         let from_uid = graph.node(edge.source()).stable_uid();
         let to_uid = graph.node(edge.target()).stable_uid();
@@ -349,8 +353,8 @@ fn layout(nodes: &[GalaxyNode], es: &[usize], ed: &[usize], seed: u32) -> Vec<f6
         let h = fnv1a(cluster_key);
         let theta = ((h & 0xffff) as f64 / 65535.0) * std::f64::consts::PI * 2.0;
         let phi = (2.0 * (((h >> 16) & 0xff) as f64 / 255.0) - 1.0).acos();
-        let radius =
-            (RING_BASE_RADIUS + ((h >> 24) & 0xff) as f64 / 255.0 * RING_RADIUS_SPREAD) * shell_scale;
+        let radius = (RING_BASE_RADIUS + ((h >> 24) & 0xff) as f64 / 255.0 * RING_RADIUS_SPREAD)
+            * shell_scale;
 
         let mut rng = mulberry32(fnv1a(&nodes[i].uid) ^ seed);
         let px = radius * phi.sin() * theta.cos() + (rng() * 2.0 - 1.0) * SEED_JITTER;

@@ -1,0 +1,5 @@
+version: 1
+coverage:
+  - id: task.state-machine.legal-transitions
+    subsystem: unknown-system
+    required_profiles: [smoke-ci]
