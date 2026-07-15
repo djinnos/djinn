@@ -237,4 +237,20 @@ mod tests {
             "could not initialize dedicated test database: template migration rejected"
         );
     }
+
+    #[tokio::test]
+    async fn opening_error_is_a_failed_outcome_with_its_diagnostic() {
+        let factory = ScriptedFactory {
+            outcomes: Mutex::new(vec![Err(DatabaseAcquisitionError::Open {
+                detail: "Postgres is unavailable".into(),
+            })]),
+        };
+
+        let outcome = acquire_for_scenario(&factory).await;
+        assert!(outcome.is_failed());
+        assert_eq!(
+            outcome.diagnostic().unwrap().to_string(),
+            "could not acquire dedicated test database: Postgres is unavailable"
+        );
+    }
 }
