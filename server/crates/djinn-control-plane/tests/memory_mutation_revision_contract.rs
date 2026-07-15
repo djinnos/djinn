@@ -11,7 +11,7 @@ use djinn_core::{
     auth_context::{REVISION_CALLER_CONTEXT, TrustedRevisionCallerContext},
     events::EventBus,
 };
-use djinn_db::NoteRepository;
+use djinn_db::{NoteRepository, NoteRevisionEvent};
 use serde_json::{Value, json};
 
 async fn dispatch_as(
@@ -24,6 +24,43 @@ async fn dispatch_as(
         .scope(Some(context), harness.call_tool(tool, arguments))
         .await
         .unwrap_or_else(|error| panic!("{tool} dispatch failed: {error}"))
+}
+
+async fn assert_tenant_state_unchanged(
+    repo: &NoteRepository,
+    owner_project_id: &str,
+    other_project_id: &str,
+    owner_note_id: &str,
+    other_note_id: &str,
+    owner_note_before: &Value,
+    other_note_before: &Value,
+    owner_revisions_before: &[NoteRevisionEvent],
+    other_revisions_before: &[NoteRevisionEvent],
+) {
+    let owner_note = repo
+        .get(owner_note_id)
+        .await
+        .expect("reload owner note")
+        .expect("owner note remains present");
+    let other_note = repo
+        .get(other_note_id)
+        .await
+        .expect("reload other note")
+        .expect("other note remains present");
+    assert_eq!(&owner_note.to_value(), owner_note_before);
+    assert_eq!(&other_note.to_value(), other_note_before);
+    assert_eq!(
+        repo.revision_events(owner_project_id)
+            .await
+            .expect("reload owner revisions"),
+        owner_revisions_before
+    );
+    assert_eq!(
+        repo.revision_events(other_project_id)
+            .await
+            .expect("reload other revisions"),
+        other_revisions_before
+    );
 }
 
 #[tokio::test]
@@ -67,7 +104,7 @@ async fn cross_project_mutations_and_revision_history_do_not_disclose_foreign_no
         "memory_write",
         json!({
             "project": other_project_ref,
-            "title": "Owner-only revision fixture",
+            "title": "Other tenant dedup-isolation fixture",
             "content": "owner content",
             "type": "reference",
             "reason": "attempt cross-project write dedup"
@@ -77,6 +114,20 @@ async fn cross_project_mutations_and_revision_history_do_not_disclose_foreign_no
     assert!(other_dedup_write["error"].is_null());
     assert_ne!(other_dedup_write["id"], created["id"]);
     assert_eq!(other_dedup_write["deduplicated"], false);
+    let other_note_id = other_dedup_write["id"]
+        .as_str()
+        .expect("other note id")
+        .to_owned();
+    let other_permalink = other_dedup_write["permalink"]
+        .as_str()
+        .expect("other permalink")
+        .to_owned();
+    assert_eq!(owner_permalink, "reference/owner-only-revision-fixture");
+    assert_eq!(
+        other_permalink,
+        "reference/other-tenant-dedup-isolation-fixture"
+    );
+    assert_ne!(owner_permalink, other_permalink);
 
     // The normal repository query is project-scoped. It proves that the owner
     // has an immutable row while the other project cannot query it.
@@ -104,6 +155,18 @@ async fn cross_project_mutations_and_revision_history_do_not_disclose_foreign_no
         other_revisions_before[0].note_id.as_deref(),
         other_dedup_write["id"].as_str()
     );
+    let owner_note_before = repo
+        .get(&owner_note_id)
+        .await
+        .expect("capture owner note")
+        .expect("owner note exists")
+        .to_value();
+    let other_note_before = repo
+        .get(&other_note_id)
+        .await
+        .expect("capture other note")
+        .expect("other note exists")
+        .to_value();
 
     let absent_permalink = "reference/no-such-owner-note";
     let foreign_edit = dispatch_as(
@@ -117,6 +180,18 @@ async fn cross_project_mutations_and_revision_history_do_not_disclose_foreign_no
             "content": "foreign mutation",
             "reason": "attempt cross-project edit"
         }),
+    )
+    .await;
+    assert_tenant_state_unchanged(
+        &repo,
+        &owner_project.id,
+        &other_project.id,
+        &owner_note_id,
+        &other_note_id,
+        &owner_note_before,
+        &other_note_before,
+        &owner_revisions_before,
+        &other_revisions_before,
     )
     .await;
     let absent_edit = dispatch_as(
@@ -156,6 +231,18 @@ async fn cross_project_mutations_and_revision_history_do_not_disclose_foreign_no
         }),
     )
     .await;
+    assert_tenant_state_unchanged(
+        &repo,
+        &owner_project.id,
+        &other_project.id,
+        &owner_note_id,
+        &other_note_id,
+        &owner_note_before,
+        &other_note_before,
+        &owner_revisions_before,
+        &other_revisions_before,
+    )
+    .await;
     let absent_delete = dispatch_as(
         other.clone(),
         &harness,
@@ -189,6 +276,18 @@ async fn cross_project_mutations_and_revision_history_do_not_disclose_foreign_no
         &harness,
         "memory_revisions",
         json!({"project": other_project_ref, "permalink": owner_permalink}),
+    )
+    .await;
+    assert_tenant_state_unchanged(
+        &repo,
+        &owner_project.id,
+        &other_project.id,
+        &owner_note_id,
+        &other_note_id,
+        &owner_note_before,
+        &other_note_before,
+        &owner_revisions_before,
+        &other_revisions_before,
     )
     .await;
     let absent_revisions = dispatch_as(
@@ -237,26 +336,7 @@ async fn cross_project_mutations_and_revision_history_do_not_disclose_foreign_no
         "create owner-only revision fixture"
     );
 
-    // Rejected calls cannot append a revision or mutate either note state. The
-    // owner query remains an exact assertion over the durable immutable row.
-    assert_eq!(
-        repo.revision_events(&owner_project.id)
-            .await
-            .expect("owner revisions after rejected attempts"),
-        owner_revisions_before
-    );
-    assert_eq!(
-        repo.revision_events(&other_project.id)
-            .await
-            .expect("other revisions after rejected attempts"),
-        other_revisions_before
-    );
-    let owner_note = repo
-        .get(&owner_note_id)
-        .await
-        .expect("load owner note")
-        .expect("owner note survives foreign attempts");
-    assert_eq!(owner_note.content, "owner content");
+    // Tenant A's permalink never resolves to tenant B's distinct fixture.
     assert!(
         repo.get_by_permalink(&other_project.id, &owner_permalink)
             .await
