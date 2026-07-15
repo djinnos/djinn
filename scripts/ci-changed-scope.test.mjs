@@ -35,6 +35,28 @@ test('UI-only selects only UI', () => {
   assertOnlyJobs(result, ['ui']);
 });
 
+test('local Tilt inputs select the dedicated contract lane', () => {
+  for (const path of [
+    'Tiltfile',
+    'scripts/tilt/build-ui.sh',
+    'scripts/kind/setup-kind.sh',
+    'scripts/test-tiltfile-config.sh',
+    'deploy/helm/djinn/values.local.yaml',
+    'deploy/langfuse-local/langfuse.yaml',
+  ]) {
+    const result = plan([path]);
+    assert.equal(result.lanes.tiltContracts, true, path);
+    assertOnlyJobs(result, ['tiltContracts']);
+  }
+});
+
+test('server Docker changes select server policy and Tilt contracts', () => {
+  const result = plan(['server/docker/djinn-image-builder.Dockerfile']);
+  assert.equal(result.lanes.rustCore, true);
+  assert.equal(result.lanes.tiltContracts, true);
+  assertOnlyJobs(result, [...protectedJobs, 'tiltContracts']);
+});
+
 test('Rust core selects protected server policy jobs but not UI or aarch64', () => {
   const result = plan(['server/crates/djinn-agent/src/lib.rs']);
   assert.equal(result.lanes.rustCore, true);
@@ -97,6 +119,7 @@ test('unknown executable and configuration paths fail closed', () => {
   for (const path of [
     'scripts/new-check.sh', '.github/actions/check/action.yml', 'package.json',
     '.cargo/config.toml', 'config/quality-gate.yml', 'tools/verify-ci.sh',
+    'deploy/helm/djinn/templates/deployment-server.yaml',
   ]) {
     const result = plan([path]);
     assert.equal(result.lanes.unknown, true, path);

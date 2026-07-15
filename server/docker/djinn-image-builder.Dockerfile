@@ -31,10 +31,14 @@ FROM moby/buildkit:v0.15.2 AS buildkit
 FROM alpine:3.20 AS helpers
 
 ARG ECR_CRED_HELPER_VERSION=0.9.0
+ARG TARGETARCH
 
-RUN apk add --no-cache curl ca-certificates \
-    && curl -fsSL -o /docker-credential-ecr-login \
-       "https://amazon-ecr-credential-helper-releases.s3.amazonaws.com/${ECR_CRED_HELPER_VERSION}/linux-amd64/docker-credential-ecr-login" \
+RUN case "${TARGETARCH}" in amd64|arm64) ;; *) echo "unsupported architecture: ${TARGETARCH}" >&2; exit 1 ;; esac \
+    && apk add --no-cache curl ca-certificates \
+    && curl -fsSL --connect-timeout 10 --max-time 120 \
+       --retry 4 --retry-delay 2 --retry-all-errors \
+       -o /docker-credential-ecr-login \
+       "https://amazon-ecr-credential-helper-releases.s3.amazonaws.com/${ECR_CRED_HELPER_VERSION}/linux-${TARGETARCH}/docker-credential-ecr-login" \
     && chmod 0755 /docker-credential-ecr-login
 
 FROM debian:bookworm-slim
