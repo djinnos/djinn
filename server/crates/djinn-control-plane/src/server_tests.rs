@@ -3,8 +3,11 @@
 mod tests {
     use std::{sync::Arc, time::Duration};
 
-    use djinn_core::events::{DjinnEventEnvelope, EventBus};
     use djinn_core::models::DispatchPause;
+    use djinn_core::{
+        auth_context::{REVISION_CALLER_CONTEXT, TrustedRevisionCallerContext},
+        events::{DjinnEventEnvelope, EventBus},
+    };
     use djinn_db::repositories::dispatch_pause::{DispatchPauseRepository, DispatchPauseTarget};
     use djinn_db::{Database, NoteRepository, ProjectRepository};
     use rmcp::{Json, ServerHandler, handler::server::wrapper::Parameters};
@@ -14,7 +17,7 @@ mod tests {
     use crate::{
         server::{DjinnMcpServer, SessionEndHookSessionManager},
         state::stubs::test_mcp_state,
-        tools::memory_tools::{EditParams, ReadParams, WriteParams},
+        tools::memory_tools::{EditParams, MemoryNoteResponse, ReadParams, WriteParams},
     };
 
     fn workspace_tempdir() -> tempfile::TempDir {
@@ -60,6 +63,30 @@ mod tests {
             .unwrap()
     }
 
+    async fn memory_write_as_test(
+        server: &DjinnMcpServer,
+        params: WriteParams,
+    ) -> Json<MemoryNoteResponse> {
+        REVISION_CALLER_CONTEXT
+            .scope(
+                TrustedRevisionCallerContext::authenticated_human("server-test"),
+                server.memory_write(Parameters(params)),
+            )
+            .await
+    }
+
+    async fn memory_edit_as_test(
+        server: &DjinnMcpServer,
+        params: EditParams,
+    ) -> Json<MemoryNoteResponse> {
+        REVISION_CALLER_CONTEXT
+            .scope(
+                TrustedRevisionCallerContext::authenticated_human("server-test"),
+                server.memory_edit(Parameters(params)),
+            )
+            .await
+    }
+
     async fn wait_for_summaries_change(
         repo: &NoteRepository,
         note_id: &str,
@@ -98,8 +125,9 @@ mod tests {
         let server = DjinnMcpServer::new(state);
         let repo = NoteRepository::new(db.clone(), EventBus::noop());
 
-        let Json(created) = server
-            .memory_write(Parameters(WriteParams {
+        let Json(created) = memory_write_as_test(
+            &server,
+            WriteParams {
                 reason: "test mutation".to_string(),
                 project: project.slug(),
                 title: "Summary Note".to_string(),
@@ -109,8 +137,9 @@ mod tests {
                 tags: None,
                 scope_paths: None,
                 retrieval_anchor: None,
-            }))
-            .await;
+            },
+        )
+        .await;
 
         assert!(created.error.is_none());
         let note_id = created.id.clone().expect("memory_write returns note id");
@@ -143,8 +172,9 @@ mod tests {
 
         let previous_overview = generated.overview.clone();
 
-        let Json(edited) = server
-            .memory_edit(Parameters(EditParams {
+        let Json(edited) = memory_edit_as_test(
+            &server,
+            EditParams {
                 reason: "test mutation".to_string(),
                 project: project.slug(),
                 identifier: note_id.clone(),
@@ -154,8 +184,9 @@ mod tests {
                 section: None,
                 note_type: None,
                 retrieval_anchor: None,
-            }))
-            .await;
+            },
+        )
+        .await;
 
         assert!(edited.error.is_none());
         let regenerated = wait_for_summaries_change(&repo, &note_id, previous_overview).await;

@@ -13,7 +13,10 @@ mod tests {
 
     use std::time::Duration;
 
-    use djinn_core::events::EventBus;
+    use djinn_core::{
+        auth_context::{REVISION_CALLER_CONTEXT, TrustedRevisionCallerContext},
+        events::EventBus,
+    };
     use djinn_db::{Database, NoteRepository, ProjectRepository};
     use rmcp::{Json, handler::server::wrapper::Parameters};
     use tokio::time::sleep;
@@ -22,7 +25,8 @@ mod tests {
         server::DjinnMcpServer,
         state::stubs::test_mcp_state,
         tools::memory_tools::{
-            BrokenLinksParams, EditParams, ListParams, ReadParams, WriteParams, ops,
+            BrokenLinksParams, EditParams, ListParams, MemoryNoteResponse, ReadParams, WriteParams,
+            ops,
             write_dedup_types::{MemoryWriteDedupDecider, MemoryWriteDedupDecision},
         },
     };
@@ -41,6 +45,30 @@ mod tests {
             .unwrap()
     }
 
+    async fn memory_write_as_test(
+        server: &DjinnMcpServer,
+        params: WriteParams,
+    ) -> Json<MemoryNoteResponse> {
+        REVISION_CALLER_CONTEXT
+            .scope(
+                TrustedRevisionCallerContext::authenticated_human("memory-tools-test"),
+                server.memory_write(Parameters(params)),
+            )
+            .await
+    }
+
+    async fn memory_edit_as_test(
+        server: &DjinnMcpServer,
+        params: EditParams,
+    ) -> Json<MemoryNoteResponse> {
+        REVISION_CALLER_CONTEXT
+            .scope(
+                TrustedRevisionCallerContext::authenticated_human("memory-tools-test"),
+                server.memory_edit(Parameters(params)),
+            )
+            .await
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn non_mergeable_note_type_bypasses_dedup() {
         let tmp = workspace_tempdir();
@@ -50,8 +78,9 @@ mod tests {
         let server = DjinnMcpServer::new(state);
 
         // Create first note
-        let Json(created1) = server
-            .memory_write(Parameters(WriteParams {
+        let Json(created1) = memory_write_as_test(
+            &server,
+            WriteParams {
                 reason: "test mutation".to_string(),
                 project: project.slug(),
                 title: "Research Topic".to_string(),
@@ -61,16 +90,18 @@ mod tests {
                 tags: None,
                 scope_paths: None,
                 retrieval_anchor: None,
-            }))
-            .await;
+            },
+        )
+        .await;
 
         assert!(created1.error.is_none());
         let note_id1 = created1.id.clone().expect("first note created");
 
         // Create second similar note - research is not mergeable, so it should create a new note
         // Use a slightly different title to avoid permalink collision
-        let Json(created2) = server
-            .memory_write(Parameters(WriteParams {
+        let Json(created2) = memory_write_as_test(
+            &server,
+            WriteParams {
                 reason: "test mutation".to_string(),
                 project: project.slug(),
                 title: "Research Topic Two".to_string(),
@@ -80,8 +111,9 @@ mod tests {
                 tags: None,
                 scope_paths: None,
                 retrieval_anchor: None,
-            }))
-            .await;
+            },
+        )
+        .await;
 
         assert!(created2.error.is_none(), "error: {:?}", created2.error);
         let note_id2 = created2.id.clone().expect("second note created");
@@ -102,8 +134,9 @@ mod tests {
         let repo = NoteRepository::new(db.clone(), EventBus::noop());
 
         // Create first pattern note
-        let Json(created1) = server
-            .memory_write(Parameters(WriteParams {
+        let Json(created1) = memory_write_as_test(
+            &server,
+            WriteParams {
                 reason: "test mutation".to_string(),
                 project: project.slug(),
                 title: "Async Pattern".to_string(),
@@ -114,8 +147,9 @@ mod tests {
                 tags: None,
                 scope_paths: None,
                 retrieval_anchor: None,
-            }))
-            .await;
+            },
+        )
+        .await;
 
         assert!(created1.error.is_none());
         let _note_id1 = created1.id.clone().expect("first pattern created");
@@ -151,8 +185,9 @@ mod tests {
         let repo = NoteRepository::new(db.clone(), EventBus::noop());
 
         // Create a pattern note
-        let Json(pattern) = server
-            .memory_write(Parameters(WriteParams {
+        let Json(pattern) = memory_write_as_test(
+            &server,
+            WriteParams {
                 reason: "test mutation".to_string(),
                 project: project.slug(),
                 title: "Error Handling Pattern".to_string(),
@@ -162,14 +197,16 @@ mod tests {
                 tags: None,
                 scope_paths: None,
                 retrieval_anchor: None,
-            }))
-            .await;
+            },
+        )
+        .await;
 
         assert!(pattern.error.is_none());
 
         // Create an ADR in decisions folder with similar content
-        let Json(adr) = server
-            .memory_write(Parameters(WriteParams {
+        let Json(adr) = memory_write_as_test(
+            &server,
+            WriteParams {
                 reason: "test mutation".to_string(),
                 project: project.slug(),
                 title: "Error Handling ADR".to_string(),
@@ -179,8 +216,9 @@ mod tests {
                 tags: None,
                 scope_paths: None,
                 retrieval_anchor: None,
-            }))
-            .await;
+            },
+        )
+        .await;
 
         assert!(adr.error.is_none());
 
@@ -231,8 +269,9 @@ mod tests {
         let server = DjinnMcpServer::new(state);
 
         // Create a pattern note with unique content
-        let Json(created) = server
-            .memory_write(Parameters(WriteParams {
+        let Json(created) = memory_write_as_test(
+            &server,
+            WriteParams {
                 reason: "test mutation".to_string(),
                 project: project.slug(),
                 title: "Unique Pattern XYZ123".to_string(),
@@ -244,8 +283,9 @@ mod tests {
                 tags: None,
                 scope_paths: None,
                 retrieval_anchor: None,
-            }))
-            .await;
+            },
+        )
+        .await;
 
         assert!(created.error.is_none());
         assert!(created.id.is_some());
@@ -261,8 +301,9 @@ mod tests {
         let server = DjinnMcpServer::new(state);
         let repo = NoteRepository::new(db.clone(), EventBus::noop());
 
-        let Json(created) = server
-            .memory_write(Parameters(WriteParams {
+        let Json(created) = memory_write_as_test(
+            &server,
+            WriteParams {
                 reason: "test mutation".to_string(),
                 project: project.slug(),
                 title: "Canonical Pattern".to_string(),
@@ -272,8 +313,9 @@ mod tests {
                 tags: None,
                 scope_paths: None,
                 retrieval_anchor: None,
-            }))
-            .await;
+            },
+        )
+        .await;
 
         assert!(created.error.is_none(), "error: {:?}", created.error);
         assert!(!created.deduplicated);
@@ -287,8 +329,9 @@ mod tests {
             .unwrap();
         assert_eq!(rebuilt, 1);
 
-        let Json(reused) = server
-            .memory_write(Parameters(WriteParams {
+        let Json(reused) = memory_write_as_test(
+            &server,
+            WriteParams {
                 reason: "test mutation".to_string(),
                 project: project.slug(),
                 title: "Canonical Pattern Copy".to_string(),
@@ -298,8 +341,9 @@ mod tests {
                 tags: None,
                 scope_paths: None,
                 retrieval_anchor: None,
-            }))
-            .await;
+            },
+        )
+        .await;
 
         assert!(reused.error.is_none(), "error: {:?}", reused.error);
         assert!(reused.deduplicated);
@@ -363,8 +407,9 @@ mod tests {
                       role permission scope grant deny policy enforcement middleware pipeline rust axum";
 
         // Write first note
-        let Json(r1) = server
-            .memory_write(Parameters(WriteParams {
+        let Json(r1) = memory_write_as_test(
+            &server,
+            WriteParams {
                 reason: "test mutation".to_string(),
                 project: project.slug(),
                 title: "Auth Token Validation Pattern".to_string(),
@@ -374,14 +419,16 @@ mod tests {
                 tags: None,
                 scope_paths: None,
                 retrieval_anchor: None,
-            }))
-            .await;
+            },
+        )
+        .await;
         assert!(r1.error.is_none(), "first write failed: {:?}", r1.error);
         let id1 = r1.id.clone().unwrap();
 
         // Write second note with same content to trigger detection
-        let Json(r2) = server
-            .memory_write(Parameters(WriteParams {
+        let Json(r2) = memory_write_as_test(
+            &server,
+            WriteParams {
                 reason: "test mutation".to_string(),
                 project: project.slug(),
                 title: "JWT Bearer Auth Validation".to_string(),
@@ -391,8 +438,9 @@ mod tests {
                 tags: None,
                 scope_paths: None,
                 retrieval_anchor: None,
-            }))
-            .await;
+            },
+        )
+        .await;
         assert!(r2.error.is_none(), "second write failed: {:?}", r2.error);
         let id2 = r2.id.clone().unwrap();
 
@@ -434,8 +482,9 @@ mod tests {
 
         let project_path = project.slug();
 
-        let Json(initial_brief) = server
-            .memory_write(Parameters(WriteParams {
+        let Json(initial_brief) = memory_write_as_test(
+            &server,
+            WriteParams {
                 reason: "test mutation".to_string(),
                 project: project_path.clone(),
                 title: "Project Brief".to_string(),
@@ -445,12 +494,14 @@ mod tests {
                 tags: None,
                 scope_paths: None,
                 retrieval_anchor: None,
-            }))
-            .await;
+            },
+        )
+        .await;
         assert!(initial_brief.error.is_none(), "{:?}", initial_brief.error);
 
-        let Json(initial_roadmap) = server
-            .memory_write(Parameters(WriteParams {
+        let Json(initial_roadmap) = memory_write_as_test(
+            &server,
+            WriteParams {
                 reason: "test mutation".to_string(),
                 project: project_path.clone(),
                 title: "Project Roadmap".to_string(),
@@ -460,8 +511,9 @@ mod tests {
                 tags: None,
                 scope_paths: None,
                 retrieval_anchor: None,
-            }))
-            .await;
+            },
+        )
+        .await;
         assert!(
             initial_roadmap.error.is_none(),
             "{:?}",
@@ -482,8 +534,9 @@ mod tests {
             3
         );
 
-        let Json(updated_roadmap) = server
-            .memory_write(Parameters(WriteParams {
+        let Json(updated_roadmap) = memory_write_as_test(
+            &server,
+            WriteParams {
                 reason: "test mutation".to_string(),
                 project: project_path.clone(),
                 title: "Project Roadmap".to_string(),
@@ -493,16 +546,18 @@ mod tests {
                 tags: None,
                 scope_paths: None,
                 retrieval_anchor: None,
-            }))
-            .await;
+            },
+        )
+        .await;
         assert!(
             updated_roadmap.error.is_none(),
             "{:?}",
             updated_roadmap.error
         );
 
-        let Json(updated_brief) = server
-            .memory_write(Parameters(WriteParams {
+        let Json(updated_brief) = memory_write_as_test(
+            &server,
+            WriteParams {
                 reason: "test mutation".to_string(),
                 project: project_path.clone(),
                 title: "Project Brief".to_string(),
@@ -512,8 +567,9 @@ mod tests {
                 tags: None,
                 scope_paths: None,
                 retrieval_anchor: None,
-            }))
-            .await;
+            },
+        )
+        .await;
         assert!(updated_brief.error.is_none(), "{:?}", updated_brief.error);
 
         let brief_read = ops::memory_read(
@@ -571,8 +627,9 @@ mod tests {
         let permalink = "design/adr-054-roadmap-memory-extraction-quality-gates-and-note-taxonomy";
         let content = "Originated from ADR-054 closure reconciliation.";
 
-        let Json(created) = server
-            .memory_write(Parameters(WriteParams {
+        let Json(created) = memory_write_as_test(
+            &server,
+            WriteParams {
                 reason: "test mutation".to_string(),
                 project: project.slug(),
                 title: title.to_string(),
@@ -582,8 +639,9 @@ mod tests {
                 tags: Some(vec!["adr-054".to_string(), "design".to_string()]),
                 scope_paths: None,
                 retrieval_anchor: None,
-            }))
-            .await;
+            },
+        )
+        .await;
 
         assert!(created.error.is_none(), "{:?}", created.error);
         assert_eq!(created.permalink.as_deref(), Some(permalink));
@@ -651,8 +709,9 @@ mod tests {
         .await
         .unwrap();
 
-        let Json(edited) = server
-            .memory_edit(Parameters(EditParams {
+        let Json(edited) = memory_edit_as_test(
+            &server,
+            EditParams {
                 reason: "test mutation".to_string(),
                 project: project.slug(),
                 identifier: "requirements/v1-requirements".to_string(),
@@ -662,8 +721,9 @@ mod tests {
                 section: None,
                 note_type: None,
                 retrieval_anchor: None,
-            }))
-            .await;
+            },
+        )
+        .await;
         assert!(edited.error.is_none(), "{:?}", edited.error);
 
         let row = repo
@@ -683,8 +743,9 @@ mod tests {
         let server = DjinnMcpServer::new(state);
         let repo = NoteRepository::new(db.clone(), EventBus::noop());
 
-        let Json(created) = server
-            .memory_write(Parameters(WriteParams {
+        let Json(created) = memory_write_as_test(
+            &server,
+            WriteParams {
                 reason: "test mutation".to_string(),
                 project: project.slug(),
                 title: "ADR-300 Empty Scope".to_string(),
@@ -694,8 +755,9 @@ mod tests {
                 tags: None,
                 scope_paths: Some(vec![]),
                 retrieval_anchor: None,
-            }))
-            .await;
+            },
+        )
+        .await;
 
         assert!(created.error.is_none(), "error: {:?}", created.error);
         let permalink = created.permalink.as_deref().unwrap();
@@ -718,8 +780,9 @@ mod tests {
         let server = DjinnMcpServer::new(state);
         let repo = NoteRepository::new(db.clone(), EventBus::noop());
 
-        let Json(created) = server
-            .memory_write(Parameters(WriteParams {
+        let Json(created) = memory_write_as_test(
+            &server,
+            WriteParams {
                 reason: "test mutation".to_string(),
                 project: project.slug(),
                 title: "ADR-301 Scoped".to_string(),
@@ -729,8 +792,9 @@ mod tests {
                 tags: None,
                 scope_paths: Some(vec!["crates/foo".to_string()]),
                 retrieval_anchor: None,
-            }))
-            .await;
+            },
+        )
+        .await;
 
         assert!(created.error.is_none(), "error: {:?}", created.error);
         let permalink = created.permalink.as_deref().unwrap();
@@ -751,8 +815,9 @@ mod tests {
         let server = DjinnMcpServer::new(state);
         let repo = NoteRepository::new(db.clone(), EventBus::noop());
 
-        let Json(created) = server
-            .memory_write(Parameters(WriteParams {
+        let Json(created) = memory_write_as_test(
+            &server,
+            WriteParams {
                 reason: "test mutation".to_string(),
                 project: project.slug(),
                 title: "ADR-303 Editable".to_string(),
@@ -762,14 +827,16 @@ mod tests {
                 tags: None,
                 scope_paths: Some(vec!["crates/foo".to_string()]),
                 retrieval_anchor: None,
-            }))
-            .await;
+            },
+        )
+        .await;
         assert!(created.error.is_none(), "error: {:?}", created.error);
         let permalink = created.permalink.clone().unwrap();
         let note_id = created.id.clone().unwrap();
 
-        let Json(edited) = server
-            .memory_edit(Parameters(EditParams {
+        let Json(edited) = memory_edit_as_test(
+            &server,
+            EditParams {
                 reason: "test mutation".to_string(),
                 project: project.slug(),
                 identifier: permalink,
@@ -779,8 +846,9 @@ mod tests {
                 section: None,
                 note_type: None,
                 retrieval_anchor: None,
-            }))
-            .await;
+            },
+        )
+        .await;
 
         assert!(edited.error.is_none(), "edit error: {:?}", edited.error);
 
@@ -806,8 +874,9 @@ mod tests {
         let server = DjinnMcpServer::new(state);
         let repo = NoteRepository::new(db.clone(), EventBus::noop());
 
-        let Json(created) = server
-            .memory_write(Parameters(WriteParams {
+        let Json(created) = memory_write_as_test(
+            &server,
+            WriteParams {
                 reason: "test mutation".to_string(),
                 project: project.slug(),
                 title: "ADR-304 NoopEdit".to_string(),
@@ -817,8 +886,9 @@ mod tests {
                 tags: None,
                 scope_paths: None,
                 retrieval_anchor: None,
-            }))
-            .await;
+            },
+        )
+        .await;
         assert!(created.error.is_none());
         let note_id = created.id.clone().unwrap();
 
@@ -828,8 +898,9 @@ mod tests {
 
         sleep(Duration::from_millis(50)).await;
 
-        let Json(edited) = server
-            .memory_edit(Parameters(EditParams {
+        let Json(edited) = memory_edit_as_test(
+            &server,
+            EditParams {
                 reason: "test mutation".to_string(),
                 project: project.slug(),
                 identifier: created.permalink.clone().unwrap(),
@@ -839,8 +910,9 @@ mod tests {
                 section: None,
                 note_type: None,
                 retrieval_anchor: None,
-            }))
-            .await;
+            },
+        )
+        .await;
 
         assert!(
             edited.error.is_some(),
@@ -885,8 +957,9 @@ mod tests {
         let project = create_project(&db, tmp.path()).await;
         let server = DjinnMcpServer::new(state);
 
-        let Json(first) = server
-            .memory_write(Parameters(WriteParams {
+        let Json(first) = memory_write_as_test(
+            &server,
+            WriteParams {
                 reason: "test mutation".to_string(),
                 project: project.slug(),
                 title: "Telemetry Reuse Pattern".to_string(),
@@ -896,15 +969,17 @@ mod tests {
                 tags: None,
                 scope_paths: None,
                 retrieval_anchor: None,
-            }))
-            .await;
+            },
+        )
+        .await;
         assert!(first.error.is_none());
         let note_id = first.id.unwrap();
 
         // Exact content match triggers the deterministic hash-reuse path and
         // records a single Success observation.
-        let Json(second) = server
-            .memory_write(Parameters(WriteParams {
+        let Json(second) = memory_write_as_test(
+            &server,
+            WriteParams {
                 reason: "test mutation".to_string(),
                 project: project.slug(),
                 title: "Telemetry Reuse Pattern".to_string(),
@@ -914,8 +989,9 @@ mod tests {
                 tags: None,
                 scope_paths: None,
                 retrieval_anchor: None,
-            }))
-            .await;
+            },
+        )
+        .await;
         assert!(
             second.error.is_none(),
             "unexpected error: {:?}",
@@ -941,8 +1017,9 @@ mod tests {
         let project = create_project(&db, tmp.path()).await;
         let server = DjinnMcpServer::new(state);
 
-        let Json(created) = server
-            .memory_write(Parameters(WriteParams {
+        let Json(created) = memory_write_as_test(
+            &server,
+            WriteParams {
                 reason: "test mutation".to_string(),
                 project: project.slug(),
                 title: "Unique Pattern".to_string(),
@@ -952,8 +1029,9 @@ mod tests {
                 tags: None,
                 scope_paths: None,
                 retrieval_anchor: None,
-            }))
-            .await;
+            },
+        )
+        .await;
         assert!(created.error.is_none());
         assert!(created.id.is_some());
 
@@ -974,8 +1052,9 @@ mod tests {
         let project = create_project(&db, tmp.path()).await;
         let server = DjinnMcpServer::new(state);
 
-        let Json(first) = server
-            .memory_write(Parameters(WriteParams {
+        let Json(first) = memory_write_as_test(
+            &server,
+            WriteParams {
                 reason: "test mutation".to_string(),
                 project: project.slug(),
                 title: "Telemetry Error Pattern".to_string(),
@@ -985,8 +1064,9 @@ mod tests {
                 tags: None,
                 scope_paths: None,
                 retrieval_anchor: None,
-            }))
-            .await;
+            },
+        )
+        .await;
         assert!(first.error.is_none());
 
         sleep(Duration::from_millis(100)).await;
@@ -999,20 +1079,23 @@ mod tests {
         // The second note uses a strict subset of the first note's content terms
         // so the lexical dedup search deterministically finds the first note, the
         // decider is invoked, and the missing candidate produces an error outcome.
-        let Json(second) = server
-            .memory_write_with_decider(
-                Parameters(WriteParams {
-                    reason: "test mutation".to_string(),
-                    project: project.slug(),
-                    title: "Telemetry Error Pattern".to_string(),
-                    content: "apple banana cherry date".to_string(),
-                    note_type: "pattern".to_string(),
-                    status: None,
-                    tags: None,
-                    scope_paths: None,
-                    retrieval_anchor: None,
-                }),
-                &decider,
+        let Json(second) = REVISION_CALLER_CONTEXT
+            .scope(
+                TrustedRevisionCallerContext::authenticated_human("memory-tools-test"),
+                server.memory_write_with_decider(
+                    Parameters(WriteParams {
+                        reason: "test mutation".to_string(),
+                        project: project.slug(),
+                        title: "Telemetry Error Pattern".to_string(),
+                        content: "apple banana cherry date".to_string(),
+                        note_type: "pattern".to_string(),
+                        status: None,
+                        tags: None,
+                        scope_paths: None,
+                        retrieval_anchor: None,
+                    }),
+                    &decider,
+                ),
             )
             .await;
         assert!(
