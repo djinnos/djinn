@@ -17,7 +17,14 @@
 
 import { useEffect, useMemo, useState } from "react";
 
-import { fetchSnapshot, fetchWorkspaces, type CodeGraphWorkspace } from "@/api/codeGraph";
+import {
+  fetchCoverage,
+  fetchSnapshot,
+  fetchWorkspaces,
+  type CodeGraphCoverage,
+  type CodeGraphWorkspace,
+} from "@/api/codeGraph";
+import { CoverageGapBanner } from "@/components/codegraph/CoverageGapBanner";
 import { GalaxyCanvas } from "@/components/galaxy/GalaxyCanvas";
 import type {
   GalaxyColorMode,
@@ -74,6 +81,7 @@ export function GalaxyView({ projectId }: { projectId: string }) {
   const [hideTests, setHideTests] = useState(false);
   const [workspaces, setWorkspaces] = useState<CodeGraphWorkspace[]>([]);
   const [workspaceSlug, setWorkspaceSlug] = useState<string | null>(null);
+  const [coverage, setCoverage] = useState<CodeGraphCoverage | null>(null);
 
   // Cmd-K search hits / AI citations fly the camera to their stars.
   const citationIds = useCodeGraphStore((s) => s.citationIds);
@@ -95,6 +103,18 @@ export function GalaxyView({ projectId }: { projectId: string }) {
       })
       .catch(() => {
         if (!cancelled) setWorkspaces([]);
+      });
+
+    // glqk: fetch index coverage in parallel — the HUD banner names any
+    // unindexed workspaces so the galaxy never lies by omission. Best-effort:
+    // a failure just hides the banner.
+    setCoverage(null);
+    void fetchCoverage(projectId)
+      .then((cov) => {
+        if (!cancelled) setCoverage(cov);
+      })
+      .catch(() => {
+        if (!cancelled) setCoverage(null);
       });
 
     void (async () => {
@@ -183,6 +203,7 @@ export function GalaxyView({ projectId }: { projectId: string }) {
       data={visibleData}
       colorMode={colorMode}
       focusIds={focusIds}
+      banner={<CoverageGapBanner coverage={coverage} />}
       headerPrimary={
         <>
           <Select

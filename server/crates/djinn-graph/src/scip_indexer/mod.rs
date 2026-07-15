@@ -135,7 +135,24 @@ impl SupportedIndexer {
         std::time::Duration::from_secs(secs)
     }
 
-    fn marker_files(self) -> &'static [&'static str] {
+    /// Candidate source-file extensions for this language, used to count the
+    /// "discovered" files under a workspace root for the coverage contract.
+    /// Best-effort — a superset is fine (the count is an extent signal, not an
+    /// exact index size).
+    pub(crate) fn source_extensions(self) -> &'static [&'static str] {
+        match self {
+            Self::RustAnalyzer => &["rs"],
+            Self::TypeScript => &["ts", "tsx", "mts", "cts", "js", "jsx", "mjs", "cjs"],
+            Self::Python => &["py", "pyi"],
+            Self::Go => &["go"],
+            Self::Java => &["java", "kt"],
+            Self::Clang => &["c", "cc", "cpp", "cxx", "h", "hh", "hpp"],
+            Self::Ruby => &["rb"],
+            Self::DotNet => &["cs"],
+        }
+    }
+
+    pub(crate) fn marker_files(self) -> &'static [&'static str] {
         match self {
             Self::RustAnalyzer => &["Cargo.toml"],
             Self::TypeScript => &["tsconfig.json", "package.json"],
@@ -341,6 +358,13 @@ pub struct WorkspaceWarmStatus {
     pub indexer: SupportedIndexer,
     pub status: String,
     pub detail: Option<String>,
+    /// Workspace root RELATIVE to the project root (empty for the repo root).
+    /// Carried through to the coverage contract so a discovered-but-failed
+    /// workspace can be file-counted and mapped back to its scope crates.
+    /// `#[serde(default)]` keeps older on-disk `workspace_warm_statuses.json`
+    /// files (written before this field existed) loadable.
+    #[serde(default)]
+    pub workspace_rel_root: String,
 }
 
 /// Outcome class of a single indexer invocation, as recorded for the adaptive

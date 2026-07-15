@@ -194,6 +194,7 @@ impl DjinnMcpServer {
             workspace_hint: scope.hint,
             next_step: None,
             graph_staleness: None,
+            coverage: None,
         }))
     }
 
@@ -339,6 +340,7 @@ impl DjinnMcpServer {
             symbols,
             next_step: None,
             graph_staleness: None,
+            coverage: None,
         }))
     }
 

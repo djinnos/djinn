@@ -48,6 +48,12 @@ export interface GalaxyCanvasProps {
   /** Extra controls rendered in the top-right HUD row (page-level knobs). */
   headerExtra?: ReactNode;
   /**
+   * glqk: optional advisory banner rendered as a top-center HUD layer (e.g. the
+   * index-coverage-gap chip naming unindexed workspaces). Absent when coverage
+   * is clean.
+   */
+  banner?: ReactNode;
+  /**
    * External focus (Cmd-K search hits, AI citations): when non-empty the
    * camera flies to these nodes and they become the highlight set,
    * replacing any click selection. Cleared by passing null/empty.
@@ -121,6 +127,7 @@ export function GalaxyCanvas({
   title,
   headerPrimary,
   headerExtra,
+  banner,
   focusIds,
   className,
   onSelect,
@@ -394,6 +401,13 @@ export function GalaxyCanvas({
           )}
         </div>
       </div>
+
+      {/* ── HUD: advisory banner (top-center) ── */}
+      {banner && (
+        <div className="pointer-events-none absolute left-1/2 top-4 flex -translate-x-1/2 justify-center">
+          <div className="pointer-events-auto">{banner}</div>
+        </div>
+      )}
 
       {/* ── HUD: controls (top-right) ── */}
       <div className="absolute right-4 top-4 flex items-center gap-2">
