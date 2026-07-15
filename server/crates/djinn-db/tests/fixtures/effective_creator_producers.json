@@ -1,12 +1,15 @@
 {
   "phase": "expand",
-  "writers": [
-    "server/crates/djinn-control-plane/src/tools/task_tools/ops.rs",
-    "server/crates/djinn-control-plane/src/tools/proposal_tools/lifecycle.rs",
-    "server/crates/djinn-control-plane/src/tools/refinement_tools.rs",
-    "server/crates/djinn-coordinator/src/refinement_outcome.rs",
-    "server/crates/djinn-coordinator/src/rules.rs",
-    "server/crates/djinn-coordinator/src/wave.rs",
-    "server/crates/djinn-coordinator/src/dispatch/retry.rs"
+  "callsites": [
+    {"path":"server/crates/djinn-agent/src/direct_services.rs","symbol":"create_arbiter_planner_escalation","provenance":"source_task"},
+    {"path":"server/crates/djinn-control-plane/src/tools/task_tools/ops.rs","symbol":"create_task","provenance":"explicit"},
+    {"path":"server/crates/djinn-control-plane/src/tools/proposal_tools/lifecycle.rs","symbol":"proposal_graduate","provenance":"explicit"},
+    {"path":"server/crates/djinn-control-plane/src/tools/refinement_tools.rs","symbol":"proposal_refinement_demand_evidence","provenance":"proposal"},
+    {"path":"server/crates/djinn-coordinator/src/dispatch/retry.rs","symbol":"create_remediation_task","provenance":"source_task"},
+    {"path":"server/crates/djinn-coordinator/src/refinement_outcome.rs","symbol":"create_refinement_task_with_context","provenance":"explicit"},
+    {"path":"server/crates/djinn-coordinator/src/rules.rs","symbol":"dispatch_proposal_reconcile","provenance":"explicit"},
+    {"path":"server/crates/djinn-coordinator/src/rules.rs","symbol":"dispatch_proposal_review","provenance":"explicit"},
+    {"path":"server/crates/djinn-coordinator/src/rules.rs","symbol":"create_planning_task_by_ids","provenance":"epic"},
+    {"path":"server/crates/djinn-coordinator/src/wave.rs","symbol":"create_planning_task","provenance":"epic"}
   ]
 }

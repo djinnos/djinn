@@ -484,7 +484,7 @@ impl DirectServices {
         dossier: &serde_json::Value,
         dossier_summary: &str,
     ) -> Result<(), String> {
-        use djinn_db::TaskRepository;
+        use djinn_db::{EffectiveCreatorProvenance, TaskRepository};
 
         let db = self.callbacks.agent_context.db.clone();
         let event_bus = self.callbacks.agent_context.event_bus.clone();
@@ -492,9 +492,6 @@ impl DirectServices {
 
         // Load the source task for naming the escalation task.
         let source_task = task_repo.get(source_task_id).await.ok().flatten();
-        let source_creator = source_task
-            .as_ref()
-            .and_then(|t| t.created_by_user_id.clone());
 
         // Idempotency: if the source already has an unresolved blocker
         // (from a prior park), skip creating a duplicate escalation.
@@ -548,21 +545,23 @@ impl DirectServices {
              again and do NOT wait for a human.";
 
         // Create the escalation review task.
-        let review_task = match djinn_core::auth_context::SESSION_USER_ID
-            .scope(
-                source_creator,
-                task_repo.create_in_project(
-                    project_id,
-                    None,
-                    &title,
-                    &description,
-                    instructions,
-                    "review",
-                    0,
-                    "system",
-                    Some("open"),
-                    None,
-                ),
+        let review_task = match task_repo
+            .create_in_project_with_provenance(
+                project_id,
+                None,
+                EffectiveCreatorProvenance {
+                    explicit_user_id: None,
+                    source_task_id: Some(source_task_id),
+                    proposal_id: None,
+                },
+                &title,
+                &description,
+                instructions,
+                "review",
+                0,
+                "system",
+                Some("open"),
+                None,
             )
             .await
         {
