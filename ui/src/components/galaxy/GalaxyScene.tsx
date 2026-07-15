@@ -21,14 +21,12 @@ import * as THREE from "three";
 import {
   bloomIntensityScale,
   edgeIntensityScale,
+  edgeKindColor,
   groupColor,
-  heatColor,
-  HEAT_MUTED,
   nodeBoostScale,
   nodeGlowBoost,
-  type Rgb,
 } from "./galaxyColors";
-import type { GalaxyColorMode, GalaxyData, GalaxyDisplay } from "./galaxyTypes";
+import type { GalaxyData, GalaxyDisplay } from "./galaxyTypes";
 
 /** At most this many labels render, picked by visual weight. */
 const MAX_LABELS = 70;
@@ -57,7 +55,6 @@ export interface FlyTarget {
 
 interface SceneProps {
   data: GalaxyData;
-  colorMode: GalaxyColorMode;
   /** Node ids to spotlight; everything else dims. Null = no highlight. */
   highlight: Set<string> | null;
   display: GalaxyDisplay;
@@ -73,14 +70,6 @@ interface SceneProps {
   onContextRestored?: () => void;
 }
 
-function baseColorOf(data: GalaxyData, index: number, colorMode: GalaxyColorMode): Rgb {
-  const node = data.nodes[index];
-  if (colorMode === "heat") {
-    return node.heatEligible ? heatColor(node.heat ?? 0) : HEAT_MUTED;
-  }
-  return groupColor(node.group);
-}
-
 // ── Nodes ───────────────────────────────────────────────────────────────────
 
 function sphereDetail(count: number): [number, number, number] {
@@ -91,7 +80,6 @@ function sphereDetail(count: number): [number, number, number] {
 
 interface NodeModeProps {
   data: GalaxyData;
-  colorMode: GalaxyColorMode;
   highlight: Set<string> | null;
   /** nodeBoostScale(count) × user nodeGlow — 1 = full glow, 0 = flat. */
   boost: number;
@@ -131,7 +119,6 @@ const POINT_FRAGMENT = /* glsl */ `
 
 function GalaxyNodeSpheres({
   data,
-  colorMode,
   highlight,
   boost,
   objectRef,
@@ -159,7 +146,7 @@ function GalaxyNodeSpheres({
       tempObj.updateMatrix();
       mesh.setMatrixAt(i, tempObj.matrix);
 
-      const [r, g, b] = baseColorOf(data, i, colorMode);
+      const [r, g, b] = groupColor(node.group);
       if (!isLit) {
         color.setRGB(r * NODE_DIM, g * NODE_DIM, b * NODE_DIM);
       } else {
@@ -173,7 +160,7 @@ function GalaxyNodeSpheres({
     mesh.instanceMatrix.needsUpdate = true;
     if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
     mesh.computeBoundingSphere();
-  }, [data, colorMode, highlight, boost, count, sizeDamp, objectRef]);
+  }, [data, highlight, boost, count, sizeDamp, objectRef]);
 
   return (
     <instancedMesh
@@ -192,7 +179,6 @@ function GalaxyNodeSpheres({
  * with per-star sizes and sub-pixel fading via the custom point shader. */
 function GalaxyNodePoints({
   data,
-  colorMode,
   highlight,
   boost,
   objectRef,
@@ -223,7 +209,7 @@ function GalaxyNodePoints({
       positions[i * 3] = node.x;
       positions[i * 3 + 1] = node.y;
       positions[i * 3 + 2] = node.z;
-      const [r, g, b] = baseColorOf(data, i, colorMode);
+      const [r, g, b] = groupColor(node.group);
       const isLit = !hasHighlight || highlight.has(node.id);
       // Same scale voice as sphere mode (diameter = size × damp, dimmed
       // stars shrink to 40%).
@@ -241,7 +227,7 @@ function GalaxyNodePoints({
       }
     }
     return { positions, colors, sizes };
-  }, [data, colorMode, highlight, boost, count, sizeDamp]);
+  }, [data, highlight, boost, count, sizeDamp]);
 
   return (
     <points
@@ -268,7 +254,6 @@ function GalaxyNodePoints({
 
 function GalaxyNodes({
   data,
-  colorMode,
   highlight,
   boost,
   onNodePointer,
@@ -351,32 +336,23 @@ function GalaxyNodes({
 
   const Mode = pointMode ? GalaxyNodePoints : GalaxyNodeSpheres;
   return (
-    <Mode
-      data={data}
-      colorMode={colorMode}
-      highlight={highlight}
-      boost={boost}
-      objectRef={objectRef}
-    />
+    <Mode data={data} highlight={highlight} boost={boost} objectRef={objectRef} />
   );
 }
 
 // ── Edges ───────────────────────────────────────────────────────────────────
 
-// Heat mode exists to make hot code pop — community-colored strands fight
-// that, so edges collapse to this dim neutral at a fraction of their
-// group-mode strength (structure stays visible, color belongs to stars).
-const HEAT_EDGE_NEUTRAL: Rgb = [0.45, 0.55, 0.7];
-const HEAT_EDGE_DAMP = 0.3;
+// Highlighted co-change edges render in their kind color (pink) so a
+// hotspot selection's coupling web reads as its own channel instead of
+// blending into the structural strands.
+const COCHANGE_LIT = edgeKindColor("CoChangedWith");
 
 function GalaxyEdges({
   data,
-  colorMode,
   highlight,
   brightness,
 }: {
   data: GalaxyData;
-  colorMode: GalaxyColorMode;
   highlight: Set<string> | null;
   brightness: number;
 }) {
@@ -384,7 +360,6 @@ function GalaxyEdges({
     const indexById = new Map<string, number>();
     data.nodes.forEach((node, i) => indexById.set(node.id, i));
 
-    const heatMode = colorMode === "heat";
     const densityScale = edgeIntensityScale(data.edges.length) * brightness;
     // 0 at ≤50k edges (approved look untouched), full strength at ≥250k.
     const hubCoefficient =
@@ -409,6 +384,8 @@ function GalaxyEdges({
       // faint and only read in aggregate — that's what keeps hub fans from
       // becoming searchlights.
       const sameCluster = (s.group ?? "") === (t.group ?? "");
+      const coChange = edge.kind === "CoChangedWith";
+      const coChangeLit = coChange && hasHighlight && sLit && tLit;
       let intensity = sameCluster ? 0.25 : 0.06;
       if (hasHighlight) {
         // A selection stays at full strength (never density-scaled).
@@ -426,24 +403,22 @@ function GalaxyEdges({
       }
 
       // Proposal qoxm: commit co-change edges ("these files change together")
-      // are a distinct, evidential channel — not structural dependencies. Draw
-      // them at a fraction of their computed strength so they read as a subtle
-      // overlay on the structural galaxy rather than competing with it. Kept
-      // deliberately simple (a dim multiplier); the community fade below still
-      // colors them by endpoint, so they tint toward their files' crates.
-      if (edge.kind === "CoChangedWith") {
+      // are a distinct, evidential channel — not structural dependencies. In
+      // the ambient galaxy they draw at a fraction of their computed strength
+      // (a subtle overlay, community-tinted by endpoint). Inside a highlight
+      // they flip to the full-strength pink kind color so a hotspot's
+      // coupling web is unmistakable against the structural strands.
+      if (coChange && !coChangeLit) {
         intensity *= 0.35;
       }
 
       // Community-colored edges: each end takes its own group's color, so
       // an import strand fades importer-hue → imported-hue instead of
       // stacking into one uniform blue glare across the whole galaxy.
-      // Heat mode neutralizes them instead — see HEAT_EDGE_NEUTRAL.
       let sr: number, sg: number, sb: number, tr: number, tg: number, tb: number;
-      if (heatMode) {
-        [sr, sg, sb] = HEAT_EDGE_NEUTRAL;
-        [tr, tg, tb] = HEAT_EDGE_NEUTRAL;
-        intensity *= HEAT_EDGE_DAMP;
+      if (coChangeLit) {
+        [sr, sg, sb] = COCHANGE_LIT;
+        [tr, tg, tb] = COCHANGE_LIT;
       } else {
         [sr, sg, sb] = groupColor(s.group);
         [tr, tg, tb] = groupColor(t.group);
@@ -467,7 +442,7 @@ function GalaxyEdges({
       positions: positions.slice(0, valid * 6),
       colors: colors.slice(0, valid * 6),
     };
-  }, [data, colorMode, highlight, brightness]);
+  }, [data, highlight, brightness]);
 
   return (
     <lineSegments key={positions.length} frustumCulled={false}>
@@ -699,7 +674,6 @@ function CameraRig({ flyTarget }: { flyTarget: FlyTarget }) {
 
 export function GalaxyScene({
   data,
-  colorMode,
   highlight,
   display,
   showLabels,
@@ -725,7 +699,6 @@ export function GalaxyScene({
 
       <GalaxyNodes
         data={data}
-        colorMode={colorMode}
         highlight={highlight}
         boost={boost}
         onNodePointer={onNodePointer}
@@ -733,7 +706,6 @@ export function GalaxyScene({
       />
       <GalaxyEdges
         data={data}
-        colorMode={colorMode}
         highlight={highlight}
         brightness={display.edgeBrightness}
       />
