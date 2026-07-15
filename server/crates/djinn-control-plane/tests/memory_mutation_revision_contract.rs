@@ -59,7 +59,10 @@ async fn live_memory_mutations_persist_trusted_attribution_and_snapshots() {
         }),
     )
     .await;
-    assert!(created.get("error").is_none(), "write error: {created}");
+    assert!(
+        created.get("error").is_none() || created["error"].is_null(),
+        "write error: {created}"
+    );
     let note_id = created["id"].as_str().expect("created note id").to_owned();
 
     let edited = dispatch_as(
@@ -81,7 +84,10 @@ async fn live_memory_mutations_persist_trusted_attribution_and_snapshots() {
         }),
     )
     .await;
-    assert!(edited.get("error").is_none(), "edit error: {edited}");
+    assert!(
+        edited.get("error").is_none() || edited["error"].is_null(),
+        "edit error: {edited}"
+    );
     assert_eq!(edited["content"], "before\n\nafter");
 
     let deleted = dispatch_as(
@@ -184,7 +190,7 @@ async fn live_singleton_rewrite_uses_trusted_revision_context() {
     )
     .await;
     assert!(
-        created.get("error").is_none(),
+        created.get("error").is_none() || created["error"].is_null(),
         "singleton create error: {created}"
     );
     let note_id = created["id"].as_str().expect("singleton id").to_owned();
@@ -203,7 +209,7 @@ async fn live_singleton_rewrite_uses_trusted_revision_context() {
     )
     .await;
     assert!(
-        rewritten.get("error").is_none(),
+        rewritten.get("error").is_none() || rewritten["error"].is_null(),
         "singleton rewrite error: {rewritten}"
     );
     assert_eq!(rewritten["id"].as_str(), Some(note_id.as_str()));

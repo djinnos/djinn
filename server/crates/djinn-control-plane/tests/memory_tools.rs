@@ -14,9 +14,26 @@
 mod common;
 
 use djinn_control_plane::test_support::McpTestHarness;
-use djinn_core::events::EventBus;
+use djinn_core::{
+    auth_context::{REVISION_CALLER_CONTEXT, TrustedRevisionCallerContext},
+    events::EventBus,
+};
 use djinn_db::{NoteRepository, ProjectRepository};
-use serde_json::json;
+use serde_json::{Value, json};
+
+/// Dispatch a direct mutation fixture with the server-owned attribution context
+/// that authenticated production transport installs before invoking MCP tools.
+async fn trusted_memory_mutation(
+    harness: &McpTestHarness,
+    tool: &str,
+    arguments: Value,
+) -> anyhow::Result<Value> {
+    let context = TrustedRevisionCallerContext::authenticated_agent("memory-tools-fixture")
+        .expect("fixture caller identity is valid");
+    REVISION_CALLER_CONTEXT
+        .scope(Some(context), harness.call_tool(tool, arguments))
+        .await
+}
 
 #[tokio::test]
 async fn mcp_memory_write_success_shape_and_duplicate_permalink_error() {
@@ -25,19 +42,19 @@ async fn mcp_memory_write_success_shape_and_duplicate_permalink_error() {
     let (proj, _dir) = common::create_test_project_with_dir(&db).await;
     let project = proj.slug();
 
-    let created = harness
-        .call_tool(
-            "memory_write",
-            json!({
-                "project": project,
-                "title": "Write Contract Note",
-                "content": "body",
-                "reason": "create note for memory write contract",
-                "type": "adr"
-            }),
-        )
-        .await
-        .expect("memory_write should dispatch");
+    let created = trusted_memory_mutation(
+        &harness,
+        "memory_write",
+        json!({
+            "project": project,
+            "title": "Write Contract Note",
+            "content": "body",
+            "reason": "create note for memory write contract",
+            "type": "adr"
+        }),
+    )
+    .await
+    .expect("memory_write should dispatch");
 
     assert!(created.get("id").and_then(|v| v.as_str()).is_some());
     assert_eq!(created["title"], "Write Contract Note");
@@ -59,19 +76,19 @@ async fn mcp_memory_write_success_shape_and_duplicate_permalink_error() {
     assert_eq!(note.storage, "db");
     assert_eq!(note.file_path, "");
 
-    let duplicate = harness
-        .call_tool(
-            "memory_write",
-            json!({
-                "project": project,
-                "title": "Write Contract Note",
-                "content": "body-2",
-                "reason": "verify duplicate permalink rejection",
-                "type": "adr"
-            }),
-        )
-        .await
-        .expect("duplicate memory_write should dispatch");
+    let duplicate = trusted_memory_mutation(
+        &harness,
+        "memory_write",
+        json!({
+            "project": project,
+            "title": "Write Contract Note",
+            "content": "body-2",
+            "reason": "verify duplicate permalink rejection",
+            "type": "adr"
+        }),
+    )
+    .await
+    .expect("duplicate memory_write should dispatch");
 
     assert!(duplicate.get("error").is_some());
 }
@@ -82,18 +99,18 @@ async fn mcp_memory_write_and_move_accept_case_and_pitfall_types() {
     let (proj, _dir) = common::create_test_project_with_dir(harness.db()).await;
     let project = proj.slug();
 
-    let created = harness
-        .call_tool(
-            "memory_write",
-            json!({
-                "project": project,
-                "title": "Recovered Incident",
-                "content": "body",
-                "reason": "create fixture note for memory tool coverage", "type": "case"
-            }),
-        )
-        .await
-        .expect("memory_write should dispatch");
+    let created = trusted_memory_mutation(
+        &harness,
+        "memory_write",
+        json!({
+            "project": project,
+            "title": "Recovered Incident",
+            "content": "body",
+            "reason": "create fixture note for memory tool coverage", "type": "case"
+        }),
+    )
+    .await
+    .expect("memory_write should dispatch");
 
     assert_eq!(created["note_type"], "case");
     assert_eq!(created["folder"], "cases");
@@ -122,18 +139,18 @@ async fn mcp_memory_read_by_permalink_by_title_and_not_found_error() {
     let (proj, _dir) = common::create_test_project_with_dir(harness.db()).await;
     let project = proj.slug();
 
-    let created = harness
-        .call_tool(
-            "memory_write",
-            json!({
-                "project": project,
-                "title": "Read Contract Note",
-                "content": "read me",
-                "reason": "create fixture note for memory tool coverage", "type": "reference"
-            }),
-        )
-        .await
-        .expect("memory_write should dispatch");
+    let created = trusted_memory_mutation(
+        &harness,
+        "memory_write",
+        json!({
+            "project": project,
+            "title": "Read Contract Note",
+            "content": "read me",
+            "reason": "create fixture note for memory tool coverage", "type": "reference"
+        }),
+    )
+    .await
+    .expect("memory_write should dispatch");
 
     let by_permalink = harness
         .call_tool(
@@ -169,22 +186,22 @@ async fn mcp_memory_search_returns_ranked_results_with_snippets_and_filters() {
     let (proj, _dir) = common::create_test_project_with_dir(harness.db()).await;
     let project = proj.slug();
 
-    harness
-        .call_tool(
+    trusted_memory_mutation(
+            &harness,
             "memory_write",
             json!({"project": project, "title": "Rust Alpha", "content": "rust rust rust memory", "reason": "create fixture note for memory tool coverage", "type": "reference"}),
         )
         .await
         .expect("memory_write alpha should dispatch");
-    harness
-        .call_tool(
+    trusted_memory_mutation(
+            &harness,
             "memory_write",
             json!({"project": project, "title": "Rust Beta", "content": "rust memory", "reason": "create fixture note for memory tool coverage", "type": "reference"}),
         )
         .await
         .expect("memory_write beta should dispatch");
-    harness
-        .call_tool(
+    trusted_memory_mutation(
+            &harness,
             "memory_write",
             json!({"project": project, "title": "ADR Gamma", "content": "rust decision", "reason": "create fixture note for memory tool coverage", "type": "adr"}),
         )
@@ -231,16 +248,16 @@ async fn mcp_memory_edit_append_prepend_replace_and_missing_note_error() {
     let (proj, _dir) = common::create_test_project_with_dir(harness.db()).await;
     let project = proj.slug();
 
-    harness
-        .call_tool(
+    trusted_memory_mutation(
+            &harness,
             "memory_write",
             json!({"project": project, "title": "Edit Note", "content": "middle", "reason": "create fixture note for memory tool coverage", "type": "reference"}),
         )
         .await
         .expect("seed memory_write should dispatch");
 
-    let appended = harness
-        .call_tool(
+    let appended = trusted_memory_mutation(
+            &harness,
             "memory_edit",
             json!({"project": project, "identifier": "Edit Note", "reason": "modify fixture note for memory tool coverage", "operation": "append", "content": "tail"}),
         )
@@ -248,8 +265,8 @@ async fn mcp_memory_edit_append_prepend_replace_and_missing_note_error() {
         .expect("memory_edit append should dispatch");
     assert!(appended["content"].as_str().unwrap().contains("tail"));
 
-    let prepended = harness
-        .call_tool(
+    let prepended = trusted_memory_mutation(
+            &harness,
             "memory_edit",
             json!({"project": project, "identifier": "Edit Note", "reason": "modify fixture note for memory tool coverage", "operation": "prepend", "content": "head"}),
         )
@@ -257,8 +274,8 @@ async fn mcp_memory_edit_append_prepend_replace_and_missing_note_error() {
         .expect("memory_edit prepend should dispatch");
     assert!(prepended["content"].as_str().unwrap().starts_with("head"));
 
-    let replaced = harness
-        .call_tool(
+    let replaced = trusted_memory_mutation(
+            &harness,
             "memory_edit",
             json!({"project": project, "identifier": "Edit Note", "reason": "modify fixture note for memory tool coverage", "operation": "find_replace", "find_text": "middle", "content": "center"}),
         )
@@ -266,8 +283,8 @@ async fn mcp_memory_edit_append_prepend_replace_and_missing_note_error() {
         .expect("memory_edit find_replace should dispatch");
     assert!(replaced["content"].as_str().unwrap().contains("center"));
 
-    let missing = harness
-        .call_tool(
+    let missing = trusted_memory_mutation(
+            &harness,
             "memory_edit",
             json!({"project": project, "identifier": "Missing", "reason": "modify fixture note for memory tool coverage", "operation": "append", "content": "x"}),
         )
@@ -282,8 +299,8 @@ async fn mcp_memory_move_changes_folder_title_and_permalink() {
     let (proj, _dir) = common::create_test_project_with_dir(harness.db()).await;
     let project = proj.slug();
 
-    let created = harness
-        .call_tool(
+    let created = trusted_memory_mutation(
+            &harness,
             "memory_write",
             json!({"project": project, "title": "Move Me", "content": "content", "reason": "create fixture note for memory tool coverage", "type": "reference"}),
         )
@@ -308,30 +325,30 @@ async fn mcp_memory_delete_success_and_missing_note_error() {
     let (proj, _dir) = common::create_test_project_with_dir(harness.db()).await;
     let project = proj.slug();
 
-    harness
-        .call_tool(
+    trusted_memory_mutation(
+            &harness,
             "memory_write",
             json!({"project": project, "title": "Delete Me", "content": "bye", "reason": "create fixture note for memory tool coverage", "type": "reference"}),
         )
         .await
         .expect("seed memory_write should dispatch");
 
-    let deleted = harness
-        .call_tool(
-            "memory_delete",
-            json!({"project": project, "reason": "remove test note", "identifier": "Delete Me"}),
-        )
-        .await
-        .expect("memory_delete should dispatch");
+    let deleted = trusted_memory_mutation(
+        &harness,
+        "memory_delete",
+        json!({"project": project, "reason": "remove test note", "identifier": "Delete Me"}),
+    )
+    .await
+    .expect("memory_delete should dispatch");
     assert_eq!(deleted["ok"], true);
 
-    let missing = harness
-        .call_tool(
-            "memory_delete",
-            json!({"project": project, "reason": "remove test note", "identifier": "Delete Me"}),
-        )
-        .await
-        .expect("memory_delete missing should dispatch");
+    let missing = trusted_memory_mutation(
+        &harness,
+        "memory_delete",
+        json!({"project": project, "reason": "remove test note", "identifier": "Delete Me"}),
+    )
+    .await
+    .expect("memory_delete missing should dispatch");
     assert_eq!(missing["ok"], false);
     assert!(missing.get("error").is_some());
 }
@@ -342,16 +359,16 @@ async fn mcp_memory_list_all_and_filters_by_folder_and_type() {
     let (proj, _dir) = common::create_test_project_with_dir(harness.db()).await;
     let project = proj.slug();
 
-    let adr = harness
-        .call_tool(
+    let adr = trusted_memory_mutation(
+            &harness,
             "memory_write",
             json!({"project": project, "title": "A", "content": "x", "reason": "create fixture note for memory tool coverage", "type": "adr"}),
         )
         .await
         .expect("memory_write adr should dispatch");
     assert_eq!(adr["deduplicated"], false);
-    let reference = harness
-        .call_tool(
+    let reference = trusted_memory_mutation(
+            &harness,
             "memory_write",
             json!({"project": project, "title": "B", "content": "different content", "reason": "create fixture note for memory tool coverage", "type": "reference"}),
         )
@@ -394,29 +411,29 @@ async fn mcp_memory_graph_returns_wikilink_edges() {
     let (proj, _dir) = common::create_test_project_with_dir(harness.db()).await;
     let project = proj.slug();
 
-    harness
-        .call_tool(
+    trusted_memory_mutation(
+            &harness,
             "memory_write",
             json!({"project": project, "title": "Node B", "content": "b", "reason": "create fixture note for memory tool coverage", "type": "reference"}),
         )
         .await
         .expect("seed node B should dispatch");
-    harness
-        .call_tool(
+    trusted_memory_mutation(
+            &harness,
             "memory_write",
             json!({"project": project, "title": "Node A", "content": "links [[Node B]] [[Node C]]", "reason": "create fixture note for memory tool coverage", "type": "reference"}),
         )
         .await
         .expect("seed node A should dispatch");
-    harness
-        .call_tool(
+    trusted_memory_mutation(
+            &harness,
             "memory_write",
             json!({"project": project, "title": "Node C", "content": "links [[Node B]] [[NonExistent]]", "reason": "create fixture note for memory tool coverage", "type": "reference"}),
         )
         .await
         .expect("seed node C should dispatch");
-    harness
-        .call_tool(
+    trusted_memory_mutation(
+            &harness,
             "memory_write",
             json!({"project": project, "title": "Node D", "content": "isolated", "reason": "create fixture note for memory tool coverage", "type": "reference"}),
         )
@@ -456,8 +473,8 @@ async fn mcp_memory_recent_orders_by_last_accessed() {
     let (proj, _dir) = common::create_test_project_with_dir(harness.db()).await;
     let project = proj.slug();
 
-    harness
-        .call_tool(
+    trusted_memory_mutation(
+            &harness,
             "memory_write",
             json!({"project": project, "title": "Older", "content": "o", "reason": "create fixture note for memory tool coverage", "type": "reference"}),
         )
@@ -469,8 +486,8 @@ async fn mcp_memory_recent_orders_by_last_accessed() {
     // 100ms is tight — 500ms gives the DB a clear timestamp boundary while
     // still keeping total runtime sub-second.
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-    harness
-        .call_tool(
+    trusted_memory_mutation(
+            &harness,
             "memory_write",
             json!({"project": project, "title": "Newer", "content": "n", "reason": "create fixture note for memory tool coverage", "type": "reference"}),
         )
@@ -513,8 +530,8 @@ async fn mcp_memory_catalog_returns_structured_catalog() {
     let (proj, _dir) = common::create_test_project_with_dir(harness.db()).await;
     let project = proj.slug();
 
-    harness
-        .call_tool(
+    trusted_memory_mutation(
+            &harness,
             "memory_write",
             json!({"project": project, "title": "Catalog Item", "content": "c", "reason": "create fixture note for memory tool coverage", "type": "reference"}),
         )
@@ -538,8 +555,8 @@ async fn mcp_memory_history_and_diff_round_trip() {
     let (proj, _dir) = common::create_test_project_with_dir(harness.db()).await;
     let project = proj.slug();
 
-    let created = harness
-        .call_tool(
+    let created = trusted_memory_mutation(
+            &harness,
             "memory_write",
             json!({"project": project, "title": "History Diff", "content": "line one", "reason": "create fixture note for memory tool coverage", "type": "reference"}),
         )
@@ -547,8 +564,8 @@ async fn mcp_memory_history_and_diff_round_trip() {
         .expect("memory_write should dispatch");
     let permalink = created["permalink"].as_str().unwrap().to_string();
 
-    let edited = harness
-        .call_tool(
+    let edited = trusted_memory_mutation(
+            &harness,
             "memory_edit",
             json!({"project": project, "identifier": permalink, "reason": "modify fixture note for memory tool coverage", "operation": "append", "content": "line two"}),
         )
@@ -589,15 +606,15 @@ async fn mcp_memory_build_context_follows_wikilinks() {
     let (proj, _dir) = common::create_test_project_with_dir(harness.db()).await;
     let project = proj.slug();
 
-    let target = harness
-        .call_tool(
+    let target = trusted_memory_mutation(
+            &harness,
             "memory_write",
             json!({"project": project, "title": "Context Target", "content": "target body", "reason": "create fixture note for memory tool coverage", "type": "reference"}),
         )
         .await
         .expect("memory_write target should dispatch");
-    let seed = harness
-        .call_tool(
+    let seed = trusted_memory_mutation(
+            &harness,
             "memory_write",
             json!({"project": project, "title": "Context Seed", "content": "see [[Context Target]]", "reason": "create fixture note for memory tool coverage", "type": "reference"}),
         )
@@ -637,8 +654,8 @@ async fn mcp_memory_task_refs_returns_tasks_for_permalink() {
     let epic = common::create_test_epic(db, &project_row.id).await;
     let project = project_row.slug();
 
-    let note = harness
-        .call_tool(
+    let note = trusted_memory_mutation(
+            &harness,
             "memory_write",
             json!({"project": project, "title": "Task Ref Note", "content": "task refs seed", "reason": "create fixture note for memory tool coverage", "type": "reference"}),
         )
@@ -791,8 +808,8 @@ async fn build_graduated_proposal_fixture(harness: &McpTestHarness) -> Graduated
     let project = project_row.slug();
 
     // Three notes: one on an epic, one on a task, one shared across both.
-    let epic_note = harness
-        .call_tool(
+    let epic_note = trusted_memory_mutation(
+            &harness,
             "memory_write",
             json!({"project": project, "title": "Epic Ref Note", "content": "epic level note", "reason": "create fixture note for memory tool coverage", "type": "adr"}),
         )
@@ -803,8 +820,8 @@ async fn build_graduated_proposal_fixture(harness: &McpTestHarness) -> Graduated
         .expect("epic note permalink")
         .to_string();
 
-    let task_note = harness
-        .call_tool(
+    let task_note = trusted_memory_mutation(
+            &harness,
             "memory_write",
             json!({"project": project, "title": "Task Ref Note", "content": "task level note", "reason": "create fixture note for memory tool coverage", "type": "pitfall"}),
         )
@@ -815,8 +832,8 @@ async fn build_graduated_proposal_fixture(harness: &McpTestHarness) -> Graduated
         .expect("task note permalink")
         .to_string();
 
-    let shared_note = harness
-        .call_tool(
+    let shared_note = trusted_memory_mutation(
+            &harness,
             "memory_write",
             json!({"project": project, "title": "Shared Ref Note", "content": "shared across epic and task", "reason": "create fixture note for memory tool coverage", "type": "reference"}),
         )
@@ -1167,8 +1184,8 @@ async fn memory_read_regression_resolved_mentions_still_works() {
     // Use a fresh project so the note body mention resolution is clean.
     let (project_row, _dir) = common::create_test_project_with_dir(harness.db()).await;
     let project = project_row.slug();
-    let note = harness
-        .call_tool(
+    let note = trusted_memory_mutation(
+            &harness,
             "memory_write",
             json!({
                 "project": project,
@@ -1298,8 +1315,8 @@ async fn memory_read_resolves_short_id_mentions() {
     // Use a fresh project so the note body mention resolution is clean.
     let (project_row, _dir) = common::create_test_project_with_dir(harness.db()).await;
     let project = project_row.slug();
-    let note = harness
-        .call_tool(
+    let note = trusted_memory_mutation(
+            &harness,
             "memory_write",
             json!({
                 "project": project,
@@ -1385,8 +1402,8 @@ async fn no_regression_memory_refs_autolink() {
     let epic = common::create_test_epic(db, &project_row.id).await;
     let project = project_row.slug();
 
-    let note = harness
-        .call_tool(
+    let note = trusted_memory_mutation(
+            &harness,
             "memory_write",
             json!({"project": project, "title": "Autolink Note", "content": "autolink seed", "reason": "create fixture note for memory tool coverage", "type": "reference"}),
         )
