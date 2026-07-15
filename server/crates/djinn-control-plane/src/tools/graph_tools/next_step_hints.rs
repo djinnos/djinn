@@ -165,6 +165,7 @@ pub(crate) fn next_step_slot(response: &mut CodeGraphResponse) -> &mut Option<St
         CodeGraphResponse::Flow(r) => &mut r.next_step,
         CodeGraphResponse::CrateGraph(r) => &mut r.next_step,
         CodeGraphResponse::ImpactCheck(r) => &mut r.next_step,
+        CodeGraphResponse::Coverage(r) => &mut r.next_step,
     }
 }
 
@@ -240,6 +241,92 @@ pub(crate) fn graph_staleness_slot(
         CodeGraphResponse::Flow(r) => &mut r.graph_staleness,
         CodeGraphResponse::CrateGraph(r) => &mut r.graph_staleness,
         CodeGraphResponse::ImpactCheck(r) => &mut r.graph_staleness,
+        CodeGraphResponse::Coverage(r) => &mut r.graph_staleness,
+    }
+}
+
+// ── glqk: per-query coverage advisory ─────────────────────────────────────────
+
+/// Mutable slot for the `coverage` advisory field, but ONLY on the six response
+/// variants the proposal designates: `dead_symbols`, `orphans`, `impact`,
+/// `impact_check`, `search`, `api_surface`. All other variants return `None`
+/// (they carry no coverage field), so [`attach_coverage_advisory`] simply skips
+/// them.
+pub(crate) fn coverage_advisory_slot(
+    response: &mut CodeGraphResponse,
+) -> Option<&mut Option<CoverageAdvisory>> {
+    match response {
+        CodeGraphResponse::DeadSymbols(r) => Some(&mut r.coverage),
+        CodeGraphResponse::Orphans(r) => Some(&mut r.coverage),
+        CodeGraphResponse::Impact(r) => Some(&mut r.coverage),
+        CodeGraphResponse::ImpactCheck(r) => Some(&mut r.coverage),
+        CodeGraphResponse::Search(r) => Some(&mut r.coverage),
+        CodeGraphResponse::ApiSurface(r) => Some(&mut r.coverage),
+        _ => None,
+    }
+}
+
+/// glqk: attach the compact coverage advisory to a successful response when a
+/// genuine gap exists. Best-effort and cheap — reads `project_workspace_coverage`
+/// rows (no graph blob) and only writes the advisory when at least one in-scope
+/// workspace is `indexer_failed` / `timed_out` / `unsupported_language`. A clean
+/// or intentionally-`excluded`-only project yields no advisory, mirroring how
+/// `graph_staleness` is omitted on a fresh graph.
+pub(crate) async fn attach_coverage_advisory(
+    db: &djinn_db::Database,
+    project_id: &str,
+    response: &mut CodeGraphResponse,
+) {
+    // Skip variants that carry no coverage field before touching the DB.
+    if coverage_advisory_slot(response).is_none() {
+        return;
+    }
+    let rows = match djinn_db::ProjectWorkspaceCoverageRepository::new(db.clone())
+        .list_for_project(project_id)
+        .await
+    {
+        Ok(rows) => rows,
+        Err(e) => {
+            tracing::debug!(
+                error = %e,
+                "code_graph coverage advisory: list_for_project failed; omitting advisory"
+            );
+            return;
+        }
+    };
+
+    let gaps: Vec<CoverageAdvisoryWorkspace> = rows
+        .into_iter()
+        .filter(|r| djinn_db::coverage_status_is_gap(&r.status))
+        .map(|r| CoverageAdvisoryWorkspace {
+            workspace_slug: r.workspace_slug,
+            language: r.language,
+            status: r.status,
+            detail: r.detail,
+        })
+        .collect();
+
+    if gaps.is_empty() {
+        return;
+    }
+
+    let names: Vec<String> = gaps
+        .iter()
+        .map(|g| format!("{} ({}, {})", g.workspace_slug, g.language, g.status))
+        .collect();
+    let message = format!(
+        "Index coverage is incomplete: {} workspace(s) not indexed — {}. \
+         Graph queries (no callers / unused / safe to remove) may be false \
+         negatives for these workspaces; fall back to grep and say so.",
+        gaps.len(),
+        names.join("; ")
+    );
+
+    if let Some(slot) = coverage_advisory_slot(response) {
+        *slot = Some(CoverageAdvisory {
+            message,
+            unindexed_workspaces: gaps,
+        });
     }
 }
 

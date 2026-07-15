@@ -13,6 +13,7 @@
             workspace_hint: None,
             next_step: None,
             graph_staleness: None,
+            coverage: None,
         })
     }
 
@@ -23,6 +24,7 @@
             workspace_hint: None,
             next_step: None,
             graph_staleness: None,
+            coverage: None,
         })
     }
 
@@ -63,6 +65,7 @@
             by_depth_counts: None,
             next_step: None,
             graph_staleness: None,
+            coverage: None,
         })
     }
 
@@ -105,6 +108,7 @@
             by_depth_counts: None,
             next_step: None,
             graph_staleness: None,
+            coverage: None,
         })
     }
 
@@ -148,6 +152,7 @@
             workspace_hint: None,
             next_step: None,
             graph_staleness: None,
+            coverage: None,
         })
     }
 
@@ -193,6 +198,7 @@
             CodeGraphResponse::Flow(r) => r.next_step.as_deref(),
             CodeGraphResponse::CrateGraph(r) => r.next_step.as_deref(),
             CodeGraphResponse::ImpactCheck(r) => r.next_step.as_deref(),
+            CodeGraphResponse::Coverage(r) => r.next_step.as_deref(),
         }
     }
 
@@ -987,6 +993,7 @@
             CodeGraphResponse::Flow(r) => &r.graph_staleness,
             CodeGraphResponse::CrateGraph(r) => &r.graph_staleness,
             CodeGraphResponse::ImpactCheck(r) => &r.graph_staleness,
+            CodeGraphResponse::Coverage(r) => &r.graph_staleness,
         }
     }
 

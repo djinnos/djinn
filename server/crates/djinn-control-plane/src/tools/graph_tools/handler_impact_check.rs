@@ -66,6 +66,7 @@ impl DjinnMcpServer {
                     .to_string(),
             ),
             graph_staleness: staleness,
+            coverage: None,
         }
     }
 
@@ -99,6 +100,57 @@ impl DjinnMcpServer {
             low_confidence: false,
             next_step: None,
             graph_staleness: staleness,
+            coverage: None,
+        }
+    }
+
+    /// glqk: build the `impact_check` response when an unindexed workspace
+    /// intersects the analysed scope. The verdict is escalated to `needs_spike`
+    /// with `low_confidence: true`, the offending workspaces are named in
+    /// `next_step`, and the coverage advisory is attached inline (so the
+    /// escalation is self-explaining even to a caller that ignores the
+    /// dispatch-layer advisory). The affected sets found SO FAR are preserved so
+    /// the caller still sees the partial (untrustworthy) analysis.
+    pub(super) fn build_uncovered_impact_check_response(
+        &self,
+        affected_crates: Vec<String>,
+        affected_files: Vec<String>,
+        affected_symbols: Vec<String>,
+        coverage_gaps: &[CoverageAdvisoryWorkspace],
+        staleness_info: &ImpactCheckStaleness,
+    ) -> ImpactCheckResponse {
+        let staleness = if !staleness_info.caller_commit.is_empty() {
+            Some(GraphStaleness::compute(
+                &staleness_info.caller_commit,
+                staleness_info.cached_commit.as_deref(),
+            ))
+        } else {
+            None
+        };
+        let names: Vec<String> = coverage_gaps
+            .iter()
+            .map(|g| format!("{} ({}, {})", g.workspace_slug, g.language, g.status))
+            .collect();
+        let message = format!(
+            "Unindexed workspace(s) intersect the analysed scope — {}. \
+             Callers in these workspaces are invisible to the graph, so this \
+             preflight cannot prove the slice is safe. Run a spike (grep the \
+             workspace) before removing/renaming.",
+            names.join("; ")
+        );
+        ImpactCheckResponse {
+            affected_crates,
+            affected_files,
+            affected_symbols,
+            safe_independent_slice: false,
+            recommendation: "needs_spike".to_string(),
+            low_confidence: true,
+            next_step: Some(message.clone()),
+            graph_staleness: staleness,
+            coverage: Some(CoverageAdvisory {
+                message,
+                unindexed_workspaces: coverage_gaps.to_vec(),
+            }),
         }
     }
 
@@ -244,6 +296,88 @@ impl<'a> CrateIndex<'a> {
     /// consumer crates.
     pub(super) fn edges(&self) -> &[CrateEdgeEntry] {
         self.edges
+    }
+
+    /// glqk: the manifest directory prefix for a crate name, if known.
+    /// Used to map a scope/affected crate back to its owning workspace so
+    /// `impact_check` can tell whether an unindexed workspace actually
+    /// intersects the analysed scope.
+    pub(super) fn dir_prefix_for_crate(&self, name: &str) -> Option<&str> {
+        self.crate_dirs
+            .iter()
+            .find(|(crate_name, _)| crate_name == name)
+            .map(|(_, dir)| dir.as_str())
+    }
+}
+
+/// `true` when `child` (a repo-relative path) lies under `root` (a repo-relative
+/// workspace root). An empty `root` is the repo root and contains everything.
+fn path_is_under(child: &str, root: &str) -> bool {
+    if root.is_empty() {
+        return true;
+    }
+    let root = root.trim_end_matches('/');
+    child == root || child.starts_with(&format!("{root}/"))
+}
+
+impl DjinnMcpServer {
+    /// glqk: gap workspaces (from `project_workspace_coverage`) whose root
+    /// contains at least one of the `relevant_crates` (the scope ∪ affected
+    /// crates). A non-empty result means the impact analysis cannot be trusted
+    /// — an unindexed workspace intersecting the scope could hide callers — so
+    /// `impact_check` escalates its verdict to `needs_spike`.
+    ///
+    /// Cheap: reads coverage rows only, never the graph blob. Returns the
+    /// intersecting gap workspaces (deduplicated by slug) for naming in the
+    /// response.
+    pub(super) async fn impact_check_coverage_gaps(
+        &self,
+        project_id: &str,
+        crate_index: &CrateIndex<'_>,
+        relevant_crates: &std::collections::HashSet<String>,
+    ) -> Vec<CoverageAdvisoryWorkspace> {
+        let rows = match djinn_db::ProjectWorkspaceCoverageRepository::new(self.state.db().clone())
+            .list_for_project(project_id)
+            .await
+        {
+            Ok(rows) => rows,
+            Err(e) => {
+                tracing::debug!(
+                    error = %e,
+                    "impact_check coverage gate: list_for_project failed; not escalating"
+                );
+                return Vec::new();
+            }
+        };
+
+        // Directory prefixes of the crates in scope, resolved once.
+        let relevant_dirs: Vec<&str> = relevant_crates
+            .iter()
+            .filter_map(|name| crate_index.dir_prefix_for_crate(name))
+            .collect();
+
+        let mut seen = std::collections::HashSet::new();
+        let mut gaps = Vec::new();
+        for row in rows {
+            if !djinn_db::coverage_status_is_gap(&row.status) {
+                continue;
+            }
+            let intersects = relevant_dirs
+                .iter()
+                .any(|dir| path_is_under(dir, &row.workspace_root));
+            if !intersects {
+                continue;
+            }
+            if seen.insert(row.workspace_slug.clone()) {
+                gaps.push(CoverageAdvisoryWorkspace {
+                    workspace_slug: row.workspace_slug,
+                    language: row.language,
+                    status: row.status,
+                    detail: row.detail,
+                });
+            }
+        }
+        gaps
     }
 }
 

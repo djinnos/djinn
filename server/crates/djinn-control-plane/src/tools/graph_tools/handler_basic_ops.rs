@@ -311,6 +311,7 @@ impl DjinnMcpServer {
             by_depth_counts,
             next_step: None,
             graph_staleness: None,
+            coverage: None,
         }))
     }
 
@@ -360,6 +361,7 @@ impl DjinnMcpServer {
             workspace_hint: scope.hint,
             next_step: None,
             graph_staleness: None,
+            coverage: None,
         }))
     }
 
@@ -618,6 +620,7 @@ impl DjinnMcpServer {
             workspace_hint: scope.hint,
             next_step: None,
             graph_staleness: None,
+            coverage: None,
         }))
     }
 
@@ -761,6 +764,110 @@ impl DjinnMcpServer {
         }))
     }
 
+    /// glqk: index-coverage table. Reads `project_workspace_coverage` rows
+    /// directly — the CHEAP path that never loads the graph blob — and returns
+    /// the per-(workspace, language) coverage entries, a per-language rollup,
+    /// and the discovered-but-unindexed source roots.
+    pub(super) async fn code_graph_coverage(
+        &self,
+        _ctx: &ProjectCtx,
+        params: &CodeGraphParams,
+    ) -> Result<CodeGraphResponse, String> {
+        use djinn_db::{ProjectWorkspaceCoverageRepository, coverage_status_is_gap};
+
+        let rows = ProjectWorkspaceCoverageRepository::new(self.state.db().clone())
+            .list_for_project(&params.project_id)
+            .await
+            .map_err(|e| format!("coverage: list_for_project failed: {e}"))?;
+
+        let mut workspaces: Vec<CoverageWorkspaceEntry> = Vec::with_capacity(rows.len());
+        let mut unindexed_source_roots: Vec<UnindexedSourceRoot> = Vec::new();
+        // language -> (total, indexed, gap, discovered_sum, indexed_sum,
+        // any_discovered_known, any_indexed_known)
+        let mut rollup: std::collections::BTreeMap<String, [i64; 7]> =
+            std::collections::BTreeMap::new();
+        let mut has_gaps = false;
+
+        for row in rows {
+            let is_gap = coverage_status_is_gap(&row.status);
+            has_gaps |= is_gap;
+            let is_indexed = row.status == djinn_db::COVERAGE_STATUS_INDEXED;
+
+            if is_gap {
+                unindexed_source_roots.push(UnindexedSourceRoot {
+                    workspace_slug: row.workspace_slug.clone(),
+                    language: row.language.clone(),
+                    workspace_root: row.workspace_root.clone(),
+                    status: row.status.clone(),
+                });
+            }
+
+            let acc = rollup.entry(row.language.clone()).or_default();
+            acc[0] += 1; // total
+            if is_indexed {
+                acc[1] += 1; // indexed
+            }
+            if is_gap {
+                acc[2] += 1; // gap
+            }
+            if let Some(d) = row.discovered_files {
+                acc[3] += d;
+                acc[5] = 1;
+            }
+            if let Some(i) = row.indexed_files {
+                acc[4] += i;
+                acc[6] = 1;
+            }
+
+            workspaces.push(CoverageWorkspaceEntry {
+                workspace_slug: row.workspace_slug,
+                language: row.language,
+                status: row.status,
+                is_gap,
+                detail: row.detail,
+                workspace_root: row.workspace_root,
+                marker_evidence: row.marker_evidence,
+                discovered_files: row.discovered_files,
+                indexed_files: row.indexed_files,
+                commit_sha: row.commit_sha,
+                warmed_at: row.warmed_at,
+            });
+        }
+
+        let language_rollup: Vec<CoverageLanguageRollup> = rollup
+            .into_iter()
+            .map(|(language, acc)| CoverageLanguageRollup {
+                language,
+                workspaces_total: acc[0] as usize,
+                workspaces_indexed: acc[1] as usize,
+                workspaces_gap: acc[2] as usize,
+                discovered_files: (acc[5] == 1).then_some(acc[3]),
+                indexed_files: (acc[6] == 1).then_some(acc[4]),
+            })
+            .collect();
+
+        let next_step = if has_gaps {
+            Some(
+                "Some workspaces are not indexed. Before asserting \"no callers / \
+                 unused / safe to remove\" for symbols in these workspaces, fall \
+                 back to grep and say so."
+                    .to_string(),
+            )
+        } else {
+            None
+        };
+
+        Ok(CodeGraphResponse::Coverage(CoverageResponse {
+            coverage: true,
+            has_gaps,
+            workspaces,
+            language_rollup,
+            unindexed_source_roots,
+            next_step,
+            graph_staleness: None,
+        }))
+    }
+
     pub(super) async fn code_graph_crate_graph(
         &self,
         ctx: &ProjectCtx,
@@ -835,6 +942,28 @@ impl DjinnMcpServer {
         //    caller-supplied scope — no I/O, no bridging.
         let (safe_independent_slice, recommendation) =
             derive_safe_slice_and_recommendation(&affected_crates, &scope_crates);
+
+        // 5b. glqk coverage gate: if an UNINDEXED workspace intersects the
+        //     scope (or affected) crates, the impact analysis can't prove "no
+        //     callers" — escalate to `needs_spike` and name the workspace. Only
+        //     `impact_check` escalates (per the design); the other five ops just
+        //     attach the advisory.
+        let mut relevant_crates: std::collections::HashSet<String> = scope_crates.clone();
+        relevant_crates.extend(affected_crates.iter().cloned());
+        let coverage_gaps = self
+            .impact_check_coverage_gaps(&params.project_id, &crate_index, &relevant_crates)
+            .await;
+        if !coverage_gaps.is_empty() {
+            return Ok(CodeGraphResponse::ImpactCheck(
+                self.build_uncovered_impact_check_response(
+                    affected_crates,
+                    affected_files,
+                    affected_symbols,
+                    &coverage_gaps,
+                    &staleness_info,
+                ),
+            ));
+        }
 
         // 6. Format the final response in one place so the wire
         //    shape stays in lock-step with the tool contract.

@@ -3,7 +3,9 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { callMcpTool } from "@/api/mcpClient";
 import {
   callCodeGraph,
+  fetchCoverage,
   fetchSnapshot,
+  parseCoverageResponse,
   parseWorkspacesResponse,
 } from "./codeGraph";
 
@@ -82,6 +84,74 @@ describe("parseWorkspacesResponse", () => {
         status: undefined,
       },
     ]);
+  });
+});
+
+describe("parseCoverageResponse", () => {
+  it("extracts gaps from the coverage op payload", () => {
+    const cov = parseCoverageResponse({
+      coverage: true,
+      has_gaps: true,
+      workspaces: [
+        { workspace_slug: "ui", language: "typescript", status: "indexed", is_gap: false },
+        { workspace_slug: "server", language: "rust", status: "timed_out", is_gap: true },
+      ],
+      unindexed_source_roots: [
+        {
+          workspace_slug: "server",
+          language: "rust",
+          status: "timed_out",
+          detail: "rust-analyzer timed out",
+        },
+      ],
+    });
+
+    expect(cov.hasGaps).toBe(true);
+    expect(cov.gaps).toHaveLength(1);
+    expect(cov.gaps[0]).toMatchObject({
+      slug: "server",
+      language: "rust",
+      status: "timed_out",
+    });
+  });
+
+  it("reports no gaps for a clean project", () => {
+    const cov = parseCoverageResponse({
+      coverage: true,
+      has_gaps: false,
+      workspaces: [
+        { workspace_slug: "server", language: "rust", status: "indexed", is_gap: false },
+      ],
+      unindexed_source_roots: [],
+    });
+    expect(cov.hasGaps).toBe(false);
+    expect(cov.gaps).toEqual([]);
+  });
+
+  it("degrades safely on a malformed payload", () => {
+    expect(parseCoverageResponse(null)).toEqual({ hasGaps: false, gaps: [] });
+    expect(parseCoverageResponse("nope")).toEqual({ hasGaps: false, gaps: [] });
+  });
+});
+
+describe("fetchCoverage", () => {
+  it("dispatches the coverage op and parses the result", async () => {
+    vi.mocked(callMcpTool).mockResolvedValueOnce({
+      coverage: true,
+      has_gaps: true,
+      unindexed_source_roots: [
+        { workspace_slug: "server", language: "rust", status: "timed_out" },
+      ],
+    } as never);
+
+    const cov = await fetchCoverage("project-a");
+
+    expect(vi.mocked(callMcpTool)).toHaveBeenCalledWith("code_graph", {
+      project: "project-a",
+      operation: "coverage",
+    });
+    expect(cov.hasGaps).toBe(true);
+    expect(cov.gaps[0].slug).toBe("server");
   });
 });
 

@@ -46,6 +46,7 @@ export type CodeGraphOperation =
   | "diff_touches"
   | "detect_changes"
   | "workspaces"
+  | "coverage"
   | "snapshot";
 
 /**
@@ -168,6 +169,56 @@ function normalizeWorkspaceEntry(value: unknown): CodeGraphWorkspace | null {
     language: nonEmptyString(value.language ?? value.indexer),
     status: nonEmptyString(value.status ?? value.warm_status),
   };
+}
+
+// ── glqk: index-coverage contract ────────────────────────────────────────────
+
+/** One unindexed (gap) workspace surfaced by the `coverage` op. */
+export interface CoverageGapWorkspace {
+  slug: string;
+  language: string;
+  /** indexer_failed | timed_out | unsupported_language. */
+  status: string;
+  detail?: string;
+}
+
+/** Parsed `coverage` op payload — the pieces the galaxy HUD needs. */
+export interface CodeGraphCoverage {
+  hasGaps: boolean;
+  /** Discovered-but-unindexed source roots, one per (workspace, language). */
+  gaps: CoverageGapWorkspace[];
+}
+
+function normalizeCoverageGap(value: unknown): CoverageGapWorkspace | null {
+  if (!isRecord(value)) return null;
+  const slug = nonEmptyString(value.workspace_slug ?? value.slug);
+  if (!slug) return null;
+  return {
+    slug,
+    language: nonEmptyString(value.language) ?? "unknown",
+    status: nonEmptyString(value.status) ?? "indexer_failed",
+    detail: nonEmptyString(value.detail),
+  };
+}
+
+export function parseCoverageResponse(value: unknown): CodeGraphCoverage {
+  if (!isRecord(value)) return { hasGaps: false, gaps: [] };
+  // Prefer the explicit unindexed_source_roots list; fall back to filtering the
+  // full workspaces table on is_gap for forward-compat.
+  const rootsRaw = Array.isArray(value.unindexed_source_roots)
+    ? value.unindexed_source_roots
+    : Array.isArray(value.workspaces)
+      ? value.workspaces.filter(
+          (w) => isRecord(w) && (w.is_gap === true || w.status === "timed_out"),
+        )
+      : [];
+  const gaps = rootsRaw.flatMap((entry) => {
+    const g = normalizeCoverageGap(entry);
+    return g ? [g] : [];
+  });
+  const hasGaps =
+    value.has_gaps === true || (value.has_gaps === undefined && gaps.length > 0);
+  return { hasGaps, gaps };
 }
 
 export function parseWorkspacesResponse(value: unknown): CodeGraphWorkspace[] {
@@ -332,6 +383,18 @@ export async function fetchWorkspaces(
 ): Promise<CodeGraphWorkspace[]> {
   const response = await callCodeGraph(project, "workspaces");
   return parseWorkspacesResponse(response);
+}
+
+/**
+ * glqk: fetch the per-workspace/per-language index-coverage table. Cheap on the
+ * server (reads coverage rows, never loads the graph blob). The galaxy HUD uses
+ * it to render a coverage-gap banner naming unindexed workspaces.
+ */
+export async function fetchCoverage(
+  project: string,
+): Promise<CodeGraphCoverage> {
+  const response = await callCodeGraph(project, "coverage");
+  return parseCoverageResponse(response);
 }
 
 /**
