@@ -59,7 +59,6 @@ fn test_agent_context(db: Database) -> AgentContext {
         reconciliation_sweep: djinn_agent::context::ReconciliationSweepConfig::default(),
         memory_intent_planner: djinn_agent::context::MemoryIntentPlannerConfig::default(),
         compaction_cs: djinn_slot::reply_loop::CompactionCriticalSection::default(),
-        memory_intent_planner: djinn_agent::context::MemoryIntentPlannerConfig::default(),
     }
 }
 

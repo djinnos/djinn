@@ -230,15 +230,15 @@ async fn assemble(
     task: &djinn_core::models::Task,
     state: &AgentContext,
     planner: Option<MemoryIntentPlannerInvocation<'_>>,
+    worktree_path: &std::path::Path,
 ) -> PromptContext {
     let role = LeadRole;
-    let worktree = test_tempdir("memory-planner-replay-");
     assemble_prompt_context(PromptContextInputs {
         task,
         runtime_role: &role,
         role_for_epic_check: &role,
         project_path: "/workspace/replay",
-        worktree_path: worktree.path(),
+        worktree_path,
         conflict_ctx: None,
         merge_validation_ctx: None,
         prompt_setup_commands: None,
@@ -290,7 +290,8 @@ async fn checked_in_replays_enter_the_production_assemble_prompt_context_boundar
             .expect("scope confidence");
 
         let state = agent_context_from_db(db, CancellationToken::new());
-        let baseline = assemble(&task, &state, None).await;
+        let worktree = test_tempdir("memory-planner-replay-");
+        let baseline = assemble(&task, &state, None, worktree.path()).await;
         let host = host(case);
         let search = ReplaySearch {
             buckets: buckets(case, &scope.id, &scope.permalink),
@@ -314,6 +315,7 @@ async fn checked_in_replays_enter_the_production_assemble_prompt_context_boundar
                     resume_compaction_summary: case.resume_compaction_summary.as_deref(),
                     planned_note_search: Some(&search),
                 }),
+                worktree.path(),
             )
         };
         let first = run().await;
