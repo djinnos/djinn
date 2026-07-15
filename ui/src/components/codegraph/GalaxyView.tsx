@@ -7,7 +7,10 @@
  * renders `GalaxyCanvas` with:
  *
  *   - top-left: project selector + workspace picker,
- *   - top-right: color mode (communities / complexity) + hide-tests toggle,
+ *   - top-right: hide-tests toggle + hotspot-panel toggle,
+ *   - right: the HotspotPanel leaderboard (complexity × co-change);
+ *     clicking a row flies the camera to the file + its co-change
+ *     partners and lights their pink coupling web,
  *   - Cmd-K integration: search hits / AI citations from the shared
  *     codeGraphStore fly the camera to the matching stars.
  *
@@ -25,11 +28,9 @@ import {
   type CodeGraphWorkspace,
 } from "@/api/codeGraph";
 import { CoverageGapBanner } from "@/components/codegraph/CoverageGapBanner";
+import { HotspotPanel } from "@/components/codegraph/HotspotPanel";
 import { GalaxyCanvas } from "@/components/galaxy/GalaxyCanvas";
-import type {
-  GalaxyColorMode,
-  GalaxyData,
-} from "@/components/galaxy/galaxyTypes";
+import type { GalaxyData } from "@/components/galaxy/galaxyTypes";
 import { layoutInWorker } from "@/components/galaxy/galaxyLayoutClient";
 import {
   Select,
@@ -39,7 +40,9 @@ import {
 } from "@/components/ui/select";
 import {
   galaxyLayoutSeed,
+  snapshotHotspots,
   snapshotToGalaxy,
+  type GalaxyHotspot,
 } from "@/lib/codeGraphGalaxyAdapter";
 import { parseSnapshotResponse } from "@/lib/codeGraphAdapter";
 import { useCodeGraphStore } from "@/stores/codeGraphStore";
@@ -56,12 +59,7 @@ const GALAXY_NODE_BUDGET = 1_000_000;
 type GalaxyState =
   | { phase: "loading"; message: string }
   | { phase: "error"; message: string }
-  | { phase: "ready"; data: GalaxyData };
-
-const COLOR_MODES: Array<{ value: GalaxyColorMode; label: string }> = [
-  { value: "group", label: "Communities" },
-  { value: "heat", label: "Complexity" },
-];
+  | { phase: "ready"; data: GalaxyData; hotspots: GalaxyHotspot[] };
 
 /** One chip voice for every HUD control (chips, selects, toggles). The
  * dark-variant background mirrors what SelectTrigger's base classes
@@ -77,25 +75,38 @@ export function GalaxyView({ projectId }: { projectId: string }) {
     phase: "loading",
     message: "Fetching graph…",
   });
-  const [colorMode, setColorMode] = useState<GalaxyColorMode>("group");
   const [hideTests, setHideTests] = useState(false);
   const [workspaces, setWorkspaces] = useState<CodeGraphWorkspace[]>([]);
   const [workspaceSlug, setWorkspaceSlug] = useState<string | null>(null);
   const [coverage, setCoverage] = useState<CodeGraphCoverage | null>(null);
+  const [showHotspots, setShowHotspots] = useState(false);
+  const [hotspotSelection, setHotspotSelection] =
+    useState<GalaxyHotspot | null>(null);
 
-  // Cmd-K search hits / AI citations fly the camera to their stars.
+  // Cmd-K search hits / AI citations fly the camera to their stars. An
+  // active hotspot row takes over the focus set (file + co-change
+  // partners); a fresh Cmd-K/citation signal takes it back.
   const citationIds = useCodeGraphStore((s) => s.citationIds);
   const toolHighlightIds = useCodeGraphStore((s) => s.toolHighlightIds);
-  const focusIds = useMemo(
-    () => [...citationIds, ...toolHighlightIds],
-    [citationIds, toolHighlightIds],
-  );
+  const focusIds = useMemo(() => {
+    if (hotspotSelection) {
+      return [hotspotSelection.fileId, ...hotspotSelection.partnerIds];
+    }
+    return [...citationIds, ...toolHighlightIds];
+  }, [hotspotSelection, citationIds, toolHighlightIds]);
+  useEffect(() => {
+    if (citationIds.size > 0 || toolHighlightIds.size > 0) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- external focus signal preempts the panel selection.
+      setHotspotSelection(null);
+    }
+  }, [citationIds, toolHighlightIds]);
 
   useEffect(() => {
     let cancelled = false;
     // eslint-disable-next-line react-hooks/set-state-in-effect -- async snapshot-fetch state machine: reset/loading transition around the network read, same convention as the old page's workspace fetch.
     setState({ phase: "loading", message: "Fetching graph…" });
     setWorkspaceSlug(null);
+    setHotspotSelection(null);
 
     void fetchWorkspaces(projectId)
       .then((list) => {
@@ -130,12 +141,13 @@ export function GalaxyView({ projectId }: { projectId: string }) {
           return;
         }
         const data = snapshotToGalaxy(snapshot, { layout: false });
+        const hotspots = snapshotHotspots(snapshot);
         // lmkv fast path: the server already shipped a warm-time galaxy layout
         // for every node — render immediately, no worker, no seconds-long
         // main-thread-free-but-still-slow force pass.
         if (data.serverPositioned) {
           if (cancelled) return;
-          setState({ phase: "ready", data });
+          setState({ phase: "ready", data, hotspots });
           return;
         }
         setState({
@@ -148,7 +160,11 @@ export function GalaxyView({ projectId }: { projectId: string }) {
           galaxyLayoutSeed(snapshot.project_id),
         );
         if (cancelled) return;
-        setState({ phase: "ready", data: { ...data, nodes: positioned } });
+        setState({
+          phase: "ready",
+          data: { ...data, nodes: positioned },
+          hotspots,
+        });
       } catch (error) {
         if (cancelled) return;
         setState({
@@ -181,6 +197,16 @@ export function GalaxyView({ projectId }: { projectId: string }) {
     return { ...full, nodes, edges };
   }, [state, hideTests, workspaceSlug]);
 
+  // Hotspot rows obey the same post-layout filters as the stars.
+  const visibleHotspots = useMemo<GalaxyHotspot[]>(() => {
+    if (state.phase !== "ready") return [];
+    return state.hotspots.filter(
+      (h) =>
+        (!hideTests || !h.isTest) &&
+        (!workspaceSlug || h.workspace === undefined || h.workspace === workspaceSlug),
+    );
+  }, [state, hideTests, workspaceSlug]);
+
   if (state.phase !== "ready" || !visibleData) {
     return (
       <div className="flex h-full w-full items-center justify-center bg-[#06090f] font-mono text-sm text-slate-400">
@@ -201,9 +227,17 @@ export function GalaxyView({ projectId }: { projectId: string }) {
   return (
     <GalaxyCanvas
       data={visibleData}
-      colorMode={colorMode}
       focusIds={focusIds}
       banner={<CoverageGapBanner coverage={coverage} />}
+      sidePanel={
+        showHotspots ? (
+          <HotspotPanel
+            hotspots={visibleHotspots}
+            selectedId={hotspotSelection?.fileId ?? null}
+            onSelect={setHotspotSelection}
+          />
+        ) : undefined
+      }
       headerPrimary={
         <>
           <Select
@@ -270,28 +304,21 @@ export function GalaxyView({ projectId }: { projectId: string }) {
           >
             {hideTests ? "Tests hidden" : "Hide tests"}
           </button>
-          <Select
-            value={colorMode}
-            onValueChange={(value) => {
-              if (typeof value === "string") {
-                setColorMode(value as GalaxyColorMode);
-              }
+          <button
+            type="button"
+            aria-pressed={showHotspots}
+            onClick={() => {
+              if (showHotspots) setHotspotSelection(null);
+              setShowHotspots(!showHotspots);
             }}
+            className={cn(
+              "h-7 rounded-lg border px-2.5 transition-colors",
+              HUD_CHIP,
+              showHotspots ? "text-sky-300" : "hover:text-slate-100",
+            )}
           >
-            <SelectTrigger size="sm" aria-label="Color mode" className={HUD_CHIP}>
-              <span>
-                {COLOR_MODES.find((m) => m.value === colorMode)?.label ??
-                  "Communities"}
-              </span>
-            </SelectTrigger>
-            <SelectContent className="min-w-40">
-              {COLOR_MODES.map(({ value, label }) => (
-                <SelectItem key={value} value={value}>
-                  {label}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
+            Hotspots
+          </button>
         </>
       }
     />
