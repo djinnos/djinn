@@ -1100,6 +1100,11 @@ export namespace DoctorRunInputSchema {
    * listing the valid check names so the caller can self-correct.
    */
   check_names?: string[]
+  /**
+   * Project UUID or exact `owner/repo` slug used only by the explicitly
+   * selected extension diagnostics probe; this is never a filesystem path.
+   */
+  project?: string
   [k: string]: any
   }
 
@@ -1146,6 +1151,11 @@ export namespace DoctorRunOutputSchema {
    */
   error?: string
   /**
+   * Persisted V1 diagnostics from the explicit project probe. Empty and
+   * skipped for ordinary global checks.
+   */
+  extension_diagnostics?: DoctorExtensionDiagnosticFinding[]
+  /**
    * Findings emitted by this check, with their persisted ids filled in.
    */
   findings: DoctorRunFindingEntry[]
@@ -1154,6 +1164,23 @@ export namespace DoctorRunOutputSchema {
    * findings). `false` when the check itself returned an error.
    */
   ran: boolean
+  [k: string]: any
+  }
+  /**
+   * Direct projection of a persisted V1 extension diagnostic.
+   * 
+   * The project probe never creates a duplicate `doctor_findings` row.
+   */
+  export interface DoctorExtensionDiagnosticFinding {
+  diagnostic_id: string
+  occurrence_count: number
+  phase: string
+  remedy: string
+  remedy_code: string
+  severity: string
+  source_key: string
+  source_kind: string
+  summary: string
   [k: string]: any
   }
   /**
@@ -11037,6 +11064,11 @@ export namespace TaskTimelineOutputSchema {
   export interface TaskTimelineOutput {
   activity?: TimelineActivity[]
   error?: string
+  /**
+   * Canonical session-associated extension-load diagnostics, including as
+   * an empty array on successful timeline lookups.
+   */
+  extension_load_diagnostic_events?: TimelineExtensionLoadDiagnosticEvent[]
   messages?: TimelineMessage[]
   sessions?: SessionToolSession[]
   [k: string]: any
@@ -11052,6 +11084,23 @@ export namespace TaskTimelineOutputSchema {
   kind: string
   payload: AnyJson
   summary?: string
+  timestamp: string
+  [k: string]: any
+  }
+  /**
+   * A canonical extension-load diagnostic placed on a task timeline.
+   * 
+   * The diagnostic remains the shared V1 wire object rather than a timeline-
+   * specific copy of its fields. `session_id` and `timestamp` provide the
+   * placement metadata needed by timeline renderers.
+   */
+  export interface TimelineExtensionLoadDiagnosticEvent {
+  diagnostic: AnyJson
+  /**
+   * Fixed discriminator for extension-load diagnostic timeline events.
+   */
+  kind: string
+  session_id: string
   timestamp: string
   [k: string]: any
   }

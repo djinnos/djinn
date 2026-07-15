@@ -8,6 +8,7 @@ use petgraph::visit::EdgeRef;
 use djinn_graph::repo_graph::RepoGraphEdgeKind;
 
 use super::bridges::{CoordinatorBridge, LspBridge, SlotPoolBridge};
+use super::extension_diagnostics_probe::ExtensionDiagnosticsProbeBridge;
 use super::graph_neighbors::format_node_key;
 
 /// Ceiling on the number of *drawable* (non-containment) edges shipped in a
@@ -116,6 +117,9 @@ impl AppState {
             Arc::new(RepoGraphBridge::new(self.clone())),
             Some(enrichment_ops),
         )
+        .with_extension_diagnostics_probe(Arc::new(ExtensionDiagnosticsProbeBridge::new(
+            self.agent_context(),
+        )))
     }
 }
 

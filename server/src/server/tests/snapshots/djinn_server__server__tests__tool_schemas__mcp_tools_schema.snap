@@ -2170,12 +2170,65 @@ expression: signatures
             "array",
             "null"
           ]
+        },
+        "project": {
+          "default": null,
+          "description": "Project UUID or exact `owner/repo` slug used only by the explicitly\nselected extension diagnostics probe; this is never a filesystem path.",
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
       "type": "object"
     },
     "output_schema": {
       "$defs": {
+        "DoctorExtensionDiagnosticFinding": {
+          "description": "Direct projection of a persisted V1 extension diagnostic.\n\nThe project probe never creates a duplicate `doctor_findings` row.",
+          "properties": {
+            "diagnostic_id": {
+              "type": "string"
+            },
+            "occurrence_count": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "phase": {
+              "type": "string"
+            },
+            "remedy": {
+              "type": "string"
+            },
+            "remedy_code": {
+              "type": "string"
+            },
+            "severity": {
+              "type": "string"
+            },
+            "source_key": {
+              "type": "string"
+            },
+            "source_kind": {
+              "type": "string"
+            },
+            "summary": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "diagnostic_id",
+            "source_kind",
+            "source_key",
+            "phase",
+            "summary",
+            "remedy_code",
+            "remedy",
+            "severity",
+            "occurrence_count"
+          ],
+          "type": "object"
+        },
         "DoctorRunCheckMeta": {
           "description": "Metadata for one check as surfaced in the run report.",
           "properties": {
@@ -2204,6 +2257,13 @@ expression: signatures
                 "string",
                 "null"
               ]
+            },
+            "extension_diagnostics": {
+              "description": "Persisted V1 diagnostics from the explicit project probe. Empty and\nskipped for ordinary global checks.",
+              "items": {
+                "$ref": "#/$defs/DoctorExtensionDiagnosticFinding"
+              },
+              "type": "array"
             },
             "findings": {
               "description": "Findings emitted by this check, with their persisted ids filled in.",
@@ -22560,6 +22620,31 @@ expression: signatures
           ],
           "type": "object"
         },
+        "TimelineExtensionLoadDiagnosticEvent": {
+          "description": "A canonical extension-load diagnostic placed on a task timeline.\n\nThe diagnostic remains the shared V1 wire object rather than a timeline-\nspecific copy of its fields. `session_id` and `timestamp` provide the\nplacement metadata needed by timeline renderers.",
+          "properties": {
+            "diagnostic": {
+              "$ref": "#/$defs/AnyJson"
+            },
+            "kind": {
+              "description": "Fixed discriminator for extension-load diagnostic timeline events.",
+              "type": "string"
+            },
+            "session_id": {
+              "type": "string"
+            },
+            "timestamp": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "session_id",
+            "timestamp",
+            "diagnostic"
+          ],
+          "type": "object"
+        },
         "TimelineMessage": {
           "properties": {
             "agent_type": {
@@ -22609,6 +22694,16 @@ expression: signatures
         "error": {
           "type": [
             "string",
+            "null"
+          ]
+        },
+        "extension_load_diagnostic_events": {
+          "description": "Canonical session-associated extension-load diagnostics, including as\nan empty array on successful timeline lookups.",
+          "items": {
+            "$ref": "#/$defs/TimelineExtensionLoadDiagnosticEvent"
+          },
+          "type": [
+            "array",
             "null"
           ]
         },
