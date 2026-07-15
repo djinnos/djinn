@@ -107,7 +107,7 @@ pub use repositories::{
         NoteDedupCandidate, NoteEmbeddingMatch, NoteEmbeddingProvider, NoteEmbeddingRecord,
         NoteQualityAssessment, NoteRepairEmbeddingRow, NoteRepository, NoteRevisionActorKind,
         NoteRevisionCreateState, NoteRevisionDesiredState, NoteRevisionEventInput,
-        NoteRevisionEventKind, NoteRevisionEventRow, NoteRevisionMutation,
+        NoteRevisionEventKind, NoteRevisionEventRow, NoteRevisionMoveState, NoteRevisionMutation,
         NoteRevisionMutationResult, NoteRevisionReason, NoteRevisionSnapshot,
         NoteRevisionSubsystem, NoteRevisionValidationError, NoteSearchParams, NoteStatus,
         NoteVectorStore, PromptBudgetReport, ProposedBackfillAnchor, QdrantConfig,

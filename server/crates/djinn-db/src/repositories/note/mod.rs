@@ -102,7 +102,7 @@ pub use lifecycle::NoteStatus;
 #[cfg(any(test, feature = "test-support"))]
 pub use mutation::NoteRevisionEventForTest;
 pub use mutation::{
-    NoteRevisionCreateState, NoteRevisionDesiredState, NoteRevisionMutation,
+    NoteRevisionCreateState, NoteRevisionDesiredState, NoteRevisionMoveState, NoteRevisionMutation,
     NoteRevisionMutationResult, PersistedNoteRevision,
 };
 

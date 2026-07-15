@@ -1,7 +1,8 @@
 use super::*;
 
 use djinn_db::{
-    NoteRevisionDesiredState, NoteRevisionEventKind, NoteRevisionMutation, NoteRevisionReason,
+    NoteRevisionDesiredState, NoteRevisionEventKind, NoteRevisionMoveState, NoteRevisionMutation,
+    NoteRevisionReason, folder_for_type, permalink_for,
 };
 use rmcp::{Json, handler::server::wrapper::Parameters};
 
@@ -36,22 +37,6 @@ pub(super) async fn memory_edit(
         }
     };
 
-    let note = if let Some(ref new_type) = p.note_type {
-        if new_type != &note.note_type {
-            match repo
-                .move_note(&note.id, Path::new(&p.project), &note.title, new_type)
-                .await
-            {
-                Ok(moved) => moved,
-                Err(e) => return Json(MemoryNoteResponse::error(e.to_string())),
-            }
-        } else {
-            note
-        }
-    } else {
-        note
-    };
-
     let new_content = match apply_edit_operation(
         &note.content,
         &p.operation,
@@ -63,15 +48,31 @@ pub(super) async fn memory_edit(
         Err(e) => return Json(MemoryNoteResponse::error(e)),
     };
 
+    let desired = match p.note_type.as_deref() {
+        Some(new_type) if new_type != note.note_type => {
+            NoteRevisionDesiredState::ExistingWithMove {
+                content: new_content,
+                confidence: note.confidence,
+                moved: NoteRevisionMoveState {
+                    title: note.title.clone(),
+                    permalink: permalink_for(new_type, &note.title),
+                    note_type: new_type.to_owned(),
+                    folder: folder_for_type(new_type).to_owned(),
+                },
+            }
+        }
+        _ => NoteRevisionDesiredState::Existing {
+            content: new_content,
+            confidence: note.confidence,
+        },
+    };
+
     match repo
         .mutate_with_revision(NoteRevisionMutation {
             project_id,
             note_id: Some(note.id.clone()),
             event_kind: NoteRevisionEventKind::Updated,
-            desired: NoteRevisionDesiredState::Existing {
-                content: new_content,
-                confidence: note.confidence,
-            },
+            desired,
             attribution,
             provenance,
             reason: NoteRevisionReason::new(p.reason).expect("validated MCP mutation reason"),

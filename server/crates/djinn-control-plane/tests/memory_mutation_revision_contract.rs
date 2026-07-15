@@ -262,6 +262,66 @@ async fn live_singleton_rewrite_uses_trusted_revision_context() {
 }
 
 #[tokio::test]
+async fn live_type_changing_empty_edit_is_atomic_with_its_revision() {
+    let harness = McpTestHarness::new().await;
+    let (project, _dir) = common::create_test_project_with_dir(harness.db()).await;
+    let project_ref = project.slug();
+    let context = TrustedRevisionCallerContext::authenticated_agent("move-agent")
+        .unwrap()
+        .with_execution_provenance(
+            Some("move-session".into()),
+            Some("move-task".into()),
+            Some("move-run".into()),
+        );
+    let created = dispatch_as(context.clone(), &harness, "memory_write", json!({"project": project_ref, "title": "Empty Move", "content": "", "type": "reference", "reason": "create empty move fixture"})).await;
+    let note_id = created["id"].as_str().unwrap().to_owned();
+    let moved = dispatch_as(context.clone(), &harness, "memory_edit", json!({"project": project_ref, "identifier": created["permalink"], "operation": "append", "content": "", "type": "design", "reason": "\u{2003} move empty note atomically \u{2003}"})).await;
+    assert_eq!(moved["note_type"], "design");
+    assert_eq!(moved["folder"], "design");
+    assert_eq!(moved["permalink"], "design/empty-move");
+    assert_eq!(moved["content"], "");
+    let repo = revision_repo(&harness);
+    let revisions = repo.revision_events(&project.id).await.unwrap();
+    assert_eq!(revisions.len(), 2);
+    let revision = &revisions[1];
+    assert_eq!(revision.note_id.as_deref(), Some(note_id.as_str()));
+    assert_eq!(revision.event_kind, "updated");
+    assert_eq!(revision.content_before.as_deref(), Some(""));
+    assert_eq!(revision.content_after.as_deref(), Some(""));
+    assert_eq!(revision.reason, "move empty note atomically");
+    assert_eq!(
+        (
+            revision.actor_kind.as_str(),
+            revision.actor_id.as_deref(),
+            revision.subsystem.as_deref()
+        ),
+        ("agent", Some("move-agent"), None)
+    );
+    assert_eq!(
+        (
+            revision.session_id.as_deref(),
+            revision.task_id.as_deref(),
+            revision.task_run_id.as_deref()
+        ),
+        (Some("move-session"), Some("move-task"), Some("move-run"))
+    );
+
+    let failed = dispatch_as(context, &harness, "memory_edit", json!({"project": project_ref, "identifier": "design/empty-move", "operation": "find_replace", "find_text": "missing", "content": "replacement", "type": "reference", "reason": "failed move must roll back"})).await;
+    assert!(failed["error"].as_str().unwrap().contains("text not found"));
+    let durable = repo.get(&note_id).await.unwrap().unwrap();
+    assert_eq!(
+        (
+            durable.note_type.as_str(),
+            durable.folder.as_str(),
+            durable.permalink.as_str(),
+            durable.content.as_str()
+        ),
+        ("design", "design", "design/empty-move", "")
+    );
+    assert_eq!(repo.revision_events(&project.id).await.unwrap().len(), 2);
+}
+
+#[tokio::test]
 async fn invalid_reasons_and_spoofed_attribution_do_not_mutate_notes_or_revisions() {
     let harness = McpTestHarness::new().await;
     let (project, _dir) = common::create_test_project_with_dir(harness.db()).await;

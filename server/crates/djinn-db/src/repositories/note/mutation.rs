@@ -68,6 +68,18 @@ pub struct NoteRevisionCreateState {
     pub confidence: f64,
 }
 
+/// Canonical metadata changed by a note type move.
+///
+/// This state is carried through the same transaction as content/confidence so
+/// callers cannot durably move a note without its attributed revision.
+#[derive(Debug, Clone, PartialEq)]
+pub struct NoteRevisionMoveState {
+    pub title: String,
+    pub permalink: String,
+    pub note_type: String,
+    pub folder: String,
+}
+
 /// The requested final state for a ledger-backed mutation.
 #[derive(Debug, Clone, PartialEq)]
 pub enum NoteRevisionDesiredState {
@@ -77,6 +89,13 @@ pub enum NoteRevisionDesiredState {
     Existing {
         content: String,
         confidence: f64,
+    },
+    /// Replace content/confidence and move canonical metadata atomically. A
+    /// metadata-only change is durable and therefore emits a revision.
+    ExistingWithMove {
+        content: String,
+        confidence: f64,
+        moved: NoteRevisionMoveState,
     },
     /// Delete the locked note after retaining its before snapshot in the ledger.
     Delete,
@@ -223,14 +242,25 @@ impl NoteRepository {
     ) -> Result<NoteRevisionMutationResult> {
         let note_id = command.note_id.as_deref().expect("validated note identity");
         let before = locked_note(tx, note_id, &command.project_id).await?;
-        let NoteRevisionDesiredState::Existing {
-            content,
-            confidence,
-        } = &command.desired
-        else {
-            unreachable!("validated update command")
+        let (content, confidence, moved) = match &command.desired {
+            NoteRevisionDesiredState::Existing {
+                content,
+                confidence,
+            } => (content, confidence, None),
+            NoteRevisionDesiredState::ExistingWithMove {
+                content,
+                confidence,
+                moved,
+            } => (content, confidence, Some(moved)),
+            _ => unreachable!("validated update command"),
         };
-        if before.content == *content && before.confidence == *confidence {
+        let metadata_changed = moved.is_some_and(|moved| {
+            before.title != moved.title
+                || before.permalink != moved.permalink
+                || before.note_type != moved.note_type
+                || before.folder != moved.folder
+        });
+        if before.content == *content && before.confidence == *confidence && !metadata_changed {
             return Ok(NoteRevisionMutationResult {
                 changed: false,
                 note: Some(before),
@@ -245,8 +275,17 @@ impl NoteRepository {
                 "confidence_changed must not alter content".to_owned(),
             ));
         }
-        sqlx::query("UPDATE notes SET content = $1, confidence = $2, content_hash = $3, updated_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') WHERE id = $4")
-            .bind(content).bind(confidence).bind(note_content_hash(content)).bind(note_id).execute(&mut **tx).await?;
+        if let Some(moved) = moved {
+            sqlx::query("UPDATE notes SET content = $1, confidence = $2, content_hash = $3, title = $4, permalink = $5, note_type = $6, folder = $7, file_path = '', updated_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') WHERE id = $8 AND project_id = $9")
+                .bind(content).bind(confidence).bind(note_content_hash(content))
+                .bind(&moved.title).bind(&moved.permalink).bind(&moved.note_type)
+                .bind(&moved.folder).bind(note_id).bind(&command.project_id)
+                .execute(&mut **tx).await?;
+        } else {
+            sqlx::query("UPDATE notes SET content = $1, confidence = $2, content_hash = $3, updated_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') WHERE id = $4 AND project_id = $5")
+                .bind(content).bind(confidence).bind(note_content_hash(content))
+                .bind(note_id).bind(&command.project_id).execute(&mut **tx).await?;
+        }
         let note = locked_note(tx, note_id, &command.project_id).await?;
         let seq = next_sequence(tx, &command.project_id, note_id).await?;
         let (content_before, content_after) =
@@ -420,6 +459,9 @@ fn validate_command(command: &NoteRevisionMutation) -> Result<()> {
         ) | (
             NoteRevisionEventKind::Updated | NoteRevisionEventKind::ConfidenceChanged,
             NoteRevisionDesiredState::Existing { .. }
+        ) | (
+            NoteRevisionEventKind::Updated,
+            NoteRevisionDesiredState::ExistingWithMove { .. }
         ) | (
             NoteRevisionEventKind::Deleted,
             NoteRevisionDesiredState::Delete
