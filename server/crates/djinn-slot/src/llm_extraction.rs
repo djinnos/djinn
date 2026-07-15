@@ -40,7 +40,7 @@ use djinn_db::{
 };
 use djinn_provider::provider::{LlmProvider, TelemetryMeta, create_provider};
 use djinn_provider::{CompletionRequest, complete, resolve_memory_provider_for_user};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
@@ -100,6 +100,65 @@ const EXTRACTION_LLM_TIMEOUT: std::time::Duration = std::time::Duration::from_se
 const NO_LLM_PROVIDER_WARNING: &str =
     "llm_extraction: no LLM provider available; skipping extraction";
 const EXTRACTION_SKIPPED_REASON: &str = "extraction completed without durable note output";
+
+/// Truthful terminal state supplied to post-session knowledge extraction.
+///
+/// This is deliberately separate from session history: callers without a
+/// terminal report must use [`TerminalExtractionOutcome::UnknownHistorical`]
+/// instead of deriving a verdict from incomplete evidence.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TerminalExtractionContext {
+    pub outcome: TerminalExtractionOutcome,
+    /// Present only when terminal task-run data explicitly recorded a review
+    /// verdict. `None` means that no review decision may be inferred.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review_decision: Option<TerminalReviewDecision>,
+}
+
+impl TerminalExtractionContext {
+    /// Deliberate context-free compatibility policy for historical callers.
+    pub const fn unknown_historical() -> Self {
+        Self {
+            outcome: TerminalExtractionOutcome::UnknownHistorical,
+            review_decision: None,
+        }
+    }
+}
+
+impl Default for TerminalExtractionContext {
+    fn default() -> Self {
+        Self::unknown_historical()
+    }
+}
+
+/// Final task-run outcome relevant to interpreting extracted knowledge.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum TerminalExtractionOutcome {
+    Completed,
+    Parked {
+        classification: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
+    },
+    Failed {
+        classification: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
+    },
+    UnknownHistorical,
+}
+
+/// An explicitly recorded review decision, never an inferred one.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "verdict", rename_all = "snake_case")]
+pub enum TerminalReviewDecision {
+    Approved,
+    Rejected {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
+    },
+}
 
 enum LlmExtractionProviderResolution {
     Provider(Box<dyn LlmProvider>),
@@ -254,6 +313,55 @@ async fn resolve_creator_scoped_llm_extraction_provider(
     .await
 }
 
+fn render_terminal_context(context: &TerminalExtractionContext) -> String {
+    let outcome = match &context.outcome {
+        TerminalExtractionOutcome::Completed => "completed successfully".to_string(),
+        TerminalExtractionOutcome::Parked {
+            classification,
+            reason,
+        } => format!(
+            "parked (classification: {classification}; reason: {})",
+            reason.as_deref().unwrap_or("not recorded")
+        ),
+        TerminalExtractionOutcome::Failed {
+            classification,
+            reason,
+        } => format!(
+            "failed (classification: {classification}; reason: {})",
+            reason.as_deref().unwrap_or("not recorded")
+        ),
+        TerminalExtractionOutcome::UnknownHistorical => {
+            "unknown/historical; no terminal verdict was supplied".to_string()
+        }
+    };
+    let review = match &context.review_decision {
+        Some(TerminalReviewDecision::Approved) => "approved".to_string(),
+        Some(TerminalReviewDecision::Rejected { reason }) => format!(
+            "rejected (reason: {})",
+            reason.as_deref().unwrap_or("not recorded")
+        ),
+        None => "no explicit review decision recorded; do not infer one".to_string(),
+    };
+    let guidance = match (&context.outcome, &context.review_decision) {
+        (_, Some(TerminalReviewDecision::Rejected { .. }))
+        | (
+            TerminalExtractionOutcome::Parked { .. } | TerminalExtractionOutcome::Failed { .. },
+            _,
+        ) => {
+            "This rejected, parked, or failed work is evidence of a failed approach or pitfall. Extract pitfalls or failed cases when supported; do not frame it as a neutral or successful pattern."
+        }
+        (TerminalExtractionOutcome::Completed, _) => {
+            "Completed work may support successful cases or patterns, but only when the transcript provides clear evidence."
+        }
+        (TerminalExtractionOutcome::UnknownHistorical, _) => {
+            "Terminal outcome is unknown. Do not assume success, failure, or a review verdict; rely only on explicit session evidence."
+        }
+    };
+    format!(
+        "Outcome: {outcome}\nExplicit review decision: {review}\nExtraction guidance: {guidance}"
+    )
+}
+
 /// Render the extraction prompt the LLM sees.
 ///
 /// Exposed (not inlined into `run_llm_extraction_inner`) so the prompt schema
@@ -269,10 +377,13 @@ fn build_extraction_prompt(
     taxonomy_json: &str,
     transcript: &str,
     scope_json: &str,
+    terminal_context: &TerminalExtractionContext,
 ) -> String {
+    let terminal_context = render_terminal_context(terminal_context);
     format!(
         "Task: {title}\n\
          Description: {description}\n\n\
+         TERMINAL TASK-RUN CONTEXT (authoritative; do not infer absent verdicts):\n{terminal_context}\n\
          Session event counts: {taxonomy_json}\n\n\
          Session transcript (excerpt — assistant reasoning, tool actions, and results; \
          this is the actual work to distill knowledge from):\n{transcript}\n\n\
@@ -305,6 +416,7 @@ fn build_extraction_prompt(
         description = description,
         taxonomy_json = taxonomy_json,
         scope_json = scope_json,
+        terminal_context = terminal_context,
     )
 }
 
@@ -883,10 +995,9 @@ impl CandidateLookup {
 
 /// Run LLM-based knowledge extraction for a completed session.
 ///
-/// Loads the session, resolves its task and project, calls the LLM to extract
-/// structured notes, and writes each note via `NoteRepository::create`.
-///
-/// All errors are logged as warnings; nothing propagates to the caller.
+/// Context-free compatibility entry point. It deliberately supplies an
+/// unknown/historical outcome and no review decision rather than fabricating
+/// a terminal verdict from session history.
 pub async fn run_llm_extraction(
     session_id: String,
     taxonomy: SessionTaxonomy,
@@ -896,6 +1007,7 @@ pub async fn run_llm_extraction(
         session_id,
         taxonomy,
         app_state,
+        TerminalExtractionContext::unknown_historical(),
         None,
         #[cfg(any(test, feature = "test-support"))]
         None,
@@ -903,8 +1015,29 @@ pub async fn run_llm_extraction(
     .await;
 }
 
-/// Test-only entry point that injects a pre-built LLM provider, bypassing
-/// credential loading and memory provider resolution.
+/// Run LLM extraction with terminal task-run context supplied by the live completion path.
+///
+/// Unlike [`run_llm_extraction`], this preserves the reported outcome and any
+/// explicit review decision in the extraction prompt.
+pub async fn run_llm_extraction_with_terminal_context(
+    session_id: String,
+    taxonomy: SessionTaxonomy,
+    app_state: SlotContext,
+    terminal_context: TerminalExtractionContext,
+) {
+    run_llm_extraction_inner(
+        session_id,
+        taxonomy,
+        app_state,
+        terminal_context,
+        None,
+        #[cfg(any(test, feature = "test-support"))]
+        None,
+    )
+    .await;
+}
+
+/// Test-only compatibility entry point that supplies unknown terminal context.
 #[cfg(any(test, feature = "test-support"))]
 pub async fn run_llm_extraction_with_provider(
     session_id: String,
@@ -912,9 +1045,18 @@ pub async fn run_llm_extraction_with_provider(
     app_state: SlotContext,
     provider: Arc<dyn LlmProvider>,
 ) {
-    run_llm_extraction_inner(session_id, taxonomy, app_state, Some(provider), None).await;
+    run_llm_extraction_inner(
+        session_id,
+        taxonomy,
+        app_state,
+        TerminalExtractionContext::unknown_historical(),
+        Some(provider),
+        None,
+    )
+    .await;
 }
 
+/// Test-only compatibility entry point that supplies unknown terminal context.
 #[cfg(any(test, feature = "test-support"))]
 pub async fn run_llm_extraction_with_provider_and_candidate_lookup(
     session_id: String,
@@ -927,6 +1069,7 @@ pub async fn run_llm_extraction_with_provider_and_candidate_lookup(
         session_id,
         taxonomy,
         app_state,
+        TerminalExtractionContext::unknown_historical(),
         Some(provider),
         Some(candidate_lookup_override),
     )
@@ -941,6 +1084,7 @@ async fn run_llm_extraction_inner(
     session_id: String,
     mut taxonomy: SessionTaxonomy,
     app_state: SlotContext,
+    terminal_context: TerminalExtractionContext,
     provider_override: Option<Arc<dyn LlmProvider>>,
     #[cfg(any(test, feature = "test-support"))] candidate_lookup_override: Option<
         CandidateLookupOverride,
@@ -1137,6 +1281,7 @@ async fn run_llm_extraction_inner(
         &taxonomy_json,
         &transcript,
         &scope_json,
+        &terminal_context,
     );
     let completion = tokio::time::timeout(
         EXTRACTION_LLM_TIMEOUT,
@@ -2876,11 +3021,82 @@ mod tests {
         );
     }
     #[test]
+    fn terminal_prompt_distinguishes_completed_review_rejection_and_ci_failure() {
+        let completed = build_extraction_prompt(
+            "title",
+            "desc",
+            "{}",
+            "transcript",
+            "[]",
+            &TerminalExtractionContext {
+                outcome: TerminalExtractionOutcome::Completed,
+                review_decision: None,
+            },
+        );
+        let review_rejected = build_extraction_prompt(
+            "title",
+            "desc",
+            "{}",
+            "transcript",
+            "[]",
+            &TerminalExtractionContext {
+                outcome: TerminalExtractionOutcome::Parked {
+                    classification: "acceptance_criteria".to_string(),
+                    reason: Some("required evidence missing".to_string()),
+                },
+                review_decision: Some(TerminalReviewDecision::Rejected {
+                    reason: Some("acceptance criteria rejected".to_string()),
+                }),
+            },
+        );
+        let ci_failed = build_extraction_prompt(
+            "title",
+            "desc",
+            "{}",
+            "transcript",
+            "[]",
+            &TerminalExtractionContext {
+                outcome: TerminalExtractionOutcome::Parked {
+                    classification: "ci_failure".to_string(),
+                    reason: Some("Quality Gate failed".to_string()),
+                },
+                review_decision: None,
+            },
+        );
+
+        assert!(completed.contains("Outcome: completed successfully"));
+        assert!(completed.contains("no explicit review decision recorded; do not infer one"));
+        assert!(review_rejected.contains("classification: acceptance_criteria"));
+        assert!(review_rejected.contains("Explicit review decision: rejected"));
+        assert!(ci_failed.contains("classification: ci_failure"));
+        assert!(!ci_failed.contains("Explicit review decision: rejected"));
+        assert!(review_rejected.contains("failed approach or pitfall"));
+        assert!(ci_failed.contains("do not frame it as a neutral or successful pattern"));
+    }
+
+    #[test]
+    fn terminal_context_serializes_unknown_without_a_fabricated_verdict() {
+        let context = TerminalExtractionContext::unknown_historical();
+        assert_eq!(context.review_decision, None);
+        assert_eq!(
+            serde_json::to_value(context).expect("terminal context serializes"),
+            serde_json::json!({"outcome": {"kind": "unknown_historical"}})
+        );
+    }
+
+    #[test]
     fn prompt_template_requires_applies_when_field() {
         // The full extraction prompt must explicitly request `applies_when`
         // and the ADR-054 sections. (Reuse the production prompt builder so
         // the test cannot drift from the live template.)
-        let prompt = build_extraction_prompt("title-x", "desc-y", "{}", "(none)", "[]");
+        let prompt = build_extraction_prompt(
+            "title-x",
+            "desc-y",
+            "{}",
+            "(none)",
+            "[]",
+            &TerminalExtractionContext::unknown_historical(),
+        );
         assert!(
             prompt.contains("\"applies_when\""),
             "prompt must include the applies_when field name"
