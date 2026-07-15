@@ -319,7 +319,7 @@ pub enum NormalizationResult {
 /// This deliberately compares server identities only; MCP client negotiation
 /// never participates in compatibility retention.
 pub fn trap_applies(lifecycle: &TrapLifecycle, current: &ServerReleaseVersion) -> bool {
-    current < &lifecycle.remove_after
+    &lifecycle.introduced_in <= current && current < &lifecycle.remove_after
 }
 
 /// Apply active, Djinn-authored traps in deterministic order before schema validation.
@@ -533,13 +533,14 @@ pub fn validate_registry(
     let mut keys = HashSet::new();
     let mut cases = HashSet::new();
     for trap in registry {
-        let (l, old, tool, replacement_tool, replacement_parameter) = match trap {
+        let (l, old, tool, replacement_tool, replacement_parameter, remedy) = match trap {
             CompatibilityTrap::RenamedTool(t) => (
                 &t.lifecycle,
                 t.old_name,
                 t.old_name,
                 Some(t.replacement_tool),
                 None,
+                t.remedy,
             ),
             CompatibilityTrap::RemovedTool(t) => (
                 &t.lifecycle,
@@ -547,6 +548,7 @@ pub fn validate_registry(
                 t.old_name,
                 t.replacement_tool,
                 None,
+                t.remedy,
             ),
             CompatibilityTrap::RenamedParameter(t) => (
                 &t.lifecycle,
@@ -554,9 +556,10 @@ pub fn validate_registry(
                 t.tool,
                 None,
                 Some(t.replacement_parameter),
+                t.remedy,
             ),
             CompatibilityTrap::RemovedParameter(t) => {
-                (&t.lifecycle, t.old_name, t.tool, None, None)
+                (&t.lifecycle, t.old_name, t.tool, None, None, t.remedy)
             }
         };
         if !ids.insert(l.id) || !keys.insert((tool, old)) {
@@ -570,6 +573,21 @@ pub fn validate_registry(
             || l.deletion.fixture_case_ids.is_empty()
         {
             return Err("invalid release-note or deletion bundle".into());
+        }
+        if l.release_note.owner != ReleaseNoteOwner::McpApi {
+            return Err("release-note owner must be mcp_api".into());
+        }
+        let expected_remedy = match trap {
+            CompatibilityTrap::RenamedTool(_) => TrustedRemedyCode::CallReplacementTool,
+            CompatibilityTrap::RemovedTool(t) if t.replacement_tool.is_some() => {
+                TrustedRemedyCode::CallReplacementTool
+            }
+            CompatibilityTrap::RemovedTool(_) => TrustedRemedyCode::NoReplacement,
+            CompatibilityTrap::RenamedParameter(_) => TrustedRemedyCode::UseReplacementParameter,
+            CompatibilityTrap::RemovedParameter(_) => TrustedRemedyCode::OmitRemovedParameter,
+        };
+        if remedy != expected_remedy {
+            return Err("trap remedy is not trusted for its surface".into());
         }
         for case in l.deletion.fixture_case_ids {
             if !cases.insert(*case) {
@@ -587,12 +605,20 @@ pub fn validate_registry(
         {
             return Err("replacement tool is not current".into());
         }
-        if let Some(parameter) = replacement_parameter {
+        if matches!(
+            trap,
+            CompatibilityTrap::RenamedParameter(_) | CompatibilityTrap::RemovedParameter(_)
+        ) {
             let surface = current_surface
                 .iter()
                 .find(|s| s.name == tool)
                 .ok_or("parameter tool is not current")?;
-            if !surface.parameters.contains(parameter) {
+            if surface.parameters.contains(old) {
+                return Err("obsolete parameter is advertised".into());
+            }
+            if let Some(parameter) = replacement_parameter
+                && !surface.parameters.contains(parameter)
+            {
                 return Err("replacement parameter is not current".into());
             }
         }
