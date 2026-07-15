@@ -1638,4 +1638,435 @@ mod tests {
             }
         }
     }
+
+    // -------------------------------------------------------------------
+    // extension_load.project_probe — focused dispatch/tool tests
+    //
+    // These tests prove the five required cases:
+    //   1. admin gate fires before project resolution
+    //   2. explicit selection / no-global-fan-out (omitted or empty
+    //      check_names never probes projects even with project set)
+    //   3. one selected project per invocation (probe invoked exactly once)
+    //   4. exact canonical projection of returned persisted V1 rows
+    //   5. clear missing bridge/project/path failure messages
+    // -------------------------------------------------------------------
+
+    use crate::server::DjinnMcpServer;
+    use crate::state::stubs::test_mcp_state;
+    use crate::test_support::RecordingExtensionDiagnosticsProbe;
+    use djinn_core::events::EventBus;
+    use djinn_core::extension_diagnostics::{
+        ExtensionLoadDiagnosticV1, ExtensionLoadPhase, ExtensionLoadRemedyCode,
+        ExtensionLoadSeverity, ExtensionLoadSourceKind,
+    };
+    use djinn_core::paths::project_dir;
+    use djinn_db::ProjectRepository;
+    use serde_json::json;
+    use std::sync::Arc;
+
+    /// RAII guard that removes a synthesized project workspace directory
+    /// on drop, since those paths live outside any TempDir.
+    struct ProjectDirCleanup {
+        path: std::path::PathBuf,
+    }
+    impl Drop for ProjectDirCleanup {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.path);
+        }
+    }
+
+    /// Create a project in the DB and its derived workspace directory on
+    /// disk, returning the project row + a cleanup guard. The owner/repo
+    /// are unique per call to avoid cross-test races.
+    async fn seed_project_with_workspace(
+        db: &djinn_db::Database,
+    ) -> (djinn_core::models::Project, ProjectDirCleanup) {
+        let id = uuid::Uuid::now_v7();
+        let owner = format!("doctor-probe-{id}");
+        let repo = format!("repo-{id}");
+        let project = ProjectRepository::new(db.clone(), EventBus::noop())
+            .create(&repo, &owner, &repo)
+            .await
+            .unwrap();
+        let dir = project_dir(&project.github_owner, &project.github_repo);
+        std::fs::create_dir_all(&dir).unwrap();
+        let guard = ProjectDirCleanup { path: dir };
+        (project, guard)
+    }
+
+    /// Build a server wired with the recording probe.
+    async fn server_with_recording_probe(
+        db: djinn_db::Database,
+        probe: Arc<RecordingExtensionDiagnosticsProbe>,
+    ) -> DjinnMcpServer {
+        let state = test_mcp_state(db).with_extension_diagnostics_probe(
+            probe as Arc<dyn crate::bridge::ExtensionDiagnosticsProbeOps>,
+        );
+        DjinnMcpServer::new(state)
+    }
+
+    /// Construct a deterministic V1 diagnostic for assertion purposes.
+    fn sample_v1_diagnostic(project_id: &str) -> ExtensionLoadDiagnosticV1 {
+        ExtensionLoadDiagnosticV1::new_v1(
+            "diag-0001".to_owned(),
+            project_id.to_owned(),
+            None,
+            None,
+            "attempt-0001".to_owned(),
+            ExtensionLoadSourceKind::ProjectMcp,
+            "my-mcp-server".to_owned(),
+            ExtensionLoadPhase::Handshake,
+            ExtensionLoadSeverity::Error,
+            "server did not respond to initialize".to_owned(),
+            ExtensionLoadRemedyCode::CheckServer,
+            "Verify the MCP server process is running and healthy.".to_owned(),
+            "2025-01-01T00:00:00Z".to_owned(),
+            "2025-01-01T00:00:01Z".to_owned(),
+            "2025-01-01T00:00:02Z".to_owned(),
+        )
+    }
+
+    /// Case 1: admin gate fires before project resolution.
+    ///
+    /// A non-admin caller selecting extension_load.project_probe with a
+    /// project must get a structured auth error. Critically, the recording
+    /// probe must have zero calls — authorization was enforced before any
+    /// project resolution or probe invocation.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn project_probe_admin_gate_before_project_resolution() {
+        let db = djinn_db::Database::open_in_memory().unwrap();
+        let (project, _guard) = seed_project_with_workspace(&db).await;
+
+        // Create a non-admin user.
+        let user_repo = djinn_db::UserRepository::new(db.clone());
+        let user = user_repo
+            .upsert_from_github(888_111, "nonadmin-probe-test", None, None)
+            .await
+            .unwrap();
+        assert!(!user.is_admin);
+
+        let probe = Arc::new(RecordingExtensionDiagnosticsProbe::default());
+        let server = server_with_recording_probe(db, probe.clone()).await;
+
+        let result = djinn_core::auth_context::SESSION_USER_ID
+            .scope(
+                Some(user.id),
+                server.dispatch_tool(
+                    "doctor_run",
+                    json!({
+                        "check_names": [EXTENSION_DIAGNOSTICS_PROBE_NAME],
+                        "project": project.slug(),
+                    }),
+                ),
+            )
+            .await;
+
+        // The dispatch must succeed (it wraps the structured error in a Value).
+        let resp = result.expect("dispatch_tool returns the response Value");
+        assert_eq!(resp["ok"], false);
+        let error = resp["error"].as_str().expect("error string");
+        assert!(
+            error.contains("admin"),
+            "error should mention admin: {error}"
+        );
+
+        // The probe was never invoked — authorization happened first.
+        assert!(
+            probe.calls().is_empty(),
+            "probe must not be invoked when auth fails before resolution"
+        );
+    }
+
+    /// Case 2: omitting or empty check_names never fans out to projects,
+    /// even when a project is supplied.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn project_probe_no_global_fan_out_without_explicit_selection() {
+        let db = djinn_db::Database::open_in_memory().unwrap();
+        let (project, _guard) = seed_project_with_workspace(&db).await;
+
+        let probe = Arc::new(RecordingExtensionDiagnosticsProbe::default());
+        let server = server_with_recording_probe(db, probe.clone()).await;
+
+        // Omitted check_names — should run all *global* checks but never
+        // the extension probe, even though project is set.
+        let resp = server
+            .dispatch_tool("doctor_run", json!({ "project": project.slug() }))
+            .await
+            .expect("dispatch");
+        assert_eq!(resp["ok"], true);
+        // The registered list includes the probe name (it's always listed),
+        // but no result for it appears since it wasn't explicitly selected.
+        let results = resp["results"].as_array().unwrap();
+        assert!(
+            results
+                .iter()
+                .all(|r| { r["check"]["name"].as_str() != Some(EXTENSION_DIAGNOSTICS_PROBE_NAME) }),
+            "extension probe must not appear in results when not explicitly selected"
+        );
+        assert!(
+            probe.calls().is_empty(),
+            "probe must not fire on a global run"
+        );
+
+        // Empty check_names — same behavior: no fan-out.
+        let resp = server
+            .dispatch_tool(
+                "doctor_run",
+                json!({ "check_names": [], "project": project.slug() }),
+            )
+            .await
+            .expect("dispatch");
+        assert_eq!(resp["ok"], true);
+        let results = resp["results"].as_array().unwrap();
+        assert!(
+            results
+                .iter()
+                .all(|r| { r["check"]["name"].as_str() != Some(EXTENSION_DIAGNOSTICS_PROBE_NAME) }),
+            "extension probe must not appear in results with empty check_names"
+        );
+        assert!(
+            probe.calls().is_empty(),
+            "probe must not fire on empty check_names"
+        );
+    }
+
+    /// Case 3: exactly one project, one probe invocation.
+    ///
+    /// When the probe is explicitly selected with a valid project + workspace,
+    /// it is invoked exactly once with the canonical project_id and workspace
+    /// path derived from project_dir(owner, repo).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn project_probe_invoked_once_for_selected_project() {
+        let db = djinn_db::Database::open_in_memory().unwrap();
+        let (project, _guard) = seed_project_with_workspace(&db).await;
+        let expected_workspace = project_dir(&project.github_owner, &project.github_repo);
+
+        let probe = Arc::new(RecordingExtensionDiagnosticsProbe::default());
+        let server = server_with_recording_probe(db, probe.clone()).await;
+
+        let resp = server
+            .dispatch_tool(
+                "doctor_run",
+                json!({
+                    "check_names": [EXTENSION_DIAGNOSTICS_PROBE_NAME],
+                    "project": project.slug(),
+                }),
+            )
+            .await
+            .expect("dispatch");
+
+        assert_eq!(resp["ok"], true);
+        let calls = probe.calls();
+        assert_eq!(calls.len(), 1, "probe must be invoked exactly once");
+        assert_eq!(calls[0].project_id, project.id);
+        assert_eq!(calls[0].canonical_workspace, expected_workspace);
+    }
+
+    /// Case 4: exact canonical projection of returned persisted V1 rows.
+    ///
+    /// The probe returns V1 diagnostics and the doctor response must project
+    /// them directly — no duplicate doctor_findings rows, no reconstruction.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn project_probe_projects_returned_rows_canonically() {
+        let db = djinn_db::Database::open_in_memory().unwrap();
+        let (project, _guard) = seed_project_with_workspace(&db).await;
+
+        let diag = sample_v1_diagnostic(&project.id);
+        let probe = Arc::new(RecordingExtensionDiagnosticsProbe::new(vec![diag]));
+        let server = server_with_recording_probe(db, probe.clone()).await;
+
+        let resp = server
+            .dispatch_tool(
+                "doctor_run",
+                json!({
+                    "check_names": [EXTENSION_DIAGNOSTICS_PROBE_NAME],
+                    "project": project.slug(),
+                }),
+            )
+            .await
+            .expect("dispatch");
+
+        assert_eq!(resp["ok"], true);
+        let results = resp["results"].as_array().unwrap();
+        let probe_result = results
+            .iter()
+            .find(|r| r["check"]["name"].as_str() == Some(EXTENSION_DIAGNOSTICS_PROBE_NAME))
+            .expect("probe result present");
+        assert_eq!(probe_result["ran"], true);
+
+        // No duplicate doctor_findings rows.
+        assert_eq!(
+            probe_result["findings"].as_array().unwrap().len(),
+            0,
+            "extension probe must not create doctor_findings rows"
+        );
+
+        // Exactly one extension_diagnostics entry — the direct projection.
+        let diags = probe_result["extension_diagnostics"]
+            .as_array()
+            .expect("extension_diagnostics array");
+        assert_eq!(diags.len(), 1);
+        let d = &diags[0];
+        assert_eq!(d["diagnostic_id"], "diag-0001");
+        assert_eq!(d["source_kind"], "project_mcp");
+        assert_eq!(d["source_key"], "my-mcp-server");
+        assert_eq!(d["phase"], "handshake");
+        assert_eq!(d["summary"], "server did not respond to initialize");
+        assert_eq!(d["remedy_code"], "check_server");
+        assert_eq!(
+            d["remedy"],
+            "Verify the MCP server process is running and healthy."
+        );
+        assert_eq!(d["severity"], "error");
+        assert_eq!(d["occurrence_count"], 1);
+
+        // total_findings includes the canonical extension finding.
+        assert_eq!(resp["total_findings"], 1);
+
+        // Probe invoked exactly once.
+        assert_eq!(probe.calls().len(), 1);
+    }
+
+    /// Case 5: clear failure messages for missing bridge, project, path, and arg.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn project_probe_missing_bridge_project_path_failures() {
+        // ── 5a: missing bridge (probe not wired) ──
+        {
+            let db = djinn_db::Database::open_in_memory().unwrap();
+            let (project, _guard) = seed_project_with_workspace(&db).await;
+            // State without the probe wired.
+            let state = test_mcp_state(db);
+            let server = DjinnMcpServer::new(state);
+
+            let resp = server
+                .dispatch_tool(
+                    "doctor_run",
+                    json!({
+                        "check_names": [EXTENSION_DIAGNOSTICS_PROBE_NAME],
+                        "project": project.slug(),
+                    }),
+                )
+                .await
+                .expect("dispatch");
+
+            assert_eq!(resp["ok"], true);
+            let results = resp["results"].as_array().unwrap();
+            let probe_result = results
+                .iter()
+                .find(|r| r["check"]["name"].as_str() == Some(EXTENSION_DIAGNOSTICS_PROBE_NAME))
+                .expect("probe result present");
+            assert_eq!(probe_result["ran"], false);
+            let error = probe_result["error"].as_str().expect("error string");
+            assert!(
+                error.contains("not configured"),
+                "missing bridge error should say 'not configured': {error}"
+            );
+        }
+
+        // ── 5b: missing project ──
+        {
+            let db = djinn_db::Database::open_in_memory().unwrap();
+            let probe = Arc::new(RecordingExtensionDiagnosticsProbe::default());
+            let server = server_with_recording_probe(db, probe.clone()).await;
+
+            let resp = server
+                .dispatch_tool(
+                    "doctor_run",
+                    json!({
+                        "check_names": [EXTENSION_DIAGNOSTICS_PROBE_NAME],
+                        "project": "nonexistent/does-not-exist",
+                    }),
+                )
+                .await
+                .expect("dispatch");
+
+            assert_eq!(resp["ok"], true);
+            let results = resp["results"].as_array().unwrap();
+            let probe_result = results
+                .iter()
+                .find(|r| r["check"]["name"].as_str() == Some(EXTENSION_DIAGNOSTICS_PROBE_NAME))
+                .expect("probe result present");
+            assert_eq!(probe_result["ran"], false);
+            let error = probe_result["error"].as_str().expect("error string");
+            assert!(
+                error.contains("project not found"),
+                "missing project error should say 'project not found': {error}"
+            );
+            // Probe was never invoked because the project didn't resolve.
+            assert!(probe.calls().is_empty());
+        }
+
+        // ── 5c: project resolved but workspace path doesn't exist ──
+        {
+            let db = djinn_db::Database::open_in_memory().unwrap();
+            // Create project in DB but do NOT create the workspace directory.
+            let id = uuid::Uuid::now_v7();
+            let owner = format!("doctor-probe-nopath-{id}");
+            let repo = format!("repo-{id}");
+            let project = ProjectRepository::new(db.clone(), EventBus::noop())
+                .create(&repo, &owner, &repo)
+                .await
+                .unwrap();
+
+            let probe = Arc::new(RecordingExtensionDiagnosticsProbe::default());
+            let server = server_with_recording_probe(db, probe.clone()).await;
+
+            let resp = server
+                .dispatch_tool(
+                    "doctor_run",
+                    json!({
+                        "check_names": [EXTENSION_DIAGNOSTICS_PROBE_NAME],
+                        "project": project.slug(),
+                    }),
+                )
+                .await
+                .expect("dispatch");
+
+            assert_eq!(resp["ok"], true);
+            let results = resp["results"].as_array().unwrap();
+            let probe_result = results
+                .iter()
+                .find(|r| r["check"]["name"].as_str() == Some(EXTENSION_DIAGNOSTICS_PROBE_NAME))
+                .expect("probe result present");
+            assert_eq!(probe_result["ran"], false);
+            let error = probe_result["error"].as_str().expect("error string");
+            assert!(
+                error.contains("not an existing directory"),
+                "missing path error should mention 'not an existing directory': {error}"
+            );
+            // Probe was never invoked because the path didn't exist.
+            assert!(probe.calls().is_empty());
+        }
+
+        // ── 5d: probe selected but no project supplied ──
+        {
+            let db = djinn_db::Database::open_in_memory().unwrap();
+            let probe = Arc::new(RecordingExtensionDiagnosticsProbe::default());
+            let server = server_with_recording_probe(db, probe.clone()).await;
+
+            let resp = server
+                .dispatch_tool(
+                    "doctor_run",
+                    json!({
+                        "check_names": [EXTENSION_DIAGNOSTICS_PROBE_NAME],
+                    }),
+                )
+                .await
+                .expect("dispatch");
+
+            assert_eq!(resp["ok"], true);
+            let results = resp["results"].as_array().unwrap();
+            let probe_result = results
+                .iter()
+                .find(|r| r["check"]["name"].as_str() == Some(EXTENSION_DIAGNOSTICS_PROBE_NAME))
+                .expect("probe result present");
+            assert_eq!(probe_result["ran"], false);
+            let error = probe_result["error"].as_str().expect("error string");
+            assert!(
+                error.contains("project is required"),
+                "missing project arg error should say 'project is required': {error}"
+            );
+            assert!(probe.calls().is_empty());
+        }
+    }
 }
