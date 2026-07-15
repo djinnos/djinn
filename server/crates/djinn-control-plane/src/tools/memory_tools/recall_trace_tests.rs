@@ -29,8 +29,8 @@ mod tests {
 
     use djinn_core::events::{DjinnEventEnvelope, EventBus};
     use djinn_db::{
-        Database, EpicCreateInput, EpicRepository, NoteRepository, ProjectRepository,
-        TaskRepository,
+        Database, EffectiveCreatorProvenance, EpicCreateInput, EpicRepository, NoteRepository,
+        ProjectRepository, TaskRepository, UserRepository,
         repositories::retrieval_trace::{
             CandidateOutcome, CreateRetrievalTraceParams, RetrievalTraceEntryPoint,
             RetrievalTraceRepository, SkippedReason, TraceCandidate,
@@ -52,6 +52,7 @@ mod tests {
         _tmp: tempfile::TempDir,
         project_id: String,
         project_slug: String,
+        creator_id: String,
     }
 
     fn event_bus_for(tx: &broadcast::Sender<DjinnEventEnvelope>) -> EventBus {
@@ -100,6 +101,10 @@ mod tests {
             .create("test-owner", "test-project", "test-project")
             .await
             .unwrap();
+        let creator = UserRepository::new(db.clone())
+            .upsert_from_github(999_981, "recall-trace-test-user", None, None)
+            .await
+            .unwrap();
         let server = DjinnMcpServer::new(test_mcp_state(db, &tx));
         let project_id = project.id.clone();
         let project_slug = project.slug();
@@ -108,6 +113,7 @@ mod tests {
             _tmp: tmp,
             project_id,
             project_slug,
+            creator_id: creator.id,
         }
     }
 
@@ -231,6 +237,7 @@ mod tests {
     async fn create_task_with_scope(
         server: &DjinnMcpServer,
         project_id: &str,
+        creator_id: &str,
         description: &str,
     ) -> djinn_core::models::Task {
         let db = server.state.db().clone();
@@ -256,9 +263,14 @@ mod tests {
             .unwrap();
         let task_repo = TaskRepository::new(db, events);
         task_repo
-            .create_in_project(
+            .create_in_project_with_provenance(
                 project_id,
                 Some(&epic.id),
+                EffectiveCreatorProvenance {
+                    explicit_user_id: Some(creator_id),
+                    source_task_id: None,
+                    proposal_id: None,
+                },
                 "test-task",
                 description,
                 "test design",
@@ -290,6 +302,7 @@ mod tests {
         let task = create_task_with_scope(
             &setup.server,
             project_id,
+            &setup.creator_id,
             "Touched server/src/server/state/mod.rs during this change.",
         )
         .await;
