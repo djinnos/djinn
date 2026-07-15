@@ -186,14 +186,9 @@ fn parse_env_u64(
     default: u64,
 ) -> Result<u64, RetrievalHealthConfigError> {
     match selected_env_value(canonical_var, alias_var) {
-        Some((var, value)) => {
-            value
-                .parse::<u64>()
-                .map_err(|_| RetrievalHealthConfigError::InvalidEnvValue {
-                    var,
-                    value,
-                })
-        }
+        Some((var, value)) => value
+            .parse::<u64>()
+            .map_err(|_| RetrievalHealthConfigError::InvalidEnvValue { var, value }),
         None => Ok(default),
     }
 }
@@ -204,14 +199,9 @@ fn parse_env_f64(
     default: f64,
 ) -> Result<f64, RetrievalHealthConfigError> {
     match selected_env_value(canonical_var, alias_var) {
-        Some((var, value)) => {
-            value
-                .parse::<f64>()
-                .map_err(|_| RetrievalHealthConfigError::InvalidEnvValue {
-                    var,
-                    value,
-                })
-        }
+        Some((var, value)) => value
+            .parse::<f64>()
+            .map_err(|_| RetrievalHealthConfigError::InvalidEnvValue { var, value }),
         None => Ok(default),
     }
 }
