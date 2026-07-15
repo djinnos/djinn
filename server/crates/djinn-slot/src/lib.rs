@@ -41,6 +41,7 @@ pub use djinn_orchestration_types::slot::{
 mod actor;
 pub mod attempt_lifecycle;
 pub mod commands;
+pub mod extraction_replay_eval;
 pub mod finalize_handlers;
 pub mod finalize_types;
 pub mod helpers;
@@ -82,7 +83,8 @@ pub use llm_extraction::{
 };
 #[cfg(any(test, feature = "test-support"))]
 pub use llm_extraction::{
-    run_llm_extraction_with_provider, run_llm_extraction_with_provider_and_candidate_lookup,
+    capture_llm_extraction_replay, run_llm_extraction_with_provider,
+    run_llm_extraction_with_provider_and_candidate_lookup,
 };
 
 pub use memory_enrichment::{
