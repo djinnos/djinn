@@ -1,0 +1,36 @@
+version: 1
+scenarios:
+  - id: qa.taxonomy-valid
+    version: 1
+    enabled: true
+    profiles: [smoke-ci]
+    sources:
+      - kind: memory
+        id: design/5pfk-roadmap
+    primary_coverage: task.state-machine.legal-transitions
+    secondary_coverage: [reaper.slow-vs-crashed-discrimination]
+    execution:
+      kind: cargo-package
+      package: djinn-qa
+    isolation:
+      database: isolated
+      providers: isolated
+      channel: isolated
+    watch_paths: [server/crates/djinn-qa/src/taxonomy.rs]
+  - id: qa.cargo-test-target
+    version: 1
+    enabled: true
+    profiles: [smoke-ci]
+    sources:
+      - kind: incident
+        id: cargo-test-target-resolution
+    primary_coverage: reaper.slow-vs-crashed-discrimination
+    execution:
+      kind: cargo-package
+      package: djinn-core
+      test: cargo_target_runs_fixtures
+    isolation:
+      database: isolated
+      providers: isolated
+      channel: isolated
+    watch_paths: [server/crates/djinn-core/tests/cargo_target_runs_fixtures.rs]
