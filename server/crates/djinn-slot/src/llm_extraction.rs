@@ -1037,6 +1037,30 @@ pub async fn run_llm_extraction_with_terminal_context(
     .await;
 }
 
+/// Test-only contextual entry point with an injected provider.
+///
+/// This keeps production provider resolution intact while allowing the
+/// post-session orchestration test to inspect the exact prompt sent to the
+/// contextual extraction path.
+#[cfg(any(test, feature = "test-support"))]
+pub async fn run_llm_extraction_with_terminal_context_and_provider(
+    session_id: String,
+    taxonomy: SessionTaxonomy,
+    app_state: SlotContext,
+    terminal_context: TerminalExtractionContext,
+    provider: Arc<dyn LlmProvider>,
+) {
+    run_llm_extraction_inner(
+        session_id,
+        taxonomy,
+        app_state,
+        terminal_context,
+        Some(provider),
+        None,
+    )
+    .await;
+}
+
 /// Test-only compatibility entry point that supplies unknown terminal context.
 #[cfg(any(test, feature = "test-support"))]
 pub async fn run_llm_extraction_with_provider(

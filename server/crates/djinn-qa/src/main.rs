@@ -73,17 +73,20 @@ fn run(args: Vec<String>) -> Result<ExitCode, String> {
     };
     let taxonomy = Taxonomy::load(taxonomy.unwrap_or_else(|| root.join("qa/taxonomy.yaml")))
         .map_err(|error| error.to_string())?;
-    let inventory = match scenarios {
-        Some(path) => ScenarioInventory::load(path).map_err(|error| error.to_string())?,
-        None => empty_inventory(),
+    let scenario_path = scenarios.unwrap_or_else(|| root.join("qa/scenarios.yaml"));
+    let inventory = if scenario_path.is_file() {
+        ScenarioInventory::load(scenario_path).map_err(|error| error.to_string())?
+    } else {
+        empty_inventory()
     };
     inventory
         .validate(&taxonomy, &root)
         .map_err(|error| error.to_string())?;
-    let evidence_path = evidence;
-    let evidence_set = match &evidence_path {
-        Some(path) => EvidenceSet::load(path).map_err(|error| error.to_string())?,
-        None => empty_evidence(),
+    let evidence_path = evidence.unwrap_or_else(|| root.join("qa/evidence.yaml"));
+    let evidence_set = if evidence_path.is_file() {
+        EvidenceSet::load(&evidence_path).map_err(|error| error.to_string())?
+    } else {
+        empty_evidence()
     };
     evidence_set
         .validate(&taxonomy, &inventory)
@@ -98,7 +101,7 @@ fn run(args: Vec<String>) -> Result<ExitCode, String> {
             accepted_baseline_shas: baselines,
             ..Default::default()
         },
-        evidence_path.as_deref(),
+        evidence_path.is_file().then_some(evidence_path.as_path()),
     );
     let rendered = if format == "json" {
         serde_json::to_string_pretty(&rows).map_err(|error| error.to_string())? + "\n"
