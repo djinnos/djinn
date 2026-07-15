@@ -1,4 +1,9 @@
-use djinn_db::{NoteRepository, is_singleton};
+use djinn_db::{
+    NoteRepository, NoteRevisionCreateState, NoteRevisionDesiredState, NoteRevisionEventKind,
+    NoteRevisionMutation, NoteRevisionReason, TrustedNoteRevisionAttribution,
+    TrustedNoteRevisionProvenance, folder_for_type_with_status, is_singleton,
+    permalink_for_with_status,
+};
 
 use crate::server::DjinnMcpServer;
 use crate::tools::memory_tools::lifecycle::{
@@ -10,6 +15,17 @@ pub(super) fn note_repository(server: &DjinnMcpServer) -> NoteRepository {
     NoteRepository::new(server.state.db().clone(), server.state.event_bus())
         .with_embedding_provider(server.state.embedding_provider())
         .with_vector_store(server.state.vector_store())
+}
+
+pub(super) fn trusted_revision_context() -> Option<(
+    TrustedNoteRevisionAttribution,
+    TrustedNoteRevisionProvenance,
+)> {
+    let context = djinn_core::auth_context::current_revision_caller_context()?;
+    Some((
+        TrustedNoteRevisionAttribution::try_from(&context).ok()?,
+        TrustedNoteRevisionProvenance::try_from(&context).ok()?,
+    ))
 }
 
 pub(super) async fn maybe_update_singleton_note(
@@ -68,30 +84,38 @@ pub(super) async fn create_note(
         .map(|value| serde_json::to_string(value).unwrap_or_else(|_| "[]".into()))
         .unwrap_or_else(|| "[]".to_string());
 
-    let create_result = if params.scope_paths.is_some() {
-        repo.create_with_scope_and_retrieval_anchor(
-            project_id,
-            &params.title,
-            &params.content,
-            &params.note_type,
-            params.status.as_deref(),
-            tags_json,
-            &scope_paths_json,
-            params.retrieval_anchor.as_deref(),
-        )
-        .await
-    } else {
-        repo.create_with_status_and_retrieval_anchor(
-            project_id,
-            &params.title,
-            &params.content,
-            &params.note_type,
-            params.status.as_deref(),
-            tags_json,
-            params.retrieval_anchor.as_deref(),
-        )
-        .await
+    let Some((attribution, provenance)) = trusted_revision_context() else {
+        return MemoryNoteResponse::error("authenticated revision caller required");
     };
+    let create_result = repo
+        .mutate_with_revision(NoteRevisionMutation {
+            project_id: project_id.to_owned(),
+            note_id: Some(uuid::Uuid::now_v7().to_string()),
+            event_kind: NoteRevisionEventKind::Created,
+            desired: NoteRevisionDesiredState::Create(NoteRevisionCreateState {
+                title: params.title.clone(),
+                permalink: permalink_for_with_status(
+                    &params.note_type,
+                    &params.title,
+                    params.status.as_deref(),
+                ),
+                content: params.content.clone(),
+                note_type: params.note_type.clone(),
+                folder: folder_for_type_with_status(&params.note_type, params.status.as_deref())
+                    .to_owned(),
+                status: params.status.clone().unwrap_or_else(|| "active".to_owned()),
+                tags: tags_json.to_owned(),
+                retrieval_anchor: params.retrieval_anchor.clone(),
+                scope_paths: scope_paths_json,
+                confidence: 0.5,
+            }),
+            attribution,
+            provenance,
+            reason: NoteRevisionReason::new(params.reason.clone())
+                .expect("validated MCP mutation reason"),
+        })
+        .await
+        .map(|result| result.note.expect("created mutation returns note"));
 
     match create_result {
         Ok(note) => {

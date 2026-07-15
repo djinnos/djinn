@@ -103,7 +103,7 @@ pub use lifecycle::NoteStatus;
 pub use mutation::NoteRevisionEventForTest;
 pub use mutation::{
     NoteRevisionCreateState, NoteRevisionDesiredState, NoteRevisionMutation,
-    NoteRevisionMutationResult,
+    NoteRevisionMutationResult, PersistedNoteRevision,
 };
 
 /// Compact scope-overlap candidate row returned by

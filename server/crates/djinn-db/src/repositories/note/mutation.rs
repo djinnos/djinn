@@ -33,6 +33,24 @@ pub struct NoteRevisionEventForTest {
     pub reason: String,
 }
 
+/// Immutable ledger projection returned by the repository query surface.
+#[derive(Debug, Clone, PartialEq, sqlx::FromRow)]
+pub struct PersistedNoteRevision {
+    pub note_id: Option<String>,
+    pub actor_kind: String,
+    pub actor_id: Option<String>,
+    pub subsystem: Option<String>,
+    pub event_kind: String,
+    pub content_before: Option<String>,
+    pub content_after: Option<String>,
+    pub confidence_before: Option<f64>,
+    pub confidence_after: Option<f64>,
+    pub session_id: Option<String>,
+    pub task_id: Option<String>,
+    pub task_run_id: Option<String>,
+    pub reason: String,
+}
+
 /// Canonical final values for a created note. Updates intentionally use only
 /// `content` and `confidence`: existing public CRUD APIs retain ownership of
 /// the unrelated legacy note fields until their callers migrate.
@@ -346,6 +364,20 @@ impl NoteRepository {
             "SELECT actor_kind, subsystem, event_kind, content_before, content_after, \
              confidence_before, confidence_after, reason \
              FROM note_revision_events WHERE project_id = $1 ORDER BY reason",
+        )
+        .bind(project_id)
+        .fetch_all(self.db.pool())
+        .await
+        .map_err(Into::into)
+    }
+
+    /// Read immutable revision rows for a project through the repository.
+    pub async fn revision_events(&self, project_id: &str) -> Result<Vec<PersistedNoteRevision>> {
+        sqlx::query_as(
+            "SELECT note_id, actor_kind, actor_id, subsystem, event_kind, content_before, \
+             content_after, confidence_before, confidence_after, session_id, task_id, \
+             task_run_id, reason FROM note_revision_events WHERE project_id = $1 \
+             ORDER BY note_id, note_seq",
         )
         .bind(project_id)
         .fetch_all(self.db.pool())
