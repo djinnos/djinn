@@ -4,20 +4,38 @@
 mod common;
 
 use djinn_control_plane::test_support::McpTestHarness;
-use serde_json::json;
+use djinn_core::auth_context::{REVISION_CALLER_CONTEXT, TrustedRevisionCallerContext};
+use serde_json::{Value, json};
+
+async fn trusted_memory_write(harness: &McpTestHarness, arguments: Value) -> anyhow::Result<Value> {
+    let context = TrustedRevisionCallerContext::authenticated_agent("memory-health-search-fixture")
+        .expect("fixture caller identity is valid");
+    REVISION_CALLER_CONTEXT
+        .scope(Some(context), async {
+            harness.call_tool("memory_write", arguments).await
+        })
+        .await
+}
+
+fn assert_mutation_succeeded(response: &Value) {
+    assert!(
+        response.get("error").is_none() || response["error"].is_null(),
+        "memory_write returned error: {response}"
+    );
+}
 
 #[tokio::test]
 async fn mcp_memory_health_orphans_and_broken_links_shapes() {
     let harness = McpTestHarness::new().await;
     let project = "test/mcp-memory-health";
 
-    harness
-        .call_tool(
-            "memory_write",
-            json!({"project": project, "title": "Source", "content": "[[Missing Target]]", "reason": "seed health and search fixture", "type": "reference"}),
-        )
-        .await
-        .expect("memory_write should dispatch");
+    let source = trusted_memory_write(
+        &harness,
+        json!({"project": project, "title": "Source", "content": "[[Missing Target]]", "reason": "seed health and search fixture", "type": "reference"}),
+    )
+    .await
+    .expect("memory_write should dispatch");
+    assert_mutation_succeeded(&source);
 
     let health = harness
         .call_tool("memory_health", json!({"project": project}))
@@ -56,20 +74,20 @@ async fn no_regression_memory_search_ranking_notes_only() {
         .expect("proposal_create should dispatch");
     let _proposal_id = proposal["id"].as_str().expect("proposal id").to_string();
 
-    harness
-        .call_tool(
-            "memory_write",
-            json!({"project": project, "title": "Rust Note One", "content": "rust memory test", "reason": "seed health and search fixture", "type": "reference"}),
-        )
-        .await
-        .expect("memory_write one should dispatch");
-    harness
-        .call_tool(
-            "memory_write",
-            json!({"project": project, "title": "Rust Note Two", "content": "another rust note", "reason": "seed health and search fixture", "type": "adr"}),
-        )
-        .await
-        .expect("memory_write two should dispatch");
+    let note_one = trusted_memory_write(
+        &harness,
+        json!({"project": project, "title": "Rust Note One", "content": "rust memory test", "reason": "seed health and search fixture", "type": "reference"}),
+    )
+    .await
+    .expect("memory_write one should dispatch");
+    assert_mutation_succeeded(&note_one);
+    let note_two = trusted_memory_write(
+        &harness,
+        json!({"project": project, "title": "Rust Note Two", "content": "another rust note", "reason": "seed health and search fixture", "type": "adr"}),
+    )
+    .await
+    .expect("memory_write two should dispatch");
+    assert_mutation_succeeded(&note_two);
 
     let searched = harness
         .call_tool(

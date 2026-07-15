@@ -31,8 +31,17 @@ async fn trusted_memory_mutation(
     let context = TrustedRevisionCallerContext::authenticated_agent("memory-tools-fixture")
         .expect("fixture caller identity is valid");
     REVISION_CALLER_CONTEXT
-        .scope(Some(context), harness.call_tool(tool, arguments))
+        .scope(Some(context), async {
+            harness.call_tool(tool, arguments).await
+        })
         .await
+}
+
+fn assert_mutation_succeeded(response: &Value) {
+    assert!(
+        response.get("error").is_none() || response["error"].is_null(),
+        "memory mutation returned error: {response}"
+    );
 }
 
 #[tokio::test]
@@ -411,34 +420,38 @@ async fn mcp_memory_graph_returns_wikilink_edges() {
     let (proj, _dir) = common::create_test_project_with_dir(harness.db()).await;
     let project = proj.slug();
 
-    trusted_memory_mutation(
-            &harness,
-            "memory_write",
-            json!({"project": project, "title": "Node B", "content": "b", "reason": "create fixture note for memory tool coverage", "type": "reference"}),
-        )
-        .await
-        .expect("seed node B should dispatch");
-    trusted_memory_mutation(
-            &harness,
-            "memory_write",
-            json!({"project": project, "title": "Node A", "content": "links [[Node B]] [[Node C]]", "reason": "create fixture note for memory tool coverage", "type": "reference"}),
-        )
-        .await
-        .expect("seed node A should dispatch");
-    trusted_memory_mutation(
-            &harness,
-            "memory_write",
-            json!({"project": project, "title": "Node C", "content": "links [[Node B]] [[NonExistent]]", "reason": "create fixture note for memory tool coverage", "type": "reference"}),
-        )
-        .await
-        .expect("seed node C should dispatch");
-    trusted_memory_mutation(
-            &harness,
-            "memory_write",
-            json!({"project": project, "title": "Node D", "content": "isolated", "reason": "create fixture note for memory tool coverage", "type": "reference"}),
-        )
-        .await
-        .expect("seed node D should dispatch");
+    let node_b = trusted_memory_mutation(
+        &harness,
+        "memory_write",
+        json!({"project": project, "title": "Node B", "content": "b", "reason": "create fixture note for memory tool coverage", "type": "reference"}),
+    )
+    .await
+    .expect("seed node B should dispatch");
+    assert_mutation_succeeded(&node_b);
+    let node_a = trusted_memory_mutation(
+        &harness,
+        "memory_write",
+        json!({"project": project, "title": "Node A", "content": "links [[Node B]] [[Node C]]", "reason": "create fixture note for memory tool coverage", "type": "reference"}),
+    )
+    .await
+    .expect("seed node A should dispatch");
+    assert_mutation_succeeded(&node_a);
+    let node_c = trusted_memory_mutation(
+        &harness,
+        "memory_write",
+        json!({"project": project, "title": "Node C", "content": "links [[Node B]] [[NonExistent]]", "reason": "create fixture note for memory tool coverage", "type": "reference"}),
+    )
+    .await
+    .expect("seed node C should dispatch");
+    assert_mutation_succeeded(&node_c);
+    let node_d = trusted_memory_mutation(
+        &harness,
+        "memory_write",
+        json!({"project": project, "title": "Node D", "content": "isolated", "reason": "create fixture note for memory tool coverage", "type": "reference"}),
+    )
+    .await
+    .expect("seed node D should dispatch");
+    assert_mutation_succeeded(&node_d);
 
     let graph = harness
         .call_tool("memory_graph", json!({"project": project}))

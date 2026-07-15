@@ -52,7 +52,7 @@ mod tests {
         REVISION_CALLER_CONTEXT
             .scope(
                 TrustedRevisionCallerContext::authenticated_human("memory-tools-test"),
-                server.memory_write(Parameters(params)),
+                async { server.memory_write(Parameters(params)).await },
             )
             .await
     }
@@ -64,7 +64,7 @@ mod tests {
         REVISION_CALLER_CONTEXT
             .scope(
                 TrustedRevisionCallerContext::authenticated_human("memory-tools-test"),
-                server.memory_edit(Parameters(params)),
+                async { server.memory_edit(Parameters(params)).await },
             )
             .await
     }
