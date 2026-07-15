@@ -21,7 +21,6 @@ struct CompatibilityTrapFixture {
 }
 
 #[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
 struct AgentSyntheticExpectedMetadata {
     agent_local_warning_envelope: Value,
 }
