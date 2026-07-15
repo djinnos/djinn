@@ -51,6 +51,10 @@ pub struct MemoryRecallTraceSummary {
     pub trace_id: String,
     pub created_at: String,
     pub entry_point: String,
+    /// Verbatim rollout cohort or suppression label recorded for this trace.
+    pub rollout_label: String,
+    /// Trace-level outcome, distinct from candidate-level outcomes.
+    pub trace_outcome: String,
     pub trigger_summary: String,
     pub candidate_count: i32,
     pub injected_count: i32,
@@ -79,6 +83,10 @@ pub struct MemoryRecallTraceDetail {
     pub task_id: Option<String>,
     pub task_run_id: Option<String>,
     pub entry_point: String,
+    /// Verbatim rollout cohort or suppression label recorded for this trace.
+    pub rollout_label: String,
+    /// Trace-level outcome, distinct from candidate-level outcomes.
+    pub trace_outcome: String,
     pub trigger: Option<AnyJson>,
     pub durations_ms: AnyJson,
     pub candidate_cap: i32,
@@ -103,6 +111,10 @@ pub struct RecallTraceParams {
     pub task_id: Option<String>,
     pub task_run_id: Option<String>,
     pub entry_point: Option<String>,
+    /// Exact, verbatim rollout label to filter list results by.
+    pub rollout_label: Option<String>,
+    /// Trace-level outcome filter. Candidate-level `outcome` remains separate.
+    pub trace_outcome: Option<String>,
     pub outcome: Option<String>,
     pub skipped_reason: Option<String>,
     pub limit: Option<i32>,
