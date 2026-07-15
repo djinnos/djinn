@@ -1,0 +1,34 @@
+{
+  "contract": "frozen coordinator three-rung pressure schedule",
+  "rung_order": ["incremental", "stale_profile", "whole_base"],
+  "dry_run": {"locks": 0, "rechecks": 0, "removals": 0, "plan_units": ["incremental", "stale_profile", "whole_base"]},
+  "delete": {"lock_path": ".warm-locks/<project-id>.lock", "fail_closed": true, "plan_units": ["incremental", "stale_profile", "whole_base"], "outcomes": {"planned": 3, "eligible": 3, "attempted": 3, "deleted": 3, "retained": 0, "failed": 0}},
+  "cold_rebuild_cases": [
+    {"name": "incremental", "removed": "debug/incremental", "preserved": ["debug/sibling", "release/artifact"], "rebuild": "debug/incremental/rebuilt"},
+    {"name": "stale_profile", "removed": "debug", "preserved": ["release/artifact", "base-sibling"], "rebuild": "debug/rebuilt"},
+    {"name": "whole_base", "removed": ".", "preserved": [], "rebuild": "debug/incremental/rebuilt"}
+  ],
+  "race_cases": [
+    {"name": "activity_changed", "planned": 2, "eligible": 0, "attempted": 0, "deleted": 0, "retained": 2, "failed": 0, "removal_calls": 0, "blocks_broader_same_base": true},
+    {"name": "warm_changed", "planned": 2, "eligible": 0, "attempted": 0, "deleted": 0, "retained": 2, "failed": 0, "removal_calls": 0, "blocks_broader_same_base": true},
+    {"name": "grace_changed", "planned": 2, "eligible": 0, "attempted": 0, "deleted": 0, "retained": 2, "failed": 0, "removal_calls": 0, "blocks_broader_same_base": true},
+    {"name": "staleness_changed", "planned": 2, "eligible": 0, "attempted": 0, "deleted": 0, "retained": 2, "failed": 0, "removal_calls": 0, "blocks_broader_same_base": true},
+    {"name": "existence_changed", "planned": 2, "eligible": 0, "attempted": 0, "deleted": 0, "retained": 1, "failed": 0, "removal_calls": 0, "blocks_broader_same_base": true},
+    {"name": "containment_symlink_swap", "planned": 2, "eligible": 0, "attempted": 0, "deleted": 0, "retained": 2, "failed": 0, "removal_calls": 0, "blocks_broader_same_base": true},
+    {"name": "traversal_error", "planned": 2, "eligible": 0, "attempted": 0, "deleted": 0, "retained": 2, "failed": 0, "removal_calls": 0, "blocks_broader_same_base": true},
+    {"name": "partial_removal_failure", "planned": 2, "eligible": 1, "attempted": 1, "deleted": 0, "retained": 2, "failed": 1, "removal_calls": 1, "blocks_broader_same_base": true}
+  ],
+  "capacity_cases": [
+    {"name": "external_before_first", "capacity_calls": 1, "planned": 2, "attempted": 0, "deleted": 0, "retained": 2, "failed": 0, "removal_calls": 0, "termination": "reached_high"},
+    {"name": "external_between_attempts", "capacity_calls": 3, "planned": 2, "attempted": 1, "deleted": 1, "retained": 1, "failed": 0, "removal_calls": 1, "termination": "reached_high"},
+    {"name": "pre_measurement_failure", "capacity_calls": 1, "planned": 2, "attempted": 0, "deleted": 0, "retained": 2, "failed": 1, "removal_calls": 0, "termination": "remeasure_failed"},
+    {"name": "post_measurement_failure", "capacity_calls": 2, "planned": 2, "attempted": 1, "deleted": 1, "retained": 1, "failed": 1, "removal_calls": 1, "termination": "remeasure_failed"}
+  ],
+  "two_actor": {
+    "lock_path": ".warm-locks/<project-id>.lock",
+    "timeline": ["warm_lock", "warm_traverse", "warm_compile", "pressure_busy", "warm_process_death", "pressure_lock", "pressure_traverse", "pressure_remove", "pressure_retry_complete"],
+    "overlap": {"traversal": 0, "removal": 0, "compilation": 0},
+    "loser_removals": 0,
+    "retry_removals": 1
+  }
+}

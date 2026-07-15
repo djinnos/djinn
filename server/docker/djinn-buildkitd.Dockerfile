@@ -27,15 +27,23 @@ ARG ACR_CRED_HELPER_VERSION=0.7.0
 # Silicon, Graviton), matching moby/buildkit's own multi-arch manifest.
 ARG TARGETARCH
 
-RUN apk add --no-cache curl ca-certificates tar && mkdir -p /helpers
+RUN case "${TARGETARCH}" in amd64|arm64) ;; *) echo "unsupported architecture: ${TARGETARCH}" >&2; exit 1 ;; esac \
+    && apk add --no-cache curl ca-certificates tar \
+    && mkdir -p /helpers
 
-RUN curl -fsSL -o /helpers/docker-credential-ecr-login \
+RUN curl -fsSL --connect-timeout 10 --max-time 120 \
+      --retry 4 --retry-delay 2 --retry-all-errors \
+      -o /helpers/docker-credential-ecr-login \
       "https://amazon-ecr-credential-helper-releases.s3.amazonaws.com/${ECR_CRED_HELPER_VERSION}/linux-${TARGETARCH}/docker-credential-ecr-login"
 
-RUN curl -fsSL "https://github.com/GoogleCloudPlatform/docker-credential-gcr/releases/download/v${GCR_CRED_HELPER_VERSION}/docker-credential-gcr_linux_${TARGETARCH}-${GCR_CRED_HELPER_VERSION}.tar.gz" \
+RUN curl -fsSL --connect-timeout 10 --max-time 120 \
+      --retry 4 --retry-delay 2 --retry-all-errors \
+      "https://github.com/GoogleCloudPlatform/docker-credential-gcr/releases/download/v${GCR_CRED_HELPER_VERSION}/docker-credential-gcr_linux_${TARGETARCH}-${GCR_CRED_HELPER_VERSION}.tar.gz" \
     | tar -xz -C /helpers docker-credential-gcr
 
-RUN curl -fsSL "https://github.com/chrismellard/docker-credential-acr-env/releases/download/${ACR_CRED_HELPER_VERSION}/docker-credential-acr-env_${ACR_CRED_HELPER_VERSION}_linux_${TARGETARCH}.tar.gz" \
+RUN curl -fsSL --connect-timeout 10 --max-time 120 \
+      --retry 4 --retry-delay 2 --retry-all-errors \
+      "https://github.com/chrismellard/docker-credential-acr-env/releases/download/${ACR_CRED_HELPER_VERSION}/docker-credential-acr-env_${ACR_CRED_HELPER_VERSION}_linux_${TARGETARCH}.tar.gz" \
     | tar -xz -C /helpers docker-credential-acr-env
 
 RUN chmod 0755 /helpers/*

@@ -3554,28 +3554,23 @@ async fn sweep_cargo_warm_base_guard(
     let locks = gc::FlockBaseLock;
     let activity = gc::DbActivityGuard::new(db.clone());
 
+    // Capture the pressure inventory and immutable plan before either legacy
+    // whole-base phase can mutate the warm root. This is deliberately outside
+    // the mode branch: dry-run and delete consume the exact same ordered plan,
+    // while only delete performs locks, post-plan guard checks, capacity probes,
+    // or removals.
+    let pressure_plan = gc::build_three_rung_pressure_plan(
+        gc::snapshot_three_rung_pressure_bases(inventory.clone(), &activity).await,
+        clock.now(),
+        Duration::from_secs(config.warm_profile_min_idle_hours.saturating_mul(60 * 60)),
+    );
+
     // Take the side-effect-free fingerprint snapshot before either whole-base
     // eviction phase. Delete mode can remove an idle or pressure candidate,
     // whereas dry-run preserves it; collecting first keeps the report-only
     // unit count and projected bytes mode-parity independent. The sweep still
     // uses the same activity, warm-job, and per-base lock guards as eviction.
-    let fingerprint_inventory = match gc::inventory_under(Path::new(gc::CARGO_WARM_BASE_ROOT)) {
-        Ok(inventory) => inventory,
-        Err(error) => {
-            tracing::warn!(
-                component = metrics::COMPONENT_CARGO_WARM_BASE_FINGERPRINT,
-                mode = config.mode.as_metric_label(),
-                error = %error,
-                "fingerprint report-only sweep inventory failed; skipping"
-            );
-            metrics::increment_cleanup_total(
-                metrics::COMPONENT_CARGO_WARM_BASE_FINGERPRINT,
-                metrics::OUTCOME_ERROR,
-                config.mode.as_metric_label(),
-            );
-            return;
-        }
-    };
+    let fingerprint_inventory = inventory.clone();
     let fingerprint_locks = gc::BaseLockPlanningAdapter::new(gc::FlockBaseLock);
     gc::report_only_fingerprint_sweep(
         fingerprint_inventory,
@@ -3623,26 +3618,8 @@ async fn sweep_cargo_warm_base_guard(
         "warm-base idle GC completed"
     );
 
-    let pressure_inventory = match gc::inventory_under(Path::new(gc::CARGO_WARM_BASE_ROOT)) {
-        Ok(inventory) => inventory,
-        Err(error) => {
-            tracing::warn!(component = metrics::COMPONENT_CARGO_WARM_BASE, mode = config.mode.as_metric_label(), error = %error, "warm-base pressure GC inventory failed; retaining bases");
-            metrics::increment_cleanup_total(
-                metrics::COMPONENT_CARGO_WARM_BASE,
-                metrics::OUTCOME_ERROR,
-                config.mode.as_metric_label(),
-            );
-            return;
-        }
-    };
     if config.mode == crate::context::CacheCleanupMode::DryRun {
-        let snapshots = gc::snapshot_three_rung_pressure_bases(pressure_inventory, &activity).await;
-        let plan = gc::build_three_rung_pressure_plan(
-            snapshots,
-            clock.now(),
-            Duration::from_secs(config.warm_profile_min_idle_hours.saturating_mul(60 * 60)),
-        );
-        let units = gc::consume_three_rung_pressure_plan_dry_run(&plan);
+        let units = gc::consume_three_rung_pressure_plan_dry_run(&pressure_plan);
         if !units.is_empty() {
             metrics::increment_candidates(
                 metrics::COMPONENT_CARGO_WARM_BASE,
@@ -3662,22 +3639,16 @@ async fn sweep_cargo_warm_base_guard(
     // Delete consumes the same immutable plan as dry-run. There is no
     // planning-time lock probe: each unit takes the shared warmer lock and
     // revalidates mutable facts while that guard is held.
-    let snapshots = gc::snapshot_three_rung_pressure_bases(pressure_inventory, &activity).await;
-    let plan = gc::build_three_rung_pressure_plan(
-        snapshots,
-        clock.now(),
-        Duration::from_secs(config.warm_profile_min_idle_hours.saturating_mul(60 * 60)),
-    );
-    if !plan.units.is_empty() {
+    if !pressure_plan.units.is_empty() {
         metrics::increment_candidates(
             metrics::COMPONENT_CARGO_WARM_BASE,
             config.mode.as_metric_label(),
-            plan.units.len() as u64,
+            pressure_plan.units.len() as u64,
         );
     }
     let capacity = gc::StatvfsFilesystemCapacity;
     let pressure = gc::execute_three_rung_pressure_plan(
-        &plan,
+        &pressure_plan,
         &activity,
         guard.as_ref(),
         &gc::SharedWarmBaseLock,

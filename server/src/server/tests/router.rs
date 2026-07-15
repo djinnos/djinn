@@ -29,6 +29,9 @@ async fn health_returns_ok() {
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(json["status"], "ok");
     assert_eq!(json["database"]["backend_label"], "postgres");
+    let database_target = json["database"]["target"].as_str().unwrap();
+    assert!(database_target.starts_with("postgres://<redacted>@"));
+    assert!(!database_target.contains("postgres:postgres"));
     assert_eq!(json["memory_mount"]["enabled"], false);
     assert_eq!(json["memory_mount"]["active"], false);
     assert_eq!(json["memory_mount"]["lifecycle"], "disabled");

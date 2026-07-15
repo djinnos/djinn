@@ -39,6 +39,7 @@ jobs:
       serverTest: ${{ steps.router.outputs.serverTest }}
       sqlxFreshness: ${{ steps.router.outputs.sqlxFreshness }}
       memoryEval: ${{ steps.router.outputs.memoryEval }}
+      tiltContracts: ${{ steps.router.outputs.tiltContracts }}
       ui: ${{ steps.router.outputs.ui }}
     steps:
       - uses: actions/checkout@v4
@@ -94,6 +95,56 @@ jobs:
           path: preflight/manifest.json
           if-no-files-found: error
           retention-days: 30
+  local-dev-contracts:
+    name: Local Dev Contracts
+    needs: preflight
+    if: needs.preflight.outputs.tiltContracts == 'true' && github.event_name != 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/setup-helm@v4
+        with:
+          version: v3.12.3
+      - name: Install checksum-verified Tilt
+        env:
+          TILT_VERSION: 0.35.1
+          TILT_SHA256: 065fd7ced548e30e2959f4b46273e987b9a46c5b78cf94da6946b84e7e3b3396
+        run: |
+          set -euo pipefail
+          archive="tilt.${TILT_VERSION}.linux.x86_64.tar.gz"
+          install_dir="$RUNNER_TEMP/tilt-bin"
+          mkdir -p "$install_dir"
+          curl --fail --silent --show-error --location \
+            --retry 3 --connect-timeout 10 --max-time 120 \
+            --output "$RUNNER_TEMP/$archive" \
+            "https://github.com/tilt-dev/tilt/releases/download/v${TILT_VERSION}/$archive"
+          printf '%s  %s\n' "$TILT_SHA256" "$RUNNER_TEMP/$archive" | sha256sum --check --strict
+          tar -xzf "$RUNNER_TEMP/$archive" -C "$install_dir" tilt
+          echo "$install_dir" >> "$GITHUB_PATH"
+      - name: Check local-dev shell syntax
+        run: |
+          bash -n \
+            scripts/kind/setup-kind.sh \
+            scripts/tilt/build-binaries.sh \
+            scripts/tilt/build-ui.sh \
+            scripts/tilt/input-fingerprint.sh \
+            scripts/tilt/wrap-agent-runtime-image.sh \
+            scripts/test-tilt-warm-restart.sh \
+            scripts/test-tiltfile-config.sh \
+            scripts/test-wrap-agent-runtime-image.sh \
+            scripts/test-helm-github-app-render.sh
+      - name: Test content-addressed warm builds
+        run: bash scripts/test-tilt-warm-restart.sh
+      - name: Test isolated Tilt configuration
+        run: KUBECONFIG=/dev/null sh scripts/test-tiltfile-config.sh
+      - name: Test runtime-base self-healing wrapper
+        run: bash scripts/test-wrap-agent-runtime-image.sh
+      - name: Lint local and default Helm values
+        run: |
+          helm lint deploy/helm/djinn
+          helm lint deploy/helm/djinn --values deploy/helm/djinn/values.local.yaml
+      - name: Test Helm rendering contracts
+        run: bash scripts/test-helm-github-app-render.sh
   main-admission:
     name: Main admission delay
     needs: preflight
@@ -1078,6 +1129,7 @@ jobs:
       - nextest-timing-publish
       - server-sqlx-freshness
       - memory-eval
+      - local-dev-contracts
       - ui-frontend
     steps:
       - name: Fail closed on selected work
@@ -1096,6 +1148,7 @@ jobs:
           SERVER_TEST_TIMING: ${{ needs.preflight.outputs.serverTest }}:${{ needs.nextest-timing-publish.result }}
           SQLX: ${{ needs.preflight.outputs.sqlxFreshness }}:${{ needs.server-sqlx-freshness.result }}
           MEMORY: ${{ needs.preflight.outputs.memoryEval }}:${{ needs.memory-eval.result }}
+          TILT_CONTRACTS: ${{ needs.preflight.outputs.tiltContracts }}:${{ needs.local-dev-contracts.result }}
           UI: ${{ needs.preflight.outputs.ui }}:${{ needs.ui-frontend.result }}
         run: |
           set -euo pipefail
@@ -1110,4 +1163,5 @@ jobs:
           check size "$SIZE"; check migrations "$MIGRATIONS"; check raw-sql "$RAW_SQL"
           check capability "$CAPABILITY"; check boundaries "$BOUNDARIES"
           check server-test-plan "$SERVER_TEST_PLAN"; check server-test-shards "$SERVER_TEST_SHARDS"; check server-test-timing "$SERVER_TEST_TIMING"
-          check sqlx-freshness "$SQLX"; check memory-eval "$MEMORY"; check ui "$UI"
+          check sqlx-freshness "$SQLX"; check memory-eval "$MEMORY"
+          check local-dev-contracts "$TILT_CONTRACTS"; check ui "$UI"

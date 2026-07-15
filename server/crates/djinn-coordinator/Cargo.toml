@@ -51,6 +51,7 @@ libc = "0.2"
 workspace-hack.workspace = true
 
 [dev-dependencies]
+djinn-agent-worker = { path = "../djinn-agent-worker" }
 tokio = { version = "1", features = ["test-util", "macros", "rt-multi-thread"] }
 tempfile = "3"
 filetime = "0.2"
