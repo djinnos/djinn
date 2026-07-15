@@ -141,6 +141,13 @@ pub struct RepoDependencyGraph {
     /// Proposal lmkv: per-node collapsed-edge degree keyed by stable node UID,
     /// computed alongside [`Self::galaxy_positions`].
     pub(super) galaxy_degrees: BTreeMap<String, u32>,
+    /// Proposal qoxm: commit co-change coupling edges, materialized during warm
+    /// from the coupling index. Kept in this dedicated sidecar OUTSIDE the
+    /// petgraph so they never inflate PageRank / node degree / SCC-cycle
+    /// detection / traversal blast radii. Surfaced by `snapshot` and the
+    /// `edges` op (opt-in via edge-kind filter); round-trips through the
+    /// artifact via the shared `edges` vec (partitioned in `from_artifact`).
+    pub(super) cochange_edges: Vec<crate::cochange::CoChangeEdge>,
 }
 
 /// A single SCIP definition range pinned to a graph node.
@@ -299,6 +306,18 @@ impl RepoDependencyGraph {
     pub fn set_galaxy_layout(&mut self, layout: crate::galaxy_layout::GalaxyLayout) {
         self.galaxy_positions = layout.positions;
         self.galaxy_degrees = layout.degrees;
+    }
+
+    /// Proposal qoxm: the materialized commit co-change coupling edges. These
+    /// live outside the petgraph — see [`crate::cochange`] — so traversal and
+    /// ranking ops exclude them by default.
+    pub fn cochange_edges(&self) -> &[crate::cochange::CoChangeEdge] {
+        &self.cochange_edges
+    }
+
+    /// Replace the co-change coupling sidecar (called at warm time).
+    pub fn set_cochange_edges(&mut self, edges: Vec<crate::cochange::CoChangeEdge>) {
+        self.cochange_edges = edges;
     }
 
     /// Compute compat-safe language-chain audit metadata for a route edge.

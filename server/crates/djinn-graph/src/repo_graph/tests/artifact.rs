@@ -585,6 +585,88 @@ fn empty_artifact_round_trip() {
 }
 
 #[test]
+fn cochange_edges_round_trip_through_shared_edges_vec_and_stay_out_of_petgraph() {
+    use crate::cochange::{CoChangeInput, coupling_score, derive_cochange_edges};
+
+    fn file_node(path: &str) -> RepoGraphNode {
+        RepoGraphNode {
+            id: RepoNodeKey::File(PathBuf::from(path)),
+            kind: RepoGraphNodeKind::File,
+            display_name: path.to_string(),
+            language: Some("rust".to_string()),
+            file_path: Some(PathBuf::from(path)),
+            symbol: None,
+            symbol_kind: None,
+            is_external: false,
+            visibility: None,
+            signature: None,
+            documentation: Vec::new(),
+            signature_parts: None,
+            is_test: false,
+            complexity: None,
+            workspace: None,
+            route_framework: None,
+            route_handler_symbol: None,
+        }
+    }
+
+    // Two file nodes, no SCIP edges.
+    let artifact = RepoGraphArtifact {
+        version: REPO_GRAPH_ARTIFACT_VERSION,
+        nodes: vec![file_node("src/a.rs"), file_node("crates/other/src/b.rs")],
+        edges: vec![],
+        symbol_ranges: BTreeMap::new(),
+        communities: Vec::new(),
+        processes: vec![],
+        route_exclusion_config: RouteExclusionConfig::default(),
+        layout_positions: BTreeMap::new(),
+        galaxy_positions: BTreeMap::new(),
+        galaxy_degrees: BTreeMap::new(),
+    };
+    let mut graph = RepoDependencyGraph::from_artifact(&artifact);
+    // A legacy-shaped blob (no co-change edges) hydrates an empty sidecar.
+    assert!(graph.cochange_edges().is_empty());
+
+    // Materialize a co-change edge from a coupling-index row.
+    let inputs = vec![CoChangeInput {
+        file_a: "src/a.rs".to_string(),
+        file_b: "crates/other/src/b.rs".to_string(),
+        co_changes: 10,
+        last_co_change_iso: "2026-07-15T12:00:00.000Z".to_string(),
+    }];
+    let derived = derive_cochange_edges(&graph, &inputs);
+    assert_eq!(derived.len(), 1, "one qualifying pair → one edge");
+    graph.set_cochange_edges(derived);
+
+    // Co-change edges never enter the petgraph.
+    assert_eq!(graph.edge_count(), 0, "co-change must not pollute petgraph");
+
+    // Serialize → bincode → deserialize via the compat seam → rebuild.
+    let out = graph.to_artifact();
+    assert!(
+        out.edges
+            .iter()
+            .any(|e| e.kind == RepoGraphEdgeKind::CoChangedWith),
+        "co-change edge persists in the shared edges vec"
+    );
+    let encoded = bincode::serialize(&out).expect("serialize cochange artifact");
+    let decoded = deserialize_repo_graph_artifact_bincode(&encoded)
+        .expect("deserialize through artifact compatibility path");
+    let restored = RepoDependencyGraph::from_artifact(&decoded);
+
+    assert_eq!(
+        restored.edge_count(),
+        0,
+        "co-change stays out of the petgraph after reload"
+    );
+    let cc = restored.cochange_edges();
+    assert_eq!(cc.len(), 1);
+    assert_eq!(cc[0].evidence_count, 10);
+    assert!((cc[0].confidence - coupling_score(10)).abs() < 1e-9);
+    assert!(cc[0].last_co_change > 20_000, "temporal epoch day survived");
+}
+
+#[test]
 fn from_artifact_round_trips_route_exclusion_config() {
     // PR s6ch / 92z7: the in-memory graph must carry the
     // `route_exclusion_config` sidecar verbatim across the

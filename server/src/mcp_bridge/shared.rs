@@ -437,6 +437,11 @@ fn edge_propagates(kind: RepoGraphEdgeKind) -> bool {
         | RepoGraphEdgeKind::DeclaredInFile
         | RepoGraphEdgeKind::MemberOf
         | RepoGraphEdgeKind::StepInProcess
+        // Proposal qoxm: co-change coupling is circumstantial history, NOT
+        // "if this changes that breaks" — it must never propagate the impact
+        // frontier (and in fact lives outside the petgraph the BFS walks). A
+        // hard `false` keeps blast radii from silently inflating.
+        | RepoGraphEdgeKind::CoChangedWith
         | RepoGraphEdgeKind::EntryPointOf => false,
     }
 }

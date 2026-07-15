@@ -448,6 +448,11 @@ pub(super) fn classify_edge_category(
         // call relationship so the UI/groupers treat it like a
         // call-site link (the source calls the trait method).
         RepoGraphEdgeKind::TraitDispatchCall => EdgeCategory::Calls,
+        // Proposal qoxm: commit co-change coupling. These edges live in a
+        // sidecar outside the petgraph, so `neighbors()` never actually
+        // encounters one here; the arm exists for exhaustiveness. "References"
+        // is the closest neutral category — co-change is not a call/read/write.
+        RepoGraphEdgeKind::CoChangedWith => EdgeCategory::References,
     }
 }
 

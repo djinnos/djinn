@@ -916,6 +916,64 @@ impl RepoGraphBridge {
                 break;
             }
         }
+
+        // Proposal qoxm: commit co-change edges live in a sidecar OUTSIDE the
+        // petgraph, so the loop above never emits them — traversal/edge ops
+        // exclude co-change by default and never inflate their result set.
+        // Opt in explicitly via the edge-kind filter (`edge_kind=CoChangedWith`):
+        // when requested, append the file↔file co-change edges whose endpoints
+        // match the globs, carrying the coupling score as confidence and the
+        // temporal `last_co_change` in the reason.
+        {
+            use djinn_graph::repo_graph::{RepoGraphEdgeKind, edge_confidence_tier};
+            let cochange_label = format!("{:?}", RepoGraphEdgeKind::CoChangedWith);
+            let cochange_requested = edge_kind
+                .map(|f| f.eq_ignore_ascii_case(&cochange_label))
+                .unwrap_or(false);
+            if cochange_requested {
+                for cc in graph.cochange_edges() {
+                    if out.len() >= limit {
+                        break;
+                    }
+                    let src_node = graph.node(cc.source);
+                    let dst_node = graph.node(cc.target);
+                    let src_target = src_node
+                        .file_path
+                        .as_ref()
+                        .map(|p| p.display().to_string())
+                        .unwrap_or_else(|| src_node.display_name.clone());
+                    let dst_target = dst_node
+                        .file_path
+                        .as_ref()
+                        .map(|p| p.display().to_string())
+                        .unwrap_or_else(|| dst_node.display_name.clone());
+                    if !from_matcher.is_match(&src_target) || !to_matcher.is_match(&dst_target) {
+                        continue;
+                    }
+                    let reason = djinn_graph::cochange::encode_reason(cc.last_co_change);
+                    out.push(EdgeEntry {
+                        from: format_node_key(&src_node.id),
+                        to: format_node_key(&dst_node.id),
+                        edge_kind: cochange_label.clone(),
+                        // Co-change edges carry the coupling score as their soft
+                        // weight (they have no structural SCIP evidence weight).
+                        edge_weight: cc.confidence,
+                        confidence: cc.confidence,
+                        confidence_tier: format!(
+                            "{:?}",
+                            edge_confidence_tier(
+                                RepoGraphEdgeKind::CoChangedWith,
+                                cc.confidence,
+                                Some(&reason),
+                            )
+                        )
+                        .to_ascii_lowercase(),
+                        reason: Some(reason),
+                        exclusion_reason: None,
+                    });
+                }
+            }
+        }
         Ok(out)
     }
 

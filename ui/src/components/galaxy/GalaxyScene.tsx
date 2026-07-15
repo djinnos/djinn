@@ -425,6 +425,16 @@ function GalaxyEdges({
         }
       }
 
+      // Proposal qoxm: commit co-change edges ("these files change together")
+      // are a distinct, evidential channel — not structural dependencies. Draw
+      // them at a fraction of their computed strength so they read as a subtle
+      // overlay on the structural galaxy rather than competing with it. Kept
+      // deliberately simple (a dim multiplier); the community fade below still
+      // colors them by endpoint, so they tint toward their files' crates.
+      if (edge.kind === "CoChangedWith") {
+        intensity *= 0.35;
+      }
+
       // Community-colored edges: each end takes its own group's color, so
       // an import strand fades importer-hue → imported-hue instead of
       // stacking into one uniform blue glare across the whole galaxy.
