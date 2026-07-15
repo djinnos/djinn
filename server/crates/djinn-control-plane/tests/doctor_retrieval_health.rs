@@ -11,6 +11,7 @@ use djinn_db::repositories::retrieval_trace::{
 };
 use djinn_db::{DoctorFindingRepository, RecentDoctorFindings};
 use serde_json::json;
+use time::{Duration, OffsetDateTime, format_description::well_known::Iso8601};
 
 async fn harness() -> McpTestHarness {
     let harness = McpTestHarness::new().await;
@@ -23,32 +24,37 @@ async fn insert_traces(
     project_id: &str,
     zero_results: usize,
     non_zero_results: usize,
-) {
+) -> Vec<String> {
     let zero_candidates = json!([]);
     let candidates = json!([{"note_id":"note-1","outcome":"injected","rank":1}]);
+    let mut trace_ids = Vec::with_capacity(zero_results + non_zero_results);
     for (count, candidates) in [
         (zero_results, &zero_candidates),
         (non_zero_results, &candidates),
     ] {
         for _ in 0..count {
-            repo.insert(CreateRetrievalTraceParams {
-                project_id,
-                session_id: None,
-                task_run_id: None,
-                task_id: None,
-                entry_point: RetrievalTraceEntryPoint::Dispatch,
-                trigger: None,
-                candidates,
-                candidate_cap: DEFAULT_CANDIDATE_CAP,
-                candidate_cap_exceeded: false,
-                sampling_metadata: None,
-                durations_ms: &json!({}),
-                estimated_injected_tokens: 0,
-            })
-            .await
-            .expect("insert retrieval trace");
+            trace_ids.push(
+                repo.insert(CreateRetrievalTraceParams {
+                    project_id,
+                    session_id: None,
+                    task_run_id: None,
+                    task_id: None,
+                    entry_point: RetrievalTraceEntryPoint::Dispatch,
+                    trigger: None,
+                    candidates,
+                    candidate_cap: DEFAULT_CANDIDATE_CAP,
+                    candidate_cap_exceeded: false,
+                    sampling_metadata: None,
+                    durations_ms: &json!({}),
+                    estimated_injected_tokens: 0,
+                })
+                .await
+                .expect("insert retrieval trace")
+                .id,
+            );
         }
     }
+    trace_ids
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -153,8 +159,23 @@ async fn injected_retrieval_config_drives_memory_health_and_doctor_prefetch() {
     // by the default floor. Its 7/8 zero-result rate clears the injected 0.75
     // threshold. The second project's 6/8 rate equals 0.75 and is suppressed;
     // it would be a finding under the default 0.50 threshold.
-    insert_traces(&traces, &project.id, 7, 1).await;
+    let project_trace_ids = insert_traces(&traces, &project.id, 7, 1).await;
     insert_traces(&traces, &at_threshold.id, 6, 2).await;
+
+    // The final trace is the only non-zero result. Backdate it to 48 hours:
+    // it is included by the injected 72-hour rollup but excluded by a
+    // fixed/default 24-hour prefetch window. The Doctor evidence below must
+    // therefore retain all eight traces, not merely describe a 72-hour check.
+    let inside_72_outside_24 = OffsetDateTime::now_utc() - Duration::hours(48);
+    let inside_72_outside_24 = inside_72_outside_24
+        .format(&Iso8601::DEFAULT)
+        .expect("format backdated trace timestamp");
+    sqlx::query("UPDATE retrieval_traces SET created_at = $1 WHERE id = $2")
+        .bind(inside_72_outside_24)
+        .bind(&project_trace_ids[7])
+        .execute(harness.db().pool())
+        .await
+        .expect("backdate window-sensitive retrieval trace");
 
     let health = harness
         .call_tool("memory_health", json!({"project": project.slug()}))
@@ -163,6 +184,10 @@ async fn injected_retrieval_config_drives_memory_health_and_doctor_prefetch() {
     assert_eq!(health["retrieval"]["config_window_hours"], 72);
     assert!(health["retrieval"]["persisted"]["window_start"].is_string());
     assert!(health["retrieval"]["persisted"]["window_end"].is_string());
+    assert_eq!(
+        health["retrieval"]["persisted"]["summaries"][0]["total_queries"],
+        8
+    );
 
     let response = harness
         .call_tool(
@@ -188,12 +213,17 @@ async fn injected_retrieval_config_drives_memory_health_and_doctor_prefetch() {
     assert_eq!(evidence["threshold"].as_f64(), Some(0.75));
     assert_eq!(evidence["floor"].as_i64(), Some(7));
     assert_eq!(evidence["numerator"].as_i64(), Some(7));
+    // Includes the 48-hour non-zero trace; a 24-hour prefetch would produce
+    // denominator 7 instead, even if the check retained this config's text.
     assert_eq!(evidence["denominator"].as_i64(), Some(8));
     assert!(evidence["window"]["start"].is_string());
     assert!(evidence["window"]["end"].is_string());
     assert!(
-        finding.detail.contains("last 72 hours"),
-        "Doctor must build the check with the injected window: {}",
+        finding
+            .detail
+            .as_deref()
+            .is_some_and(|detail| detail.contains("last 72 hours")),
+        "Doctor must build the check with the injected window: {:?}",
         finding.detail
     );
 }
