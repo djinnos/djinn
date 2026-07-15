@@ -1,0 +1,12 @@
+version: 1
+scenarios:
+  - id: reaper.stall_kill_cascade
+    version: 1
+    enabled: true
+    profiles: [smoke-ci]
+    sources: [{kind: incident, id: "xh6f zombie zero-token stall-kill cascade"}]
+    primary_coverage: reaper.slow-vs-crashed-discrimination
+    secondary_coverage: [heartbeat.liveness-semantics]
+    execution: {kind: cargo-package, package: djinn-coordinator}
+    isolation: {database: isolated, providers: isolated, channel: isolated}
+    watch_paths: [server/crates/djinn-coordinator/src/tests/session_reaping.rs]

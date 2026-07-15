@@ -674,7 +674,7 @@ impl CoordinatorActor {
         phase: RefinementPhase,
         diverse_refinement: bool,
         attributed_user_id: Option<&str>,
-    ) -> (String, String) {
+    ) -> Option<(String, String)> {
         let agent_type = match phase {
             RefinementPhase::AdvocateRevision => "advocate",
             RefinementPhase::AdversaryAttack => "adversary",
@@ -682,7 +682,7 @@ impl CoordinatorActor {
             RefinementPhase::AwaitingHumanReview
             | RefinementPhase::AwaitingEvidence
             | RefinementPhase::Complete => {
-                return ("advocate".into(), String::new());
+                return Some(("advocate".into(), String::new()));
             }
         };
 
@@ -690,25 +690,22 @@ impl CoordinatorActor {
             .resolve_dispatch_models_for_role("planner", attributed_user_id)
             .await;
 
-        let primary_model = self.resolve_refinement_primary_model(&user_models);
+        // An empty owner-scoped model set is a hard dispatch boundary.
+        let primary_model = self.resolve_refinement_primary_model(&user_models)?;
         let candidates = self.resolve_refinement_model_candidates(&user_models);
 
         let (model_id, _same_fallback) =
             select_refinement_model(diverse_refinement, &primary_model, &candidates);
 
-        (agent_type.to_string(), model_id)
+        Some((agent_type.to_string(), model_id))
     }
 
     /// Resolve the primary model for a refinement session.
-    pub(super) fn resolve_refinement_primary_model(&self, user_models: &[String]) -> String {
-        if let Some(first) = user_models.first() {
-            return first.clone();
-        }
-        self.model_priorities
-            .values()
-            .next()
-            .and_then(|models| models.first().cloned())
-            .unwrap_or_else(|| "anthropic/claude-sonnet-4-20250514".to_string())
+    pub(super) fn resolve_refinement_primary_model(
+        &self,
+        user_models: &[String],
+    ) -> Option<String> {
+        user_models.first().cloned()
     }
 
     /// Resolve candidate models for diverse-refinement selection.
@@ -716,32 +713,31 @@ impl CoordinatorActor {
         &self,
         user_models: &[String],
     ) -> Vec<String> {
-        if !user_models.is_empty() {
-            return user_models.to_vec();
-        }
-        self.model_priorities
-            .values()
-            .flat_map(|models| models.iter().cloned())
-            .collect()
+        user_models.to_vec()
     }
 
-    /// Resolve the user a refinement run is attributed to.
+    /// Resolve the user a refinement run is attributed to. Durable refinement
+    /// ownership is mandatory: never use proposal-author or task-row fallback.
     pub(super) async fn resolve_refinement_attributed_user(
         &self,
         proposal_id: &str,
         explicit: Option<String>,
     ) -> Option<String> {
-        if explicit.is_some() {
-            return explicit;
-        }
         let event_bus = crate::events::event_bus_for(&self.events_tx);
         let proposal_repo = ProposalRepository::new(self.db.clone(), event_bus);
-        proposal_repo
+        let durable_owner = proposal_repo
             .get(proposal_id)
             .await
             .ok()
             .flatten()
-            .and_then(|p| p.author_user_id)
+            .and_then(|p| p.refinement_owner_user_id);
+        match (explicit, durable_owner) {
+            (Some(runtime_owner), Some(persisted_owner)) if runtime_owner == persisted_owner => {
+                Some(runtime_owner)
+            }
+            (None, Some(persisted_owner)) => Some(persisted_owner),
+            _ => None,
+        }
     }
 
     /// Resolve a user id to the display identity used for the legacy `owner`

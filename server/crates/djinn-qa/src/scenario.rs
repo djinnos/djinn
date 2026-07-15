@@ -16,6 +16,29 @@ pub struct ScenarioInventory {
     pub scenarios: Vec<Scenario>,
 }
 
+fn scenario_yaml_files(dir: &Path, files: &mut Vec<PathBuf>) -> Result<(), ScenarioError> {
+    let entries = fs::read_dir(dir).map_err(|source| ScenarioError::Read {
+        path: dir.display().to_string(),
+        source,
+    })?;
+    for entry in entries {
+        let entry = entry.map_err(|source| ScenarioError::Read {
+            path: dir.display().to_string(),
+            source,
+        })?;
+        let path = entry.path();
+        if path.is_dir() {
+            scenario_yaml_files(&path, files)?;
+        } else if matches!(
+            path.extension().and_then(|value| value.to_str()),
+            Some("yaml" | "yml")
+        ) {
+            files.push(path);
+        }
+    }
+    Ok(())
+}
+
 /// Metadata consumed by the deterministic QA runner.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct Scenario {
@@ -127,11 +150,53 @@ impl ScenarioInventory {
 
     pub fn load(path: impl AsRef<Path>) -> Result<Self, ScenarioError> {
         let path = path.as_ref();
+        if path.is_dir() {
+            return Self::load_directory(path);
+        }
         let yaml = fs::read_to_string(path).map_err(|source| ScenarioError::Read {
             path: path.display().to_string(),
             source,
         })?;
         Self::from_yaml(&yaml)
+    }
+
+    /// Merge version-one scenario files from a theme directory deterministically.
+    fn load_directory(path: &Path) -> Result<Self, ScenarioError> {
+        let mut files = Vec::new();
+        scenario_yaml_files(path, &mut files)?;
+        files.sort();
+        let mut scenarios = Vec::new();
+        let mut scenario_files = BTreeMap::new();
+        let mut primary_files = BTreeMap::new();
+        for file in files {
+            let file_name = file.display().to_string();
+            for scenario in Self::load(&file)?.scenarios {
+                if let Some(first_path) =
+                    scenario_files.insert(scenario.id.clone(), file_name.clone())
+                {
+                    return Err(ScenarioError::DuplicateDirectoryRegistration {
+                        registration: format!("scenario id `{}`", scenario.id),
+                        first_path,
+                        duplicate_path: file_name,
+                    });
+                }
+                if let Some(first_path) =
+                    primary_files.insert(scenario.primary_coverage.clone(), file_name.clone())
+                {
+                    return Err(ScenarioError::DuplicateDirectoryRegistration {
+                        registration: format!("primary coverage `{}`", scenario.primary_coverage),
+                        first_path,
+                        duplicate_path: file_name,
+                    });
+                }
+                scenarios.push(scenario);
+            }
+        }
+        scenarios.sort_by(|left, right| left.id.cmp(&right.id));
+        Ok(Self {
+            version: 1,
+            scenarios,
+        })
     }
 
     /// Validate cross-inventory invariants and local targets against an explicit repository root.
@@ -341,6 +406,14 @@ pub enum ScenarioError {
     UnsupportedVersion { version: u32 },
     #[error("scenario `{scenario}` has invalid profile `{value}`; expected `smoke-ci`")]
     InvalidProfile { scenario: String, value: String },
+    #[error(
+        "scenario directory has duplicate {registration}: `{duplicate_path}` conflicts with `{first_path}`"
+    )]
+    DuplicateDirectoryRegistration {
+        registration: String,
+        first_path: String,
+        duplicate_path: String,
+    },
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -410,5 +483,99 @@ mod tests {
                 "missing {expected}: {rendered}"
             );
         }
+    }
+
+    fn directory_scenario(id: &str, primary: &str) -> String {
+        format!(
+            "version: 1\nscenarios:\n- id: {id}\n  version: 1\n  enabled: true\n  profiles: [smoke-ci]\n  sources: [{{kind: memory, id: fixture}}]\n  primary_coverage: {primary}\n  execution: {{kind: cargo-package, package: djinn-qa}}\n  isolation: {{database: isolated, providers: isolated, channel: isolated}}\n  watch_paths: [src/scenario.rs]\n"
+        )
+    }
+
+    #[test]
+    fn directory_loading_is_recursive_sorted_and_rejects_cross_file_duplicates() {
+        let directory = tempfile::tempdir().unwrap();
+        let nested = directory.path().join("nested");
+        fs::create_dir(&nested).unwrap();
+        fs::write(
+            nested.join("z.yaml"),
+            directory_scenario("zeta", "task.state-machine.legal-transitions"),
+        )
+        .unwrap();
+        fs::write(
+            directory.path().join("a.yaml"),
+            directory_scenario("alpha", "task.park.reason-attribution"),
+        )
+        .unwrap();
+        let inventory = ScenarioInventory::load(directory.path()).unwrap();
+        assert_eq!(
+            inventory
+                .scenarios
+                .iter()
+                .map(|scenario| scenario.id.as_str())
+                .collect::<Vec<_>>(),
+            ["alpha", "zeta"]
+        );
+
+        fs::write(
+            directory.path().join("b.yaml"),
+            directory_scenario("alpha", "task.state-machine.legal-transitions"),
+        )
+        .unwrap();
+        assert!(
+            ScenarioInventory::load(directory.path())
+                .unwrap_err()
+                .to_string()
+                .contains("duplicate scenario id `alpha`")
+        );
+        fs::remove_file(directory.path().join("b.yaml")).unwrap();
+        fs::write(
+            directory.path().join("b.yaml"),
+            directory_scenario("beta", "task.state-machine.legal-transitions"),
+        )
+        .unwrap();
+        assert!(
+            ScenarioInventory::load(directory.path())
+                .unwrap_err()
+                .to_string()
+                .contains("duplicate primary coverage `task.state-machine.legal-transitions`")
+        );
+    }
+
+    #[test]
+    fn production_inventory_has_ten_exact_scenario_coverage_bindings() {
+        let inventory = ScenarioInventory::load(root().join("qa/scenarios")).unwrap();
+        inventory
+            .validate(
+                &Taxonomy::load(root().join("qa/taxonomy.yaml")).unwrap(),
+                root(),
+            )
+            .unwrap();
+        let bindings = inventory
+            .scenarios
+            .iter()
+            .map(|scenario| {
+                format!(
+                    "{}|{}|{}",
+                    scenario.id,
+                    scenario.primary_coverage,
+                    scenario.secondary_coverage.join(",")
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            bindings,
+            vec![
+                "agents.empty_turn_loop_stale_metadata|agent-loop.empty-turn-detection|agent-loop.loop-metadata-freshness",
+                "db.test_template_clone_locking|test-infra.db-template-clone-lock|test-infra.deterministic-db-isolation",
+                "dispatch.credential_admission_failure|dispatch.claim-admission|provider.credentials-preflight",
+                "dispatch.deferred_health_terminal_audit|dispatch.deferred-health|task-lifecycle.terminal-side-effects",
+                "dispatch.exhaustion_terminal_side_effects|dispatch.exhaustion-terminality|task-lifecycle.terminal-side-effects",
+                "dispatch.zero_cap_slot_pool_non_vacuous|dispatch.slot-pool-capacity|dispatch.race-test-non-vacuous",
+                "github.merge_queue_reopen_blindness|github.merge-queue-reopen|task-lifecycle.pr-reopen-requeue",
+                "metrics.actor_metric_integration|telemetry.actor-metrics-export|agent-loop.metrics-integration",
+                "reaper.stall_kill_cascade|reaper.slow-vs-crashed-discrimination|heartbeat.liveness-semantics",
+                "tasks.park_reason_attribution_3t22|task-lifecycle.park-reason-attribution|task-lifecycle.park-event-causality",
+            ]
+        );
     }
 }

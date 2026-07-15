@@ -243,9 +243,9 @@ impl CoordinatorActor {
     ///   - **current revision**: the proposal head (`latest_revision_seq`).
     ///   - **snapshot revision** (revert-on-reject baseline): the `seq` stamped
     ///     on the latest `refinement_start` lifecycle row.
-    ///   - **attribution**: the most recent this-run refinement task's
-    ///     `created_by_user_id`, falling back to the proposal author (same as
-    ///     `resolve_refinement_attributed_user`).
+    ///   - **attribution**: the proposal.s durable
+    ///     `refinement_owner_user_id`, never tribunal task rows or the proposal
+    ///     author.
     ///   - **spawn budget**: the count of this run's refinement task rows, so the
     ///     spawn cap still binds across the restart (conservative — includes a
     ///     re-dispatched orphan, which only tightens the cap).
@@ -357,12 +357,12 @@ impl CoordinatorActor {
             }
         };
 
-        // Reconstruct attribution, spawn budget, and orphaned open tasks from
-        // this run's refinement task rows.
-        let (task_attributed_user, run_task_count, orphaned_open_task_ids) = self
+        // Reconstruct spawn budget and orphaned open tasks from this run.s task
+        // rows. Attribution itself comes only from durable proposal state.
+        let (_task_attributed_user, run_task_count, orphaned_open_task_ids) = self
             .reconstruct_run_refinement_tasks(proposal_id, run_start.as_deref())
             .await;
-        let attributed_user_id = task_attributed_user.or_else(|| proposal.author_user_id.clone());
+        let attributed_user_id = proposal.refinement_owner_user_id.clone();
 
         let mut state = RefinementLoopState::with_config(proposal_id, head_revision_seq, config)
             .with_attributed_user(attributed_user_id);
