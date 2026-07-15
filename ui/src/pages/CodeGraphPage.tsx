@@ -13,7 +13,6 @@ import { HugeiconsIcon } from "@hugeicons/react";
 import { ConnectIcon } from "@hugeicons/core-free-icons";
 
 import { GalaxyView } from "@/components/codegraph/GalaxyView";
-import { QueryFAB } from "@/components/codegraph/QueryFAB";
 import { QueryPalette } from "@/components/codegraph/QueryPalette";
 import {
   useSelectedProject,
@@ -50,7 +49,6 @@ export function CodeGraphPage() {
               />
             </div>
             <QueryPalette projectId={selectedProjectId} />
-            <QueryFAB projectId={selectedProjectId} />
           </>
         ) : (
           <EmptyHint message="Select a project to view its code graph." />

@@ -30,7 +30,6 @@ import {
   SelectContent,
   SelectItem,
   SelectTrigger,
-  SelectValue,
 } from "@/components/ui/select";
 import {
   galaxyLayoutSeed,
@@ -53,6 +52,10 @@ const COLOR_MODES: Array<{ value: GalaxyColorMode; label: string }> = [
   { value: "group", label: "Crates" },
   { value: "heat", label: "Complexity" },
 ];
+
+/** One chip voice for every HUD control (chips, selects, toggles). */
+const HUD_CHIP =
+  "border-slate-700/60 bg-slate-900/80 font-mono text-[11px] text-slate-300 backdrop-blur-sm";
 
 export function GalaxyView({ projectId }: { projectId: string }) {
   const project = useSelectedProject();
@@ -167,7 +170,12 @@ export function GalaxyView({ projectId }: { projectId: string }) {
       focusIds={focusIds}
       headerPrimary={
         <>
-          <span className="rounded-md border border-slate-700/60 bg-slate-900/80 px-2 py-1 text-[11px] font-semibold tracking-wide text-slate-200 backdrop-blur-sm">
+          <span
+            className={cn(
+              "rounded-lg border px-2.5 py-1 font-semibold tracking-wide text-slate-200",
+              HUD_CHIP,
+            )}
+          >
             {project?.name ?? projectId}
           </span>
           {workspaces.length > 1 && (
@@ -179,15 +187,16 @@ export function GalaxyView({ projectId }: { projectId: string }) {
                 }
               }}
             >
-              <SelectTrigger
-                size="sm"
-                aria-label="Workspace"
-                className="border-slate-700/60 bg-slate-900/80 font-mono text-[11px] text-slate-300 backdrop-blur-sm"
-              >
-                <SelectValue />
+              <SelectTrigger size="sm" aria-label="Workspace" className={HUD_CHIP}>
+                <span>
+                  {workspaceSlug
+                    ? (workspaces.find((w) => w.slug === workspaceSlug)?.display ??
+                      workspaceSlug)
+                    : "All"}
+                </span>
               </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="__all__">All workspaces</SelectItem>
+              <SelectContent className="max-h-80 min-w-56">
+                <SelectItem value="__all__">All</SelectItem>
                 {workspaces.map((workspace) => (
                   <SelectItem key={workspace.slug} value={workspace.slug}>
                     {workspace.display ?? workspace.slug}
@@ -205,8 +214,9 @@ export function GalaxyView({ projectId }: { projectId: string }) {
             aria-pressed={hideTests}
             onClick={() => setHideTests((v) => !v)}
             className={cn(
-              "rounded-md border border-slate-700/60 bg-slate-900/80 px-2 py-1 font-mono text-[11px] backdrop-blur-sm transition-colors",
-              hideTests ? "text-sky-300" : "text-slate-300 hover:text-slate-100",
+              "rounded-lg border px-2 py-1 transition-colors",
+              HUD_CHIP,
+              hideTests ? "text-sky-300" : "hover:text-slate-100",
             )}
           >
             {hideTests ? "Tests hidden" : "Hide tests"}
@@ -219,14 +229,12 @@ export function GalaxyView({ projectId }: { projectId: string }) {
               }
             }}
           >
-            <SelectTrigger
-              size="sm"
-              aria-label="Color mode"
-              className="border-slate-700/60 bg-slate-900/80 font-mono text-[11px] text-slate-300 backdrop-blur-sm"
-            >
-              <SelectValue />
+            <SelectTrigger size="sm" aria-label="Color mode" className={HUD_CHIP}>
+              <span>
+                {COLOR_MODES.find((m) => m.value === colorMode)?.label ?? "Crates"}
+              </span>
             </SelectTrigger>
-            <SelectContent>
+            <SelectContent className="min-w-40">
               {COLOR_MODES.map(({ value, label }) => (
                 <SelectItem key={value} value={value}>
                   {label}
