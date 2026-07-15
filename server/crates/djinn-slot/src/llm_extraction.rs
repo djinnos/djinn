@@ -3401,6 +3401,9 @@ mod evidence_merge_regression_tests {
                             Some(note.clone()),
                         )
                     }
+                    NoteRevisionDesiredState::ExistingWithMove { .. } => {
+                        unreachable!("note moves are not used by extraction")
+                    }
                     NoteRevisionDesiredState::ExtractionSkipped => (None, None, true, None),
                     NoteRevisionDesiredState::Delete => unreachable!("not used by extraction"),
                 };
