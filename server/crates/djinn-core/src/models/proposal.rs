@@ -78,6 +78,10 @@ pub struct Proposal {
     /// Participant accountable for the build once graduated (also the epic
     /// creator, so commits attribute correctly).
     pub build_owner_user_id: Option<String>,
+    /// Durable owner of the active refinement run. This identity scopes every
+    /// tribunal runtime model and credential lookup; it is intentionally
+    /// distinct from the proposal author and build owner.
+    pub refinement_owner_user_id: Option<String>,
     /// When `true`, the build is frozen: the proposal stays `building` but its
     /// graduated epics' tasks are held out of dispatch. Cleared to resume.
     pub build_frozen: bool,

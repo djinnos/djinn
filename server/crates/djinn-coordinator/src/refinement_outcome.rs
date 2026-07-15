@@ -725,23 +725,28 @@ impl CoordinatorActor {
             .collect()
     }
 
-    /// Resolve the user a refinement run is attributed to.
+    /// Resolve the user a refinement run is attributed to. Durable refinement
+    /// ownership is mandatory: never use proposal-author or task-row fallback.
     pub(super) async fn resolve_refinement_attributed_user(
         &self,
         proposal_id: &str,
         explicit: Option<String>,
     ) -> Option<String> {
-        if explicit.is_some() {
-            return explicit;
-        }
         let event_bus = crate::events::event_bus_for(&self.events_tx);
         let proposal_repo = ProposalRepository::new(self.db.clone(), event_bus);
-        proposal_repo
+        let durable_owner = proposal_repo
             .get(proposal_id)
             .await
             .ok()
             .flatten()
-            .and_then(|p| p.author_user_id)
+            .and_then(|p| p.refinement_owner_user_id);
+        match (explicit, durable_owner) {
+            (Some(runtime_owner), Some(persisted_owner)) if runtime_owner == persisted_owner => {
+                Some(runtime_owner)
+            }
+            (None, Some(persisted_owner)) => Some(persisted_owner),
+            _ => None,
+        }
     }
 
     /// Resolve a user id to the display identity used for the legacy `owner`
