@@ -10,7 +10,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use super::{
     NoteRepository, NoteRevisionEventKind, NoteRevisionReason, TrustedNoteRevisionAttribution,
-    TrustedNoteRevisionProvenance,
+    TrustedNoteRevisionProvenance, index_links_for_note, resolve_links_for_note,
 };
 use crate::error::{DbError as Error, DbResult as Result};
 use crate::note_hash::note_content_hash;
@@ -137,6 +137,8 @@ impl NoteRepository {
         self.db.ensure_initialized().await?;
         validate_command(&command)?;
 
+        let event_kind = command.event_kind;
+        let deleted_note_id = command.note_id.clone();
         let mut tx = self.db.pool().begin().await?;
         let result = match command.event_kind {
             NoteRevisionEventKind::ExtractionSkipped => {
@@ -149,6 +151,37 @@ impl NoteRepository {
             NoteRevisionEventKind::Deleted => self.delete_with_revision(&mut tx, &command).await?,
         };
         tx.commit().await?;
+
+        if result.changed {
+            match event_kind {
+                NoteRevisionEventKind::Created => {
+                    let note = result.note.as_ref().expect("created mutation returns note");
+                    self.spawn_note_embedding_sync(note);
+                    self.events.send(djinn_memory::events::note_created(note));
+                }
+                NoteRevisionEventKind::Updated => {
+                    let note = result.note.as_ref().expect("updated mutation returns note");
+                    self.spawn_note_embedding_sync(note);
+                    self.events.send(djinn_memory::events::note_updated(note));
+                }
+                NoteRevisionEventKind::ConfidenceChanged => {
+                    let note = result
+                        .note
+                        .as_ref()
+                        .expect("confidence mutation returns note");
+                    self.events.send(djinn_memory::events::note_updated(note));
+                }
+                NoteRevisionEventKind::Deleted => {
+                    let note_id = deleted_note_id.as_deref().expect("validated note identity");
+                    if let Err(error) = self.delete_embedding(note_id).await {
+                        tracing::warn!(%note_id, %error, "failed to delete note embedding during note removal");
+                    }
+                    self.events
+                        .send(djinn_memory::events::note_deleted(note_id));
+                }
+                NoteRevisionEventKind::ExtractionSkipped => {}
+            }
+        }
         Ok(result)
     }
 
@@ -213,6 +246,15 @@ impl NoteRepository {
         .bind(scope_paths)
         .bind(desired.confidence)
         .execute(&mut **tx)
+        .await?;
+        index_links_for_note(tx, note_id, &command.project_id, &desired.content).await?;
+        resolve_links_for_note(
+            tx,
+            note_id,
+            &desired.title,
+            &desired.permalink,
+            &command.project_id,
+        )
         .await?;
         let note = locked_note(tx, note_id, &command.project_id).await?;
         let revision_id = self
@@ -287,6 +329,17 @@ impl NoteRepository {
                 .bind(note_id).bind(&command.project_id).execute(&mut **tx).await?;
         }
         let note = locked_note(tx, note_id, &command.project_id).await?;
+        if command.event_kind == NoteRevisionEventKind::Updated {
+            index_links_for_note(tx, note_id, &command.project_id, &note.content).await?;
+            resolve_links_for_note(
+                tx,
+                note_id,
+                &note.title,
+                &note.permalink,
+                &command.project_id,
+            )
+            .await?;
+        }
         let seq = next_sequence(tx, &command.project_id, note_id).await?;
         let (content_before, content_after) =
             if command.event_kind == NoteRevisionEventKind::ConfidenceChanged {

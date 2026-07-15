@@ -27,7 +27,8 @@ fn assert_mutation_succeeded(response: &Value) {
 #[tokio::test]
 async fn mcp_memory_health_orphans_and_broken_links_shapes() {
     let harness = McpTestHarness::new().await;
-    let project = "test/mcp-memory-health";
+    let (project_row, _dir) = common::create_test_project_with_dir(harness.db()).await;
+    let project = project_row.slug();
 
     let source = trusted_memory_write(
         &harness,
