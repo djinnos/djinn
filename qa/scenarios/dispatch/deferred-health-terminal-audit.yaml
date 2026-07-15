@@ -1,0 +1,12 @@
+version: 1
+scenarios:
+  - id: dispatch.deferred_health_terminal_audit
+    version: 1
+    enabled: true
+    profiles: [smoke-ci]
+    sources: [{kind: incident, id: "deferred health observations require terminal audit"}]
+    primary_coverage: dispatch.deferred-health
+    secondary_coverage: [task-lifecycle.terminal-side-effects]
+    execution: {kind: cargo-package, package: djinn-coordinator}
+    isolation: {database: isolated, providers: isolated, channel: isolated}
+    watch_paths: [server/crates/djinn-coordinator/src/dispatch/task_dispatch.rs]

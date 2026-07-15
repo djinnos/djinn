@@ -1,0 +1,12 @@
+version: 1
+scenarios:
+  - id: github.merge_queue_reopen_blindness
+    version: 1
+    enabled: true
+    profiles: [smoke-ci]
+    sources: [{kind: incident, id: "gton merge-queue requeue loop"}]
+    primary_coverage: github.merge-queue-reopen
+    secondary_coverage: [task-lifecycle.pr-reopen-requeue]
+    execution: {kind: cargo-package, package: djinn-coordinator}
+    isolation: {database: isolated, providers: isolated, channel: isolated}
+    watch_paths: [server/crates/djinn-coordinator/src/dispatch/respawn_guard_mergequeue_tests.rs]

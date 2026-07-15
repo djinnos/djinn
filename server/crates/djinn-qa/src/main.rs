@@ -73,8 +73,15 @@ fn run(args: Vec<String>) -> Result<ExitCode, String> {
     };
     let taxonomy = Taxonomy::load(taxonomy.unwrap_or_else(|| root.join("qa/taxonomy.yaml")))
         .map_err(|error| error.to_string())?;
-    let scenario_path = scenarios.unwrap_or_else(|| root.join("qa/scenarios.yaml"));
-    let inventory = if scenario_path.is_file() {
+    let scenario_path = scenarios.unwrap_or_else(|| {
+        let directory = root.join("qa/scenarios");
+        if directory.is_dir() {
+            directory
+        } else {
+            root.join("qa/scenarios.yaml")
+        }
+    });
+    let inventory = if scenario_path.is_file() || scenario_path.is_dir() {
         ScenarioInventory::load(scenario_path).map_err(|error| error.to_string())?
     } else {
         empty_inventory()

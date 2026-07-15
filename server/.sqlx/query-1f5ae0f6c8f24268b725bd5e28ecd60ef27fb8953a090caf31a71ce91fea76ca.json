@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT id, short_id, title, body, body_format,\n                    acceptance_criteria::text AS \"acceptance_criteria!\",\n                    status, author_user_id, superseded_by, created_at, updated_at, closed_at, latest_revision_seq, last_reconciled_revision_seq, pending_reconcile, build_owner_user_id, build_frozen, build_breakdown_task_id, linked_spike_task_id, needs_evidence_claim\n             FROM proposals WHERE id = $1",
+  "query": "SELECT id, short_id, title, body, body_format,\n                    acceptance_criteria::text AS \"acceptance_criteria!\",\n                    status, author_user_id, superseded_by, created_at, updated_at, closed_at, latest_revision_seq, last_reconciled_revision_seq, pending_reconcile, build_owner_user_id, refinement_owner_user_id, build_frozen, build_breakdown_task_id, linked_spike_task_id, needs_evidence_claim\n             FROM proposals WHERE short_id = $1",
   "describe": {
     "columns": [
       {
@@ -85,21 +85,26 @@
       },
       {
         "ordinal": 16,
+        "name": "refinement_owner_user_id",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 17,
         "name": "build_frozen",
         "type_info": "Bool"
       },
       {
-        "ordinal": 17,
+        "ordinal": 18,
         "name": "build_breakdown_task_id",
         "type_info": "Varchar"
       },
       {
-        "ordinal": 18,
+        "ordinal": 19,
         "name": "linked_spike_task_id",
         "type_info": "Varchar"
       },
       {
-        "ordinal": 19,
+        "ordinal": 20,
         "name": "needs_evidence_claim",
         "type_info": "Text"
       }
@@ -126,11 +131,12 @@
       true,
       false,
       true,
+      true,
       false,
       true,
       true,
       true
     ]
   },
-  "hash": "5c57611e583c29cf5efe242df2d6826be52328bd69c7ff57d6c4f1887b441314"
+  "hash": "1f5ae0f6c8f24268b725bd5e28ecd60ef27fb8953a090caf31a71ce91fea76ca"
 }
