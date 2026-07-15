@@ -22,6 +22,7 @@
   "synthetic_expected_metadata": {
     "unsafe_removed_parameter": { "schema_version": 1, "code": "invalid_compat_call", "surface_kind": "parameter", "old_name": "unsafe_cached_hint", "tool": "task_list", "introduced_in": "1.0.0", "remove_after": "1.3.0", "remedy": { "code": "omit_removed_parameter", "text": "Omit the removed parameter." }, "reason": "unsafe_omission" },
     "unsafe_renamed_tool": { "schema_version": 1, "code": "invalid_compat_call", "surface_kind": "tool", "old_name": "unsafe_cached_tool", "tool": "unsafe_cached_tool", "replacement_tool": "task_show", "introduced_in": "1.0.0", "remove_after": "1.3.0", "remedy": { "code": "call_replacement_tool", "text": "Call the replacement tool named in replacement_tool." }, "reason": "unsafe_forwarding" },
-    "removed_tool_without_replacement": { "schema_version": 1, "code": "removed_surface", "surface_kind": "tool", "old_name": "gone_forever", "tool": "gone_forever", "introduced_in": "1.0.0", "remove_after": "1.3.0", "remedy": { "code": "no_replacement", "text": "There is no replacement for this surface." } }
+    "removed_tool_without_replacement": { "schema_version": 1, "code": "removed_surface", "surface_kind": "tool", "old_name": "gone_forever", "tool": "gone_forever", "introduced_in": "1.0.0", "remove_after": "1.3.0", "remedy": { "code": "no_replacement", "text": "There is no replacement for this surface." } },
+    "agent_local_warning_envelope": { "warnings": [{ "schema_version": 1, "code": "deprecated_surface", "surface_kind": "tool", "old_name": "compat_read", "tool": "read", "replacement_tool": "read", "introduced_in": "0.1.0", "remove_after": "0.3.0", "remedy": { "code": "call_replacement_tool", "text": "Call the replacement tool named in replacement_tool." } }] }
   }
 }

@@ -319,7 +319,7 @@ pub enum NormalizationResult {
 /// This deliberately compares server identities only; MCP client negotiation
 /// never participates in compatibility retention.
 pub fn trap_applies(lifecycle: &TrapLifecycle, current: &ServerReleaseVersion) -> bool {
-    current < &lifecycle.remove_after
+    &lifecycle.introduced_in <= current && current < &lifecycle.remove_after
 }
 
 /// Apply active, Djinn-authored traps in deterministic order before schema validation.

@@ -5,11 +5,26 @@ use djinn_mcp_extension::compatibility::{
     AtomicDeletionBundle, CompatibilityTrap, ReleaseNoteOwner, ReleaseNoteRef, RenamedToolTrap,
     ServerReleaseVersion, ToolForwardingSafety, TrapLifecycle,
 };
-use serde_json::json;
+use serde::Deserialize;
+use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
 
 use super::*;
 use crate::test_helpers::{agent_context_from_db, create_test_db, test_services, test_tempdir};
+
+const COMPATIBILITY_TRAPS_FIXTURE: &str =
+    include_str!("../../../../djinn-mcp-extension/tests/fixtures/compatibility_traps.json");
+
+#[derive(Deserialize)]
+struct CompatibilityTrapFixture {
+    synthetic_expected_metadata: AgentSyntheticExpectedMetadata,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AgentSyntheticExpectedMetadata {
+    agent_local_warning_envelope: Value,
+}
 
 fn current_release() -> ServerReleaseVersion {
     ServerReleaseVersion {
@@ -89,24 +104,14 @@ async fn safe_hidden_alias_reaches_local_handler_and_unauthorized_replacement_is
                     .unwrap_or_default()
                     .contains("normalized local fallback")
             );
+            let fixture: CompatibilityTrapFixture =
+                serde_json::from_str(COMPATIBILITY_TRAPS_FIXTURE)
+                    .expect("strict compatibility contract fixture");
             assert_eq!(
                 json!({ "warnings": warnings }),
-                json!({
-                    "warnings": [{
-                        "schema_version": 1,
-                        "code": "deprecated_surface",
-                        "surface_kind": "tool",
-                        "old_name": "compat_read",
-                        "tool": "read",
-                        "replacement_tool": "read",
-                        "introduced_in": "0.1.0",
-                        "remove_after": "0.3.0",
-                        "remedy": {
-                            "code": "call_replacement_tool",
-                            "text": "Call the replacement tool named in replacement_tool."
-                        }
-                    }]
-                })
+                fixture
+                    .synthetic_expected_metadata
+                    .agent_local_warning_envelope
             );
         }
         other => panic!("safe alias must reach the current local handler: {other:?}"),

@@ -30,6 +30,7 @@ struct SyntheticExpectedMetadata {
     unsafe_removed_parameter: Value,
     unsafe_renamed_tool: Value,
     removed_tool_without_replacement: Value,
+    agent_local_warning_envelope: Value,
 }
 
 #[derive(Clone, Deserialize)]
@@ -315,6 +316,14 @@ fn compatibility_traps() {
     assert!(djinn_mcp_extension::compatibility::PRODUCTION_REGISTRY.is_empty());
     let fixture: Fixture = serde_json::from_str(FIXTURE).expect("strict checked-in fixture");
     validate_fixture(&fixture).expect("all deletion fixture cases resolve");
+    assert_eq!(
+        fixture
+            .synthetic_expected_metadata
+            .agent_local_warning_envelope["warnings"]
+            .as_array()
+            .map(Vec::len),
+        Some(1)
+    );
     let expected = fixture
         .traps
         .iter()
@@ -544,12 +553,15 @@ fn compatibility_traps() {
     assert_eq!(unknown.arguments, args(json!({"x":1})));
     assert!(unknown.compatibility_warnings.is_empty());
 
-    // Retention is lower-inclusive and upper-exclusive; the calendar has day 89,
-    // day 90, patch, and first-following-minor boundaries represented above.
+    // Retention is lower-inclusive and upper-exclusive; calls before a break
+    // retain ordinary behavior rather than being prospectively trapped.
     let lifecycle = match &registry[0] {
         CompatibilityTrap::RenamedTool(t) => &t.lifecycle,
         _ => unreachable!(),
     };
+    assert!(!trap_applies(lifecycle, &"0.9.9".parse().unwrap()));
+    assert!(trap_applies(lifecycle, &"1.0.0".parse().unwrap()));
+    assert!(trap_applies(lifecycle, &"1.0.1".parse().unwrap()));
     assert!(trap_applies(lifecycle, &"1.2.1".parse().unwrap()));
     assert!(!trap_applies(lifecycle, &"1.3.0".parse().unwrap()));
     assert!(!trap_applies(lifecycle, &"1.3.1".parse().unwrap()));
