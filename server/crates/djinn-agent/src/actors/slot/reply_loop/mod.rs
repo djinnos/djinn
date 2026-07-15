@@ -192,7 +192,7 @@ impl djinn_slot::host::SlotToolDispatcher for AgentToolDispatcher {
         task_id: &'a str,
         role_name: &'a str,
     ) -> std::pin::Pin<
-        Box<dyn std::future::Future<Output = Result<serde_json::Value, String>> + Send + 'a>,
+        Box<dyn std::future::Future<Output = djinn_core::tool_call::ToolCallOutcome> + Send + 'a>,
     > {
         Box::pin(crate::extension::call_tool(
             &self.app_state,
