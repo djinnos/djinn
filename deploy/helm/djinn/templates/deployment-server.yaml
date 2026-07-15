@@ -184,6 +184,10 @@ spec:
             # the in-process TestRuntime.
             - name: DJINN_RUNTIME
               value: "kubernetes"
+            # Keep cleanup off migrate-only: only the application container
+            # activates the coordinator's selected cleanup mode.
+            - name: DJINN_CACHE_CLEANUP_MODE
+              value: {{ .Values.cacheCleanup.mode | quote }}
             - name: DJINN_IMAGE_BUILDER_IMAGE
               value: {{ .Values.imagePipeline.builderImage | quote }}
             # Fully-qualified ref used in `COPY --from=<ref>` in each
