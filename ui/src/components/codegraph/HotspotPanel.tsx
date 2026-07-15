@@ -102,7 +102,7 @@ export function HotspotPanel({
               className={cn(
                 "rounded px-1.5 py-0.5 text-[10px] transition-colors",
                 sortKey === key
-                  ? "bg-slate-800/80 text-sky-300"
+                  ? "bg-slate-600/40 text-slate-100"
                   : "text-slate-500 hover:text-slate-300",
               )}
             >
@@ -128,7 +128,7 @@ export function HotspotPanel({
                 onClick={() => onSelect(selected ? null : h)}
                 className={cn(
                   "block w-full border-b border-slate-800/50 px-3 py-2 text-left transition-colors",
-                  selected ? "bg-sky-500/10" : "hover:bg-slate-800/40",
+                  selected ? "bg-slate-500/15" : "hover:bg-slate-800/40",
                 )}
               >
                 <div className="flex items-center gap-2">
