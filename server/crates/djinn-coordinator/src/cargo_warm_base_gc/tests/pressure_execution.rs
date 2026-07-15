@@ -1513,30 +1513,265 @@ async fn frozen_cold_rebuild_cases_execute_and_preserve_required_siblings() {
     }
 }
 
+// Helper types and functions for the two-actor test, kept at module scope.
+
+/// A recursive snapshot of every target-relative path, its file type, byte
+/// content, and symlink target. Used to prove the busy pressure loser performs
+/// zero filesystem mutation.
+fn recursive_snapshot(root: &Path) -> Vec<(String, String, Vec<u8>)> {
+    let mut entries = Vec::new();
+    let mut pending = vec![root.to_path_buf()];
+    while let Some(dir) = pending.pop() {
+        let read = match std::fs::read_dir(&dir) {
+            Ok(r) => r,
+            Err(_) => continue,
+        };
+        for child in read.flatten() {
+            let path = child.path();
+            let relative = path
+                .strip_prefix(root)
+                .unwrap_or(&path)
+                .to_string_lossy()
+                .into_owned();
+            let metadata = match std::fs::symlink_metadata(&path) {
+                Ok(m) => m,
+                Err(_) => continue,
+            };
+            if metadata.file_type().is_symlink() {
+                let target = std::fs::read_link(&path)
+                    .map(|t| t.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                entries.push((relative, format!("symlink:{target}"), Vec::new()));
+            } else if metadata.is_dir() {
+                entries.push((relative, "dir".into(), Vec::new()));
+                pending.push(path);
+            } else if metadata.is_file() {
+                let bytes = std::fs::read(&path).unwrap_or_default();
+                entries.push((relative, "file".into(), bytes));
+            }
+        }
+    }
+    entries.sort_by(|a, b| a.0.cmp(&b.0));
+    entries
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TwoActorActor {
+    Warm,
+    Pressure,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TwoActorOp {
+    Traversal,
+    Compilation,
+    Removal,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TwoActorBoundary {
+    Enter,
+    Exit,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct TwoActorEvent {
+    actor: TwoActorActor,
+    op: TwoActorOp,
+    boundary: TwoActorBoundary,
+    seq: u64,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct TwoActorInterval {
+    actor: TwoActorActor,
+    #[allow(dead_code)]
+    op: TwoActorOp,
+    enter_seq: u64,
+    exit_seq: u64,
+}
+
+impl TwoActorInterval {
+    /// Two intervals overlap if neither is completely before the other.
+    fn overlaps(&self, other: &TwoActorInterval) -> bool {
+        !(self.exit_seq < other.enter_seq || other.exit_seq < self.enter_seq)
+    }
+}
+
+fn two_actor_event_line(
+    actor: TwoActorActor,
+    op: TwoActorOp,
+    boundary: TwoActorBoundary,
+    seq: u64,
+) -> String {
+    let (a, o, b) = match (actor, op, boundary) {
+        (TwoActorActor::Warm, TwoActorOp::Traversal, TwoActorBoundary::Enter) => {
+            ("warm", "traversal", "enter")
+        }
+        (TwoActorActor::Warm, TwoActorOp::Traversal, TwoActorBoundary::Exit) => {
+            ("warm", "traversal", "exit")
+        }
+        (TwoActorActor::Warm, TwoActorOp::Compilation, TwoActorBoundary::Enter) => {
+            ("warm", "compilation", "enter")
+        }
+        (TwoActorActor::Warm, TwoActorOp::Compilation, TwoActorBoundary::Exit) => {
+            ("warm", "compilation", "exit")
+        }
+        (TwoActorActor::Pressure, TwoActorOp::Traversal, TwoActorBoundary::Enter) => {
+            ("pressure", "traversal", "enter")
+        }
+        (TwoActorActor::Pressure, TwoActorOp::Traversal, TwoActorBoundary::Exit) => {
+            ("pressure", "traversal", "exit")
+        }
+        (TwoActorActor::Pressure, TwoActorOp::Removal, TwoActorBoundary::Enter) => {
+            ("pressure", "removal", "enter")
+        }
+        (TwoActorActor::Pressure, TwoActorOp::Removal, TwoActorBoundary::Exit) => {
+            ("pressure", "removal", "exit")
+        }
+        _ => ("warm", "compilation", "exit"),
+    };
+    format!("{{\"actor\":\"{a}\",\"op\":\"{o}\",\"boundary\":\"{b}\",\"seq\":{seq}}}")
+}
+
+fn parse_two_actor_event(line: &str, global_seq: u64) -> Option<TwoActorEvent> {
+    let value: serde_json::Value = serde_json::from_str(line.trim()).ok()?;
+    let actor = match value["actor"].as_str()? {
+        "warm" => TwoActorActor::Warm,
+        "pressure" => TwoActorActor::Pressure,
+        _ => return None,
+    };
+    let op = match value["op"].as_str()? {
+        "traversal" => TwoActorOp::Traversal,
+        "compilation" => TwoActorOp::Compilation,
+        "removal" => TwoActorOp::Removal,
+        _ => return None,
+    };
+    let boundary = match value["boundary"].as_str()? {
+        "enter" => TwoActorBoundary::Enter,
+        "exit" => TwoActorBoundary::Exit,
+        _ => return None,
+    };
+    Some(TwoActorEvent {
+        actor,
+        op,
+        boundary,
+        seq: global_seq,
+    })
+}
+
+fn read_two_actor_events(log: &Path) -> Vec<TwoActorEvent> {
+    let content = std::fs::read_to_string(log).unwrap_or_default();
+    content
+        .lines()
+        .enumerate()
+        .filter_map(|(i, line)| parse_two_actor_event(line, i as u64))
+        .collect()
+}
+
+fn build_two_actor_intervals(events: &[TwoActorEvent]) -> Vec<TwoActorInterval> {
+    let mut intervals = Vec::new();
+    for actor in [TwoActorActor::Warm, TwoActorActor::Pressure] {
+        for op in [
+            TwoActorOp::Traversal,
+            TwoActorOp::Compilation,
+            TwoActorOp::Removal,
+        ] {
+            let mut enter_seq = None;
+            for event in events.iter().filter(|e| e.actor == actor && e.op == op) {
+                match event.boundary {
+                    TwoActorBoundary::Enter => enter_seq = Some(event.seq),
+                    TwoActorBoundary::Exit => {
+                        if let Some(enter) = enter_seq.take() {
+                            intervals.push(TwoActorInterval {
+                                actor,
+                                op,
+                                enter_seq: enter,
+                                exit_seq: event.seq,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+    }
+    intervals
+}
+
+/// Thread-safe pressure observer that appends structured events to the shared
+/// two-actor recorder log and increments a total-callback counter.
+struct RecordingObserver {
+    log: PathBuf,
+    seq: std::sync::atomic::AtomicU64,
+    counter: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl PressureOperationObserver for RecordingObserver {
+    fn observe(&self, operation: PressureOperation) {
+        use PressureOperation::*;
+        let (op, boundary) = match operation {
+            TraversalEnter => (TwoActorOp::Traversal, TwoActorBoundary::Enter),
+            TraversalExit => (TwoActorOp::Traversal, TwoActorBoundary::Exit),
+            RemovalEnter => (TwoActorOp::Removal, TwoActorBoundary::Enter),
+            RemovalExit => (TwoActorOp::Removal, TwoActorBoundary::Exit),
+        };
+        self.counter
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let seq = self.seq.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let line = two_actor_event_line(TwoActorActor::Pressure, op, boundary, seq);
+        if let Ok(mut file) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.log)
+        {
+            use std::io::Write;
+            let _ = writeln!(file, "{line}");
+        }
+    }
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn frozen_two_actor_schedule_serializes_warm_work_and_pressure_retry() {
-    use std::process::Command;
+    use std::process::{Command, Stdio};
 
+    // ---------- Child entry: run the landed warm path ----------
     if std::env::var_os("DJINN_TWO_ACTOR_WARM_CHILD").is_some() {
         let root = PathBuf::from(std::env::var("DJINN_TWO_ACTOR_ROOT").unwrap());
         let workspace = PathBuf::from(std::env::var("DJINN_TWO_ACTOR_WORKSPACE").unwrap());
         let id = std::env::var("DJINN_TWO_ACTOR_PROJECT").unwrap();
-        let events = root.join("warm-events");
-        std::fs::create_dir_all(&events).unwrap();
+        let log = root.join("two-actor-recorder.jsonl");
+        let counter = std::sync::atomic::AtomicU64::new(0);
+        let observe = move |phase: djinn_agent_worker::cargo_incremental_prune::WarmWorkPhase| {
+            use djinn_agent_worker::cargo_incremental_prune::WarmWorkPhase::*;
+            let (op, boundary) = match phase {
+                TraversalEnter => (TwoActorOp::Traversal, TwoActorBoundary::Enter),
+                TraversalExit => (TwoActorOp::Traversal, TwoActorBoundary::Exit),
+                CompilationEnter => (TwoActorOp::Compilation, TwoActorBoundary::Enter),
+                CompilationExit => (TwoActorOp::Compilation, TwoActorBoundary::Exit),
+            };
+            let seq = counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let line = two_actor_event_line(TwoActorActor::Warm, op, boundary, seq);
+            let mut file = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&log)
+                .unwrap();
+            use std::io::Write;
+            writeln!(file, "{line}").unwrap();
+        };
         let _guard = djinn_agent_worker::cargo_incremental_prune::run_warm_work_at_root(
-            &id,
-            &root,
-            &workspace,
-            |phase| std::fs::write(events.join(format!("{phase:?}")), b"observed").unwrap(),
+            &id, &root, &workspace, observe,
         )
         .unwrap();
-        std::fs::write(events.join("warm-lock-held"), b"held").unwrap();
+        // Signal the parent that the warm actor holds the lock and is alive.
+        std::fs::write(root.join("warm-lock-held"), b"held").unwrap();
         loop {
             std::thread::sleep(Duration::from_secs(1));
         }
     }
 
+    // ---------- Parent: set up the two-actor schedule ----------
     let fixture = frozen_coordinator_fixture();
     let temp = tempfile::tempdir().unwrap();
     let id = "018f8b9a-0d70-7f0a-8000-000000000299";
@@ -1549,8 +1784,11 @@ async fn frozen_two_actor_schedule_serializes_warm_work_and_pressure_retry() {
     )
     .unwrap();
     std::fs::write(workspace.join("src/lib.rs"), "pub fn compiled() {}\n").unwrap();
-    let lock_path = temp.path().join(".warm-locks").join(format!("{id}.lock"));
-    std::fs::create_dir_all(lock_path.parent().unwrap()).unwrap();
+    let log_path = temp.path().join("two-actor-recorder.jsonl");
+    let _ = std::fs::File::create(&log_path).unwrap();
+
+    // The warm child drives the real WarmBaseLock::acquire -> prune traversal ->
+    // cargo check path and appends structured warm events to the shared recorder.
     let mut warm = Command::new(std::env::current_exe().unwrap())
         .args([
             "cargo_warm_base_gc::tests::pressure_execution::frozen_two_actor_schedule_serializes_warm_work_and_pressure_retry",
@@ -1561,27 +1799,71 @@ async fn frozen_two_actor_schedule_serializes_warm_work_and_pressure_retry() {
         .env("DJINN_TWO_ACTOR_ROOT", temp.path())
         .env("DJINN_TWO_ACTOR_WORKSPACE", &workspace)
         .env("DJINN_TWO_ACTOR_PROJECT", id)
+        .stdout(Stdio::null())
+        .stderr(Stdio::inherit())
         .spawn()
         .expect("start deterministic warm actor");
-    for _ in 0..100 {
-        if temp.path().join("warm-events/warm-lock-held").exists() {
+
+    // Wait until the child proves it reached the end of the warm path by
+    // writing the held-lock signal. This proves real warm traversal and cargo
+    // compilation completed while holding the lock.
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        if temp.path().join("warm-lock-held").exists() {
             break;
         }
-        std::thread::sleep(Duration::from_millis(10));
+        assert!(std::time::Instant::now() < deadline, "warm actor timed out");
+        std::thread::sleep(Duration::from_millis(20));
     }
+
+    // Read the warm events the child recorded so far and assert the real warm
+    // traversal and compilation ran to completion.
+    let warm_events = read_two_actor_events(&log_path);
     assert!(
-        temp.path().join("warm-events/CompilationExit").exists(),
-        "warm actor reached worker-owned Cargo compilation"
+        warm_events.iter().any(|e| {
+            e.actor == TwoActorActor::Warm
+                && e.op == TwoActorOp::Traversal
+                && e.boundary == TwoActorBoundary::Enter
+        }) && warm_events.iter().any(|e| {
+            e.actor == TwoActorActor::Warm
+                && e.op == TwoActorOp::Traversal
+                && e.boundary == TwoActorBoundary::Exit
+        }),
+        "warm child must record real traversal enter/exit"
+    );
+    assert!(
+        warm_events.iter().any(|e| {
+            e.actor == TwoActorActor::Warm
+                && e.op == TwoActorOp::Compilation
+                && e.boundary == TwoActorBoundary::Enter
+        }) && warm_events.iter().any(|e| {
+            e.actor == TwoActorActor::Warm
+                && e.op == TwoActorOp::Compilation
+                && e.boundary == TwoActorBoundary::Exit
+        }),
+        "warm child must record real compilation enter/exit"
     );
 
     let lock = SharedWarmBaseLock;
     let unit = eligible_three_rung_unit(&base, &base, PressureRung::WholeBase);
-    let loser_removals = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let calls = loser_removals.clone();
-    set_remove_dir_all_hook(Some(Box::new(move |_| {
-        calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        Ok(())
-    })));
+
+    // Snapshot every target-relative path, file bytes, and file type before the
+    // loser attempts to run. This proves the loser performs no mutation.
+    let before_snapshot = recursive_snapshot(&base);
+
+    // Pressure-side observer: the test-only seam records the executor's real
+    // traversal/removal boundaries into the same shared recorder.
+    let pressure_counter = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let observer = RecordingObserver {
+        log: log_path.clone(),
+        seq: std::sync::atomic::AtomicU64::new(0),
+        counter: pressure_counter.clone(),
+    };
+    set_pressure_operation_observer(Some(Box::new(observer)));
+
+    // While the warm actor owns the shared lock, invoke the pressure executor.
+    // It must fail to acquire the lock, performing zero traversal and zero
+    // removal.
     let loser = execute_three_rung_pressure_plan(
         &ThreeRungPressurePlan {
             units: vec![unit.clone()],
@@ -1595,20 +1877,37 @@ async fn frozen_two_actor_schedule_serializes_warm_work_and_pressure_retry() {
         temp.path(),
     )
     .await;
-    set_remove_dir_all_hook(None);
-    assert!(loser.attempted.is_empty() && loser.deleted.is_empty());
-    assert_eq!(
-        loser_removals.load(std::sync::atomic::Ordering::SeqCst),
-        0,
-        "pressure loser must not traverse or remove"
-    );
+    set_pressure_operation_observer(None);
+
     assert!(
-        base.exists(),
-        "busy pressure actor must not mutate the base"
+        loser.attempted.is_empty() && loser.deleted.is_empty(),
+        "pressure loser must not attempt or delete while warm owns the lock"
     );
+    assert_eq!(
+        pressure_counter.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "pressure loser must perform zero traversal and zero removal callbacks"
+    );
+    let after_loser_snapshot = recursive_snapshot(&base);
+    assert_eq!(
+        before_snapshot, after_loser_snapshot,
+        "pressure loser must leave every target-relative path, file bytes, and file type unchanged"
+    );
+
+    // Kill and reap the warm lock owner without graceful unlock. The kernel
+    // releases the advisory flock on process death.
     warm.kill().unwrap();
     warm.wait().unwrap();
 
+    // Retry with the same observed executor and SharedWarmBaseLock. After the
+    // owner's death, the lock is available.
+    let retry_counter = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let retry_observer = RecordingObserver {
+        log: log_path.clone(),
+        seq: std::sync::atomic::AtomicU64::new(0),
+        counter: retry_counter.clone(),
+    };
+    set_pressure_operation_observer(Some(Box::new(retry_observer)));
     let result = execute_three_rung_pressure_plan(
         &ThreeRungPressurePlan {
             units: vec![unit.clone()],
@@ -1631,16 +1930,77 @@ async fn frozen_two_actor_schedule_serializes_warm_work_and_pressure_retry() {
         temp.path(),
     )
     .await;
+    set_pressure_operation_observer(None);
+
+    // Exact accounting after retry.
+    assert_eq!(result.planned, vec![unit.clone()]);
+    assert_eq!(result.post_lock_eligible, vec![unit.clone()]);
     assert_eq!(result.attempted, vec![unit.clone()]);
-    assert_eq!(result.deleted, vec![unit]);
+    assert_eq!(result.deleted, vec![unit.clone()]);
+    assert!(result.retained.is_empty() && result.failed.is_empty());
     assert!(
         !base.exists(),
         "pressure retry removes only after owner death releases the lock"
     );
+
+    // Exactly one pressure traversal enter/exit and one removal enter/exit
+    // (4 callback boundaries total).
+    assert_eq!(
+        retry_counter.load(std::sync::atomic::Ordering::SeqCst),
+        4,
+        "retry must record exactly one traversal enter/exit and one removal enter/exit"
+    );
+
+    // Read the complete recorder and build intervals from the recorded data.
+    let all_events = read_two_actor_events(&log_path);
+    let intervals = build_two_actor_intervals(&all_events);
+    assert!(
+        !intervals.is_empty(),
+        "recorder must have recorded at least one operation interval"
+    );
+
+    // Each enter must have a later exit (ordered seq within the same actor+op).
+    for interval in &intervals {
+        assert!(
+            interval.enter_seq < interval.exit_seq,
+            "every operation exit must come after its enter: {interval:?}"
+        );
+    }
+
+    // Assert no warm interval overlaps any pressure interval, derived from the
+    // recorded data — not from the static fixture literal.
+    let warm_intervals: Vec<_> = intervals
+        .iter()
+        .filter(|i| i.actor == TwoActorActor::Warm)
+        .collect();
+    let pressure_intervals: Vec<_> = intervals
+        .iter()
+        .filter(|i| i.actor == TwoActorActor::Pressure)
+        .collect();
+    assert!(
+        !warm_intervals.is_empty(),
+        "recorder must contain warm operation intervals"
+    );
+    assert!(
+        !pressure_intervals.is_empty(),
+        "recorder must contain pressure operation intervals"
+    );
+    for warm_iv in &warm_intervals {
+        for pressure_iv in &pressure_intervals {
+            assert!(
+                !warm_iv.overlaps(pressure_iv),
+                "warm {warm_iv:?} must not overlap pressure {pressure_iv:?}"
+            );
+        }
+    }
+
     assert_eq!(
         fixture["two_actor"]["lock_path"],
         ".warm-locks/<project-id>.lock"
     );
     assert_eq!(fixture["two_actor"]["loser_removals"], 0);
     assert_eq!(fixture["two_actor"]["retry_removals"], result.deleted.len());
+    assert_eq!(fixture["two_actor"]["overlap"]["traversal"], 0);
+    assert_eq!(fixture["two_actor"]["overlap"]["removal"], 0);
+    assert_eq!(fixture["two_actor"]["overlap"]["compilation"], 0);
 }
