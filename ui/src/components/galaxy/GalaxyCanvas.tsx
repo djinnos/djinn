@@ -62,6 +62,12 @@ export interface GalaxyCanvasProps {
    * replacing any click selection. Cleared by passing null/empty.
    */
   focusIds?: string[] | null;
+  /**
+   * The anchor of the external focus set (e.g. the hotspot file whose
+   * partners fill `focusIds`) — rendered bigger/brighter than the rest of
+   * the highlight. Click selections get this treatment automatically.
+   */
+  focusPrimaryId?: string | null;
   className?: string;
   onSelect?: (nodeId: string | null) => void;
 }
@@ -126,6 +132,7 @@ export function GalaxyCanvas({
   banner,
   sidePanel,
   focusIds,
+  focusPrimaryId,
   className,
   onSelect,
 }: GalaxyCanvasProps) {
@@ -168,6 +175,18 @@ export function GalaxyCanvas({
     for (const n of adjacency.get(selectedId) ?? []) set.add(n);
     return set;
   }, [focusHighlight, selectedId, adjacency]);
+
+  // The focus anchor: a star click anchors on the clicked node; an external
+  // focus anchors on focusPrimaryId when it's part of the lit set (a lone
+  // Cmd-K/search swarm has no single anchor — nothing pops).
+  const primaryId = useMemo(() => {
+    if (focusHighlight && focusHighlight.size > 0) {
+      return focusPrimaryId && focusHighlight.has(focusPrimaryId)
+        ? focusPrimaryId
+        : null;
+    }
+    return selectedId;
+  }, [focusHighlight, focusPrimaryId, selectedId]);
 
   const overviewTarget = useMemo<FlyTarget>(() => {
     const { center, radius } = boundsOf(data.nodes);
@@ -309,6 +328,7 @@ export function GalaxyCanvas({
           key={sceneGeneration}
           data={data}
           highlight={highlight}
+          primaryId={primaryId}
           display={display}
           showLabels={showLabels}
           flyTarget={flyTarget}
