@@ -23,7 +23,7 @@ pub const CODE_GRAPH_REGISTRY: &[OpEntry] = &[
     // Bridge   : RepoGraphOps::neighbors
     // Pre-res  : single_key — `params.key` resolved via `RepoGraphOps::resolve`
     // Validation: require_key + validate_direction + validate_group_by
-    //            + validate_edge_kind_filter (reads/writes)
+    //            + validate_edge_kind_filter (reads/writes/co_changed_with)
     // Workspace: ignored — neighbors are not workspace-scoped
     OpEntry {
         name: "neighbors",

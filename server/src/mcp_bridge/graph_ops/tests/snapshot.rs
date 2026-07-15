@@ -574,6 +574,82 @@ fn snapshot_payload_returns_full_graph_under_cap_pr_d2() {
 }
 
 #[test]
+fn snapshot_payload_emits_cochange_edges_as_distinct_channel_qoxm() {
+    // Proposal qoxm: co-change edges live in a sidecar outside the petgraph.
+    // The snapshot must emit them as their own `CoChangedWith` kind (with the
+    // coupling score as confidence and the temporal reason) when both file
+    // endpoints survive — and must emit none when the sidecar is empty.
+    use djinn_control_plane::tools::graph_exclusions::GraphExclusions;
+    use djinn_graph::cochange::{CoChangeInput, derive_cochange_edges};
+
+    let mut graph = build_test_graph();
+    let ranking = graph.rank();
+
+    // Baseline: no sidecar → no CoChangedWith edges in the payload.
+    let baseline = build_snapshot_payload(
+        &graph,
+        &ranking,
+        "proj-test".to_string(),
+        "deadbeef".to_string(),
+        "2026-07-15T00:00:00Z".to_string(),
+        &GraphExclusions::empty(),
+        None,
+        SnapshotLevel::Symbol,
+        2_000,
+    );
+    assert!(
+        baseline.edges.iter().all(|e| e.kind != "CoChangedWith"),
+        "empty sidecar must emit no co-change edges"
+    );
+
+    // Materialize one co-change pair between the fixture's two files.
+    let derived = derive_cochange_edges(
+        &graph,
+        &[CoChangeInput {
+            file_a: "src/app.rs".to_string(),
+            file_b: "src/helper.rs".to_string(),
+            co_changes: 10,
+            last_co_change_iso: "2026-07-01T00:00:00Z".to_string(),
+        }],
+    );
+    assert_eq!(derived.len(), 1, "fixture pair should qualify");
+    graph.set_cochange_edges(derived);
+
+    let payload = build_snapshot_payload(
+        &graph,
+        &ranking,
+        "proj-test".to_string(),
+        "deadbeef".to_string(),
+        "2026-07-15T00:00:00Z".to_string(),
+        &GraphExclusions::empty(),
+        None,
+        SnapshotLevel::Symbol,
+        2_000,
+    );
+    let cc: Vec<_> = payload
+        .edges
+        .iter()
+        .filter(|e| e.kind == "CoChangedWith")
+        .collect();
+    assert_eq!(cc.len(), 1, "one surviving pair → one co-change edge");
+    assert!(cc[0].from.starts_with("file:") && cc[0].to.starts_with("file:"));
+    assert!(
+        cc[0].confidence > 0.0 && cc[0].confidence < 1.0,
+        "confidence carries the coupling score"
+    );
+    assert!(
+        cc[0]
+            .reason
+            .as_deref()
+            .is_some_and(|r| r.starts_with("cochange;last_day=")),
+        "temporal last_co_change rides in the reason: {:?}",
+        cc[0].reason
+    );
+    // Co-change is not part of the structural edge total.
+    assert_eq!(payload.total_edges, baseline.total_edges);
+}
+
+#[test]
 fn snapshot_payload_truncates_when_node_cap_smaller_than_graph_pr_d2() {
     // Cap below the graph's node count — `truncated` must be true,
     // emitted nodes must equal cap, and every emitted edge's
