@@ -12,7 +12,8 @@ mod common;
 use djinn_control_plane::test_support::McpTestHarness;
 use djinn_core::events::EventBus;
 use djinn_core::extension_diagnostics::{
-    ExtensionLoadPhase, ExtensionLoadRemedyCode, ExtensionLoadSeverity, ExtensionLoadSourceKind,
+    ExtensionLoadDiagnosticV1, ExtensionLoadPhase, ExtensionLoadRemedyCode, ExtensionLoadSeverity,
+    ExtensionLoadSourceKind,
 };
 use djinn_db::{
     ExtensionLoadDiagnosticRepository, InsertExtensionLoadDiagnostic, SessionMessageRepository,
@@ -252,6 +253,165 @@ fn extension_diagnostic_input(
         last_seen_at: "2026-07-14T12:00:00.000Z".to_owned(),
         created_at: "2026-07-14T12:00:00.000Z".to_owned(),
     }
+}
+
+fn assert_canonical_diagnostic_projection(
+    persisted: &ExtensionLoadDiagnosticV1,
+    projection: &serde_json::Value,
+) {
+    let canonical = serde_json::to_value(persisted).expect("serialize canonical V1 record");
+    for field in [
+        "diagnostic_id",
+        "source_kind",
+        "source_key",
+        "phase",
+        "summary",
+        "remedy_code",
+        "remedy",
+        "severity",
+        "occurrence_count",
+    ] {
+        assert_eq!(
+            projection.get(field),
+            canonical.get(field),
+            "canonical {field}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn extension_diagnostics_session_projections() {
+    let harness = McpTestHarness::new().await;
+    let db = harness.db();
+    let project = common::create_test_project(db).await;
+    let epic = common::create_test_epic(db, &project.id).await;
+    let task = common::create_test_task(db, &project.id, &epic.id).await;
+    let session = common::create_test_session(db, &project.id, &task.id).await;
+    let empty_session = common::create_test_session(db, &project.id, &task.id).await;
+    let empty_task = common::create_test_task(db, &project.id, &epic.id).await;
+    let diagnostics = ExtensionLoadDiagnosticRepository::new(db.clone());
+
+    let empty_show = harness
+        .call_tool(
+            "session_show",
+            json!({ "id": empty_session.id, "project": project.slug() }),
+        )
+        .await
+        .expect("empty session_show should dispatch");
+    assert_eq!(
+        empty_show.get("extension_load_diagnostics"),
+        Some(&json!([]))
+    );
+    let empty_timeline = harness
+        .call_tool(
+            "task_timeline",
+            json!({ "task_id": empty_task.id, "project": project.slug() }),
+        )
+        .await
+        .expect("empty task_timeline should dispatch");
+    assert_eq!(
+        empty_timeline.get("extension_load_diagnostic_events"),
+        Some(&json!([]))
+    );
+
+    let observation = extension_diagnostic_input(
+        &project.id,
+        Some(&task.id),
+        Some(&session.id),
+        "named-projection-server",
+    );
+    let first = diagnostics
+        .insert_or_increment(observation.clone())
+        .await
+        .expect("persist first session diagnostic");
+    let persisted = diagnostics
+        .insert_or_increment(observation)
+        .await
+        .expect("aggregate same-attempt retry");
+    assert_eq!(persisted.diagnostic_id, first.diagnostic_id);
+    assert_eq!(persisted.occurrence_count, 2);
+    assert_eq!(
+        diagnostics
+            .list_for_session(&project.id, &session.id)
+            .await
+            .expect("list persisted session diagnostics"),
+        vec![persisted.clone()]
+    );
+
+    // PromptContextInputs consumes the canonical V1 list at this serialization boundary.
+    let prompt = serde_json::to_value(vec![persisted.clone()]).expect("serialize prompt input");
+    assert_canonical_diagnostic_projection(&persisted, &prompt.as_array().unwrap()[0]);
+
+    diagnostics
+        .insert_or_increment(extension_diagnostic_input(
+            &project.id,
+            None,
+            None,
+            "doctor-only-named-projection",
+        ))
+        .await
+        .expect("persist doctor-only diagnostic");
+    let show = harness
+        .call_tool(
+            "session_show",
+            json!({ "id": session.id, "project": project.slug() }),
+        )
+        .await
+        .expect("session_show should dispatch");
+    let shown = show
+        .get("extension_load_diagnostics")
+        .and_then(|v| v.as_array())
+        .unwrap();
+    assert_eq!(shown.len(), 1, "doctor-only rows are not session-projected");
+    assert_canonical_diagnostic_projection(&persisted, &shown[0]);
+    let mut future = shown[0].clone();
+    future["future_extension_field"] = json!({ "version": 2 });
+    assert_eq!(
+        serde_json::from_value::<ExtensionLoadDiagnosticV1>(future)
+            .expect("canonical V1 readers tolerate unknown future fields"),
+        persisted
+    );
+
+    let timeline = harness
+        .call_tool(
+            "task_timeline",
+            json!({ "task_id": task.id, "project": project.slug() }),
+        )
+        .await
+        .expect("task_timeline should dispatch");
+    let events = timeline
+        .get("extension_load_diagnostic_events")
+        .and_then(|v| v.as_array())
+        .unwrap();
+    assert_eq!(events.len(), 1, "one aggregated identity yields one event");
+    assert_eq!(
+        events[0].get("kind").and_then(|v| v.as_str()),
+        Some("extension_load_diagnostic")
+    );
+    assert_eq!(
+        events[0].get("session_id").and_then(|v| v.as_str()),
+        Some(session.id.as_str())
+    );
+    assert_canonical_diagnostic_projection(&persisted, events[0].get("diagnostic").unwrap());
+
+    let other_project = common::create_test_project(db).await;
+    let denied = harness
+        .call_tool(
+            "session_show",
+            json!({ "id": session.id, "project": other_project.slug() }),
+        )
+        .await
+        .expect("wrong-project session_show should dispatch");
+    assert!(denied.get("error").and_then(|v| v.as_str()).is_some());
+
+    djinn_db::test_support::delete_session_row(db, &session.id).await;
+    assert!(
+        diagnostics
+            .list_for_session(&project.id, &session.id)
+            .await
+            .expect("list diagnostics after session deletion")
+            .is_empty()
+    );
 }
 
 #[tokio::test]
