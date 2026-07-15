@@ -1667,17 +1667,9 @@ impl CoordinatorActor {
     /// falling back to credential-backed tool-capable models.
     pub(super) async fn resolve_dispatch_models_for_role(
         &self,
-        _role: &str,
+        role: &str,
         user_id: Option<&str>,
     ) -> Vec<String> {
-        #[cfg(test)]
-        {
-            let _ = user_id;
-            vec![DEFAULT_MODEL_ID.to_owned()]
-        }
-
-        #[cfg(not(test))]
-        {
             let cred_repo = djinn_provider::repos::CredentialRepository::new(
                 self.db.clone(),
                 crate::events::event_bus_for(&self.events_tx),
@@ -1714,7 +1706,7 @@ impl CoordinatorActor {
             // escalating to a Planner that can decompose/rescope/close them.
             let effective_priorities = self
                 .model_priorities
-                .get(_role)
+                .get(role)
                 .or_else(|| self.model_priorities.get("worker"));
 
             if let Some(priority_models) = effective_priorities {
@@ -1771,10 +1763,9 @@ impl CoordinatorActor {
             // the same rejected acceptance criterion forever instead of
             // escalating to a Planner that can decompose/rescope/close them.
             if selected.is_empty() {
-                return self.resolve_user_model_priority(user_id, _role).await;
+                return self.resolve_user_model_priority(user_id, role).await;
             }
             selected
-        }
     }
 
     pub(super) fn task_repo(&self) -> TaskRepository {
