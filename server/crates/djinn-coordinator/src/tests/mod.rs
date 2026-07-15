@@ -448,6 +448,8 @@ fn coordinator_actor_for_tests(
         .0,
         dispatch_limit: 50,
         model_priorities: HashMap::new(),
+        #[cfg(test)]
+        test_use_live_credential_resolution: false,
         pr_errors: HashMap::new(),
         last_dispatched: HashMap::new(),
         inflight_dispatches: HashMap::new(),

@@ -176,9 +176,15 @@ impl DjinnMcpServer {
             ));
         }
 
-        // Record refinement_start lifecycle entry.
+        // Persist the exact selected owner with the refinement_start boundary.
+        // Recovery and runtime attribution consume this durable value rather
+        // than proposal-author or tribunal-task fallbacks.
+        let refinement_owner_user_id = p
+            .owner_user_id
+            .clone()
+            .or_else(|| proposal.author_user_id.clone());
         match repo
-            .record_refinement_lifecycle(&proposal.id, "refinement_start", None)
+            .start_refinement_with_owner(&proposal.id, refinement_owner_user_id.as_deref())
             .await
         {
             Ok(_) => {}
@@ -204,10 +210,7 @@ impl DjinnMcpServer {
                     // author. This owns the tribunal tasks and scopes per-user
                     // model resolution (so refinement uses the attributed user's
                     // Plan-role models instead of a hardcoded fallback).
-                    owner_user_id: p
-                        .owner_user_id
-                        .clone()
-                        .or_else(|| proposal.author_user_id.clone()),
+                    owner_user_id: refinement_owner_user_id,
                 };
                 if let Err(e) = coordinator_handle.start_proposal_refinement(request).await {
                     let stop_metadata = json!({

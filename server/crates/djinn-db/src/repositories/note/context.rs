@@ -274,7 +274,8 @@ impl NoteRepository {
                           p.created_at, p.updated_at, p.closed_at,
                           p.latest_revision_seq, p.last_reconciled_revision_seq,
                           p.pending_reconcile, p.build_owner_user_id,
-                          p.build_frozen, p.build_breakdown_task_id,
+                          p.refinement_owner_user_id, p.build_frozen,
+                          p.build_breakdown_task_id,
                           p.linked_spike_task_id, p.needs_evidence_claim
                    FROM proposals p
                    JOIN proposal_targets pt ON pt.proposal_id = p.id
