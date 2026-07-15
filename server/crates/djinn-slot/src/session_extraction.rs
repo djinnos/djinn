@@ -47,6 +47,19 @@ pub async fn run_post_session_extraction(
     terminal_context: TerminalExtractionContext,
     app_state: SlotContext,
 ) {
+    run_post_session_extraction_inner(task_id, task_run_id, terminal_context, app_state, None).await;
+}
+
+/// Shared implementation with a test-only LLM provider seam. Production always
+/// resolves its provider through the contextual LLM extraction entry point.
+async fn run_post_session_extraction_inner(
+    task_id: String,
+    task_run_id: String,
+    terminal_context: TerminalExtractionContext,
+    app_state: SlotContext,
+    #[cfg_attr(not(any(test, feature = "test-support")), allow(unused_variables))]
+    provider_override: Option<std::sync::Arc<dyn djinn_provider::provider::LlmProvider>>,
+) {
     let session_repo =
         djinn_db::SessionRepository::new(app_state.db.clone(), app_state.event_bus.clone());
     let msg_repo =
@@ -92,6 +105,26 @@ pub async fn run_post_session_extraction(
         if let Some(taxonomy) =
             run_structural_extraction(session.id.clone(), messages, app_state.clone()).await
         {
+            #[cfg(any(test, feature = "test-support"))]
+            if let Some(provider) = provider_override.clone() {
+                super::llm_extraction::run_llm_extraction_with_terminal_context_and_provider(
+                    session.id,
+                    taxonomy,
+                    app_state.clone(),
+                    terminal_context.clone(),
+                    provider,
+                )
+                .await;
+            } else {
+                super::llm_extraction::run_llm_extraction_with_terminal_context(
+                    session.id,
+                    taxonomy,
+                    app_state.clone(),
+                    terminal_context.clone(),
+                )
+                .await;
+            }
+            #[cfg(not(any(test, feature = "test-support")))]
             super::llm_extraction::run_llm_extraction_with_terminal_context(
                 session.id,
                 taxonomy,
@@ -101,6 +134,25 @@ pub async fn run_post_session_extraction(
             .await;
         }
     }
+}
+
+/// Test-only production-orchestration entry point with an injected provider.
+#[cfg(any(test, feature = "test-support"))]
+async fn run_post_session_extraction_with_provider(
+    task_id: String,
+    task_run_id: String,
+    terminal_context: TerminalExtractionContext,
+    app_state: SlotContext,
+    provider: std::sync::Arc<dyn djinn_provider::provider::LlmProvider>,
+) {
+    run_post_session_extraction_inner(
+        task_id,
+        task_run_id,
+        terminal_context,
+        app_state,
+        Some(provider),
+    )
+    .await;
 }
 
 /// One-shot recovery sweep: run post-session extraction over every COMPLETED
@@ -987,8 +1039,12 @@ pub fn derive_scope_paths(file_paths: &[String], project_root: &str) -> Vec<Stri
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::TerminalExtractionOutcome;
-    use djinn_core::message::{ContentBlock, Message};
+    use crate::{TerminalExtractionOutcome, TerminalReviewDecision};
+    use djinn_core::message::{ContentBlock, Conversation, Message};
+    use djinn_provider::provider::{LlmProvider, StreamEvent, ToolChoice};
+    use futures::{Future, Stream};
+    use std::pin::Pin;
+    use std::sync::{Arc, Mutex};
     use djinn_db::{
         CreateSessionParams, EpicCreateInput, EpicRepository, MemoryEntityKind, MemoryEntityRef,
         MemoryEntityType, NoteRepository, ProposalCreateInput, ProposalRepository,
@@ -1002,6 +1058,135 @@ mod tests {
             backfill_terminal_context().outcome,
             TerminalExtractionOutcome::UnknownHistorical
         );
+    }
+
+    #[derive(Default)]
+    struct PromptRecordingProvider {
+        prompts: Mutex<Vec<String>>,
+    }
+
+    impl PromptRecordingProvider {
+        fn prompts(&self) -> Vec<String> {
+            self.prompts.lock().expect("prompt recorder mutex").clone()
+        }
+    }
+
+    impl LlmProvider for PromptRecordingProvider {
+        fn name(&self) -> &str {
+            "prompt-recording"
+        }
+
+        fn stream<'a>(
+            &'a self,
+            conversation: &'a Conversation,
+            _tools: &'a [serde_json::Value],
+            _tool_choice: Option<ToolChoice>,
+        ) -> Pin<
+            Box<
+                dyn Future<
+                        Output = anyhow::Result<
+                            Pin<Box<dyn Stream<Item = anyhow::Result<StreamEvent>> + Send>>,
+                        >,
+                    > + Send
+                    + 'a,
+            >,
+        > {
+            let prompt = conversation
+                .messages
+                .last()
+                .map(Message::text_content)
+                .unwrap_or_default();
+            self.prompts.lock().expect("prompt recorder mutex").push(prompt);
+            let stream = futures::stream::iter(vec![
+                Ok(StreamEvent::Delta(ContentBlock::text(
+                    r#"{"cases":[],"patterns":[],"pitfalls":[]}"#,
+                ))),
+                Ok(StreamEvent::Done),
+            ]);
+            Box::pin(async move { Ok(Box::pin(stream) as _) })
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn post_session_extraction_forwards_parked_context_to_llm_prompt() {
+        let fixture = crate::test_helpers::seed_context_fixture().await;
+        let task_run_id = uuid::Uuid::now_v7().to_string();
+        djinn_db::TaskRunRepository::new(fixture.db.clone())
+            .create(djinn_db::CreateTaskRunParams {
+                id: &task_run_id,
+                project_id: &fixture.project.id,
+                task_id: &fixture.task.id,
+                trigger_type: djinn_core::models::TaskRunTrigger::NewTask.as_str(),
+                status: None,
+                workspace_path: None,
+                mirror_ref: None,
+            })
+            .await
+            .expect("create task run");
+        let sessions = SessionRepository::new(
+            fixture.db.clone(),
+            djinn_core::events::EventBus::noop(),
+        );
+        let session = sessions
+            .create(CreateSessionParams {
+                project_id: &fixture.project.id,
+                task_id: Some(&fixture.task.id),
+                model: "test-model",
+                agent_type: "worker",
+                metadata_json: None,
+                task_run_id: Some(&task_run_id),
+                pricing: None,
+                cost_basis: None,
+            })
+            .await
+            .expect("create session");
+        djinn_db::SessionMessageRepository::new(
+            fixture.db.clone(),
+            djinn_core::events::EventBus::noop(),
+        )
+        .insert_messages_batch(
+            &session.id,
+            &fixture.task.id,
+            &[
+                Message {
+                    role: Role::Assistant,
+                    content: vec![ContentBlock::text("attempted implementation")],
+                    metadata: None,
+                },
+                Message {
+                    role: Role::User,
+                    content: vec![ContentBlock::text("review rejected it")],
+                    metadata: None,
+                },
+            ],
+        )
+        .await
+        .expect("insert session messages");
+        let provider = Arc::new(PromptRecordingProvider::default());
+        run_post_session_extraction_with_provider(
+            fixture.task.id.clone(),
+            task_run_id,
+            TerminalExtractionContext {
+                outcome: TerminalExtractionOutcome::Parked {
+                    classification: "acceptance_criteria".to_string(),
+                    reason: Some("required evidence missing".to_string()),
+                },
+                review_decision: Some(TerminalReviewDecision::Rejected {
+                    reason: Some("review rejected the evidence".to_string()),
+                }),
+            },
+            fixture.ctx,
+            provider.clone(),
+        )
+        .await;
+
+        let prompts = provider.prompts();
+        assert_eq!(prompts.len(), 1, "one eligible session reaches the LLM");
+        let prompt = &prompts[0];
+        assert!(prompt.contains("classification: acceptance_criteria"));
+        assert!(prompt.contains("reason: required evidence missing"));
+        assert!(prompt.contains("Explicit review decision: rejected"));
+        assert!(prompt.contains("review rejected the evidence"));
     }
 
     fn tool_use(name: &str, input: serde_json::Value) -> Message {
