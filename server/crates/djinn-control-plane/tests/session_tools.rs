@@ -404,11 +404,7 @@ async fn extension_diagnostics_session_projections() {
         .expect("wrong-project session_show should dispatch");
     assert!(denied.get("error").and_then(|v| v.as_str()).is_some());
 
-    sqlx::query("DELETE FROM sessions WHERE id = $1")
-        .bind(&session.id)
-        .execute(db.pool())
-        .await
-        .expect("delete owning session");
+    djinn_db::test_support::delete_session_row(db, &session.id).await;
     assert!(
         diagnostics
             .list_for_session(&project.id, &session.id)
