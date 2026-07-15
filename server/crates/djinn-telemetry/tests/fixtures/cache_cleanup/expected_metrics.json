@@ -6,7 +6,7 @@
   "byte_metrics": {"projected": "djinn_cache_pressure_projected_allocated_bytes_total", "reclaimed": "djinn_cache_pressure_reclaimed_allocated_bytes_total"},
   "terminations": ["completed", "reached_high", "remeasure_failed"],
   "cases": {
-    "dry_run": {"planned": 3, "projected": 12288, "attempted": 0, "deleted": 0, "failed": 0, "reclaimed": 0, "termination": "completed"},
+    "dry_run": {"planned": 3, "projected": 12288, "attempted": 0, "deleted": 0, "failed": 0, "reclaimed": 0, "termination": null},
     "pre_attempt_measurement_failure": {"planned": 1, "post_lock_eligible": 0, "retained": 1, "attempted": 0, "deleted": 0, "failed": 1, "projected": 4096, "reclaimed": 0, "termination": "remeasure_failed"},
     "pre_attempt_reached_high": {"planned": 1, "post_lock_eligible": 0, "retained": 1, "attempted": 0, "deleted": 0, "failed": 0, "projected": 4096, "reclaimed": 0, "termination": "reached_high"},
     "removal_failure": {"planned": 1, "post_lock_eligible": 1, "retained": 1, "attempted": 1, "deleted": 0, "failed": 1, "projected": 4096, "reclaimed": 0, "termination": "completed"},

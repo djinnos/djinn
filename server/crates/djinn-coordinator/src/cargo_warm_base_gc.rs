@@ -472,9 +472,7 @@ fn remove_three_rung_target(unit: &PressurePlanUnit, root: &Path) -> Result<Remo
 pub fn consume_three_rung_pressure_plan_dry_run(
     plan: &ThreeRungPressurePlan,
 ) -> Vec<PressurePlanUnit> {
-    use djinn_telemetry::cache_cleanup::{
-        self as metrics, PressureMode, PressureOutcome, PressureTermination,
-    };
+    use djinn_telemetry::cache_cleanup::{self as metrics, PressureMode, PressureOutcome};
     for unit in &plan.units {
         metrics::increment_pressure_unit(
             PressureMode::DryRun,
@@ -487,7 +485,6 @@ pub fn consume_three_rung_pressure_plan_dry_run(
             unit.projected_allocated_bytes,
         );
     }
-    metrics::increment_pressure_termination(PressureMode::DryRun, PressureTermination::Completed);
     plan.units.clone()
 }
 

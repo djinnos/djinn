@@ -954,12 +954,14 @@ async fn pressure_metrics_match_the_bounded_fixture_for_execution_boundaries() {
             0
         );
     }
+    assert!(dry["termination"].is_null());
     for termination in fixture["terminations"].as_array().unwrap() {
         let termination = termination.as_str().unwrap();
         assert_eq!(
             pressure_termination(&after, "dry_run", termination)
                 - pressure_termination(&before, "dry_run", termination),
-            u64::from(termination == dry["termination"].as_str().unwrap())
+            0,
+            "dry-run unexpectedly emitted {termination} termination telemetry"
         );
     }
     assert_eq!(value(dry, "projected"), 3 * 4096);
