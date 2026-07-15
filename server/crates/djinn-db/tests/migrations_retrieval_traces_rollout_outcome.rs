@@ -377,7 +377,7 @@ const HISTORICAL_FIXTURES: &[(&str, &str, i32, &str)] = &[
     //    classification evidence cannot reliably prove zero injection. In
     //    particular, a bare note_id must not be treated as an empty result. ──
     (
-        "rt-zero-tokens-candidate-missing-evidence",
+        "rt-zero-missing-evidence",
         r#"[{"note_id":"n1"}]"#,
         0,
         "legacy_unknown",
@@ -413,8 +413,24 @@ const HISTORICAL_FIXTURES: &[(&str, &str, i32, &str)] = &[
     //    without required TraceCandidate identity/classification shape. A
     //    JSON-null skipped_reason alone cannot prove injection. ──────────────
     (
-        "rt-positive-tokens-missing-candidate-shape",
+        "rt-positive-missing-shape",
         r#"[{"skipped_reason":null}]"#,
+        120,
+        "legacy_unknown",
+    ),
+    // ── legacy_unknown: rank is present but cannot deserialize as Option<i32>.
+    //    Otherwise-valid skipped evidence must not be classified empty. ─────
+    (
+        "rt-zero-invalid-rank",
+        r#"[{"note_id":"n1","outcome":"skipped","skipped_reason":"not_top_k","rank":"not-an-int"}]"#,
+        0,
+        "legacy_unknown",
+    ),
+    // ── legacy_unknown: confidence is present but cannot deserialize as
+    //    Option<f64>. Otherwise-valid injected evidence remains malformed. ──
+    (
+        "rt-positive-invalid-confidence",
+        r#"[{"note_id":"n1","outcome":"injected","skipped_reason":null,"confidence":"not-a-float"}]"#,
         120,
         "legacy_unknown",
     ),

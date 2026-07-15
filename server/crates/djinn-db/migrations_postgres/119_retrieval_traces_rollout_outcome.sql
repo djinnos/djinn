@@ -98,6 +98,40 @@ FROM (
                      ) AS cand
                      WHERE jsonb_typeof(cand) <> 'object'
                         OR jsonb_typeof(cand -> 'note_id') IS DISTINCT FROM 'string'
+                        -- Match TraceCandidate's present optional typed fields.
+                        -- Missing and JSON-null values deserialize as None;
+                        -- present values must have the DTO's concrete type.
+                        OR NOT CASE
+                            WHEN cand -> 'rank' IS NULL
+                              OR cand -> 'rank' = 'null'::jsonb THEN TRUE
+                            WHEN jsonb_typeof(cand -> 'rank') = 'number' THEN
+                                (cand ->> 'rank')::numeric = trunc((cand ->> 'rank')::numeric)
+                                AND (cand ->> 'rank')::numeric BETWEEN -2147483648 AND 2147483647
+                            ELSE FALSE
+                        END
+                        OR NOT CASE
+                            WHEN cand -> 'confidence' IS NULL
+                              OR cand -> 'confidence' = 'null'::jsonb THEN TRUE
+                            WHEN jsonb_typeof(cand -> 'confidence') = 'number' THEN
+                                abs((cand ->> 'confidence')::numeric)
+                                    <= 1.7976931348623157e308::numeric
+                            ELSE FALSE
+                        END
+                        OR NOT CASE
+                            WHEN cand -> 'permalink' IS NULL
+                              OR cand -> 'permalink' = 'null'::jsonb THEN TRUE
+                            ELSE jsonb_typeof(cand -> 'permalink') = 'string'
+                        END
+                        OR NOT CASE
+                            WHEN cand -> 'title' IS NULL
+                              OR cand -> 'title' = 'null'::jsonb THEN TRUE
+                            ELSE jsonb_typeof(cand -> 'title') = 'string'
+                        END
+                        OR NOT CASE
+                            WHEN cand -> 'source' IS NULL
+                              OR cand -> 'source' = 'null'::jsonb THEN TRUE
+                            ELSE jsonb_typeof(cand -> 'source') = 'string'
+                        END
                         OR (
                             (cand ->> 'outcome') IS DISTINCT FROM 'injected'
                             AND (cand ->> 'outcome') IS DISTINCT FROM 'skipped'
@@ -157,6 +191,37 @@ FROM (
                      ) AS cand
                      WHERE jsonb_typeof(cand) <> 'object'
                         OR jsonb_typeof(cand -> 'note_id') IS DISTINCT FROM 'string'
+                        OR NOT CASE
+                            WHEN cand -> 'rank' IS NULL
+                              OR cand -> 'rank' = 'null'::jsonb THEN TRUE
+                            WHEN jsonb_typeof(cand -> 'rank') = 'number' THEN
+                                (cand ->> 'rank')::numeric = trunc((cand ->> 'rank')::numeric)
+                                AND (cand ->> 'rank')::numeric BETWEEN -2147483648 AND 2147483647
+                            ELSE FALSE
+                        END
+                        OR NOT CASE
+                            WHEN cand -> 'confidence' IS NULL
+                              OR cand -> 'confidence' = 'null'::jsonb THEN TRUE
+                            WHEN jsonb_typeof(cand -> 'confidence') = 'number' THEN
+                                abs((cand ->> 'confidence')::numeric)
+                                    <= 1.7976931348623157e308::numeric
+                            ELSE FALSE
+                        END
+                        OR NOT CASE
+                            WHEN cand -> 'permalink' IS NULL
+                              OR cand -> 'permalink' = 'null'::jsonb THEN TRUE
+                            ELSE jsonb_typeof(cand -> 'permalink') = 'string'
+                        END
+                        OR NOT CASE
+                            WHEN cand -> 'title' IS NULL
+                              OR cand -> 'title' = 'null'::jsonb THEN TRUE
+                            ELSE jsonb_typeof(cand -> 'title') = 'string'
+                        END
+                        OR NOT CASE
+                            WHEN cand -> 'source' IS NULL
+                              OR cand -> 'source' = 'null'::jsonb THEN TRUE
+                            ELSE jsonb_typeof(cand -> 'source') = 'string'
+                        END
                         OR (cand ->> 'outcome') IS DISTINCT FROM 'skipped'
                         OR jsonb_typeof(cand -> 'skipped_reason') IS DISTINCT FROM 'string'
                         OR (cand ->> 'skipped_reason') NOT IN (
