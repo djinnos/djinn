@@ -55,6 +55,9 @@ interface SceneProps {
   flyTarget: FlyTarget;
   onNodePointer: (index: number | null, clientX?: number, clientY?: number) => void;
   onNodeClick: (index: number | null) => void;
+  /** Fired when the GPU drops the WebGL context (three keeps silently not
+   * drawing — the owner must offer a remount). */
+  onContextLost?: () => void;
 }
 
 function baseColorOf(data: GalaxyData, index: number, colorMode: GalaxyColorMode): Rgb {
@@ -374,6 +377,27 @@ function GalaxyLabels({
   );
 }
 
+// ── Context-loss sentinel ───────────────────────────────────────────────────
+//
+// A lost WebGL context is NOT a React error: three simply stops drawing
+// and the scene goes silently blank (heavy graphs on weak GPUs are the
+// usual trigger). Surface it so the owner can offer a remount.
+
+function ContextLossSentinel({ onLost }: { onLost?: () => void }) {
+  const gl = useThree((s) => s.gl);
+  useEffect(() => {
+    if (!onLost) return;
+    const canvas = gl.domElement;
+    const handle = (event: Event) => {
+      event.preventDefault();
+      onLost();
+    };
+    canvas.addEventListener("webglcontextlost", handle);
+    return () => canvas.removeEventListener("webglcontextlost", handle);
+  }, [gl, onLost]);
+  return null;
+}
+
 // ── GL context janitor ──────────────────────────────────────────────────────
 //
 // Browsers cap live WebGL contexts (~16) and reclaim dead ones lazily, so
@@ -481,6 +505,7 @@ export function GalaxyScene({
   flyTarget,
   onNodePointer,
   onNodeClick,
+  onContextLost,
 }: SceneProps) {
   const nodeCount = data.nodes.length;
   const boost = nodeBoostScale(nodeCount) * display.nodeGlow;
@@ -494,6 +519,7 @@ export function GalaxyScene({
     >
       <color attach="background" args={["#06090f"]} />
       <ContextJanitor />
+      <ContextLossSentinel onLost={onContextLost} />
 
       <GalaxyNodes
         data={data}
