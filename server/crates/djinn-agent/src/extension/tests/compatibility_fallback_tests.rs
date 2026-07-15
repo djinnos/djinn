@@ -1,8 +1,6 @@
 //! Regression coverage for compatibility normalization at the agent-local fallback boundary.
 
-use djinn_core::tool_call::{
-    CompatibilityCode, ToolCallFailure, ToolCallOutcome, TrustedRemedyCode,
-};
+use djinn_core::tool_call::{ToolCallFailure, ToolCallOutcome, TrustedRemedyCode};
 use djinn_mcp_extension::compatibility::{
     AtomicDeletionBundle, CompatibilityTrap, ReleaseNoteOwner, ReleaseNoteRef, RenamedToolTrap,
     ServerReleaseVersion, ToolForwardingSafety, TrapLifecycle,
@@ -91,10 +89,25 @@ async fn safe_hidden_alias_reaches_local_handler_and_unauthorized_replacement_is
                     .unwrap_or_default()
                     .contains("normalized local fallback")
             );
-            assert_eq!(warnings.len(), 1);
-            assert_eq!(warnings[0].code, CompatibilityCode::DeprecatedSurface);
-            assert_eq!(warnings[0].old_name, "compat_read");
-            assert_eq!(warnings[0].tool, "read");
+            assert_eq!(
+                json!({ "warnings": warnings }),
+                json!({
+                    "warnings": [{
+                        "schema_version": 1,
+                        "code": "deprecated_surface",
+                        "surface_kind": "tool",
+                        "old_name": "compat_read",
+                        "tool": "read",
+                        "replacement_tool": "read",
+                        "introduced_in": "0.1.0",
+                        "remove_after": "0.3.0",
+                        "remedy": {
+                            "code": "call_replacement_tool",
+                            "text": "Call the replacement tool named in replacement_tool."
+                        }
+                    }]
+                })
+            );
         }
         other => panic!("safe alias must reach the current local handler: {other:?}"),
     }

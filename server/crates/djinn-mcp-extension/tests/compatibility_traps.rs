@@ -3,7 +3,7 @@
 use djinn_core::tool_call::{ToolCallFailure, TrustedRemedyCode};
 use djinn_mcp_extension::compatibility::{
     AtomicDeletionBundle, CompatibilityTrap, CurrentToolSurface, ParameterMappingSafety,
-    ReleaseCalendar, ReleaseNoteOwner, ReleaseNoteRef, RemovedParameterBehavior,
+    ReleaseCalendar, ReleaseKind, ReleaseNoteOwner, ReleaseNoteRef, RemovedParameterBehavior,
     RemovedParameterTrap, RemovedToolTrap, RenamedParameterTrap, RenamedToolTrap, ServerRelease,
     ServerReleaseVersion, ToolForwardingSafety, TrapLifecycle, normalize_call, trap_applies,
     validate_registry,
@@ -18,8 +18,18 @@ const FIXTURE: &str = include_str!("fixtures/compatibility_traps.json");
 struct Fixture {
     current_release: ServerReleaseVersion,
     calendar: Vec<ServerRelease>,
+    fixture_case_ids: Vec<String>,
     current_surfaces: Vec<FixtureSurface>,
     traps: Vec<FixtureTrap>,
+    synthetic_expected_metadata: SyntheticExpectedMetadata,
+}
+
+#[derive(Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SyntheticExpectedMetadata {
+    unsafe_removed_parameter: Value,
+    unsafe_renamed_tool: Value,
+    removed_tool_without_replacement: Value,
 }
 
 #[derive(Clone, Deserialize)]
@@ -255,11 +265,56 @@ fn metadata(failure: djinn_core::tool_call::ToolCallFailure) -> Value {
     }
 }
 
+fn validate_fixture(fixture: &Fixture) -> Result<(), String> {
+    let declared = fixture
+        .fixture_case_ids
+        .iter()
+        .collect::<std::collections::BTreeSet<_>>();
+    if declared.len() != fixture.fixture_case_ids.len() {
+        return Err("duplicate declared fixture case id".into());
+    }
+    for trap in &fixture.traps {
+        let deletion = match trap {
+            FixtureTrap::RenamedTool { deletion, .. }
+            | FixtureTrap::RemovedTool { deletion, .. }
+            | FixtureTrap::RenamedParameter { deletion, .. }
+            | FixtureTrap::RemovedParameter { deletion, .. } => deletion,
+        };
+        if deletion
+            .fixture_case_ids
+            .iter()
+            .any(|id| !declared.contains(id))
+        {
+            return Err("deletion bundle references unknown fixture case".into());
+        }
+    }
+    Ok(())
+}
+
+fn lifecycle_mut(trap: &mut CompatibilityTrap) -> &mut TrapLifecycle {
+    match trap {
+        CompatibilityTrap::RenamedTool(t) => &mut t.lifecycle,
+        CompatibilityTrap::RemovedTool(t) => &mut t.lifecycle,
+        CompatibilityTrap::RenamedParameter(t) => &mut t.lifecycle,
+        CompatibilityTrap::RemovedParameter(t) => &mut t.lifecycle,
+    }
+}
+
+fn remedy_mut(trap: &mut CompatibilityTrap) -> &mut TrustedRemedyCode {
+    match trap {
+        CompatibilityTrap::RenamedTool(t) => &mut t.remedy,
+        CompatibilityTrap::RemovedTool(t) => &mut t.remedy,
+        CompatibilityTrap::RenamedParameter(t) => &mut t.remedy,
+        CompatibilityTrap::RemovedParameter(t) => &mut t.remedy,
+    }
+}
+
 /// The requested selector intentionally resolves this single root contract test.
 #[test]
 fn compatibility_traps() {
     assert!(djinn_mcp_extension::compatibility::PRODUCTION_REGISTRY.is_empty());
     let fixture: Fixture = serde_json::from_str(FIXTURE).expect("strict checked-in fixture");
+    validate_fixture(&fixture).expect("all deletion fixture cases resolve");
     let expected = fixture
         .traps
         .iter()
@@ -423,7 +478,13 @@ fn compatibility_traps() {
     else {
         panic!("unsafe omission");
     };
-    assert_eq!(metadata(rejected)["reason"], "unsafe_omission");
+    assert_eq!(
+        metadata(rejected),
+        fixture
+            .synthetic_expected_metadata
+            .unsafe_removed_parameter
+            .clone()
+    );
 
     let unsafe_tool = CompatibilityTrap::RenamedTool(RenamedToolTrap {
         old_name: "unsafe_cached_tool",
@@ -446,7 +507,13 @@ fn compatibility_traps() {
     else {
         panic!("unsafe forwarding precedes allowlist/schema/handler");
     };
-    assert_eq!(metadata(unsafe_result)["reason"], "unsafe_forwarding");
+    assert_eq!(
+        metadata(unsafe_result),
+        fixture
+            .synthetic_expected_metadata
+            .unsafe_renamed_tool
+            .clone()
+    );
     let no_replacement = CompatibilityTrap::RemovedTool(RemovedToolTrap {
         old_name: "gone_forever",
         replacement_tool: None,
@@ -462,8 +529,11 @@ fn compatibility_traps() {
         panic!("no-replacement removal");
     };
     assert_eq!(
-        metadata(no_replacement_failure)["remedy"]["code"],
-        "no_replacement"
+        metadata(no_replacement_failure),
+        fixture
+            .synthetic_expected_metadata
+            .removed_tool_without_replacement
+            .clone()
     );
     let djinn_mcp_extension::compatibility::NormalizationResult::Prepared(unknown) =
         normalize_call(&[], current, "unknown_current", args(json!({"x":1})))
@@ -485,6 +555,56 @@ fn compatibility_traps() {
     assert!(!trap_applies(lifecycle, &"1.3.1".parse().unwrap()));
     assert_eq!(calendar.releases[2].released_on.to_string(), "2030-03-31");
     assert_eq!(calendar.releases[3].released_on.to_string(), "2030-04-01");
+    let mut unresolved_fixture_case = fixture.clone();
+    unresolved_fixture_case.fixture_case_ids.clear();
+    assert_eq!(
+        validate_fixture(&unresolved_fixture_case),
+        Err("deletion bundle references unknown fixture case".into())
+    );
+    let mut untrusted_remedy = registry.clone();
+    *remedy_mut(&mut untrusted_remedy[0]) = TrustedRemedyCode::NoReplacement;
+    assert_eq!(
+        validate_registry(&untrusted_remedy, &surfaces, &calendar),
+        Err("trap remedy is not trusted for its surface".into())
+    );
+    let mut invalid_owner = registry.clone();
+    lifecycle_mut(&mut invalid_owner[0]).release_note.owner = ReleaseNoteOwner::Server;
+    assert_eq!(
+        validate_registry(&invalid_owner, &surfaces, &calendar),
+        Err("release-note owner must be mcp_api".into())
+    );
+    let mut missing_note = registry.clone();
+    lifecycle_mut(&mut missing_note[0]).release_note.reference = "";
+    assert_eq!(
+        validate_registry(&missing_note, &surfaces, &calendar),
+        Err("invalid release-note or deletion bundle".into())
+    );
+    let mut mismatched_deletion = registry.clone();
+    lifecycle_mut(&mut mismatched_deletion[0])
+        .deletion
+        .release_note_reference = "other-note";
+    assert_eq!(
+        validate_registry(&mismatched_deletion, &surfaces, &calendar),
+        Err("invalid release-note or deletion bundle".into())
+    );
+    let mut early_removal = registry.clone();
+    lifecycle_mut(&mut early_removal[0]).remove_after = "1.2.0".parse().unwrap();
+    assert_eq!(
+        validate_registry(&early_removal, &surfaces, &calendar),
+        Err("remove_after must be first minor after two releases and 90 days".into())
+    );
+    let mut late_calendar = calendar.clone();
+    late_calendar.releases.push(ServerRelease {
+        version: "1.4.0".parse().unwrap(),
+        released_on: "2030-06-01".parse().unwrap(),
+        kind: ReleaseKind::Minor,
+    });
+    let mut late_removal = registry.clone();
+    lifecycle_mut(&mut late_removal[0]).remove_after = "1.4.0".parse().unwrap();
+    assert_eq!(
+        validate_registry(&late_removal, &surfaces, &late_calendar),
+        Err("remove_after must be first minor after two releases and 90 days".into())
+    );
     assert!(serde_json::from_str::<Fixture>(r#"{"current_release":"1.1.0","calendar":[],"current_surfaces":[],"traps":[],"unknown":true}"#).is_err());
     assert!(serde_json::from_str::<Fixture>(r#"{"current_release":"1.1.0","calendar":[{"version":"1.0.0","released_on":"2030-01-01","kind":"minor","bad":true}],"current_surfaces":[],"traps":[]}"#).is_err());
 }

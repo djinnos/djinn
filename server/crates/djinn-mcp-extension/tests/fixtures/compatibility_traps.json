@@ -8,60 +8,20 @@
     { "version": "1.2.1", "released_on": "2030-04-15", "kind": "patch" },
     { "version": "1.3.0", "released_on": "2030-05-01", "kind": "minor" }
   ],
+  "fixture_case_ids": ["safe-renamed-tool", "removed-tool", "renamed-parameter", "renamed-parameter-ambiguous", "removed-parameter-ignore", "removed-parameter-reject"],
   "current_surfaces": [
     { "name": "task_show", "parameters": ["id"] },
     { "name": "task_list", "parameters": ["text", "limit"] }
   ],
   "traps": [
-    {
-      "kind": "renamed_tool",
-      "id": "safe-task-show-rename",
-      "old_name": "cached_task_show",
-      "replacement_tool": "task_show",
-      "introduced_in": "1.0.0",
-      "remove_after": "1.3.0",
-      "release_note": { "owner": "mcp_api", "reference": "notes/mcp-1.0#safe-task-show-rename" },
-      "deletion": { "change_id": "delete-safe-task-show-rename", "trap_id": "safe-task-show-rename", "fixture_case_ids": ["safe-renamed-tool"], "release_note_reference": "notes/mcp-1.0#safe-task-show-rename" },
-      "remedy": "call_replacement_tool",
-      "expected_metadata": { "schema_version": 1, "code": "deprecated_surface", "surface_kind": "tool", "old_name": "cached_task_show", "tool": "task_show", "replacement_tool": "task_show", "introduced_in": "1.0.0", "remove_after": "1.3.0", "remedy": { "code": "call_replacement_tool", "text": "Call the replacement tool named in replacement_tool." } }
-    },
-    {
-      "kind": "removed_tool",
-      "id": "removed-task-list",
-      "old_name": "cached_task_list",
-      "replacement_tool": "task_list",
-      "introduced_in": "1.0.0",
-      "remove_after": "1.3.0",
-      "release_note": { "owner": "mcp_api", "reference": "notes/mcp-1.0#removed-task-list" },
-      "deletion": { "change_id": "delete-removed-task-list", "trap_id": "removed-task-list", "fixture_case_ids": ["removed-tool"], "release_note_reference": "notes/mcp-1.0#removed-task-list" },
-      "remedy": "call_replacement_tool",
-      "expected_metadata": { "schema_version": 1, "code": "removed_surface", "surface_kind": "tool", "old_name": "cached_task_list", "tool": "task_list", "replacement_tool": "task_list", "introduced_in": "1.0.0", "remove_after": "1.3.0", "remedy": { "code": "call_replacement_tool", "text": "Call the replacement tool named in replacement_tool." } }
-    },
-    {
-      "kind": "renamed_parameter",
-      "id": "task-list-query-rename",
-      "tool": "task_list",
-      "old_name": "cached_query",
-      "replacement_parameter": "text",
-      "introduced_in": "1.0.0",
-      "remove_after": "1.3.0",
-      "release_note": { "owner": "mcp_api", "reference": "notes/mcp-1.0#task-list-query-rename" },
-      "deletion": { "change_id": "delete-task-list-query-rename", "trap_id": "task-list-query-rename", "fixture_case_ids": ["renamed-parameter", "renamed-parameter-ambiguous"], "release_note_reference": "notes/mcp-1.0#task-list-query-rename" },
-      "remedy": "use_replacement_parameter",
-      "expected_metadata": { "schema_version": 1, "code": "deprecated_surface", "surface_kind": "parameter", "old_name": "cached_query", "tool": "task_list", "replacement_parameter": "text", "introduced_in": "1.0.0", "remove_after": "1.3.0", "remedy": { "code": "use_replacement_parameter", "text": "Use the replacement parameter named in replacement_parameter." } }
-    },
-    {
-      "kind": "removed_parameter",
-      "id": "task-list-hint-removal",
-      "tool": "task_list",
-      "old_name": "cached_hint",
-      "behavior": "safe_ignore",
-      "introduced_in": "1.0.0",
-      "remove_after": "1.3.0",
-      "release_note": { "owner": "mcp_api", "reference": "notes/mcp-1.0#task-list-hint-removal" },
-      "deletion": { "change_id": "delete-task-list-hint-removal", "trap_id": "task-list-hint-removal", "fixture_case_ids": ["removed-parameter-ignore", "removed-parameter-reject"], "release_note_reference": "notes/mcp-1.0#task-list-hint-removal" },
-      "remedy": "omit_removed_parameter",
-      "expected_metadata": { "schema_version": 1, "code": "deprecated_surface", "surface_kind": "parameter", "old_name": "cached_hint", "tool": "task_list", "introduced_in": "1.0.0", "remove_after": "1.3.0", "remedy": { "code": "omit_removed_parameter", "text": "Omit the removed parameter." } }
-    }
-  ]
+    { "kind": "renamed_tool", "id": "safe-task-show-rename", "old_name": "cached_task_show", "replacement_tool": "task_show", "introduced_in": "1.0.0", "remove_after": "1.3.0", "release_note": { "owner": "mcp_api", "reference": "notes/mcp-1.0#safe-task-show-rename" }, "deletion": { "change_id": "delete-safe-task-show-rename", "trap_id": "safe-task-show-rename", "fixture_case_ids": ["safe-renamed-tool"], "release_note_reference": "notes/mcp-1.0#safe-task-show-rename" }, "remedy": "call_replacement_tool", "expected_metadata": { "schema_version": 1, "code": "deprecated_surface", "surface_kind": "tool", "old_name": "cached_task_show", "tool": "task_show", "replacement_tool": "task_show", "introduced_in": "1.0.0", "remove_after": "1.3.0", "remedy": { "code": "call_replacement_tool", "text": "Call the replacement tool named in replacement_tool." } } },
+    { "kind": "removed_tool", "id": "removed-task-list", "old_name": "cached_task_list", "replacement_tool": "task_list", "introduced_in": "1.0.0", "remove_after": "1.3.0", "release_note": { "owner": "mcp_api", "reference": "notes/mcp-1.0#removed-task-list" }, "deletion": { "change_id": "delete-removed-task-list", "trap_id": "removed-task-list", "fixture_case_ids": ["removed-tool"], "release_note_reference": "notes/mcp-1.0#removed-task-list" }, "remedy": "call_replacement_tool", "expected_metadata": { "schema_version": 1, "code": "removed_surface", "surface_kind": "tool", "old_name": "cached_task_list", "tool": "task_list", "replacement_tool": "task_list", "introduced_in": "1.0.0", "remove_after": "1.3.0", "remedy": { "code": "call_replacement_tool", "text": "Call the replacement tool named in replacement_tool." } } },
+    { "kind": "renamed_parameter", "id": "task-list-query-rename", "tool": "task_list", "old_name": "cached_query", "replacement_parameter": "text", "introduced_in": "1.0.0", "remove_after": "1.3.0", "release_note": { "owner": "mcp_api", "reference": "notes/mcp-1.0#task-list-query-rename" }, "deletion": { "change_id": "delete-task-list-query-rename", "trap_id": "task-list-query-rename", "fixture_case_ids": ["renamed-parameter", "renamed-parameter-ambiguous"], "release_note_reference": "notes/mcp-1.0#task-list-query-rename" }, "remedy": "use_replacement_parameter", "expected_metadata": { "schema_version": 1, "code": "deprecated_surface", "surface_kind": "parameter", "old_name": "cached_query", "tool": "task_list", "replacement_parameter": "text", "introduced_in": "1.0.0", "remove_after": "1.3.0", "remedy": { "code": "use_replacement_parameter", "text": "Use the replacement parameter named in replacement_parameter." } } },
+    { "kind": "removed_parameter", "id": "task-list-hint-removal", "tool": "task_list", "old_name": "cached_hint", "behavior": "safe_ignore", "introduced_in": "1.0.0", "remove_after": "1.3.0", "release_note": { "owner": "mcp_api", "reference": "notes/mcp-1.0#task-list-hint-removal" }, "deletion": { "change_id": "delete-task-list-hint-removal", "trap_id": "task-list-hint-removal", "fixture_case_ids": ["removed-parameter-ignore", "removed-parameter-reject"], "release_note_reference": "notes/mcp-1.0#task-list-hint-removal" }, "remedy": "omit_removed_parameter", "expected_metadata": { "schema_version": 1, "code": "deprecated_surface", "surface_kind": "parameter", "old_name": "cached_hint", "tool": "task_list", "introduced_in": "1.0.0", "remove_after": "1.3.0", "remedy": { "code": "omit_removed_parameter", "text": "Omit the removed parameter." } } }
+  ],
+  "synthetic_expected_metadata": {
+    "unsafe_removed_parameter": { "schema_version": 1, "code": "invalid_compat_call", "surface_kind": "parameter", "old_name": "unsafe_cached_hint", "tool": "task_list", "introduced_in": "1.0.0", "remove_after": "1.3.0", "remedy": { "code": "omit_removed_parameter", "text": "Omit the removed parameter." }, "reason": "unsafe_omission" },
+    "unsafe_renamed_tool": { "schema_version": 1, "code": "invalid_compat_call", "surface_kind": "tool", "old_name": "unsafe_cached_tool", "tool": "unsafe_cached_tool", "replacement_tool": "task_show", "introduced_in": "1.0.0", "remove_after": "1.3.0", "remedy": { "code": "call_replacement_tool", "text": "Call the replacement tool named in replacement_tool." }, "reason": "unsafe_forwarding" },
+    "removed_tool_without_replacement": { "schema_version": 1, "code": "removed_surface", "surface_kind": "tool", "old_name": "gone_forever", "tool": "gone_forever", "introduced_in": "1.0.0", "remove_after": "1.3.0", "remedy": { "code": "no_replacement", "text": "There is no replacement for this surface." } }
+  }
 }
