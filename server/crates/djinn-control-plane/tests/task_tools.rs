@@ -422,11 +422,18 @@ async fn task_list_status_merged() {
     let project = common::create_test_project(db).await;
     let epic = common::create_test_epic(db, &project.id).await;
     let repo = TaskRepository::new(db.clone(), EventBus::noop());
+    let creator_id = common::create_test_user(db).await;
+    let provenance = EffectiveCreatorProvenance {
+        explicit_user_id: Some(&creator_id),
+        source_task_id: None,
+        proposal_id: None,
+    };
 
     let mk = async |title: &str| {
-        repo.create_in_project(
+        repo.create_in_project_with_provenance(
             &project.id,
             Some(&epic.id),
+            provenance,
             title,
             "desc",
             "design",
