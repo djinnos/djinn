@@ -17,8 +17,8 @@ use djinn_core::extension_diagnostics::ExtensionLoadDiagnosticV1;
 use djinn_core::paths::project_dir;
 use djinn_db::{
     ExtensionLoadDiagnosticRepository, InsertExtensionLoadDiagnostic, ProjectRepository,
-    SessionRepository, TaskRepository,
-    repositories::session::CreateSessionParams,
+    SessionRepository, TaskRepository, repositories::session::CreateSessionParams,
+    test_support::delete_session_row,
 };
 use serde_json::json;
 use tokio_util::sync::CancellationToken;
@@ -223,7 +223,7 @@ async fn extension_diagnostics_doctor_auth_retention() {
             project_id: &project_a.id,
             task_id: Some(&task.id),
             model: "test",
-            agent_type: "chat",
+            agent_type: "worker",
             metadata_json: None,
             task_run_id: None,
             pricing: None,
@@ -253,10 +253,7 @@ async fn extension_diagnostics_doctor_auth_retention() {
         .await
         .expect("seed equivalent session diagnostic");
     assert_eq!(historical.task_id.as_deref(), Some(task.id.as_str()));
-    assert_eq!(
-        historical.session_id.as_deref(),
-        Some(session.id.as_str())
-    );
+    assert_eq!(historical.session_id.as_deref(), Some(session.id.as_str()));
     assert_eq!(
         historical.source_kind.as_str(),
         first_findings[0]["source_kind"]
@@ -322,7 +319,10 @@ async fn extension_diagnostics_doctor_auth_retention() {
         .list_for_load_attempt(&project_a.id, &fresh)
         .await
         .expect("attempt rows");
-    assert_eq!(canonical, fresh_rows, "probe returns canonical persisted rows");
+    assert_eq!(
+        canonical, fresh_rows,
+        "probe returns canonical persisted rows"
+    );
     assert!(
         canonical
             .iter()
@@ -406,10 +406,7 @@ async fn extension_diagnostics_doctor_auth_retention() {
         "probe never mutates project files"
     );
 
-    SessionRepository::new(harness.db().clone(), EventBus::noop())
-        .delete_chat_session(&session.id)
-        .await
-        .expect("delete historical session");
+    delete_session_row(harness.db(), &session.id).await;
     assert!(
         repository
             .list_for_load_attempt(&project_a.id, &fresh)
