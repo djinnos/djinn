@@ -99,10 +99,8 @@ pub use housekeeping::{
     LlmAnchorProposer, ProposedBackfillAnchor, propose_anchor_deterministic,
 };
 pub use lifecycle::NoteStatus;
-#[cfg(any(test, feature = "test-support"))]
-pub use mutation::NoteRevisionEventForTest;
 pub use mutation::{
-    NoteRevisionCreateState, NoteRevisionDesiredState, NoteRevisionMutation,
+    NoteRevisionCreateState, NoteRevisionDesiredState, NoteRevisionEvent, NoteRevisionMutation,
     NoteRevisionMutationResult,
 };
 

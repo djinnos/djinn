@@ -16,21 +16,29 @@ use crate::error::{DbError as Error, DbResult as Result};
 use crate::note_hash::note_content_hash;
 use djinn_memory::Note;
 
-/// Test-only projection of a persisted revision event.
+/// Immutable revision row returned by the production query surface.
 ///
-/// Keeping the SQL projection in `djinn-db` lets downstream writer tests prove
-/// ledger attribution without reaching around the repository boundary.
-#[cfg(any(test, feature = "test-support"))]
+/// This mirrors the ledger columns so callers can verify authorization without
+/// bypassing the repository boundary with direct SQL.
 #[derive(Debug, Clone, PartialEq, sqlx::FromRow)]
-pub struct NoteRevisionEventForTest {
+pub struct NoteRevisionEvent {
+    pub id: String,
+    pub project_id: String,
+    pub note_id: Option<String>,
+    pub note_seq: Option<i64>,
     pub actor_kind: String,
+    pub actor_id: Option<String>,
     pub subsystem: Option<String>,
     pub event_kind: String,
     pub content_before: Option<String>,
     pub content_after: Option<String>,
     pub confidence_before: Option<f64>,
     pub confidence_after: Option<f64>,
+    pub session_id: Option<String>,
+    pub task_id: Option<String>,
+    pub task_run_id: Option<String>,
     pub reason: String,
+    pub created_at: String,
 }
 
 /// Canonical final values for a created note. Updates intentionally use only
@@ -336,18 +344,35 @@ impl NoteRepository {
         self.revision_event_failure.store(enabled, Ordering::SeqCst);
     }
 
-    /// Returns a stable ledger projection for focused downstream writer tests.
-    #[cfg(any(test, feature = "test-support"))]
-    pub async fn revision_events_for_test(
-        &self,
-        project_id: &str,
-    ) -> Result<Vec<NoteRevisionEventForTest>> {
+    /// Returns immutable revision rows for one project in creation order.
+    pub async fn revision_events(&self, project_id: &str) -> Result<Vec<NoteRevisionEvent>> {
         sqlx::query_as(
-            "SELECT actor_kind, subsystem, event_kind, content_before, content_after, \
-             confidence_before, confidence_after, reason \
-             FROM note_revision_events WHERE project_id = $1 ORDER BY reason",
+            "SELECT id, project_id, note_id, note_seq, actor_kind, actor_id, subsystem, \
+             event_kind, content_before, content_after, confidence_before, confidence_after, \
+             session_id, task_id, task_run_id, reason, created_at::text AS created_at \
+             FROM note_revision_events WHERE project_id = $1 ORDER BY created_at, id",
         )
         .bind(project_id)
+        .fetch_all(self.db.pool())
+        .await
+        .map_err(Into::into)
+    }
+
+    /// Returns immutable revision rows for one note, scoped to its project.
+    pub async fn revision_events_for_note(
+        &self,
+        project_id: &str,
+        note_id: &str,
+    ) -> Result<Vec<NoteRevisionEvent>> {
+        sqlx::query_as(
+            "SELECT id, project_id, note_id, note_seq, actor_kind, actor_id, subsystem, \
+             event_kind, content_before, content_after, confidence_before, confidence_after, \
+             session_id, task_id, task_run_id, reason, created_at::text AS created_at \
+             FROM note_revision_events WHERE project_id = $1 AND note_id = $2 \
+             ORDER BY note_seq, created_at, id",
+        )
+        .bind(project_id)
+        .bind(note_id)
         .fetch_all(self.db.pool())
         .await
         .map_err(Into::into)
