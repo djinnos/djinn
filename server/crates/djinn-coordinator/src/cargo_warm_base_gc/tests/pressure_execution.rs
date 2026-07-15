@@ -11,6 +11,47 @@ struct EventRecordingLayer {
     events: Arc<Mutex<Vec<HashMap<String, String>>>>,
 }
 
+const PRESSURE_METRICS_FIXTURE: &str =
+    include_str!("../../../../djinn-telemetry/tests/fixtures/cache_cleanup/expected_metrics.json");
+
+fn rendered_counter(rendered: &str, metric: &str, labels: &[(&str, &str)]) -> u64 {
+    rendered
+        .lines()
+        .find_map(|line| {
+            let (sample, value) = line.rsplit_once(' ')?;
+            let (name, rendered_labels) = sample.split_once('{')?;
+            let rendered_labels = rendered_labels.strip_suffix('}')?;
+            (name == metric
+                && labels.iter().all(|(key, value)| {
+                    rendered_labels
+                        .split(',')
+                        .any(|label| label == format!("{key}=\"{value}\""))
+                }))
+            .then(|| value.parse().unwrap())
+        })
+        .unwrap_or(0)
+}
+
+fn pressure_counter(rendered: &str, mode: &str, rung: &str, outcome: &str) -> u64 {
+    rendered_counter(
+        rendered,
+        "djinn_cache_pressure_units_total",
+        &[("mode", mode), ("rung", rung), ("outcome", outcome)],
+    )
+}
+
+fn pressure_bytes(rendered: &str, metric: &str, mode: &str, rung: &str) -> u64 {
+    rendered_counter(rendered, metric, &[("mode", mode), ("rung", rung)])
+}
+
+fn pressure_termination(rendered: &str, mode: &str, termination: &str) -> u64 {
+    rendered_counter(
+        rendered,
+        "djinn_cache_pressure_terminations_total",
+        &[("mode", mode), ("termination", termination)],
+    )
+}
+
 impl EventRecordingLayer {
     fn events(&self) -> Vec<HashMap<String, String>> {
         self.events.lock().unwrap().clone()
@@ -786,4 +827,282 @@ async fn three_rung_executor_path_swap_to_symlink_is_retained_without_mutation()
     assert_eq!(result.retained, vec![unit]);
     assert!(target.is_symlink());
     assert_eq!(std::fs::read(outside.join("preserve")).unwrap(), b"safe");
+}
+
+#[tokio::test]
+async fn pressure_metrics_match_the_bounded_fixture_for_execution_boundaries() {
+    let fixture: serde_json::Value = serde_json::from_str(PRESSURE_METRICS_FIXTURE).unwrap();
+    let case = |name: &str| &fixture["cases"][name];
+    let value = |case: &serde_json::Value, field: &str| case[field].as_u64().unwrap();
+    let assert_execution_metrics =
+        |before: &str, after: &str, case: &serde_json::Value, rung: &str| {
+            for outcome in fixture["outcomes"].as_array().unwrap() {
+                let outcome = outcome.as_str().unwrap();
+                assert_eq!(
+                    pressure_counter(after, "delete", rung, outcome)
+                        - pressure_counter(before, "delete", rung, outcome),
+                    case[outcome].as_u64().unwrap_or(0),
+                    "unexpected {outcome} delta for {rung}"
+                );
+            }
+            for field in ["projected", "reclaimed"] {
+                let metric = fixture["byte_metrics"][field].as_str().unwrap();
+                assert_eq!(
+                    pressure_bytes(after, metric, "delete", rung)
+                        - pressure_bytes(before, metric, "delete", rung),
+                    value(case, field),
+                    "unexpected {field} byte delta for {rung}"
+                );
+            }
+            let expected = case["termination"].as_str().unwrap();
+            for termination in fixture["terminations"].as_array().unwrap() {
+                let termination = termination.as_str().unwrap();
+                assert_eq!(
+                    pressure_termination(after, "delete", termination)
+                        - pressure_termination(before, "delete", termination),
+                    u64::from(termination == expected),
+                    "unexpected {termination} termination delta"
+                );
+            }
+        };
+    assert_eq!(fixture["metric"], "djinn_cache_pressure_units_total");
+    assert_eq!(
+        fixture["rungs"],
+        serde_json::json!(["incremental", "profile", "base"])
+    );
+    assert_eq!(
+        fixture["outcomes"],
+        serde_json::json!([
+            "planned",
+            "post_lock_eligible",
+            "retained",
+            "attempted",
+            "deleted",
+            "failed"
+        ])
+    );
+
+    djinn_telemetry::init().unwrap();
+    let temp = tempfile::tempdir().unwrap();
+    let config = executable_pressure_config();
+    let clock = three_rung_clock();
+    let capacity_low = || CapacitySnapshot {
+        total_bytes: 100,
+        available_bytes: 10,
+    };
+    let unit = |id: &str, rung: PressureRung| {
+        let base = old_base(&temp, id);
+        let mut unit = eligible_three_rung_unit(&base, &base, rung);
+        unit.projected_allocated_bytes = 4096;
+        (base, unit)
+    };
+
+    let (_, incremental) = unit(
+        "018f8b9a-0d70-7f0a-8000-000000000101",
+        PressureRung::Incremental,
+    );
+    let (_, profile) = unit(
+        "018f8b9a-0d70-7f0a-8000-000000000102",
+        PressureRung::StaleProfile,
+    );
+    let (_, base) = unit(
+        "018f8b9a-0d70-7f0a-8000-000000000103",
+        PressureRung::WholeBase,
+    );
+    let before = djinn_telemetry::render().unwrap();
+    let dry_run = consume_three_rung_pressure_plan_dry_run(&ThreeRungPressurePlan {
+        units: vec![incremental, profile, base],
+    });
+    let after = djinn_telemetry::render().unwrap();
+    let dry = case("dry_run");
+    assert_eq!(dry_run.len() as u64, value(dry, "planned"));
+    for rung in ["incremental", "profile", "base"] {
+        for outcome in fixture["outcomes"].as_array().unwrap() {
+            let outcome = outcome.as_str().unwrap();
+            assert_eq!(
+                pressure_counter(&after, "dry_run", rung, outcome)
+                    - pressure_counter(&before, "dry_run", rung, outcome),
+                u64::from(outcome == "planned")
+            );
+        }
+        assert_eq!(
+            pressure_bytes(
+                &after,
+                fixture["byte_metrics"]["projected"].as_str().unwrap(),
+                "dry_run",
+                rung
+            ) - pressure_bytes(
+                &before,
+                fixture["byte_metrics"]["projected"].as_str().unwrap(),
+                "dry_run",
+                rung
+            ),
+            4096
+        );
+        assert_eq!(
+            pressure_bytes(
+                &after,
+                fixture["byte_metrics"]["reclaimed"].as_str().unwrap(),
+                "dry_run",
+                rung
+            ) - pressure_bytes(
+                &before,
+                fixture["byte_metrics"]["reclaimed"].as_str().unwrap(),
+                "dry_run",
+                rung
+            ),
+            0
+        );
+    }
+    assert!(dry["termination"].is_null());
+    for termination in fixture["terminations"].as_array().unwrap() {
+        let termination = termination.as_str().unwrap();
+        assert_eq!(
+            pressure_termination(&after, "dry_run", termination)
+                - pressure_termination(&before, "dry_run", termination),
+            0,
+            "dry-run unexpectedly emitted {termination} termination telemetry"
+        );
+    }
+    assert_eq!(value(dry, "projected"), 3 * 4096);
+    assert_eq!(value(dry, "reclaimed"), 0);
+
+    let (pre_base, pre) = unit(
+        "018f8b9a-0d70-7f0a-8000-000000000104",
+        PressureRung::WholeBase,
+    );
+    std::fs::write(pre_base.join("bytes"), vec![0; 4096]).unwrap();
+    let before = djinn_telemetry::render().unwrap();
+    let pre_result = execute_three_rung_pressure_plan(
+        &ThreeRungPressurePlan { units: vec![pre] },
+        &Activity(Ok(snapshot())),
+        &Warm(Ok(false)),
+        &NoopBaseLock,
+        &SequenceCapacity(Mutex::new(std::collections::VecDeque::from([Err(
+            "probe".into()
+        )]))),
+        &config,
+        &clock,
+        temp.path(),
+    )
+    .await;
+    let after = djinn_telemetry::render().unwrap();
+    let pre_case = case("pre_attempt_measurement_failure");
+    assert!(pre_result.attempted.is_empty() && pre_result.deleted.is_empty());
+    assert_execution_metrics(&before, &after, pre_case, "base");
+
+    let (high_base, high) = unit(
+        "018f8b9a-0d70-7f0a-8000-000000000108",
+        PressureRung::StaleProfile,
+    );
+    std::fs::write(high_base.join("bytes"), vec![0; 4096]).unwrap();
+    let before = djinn_telemetry::render().unwrap();
+    let high_result = execute_three_rung_pressure_plan(
+        &ThreeRungPressurePlan { units: vec![high] },
+        &Activity(Ok(ActivitySnapshot {
+            latest_activity: Some("2020-01-01T00:00:00Z".into()),
+            ..snapshot()
+        })),
+        &Warm(Ok(false)),
+        &NoopBaseLock,
+        &SequenceCapacity(Mutex::new(std::collections::VecDeque::from([Ok(
+            CapacitySnapshot {
+                total_bytes: 100,
+                available_bytes: 25,
+            },
+        )]))),
+        &config,
+        &clock,
+        temp.path(),
+    )
+    .await;
+    let after = djinn_telemetry::render().unwrap();
+    let high_case = case("pre_attempt_reached_high");
+    assert!(high_result.reached_high_watermark && high_result.attempted.is_empty());
+    assert_execution_metrics(&before, &after, high_case, "profile");
+
+    let (failed_base, failed) = unit(
+        "018f8b9a-0d70-7f0a-8000-000000000105",
+        PressureRung::Incremental,
+    );
+    std::fs::write(failed_base.join("bytes"), vec![0; 4096]).unwrap();
+    let before = djinn_telemetry::render().unwrap();
+    set_remove_dir_all_hook(Some(Box::new(|_| {
+        Err(std::io::Error::other("remove failed"))
+    })));
+    let failed_result = execute_three_rung_pressure_plan(
+        &ThreeRungPressurePlan {
+            units: vec![failed],
+        },
+        &Activity(Ok(snapshot())),
+        &Warm(Ok(false)),
+        &NoopBaseLock,
+        &SequenceCapacity(Mutex::new(std::collections::VecDeque::from([Ok(
+            capacity_low(),
+        )]))),
+        &config,
+        &clock,
+        temp.path(),
+    )
+    .await;
+    set_remove_dir_all_hook(None);
+    let after = djinn_telemetry::render().unwrap();
+    let removal = case("removal_failure");
+    assert!(failed_result.deleted.is_empty());
+    assert_execution_metrics(&before, &after, removal, "incremental");
+
+    let (success_base, success) = unit(
+        "018f8b9a-0d70-7f0a-8000-000000000106",
+        PressureRung::WholeBase,
+    );
+    std::fs::write(success_base.join("bytes"), vec![0; 4096]).unwrap();
+    let before = djinn_telemetry::render().unwrap();
+    let success_result = execute_three_rung_pressure_plan(
+        &ThreeRungPressurePlan {
+            units: vec![success],
+        },
+        &Activity(Ok(snapshot())),
+        &Warm(Ok(false)),
+        &NoopBaseLock,
+        &SequenceCapacity(Mutex::new(std::collections::VecDeque::from([
+            Ok(capacity_low()),
+            Ok(capacity_low()),
+        ]))),
+        &config,
+        &clock,
+        temp.path(),
+    )
+    .await;
+    let after = djinn_telemetry::render().unwrap();
+    let success_case = case("successful_deletion");
+    assert_eq!(
+        success_result.reclaimed_bytes,
+        value(success_case, "reclaimed")
+    );
+    assert_execution_metrics(&before, &after, success_case, "base");
+
+    let (post_base, post) = unit(
+        "018f8b9a-0d70-7f0a-8000-000000000107",
+        PressureRung::WholeBase,
+    );
+    std::fs::write(post_base.join("bytes"), vec![0; 4096]).unwrap();
+    let before = djinn_telemetry::render().unwrap();
+    let post_result = execute_three_rung_pressure_plan(
+        &ThreeRungPressurePlan { units: vec![post] },
+        &Activity(Ok(snapshot())),
+        &Warm(Ok(false)),
+        &NoopBaseLock,
+        &SequenceCapacity(Mutex::new(std::collections::VecDeque::from([
+            Ok(capacity_low()),
+            Err("post probe".into()),
+        ]))),
+        &config,
+        &clock,
+        temp.path(),
+    )
+    .await;
+    let after = djinn_telemetry::render().unwrap();
+    let post_case = case("post_success_remeasurement_failure");
+    assert!(post_result.remeasurement_failed && post_result.deleted.len() == 1);
+    assert_execution_metrics(&before, &after, post_case, "base");
 }

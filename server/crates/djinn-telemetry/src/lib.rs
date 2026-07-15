@@ -120,6 +120,12 @@ const NODE_PSI_READ_ERRORS_TOTAL: &str = "node_psi_read_errors_total";
 const CACHE_CLEANUP_TOTAL: &str = "djinn_cache_cleanup_total";
 const CACHE_CLEANUP_RECLAIMED_BYTES_TOTAL: &str = "djinn_cache_cleanup_reclaimed_bytes_total";
 const CACHE_CLEANUP_CANDIDATES_TOTAL: &str = "djinn_cache_cleanup_candidates_total";
+const CACHE_PRESSURE_UNITS_TOTAL: &str = "djinn_cache_pressure_units_total";
+const CACHE_PRESSURE_PROJECTED_ALLOCATED_BYTES_TOTAL: &str =
+    "djinn_cache_pressure_projected_allocated_bytes_total";
+const CACHE_PRESSURE_RECLAIMED_ALLOCATED_BYTES_TOTAL: &str =
+    "djinn_cache_pressure_reclaimed_allocated_bytes_total";
+const CACHE_PRESSURE_TERMINATIONS_TOTAL: &str = "djinn_cache_pressure_terminations_total";
 const CACHE_CLEANUP_COMPONENTS: [&str; 4] = [
     "sccache",
     "cargo_target_runs",
@@ -1735,6 +1741,95 @@ pub mod arbiter {
 /// individual entry names) belong in structured tracing fields emitted at
 /// the cleanup call site, not in Prometheus labels.
 pub mod cache_cleanup {
+    /// Closed label domains for three-rung pressure cleanup; no identity or error data can be labels.
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    pub enum PressureMode {
+        DryRun,
+        Delete,
+    }
+    impl PressureMode {
+        pub const fn as_label(self) -> &'static str {
+            match self {
+                Self::DryRun => "dry_run",
+                Self::Delete => "delete",
+            }
+        }
+    }
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    pub enum PressureRung {
+        Incremental,
+        Profile,
+        Base,
+    }
+    impl PressureRung {
+        pub const fn as_label(self) -> &'static str {
+            match self {
+                Self::Incremental => "incremental",
+                Self::Profile => "profile",
+                Self::Base => "base",
+            }
+        }
+    }
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    pub enum PressureOutcome {
+        Planned,
+        PostLockEligible,
+        Retained,
+        Attempted,
+        Deleted,
+        Failed,
+    }
+    impl PressureOutcome {
+        pub const fn as_label(self) -> &'static str {
+            match self {
+                Self::Planned => "planned",
+                Self::PostLockEligible => "post_lock_eligible",
+                Self::Retained => "retained",
+                Self::Attempted => "attempted",
+                Self::Deleted => "deleted",
+                Self::Failed => "failed",
+            }
+        }
+    }
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    pub enum PressureTermination {
+        Completed,
+        ReachedHigh,
+        RemeasureFailed,
+    }
+    impl PressureTermination {
+        pub const fn as_label(self) -> &'static str {
+            match self {
+                Self::Completed => "completed",
+                Self::ReachedHigh => "reached_high",
+                Self::RemeasureFailed => "remeasure_failed",
+            }
+        }
+    }
+    pub fn increment_pressure_unit(
+        mode: PressureMode,
+        rung: PressureRung,
+        outcome: PressureOutcome,
+    ) {
+        metrics::counter!(super::CACHE_PRESSURE_UNITS_TOTAL, "mode" => mode.as_label(), "rung" => rung.as_label(), "outcome" => outcome.as_label()).increment(1);
+    }
+    pub fn record_pressure_projected_allocated_bytes(
+        mode: PressureMode,
+        rung: PressureRung,
+        bytes: u64,
+    ) {
+        metrics::counter!(super::CACHE_PRESSURE_PROJECTED_ALLOCATED_BYTES_TOTAL, "mode" => mode.as_label(), "rung" => rung.as_label()).increment(bytes);
+    }
+    pub fn record_pressure_reclaimed_allocated_bytes(
+        mode: PressureMode,
+        rung: PressureRung,
+        bytes: u64,
+    ) {
+        metrics::counter!(super::CACHE_PRESSURE_RECLAIMED_ALLOCATED_BYTES_TOTAL, "mode" => mode.as_label(), "rung" => rung.as_label()).increment(bytes);
+    }
+    pub fn increment_pressure_termination(mode: PressureMode, termination: PressureTermination) {
+        metrics::counter!(super::CACHE_PRESSURE_TERMINATIONS_TOTAL, "mode" => mode.as_label(), "termination" => termination.as_label()).increment(1);
+    }
     /// Stable component labels.
     pub const COMPONENT_SCCACHE: &str = "sccache";
     pub const COMPONENT_CARGO_TARGET_RUNS: &str = "cargo_target_runs";
