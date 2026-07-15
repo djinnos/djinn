@@ -1,9 +1,5 @@
 // Outcome processing, lifecycle management, and helper methods for the
-// refinement tribunal dispatch loop.
-//
-// Complements `refinement_dispatch.rs` which owns the dispatch loop and
-// per-user/model cap admission. Split to keep both files under the
-// size-guard threshold.
+// refinement tribunal dispatch loop. Split from `refinement_dispatch.rs`.
 
 use djinn_control_plane::tools::epic_ops::{
     AcceptanceCriterionItem, parse_acceptance_criteria_array,
