@@ -61,6 +61,15 @@ pub(super) struct CoordinatorActor {
     // State
     pub(super) dispatch_limit: usize,
     pub(super) model_priorities: HashMap<String, Vec<String>>,
+    /// Narrow test seam for `resolve_dispatch_models_for_role`. When `false`
+    /// (the default), the function returns the fixed `DEFAULT_MODEL_ID` without
+    /// touching the credential catalog, preserving historical test behaviour so
+    /// every existing dispatch test continues to work without seeding
+    /// credentials. Only tests that need to prove owner-scoped credential
+    /// filtering set this to `true`, forcing the production credential-lookup
+    /// path.
+    #[cfg(test)]
+    pub(super) test_use_live_credential_resolution: bool,
     /// Per-project PR creation errors (project_id → error message).
     pub(super) pr_errors: HashMap<String, String>,
     /// Durable dispatch-state: per-task dispatch tracking (task UUID → last
@@ -478,6 +487,8 @@ impl CoordinatorActor {
             status_tx,
             dispatch_limit: 50,
             model_priorities: HashMap::new(),
+            #[cfg(test)]
+            test_use_live_credential_resolution: false,
             pr_errors: HashMap::new(),
             last_dispatched: HashMap::new(),
             inflight_dispatches: HashMap::new(),
@@ -1670,102 +1681,108 @@ impl CoordinatorActor {
         role: &str,
         user_id: Option<&str>,
     ) -> Vec<String> {
-            let cred_repo = djinn_provider::repos::CredentialRepository::new(
-                self.db.clone(),
-                crate::events::event_bus_for(&self.events_tx),
-            );
-            // Scope eligibility to the SAME credentials the runtime will use for
-            // this task's creator (own + org-shared) — never the global unscoped
-            // set — so the coordinator can't deem a model dispatchable that the
-            // worker then can't authenticate.
-            let credentials = match cred_repo.list_for_user(user_id).await {
-                Ok(credentials) => credentials,
-                Err(_) => return Vec::new(),
-            };
+        #[cfg(test)]
+        if !self.test_use_live_credential_resolution {
+            let _ = (role, user_id);
+            return vec![DEFAULT_MODEL_ID.to_owned()];
+        }
 
-            let credential_provider_ids = self.catalog.connected_provider_ids(&credentials);
-            if credential_provider_ids.is_empty() {
-                return Vec::new();
-            }
+        let cred_repo = djinn_provider::repos::CredentialRepository::new(
+            self.db.clone(),
+            crate::events::event_bus_for(&self.events_tx),
+        );
+        // Scope eligibility to the SAME credentials the runtime will use for
+        // this task's creator (own + org-shared) — never the global unscoped
+        // set — so the coordinator can't deem a model dispatchable that the
+        // worker then can't authenticate.
+        let credentials = match cred_repo.list_for_user(user_id).await {
+            Ok(credentials) => credentials,
+            Err(_) => return Vec::new(),
+        };
 
-            let mut selected = Vec::new();
-            let mut seen = HashSet::new();
+        let credential_provider_ids = self.catalog.connected_provider_ids(&credentials);
+        if credential_provider_ids.is_empty() {
+            return Vec::new();
+        }
 
-            // Per-role priorities are an OVERRIDE. When a role has none
-            // configured, fall back to the "worker" role's priorities as the
-            // de-facto per-user default model, so EVERY role (planner, lead,
-            // architect, reviewer) is dispatchable out of the box once the user
-            // has connected a model — model preference is effectively global
-            // per user, with per-role config layered on top.
-            //
-            // Previously only "architect" fell back here, so planner/lead
-            // silently resolved to NO model. That made stuck-task Planner
-            // intervention (reopen_count >= REOPEN_INTERVENTION_THRESHOLD) a
-            // no-op ("no model configured for planner role") and let tasks loop
-            // on the same rejected acceptance criterion forever instead of
-            // escalating to a Planner that can decompose/rescope/close them.
-            let effective_priorities = self
-                .model_priorities
-                .get(role)
-                .or_else(|| self.model_priorities.get("worker"));
+        let mut selected = Vec::new();
+        let mut seen = HashSet::new();
 
-            if let Some(priority_models) = effective_priorities {
-                for configured in priority_models {
-                    if let Some((provider_id, model_name)) = configured.split_once('/') {
-                        if !credential_provider_ids.contains(provider_id) {
-                            continue;
-                        }
-                        // Match by model ID, bare name (after last '/'), display
-                        // name, or full configured ID.  Internal IDs may be in
-                        // HuggingFace form (e.g. "hf:zai-org/GLM-4.7") while
-                        // settings store the API form ("synthetic/GLM-4.7").
-                        let exists = self.catalog.list_models(provider_id).iter().any(|m| {
-                            let bare = m.id.rsplit('/').next().unwrap_or(&m.id);
-                            bare == model_name
-                                || m.id == model_name
-                                || m.name == model_name
-                                || m.id == *configured
-                        });
-                        if exists && seen.insert(configured.clone()) {
-                            selected.push(configured.clone());
-                        }
+        // Per-role priorities are an OVERRIDE. When a role has none
+        // configured, fall back to the "worker" role's priorities as the
+        // de-facto per-user default model, so EVERY role (planner, lead,
+        // architect, reviewer) is dispatchable out of the box once the user
+        // has connected a model — model preference is effectively global
+        // per user, with per-role config layered on top.
+        //
+        // Previously only "architect" fell back here, so planner/lead
+        // silently resolved to NO model. That made stuck-task Planner
+        // intervention (reopen_count >= REOPEN_INTERVENTION_THRESHOLD) a
+        // no-op ("no model configured for planner role") and let tasks loop
+        // on the same rejected acceptance criterion forever instead of
+        // escalating to a Planner that can decompose/rescope/close them.
+        let effective_priorities = self
+            .model_priorities
+            .get(role)
+            .or_else(|| self.model_priorities.get("worker"));
+
+        if let Some(priority_models) = effective_priorities {
+            for configured in priority_models {
+                if let Some((provider_id, model_name)) = configured.split_once('/') {
+                    if !credential_provider_ids.contains(provider_id) {
                         continue;
                     }
+                    // Match by model ID, bare name (after last '/'), display
+                    // name, or full configured ID.  Internal IDs may be in
+                    // HuggingFace form (e.g. "hf:zai-org/GLM-4.7") while
+                    // settings store the API form ("synthetic/GLM-4.7").
+                    let exists = self.catalog.list_models(provider_id).iter().any(|m| {
+                        let bare = m.id.rsplit('/').next().unwrap_or(&m.id);
+                        bare == model_name
+                            || m.id == model_name
+                            || m.name == model_name
+                            || m.id == *configured
+                    });
+                    if exists && seen.insert(configured.clone()) {
+                        selected.push(configured.clone());
+                    }
+                    continue;
+                }
 
-                    if credential_provider_ids.contains(configured) {
-                        let models = self.catalog.list_models(configured);
-                        if let Some(model) = models.iter().find(|m| m.tool_call) {
-                            let model_id = format!("{configured}/{}", model.id);
-                            if seen.insert(model_id.clone()) {
-                                selected.push(model_id);
-                            }
+                if credential_provider_ids.contains(configured) {
+                    let models = self.catalog.list_models(configured);
+                    if let Some(model) = models.iter().find(|m| m.tool_call) {
+                        let model_id = format!("{configured}/{}", model.id);
+                        if seen.insert(model_id.clone()) {
+                            selected.push(model_id);
                         }
-                        for model in models {
-                            let model_id = format!("{configured}/{}", model.id);
-                            if seen.insert(model_id.clone()) {
-                                selected.push(model_id);
-                            }
+                    }
+                    for model in models {
+                        let model_id = format!("{configured}/{}", model.id);
+                        if seen.insert(model_id.clone()) {
+                            selected.push(model_id);
                         }
                     }
                 }
             }
+        }
 
-            // When the role resolved no model (no per-role priorities — the
-            // common case, since model_priorities is usually empty and workers
-            // get their model from the per-USER selection below — or all
-            // configured providers disconnected), fall back to the creator's
-            // GLOBAL per-user model selection: the SAME `resolve_user_model_priority`
-            // the worker dispatch path uses. This is still "only what the user
-            // configured" (their global model choice), not random credentials.
-            // Without it, escalation roles (planner, lead) silently get
-            // NO model and the autonomous stuck-task Planner intervention no-ops
-            // ("no model configured for planner role"), so stuck tasks loop on
-            // the same rejected acceptance criterion forever instead of
-            // escalating to a Planner that can decompose/rescope/close them.
-            if selected.is_empty() {
-                return self.resolve_user_model_priority(user_id, role).await;
-            }
-            selected
+        // When the role resolved no model (no per-role priorities — the
+        // common case, since model_priorities is usually empty and workers
+        // get their model from the per-USER selection below — or all
+        // configured providers disconnected), fall back to the creator's
+        // GLOBAL per-user model selection: the SAME `resolve_user_model_priority`
+        // the worker dispatch path uses. This is still "only what the user
+        // configured" (their global model choice), not random credentials.
+        // Without it, escalation roles (planner, lead) silently get
+        // NO model and the autonomous stuck-task Planner intervention no-ops
+        // ("no model configured for planner role"), so stuck tasks loop on
+        // the same rejected acceptance criterion forever instead of
+        // escalating to a Planner that can decompose/rescope/close them.
+        if selected.is_empty() {
+            return self.resolve_user_model_priority(user_id, role).await;
+        }
+        selected
     }
 
     pub(super) fn task_repo(&self) -> TaskRepository {

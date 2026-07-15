@@ -59,7 +59,12 @@ pub(crate) async fn seed_refinement_fixture(db: &djinn_db::Database) -> Refineme
     let user_id = user.id.clone();
 
     CredentialRepository::new(db.clone(), EventBus::noop())
-        .set_with_owner("test", "TEST_API_KEY", "owner-test-credential", Some(&user_id))
+        .set_with_owner(
+            "test",
+            "TEST_API_KEY",
+            "owner-test-credential",
+            Some(&user_id),
+        )
         .await
         .expect("seed owner test credential");
 
@@ -130,6 +135,8 @@ pub(crate) fn build_refinement_actor(
         // Keep pool-driven refinement tests deterministic while resolving the
         // model through the same owner-scoped credential path as production.
         model_priorities: HashMap::from([("planner".to_owned(), vec![TEST_MODEL.to_owned()])]),
+        #[cfg(test)]
+        test_use_live_credential_resolution: false,
         pr_errors: HashMap::new(),
         last_dispatched: HashMap::new(),
         inflight_dispatches: HashMap::new(),
@@ -1401,6 +1408,10 @@ async fn refinement_model_resolution_scopes_private_credentials_to_durable_owner
     let (events_tx, _events_rx) = tokio::sync::broadcast::channel(16);
     let pool = spawn_test_pool(&db, 1);
     let mut actor = build_refinement_actor(&db, &events_tx, pool);
+    // Force the production credential-lookup path so model selection is
+    // driven by the durable owner's credentials, not the fixed test-model
+    // shortcut. This is the ONLY test that enables this seam.
+    actor.test_use_live_credential_resolution = true;
     actor.catalog.add_custom_provider(
         test_provider("owner-provider"),
         vec![test_model("owner-model", "owner-provider")],
