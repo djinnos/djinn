@@ -9,8 +9,7 @@
  * no MCP mock needed (the component is fed data directly).
  *
  * Judge with: Medium for the default look, Large for density compensation
- * at ~20k nodes, ComplexityHeat for the heat mode, Labels for the sprite
- * pass. Click a star to fly to its neighborhood; click space to fly back;
+ * at ~20k nodes, Labels for the sprite pass. Click a star to fly to its neighborhood; click space to fly back;
  * idle 20s for the ambient auto-rotate.
  */
 
@@ -34,7 +33,6 @@ function xlarge() {
 
 interface GalaxyArgs {
   fixture: "small" | "medium" | "large" | "xlarge";
-  colorMode: "group" | "heat";
   showLabels: boolean;
   edgeBrightness: number;
   nodeGlow: number;
@@ -48,7 +46,6 @@ function fixtureData(name: GalaxyArgs["fixture"]) {
 
 function GalaxyHarness({
   fixture,
-  colorMode,
   showLabels,
   edgeBrightness,
   nodeGlow,
@@ -60,7 +57,6 @@ function GalaxyHarness({
     <div className="h-screen w-full">
       <GalaxyCanvas
         data={data}
-        colorMode={colorMode}
         showLabels={showLabels}
         display={display}
         title={`djinn / ${fixture} fixture`}
@@ -75,7 +71,6 @@ const meta = {
   parameters: { layout: "fullscreen" },
   args: {
     fixture: "medium",
-    colorMode: "group",
     showLabels: false,
     edgeBrightness: DEFAULT_GALAXY_DISPLAY.edgeBrightness,
     nodeGlow: DEFAULT_GALAXY_DISPLAY.nodeGlow,
@@ -83,7 +78,6 @@ const meta = {
   },
   argTypes: {
     fixture: { control: "radio", options: ["small", "medium", "large", "xlarge"] },
-    colorMode: { control: "radio", options: ["group", "heat"] },
     edgeBrightness: { control: { type: "range", min: 0.1, max: 3, step: 0.05 } },
     nodeGlow: { control: { type: "range", min: 0, max: 2, step: 0.05 } },
     bloom: { control: { type: "range", min: 0, max: 2, step: 0.05 } },
@@ -109,11 +103,6 @@ export const XLarge50k: Story = {
 /** Small graph — verifies the look doesn't fall apart under sparse data. */
 export const Small: Story = {
   args: { fixture: "small" },
-};
-
-/** Cognitive-complexity heat mode: hot functions burn red, types/files mute. */
-export const ComplexityHeat: Story = {
-  args: { colorMode: "heat" },
 };
 
 /** Label sprites for the top nodes by visual weight. */
