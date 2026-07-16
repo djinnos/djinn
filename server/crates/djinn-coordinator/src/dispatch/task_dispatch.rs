@@ -12,11 +12,14 @@ use super::admission::{
     overlay_inflight_ledger,
 };
 use super::post_intervention_lane;
+use crate::build_admission::BuildAdmissionDecision;
 use crate::dispatch_pause::{load_dispatch_pause_state, matching_task_dispatch_pause};
 use crate::roles::DispatchContext;
 use djinn_core::clock::{Clock, SystemClock};
+use djinn_db::AdmissionDomain;
 use djinn_db::repositories::task_arbitration::TaskArbitrationRepository;
 use djinn_db::{DispatchStateRepository, DispatchStateUpsert};
+use djinn_k8s::{WarmAdmission, WarmAdmissionPermit, WarmAdmissionTransition};
 
 fn record_dispatch_attempt(outcome: &'static str) {
     djinn_telemetry::dispatch::increment_attempt(outcome);
@@ -660,6 +663,167 @@ impl CoordinatorActor {
     // `dispatch_planner_escalation`) and `refinement_dispatch::
     // dispatch_next_refinement_phase`, so refinement tribunal dispatch and
     // normal task dispatch go through the exact same cap/ledger code path.
+
+    fn admission_controller(&self) -> Option<&crate::build_admission::BuildAdmissionController> {
+        self.build_admission.as_deref()
+    }
+
+    /// Reserve and durably mark a task-run create before the pool side effect.
+    /// A controller denial is deliberately neutral: callers leave the task queued.
+    pub(crate) async fn begin_task_run_build_admission(
+        &self,
+        role: &str,
+        task_id: &str,
+        generation: i64,
+        object_name: String,
+    ) -> Result<Option<WarmAdmissionPermit>, ()> {
+        let Some(controller) = self.admission_controller() else {
+            return Ok(None);
+        };
+        match controller
+            .admit_task_run(
+                Some(role),
+                AdmissionDomain::TaskObservation,
+                task_id.to_owned(),
+                generation,
+                object_name,
+            )
+            .await
+        {
+            Ok(BuildAdmissionDecision::Permitted { permit, .. }) => {
+                if let Err(error) = controller
+                    .transition(&permit, WarmAdmissionTransition::CreateStarted)
+                    .await
+                {
+                    // No pool create was attempted. A reservation that cannot
+                    // enter CreateStarted is definitive pre-create failure, not
+                    // an ambiguous runtime outcome. Best-effort terminalization
+                    // prevents a valid reservation from leaking; persistence
+                    // unavailability deliberately retains capacity.
+                    if let Err(terminal_error) = controller
+                        .transition(
+                            &permit,
+                            WarmAdmissionTransition::DefinitiveFailure {
+                                diagnostic:
+                                    "CreateStarted could not be recorded before pool create"
+                                        .to_owned(),
+                            },
+                        )
+                        .await
+                    {
+                        tracing::warn!(task_id, role, %terminal_error, "failed to terminalize pre-create admission after CreateStarted failure; retaining capacity conservatively");
+                    }
+                    tracing::warn!(task_id, role, %error, "build admission CreateStarted failed; deferring pool create");
+                    return Err(());
+                }
+                Ok(Some(permit))
+            }
+            Ok(BuildAdmissionDecision::Denied { occupancy, cap }) => {
+                tracing::info!(
+                    task_id,
+                    role,
+                    occupancy,
+                    cap,
+                    "build admission denied; leaving task queued"
+                );
+                Err(())
+            }
+            Ok(BuildAdmissionDecision::Unclassified) => {
+                tracing::warn!(
+                    task_id,
+                    role,
+                    "unclassified build admission; leaving task queued"
+                );
+                Err(())
+            }
+            Err(error) => {
+                tracing::warn!(task_id, role, %error, "build admission unavailable; deferring pool create");
+                Err(())
+            }
+        }
+    }
+
+    /// Translate the strongest result available from the slot-pool seam. The pool
+    /// does not return a Kubernetes UID, so even an accepted request remains
+    /// CreateUnknown until a UID-bearing runtime callback is wired.
+    pub(crate) async fn finish_task_run_build_admission(
+        &self,
+        permit: Option<WarmAdmissionPermit>,
+        dispatched: bool,
+    ) {
+        let (Some(controller), Some(permit)) = (self.admission_controller(), permit) else {
+            return;
+        };
+        let transition = if dispatched {
+            WarmAdmissionTransition::CreateUnknown {
+                diagnostic: "slot-pool accepted create without object UID".to_owned(),
+            }
+        } else {
+            WarmAdmissionTransition::DefinitiveFailure {
+                diagnostic: "slot-pool rejected before task-run creation".to_owned(),
+            }
+        };
+        if let Err(error) = controller.transition(&permit, transition).await {
+            tracing::warn!(%error, "failed to persist task-run build-admission outcome; retaining capacity conservatively");
+        }
+    }
+
+    /// Mark a runtime task-run live and bind its UID to this exact generation.
+    /// Terminal events must use this UID binding rather than a task-ID lookup.
+    pub(crate) async fn live_task_run_build_admission(
+        &self,
+        task_id: &str,
+        generation: i64,
+        task_run_id: &str,
+    ) {
+        let Some(controller) = self.admission_controller() else {
+            return;
+        };
+        let Some(permit) = controller.task_run_permit(task_id, generation).await else {
+            return;
+        };
+        if let Err(error) = controller
+            .transition(
+                &permit,
+                WarmAdmissionTransition::Live {
+                    uid: task_run_id.to_owned(),
+                },
+            )
+            .await
+        {
+            tracing::warn!(task_id, task_run_id, generation, %error, "failed to mark task-run admission live; retaining capacity conservatively");
+            return;
+        }
+        controller
+            .bind_task_run(task_run_id.to_owned(), permit)
+            .await;
+    }
+
+    /// Terminal callbacks without a live UID binding are ambiguous and retain
+    /// capacity rather than accidentally releasing a newer task generation.
+    pub(crate) async fn terminal_task_run_build_admission(&self, task_run_id: &str) {
+        let Some(controller) = self.admission_controller() else {
+            return;
+        };
+        let Some(permit) = controller.task_run_permit_for_runtime_id(task_run_id).await else {
+            tracing::debug!(
+                task_run_id,
+                "unbound terminal task-run callback; retaining admission capacity"
+            );
+            return;
+        };
+        if let Err(error) = controller
+            .transition(
+                &permit,
+                WarmAdmissionTransition::Terminal {
+                    uid: task_run_id.to_owned(),
+                },
+            )
+            .await
+        {
+            tracing::warn!(task_run_id, %error, "failed to terminalize task-run admission; retaining capacity conservatively");
+        }
+    }
 
     /// Check whether a single `(user, model, lane)` dispatch is admissible
     /// under both configured concurrency ceilings.
@@ -2535,6 +2699,19 @@ impl CoordinatorActor {
                     .await;
             }
 
+            let build_admission = match self
+                .begin_task_run_build_admission(
+                    role,
+                    &task.id,
+                    task.reopen_count.max(0),
+                    format!("task-run-{}-{}", task.id, task.reopen_count.max(0)),
+                )
+                .await
+            {
+                Ok(permit) => permit,
+                Err(()) => continue,
+            };
+
             // Coordinator-side resume-via-git selection: when resume is
             // enabled and the selector produced a metadata struct, serialize
             // it and route the dispatch through `dispatch_with_resume_metadata`
@@ -2595,6 +2772,12 @@ impl CoordinatorActor {
                     },
                 )
                 .await;
+
+            self.finish_task_run_build_admission(
+                build_admission,
+                matches!(outcome, DispatchOutcome::Dispatched),
+            )
+            .await;
 
             match outcome {
                 DispatchOutcome::Dispatched => {
@@ -3135,6 +3318,7 @@ mod inflight_ledger_tests {
             db: db.clone(),
             events_tx: events_tx.clone(),
             pool: controlled_runtime.spawn_pool(db, cancel, max_slots),
+            build_admission: None,
             catalog: CatalogService::new(),
             health: djinn_provider::catalog::health::HealthTracker::new(),
             role_registry: std::sync::Arc::new(crate::roles::RoleRegistry::new()),
@@ -3374,6 +3558,114 @@ mod inflight_ledger_tests {
             effective_after_overlay, persisted_running,
             "cap {cap}: coordinator effective cap accounting drifted from persisted session state after settlement"
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn terminal_session_event_retains_release_wakeup_for_queued_dispatch() {
+        use crate::build_admission::{BuildAdmissionController, BuildAdmissionMode};
+
+        let db = crate::test_helpers::create_test_db();
+        let (events_tx, _events_rx) = tokio::sync::broadcast::channel(256);
+        let fixture = seed_wnd1_ready_worker_tasks(&db, WND1_READY_TASK_COUNT).await;
+        configure_wnd1_user_max_sessions(&db, &fixture.created_by_user_id, &fixture.model_id, 2)
+            .await;
+
+        let (runtime, mut started_rx) = Wnd1ControlledRuntime::new();
+        let mut actor = wnd1_actor_for_tests(&db, &events_tx, &runtime, 2);
+        let controller = std::sync::Arc::new(BuildAdmissionController::new(
+            std::sync::Arc::new(djinn_db::AdmissionJournalRepository::new(db.clone())),
+            BuildAdmissionMode::Enforce,
+            1,
+            "runtime-release-test",
+        ));
+        actor.build_admission = Some(controller.clone());
+
+        let active_task_id = &fixture.task_ids[0];
+        let queued_task_id = &fixture.task_ids[1];
+        let task_repo =
+            djinn_db::TaskRepository::new(db.clone(), djinn_core::events::EventBus::noop());
+        for task_id in fixture.task_ids.iter().filter(|id| *id != queued_task_id) {
+            task_repo
+                .set_status(task_id, "closed")
+                .await
+                .expect("remove non-queued fixture task from the ready queue");
+        }
+        let permit = actor
+            .begin_task_run_build_admission(
+                "worker",
+                active_task_id,
+                0,
+                format!("task-run-{active_task_id}-0"),
+            )
+            .await
+            .expect("reserve active task admission")
+            .expect("controller returns a permit");
+        let runtime_uid = "runtime-release-test-uid";
+        controller
+            .transition(
+                &permit,
+                WarmAdmissionTransition::Live {
+                    uid: runtime_uid.to_owned(),
+                },
+            )
+            .await
+            .expect("mark active task admission live");
+        controller
+            .bind_task_run(runtime_uid.to_owned(), permit)
+            .await;
+
+        actor.dispatch_ready_tasks(Some(&fixture.project_id)).await;
+        assert_eq!(actor.dispatched, 0, "queued task must be cap-denied");
+
+        let mut session =
+            djinn_db::SessionRepository::new(db.clone(), djinn_core::events::EventBus::noop())
+                .create(djinn_db::CreateSessionParams {
+                    project_id: &fixture.project_id,
+                    task_id: Some(active_task_id),
+                    model: &fixture.model_id,
+                    agent_type: "worker",
+                    metadata_json: None,
+                    task_run_id: None,
+                    pricing: None,
+                    cost_basis: None,
+                })
+                .await
+                .expect("create terminal event session payload");
+        session.task_run_id = Some(runtime_uid.to_owned());
+        session.status = "completed".to_owned();
+
+        // No `notified()` future exists while the actor handles this event. The
+        // release therefore has to survive until the select branch is rebuilt.
+        actor
+            .handle_event(djinn_core::events::DjinnEventEnvelope {
+                entity_type: "session",
+                action: "completed",
+                payload: serde_json::to_value(session).expect("serialize session event"),
+                id: None,
+                project_id: None,
+                from_sync: false,
+            })
+            .await;
+        tokio::time::timeout(
+            Duration::from_millis(100),
+            controller.release_notifier().notified(),
+        )
+        .await
+        .expect("terminal release wakeup must be retained");
+
+        // Invoke the exact pass used by the actor's admission-release select
+        // branch; no periodic tick is advanced in this test.
+        actor.run_build_admission_release_pass().await;
+        assert_eq!(
+            actor.dispatched, 1,
+            "release wakeup must dispatch queued work"
+        );
+        assert_eq!(
+            started_rx.recv().await.as_deref(),
+            Some(queued_task_id.as_str()),
+            "the queued task must be the work invoked by the release pass"
+        );
+        runtime.release(queued_task_id).await;
     }
 
     // Normal Rust/nextest-discoverable test: it uses only TestRuntime/template
@@ -4339,6 +4631,7 @@ mod failover_chain_tests {
             db: db.clone(),
             events_tx: events_tx.clone(),
             pool: pool.clone(),
+            build_admission: None,
             catalog: CatalogService::new(),
             health: djinn_provider::catalog::health::HealthTracker::new(),
             role_registry: std::sync::Arc::new(crate::roles::RoleRegistry::new()),
@@ -6837,6 +7130,7 @@ mod monitored_reopen_no_eligible_model_tests {
             db: db.clone(),
             events_tx: events_tx.clone(),
             pool,
+            build_admission: None,
             catalog: CatalogService::new(),
             health: djinn_provider::catalog::health::HealthTracker::new(),
             role_registry: std::sync::Arc::new(crate::roles::RoleRegistry::new()),

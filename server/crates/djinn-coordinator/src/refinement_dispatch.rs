@@ -766,6 +766,24 @@ impl CoordinatorActor {
         )
         .await;
 
+        // The task identity is now fixed; journal CreateStarted before the pool side effect.
+        // A cap denial is neutral: leave this open refinement task queued.
+        let build_admission = match self
+            .begin_task_run_build_admission(
+                &agent_type,
+                &task_id,
+                i64::from(round),
+                format!("task-run-{}-{}", task_id, round),
+            )
+            .await
+        {
+            Ok(permit) => permit,
+            Err(()) => {
+                self.clear_inflight_dispatch(&task_id).await;
+                return;
+            }
+        };
+
         // ── Step 4: Consume spawn budget ────────────────────────────────────
         //
         // On spawn-cap overflow, clear the in-flight reservation (the real
@@ -779,6 +797,9 @@ impl CoordinatorActor {
                     ?reason,
                     "Refinement spawn cap reached"
                 );
+                // No pool side effect will occur after this deterministic denial.
+                self.finish_task_run_build_admission(build_admission, false)
+                    .await;
                 self.clear_inflight_dispatch(&task_id).await;
                 self.close_refinement_task(
                     &task_id,
@@ -799,6 +820,8 @@ impl CoordinatorActor {
         // slot is immediately available and terminate the refinement.
         match self.pool.dispatch(&task_id, &project_path, &model_id).await {
             Ok(()) => {
+                self.finish_task_run_build_admission(build_admission, true)
+                    .await;
                 tracing::info!(
                     proposal_id = %proposal_id,
                     task_id = %task_id,
@@ -819,6 +842,8 @@ impl CoordinatorActor {
                 );
             }
             Err(e) => {
+                self.finish_task_run_build_admission(build_admission, false)
+                    .await;
                 self.clear_inflight_dispatch(&task_id).await;
                 self.close_refinement_task(&task_id, "refinement dispatch failed (pool error)")
                     .await;

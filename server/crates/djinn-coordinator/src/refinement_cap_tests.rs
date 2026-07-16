@@ -123,6 +123,7 @@ pub(crate) fn build_refinement_actor(
         db: db.clone(),
         events_tx: events_tx.clone(),
         pool,
+        build_admission: None,
         catalog,
         health: HealthTracker::default(),
         role_registry: Arc::new(RoleRegistry::new()),
