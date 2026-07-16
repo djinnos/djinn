@@ -1169,11 +1169,116 @@ async fn admission_denial_or_failed_create_started_never_posts_and_is_retryable(
         }));
         warmer.trigger(&project_id).await;
         warmer.trigger(&project_id).await;
+        let events = events.lock().await;
         assert!(
-            !events.lock().await.iter().any(|event| event == "post"),
+            !events.iter().any(|event| event == "post"),
             "a denial or non-durable CreateStarted must perform zero POSTs"
         );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event.starts_with("reserve:"))
+                .count(),
+            1,
+            "an immediate retrigger must coalesce onto the pending identity"
+        );
+        drop(events);
+        assert!(
+            warmer
+                .dispatch
+                .in_flight
+                .lock()
+                .await
+                .contains_key(&project_id),
+            "admission-gated work remains pending rather than becoming a failed warm"
+        );
     }
+}
+
+#[tokio::test]
+async fn dispatcher_failures_report_one_conservative_admission_outcome() {
+    for (error, expected) in [
+        (
+            "connection reset after POST",
+            "CreateUnknown { diagnostic: \"connection reset after POST\" }",
+        ),
+        (
+            "Forbidden: status code 403",
+            "DefinitiveFailure { diagnostic: \"Forbidden: status code 403\" }",
+        ),
+    ] {
+        let db = Database::open_in_memory().expect("in-memory db");
+        let project_id = seed_project_with_ready_image(&db, "proj-admission-post-error").await;
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let warmer = K8sGraphWarmer::with_dispatcher(
+            test_config(),
+            db,
+            Arc::new(LifecycleRecordingDispatcher {
+                events: events.clone(),
+                result: Err(error.to_string()),
+            }),
+            Arc::new(UidWatcher),
+        )
+        .with_warm_admission(Arc::new(AdmissionRecording {
+            events: events.clone(),
+            admit_error: None,
+            fail_create_started: false,
+        }));
+        warmer.trigger(&project_id).await;
+        let events = events.lock().await;
+        assert_eq!(
+            events.len(),
+            4,
+            "one dispatcher POST has one reported outcome"
+        );
+        assert!(events[0].starts_with("reserve:djinn-warm-"));
+        assert_eq!(events[1], "CreateStarted");
+        assert_eq!(events[2], "post");
+        assert_eq!(events[3], expected);
+        drop(events);
+        assert!(
+            !warmer
+                .dispatch
+                .in_flight
+                .lock()
+                .await
+                .contains_key(&project_id),
+            "a POST failure is cleaned up once and does not leave a watcher cleanup"
+        );
+    }
+}
+
+#[tokio::test]
+async fn unconfigured_admission_fails_closed_without_posting() {
+    let db = Database::open_in_memory().expect("in-memory db");
+    let project_id = seed_project_with_ready_image(&db, "proj-admission-unconfigured").await;
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let mut warmer = K8sGraphWarmer::with_dispatcher(
+        test_config(),
+        db,
+        Arc::new(LifecycleRecordingDispatcher {
+            events: events.clone(),
+            result: Ok("must-not-post".to_string()),
+        }),
+        Arc::new(UidWatcher),
+    );
+    warmer.dispatch.admission = None;
+
+    warmer.trigger(&project_id).await;
+    warmer.trigger(&project_id).await;
+    assert!(
+        events.lock().await.is_empty(),
+        "no admission means no dispatcher POST"
+    );
+    assert!(
+        warmer
+            .dispatch
+            .in_flight
+            .lock()
+            .await
+            .contains_key(&project_id),
+        "the unconfigured dispatch remains coalesced instead of retrying a POST"
+    );
 }
 
 #[test]

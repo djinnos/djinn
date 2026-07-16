@@ -46,6 +46,41 @@ pub use warm_admission::{
     WarmAdmissionTransition,
 };
 
+#[cfg(test)]
+struct TestWarmAdmission;
+
+#[cfg(test)]
+#[async_trait]
+impl WarmAdmission for TestWarmAdmission {
+    async fn admit(
+        &self,
+        _request: WarmAdmissionRequest,
+    ) -> Result<WarmAdmissionPermit, WarmAdmissionError> {
+        Ok(WarmAdmissionPermit::new())
+    }
+
+    async fn transition(
+        &self,
+        _permit: &WarmAdmissionPermit,
+        _transition: WarmAdmissionTransition,
+    ) -> Result<(), WarmAdmissionError> {
+        Ok(())
+    }
+}
+
+/// Test mock constructors explicitly receive an in-memory admission boundary
+/// so existing debounce, dedupe, Notify, and completion-sink component tests
+/// exercise the same admission-fenced path as production.
+#[cfg(test)]
+fn mock_warm_admission() -> Option<Arc<dyn WarmAdmission>> {
+    Some(Arc::new(TestWarmAdmission))
+}
+
+#[cfg(not(test))]
+fn mock_warm_admission() -> Option<Arc<dyn WarmAdmission>> {
+    None
+}
+
 /// Default quiet-window for the merge-storm debounce (`DJINN_WARM_DEBOUNCE_SECONDS`).
 /// A few minutes: long enough that a burst of PRs landing on `main` every
 /// couple of minutes collapses into a single warm run, short enough that a
@@ -362,9 +397,9 @@ struct WarmDispatch {
     db: Database,
     dispatcher: Arc<dyn WarmJobDispatcher>,
     watcher: Arc<dyn WarmJobWatcher>,
-    /// Coordinator-owned admission boundary. It is optional to preserve the
-    /// existing non-coordinator deployment path; when supplied it fences every
-    /// Kubernetes POST with the durable admission lifecycle below.
+    /// Coordinator-owned admission boundary. Its absence is deliberately a
+    /// fail-closed state: no Kubernetes POST may occur without a durable
+    /// admission decision.
     admission: Option<Arc<dyn WarmAdmission>>,
     /// Cluster-side dedupe: lists non-terminal warm Jobs for a project so
     /// triggers from any process can coalesce against in-flight Jobs created
@@ -661,9 +696,10 @@ impl WarmDispatch {
             &image_tag,
             cargo_cache_policy.as_ref(),
         );
-        if self.admission.is_some() {
-            job.metadata.name = Some(admission_request.object_name.clone());
-        }
+        // The object name belongs to the reserved identity, rather than to a
+        // particular POST attempt. This also makes an ambiguous create
+        // recoverable by deterministic-name lookup.
+        job.metadata.name = Some(admission_request.object_name.clone());
         let namespace = self.config.namespace.clone();
         let permit = match self.admission.as_ref() {
             Some(admission) => match admission.admit(admission_request).await {
@@ -673,20 +709,29 @@ impl WarmDispatch {
                         .await
                     {
                         warn!(project_id, error = %error, "K8sGraphWarmer: CreateStarted was not durable; skipping Job POST");
-                        self.release_in_flight(project_id).await;
+                        self.schedule_admission_retry(project_id, notify.clone());
                         return;
                     }
                     Some(permit)
                 }
                 Err(error) => {
-                    // This is not a failed warm: the deterministic identity is
-                    // retained by the admission implementation for retry.
+                    // This is not a failed warm: retain its deterministic
+                    // identity and retry it as one coalesced pending warm.
                     warn!(project_id, error = %error, "K8sGraphWarmer: admission denied or unavailable; skipping Job POST");
-                    self.release_in_flight(project_id).await;
+                    self.schedule_admission_retry(project_id, notify.clone());
                     return;
                 }
             },
-            None => None,
+            None => {
+                // Do not turn an unconfigured boundary into an implicit
+                // allow-all. Keep the single-flight identity pending so a
+                // burst of ticks remains coalesced instead of issuing POSTs.
+                warn!(
+                    project_id,
+                    "K8sGraphWarmer: no warm admission configured; skipping Job POST"
+                );
+                return;
+            }
         };
         let job_name = match self.dispatcher.dispatch(&namespace, job).await {
             Ok(name) => name,
@@ -794,6 +839,29 @@ impl WarmDispatch {
         if let Some(notify) = guard.remove(project_id) {
             notify.notify_waiters();
         }
+    }
+
+    /// Keep an admission-gated identity coalesced briefly, then retry it.
+    /// In particular, a denial and a non-durable CreateStarted are neither a
+    /// completed warm nor a dispatcher failure; dropping their slot immediately
+    /// would let every trigger create a fresh reservation attempt.
+    fn schedule_admission_retry(&self, project_id: &str, notify: Arc<Notify>) {
+        let dispatch = self.clone();
+        let project_id = project_id.to_string();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            let removed = {
+                let mut guard = dispatch.in_flight.lock().await;
+                match guard.get(&project_id) {
+                    Some(current) if Arc::ptr_eq(current, &notify) => guard.remove(&project_id),
+                    _ => None,
+                }
+            };
+            if let Some(current) = removed {
+                current.notify_waiters();
+                dispatch.dispatch_warm_now(&project_id).await;
+            }
+        });
     }
 }
 
@@ -906,7 +974,7 @@ impl K8sGraphWarmer {
                 db,
                 dispatcher,
                 watcher,
-                admission: None,
+                admission: mock_warm_admission(),
                 lister,
                 completion_sink: None,
                 in_flight: Arc::new(Mutex::new(HashMap::new())),
