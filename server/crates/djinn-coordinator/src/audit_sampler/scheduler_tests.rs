@@ -3,7 +3,7 @@
 use super::*;
 use djinn_db::{
     AuditSamplerRepository, AuditStratum, CreateSampleFrameParams, CreateSamplePolicyParams,
-    CreateSelectionParams, Database, EpicRepository, SelectionRow,
+    CreateSelectionParams, Database, EpicRepository, SelectionRow, UserRepository,
 };
 use serde_json::json;
 use std::sync::atomic::{AtomicI64, Ordering};
@@ -34,15 +34,17 @@ async fn seed_selection(
     created_at: &str,
 ) -> SelectionRow {
     let repo = AuditSamplerRepository::new(db.clone());
-    let source_user_id = uuid::Uuid::now_v7().to_string();
     let source_github_id = NEXT_SOURCE_GITHUB_ID.fetch_add(1, Ordering::Relaxed);
-    sqlx::query("INSERT INTO users (id, github_id, github_login) VALUES ($1, $2, $3)")
-        .bind(&source_user_id)
-        .bind(source_github_id)
-        .bind(format!("audit-source-{source_user_id}"))
-        .execute(db.pool())
+    let source_user = UserRepository::new(db.clone())
+        .upsert_from_github(
+            source_github_id,
+            &format!("audit-source-{source_github_id}"),
+            None,
+            None,
+        )
         .await
         .unwrap();
+    let source_user_id = source_user.id;
     let source_task_id = djinn_db::test_support::seed_task_row(
         db,
         djinn_db::test_support::UsageTestTaskSeed {
@@ -53,10 +55,8 @@ async fn seed_selection(
         },
     )
     .await;
-    sqlx::query("UPDATE tasks SET created_by_user_id = $1 WHERE id = $2")
-        .bind(&source_user_id)
-        .bind(&source_task_id)
-        .execute(db.pool())
+    TaskRepository::new(db.clone(), djinn_core::events::EventBus::noop())
+        .set_created_by_user_id(&source_task_id, &source_user_id)
         .await
         .unwrap();
 
@@ -760,14 +760,11 @@ async fn atomic_materialization_creates_task_and_links_in_one_tx() {
         .find(|item| item.selection_id == sel.id)
         .and_then(|item| item.task_id)
         .expect("seeded selection has source task provenance");
-    let source_creator_id = sqlx::query_scalar::<_, Option<String>>(
-        "SELECT created_by_user_id FROM tasks WHERE id = $1",
-    )
-    .bind(&source_task_id)
-    .fetch_one(db.pool())
-    .await
-    .unwrap()
-    .expect("seeded source task has a creator");
+    let source_creator_id = task_repo
+        .created_by_user_id(&source_task_id)
+        .await
+        .unwrap()
+        .expect("seeded source task has a creator");
     let task_id = audit_repo
         .materialize_audit_task_atomic(
             &sel.id,
@@ -828,9 +825,8 @@ async fn atomic_materialization_rolls_back_when_creator_is_unavailable() {
         .find(|item| item.selection_id == sel.id)
         .and_then(|item| item.task_id)
         .unwrap();
-    sqlx::query("UPDATE tasks SET created_by_user_id = NULL WHERE id = $1")
-        .bind(&source_task_id)
-        .execute(db.pool())
+    TaskRepository::new(db.clone(), djinn_core::events::EventBus::noop())
+        .clear_created_by_user_id(&source_task_id)
         .await
         .unwrap();
     let error = audit_repo
@@ -846,9 +842,8 @@ async fn atomic_materialization_rolls_back_when_creator_is_unavailable() {
         .unwrap_err();
     assert!(error.to_string().contains("effective_creator_unavailable"));
     assert_eq!(
-        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM tasks WHERE title = $1")
-            .bind("Audit review: unavailable creator")
-            .fetch_one(db.pool())
+        TaskRepository::new(db.clone(), djinn_core::events::EventBus::noop())
+            .count_by_title("Audit review: unavailable creator")
             .await
             .unwrap(),
         0
@@ -904,9 +899,8 @@ async fn atomic_materialization_rolls_back_when_selection_link_fails() {
             .contains("audit_selection_not_unmaterialized")
     );
     assert_eq!(
-        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM tasks WHERE title = $1")
-            .bind("Audit review: link failure")
-            .fetch_one(db.pool())
+        TaskRepository::new(db.clone(), djinn_core::events::EventBus::noop())
+            .count_by_title("Audit review: link failure")
             .await
             .unwrap(),
         0
