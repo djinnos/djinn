@@ -1,5 +1,9 @@
 use super::*;
 
+use djinn_db::{
+    NoteRevisionDesiredState, NoteRevisionEventKind, NoteRevisionMutation, NoteRevisionUpdateState,
+    folder_for_type, permalink_for,
+};
 use rmcp::{Json, handler::server::wrapper::Parameters};
 
 pub(super) async fn memory_edit(
@@ -27,22 +31,6 @@ pub(super) async fn memory_edit(
         }
     };
 
-    let note = if let Some(ref new_type) = p.note_type {
-        if new_type != &note.note_type {
-            match repo
-                .move_note(&note.id, Path::new(&p.project), &note.title, new_type)
-                .await
-            {
-                Ok(moved) => moved,
-                Err(e) => return Json(MemoryNoteResponse::error(e.to_string())),
-            }
-        } else {
-            note
-        }
-    } else {
-        note
-    };
-
     let new_content = match apply_edit_operation(
         &note.content,
         &p.operation,
@@ -54,21 +42,44 @@ pub(super) async fn memory_edit(
         Err(e) => return Json(MemoryNoteResponse::error(e)),
     };
 
+    let (reason, attribution, provenance) =
+        match super::write_services::revision_identity(&p.reason) {
+            Ok(identity) => identity,
+            Err(error) => return Json(MemoryNoteResponse::error(error)),
+        };
+    let note_type = p.note_type.as_deref().unwrap_or(&note.note_type).to_owned();
+    let moved = note_type != note.note_type;
     match repo
-        .update(&note.id, &note.title, &new_content, &note.tags)
+        .mutate_with_revision(NoteRevisionMutation {
+            project_id,
+            note_id: Some(note.id.clone()),
+            event_kind: NoteRevisionEventKind::Updated,
+            desired: NoteRevisionDesiredState::ExistingWithMetadata(NoteRevisionUpdateState {
+                title: note.title.clone(),
+                permalink: if moved {
+                    permalink_for(&note_type, &note.title)
+                } else {
+                    note.permalink.clone()
+                },
+                content: new_content,
+                note_type: note_type.clone(),
+                folder: if moved {
+                    folder_for_type(&note_type).to_owned()
+                } else {
+                    note.folder.clone()
+                },
+                tags: note.tags.clone(),
+                retrieval_anchor: p.retrieval_anchor.clone().or(note.retrieval_anchor.clone()),
+                confidence: note.confidence,
+            }),
+            attribution,
+            provenance,
+            reason,
+        })
         .await
     {
-        Ok(updated) => {
-            let updated = match p.retrieval_anchor.as_deref() {
-                Some(anchor) => match repo
-                    .update_retrieval_anchor(&updated.id, Some(anchor))
-                    .await
-                {
-                    Ok(note) => note,
-                    Err(e) => return Json(MemoryNoteResponse::error(e.to_string())),
-                },
-                None => updated,
-            };
+        Ok(result) => {
+            let updated = result.note.expect("updated mutation returns note");
             super::lifecycle::schedule_summary_regeneration(server, &updated.id);
             Json(MemoryNoteResponse::from_note(&updated))
         }

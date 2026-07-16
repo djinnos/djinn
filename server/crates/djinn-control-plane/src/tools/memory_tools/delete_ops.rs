@@ -1,5 +1,6 @@
 use super::*;
 
+use djinn_db::{NoteRevisionDesiredState, NoteRevisionEventKind, NoteRevisionMutation};
 use rmcp::{Json, handler::server::wrapper::Parameters};
 
 pub(super) async fn memory_delete(
@@ -24,8 +25,29 @@ pub(super) async fn memory_delete(
         });
     };
 
-    match repo.delete(&note.id).await {
-        Ok(()) => Json(MemoryDeleteResponse {
+    let (reason, attribution, provenance) =
+        match super::write_services::revision_identity(&p.reason) {
+            Ok(identity) => identity,
+            Err(error) => {
+                return Json(MemoryDeleteResponse {
+                    ok: false,
+                    error: Some(error),
+                });
+            }
+        };
+    match repo
+        .mutate_with_revision(NoteRevisionMutation {
+            project_id,
+            note_id: Some(note.id),
+            event_kind: NoteRevisionEventKind::Deleted,
+            desired: NoteRevisionDesiredState::Delete,
+            attribution,
+            provenance,
+            reason,
+        })
+        .await
+    {
+        Ok(_) => Json(MemoryDeleteResponse {
             ok: true,
             error: None,
         }),

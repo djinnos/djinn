@@ -1,5 +1,8 @@
 use djinn_db::{
-    NoteRepository, NoteStatus, folder_for_type_with_status, note_hash::note_content_hash,
+    NoteRepository, NoteRevisionDesiredState, NoteRevisionEventKind, NoteRevisionMutation,
+    NoteRevisionReason, NoteRevisionSubsystem, NoteRevisionUpdateState, NoteStatus,
+    TrustedNoteRevisionAttribution, TrustedNoteRevisionProvenance, folder_for_type_with_status,
+    note_hash::note_content_hash,
 };
 use djinn_memory::{Note, NoteDedupCandidate};
 use djinn_provider::CompletionRequest;
@@ -17,6 +20,7 @@ use super::write_dedup_types::{
 const MEMORY_WRITE_DEDUP_MAX_TOKENS: u32 = 768;
 const MEMORY_WRITE_DEDUP_CANDIDATE_LIMIT: usize = 5;
 const SUPERSEDES_WEIGHT: f64 = 1.0;
+const DEDUP_MERGE_REVISION_REASON: &str = "merge memory write into deduplicated note";
 
 pub(crate) struct LlmMemoryWriteDedupDecider {
     runtime: Box<dyn MemoryWriteProviderRuntime>,
@@ -145,9 +149,9 @@ pub(crate) async fn lookup_write_dedup_candidates(
     .map_err(|error| error.to_string())
 }
 
-/// The sole write-dedup mutation integration point until a note revision API is
-/// available. Merge updates immediately; supersede is completed after the
-/// centralized normal note creation path has produced the incoming note.
+/// The sole write-dedup mutation integration point. Merges use the canonical
+/// revision boundary immediately; supersede is completed after the centralized
+/// normal note creation path has produced the incoming note.
 pub(crate) async fn apply_dedup_decision(
     repo: &NoteRepository,
     pending: PendingWriteDedup<'_>,
@@ -170,15 +174,39 @@ pub(crate) async fn apply_dedup_decision(
             merged_title,
             merged_content,
         } => {
-            let note = repo
-                .update(
-                    &candidate_id,
-                    &merged_title,
-                    &merged_content,
-                    pending.tags_json,
-                )
+            let existing = repo
+                .get(&candidate_id)
                 .await
-                .map_err(|error| error.to_string())?;
+                .map_err(|error| error.to_string())?
+                .ok_or_else(|| format!("dedup candidate not found: {candidate_id}"))?;
+            let note = repo
+                .mutate_with_revision(NoteRevisionMutation {
+                    project_id: pending.project_id.to_owned(),
+                    note_id: Some(candidate_id),
+                    event_kind: NoteRevisionEventKind::Updated,
+                    desired: NoteRevisionDesiredState::ExistingWithMetadata(
+                        NoteRevisionUpdateState {
+                            title: merged_title,
+                            permalink: existing.permalink,
+                            content: merged_content,
+                            note_type: existing.note_type,
+                            folder: existing.folder,
+                            tags: pending.tags_json.to_owned(),
+                            retrieval_anchor: existing.retrieval_anchor,
+                            confidence: existing.confidence,
+                        },
+                    ),
+                    attribution: TrustedNoteRevisionAttribution::system(
+                        NoteRevisionSubsystem::Dedup,
+                    ),
+                    provenance: TrustedNoteRevisionProvenance::default(),
+                    reason: NoteRevisionReason::new(DEDUP_MERGE_REVISION_REASON)
+                        .expect("dedup merge revision reason is non-blank"),
+                })
+                .await
+                .map_err(|error| error.to_string())?
+                .note
+                .expect("existing revision mutation returns note");
             Ok(WriteDedupOutcome::Respond(Box::new(
                 MemoryNoteResponse::deduplicated_from_note(&note),
             )))
