@@ -484,13 +484,43 @@ impl NoteRepository {
         source_note_id: &str,
         weight: f64,
     ) -> Result<()> {
-        self.upsert_typed_association(
-            canonical_note_id,
-            source_note_id,
-            NoteAssociationKind::Supersedes,
-            weight,
-        )
-        .await
+        self.db.ensure_initialized().await?;
+        let mut tx = self.db.pool().begin().await?;
+        self.record_supersedes_in_transaction(&mut tx, canonical_note_id, source_note_id, weight)
+            .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    pub(super) async fn record_supersedes_in_transaction(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        canonical_note_id: &str,
+        source_note_id: &str,
+        weight: f64,
+    ) -> Result<super::NoteSupersedesAssociation> {
+        if self
+            .association_failure
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err(crate::error::DbError::Internal(
+                "forced supersedes association insertion failure".to_owned(),
+            ));
+        }
+        let (a_id, b_id) = canonical_pair(canonical_note_id, source_note_id);
+        let weight = weight.clamp(0.0, 1.0);
+        sqlx::query("DELETE FROM note_associations WHERE note_a_id = $1 AND note_b_id = $2 AND kind = 'co_access' AND source = 'session_co_access'")
+            .bind(a_id).bind(b_id).execute(&mut **tx).await?;
+        // Return the stored value rather than the requested weight: conflict
+        // resolution preserves a stronger pre-existing supersedes edge.
+        let persisted_weight: f64 = sqlx::query_scalar(r#"INSERT INTO note_associations (note_a_id, note_b_id, weight, co_access_count, last_co_access, kind, source) VALUES ($1, $2, $3, 0, to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'), 'supersedes', 'session_co_access') ON CONFLICT (note_a_id, note_b_id, kind, source) DO UPDATE SET weight = GREATEST(note_associations.weight, EXCLUDED.weight), last_co_access = EXCLUDED.last_co_access RETURNING weight"#)
+            .bind(a_id).bind(b_id).bind(weight).fetch_one(&mut **tx).await?;
+        Ok(super::NoteSupersedesAssociation {
+            note_a_id: a_id.to_owned(),
+            note_b_id: b_id.to_owned(),
+            kind: NoteAssociationKind::Supersedes,
+            weight: persisted_weight,
+        })
     }
 
     /// Read back the `(weight, kind)` of the association between two notes, if
