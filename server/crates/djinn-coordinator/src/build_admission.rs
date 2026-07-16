@@ -721,9 +721,9 @@ mod tests {
             .await
             .unwrap();
 
-        // A delayed callback for the already-terminal old generation is an
-        // idempotent success and cannot release the newer row.
-        controller
+        // Once generation two exists, a delayed callback for the old
+        // generation is stale and cannot release the newer row.
+        let error = controller
             .transition(
                 &first,
                 WarmAdmissionTransition::Terminal {
@@ -731,7 +731,13 @@ mod tests {
                 },
             )
             .await
-            .unwrap();
+            .expect_err("generation-one callback must be rejected as stale");
+        assert_eq!(
+            error,
+            WarmAdmissionError::Unavailable {
+                diagnostic: "invalid transition: stale admission generation 1 for task".into(),
+            }
+        );
         assert!(
             controller
                 .release_notifier()
