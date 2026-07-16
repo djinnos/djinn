@@ -4,10 +4,7 @@ use djinn_core::models::{CiStatus, TaskPrCiSnapshotInput};
 
 impl CoordinatorActor {
     pub(crate) async fn poll_pr_statuses(&mut self) {
-        // PR polling runs outside any MCP request scope, so there is no
-        // `SESSION_USER_TOKEN` task-local to read. Each task's GitHub client
-        // is built from its project's GitHub App installation token
-        // (resolved per-task inside the loops below).
+        // Polling has no request token; each task uses its GitHub App installation token.
         self.poll_pr_draft_tasks().await;
         self.poll_pr_review_tasks().await;
         self.poll_pr_review_stuck_tasks().await;
@@ -149,8 +146,14 @@ impl CoordinatorActor {
                     pr = pull_number,
                     "PR poller: PR merged → closing task"
                 );
-                self.apply_pr_merge(&task.id, pr.merge_commit_sha.as_deref())
-                    .await;
+                self.apply_pr_merge(
+                    &task.id,
+                    task.pr_url.as_deref().unwrap_or_default(),
+                    pr.merge_commit_sha.as_deref(),
+                    Some("not_applicable"),
+                    "not_applicable",
+                )
+                .await;
                 self.pr_status_cache.remove(&task.id);
                 self.pr_draft_first_seen.remove(&task.id);
                 self.review_stuck_sha_first_seen.remove(&task.id);

@@ -7,13 +7,13 @@ use super::{
     build_unreproducible_same_signature_reason, ci_merge_gate_verdict,
     classify_same_signature_escalation, compute_ci_failure_fingerprint,
     count_consecutive_identical, decide_auto_merge_tick, decide_pr_draft_ci_action,
-    dequeue_reason_is_failure, dequeue_requires_rework, detect_scope_inversion,
-    effective_review_decision, extract_crate_name, extract_crate_names, is_advisory_check_name,
-    is_conversation_resolution_block, is_merge_method_not_allowed, is_merge_queue_405,
-    is_racing_unmerged_status, parse_actions_run_id, parse_pr_url, pick_conflict_blocker_sibling,
-    pr_transition_increments_reopen_count, record_auto_merge_decision_metrics,
-    record_pr_transition_reopen_metric, rollout_policy_publication_marker,
-    should_auto_resolve_conversations,
+    delegated_review_verdict, dequeue_reason_is_failure, dequeue_requires_rework,
+    detect_scope_inversion, effective_review_decision, extract_crate_name, extract_crate_names,
+    is_advisory_check_name, is_conversation_resolution_block, is_merge_method_not_allowed,
+    is_merge_queue_405, is_racing_unmerged_status, merged_review_outcome, parse_actions_run_id,
+    parse_pr_url, pick_conflict_blocker_sibling, pr_transition_increments_reopen_count,
+    record_auto_merge_decision_metrics, record_pr_transition_reopen_metric,
+    rollout_policy_publication_marker, should_auto_resolve_conversations,
 };
 use djinn_core::events::EventBus;
 use djinn_core::models::TransitionAction;
@@ -452,6 +452,27 @@ fn effective_decision_ignores_commented_only() {
         review("claude", "COMMENTED", "2026-06-01T18:00:00Z"),
     ];
     assert_eq!(effective_review_decision(&reviews), (false, false));
+}
+
+#[test]
+fn approved_queue_405_delegation_survives_restart_until_merged_poll() {
+    let reviews = vec![review("reviewer", "APPROVED", "2026-07-16T12:00:00Z")];
+    let (_, has_approved) = effective_review_decision(&reviews);
+
+    // Successful enqueue after REST queue-405 durably writes this value.
+    let persisted_review = delegated_review_verdict(has_approved);
+    assert_eq!(persisted_review, "accepted");
+
+    // After restart the in-memory map is empty. The exact PR attempt's durable
+    // review fact alone must classify the later merged observation as queued.
+    let (review, queue) = merged_review_outcome(Some(persisted_review), false);
+    assert_eq!((review, queue), ("accepted", "passed"));
+}
+
+#[test]
+fn genuinely_no_review_non_queue_merge_stays_not_applicable() {
+    let (review, queue) = merged_review_outcome(None, false);
+    assert_eq!((review, queue), ("not_applicable", "not_applicable"));
 }
 
 /// Minimal `Task` builder for the sibling-attribution heuristic tests.

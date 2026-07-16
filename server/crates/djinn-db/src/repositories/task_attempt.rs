@@ -704,6 +704,29 @@ impl TaskAttemptRepository {
         Ok(row)
     }
 
+    /// Return the sole submitted worker attempt durably associated with a PR.
+    ///
+    /// PR lifecycle consumers must use this association rather than selecting a
+    /// task's newest attempt. Multiple submitted attempts claiming one PR are a
+    /// data contradiction, so deliberately fail rather than arbitrarily choose.
+    pub async fn submitted_worker_for_pr_url(&self, pr_url: &str) -> Result<Option<TaskAttempt>> {
+        self.db.ensure_initialized().await?;
+        let ids: Vec<String> = sqlx::query_scalar(
+            "SELECT id FROM task_attempts
+             WHERE pr_url = $1 AND role = 'worker' AND outcome = 'submitted'",
+        )
+        .bind(pr_url)
+        .fetch_all(self.db.pool())
+        .await?;
+        match ids.as_slice() {
+            [] => Ok(None),
+            [id] => self.get(id).await,
+            _ => Err(DbError::InvalidData(
+                "multiple submitted worker attempts are associated with one PR".into(),
+            )),
+        }
+    }
+
     /// List `pending` attempt rows that look orphaned: created before
     /// `created_before_iso` (lexicographic compare over the ISO-8601 UTC text
     /// timestamps, same convention as `TaskRunRepository::reap_stale_running`)
