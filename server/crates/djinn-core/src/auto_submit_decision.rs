@@ -18,7 +18,9 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::canonical_verify::{FileStatus, FreshnessVerdict, evaluate_freshness};
+use crate::canonical_verify::{
+    FileStatus, FreshnessCompatibilityInput, FreshnessVerdict, evaluate_freshness,
+};
 use crate::models::{AutoSubmitTriggerReason, VerifyRunRecord};
 
 // ─── Changed-file classification ──────────────────────────────────────────
@@ -156,6 +158,9 @@ pub struct AutoSubmitDecisionInput {
     /// Task-specific required checks from the resolved canonical verify
     /// profile.
     pub required_checks: Vec<String>,
+    /// Complete current compatibility material. Unavailable derivation or
+    /// manifest resolution is represented explicitly and blocks reuse.
+    pub compatibility: FreshnessCompatibilityInput,
     /// Changed files in the diff with their pre-classified safety
     /// categories.
     pub changed_files: Vec<ChangedFile>,
@@ -284,6 +289,7 @@ pub fn evaluate_auto_submit_decision(
         &input.tracked_files,
         &input.allowed_untracked_files,
         &input.required_checks,
+        &input.compatibility,
     );
 
     // Build the verify.freshness_evaluated event payload.
@@ -343,6 +349,11 @@ fn freshness_to_block_reason(verdict: &FreshnessVerdict) -> AutoSubmitBlockReaso
         }
         Some(FreshnessRejectionReason::VerifyNotPass) => {
             AutoSubmitBlockReason::StaleVerify("verify result is not pass".to_owned())
+        }
+        Some(FreshnessRejectionReason::VersionIncompatible(reason)) => {
+            AutoSubmitBlockReason::StaleVerify(format!(
+                "verification compatibility miss: {reason:?}"
+            ))
         }
         Some(FreshnessRejectionReason::DiffMismatch) => {
             AutoSubmitBlockReason::StaleVerify("diff fingerprint mismatch".to_owned())
@@ -458,6 +469,21 @@ fn build_review_event(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::canonical_verify::{
+        CurrentEnvironmentIdentity, SUPPORTED_ENVIRONMENT_IDENTITY_VERSION_V1,
+        SUPPORTED_VERIFICATION_INPUT_MANIFEST_VERSION_V1,
+    };
+
+    fn compatibility() -> FreshnessCompatibilityInput {
+        FreshnessCompatibilityInput {
+            verification_input_fingerprint: Some("inputs-v1".to_owned()),
+            environment_identity: Some(CurrentEnvironmentIdentity {
+                version: SUPPORTED_ENVIRONMENT_IDENTITY_VERSION_V1.to_owned(),
+                digest: "identity-digest-v1".to_owned(),
+            }),
+            manifest_version: Some(SUPPORTED_VERIFICATION_INPUT_MANIFEST_VERSION_V1.to_owned()),
+        }
+    }
 
     fn make_run(
         result: &str,
@@ -476,15 +502,17 @@ mod tests {
             result: result.to_owned(),
             diff_fingerprint: diff_fingerprint.to_owned(),
             check_coverage,
-            source_phase: None,
-            verification_attempt_id: None,
+            source_phase: Some("final_verification".to_owned()),
+            verification_attempt_id: Some("attempt-1".to_owned()),
             ordered_commands: None,
             covered_checks: None,
-            verification_input_fingerprint: None,
-            manifest_version: None,
+            verification_input_fingerprint: Some("inputs-v1".to_owned()),
+            manifest_version: Some(SUPPORTED_VERIFICATION_INPUT_MANIFEST_VERSION_V1.to_owned()),
             environment_identity_json: None,
-            environment_identity_digest: None,
-            environment_identity_version: None,
+            environment_identity_digest: Some("identity-digest-v1".to_owned()),
+            environment_identity_version: Some(
+                SUPPORTED_ENVIRONMENT_IDENTITY_VERSION_V1.to_owned(),
+            ),
             created_at: "2025-01-15T10:30:00.000Z".to_owned(),
         }
     }
@@ -502,6 +530,7 @@ mod tests {
             tracked_files: vec![],
             allowed_untracked_files: vec![],
             required_checks: vec!["lint".into(), "test".into()],
+            compatibility: compatibility(),
             changed_files: vec![
                 ChangedFile {
                     path: "src/main.rs".to_owned(),

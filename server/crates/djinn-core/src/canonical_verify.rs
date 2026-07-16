@@ -39,6 +39,28 @@ pub enum VerifyProfileSource {
     RepositoryDefault,
 }
 
+/// The only durable contract versions this evaluator can reuse.
+pub const SUPPORTED_ENVIRONMENT_IDENTITY_VERSION_V1: &str = "identity-v1";
+pub const SUPPORTED_VERIFICATION_INPUT_MANIFEST_VERSION_V1: &str = "manifest-v1";
+
+/// Current environment identity material required to reuse a verification.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CurrentEnvironmentIdentity {
+    pub version: String,
+    pub digest: String,
+}
+
+/// Current compatibility material required for reusable final verification.
+///
+/// Optional values represent derivation or resolution failure and therefore
+/// produce a categorical cache miss; they are never fallback inputs.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FreshnessCompatibilityInput {
+    pub verification_input_fingerprint: Option<String>,
+    pub environment_identity: Option<CurrentEnvironmentIdentity>,
+    pub manifest_version: Option<String>,
+}
+
 impl VerifyProfileSource {
     pub fn as_str(&self) -> &'static str {
         match self {
@@ -139,6 +161,9 @@ pub enum FreshnessRejectionReason {
     NoCanonicalVerify,
     /// Canonical verify exists but result was not `pass`.
     VerifyNotPass,
+    /// A durable compatibility contract is missing, unsupported, or mismatched.
+    /// The bounded subtype is suitable for later audit mapping.
+    VersionIncompatible(FreshnessVersionRejection),
     /// The diff fingerprint does not match the current worker diff.
     DiffMismatch,
     /// A tracked or allowed-untracked file was modified after the verify
@@ -151,6 +176,21 @@ pub enum FreshnessRejectionReason {
     ///
     /// Contains the names of the missing checks.
     MissingTaskChecks(Vec<String>),
+}
+
+/// Bounded subtypes for durable compatibility misses.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FreshnessVersionRejection {
+    NotFinalVerification,
+    MissingVerificationInputFingerprint,
+    VerificationInputFingerprintMismatch,
+    MissingEnvironmentIdentity,
+    UnsupportedEnvironmentIdentityVersion,
+    EnvironmentIdentityDigestMismatch,
+    MissingManifestVersion,
+    UnsupportedManifestVersion,
+    ManifestVersionMismatch,
 }
 
 // ─── Profile resolution ─────────────────────────────────────────────────────
@@ -225,11 +265,13 @@ pub fn resolve_canonical_verify_profile(
 /// Checks, in order:
 ///
 /// 1. A canonical verify run exists.
-/// 2. The verify run result is `pass`.
-/// 3. The verify run's `diff_fingerprint` matches the current diff fingerprint.
-/// 4. No tracked or allowed-untracked file has been modified after the verify
+/// 2. The run was produced by `final_verification`.
+/// 3. The verify run result is `pass`.
+/// 4. Complete fingerprint, environment identity, and manifest contracts match.
+/// 5. The verify run's `diff_fingerprint` matches the current diff fingerprint.
+/// 6. No tracked or allowed-untracked file has been modified after the verify
 ///    run's `completed_at` timestamp.
-/// 5. All task-specific required checks are present in the verify run's
+/// 7. All task-specific required checks are present in the verify run's
 ///    check coverage.
 ///
 /// Returns [`FreshnessVerdict::accept()`] when all checks pass, or
@@ -240,6 +282,7 @@ pub fn evaluate_freshness(
     tracked_files: &[FileStatus],
     allowed_untracked_files: &[FileStatus],
     required_checks: &[String],
+    compatibility: &FreshnessCompatibilityInput,
 ) -> FreshnessVerdict {
     // 1. Must have a verify run.
     let run = match verify_run {
@@ -247,18 +290,60 @@ pub fn evaluate_freshness(
         None => return FreshnessVerdict::reject(FreshnessRejectionReason::NoCanonicalVerify),
     };
 
-    // 2. Result must be `pass`.
+    // 2. Legacy and non-final rows remain auditable but are never reusable.
+    if run.source_phase.as_deref() != Some("final_verification") {
+        return version_miss(FreshnessVersionRejection::NotFinalVerification);
+    }
+
+    // 3. Result must be `pass`.
     match run.result.parse::<VerifyResult>() {
         Ok(VerifyResult::Pass) => {}
         _ => return FreshnessVerdict::reject(FreshnessRejectionReason::VerifyNotPass),
     }
 
-    // 3. Diff fingerprint must match exactly.
+    // 4. Require exact complete verification inputs, with no legacy fallback.
+    let fingerprint = match compatibility.verification_input_fingerprint.as_deref() {
+        Some(value) if !value.trim().is_empty() => value,
+        _ => return version_miss(FreshnessVersionRejection::MissingVerificationInputFingerprint),
+    };
+    if run.verification_input_fingerprint.as_deref() != Some(fingerprint) {
+        return version_miss(FreshnessVersionRejection::VerificationInputFingerprintMismatch);
+    }
+
+    let identity = match &compatibility.environment_identity {
+        Some(identity)
+            if identity.version == SUPPORTED_ENVIRONMENT_IDENTITY_VERSION_V1
+                && !identity.digest.trim().is_empty() =>
+        {
+            identity
+        }
+        Some(_) => {
+            return version_miss(FreshnessVersionRejection::UnsupportedEnvironmentIdentityVersion);
+        }
+        None => return version_miss(FreshnessVersionRejection::MissingEnvironmentIdentity),
+    };
+    if run.environment_identity_version.as_deref() != Some(identity.version.as_str()) {
+        return version_miss(FreshnessVersionRejection::UnsupportedEnvironmentIdentityVersion);
+    }
+    if run.environment_identity_digest.as_deref() != Some(identity.digest.as_str()) {
+        return version_miss(FreshnessVersionRejection::EnvironmentIdentityDigestMismatch);
+    }
+
+    let manifest = match compatibility.manifest_version.as_deref() {
+        Some(value) if value == SUPPORTED_VERIFICATION_INPUT_MANIFEST_VERSION_V1 => value,
+        Some(_) => return version_miss(FreshnessVersionRejection::UnsupportedManifestVersion),
+        None => return version_miss(FreshnessVersionRejection::MissingManifestVersion),
+    };
+    if run.manifest_version.as_deref() != Some(manifest) {
+        return version_miss(FreshnessVersionRejection::ManifestVersionMismatch);
+    }
+
+    // 5. Diff fingerprint must match exactly.
     if run.diff_fingerprint != current_diff_fingerprint {
         return FreshnessVerdict::reject(FreshnessRejectionReason::DiffMismatch);
     }
 
-    // 4. No tracked or allowed-untracked file may have changed after verify.
+    // 6. No tracked or allowed-untracked file may have changed after verify.
     let completed_at = &run.completed_at;
     let all_files = tracked_files.iter().chain(allowed_untracked_files.iter());
     for file in all_files {
@@ -269,7 +354,7 @@ pub fn evaluate_freshness(
         }
     }
 
-    // 5. All task-specific required checks must be present in coverage.
+    // 7. All task-specific required checks must be present in coverage.
     if !required_checks.is_empty() {
         let coverage = match &run.check_coverage {
             Some(serde_json::Value::Object(map)) => map,
@@ -298,6 +383,10 @@ pub fn evaluate_freshness(
     }
 
     FreshnessVerdict::accept()
+}
+
+fn version_miss(reason: FreshnessVersionRejection) -> FreshnessVerdict {
+    FreshnessVerdict::reject(FreshnessRejectionReason::VersionIncompatible(reason))
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -338,6 +427,34 @@ fn build_profile(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn compatibility() -> FreshnessCompatibilityInput {
+        FreshnessCompatibilityInput {
+            verification_input_fingerprint: Some("inputs-v1".to_owned()),
+            environment_identity: Some(CurrentEnvironmentIdentity {
+                version: SUPPORTED_ENVIRONMENT_IDENTITY_VERSION_V1.to_owned(),
+                digest: "identity-digest-v1".to_owned(),
+            }),
+            manifest_version: Some(SUPPORTED_VERIFICATION_INPUT_MANIFEST_VERSION_V1.to_owned()),
+        }
+    }
+
+    fn freshness(
+        current_diff_fingerprint: &str,
+        verify_run: Option<&VerifyRunRecord>,
+        tracked_files: &[FileStatus],
+        allowed_untracked_files: &[FileStatus],
+        required_checks: &[String],
+    ) -> FreshnessVerdict {
+        super::evaluate_freshness(
+            current_diff_fingerprint,
+            verify_run,
+            tracked_files,
+            allowed_untracked_files,
+            required_checks,
+            &compatibility(),
+        )
+    }
 
     // ── Profile resolution tests ─────────────────────────────────────────────
 
@@ -440,15 +557,17 @@ mod tests {
             result: result.to_owned(),
             diff_fingerprint: diff_fingerprint.to_owned(),
             check_coverage,
-            source_phase: None,
-            verification_attempt_id: None,
+            source_phase: Some("final_verification".to_owned()),
+            verification_attempt_id: Some("attempt-1".to_owned()),
             ordered_commands: None,
             covered_checks: None,
-            verification_input_fingerprint: None,
-            manifest_version: None,
+            verification_input_fingerprint: Some("inputs-v1".to_owned()),
+            manifest_version: Some(SUPPORTED_VERIFICATION_INPUT_MANIFEST_VERSION_V1.to_owned()),
             environment_identity_json: None,
-            environment_identity_digest: None,
-            environment_identity_version: None,
+            environment_identity_digest: Some("identity-digest-v1".to_owned()),
+            environment_identity_version: Some(
+                SUPPORTED_ENVIRONMENT_IDENTITY_VERSION_V1.to_owned(),
+            ),
             created_at: "2025-01-15T10:30:00.000Z".to_owned(),
         }
     }
@@ -461,7 +580,7 @@ mod tests {
             "2025-01-15T10:30:00.000Z",
             Some(serde_json::json!({"lint": true, "test": true})),
         );
-        let verdict = evaluate_freshness(
+        let verdict = freshness(
             "abc123",
             Some(&run),
             &[],
@@ -474,7 +593,7 @@ mod tests {
     #[test]
     fn stale_diff_rejected() {
         let run = make_run("pass", "abc123", "2025-01-15T10:30:00.000Z", None);
-        let verdict = evaluate_freshness("different_fingerprint", Some(&run), &[], &[], &[]);
+        let verdict = freshness("different_fingerprint", Some(&run), &[], &[], &[]);
         assert_eq!(
             verdict,
             FreshnessVerdict::reject(FreshnessRejectionReason::DiffMismatch)
@@ -483,7 +602,7 @@ mod tests {
 
     #[test]
     fn missing_canonical_verify_rejected() {
-        let verdict = evaluate_freshness("abc123", None, &[], &[], &[]);
+        let verdict = freshness("abc123", None, &[], &[], &[]);
         assert_eq!(
             verdict,
             FreshnessVerdict::reject(FreshnessRejectionReason::NoCanonicalVerify)
@@ -493,7 +612,7 @@ mod tests {
     #[test]
     fn failed_verify_rejected() {
         let run = make_run("fail", "abc123", "2025-01-15T10:30:00.000Z", None);
-        let verdict = evaluate_freshness("abc123", Some(&run), &[], &[], &[]);
+        let verdict = freshness("abc123", Some(&run), &[], &[], &[]);
         assert_eq!(
             verdict,
             FreshnessVerdict::reject(FreshnessRejectionReason::VerifyNotPass)
@@ -503,7 +622,7 @@ mod tests {
     #[test]
     fn errored_verify_rejected() {
         let run = make_run("error", "abc123", "2025-01-15T10:30:00.000Z", None);
-        let verdict = evaluate_freshness("abc123", Some(&run), &[], &[], &[]);
+        let verdict = freshness("abc123", Some(&run), &[], &[], &[]);
         assert_eq!(
             verdict,
             FreshnessVerdict::reject(FreshnessRejectionReason::VerifyNotPass)
@@ -517,7 +636,7 @@ mod tests {
             path: "src/main.rs".to_owned(),
             modified_at: "2025-01-15T11:00:00.000Z".to_owned(),
         }];
-        let verdict = evaluate_freshness("abc123", Some(&run), &tracked, &[], &[]);
+        let verdict = freshness("abc123", Some(&run), &tracked, &[], &[]);
         assert_eq!(
             verdict,
             FreshnessVerdict::reject(FreshnessRejectionReason::FileChangedAfterVerify(
@@ -533,7 +652,7 @@ mod tests {
             path: "generated/output.rs".to_owned(),
             modified_at: "2025-01-15T12:00:00.000Z".to_owned(),
         }];
-        let verdict = evaluate_freshness("abc123", Some(&run), &[], &untracked, &[]);
+        let verdict = freshness("abc123", Some(&run), &[], &untracked, &[]);
         assert_eq!(
             verdict,
             FreshnessVerdict::reject(FreshnessRejectionReason::FileChangedAfterVerify(
@@ -555,7 +674,7 @@ mod tests {
                 modified_at: "2025-01-15T10:30:00.000Z".to_owned(), // equal is OK
             },
         ];
-        let verdict = evaluate_freshness("abc123", Some(&run), &tracked, &[], &[]);
+        let verdict = freshness("abc123", Some(&run), &tracked, &[], &[]);
         assert_eq!(verdict, FreshnessVerdict::accept());
     }
 
@@ -567,7 +686,7 @@ mod tests {
             "2025-01-15T10:30:00.000Z",
             Some(serde_json::json!({"lint": true})),
         );
-        let verdict = evaluate_freshness(
+        let verdict = freshness(
             "abc123",
             Some(&run),
             &[],
@@ -590,7 +709,7 @@ mod tests {
             "2025-01-15T10:30:00.000Z",
             Some(serde_json::json!({"lint": true, "test": false})),
         );
-        let verdict = evaluate_freshness(
+        let verdict = freshness(
             "abc123",
             Some(&run),
             &[],
@@ -613,7 +732,7 @@ mod tests {
             "2025-01-15T10:30:00.000Z",
             Some(serde_json::json!("not-an-object")),
         );
-        let verdict = evaluate_freshness(
+        let verdict = freshness(
             "abc123",
             Some(&run),
             &[],
@@ -632,7 +751,7 @@ mod tests {
     #[test]
     fn null_check_coverage_rejected_when_checks_required() {
         let run = make_run("pass", "abc123", "2025-01-15T10:30:00.000Z", None);
-        let verdict = evaluate_freshness("abc123", Some(&run), &[], &[], &["lint".into()]);
+        let verdict = freshness("abc123", Some(&run), &[], &[], &["lint".into()]);
         assert_eq!(
             verdict,
             FreshnessVerdict::reject(FreshnessRejectionReason::MissingTaskChecks(vec![
@@ -649,7 +768,7 @@ mod tests {
             "2025-01-15T10:30:00.000Z",
             Some(serde_json::json!({"lint": true, "test": true, "typecheck": true})),
         );
-        let verdict = evaluate_freshness(
+        let verdict = freshness(
             "abc123",
             Some(&run),
             &[],
@@ -662,8 +781,85 @@ mod tests {
     #[test]
     fn empty_required_checks_means_no_coverage_needed() {
         let run = make_run("pass", "abc123", "2025-01-15T10:30:00.000Z", None);
-        let verdict = evaluate_freshness("abc123", Some(&run), &[], &[], &[]);
+        let verdict = freshness("abc123", Some(&run), &[], &[], &[]);
         assert_eq!(verdict, FreshnessVerdict::accept());
+    }
+
+    #[test]
+    fn durable_compatibility_requires_exact_final_verification_contract() {
+        let base = make_run("pass", "abc123", "2025-01-15T10:30:00.000Z", None);
+        let cases: Vec<(
+            &str,
+            Box<dyn Fn(&mut VerifyRunRecord, &mut FreshnessCompatibilityInput)>,
+            FreshnessVersionRejection,
+        )> = vec![
+            (
+                "legacy phase",
+                Box::new(|run, _| run.source_phase = None),
+                FreshnessVersionRejection::NotFinalVerification,
+            ),
+            (
+                "missing fingerprint",
+                Box::new(|run, _| run.verification_input_fingerprint = None),
+                FreshnessVersionRejection::VerificationInputFingerprintMismatch,
+            ),
+            (
+                "fingerprint mismatch",
+                Box::new(|run, _| run.verification_input_fingerprint = Some("other".into())),
+                FreshnessVersionRejection::VerificationInputFingerprintMismatch,
+            ),
+            (
+                "missing identity digest",
+                Box::new(|run, _| run.environment_identity_digest = None),
+                FreshnessVersionRejection::EnvironmentIdentityDigestMismatch,
+            ),
+            (
+                "missing identity version",
+                Box::new(|run, _| run.environment_identity_version = None),
+                FreshnessVersionRejection::UnsupportedEnvironmentIdentityVersion,
+            ),
+            (
+                "unknown identity version",
+                Box::new(|run, _| run.environment_identity_version = Some("identity-v2".into())),
+                FreshnessVersionRejection::UnsupportedEnvironmentIdentityVersion,
+            ),
+            (
+                "identity mismatch",
+                Box::new(|run, _| run.environment_identity_digest = Some("other".into())),
+                FreshnessVersionRejection::EnvironmentIdentityDigestMismatch,
+            ),
+            (
+                "missing manifest",
+                Box::new(|run, _| run.manifest_version = None),
+                FreshnessVersionRejection::ManifestVersionMismatch,
+            ),
+            (
+                "manifest mismatch",
+                Box::new(|run, _| run.manifest_version = Some("manifest-v2".into())),
+                FreshnessVersionRejection::ManifestVersionMismatch,
+            ),
+            (
+                "current identity unavailable",
+                Box::new(|_, current| current.environment_identity = None),
+                FreshnessVersionRejection::MissingEnvironmentIdentity,
+            ),
+            (
+                "current manifest unsupported",
+                Box::new(|_, current| current.manifest_version = Some("manifest-v2".into())),
+                FreshnessVersionRejection::UnsupportedManifestVersion,
+            ),
+        ];
+
+        for (name, mutate, expected) in cases {
+            let mut run = base.clone();
+            let mut current = compatibility();
+            mutate(&mut run, &mut current);
+            assert_eq!(
+                super::evaluate_freshness("abc123", Some(&run), &[], &[], &[], &current),
+                FreshnessVerdict::reject(FreshnessRejectionReason::VersionIncompatible(expected)),
+                "{name}"
+            );
+        }
     }
 
     // ── VerifyProfileSource parsing ──────────────────────────────────────────
