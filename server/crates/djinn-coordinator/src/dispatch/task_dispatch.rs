@@ -7537,11 +7537,15 @@ mod build_admission_route_tests {
     #[derive(Clone, Default)]
     struct CreateTimeSnapshot {
         row_existed: bool,
+        generation: Option<i64>,
+        history_len: usize,
+        occupancy: i64,
     }
 
     /// Controlled runtime that snapshots the admission journal at create time.
     struct AdmissionRouteRuntime {
         started_tx: tokio::sync::mpsc::UnboundedSender<String>,
+        completed_tx: tokio::sync::mpsc::UnboundedSender<String>,
         releases: StdArc<StdMutex<HashMap<String, tokio::sync::oneshot::Sender<()>>>>,
         snapshots: StdArc<StdMutex<HashMap<String, CreateTimeSnapshot>>>,
         journal: StdArc<AdmissionJournalRepository>,
@@ -7550,16 +7554,23 @@ mod build_admission_route_tests {
     impl AdmissionRouteRuntime {
         fn new(
             journal: StdArc<AdmissionJournalRepository>,
-        ) -> (Self, tokio::sync::mpsc::UnboundedReceiver<String>) {
+        ) -> (
+            Self,
+            tokio::sync::mpsc::UnboundedReceiver<String>,
+            tokio::sync::mpsc::UnboundedReceiver<String>,
+        ) {
             let (started_tx, started_rx) = tokio::sync::mpsc::unbounded_channel();
+            let (completed_tx, completed_rx) = tokio::sync::mpsc::unbounded_channel();
             (
                 Self {
                     started_tx,
+                    completed_tx,
                     releases: StdArc::new(StdMutex::new(HashMap::new())),
                     snapshots: StdArc::new(StdMutex::new(HashMap::new())),
                     journal,
                 },
                 started_rx,
+                completed_rx,
             )
         }
 
@@ -7570,6 +7581,7 @@ mod build_admission_route_tests {
             max_slots: u32,
         ) -> djinn_slot::SlotPoolHandle {
             let started_tx = self.started_tx.clone();
+            let completed_tx = self.completed_tx.clone();
             let releases = self.releases.clone();
             let snapshots = self.snapshots.clone();
             let journal = self.journal.clone();
@@ -7588,6 +7600,7 @@ mod build_admission_route_tests {
                 },
                 StdArc::new(move |slot_id, model_id, event_tx, app_state, cancel| {
                     let started_tx = started_tx.clone();
+                    let completed_tx = completed_tx.clone();
                     let releases = releases.clone();
                     let snapshots = snapshots.clone();
                     let journal = journal.clone();
@@ -7600,6 +7613,7 @@ mod build_admission_route_tests {
                               _pause,
                               _resume_lifecycle_metadata| {
                             let started_tx = started_tx.clone();
+                            let completed_tx = completed_tx.clone();
                             let releases = releases.clone();
                             let snapshots = snapshots.clone();
                             let journal = journal.clone();
@@ -7608,25 +7622,37 @@ mod build_admission_route_tests {
                                 // If a journal row exists for this task, the
                                 // reservation/CreateStarted happened before the
                                 // pool runner fired.
-                                let row_existed = journal
+                                let history = journal
                                     .list_history(AdmissionDomain::TaskObservation, &task_id)
                                     .await
-                                    .map(|rows| {
-                                        rows.iter().any(|r| {
-                                            matches!(
-                                                r.state,
-                                                AdmissionState::CreateInFlight
-                                                    | AdmissionState::CreateUnknown
-                                                    | AdmissionState::Live
-                                                    | AdmissionState::Reserved
-                                            )
-                                        })
-                                    })
-                                    .unwrap_or(false);
+                                    .unwrap_or_default();
+                                let row_existed = history.iter().any(|r| {
+                                    matches!(
+                                        r.state,
+                                        AdmissionState::CreateInFlight
+                                            | AdmissionState::CreateUnknown
+                                            | AdmissionState::Live
+                                            | AdmissionState::Reserved
+                                    )
+                                });
+                                let generation = history.first().map(|row| row.key.generation);
+                                let history_len = history.len();
+                                let occupancy = journal
+                                    .count_task_or_warm_occupancy()
+                                    .await
+                                    .unwrap_or_default();
                                 snapshots
                                     .lock()
                                     .expect("snapshot map mutex")
-                                    .insert(task_id.clone(), CreateTimeSnapshot { row_existed });
+                                    .insert(
+                                        task_id.clone(),
+                                        CreateTimeSnapshot {
+                                            row_existed,
+                                            generation,
+                                            history_len,
+                                            occupancy,
+                                        },
+                                    );
 
                                 let (release_tx, release_rx) = tokio::sync::oneshot::channel();
                                 releases
@@ -7639,6 +7665,7 @@ mod build_admission_route_tests {
                                     _ = kill.cancelled() => {}
                                     _ = tokio::time::sleep(WND1_CONTROLLED_RUNTIME_GUARD) => {}
                                 }
+                                let _ = completed_tx.send(task_id.clone());
                                 Ok(())
                             })
                         },
@@ -7800,7 +7827,8 @@ mod build_admission_route_tests {
 
         let journal = route_journal(&db);
         let controller = route_controller(&journal, BuildAdmissionMode::Enforce, 1);
-        let (runtime, mut started_rx) = AdmissionRouteRuntime::new(journal.clone());
+        let (runtime, mut started_rx, _completed_rx) =
+            AdmissionRouteRuntime::new(journal.clone());
 
         let mut actor = build_route_actor(&db, &events_tx, &runtime, 1);
         actor.build_admission = Some(controller.clone());
@@ -7861,7 +7889,8 @@ mod build_admission_route_tests {
 
         let journal = route_journal(&db);
         let controller = route_controller(&journal, BuildAdmissionMode::Enforce, 1);
-        let (runtime, mut started_rx) = AdmissionRouteRuntime::new(journal.clone());
+        let (runtime, mut started_rx, _completed_rx) =
+            AdmissionRouteRuntime::new(journal.clone());
 
         let mut actor = build_route_actor(&db, &events_tx, &runtime, 1);
         actor.build_admission = Some(controller.clone());
@@ -7927,7 +7956,8 @@ mod build_admission_route_tests {
 
         let journal = route_journal(&db);
         let controller = route_controller(&journal, BuildAdmissionMode::Enforce, 1);
-        let (runtime, mut started_rx) = AdmissionRouteRuntime::new(journal.clone());
+        let (runtime, mut started_rx, _completed_rx) =
+            AdmissionRouteRuntime::new(journal.clone());
 
         let mut actor = build_route_actor(&db, &events_tx, &runtime, 1);
         actor.build_admission = Some(controller.clone());
@@ -7999,7 +8029,8 @@ mod build_admission_route_tests {
         let journal = route_journal(&db);
         // cap=0 → first admission is denied.
         let controller = route_controller(&journal, BuildAdmissionMode::Enforce, 0);
-        let (runtime, _started_rx) = AdmissionRouteRuntime::new(journal.clone());
+        let (runtime, _started_rx, _completed_rx) =
+            AdmissionRouteRuntime::new(journal.clone());
 
         let mut actor = build_route_actor(&db, &events_tx, &runtime, 5);
         actor.build_admission = Some(controller.clone());
@@ -8069,7 +8100,8 @@ mod build_admission_route_tests {
 
         let journal = route_journal(&db);
         let controller = route_controller(&journal, BuildAdmissionMode::Observe, 1);
-        let (runtime, mut started_rx) = AdmissionRouteRuntime::new(journal.clone());
+        let (runtime, mut started_rx, _completed_rx) =
+            AdmissionRouteRuntime::new(journal.clone());
 
         let mut actor = build_route_actor(&db, &events_tx, &runtime, 2);
         actor.build_admission = Some(controller.clone());
@@ -8143,7 +8175,8 @@ mod build_admission_route_tests {
 
         let journal = route_journal(&db);
         let controller = route_controller(&journal, BuildAdmissionMode::Off, 0);
-        let (runtime, mut started_rx) = AdmissionRouteRuntime::new(journal.clone());
+        let (runtime, mut started_rx, _completed_rx) =
+            AdmissionRouteRuntime::new(journal.clone());
 
         let mut actor = build_route_actor(&db, &events_tx, &runtime, 1);
         actor.build_admission = Some(controller.clone());
@@ -8199,7 +8232,8 @@ mod build_admission_route_tests {
 
         let journal = route_journal(&db);
         let controller = route_controller(&journal, BuildAdmissionMode::Enforce, 2);
-        let (runtime, mut started_rx) = AdmissionRouteRuntime::new(journal.clone());
+        let (runtime, mut started_rx, mut completed_rx) =
+            AdmissionRouteRuntime::new(journal.clone());
 
         let mut actor = build_route_actor(&db, &events_tx, &runtime, 1);
         actor.build_admission = Some(controller.clone());
@@ -8222,21 +8256,49 @@ mod build_admission_route_tests {
         // the task, then re-dispatch. The controller's idempotent permit means
         // begin_task_run_build_admission returns the existing permit without
         // re-reserving.
-        runtime.release(&task_id).await;
-        actor
-            .pool
-            .kill_session(&task_id)
-            .await
-            .expect("kill session to simulate crash");
+        let first_snapshot = runtime.snapshot(&task_id);
+        assert_eq!(first_snapshot.generation, Some(0));
+        assert_eq!(first_snapshot.history_len, 1);
+        assert_eq!(first_snapshot.occupancy, 1);
 
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
-        loop {
-            if !actor.pool.has_session(&task_id).await.expect("check pool") {
-                break;
-            }
-            assert!(tokio::time::Instant::now() < deadline);
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
+        runtime.release(&task_id).await;
+        assert_eq!(
+            completed_rx.recv().await.as_deref(),
+            Some(task_id.as_str()),
+            "first controlled create must signal direct completion"
+        );
+        // Serialize with the pool actor after runner completion. The pool may
+        // already have removed the mapping, in which case TaskNotFound is the
+        // expected deterministic outcome.
+        let _ = actor.pool.kill_session(&task_id).await;
+        assert!(
+            !actor.pool.has_session(&task_id).await.expect("check pool"),
+            "runner completion must remove the first controlled session"
+        );
+        actor
+            .clear_planned_dispatch_completion(&task_id, "ambiguous retry fixture settlement")
+            .await;
+        let attempt_repo = djinn_db::TaskAttemptRepository::new(db.clone());
+        let first_attempt = attempt_repo
+            .latest_pending_or_submitted(&task_id, Some("worker"))
+            .await
+            .expect("read first controlled attempt")
+            .expect("first controlled attempt exists");
+        attempt_repo
+            .advance_to_terminal(djinn_db::TerminalTaskAttemptParams {
+                id: &first_attempt.id,
+                outcome: djinn_core::models::task_attempt::TaskAttemptOutcome::Crashed,
+                pr_url: None,
+                submit_ref: None,
+                checkpoint_ref: None,
+                mirror_head_sha: None,
+                github_head_sha: None,
+                summary: Some("controlled ambiguous-create retry"),
+                summary_json: None,
+                log_tail: None,
+            })
+            .await
+            .expect("terminalize first controlled attempt before retry");
 
         actor.dispatch_ready_tasks(Some(&fixture.project_id)).await;
 
@@ -8258,10 +8320,17 @@ mod build_admission_route_tests {
             "idempotent retry must not double-count occupancy"
         );
 
-        if actor.dispatched == 2 {
-            let _ = started_rx.recv().await;
-            runtime.release(&task_id).await;
-        }
+        assert_eq!(actor.dispatched, 2, "retry must execute a second pool create");
+        assert_eq!(
+            started_rx.recv().await.as_deref(),
+            Some(task_id.as_str()),
+            "second controlled create callback must execute"
+        );
+        let second_snapshot = runtime.snapshot(&task_id);
+        assert_eq!(second_snapshot.generation, first_snapshot.generation);
+        assert_eq!(second_snapshot.history_len, 1);
+        assert_eq!(second_snapshot.occupancy, 1);
+        runtime.release(&task_id).await;
     }
 
     // ─── AC3: Terminal release via actor route — uid-fenced and idempotent ─
@@ -8279,7 +8348,8 @@ mod build_admission_route_tests {
 
         let journal = route_journal(&db);
         let controller = route_controller(&journal, BuildAdmissionMode::Enforce, 2);
-        let (runtime, mut started_rx) = AdmissionRouteRuntime::new(journal.clone());
+        let (runtime, mut started_rx, _completed_rx) =
+            AdmissionRouteRuntime::new(journal.clone());
 
         let mut actor = build_route_actor(&db, &events_tx, &runtime, 1);
         actor.build_admission = Some(controller.clone());
@@ -8435,7 +8505,8 @@ mod build_admission_route_tests {
 
         let journal = route_journal(&db);
         let controller = route_controller(&journal, BuildAdmissionMode::Enforce, 2);
-        let (runtime, mut started_rx) = AdmissionRouteRuntime::new(journal.clone());
+        let (runtime, mut started_rx, _completed_rx) =
+            AdmissionRouteRuntime::new(journal.clone());
 
         let mut actor = build_route_actor(&db, &events_tx, &runtime, 1);
         actor.build_admission = Some(controller.clone());
@@ -8501,5 +8572,164 @@ mod build_admission_route_tests {
         );
 
         runtime.release(&task_id).await;
+    }
+
+    /// A delayed terminal callback for an older admission generation must route
+    /// through the actor without releasing the current generation or notifying
+    /// the dispatcher.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn stale_generation_terminal_via_actor_retains_current_occupancy() {
+        let db = crate::test_helpers::create_test_db();
+        let (events_tx, _events_rx) = tokio::sync::broadcast::channel(256);
+        let fixture = seed_wnd1_ready_worker_tasks(&db, WND1_READY_TASK_COUNT).await;
+        let journal = route_journal(&db);
+        let controller = route_controller(&journal, BuildAdmissionMode::Enforce, 2);
+        let (runtime, _started_rx, _completed_rx) =
+            AdmissionRouteRuntime::new(journal.clone());
+        let mut actor = build_route_actor(&db, &events_tx, &runtime, 1);
+        actor.build_admission = Some(controller.clone());
+
+        let task_id = fixture.task_ids[0].clone();
+        close_all_except(&db, &fixture, &task_id).await;
+        let session_repo =
+            djinn_db::SessionRepository::new(db.clone(), djinn_core::events::EventBus::noop());
+
+        let first_permit = actor
+            .begin_task_run_build_admission(
+                "worker",
+                &task_id,
+                0,
+                format!("task-run-{task_id}-0"),
+            )
+            .await
+            .expect("generation zero admission");
+        actor
+            .finish_task_run_build_admission(first_permit, true)
+            .await;
+        let mut first_session = session_repo
+            .create(djinn_db::CreateSessionParams {
+                project_id: &fixture.project_id,
+                task_id: Some(&task_id),
+                model: &fixture.model_id,
+                agent_type: "worker",
+                metadata_json: None,
+                task_run_id: None,
+                pricing: None,
+                cost_basis: None,
+            })
+            .await
+            .expect("create generation zero session");
+        first_session.task_run_id = Some("stale-generation-uid".to_owned());
+        first_session.status = "running".to_owned();
+        actor
+            .handle_event(DjinnEventEnvelope {
+                entity_type: "session",
+                action: "started",
+                payload: serde_json::to_value(&first_session).expect("serialize first started"),
+                id: None,
+                project_id: None,
+                from_sync: false,
+            })
+            .await;
+        first_session.status = "completed".to_owned();
+        actor
+            .handle_event(DjinnEventEnvelope {
+                entity_type: "session",
+                action: "completed",
+                payload: serde_json::to_value(&first_session).expect("serialize first terminal"),
+                id: None,
+                project_id: None,
+                from_sync: false,
+            })
+            .await;
+        assert!(controller.release_notifier().notified().now_or_never().is_some());
+
+        let task_repo = TaskRepository::new(db.clone(), djinn_core::events::EventBus::noop());
+        task_repo
+            .set_status(&task_id, "closed")
+            .await
+            .expect("close before reopen");
+        let reopened = task_repo
+            .set_status(&task_id, "open")
+            .await
+            .expect("reopen for next generation");
+        assert_eq!(reopened.reopen_count, 1);
+
+        let second_permit = actor
+            .begin_task_run_build_admission(
+                "worker",
+                &task_id,
+                1,
+                format!("task-run-{task_id}-1"),
+            )
+            .await
+            .expect("generation one admission");
+        actor
+            .finish_task_run_build_admission(second_permit, true)
+            .await;
+        let mut second_session = session_repo
+            .create(djinn_db::CreateSessionParams {
+                project_id: &fixture.project_id,
+                task_id: Some(&task_id),
+                model: &fixture.model_id,
+                agent_type: "worker",
+                metadata_json: None,
+                task_run_id: None,
+                pricing: None,
+                cost_basis: None,
+            })
+            .await
+            .expect("create generation one session");
+        second_session.task_run_id = Some("current-generation-uid".to_owned());
+        second_session.status = "running".to_owned();
+        actor
+            .handle_event(DjinnEventEnvelope {
+                entity_type: "session",
+                action: "started",
+                payload: serde_json::to_value(&second_session).expect("serialize second started"),
+                id: None,
+                project_id: None,
+                from_sync: false,
+            })
+            .await;
+
+        // Deliver the old generation's terminal callback again through the actor.
+        actor
+            .handle_event(DjinnEventEnvelope {
+                entity_type: "session",
+                action: "completed",
+                payload: serde_json::to_value(&first_session).expect("serialize stale terminal"),
+                id: None,
+                project_id: None,
+                from_sync: false,
+            })
+            .await;
+
+        let history = journal
+            .list_history(AdmissionDomain::TaskObservation, &task_id)
+            .await
+            .expect("read generation history");
+        assert_eq!(history.len(), 2);
+        assert_eq!(
+            history
+                .iter()
+                .find(|row| row.key.generation == 1)
+                .expect("current generation row")
+                .state,
+            AdmissionState::Live,
+        );
+        assert_eq!(
+            journal.count_task_or_warm_occupancy().await.expect("count occupancy"),
+            1,
+            "stale actor callback must retain the current generation"
+        );
+        assert!(
+            controller
+                .release_notifier()
+                .notified()
+                .now_or_never()
+                .is_none(),
+            "stale generation callback must not emit a release notification"
+        );
     }
 }

@@ -17,7 +17,7 @@ use djinn_provider::catalog::CatalogService;
 use djinn_provider::catalog::health::HealthTracker;
 use djinn_provider::repos::CredentialRepository;
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant as StdInstant};
 use tokio_util::sync::CancellationToken;
 
@@ -210,6 +210,73 @@ pub(crate) fn spawn_test_pool(
             role_priorities: HashMap::new(),
         },
     )
+}
+
+/// Create a controlled refinement pool whose runner snapshots the durable
+/// admission row before performing any lifecycle side effect.
+fn spawn_admission_observing_pool(
+    db: &djinn_db::Database,
+    journal: Arc<AdmissionJournalRepository>,
+) -> (
+    djinn_slot::SlotPoolHandle,
+    tokio::sync::mpsc::UnboundedReceiver<(String, Vec<djinn_db::AdmissionJournalRow>, i64)>,
+    Arc<Mutex<Option<tokio::sync::oneshot::Sender<()>>>>,
+) {
+    let cancel = CancellationToken::new();
+    let (observed_tx, observed_rx) = tokio::sync::mpsc::unbounded_channel();
+    let release = Arc::new(Mutex::new(None));
+    let release_for_factory = release.clone();
+    let pool = djinn_slot::SlotPoolHandle::spawn_with_factory(
+        crate::test_helpers::agent_context_from_db(db.clone(), cancel.clone()),
+        cancel,
+        djinn_slot::SlotPoolConfig {
+            models: vec![djinn_slot::ModelSlotConfig {
+                model_id: TEST_MODEL.to_owned(),
+                max_slots: 1,
+                roles: ["advocate", "adversary", "judge", "worker"]
+                    .into_iter()
+                    .map(str::to_owned)
+                    .collect(),
+            }],
+            role_priorities: HashMap::new(),
+        },
+        Arc::new(move |slot_id, model_id, event_tx, app_state, cancel| {
+            let observed_tx = observed_tx.clone();
+            let journal = journal.clone();
+            let release = release_for_factory.clone();
+            let runner: djinn_slot::TestLifecycleRunner = Arc::new(
+                move |task_id, _, _, _, kill, _, _| {
+                    let observed_tx = observed_tx.clone();
+                    let journal = journal.clone();
+                    let release = release.clone();
+                    Box::pin(async move {
+                        let history = journal
+                            .list_history(AdmissionDomain::TaskObservation, &task_id)
+                            .await
+                            .expect("snapshot refinement admission at create time");
+                        let occupancy = journal
+                            .count_task_or_warm_occupancy()
+                            .await
+                            .expect("snapshot refinement occupancy at create time");
+                        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+                        *release.lock().expect("refinement release mutex") = Some(release_tx);
+                        observed_tx
+                            .send((task_id, history, occupancy))
+                            .expect("report refinement create-time snapshot");
+                        tokio::select! {
+                            _ = release_rx => {}
+                            _ = kill.cancelled() => {}
+                        }
+                        Ok(())
+                    })
+                },
+            );
+            djinn_slot::SlotHandle::spawn_with_test_runner(
+                slot_id, model_id, event_tx, app_state, cancel, runner,
+            )
+        }),
+    );
+    (pool, observed_rx, release)
 }
 
 /// Seed a `RefinementLoopState` in the actor's `active_refinements` map.
@@ -421,7 +488,9 @@ async fn capacity_free_retry_dispatches_exactly_one_refinement() {
     let db = crate::test_helpers::create_test_db();
     let fixture = seed_refinement_fixture(&db).await;
     let (events_tx, _events_rx) = tokio::sync::broadcast::channel::<DjinnEventEnvelope>(256);
-    let pool = spawn_test_pool(&db, 4);
+    let journal = Arc::new(AdmissionJournalRepository::new(db.clone()));
+    let (pool, mut create_observed_rx, release) =
+        spawn_admission_observing_pool(&db, journal.clone());
 
     // Seed one running session + cap = 1 so the first tick defers.
     let blocking_task_id = seed_task(&db, &fixture.project_id, &fixture.user_id, "blocking").await;
@@ -430,7 +499,6 @@ async fn capacity_free_retry_dispatches_exactly_one_refinement() {
     set_user_cap(&db, &fixture.user_id, TEST_MODEL, 1).await;
 
     let mut actor = build_refinement_actor(&db, &events_tx, pool.clone());
-    let journal = Arc::new(AdmissionJournalRepository::new(db.clone()));
     actor.build_admission = Some(Arc::new(
         crate::build_admission::BuildAdmissionController::new(
             journal.clone(),
@@ -465,6 +533,21 @@ async fn capacity_free_retry_dispatches_exactly_one_refinement() {
 
     // Tick 2: should now dispatch exactly one refinement task.
     actor.drive_active_refinements().await;
+
+    let (created_task_id, create_time_history, create_time_occupancy) = create_observed_rx
+        .recv()
+        .await
+        .expect("controlled refinement create callback must execute");
+    assert_eq!(create_time_history.len(), 1, "one durable generation at create time");
+    assert_eq!(create_time_history[0].key.work_id, created_task_id);
+    assert!(
+        matches!(
+            create_time_history[0].state,
+            AdmissionState::CreateInFlight | AdmissionState::CreateUnknown
+        ),
+        "CreateStarted must be durable before the refinement pool create callback"
+    );
+    assert_eq!(create_time_occupancy, 1, "reservation occupies capacity at create time");
 
     assert!(
         actor.refinement_sessions.contains_key(&fixture.proposal_id),
@@ -523,6 +606,9 @@ async fn capacity_free_retry_dispatches_exactly_one_refinement() {
         actor.provisional_admissions.is_empty(),
         "provisional admission re-keyed to inflight"
     );
+    if let Some(release) = release.lock().expect("refinement release mutex").take() {
+        let _ = release.send(());
+    }
 }
 
 // ── AC#4: Unresolved attribution fails closed ────────────────────────
