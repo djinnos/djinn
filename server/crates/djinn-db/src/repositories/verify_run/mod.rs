@@ -4,6 +4,7 @@ use djinn_core::models::{
 
 use crate::Result;
 use crate::database::Database;
+use crate::error::DbError;
 
 // ─── VerifyRunRepository ──────────────────────────────────────────────────────
 
@@ -22,6 +23,36 @@ pub struct CreateVerifyRunParams<'a> {
     pub result: &'a str,
     pub diff_fingerprint: &'a str,
     pub check_coverage: Option<&'a serde_json::Value>,
+}
+
+/// One command descriptor required by a final-verification plan, in plan order.
+///
+/// The identifier is supplied independently from the persisted JSON result so a
+/// caller cannot claim an arbitrary passing result object is a complete plan.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RequiredFinalVerificationCommand<'a> {
+    pub descriptor_id: &'a str,
+}
+
+/// Complete data required to create one reusable final-verification pass.
+pub struct RecordEligibleFinalVerificationPassParams<'a> {
+    pub id: &'a str,
+    pub task_run_id: &'a str,
+    pub verify_source: &'a str,
+    pub verify_run_id: &'a str,
+    pub verification_attempt_id: &'a str,
+    /// Required plan descriptors, in the exact order in which they must run.
+    pub required_commands: &'a [RequiredFinalVerificationCommand<'a>],
+    pub ordered_commands: &'a serde_json::Value,
+    pub covered_checks: &'a serde_json::Value,
+    pub required_checks: &'a [String],
+    pub verification_input_fingerprint: &'a str,
+    pub manifest_version: &'a str,
+    pub environment_identity_json: &'a serde_json::Value,
+    pub environment_identity_digest: &'a str,
+    pub environment_identity_version: &'a str,
+    pub completed_at: &'a str,
+    pub diff_fingerprint: &'a str,
 }
 
 impl VerifyRunRepository {
@@ -53,16 +84,17 @@ impl VerifyRunRepository {
         .execute(self.db.pool())
         .await?;
 
-        let row = sqlx::query_as!(
-            VerifyRunRecord,
+        let row = sqlx::query_as::<_, VerifyRunRecord>(
             r#"SELECT id, task_run_id, verify_source, verify_run_id,
                 command_version, profile_version, completed_at,
-                result, diff_fingerprint,
-                check_coverage AS "check_coverage: serde_json::Value",
-                created_at
+                result, diff_fingerprint, check_coverage,
+                source_phase, verification_attempt_id, ordered_commands,
+                covered_checks, verification_input_fingerprint, manifest_version,
+                environment_identity_json, environment_identity_digest,
+                environment_identity_version, created_at
              FROM verify_runs WHERE id = $1"#,
-            params.id
         )
+        .bind(params.id)
         .fetch_one(self.db.pool())
         .await?;
 
@@ -73,16 +105,17 @@ impl VerifyRunRepository {
     pub async fn get(&self, id: &str) -> Result<Option<VerifyRunRecord>> {
         self.db.ensure_initialized().await?;
 
-        Ok(sqlx::query_as!(
-            VerifyRunRecord,
+        Ok(sqlx::query_as::<_, VerifyRunRecord>(
             r#"SELECT id, task_run_id, verify_source, verify_run_id,
                 command_version, profile_version, completed_at,
-                result, diff_fingerprint,
-                check_coverage AS "check_coverage: serde_json::Value",
-                created_at
+                result, diff_fingerprint, check_coverage,
+                source_phase, verification_attempt_id, ordered_commands,
+                covered_checks, verification_input_fingerprint, manifest_version,
+                environment_identity_json, environment_identity_digest,
+                environment_identity_version, created_at
              FROM verify_runs WHERE id = $1"#,
-            id
         )
+        .bind(id)
         .fetch_optional(self.db.pool())
         .await?)
     }
@@ -95,19 +128,20 @@ impl VerifyRunRepository {
     pub async fn latest_for_task_run(&self, task_run_id: &str) -> Result<Option<VerifyRunRecord>> {
         self.db.ensure_initialized().await?;
 
-        Ok(sqlx::query_as!(
-            VerifyRunRecord,
+        Ok(sqlx::query_as::<_, VerifyRunRecord>(
             r#"SELECT id, task_run_id, verify_source, verify_run_id,
                 command_version, profile_version, completed_at,
-                result, diff_fingerprint,
-                check_coverage AS "check_coverage: serde_json::Value",
-                created_at
+                result, diff_fingerprint, check_coverage,
+                source_phase, verification_attempt_id, ordered_commands,
+                covered_checks, verification_input_fingerprint, manifest_version,
+                environment_identity_json, environment_identity_digest,
+                environment_identity_version, created_at
              FROM verify_runs
              WHERE task_run_id = $1
              ORDER BY created_at DESC
              LIMIT 1"#,
-            task_run_id
         )
+        .bind(task_run_id)
         .fetch_optional(self.db.pool())
         .await?)
     }
@@ -131,13 +165,14 @@ impl VerifyRunRepository {
     ) -> Result<Option<VerifyRunRecord>> {
         self.db.ensure_initialized().await?;
 
-        Ok(sqlx::query_as!(
-            VerifyRunRecord,
+        Ok(sqlx::query_as::<_, VerifyRunRecord>(
             r#"SELECT vr.id, vr.task_run_id, vr.verify_source, vr.verify_run_id,
                 vr.command_version, vr.profile_version, vr.completed_at,
-                vr.result, vr.diff_fingerprint,
-                vr.check_coverage AS "check_coverage: serde_json::Value",
-                vr.created_at
+                vr.result, vr.diff_fingerprint, vr.check_coverage,
+                vr.source_phase, vr.verification_attempt_id, vr.ordered_commands,
+                vr.covered_checks, vr.verification_input_fingerprint, vr.manifest_version,
+                vr.environment_identity_json, vr.environment_identity_digest,
+                vr.environment_identity_version, vr.created_at
              FROM verify_runs vr
              JOIN task_runs tr ON tr.id = vr.task_run_id
              WHERE tr.task_id = $1
@@ -145,9 +180,9 @@ impl VerifyRunRepository {
                AND vr.result = 'pass'
              ORDER BY vr.created_at DESC
              LIMIT 1"#,
-            task_id,
-            diff_fingerprint
         )
+        .bind(task_id)
+        .bind(diff_fingerprint)
         .fetch_optional(self.db.pool())
         .await?)
     }
@@ -156,21 +191,136 @@ impl VerifyRunRepository {
     pub async fn list_for_task_run(&self, task_run_id: &str) -> Result<Vec<VerifyRunRecord>> {
         self.db.ensure_initialized().await?;
 
-        Ok(sqlx::query_as!(
-            VerifyRunRecord,
+        Ok(sqlx::query_as::<_, VerifyRunRecord>(
             r#"SELECT id, task_run_id, verify_source, verify_run_id,
                 command_version, profile_version, completed_at,
-                result, diff_fingerprint,
-                check_coverage AS "check_coverage: serde_json::Value",
-                created_at
+                result, diff_fingerprint, check_coverage,
+                source_phase, verification_attempt_id, ordered_commands,
+                covered_checks, verification_input_fingerprint, manifest_version,
+                environment_identity_json, environment_identity_digest,
+                environment_identity_version, created_at
              FROM verify_runs
              WHERE task_run_id = $1
              ORDER BY created_at DESC"#,
-            task_run_id
         )
+        .bind(task_run_id)
         .fetch_all(self.db.pool())
         .await?)
     }
+
+    /// Validate then atomically insert exactly one complete reusable pass.
+    pub async fn record_eligible_final_verification_pass(
+        &self,
+        p: RecordEligibleFinalVerificationPassParams<'_>,
+    ) -> Result<VerifyRunRecord> {
+        validate_eligible_final_pass(&p)?;
+        self.db.ensure_initialized().await?;
+        let mut tx = self.db.pool().begin().await?;
+        sqlx::query("INSERT INTO verify_runs (id,task_run_id,verify_source,verify_run_id,completed_at,result,diff_fingerprint,check_coverage,source_phase,verification_attempt_id,ordered_commands,covered_checks,verification_input_fingerprint,manifest_version,environment_identity_json,environment_identity_digest,environment_identity_version) VALUES ($1,$2,$3,$4,$5,'pass',$6,$7,'final_verification',$8,$9,$10,$11,$12,$13,$14,$15)")
+            .bind(p.id).bind(p.task_run_id).bind(p.verify_source).bind(p.verify_run_id).bind(p.completed_at).bind(p.diff_fingerprint).bind(p.covered_checks).bind(p.verification_attempt_id).bind(p.ordered_commands).bind(p.covered_checks).bind(p.verification_input_fingerprint).bind(p.manifest_version).bind(p.environment_identity_json).bind(p.environment_identity_digest).bind(p.environment_identity_version).execute(&mut *tx).await?;
+        let row = sqlx::query_as::<_, VerifyRunRecord>("SELECT id,task_run_id,verify_source,verify_run_id,command_version,profile_version,completed_at,result,diff_fingerprint,check_coverage,source_phase,verification_attempt_id,ordered_commands,covered_checks,verification_input_fingerprint,manifest_version,environment_identity_json,environment_identity_digest,environment_identity_version,created_at FROM verify_runs WHERE id=$1").bind(p.id).fetch_one(&mut *tx).await?;
+        tx.commit().await?;
+        Ok(row)
+    }
+
+    /// Reuse lookup requires a task-scoped, complete final-verification contract.
+    pub async fn latest_compatible_passing_final_verification(
+        &self,
+        task_id: &str,
+        fingerprint: &str,
+        manifest_version: &str,
+        supported_identity_version: &str,
+        required_checks: &[String],
+    ) -> Result<Option<VerifyRunRecord>> {
+        if supported_identity_version.trim().is_empty() {
+            return Err(DbError::InvalidData(
+                "supported identity version is required".to_owned(),
+            ));
+        }
+        self.db.ensure_initialized().await?;
+        let required = serde_json::Value::Array(
+            required_checks
+                .iter()
+                .cloned()
+                .map(serde_json::Value::String)
+                .collect(),
+        );
+        Ok(sqlx::query_as::<_, VerifyRunRecord>("SELECT vr.id,vr.task_run_id,vr.verify_source,vr.verify_run_id,vr.command_version,vr.profile_version,vr.completed_at,vr.result,vr.diff_fingerprint,vr.check_coverage,vr.source_phase,vr.verification_attempt_id,vr.ordered_commands,vr.covered_checks,vr.verification_input_fingerprint,vr.manifest_version,vr.environment_identity_json,vr.environment_identity_digest,vr.environment_identity_version,vr.created_at FROM verify_runs vr JOIN task_runs tr ON tr.id=vr.task_run_id WHERE tr.task_id=$1 AND vr.verification_input_fingerprint=$2 AND vr.manifest_version=$3 AND vr.environment_identity_version=$4 AND vr.environment_identity_digest IS NOT NULL AND vr.source_phase='final_verification' AND vr.result='pass' AND vr.covered_checks @> $5::jsonb ORDER BY vr.created_at DESC LIMIT 1").bind(task_id).bind(fingerprint).bind(manifest_version).bind(supported_identity_version).bind(required).fetch_optional(self.db.pool()).await?)
+    }
+}
+
+fn validate_eligible_final_pass(p: &RecordEligibleFinalVerificationPassParams<'_>) -> Result<()> {
+    for (name, value) in [
+        ("attempt", p.verification_attempt_id),
+        ("fingerprint", p.verification_input_fingerprint),
+        ("manifest", p.manifest_version),
+        ("identity digest", p.environment_identity_digest),
+        ("identity version", p.environment_identity_version),
+    ] {
+        if value.trim().is_empty() {
+            return Err(DbError::InvalidData(format!("{name} is required")));
+        }
+    }
+    if p.required_commands.is_empty()
+        || p.required_commands
+            .iter()
+            .enumerate()
+            .any(|(index, command)| {
+                command.descriptor_id.trim().is_empty()
+                    || p.required_commands[index + 1..]
+                        .iter()
+                        .any(|other| other.descriptor_id == command.descriptor_id)
+            })
+    {
+        return Err(DbError::InvalidData(
+            "required command descriptor IDs must be non-empty and unique".to_owned(),
+        ));
+    }
+    let commands = p
+        .ordered_commands
+        .as_array()
+        .ok_or_else(|| DbError::InvalidData("ordered commands must be an array".to_owned()))?;
+    if commands.len() != p.required_commands.len() {
+        return Err(DbError::InvalidData(
+            "ordered commands do not match the required command plan".to_owned(),
+        ));
+    }
+    if commands
+        .iter()
+        .zip(p.required_commands)
+        .any(|(command, required)| {
+            !command.is_object()
+                || command
+                    .get("descriptor_id")
+                    .and_then(serde_json::Value::as_str)
+                    != Some(required.descriptor_id)
+                || command.get("result").and_then(serde_json::Value::as_str) != Some("pass")
+                || command.get("passed").and_then(serde_json::Value::as_bool) != Some(true)
+        })
+    {
+        return Err(DbError::InvalidData(
+            "ordered command descriptors must match the required plan and pass".to_owned(),
+        ));
+    }
+    let covered = p
+        .covered_checks
+        .as_array()
+        .ok_or_else(|| DbError::InvalidData("covered checks must be an array".to_owned()))?;
+    if !p
+        .required_checks
+        .iter()
+        .all(|r| covered.iter().any(|c| c.as_str() == Some(r)))
+    {
+        return Err(DbError::InvalidData(
+            "covered checks do not include every required check".to_owned(),
+        ));
+    }
+    if !p.environment_identity_json.is_object() {
+        return Err(DbError::InvalidData(
+            "environment identity must be a JSON object".to_owned(),
+        ));
+    }
+    Ok(())
 }
 
 // ─── AutoSubmitReviewRepository ───────────────────────────────────────────────
