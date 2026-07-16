@@ -10,6 +10,7 @@ use djinn_core::events::EventBus;
 use djinn_db::NoteRepository;
 use djinn_db::repositories::retrieval_trace::{
     CandidateOutcome, RetrievalTraceEntryPoint, RetrievalTraceListFilter, RetrievalTraceRepository,
+    RetrievalTraceOutcome,
     SkippedReason,
 };
 use tokio_util::sync::CancellationToken;
@@ -587,6 +588,9 @@ async fn trace_candidate_search_failure_does_not_change_prompt_output() {
         !prompt.contains("TC fail A"),
         "NULL-confidence note excluded from production results"
     );
+    let trace = latest_trace(&db, &project_id).await.expect("error trace");
+    assert_eq!(trace.outcome, RetrievalTraceOutcome::Error);
+    assert!(trace.candidates_typed().is_empty());
 }
 
 // ── Fail-open: production search error returns None and persists error trace ──
@@ -624,6 +628,9 @@ async fn production_search_error_returns_none_fail_open() {
         result.is_none(),
         "production search error must return None (fail-open)"
     );
+    let trace = latest_trace(&db, &project_id).await.expect("error trace");
+    assert_eq!(trace.outcome, RetrievalTraceOutcome::Error);
+    assert!(trace.candidates_typed().is_empty());
 }
 
 // ── Rendered output unchanged by trace instrumentation ─────────────────────

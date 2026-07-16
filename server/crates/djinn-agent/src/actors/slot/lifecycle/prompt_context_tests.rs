@@ -10,6 +10,7 @@ use djinn_core::extension_diagnostics::{
 use djinn_core::models::ActivityEntry;
 use djinn_db::repositories::retrieval_trace::{
     RetrievalTraceEntryPoint, RetrievalTraceListFilter, RetrievalTraceRepository,
+    RetrievalTraceOutcome,
 };
 use djinn_db::{Database, EpicRepository, NoteRepository, ProposalCreateInput, ProposalRepository};
 use tokio_util::sync::CancellationToken;
@@ -2434,4 +2435,132 @@ async fn planner_production_boundary_scope_first_dedup_caps_and_order_are_determ
     }
     assert_eq!(host.requests.lock().expect("host work").len(), 2);
     assert_eq!(search.requests.lock().expect("search work").len(), 6);
+}
+
+// Environment is process-global. These assembly-boundary tests deliberately
+// hold the lock across awaits so each rollout value is observed atomically.
+static KNOWLEDGE_CONTEXT_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+async fn latest_knowledge_trace_for_assembly(
+    db: &Database,
+    project_id: &str,
+) -> djinn_db::repositories::retrieval_trace::RetrievalTraceRow {
+    RetrievalTraceRepository::new(db.clone())
+        .list_by_project(
+            project_id,
+            RetrievalTraceListFilter {
+                entry_point: Some(RetrievalTraceEntryPoint::LoadKnowledgeContext),
+                limit: Some(1),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("list knowledge traces")
+        .into_iter()
+        .next()
+        .expect("knowledge trace")
+}
+
+async fn assembly_with_rollout(db: Database, task: &Task, role: &dyn AgentRole) -> PromptContext {
+    assemble_for_role(db, task, role, None, "", &[], &[]).await
+}
+
+#[tokio::test]
+async fn assembly_rollout_default_enabled_and_cohort_persist_effective_labels() {
+    let _guard = KNOWLEDGE_CONTEXT_ENV_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    // SAFETY: process-global environment mutation is serialized by the lock.
+    unsafe {
+        std::env::remove_var(KNOWLEDGE_CONTEXT_ROLLOUT_ENV);
+        std::env::remove_var(KNOWLEDGE_CONTEXT_LEGACY_ENV);
+    }
+    let db = Database::ephemeral().await.expect("ephemeral db");
+    let events = EventBus::noop();
+    let task = create_project_epic_task(&db, &events, "Rollout epic", "Rollout task").await;
+    let note_repo = NoteRepository::new(db.clone(), EventBus::noop());
+    let note = note_repo
+        .create(&task.project_id, "Assembly knowledge", "content", "pattern", "[]")
+        .await
+        .expect("seed note");
+    note_repo
+        .set_confidence(&note.id, 0.9)
+        .await
+        .expect("set confidence");
+    let role = LeadRole;
+
+    let default_context = assembly_with_rollout(db.clone(), &task, &role).await;
+    assert!(default_context.knowledge_context.is_some(), "default remains enabled");
+    let default_trace = latest_knowledge_trace_for_assembly(&db, &task.project_id).await;
+    assert_eq!(default_trace.rollout_label, "enabled");
+    assert_eq!(default_trace.outcome, RetrievalTraceOutcome::Injected);
+
+    // SAFETY: process-global environment mutation is serialized by the lock.
+    unsafe { std::env::set_var(KNOWLEDGE_CONTEXT_ROLLOUT_ENV, "cohort:Blue Canary") };
+    let cohort_context = assembly_with_rollout(db.clone(), &task, &role).await;
+    assert!(cohort_context.knowledge_context.is_some(), "cohort injects every session");
+    let cohort_trace = latest_knowledge_trace_for_assembly(&db, &task.project_id).await;
+    assert_eq!(cohort_trace.rollout_label, "cohort:Blue Canary");
+    assert_eq!(cohort_trace.outcome, RetrievalTraceOutcome::Injected);
+
+    // SAFETY: process-global environment mutation is serialized by the lock.
+    unsafe { std::env::remove_var(KNOWLEDGE_CONTEXT_ROLLOUT_ENV) };
+}
+
+#[tokio::test]
+async fn assembly_rollout_disabled_modes_omit_context_and_persist_suppression() {
+    let _guard = KNOWLEDGE_CONTEXT_ENV_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let role = LeadRole;
+    for (rollout, legacy, label, outcome) in [
+        (Some("off"), None, "off", RetrievalTraceOutcome::DisabledOff),
+        (Some("kill_switch"), None, "kill_switch", RetrievalTraceOutcome::DisabledKillSwitch),
+        (None, Some("0"), "legacy_disabled", RetrievalTraceOutcome::DisabledLegacy),
+    ] {
+        // SAFETY: process-global environment mutation is serialized by the lock.
+        unsafe {
+            match rollout {
+                Some(value) => std::env::set_var(KNOWLEDGE_CONTEXT_ROLLOUT_ENV, value),
+                None => std::env::remove_var(KNOWLEDGE_CONTEXT_ROLLOUT_ENV),
+            }
+            match legacy {
+                Some(value) => std::env::set_var(KNOWLEDGE_CONTEXT_LEGACY_ENV, value),
+                None => std::env::remove_var(KNOWLEDGE_CONTEXT_LEGACY_ENV),
+            }
+        }
+        let db = Database::ephemeral().await.expect("ephemeral db");
+        let events = EventBus::noop();
+        let task = create_project_epic_task(&db, &events, "Suppression epic", "Suppression task").await;
+        let context = assembly_with_rollout(db.clone(), &task, &role).await;
+        assert!(context.knowledge_context.is_none(), "{label} omits knowledge context");
+        let trace = latest_knowledge_trace_for_assembly(&db, &task.project_id).await;
+        assert_eq!(trace.rollout_label, label);
+        assert_eq!(trace.outcome, outcome);
+        assert_eq!(trace.estimated_injected_tokens, 0);
+        assert!(trace.candidates_typed().is_empty());
+        assert_eq!(trace.task_id.as_deref(), Some(task.id.as_str()));
+    }
+    // SAFETY: process-global environment mutation is serialized by the lock.
+    unsafe {
+        std::env::remove_var(KNOWLEDGE_CONTEXT_ROLLOUT_ENV);
+        std::env::remove_var(KNOWLEDGE_CONTEXT_LEGACY_ENV);
+    }
+}
+
+#[tokio::test]
+async fn assembly_suppression_write_failure_leaves_prompt_unchanged() {
+    let _guard = KNOWLEDGE_CONTEXT_ENV_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    // SAFETY: process-global environment mutation is serialized by the lock.
+    unsafe {
+        std::env::set_var(KNOWLEDGE_CONTEXT_ROLLOUT_ENV, "off");
+        std::env::remove_var(KNOWLEDGE_CONTEXT_LEGACY_ENV);
+    }
+    let role = LeadRole;
+    let db = Database::ephemeral().await.expect("ephemeral db");
+    let events = EventBus::noop();
+    let task = create_project_epic_task(&db, &events, "Failure epic", "Failure task").await;
+    let expected = assembly_with_rollout(db.clone(), &task, &role).await;
+    djinn_db::test_support::drop_table_for_test(&db, "retrieval_traces").await;
+    let actual = assembly_with_rollout(db, &task, &role).await;
+    assert_eq!(actual.knowledge_context, expected.knowledge_context);
+    assert_eq!(actual.system_prompt, expected.system_prompt);
+    // SAFETY: process-global environment mutation is serialized by the lock.
+    unsafe { std::env::remove_var(KNOWLEDGE_CONTEXT_ROLLOUT_ENV) };
 }

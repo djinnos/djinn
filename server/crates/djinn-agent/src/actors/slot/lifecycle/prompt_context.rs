@@ -440,37 +440,84 @@ async fn load_knowledge_context_with_planner(
                 error = %e,
                 "Lifecycle: failed to query knowledge context"
             );
-            // Even on production-query error, attempt to persist a trace with the
-            // candidates we have (if any) classifying them as search_error.
-            if let Ok(ref candidates) = trace_candidates_result {
-                let error_candidates = classify_knowledge_candidates_for_error(candidates);
-                let cap_exceeded = candidates.len()
-                    >= djinn_db::repositories::retrieval_trace::DEFAULT_CANDIDATE_CAP as usize;
-                persist_knowledge_trace(
-                    task,
-                    &task_paths,
-                    &error_candidates,
-                    0,
-                    KnowledgeTraceDurations {
-                        candidate_fetch_ms,
-                        classify_ms: 0,
-                        prompt_pack_ms: 0,
-                        persist_ms: 0,
-                    },
-                    cap_exceeded,
-                    &app_state.db,
-                    planner.map(|p| (p.session_id, p.task_run_id)),
-                    rollout,
-                    djinn_db::repositories::retrieval_trace::RetrievalTraceOutcome::Error,
-                )
-                .await;
-            }
+            // Even when either query failed, attempt an explicit error trace.
+            // Trace candidates are useful diagnostic evidence when available;
+            // otherwise the empty array records that the candidate universe was
+            // unavailable without changing the production fail-open behavior.
+            let (error_candidates, cap_exceeded) = match trace_candidates_result {
+                Ok(candidates) => {
+                    let cap_exceeded = candidates.len()
+                        >= djinn_db::repositories::retrieval_trace::DEFAULT_CANDIDATE_CAP as usize;
+                    (classify_knowledge_candidates_for_error(&candidates), cap_exceeded)
+                }
+                Err(trace_error) => {
+                    tracing::warn!(
+                        task_id = %task.short_id,
+                        error = %trace_error,
+                        "Lifecycle: failed to query knowledge trace candidates"
+                    );
+                    (Vec::new(), false)
+                }
+            };
+            persist_knowledge_trace(
+                task,
+                &task_paths,
+                &error_candidates,
+                0,
+                KnowledgeTraceDurations {
+                    candidate_fetch_ms,
+                    classify_ms: 0,
+                    prompt_pack_ms: 0,
+                    persist_ms: 0,
+                },
+                cap_exceeded,
+                &app_state.db,
+                planner.map(|p| (p.session_id, p.task_run_id)),
+                rollout,
+                djinn_db::repositories::retrieval_trace::RetrievalTraceOutcome::Error,
+            )
+            .await;
             return None;
         }
     };
 
+    // Trace candidate query failures are trace failures, even if the production
+    // prompt query succeeded. Persist an Error attempt with no candidates while
+    // returning the production-rendered prompt unchanged.
+    if let Err(trace_error) = trace_candidates_result {
+        tracing::warn!(
+            task_id = %task.short_id,
+            error = %trace_error,
+            "Lifecycle: failed to query knowledge trace candidates"
+        );
+        let pack_start = tokio::time::Instant::now();
+        let packed = pack_knowledge_notes(&notes, KNOWLEDGE_BUDGET_CHARS);
+        let pack_ms = pack_start.elapsed().as_millis() as i64;
+        let rendered = if notes.is_empty() { None } else { Some(packed.rendered) };
+        let rendered = merge_planned_knowledge(rendered, &notes, &note_repo, task, planner).await;
+        persist_knowledge_trace(
+            task,
+            &task_paths,
+            &[],
+            0,
+            KnowledgeTraceDurations {
+                candidate_fetch_ms,
+                classify_ms: 0,
+                prompt_pack_ms: pack_ms,
+                persist_ms: 0,
+            },
+            false,
+            &app_state.db,
+            planner.map(|p| (p.session_id, p.task_run_id)),
+            rollout,
+            djinn_db::repositories::retrieval_trace::RetrievalTraceOutcome::Error,
+        )
+        .await;
+        return rendered;
+    }
+
     let classification_start = tokio::time::Instant::now();
-    let trace_candidates = trace_candidates_result.unwrap_or_default();
+    let trace_candidates = trace_candidates_result.expect("trace candidate result checked above");
     let candidate_cap_exceeded = trace_candidates.len()
         >= djinn_db::repositories::retrieval_trace::DEFAULT_CANDIDATE_CAP as usize;
 
