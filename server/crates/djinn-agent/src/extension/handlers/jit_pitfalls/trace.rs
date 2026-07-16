@@ -13,7 +13,10 @@ use std::collections::HashSet;
 
 use djinn_core::clock::{Clock, SystemClock as SystemClockTrait};
 
-use super::{JitPitfallRolloutMode, TELEMETRY_TARGET, elapsed_millis, touched_path_summary};
+use super::{
+    JitPitfallRolloutMode, TELEMETRY_TARGET, elapsed_millis, jit_rollout_label,
+    touched_path_summary,
+};
 
 // ── Trace classification constants (synced with the production query) ────────
 //
@@ -58,7 +61,7 @@ pub(super) fn build_trace_trigger(
 ) -> serde_json::Value {
     serde_json::json!({
         "shape": "touched_file",
-        "rollout_mode": rollout_mode.label(),
+        "rollout_mode": jit_rollout_label(&rollout_mode),
         "touched_paths": touched_paths,
         "touched_path_count": touched_paths.len(),
         "touched_path_summary": touched_path_summary(touched_paths),

@@ -117,6 +117,19 @@ impl JitPitfallOutcome {
 
 type JitPitfallRolloutMode = RolloutMode;
 
+/// Preserve rollout labels emitted by the original JIT gate.
+///
+/// The shared parser's canonical labels distinguish `off` and legacy-disabled
+/// inputs for new trace writers. JIT telemetry and its existing trace payloads
+/// predate that vocabulary, so keep their externally observable labels stable.
+fn jit_rollout_label(rollout_mode: &JitPitfallRolloutMode) -> &str {
+    match rollout_mode {
+        JitPitfallRolloutMode::Off | JitPitfallRolloutMode::LegacyDisabled => "default_off",
+        JitPitfallRolloutMode::LegacyEnabled => "legacy_opt_in",
+        _ => rollout_mode.label(),
+    }
+}
+
 fn disabled_outcome(rollout_mode: &JitPitfallRolloutMode) -> JitPitfallOutcome {
     match rollout_mode {
         JitPitfallRolloutMode::KillSwitch => JitPitfallOutcome::DisabledKillSwitch,
@@ -227,7 +240,7 @@ fn record_outcome(
     tracing::info!(
         target: TELEMETRY_TARGET,
         outcome = outcome.label(),
-        rollout_mode = rollout_mode.label(),
+        rollout_mode = jit_rollout_label(&rollout_mode),
         session_id = %session_id,
         project_id = project_id.unwrap_or(""),
         touched_path_count = touched_paths.len(),
@@ -322,7 +335,7 @@ pub(super) async fn maybe_pitfall_hint(
             tracing::info!(
                 target: TELEMETRY_TARGET,
                 outcome = JitPitfallOutcome::Empty.label(),
-                rollout_mode = rollout_mode.label(),
+                rollout_mode = jit_rollout_label(&rollout_mode),
                 session_id = %session_id,
                 project_id = %project_id,
                 touched_path_count = touched_paths.len(),
@@ -351,7 +364,7 @@ pub(super) async fn maybe_pitfall_hint(
             tracing::info!(
                 target: TELEMETRY_TARGET,
                 outcome = JitPitfallOutcome::Error.label(),
-                rollout_mode = rollout_mode.label(),
+                rollout_mode = jit_rollout_label(&rollout_mode),
                 session_id = %session_id,
                 project_id = %project_id,
                 touched_path_count = touched_paths.len(),
@@ -385,7 +398,7 @@ pub(super) async fn maybe_pitfall_hint(
     tracing::info!(
         target: TELEMETRY_TARGET,
         outcome = JitPitfallOutcome::Injected.label(),
-        rollout_mode = rollout_mode.label(),
+        rollout_mode = jit_rollout_label(&rollout_mode),
         session_id = %session_id,
         project_id = %project_id,
         touched_path_count = touched_paths.len(),
@@ -764,6 +777,34 @@ mod tests {
         assert_eq!(
             rollout_mode_from_values(Some("unknown"), Some("1")),
             JitPitfallRolloutMode::LegacyDisabled
+        );
+    }
+
+    #[test]
+    fn jit_rollout_labels_preserve_existing_telemetry_contract() {
+        assert_eq!(
+            jit_rollout_label(&rollout_mode_from_values(None, None)),
+            "default_off"
+        );
+        assert_eq!(
+            jit_rollout_label(&rollout_mode_from_values(None, Some("1"))),
+            "legacy_opt_in"
+        );
+        assert_eq!(
+            jit_rollout_label(&rollout_mode_from_values(Some("off"), None)),
+            "default_off"
+        );
+        assert_eq!(
+            jit_rollout_label(&rollout_mode_from_values(Some("unknown"), None)),
+            "default_off"
+        );
+        assert_eq!(
+            jit_rollout_label(&rollout_mode_from_values(Some("kill_switch"), None)),
+            "kill_switch"
+        );
+        assert_eq!(
+            jit_rollout_label(&rollout_mode_from_values(Some("cohort:jit-canary"), None)),
+            "cohort:jit-canary"
         );
     }
 }
