@@ -433,6 +433,7 @@ fn coordinator_actor_for_tests(
                 )
             }),
         ),
+        build_admission: None,
         catalog: CatalogService::new(),
         health: HealthTracker::new(),
         role_registry: Arc::new(RoleRegistry::new()),
