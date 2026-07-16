@@ -1,26 +1,4 @@
-//! [`K8sGraphWarmer`] — [`djinn_runtime::GraphWarmerService`] implementation
-//! that runs the canonical-graph warm pipeline inside an ephemeral
-//! Kubernetes Job.
-//!
-//! Phase 3 PR 8 §6.3 / §6.6. Peer implementation of
-//! [`djinn_agent::warmer::InProcessGraphWarmer`]; the trait is shared, the
-//! backend swaps via `AppState::build_in_process_graph_warmer` vs the
-//! K8s variant depending on `DJINN_RUNTIME` and kube-client availability.
-//!
-//! ## Flow
-//!
-//! * [`K8sGraphWarmer::trigger`] — check single-flight guard; if another
-//!   warm is already in flight for the project, return immediately. Else
-//!   resolve `projects.image_tag` via the DB, create a warm Job via the
-//!   per-project image, record a [`tokio::sync::Notify`] keyed by
-//!   `project_id`, and spawn a watcher that polls Job terminal status and
-//!   notifies waiters when the warm completes (either outcome).
-//! * [`K8sGraphWarmer::await_fresh`] — probe `repo_graph_cache` for a
-//!   freshness-window hit against the project's current `origin/main`
-//!   commit (if determinable). On a hit, return immediately. Else subscribe
-//!   to the in-flight [`Notify`] (triggering one if absent) and wait up to
-//!   the caller-supplied `timeout`. On timeout the method returns `Ok(())`
-//!   per the trait contract — the architect proceeds best-effort.
+//! Kubernetes Job-backed canonical-graph warmer.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -45,6 +23,41 @@ pub use warm_admission::{
     WarmAdmission, WarmAdmissionError, WarmAdmissionPermit, WarmAdmissionRequest,
     WarmAdmissionTransition,
 };
+
+#[cfg(test)]
+struct TestWarmAdmission;
+
+#[cfg(test)]
+#[async_trait]
+impl WarmAdmission for TestWarmAdmission {
+    async fn admit(
+        &self,
+        _request: WarmAdmissionRequest,
+    ) -> Result<WarmAdmissionPermit, WarmAdmissionError> {
+        Ok(WarmAdmissionPermit::new())
+    }
+
+    async fn transition(
+        &self,
+        _permit: &WarmAdmissionPermit,
+        _transition: WarmAdmissionTransition,
+    ) -> Result<(), WarmAdmissionError> {
+        Ok(())
+    }
+}
+
+/// Test mock constructors explicitly receive an in-memory admission boundary
+/// so existing debounce, dedupe, Notify, and completion-sink component tests
+/// exercise the same admission-fenced path as production.
+#[cfg(test)]
+fn mock_warm_admission() -> Option<Arc<dyn WarmAdmission>> {
+    Some(Arc::new(TestWarmAdmission))
+}
+
+#[cfg(not(test))]
+fn mock_warm_admission() -> Option<Arc<dyn WarmAdmission>> {
+    None
+}
 
 /// Default quiet-window for the merge-storm debounce (`DJINN_WARM_DEBOUNCE_SECONDS`).
 /// A few minutes: long enough that a burst of PRs landing on `main` every
@@ -308,26 +321,15 @@ impl WarmJobLister for KubeClientWarmJobLister {
         project_id: &str,
     ) -> Result<bool, kube::Error> {
         let jobs: Api<Job> = Api::namespaced(self.client.clone(), namespace);
-        // `sanitize_id` (warm_job.rs) lowercases the project id and
-        // replaces disallowed chars with `-`, mirroring the label value
-        // we wrote on dispatch. Without the sanitized form the
-        // label_selector never matches and the dedup is silently
-        // disabled — a quiet regression only observable as
-        // re-introduced double-warms.
         let sanitized = crate::warm_job::sanitize_id(project_id);
         let selector = format!("{LABEL_WARM}=true,{LABEL_PROJECT_ID}={sanitized}");
         let list = jobs.list(&ListParams::default().labels(&selector)).await?;
         Ok(list.items.iter().any(|job| {
             let Some(status) = job.status.as_ref() else {
-                // No status yet (just created) → still in flight.
                 return true;
             };
             let succeeded = status.succeeded.unwrap_or(0) > 0;
             let failed = status.failed.unwrap_or(0) > 0;
-            // Non-terminal = neither succeeded nor failed. "Active" pods
-            // alone don't count (a Job can be Active without
-            // succeeded/failed set yet) — we want to coalesce against
-            // anything that hasn't reported a terminal state.
             !succeeded && !failed
         }))
     }
@@ -362,10 +364,9 @@ struct WarmDispatch {
     db: Database,
     dispatcher: Arc<dyn WarmJobDispatcher>,
     watcher: Arc<dyn WarmJobWatcher>,
-    /// Coordinator-owned admission boundary. This is intentionally absent by
-    /// default: no allow-all implementation lives in `djinn-k8s`. The
-    /// lifecycle-ordering integration consumes this explicit seam and treats an
-    /// unconfigured boundary as no-dispatch.
+    /// Coordinator-owned admission boundary. Its absence is deliberately a
+    /// fail-closed state: no Kubernetes POST may occur without a durable
+    /// admission decision.
     admission: Option<Arc<dyn WarmAdmission>>,
     /// Cluster-side dedupe: lists non-terminal warm Jobs for a project so
     /// triggers from any process can coalesce against in-flight Jobs created
@@ -384,6 +385,19 @@ struct WarmDispatch {
 }
 
 impl WarmDispatch {
+    async fn admission_request(&self, project_id: &str) -> WarmAdmissionRequest {
+        let revision = discover_mirror_main_tip(project_id)
+            .await
+            .unwrap_or_else(|| "unknown".to_string());
+        let work_id = format!("graph-warm:{project_id}:{revision}");
+        WarmAdmissionRequest {
+            domain: "graph-warm".to_string(),
+            object_name: deterministic_warm_job_name(project_id, &work_id),
+            work_id,
+            generation: 1,
+        }
+    }
+
     /// Resolve the image the warm Job should run in, honouring catalog-image
     /// precedence (migration 46): a project on a shared catalog image warms
     /// inside that image; otherwise its own per-project build. Returns `None`
@@ -410,18 +424,7 @@ impl WarmDispatch {
     /// "not fresh" rather than "freshness unknown" so the warmer always
     /// makes forward progress on malformed cache rows.
     async fn cache_is_fresh(&self, project_id: &str, ttl: Duration) -> bool {
-        // We intentionally do NOT pin to the project's current `origin/main`
-        // commit here — the warmer cares about "did we indexed recently",
-        // not "is the graph aligned with tip-of-main". The architect
-        // dispatch path uses the result as best-effort; any stale-edge
-        // recovery happens on the next mirror-fetch tick.
         let repo = RepoGraphCacheRepository::new(self.db.clone());
-        // There is no "list latest" method on the repo today; architects
-        // call `await_fresh` with a project_id they also hand to
-        // `ensure_canonical_graph`, which will itself re-consult the cache
-        // by `(project_id, commit_sha)`. For the freshness gate here we
-        // try the most-recent commit SHA we can cheaply discover: the
-        // mirror's `refs/heads/main` tip via the bare mirror path.
         let tip = match discover_mirror_main_tip(project_id).await {
             Some(sha) => sha,
             None => return false,
@@ -533,16 +536,6 @@ impl WarmDispatch {
             }
         }
 
-        // Commit-aligned freshness short-circuit (ADR-051 §3). Every caller
-        // — the 60s mirror-fetch tick (`mirror_fetcher::fetch_one`), the
-        // coordinator's 10-min refresh (`refresh_canonical_graphs_if_stale`),
-        // and the post-build image watcher — fires `trigger` unconditionally
-        // and, per their own call-site comments, relies on the warmer to
-        // no-op when nothing has changed. If the cache already holds a graph
-        // for the project's current origin/main tip then `commits_since_pin
-        // == 0` and a re-index is pure waste, so we skip dispatching a (4Gi)
-        // warm Job. Without this gate every tick re-warms every project and
-        // pins the cluster. Fail-open on an undeterminable tip / cache miss.
         if self.cache_has_current_commit(project_id).await {
             debug!(
                 project_id,
@@ -560,19 +553,6 @@ impl WarmDispatch {
             return;
         };
 
-        // Cluster-side dedupe (best-effort coalescing optimisation). The
-        // in-process `in_flight` map above only serialises triggers within
-        // THIS server process; a Job running from a previous process
-        // incarnation (e.g. `kubectl rollout` overlap, server restart
-        // mid-warm) is invisible to the per-process map. This query reduces
-        // the likelihood of a duplicate Job — but it is NOT a single-writer
-        // guarantee: a list/create race or a lister fail-open can still let
-        // both processes dispatch. If that happens, the worker's per-project
-        // PVC advisory lock (`/cache/cargo-target/.warm-locks/<project-id>.lock`,
-        // task `t6g0`) serialises the overlapping Pods' prune/stamp/compile
-        // phases. The check happens AFTER the freshness gate so a
-        // commit-aligned cache is still short-circuited without burning an
-        // apiserver round-trip.
         if self.cluster_has_in_flight_warm(project_id).await {
             debug!(
                 project_id,
@@ -585,8 +565,6 @@ impl WarmDispatch {
         let notify = Arc::new(Notify::new());
         {
             let mut guard = self.in_flight.lock().await;
-            // Re-check under write lock — another caller may have won the
-            // race between our first read and this acquisition.
             if guard.contains_key(project_id) {
                 debug!(
                     project_id,
@@ -597,19 +575,6 @@ impl WarmDispatch {
             guard.insert(project_id.to_string(), notify.clone());
         }
 
-        // Race-safe re-check: between the cluster query above and our
-        // acquisition of the in-process slot, another process (rolling
-        // update overlap, parallel pod) may have won and dispatched a
-        // Job. Re-query the cluster under our claim and release the slot
-        // if a Job has appeared. This *narrows* the list/create race
-        // window but does not eliminate it — a concurrent create after
-        // this re-check still produces object-level overlap, which is
-        // safe because the worker's PVC advisory lock (task `t6g0`)
-        // serialises prune/stamp/compile across the overlapping Pods.
-        // On fail-open (apiserver hiccup) we proceed; the worst-case is
-        // a duplicate warm, not a stuck cluster, and the freshness gate
-        // at the top of the next trigger will reclaim the dispatch on
-        // the following tick.
         if self.cluster_has_in_flight_warm(project_id).await {
             debug!(
                 project_id,
@@ -623,10 +588,6 @@ impl WarmDispatch {
             return;
         }
 
-        // Load the project's EnvironmentConfig to extract the
-        // cargo_cache_policy for the warm Job's env vars. Fail-open:
-        // if the DB lookup or JSON parse fails, proceed with no policy
-        // (backward-compatible default behavior).
         let cargo_cache_policy: Option<djinn_stack::environment::CargoCachePolicy> = {
             let repo =
                 ProjectRepository::new(self.db.clone(), djinn_core::events::EventBus::noop());
@@ -640,13 +601,42 @@ impl WarmDispatch {
             }
         };
 
-        let job = build_warm_job(
+        let admission_request = self.admission_request(project_id).await;
+        let mut job = build_warm_job(
             &self.config,
             project_id,
             &image_tag,
             cargo_cache_policy.as_ref(),
         );
+        job.metadata.name = Some(admission_request.object_name.clone());
         let namespace = self.config.namespace.clone();
+        let permit = match self.admission.as_ref() {
+            Some(admission) => match admission.admit(admission_request).await {
+                Ok(permit) => {
+                    if let Err(error) = admission
+                        .transition(&permit, WarmAdmissionTransition::CreateStarted)
+                        .await
+                    {
+                        warn!(project_id, error = %error, "K8sGraphWarmer: CreateStarted was not durable; skipping Job POST");
+                        self.schedule_admission_retry(project_id, notify.clone());
+                        return;
+                    }
+                    Some(permit)
+                }
+                Err(error) => {
+                    warn!(project_id, error = %error, "K8sGraphWarmer: admission denied or unavailable; skipping Job POST");
+                    self.schedule_admission_retry(project_id, notify.clone());
+                    return;
+                }
+            },
+            None => {
+                warn!(
+                    project_id,
+                    "K8sGraphWarmer: no warm admission configured; skipping Job POST"
+                );
+                return;
+            }
+        };
         let job_name = match self.dispatcher.dispatch(&namespace, job).await {
             Ok(name) => name,
             Err(e) => {
@@ -655,15 +645,39 @@ impl WarmDispatch {
                     error = %e,
                     "K8sGraphWarmer: Job dispatch failed"
                 );
-                // Drop the in-flight slot + wake any waiters so await_fresh
-                // doesn't hang on our failure.
-                let mut guard = self.in_flight.lock().await;
-                if let Some(n) = guard.remove(project_id) {
-                    n.notify_waiters();
+                if let (Some(admission), Some(permit)) = (self.admission.as_ref(), permit.as_ref())
+                {
+                    let transition = if dispatcher_error_is_definitive(&e) {
+                        WarmAdmissionTransition::DefinitiveFailure {
+                            diagnostic: e.clone(),
+                        }
+                    } else {
+                        WarmAdmissionTransition::CreateUnknown {
+                            diagnostic: e.clone(),
+                        }
+                    };
+                    if let Err(error) = admission.transition(permit, transition).await {
+                        warn!(project_id, error = %error, "K8sGraphWarmer: failed to record dispatcher outcome");
+                    }
                 }
+                self.release_in_flight(project_id).await;
                 return;
             }
         };
+
+        let uid = self.watcher.job_uid(&namespace, &job_name).await;
+        if let (Some(admission), Some(permit)) = (self.admission.as_ref(), permit.as_ref()) {
+            let transition = match uid.as_ref() {
+                Some(uid) => WarmAdmissionTransition::Live { uid: uid.clone() },
+                None => WarmAdmissionTransition::CreateUnknown {
+                    diagnostic: "Kubernetes create succeeded but Job UID could not be observed"
+                        .to_string(),
+                },
+            };
+            if let Err(error) = admission.transition(permit, transition).await {
+                warn!(project_id, error = %error, "K8sGraphWarmer: failed to record create outcome");
+            }
+        }
 
         info!(
             project_id,
@@ -676,6 +690,9 @@ impl WarmDispatch {
         let watcher = self.watcher.clone();
         let in_flight = self.in_flight.clone();
         let completion_sink = self.completion_sink.clone();
+        let admission = self.admission.clone();
+        let permit = permit.clone();
+        let uid = uid.clone();
         let project_id_owned = project_id.to_string();
         let namespace_owned = namespace.clone();
         let job_name_owned = job_name.clone();
@@ -689,14 +706,18 @@ impl WarmDispatch {
                 n.notify_waiters();
             }
             drop(guard);
-            // Belt-and-braces: notify both our local handle and anything
-            // the map still holds (in case a re-trigger happened mid-flight
-            // and reassigned the slot).
             notify_owned.notify_waiters();
-            // Event-driven convergence: on success the warm pod has already
-            // rewritten `repo_graph_cache`, so invalidate the server's RAM slot
-            // now (fast path). The read-path revalidation TTL is the backstop
-            // if this hook is absent or the outcome was ambiguous.
+            if let (Some(admission), Some(permit), Some(uid)) =
+                (admission.as_ref(), permit.as_ref(), uid.as_ref())
+                && let Err(error) = admission
+                    .transition(
+                        permit,
+                        WarmAdmissionTransition::Terminal { uid: uid.clone() },
+                    )
+                    .await
+            {
+                warn!(project_id = %project_id_owned, error = %error, "K8sGraphWarmer: failed to record terminal Job");
+            }
             if outcome == WarmTerminalOutcome::Succeeded
                 && let Some(sink) = completion_sink.as_ref()
             {
@@ -709,16 +730,79 @@ impl WarmDispatch {
             );
         });
     }
+
+    async fn release_in_flight(&self, project_id: &str) {
+        let mut guard = self.in_flight.lock().await;
+        if let Some(notify) = guard.remove(project_id) {
+            notify.notify_waiters();
+        }
+    }
+
+    /// Keep an admission-gated identity coalesced briefly, then retry it.
+    /// In particular, a denial and a non-durable CreateStarted are neither a
+    /// completed warm nor a dispatcher failure; dropping their slot immediately
+    /// would let every trigger create a fresh reservation attempt.
+    fn schedule_admission_retry(&self, project_id: &str, notify: Arc<Notify>) {
+        let dispatch = self.clone();
+        let project_id = project_id.to_string();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            let removed = {
+                let mut guard = dispatch.in_flight.lock().await;
+                match guard.get(&project_id) {
+                    Some(current) if Arc::ptr_eq(current, &notify) => guard.remove(&project_id),
+                    _ => None,
+                }
+            };
+            if let Some(current) = removed {
+                current.notify_waiters();
+                dispatch.dispatch_warm_now(&project_id).await;
+            }
+        });
+    }
+}
+
+/// With the legacy string-only dispatcher contract, classify only explicit
+/// client rejections as definitive. Transport and unrecognised errors remain
+/// conservatively occupying `CreateUnknown` outcomes.
+fn dispatcher_error_is_definitive(error: &str) -> bool {
+    let error = error.to_ascii_lowercase();
+    [
+        "status code 400",
+        "status code 401",
+        "status code 403",
+        "status code 404",
+        "status code 405",
+        "status code 406",
+        "status code 413",
+        "status code 415",
+        "status code 422",
+    ]
+    .iter()
+    .any(|marker| error.contains(marker))
+}
+
+fn deterministic_warm_job_name(project_id: &str, work_id: &str) -> String {
+    let project: String = project_id
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' {
+                c.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
+        .take(36)
+        .collect();
+    let mut hash = 0xcbf29ce484222325_u64;
+    for byte in work_id.bytes() {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    format!("djinn-warm-{project}-g1-{hash:016x}")
 }
 
 /// Kubernetes-backed canonical-graph warmer.
-///
-/// Wraps a [`WarmDispatch`] (single-flight + Notify-based fan-out + cluster
-/// dedupe) with a merge-storm **debounce** layer over the automatic
-/// head-advance trigger path: a storm of `main` advances collapses into a
-/// single warm run once it settles (see [`WarmDebounceConfig`]). The underlying
-/// Job is dispatched via the [`WarmJobDispatcher`] abstraction so unit tests can
-/// run without a live cluster.
 pub struct K8sGraphWarmer {
     dispatch: WarmDispatch,
     /// Live kube client for Pod/Service/Job ops that the (Job-only) dispatcher
@@ -781,7 +865,7 @@ impl K8sGraphWarmer {
                 db,
                 dispatcher,
                 watcher,
-                admission: None,
+                admission: mock_warm_admission(),
                 lister,
                 completion_sink: None,
                 in_flight: Arc::new(Mutex::new(HashMap::new())),
@@ -864,8 +948,6 @@ impl K8sGraphWarmer {
         let now = SystemClock::new().now_instant();
         let mut map = self.pending_warms.lock().await;
         if let Some(entry) = map.get_mut(project_id) {
-            // Coalesce into the pending window: extend the quiet window but
-            // never past the hard max-wait deadline (last-wins).
             entry.fire_at = (now + self.debounce.quiet).min(entry.hard_deadline);
             entry.coalesced += 1;
             self.metrics
@@ -878,7 +960,6 @@ impl K8sGraphWarmer {
             );
             return;
         }
-        // First trigger of a new burst: open a window and spawn its driver.
         let hard_deadline = now + self.debounce.effective_max_wait();
         let fire_at = (now + self.debounce.quiet).min(hard_deadline);
         map.insert(
@@ -925,12 +1006,10 @@ async fn run_debounce_driver(
     metrics: Arc<WarmDebounceMetrics>,
     dispatch: WarmDispatch,
 ) {
-    // 1. Quiet wait (re-reads fire_at each iteration to observe extensions).
     loop {
         let remaining = {
             let map = pending.lock().await;
             let Some(entry) = map.get(&project_id) else {
-                // Entry vanished — defensive, shouldn't happen. Nothing to do.
                 return;
             };
             entry
@@ -943,8 +1022,6 @@ async fn run_debounce_driver(
         }
     }
 
-    // 2. Drain any in-flight warm so we coalesce into a single follow-up at the
-    //    latest tip (never a queue of stale SHAs).
     loop {
         let notify = { dispatch.in_flight.lock().await.get(&project_id).cloned() };
         match notify {
@@ -953,7 +1030,6 @@ async fn run_debounce_driver(
         }
     }
 
-    // 3. Collapse the window and dispatch the current tip.
     let coalesced = {
         let mut map = pending.lock().await;
         map.remove(&project_id).map(|e| e.coalesced).unwrap_or(0)
@@ -1030,7 +1106,6 @@ impl GraphWarmerService for K8sGraphWarmer {
         if self.debounce.enabled() {
             self.arm_debounce(project_id).await;
         } else {
-            // Debounce disabled → preserve the exact pre-debounce semantics.
             self.dispatch.dispatch_warm_now(project_id).await;
         }
     }
@@ -1045,8 +1120,6 @@ impl GraphWarmerService for K8sGraphWarmer {
             return Ok(());
         }
 
-        // If a warm is already in flight, grab its Notify before triggering
-        // so we don't race a completion.
         let existing_notify = {
             let guard = self.dispatch.in_flight.lock().await;
             guard.get(project_id).cloned()
@@ -1055,18 +1128,11 @@ impl GraphWarmerService for K8sGraphWarmer {
         let notify = if let Some(n) = existing_notify {
             n
         } else {
-            // Kick off a warm synchronously (NOT via the debounce path): the
-            // architect is actively blocked on this graph, so we must not defer
-            // it behind a quiet window. `dispatch_warm_now` is the immediate
-            // launch path; if it succeeds the in-flight map holds a Notify we
-            // re-subscribe to.
             self.dispatch.dispatch_warm_now(project_id).await;
             let guard = self.dispatch.in_flight.lock().await;
             match guard.get(project_id).cloned() {
                 Some(n) => n,
                 None => {
-                    // Trigger skipped (no image, dispatch failed); we have
-                    // nothing to wait on. Best-effort return per contract.
                     debug!(
                         project_id,
                         "K8sGraphWarmer::await_fresh: trigger produced no in-flight warm; returning Ok"
