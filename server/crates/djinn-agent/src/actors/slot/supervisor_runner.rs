@@ -848,6 +848,7 @@ async fn load_task_or_bail(task_id: &str, task_repo: &TaskRepository) -> anyhow:
 /// Inputs to TaskRunSpec construction resolved from task row, dispatch context, and repos.
 struct TaskRunSpecInputs {
     task_run_id: String,
+    task_attempt_id: Option<String>,
     task_id: String,
     project_id: String,
     trigger: TaskRunTrigger,
@@ -913,9 +914,27 @@ impl TaskRunSpecInputs {
         let resume_lifecycle_metadata =
             decode_resume_lifecycle_metadata(resume_lifecycle_metadata, &task.id);
         let task_run_id = uuid::Uuid::now_v7().to_string();
+        let attempt_id = uuid::Uuid::now_v7().to_string();
+        let task_attempt_id = TaskAttemptRepository::new(app_state.db.clone())
+            .create_or_get_pending(djinn_db::CreateTaskAttemptParams {
+                id: &attempt_id,
+                task_id: &task.id,
+                role: flow
+                    .role_sequence()
+                    .first()
+                    .map(|role| role.as_str())
+                    .unwrap_or("worker"),
+                dispatch_key: &format!("task-run:{task_run_id}"),
+                session_id: None,
+                attempt_seq: None,
+            })
+            .await
+            .map(|attempt| attempt.id)
+            .ok();
         let is_evidence_spike = djinn_core::models::task::is_evidence_spike(&task.labels);
         Self {
             task_run_id,
+            task_attempt_id,
             task_id: task.id.clone(),
             project_id: task.project_id.clone(),
             trigger: trigger_for_flow(flow, ctx.has_conflict),
@@ -939,6 +958,7 @@ impl From<TaskRunSpecInputs> for TaskRunSpec {
     fn from(inputs: TaskRunSpecInputs) -> Self {
         Self {
             task_run_id: inputs.task_run_id,
+            task_attempt_id: inputs.task_attempt_id,
             task_id: inputs.task_id,
             project_id: inputs.project_id,
             trigger: inputs.trigger,

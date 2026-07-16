@@ -28,6 +28,7 @@ use djinn_db::repositories::llm_call_attempt::{
 };
 use djinn_db::repositories::session::CreateSessionParams;
 use djinn_db::repositories::task_run::CreateTaskRunParams;
+use djinn_db::repositories::task_run_outcome::TaskRunOutcomeRepository;
 use djinn_stack::environment::EnvironmentConfig;
 use djinn_supervisor::services::wire::{PlannerAttemptResult, PlannerOutcome};
 use djinn_supervisor::services::{
@@ -869,7 +870,14 @@ impl SupervisorServices for DirectServices {
             })
             .await
             .map(|_| ())
-            .map_err(|e| e.to_string())
+            .map_err(|e| e.to_string())?;
+        if let Some(attempt_id) = params.task_attempt_id.as_deref() {
+            TaskRunOutcomeRepository::new(self.callbacks.agent_context.db.clone())
+                .create_for_attempt(&params.id, attempt_id)
+                .await
+                .map_err(|e| e.to_string())?;
+        }
+        Ok(())
     }
 
     async fn update_task_run_status(

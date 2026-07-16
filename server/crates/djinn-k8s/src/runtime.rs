@@ -1803,6 +1803,7 @@ mod tests {
 
         let spec = TaskRunSpec {
             task_run_id: task_run_id.to_string(),
+            task_attempt_id: None,
             task_id: "task-abc".to_string(),
             project_id: "proj-xyz".to_string(),
             trigger: TaskRunTrigger::NewTask,
