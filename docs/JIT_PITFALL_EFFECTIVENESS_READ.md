@@ -13,6 +13,46 @@ Fill this document (or a copied dated instance) with evidence from a staging/coh
 
 ## Rollout / kill-switch controls
 
+### Session-start knowledge-context control
+
+`DJINN_KNOWLEDGE_CONTEXT_ROLLOUT` controls the session-start
+`knowledge_context` / `Relevant Knowledge` prompt block. It is an operator
+safety control, not an effectiveness experiment: the knowledge-context kill
+switch is **incident-response plumbing, not an experiment knob or randomized
+control arm**. In particular, `cohort:<label>` is deployment metadata only;
+it does not randomly assign sessions, create a per-session eligibility arm, or
+change eligibility. Every otherwise eligible session injects in enabled and
+cohort modes.
+
+| Env/config | Effective label and behavior |
+| --- | --- |
+| `DJINN_KNOWLEDGE_CONTEXT_ROLLOUT` unset (and legacy value unset) | Default **enabled**. Eligible sessions load and render knowledge context. Trace label: `enabled`. |
+| `DJINN_KNOWLEDGE_CONTEXT_ROLLOUT=enabled` | Eligible sessions load and render knowledge context. Trace label: `enabled`. |
+| `DJINN_KNOWLEDGE_CONTEXT_ROLLOUT=cohort:<label>` | Eligible sessions load and render knowledge context for every eligible session. The full supplied value, including the label's case, is persisted verbatim (for example `cohort:Blue Canary`). It is not an assignment mechanism. Bare `cohort` and the compatibility aliases `staging`, `rollout`, and `controlled` persist `cohort`. |
+| `DJINN_KNOWLEDGE_CONTEXT_ROLLOUT=off` | Suppresses the prompt block and records a durable `load_knowledge_context` trace with `rollout_label=off`, `trace_outcome=disabled_off`, no candidates, and zero estimated tokens. |
+| `DJINN_KNOWLEDGE_CONTEXT_ROLLOUT=kill_switch` | Suppresses the prompt block and records a durable trace with `rollout_label=kill_switch`, `trace_outcome=disabled_kill_switch`, no candidates, and zero estimated tokens. `disabled`, `disable`, `killswitch`, `false`, and `0` are kill-switch aliases. |
+| Legacy `DJINN_KNOWLEDGE_CONTEXT` with rollout unset | `1` is legacy-enabled and injects with `rollout_label=legacy_enabled`; every other legacy value is legacy-disabled. Legacy-disabled and unknown explicit rollout values suppress the block and record `rollout_label=legacy_disabled`, `trace_outcome=disabled_legacy`. An explicit rollout value takes precedence over the legacy value. |
+
+The server prompt-rendering process owns `load_knowledge_context` rows and
+writes them through its server database connection. The worker owns
+`jit_pitfalls` rows and writes them through its worker database connection.
+Neither writer needs a control-plane collector. Both writers are fail-open:
+failed retrieval-trace persistence is logged as a warning and never blocks or
+changes prompt assembly, a write, or an edit.
+
+Treat a durable disabled row as evidence that the relevant process reached a
+deliberate suppression decision. It is different from a missing/unrecorded
+trace, which means there is no durable evidence of an attempt (for example,
+the path was never reached or fail-open trace persistence failed). Do not
+interpret missing rows as disabled traffic.
+
+`memory_recall_trace` list and detail responses expose the trace-level
+`rollout_label` and `trace_outcome` separately from per-candidate `outcome`.
+Use `rollout_label` and `trace_outcome` list filters when triaging a rollout;
+candidate filters remain for injected/skipped note candidates. This preserves
+the compatibility API used by dispatch and other existing writers: they are
+not relabeled by this knowledge-context/JIT work.
+
 Primary control surface implemented by the JIT handler:
 
 | Env/config | Values | Expected telemetry / behavior |

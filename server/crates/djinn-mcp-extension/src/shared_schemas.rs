@@ -18,7 +18,7 @@ pub struct ToolSafetyAnnotations {
 pub fn tool_memory_recall_trace() -> RmcpTool {
     RmcpTool::new(
         "memory_recall_trace".to_string(),
-        "Inspect persisted memory-retrieval traces for the current project. Use mode=list to triage compact trace summaries with optional filters and bounded pagination, or mode=detail with trace_id to inspect one trace and its bounded note excerpts. Allowed entry points: dispatch, jit_pitfalls, load_knowledge_context, format_knowledge_notes, memory_recall_trace. Allowed outcomes: injected, skipped. Allowed skipped reasons: not_top_k, min_confidence, budget_pruned, superseded_pruned, dedupe, search_error.".to_string(),
+        "Inspect persisted memory-retrieval traces for the current project. Use mode=list to triage compact trace summaries with optional filters and bounded pagination, or mode=detail with trace_id to inspect one trace and its bounded note excerpts. List/detail expose rollout_label and trace_outcome separately from candidate outcome: rollout_label is the recorded deployment label, trace_outcome is injected, empty, error, legacy_unknown, disabled_off, disabled_kill_switch, or disabled_legacy, while candidate outcomes are injected or skipped. Allowed entry points: dispatch, jit_pitfalls, load_knowledge_context, format_knowledge_notes, memory_recall_trace. Allowed skipped reasons: not_top_k, min_confidence, budget_pruned, superseded_pruned, dedupe, search_error.".to_string(),
         object!({
             "type": "object",
             "oneOf": [
@@ -32,6 +32,8 @@ pub fn tool_memory_recall_trace() -> RmcpTool {
                         "task_id": {"type": "string"},
                         "task_run_id": {"type": "string"},
                         "entry_point": {"type": "string", "enum": ["dispatch", "jit_pitfalls", "load_knowledge_context", "format_knowledge_notes", "memory_recall_trace"], "description": "Retrieval entry point."},
+                        "rollout_label": {"type": "string", "description": "Exact recorded rollout label filter."},
+                        "trace_outcome": {"type": "string", "enum": ["injected", "empty", "error", "legacy_unknown", "disabled_off", "disabled_kill_switch", "disabled_legacy"], "description": "Trace-level outcome filter, distinct from candidate outcome."},
                         "outcome": {"type": "string", "enum": ["injected", "skipped"], "description": "Candidate outcome filter."},
                         "skipped_reason": {"type": "string", "enum": ["not_top_k", "min_confidence", "budget_pruned", "superseded_pruned", "dedupe", "search_error"], "description": "Skipped-candidate reason filter."},
                         "limit": {"type": "integer", "minimum": 1, "maximum": 100, "description": "Maximum compact trace summaries to return (1-100; default is server-defined)."},
@@ -51,6 +53,7 @@ pub fn tool_memory_recall_trace() -> RmcpTool {
                         "anyOf": [
                             {"required": ["session_id"]}, {"required": ["task_id"]},
                             {"required": ["task_run_id"]}, {"required": ["entry_point"]},
+                            {"required": ["rollout_label"]}, {"required": ["trace_outcome"]},
                             {"required": ["outcome"]}, {"required": ["skipped_reason"]},
                             {"required": ["limit"]}, {"required": ["offset"]}
                         ]
