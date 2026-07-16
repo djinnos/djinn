@@ -132,6 +132,19 @@ pub(crate) async fn resolve_effective_creator(
 }
 
 impl TaskRepository {
+    /// Test-support helper for fixtures that need to establish source-task
+    /// provenance without using a production post-insert attribution path.
+    #[cfg(any(test, feature = "test-support"))]
+    pub async fn set_created_by_user_id(&self, id: &str, user_id: &str) -> Result<()> {
+        self.db.ensure_initialized().await?;
+        sqlx::query("UPDATE tasks SET created_by_user_id = $1 WHERE id = $2")
+            .bind(user_id)
+            .bind(id)
+            .execute(self.db.pool())
+            .await?;
+        Ok(())
+    }
+
     /// Test-only convenience: create a task under an epic with no explicit
     /// provenance. Production code must use [`Self::create_in_project_with_provenance`].
     #[cfg(any(test, feature = "test-support"))]

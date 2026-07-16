@@ -788,3 +788,120 @@ async fn atomic_materialization_creates_task_and_links_in_one_tx() {
         "linked selection must not appear in unmaterialized list"
     );
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn atomic_materialization_rolls_back_when_creator_is_unavailable() {
+    let db = test_db();
+    let project_id = uuid::Uuid::now_v7().to_string();
+    djinn_db::test_support::seed_project(&db, &project_id, &format!("proj-{project_id}")).await;
+    let sel = seed_selection(
+        &db,
+        &project_id,
+        "sha-creator-unavailable",
+        "unflagged_merged",
+        0,
+        "2026-07-09T12:00:00Z",
+    )
+    .await;
+    let audit_repo = AuditSamplerRepository::new(db.clone());
+    let source_task_id = audit_repo
+        .list_unmaterialized_selections()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|item| item.selection_id == sel.id)
+        .and_then(|item| item.task_id)
+        .unwrap();
+    sqlx::query("UPDATE tasks SET created_by_user_id = NULL WHERE id = $1")
+        .bind(&source_task_id)
+        .execute(db.pool())
+        .await
+        .unwrap();
+    let error = audit_repo
+        .materialize_audit_task_atomic(
+            &sel.id,
+            &project_id,
+            None,
+            Some(&source_task_id),
+            "Audit review: unavailable creator",
+            "must roll back",
+        )
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("effective_creator_unavailable"));
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM tasks WHERE title = $1")
+            .bind("Audit review: unavailable creator")
+            .fetch_one(db.pool())
+            .await
+            .unwrap(),
+        0
+    );
+    assert!(
+        audit_repo
+            .get_selection_by_id(&sel.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .audit_task_id
+            .is_none()
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn atomic_materialization_rolls_back_when_selection_link_fails() {
+    let db = test_db();
+    let project_id = uuid::Uuid::now_v7().to_string();
+    djinn_db::test_support::seed_project(&db, &project_id, &format!("proj-{project_id}")).await;
+    let sel = seed_selection(
+        &db,
+        &project_id,
+        "sha-link-failure",
+        "unflagged_merged",
+        0,
+        "2026-07-09T12:00:00Z",
+    )
+    .await;
+    let audit_repo = AuditSamplerRepository::new(db.clone());
+    let source_task_id = audit_repo
+        .list_unmaterialized_selections()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|item| item.selection_id == sel.id)
+        .and_then(|item| item.task_id)
+        .unwrap();
+    let error = audit_repo
+        .materialize_audit_task_atomic(
+            &uuid::Uuid::now_v7().to_string(),
+            &project_id,
+            None,
+            Some(&source_task_id),
+            "Audit review: link failure",
+            "must roll back",
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("audit_selection_not_unmaterialized")
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM tasks WHERE title = $1")
+            .bind("Audit review: link failure")
+            .fetch_one(db.pool())
+            .await
+            .unwrap(),
+        0
+    );
+    assert!(
+        audit_repo
+            .get_selection_by_id(&sel.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .audit_task_id
+            .is_none()
+    );
+}
