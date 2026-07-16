@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::Result;
 use crate::database::Database;
+use crate::repositories::task::{EffectiveCreatorProvenance, resolve_effective_creator};
 
 // ── Domain types ──────────────────────────────────────────────────────────────
 
@@ -632,6 +633,7 @@ impl AuditSamplerRepository {
         selection_id: &str,
         project_id: &str,
         epic_id: Option<&str>,
+        source_task_id: Option<&str>,
         title: &str,
         description: &str,
     ) -> Result<String> {
@@ -642,6 +644,19 @@ impl AuditSamplerRepository {
             let short_id = compute_audit_short_id(&task_id);
 
             let mut tx = self.db.pool().begin().await?;
+            // Resolve while the insert/link transaction is open. Source-task
+            // provenance wins; the audit epic is the shared fallback. No local
+            // or synthetic identity fallback is permitted.
+            let created_by_user_id = resolve_effective_creator(
+                &mut tx,
+                EffectiveCreatorProvenance {
+                    explicit_user_id: None,
+                    source_task_id,
+                    proposal_id: None,
+                },
+                epic_id,
+            )
+            .await?;
 
             let insert_result = sqlx::query(MATERIALIZED_TASK_INSERT)
                 .bind(&task_id)
@@ -650,17 +665,23 @@ impl AuditSamplerRepository {
                 .bind(epic_id)
                 .bind(title)
                 .bind(description)
+                .bind(&created_by_user_id)
                 .execute(&mut *tx)
                 .await;
 
             match insert_result {
                 Ok(_) => {
                     // Link the selection in the same transaction.
-                    sqlx::query(MATERIALIZED_LINK_SELECTION)
+                    let link_result = sqlx::query(MATERIALIZED_LINK_SELECTION)
                         .bind(&task_id)
                         .bind(selection_id)
                         .execute(&mut *tx)
                         .await?;
+                    if link_result.rows_affected() != 1 {
+                        return Err(crate::Error::InvalidData(
+                            "audit_selection_not_unmaterialized".to_owned(),
+                        ));
+                    }
 
                     tx.commit().await?;
                     return Ok(task_id);
@@ -1018,11 +1039,11 @@ const MATERIALIZED_TASK_INSERT: &str = r#"
     INSERT INTO tasks (
         id, project_id, short_id, epic_id, title, description, design,
         issue_type, priority, owner, status,
-        labels, acceptance_criteria, memory_refs
+        labels, acceptance_criteria, memory_refs, created_by_user_id
     ) VALUES (
         $1, $2, $3, $4, $5, $6, '',
         'task', 2, '', 'open',
-        '[]'::jsonb, '[]'::jsonb, '[]'::jsonb
+        '[]'::jsonb, '[]'::jsonb, '[]'::jsonb, $7
     )
 "#;
 

@@ -31,6 +31,30 @@ async fn seed_selection(
     created_at: &str,
 ) -> SelectionRow {
     let repo = AuditSamplerRepository::new(db.clone());
+    let source_user_id = uuid::Uuid::now_v7().to_string();
+    sqlx::query("INSERT INTO users (id, github_id, github_login) VALUES ($1, $2, $3)")
+        .bind(&source_user_id)
+        .bind(100_000_i64)
+        .bind(format!("audit-source-{source_user_id}"))
+        .execute(db.pool())
+        .await
+        .unwrap();
+    let source_task_id = djinn_db::test_support::seed_task_row(
+        db,
+        djinn_db::test_support::UsageTestTaskSeed {
+            project_id,
+            status: "closed",
+            close_reason: None,
+            total_reopen_count: 0,
+        },
+    )
+    .await;
+    sqlx::query("UPDATE tasks SET created_by_user_id = $1 WHERE id = $2")
+        .bind(&source_user_id)
+        .bind(&source_task_id)
+        .execute(db.pool())
+        .await
+        .unwrap();
 
     // Seed or reuse one policy per project; repeated helper calls for the
     // same project must not violate uq_audit_sample_policies_project_rev.
@@ -80,7 +104,7 @@ async fn seed_selection(
     let mc = repo
         .upsert_merged_change(djinn_db::UpsertMergedChangeParams {
             project_id,
-            task_id: Some("task-source-1"),
+            task_id: Some(&source_task_id),
             pr_number: Some(42),
             head_sha: Some("head-sha-1"),
             merge_commit_sha: merge_sha,
@@ -578,7 +602,7 @@ async fn task_description_includes_provenance_data() {
     assert!(desc.contains("revealed"), "seed status");
     assert!(desc.contains("Frame revision"), "frame revision");
     assert!(desc.contains("Policy revision"), "policy revision");
-    assert!(desc.contains("task-source-1"), "source task id");
+    assert!(desc.contains("Source task"), "source task label");
     assert!(desc.contains("42"), "PR number");
     assert!(desc.contains("head-sha-1"), "head SHA");
     assert!(desc.contains("Gate provenance"), "gate provenance section");
@@ -723,12 +747,21 @@ async fn atomic_materialization_creates_task_and_links_in_one_tx() {
     // Ensure the audit epic exists.
     let epic_id = ensure_audit_epic(&epic_repo, &project_id).await.unwrap();
 
-    // Call the atomic method directly.
+    // Pass source-task provenance from the selection; it must determine the creator.
+    let source_task_id = audit_repo
+        .list_unmaterialized_selections()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|item| item.selection_id == sel.id)
+        .and_then(|item| item.task_id)
+        .expect("seeded selection has source task provenance");
     let task_id = audit_repo
         .materialize_audit_task_atomic(
             &sel.id,
             &project_id,
             Some(&epic_id),
+            Some(&source_task_id),
             "Audit review: test",
             "test description",
         )

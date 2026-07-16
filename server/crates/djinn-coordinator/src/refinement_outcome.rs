@@ -10,7 +10,9 @@ use djinn_control_plane::tools::epic_ops::{
 };
 use djinn_control_plane::tools::proposal_readiness::evaluate_proposal_readiness;
 use djinn_core::models::{Proposal, ProposalDebateTrail, TransitionAction};
-use djinn_db::{ProposalRepository, TaskRepository, UserSettingsRepository};
+use djinn_db::{
+    EffectiveCreatorProvenance, ProposalRepository, TaskRepository, UserSettingsRepository,
+};
 
 use super::refinement::{
     AdversaryPassOutcome, AdversaryPassResult, JudgeVerdictResult, RefinementLoopState,
@@ -923,9 +925,14 @@ impl CoordinatorActor {
         };
 
         match task_repo
-            .create_in_project(
+            .create_in_project_with_provenance(
                 &project_id,
                 None,
+                EffectiveCreatorProvenance {
+                    explicit_user_id: attributed_user_id,
+                    source_task_id: None,
+                    proposal_id: Some(proposal_id),
+                },
                 &title,
                 &description,
                 "",
@@ -949,15 +956,6 @@ impl CoordinatorActor {
                         agent_type,
                         error = %e,
                         "Failed to set agent_type on refinement task"
-                    );
-                }
-                if let Some(uid) = attributed_user_id
-                    && let Err(e) = task_repo2.set_created_by_user_id(&task.id, uid).await
-                {
-                    tracing::warn!(
-                        task_id = %task.id,
-                        error = %e,
-                        "Failed to attribute refinement task to user"
                     );
                 }
                 Some(task.id)
