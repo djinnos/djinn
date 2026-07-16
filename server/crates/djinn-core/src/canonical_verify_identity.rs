@@ -155,6 +155,8 @@ pub enum EnvironmentIdentityError {
     MalformedDigest { kind: &'static str, value: String },
     #[error("ambiguous declaration: {detail}")]
     AmbiguousDeclaration { detail: String },
+    #[error("reusable final verification must be hermetic and deny network access")]
+    InvalidReusableHermeticity,
 }
 
 impl EnvironmentIdentityV1 {
@@ -198,6 +200,11 @@ impl ResolvedEnvironmentIdentityInputV1 {
             self.input_manifest.version,
             VERIFICATION_INPUT_MANIFEST_VERSION_V1,
         )?;
+        if self.plan.hermeticity.reusable
+            && (!self.plan.hermeticity.hermetic || self.plan.hermeticity.network_access)
+        {
+            return Err(EnvironmentIdentityError::InvalidReusableHermeticity);
+        }
         nonempty("profile_id", &self.plan.profile_id)?;
         if self.plan.profile_revision == 0 {
             return Err(EnvironmentIdentityError::MissingResolved {
@@ -568,7 +575,10 @@ mod tests {
             ),
             (
                 "hermetic",
-                Box::new(|v| v.plan.hermeticity.hermetic = false),
+                Box::new(|v| {
+                    v.plan.hermeticity.hermetic = false;
+                    v.plan.hermeticity.reusable = false;
+                }),
             ),
             (
                 "reusable",
@@ -576,7 +586,10 @@ mod tests {
             ),
             (
                 "network access",
-                Box::new(|v| v.plan.hermeticity.network_access = true),
+                Box::new(|v| {
+                    v.plan.hermeticity.network_access = true;
+                    v.plan.hermeticity.reusable = false;
+                }),
             ),
             (
                 "manifest repo paths",
@@ -685,6 +698,44 @@ mod tests {
             EnvironmentIdentityV1::derive(bad),
             Err(EnvironmentIdentityError::AmbiguousDeclaration { .. })
         ));
+    }
+
+    #[test]
+    fn rejects_reusable_non_hermetic_plan_before_identity_derivation() {
+        let mut bad = input();
+        bad.plan.hermeticity.hermetic = false;
+
+        assert_eq!(
+            bad.clone().canonicalized(),
+            Err(EnvironmentIdentityError::InvalidReusableHermeticity)
+        );
+        assert_eq!(
+            EnvironmentIdentityV1::derive(bad),
+            Err(EnvironmentIdentityError::InvalidReusableHermeticity)
+        );
+    }
+
+    #[test]
+    fn rejects_reusable_networked_plan_before_identity_derivation() {
+        let mut bad = input();
+        bad.plan.hermeticity.network_access = true;
+
+        assert_eq!(
+            bad.clone().canonicalized(),
+            Err(EnvironmentIdentityError::InvalidReusableHermeticity)
+        );
+        assert_eq!(
+            EnvironmentIdentityV1::derive(bad),
+            Err(EnvironmentIdentityError::InvalidReusableHermeticity)
+        );
+    }
+
+    #[test]
+    fn derives_reusable_hermetic_network_denied_plan() {
+        let identity = EnvironmentIdentityV1::derive(input()).unwrap();
+
+        assert!(!identity.canonical_json.is_empty());
+        assert!(!identity.digest.is_empty());
     }
 
     #[test]
