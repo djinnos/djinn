@@ -10,7 +10,7 @@ const EVENTS = new Set(['pull_request', 'merge_group', 'push', 'workflow_dispatc
 const JOB_NAMES = [
   'cargoDeny', 'clippy', 'aarch64', 'size', 'migrations', 'rawSql',
   'capability', 'boundaries', 'serverTest', 'sqlxFreshness', 'memoryEval',
-  'tiltContracts', 'ui',
+  'tiltContracts', 'ui', 'qaSmoke',
 ];
 const PROTECTED_SERVER_JOBS = [
   'cargoDeny', 'clippy', 'size', 'migrations', 'rawSql', 'capability',
@@ -19,6 +19,12 @@ const PROTECTED_SERVER_JOBS = [
 
 function fail(message) {
   throw new Error(`ci-changed-scope: ${message}`);
+}
+
+function isQaSmoke(path) {
+  return path === 'qa/taxonomy.yaml' ||
+    matches(path, 'qa/scenarios') ||
+    matches(path, 'server/crates/djinn-qa');
 }
 
 /** Normalize a repository-relative changed path, rejecting ambiguous spellings. */
@@ -79,11 +85,11 @@ const UI_CODEGEN_INPUTS = new Set([
 ]);
 
 function isUnclassifiedNonDocumentation(path) {
-  // Documentation and the explicitly enumerated local-dev contract are the
-  // only narrow lanes. Every other executable/configuration path receives
-  // fail-closed full validation.
+  // Documentation, the explicitly enumerated local-dev contract, and
+  // deterministic QA smoke inputs are narrow lanes. Every other
+  // executable/configuration path receives fail-closed full validation.
   return !isDocumentation(path) && !matches(path, 'ui') && !matches(path, 'server') &&
-    !matches(path, '.github/workflows') && !isTiltContract(path);
+    !matches(path, '.github/workflows') && !isTiltContract(path) && !isQaSmoke(path);
 }
 
 /**
@@ -103,6 +109,7 @@ export function classifyChangedScope(files) {
     sandboxAarch64: false,
     memoryRanking: false,
     tiltContracts: false,
+    qaSmoke: false,
     workflowCi: false,
     unknown: false,
   };
@@ -120,6 +127,7 @@ export function classifyChangedScope(files) {
     ) lanes.sandboxAarch64 = true;
     if (isMemoryRanking(path)) lanes.memoryRanking = true;
     if (isTiltContract(path)) lanes.tiltContracts = true;
+    if (isQaSmoke(path)) lanes.qaSmoke = true;
     if (matches(path, '.github/workflows')) lanes.workflowCi = true;
     if (isUnclassifiedNonDocumentation(path)) lanes.unknown = true;
   }
@@ -153,6 +161,7 @@ export function planChangedScope(input) {
   if (lanes.memoryRanking || lanes.workflowCi || fullValidation || lanes.unknown) jobs.memoryEval = true;
   if (lanes.tiltContracts || lanes.workflowCi || fullValidation || lanes.unknown) jobs.tiltContracts = true;
   if (lanes.ui || lanes.workflowCi || fullValidation || lanes.unknown) jobs.ui = true;
+  if (lanes.qaSmoke || lanes.workflowCi || fullValidation || lanes.unknown) jobs.qaSmoke = true;
 
   // Merge queues must validate the server policy set even for docs-only changes;
   // UI remains intentionally independent so docs queue entries do not pay it.
