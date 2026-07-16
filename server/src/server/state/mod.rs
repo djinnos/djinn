@@ -1717,6 +1717,17 @@ impl AppState {
                 self.inner.background_work_tasks.clone(),
                 self.inner.lsp.clone(),
             )
+            .with_build_admission(Arc::new(
+                djinn_agent::actors::coordinator::BuildAdmissionController::new(
+                    Arc::new(djinn_db::AdmissionJournalRepository::new(self.db().clone())),
+                    djinn_agent::actors::coordinator::BuildAdmissionMode::Enforce,
+                    std::env::var("DJINN_BUILD_ADMISSION_CAP")
+                        .ok()
+                        .and_then(|value| value.parse().ok())
+                        .unwrap_or(50),
+                    std::env::var("HOSTNAME").unwrap_or_else(|_| "coordinator".to_owned()),
+                ),
+            ))
             .with_graph_warmer(self.graph_warmer().await)
             .with_mirror(self.inner.mirror.clone())
             .with_runtime_ops(Arc::new(self.clone()))
