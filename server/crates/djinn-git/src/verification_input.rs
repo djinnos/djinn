@@ -98,7 +98,6 @@ impl Default for VerificationInputFingerprintConfig {
             external_inputs: Vec::new(),
         }
     }
-
 }
 
 impl VerificationInputFingerprintConfig {
@@ -233,10 +232,16 @@ impl std::fmt::Display for VerificationInputUnavailable {
                 )
             }
             Self::MalformedManifest { detail } => {
-                write!(f, "verification input unavailable: malformed manifest: {detail}")
+                write!(
+                    f,
+                    "verification input unavailable: malformed manifest: {detail}"
+                )
             }
             Self::MissingExternalInput { id } => {
-                write!(f, "verification input unavailable: missing external input {id}")
+                write!(
+                    f,
+                    "verification input unavailable: missing external input {id}"
+                )
             }
             Self::UnresolvedHead => {
                 write!(f, "verification input unavailable: unresolved HEAD")
@@ -429,10 +434,14 @@ pub async fn compute_verification_input_fingerprint_with_config(
 }
 
 fn unavailable_manifest(detail: impl Into<String>) -> VerificationInputUnavailable {
-    VerificationInputUnavailable::MalformedManifest { detail: detail.into() }
+    VerificationInputUnavailable::MalformedManifest {
+        detail: detail.into(),
+    }
 }
 
-fn validate_manifest(config: &VerificationInputFingerprintConfig) -> Result<GlobSet, VerificationInputUnavailable> {
+fn validate_manifest(
+    config: &VerificationInputFingerprintConfig,
+) -> Result<GlobSet, VerificationInputUnavailable> {
     let manifest = &config.manifest;
     if manifest.version != VERIFICATION_INPUT_MANIFEST_VERSION_V1 {
         return Err(unavailable_manifest("unsupported manifest version"));
@@ -445,71 +454,202 @@ fn validate_manifest(config: &VerificationInputFingerprintConfig) -> Result<Glob
     }
     let mut declared = std::collections::BTreeSet::new();
     for input in &manifest.read_only_external_inputs {
-        if input.id.trim().is_empty() || input.locator.trim().is_empty() || !declared.insert(input.id.as_str()) {
+        if input.id.trim().is_empty()
+            || input.locator.trim().is_empty()
+            || !declared.insert(input.id.as_str())
+        {
             return Err(unavailable_manifest("ambiguous external input declaration"));
         }
     }
     if config.external_inputs.len() != manifest.read_only_external_inputs.len() {
-        return Err(unavailable_manifest("external declarations do not match resolved mounts"));
+        return Err(unavailable_manifest(
+            "external declarations do not match resolved mounts",
+        ));
     }
     let mut resolved = std::collections::BTreeSet::new();
     for mount in &config.external_inputs {
-        if mount.id.trim().is_empty() || mount.path.as_os_str().is_empty()
-            || !declared.contains(mount.id.as_str()) || !resolved.insert(mount.id.as_str()) {
-            return Err(unavailable_manifest("undeclared or ambiguous external mount"));
+        if mount.id.trim().is_empty()
+            || mount.path.as_os_str().is_empty()
+            || !declared.contains(mount.id.as_str())
+            || !resolved.insert(mount.id.as_str())
+        {
+            return Err(unavailable_manifest(
+                "undeclared or ambiguous external mount",
+            ));
         }
     }
     let mut builder = GlobSetBuilder::new();
     let mut outputs = std::collections::BTreeSet::new();
     for pattern in &manifest.output_only_globs {
         if !safe_relative(pattern) || !outputs.insert(pattern) {
-            return Err(unavailable_manifest("invalid or ambiguous output-only glob"));
+            return Err(unavailable_manifest(
+                "invalid or ambiguous output-only glob",
+            ));
         }
-        let glob = Glob::new(pattern).map_err(|_| unavailable_manifest("invalid output-only glob"))?;
+        let glob =
+            Glob::new(pattern).map_err(|_| unavailable_manifest("invalid output-only glob"))?;
         let matcher = glob.compile_matcher();
-        if repo_paths.iter().any(|path| matcher.is_match(path)) || matcher.is_match(".git") || matcher.is_match(".git/config") {
-            return Err(unavailable_manifest("output-only glob overlaps declared input or repository metadata"));
+        if repo_paths.iter().any(|path| matcher.is_match(path))
+            || matcher.is_match(".git")
+            || matcher.is_match(".git/config")
+        {
+            return Err(unavailable_manifest(
+                "output-only glob overlaps declared input or repository metadata",
+            ));
         }
         builder.add(glob);
     }
-    builder.build().map_err(|_| unavailable_manifest("invalid output-only glob"))
+    let output_patterns: Vec<_> = outputs.into_iter().collect();
+    for (index, pattern) in output_patterns.iter().enumerate() {
+        if output_patterns[index + 1..]
+            .iter()
+            .any(|other| output_globs_may_overlap(pattern, other))
+        {
+            return Err(unavailable_manifest(
+                "invalid or ambiguous output-only glob",
+            ));
+        }
+    }
+    builder
+        .build()
+        .map_err(|_| unavailable_manifest("invalid output-only glob"))
+}
+
+/// Conservatively determine whether two output patterns can select the same
+/// path. A false positive rejects an unnecessarily broad manifest, while a
+/// false negative could delete input state, so wildcard components are treated
+/// as overlapping unless distinct literal components prove otherwise.
+fn output_globs_may_overlap(left: &str, right: &str) -> bool {
+    fn overlap(left: &[&str], right: &[&str]) -> bool {
+        match (left.split_first(), right.split_first()) {
+            (None, None) => true,
+            (Some((left_component, left_rest)), _) if *left_component == "**" => {
+                overlap(left_rest, right)
+                    || right
+                        .split_first()
+                        .is_some_and(|(_, right_rest)| overlap(left, right_rest))
+            }
+            (_, Some((right_component, right_rest))) if *right_component == "**" => {
+                overlap(left, right_rest)
+                    || left
+                        .split_first()
+                        .is_some_and(|(_, left_rest)| overlap(left_rest, right))
+            }
+            (Some((left_component, left_rest)), Some((right_component, right_rest))) => {
+                if left_component != right_component
+                    && !glob_component(left_component)
+                    && !glob_component(right_component)
+                {
+                    false
+                } else {
+                    overlap(left_rest, right_rest)
+                }
+            }
+            _ => false,
+        }
+    }
+
+    overlap(
+        &left.split('/').collect::<Vec<_>>(),
+        &right.split('/').collect::<Vec<_>>(),
+    )
+}
+
+fn glob_component(component: &str) -> bool {
+    component.contains(['*', '?', '[', '{'])
 }
 
 fn safe_relative(value: &str) -> bool {
-    !value.is_empty() && !Path::new(value).is_absolute()
-        && !value.split('/').any(|part| part.is_empty() || part == "." || part == "..")
+    !value.is_empty()
+        && !Path::new(value).is_absolute()
+        && !value
+            .split('/')
+            .any(|part| part.is_empty() || part == "." || part == "..")
 }
 
-fn cleanup_output_only(worktree: &Path, globs: &GlobSet) -> Result<(), VerificationInputUnavailable> {
-    if globs.is_empty() { return Ok(()); }
-    let root = std::fs::canonicalize(worktree).map_err(|e| VerificationInputUnavailable::UnreadableFile { path: ".".into(), error: e.to_string() })?;
+fn cleanup_output_only(
+    worktree: &Path,
+    globs: &GlobSet,
+) -> Result<(), VerificationInputUnavailable> {
+    if globs.is_empty() {
+        return Ok(());
+    }
+    let root = std::fs::canonicalize(worktree).map_err(|e| {
+        VerificationInputUnavailable::UnreadableFile {
+            path: ".".into(),
+            error: e.to_string(),
+        }
+    })?;
     cleanup_output_dir(&root, &root, globs)
 }
 
-fn cleanup_output_dir(root: &Path, dir: &Path, globs: &GlobSet) -> Result<(), VerificationInputUnavailable> {
-    for entry in std::fs::read_dir(dir).map_err(|e| VerificationInputUnavailable::UnreadableFile { path: dir.display().to_string(), error: e.to_string() })? {
-        let entry = entry.map_err(|e| VerificationInputUnavailable::UnreadableFile { path: dir.display().to_string(), error: e.to_string() })?;
-        if entry.file_name() == ".git" { continue; }
+fn cleanup_output_dir(
+    root: &Path,
+    dir: &Path,
+    globs: &GlobSet,
+) -> Result<(), VerificationInputUnavailable> {
+    for entry in
+        std::fs::read_dir(dir).map_err(|e| VerificationInputUnavailable::UnreadableFile {
+            path: dir.display().to_string(),
+            error: e.to_string(),
+        })?
+    {
+        let entry = entry.map_err(|e| VerificationInputUnavailable::UnreadableFile {
+            path: dir.display().to_string(),
+            error: e.to_string(),
+        })?;
+        if entry.file_name() == ".git" {
+            continue;
+        }
         let path = entry.path();
-        let rel = path.strip_prefix(root).map_err(|_| unavailable_manifest("output-only path escaped worktree"))?;
-        let meta = std::fs::symlink_metadata(&path).map_err(|_| unavailable_manifest("output-only traversal changed"))?;
+        let rel = path
+            .strip_prefix(root)
+            .map_err(|_| unavailable_manifest("output-only path escaped worktree"))?;
+        let meta = std::fs::symlink_metadata(&path)
+            .map_err(|_| unavailable_manifest("output-only traversal changed"))?;
         if globs.is_match(rel) {
-            if meta.file_type().is_dir() { std::fs::remove_dir_all(&path) } else { std::fs::remove_file(&path) }
-                .map_err(|e| VerificationInputUnavailable::UnreadableFile { path: rel.display().to_string(), error: e.to_string() })?;
-        } else if meta.file_type().is_dir() { cleanup_output_dir(root, &path, globs)?; }
+            if meta.file_type().is_dir() {
+                std::fs::remove_dir_all(&path)
+            } else {
+                std::fs::remove_file(&path)
+            }
+            .map_err(|e| VerificationInputUnavailable::UnreadableFile {
+                path: rel.display().to_string(),
+                error: e.to_string(),
+            })?;
+        } else if meta.file_type().is_dir() {
+            cleanup_output_dir(root, &path, globs)?;
+        }
     }
     Ok(())
 }
 
-struct ExternalState { id: Vec<u8>, locator: Vec<u8>, path: Vec<u8>, state: WorktreeState }
+struct ExternalState {
+    id: Vec<u8>,
+    locator: Vec<u8>,
+    path: Vec<u8>,
+    state: WorktreeState,
+}
 
-fn collect_external_states(config: &VerificationInputFingerprintConfig) -> Result<Vec<ExternalState>, VerificationInputUnavailable> {
+fn collect_external_states(
+    config: &VerificationInputFingerprintConfig,
+) -> Result<Vec<ExternalState>, VerificationInputUnavailable> {
     let mut states = Vec::new();
     for declaration in &config.manifest.read_only_external_inputs {
-        let mount = config.external_inputs.iter().find(|mount| mount.id == declaration.id)
-            .ok_or_else(|| VerificationInputUnavailable::MissingExternalInput { id: declaration.id.clone() })?;
-        if !std::fs::symlink_metadata(&mount.path).map(|m| m.file_type().is_dir()).unwrap_or(false) {
-            return Err(VerificationInputUnavailable::MissingExternalInput { id: declaration.id.clone() });
+        let mount = config
+            .external_inputs
+            .iter()
+            .find(|mount| mount.id == declaration.id)
+            .ok_or_else(|| VerificationInputUnavailable::MissingExternalInput {
+                id: declaration.id.clone(),
+            })?;
+        if !std::fs::symlink_metadata(&mount.path)
+            .map(|m| m.file_type().is_dir())
+            .unwrap_or(false)
+        {
+            return Err(VerificationInputUnavailable::MissingExternalInput {
+                id: declaration.id.clone(),
+            });
         }
         collect_external_dir(&mount.path, &mount.path, declaration, &mut states)?;
     }
@@ -517,15 +657,43 @@ fn collect_external_states(config: &VerificationInputFingerprintConfig) -> Resul
     Ok(states)
 }
 
-fn collect_external_dir(root: &Path, dir: &Path, declaration: &djinn_core::canonical_verify::DeclaredExternalInputV1, states: &mut Vec<ExternalState>) -> Result<(), VerificationInputUnavailable> {
-    let mut entries: Vec<_> = std::fs::read_dir(dir).map_err(|e| VerificationInputUnavailable::UnreadableFile { path: dir.display().to_string(), error: e.to_string() })?.collect::<Result<_, _>>().map_err(|e| VerificationInputUnavailable::UnreadableFile { path: dir.display().to_string(), error: e.to_string() })?;
-    entries.sort_by_key(|entry| path_bytes(&entry.file_name().into()));
+fn collect_external_dir(
+    root: &Path,
+    dir: &Path,
+    declaration: &djinn_core::canonical_verify::DeclaredExternalInputV1,
+    states: &mut Vec<ExternalState>,
+) -> Result<(), VerificationInputUnavailable> {
+    let mut entries: Vec<_> = std::fs::read_dir(dir)
+        .map_err(|e| VerificationInputUnavailable::UnreadableFile {
+            path: dir.display().to_string(),
+            error: e.to_string(),
+        })?
+        .collect::<Result<_, _>>()
+        .map_err(|e| VerificationInputUnavailable::UnreadableFile {
+            path: dir.display().to_string(),
+            error: e.to_string(),
+        })?;
+    entries.sort_by_key(|entry| {
+        let name = entry.file_name();
+        path_bytes(Path::new(&name))
+    });
     for entry in entries {
-        let path = entry.path(); let rel = path.strip_prefix(root).map_err(|_| unavailable_manifest("external path escaped mount"))?;
-        let meta = std::fs::symlink_metadata(&path).map_err(|_| unavailable_manifest("external traversal changed"))?;
-        if meta.file_type().is_dir() { collect_external_dir(root, &path, declaration, states)?; } else {
+        let path = entry.path();
+        let rel = path
+            .strip_prefix(root)
+            .map_err(|_| unavailable_manifest("external path escaped mount"))?;
+        let meta = std::fs::symlink_metadata(&path)
+            .map_err(|_| unavailable_manifest("external traversal changed"))?;
+        if meta.file_type().is_dir() {
+            collect_external_dir(root, &path, declaration, states)?;
+        } else {
             let bytes = path_bytes(rel);
-            states.push(ExternalState { id: declaration.id.as_bytes().to_vec(), locator: declaration.locator.as_bytes().to_vec(), path: bytes.clone(), state: classify_worktree_entry(root, &bytes, false)? });
+            states.push(ExternalState {
+                id: declaration.id.as_bytes().to_vec(),
+                locator: declaration.locator.as_bytes().to_vec(),
+                path: bytes.clone(),
+                state: classify_worktree_entry(root, &bytes, false)?,
+            });
         }
     }
     Ok(())
@@ -1349,6 +1517,93 @@ mod tests {
             }
             other => panic!("expected UnsupportedSpecialFile, got {other:?}"),
         }
+    }
+
+    // ── Configured manifest inputs and outputs ───────────────────────────────
+
+    async fn configured_fingerprint(
+        repo_path: &Path,
+        config: &VerificationInputFingerprintConfig,
+    ) -> VerificationInputFingerprint {
+        compute_verification_input_fingerprint_with_config(repo_path, config)
+            .await
+            .expect("compute configured fingerprint")
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn configured_external_content_change_alters_digest() {
+        let fixture = init_repo_with_main_commit();
+        let external = tempfile::tempdir().expect("create external mount");
+        write_str(external.path(), "toolchain/version.txt", "v1\n");
+
+        let mut config = VerificationInputFingerprintConfig::default();
+        config.manifest.read_only_external_inputs.push(
+            djinn_core::canonical_verify::DeclaredExternalInputV1 {
+                id: "toolchain".to_string(),
+                locator: "host://toolchain".to_string(),
+            },
+        );
+        config.external_inputs.push(ResolvedExternalInputV1 {
+            id: "toolchain".to_string(),
+            path: external.path().to_path_buf(),
+        });
+
+        let before = digest(configured_fingerprint(fixture.path(), &config).await);
+        write_str(external.path(), "toolchain/version.txt", "v2\n");
+        let after = digest(configured_fingerprint(fixture.path(), &config).await);
+
+        assert_ne!(before.fingerprint, after.fingerprint);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn configured_output_only_files_are_removed_and_excluded_from_digest() {
+        let fixture = init_repo_with_main_commit();
+        let mut config = VerificationInputFingerprintConfig::default();
+        config.manifest.output_only_globs.push("out/**".to_string());
+
+        write_str(fixture.path(), "out/result.txt", "first generated result\n");
+        let first = digest(configured_fingerprint(fixture.path(), &config).await);
+        assert!(
+            !fixture.path().join("out/result.txt").exists(),
+            "configured output-only file must be removed before hashing"
+        );
+
+        write_str(
+            fixture.path(),
+            "out/result.txt",
+            "different generated result\n",
+        );
+        let second = digest(configured_fingerprint(fixture.path(), &config).await);
+        assert!(
+            !fixture.path().join("out/result.txt").exists(),
+            "recreated output-only file must be removed before hashing"
+        );
+        assert_eq!(first.fingerprint, second.fingerprint);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn configured_overlapping_output_only_globs_fail_before_cleanup() {
+        let fixture = init_repo_with_main_commit();
+        let output = fixture.path().join("out/result.txt");
+        write_str(fixture.path(), "out/result.txt", "must not be deleted\n");
+
+        let mut config = VerificationInputFingerprintConfig::default();
+        config
+            .manifest
+            .output_only_globs
+            .extend(["out/**".to_string(), "out/*.txt".to_string()]);
+        let result = configured_fingerprint(fixture.path(), &config).await;
+
+        assert!(matches!(
+            result,
+            VerificationInputFingerprint::Unavailable(
+                VerificationInputUnavailable::MalformedManifest { .. }
+            )
+        ));
+        assert!(
+            output.exists(),
+            "ambiguous declaration must fail before cleanup"
+        );
     }
 
     // ── Unresolved base ref ─────────────────────────────────────────────────
