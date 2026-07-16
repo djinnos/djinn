@@ -383,6 +383,7 @@ mod tests {
             diff_fingerprint: "diff-123".to_string(),
             check_coverage: None,
             created_at: "2026-07-01T00:00:01.000Z".to_string(),
+            ..VerifyRunRecord::default()
         }
     }
     fn settlement(task_run_id: &str, eligible: bool) -> AutoSubmitSettlement {
