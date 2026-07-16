@@ -1781,12 +1781,12 @@ mod tests {
         assert_eq!(
             revisions[0].content_after.as_deref(),
             Some(
-                "# The dispatch gate controls concurrency\n\n## Source\n- source-note\n\n## Evidence\n> controls concurrency\n\n---\n*Extracted by memory enrichment pass.*"
+                "# Dispatch Gate\n\n## Aliases\n- dispatch\n- gate\n\n---\n*Extracted by memory enrichment pass.*"
             )
         );
         assert_eq!(revisions[0].confidence_before, None);
         assert_eq!(revisions[0].confidence_after, Some(0.0));
-        assert_eq!(revisions[0].reason, "enrichment:create claim note");
+        assert_eq!(revisions[0].reason, "enrichment:create entity note");
         assert_eq!(revisions[1].actor_kind, "system");
         assert_eq!(revisions[1].subsystem.as_deref(), Some("enrichment"));
         assert_eq!(revisions[1].event_kind, "created");
@@ -1794,12 +1794,12 @@ mod tests {
         assert_eq!(
             revisions[1].content_after.as_deref(),
             Some(
-                "# Dispatch Gate\n\n## Aliases\n- dispatch\n- gate\n\n---\n*Extracted by memory enrichment pass.*"
+                "# The dispatch gate controls concurrency\n\n## Source\n- source-note\n\n## Evidence\n> controls concurrency\n\n---\n*Extracted by memory enrichment pass.*"
             )
         );
         assert_eq!(revisions[1].confidence_before, None);
         assert_eq!(revisions[1].confidence_after, Some(0.0));
-        assert_eq!(revisions[1].reason, "enrichment:create entity note");
+        assert_eq!(revisions[1].reason, "enrichment:create claim note");
 
         let (same_entity_id, entity_changed) =
             persist_entity(&note_repo, &project.id, "Dispatch Gate", &aliases)
