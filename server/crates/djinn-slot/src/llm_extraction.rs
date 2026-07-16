@@ -3908,6 +3908,12 @@ mod evidence_merge_regression_tests {
                     NoteRevisionDesiredState::ExistingWithMetadata(_) => {
                         unreachable!("extraction never submits metadata updates")
                     }
+                    NoteRevisionDesiredState::GuardedPatch { .. }
+                    | NoteRevisionDesiredState::DeprecateWithSupersedes { .. } => {
+                        unreachable!(
+                            "this legacy extraction test seam never submits revision operations"
+                        )
+                    }
                     NoteRevisionDesiredState::ExtractionSkipped => (None, None, true, None),
                     NoteRevisionDesiredState::Delete => unreachable!("not used by extraction"),
                 };
@@ -3927,6 +3933,9 @@ mod evidence_merge_regression_tests {
                 note: committed_note,
                 note_seq: changed.then_some(1),
                 revision_id,
+                deprecated_note_id: None,
+                superseding_note_id: None,
+                supersedes_association: None,
             })
         }
         async fn get(&self, id: &str) -> djinn_db::Result<Option<djinn_memory::Note>> {

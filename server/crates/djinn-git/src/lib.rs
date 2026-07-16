@@ -212,9 +212,9 @@ pub use submission_diff::{
 
 pub mod verification_input;
 pub use verification_input::{
-    DEFAULT_VERIFICATION_BASE_REF, VERIFICATION_INPUT_FINGERPRINT_VERSION_V1,
-    VerificationInputDigestV1, VerificationInputError, VerificationInputFingerprint,
-    VerificationInputFingerprintConfig, VerificationInputUnavailable,
+    DEFAULT_VERIFICATION_BASE_REF, ResolvedExternalInputV1,
+    VERIFICATION_INPUT_FINGERPRINT_VERSION_V1, VerificationInputDigestV1, VerificationInputError,
+    VerificationInputFingerprint, VerificationInputFingerprintConfig, VerificationInputUnavailable,
     compute_verification_input_fingerprint, compute_verification_input_fingerprint_with_config,
 };
 

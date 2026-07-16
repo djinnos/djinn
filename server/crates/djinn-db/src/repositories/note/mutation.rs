@@ -9,12 +9,23 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use super::{
-    NoteRepository, NoteRevisionEventKind, NoteRevisionReason, TrustedNoteRevisionAttribution,
-    TrustedNoteRevisionProvenance, index_links_for_note, resolve_links_for_note,
+    NoteAssociationKind, NoteRepository, NoteRevisionEventKind, NoteRevisionReason,
+    TrustedNoteRevisionAttribution, TrustedNoteRevisionProvenance, index_links_for_note,
+    resolve_links_for_note,
 };
 use crate::error::{DbError as Error, DbResult as Result};
 use crate::note_hash::note_content_hash;
 use djinn_memory::Note;
+
+use super::scoring::{CONFIDENCE_CEILING, CONFIDENCE_FLOOR};
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct NoteSupersedesAssociation {
+    pub note_a_id: String,
+    pub note_b_id: String,
+    pub kind: NoteAssociationKind,
+    pub weight: f64,
+}
 
 /// Immutable revision row returned by the production query surface.
 ///
@@ -82,6 +93,15 @@ pub enum NoteRevisionDesiredState {
         confidence: f64,
     },
     ExistingWithMetadata(NoteRevisionUpdateState),
+    GuardedPatch {
+        expected_content: String,
+        content: String,
+        confidence: f64,
+    },
+    DeprecateWithSupersedes {
+        superseding_note_id: String,
+        association_weight: f64,
+    },
     /// Delete the locked note after retaining its before snapshot in the ledger.
     Delete,
     /// Record an extraction run which intentionally produced no note.
@@ -108,6 +128,9 @@ pub struct NoteRevisionMutationResult {
     pub note: Option<Note>,
     pub note_seq: Option<i64>,
     pub revision_id: Option<String>,
+    pub deprecated_note_id: Option<String>,
+    pub superseding_note_id: Option<String>,
+    pub supersedes_association: Option<NoteSupersedesAssociation>,
 }
 
 impl NoteRepository {
@@ -130,7 +153,13 @@ impl NoteRepository {
                 self.insert_skipped(&mut tx, &command).await?
             }
             NoteRevisionEventKind::Created => self.create_with_revision(&mut tx, &command).await?,
-            NoteRevisionEventKind::Updated | NoteRevisionEventKind::ConfidenceChanged => {
+            NoteRevisionEventKind::Updated => match command.desired {
+                NoteRevisionDesiredState::DeprecateWithSupersedes { .. } => {
+                    self.deprecate_with_supersedes(&mut tx, &command).await?
+                }
+                _ => self.update_with_revision(&mut tx, &command).await?,
+            },
+            NoteRevisionEventKind::ConfidenceChanged => {
                 self.update_with_revision(&mut tx, &command).await?
             }
             NoteRevisionEventKind::Deleted => self.delete_with_revision(&mut tx, &command).await?,
@@ -254,6 +283,9 @@ impl NoteRepository {
             note: Some(note),
             note_seq: Some(1),
             revision_id: Some(revision_id),
+            deprecated_note_id: None,
+            superseding_note_id: None,
+            supersedes_association: None,
         })
     }
 
@@ -272,6 +304,18 @@ impl NoteRepository {
             NoteRevisionDesiredState::ExistingWithMetadata(state) => {
                 (&state.content, &state.confidence, Some(state))
             }
+            NoteRevisionDesiredState::GuardedPatch {
+                expected_content,
+                content,
+                confidence,
+            } => {
+                if before.content != *expected_content {
+                    return Err(Error::InvalidData(
+                        "guarded patch expected content is stale".to_owned(),
+                    ));
+                }
+                (content, confidence, None)
+            }
             _ => unreachable!("validated update command"),
         };
         let metadata_changed = metadata.is_some_and(|state| {
@@ -288,6 +332,9 @@ impl NoteRepository {
                 note: Some(before),
                 note_seq: None,
                 revision_id: None,
+                deprecated_note_id: None,
+                superseding_note_id: None,
+                supersedes_association: None,
             });
         }
         if command.event_kind == NoteRevisionEventKind::ConfidenceChanged
@@ -344,6 +391,9 @@ impl NoteRepository {
             note: Some(note),
             note_seq: Some(seq),
             revision_id: Some(revision_id),
+            deprecated_note_id: None,
+            superseding_note_id: None,
+            supersedes_association: None,
         })
     }
 
@@ -377,6 +427,73 @@ impl NoteRepository {
             note: None,
             note_seq: Some(seq),
             revision_id: Some(revision_id),
+            deprecated_note_id: None,
+            superseding_note_id: None,
+            supersedes_association: None,
+        })
+    }
+
+    async fn deprecate_with_supersedes(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        command: &NoteRevisionMutation,
+    ) -> Result<NoteRevisionMutationResult> {
+        let old_id = command.note_id.as_deref().expect("validated note identity");
+        let NoteRevisionDesiredState::DeprecateWithSupersedes {
+            superseding_note_id,
+            association_weight,
+        } = &command.desired
+        else {
+            unreachable!("validated deprecation command")
+        };
+        if old_id == superseding_note_id {
+            return Err(Error::InvalidData(
+                "superseding note must differ from deprecated note".to_owned(),
+            ));
+        }
+        let (first, second) = if old_id < superseding_note_id.as_str() {
+            (old_id, superseding_note_id.as_str())
+        } else {
+            (superseding_note_id.as_str(), old_id)
+        };
+        let locked: Vec<Note> = sqlx::query_as("SELECT id, project_id, permalink, title, file_path, storage, note_type, folder, status, tags::text AS tags, content, retrieval_anchor, created_at, updated_at, last_accessed, access_count, confidence, abstract as abstract_, overview, scope_paths::text AS scope_paths FROM notes WHERE project_id = $1 AND id IN ($2, $3) ORDER BY id FOR UPDATE")
+            .bind(&command.project_id).bind(first).bind(second).fetch_all(&mut **tx).await?;
+        if locked.len() != 2 {
+            return Err(Error::InvalidData(
+                "deprecated and superseding notes must belong to the command project".to_owned(),
+            ));
+        }
+        let before = locked
+            .into_iter()
+            .find(|note| note.id == old_id)
+            .expect("old note locked");
+        sqlx::query("UPDATE notes SET status = 'deprecated', updated_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') WHERE id = $1 AND project_id = $2")
+            .bind(old_id).bind(&command.project_id).execute(&mut **tx).await?;
+        let association = self
+            .record_supersedes_in_transaction(tx, superseding_note_id, old_id, *association_weight)
+            .await?;
+        let note = locked_note(tx, old_id, &command.project_id).await?;
+        let seq = next_sequence(tx, &command.project_id, old_id).await?;
+        let revision_id = self
+            .insert_revision(
+                tx,
+                command,
+                Some(old_id),
+                Some(seq),
+                Some(&before.content),
+                Some(&note.content),
+                Some(before.confidence),
+                Some(note.confidence),
+            )
+            .await?;
+        Ok(NoteRevisionMutationResult {
+            changed: true,
+            note: Some(note),
+            note_seq: Some(seq),
+            revision_id: Some(revision_id),
+            deprecated_note_id: Some(old_id.to_owned()),
+            superseding_note_id: Some(superseding_note_id.clone()),
+            supersedes_association: Some(association),
         })
     }
 
@@ -393,6 +510,9 @@ impl NoteRepository {
             note: None,
             note_seq: None,
             revision_id: Some(revision_id),
+            deprecated_note_id: None,
+            superseding_note_id: None,
+            supersedes_association: None,
         })
     }
 
@@ -424,6 +544,11 @@ impl NoteRepository {
     #[cfg(any(test, feature = "test-support"))]
     pub fn set_revision_event_insertion_failure_for_test(&self, enabled: bool) {
         self.revision_event_failure.store(enabled, Ordering::SeqCst);
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn set_supersedes_association_failure_for_test(&self, enabled: bool) {
+        self.association_failure.store(enabled, Ordering::SeqCst);
     }
 
     /// Returns immutable revision rows for one project in creation order.
@@ -497,7 +622,13 @@ fn validate_command(command: &NoteRevisionMutation) -> Result<()> {
             NoteRevisionDesiredState::Existing { .. }
         ) | (
             NoteRevisionEventKind::Updated,
+            NoteRevisionDesiredState::GuardedPatch { .. }
+        ) | (
+            NoteRevisionEventKind::Updated,
             NoteRevisionDesiredState::ExistingWithMetadata(_)
+        ) | (
+            NoteRevisionEventKind::Updated,
+            NoteRevisionDesiredState::DeprecateWithSupersedes { .. }
         ) | (
             NoteRevisionEventKind::Deleted,
             NoteRevisionDesiredState::Delete
@@ -510,6 +641,14 @@ fn validate_command(command: &NoteRevisionMutation) -> Result<()> {
         return Err(Error::InvalidData(
             "event kind does not match desired final state".to_owned(),
         ));
+    }
+    if let NoteRevisionDesiredState::GuardedPatch { confidence, .. } = &command.desired
+        && (!confidence.is_finite()
+            || !(CONFIDENCE_FLOOR..=CONFIDENCE_CEILING).contains(confidence))
+    {
+        return Err(Error::InvalidData(format!(
+            "guarded patch confidence must be within [{CONFIDENCE_FLOOR}, {CONFIDENCE_CEILING}]"
+        )));
     }
     if command.event_kind == NoteRevisionEventKind::ExtractionSkipped
         && command.provenance.session_id().is_none()

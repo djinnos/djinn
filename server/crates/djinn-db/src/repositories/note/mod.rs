@@ -101,7 +101,7 @@ pub use housekeeping::{
 pub use lifecycle::NoteStatus;
 pub use mutation::{
     NoteRevisionCreateState, NoteRevisionDesiredState, NoteRevisionEvent, NoteRevisionMutation,
-    NoteRevisionMutationResult, NoteRevisionUpdateState,
+    NoteRevisionMutationResult, NoteRevisionUpdateState, NoteSupersedesAssociation,
 };
 
 /// Compact scope-overlap candidate row returned by
@@ -237,6 +237,7 @@ pub struct NoteRepository {
     embedding_branch: String,
     vector_store: Arc<dyn NoteVectorStore>,
     revision_event_failure: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    association_failure: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl NoteRepository {
@@ -248,6 +249,7 @@ impl NoteRepository {
             embedding_branch: "main".to_string(),
             vector_store: Arc::new(NoopNoteVectorStore) as Arc<dyn NoteVectorStore>,
             revision_event_failure: mutation::revision_failure_flag(),
+            association_failure: mutation::revision_failure_flag(),
         }
     }
 

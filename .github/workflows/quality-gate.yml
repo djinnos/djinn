@@ -664,6 +664,11 @@ jobs:
         options: --health-cmd="pg_isready -U postgres" --health-interval=5s --health-timeout=3s --health-retries=20
     steps:
       - uses: actions/checkout@v4
+      - name: Reclaim runner disk for server test artifacts
+        run: |
+          # The all-targets test build can exhaust the hosted runner after the
+          # Rust cache is restored. These preinstalled SDKs are unused here.
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc
       - run: rustup toolchain install
         working-directory: server
       - uses: Swatinem/rust-cache@v2
