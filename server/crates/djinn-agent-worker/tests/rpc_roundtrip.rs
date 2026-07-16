@@ -97,6 +97,7 @@ fn fixture_task(id: &str) -> Task {
 fn fixture_spec(task_id: &str) -> TaskRunSpec {
     TaskRunSpec {
         task_run_id: format!("run-{task_id}"),
+        task_attempt_id: None,
         task_id: task_id.into(),
         project_id: "proj-xyz".into(),
         trigger: TaskRunTrigger::NewTask,
