@@ -23,17 +23,17 @@ use tracing::Instrument;
 // Environment variables are process-global. Keep the test guard here, rather
 // than in an individual test module, so every knowledge-context test that
 // reads or changes the rollout configuration serializes with assembly tests.
-#[cfg(test)]
-pub(super) static KNOWLEDGE_CONTEXT_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) static KNOWLEDGE_CONTEXT_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-#[cfg(test)]
-pub(super) struct KnowledgeContextTestEnvGuard {
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) struct KnowledgeContextTestEnvGuard {
     _lock: std::sync::MutexGuard<'static, ()>,
     rollout: Option<std::ffi::OsString>,
     legacy: Option<std::ffi::OsString>,
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 impl KnowledgeContextTestEnvGuard {
     pub(super) fn clear(&mut self) {
         // SAFETY: this guard serializes all knowledge-context rollout tests.
@@ -54,7 +54,7 @@ impl KnowledgeContextTestEnvGuard {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 impl Drop for KnowledgeContextTestEnvGuard {
     fn drop(&mut self) {
         // SAFETY: the guard is still held while the original process environment
@@ -72,8 +72,8 @@ impl Drop for KnowledgeContextTestEnvGuard {
     }
 }
 
-#[cfg(test)]
-pub(super) fn knowledge_context_test_env_guard() -> KnowledgeContextTestEnvGuard {
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) fn knowledge_context_test_env_guard() -> KnowledgeContextTestEnvGuard {
     let lock = KNOWLEDGE_CONTEXT_ENV_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -415,7 +415,11 @@ const KNOWLEDGE_CONTEXT_LEGACY_ENV: &str = "DJINN_KNOWLEDGE_CONTEXT";
 fn knowledge_context_rollout_from_env() -> RolloutMode {
     let rollout = std::env::var(KNOWLEDGE_CONTEXT_ROLLOUT_ENV).ok();
     let legacy = std::env::var(KNOWLEDGE_CONTEXT_LEGACY_ENV).ok();
-    parse_rollout(rollout.as_deref(), legacy.as_deref(), DefaultPolicy::Enabled)
+    parse_rollout(
+        rollout.as_deref(),
+        legacy.as_deref(),
+        DefaultPolicy::Enabled,
+    )
 }
 
 fn disabled_knowledge_outcome(
@@ -468,7 +472,19 @@ async fn load_knowledge_context_with_planner(
 ) -> Option<String> {
     let task_paths = derive_task_scope_paths(task, epic_context);
     if !rollout.enabled() {
-        persist_knowledge_trace(task, &task_paths, &[], 0, KnowledgeTraceDurations::default(), false, &app_state.db, planner.map(|p| (p.session_id, p.task_run_id)), rollout, disabled_knowledge_outcome(rollout)).await;
+        persist_knowledge_trace(
+            task,
+            &task_paths,
+            &[],
+            0,
+            KnowledgeTraceDurations::default(),
+            false,
+            &app_state.db,
+            planner.map(|p| (p.session_id, p.task_run_id)),
+            rollout,
+            disabled_knowledge_outcome(rollout),
+        )
+        .await;
         return None;
     }
     let note_repo = NoteRepository::new(app_state.db.clone(), app_state.event_bus.clone());
@@ -512,7 +528,10 @@ async fn load_knowledge_context_with_planner(
                 Ok(candidates) => {
                     let cap_exceeded = candidates.len()
                         >= djinn_db::repositories::retrieval_trace::DEFAULT_CANDIDATE_CAP as usize;
-                    (classify_knowledge_candidates_for_error(&candidates), cap_exceeded)
+                    (
+                        classify_knowledge_candidates_for_error(&candidates),
+                        cap_exceeded,
+                    )
                 }
                 Err(trace_error) => {
                     tracing::warn!(
@@ -557,7 +576,11 @@ async fn load_knowledge_context_with_planner(
         let pack_start = tokio::time::Instant::now();
         let packed = pack_knowledge_notes(&notes, KNOWLEDGE_BUDGET_CHARS);
         let pack_ms = pack_start.elapsed().as_millis() as i64;
-        let rendered = if notes.is_empty() { None } else { Some(packed.rendered) };
+        let rendered = if notes.is_empty() {
+            None
+        } else {
+            Some(packed.rendered)
+        };
         let rendered = merge_planned_knowledge(rendered, &notes, &note_repo, task, planner).await;
         persist_knowledge_trace(
             task,
@@ -627,7 +650,15 @@ async fn load_knowledge_context_with_planner(
         &app_state.db,
         planner.map(|p| (p.session_id, p.task_run_id)),
         rollout,
-        if estimated_injected_tokens > 0 && trace_candidates_final.iter().any(|c| c.outcome == djinn_db::repositories::retrieval_trace::CandidateOutcome::Injected) { djinn_db::repositories::retrieval_trace::RetrievalTraceOutcome::Injected } else { djinn_db::repositories::retrieval_trace::RetrievalTraceOutcome::Empty },
+        if estimated_injected_tokens > 0
+            && trace_candidates_final.iter().any(|c| {
+                c.outcome == djinn_db::repositories::retrieval_trace::CandidateOutcome::Injected
+            })
+        {
+            djinn_db::repositories::retrieval_trace::RetrievalTraceOutcome::Injected
+        } else {
+            djinn_db::repositories::retrieval_trace::RetrievalTraceOutcome::Empty
+        },
     )
     .await;
 
@@ -798,8 +829,8 @@ async fn persist_knowledge_trace(
     outcome: djinn_db::repositories::retrieval_trace::RetrievalTraceOutcome,
 ) {
     use djinn_db::repositories::retrieval_trace::{
-        CreateRetrievalTraceParams, CreateRetrievalTraceWithSemanticsParams, RetrievalTraceEntryPoint, RetrievalTraceRepository,
-        validate_candidates,
+        CreateRetrievalTraceParams, CreateRetrievalTraceWithSemanticsParams,
+        RetrievalTraceEntryPoint, RetrievalTraceRepository, validate_candidates,
     };
 
     // Validate candidate invariants before serialization.
@@ -853,7 +884,14 @@ async fn persist_knowledge_trace(
         estimated_injected_tokens,
     };
 
-    if let Err(e) = repo.insert_with_semantics(CreateRetrievalTraceWithSemanticsParams { trace: params, rollout_label: rollout.label(), outcome }).await {
+    if let Err(e) = repo
+        .insert_with_semantics(CreateRetrievalTraceWithSemanticsParams {
+            trace: params,
+            rollout_label: rollout.label(),
+            outcome,
+        })
+        .await
+    {
         tracing::warn!(
             task_id = %task.short_id,
             error = %e,
@@ -977,7 +1015,7 @@ pub(crate) async fn assemble_prompt_context(inputs: PromptContextInputs<'_>) -> 
                     epic_context_ref,
                     app_state,
                     memory_intent_planner.as_ref(),
-                                    &knowledge_rollout,
+                    &knowledge_rollout,
                 )
                 .await;
                 (result, child_start.elapsed())

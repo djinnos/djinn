@@ -9,8 +9,8 @@ use djinn_core::extension_diagnostics::{
 };
 use djinn_core::models::ActivityEntry;
 use djinn_db::repositories::retrieval_trace::{
-    RetrievalTraceEntryPoint, RetrievalTraceListFilter, RetrievalTraceRepository,
-    RetrievalTraceOutcome,
+    RetrievalTraceEntryPoint, RetrievalTraceListFilter, RetrievalTraceOutcome,
+    RetrievalTraceRepository,
 };
 use djinn_db::{Database, EpicRepository, NoteRepository, ProposalCreateInput, ProposalRepository};
 use tokio_util::sync::CancellationToken;
@@ -1843,6 +1843,7 @@ async fn resume_context_deterministic_with_discontinuity_metadata() {
 // standalone `tokio::join!` timing tests or telemetry-facade-only tests.
 
 mod prompt_context_instrumentation_tests {
+    use super::super::knowledge_context_test_env_guard;
     use super::super::test_support::{assemble_for_role, create_project_epic_task};
     use crate::roles::WorkerRole;
     use djinn_core::events::EventBus;
@@ -1865,6 +1866,7 @@ mod prompt_context_instrumentation_tests {
     /// should have a non-empty `system_prompt` and valid fields.
     #[tokio::test]
     async fn assemble_prompt_context_emits_total_and_child_span_metrics() {
+        let _knowledge_context_env = knowledge_context_test_env_guard();
         // Initialize telemetry under the guard, then drop before async work
         // to avoid holding a std::sync::Mutex across await points.
         {
@@ -2498,7 +2500,13 @@ async fn assembly_rollout_default_enabled_and_cohort_persist_effective_labels() 
     let task = create_project_epic_task(&db, &events, "Rollout epic", "Rollout task").await;
     let note_repo = NoteRepository::new(db.clone(), EventBus::noop());
     let note = note_repo
-        .create(&task.project_id, "Assembly knowledge", "content", "pattern", "[]")
+        .create(
+            &task.project_id,
+            "Assembly knowledge",
+            "content",
+            "pattern",
+            "[]",
+        )
         .await
         .expect("seed note");
     note_repo
@@ -2508,18 +2516,23 @@ async fn assembly_rollout_default_enabled_and_cohort_persist_effective_labels() 
     let role = LeadRole;
 
     let default_context = assembly_with_rollout(db.clone(), &task, &role).await;
-    assert!(default_context.knowledge_context.is_some(), "default remains enabled");
+    assert!(
+        default_context.knowledge_context.is_some(),
+        "default remains enabled"
+    );
     let default_trace = latest_knowledge_trace_for_assembly(&db, &task.project_id).await;
     assert_eq!(default_trace.rollout_label, "enabled");
     assert_eq!(default_trace.outcome, RetrievalTraceOutcome::Injected);
 
     env.set_rollout("cohort:Blue Canary");
     let cohort_context = assembly_with_rollout(db.clone(), &task, &role).await;
-    assert!(cohort_context.knowledge_context.is_some(), "cohort injects every session");
+    assert!(
+        cohort_context.knowledge_context.is_some(),
+        "cohort injects every session"
+    );
     let cohort_trace = latest_knowledge_trace_for_assembly(&db, &task.project_id).await;
     assert_eq!(cohort_trace.rollout_label, "cohort:Blue Canary");
     assert_eq!(cohort_trace.outcome, RetrievalTraceOutcome::Injected);
-
 }
 
 #[tokio::test]
@@ -2528,8 +2541,18 @@ async fn assembly_rollout_disabled_modes_omit_context_and_persist_suppression() 
     let role = LeadRole;
     for (rollout, legacy, label, outcome) in [
         (Some("off"), None, "off", RetrievalTraceOutcome::DisabledOff),
-        (Some("kill_switch"), None, "kill_switch", RetrievalTraceOutcome::DisabledKillSwitch),
-        (None, Some("0"), "legacy_disabled", RetrievalTraceOutcome::DisabledLegacy),
+        (
+            Some("kill_switch"),
+            None,
+            "kill_switch",
+            RetrievalTraceOutcome::DisabledKillSwitch,
+        ),
+        (
+            None,
+            Some("0"),
+            "legacy_disabled",
+            RetrievalTraceOutcome::DisabledLegacy,
+        ),
     ] {
         env.clear();
         if let Some(value) = rollout {
@@ -2540,9 +2563,13 @@ async fn assembly_rollout_disabled_modes_omit_context_and_persist_suppression() 
         }
         let db = Database::ephemeral().await.expect("ephemeral db");
         let events = EventBus::noop();
-        let task = create_project_epic_task(&db, &events, "Suppression epic", "Suppression task").await;
+        let task =
+            create_project_epic_task(&db, &events, "Suppression epic", "Suppression task").await;
         let context = assembly_with_rollout(db.clone(), &task, &role).await;
-        assert!(context.knowledge_context.is_none(), "{label} omits knowledge context");
+        assert!(
+            context.knowledge_context.is_none(),
+            "{label} omits knowledge context"
+        );
         let trace = latest_knowledge_trace_for_assembly(&db, &task.project_id).await;
         assert_eq!(trace.rollout_label, label);
         assert_eq!(trace.outcome, outcome);

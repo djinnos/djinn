@@ -9,9 +9,8 @@ use super::*;
 use djinn_core::events::EventBus;
 use djinn_db::NoteRepository;
 use djinn_db::repositories::retrieval_trace::{
-    CandidateOutcome, RetrievalTraceEntryPoint, RetrievalTraceListFilter, RetrievalTraceRepository,
-    RetrievalTraceOutcome,
-    SkippedReason,
+    CandidateOutcome, RetrievalTraceEntryPoint, RetrievalTraceListFilter, RetrievalTraceOutcome,
+    RetrievalTraceRepository, SkippedReason,
 };
 use tokio_util::sync::CancellationToken;
 
