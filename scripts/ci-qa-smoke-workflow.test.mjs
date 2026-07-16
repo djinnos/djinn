@@ -5,6 +5,7 @@ import test from 'node:test';
 
 const WORKFLOW = resolve('.github/workflows/quality-gate.yml');
 const BUILD_COMMAND = 'cargo build -p djinn-qa';
+const PRECOMPILE_COMMAND = 'cargo test --no-run -p djinn-coordinator -p djinn-slot -p djinn-db';
 const RUN_COMMAND = 'target/debug/djinn-qa run --qa-profile smoke-ci --concurrency 8 --evidence-dir qa/evidence/smoke-ci';
 const MAINTENANCE_DATABASE_URL = 'postgres://postgres:postgres@127.0.0.1:5433/postgres';
 const TEMPLATE_DATABASE_URL = 'postgres://postgres:postgres@127.0.0.1:5433/djinn_test_template';
@@ -62,6 +63,7 @@ test('qa-smoke workflow contract is deterministic, routed, and fail closed', () 
   const executionStep = smoke.slice(smokeStepAt, uploadStepAt);
   const compileDatabaseMatches = [...executionStep.matchAll(/^          DATABASE_URL: (\S+)$/gm)];
   const buildAt = smoke.indexOf(BUILD_COMMAND);
+  const precompileAt = smoke.indexOf(PRECOMPILE_COMMAND);
   const runAt = smoke.indexOf(RUN_COMMAND);
   const coverageAt = smoke.indexOf(COVERAGE_COMMAND);
   assert.doesNotMatch(executionStep, /cargo run -p djinn-qa/,
@@ -69,13 +71,16 @@ test('qa-smoke workflow contract is deterministic, routed, and fail closed', () 
   assert.equal(executionStep.split(BUILD_COMMAND).length - 1, 1,
     'qa-smoke must build djinn-qa exactly once before execution');
   assert.ok(buildAt >= 0, 'the djinn-qa build must be present');
+  assert.equal(executionStep.split(PRECOMPILE_COMMAND).length - 1, 1,
+    'scenario packages must be precompiled exactly once against the template');
+  assert.ok(precompileAt >= 0, 'the exact scenario package precompile must be present');
   assert.ok(runAt >= 0, 'qa-smoke must run the exact deterministic smoke command');
-  assert.ok(templateAt >= 0 && migrationAt > templateAt && templateReadyAt > migrationAt && templateReadyAt < smokeStepAt && smokeStepAt < buildAt && buildAt < runAt,
-    'template migration and clone-template marking must complete before building and directly executing qa smoke');
+  assert.ok(templateAt >= 0 && migrationAt > templateAt && templateReadyAt > migrationAt && templateReadyAt < smokeStepAt && smokeStepAt < buildAt && buildAt < precompileAt && precompileAt < runAt,
+    'template bootstrap, djinn-qa build, package precompile, and direct runner must remain ordered');
   assert.equal(compileDatabaseMatches.length, 1,
     'the smoke and coverage execution step must own exactly one SQLx compile-time database URL');
   assert.equal(compileDatabaseMatches[0][1], TEMPLATE_DATABASE_URL,
-    'the djinn-qa build must compile SQLx macros against the migrated template');
+    'the build and package precompile must share the migrated template compile URL');
   assert.notEqual(maintenanceDatabaseMatch[1], compileDatabaseMatches[0][1],
     'isolated clone acquisition and SQLx compile-time checks must use distinct databases');
   assert.ok(coverageAt > runAt, 'coverage must run after smoke evidence is emitted');

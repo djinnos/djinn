@@ -91,6 +91,9 @@ pub trait DatabaseAcquirer: Sync {
 
 pub struct CargoExecutor;
 const CARGO_EXECUTION_TIMEOUT: Duration = Duration::from_secs(30 * 60);
+/// Maximum diagnostic payload retained from each child output stream.
+/// Readers continue draining after this limit so a noisy child cannot block.
+const OUTPUT_TAIL_CAP: usize = 64 * 1024;
 
 impl ScenarioExecutor for CargoExecutor {
     fn execute(&self, root: &Path, execution: &Execution) -> Result<(), String> {
@@ -124,17 +127,47 @@ fn cargo_command(root: &Path, execution: &Execution) -> Command {
     command
 }
 
-fn drain<T: Read + Send + 'static>(stream: Option<T>) -> thread::JoinHandle<Vec<u8>> {
+#[derive(Debug, Default)]
+struct OutputTail {
+    bytes: Vec<u8>,
+    truncated: bool,
+}
+
+fn drain<T: Read + Send + 'static>(stream: Option<T>) -> thread::JoinHandle<OutputTail> {
     thread::spawn(move || {
-        let mut bytes = Vec::new();
+        let mut tail = OutputTail::default();
         if let Some(mut stream) = stream {
-            let _ = stream.read_to_end(&mut bytes);
+            let mut chunk = [0_u8; 8 * 1024];
+            loop {
+                let count = match stream.read(&mut chunk) {
+                    Ok(0) | Err(_) => break,
+                    Ok(count) => count,
+                };
+                let overflow = tail
+                    .bytes
+                    .len()
+                    .saturating_add(count)
+                    .saturating_sub(OUTPUT_TAIL_CAP);
+                if overflow > 0 {
+                    if overflow >= tail.bytes.len() {
+                        let skip = overflow - tail.bytes.len();
+                        tail.bytes.clear();
+                        tail.bytes.extend_from_slice(&chunk[skip..count]);
+                    } else {
+                        tail.bytes.drain(..overflow);
+                        tail.bytes.extend_from_slice(&chunk[..count]);
+                    }
+                    tail.truncated = true;
+                } else {
+                    tail.bytes.extend_from_slice(&chunk[..count]);
+                }
+            }
         }
-        bytes
+        tail
     })
 }
 
-fn join_drain(handle: thread::JoinHandle<Vec<u8>>) -> Vec<u8> {
+fn join_drain(handle: thread::JoinHandle<OutputTail>) -> OutputTail {
     let (sender, receiver) = mpsc::channel();
     thread::spawn(move || {
         let _ = sender.send(handle.join().unwrap_or_default());
@@ -144,9 +177,18 @@ fn join_drain(handle: thread::JoinHandle<Vec<u8>>) -> Vec<u8> {
         .unwrap_or_default()
 }
 
-fn command_failure_detail(stdout: &[u8], stderr: &[u8]) -> String {
-    let stdout = String::from_utf8_lossy(stdout);
-    let stderr = String::from_utf8_lossy(stderr);
+fn stream_detail(stream: &OutputTail) -> String {
+    let truncation = if stream.truncated {
+        format!("[truncated; retained newest {OUTPUT_TAIL_CAP} bytes]\n")
+    } else {
+        String::new()
+    };
+    format!("{truncation}{}", String::from_utf8_lossy(&stream.bytes))
+}
+
+fn command_failure_detail(stdout: &OutputTail, stderr: &OutputTail) -> String {
+    let stdout = stream_detail(stdout);
+    let stderr = stream_detail(stderr);
     match (stdout.trim(), stderr.trim()) {
         ("", "") => String::new(),
         (stdout, "") => format!("stdout:\n{stdout}"),
@@ -811,6 +853,40 @@ mod tests {
 
         assert!(diagnostic.contains("stdout:\nfailing test: assertion details"));
         assert!(diagnostic.contains("stderr:\ncompiler note"));
+    }
+
+    #[test]
+    fn drain_retains_bounded_tail_and_marks_truncation() {
+        let mut output = vec![b'o'; OUTPUT_TAIL_CAP + 512];
+        output[..10].copy_from_slice(b"OLD-MARKER");
+        output.extend_from_slice(b"FINAL-MARKER");
+
+        let tail = drain(Some(std::io::Cursor::new(output))).join().unwrap();
+        let detail = command_failure_detail(&tail, &OutputTail::default());
+
+        assert_eq!(tail.bytes.len(), OUTPUT_TAIL_CAP);
+        assert!(tail.truncated);
+        assert!(detail.contains("truncated; retained newest 65536 bytes"));
+        assert!(detail.contains("FINAL-MARKER"));
+        assert!(!detail.contains("OLD-MARKER"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn timeout_stdout_evidence_is_capped_and_keeps_final_marker() {
+        let mut command = Command::new("sh");
+        command.args([
+            "-c",
+            "head -c 70000 /dev/zero | tr '\\0' x; printf FINAL-MARKER; sleep 10",
+        ]);
+
+        let diagnostic =
+            execute_command(&mut command, Duration::from_millis(100), "djinn-qa").unwrap_err();
+
+        assert!(diagnostic.contains("timed out"));
+        assert!(diagnostic.contains("truncated; retained newest 65536 bytes"));
+        assert!(diagnostic.contains("FINAL-MARKER"));
+        assert!(diagnostic.len() <= OUTPUT_TAIL_CAP + 256);
     }
 
     #[test]

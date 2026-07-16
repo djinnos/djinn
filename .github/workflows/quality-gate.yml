@@ -1130,6 +1130,7 @@ jobs:
           DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5433/djinn_test_template
         run: |
           cargo build -p djinn-qa
+          cargo test --no-run -p djinn-coordinator -p djinn-slot -p djinn-db
           set +e
           target/debug/djinn-qa run --qa-profile smoke-ci --concurrency 8 --evidence-dir qa/evidence/smoke-ci
           run_status=$?
