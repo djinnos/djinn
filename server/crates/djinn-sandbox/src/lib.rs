@@ -194,6 +194,16 @@ fn _detect() -> Box<dyn Sandbox> {
 
 #[cfg(target_os = "linux")]
 pub(crate) fn probe_landlock() -> bool {
+    landlock_abi().is_some()
+}
+
+/// Return the Landlock ABI reported by the running kernel.
+///
+/// Callers with stricter policies must compare this value with the ABI whose
+/// access set they request; basic agent-shell backend detection intentionally
+/// continues to accept every supported ABI.
+#[cfg(target_os = "linux")]
+pub(crate) fn landlock_abi() -> Option<i32> {
     // landlock_create_ruleset(NULL, 0, LANDLOCK_CREATE_RULESET_VERSION=1)
     // Returns the Landlock ABI version (> 0) if the kernel supports it,
     // or -ENOSYS if Landlock is not available. Syscall 444 is stable on
@@ -206,7 +216,7 @@ pub(crate) fn probe_landlock() -> bool {
             1i32,                             // flags = LANDLOCK_CREATE_RULESET_VERSION
         )
     };
-    ret > 0
+    (ret > 0).then_some(ret as i32)
 }
 
 // ─── Tests ────────────────────────────────────────────────────────────────────

@@ -14,7 +14,10 @@ use std::process::{Command, Stdio};
 
 use landlock::{
     ABI, Access, AccessFs, PathBeneath, PathFd, Ruleset, RulesetAttr, RulesetCreatedAttr,
+    RulesetStatus,
 };
+
+const REQUIRED_LANDLOCK_ABI: i32 = ABI::V3 as i32;
 
 /// An argv invocation and the complete set of host paths it may use.
 ///
@@ -91,10 +94,17 @@ pub enum FinalVerificationError {
 pub fn launch_final_verification(
     request: FinalVerificationRequest,
 ) -> Result<FinalVerificationResult, FinalVerificationError> {
+    launch_with_backend_check(request, ensure_backend_available)
+}
+
+fn launch_with_backend_check(
+    request: FinalVerificationRequest,
+    backend_check: impl FnOnce() -> Result<(), FinalVerificationError>,
+) -> Result<FinalVerificationResult, FinalVerificationError> {
     let prepared = PreparedRequest::new(request)?;
     // Request validation performs no mutation, so report a pre-existing output
     // as a policy violation even if the host cannot provide the backend.
-    ensure_backend_available()?;
+    backend_check()?;
     prepared.create_empty_output_directories()?;
 
     let mut command = Command::new(&prepared.argv[0]);
@@ -132,13 +142,13 @@ pub fn launch_final_verification(
 
 /// Whether the two kernel mechanisms required by this launcher are available.
 pub fn final_verification_backend_available() -> bool {
-    crate::probe_landlock() && probe_network_namespace()
+    probe_required_filesystem_policy() && probe_network_namespace()
 }
 
 fn ensure_backend_available() -> Result<(), FinalVerificationError> {
-    if !crate::probe_landlock() {
+    if !probe_required_filesystem_policy() {
         return Err(FinalVerificationError::BackendUnavailable {
-            reason: "Landlock is unavailable",
+            reason: "Landlock ABI V3 policy is unavailable",
         });
     }
     if !probe_network_namespace() {
@@ -147,6 +157,32 @@ fn ensure_backend_available() -> Result<(), FinalVerificationError> {
         });
     }
     Ok(())
+}
+
+fn landlock_abi_supports_final_verification(abi: Option<i32>) -> bool {
+    abi.is_some_and(|abi| abi >= REQUIRED_LANDLOCK_ABI)
+}
+
+/// Verify that the exact V3 filesystem access set used for final verification
+/// can be created and installed. Installation happens in a disposable child
+/// because Landlock restrictions cannot be removed from the calling thread.
+fn probe_required_filesystem_policy() -> bool {
+    if !landlock_abi_supports_final_verification(crate::landlock_abi()) {
+        return false;
+    }
+
+    let pid = unsafe { libc::fork() };
+    if pid < 0 {
+        return false;
+    }
+    if pid == 0 {
+        // Using `/` as the read root exercises apply_filesystem_policy's exact
+        // handled-access set, device rules, ruleset creation, and installation
+        // without granting the probe child any new privileges.
+        let ok = apply_filesystem_policy(Path::new("/"), &[], &[], &[]).is_ok();
+        unsafe { libc::_exit(if ok { 0 } else { 1 }) };
+    }
+    child_exited_successfully(pid)
 }
 
 #[derive(Debug)]
@@ -299,8 +335,19 @@ fn apply_filesystem_policy(
     for device in ["/dev/null", "/dev/zero", "/dev/urandom"] {
         ruleset = ruleset.add_rule(PathBeneath::new(PathFd::new(device)?, full))?;
     }
-    ruleset.restrict_self()?;
+    let status = ruleset.restrict_self()?;
+    anyhow::ensure!(
+        status.ruleset == RulesetStatus::FullyEnforced,
+        "Landlock policy was not fully enforced"
+    );
     Ok(())
+}
+
+fn child_exited_successfully(pid: libc::pid_t) -> bool {
+    let mut status = 0;
+    (unsafe { libc::waitpid(pid, &mut status, 0) >= 0 })
+        && libc::WIFEXITED(status)
+        && libc::WEXITSTATUS(status) == 0
 }
 
 fn probe_network_namespace() -> bool {
@@ -312,10 +359,7 @@ fn probe_network_namespace() -> bool {
         let ok = unsafe { libc::unshare(libc::CLONE_NEWUSER | libc::CLONE_NEWNET) } == 0;
         unsafe { libc::_exit(if ok { 0 } else { 1 }) };
     }
-    let mut status = 0;
-    (unsafe { libc::waitpid(pid, &mut status, 0) >= 0 })
-        && libc::WIFEXITED(status)
-        && libc::WEXITSTATUS(status) == 0
+    child_exited_successfully(pid)
 }
 
 fn enter_isolated_network_namespace() -> io::Result<()> {
@@ -391,6 +435,33 @@ mod tests {
     }
 
     #[test]
+    fn final_verification_rejects_landlock_abi_v1_and_v2() {
+        assert!(!landlock_abi_supports_final_verification(None));
+        assert!(!landlock_abi_supports_final_verification(Some(1)));
+        assert!(!landlock_abi_supports_final_verification(Some(2)));
+        assert!(landlock_abi_supports_final_verification(Some(3)));
+        assert!(landlock_abi_supports_final_verification(Some(4)));
+    }
+
+    #[test]
+    fn unavailable_required_policy_does_not_create_output() {
+        let worktree = TempDir::new().unwrap();
+        let output = worktree.path().join("outputs");
+        let error = launch_with_backend_check(request(worktree.path()), || {
+            Err(FinalVerificationError::BackendUnavailable {
+                reason: "injected unavailable V3 policy",
+            })
+        })
+        .unwrap_err();
+
+        assert!(matches!(
+            error,
+            FinalVerificationError::BackendUnavailable { .. }
+        ));
+        assert!(!output.exists());
+    }
+
+    #[test]
     fn declared_external_and_new_output_work_when_backend_is_available() {
         if !final_verification_backend_available() {
             return;
@@ -423,7 +494,7 @@ mod tests {
         let secret = host_only.path().join("secret");
         std::fs::write(&secret, b"must not be readable").unwrap();
         let mut req = request(worktree.path());
-        req.argv[2] = format!("cat {} >/dev/null 2>&1; exit 7", secret.display());
+        req.argv[2] = format!("cat {} >/dev/null 2>&1", secret.display());
         let result = launch_final_verification(req).unwrap();
         assert!(!result.succeeded());
         assert!(result.stderr.is_empty());
