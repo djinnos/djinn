@@ -625,6 +625,9 @@ mod tests {
     }
 }
 
+#[cfg(test)]
+mod retrieval_outcomes_report_tests;
+
 fn report_interval(
     request: &TaskRunOutcomeReportRequest,
 ) -> Result<(DateTime<FixedOffset>, DateTime<FixedOffset>)> {
