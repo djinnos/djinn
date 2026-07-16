@@ -241,14 +241,15 @@ async fn pr_cleanup_allows_bot_pr_after_guardrails_pass() {
 async fn branch_cleanup_skips_protected_branches() {
     let cleanup = policy(MockCleanupGitHub::default(), config());
 
-    assert!(
-        !cleanup
+    assert_eq!(
+        cleanup
             .delete_branch_if_allowed_for_target(
                 &target(Some("2026-06-21T10:00:00Z"), "2026-06-21T10:00:00Z"),
                 "main",
             )
             .await
-            .unwrap()
+            .unwrap(),
+        BranchCleanupOutcome::Skipped,
     );
 }
 
@@ -263,14 +264,15 @@ async fn branch_cleanup_skips_branch_used_as_base_of_open_pr() {
         .push(pr(2, "djinn-bot[bot]", "task/child", "task/b111"));
     let cleanup = policy(github, config());
 
-    assert!(
-        !cleanup
+    assert_eq!(
+        cleanup
             .delete_branch_if_allowed_for_target(
                 &target(Some("2026-06-21T10:00:00Z"), "2026-06-21T10:00:00Z"),
                 "task/b111",
             )
             .await
-            .unwrap()
+            .unwrap(),
+        BranchCleanupOutcome::Skipped,
     );
 }
 

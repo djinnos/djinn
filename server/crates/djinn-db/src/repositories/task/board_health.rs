@@ -239,8 +239,7 @@ pub(super) async fn attribution_findings_section(pool: &sqlx::PgPool) -> serde_j
     let findings: Vec<serde_json::Value> = rows
         .into_iter()
         .map(|row| {
-            let creator_user_id: Option<String> =
-                row.try_get("created_by_user_id").ok().flatten();
+            let creator_user_id: Option<String> = row.try_get("created_by_user_id").ok().flatten();
             let creator_resolved = row
                 .try_get::<Option<String>, _>("resolved_creator_user_id")
                 .ok()

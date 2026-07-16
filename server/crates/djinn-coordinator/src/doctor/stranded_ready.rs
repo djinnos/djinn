@@ -549,9 +549,15 @@ mod tests {
         let findings = StrandedReadyCheck::new(source).run().expect("run");
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].severity, FindingSeverity::Error);
-        assert_eq!(findings[0].resolver_snapshot.outputs["reason"], "legacy_null_creator");
+        assert_eq!(
+            findings[0].resolver_snapshot.outputs["reason"],
+            "legacy_null_creator"
+        );
         assert_eq!(findings[0].evidence["gate_verdict"], "blocked");
-        assert_eq!(findings[0].evidence["creation_provenance"]["creator_resolved"], false);
+        assert_eq!(
+            findings[0].evidence["creation_provenance"]["creator_resolved"],
+            false
+        );
     }
 
     #[test]
