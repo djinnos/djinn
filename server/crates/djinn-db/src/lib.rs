@@ -49,7 +49,7 @@ pub use repositories::{
     admission_journal::{
         AdmissionDomain, AdmissionJournalKey, AdmissionJournalRepository, AdmissionJournalRow,
         AdmissionRecoveryResult, AdmissionState, AdmissionWorkloadKind, CreateStartedInput,
-        ReserveAdmissionInput, ReserveAdmissionResult, TerminalAdmissionInput,
+        ObserveAdmissionResult, ReserveAdmissionInput, ReserveAdmissionResult, TerminalAdmissionInput,
         UidFencedAdmissionInput,
     },
     agent::{
