@@ -1,3 +1,4 @@
+// djinn:allow-oversize — cohesive prompt assembly; follow-up modularization is out of scope.
 //! Role-specific prompt-context assembly: conflict, activity, epic, knowledge,
 //! code-graph, and CI directives → rendered system prompt with extensions + skills.
 
