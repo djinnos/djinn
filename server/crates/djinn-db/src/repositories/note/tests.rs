@@ -26,6 +26,7 @@ mod lifecycle_archive;
 mod lifecycle_decay;
 mod memory_revision_repository;
 mod mutation;
+mod revision_readers;
 mod scope_overlap_trace_candidates;
 mod scope_paths_regressions;
 mod search_ranking;

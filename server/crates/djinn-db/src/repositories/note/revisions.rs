@@ -295,6 +295,168 @@ pub struct NoteRevisionEventRow {
     pub created_at: String,
 }
 
+// ── Read boundary types ──────────────────────────────────────────────────────
+
+/// Maximum page size accepted by any bounded ledger reader.
+pub const REVISION_PAGE_MAX: usize = 100;
+
+/// A decoded, validated before-cursor for one ordered ledger view.
+///
+/// Each cursor variant carries only the sort key tuple required for one view.
+/// The wire encoding is a short base64url JSON payload with an internal
+/// discriminant string so a note-history cursor cannot be replayed against the
+/// session view (or vice-versa). Cursors are only ever produced by the
+/// repository from a fetched row's sort key; they are decoded (never
+/// interpolated) before use.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RevisionCursor {
+    /// Sort key for note-history pagination: `(note_seq DESC)`.
+    NoteHistory { note_seq: i64 },
+    /// Sort key for session/task-run pagination: `(created_at DESC, id DESC)`.
+    Session { created_at: String, id: String },
+}
+
+/// Discriminant embedded in the cursor JSON to prevent cross-view replay.
+const CURSOR_KIND_NOTE_HISTORY: &str = "note_history";
+const CURSOR_KIND_SESSION: &str = "session";
+
+impl RevisionCursor {
+    fn encode(kind: &'static str, payload: serde_json::Value) -> String {
+        use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+        let json = serde_json::json!({ "k": kind, "v": payload });
+        let bytes = serde_json::to_vec(&json).unwrap_or_default();
+        URL_SAFE_NO_PAD.encode(&bytes)
+    }
+
+    fn decode(kind: &'static str, encoded: &str) -> Result<serde_json::Value, RevisionCursorError> {
+        use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+        let bytes = URL_SAFE_NO_PAD
+            .decode(encoded)
+            .map_err(|_| RevisionCursorError::Malformed)?;
+        let json: serde_json::Value =
+            serde_json::from_slice(&bytes).map_err(|_| RevisionCursorError::Malformed)?;
+        let actual = json
+            .get("k")
+            .and_then(|v| v.as_str())
+            .ok_or(RevisionCursorError::Malformed)?;
+        if actual != kind {
+            return Err(RevisionCursorError::WrongView);
+        }
+        json.get("v").cloned().ok_or(RevisionCursorError::Malformed)
+    }
+
+    pub fn encode_note_history(note_seq: i64) -> String {
+        Self::encode(
+            CURSOR_KIND_NOTE_HISTORY,
+            serde_json::json!({ "s": note_seq }),
+        )
+    }
+
+    pub fn encode_session(created_at: &str, id: &str) -> String {
+        Self::encode(
+            CURSOR_KIND_SESSION,
+            serde_json::json!({ "c": created_at, "i": id }),
+        )
+    }
+
+    pub fn decode_note_history(encoded: &str) -> Result<Self, RevisionCursorError> {
+        let v = Self::decode(CURSOR_KIND_NOTE_HISTORY, encoded)?;
+        let note_seq = v
+            .get("s")
+            .and_then(|s| s.as_i64())
+            .ok_or(RevisionCursorError::Malformed)?;
+        Ok(Self::NoteHistory { note_seq })
+    }
+
+    pub fn decode_session(encoded: &str) -> Result<Self, RevisionCursorError> {
+        let v = Self::decode(CURSOR_KIND_SESSION, encoded)?;
+        let created_at = v
+            .get("c")
+            .and_then(|s| s.as_str())
+            .ok_or(RevisionCursorError::Malformed)?
+            .to_owned();
+        let id = v
+            .get("i")
+            .and_then(|s| s.as_str())
+            .ok_or(RevisionCursorError::Malformed)?
+            .to_owned();
+        Ok(Self::Session { created_at, id })
+    }
+}
+
+/// Why a cursor string was rejected.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum RevisionCursorError {
+    #[error("malformed cursor")]
+    Malformed,
+    #[error("cursor does not match this view")]
+    WrongView,
+}
+
+/// Bounded request for one note's revision history.
+///
+/// All SQL requires `project_id`; the caller cannot widen scope.  The
+/// `note_exists` flag on the response carries live-row metadata so upper layers
+/// can distinguish a live pre-migration note with zero events from an unknown
+/// or deleted note without synthesizing revisions.
+#[derive(Debug, Clone)]
+pub struct NoteHistoryRequest<'a> {
+    pub project_id: &'a str,
+    pub note_id: &'a str,
+    pub limit: usize,
+    pub before: Option<&'a str>,
+}
+
+/// Bounded request for one session's or task-run's revision events.
+#[derive(Debug, Clone)]
+pub struct SessionRevisionRequest<'a> {
+    pub project_id: &'a str,
+    pub limit: usize,
+    pub before: Option<&'a str>,
+}
+
+/// A page of revision events plus the opaque cursor for the next page.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RevisionHistoryPage {
+    pub events: Vec<NoteRevisionEventRow>,
+    pub next_cursor: Option<String>,
+    /// Whether a live `notes` row currently exists for the requested note.
+    /// `false` for deleted or unknown notes; `true` for live notes (including
+    /// pre-migration notes with zero events).
+    pub note_exists: bool,
+}
+
+/// A page of session/task-run revision events.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SessionRevisionPage {
+    pub events: Vec<NoteRevisionEventRow>,
+    pub next_cursor: Option<String>,
+}
+
+/// Bounded request for an explicit single revision lookup.
+#[derive(Debug, Clone)]
+pub struct RevisionLookupRequest<'a> {
+    pub project_id: &'a str,
+    pub note_id: &'a str,
+    pub revision_id: &'a str,
+}
+
+/// Bounded request for an inclusive revision range between two note-sequence
+/// values (descending).  Both endpoints are required to be content-bearing
+/// revision sequence numbers; the range includes both endpoints and every
+/// intervening event, regardless of event kind, so callers can build
+/// deterministic pairwise diffs from explicit snapshots without inferring
+/// neighboring state.
+#[derive(Debug, Clone)]
+pub struct RevisionRangeRequest<'a> {
+    pub project_id: &'a str,
+    pub note_id: &'a str,
+    /// Higher (newer) note_seq endpoint.
+    pub to_seq: i64,
+    /// Lower (older) note_seq endpoint.
+    pub from_seq: i64,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

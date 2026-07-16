@@ -283,18 +283,22 @@ async fn revision_mutation_replaces_wikilinks_and_rolls_back_failed_updates() {
     .await
     .unwrap();
     let graph = repo.graph(&project.id).await.unwrap();
-    assert!(graph
-        .edges
-        .iter()
-        .any(|edge| edge.source_id == source.id && edge.target_id == new_target.id));
-    assert!(!graph
-        .edges
-        .iter()
-        .any(|edge| edge.source_id == source.id && edge.target_id == old_target.id));
+    assert!(
+        graph
+            .edges
+            .iter()
+            .any(|edge| edge.source_id == source.id && edge.target_id == new_target.id)
+    );
+    assert!(
+        !graph
+            .edges
+            .iter()
+            .any(|edge| edge.source_id == source.id && edge.target_id == old_target.id)
+    );
 
     repo.set_revision_event_insertion_failure_for_test(true);
-    assert!(repo
-        .mutate_with_revision(existing_command(
+    assert!(
+        repo.mutate_with_revision(existing_command(
             &project.id,
             &source.id,
             NoteRevisionEventKind::Updated,
@@ -302,7 +306,8 @@ async fn revision_mutation_replaces_wikilinks_and_rolls_back_failed_updates() {
             0.5,
         ))
         .await
-        .is_err());
+        .is_err()
+    );
     repo.set_revision_event_insertion_failure_for_test(false);
 
     assert_eq!(
@@ -310,14 +315,18 @@ async fn revision_mutation_replaces_wikilinks_and_rolls_back_failed_updates() {
         "links [[NewTarget]]"
     );
     let graph_after_rollback = repo.graph(&project.id).await.unwrap();
-    assert!(graph_after_rollback
-        .edges
-        .iter()
-        .any(|edge| edge.source_id == source.id && edge.target_id == new_target.id));
-    assert!(!graph_after_rollback
-        .edges
-        .iter()
-        .any(|edge| edge.source_id == source.id && edge.target_id == old_target.id));
+    assert!(
+        graph_after_rollback
+            .edges
+            .iter()
+            .any(|edge| edge.source_id == source.id && edge.target_id == new_target.id)
+    );
+    assert!(
+        !graph_after_rollback
+            .edges
+            .iter()
+            .any(|edge| edge.source_id == source.id && edge.target_id == old_target.id)
+    );
 }
 
 #[tokio::test]

@@ -75,9 +75,11 @@ pub use replay_validation::{
     generate_anchor_embedding_replay_report, render_anchor_embedding_replay_report_markdown,
 };
 pub use revisions::{
-    NoteRevisionActorKind, NoteRevisionEventInput, NoteRevisionEventKind, NoteRevisionEventRow,
-    NoteRevisionReason, NoteRevisionSnapshot, NoteRevisionSubsystem, NoteRevisionValidationError,
-    TrustedNoteRevisionAttribution, TrustedNoteRevisionProvenance,
+    NoteHistoryRequest, NoteRevisionActorKind, NoteRevisionEventInput, NoteRevisionEventKind,
+    NoteRevisionEventRow, NoteRevisionReason, NoteRevisionSnapshot, NoteRevisionSubsystem,
+    NoteRevisionValidationError, REVISION_PAGE_MAX, RevisionCursor, RevisionCursorError,
+    RevisionHistoryPage, RevisionLookupRequest, RevisionRangeRequest, SessionRevisionPage,
+    SessionRevisionRequest, TrustedNoteRevisionAttribution, TrustedNoteRevisionProvenance,
 };
 pub use rrf::rrf_fuse;
 pub use scoring::{
