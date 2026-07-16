@@ -1537,7 +1537,7 @@ async fn run_task_run(args: WorkerDefaultArgs) -> Result<()> {
 
     // Identity used by the SIGTERM / soft-deadline checkpoint, mirroring the
     // supervisor's post-stage auto-commit: attribute to the task creator,
-    // falling back to the bot for system/patrol tasks (or host/worker skew).
+    // falling back to the bot when creator identity is unavailable (for example, during host/worker skew).
     let checkpoint_identity = CheckpointIdentity {
         name: spec
             .commit_author_name
