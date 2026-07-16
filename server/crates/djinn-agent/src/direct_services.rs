@@ -28,6 +28,7 @@ use djinn_db::repositories::llm_call_attempt::{
 };
 use djinn_db::repositories::session::CreateSessionParams;
 use djinn_db::repositories::task_run::CreateTaskRunParams;
+use djinn_db::repositories::task_run_outcome::TaskRunOutcomeRepository;
 use djinn_stack::environment::EnvironmentConfig;
 use djinn_supervisor::services::wire::{PlannerAttemptResult, PlannerOutcome};
 use djinn_supervisor::services::{
@@ -857,16 +858,23 @@ impl SupervisorServices for DirectServices {
     }
 
     async fn create_task_run(&self, params: SerializableCreateTaskRunParams) -> Result<(), String> {
-        self.task_runs
-            .create(CreateTaskRunParams {
-                id: params.id.as_str(),
-                project_id: params.project_id.as_str(),
-                task_id: params.task_id.as_str(),
-                trigger_type: params.trigger_type.as_str(),
-                status: params.status.as_deref(),
-                workspace_path: params.workspace_path.as_deref(),
-                mirror_ref: params.mirror_ref.as_deref(),
-            })
+        let attempt_id = params
+            .task_attempt_id
+            .as_deref()
+            .ok_or_else(|| "task-run creation requires an exact task attempt ID".to_owned())?;
+        TaskRunOutcomeRepository::new(self.callbacks.agent_context.db.clone())
+            .create_run_for_attempt(
+                CreateTaskRunParams {
+                    id: params.id.as_str(),
+                    project_id: params.project_id.as_str(),
+                    task_id: params.task_id.as_str(),
+                    trigger_type: params.trigger_type.as_str(),
+                    status: params.status.as_deref(),
+                    workspace_path: params.workspace_path.as_deref(),
+                    mirror_ref: params.mirror_ref.as_deref(),
+                },
+                attempt_id,
+            )
             .await
             .map(|_| ())
             .map_err(|e| e.to_string())

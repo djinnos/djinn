@@ -1482,6 +1482,7 @@ mod tests {
         let (services, bg) = RpcServices::from_unix_stream(client, cancel.clone());
         let params = SerializableCreateTaskRunParams {
             id: "run-create-rt".into(),
+            task_attempt_id: None,
             project_id: "p1".into(),
             task_id: "t1".into(),
             trigger_type: "new_task".into(),

@@ -424,7 +424,7 @@ pub(super) async fn dispatch_task_runtime(
         &model_id,
         resume_lifecycle_metadata,
     )
-    .await;
+    .await?;
     let creator_scope = spec_inputs.created_by_user_id.clone();
     let spec = TaskRunSpec::from(spec_inputs);
     announce_dispatch(&app_state, &spec, &model_id);
@@ -848,6 +848,7 @@ async fn load_task_or_bail(task_id: &str, task_repo: &TaskRepository) -> anyhow:
 /// Inputs to TaskRunSpec construction resolved from task row, dispatch context, and repos.
 struct TaskRunSpecInputs {
     task_run_id: String,
+    task_attempt_id: Option<String>,
     task_id: String,
     project_id: String,
     trigger: TaskRunTrigger,
@@ -873,7 +874,7 @@ impl TaskRunSpecInputs {
         app_state: &AgentContext,
         model_id: &str,
         resume_lifecycle_metadata: Option<serde_json::Value>,
-    ) -> Self {
+    ) -> anyhow::Result<Self> {
         let mut model_id_per_role: HashMap<RoleKind, String> = HashMap::new();
         for role in flow.role_sequence() {
             let resolved =
@@ -913,9 +914,35 @@ impl TaskRunSpecInputs {
         let resume_lifecycle_metadata =
             decode_resume_lifecycle_metadata(resume_lifecycle_metadata, &task.id);
         let task_run_id = uuid::Uuid::now_v7().to_string();
+        let attempt_id = uuid::Uuid::now_v7().to_string();
+        // A run must never be created without the identity of the attempt that
+        // dispatch allocated for it. Do not turn an allocation failure into an
+        // optional ID: that would create an unattributable run.
+        let task_attempt_id = TaskAttemptRepository::new(app_state.db.clone())
+            .create_or_get_pending(djinn_db::CreateTaskAttemptParams {
+                id: &attempt_id,
+                task_id: &task.id,
+                role: flow
+                    .role_sequence()
+                    .first()
+                    .map(|role| role.as_str())
+                    .unwrap_or("worker"),
+                dispatch_key: &format!("task-run:{task_run_id}"),
+                session_id: None,
+                attempt_seq: None,
+            })
+            .await
+            .map(|attempt| attempt.id)
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "supervisor dispatch: failed to allocate exact attempt for task {}: {e}",
+                    task.id
+                )
+            })?;
         let is_evidence_spike = djinn_core::models::task::is_evidence_spike(&task.labels);
-        Self {
+        Ok(Self {
             task_run_id,
+            task_attempt_id: Some(task_attempt_id),
             task_id: task.id.clone(),
             project_id: task.project_id.clone(),
             trigger: trigger_for_flow(flow, ctx.has_conflict),
@@ -931,7 +958,7 @@ impl TaskRunSpecInputs {
             resume_lifecycle_metadata,
             created_by_user_id,
             is_evidence_spike,
-        }
+        })
     }
 }
 
@@ -939,6 +966,7 @@ impl From<TaskRunSpecInputs> for TaskRunSpec {
     fn from(inputs: TaskRunSpecInputs) -> Self {
         Self {
             task_run_id: inputs.task_run_id,
+            task_attempt_id: inputs.task_attempt_id,
             task_id: inputs.task_id,
             project_id: inputs.project_id,
             trigger: inputs.trigger,
