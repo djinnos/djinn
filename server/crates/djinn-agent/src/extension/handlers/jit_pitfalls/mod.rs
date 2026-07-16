@@ -61,7 +61,8 @@ use crate::rollout::{DefaultPolicy, RolloutMode, parse as parse_rollout};
 use trace::{
     JIT_TRACE_PROD_MIN_CONFIDENCE, JIT_TRACE_PROD_NOTE_TYPES, JIT_TRACE_PROD_QUERY_LIMIT,
     JIT_TRACE_PROD_TOP_K, build_trace_durations_ms, build_trace_trigger, classify_trace_candidate,
-    estimate_injected_tokens, persist_jit_empty_trace, persist_jit_error_trace, persist_jit_trace,
+    estimate_injected_tokens, persist_jit_empty_trace, persist_jit_error_trace,
+    persist_jit_suppression_trace, persist_jit_trace,
 };
 
 const TELEMETRY_TARGET: &str = "djinn_agent::jit_pitfalls";
@@ -134,6 +135,19 @@ fn disabled_outcome(rollout_mode: &JitPitfallRolloutMode) -> JitPitfallOutcome {
     match rollout_mode {
         JitPitfallRolloutMode::KillSwitch => JitPitfallOutcome::DisabledKillSwitch,
         _ => JitPitfallOutcome::DisabledDefaultOff,
+    }
+}
+
+fn disabled_trace_outcome(
+    rollout_mode: &JitPitfallRolloutMode,
+) -> djinn_db::repositories::retrieval_trace::RetrievalTraceOutcome {
+    use djinn_db::repositories::retrieval_trace::RetrievalTraceOutcome;
+
+    match rollout_mode {
+        JitPitfallRolloutMode::Off => RetrievalTraceOutcome::DisabledOff,
+        JitPitfallRolloutMode::KillSwitch => RetrievalTraceOutcome::DisabledKillSwitch,
+        JitPitfallRolloutMode::LegacyDisabled => RetrievalTraceOutcome::DisabledLegacy,
+        _ => RetrievalTraceOutcome::DisabledLegacy,
     }
 }
 
@@ -269,6 +283,20 @@ pub(super) async fn maybe_pitfall_hint(
             project_id,
             touched_paths,
         );
+        if let Some(project_id) = project_id
+            && !touched_paths.is_empty()
+            && claim_first_modification(session_id)
+        {
+            persist_jit_suppression_trace(
+                &state.db,
+                session_id,
+                project_id,
+                rollout_mode.clone(),
+                touched_paths,
+                disabled_trace_outcome(&rollout_mode),
+            )
+            .await;
+        }
         return None;
     }
 
@@ -496,6 +524,8 @@ pub(super) async fn maybe_pitfall_hint(
                             estimated_tokens,
                             candidate_cap,
                             candidate_cap_exceeded,
+                            rollout_mode.label(),
+                            djinn_db::repositories::retrieval_trace::RetrievalTraceOutcome::Injected,
                         )
                         .await;
                         tracing::debug!(
@@ -551,6 +581,8 @@ pub(super) async fn maybe_pitfall_hint(
                 estimated_tokens,
                 candidate_cap,
                 candidate_cap_exceeded,
+                rollout_mode.label(),
+                djinn_db::repositories::retrieval_trace::RetrievalTraceOutcome::Injected,
             )
             .await;
             tracing::debug!(
@@ -596,6 +628,8 @@ pub(super) async fn maybe_pitfall_hint(
                 estimated_tokens,
                 candidate_cap,
                 candidate_cap_exceeded,
+                rollout_mode.label(),
+                djinn_db::repositories::retrieval_trace::RetrievalTraceOutcome::Injected,
             )
             .await;
             tracing::debug!(
