@@ -16,6 +16,10 @@
 
 use serde::{Deserialize, Serialize};
 
+#[path = "canonical_verify_identity.rs"]
+pub mod environment_identity;
+pub use environment_identity::*;
+
 use crate::models::{VerifyResult, VerifyRunRecord, VerifySource};
 
 // ─── Profile resolution types ────────────────────────────────────────────────
