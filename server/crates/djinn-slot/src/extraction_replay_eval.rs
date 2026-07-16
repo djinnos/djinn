@@ -5,6 +5,12 @@
 
 use std::collections::BTreeMap;
 use std::path::Path;
+#[cfg(feature = "test-support")]
+use std::{
+    collections::VecDeque,
+    pin::Pin,
+    sync::{Arc, Mutex},
+};
 
 use async_trait::async_trait;
 use djinn_core::{events::EventBus, message::Conversation};
@@ -12,6 +18,8 @@ use djinn_db::{
     Database, NoteDedupCandidate, NoteRepository, SessionMessageRepository, assess_note_quality,
     folder_for_type,
 };
+#[cfg(feature = "test-support")]
+use futures::{Future, Stream};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -420,6 +428,284 @@ pub struct ExtractionReplayReport {
     pub dedup: DedupConfusionCounts,
     pub dedup_precision: f64,
     pub failures: Vec<ReplayFailureDiagnostic>,
+}
+
+/// Rubric floors enforced by the offline command. Both values are fractions in
+/// the inclusive range `0.0..=1.0`.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+pub struct OfflineReplayThresholds {
+    pub minimum_rubric_satisfaction: f64,
+    pub minimum_dedup_precision: f64,
+}
+
+impl Default for OfflineReplayThresholds {
+    fn default() -> Self {
+        Self {
+            minimum_rubric_satisfaction: 1.0,
+            minimum_dedup_precision: 1.0,
+        }
+    }
+}
+
+impl OfflineReplayThresholds {
+    pub fn validate(self) -> Result<(), String> {
+        for (name, value) in [
+            (
+                "minimum_rubric_satisfaction",
+                self.minimum_rubric_satisfaction,
+            ),
+            ("minimum_dedup_precision", self.minimum_dedup_precision),
+        ] {
+            if !(0.0..=1.0).contains(&value) {
+                return Err(format!("{name} must be within 0.0..=1.0"));
+            }
+        }
+        Ok(())
+    }
+
+    pub fn unmet_dimensions(self, report: &ExtractionReplayReport) -> Vec<String> {
+        let mut unmet = Vec::new();
+        if report.rubric_satisfaction_rate < self.minimum_rubric_satisfaction {
+            unmet.push("rubric_satisfaction".to_string());
+        }
+        if report.dedup_precision < self.minimum_dedup_precision {
+            unmet.push("dedup_precision".to_string());
+        }
+        unmet
+    }
+}
+
+/// Render the stable human-readable companion to the JSON report.
+pub fn render_extraction_replay_markdown(
+    report: &ExtractionReplayReport,
+    thresholds: OfflineReplayThresholds,
+) -> String {
+    let mut output = format!(
+        "# Offline extraction replay report\n\n\
+         - Cases: {}/{} ({:.4})\n\
+         - Dedup precision: {:.4}\n\
+         - Dedup confusion: TP={} FP={} TN={} FN={}\n\
+         - Thresholds: rubric >= {:.4}; dedup precision >= {:.4}\n\n\
+         ## Per fixture\n\n",
+        report.satisfied_cases,
+        report.total_cases,
+        report.rubric_satisfaction_rate,
+        report.dedup_precision,
+        report.dedup.true_positive,
+        report.dedup.false_positive,
+        report.dedup.true_negative,
+        report.dedup.false_negative,
+        thresholds.minimum_rubric_satisfaction,
+        thresholds.minimum_dedup_precision,
+    );
+    for case in &report.cases {
+        let mut failed = case.failed_dimensions.clone();
+        failed.extend(case.failed_stages.iter().cloned());
+        let result = if failed.is_empty() { "PASS" } else { "FAIL" };
+        let failed = if failed.is_empty() {
+            "none".to_string()
+        } else {
+            failed.join(", ")
+        };
+        output.push_str(&format!(
+            "- **{result}** `{}` — failed: {failed}\n",
+            case.fixture_id
+        ));
+    }
+    let unmet = thresholds.unmet_dimensions(report);
+    if !unmet.is_empty() {
+        output.push_str(&format!(
+            "\n## Gate failure\n\nThresholds not met: {}\n",
+            unmet.join(", ")
+        ));
+    }
+    output
+}
+
+#[cfg(feature = "test-support")]
+struct FixtureResponseProvider {
+    responses: Mutex<VecDeque<String>>,
+}
+
+#[cfg(feature = "test-support")]
+impl FixtureResponseProvider {
+    fn new(responses: Vec<String>) -> Self {
+        Self {
+            responses: Mutex::new(responses.into_iter().collect()),
+        }
+    }
+}
+
+/// Queue-backed fixtures cannot resolve a client, inspect credentials, or make
+/// a network request.
+#[cfg(feature = "test-support")]
+impl djinn_provider::provider::LlmProvider for FixtureResponseProvider {
+    fn name(&self) -> &str {
+        "offline-fixture"
+    }
+    fn stream<'a>(
+        &'a self,
+        _conversation: &'a djinn_provider::message::Conversation,
+        _tools: &'a [serde_json::Value],
+        _tool_choice: Option<djinn_provider::provider::ToolChoice>,
+    ) -> Pin<
+        Box<
+            dyn Future<
+                    Output = anyhow::Result<
+                        Pin<
+                            Box<
+                                dyn Stream<
+                                        Item = anyhow::Result<
+                                            djinn_provider::provider::StreamEvent,
+                                        >,
+                                    > + Send,
+                            >,
+                        >,
+                    >,
+                > + Send
+                + 'a,
+        >,
+    > {
+        let response = self
+            .responses
+            .lock()
+            .map_err(|_| anyhow::anyhow!("offline fixture response queue poisoned"))
+            .map(|mut queue| queue.pop_front().unwrap_or_default());
+        Box::pin(async move {
+            let stream = futures::stream::iter(vec![
+                Ok(djinn_provider::provider::StreamEvent::Delta(
+                    djinn_core::message::ContentBlock::text(response?),
+                )),
+                Ok(djinn_provider::provider::StreamEvent::Done),
+            ]);
+            Ok(Box::pin(stream) as _)
+        })
+    }
+}
+
+/// Execute the committed corpus against a template-cloned test Postgres
+/// database using only fixture-backed providers. No production project opens.
+#[cfg(feature = "test-support")]
+pub async fn run_offline_fixture_replay(
+    fixture_directory: impl AsRef<Path>,
+) -> Result<ExtractionReplayReport, String> {
+    let fixtures = load_extraction_replay_fixtures(fixture_directory)?;
+    let db = Database::open_in_memory().map_err(|error| error.to_string())?;
+    let events = EventBus::noop();
+    let eval = djinn_db::ProjectRepository::new(db.clone(), events.clone())
+        .create("extraction-replay", "test", "offline-fixture-replay")
+        .await
+        .map_err(|error| error.to_string())?;
+    let notes = NoteRepository::new(db.clone(), events.clone());
+    let mut cases = Vec::with_capacity(fixtures.len());
+    for mut fixture in fixtures {
+        for target in [
+            &mut fixture.expected_duplicate_target,
+            &mut fixture.must_not_duplicate_target,
+        ]
+        .into_iter()
+        .flatten()
+        {
+            let candidate = notes
+                .create_db_note_with_permalink(
+                    &eval.id,
+                    target,
+                    target,
+                    &fixture.required_discriminative_text,
+                    &fixture.expected_note_type,
+                    "[]",
+                )
+                .await
+                .map_err(|error| error.to_string())?;
+            *target = candidate.id;
+        }
+        let task = djinn_db::TaskRepository::new(db.clone(), events.clone())
+            .create_in_project(
+                &eval.id,
+                None,
+                &format!("replay {}", fixture.id),
+                "offline replay fixture",
+                "",
+                "task",
+                1,
+                "eval",
+                None,
+                None,
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+        let metadata =
+            serde_json::to_string(&fixture.terminal_context).map_err(|error| error.to_string())?;
+        let session = djinn_db::SessionRepository::new(db.clone(), events.clone())
+            .create(djinn_db::CreateSessionParams {
+                project_id: &eval.id,
+                task_id: Some(&task.id),
+                model: "offline/injected-fixture",
+                agent_type: "worker",
+                metadata_json: Some(&metadata),
+                task_run_id: None,
+                pricing: None,
+                cost_basis: None,
+            })
+            .await
+            .map_err(|error| error.to_string())?;
+        let messages = fixture
+            .messages
+            .iter()
+            .map(|message| {
+                let role = match message.role.as_str() {
+                    "system" => djinn_core::message::Role::System,
+                    "user" => djinn_core::message::Role::User,
+                    "assistant" => djinn_core::message::Role::Assistant,
+                    role => {
+                        return Err(format!(
+                            "{} has unsupported persisted role {role}",
+                            fixture.id
+                        ));
+                    }
+                };
+                Ok(djinn_core::message::Message {
+                    role,
+                    content: vec![djinn_core::message::ContentBlock::text(&message.content)],
+                    metadata: None,
+                })
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        SessionMessageRepository::new(db.clone(), events.clone())
+            .insert_messages_batch(&session.id, &task.id, &messages)
+            .await
+            .map_err(|error| error.to_string())?;
+        cases.push(DatabaseReplayCase {
+            candidate_lookup_text: fixture.required_discriminative_text.clone(),
+            fixture,
+            session_id: session.id,
+        });
+    }
+    let extractions = cases
+        .iter()
+        .map(|case| case.fixture.injected_provider_response.clone())
+        .collect();
+    let novelty = cases
+        .iter()
+        .filter(|case| {
+            case.fixture.expect_adr_054_quality
+                && (case.fixture.expected_duplicate_target.is_some()
+                    || case.fixture.must_not_duplicate_target.is_some())
+        })
+        .map(
+            |case| match case.fixture.expected_duplicate_target.as_deref() {
+                Some(target) => {
+                    format!(r#"{{"decision":"already_known","existing_note_id":"{target}"}}"#)
+                }
+                None => r#"{"decision":"novel","existing_note_id":null}"#.to_string(),
+            },
+        )
+        .collect();
+    let seam = ProductionReplaySeam {
+        extraction_provider: Arc::new(FixtureResponseProvider::new(extractions)),
+        novelty_provider: Arc::new(FixtureResponseProvider::new(novelty)),
+    };
+    Ok(run_database_extraction_replay(db, events, &eval.id, &cases, &seam).await)
 }
 
 /// Score captured observations. Quality is deliberately re-evaluated through

@@ -7,6 +7,11 @@ edition = "2024"
 [lib]
 doctest = false
 
+[[bin]]
+name = "extraction-replay"
+path = "src/bin/extraction_replay.rs"
+required-features = ["test-support"]
+
 [features]
 # Exposes cluster-free slot-pool factory hooks for downstream integration tests.
 test-support = []
