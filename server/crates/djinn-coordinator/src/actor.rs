@@ -764,6 +764,11 @@ impl CoordinatorActor {
         }
     }
 
+    pub(super) async fn run_build_admission_release_pass(&mut self) {
+        Self::run_pass_with_watchdog("build-admission-release", self.dispatch_ready_tasks(None))
+            .await;
+    }
+
     pub(super) async fn run(mut self) {
         tracing::info!("CoordinatorActor started");
 
@@ -825,7 +830,7 @@ impl CoordinatorActor {
                         std::future::pending::<()>().await;
                     }
                 } => {
-                    Self::run_pass_with_watchdog("build-admission-release", self.dispatch_ready_tasks(None)).await;
+                    self.run_build_admission_release_pass().await;
                 }
 
                 // 2. Incoming API messages.

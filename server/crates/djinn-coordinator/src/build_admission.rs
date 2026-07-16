@@ -106,6 +106,7 @@ struct PermitState {
     creator_server_epoch: String,
     object_name: String,
     durable: bool,
+    released: bool,
 }
 
 /// A single controller shared by task-run dispatch and graph warming.
@@ -248,6 +249,7 @@ impl BuildAdmissionController {
             creator_server_epoch: self.creator_server_epoch.clone(),
             object_name: request.object_name,
             durable,
+            released: false,
         };
         self.permits.lock().await.insert(permit.clone(), state);
         self.permits_by_key
@@ -387,7 +389,21 @@ impl BuildAdmissionController {
                 .map_err(unavailable)?,
         }
         if terminal {
-            self.released.notify_waiters();
+            let newly_released = {
+                let mut permits = self.permits.lock().await;
+                let state = permits
+                    .get_mut(permit)
+                    .expect("permit existence was checked before persistence");
+                let newly_released = !state.released;
+                state.released = true;
+                newly_released
+            };
+            if newly_released {
+                // Retain one wakeup when the actor is currently handling the event
+                // that performed this release and therefore has no `notified()`
+                // future registered in its select loop.
+                self.released.notify_one();
+            }
         }
         Ok(())
     }

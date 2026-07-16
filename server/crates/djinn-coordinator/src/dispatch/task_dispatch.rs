@@ -3560,6 +3560,114 @@ mod inflight_ledger_tests {
         );
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn terminal_session_event_retains_release_wakeup_for_queued_dispatch() {
+        use crate::build_admission::{BuildAdmissionController, BuildAdmissionMode};
+
+        let db = crate::test_helpers::create_test_db();
+        let (events_tx, _events_rx) = tokio::sync::broadcast::channel(256);
+        let fixture = seed_wnd1_ready_worker_tasks(&db, WND1_READY_TASK_COUNT).await;
+        configure_wnd1_user_max_sessions(&db, &fixture.created_by_user_id, &fixture.model_id, 2)
+            .await;
+
+        let (runtime, mut started_rx) = Wnd1ControlledRuntime::new();
+        let mut actor = wnd1_actor_for_tests(&db, &events_tx, &runtime, 2);
+        let controller = std::sync::Arc::new(BuildAdmissionController::new(
+            std::sync::Arc::new(djinn_db::AdmissionJournalRepository::new(db.clone())),
+            BuildAdmissionMode::Enforce,
+            1,
+            "runtime-release-test",
+        ));
+        actor.build_admission = Some(controller.clone());
+
+        let active_task_id = &fixture.task_ids[0];
+        let queued_task_id = &fixture.task_ids[1];
+        let task_repo =
+            djinn_db::TaskRepository::new(db.clone(), djinn_core::events::EventBus::noop());
+        for task_id in fixture.task_ids.iter().filter(|id| *id != queued_task_id) {
+            task_repo
+                .set_status(task_id, "closed")
+                .await
+                .expect("remove non-queued fixture task from the ready queue");
+        }
+        let permit = actor
+            .begin_task_run_build_admission(
+                "worker",
+                active_task_id,
+                0,
+                format!("task-run-{active_task_id}-0"),
+            )
+            .await
+            .expect("reserve active task admission")
+            .expect("controller returns a permit");
+        let runtime_uid = "runtime-release-test-uid";
+        controller
+            .transition(
+                &permit,
+                WarmAdmissionTransition::Live {
+                    uid: runtime_uid.to_owned(),
+                },
+            )
+            .await
+            .expect("mark active task admission live");
+        controller
+            .bind_task_run(runtime_uid.to_owned(), permit)
+            .await;
+
+        actor.dispatch_ready_tasks(Some(&fixture.project_id)).await;
+        assert_eq!(actor.dispatched, 0, "queued task must be cap-denied");
+
+        let mut session =
+            djinn_db::SessionRepository::new(db.clone(), djinn_core::events::EventBus::noop())
+                .create(djinn_db::CreateSessionParams {
+                    project_id: &fixture.project_id,
+                    task_id: Some(active_task_id),
+                    model: &fixture.model_id,
+                    agent_type: "worker",
+                    metadata_json: None,
+                    task_run_id: None,
+                    pricing: None,
+                    cost_basis: None,
+                })
+                .await
+                .expect("create terminal event session payload");
+        session.task_run_id = Some(runtime_uid.to_owned());
+        session.status = "completed".to_owned();
+
+        // No `notified()` future exists while the actor handles this event. The
+        // release therefore has to survive until the select branch is rebuilt.
+        actor
+            .handle_event(djinn_core::events::DjinnEventEnvelope {
+                entity_type: "session",
+                action: "completed",
+                payload: serde_json::to_value(session).expect("serialize session event"),
+                id: None,
+                project_id: None,
+                from_sync: false,
+            })
+            .await;
+        tokio::time::timeout(
+            Duration::from_millis(100),
+            controller.release_notifier().notified(),
+        )
+        .await
+        .expect("terminal release wakeup must be retained");
+
+        // Invoke the exact pass used by the actor's admission-release select
+        // branch; no periodic tick is advanced in this test.
+        actor.run_build_admission_release_pass().await;
+        assert_eq!(
+            actor.dispatched, 1,
+            "release wakeup must dispatch queued work"
+        );
+        assert_eq!(
+            started_rx.recv().await.as_deref(),
+            Some(queued_task_id.as_str()),
+            "the queued task must be the work invoked by the release pass"
+        );
+        runtime.release(queued_task_id).await;
+    }
+
     // Normal Rust/nextest-discoverable test: it uses only TestRuntime/template
     // Postgres (no kind/k8s) and covers the historical v0.4.15 per-user cap
     // overshoot when session rows lagged behind newly-dispatched worker tasks.

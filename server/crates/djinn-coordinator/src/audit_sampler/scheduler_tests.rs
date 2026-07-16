@@ -11,7 +11,9 @@ fn test_config() -> AuditSchedulerConfig {
     AuditSchedulerConfig {
         enabled: true,
         max_open_audits: 3,
-        slo_age_hours: 168, // 7 days
+        // SLO behavior is enabled explicitly by the dedicated test below so
+        // fixed fixture timestamps cannot make unrelated tests expire over time.
+        slo_age_hours: 0,
         per_tick_budget: 2,
         min_materialization_interval_hours: 0,
     }
