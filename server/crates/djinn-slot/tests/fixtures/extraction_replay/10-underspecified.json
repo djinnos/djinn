@@ -1,0 +1,28 @@
+{
+   "provenance" : "sanitized_archived_transcript_derived",
+   "injected_provider_response" : "{\"cases\":[{\"applies_when\":\"offline replay fixture\",\"content\":\"## Situation\\ndiscriminative replay fact 10.\",\"title\":\"Sanitized underspecified 10\"}]}",
+   "id" : "archive-derived-10",
+   "messages" : [
+      {
+         "role" : "user",
+         "content" : "Summarize sanitized task evidence for discriminative replay fact 10."
+      },
+      {
+         "role" : "assistant",
+         "content" : "Implemented a concise deterministic change and recorded the outcome."
+      }
+   ],
+   "expected_duplicate_target" : null,
+   "must_not_duplicate_target" : null,
+   "expected_note_type" : "case",
+   "required_discriminative_text" : "discriminative replay fact 10",
+   "terminal_context" : {
+      "review_decision" : null,
+      "outcome" : {
+         "kind" : "failed",
+         "classification" : "sanitized_failure"
+      }
+   },
+   "expect_adr_054_quality" : false,
+   "category" : "underspecified"
+}
