@@ -106,16 +106,17 @@ impl CoordinatorActor {
                     pr = pull_number,
                     "PR poller: PR merged → closing task"
                 );
+                let durable_review = self.durable_pr_review_verdict(pr_url).await;
+                let (review, merge_queue) = merged_review_outcome(
+                    durable_review.as_deref(),
+                    self.delegated_to_github.contains_key(&task.id),
+                );
                 self.apply_pr_merge(
                     &task.id,
                     pr_url,
                     pr.merge_commit_sha.as_deref(),
-                    None,
-                    if self.delegated_to_github.contains_key(&task.id) {
-                        "passed"
-                    } else {
-                        "not_applicable"
-                    },
+                    Some(review),
+                    merge_queue,
                 )
                 .await;
                 self.pr_status_cache.remove(&task.id);

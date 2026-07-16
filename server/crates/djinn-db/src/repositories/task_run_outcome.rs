@@ -13,6 +13,22 @@ impl TaskRunOutcomeRepository {
         self.db.ensure_initialized().await?;
         Ok(sqlx::query_as("SELECT task_run_id, attempt_seq, outcome, parked_reason, review_verdict, merge_queue_result, created_at, updated_at FROM task_run_outcome_facts WHERE task_run_id = $1").bind(run_id).fetch_optional(self.db.pool()).await?)
     }
+
+    /// Read the outcome associated with this exact attempt. There is
+    /// intentionally no task-id or temporal fallback.
+    pub async fn get_for_attempt(&self, attempt_id: &str) -> Result<Option<TaskRunOutcomeFact>> {
+        self.db.ensure_initialized().await?;
+        Ok(sqlx::query_as(
+            "SELECT f.task_run_id, f.attempt_seq, f.outcome, f.parked_reason, \
+                    f.review_verdict, f.merge_queue_result, f.created_at, f.updated_at \
+             FROM task_attempts a \
+             JOIN task_run_outcome_facts f ON f.task_run_id = a.task_run_id \
+             WHERE a.id = $1",
+        )
+        .bind(attempt_id)
+        .fetch_optional(self.db.pool())
+        .await?)
+    }
     /// Create a run and attach the already allocated exact attempt in one transaction.
     /// A failed association rolls the run insertion back, so a fresh dispatch
     /// cannot leave an unattributed task run behind.

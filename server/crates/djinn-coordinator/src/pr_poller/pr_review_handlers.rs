@@ -382,6 +382,34 @@ impl CoordinatorActor {
         }
     }
 
+    /// Resolve a persisted review decision only through the unique
+    /// PR-associated submitted attempt. This survives coordinator restarts
+    /// without consulting task/latest ordering.
+    pub(crate) async fn durable_pr_review_verdict(&self, pr_url: &str) -> Option<String> {
+        let attempt = match TaskAttemptRepository::new(self.db.clone())
+            .submitted_worker_for_pr_url(pr_url)
+            .await
+        {
+            Ok(Some(attempt)) => attempt,
+            Ok(None) => return None,
+            Err(e) => {
+                tracing::warn!(pr_url, error = %e, "PR poller: unable to resolve exact submitted attempt for durable review fact");
+                return None;
+            }
+        };
+        match TaskRunOutcomeRepository::new(self.db.clone())
+            .get_for_attempt(&attempt.id)
+            .await
+        {
+            Ok(Some(outcome)) => outcome.review_verdict,
+            Ok(None) => None,
+            Err(e) => {
+                tracing::warn!(pr_url, attempt_id = %attempt.id, error = %e, "PR poller: unable to read durable review fact");
+                None
+            }
+        }
+    }
+
     /// Close a task whose PR has merged, recording the landed merge-commit SHA.
     ///
     /// The SHA is persisted *before* the `PrMerge` transition so the
@@ -1054,6 +1082,36 @@ pub(crate) fn is_racing_unmerged_status(status: &str) -> bool {
         status,
         "approved" | "pr_draft" | "pr_review" | "needs_task_review"
     )
+}
+
+/// Review value persisted at the successful merge-queue delegation boundary.
+pub(crate) fn delegated_review_verdict(has_approved: bool) -> &'static str {
+    if has_approved {
+        "accepted"
+    } else {
+        "not_applicable"
+    }
+}
+
+/// Classify a later merged observation. A durable review value is also the
+/// restart-safe proof that this exact PR attempt crossed queue delegation.
+pub(crate) fn merged_review_outcome<'a>(
+    durable_review: Option<&'a str>,
+    delegated_in_memory: bool,
+) -> (&'a str, &'static str) {
+    match durable_review {
+        Some(review @ ("accepted" | "not_applicable")) => (review, "passed"),
+        Some(review) => (
+            review,
+            if delegated_in_memory {
+                "passed"
+            } else {
+                "not_applicable"
+            },
+        ),
+        None if delegated_in_memory => ("not_applicable", "passed"),
+        None => ("not_applicable", "not_applicable"),
+    }
 }
 
 /// Effective gating review decision, deduping stale CHANGES_REQUESTED by reviewer.
