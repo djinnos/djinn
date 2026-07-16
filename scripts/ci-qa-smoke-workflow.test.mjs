@@ -55,17 +55,19 @@ test('qa-smoke workflow contract is deterministic, routed, and fail closed', () 
   const migrationAt = smoke.indexOf('sqlx migrate run --source migrations_postgres', templateAt);
   const templateReadyAt = smoke.indexOf("UPDATE pg_database SET datistemplate = TRUE WHERE datname = 'djinn_test_template'", migrationAt);
   const smokeStepAt = smoke.indexOf('name: Run deterministic qa smoke evidence');
-  const compileDatabaseMatch = smoke.slice(smokeStepAt).match(/^          DATABASE_URL: (\S+)$/m);
+  const uploadStepAt = smoke.indexOf('name: Upload qa-smoke evidence', smokeStepAt);
+  const executionStep = smoke.slice(smokeStepAt, uploadStepAt);
+  const compileDatabaseMatches = [...executionStep.matchAll(/^          DATABASE_URL: (\S+)$/gm)];
   const runAt = smoke.indexOf(RUN_COMMAND);
   const coverageAt = smoke.indexOf(COVERAGE_COMMAND);
   assert.ok(runAt >= 0, 'qa-smoke must run the exact deterministic smoke command');
   assert.ok(templateAt >= 0 && migrationAt > templateAt && templateReadyAt > migrationAt && templateReadyAt < smokeStepAt && smokeStepAt < runAt,
     'template migration and clone-template marking must complete before cargo smoke execution');
-  assert.ok(compileDatabaseMatch,
-    'the smoke execution step must provide SQLx a compile-time database URL');
-  assert.equal(compileDatabaseMatch[1], TEMPLATE_DATABASE_URL,
+  assert.equal(compileDatabaseMatches.length, 1,
+    'the smoke and coverage execution step must own exactly one SQLx compile-time database URL');
+  assert.equal(compileDatabaseMatches[0][1], TEMPLATE_DATABASE_URL,
     'cargo smoke and coverage must compile SQLx macros against the migrated template');
-  assert.notEqual(maintenanceDatabaseMatch[1], compileDatabaseMatch[1],
+  assert.notEqual(maintenanceDatabaseMatch[1], compileDatabaseMatches[0][1],
     'isolated clone acquisition and SQLx compile-time checks must use distinct databases');
   assert.ok(coverageAt > runAt, 'coverage must run after smoke evidence is emitted');
   assert.match(smoke, /--evidence \.\.\/qa\/evidence\/smoke-ci --output \.\.\/qa\/evidence\/smoke-ci\/coverage\.json/,
