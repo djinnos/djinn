@@ -782,6 +782,7 @@ impl DjinnMcpServer {
                 self.memory_delete(Parameters(decode_args::<DeleteParams>(name, args)?))
                     .await,
             ),
+            // Registered ledger reads must use the same canonical dispatch path as mutations.
             "memory_revisions" => map_json(
                 name,
                 self.memory_revisions(Parameters(decode_args::<RevisionsParams>(name, args)?))
