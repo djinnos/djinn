@@ -145,8 +145,9 @@ impl FromStr for AutoSubmitTriggerReason {
 /// Captures the identity, versioning, timing, result, diff fingerprint, and
 /// task-specific check coverage of the verification that produced the
 /// authoritative pass/fail signal used by auto-submit decisions.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "sqlx", derive(sqlx::FromRow))]
+#[cfg_attr(feature = "sqlx", sqlx(default))]
 pub struct VerifyRunRecord {
     pub id: String,
     pub task_run_id: String,
@@ -159,6 +160,24 @@ pub struct VerifyRunRecord {
     pub diff_fingerprint: String,
     /// JSON object encoding per-check coverage (e.g. `{"lint": true, "test": true}`).
     pub check_coverage: Option<serde_json::Value>,
+    /// Phase that produced this record. Legacy records have no phase.
+    pub source_phase: Option<String>,
+    /// Durable identifier for the final-verification attempt.
+    pub verification_attempt_id: Option<String>,
+    /// Ordered command descriptors and their results for an atomic attempt.
+    pub ordered_commands: Option<serde_json::Value>,
+    /// Ordered check IDs covered by the completed attempt.
+    pub covered_checks: Option<serde_json::Value>,
+    /// Complete fingerprint of all inputs to final verification.
+    pub verification_input_fingerprint: Option<String>,
+    /// Exact version of the input manifest used to derive the fingerprint.
+    pub manifest_version: Option<String>,
+    /// Canonical JSON representation of the execution environment identity.
+    pub environment_identity_json: Option<serde_json::Value>,
+    /// Digest of the canonical environment identity JSON.
+    pub environment_identity_digest: Option<String>,
+    /// Version of the environment identity canonicalization contract.
+    pub environment_identity_version: Option<String>,
     pub created_at: String,
 }
 
