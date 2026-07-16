@@ -7,6 +7,6 @@ scenarios:
     sources: [{kind: incident, id: "deferred health observations require terminal audit"}]
     primary_coverage: dispatch.deferred-health
     secondary_coverage: [task-lifecycle.terminal-side-effects]
-    execution: {kind: cargo-package, package: djinn-coordinator}
+    execution: {kind: cargo-package, package: djinn-coordinator, selector: dispatch::respawn_guard::tests::guard_deferred_creates_audit_row}
     isolation: {database: isolated, providers: isolated, channel: isolated}
     watch_paths: [server/crates/djinn-coordinator/src/dispatch/task_dispatch.rs]
