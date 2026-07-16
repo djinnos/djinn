@@ -840,6 +840,7 @@ async fn settlement_accepted_and_rejected_paths_store_same_review_fingerprint() 
                 diff_fingerprint: fingerprint.to_string(),
                 check_coverage: None,
                 created_at: "2026-07-01T00:00:01.000Z".to_string(),
+                ..VerifyRunRecord::default()
             }),
             commit_title: Some("settlement compare".to_string()),
             summary: Some("settlement compare".to_string()),

@@ -76,6 +76,43 @@ pub(super) fn build_trace_trigger(
     })
 }
 
+/// Persist a first-modification rollout suppression without performing a note
+/// search. Like every JIT trace, this is fail-open bookkeeping only.
+pub(super) async fn persist_jit_suppression_trace(
+    db: &djinn_db::Database,
+    session_id: &str,
+    project_id: &str,
+    rollout_mode: JitPitfallRolloutMode,
+    touched_paths: &[String],
+    outcome: djinn_db::repositories::retrieval_trace::RetrievalTraceOutcome,
+) {
+    let trigger = build_trace_trigger(
+        rollout_mode.clone(),
+        touched_paths,
+        0,
+        0,
+        JIT_TRACE_PROD_MIN_CONFIDENCE,
+        JIT_TRACE_PROD_QUERY_LIMIT,
+        None,
+    );
+    let candidates = serde_json::json!([]);
+    let durations_ms = build_trace_durations_ms(0, None);
+    let _ = persist_jit_trace(
+        db,
+        session_id,
+        project_id,
+        &candidates,
+        &durations_ms,
+        &trigger,
+        0,
+        djinn_db::repositories::retrieval_trace::DEFAULT_CANDIDATE_CAP,
+        false,
+        rollout_mode.label(),
+        outcome,
+    )
+    .await;
+}
+
 /// Build the pre-insert per-phase durations JSON object for the trace row.
 ///
 /// `search_elapsed_ms` is mandatory for every trace (it covers the production
@@ -202,9 +239,12 @@ pub(super) async fn persist_jit_trace(
     estimated_injected_tokens: i32,
     candidate_cap: i32,
     candidate_cap_exceeded: bool,
+    rollout_label: &str,
+    outcome: djinn_db::repositories::retrieval_trace::RetrievalTraceOutcome,
 ) -> Option<u64> {
     use djinn_db::repositories::retrieval_trace::{
-        CreateRetrievalTraceParams, RetrievalTraceEntryPoint, RetrievalTraceRepository,
+        CreateRetrievalTraceParams, CreateRetrievalTraceWithSemanticsParams,
+        RetrievalTraceEntryPoint, RetrievalTraceRepository,
     };
 
     let trace_repo = RetrievalTraceRepository::new(db.clone());
@@ -229,7 +269,13 @@ pub(super) async fn persist_jit_trace(
     };
 
     let insert_started = SystemClockTrait::new().now_instant();
-    let inserted = trace_repo.insert(params).await;
+    let inserted = trace_repo
+        .insert_with_semantics(CreateRetrievalTraceWithSemanticsParams {
+            trace: params,
+            rollout_label,
+            outcome,
+        })
+        .await;
     let persist_elapsed_ms = elapsed_millis(insert_started);
 
     match inserted {
@@ -298,6 +344,7 @@ pub(super) async fn persist_jit_empty_trace(
     candidate_cap: i32,
 ) {
     use djinn_db::repositories::retrieval_trace::TraceCandidate;
+    let rollout_label = rollout_mode.label().to_owned();
     let trace_search_started = SystemClockTrait::new().now_instant();
     let trace_universe = note_repo
         .query_by_scope_overlap_trace_candidates(
@@ -343,6 +390,8 @@ pub(super) async fn persist_jit_empty_trace(
                 0,
                 candidate_cap,
                 false,
+                &rollout_label,
+                djinn_db::repositories::retrieval_trace::RetrievalTraceOutcome::Empty,
             )
             .await;
             tracing::debug!(
@@ -426,6 +475,8 @@ pub(super) async fn persist_jit_empty_trace(
         0,
         candidate_cap,
         candidate_cap_exceeded,
+        &rollout_label,
+        djinn_db::repositories::retrieval_trace::RetrievalTraceOutcome::Empty,
     )
     .await;
     tracing::debug!(
@@ -455,6 +506,7 @@ pub(super) async fn persist_jit_error_trace(
     candidate_cap: i32,
     candidate_cap_exceeded: bool,
 ) {
+    let rollout_label = rollout_mode.label().to_owned();
     let trigger = build_trace_trigger(
         rollout_mode,
         touched_paths,
@@ -476,6 +528,8 @@ pub(super) async fn persist_jit_error_trace(
         0,
         candidate_cap,
         candidate_cap_exceeded,
+        &rollout_label,
+        djinn_db::repositories::retrieval_trace::RetrievalTraceOutcome::Error,
     )
     .await;
 }
