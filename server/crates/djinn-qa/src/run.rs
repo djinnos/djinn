@@ -11,7 +11,7 @@ use std::{
     thread,
 };
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
 use crate::{Execution, Profile, Scenario, ScenarioInventory, Taxonomy, scenario::resolves};
@@ -19,7 +19,8 @@ use crate::{Execution, Profile, Scenario, ScenarioInventory, Taxonomy, scenario:
 pub const RUNNER_NAME: &str = "djinn-qa";
 pub const RUNNER_VERSION: &str = env!("CARGO_PKG_VERSION");
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ScenarioEvidenceArtifact {
     pub scenario_id: String,
     pub scenario_version: u32,
@@ -37,13 +38,14 @@ pub struct ScenarioEvidenceArtifact {
     pub diagnostics: Vec<String>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RunnerArtifactIdentity {
     pub name: String,
     pub version: String,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum RunStatus {
     Passed,
