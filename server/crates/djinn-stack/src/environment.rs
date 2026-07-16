@@ -2199,12 +2199,15 @@ mod tests {
 
     #[test]
     fn pre_verification_hook_list_cannot_deserialize_as_final_verification_plan() {
-        let raw = json!({
-            "schema_version": 1,
-            "lifecycle": {"final_verification": ["cargo test"]}
-        });
+        let hook_list = json!(["cargo test"]);
+
+        let pre_verification: Vec<HookCommand> = serde_json::from_value(hook_list.clone()).unwrap();
+        assert!(matches!(
+            pre_verification.as_slice(),
+            [HookCommand::Shell(command)] if command == "cargo test"
+        ));
         assert!(
-            serde_json::from_value::<EnvironmentConfig>(raw).is_err(),
+            serde_json::from_value::<FinalVerificationPlan>(hook_list).is_err(),
             "a pre-verification hook list must not deserialize as a final-verification plan"
         );
     }
