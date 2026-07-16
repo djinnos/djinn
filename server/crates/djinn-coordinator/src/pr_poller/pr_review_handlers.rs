@@ -356,29 +356,26 @@ impl CoordinatorActor {
             }
         };
         let outcomes = TaskRunOutcomeRepository::new(self.db.clone());
-        if let Some(value) = review {
-            if let Err(e) = outcomes
+        if let Some(value) = review
+            && let Err(e) = outcomes
                 .record_review_verdict_for_attempt(&attempt.id, value)
                 .await
-            {
-                tracing::warn!(pr_url, attempt_id = %attempt.id, error = %e, "PR poller: failed to record exact PR review fact");
-            }
+        {
+            tracing::warn!(pr_url, attempt_id = %attempt.id, error = %e, "PR poller: failed to record exact PR review fact");
         }
-        if let Some(value) = merge_queue {
-            if let Err(e) = outcomes
+        if let Some(value) = merge_queue
+            && let Err(e) = outcomes
                 .record_merge_queue_result_for_attempt(&attempt.id, value)
                 .await
-            {
-                tracing::warn!(pr_url, attempt_id = %attempt.id, error = %e, "PR poller: failed to record exact PR merge-queue fact");
-            }
+        {
+            tracing::warn!(pr_url, attempt_id = %attempt.id, error = %e, "PR poller: failed to record exact PR merge-queue fact");
         }
-        if let Some(value) = parked {
-            if let Err(e) = outcomes
+        if let Some(value) = parked
+            && let Err(e) = outcomes
                 .record_parked_reason_for_attempt(&attempt.id, value)
                 .await
-            {
-                tracing::warn!(pr_url, attempt_id = %attempt.id, error = %e, "PR poller: failed to record exact PR parked fact");
-            }
+        {
+            tracing::warn!(pr_url, attempt_id = %attempt.id, error = %e, "PR poller: failed to record exact PR parked fact");
         }
     }
 
@@ -1095,10 +1092,10 @@ pub(crate) fn delegated_review_verdict(has_approved: bool) -> &'static str {
 
 /// Classify a later merged observation. A durable review value is also the
 /// restart-safe proof that this exact PR attempt crossed queue delegation.
-pub(crate) fn merged_review_outcome<'a>(
-    durable_review: Option<&'a str>,
+pub(crate) fn merged_review_outcome(
+    durable_review: Option<&str>,
     delegated_in_memory: bool,
-) -> (&'a str, &'static str) {
+) -> (&str, &'static str) {
     match durable_review {
         Some(review @ ("accepted" | "not_applicable")) => (review, "passed"),
         Some(review) => (

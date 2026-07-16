@@ -866,11 +866,7 @@ impl CoordinatorActor {
                         &task.id,
                         pr_url,
                         merge_commit_sha.as_deref(),
-                        Some(if has_approved {
-                            "accepted"
-                        } else {
-                            "not_applicable"
-                        }),
+                        Some(delegated_review_verdict(has_approved)),
                         "not_applicable",
                     )
                     .await;
@@ -906,11 +902,7 @@ impl CoordinatorActor {
                                 // apply_pr_merge will add `passed` to that run.
                                 self.record_pr_outcome_facts(
                                     pr_url,
-                                    Some(if has_approved {
-                                        "accepted"
-                                    } else {
-                                        "not_applicable"
-                                    }),
+                                    Some(delegated_review_verdict(has_approved)),
                                     None,
                                     None,
                                 )
@@ -940,11 +932,7 @@ impl CoordinatorActor {
                                 // before a later merged poll loses this snapshot.
                                 self.record_pr_outcome_facts(
                                     pr_url,
-                                    Some(if has_approved {
-                                        "accepted"
-                                    } else {
-                                        "not_applicable"
-                                    }),
+                                    Some(delegated_review_verdict(has_approved)),
                                     None,
                                     None,
                                 )
