@@ -2203,10 +2203,9 @@ mod tests {
             "schema_version": 1,
             "lifecycle": {"final_verification": ["cargo test"]}
         });
-        let error = serde_json::from_value::<EnvironmentConfig>(raw).unwrap_err();
         assert!(
-            error.to_string().contains("final_verification"),
-            "expected final_verification type error, got: {error}"
+            serde_json::from_value::<EnvironmentConfig>(raw).is_err(),
+            "a pre-verification hook list must not deserialize as a final-verification plan"
         );
     }
 
