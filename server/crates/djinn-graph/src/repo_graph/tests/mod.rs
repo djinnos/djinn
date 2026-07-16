@@ -14,6 +14,7 @@ mod artifact;
 mod build;
 mod graph_queries;
 mod ranking;
+mod salvage;
 mod scip_file_iter;
 mod stable_uid;
 mod symbols_complexity;
