@@ -51,6 +51,7 @@
 
 use std::time::Duration;
 
+use djinn_db::advisory_lock;
 use sqlx::Connection;
 use sqlx::postgres::PgConnection;
 use tokio_util::sync::CancellationToken;
@@ -164,15 +165,11 @@ pub async fn run_with_leadership<F, Fut>(
         tokio::select! {
             _ = cancel.cancelled() => {
                 tracing::info!("leadership: shutting down — releasing coordinator advisory lock");
-                let _ = sqlx::query("SELECT pg_advisory_unlock($1, $2)")
-                    .bind(LOCK_CLASSID)
-                    .bind(LOCK_OBJID)
-                    .execute(&mut conn)
-                    .await;
+                let _ = advisory_lock::release(&mut conn, LOCK_CLASSID, LOCK_OBJID).await;
                 return;
             }
             _ = tokio::time::sleep(POLL_INTERVAL) => {
-                if let Err(e) = sqlx::query("SELECT 1").execute(&mut conn).await {
+                if let Err(e) = advisory_lock::ping(&mut conn).await {
                     tracing::error!(
                         error = %e,
                         "leadership: lock connection lost — exiting to restart clean"
@@ -187,11 +184,7 @@ pub async fn run_with_leadership<F, Fut>(
 /// Try to take the coordinator lock. Returns `Ok(true)` if this connection now
 /// holds it, `Ok(false)` if another session does.
 async fn try_acquire(conn: &mut PgConnection) -> Result<bool, sqlx::Error> {
-    sqlx::query_scalar::<_, bool>("SELECT pg_try_advisory_lock($1, $2)")
-        .bind(LOCK_CLASSID)
-        .bind(LOCK_OBJID)
-        .fetch_one(conn)
-        .await
+    advisory_lock::try_acquire(conn, LOCK_CLASSID, LOCK_OBJID).await
 }
 
 /// Sleep one poll interval unless cancelled first. Returns `true` if cancelled.
