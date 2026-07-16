@@ -7,11 +7,10 @@ use std::{
     collections::BTreeMap,
     fs,
     path::{Path, PathBuf},
-    process::{Command, Output},
+    process::{Command, ExitStatus, Output},
     sync::mpsc,
     thread,
 };
-#[cfg(not(test))]
 use std::{
     io::Read,
     process::Stdio,
@@ -25,11 +24,8 @@ use crate::{Execution, Profile, Scenario, ScenarioInventory, Taxonomy, scenario:
 
 pub const RUNNER_NAME: &str = "djinn-qa";
 pub const RUNNER_VERSION: &str = env!("CARGO_PKG_VERSION");
-#[cfg(not(test))]
 const CHILD_DEADLINE: Duration = Duration::from_secs(10 * 60);
-#[cfg(not(test))]
 const TERMINATION_GRACE: Duration = Duration::from_secs(2);
-#[cfg(not(test))]
 const STREAM_TAIL_BYTES: usize = 64 * 1024;
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -51,9 +47,14 @@ pub struct ScenarioEvidenceArtifact {
     pub diagnostics: Vec<String>,
 }
 
-fn format_stream_tail(name: &str, bytes: &[u8]) -> String {
+fn format_stream_tail(name: &str, bytes: &[u8], truncated: bool) -> String {
+    let truncation = if truncated {
+        "; truncated to final 65536 bytes"
+    } else {
+        ""
+    };
     format!(
-        "{name} tail ({} bytes):\n{}",
+        "{name} tail ({} bytes{truncation}):\n{}",
         bytes.len(),
         String::from_utf8_lossy(bytes).trim()
     )
@@ -61,7 +62,6 @@ fn format_stream_tail(name: &str, bytes: &[u8]) -> String {
 
 /// Drain output continuously but retain only a deterministic suffix, preventing
 /// a noisy cargo descendant from consuming unbounded runner memory.
-#[cfg(not(test))]
 fn read_tail(mut reader: impl Read + Send + 'static) -> thread::JoinHandle<(Vec<u8>, bool)> {
     thread::spawn(move || {
         let mut tail = Vec::new();
@@ -82,11 +82,19 @@ fn read_tail(mut reader: impl Read + Send + 'static) -> thread::JoinHandle<(Vec<
     })
 }
 
-#[cfg(not(test))]
 #[allow(clippy::disallowed_methods)]
-fn run_bounded(command: &mut Command, deadline: Duration) -> Result<Output, String> {
+fn run_bounded(command: &mut Command, deadline: Duration) -> Result<BoundedOutput, String> {
+    run_bounded_with_grace(command, deadline, TERMINATION_GRACE)
+}
+
+#[allow(clippy::disallowed_methods)]
+fn run_bounded_with_grace(
+    command: &mut Command,
+    deadline: Duration,
+    termination_grace: Duration,
+) -> Result<BoundedOutput, String> {
     command.stdout(Stdio::piped()).stderr(Stdio::piped());
-    #[cfg(all(unix, not(test)))]
+    #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
         unsafe {
@@ -115,8 +123,9 @@ fn run_bounded(command: &mut Command, deadline: Duration) -> Result<Output, Stri
                 if let Some(status) = child.try_wait().map_err(|error| error.to_string())? {
                     break 'wait status;
                 }
-                if grace.elapsed() >= TERMINATION_GRACE {
+                if grace.elapsed() >= termination_grace {
                     kill_process_group(child.id());
+                    let _ = child.kill();
                     break 'wait child.wait().map_err(|error| error.to_string())?;
                 }
                 thread::sleep(Duration::from_millis(10));
@@ -135,35 +144,41 @@ fn run_bounded(command: &mut Command, deadline: Duration) -> Result<Output, Stri
             format_tail_with_truncation("stderr", &stderr, stderr_truncated),
         ));
     }
-    Ok(Output {
+    Ok(BoundedOutput {
         status,
         stdout,
         stderr,
+        stdout_truncated,
+        stderr_truncated,
     })
 }
 
-#[cfg(not(test))]
 fn format_tail_with_truncation(name: &str, bytes: &[u8], truncated: bool) -> String {
-    let label = if truncated {
-        " tail (truncated to final 65536 bytes)"
-    } else {
-        " tail"
-    };
-    format!("{name}{label}:\n{}", String::from_utf8_lossy(bytes).trim())
+    format_stream_tail(name, bytes, truncated)
 }
 
-#[cfg(all(unix, not(test)))]
+#[cfg(unix)]
 fn terminate_process_group(pid: u32) {
     unsafe { libc::kill(-(pid as libc::pid_t), libc::SIGTERM) };
 }
-#[cfg(all(not(unix), not(test)))]
+#[cfg(not(unix))]
 fn terminate_process_group(_pid: u32) {}
-#[cfg(all(unix, not(test)))]
+#[cfg(unix)]
 fn kill_process_group(pid: u32) {
     unsafe { libc::kill(-(pid as libc::pid_t), libc::SIGKILL) };
 }
-#[cfg(all(not(unix), not(test)))]
+#[cfg(not(unix))]
 fn kill_process_group(_pid: u32) {}
+
+/// Captured child output with bounded-tail metadata retained for diagnostics.
+#[derive(Debug)]
+struct BoundedOutput {
+    status: ExitStatus,
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+    stdout_truncated: bool,
+    stderr_truncated: bool,
+}
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -240,6 +255,18 @@ impl CargoExecutor {
     }
 }
 
+impl From<Output> for BoundedOutput {
+    fn from(output: Output) -> Self {
+        Self {
+            status: output.status,
+            stdout: output.stdout,
+            stderr: output.stderr,
+            stdout_truncated: false,
+            stderr_truncated: false,
+        }
+    }
+}
+
 impl ScenarioExecutor for CargoExecutor {
     fn execute(&self, root: &Path, execution: &Execution) -> Result<(), String> {
         let Execution::CargoPackage {
@@ -269,6 +296,7 @@ impl ScenarioExecutor for CargoExecutor {
         command.arg("--").arg("--exact").arg(selector);
         #[cfg(test)]
         let output = (self.run_command)(&mut command)
+            .map(BoundedOutput::from)
             .map_err(|e| format!("cargo adapter could not start `{package}`: {e}"))?;
         #[cfg(not(test))]
         let output = run_bounded(&mut command, CHILD_DEADLINE)
@@ -277,8 +305,8 @@ impl ScenarioExecutor for CargoExecutor {
             return Err(format!(
                 "cargo adapter failed for package `{package}` (exit {}):\n{}\n{}",
                 output.status,
-                format_stream_tail("stdout", &output.stdout),
-                format_stream_tail("stderr", &output.stderr),
+                format_stream_tail("stdout", &output.stdout, output.stdout_truncated),
+                format_stream_tail("stderr", &output.stderr, output.stderr_truncated),
             ));
         }
         // Fail closed: a successful child process that executed zero tests is
@@ -703,7 +731,11 @@ mod tests {
             peak: AtomicUsize::new(0),
             barrier: Barrier::new(2),
         });
-        let scenarios = vec![scenario("a"), scenario("b"), scenario("c"), scenario("d")];
+        let mut scenarios = vec![scenario("a"), scenario("b"), scenario("c"), scenario("d")];
+        for (index, scenario) in scenarios.iter_mut().enumerate() {
+            let Execution::CargoPackage { selector, .. } = &mut scenario.execution;
+            *selector = format!("scenario::tests::distinct_{index}");
+        }
         let outcomes =
             execute_selected(&repository_root(), &scenarios, 2, executor.as_ref(), &Db).unwrap();
         assert_eq!(outcomes.len(), 4);
@@ -889,4 +921,42 @@ scenarios:
             "whitespace-only selector must be rejected: {err}"
         );
     }
+    #[test]
+    fn identical_execution_fans_out_once_in_scenario_id_order() {
+        let executor = Executor { calls: Mutex::new(0), peak: AtomicUsize::new(0) };
+        let outcomes = execute_selected(&repository_root(), &[scenario("z"), scenario("a")], 2, &executor, &Db).unwrap();
+        assert_eq!(*executor.calls.lock().unwrap(), 1);
+        assert_eq!(outcomes.iter().map(|outcome| outcome.scenario_id.as_str()).collect::<Vec<_>>(), vec!["a", "z"]);
+    }
+
+    #[test]
+    fn bounded_tail_marks_truncation_and_retains_suffix() {
+        let payload = [vec![b'x'; STREAM_TAIL_BYTES], b"final".to_vec()].concat();
+        let (tail, truncated) = read_tail(std::io::Cursor::new(payload)).join().unwrap();
+        assert!(truncated);
+        assert_eq!(tail.len(), STREAM_TAIL_BYTES);
+        assert!(format_stream_tail("stdout", &tail, truncated).contains("truncated to final 65536 bytes"));
+        assert!(tail.ends_with(b"final"));
+    }
+
+    #[test]
+    fn stdout_only_child_failure_keeps_both_labeled_diagnostics() {
+        use std::os::unix::process::ExitStatusExt;
+        let executor = CargoExecutor::with_process(|_| Ok(Output { status: std::process::ExitStatus::from_raw(1 << 8), stdout: b"failure detail".to_vec(), stderr: Vec::new() }));
+        let error = executor.execute(Path::new("."), &scenario("failure").execution).unwrap_err();
+        assert!(error.contains("stdout tail"));
+        assert!(error.contains("failure detail"));
+        assert!(error.contains("stderr tail (0 bytes)"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn deadline_terminates_the_child_process_group() {
+        let mut command = Command::new("sh");
+        command.arg("-c").arg("sleep 30 & wait");
+        let error = run_bounded_with_grace(&mut command, Duration::from_millis(20), Duration::from_millis(20)).unwrap_err();
+        assert!(error.contains("timed out"));
+        assert!(error.contains("process group terminated"));
+    }
+
 }

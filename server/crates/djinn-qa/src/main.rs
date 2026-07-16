@@ -277,3 +277,20 @@ fn state_name(state: djinn_qa::CoverageState) -> &'static str {
         djinn_qa::CoverageState::Failing => "failing",
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use djinn_qa::ScenarioOutcome;
+
+    #[test]
+    fn summary_formats_sorted_outcomes_and_diagnostics() {
+        let summary = RunSummary { outcomes: vec![
+            ScenarioOutcome { scenario_id: "z".into(), status: RunStatus::Failed, diagnostics: vec!["why".into()], started_at: String::new(), finished_at: String::new() },
+            ScenarioOutcome { scenario_id: "a".into(), status: RunStatus::Passed, diagnostics: vec![], started_at: String::new(), finished_at: String::new() },
+        ] };
+        let mut rendered = Vec::new();
+        write_run_summary(&mut rendered, &summary).unwrap();
+        assert_eq!(String::from_utf8(rendered).unwrap(), "scenario a: passed\nscenario z: failed\n  diagnostic: why\n");
+    }
+}
