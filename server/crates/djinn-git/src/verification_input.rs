@@ -14,6 +14,7 @@ const TYPE_SYMLINK: &[u8] = b"symlink";
 const TYPE_MISSING: &[u8] = b"missing";
 const MODE_EXEC: &[u8] = b"exec";
 const MODE_NORMAL: &[u8] = b"normal";
+const MODE_GITLINK_TAG: &[u8] = b"160000";
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VerificationInputFingerprintConfig {
     pub base_ref: String,
@@ -97,14 +98,42 @@ pub struct VerificationInputDigestV1 {
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum VerificationInputUnavailable {
-    UnresolvedBaseRef { base_ref: String },
-    MalformedManifest { detail: String },
-    MissingExternalInput { id: String },
+    UnresolvedBaseRef {
+        base_ref: String,
+    },
+    MalformedManifest {
+        detail: String,
+    },
+    MissingExternalInput {
+        id: String,
+    },
     UnresolvedHead,
-    UnsupportedIndexMode { path: String, mode: String },
-    UnsupportedSpecialFile { path: String, kind: String },
-    UnreadableFile { path: String, error: String },
-    MissingExtraEntry { path: String },
+    UnsupportedIndexMode {
+        path: String,
+        mode: String,
+    },
+    UnsupportedSpecialFile {
+        path: String,
+        kind: String,
+    },
+    UnreadableFile {
+        path: String,
+        error: String,
+    },
+    MissingExtraEntry {
+        path: String,
+    },
+    UninitializedSubmodule {
+        path: String,
+    },
+    SubmodulePathEscape {
+        path: String,
+    },
+    SubmoduleHeadMismatch {
+        path: String,
+        expected: String,
+        actual: String,
+    },
 }
 impl std::fmt::Display for VerificationInputUnavailable {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -152,6 +181,28 @@ impl std::fmt::Display for VerificationInputUnavailable {
                 write!(
                     f,
                     "verification input unavailable: missing extra entry {path}"
+                )
+            }
+            Self::UninitializedSubmodule { path } => {
+                write!(
+                    f,
+                    "verification input unavailable: uninitialized submodule {path}"
+                )
+            }
+            Self::SubmodulePathEscape { path } => {
+                write!(
+                    f,
+                    "verification input unavailable: submodule {path} escaped parent worktree"
+                )
+            }
+            Self::SubmoduleHeadMismatch {
+                path,
+                expected,
+                actual,
+            } => {
+                write!(
+                    f,
+                    "verification input unavailable: submodule {path} HEAD {actual} != committed gitlink {expected}"
                 )
             }
         }
@@ -232,11 +283,21 @@ pub async fn compute_verification_input_fingerprint_with_config(
         }
     }
     let mut tracked_states = Vec::with_capacity(index_entries.len());
+    let mut gitlink_states: Vec<GitlinkState> = Vec::new();
     for entry in &index_entries {
-        match classify_worktree_entry(worktree, &entry.path, false) {
-            Ok(state) => tracked_states.push(state),
-            Err(unavailable) => {
-                return Ok(VerificationInputFingerprint::Unavailable(unavailable));
+        if entry.mode == MODE_GITLINK_TAG {
+            match collect_gitlink_state(worktree, &entry.path, &entry.blob_sha).await {
+                Ok(state) => gitlink_states.push(state),
+                Err(unavailable) => {
+                    return Ok(VerificationInputFingerprint::Unavailable(unavailable));
+                }
+            }
+        } else {
+            match classify_worktree_entry(worktree, &entry.path, false) {
+                Ok(state) => tracked_states.push(state),
+                Err(unavailable) => {
+                    return Ok(VerificationInputFingerprint::Unavailable(unavailable));
+                }
             }
         }
     }
@@ -254,6 +315,7 @@ pub async fn compute_verification_input_fingerprint_with_config(
     index_entries.sort_by(|a, b| a.path.cmp(&b.path));
     tracked_states.sort_by(|a, b| a.path.cmp(&b.path));
     extra_states.sort_by(|a, b| a.path.cmp(&b.path));
+    gitlink_states.sort_by(|a, b| a.path.cmp(&b.path));
     let external_states = match collect_external_states(config) {
         Ok(states) => states,
         Err(reason) => return Ok(VerificationInputFingerprint::Unavailable(reason)),
@@ -265,6 +327,7 @@ pub async fn compute_verification_input_fingerprint_with_config(
     stream.write_refs(&merge_base, &head);
     stream.write_index_entries(&index_entries);
     stream.write_worktree_states(&tracked_states);
+    stream.write_gitlink_states(&gitlink_states);
     stream.write_worktree_states(&extra_states);
     stream.write_external_states(&external_states);
     let canonical_bytes = stream.finalize();
@@ -636,7 +699,7 @@ fn parse_index_entries(output: &[u8]) -> Vec<IndexEntry> {
     entries
 }
 fn is_supported_index_mode(mode: &[u8]) -> bool {
-    matches!(mode, b"100644" | b"100755" | b"120000")
+    matches!(mode, b"100644" | b"100755" | b"120000" | b"160000")
 }
 #[derive(Debug, Clone)]
 struct WorktreeState {
@@ -644,6 +707,12 @@ struct WorktreeState {
     type_tag: &'static [u8],
     mode_tag: &'static [u8],
     content: Vec<u8>,
+}
+#[derive(Debug, Clone)]
+struct GitlinkState {
+    path: Vec<u8>,
+    committed_sha: String,
+    submodule_stream: Vec<u8>,
 }
 fn path_from_bytes(bytes: &[u8]) -> std::path::PathBuf {
     #[cfg(unix)]
@@ -755,6 +824,183 @@ async fn collect_extra_paths(worktree: &Path) -> Result<Vec<Vec<u8>>, Verificati
     paths.dedup();
     Ok(paths)
 }
+/// Collect a gitlink's canonical state: the committed index SHA frames a
+/// recursively computed repository-aware worktree stream for the checked-out
+/// submodule. Missing, unreadable, path-escaping, or HEAD-mismatched submodules
+/// return identity-unavailable rather than degrading to an ordinary directory
+/// walk.
+async fn collect_gitlink_state(
+    parent_worktree: &Path,
+    rel_path: &[u8],
+    committed_sha: &str,
+) -> Result<GitlinkState, VerificationInputUnavailable> {
+    let sub_path = path_from_bytes(rel_path);
+    let full_sub_path = parent_worktree.join(&sub_path);
+    let canonical_sub_path = std::fs::canonicalize(&full_sub_path).map_err(|_| {
+        VerificationInputUnavailable::UninitializedSubmodule {
+            path: lossy_path(rel_path),
+        }
+    })?;
+    let canonical_parent = std::fs::canonicalize(parent_worktree).map_err(|_| {
+        VerificationInputUnavailable::UninitializedSubmodule {
+            path: lossy_path(rel_path),
+        }
+    })?;
+    if !canonical_sub_path.starts_with(&canonical_parent) {
+        return Err(VerificationInputUnavailable::SubmodulePathEscape {
+            path: lossy_path(rel_path),
+        });
+    }
+    let metadata = std::fs::symlink_metadata(&canonical_sub_path).map_err(|_| {
+        VerificationInputUnavailable::UninitializedSubmodule {
+            path: lossy_path(rel_path),
+        }
+    })?;
+    if !metadata.file_type().is_dir() {
+        return Err(VerificationInputUnavailable::UninitializedSubmodule {
+            path: lossy_path(rel_path),
+        });
+    }
+    if !canonical_sub_path.join(".git").exists() {
+        return Err(VerificationInputUnavailable::UninitializedSubmodule {
+            path: lossy_path(rel_path),
+        });
+    }
+    let sub_head = match try_rev_parse(&canonical_sub_path, "HEAD").await {
+        Ok(Some(sha)) => sha,
+        Ok(None) => {
+            return Err(VerificationInputUnavailable::UninitializedSubmodule {
+                path: lossy_path(rel_path),
+            });
+        }
+        Err(e) => {
+            return Err(VerificationInputUnavailable::UnreadableFile {
+                path: lossy_path(rel_path),
+                error: e.to_string(),
+            });
+        }
+    };
+    if sub_head != committed_sha {
+        return Err(VerificationInputUnavailable::SubmoduleHeadMismatch {
+            path: lossy_path(rel_path),
+            expected: committed_sha.to_string(),
+            actual: sub_head,
+        });
+    }
+    let submodule_stream = collect_submodule_stream(&canonical_sub_path, b"").await?;
+    Ok(GitlinkState {
+        path: rel_path.to_vec(),
+        committed_sha: committed_sha.to_string(),
+        submodule_stream,
+    })
+}
+/// Recursively compute a repository-aware canonical stream for a submodule
+/// worktree, covering the submodule's own index, tracked/untracked/ignored
+/// state, and nested gitlinks. Namespaces entries by a parent-relative prefix
+/// so bytewise framing is unambiguous at every recursion level. Returns
+/// `Err(unavailable)` when a nested repository is missing, unreadable, or
+/// invalid so that the top-level identity becomes unavailable.
+fn collect_submodule_stream(
+    sub_worktree: &Path,
+    namespace: &[u8],
+) -> std::pin::Pin<
+    Box<dyn std::future::Future<Output = Result<Vec<u8>, VerificationInputUnavailable>> + Send>,
+> {
+    Box::pin(collect_submodule_stream_inner(
+        sub_worktree.to_path_buf(),
+        namespace.to_vec(),
+    ))
+}
+async fn collect_submodule_stream_inner(
+    sub_worktree: PathBuf,
+    namespace: Vec<u8>,
+) -> Result<Vec<u8>, VerificationInputUnavailable> {
+    let index_output = git_binary_stdout(
+        &sub_worktree,
+        vec!["ls-files".into(), "-s".into(), "-z".into()],
+    )
+    .await
+    .map_err(|e| VerificationInputUnavailable::UnreadableFile {
+        path: String::from_utf8_lossy(&namespace).into_owned(),
+        error: e.to_string(),
+    })?;
+    let mut index_entries = parse_index_entries(&index_output);
+    let mut tracked_states = Vec::with_capacity(index_entries.len());
+    let mut gitlink_states: Vec<GitlinkState> = Vec::new();
+    for entry in &index_entries {
+        if !is_supported_index_mode(&entry.mode) {
+            return Err(VerificationInputUnavailable::UnsupportedIndexMode {
+                path: lossy_path(&namespace_join(&namespace, &entry.path)),
+                mode: lossy_path(&entry.mode),
+            });
+        }
+        if entry.mode == MODE_GITLINK_TAG {
+            let namespaced = namespace_join(&namespace, &entry.path);
+            match collect_gitlink_state(&sub_worktree, &entry.path, &entry.blob_sha).await {
+                Ok(mut state) => {
+                    state.path = namespaced;
+                    gitlink_states.push(state);
+                }
+                Err(unavailable) => {
+                    return Err(unavailable);
+                }
+            }
+        } else {
+            let namespaced = namespace_join(&namespace, &entry.path);
+            match classify_worktree_entry(&sub_worktree, &entry.path, false) {
+                Ok(mut state) => {
+                    state.path = namespaced;
+                    tracked_states.push(state);
+                }
+                Err(unavailable) => {
+                    return Err(unavailable);
+                }
+            }
+        }
+    }
+    let extra_paths = collect_extra_paths(&sub_worktree).await.map_err(|e| {
+        VerificationInputUnavailable::UnreadableFile {
+            path: String::from_utf8_lossy(&namespace).into_owned(),
+            error: e.to_string(),
+        }
+    })?;
+    let mut extra_states = Vec::with_capacity(extra_paths.len());
+    for path in &extra_paths {
+        let namespaced = namespace_join(&namespace, path);
+        match classify_worktree_entry(&sub_worktree, path, true) {
+            Ok(mut state) => {
+                state.path = namespaced;
+                extra_states.push(state);
+            }
+            Err(unavailable) => {
+                return Err(unavailable);
+            }
+        }
+    }
+    index_entries.sort_by(|a, b| a.path.cmp(&b.path));
+    tracked_states.sort_by(|a, b| a.path.cmp(&b.path));
+    extra_states.sort_by(|a, b| a.path.cmp(&b.path));
+    gitlink_states.sort_by(|a, b| a.path.cmp(&b.path));
+    let mut stream = CanonicalStream::new();
+    stream.write_header();
+    stream.field(&namespace);
+    stream.write_index_entries(&index_entries);
+    stream.write_worktree_states(&tracked_states);
+    stream.write_gitlink_states(&gitlink_states);
+    stream.write_worktree_states(&extra_states);
+    Ok(stream.finalize())
+}
+fn namespace_join(namespace: &[u8], path: &[u8]) -> Vec<u8> {
+    if namespace.is_empty() {
+        path.to_vec()
+    } else {
+        let mut joined = Vec::with_capacity(namespace.len() + 1 + path.len());
+        joined.extend_from_slice(namespace);
+        joined.push(b'/');
+        joined.extend_from_slice(path);
+        joined
+    }
+}
 fn split_nul_paths_bytes(output: &[u8]) -> Vec<Vec<u8>> {
     output
         .split(|&b| b == 0)
@@ -850,6 +1096,14 @@ impl CanonicalStream {
             self.field(&state.content);
         }
     }
+    fn write_gitlink_states(&mut self, states: &[GitlinkState]) {
+        self.u64(states.len() as u64);
+        for state in states {
+            self.field(&state.path);
+            self.field(state.committed_sha.as_bytes());
+            self.field(&state.submodule_stream);
+        }
+    }
     fn write_external_states(&mut self, states: &[ExternalState]) {
         self.u64(states.len() as u64);
         for external in states {
@@ -874,7 +1128,11 @@ fn sha256_hex(bytes: &[u8]) -> String {
 #[allow(clippy::disallowed_methods)]
 mod tests {
     use super::*;
-    use crate::test_support::{git, init_repo_with_main_commit, write_and_commit};
+    use crate::test_support::{
+        TestRepoFixture, configure_local_identity, git, init_repo_with_main_commit,
+        write_and_commit,
+    };
+    use tempfile::TempDir;
     fn write(repo_path: &Path, relative_path: &str, contents: &[u8]) {
         let path = repo_path.join(relative_path);
         if let Some(parent) = path.parent() {
@@ -1306,5 +1564,213 @@ mod tests {
         write_and_commit(fixture.path(), "src/new.rs", "pub fn f() {}\n", "add code");
         let after = digest(fingerprint(fixture.path()).await);
         assert_ne!(before.fingerprint, after.fingerprint);
+    }
+
+    /// Create a real Git submodule fixture: an outer repo with a checked-out
+    /// inner submodule at `sub_path` containing one committed file.
+    #[allow(dead_code)]
+    struct SubmoduleFixture {
+        outer: TestRepoFixture,
+        inner: TempDir,
+    }
+
+    fn git_with_file_protocol<I, S>(repo_path: &Path, args: I)
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<std::ffi::OsStr>,
+    {
+        let args: Vec<std::ffi::OsString> = args
+            .into_iter()
+            .map(|arg| arg.as_ref().to_os_string())
+            .collect();
+        let output = std::process::Command::new("git")
+            .args(["-c", "protocol.file.allow=always"])
+            .args(&args)
+            .current_dir(repo_path)
+            .output()
+            .unwrap_or_else(|err| {
+                panic!(
+                    "failed to run git -c protocol.file.allow=always {args:?} in {}: {err}",
+                    repo_path.display()
+                )
+            });
+        assert!(
+            output.status.success(),
+            "git -c protocol.file.allow=always {:?} failed in {} with status {:?}\nstdout:\n{}\nstderr:\n{}",
+            args,
+            repo_path.display(),
+            output.status.code(),
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn make_submodule_fixture(sub_path: &str) -> SubmoduleFixture {
+        let outer = init_repo_with_main_commit();
+        let inner = tempfile::tempdir().expect("create inner temp dir");
+        git(inner.path(), ["init"]);
+        configure_local_identity(inner.path());
+        write_str(inner.path(), "README.md", "submodule\n");
+        git(inner.path(), ["add", "README.md"]);
+        git(inner.path(), ["commit", "-m", "inner init"]);
+        git(inner.path(), ["branch", "-m", "main"]);
+        git_with_file_protocol(
+            outer.path(),
+            ["submodule", "add", inner.path().to_str().unwrap(), sub_path],
+        );
+        git(outer.path(), ["commit", "-m", "add submodule"]);
+        SubmoduleFixture { outer, inner }
+    }
+
+    fn make_nested_submodule_fixture(outer_sub: &str, inner_sub: &str) -> SubmoduleFixture {
+        let outer = init_repo_with_main_commit();
+        git(outer.path(), ["config", "protocol.file.allow", "always"]);
+        let inner = tempfile::tempdir().expect("create inner temp dir");
+        git(inner.path(), ["init"]);
+        configure_local_identity(inner.path());
+        write_str(inner.path(), "README.md", "inner module\n");
+        git(inner.path(), ["add", "README.md"]);
+        git(inner.path(), ["commit", "-m", "inner init"]);
+        git(inner.path(), ["branch", "-m", "main"]);
+        let nested = tempfile::tempdir().expect("create nested temp dir");
+        git(nested.path(), ["init"]);
+        configure_local_identity(nested.path());
+        write_str(nested.path(), "nested.txt", "nested module\n");
+        git(nested.path(), ["add", "nested.txt"]);
+        git(nested.path(), ["commit", "-m", "nested init"]);
+        git(nested.path(), ["branch", "-m", "main"]);
+        git_with_file_protocol(
+            inner.path(),
+            [
+                "submodule",
+                "add",
+                nested.path().to_str().unwrap(),
+                inner_sub,
+            ],
+        );
+        git(inner.path(), ["commit", "-m", "add nested submodule"]);
+        git_with_file_protocol(
+            outer.path(),
+            [
+                "submodule",
+                "add",
+                inner.path().to_str().unwrap(),
+                outer_sub,
+            ],
+        );
+        git_with_file_protocol(
+            outer.path(),
+            ["submodule", "update", "--init", "--recursive"],
+        );
+        git(outer.path(), ["commit", "-m", "add submodule"]);
+        SubmoduleFixture { outer, inner }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn clean_submodule_produces_stable_available_digest() {
+        let fixture = make_submodule_fixture("vendor");
+        let first = match fingerprint(fixture.outer.path()).await {
+            VerificationInputFingerprint::Available(d) => d,
+            VerificationInputFingerprint::Unavailable(reason) => {
+                panic!("clean submodule should produce Available, got: {reason}")
+            }
+        };
+        let second = digest(fingerprint(fixture.outer.path()).await);
+        assert_eq!(
+            first.fingerprint, second.fingerprint,
+            "clean submodule repo should be deterministic"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn submodule_local_dirtiness_changes_top_level_digest() {
+        let fixture = make_submodule_fixture("vendor");
+        let before = digest(fingerprint(fixture.outer.path()).await);
+        write_str(
+            &fixture.outer.path().join("vendor"),
+            "dirty.txt",
+            "local change\n",
+        );
+        let after = digest(fingerprint(fixture.outer.path()).await);
+        assert_ne!(
+            before.fingerprint, after.fingerprint,
+            "submodule-local dirtiness must change the top-level digest"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn submodule_tracked_file_change_alters_digest() {
+        let fixture = make_submodule_fixture("vendor");
+        let before = digest(fingerprint(fixture.outer.path()).await);
+        write_str(
+            &fixture.outer.path().join("vendor"),
+            "README.md",
+            "changed\n",
+        );
+        let after = digest(fingerprint(fixture.outer.path()).await);
+        assert_ne!(
+            before.fingerprint, after.fingerprint,
+            "modifying a tracked file inside a submodule must alter the top-level digest"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn nested_submodule_dirtiness_changes_top_level_digest() {
+        let fixture = make_nested_submodule_fixture("vendor", "nested");
+        let before = match fingerprint(fixture.outer.path()).await {
+            VerificationInputFingerprint::Available(d) => d,
+            VerificationInputFingerprint::Unavailable(reason) => {
+                panic!("clean nested submodule should produce Available, got: {reason}")
+            }
+        };
+        let nested_path = fixture.outer.path().join("vendor").join("nested");
+        write_str(&nested_path, "dirty.txt", "nested local change\n");
+        let after = digest(fingerprint(fixture.outer.path()).await);
+        assert_ne!(
+            before.fingerprint, after.fingerprint,
+            "nested-submodule dirtiness must change the top-level digest"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn missing_submodule_content_fails_closed() {
+        let fixture = make_submodule_fixture("vendor");
+        let sub_path = fixture.outer.path().join("vendor");
+        std::fs::remove_dir_all(&sub_path).expect("remove submodule checkout");
+        let result = fingerprint(fixture.outer.path()).await;
+        assert!(
+            result.is_unavailable(),
+            "missing submodule checkout should make identity unavailable, got: {result:?}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn uninitialized_submodule_fails_closed() {
+        let fixture = make_submodule_fixture("vendor");
+        git(
+            fixture.outer.path(),
+            ["submodule", "deinit", "-f", "vendor"],
+        );
+        let result = fingerprint(fixture.outer.path()).await;
+        assert!(
+            result.is_unavailable(),
+            "uninitialized submodule should make identity unavailable, got: {result:?}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn submodule_detached_head_mismatch_fails_closed() {
+        let fixture = make_submodule_fixture("vendor");
+        let sub_path = fixture.outer.path().join("vendor");
+        configure_local_identity(&sub_path);
+        write_str(&sub_path, "new_branch_file.txt", "branch\n");
+        git(&sub_path, ["checkout", "-b", "other-branch"]);
+        git(&sub_path, ["add", "new_branch_file.txt"]);
+        git(&sub_path, ["commit", "-m", "other branch commit"]);
+        let result = fingerprint(fixture.outer.path()).await;
+        assert!(
+            result.is_unavailable(),
+            "submodule HEAD mismatch should make identity unavailable, got: {result:?}"
+        );
     }
 }
