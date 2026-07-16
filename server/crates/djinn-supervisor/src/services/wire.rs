@@ -107,6 +107,7 @@ pub struct AuthHelloMsg {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SerializableCreateTaskRunParams {
     pub id: String,
+    pub task_attempt_id: Option<String>,
     pub project_id: String,
     pub task_id: String,
     pub trigger_type: String,
@@ -682,6 +683,7 @@ mod tests {
     fn fake_spec() -> TaskRunSpec {
         TaskRunSpec {
             task_run_id: "run-t1".into(),
+            task_attempt_id: None,
             task_id: "t1".into(),
             project_id: "p1".into(),
             trigger: TaskRunTrigger::NewTask,
@@ -879,6 +881,7 @@ mod tests {
     fn create_task_run_request_roundtrip() {
         let params = SerializableCreateTaskRunParams {
             id: "run-create-1".into(),
+            task_attempt_id: Some("attempt-2".into()),
             project_id: "p1".into(),
             task_id: "t1".into(),
             trigger_type: "new_task".into(),
