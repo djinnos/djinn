@@ -511,13 +511,15 @@ impl NoteRepository {
         let weight = weight.clamp(0.0, 1.0);
         sqlx::query("DELETE FROM note_associations WHERE note_a_id = $1 AND note_b_id = $2 AND kind = 'co_access' AND source = 'session_co_access'")
             .bind(a_id).bind(b_id).execute(&mut **tx).await?;
-        sqlx::query(r#"INSERT INTO note_associations (note_a_id, note_b_id, weight, co_access_count, last_co_access, kind, source) VALUES ($1, $2, $3, 0, to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'), 'supersedes', 'session_co_access') ON CONFLICT (note_a_id, note_b_id, kind, source) DO UPDATE SET weight = GREATEST(note_associations.weight, EXCLUDED.weight), last_co_access = EXCLUDED.last_co_access"#)
-            .bind(a_id).bind(b_id).bind(weight).execute(&mut **tx).await?;
+        // Return the stored value rather than the requested weight: conflict
+        // resolution preserves a stronger pre-existing supersedes edge.
+        let persisted_weight: f64 = sqlx::query_scalar(r#"INSERT INTO note_associations (note_a_id, note_b_id, weight, co_access_count, last_co_access, kind, source) VALUES ($1, $2, $3, 0, to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'), 'supersedes', 'session_co_access') ON CONFLICT (note_a_id, note_b_id, kind, source) DO UPDATE SET weight = GREATEST(note_associations.weight, EXCLUDED.weight), last_co_access = EXCLUDED.last_co_access RETURNING weight"#)
+            .bind(a_id).bind(b_id).bind(weight).fetch_one(&mut **tx).await?;
         Ok(super::NoteSupersedesAssociation {
             note_a_id: a_id.to_owned(),
             note_b_id: b_id.to_owned(),
             kind: NoteAssociationKind::Supersedes,
-            weight,
+            weight: persisted_weight,
         })
     }
 

@@ -3706,6 +3706,12 @@ mod evidence_merge_regression_tests {
                     NoteRevisionDesiredState::ExistingWithMetadata(_) => {
                         unreachable!("extraction never submits metadata updates")
                     }
+                    NoteRevisionDesiredState::GuardedPatch { .. }
+                    | NoteRevisionDesiredState::DeprecateWithSupersedes { .. } => {
+                        unreachable!(
+                            "this legacy extraction test seam never submits revision operations"
+                        )
+                    }
                     NoteRevisionDesiredState::ExtractionSkipped => (None, None, true, None),
                     NoteRevisionDesiredState::Delete => unreachable!("not used by extraction"),
                 };
