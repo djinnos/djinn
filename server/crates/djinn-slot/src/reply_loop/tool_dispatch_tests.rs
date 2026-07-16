@@ -1,3 +1,5 @@
+// The telemetry guard mutex is intentionally held across awaits to serialize tests.
+#![allow(clippy::await_holding_lock)]
 use super::super::turn_budget::{
     DEFAULT_TURN_INLINE_CHAR_BUDGET, DEFAULT_TURN_INLINE_PREVIEW_FLOOR, TurnInlineBudgetConfig,
     apply_turn_inline_budget_pass_with_config, read_positive_env_usize,
@@ -228,9 +230,6 @@ fn scripted_request(idx: usize, name: &str, retry_safe: bool) -> ToolDispatchReq
         retry_safe,
     }
 }
-// The telemetry guard intentionally serializes these async tests across
-// their await points; single-threaded #[tokio::test] cannot deadlock on it.
-#[allow(clippy::await_holding_lock)]
 #[tokio::test]
 async fn dispatcher_phase_metrics_cover_success_and_returned_errors_for_all_routes() {
     let _guard = turn_budget_telemetry_guard();
@@ -262,9 +261,6 @@ async fn dispatcher_phase_metrics_cover_success_and_returned_errors_for_all_rout
     assert_eq!(phase_metric_value(&rendered) - before, 36.0);
     assert_phase_labels_are_bounded(&rendered);
 }
-// The telemetry guard intentionally serializes these async tests across
-// their await points; single-threaded #[tokio::test] cannot deadlock on it.
-#[allow(clippy::await_holding_lock)]
 #[tokio::test(start_paused = true)]
 async fn extension_retry_and_backoff_are_one_outer_tool_interval() {
     let _guard = turn_budget_telemetry_guard();
@@ -292,9 +288,6 @@ async fn extension_retry_and_backoff_are_one_outer_tool_interval() {
     let rendered = render().expect("render metrics after retry");
     assert_eq!(phase_metric_value(&rendered) - before, 4.0);
 }
-// The telemetry guard intentionally serializes these async tests across
-// their await points; single-threaded #[tokio::test] cannot deadlock on it.
-#[allow(clippy::await_holding_lock)]
 #[tokio::test]
 async fn concurrent_dispatch_guards_suppress_nested_tool_intervals_and_drop_flushes_once() {
     let _guard = turn_budget_telemetry_guard();
