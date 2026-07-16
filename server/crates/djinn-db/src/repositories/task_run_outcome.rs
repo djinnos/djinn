@@ -13,6 +13,22 @@ impl TaskRunOutcomeRepository {
         self.db.ensure_initialized().await?;
         Ok(sqlx::query_as("SELECT task_run_id, attempt_seq, outcome, parked_reason, review_verdict, merge_queue_result, created_at, updated_at FROM task_run_outcome_facts WHERE task_run_id = $1").bind(run_id).fetch_optional(self.db.pool()).await?)
     }
+
+    /// Read the outcome associated with this exact attempt. There is
+    /// intentionally no task-id or temporal fallback.
+    pub async fn get_for_attempt(&self, attempt_id: &str) -> Result<Option<TaskRunOutcomeFact>> {
+        self.db.ensure_initialized().await?;
+        Ok(sqlx::query_as(
+            "SELECT f.task_run_id, f.attempt_seq, f.outcome, f.parked_reason, \
+                    f.review_verdict, f.merge_queue_result, f.created_at, f.updated_at \
+             FROM task_attempts a \
+             JOIN task_run_outcome_facts f ON f.task_run_id = a.task_run_id \
+             WHERE a.id = $1",
+        )
+        .bind(attempt_id)
+        .fetch_optional(self.db.pool())
+        .await?)
+    }
     /// Create a run and attach the already allocated exact attempt in one transaction.
     /// A failed association rolls the run insertion back, so a fresh dispatch
     /// cannot leave an unattributed task run behind.
@@ -169,6 +185,55 @@ impl TaskRunOutcomeRepository {
         }
         self.write_once(run_id, "merge_queue_result", result).await
     }
+
+    /// Resolve only through the supplied attempt's durable association. There
+    /// is intentionally no task-id, current-state, or temporal fallback.
+    async fn run_id_for_attempt(&self, attempt_id: &str) -> Result<Option<String>> {
+        self.db.ensure_initialized().await?;
+        Ok(
+            sqlx::query_scalar("SELECT task_run_id FROM task_attempts WHERE id = $1")
+                .bind(attempt_id)
+                .fetch_optional(self.db.pool())
+                .await?
+                .flatten(),
+        )
+    }
+
+    pub async fn record_review_verdict_for_attempt(
+        &self,
+        attempt_id: &str,
+        verdict: &str,
+    ) -> Result<Option<TaskRunOutcomeFact>> {
+        match self.run_id_for_attempt(attempt_id).await? {
+            Some(run_id) => self.record_review_verdict(&run_id, verdict).await.map(Some),
+            None => Ok(None),
+        }
+    }
+
+    pub async fn record_merge_queue_result_for_attempt(
+        &self,
+        attempt_id: &str,
+        result: &str,
+    ) -> Result<Option<TaskRunOutcomeFact>> {
+        match self.run_id_for_attempt(attempt_id).await? {
+            Some(run_id) => self
+                .record_merge_queue_result(&run_id, result)
+                .await
+                .map(Some),
+            None => Ok(None),
+        }
+    }
+
+    pub async fn record_parked_reason_for_attempt(
+        &self,
+        attempt_id: &str,
+        reason: &str,
+    ) -> Result<Option<TaskRunOutcomeFact>> {
+        match self.run_id_for_attempt(attempt_id).await? {
+            Some(run_id) => self.record_parked_reason(&run_id, reason).await.map(Some),
+            None => Ok(None),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -186,6 +251,7 @@ mod tests {
             .create("outcome facts", "", "", "", "", None)
             .await
             .unwrap();
+
         let task_id = uuid::Uuid::now_v7().to_string();
         let short_id = format!("t{}{}", &task_id[..6], &task_id[task_id.len() - 6..]);
         sqlx::query(
@@ -267,6 +333,31 @@ mod tests {
             .await
             .unwrap();
 
+        // Each writer receives an authoritative attempt and follows only its
+        // durable association. Retry is idempotent; contradiction is rejected.
+        outcomes
+            .record_review_verdict_for_attempt(&first.id, "accepted")
+            .await
+            .unwrap();
+        outcomes
+            .record_review_verdict_for_attempt(&first.id, "accepted")
+            .await
+            .unwrap();
+        assert!(
+            outcomes
+                .record_review_verdict_for_attempt(&first.id, "rejected")
+                .await
+                .is_err()
+        );
+        outcomes
+            .record_merge_queue_result_for_attempt(&second.id, "failed")
+            .await
+            .unwrap();
+        outcomes
+            .record_parked_reason_for_attempt(&second.id, "merge_queue_failed")
+            .await
+            .unwrap();
+
         assert_eq!(
             outcomes.get(&run_one).await.unwrap().unwrap().attempt_seq,
             Some(1)
@@ -289,5 +380,69 @@ mod tests {
                 .unwrap();
         assert_eq!(first_run.as_deref(), Some(run_one.as_str()));
         assert_eq!(second_run.as_deref(), Some(run_two.as_str()));
+        let first_fact = outcomes.get(&run_one).await.unwrap().unwrap();
+        let second_fact = outcomes.get(&run_two).await.unwrap().unwrap();
+        assert_eq!(first_fact.review_verdict.as_deref(), Some("accepted"));
+        assert!(first_fact.merge_queue_result.is_none());
+        assert_eq!(second_fact.merge_queue_result.as_deref(), Some("failed"));
+        assert_eq!(
+            second_fact.parked_reason.as_deref(),
+            Some("merge_queue_failed")
+        );
+
+        // Queue-405 delegation spans polls: retain the accepted review written
+        // at enqueue, then add the later successful queue observation.
+        outcomes
+            .record_merge_queue_result_for_attempt(&first.id, "passed")
+            .await
+            .unwrap();
+        let delegated_fact = outcomes.get(&run_one).await.unwrap().unwrap();
+        assert_eq!(delegated_fact.review_verdict.as_deref(), Some("accepted"));
+        assert_eq!(delegated_fact.merge_queue_result.as_deref(), Some("passed"));
+
+        // A genuinely review-inapplicable merge remains distinguishable after
+        // the same later queue-success write.
+        let third_id = uuid::Uuid::now_v7().to_string();
+        let third = attempts
+            .create_or_get_pending(CreateTaskAttemptParams {
+                id: &third_id,
+                task_id: &task_id,
+                role: "worker",
+                dispatch_key: "exact-run-no-review",
+                session_id: None,
+                attempt_seq: None,
+            })
+            .await
+            .unwrap();
+        let run_three = uuid::Uuid::now_v7().to_string();
+        outcomes
+            .create_run_for_attempt(
+                CreateTaskRunParams {
+                    id: &run_three,
+                    project_id: &project_id,
+                    task_id: &task_id,
+                    trigger_type: TaskRunTrigger::NewTask.as_str(),
+                    status: None,
+                    workspace_path: None,
+                    mirror_ref: None,
+                },
+                &third.id,
+            )
+            .await
+            .unwrap();
+        outcomes
+            .record_review_verdict_for_attempt(&third.id, "not_applicable")
+            .await
+            .unwrap();
+        outcomes
+            .record_merge_queue_result_for_attempt(&third.id, "passed")
+            .await
+            .unwrap();
+        let no_review_fact = outcomes.get(&run_three).await.unwrap().unwrap();
+        assert_eq!(
+            no_review_fact.review_verdict.as_deref(),
+            Some("not_applicable")
+        );
+        assert_eq!(no_review_fact.merge_queue_result.as_deref(), Some("passed"));
     }
 }

@@ -9,6 +9,7 @@ use djinn_core::models::Task;
 use djinn_core::models::{TaskRunStatus, TaskRunTrigger};
 use djinn_db::repositories::task_attempt::TaskAttemptRepository;
 use djinn_db::repositories::task_run::TaskRunRepository;
+use djinn_db::repositories::task_run_outcome::TaskRunOutcomeRepository;
 use djinn_db::{TaskRepository, task_branch_name};
 use djinn_runtime::{
     BiStream, InfraDeathLogTailCapture, LoopGuardKind, ProviderFailureClass, ResolvedCredentials,
@@ -513,6 +514,13 @@ pub(super) async fn dispatch_task_runtime(
     match (report_result, teardown) {
         (Ok(streamed), Ok(teardown_report)) => {
             let report = select_terminal_report(streamed, teardown_report);
+            if let TaskRunOutcome::Parked { reason, .. } = &report.outcome
+                && let Err(e) = TaskRunOutcomeRepository::new(app_state.db.clone())
+                    .record_parked_reason(&report.task_run_id, reason)
+                    .await
+            {
+                tracing::warn!(task_run_id = %report.task_run_id, error = %e, "supervisor dispatch: failed to record exact parked outcome");
+            }
             tracing::info!(
                 task_id = %task.short_id,
                 task_run_id = %report.task_run_id,
@@ -634,7 +642,7 @@ async fn execute_runtime_report_phase(
     };
     let teardown = runtime.teardown(handle).await;
     let reap_status = select_orphan_reap_status(&await_outcome.presession_timeout, &teardown);
-    reap_orphan_task_run(app_state, &task.id, reap_status).await;
+    reap_orphan_task_run(app_state, &spec.task_run_id, reap_status).await;
     teardown_cargo_target_run_dir(app_state, &spec.task_run_id).await;
     Ok(RuntimeExecutionOutcome {
         report_result: await_outcome.report_result,
@@ -1351,27 +1359,27 @@ fn select_terminal_report(
 
 async fn reap_orphan_task_run(
     app_state: &AgentContext,
-    task_id: &str,
+    task_run_id: &str,
     terminal_status: TaskRunStatus,
 ) {
     let repo = TaskRunRepository::new(app_state.db.clone());
-    match repo.reap_running_for_task(task_id, terminal_status).await {
-        Ok(Some(run_id)) => {
-            tracing::warn!(
-                task_id = %task_id,
-                task_run_id = %run_id,
-                status = %terminal_status,
-                "supervisor dispatch: reaped orphan task_run row \
-                 (in-pod supervisor never sent terminal RPC)"
-            );
+    match repo.get(task_run_id).await {
+        Ok(Some(run)) if !matches!(run.status.as_str(), "completed" | "failed" | "interrupted") => {
+            if let Err(e) = repo.update_status(task_run_id, terminal_status).await {
+                tracing::warn!(task_run_id, error = %e, "supervisor dispatch: failed to reap exact orphan task_run row");
+                return;
+            }
+            if let Err(e) = TaskRunOutcomeRepository::new(app_state.db.clone())
+                .record_parked_reason(task_run_id, "orphaned")
+                .await
+            {
+                tracing::warn!(task_run_id, error = %e, "supervisor dispatch: failed to record exact orphan parked reason");
+            }
+            tracing::warn!(task_run_id, status = %terminal_status, "supervisor dispatch: reaped orphan task_run row (in-pod supervisor never sent terminal RPC)");
         }
-        Ok(None) => {}
+        Ok(_) => {}
         Err(e) => {
-            tracing::warn!(
-                task_id = %task_id,
-                error = %e,
-                "supervisor dispatch: reap_running_for_task failed"
-            );
+            tracing::warn!(task_run_id, error = %e, "supervisor dispatch: failed to load exact orphan task_run row")
         }
     }
 }
