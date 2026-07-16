@@ -1127,7 +1127,7 @@ jobs:
           set +e
           cargo run -p djinn-qa -- run --qa-profile smoke-ci --concurrency 8 --evidence-dir qa/evidence/smoke-ci
           run_status=$?
-          cargo run -p djinn-qa -- coverage --profile smoke-ci --format json --evidence qa/evidence/smoke-ci --output qa/evidence/smoke-ci/coverage.json
+          cargo run -p djinn-qa -- coverage --profile smoke-ci --format json --evidence ../qa/evidence/smoke-ci --output ../qa/evidence/smoke-ci/coverage.json
           coverage_status=$?
           if [ "$run_status" -ne 0 ]; then exit "$run_status"; fi
           exit "$coverage_status"

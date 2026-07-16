@@ -5,7 +5,9 @@ import test from 'node:test';
 
 const WORKFLOW = resolve('.github/workflows/quality-gate.yml');
 const RUN_COMMAND = 'cargo run -p djinn-qa -- run --qa-profile smoke-ci --concurrency 8 --evidence-dir qa/evidence/smoke-ci';
-const COVERAGE_COMMAND = 'cargo run -p djinn-qa -- coverage --profile smoke-ci --format json --evidence qa/evidence/smoke-ci --output qa/evidence/smoke-ci/coverage.json';
+// qa-smoke runs from server, while the runner emits evidence at the repository
+// root. Coverage must use that emitted directory, not server/qa/evidence.
+const COVERAGE_COMMAND = 'cargo run -p djinn-qa -- coverage --profile smoke-ci --format json --evidence ../qa/evidence/smoke-ci --output ../qa/evidence/smoke-ci/coverage.json';
 
 function job(source, id) {
   const match = source.match(new RegExp(`^  ${id}:\\n([\\s\\S]*?)(?=^  [A-Za-z0-9_-]+:|$(?![\\s\\S]))`, 'm'));
@@ -51,6 +53,8 @@ test('qa-smoke workflow contract is deterministic, routed, and fail closed', () 
   assert.ok(templateAt >= 0 && templateAt < runAt,
     'the disposable migrated test template must exist before smoke scenarios run');
   assert.ok(coverageAt > runAt, 'coverage must run after smoke evidence is emitted');
+  assert.match(smoke, /--evidence \.\.\/qa\/evidence\/smoke-ci --output \.\.\/qa\/evidence\/smoke-ci\/coverage\.json/,
+    'coverage must read and write alongside the repository-root evidence emitted from server');
   assert.match(smoke, /set \+e[\s\S]*?run_status=\$\?[\s\S]*?coverage_status=\$\?/,
     'coverage must still run after scenario failure so evidence remains diagnosable');
 
