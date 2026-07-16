@@ -621,7 +621,8 @@ impl ExtractionContext<'_> {
         scope_paths_json: &str,
         retrieval_anchor: Option<&str>,
     ) -> djinn_db::Result<djinn_db::NoteRevisionMutationResult> {
-        let result = self.note_repo
+        let result = self
+            .note_repo
             .mutate_with_revision(NoteRevisionMutation {
                 project_id: self.project_id.to_owned(),
                 note_id: Some(uuid::Uuid::now_v7().to_string()),
@@ -647,7 +648,10 @@ impl ExtractionContext<'_> {
             })
             .await?;
         if let Some(note) = result.note.as_ref() {
-            self.created_note_ids.lock().unwrap().insert(note.id.clone());
+            self.created_note_ids
+                .lock()
+                .unwrap()
+                .insert(note.id.clone());
         }
         Ok(result)
     }
@@ -664,7 +668,7 @@ struct ExtractionResponse {
     #[serde(default)]
     revision_operations: Vec<RevisionOperation>,
 }
-#[derive(Debug, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Deserialize, PartialEq)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 enum RevisionOperation {
     Patch {
@@ -765,36 +769,237 @@ fn normalize_reason(reason: &mut String) -> Result<(), RevisionOperationRefusalR
 }
 
 #[derive(Debug, Clone, Copy)]
-enum RevisionGuardRefusalReason { TargetNotFound, CrossProject, Ineligible, LifecycleInvalid, HumanConfidenceImmutable, ConfidenceCeiling, StaleBeforeText, CanonicalMutationRejected }
-impl std::fmt::Display for RevisionGuardRefusalReason {
-    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result { f.write_str(match self { Self::TargetNotFound => "target_not_found", Self::CrossProject => "cross_project", Self::Ineligible => "ineligible", Self::LifecycleInvalid => "lifecycle_invalid", Self::HumanConfidenceImmutable => "human_confidence_immutable", Self::ConfidenceCeiling => "confidence_ceiling", Self::StaleBeforeText => "stale_before_text", Self::CanonicalMutationRejected => "canonical_mutation_rejected" }) }
+enum RevisionGuardRefusalReason {
+    TargetNotFound,
+    CrossProject,
+    Ineligible,
+    LifecycleInvalid,
+    HumanConfidenceImmutable,
+    ConfidenceCeiling,
+    StaleBeforeText,
+    CanonicalMutationRejected,
 }
-fn revision_refused(context: &ExtractionContext<'_>, target: &str, reason: RevisionGuardRefusalReason) { tracing::warn!(refusal_reason = %reason, task_id = %context.task_id, session_id = %context.session_id, task_run_id = ?context.task_run_id, target_note_id = target, "llm_extraction: revision operation refused"); }
-async fn load_eligible_task_memory_refs(context: &ExtractionContext<'_>, refs_json: &str) -> HashSet<String> {
-    let Ok(refs) = serde_json::from_str::<Vec<String>>(refs_json) else { return HashSet::new(); };
+impl std::fmt::Display for RevisionGuardRefusalReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::TargetNotFound => "target_not_found",
+            Self::CrossProject => "cross_project",
+            Self::Ineligible => "ineligible",
+            Self::LifecycleInvalid => "lifecycle_invalid",
+            Self::HumanConfidenceImmutable => "human_confidence_immutable",
+            Self::ConfidenceCeiling => "confidence_ceiling",
+            Self::StaleBeforeText => "stale_before_text",
+            Self::CanonicalMutationRejected => "canonical_mutation_rejected",
+        })
+    }
+}
+fn revision_refused(context: &ExtractionContext<'_>, target: &str, reason: impl std::fmt::Display) {
+    tracing::warn!(
+        refusal_reason = %reason,
+        task_id = %context.task_id,
+        session_id = %context.session_id,
+        task_run_id = ?context.task_run_id,
+        target_note_id = target,
+        "llm_extraction: revision operation refused"
+    );
+}
+
+async fn load_eligible_task_memory_refs(
+    context: &ExtractionContext<'_>,
+    refs_json: &str,
+) -> HashSet<String> {
+    let Ok(refs) = serde_json::from_str::<Vec<String>>(refs_json) else {
+        return HashSet::new();
+    };
     let mut eligible = HashSet::new();
-    for permalink in refs { if let Ok(Some(note)) = context.note_repo.get_by_permalink(context.project_id, &permalink).await && note.project_id == context.project_id { eligible.insert(note.id); } }
+    for permalink in refs {
+        if let Ok(Some(note)) = context
+            .note_repo
+            .get_by_permalink(context.project_id, &permalink)
+            .await
+            && note.project_id == context.project_id
+        {
+            eligible.insert(note.id);
+        }
+    }
     eligible
 }
-async fn apply_revision_operations(context: &ExtractionContext<'_>, operations: &[RevisionOperation], eligible: &HashSet<String>) -> usize {
+async fn apply_revision_operations(
+    context: &ExtractionContext<'_>,
+    operations: &[RevisionOperation],
+    eligible: &HashSet<String>,
+) -> usize {
     let mut applied = 0;
     for operation in operations {
-        let (target_id, superseding_id) = match operation { RevisionOperation::Patch { target_note_id, .. } => (target_note_id.as_str(), None), RevisionOperation::DeprecateWithSupersedes { deprecated_note_id, superseding_note_id, .. } => (deprecated_note_id.as_str(), Some(superseding_note_id.as_str())) };
-        let target = match context.note_repo.get(target_id).await { Ok(Some(note)) => note, _ => { revision_refused(context, target_id, RevisionGuardRefusalReason::TargetNotFound); continue; } };
-        if target.project_id != context.project_id { revision_refused(context, target_id, RevisionGuardRefusalReason::CrossProject); continue; }
-        if !eligible.contains(target_id) { revision_refused(context, target_id, RevisionGuardRefusalReason::Ineligible); continue; }
-        if target.status != "active" { revision_refused(context, target_id, RevisionGuardRefusalReason::LifecycleInvalid); continue; }
-        if target.confidence >= 1.0 { revision_refused(context, target_id, RevisionGuardRefusalReason::HumanConfidenceImmutable); continue; }
-        if target.confidence > EVIDENCE_MERGE_MAX_CONFIDENCE { revision_refused(context, target_id, RevisionGuardRefusalReason::ConfidenceCeiling); continue; }
-        if let Some(id) = superseding_id { let superseding = match context.note_repo.get(id).await { Ok(Some(note)) => note, _ => { revision_refused(context, target_id, RevisionGuardRefusalReason::TargetNotFound); continue; } }; if superseding.project_id != context.project_id { revision_refused(context, target_id, RevisionGuardRefusalReason::CrossProject); continue; } if !eligible.contains(id) { revision_refused(context, target_id, RevisionGuardRefusalReason::Ineligible); continue; } if superseding.status != "active" { revision_refused(context, target_id, RevisionGuardRefusalReason::LifecycleInvalid); continue; } }
-        let (desired, reason) = match operation {
-            RevisionOperation::Patch { before_text, after_text, confidence_delta, reason, .. } => { if target.content != *before_text { revision_refused(context, target_id, RevisionGuardRefusalReason::StaleBeforeText); continue; } let confidence = target.confidence + confidence_delta; if !(0.0..=EVIDENCE_MERGE_MAX_CONFIDENCE).contains(&confidence) { revision_refused(context, target_id, RevisionGuardRefusalReason::ConfidenceCeiling); continue; } (NoteRevisionDesiredState::GuardedPatch { expected_content: before_text.clone(), content: after_text.clone(), confidence }, reason) }
-            RevisionOperation::DeprecateWithSupersedes { superseding_note_id, reason, .. } => (NoteRevisionDesiredState::DeprecateWithSupersedes { superseding_note_id: superseding_note_id.clone(), association_weight: 1.0 }, reason),
+        let (target_id, superseding_id) = match operation {
+            RevisionOperation::Patch { target_note_id, .. } => (target_note_id.as_str(), None),
+            RevisionOperation::DeprecateWithSupersedes {
+                deprecated_note_id,
+                superseding_note_id,
+                ..
+            } => (
+                deprecated_note_id.as_str(),
+                Some(superseding_note_id.as_str()),
+            ),
         };
-        let Ok(provenance) = context.revision_provenance() else { revision_refused(context, target_id, RevisionGuardRefusalReason::CanonicalMutationRejected); continue; };
-        let Ok(reason) = NoteRevisionReason::new(reason) else { revision_refused(context, target_id, RevisionGuardRefusalReason::CanonicalMutationRejected); continue; };
-        let mutation = NoteRevisionMutation { project_id: context.project_id.to_owned(), note_id: Some(target_id.to_owned()), event_kind: NoteRevisionEventKind::Updated, desired, attribution: TrustedNoteRevisionAttribution::system(NoteRevisionSubsystem::Extraction), provenance, reason };
-        match context.note_repo.mutate_with_revision(mutation).await { Ok(result) if result.changed => applied += 1, _ => revision_refused(context, target_id, RevisionGuardRefusalReason::CanonicalMutationRejected) }
+        // Parsing validates this already, but preserve the refusal contract at
+        // the persistence boundary if a future caller constructs operations
+        // directly instead of going through the parser.
+        if let Err(reason) = validate_revision_operations(&mut [operation.clone()]) {
+            revision_refused(context, target_id, reason);
+            continue;
+        }
+        let target = match context.note_repo.get(target_id).await {
+            Ok(Some(note)) => note,
+            _ => {
+                revision_refused(
+                    context,
+                    target_id,
+                    RevisionGuardRefusalReason::TargetNotFound,
+                );
+                continue;
+            }
+        };
+        if target.project_id != context.project_id {
+            revision_refused(context, target_id, RevisionGuardRefusalReason::CrossProject);
+            continue;
+        }
+        if !eligible.contains(target_id) {
+            revision_refused(context, target_id, RevisionGuardRefusalReason::Ineligible);
+            continue;
+        }
+        if target.status != "active" {
+            revision_refused(
+                context,
+                target_id,
+                RevisionGuardRefusalReason::LifecycleInvalid,
+            );
+            continue;
+        }
+        if target.confidence >= 1.0 {
+            revision_refused(
+                context,
+                target_id,
+                RevisionGuardRefusalReason::HumanConfidenceImmutable,
+            );
+            continue;
+        }
+        if target.confidence > EVIDENCE_MERGE_MAX_CONFIDENCE {
+            revision_refused(
+                context,
+                target_id,
+                RevisionGuardRefusalReason::ConfidenceCeiling,
+            );
+            continue;
+        }
+        if let Some(id) = superseding_id {
+            let superseding = match context.note_repo.get(id).await {
+                Ok(Some(note)) => note,
+                _ => {
+                    revision_refused(
+                        context,
+                        target_id,
+                        RevisionGuardRefusalReason::TargetNotFound,
+                    );
+                    continue;
+                }
+            };
+            if superseding.project_id != context.project_id {
+                revision_refused(context, target_id, RevisionGuardRefusalReason::CrossProject);
+                continue;
+            }
+            if !eligible.contains(id) {
+                revision_refused(context, target_id, RevisionGuardRefusalReason::Ineligible);
+                continue;
+            }
+            if superseding.status != "active" {
+                revision_refused(
+                    context,
+                    target_id,
+                    RevisionGuardRefusalReason::LifecycleInvalid,
+                );
+                continue;
+            }
+        }
+        let (desired, reason) = match operation {
+            RevisionOperation::Patch {
+                before_text,
+                after_text,
+                confidence_delta,
+                reason,
+                ..
+            } => {
+                if target.content != *before_text {
+                    revision_refused(
+                        context,
+                        target_id,
+                        RevisionGuardRefusalReason::StaleBeforeText,
+                    );
+                    continue;
+                }
+                let confidence = target.confidence + confidence_delta;
+                if !(0.0..=EVIDENCE_MERGE_MAX_CONFIDENCE).contains(&confidence) {
+                    revision_refused(
+                        context,
+                        target_id,
+                        RevisionGuardRefusalReason::ConfidenceCeiling,
+                    );
+                    continue;
+                }
+                (
+                    NoteRevisionDesiredState::GuardedPatch {
+                        expected_content: before_text.clone(),
+                        content: after_text.clone(),
+                        confidence,
+                    },
+                    reason,
+                )
+            }
+            RevisionOperation::DeprecateWithSupersedes {
+                superseding_note_id,
+                reason,
+                ..
+            } => (
+                NoteRevisionDesiredState::DeprecateWithSupersedes {
+                    superseding_note_id: superseding_note_id.clone(),
+                    association_weight: 1.0,
+                },
+                reason,
+            ),
+        };
+        let Ok(provenance) = context.revision_provenance() else {
+            revision_refused(
+                context,
+                target_id,
+                RevisionGuardRefusalReason::CanonicalMutationRejected,
+            );
+            continue;
+        };
+        let Ok(reason) = NoteRevisionReason::new(reason) else {
+            revision_refused(
+                context,
+                target_id,
+                RevisionGuardRefusalReason::CanonicalMutationRejected,
+            );
+            continue;
+        };
+        let mutation = NoteRevisionMutation {
+            project_id: context.project_id.to_owned(),
+            note_id: Some(target_id.to_owned()),
+            event_kind: NoteRevisionEventKind::Updated,
+            desired,
+            attribution: TrustedNoteRevisionAttribution::system(NoteRevisionSubsystem::Extraction),
+            provenance,
+            reason,
+        };
+        match context.note_repo.mutate_with_revision(mutation).await {
+            Ok(result) if result.changed => applied += 1,
+            _ => revision_refused(
+                context,
+                target_id,
+                RevisionGuardRefusalReason::CanonicalMutationRejected,
+            ),
+        }
     }
     applied
 }
@@ -1117,6 +1322,7 @@ struct ExtractionContext<'a> {
     provenance: &'a str,
     caller_attributed: bool,
     session_scope_paths: &'a [String],
+    created_note_ids: Mutex<HashSet<String>>,
     #[cfg(any(test, feature = "test-support"))]
     candidate_lookup: CandidateLookup,
 }
@@ -1680,14 +1886,38 @@ async fn run_llm_extraction_inner(
         )
         .await;
     }
-    let mut eligible_note_ids = load_eligible_task_memory_refs(&extraction_context, &task.memory_refs).await;
-    match djinn_db::repositories::retrieval_trace::RetrievalTraceRepository::new(app_state.db.clone())
-        .injected_candidate_note_ids_for_attribution(&project.id, &session_id, &task.id, session.task_run_id.as_deref()).await {
+    let mut eligible_note_ids =
+        load_eligible_task_memory_refs(&extraction_context, &task.memory_refs).await;
+    match djinn_db::repositories::retrieval_trace::RetrievalTraceRepository::new(
+        app_state.db.clone(),
+    )
+    .injected_candidate_note_ids_for_attribution(
+        &project.id,
+        &session_id,
+        &task.id,
+        session.task_run_id.as_deref(),
+    )
+    .await
+    {
         Ok(ids) => eligible_note_ids.extend(ids),
-        Err(error) => tracing::warn!(session_id = %session_id, task_id = %task.id, %error, "llm_extraction: failed to resolve retrieval revision eligibility"),
+        Err(error) => {
+            tracing::warn!(session_id = %session_id, task_id = %task.id, %error, "llm_extraction: failed to resolve retrieval revision eligibility")
+        }
     }
-    eligible_note_ids.extend(extraction_context.created_note_ids.lock().unwrap().iter().cloned());
-    durable_output_count += apply_revision_operations(&extraction_context, &extracted.revision_operations, &eligible_note_ids).await;
+    eligible_note_ids.extend(
+        extraction_context
+            .created_note_ids
+            .lock()
+            .unwrap()
+            .iter()
+            .cloned(),
+    );
+    durable_output_count += apply_revision_operations(
+        &extraction_context,
+        &extracted.revision_operations,
+        &eligible_note_ids,
+    )
+    .await;
     finalize_extraction_output(
         &note_repo,
         &project.id,
@@ -4271,6 +4501,162 @@ mod evidence_merge_regression_tests {
         assert_eq!(record.mutation.reason.as_str(), reason);
         assert!(record.changed);
         assert!(record.revision_id.is_some());
+    }
+
+    #[derive(Clone, Default)]
+    struct RevisionRefusalLogs(Arc<Mutex<Vec<u8>>>);
+
+    impl RevisionRefusalLogs {
+        fn take(&self) -> String {
+            let mut bytes = self.0.lock().expect("revision refusal log mutex poisoned");
+            let output = String::from_utf8(bytes.clone()).expect("revision refusal logs are utf-8");
+            bytes.clear();
+            output
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for RevisionRefusalLogs {
+        type Writer = RevisionRefusalLogWriter;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            RevisionRefusalLogWriter {
+                bytes: Arc::clone(&self.0),
+            }
+        }
+    }
+
+    struct RevisionRefusalLogWriter {
+        bytes: Arc<Mutex<Vec<u8>>>,
+    }
+
+    impl std::io::Write for RevisionRefusalLogWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.bytes
+                .lock()
+                .expect("revision refusal log mutex poisoned")
+                .extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    async fn assert_revision_operation_refused(
+        note: djinn_memory::Note,
+        operation: RevisionOperation,
+        eligible: HashSet<String>,
+        expected_reason: &str,
+    ) {
+        let provider = ScriptedProvider::new(vec![]);
+        let repo = RecordingExtractionRepository::with_existing(note.clone());
+        let context = test_context(&repo, &provider);
+        let logs = RevisionRefusalLogs::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(logs.clone())
+            .with_ansi(false)
+            .finish();
+        let guard = tracing::subscriber::set_default(subscriber);
+
+        assert_eq!(
+            apply_revision_operations(&context, &[operation], &eligible).await,
+            0,
+            "refused operations are not durable output"
+        );
+        drop(guard);
+
+        assert_eq!(repo.existing_content(), note.content);
+        assert!(
+            repo.revisions().is_empty(),
+            "refusals must not invoke mutate_with_revision or create revisions/associations"
+        );
+        let captured = logs.take();
+        assert!(captured.contains("llm_extraction: revision operation refused"));
+        assert!(
+            captured.contains(&format!("refusal_reason={expected_reason}")),
+            "missing stable refusal reason in {captured}"
+        );
+        assert!(captured.contains("task_id=task-1"));
+        assert!(captured.contains("session_id=new"));
+        assert!(captured.contains("task_run_id=Some(\"run-1\")"));
+        assert!(
+            captured.contains(&note.id),
+            "target note context missing from {captured}"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn revision_operation_guards_refuse_without_mutation_or_association_side_effects() {
+        const NOTE_ID: &str = "018f0000-0000-7000-8000-000000000001";
+        const SUPERSEDING_ID: &str = "018f0000-0000-7000-8000-000000000002";
+
+        let eligible = || HashSet::from([NOTE_ID.to_owned()]);
+        let patch = |before_text: &str| RevisionOperation::Patch {
+            target_note_id: NOTE_ID.to_owned(),
+            before_text: before_text.to_owned(),
+            after_text: "replacement content".to_owned(),
+            confidence_delta: 0.0,
+            reason: "supported correction".to_owned(),
+        };
+        let deprecate = || RevisionOperation::DeprecateWithSupersedes {
+            deprecated_note_id: NOTE_ID.to_owned(),
+            superseding_note_id: SUPERSEDING_ID.to_owned(),
+            reason: "replacement is authoritative".to_owned(),
+        };
+        let note = || {
+            let mut note = test_existing_note();
+            note.id = NOTE_ID.to_owned();
+            note
+        };
+
+        // Direct callers cannot bypass parser-level malformed-operation checks.
+        assert_revision_operation_refused(
+            note(),
+            RevisionOperation::Patch {
+                target_note_id: NOTE_ID.to_owned(),
+                before_text: "current content".to_owned(),
+                after_text: " ".to_owned(),
+                confidence_delta: 0.0,
+                reason: "supported correction".to_owned(),
+            },
+            eligible(),
+            "blank_required_text",
+        )
+        .await;
+        assert_revision_operation_refused(
+            note(),
+            patch("stale content"),
+            eligible(),
+            "stale_before_text",
+        )
+        .await;
+        assert_revision_operation_refused(note(), deprecate(), HashSet::new(), "ineligible").await;
+
+        let mut cross_project = note();
+        cross_project.project_id = "other-project".to_owned();
+        assert_revision_operation_refused(
+            cross_project,
+            patch("Existing evidence\n\n---\n*Extracted from session old. Confidence: 0.5 (session-extracted).*"),
+            eligible(),
+            "cross_project",
+        )
+        .await;
+
+        let mut deprecated = note();
+        deprecated.status = "deprecated".to_owned();
+        assert_revision_operation_refused(deprecated, deprecate(), eligible(), "lifecycle_invalid")
+            .await;
+
+        let mut human_curated = note();
+        human_curated.confidence = 1.0;
+        assert_revision_operation_refused(
+            human_curated,
+            patch("Existing evidence\n\n---\n*Extracted from session old. Confidence: 0.5 (session-extracted).*"),
+            eligible(),
+            "human_confidence_immutable",
+        )
+        .await;
     }
 
     #[tokio::test]
