@@ -1335,7 +1335,10 @@ impl CoordinatorActor {
             // exit while the task remains nonterminal is a protocol
             // violation and must count as a failed attempt for retry
             // accounting.
-            ("session", "created") => {
+            // SessionRepository emits `started` both when a runtime session is
+            // created and when it is subsequently observed running. Binding
+            // here makes the UID available to the terminal callback below.
+            ("session", "started") => {
                 let Some(session) = envelope.parse_payload::<djinn_core::models::SessionRecord>()
                 else {
                     return;

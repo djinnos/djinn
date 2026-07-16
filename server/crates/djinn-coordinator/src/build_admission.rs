@@ -617,6 +617,19 @@ mod tests {
         let BuildAdmissionDecision::Permitted { permit: first, .. } = first else {
             panic!("task generation one must be admitted");
         };
+        controller
+            .transition(&first, WarmAdmissionTransition::CreateStarted)
+            .await
+            .unwrap();
+        controller
+            .transition(
+                &first,
+                WarmAdmissionTransition::Live {
+                    uid: "uid-one".into(),
+                },
+            )
+            .await
+            .unwrap();
         let second = controller
             .admit_task_run(
                 Some("worker"),
@@ -631,27 +644,33 @@ mod tests {
             panic!("task generation two must be admitted");
         };
 
-        for (permit, uid) in [(&first, "uid-one"), (&second, "uid-two")] {
-            controller
-                .transition(permit, WarmAdmissionTransition::CreateStarted)
-                .await
-                .unwrap();
-            controller
-                .transition(permit, WarmAdmissionTransition::Live { uid: uid.into() })
-                .await
-                .unwrap();
-        }
-
-        // A delayed old-generation callback cannot release the newer row.
+        controller
+            .transition(&second, WarmAdmissionTransition::CreateStarted)
+            .await
+            .unwrap();
         controller
             .transition(
-                &first,
-                WarmAdmissionTransition::Terminal {
-                    uid: "uid-one".into(),
+                &second,
+                WarmAdmissionTransition::Live {
+                    uid: "uid-two".into(),
                 },
             )
             .await
             .unwrap();
+
+        // A delayed old-generation callback is rejected and cannot release the
+        // newer row.
+        assert!(
+            controller
+                .transition(
+                    &first,
+                    WarmAdmissionTransition::Terminal {
+                        uid: "uid-one".into(),
+                    },
+                )
+                .await
+                .is_err()
+        );
         let history = controller
             .journal
             .list_history(AdmissionDomain::TaskObservation, "task")
