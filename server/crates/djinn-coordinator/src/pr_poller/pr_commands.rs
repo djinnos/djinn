@@ -1,5 +1,7 @@
 use super::*;
 use djinn_core::models::TaskPrCiSnapshotMqLaneInput;
+use djinn_db::TaskAttemptRepository;
+use djinn_db::repositories::task_run_outcome::TaskRunOutcomeRepository;
 
 impl CoordinatorActor {
     #[allow(clippy::too_many_arguments)]
@@ -459,6 +461,26 @@ impl CoordinatorActor {
 
         let transition_reason =
             format!("merge queue rejected PR (reason: {reason}) — re-run with fresh CI feedback");
+        if let Ok(Some(attempt)) = TaskAttemptRepository::new(self.db.clone())
+            .latest_pending_or_submitted(task_id, Some("worker"))
+            .await
+        {
+            let outcomes = TaskRunOutcomeRepository::new(self.db.clone());
+            for write in [
+                outcomes
+                    .record_merge_queue_result_for_attempt(&attempt.id, "failed")
+                    .await
+                    .map(|_| ()),
+                outcomes
+                    .record_parked_reason_for_attempt(&attempt.id, "merge_queue_failed")
+                    .await
+                    .map(|_| ()),
+            ] {
+                if let Err(e) = write {
+                    tracing::warn!(task_id, attempt_id = %attempt.id, error = %e, "PR poller: failed to record exact merge-queue outcome fact");
+                }
+            }
+        }
         self.apply_pr_transition(
             task_id,
             TransitionAction::PrCiFailed,
