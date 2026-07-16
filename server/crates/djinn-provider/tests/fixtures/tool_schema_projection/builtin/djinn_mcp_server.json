@@ -5387,8 +5387,7 @@
           "properties": {
             "version": {
               "type": "integer",
-              "format": "uint32",
-              "minimum": 0,
+              "format": "int64",
               "default": 1
             },
             "profile_id": {
@@ -5397,8 +5396,7 @@
             },
             "profile_revision": {
               "type": "integer",
-              "format": "uint32",
-              "minimum": 0,
+              "format": "int64",
               "default": 0
             },
             "commands": {
@@ -5477,13 +5475,11 @@
             },
             "timeout_seconds": {
               "type": "integer",
-              "format": "uint64",
-              "minimum": 0
+              "format": "int64"
             },
             "descriptor_revision": {
               "type": "integer",
-              "format": "uint32",
-              "minimum": 0,
+              "format": "int64",
               "default": 1
             }
           },
@@ -5499,8 +5495,7 @@
           "properties": {
             "version": {
               "type": "integer",
-              "format": "uint32",
-              "minimum": 0,
+              "format": "int64",
               "default": 1
             },
             "repo_paths": {
@@ -6281,8 +6276,7 @@
           "properties": {
             "version": {
               "type": "integer",
-              "format": "uint32",
-              "minimum": 0,
+              "format": "int64",
               "default": 1
             },
             "profile_id": {
@@ -6291,8 +6285,7 @@
             },
             "profile_revision": {
               "type": "integer",
-              "format": "uint32",
-              "minimum": 0,
+              "format": "int64",
               "default": 0
             },
             "commands": {
@@ -6371,13 +6364,11 @@
             },
             "timeout_seconds": {
               "type": "integer",
-              "format": "uint64",
-              "minimum": 0
+              "format": "int64"
             },
             "descriptor_revision": {
               "type": "integer",
-              "format": "uint32",
-              "minimum": 0,
+              "format": "int64",
               "default": 1
             }
           },
@@ -6393,8 +6384,7 @@
           "properties": {
             "version": {
               "type": "integer",
-              "format": "uint32",
-              "minimum": 0,
+              "format": "int64",
               "default": 1
             },
             "repo_paths": {
@@ -7117,8 +7107,7 @@
           "properties": {
             "version": {
               "type": "integer",
-              "format": "uint32",
-              "minimum": 0,
+              "format": "int64",
               "default": 1
             },
             "profile_id": {
@@ -7127,8 +7116,7 @@
             },
             "profile_revision": {
               "type": "integer",
-              "format": "uint32",
-              "minimum": 0,
+              "format": "int64",
               "default": 0
             },
             "commands": {
@@ -7207,13 +7195,11 @@
             },
             "timeout_seconds": {
               "type": "integer",
-              "format": "uint64",
-              "minimum": 0
+              "format": "int64"
             },
             "descriptor_revision": {
               "type": "integer",
-              "format": "uint32",
-              "minimum": 0,
+              "format": "int64",
               "default": 1
             }
           },
@@ -7229,8 +7215,7 @@
           "properties": {
             "version": {
               "type": "integer",
-              "format": "uint32",
-              "minimum": 0,
+              "format": "int64",
               "default": 1
             },
             "repo_paths": {
@@ -12504,8 +12489,7 @@
           "properties": {
             "version": {
               "type": "integer",
-              "format": "uint32",
-              "minimum": 0,
+              "format": "int64",
               "default": 1
             },
             "profile_id": {
@@ -12514,8 +12498,7 @@
             },
             "profile_revision": {
               "type": "integer",
-              "format": "uint32",
-              "minimum": 0,
+              "format": "int64",
               "default": 0
             },
             "commands": {
@@ -12594,13 +12577,11 @@
             },
             "timeout_seconds": {
               "type": "integer",
-              "format": "uint64",
-              "minimum": 0
+              "format": "int64"
             },
             "descriptor_revision": {
               "type": "integer",
-              "format": "uint32",
-              "minimum": 0,
+              "format": "int64",
               "default": 1
             }
           },
@@ -12616,8 +12597,7 @@
           "properties": {
             "version": {
               "type": "integer",
-              "format": "uint32",
-              "minimum": 0,
+              "format": "int64",
               "default": 1
             },
             "repo_paths": {
@@ -13316,8 +13296,7 @@
           "properties": {
             "version": {
               "type": "integer",
-              "format": "uint32",
-              "minimum": 0,
+              "format": "int64",
               "default": 1
             },
             "profile_id": {
@@ -13326,8 +13305,7 @@
             },
             "profile_revision": {
               "type": "integer",
-              "format": "uint32",
-              "minimum": 0,
+              "format": "int64",
               "default": 0
             },
             "commands": {
@@ -13406,13 +13384,11 @@
             },
             "timeout_seconds": {
               "type": "integer",
-              "format": "uint64",
-              "minimum": 0
+              "format": "int64"
             },
             "descriptor_revision": {
               "type": "integer",
-              "format": "uint32",
-              "minimum": 0,
+              "format": "int64",
               "default": 1
             }
           },
@@ -13428,8 +13404,7 @@
           "properties": {
             "version": {
               "type": "integer",
-              "format": "uint32",
-              "minimum": 0,
+              "format": "int64",
               "default": 1
             },
             "repo_paths": {
@@ -14102,8 +14077,7 @@
           "properties": {
             "version": {
               "type": "integer",
-              "format": "uint32",
-              "minimum": 0,
+              "format": "int64",
               "default": 1
             },
             "profile_id": {
@@ -14112,8 +14086,7 @@
             },
             "profile_revision": {
               "type": "integer",
-              "format": "uint32",
-              "minimum": 0,
+              "format": "int64",
               "default": 0
             },
             "commands": {
@@ -14192,13 +14165,11 @@
             },
             "timeout_seconds": {
               "type": "integer",
-              "format": "uint64",
-              "minimum": 0
+              "format": "int64"
             },
             "descriptor_revision": {
               "type": "integer",
-              "format": "uint32",
-              "minimum": 0,
+              "format": "int64",
               "default": 1
             }
           },
@@ -14214,8 +14185,7 @@
           "properties": {
             "version": {
               "type": "integer",
-              "format": "uint32",
-              "minimum": 0,
+              "format": "int64",
               "default": 1
             },
             "repo_paths": {

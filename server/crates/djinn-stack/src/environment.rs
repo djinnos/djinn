@@ -1000,10 +1000,12 @@ impl LifecycleHooks {
 #[serde(deny_unknown_fields)]
 pub struct FinalVerificationPlan {
     #[serde(default = "final_verification_version")]
+    #[schemars(with = "i64")]
     pub version: u32,
     #[serde(default)]
     pub profile_id: String,
     #[serde(default)]
+    #[schemars(with = "i64")]
     pub profile_revision: u32,
     #[serde(default)]
     pub commands: Vec<FinalVerificationCommand>,
@@ -1052,14 +1054,17 @@ pub struct FinalVerificationCommand {
     pub working_directory: String,
     #[serde(default)]
     pub environment_names: Vec<String>,
+    #[schemars(with = "i64")]
     pub timeout_seconds: u64,
     #[serde(default = "final_verification_version")]
+    #[schemars(with = "i64")]
     pub descriptor_revision: u32,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct VerificationInputManifest {
     #[serde(default = "final_verification_version")]
+    #[schemars(with = "i64")]
     pub version: u32,
     #[serde(default)]
     pub repo_paths: Vec<String>,

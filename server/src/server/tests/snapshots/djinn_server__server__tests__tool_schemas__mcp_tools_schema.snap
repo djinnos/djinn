@@ -5114,8 +5114,7 @@ expression: signatures
             },
             "descriptor_revision": {
               "default": 1,
-              "format": "uint32",
-              "minimum": 0,
+              "format": "int64",
               "type": "integer"
             },
             "environment_names": {
@@ -5129,8 +5128,7 @@ expression: signatures
               "type": "string"
             },
             "timeout_seconds": {
-              "format": "uint64",
-              "minimum": 0,
+              "format": "int64",
               "type": "integer"
             },
             "working_directory": {
@@ -5184,8 +5182,7 @@ expression: signatures
             },
             "profile_revision": {
               "default": 0,
-              "format": "uint32",
-              "minimum": 0,
+              "format": "int64",
               "type": "integer"
             },
             "read_only_external_inputs": {
@@ -5204,8 +5201,7 @@ expression: signatures
             },
             "version": {
               "default": 1,
-              "format": "uint32",
-              "minimum": 0,
+              "format": "int64",
               "type": "integer"
             }
           },
@@ -5534,8 +5530,7 @@ expression: signatures
             },
             "version": {
               "default": 1,
-              "format": "uint32",
-              "minimum": 0,
+              "format": "int64",
               "type": "integer"
             }
           },
@@ -5967,8 +5962,7 @@ expression: signatures
             },
             "descriptor_revision": {
               "default": 1,
-              "format": "uint32",
-              "minimum": 0,
+              "format": "int64",
               "type": "integer"
             },
             "environment_names": {
@@ -5982,8 +5976,7 @@ expression: signatures
               "type": "string"
             },
             "timeout_seconds": {
-              "format": "uint64",
-              "minimum": 0,
+              "format": "int64",
               "type": "integer"
             },
             "working_directory": {
@@ -6037,8 +6030,7 @@ expression: signatures
             },
             "profile_revision": {
               "default": 0,
-              "format": "uint32",
-              "minimum": 0,
+              "format": "int64",
               "type": "integer"
             },
             "read_only_external_inputs": {
@@ -6057,8 +6049,7 @@ expression: signatures
             },
             "version": {
               "default": 1,
-              "format": "uint32",
-              "minimum": 0,
+              "format": "int64",
               "type": "integer"
             }
           },
@@ -6426,8 +6417,7 @@ expression: signatures
             },
             "version": {
               "default": 1,
-              "format": "uint32",
-              "minimum": 0,
+              "format": "int64",
               "type": "integer"
             }
           },
@@ -6840,8 +6830,7 @@ expression: signatures
             },
             "descriptor_revision": {
               "default": 1,
-              "format": "uint32",
-              "minimum": 0,
+              "format": "int64",
               "type": "integer"
             },
             "environment_names": {
@@ -6855,8 +6844,7 @@ expression: signatures
               "type": "string"
             },
             "timeout_seconds": {
-              "format": "uint64",
-              "minimum": 0,
+              "format": "int64",
               "type": "integer"
             },
             "working_directory": {
@@ -6910,8 +6898,7 @@ expression: signatures
             },
             "profile_revision": {
               "default": 0,
-              "format": "uint32",
-              "minimum": 0,
+              "format": "int64",
               "type": "integer"
             },
             "read_only_external_inputs": {
@@ -6930,8 +6917,7 @@ expression: signatures
             },
             "version": {
               "default": 1,
-              "format": "uint32",
-              "minimum": 0,
+              "format": "int64",
               "type": "integer"
             }
           },
@@ -7260,8 +7246,7 @@ expression: signatures
             },
             "version": {
               "default": 1,
-              "format": "uint32",
-              "minimum": 0,
+              "format": "int64",
               "type": "integer"
             }
           },
@@ -12189,8 +12174,7 @@ expression: signatures
             },
             "descriptor_revision": {
               "default": 1,
-              "format": "uint32",
-              "minimum": 0,
+              "format": "int64",
               "type": "integer"
             },
             "environment_names": {
@@ -12204,8 +12188,7 @@ expression: signatures
               "type": "string"
             },
             "timeout_seconds": {
-              "format": "uint64",
-              "minimum": 0,
+              "format": "int64",
               "type": "integer"
             },
             "working_directory": {
@@ -12259,8 +12242,7 @@ expression: signatures
             },
             "profile_revision": {
               "default": 0,
-              "format": "uint32",
-              "minimum": 0,
+              "format": "int64",
               "type": "integer"
             },
             "read_only_external_inputs": {
@@ -12279,8 +12261,7 @@ expression: signatures
             },
             "version": {
               "default": 1,
-              "format": "uint32",
-              "minimum": 0,
+              "format": "int64",
               "type": "integer"
             }
           },
@@ -12609,8 +12590,7 @@ expression: signatures
             },
             "version": {
               "default": 1,
-              "format": "uint32",
-              "minimum": 0,
+              "format": "int64",
               "type": "integer"
             }
           },
@@ -13000,8 +12980,7 @@ expression: signatures
             },
             "descriptor_revision": {
               "default": 1,
-              "format": "uint32",
-              "minimum": 0,
+              "format": "int64",
               "type": "integer"
             },
             "environment_names": {
@@ -13015,8 +12994,7 @@ expression: signatures
               "type": "string"
             },
             "timeout_seconds": {
-              "format": "uint64",
-              "minimum": 0,
+              "format": "int64",
               "type": "integer"
             },
             "working_directory": {
@@ -13070,8 +13048,7 @@ expression: signatures
             },
             "profile_revision": {
               "default": 0,
-              "format": "uint32",
-              "minimum": 0,
+              "format": "int64",
               "type": "integer"
             },
             "read_only_external_inputs": {
@@ -13090,8 +13067,7 @@ expression: signatures
             },
             "version": {
               "default": 1,
-              "format": "uint32",
-              "minimum": 0,
+              "format": "int64",
               "type": "integer"
             }
           },
@@ -13420,8 +13396,7 @@ expression: signatures
             },
             "version": {
               "default": 1,
-              "format": "uint32",
-              "minimum": 0,
+              "format": "int64",
               "type": "integer"
             }
           },
@@ -13785,8 +13760,7 @@ expression: signatures
             },
             "descriptor_revision": {
               "default": 1,
-              "format": "uint32",
-              "minimum": 0,
+              "format": "int64",
               "type": "integer"
             },
             "environment_names": {
@@ -13800,8 +13774,7 @@ expression: signatures
               "type": "string"
             },
             "timeout_seconds": {
-              "format": "uint64",
-              "minimum": 0,
+              "format": "int64",
               "type": "integer"
             },
             "working_directory": {
@@ -13855,8 +13828,7 @@ expression: signatures
             },
             "profile_revision": {
               "default": 0,
-              "format": "uint32",
-              "minimum": 0,
+              "format": "int64",
               "type": "integer"
             },
             "read_only_external_inputs": {
@@ -13875,8 +13847,7 @@ expression: signatures
             },
             "version": {
               "default": 1,
-              "format": "uint32",
-              "minimum": 0,
+              "format": "int64",
               "type": "integer"
             }
           },
@@ -14205,8 +14176,7 @@ expression: signatures
             },
             "version": {
               "default": 1,
-              "format": "uint32",
-              "minimum": 0,
+              "format": "int64",
               "type": "integer"
             }
           },
