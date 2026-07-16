@@ -41,6 +41,7 @@ jobs:
       memoryEval: ${{ steps.router.outputs.memoryEval }}
       tiltContracts: ${{ steps.router.outputs.tiltContracts }}
       ui: ${{ steps.router.outputs.ui }}
+      qaSmoke: ${{ steps.router.outputs.qaSmoke }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -49,6 +50,8 @@ jobs:
         run: node --test scripts/ci-changed-scope.test.mjs
       - name: Verify cache ownership policy
         run: node --test scripts/ci-cache-policy.test.mjs
+      - name: Verify qa-smoke workflow contract
+        run: node --test scripts/ci-qa-smoke-workflow.test.mjs
       - name: Compute safe event diff and route it
         id: router
         env:
@@ -1074,6 +1077,43 @@ jobs:
         run: pnpm test
       - name: Production build
         run: pnpm build
+  qa-smoke:
+    name: qa-smoke
+    needs: preflight
+    if: needs.preflight.outputs.qaSmoke == 'true' && (github.event_name == 'pull_request' || github.event_name == 'merge_group' || github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: server
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup toolchain install
+        working-directory: server
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: server
+          shared-key: server-quality
+          cache-on-failure: true
+          cache-all-crates: true
+          save-if: false
+        id: rust-cache
+      - name: Run deterministic qa smoke evidence
+        run: |
+          set +e
+          cargo run -p djinn-qa -- run --qa-profile smoke-ci --concurrency 8 --evidence-dir qa/evidence/smoke-ci
+          run_status=$?
+          cargo run -p djinn-qa -- coverage --profile smoke-ci --format json --evidence qa/evidence/smoke-ci --output qa/evidence/smoke-ci/coverage.json
+          coverage_status=$?
+          if [ "$run_status" -ne 0 ]; then exit "$run_status"; fi
+          exit "$coverage_status"
+      - name: Upload qa-smoke evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: qa-smoke-evidence
+          path: qa/evidence/smoke-ci
+          if-no-files-found: error
+          retention-days: 30
   fail-fast-watchdog:
     name: Fail-fast watchdog
     needs: preflight
@@ -1131,6 +1171,7 @@ jobs:
       - memory-eval
       - local-dev-contracts
       - ui-frontend
+      - qa-smoke
     steps:
       - name: Fail closed on selected work
         env:
@@ -1150,6 +1191,7 @@ jobs:
           MEMORY: ${{ needs.preflight.outputs.memoryEval }}:${{ needs.memory-eval.result }}
           TILT_CONTRACTS: ${{ needs.preflight.outputs.tiltContracts }}:${{ needs.local-dev-contracts.result }}
           UI: ${{ needs.preflight.outputs.ui }}:${{ needs.ui-frontend.result }}
+          QA_SMOKE: ${{ needs.preflight.outputs.qaSmoke }}:${{ needs.qa-smoke.result }}
         run: |
           set -euo pipefail
           [ "$PREFLIGHT" = success ] || { echo "preflight ended $PREFLIGHT"; exit 1; }
@@ -1165,3 +1207,4 @@ jobs:
           check server-test-plan "$SERVER_TEST_PLAN"; check server-test-shards "$SERVER_TEST_SHARDS"; check server-test-timing "$SERVER_TEST_TIMING"
           check sqlx-freshness "$SQLX"; check memory-eval "$MEMORY"
           check local-dev-contracts "$TILT_CONTRACTS"; check ui "$UI"
+          check qa-smoke "$QA_SMOKE"
