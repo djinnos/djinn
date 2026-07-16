@@ -674,6 +674,26 @@ mod tests {
             "generation one release must not retain a second wakeup"
         );
 
+        // Repeating the matching terminal callback while generation one is
+        // still current is idempotent and does not emit another wakeup.
+        controller
+            .transition(
+                &first,
+                WarmAdmissionTransition::Terminal {
+                    uid: "uid-one".into(),
+                },
+            )
+            .await
+            .unwrap();
+        assert!(
+            controller
+                .release_notifier()
+                .notified()
+                .now_or_never()
+                .is_none(),
+            "duplicate generation-one terminal must not wake dispatch again"
+        );
+
         let second = controller
             .admit_task_run(
                 Some("worker"),
