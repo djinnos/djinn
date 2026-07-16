@@ -4,20 +4,31 @@
 mod common;
 
 use djinn_control_plane::test_support::McpTestHarness;
+use djinn_core::auth_context::{REVISION_CALLER_CONTEXT, TrustedRevisionCallerContext};
 use serde_json::json;
 
 #[tokio::test]
 async fn mcp_memory_health_orphans_and_broken_links_shapes() {
     let harness = McpTestHarness::new().await;
-    let project = "test/mcp-memory-health";
+    let (project_row, _dir) = common::create_test_project_with_dir(harness.db()).await;
+    let project = project_row.slug();
+    let caller = TrustedRevisionCallerContext::authenticated_human("health-search-test-user")
+        .expect("test revision caller must be non-blank");
 
-    harness
-        .call_tool(
-            "memory_write",
-            json!({"project": project, "title": "Source", "content": "[[Missing Target]]", "reason": "seed health and search fixture", "type": "reference"}),
+    let health_write_response: serde_json::Value = REVISION_CALLER_CONTEXT
+        .scope(
+            Some(caller),
+            harness.call_tool(
+                "memory_write",
+                json!({"project": project, "title": "Source", "content": "[[Missing Target]]", "reason": "seed health and search fixture", "type": "reference"}),
+            ),
         )
         .await
         .expect("memory_write should dispatch");
+    assert!(
+        health_write_response.get("error").is_none() || health_write_response["error"].is_null(),
+        "memory_write returned tool error: {health_write_response}"
+    );
 
     let health = harness
         .call_tool("memory_health", json!({"project": project}))
@@ -46,6 +57,8 @@ async fn no_regression_memory_search_ranking_notes_only() {
     let harness = McpTestHarness::new().await;
     let (project_row, _dir) = common::create_test_project_with_dir(harness.db()).await;
     let project = project_row.slug();
+    let caller = TrustedRevisionCallerContext::authenticated_human("health-search-test-user")
+        .expect("test revision caller must be non-blank");
 
     let proposal = harness
         .call_tool(
@@ -56,20 +69,36 @@ async fn no_regression_memory_search_ranking_notes_only() {
         .expect("proposal_create should dispatch");
     let _proposal_id = proposal["id"].as_str().expect("proposal id").to_string();
 
-    harness
-        .call_tool(
-            "memory_write",
-            json!({"project": project, "title": "Rust Note One", "content": "rust memory test", "reason": "seed health and search fixture", "type": "reference"}),
+    let first_search_write_response: serde_json::Value = REVISION_CALLER_CONTEXT
+        .scope(
+            Some(caller.clone()),
+            harness.call_tool(
+                "memory_write",
+                json!({"project": project, "title": "Rust Note One", "content": "rust memory test", "reason": "seed health and search fixture", "type": "reference"}),
+            ),
         )
         .await
         .expect("memory_write one should dispatch");
-    harness
-        .call_tool(
-            "memory_write",
-            json!({"project": project, "title": "Rust Note Two", "content": "another rust note", "reason": "seed health and search fixture", "type": "adr"}),
+    assert!(
+        first_search_write_response.get("error").is_none()
+            || first_search_write_response["error"].is_null(),
+        "memory_write returned tool error: {first_search_write_response}"
+    );
+    let second_search_write_response: serde_json::Value = REVISION_CALLER_CONTEXT
+        .scope(
+            Some(caller),
+            harness.call_tool(
+                "memory_write",
+                json!({"project": project, "title": "Rust Note Two", "content": "another rust note", "reason": "seed health and search fixture", "type": "adr"}),
+            ),
         )
         .await
         .expect("memory_write two should dispatch");
+    assert!(
+        second_search_write_response.get("error").is_none()
+            || second_search_write_response["error"].is_null(),
+        "memory_write returned tool error: {second_search_write_response}"
+    );
 
     let searched = harness
         .call_tool(

@@ -3703,6 +3703,9 @@ mod evidence_merge_regression_tests {
                             Some(note.clone()),
                         )
                     }
+                    NoteRevisionDesiredState::ExistingWithMetadata(_) => {
+                        unreachable!("extraction never submits metadata updates")
+                    }
                     NoteRevisionDesiredState::ExtractionSkipped => (None, None, true, None),
                     NoteRevisionDesiredState::Delete => unreachable!("not used by extraction"),
                 };

@@ -1,5 +1,7 @@
 use super::*;
 use djinn_core::models::TaskPrCiSnapshotMqLaneInput;
+use djinn_db::TaskAttemptRepository;
+use djinn_db::repositories::task_run_outcome::TaskRunOutcomeRepository;
 
 impl CoordinatorActor {
     #[allow(clippy::too_many_arguments)]
@@ -422,6 +424,8 @@ impl CoordinatorActor {
         // `ci_mq_*` projection carries the fresh lane facts that
         // `escalate_ci_failure_and_park` surfaces in the escalation text.
         if mq_rejection_requires_park(mq_strike_count) {
+            self.record_pr_outcome_facts(pr_url, None, Some("failed"), Some("merge_queue_failed"))
+                .await;
             match self.task_repo().get(task_id).await {
                 Ok(Some(task)) => {
                     let checks_display = if mq_escalation_checks.is_empty() {
@@ -459,6 +463,26 @@ impl CoordinatorActor {
 
         let transition_reason =
             format!("merge queue rejected PR (reason: {reason}) — re-run with fresh CI feedback");
+        if let Ok(Some(attempt)) = TaskAttemptRepository::new(self.db.clone())
+            .submitted_worker_for_pr_url(pr_url)
+            .await
+        {
+            let outcomes = TaskRunOutcomeRepository::new(self.db.clone());
+            for write in [
+                outcomes
+                    .record_merge_queue_result_for_attempt(&attempt.id, "failed")
+                    .await
+                    .map(|_| ()),
+                outcomes
+                    .record_parked_reason_for_attempt(&attempt.id, "merge_queue_failed")
+                    .await
+                    .map(|_| ()),
+            ] {
+                if let Err(e) = write {
+                    tracing::warn!(task_id, attempt_id = %attempt.id, error = %e, "PR poller: failed to record exact merge-queue outcome fact");
+                }
+            }
+        }
         self.apply_pr_transition(
             task_id,
             TransitionAction::PrCiFailed,
