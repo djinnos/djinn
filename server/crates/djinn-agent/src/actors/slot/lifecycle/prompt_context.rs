@@ -20,6 +20,70 @@ use crate::skills::ResolvedSkill;
 use djinn_db::{NoteRepository, ProposalRepository, TaskRepository};
 use tracing::Instrument;
 
+// Environment variables are process-global. Keep the test guard here, rather
+// than in an individual test module, so every knowledge-context test that
+// reads or changes the rollout configuration serializes with assembly tests.
+#[cfg(test)]
+pub(super) static KNOWLEDGE_CONTEXT_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+#[cfg(test)]
+pub(super) struct KnowledgeContextTestEnvGuard {
+    _lock: std::sync::MutexGuard<'static, ()>,
+    rollout: Option<std::ffi::OsString>,
+    legacy: Option<std::ffi::OsString>,
+}
+
+#[cfg(test)]
+impl KnowledgeContextTestEnvGuard {
+    pub(super) fn clear(&mut self) {
+        // SAFETY: this guard serializes all knowledge-context rollout tests.
+        unsafe {
+            std::env::remove_var(KNOWLEDGE_CONTEXT_ROLLOUT_ENV);
+            std::env::remove_var(KNOWLEDGE_CONTEXT_LEGACY_ENV);
+        }
+    }
+
+    pub(super) fn set_rollout(&mut self, value: &str) {
+        // SAFETY: this guard serializes all knowledge-context rollout tests.
+        unsafe { std::env::set_var(KNOWLEDGE_CONTEXT_ROLLOUT_ENV, value) }
+    }
+
+    pub(super) fn set_legacy(&mut self, value: &str) {
+        // SAFETY: this guard serializes all knowledge-context rollout tests.
+        unsafe { std::env::set_var(KNOWLEDGE_CONTEXT_LEGACY_ENV, value) }
+    }
+}
+
+#[cfg(test)]
+impl Drop for KnowledgeContextTestEnvGuard {
+    fn drop(&mut self) {
+        // SAFETY: the guard is still held while the original process environment
+        // is restored, including during unwinding from a failed assertion.
+        unsafe {
+            match &self.rollout {
+                Some(value) => std::env::set_var(KNOWLEDGE_CONTEXT_ROLLOUT_ENV, value),
+                None => std::env::remove_var(KNOWLEDGE_CONTEXT_ROLLOUT_ENV),
+            }
+            match &self.legacy {
+                Some(value) => std::env::set_var(KNOWLEDGE_CONTEXT_LEGACY_ENV, value),
+                None => std::env::remove_var(KNOWLEDGE_CONTEXT_LEGACY_ENV),
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+pub(super) fn knowledge_context_test_env_guard() -> KnowledgeContextTestEnvGuard {
+    let lock = KNOWLEDGE_CONTEXT_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    KnowledgeContextTestEnvGuard {
+        rollout: std::env::var_os(KNOWLEDGE_CONTEXT_ROLLOUT_ENV),
+        legacy: std::env::var_os(KNOWLEDGE_CONTEXT_LEGACY_ENV),
+        _lock: lock,
+    }
+}
+
 mod ci_directive;
 mod diagnostics;
 mod planner_enrichment;
