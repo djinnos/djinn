@@ -513,9 +513,27 @@ async fn jit_pitfalls_suppression_insert_failure_is_fail_open() {
     let response = call_write(&state, &args, worktree.path(), Some(pid), None, None)
         .await
         .expect("failed suppression insert must not fail write");
+    // `path` necessarily identifies each distinct fixture worktree. Compare
+    // every other response field to prove the failed observational write did
+    // not alter the underlying tool response.
+    let mut normalized_response = response.clone();
+    let mut normalized_baseline = baseline.clone();
+    normalized_response
+        .as_object_mut()
+        .expect("write response object")
+        .remove("path");
+    normalized_baseline
+        .as_object_mut()
+        .expect("baseline write response object")
+        .remove("path");
     assert_eq!(
-        response, baseline,
+        normalized_response, normalized_baseline,
         "suppression persistence failure must preserve the underlying write result"
+    );
+    assert_eq!(
+        response["path"],
+        serde_json::Value::String(worktree.path().join("src/a.rs").display().to_string()),
+        "failed suppression insert must still return the written file path"
     );
     assert_eq!(
         tokio::fs::read_to_string(worktree.path().join("src/a.rs"))
