@@ -11,7 +11,11 @@ fn test_config() -> AuditSchedulerConfig {
     AuditSchedulerConfig {
         enabled: true,
         max_open_audits: 3,
-        slo_age_hours: 168, // 7 days
+        // Ordinary scheduler fixtures use fixed timestamps for deterministic
+        // ordering. Keep their SLO horizon intentionally large so they do not
+        // turn into wall-clock-dependent backlog tests; the dedicated SLO test
+        // below overrides this with the production-like seven-day horizon.
+        slo_age_hours: 100_000,
         per_tick_budget: 2,
         min_materialization_interval_hours: 0,
     }
