@@ -1602,6 +1602,7 @@ dependencies = [
  "async-trait",
  "djinn-db",
  "djinn-git",
+ "libc",
  "serde",
  "serde_json",
  "serde_yaml",

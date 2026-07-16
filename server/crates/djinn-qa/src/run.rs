@@ -4,11 +4,18 @@
 //! tested without wall-clock sleeps or a live database.
 
 use std::{
+    collections::BTreeMap,
     fs,
     path::{Path, PathBuf},
     process::{Command, Output},
     sync::mpsc,
     thread,
+};
+#[cfg(not(test))]
+use std::{
+    io::Read,
+    process::Stdio,
+    time::{Duration, Instant},
 };
 
 use serde::{Deserialize, Serialize};
@@ -18,6 +25,12 @@ use crate::{Execution, Profile, Scenario, ScenarioInventory, Taxonomy, scenario:
 
 pub const RUNNER_NAME: &str = "djinn-qa";
 pub const RUNNER_VERSION: &str = env!("CARGO_PKG_VERSION");
+#[cfg(not(test))]
+const CHILD_DEADLINE: Duration = Duration::from_secs(10 * 60);
+#[cfg(not(test))]
+const TERMINATION_GRACE: Duration = Duration::from_secs(2);
+#[cfg(not(test))]
+const STREAM_TAIL_BYTES: usize = 64 * 1024;
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -37,6 +50,120 @@ pub struct ScenarioEvidenceArtifact {
     pub finished_at: String,
     pub diagnostics: Vec<String>,
 }
+
+fn format_stream_tail(name: &str, bytes: &[u8]) -> String {
+    format!(
+        "{name} tail ({} bytes):\n{}",
+        bytes.len(),
+        String::from_utf8_lossy(bytes).trim()
+    )
+}
+
+/// Drain output continuously but retain only a deterministic suffix, preventing
+/// a noisy cargo descendant from consuming unbounded runner memory.
+#[cfg(not(test))]
+fn read_tail(mut reader: impl Read + Send + 'static) -> thread::JoinHandle<(Vec<u8>, bool)> {
+    thread::spawn(move || {
+        let mut tail = Vec::new();
+        let mut truncated = false;
+        let mut buffer = [0_u8; 8192];
+        loop {
+            let count = match reader.read(&mut buffer) {
+                Ok(0) | Err(_) => break,
+                Ok(count) => count,
+            };
+            tail.extend_from_slice(&buffer[..count]);
+            if tail.len() > STREAM_TAIL_BYTES {
+                tail.drain(..tail.len() - STREAM_TAIL_BYTES);
+                truncated = true;
+            }
+        }
+        (tail, truncated)
+    })
+}
+
+#[cfg(not(test))]
+#[allow(clippy::disallowed_methods)]
+fn run_bounded(command: &mut Command, deadline: Duration) -> Result<Output, String> {
+    command.stdout(Stdio::piped()).stderr(Stdio::piped());
+    #[cfg(all(unix, not(test)))]
+    {
+        use std::os::unix::process::CommandExt;
+        unsafe {
+            command.pre_exec(|| {
+                if libc::setpgid(0, 0) == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+    }
+    let mut child = command.spawn().map_err(|error| error.to_string())?;
+    let stdout = read_tail(child.stdout.take().ok_or("child stdout pipe unavailable")?);
+    let stderr = read_tail(child.stderr.take().ok_or("child stderr pipe unavailable")?);
+    let started = Instant::now();
+    let mut timed_out = false;
+    let status = 'wait: loop {
+        if let Some(status) = child.try_wait().map_err(|error| error.to_string())? {
+            break 'wait status;
+        }
+        if started.elapsed() >= deadline {
+            timed_out = true;
+            terminate_process_group(child.id());
+            let grace = Instant::now();
+            loop {
+                if let Some(status) = child.try_wait().map_err(|error| error.to_string())? {
+                    break 'wait status;
+                }
+                if grace.elapsed() >= TERMINATION_GRACE {
+                    kill_process_group(child.id());
+                    break 'wait child.wait().map_err(|error| error.to_string())?;
+                }
+                thread::sleep(Duration::from_millis(10));
+            }
+        } else {
+            thread::sleep(Duration::from_millis(10));
+        }
+    };
+    let (stdout, stdout_truncated) = stdout.join().map_err(|_| "stdout reader panicked")?;
+    let (stderr, stderr_truncated) = stderr.join().map_err(|_| "stderr reader panicked")?;
+    if timed_out {
+        return Err(format!(
+            "timed out after {} seconds; process group terminated\n{}\n{}",
+            deadline.as_secs(),
+            format_tail_with_truncation("stdout", &stdout, stdout_truncated),
+            format_tail_with_truncation("stderr", &stderr, stderr_truncated),
+        ));
+    }
+    Ok(Output {
+        status,
+        stdout,
+        stderr,
+    })
+}
+
+#[cfg(not(test))]
+fn format_tail_with_truncation(name: &str, bytes: &[u8], truncated: bool) -> String {
+    let label = if truncated {
+        " tail (truncated to final 65536 bytes)"
+    } else {
+        " tail"
+    };
+    format!("{name}{label}:\n{}", String::from_utf8_lossy(bytes).trim())
+}
+
+#[cfg(all(unix, not(test)))]
+fn terminate_process_group(pid: u32) {
+    unsafe { libc::kill(-(pid as libc::pid_t), libc::SIGTERM) };
+}
+#[cfg(all(not(unix), not(test)))]
+fn terminate_process_group(_pid: u32) {}
+#[cfg(all(unix, not(test)))]
+fn kill_process_group(pid: u32) {
+    unsafe { libc::kill(-(pid as libc::pid_t), libc::SIGKILL) };
+}
+#[cfg(all(not(unix), not(test)))]
+fn kill_process_group(_pid: u32) {}
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -84,15 +211,19 @@ pub trait DatabaseAcquirer: Sync {
 
 /// The process runner is injected by focused tests so command construction and
 /// evidence validation are tested on the same production execution path.
+#[cfg(test)]
 type CommandRunner = dyn Fn(&mut Command) -> std::io::Result<Output> + Send + Sync;
 
 pub struct CargoExecutor {
+    #[cfg(test)]
     run_command: Box<CommandRunner>,
 }
 
+#[allow(clippy::derivable_impls)]
 impl Default for CargoExecutor {
     fn default() -> Self {
         Self {
+            #[cfg(test)]
             run_command: Box::new(Command::output),
         }
     }
@@ -136,13 +267,18 @@ impl ScenarioExecutor for CargoExecutor {
             command.arg("--test").arg(test);
         }
         command.arg("--").arg("--exact").arg(selector);
+        #[cfg(test)]
         let output = (self.run_command)(&mut command)
             .map_err(|e| format!("cargo adapter could not start `{package}`: {e}"))?;
+        #[cfg(not(test))]
+        let output = run_bounded(&mut command, CHILD_DEADLINE)
+            .map_err(|error| format!("cargo adapter could not complete `{package}`: {error}"))?;
         if !output.status.success() {
             return Err(format!(
-                "cargo adapter failed for package `{package}` (exit {}): {}",
+                "cargo adapter failed for package `{package}` (exit {}):\n{}\n{}",
                 output.status,
-                String::from_utf8_lossy(&output.stderr).trim()
+                format_stream_tail("stdout", &output.stdout),
+                format_stream_tail("stderr", &output.stderr),
             ));
         }
         // Fail closed: a successful child process that executed zero tests is
@@ -223,7 +359,8 @@ pub fn select_scenarios(inventory: &ScenarioInventory, profile: Profile) -> Vec<
         .collect()
 }
 
-/// Runs batches no larger than `concurrency`, collecting outcomes in stable ID order.
+/// Runs distinct exact executable identities in bounded batches, then fans each
+/// execution result back out to every scenario that declared that identity.
 pub fn execute_selected(
     root: &Path,
     selected: &[Scenario],
@@ -239,14 +376,23 @@ pub fn execute_selected(
             "no enabled, executable scenarios are eligible for the requested profile".into(),
         );
     }
+    let mut identities: BTreeMap<String, Vec<&Scenario>> = BTreeMap::new();
+    for scenario in selected {
+        identities
+            .entry(scenario.execution.identity())
+            .or_default()
+            .push(scenario);
+    }
+    let groups: Vec<_> = identities.into_values().collect();
     let mut outcomes = Vec::with_capacity(selected.len());
-    for batch in selected.chunks(concurrency) {
+    for batch in groups.chunks(concurrency) {
         let (sender, receiver) = mpsc::channel();
         thread::scope(|scope| {
-            for scenario in batch {
+            for scenarios in batch {
                 let sender = sender.clone();
                 scope.spawn(move || {
                     let started_at = now();
+                    let scenario = scenarios[0];
                     let (status, diagnostics) = if !resolves(&scenario.execution, root) {
                         (
                             RunStatus::Failed,
@@ -267,13 +413,16 @@ pub fn execute_selected(
                             Err(error) => (RunStatus::Failed, vec![error]),
                         }
                     };
-                    let _ = sender.send(ScenarioOutcome {
-                        scenario_id: scenario.id.clone(),
-                        status,
-                        diagnostics,
-                        started_at,
-                        finished_at: now(),
-                    });
+                    let finished_at = now();
+                    for scenario in scenarios {
+                        let _ = sender.send(ScenarioOutcome {
+                            scenario_id: scenario.id.clone(),
+                            status,
+                            diagnostics: diagnostics.clone(),
+                            started_at: started_at.clone(),
+                            finished_at: finished_at.clone(),
+                        });
+                    }
                 });
             }
         });
@@ -653,7 +802,13 @@ scenarios:
         assert_eq!(
             *captured_args.lock().unwrap(),
             vec![
-                "test", "-p", "djinn-qa", "--test", "scenario_contract", "--", "--exact",
+                "test",
+                "-p",
+                "djinn-qa",
+                "--test",
+                "scenario_contract",
+                "--",
+                "--exact",
                 "scenario::tests::exact_match",
             ]
         );
@@ -676,7 +831,10 @@ scenarios:
             selector: "scenario::tests::missing".into(),
         };
         let error = executor.execute(Path::new("."), &execution).unwrap_err();
-        assert!(error.contains("executed zero tests"), "unexpected error: {error}");
+        assert!(
+            error.contains("executed zero tests"),
+            "unexpected error: {error}"
+        );
     }
 
     #[test]
