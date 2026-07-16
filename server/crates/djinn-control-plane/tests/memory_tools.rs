@@ -221,21 +221,24 @@ async fn mcp_memory_search_returns_ranked_results_with_snippets_and_filters() {
     let (proj, _dir) = common::create_test_project_with_dir(harness.db()).await;
     let project = proj.slug();
 
-    dispatch_as_authenticated_human(&caller, &harness, "memory_write",
+    let alpha = dispatch_as_authenticated_human(&caller, &harness, "memory_write",
             json!({"project": project, "title": "Rust Alpha", "content": "rust rust rust memory", "reason": "create fixture note for memory tool coverage", "type": "reference"}),
         )
         .await
         .expect("memory_write alpha should dispatch");
-    dispatch_as_authenticated_human(&caller, &harness, "memory_write",
+    assert_tool_success(&alpha, "seed Rust Alpha mutation");
+    let beta = dispatch_as_authenticated_human(&caller, &harness, "memory_write",
             json!({"project": project, "title": "Rust Beta", "content": "rust memory", "reason": "create fixture note for memory tool coverage", "type": "reference"}),
         )
         .await
         .expect("memory_write beta should dispatch");
-    dispatch_as_authenticated_human(&caller, &harness, "memory_write",
+    assert_tool_success(&beta, "seed Rust Beta mutation");
+    let gamma = dispatch_as_authenticated_human(&caller, &harness, "memory_write",
             json!({"project": project, "title": "ADR Gamma", "content": "rust decision", "reason": "create fixture note for memory tool coverage", "type": "adr"}),
         )
         .await
         .expect("memory_write gamma should dispatch");
+    assert_tool_success(&gamma, "seed ADR Gamma mutation");
 
     let searched = harness
         .call_tool(
@@ -279,11 +282,12 @@ async fn mcp_memory_edit_append_prepend_replace_and_missing_note_error() {
     let (proj, _dir) = common::create_test_project_with_dir(harness.db()).await;
     let project = proj.slug();
 
-    dispatch_as_authenticated_human(&caller, &harness, "memory_write",
+    let seed = dispatch_as_authenticated_human(&caller, &harness, "memory_write",
             json!({"project": project, "title": "Edit Note", "content": "middle", "reason": "create fixture note for memory tool coverage", "type": "reference"}),
         )
         .await
         .expect("seed memory_write should dispatch");
+    assert_tool_success(&seed, "seed edit note mutation");
 
     let appended = dispatch_as_authenticated_human(&caller, &harness, "memory_edit",
             json!({"project": project, "identifier": "Edit Note", "reason": "modify fixture note for memory tool coverage", "operation": "append", "content": "tail"}),
@@ -344,6 +348,7 @@ async fn mcp_memory_move_changes_folder_title_and_permalink() {
         )
         .await
         .expect("memory_move should dispatch");
+    assert_tool_success(&moved, "memory move");
     assert_eq!(moved["title"], "Moved Title");
     assert_eq!(moved["folder"], "research");
     assert_ne!(moved["permalink"], created["permalink"]);
@@ -357,11 +362,12 @@ async fn mcp_memory_delete_success_and_missing_note_error() {
     let (proj, _dir) = common::create_test_project_with_dir(harness.db()).await;
     let project = proj.slug();
 
-    dispatch_as_authenticated_human(&caller, &harness, "memory_write",
+    let seed = dispatch_as_authenticated_human(&caller, &harness, "memory_write",
             json!({"project": project, "title": "Delete Me", "content": "bye", "reason": "create fixture note for memory tool coverage", "type": "reference"}),
         )
         .await
         .expect("seed memory_write should dispatch");
+    assert_tool_success(&seed, "seed delete note mutation");
 
     let deleted = dispatch_as_authenticated_human(
         &caller,
@@ -506,22 +512,24 @@ async fn mcp_memory_recent_orders_by_last_accessed() {
     let (proj, _dir) = common::create_test_project_with_dir(harness.db()).await;
     let project = proj.slug();
 
-    dispatch_as_authenticated_human(&caller, &harness, "memory_write",
+    let older = dispatch_as_authenticated_human(&caller, &harness, "memory_write",
             json!({"project": project, "title": "Older", "content": "o", "reason": "create fixture note for memory tool coverage", "type": "reference"}),
         )
         .await
         .expect("memory_write older should dispatch");
+    assert_tool_success(&older, "seed older note mutation");
     // `memory_recent` orders by `updated_at` (3ms precision); without a gap
     // the two writes below can land in the same millisecond and the secondary
     // sort is implementation-defined.  Under parallel cargo-test contention
     // 100ms is tight — 500ms gives the DB a clear timestamp boundary while
     // still keeping total runtime sub-second.
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-    dispatch_as_authenticated_human(&caller, &harness, "memory_write",
+    let newer = dispatch_as_authenticated_human(&caller, &harness, "memory_write",
             json!({"project": project, "title": "Newer", "content": "n", "reason": "create fixture note for memory tool coverage", "type": "reference"}),
         )
         .await
         .expect("memory_write newer should dispatch");
+    assert_tool_success(&newer, "seed newer note mutation");
     harness
         .call_tool(
             "memory_read",
@@ -561,11 +569,12 @@ async fn mcp_memory_catalog_returns_structured_catalog() {
     let (proj, _dir) = common::create_test_project_with_dir(harness.db()).await;
     let project = proj.slug();
 
-    dispatch_as_authenticated_human(&caller, &harness, "memory_write",
+    let seed = dispatch_as_authenticated_human(&caller, &harness, "memory_write",
             json!({"project": project, "title": "Catalog Item", "content": "c", "reason": "create fixture note for memory tool coverage", "type": "reference"}),
         )
         .await
         .expect("memory_write should dispatch");
+    assert_tool_success(&seed, "seed catalog item mutation");
     let catalog = harness
         .call_tool("memory_catalog", json!({"project": project}))
         .await
