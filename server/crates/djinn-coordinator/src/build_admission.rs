@@ -391,12 +391,13 @@ impl BuildAdmissionController {
         if terminal {
             let newly_released = {
                 let mut permits = self.permits.lock().await;
-                let state = permits
-                    .get_mut(permit)
-                    .expect("permit existence was checked before persistence");
-                let newly_released = !state.released;
-                state.released = true;
-                newly_released
+                match permits.get_mut(permit) {
+                    Some(state) if !state.released => {
+                        state.released = true;
+                        true
+                    }
+                    Some(_) | None => false,
+                }
             };
             if newly_released {
                 // Retain one wakeup when the actor is currently handling the event
