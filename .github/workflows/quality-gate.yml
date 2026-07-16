@@ -1123,6 +1123,10 @@ jobs:
           cd crates/djinn-db && DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5433/djinn_test_template sqlx migrate run --source migrations_postgres
           psql -h 127.0.0.1 -p 5433 -U postgres -d postgres -v ON_ERROR_STOP=1 -c "UPDATE pg_database SET datistemplate = TRUE WHERE datname = 'djinn_test_template'"
       - name: Run deterministic qa smoke evidence
+        env:
+          # SQLx macros compile against the migrated template, while the QA
+          # runner keeps using DJINN_TEST_DATABASE_URL to clone isolated DBs.
+          DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5433/djinn_test_template
         run: |
           set +e
           cargo run -p djinn-qa -- run --qa-profile smoke-ci --concurrency 8 --evidence-dir qa/evidence/smoke-ci
