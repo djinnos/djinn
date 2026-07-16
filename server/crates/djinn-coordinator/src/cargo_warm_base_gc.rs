@@ -457,8 +457,11 @@ impl PressureOperationObserver for NoopPressureOperationObserver {
 // unit-test builds and is thread-local so parallel tests cannot affect one
 // another.
 #[cfg(test)]
+type RemoveDirAllHook = Box<dyn Fn(&Path) -> std::io::Result<()>>;
+
+#[cfg(test)]
 thread_local! {
-    static REMOVE_DIR_ALL_HOOK: std::cell::RefCell<Option<Box<dyn Fn(&Path) -> std::io::Result<()>>>> =
+    static REMOVE_DIR_ALL_HOOK: std::cell::RefCell<Option<RemoveDirAllHook>> =
         const { std::cell::RefCell::new(None) };
     static PRESSURE_OPERATION_OBSERVER:
         std::cell::RefCell<Option<Box<dyn PressureOperationObserver>>> =
@@ -466,7 +469,7 @@ thread_local! {
 }
 
 #[cfg(test)]
-fn set_remove_dir_all_hook(hook: Option<Box<dyn Fn(&Path) -> std::io::Result<()>>>) {
+fn set_remove_dir_all_hook(hook: Option<RemoveDirAllHook>) {
     REMOVE_DIR_ALL_HOOK.with(|slot| *slot.borrow_mut() = hook);
 }
 
