@@ -114,6 +114,33 @@ pub(crate) enum BranchCleanupOutcome {
     Deleted,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PrCleanupTarget {
+    pub(crate) short_id: String,
+    pub(crate) closed_at: Option<String>,
+    pub(crate) updated_at: String,
+}
+
+impl PrCleanupTarget {
+    pub(crate) fn orphaned(short_id: impl Into<String>) -> Self {
+        Self {
+            short_id: short_id.into(),
+            closed_at: Some("1970-01-01T00:00:00Z".to_string()),
+            updated_at: "1970-01-01T00:00:00Z".to_string(),
+        }
+    }
+}
+
+impl From<&Task> for PrCleanupTarget {
+    fn from(task: &Task) -> Self {
+        Self {
+            short_id: task.short_id.clone(),
+            closed_at: task.closed_at.clone(),
+            updated_at: task.updated_at.clone(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CloseKind {
     Merge,
@@ -152,6 +179,83 @@ impl<C> PrCleanupPolicy<C> {
 }
 
 impl<C: PrCleanupGitHub> PrCleanupPolicy<C> {
+    pub(crate) async fn should_cleanup_pr_for_target(
+        &self,
+        target: &PrCleanupTarget,
+        pr: &PullRequest,
+    ) -> Result<bool> {
+        if !self.config.enabled || self.within_grace_period_target(target)? {
+            return Ok(false);
+        }
+        let Some(user) = pr.user.as_ref() else {
+            return Ok(false);
+        };
+        if !self.config.bot_logins.contains(&user.login) {
+            return Ok(false);
+        }
+        if self
+            .github
+            .get_pr_merge_queue_state(&self.config.owner, &self.config.repo, pr.number)
+            .await?
+            .merge_queue_entry
+            .is_some()
+        {
+            return Ok(false);
+        }
+        Ok(!self.config.dry_run)
+    }
+
+    pub(crate) async fn delete_branch_if_allowed_for_target(
+        &self,
+        target: &PrCleanupTarget,
+        branch: &str,
+    ) -> Result<BranchCleanupOutcome> {
+        if !self.config.enabled || self.within_grace_period_target(target)? {
+            return Ok(BranchCleanupOutcome::Skipped);
+        }
+        let branch = normalize_branch_name(branch);
+        if self.config.protected_branches.contains(branch)
+            || (!self.config.allowed_branch_prefixes.is_empty()
+                && !self
+                    .config
+                    .allowed_branch_prefixes
+                    .iter()
+                    .any(|prefix| branch.starts_with(prefix)))
+        {
+            return Ok(BranchCleanupOutcome::Skipped);
+        }
+        if self
+            .github
+            .list_pulls_by_base(&self.config.owner, &self.config.repo, branch)
+            .await?
+            .iter()
+            .any(|pr| pr.base.ref_name == branch)
+        {
+            return Ok(BranchCleanupOutcome::Skipped);
+        }
+        if self.config.dry_run {
+            return Ok(BranchCleanupOutcome::DryRunWouldDelete);
+        }
+        self.github
+            .delete_ref(
+                &self.config.owner,
+                &self.config.repo,
+                &format!("heads/{branch}"),
+            )
+            .await?;
+        djinn_telemetry::inline_cleanup::increment_branch_deleted();
+        Ok(BranchCleanupOutcome::Deleted)
+    }
+
+    fn within_grace_period_target(&self, target: &PrCleanupTarget) -> Result<bool> {
+        let timestamp = target.closed_at.as_deref().unwrap_or(&target.updated_at);
+        let at = OffsetDateTime::parse(timestamp, &Rfc3339).map_err(|e| {
+            anyhow!("failed to parse task close/update timestamp {timestamp:?}: {e}")
+        })?;
+        let grace = time::Duration::try_from(self.config.grace_period)
+            .map_err(|e| anyhow!("invalid PR cleanup grace period: {e}"))?;
+        Ok(self.now() < at + grace)
+    }
     /// Return true when it is safe and intended to clean up the PR.
     ///
     /// Emits `djinn_inline_cleanup_skipped_total` metrics for each skip reason
