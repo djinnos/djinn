@@ -8,15 +8,20 @@ use crate::repositories::retrieval_trace::{
     CANDIDATE_OUTCOME_VALUES, CandidateOutcome, CreateRetrievalTraceParams,
     CreateRetrievalTraceWithSemanticsParams, DEFAULT_CANDIDATE_CAP, DEFAULT_RETRIEVAL_TRACE_LIMIT,
     DurationStageSummary, ENTRY_POINT_VALUES, MAX_RETRIEVAL_TRACE_OFFSET,
-    RETRIEVAL_TRACE_OUTCOME_VALUES, RETRIEVAL_TRACE_SCHEMA_VERSION, RetrievalTraceEntryPoint,
-    RetrievalTraceListFilter, RetrievalTraceOutcome, RetrievalTraceRepository, RetrievalTraceRow,
-    SKIPPED_REASON_VALUES, SkippedReason, TraceCandidate, WORKLOAD_ENTRY_POINTS,
-    classify_legacy_trace_outcome, validate_candidates,
+    MINIMUM_RETRIEVAL_TRACE_RETENTION_WINDOW, RETRIEVAL_TRACE_OUTCOME_VALUES,
+    RETRIEVAL_TRACE_SCHEMA_VERSION, RetrievalTraceEntryPoint, RetrievalTraceListFilter,
+    RetrievalTraceOutcome, RetrievalTraceRepository, RetrievalTraceRow, SKIPPED_REASON_VALUES,
+    SkippedReason, TraceCandidate, WORKLOAD_ENTRY_POINTS, classify_legacy_trace_outcome,
+    validate_candidates,
 };
 
 #[cfg(test)]
 #[path = "retrieval_trace_semantics_tests.rs"]
 mod retrieval_trace_semantics_tests;
+
+#[cfg(test)]
+#[path = "retrieval_trace_retention_tests.rs"]
+mod retrieval_trace_retention_tests;
 
 fn test_db() -> Database {
     Database::open_in_memory().unwrap()
@@ -809,142 +814,6 @@ async fn backdate_created_at(db: &Database, trace_id: &str, created_at: &str) {
         .execute(db.pool())
         .await
         .unwrap();
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn prune_older_than_deletes_old_rows_and_reports_count() {
-    let db = test_db();
-    let project_id = "019f4900-0000-7000-8000-000000000012";
-    let other_project = "019f4900-0000-7000-8000-000000000013";
-    seed_project(&db, project_id).await;
-    seed_project(&db, other_project).await;
-    let repo = RetrievalTraceRepository::new(db.clone());
-
-    // Two "old" rows in the target project.
-    let old1 = insert_trace(
-        &repo,
-        project_id,
-        &json!([]),
-        DEFAULT_CANDIDATE_CAP,
-        false,
-        None,
-    )
-    .await;
-    let old2 = insert_trace(
-        &repo,
-        project_id,
-        &json!([]),
-        DEFAULT_CANDIDATE_CAP,
-        false,
-        None,
-    )
-    .await;
-    // One "new" row that should survive.
-    let keep = insert_trace(
-        &repo,
-        project_id,
-        &json!([]),
-        DEFAULT_CANDIDATE_CAP,
-        false,
-        None,
-    )
-    .await;
-    // An old row in a *different* project — must NOT be pruned by this call.
-    let other_old = insert_trace(
-        &repo,
-        other_project,
-        &json!([]),
-        DEFAULT_CANDIDATE_CAP,
-        false,
-        None,
-    )
-    .await;
-
-    // Backdate: old rows → 2026-01-01, keep row → 2026-12-01.
-    backdate_created_at(&db, &old1.id, "2026-01-01T00:00:00.000Z").await;
-    backdate_created_at(&db, &old2.id, "2026-06-01T00:00:00.000Z").await;
-    backdate_created_at(&db, &keep.id, "2026-12-01T00:00:00.000Z").await;
-    backdate_created_at(&db, &other_old.id, "2026-01-01T00:00:00.000Z").await;
-
-    // Cutoff: prune everything strictly before 2026-07-01.
-    let pruned = repo
-        .prune_older_than(project_id, "2026-07-01T00:00:00.000Z")
-        .await
-        .unwrap();
-
-    // old1 and old2 are before the cutoff → 2 pruned.
-    assert_eq!(pruned, 2);
-
-    // The "keep" row survives.
-    let remaining = repo
-        .list_by_project(project_id, RetrievalTraceListFilter::default())
-        .await
-        .unwrap();
-    assert_eq!(remaining.len(), 1);
-    assert_eq!(remaining[0].id, keep.id);
-
-    // The other-project old row is untouched.
-    let other_remaining = repo
-        .list_by_project(other_project, RetrievalTraceListFilter::default())
-        .await
-        .unwrap();
-    assert_eq!(other_remaining.len(), 1);
-    assert_eq!(other_remaining[0].id, other_old.id);
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn prune_older_than_deletes_nothing_when_all_newer() {
-    let db = test_db();
-    let project_id = "019f4900-0000-7000-8000-000000000014";
-    seed_project(&db, project_id).await;
-    let repo = RetrievalTraceRepository::new(db.clone());
-
-    let r1 = insert_trace(
-        &repo,
-        project_id,
-        &json!([]),
-        DEFAULT_CANDIDATE_CAP,
-        false,
-        None,
-    )
-    .await;
-    let r2 = insert_trace(
-        &repo,
-        project_id,
-        &json!([]),
-        DEFAULT_CANDIDATE_CAP,
-        false,
-        None,
-    )
-    .await;
-    backdate_created_at(&db, &r1.id, "2026-11-01T00:00:00.000Z").await;
-    backdate_created_at(&db, &r2.id, "2026-12-01T00:00:00.000Z").await;
-
-    let pruned = repo
-        .prune_older_than(project_id, "2026-01-01T00:00:00.000Z")
-        .await
-        .unwrap();
-    assert_eq!(pruned, 0);
-
-    let remaining = repo
-        .list_by_project(project_id, RetrievalTraceListFilter::default())
-        .await
-        .unwrap();
-    assert_eq!(remaining.len(), 2);
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn prune_older_than_empty_project_prunes_zero() {
-    let db = test_db();
-    let project_id = "019f4900-0000-7000-8000-000000000015";
-    seed_project(&db, project_id).await;
-    let repo = RetrievalTraceRepository::new(db);
-
-    let pruned = repo
-        .prune_older_than(project_id, "2026-07-01T00:00:00.000Z")
-        .await
-        .unwrap();
-    assert_eq!(pruned, 0);
 }
 
 // ── Candidate validation invariants (qmel) ────────────────────────────────
