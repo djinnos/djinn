@@ -631,6 +631,21 @@ mod tests {
         }
     }
 
+    fn create_started(input: &ReserveAdmissionInput) -> CreateStartedInput {
+        CreateStartedInput {
+            key: input.key.clone(),
+            creator_server_epoch: input.creator_server_epoch.clone(),
+            object_name: input.object_name.clone(),
+        }
+    }
+
+    fn uid_input(input: &ReserveAdmissionInput, object_uid: &str) -> UidFencedAdmissionInput {
+        UidFencedAdmissionInput {
+            key: input.key.clone(),
+            object_uid: object_uid.into(),
+        }
+    }
+
     async fn set_state(db: &Database, key: &AdmissionJournalKey, state: &str) {
         sqlx::query(
             "UPDATE admission_journal SET state = $1, terminal_at = \
@@ -775,6 +790,210 @@ mod tests {
                 .await
                 .unwrap(),
             1
+        );
+    }
+
+    #[tokio::test]
+    async fn definitive_and_ambiguous_create_failures_have_distinct_occupancy() {
+        let db = Database::open_in_memory().unwrap();
+        let repo = AdmissionJournalRepository::new(db);
+        let reserved = input(AdmissionDomain::TaskObservation, "definitive-reserved", 0);
+        let in_flight = input(AdmissionDomain::TaskObservation, "definitive-flight", 0);
+        let ambiguous = input(AdmissionDomain::TaskObservation, "ambiguous", 0);
+        for reservation in [&reserved, &in_flight, &ambiguous] {
+            repo.reserve(reservation, 3).await.unwrap();
+        }
+
+        assert_eq!(
+            repo.mark_definitive_create_failure(&reserved.key)
+                .await
+                .unwrap()
+                .state,
+            AdmissionState::Terminal
+        );
+        assert_eq!(
+            repo.mark_definitive_create_failure(&reserved.key)
+                .await
+                .unwrap()
+                .state,
+            AdmissionState::Terminal
+        );
+        repo.mark_create_started(&create_started(&in_flight))
+            .await
+            .unwrap();
+        assert_eq!(
+            repo.mark_definitive_create_failure(&in_flight.key)
+                .await
+                .unwrap()
+                .state,
+            AdmissionState::Terminal
+        );
+
+        repo.mark_create_started(&create_started(&ambiguous))
+            .await
+            .unwrap();
+        assert_eq!(
+            repo.mark_create_started(&create_started(&ambiguous))
+                .await
+                .unwrap()
+                .state,
+            AdmissionState::CreateInFlight
+        );
+        assert_eq!(
+            repo.mark_create_unknown(&ambiguous.key)
+                .await
+                .unwrap()
+                .state,
+            AdmissionState::CreateUnknown
+        );
+        assert_eq!(
+            repo.mark_create_unknown(&ambiguous.key)
+                .await
+                .unwrap()
+                .state,
+            AdmissionState::CreateUnknown
+        );
+        // LIST absence is deliberately not an input to this repository: ambiguity occupies.
+        assert_eq!(repo.count_task_or_warm_occupancy().await.unwrap(), 1);
+        assert_eq!(repo.list_active_rows().await.unwrap()[0].key, ambiguous.key);
+        assert_eq!(
+            repo.mark_live(&uid_input(&ambiguous, "uid-ambiguous"))
+                .await
+                .unwrap()
+                .state,
+            AdmissionState::Live
+        );
+    }
+
+    #[tokio::test]
+    async fn cancellation_is_reserved_only_and_idempotent() {
+        let db = Database::open_in_memory().unwrap();
+        let repo = AdmissionJournalRepository::new(db);
+        let cancelled = input(AdmissionDomain::TaskObservation, "cancelled", 0);
+        let posted = input(AdmissionDomain::TaskObservation, "posted", 0);
+        repo.reserve(&cancelled, 2).await.unwrap();
+        repo.reserve(&posted, 2).await.unwrap();
+        assert_eq!(
+            repo.cancel_reserved(&cancelled.key).await.unwrap().state,
+            AdmissionState::Terminal
+        );
+        assert_eq!(
+            repo.cancel_reserved(&cancelled.key).await.unwrap().state,
+            AdmissionState::Terminal
+        );
+        repo.mark_create_started(&create_started(&posted))
+            .await
+            .unwrap();
+        assert!(matches!(
+            repo.cancel_reserved(&posted.key).await,
+            Err(DbError::InvalidTransition(_))
+        ));
+        assert_eq!(repo.count_task_or_warm_occupancy().await.unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn stale_generations_and_mismatched_uids_cannot_release_current_work() {
+        let db = Database::open_in_memory().unwrap();
+        let repo = AdmissionJournalRepository::new(db);
+        let first = input(AdmissionDomain::TaskObservation, "fenced", 0);
+        repo.reserve(&first, 1).await.unwrap();
+        repo.mark_create_started(&create_started(&first))
+            .await
+            .unwrap();
+        repo.mark_live(&uid_input(&first, "uid-first"))
+            .await
+            .unwrap();
+        repo.mark_terminal(&TerminalAdmissionInput {
+            key: first.key.clone(),
+            object_uid: Some("uid-first".into()),
+        })
+        .await
+        .unwrap();
+
+        let second = input(AdmissionDomain::TaskObservation, "fenced", 1);
+        repo.reserve(&second, 1).await.unwrap();
+        repo.mark_create_started(&create_started(&second))
+            .await
+            .unwrap();
+        repo.mark_live(&uid_input(&second, "uid-current"))
+            .await
+            .unwrap();
+        assert!(matches!(
+            repo.mark_live(&uid_input(&first, "uid-first")).await,
+            Err(DbError::InvalidTransition(_))
+        ));
+        assert!(matches!(
+            repo.mark_terminal(&TerminalAdmissionInput {
+                key: second.key.clone(),
+                object_uid: Some("wrong-uid".into()),
+            })
+            .await,
+            Err(DbError::InvalidTransition(_))
+        ));
+        assert_eq!(
+            repo.mark_live(&uid_input(&second, "uid-current"))
+                .await
+                .unwrap()
+                .state,
+            AdmissionState::Live
+        );
+        assert_eq!(repo.count_task_or_warm_occupancy().await.unwrap(), 1);
+        for _ in 0..2 {
+            assert_eq!(
+                repo.mark_terminal(&TerminalAdmissionInput {
+                    key: second.key.clone(),
+                    object_uid: Some("uid-current".into()),
+                })
+                .await
+                .unwrap()
+                .state,
+                AdmissionState::Terminal
+            );
+        }
+        assert_eq!(repo.count_task_or_warm_occupancy().await.unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn predecessor_recovery_retires_only_reserved_and_retains_ambiguous_work() {
+        let db = Database::open_in_memory().unwrap();
+        let repo = AdmissionJournalRepository::new(db);
+        let reserved = input(AdmissionDomain::TaskObservation, "recover-reserved", 0);
+        let flight = input(AdmissionDomain::TaskObservation, "recover-flight", 0);
+        let unknown = input(AdmissionDomain::TaskObservation, "recover-unknown", 0);
+        let live = input(AdmissionDomain::TaskObservation, "recover-live", 0);
+        let mut successor = input(AdmissionDomain::TaskObservation, "recover-successor", 0);
+        successor.creator_server_epoch = "epoch-2".into();
+        for reservation in [&reserved, &flight, &unknown, &live, &successor] {
+            repo.reserve(reservation, 5).await.unwrap();
+        }
+        repo.mark_create_started(&create_started(&flight))
+            .await
+            .unwrap();
+        repo.mark_create_started(&create_started(&unknown))
+            .await
+            .unwrap();
+        repo.mark_create_unknown(&unknown.key).await.unwrap();
+        repo.mark_create_started(&create_started(&live))
+            .await
+            .unwrap();
+        repo.mark_live(&uid_input(&live, "uid-live")).await.unwrap();
+
+        let report = repo.recover_predecessor_epoch("epoch-1").await.unwrap();
+        assert_eq!(report.retired_reserved, 1);
+        assert_eq!(report.marked_create_unknown, 1);
+        let states = report
+            .active_rows
+            .iter()
+            .map(|row| (row.key.work_id.as_str(), row.state))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            states,
+            vec![
+                ("recover-flight", AdmissionState::CreateUnknown),
+                ("recover-live", AdmissionState::Live),
+                ("recover-successor", AdmissionState::Reserved),
+                ("recover-unknown", AdmissionState::CreateUnknown),
+            ]
         );
     }
 }
