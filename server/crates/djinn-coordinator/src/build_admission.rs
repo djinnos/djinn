@@ -182,16 +182,21 @@ impl BuildAdmissionController {
         }
         let mut idempotent = false;
         if durable {
-            if self.mode == BuildAdmissionMode::Observe
-                && self.journal.count_task_or_warm_occupancy().await.map_err(unavailable)? >= self.cap
-            {
-                let mut count = self.would_defer_observations.lock().await;
-                *count = count.saturating_add(1).min(1024);
-            }
-            let cap = if self.mode == BuildAdmissionMode::Observe { i64::MAX } else { self.cap };
-            match self.journal.reserve(&ReserveAdmissionInput {
-                key: key.clone(), workload_kind, creator_server_epoch: self.creator_server_epoch.clone(), object_name: request.object_name.clone(),
-            }, cap).await.map_err(unavailable)? {
+            let reservation = if self.mode == BuildAdmissionMode::Observe {
+                let observed = self.journal.reserve_observed(&ReserveAdmissionInput {
+                    key: key.clone(), workload_kind, creator_server_epoch: self.creator_server_epoch.clone(), object_name: request.object_name.clone(),
+                }, self.cap).await.map_err(unavailable)?;
+                if observed.would_defer {
+                    let mut count = self.would_defer_observations.lock().await;
+                    *count = count.saturating_add(1).min(1024);
+                }
+                observed.reservation
+            } else {
+                self.journal.reserve(&ReserveAdmissionInput {
+                    key: key.clone(), workload_kind, creator_server_epoch: self.creator_server_epoch.clone(), object_name: request.object_name.clone(),
+                }, self.cap).await.map_err(unavailable)?
+            };
+            match reservation {
                 ReserveAdmissionResult::Denied { occupancy, cap } => return Ok(BuildAdmissionDecision::Denied { occupancy, cap }),
                 ReserveAdmissionResult::Reserved { idempotent: value, .. } => idempotent = value,
             }
@@ -290,11 +295,29 @@ mod tests {
         assert_eq!(controller.unclassified_observation_count().await, 1024);
     }
 
-    #[tokio::test]
-    async fn observe_records_but_never_denies_and_enforce_combines_domains() {
-        let observed = controller(BuildAdmissionMode::Observe, 0);
-        assert!(WarmAdmission::admit(&observed, warm("a")).await.is_ok());
-        assert!(WarmAdmission::admit(&observed, warm("b")).await.is_ok());
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn observe_records_serialized_would_defer_without_denial_and_enforce_combines_domains() {
+        let observed = Arc::new(controller(BuildAdmissionMode::Observe, 1));
+        let barrier = Arc::new(tokio::sync::Barrier::new(2));
+        let first = {
+            let observed = Arc::clone(&observed);
+            let barrier = Arc::clone(&barrier);
+            tokio::spawn(async move {
+                barrier.wait().await;
+                WarmAdmission::admit(observed.as_ref(), warm("a")).await
+            })
+        };
+        let second = {
+            let observed = Arc::clone(&observed);
+            let barrier = Arc::clone(&barrier);
+            tokio::spawn(async move {
+                barrier.wait().await;
+                WarmAdmission::admit(observed.as_ref(), warm("b")).await
+            })
+        };
+        assert!(first.await.unwrap().is_ok());
+        assert!(second.await.unwrap().is_ok());
+        assert_eq!(observed.would_defer_observation_count().await, 1);
         let enforced = controller(BuildAdmissionMode::Enforce, 1);
         let _ = enforced.admit_task_run(Some("worker"), AdmissionDomain::TaskObservation, "task".into(), 0, "task-job".into()).await.unwrap();
         assert!(matches!(WarmAdmission::admit(&enforced, warm("warm")).await, Err(WarmAdmissionError::Denied { .. })));
