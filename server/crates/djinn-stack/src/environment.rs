@@ -996,7 +996,7 @@ impl LifecycleHooks {
     }
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct FinalVerificationPlan {
     #[serde(default = "final_verification_version")]
@@ -1018,8 +1018,30 @@ pub struct FinalVerificationPlan {
     #[serde(default)]
     pub hermeticity: HermeticityDeclaration,
 }
+
+/// Manual `Default` so that `version` matches the serde default (1) rather
+/// than the zero the derive would produce.  This ensures an empty
+/// `FinalVerificationPlan` validates (the empty-plan early-return path in
+/// `validate()` skips when `commands` and `profile_id` are both empty, but
+/// `version` must still be the supported schema version).
+impl Default for FinalVerificationPlan {
+    fn default() -> Self {
+        FinalVerificationPlan {
+            version: FINAL_VERIFICATION_VERSION,
+            profile_id: String::new(),
+            profile_revision: 0,
+            commands: Vec::new(),
+            required_checks: Vec::new(),
+            input_manifest: VerificationInputManifest::default(),
+            read_only_external_inputs: Vec::new(),
+            output_only_globs: Vec::new(),
+            hermeticity: HermeticityDeclaration::default(),
+        }
+    }
+}
+
 fn final_verification_version() -> u32 {
-    1
+    FINAL_VERIFICATION_VERSION
 }
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -1036,7 +1058,7 @@ pub struct FinalVerificationCommand {
     #[serde(default = "final_verification_version")]
     pub descriptor_revision: u32,
 }
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct VerificationInputManifest {
     #[serde(default = "final_verification_version")]
@@ -1045,6 +1067,17 @@ pub struct VerificationInputManifest {
     pub repo_paths: Vec<String>,
     #[serde(default)]
     pub environment_names: Vec<String>,
+}
+
+/// Manual `Default` so that `version` matches the serde default (1).
+impl Default for VerificationInputManifest {
+    fn default() -> Self {
+        VerificationInputManifest {
+            version: FINAL_VERIFICATION_VERSION,
+            repo_paths: Vec::new(),
+            environment_names: Vec::new(),
+        }
+    }
 }
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -1081,6 +1114,14 @@ impl FinalVerificationPlan {
                 field: "lifecycle.final_verification.profile_revision".into(),
             });
         };
+        // Bounded commands list.
+        if self.commands.len() > MAX_FINAL_VERIFICATION_COMMANDS {
+            return Err(EnvironmentConfigError::ListTooLong {
+                field: "lifecycle.final_verification.commands".into(),
+                len: self.commands.len(),
+                max: MAX_FINAL_VERIFICATION_COMMANDS,
+            });
+        };
         let mut ids = HashSet::new();
         for c in &self.commands {
             validate_identifier(
@@ -1093,18 +1134,57 @@ impl FinalVerificationPlan {
                     name: c.check_id.clone(),
                 });
             };
+            validate_plain_string(
+                "lifecycle.final_verification.commands.executable",
+                &c.executable,
+                MAX_STRING_LEN,
+            )?;
+            if c.argv.len() > MAX_STRING_LEN {
+                return Err(EnvironmentConfigError::ListTooLong {
+                    field: "lifecycle.final_verification.commands.argv".into(),
+                    len: c.argv.len(),
+                    max: MAX_STRING_LEN,
+                });
+            };
+            for arg in &c.argv {
+                validate_plain_string(
+                    "lifecycle.final_verification.commands.argv",
+                    arg,
+                    MAX_STRING_LEN,
+                )?;
+            }
             validate_path(
                 "lifecycle.final_verification.commands.working_directory",
                 &c.working_directory,
             )?;
-            if c.timeout_seconds == 0 {
+            if c.environment_names.len() > MAX_ENV_ENTRIES {
+                return Err(EnvironmentConfigError::ListTooLong {
+                    field: "lifecycle.final_verification.commands.environment_names".into(),
+                    len: c.environment_names.len(),
+                    max: MAX_ENV_ENTRIES,
+                });
+            };
+            for env_name in &c.environment_names {
+                validate_identifier(
+                    "lifecycle.final_verification.commands.environment_names",
+                    env_name,
+                )?;
+            }
+            if c.timeout_seconds < FINAL_VERIFICATION_TIMEOUT_MIN
+                || c.timeout_seconds > FINAL_VERIFICATION_TIMEOUT_MAX
+            {
                 return Err(EnvironmentConfigError::OutOfRange {
                     field: "lifecycle.final_verification.commands.timeout_seconds".into(),
-                    value: 0,
-                    min: 1,
-                    max: 3600,
+                    value: c.timeout_seconds,
+                    min: FINAL_VERIFICATION_TIMEOUT_MIN,
+                    max: FINAL_VERIFICATION_TIMEOUT_MAX,
                 });
-            }
+            };
+            if c.descriptor_revision == 0 {
+                return Err(EnvironmentConfigError::EmptyValue {
+                    field: "lifecycle.final_verification.commands.descriptor_revision".into(),
+                });
+            };
         }
         for x in &self.required_checks {
             if !ids.contains(x.as_str()) {
@@ -1122,6 +1202,68 @@ impl FinalVerificationPlan {
                 max: 1,
             });
         };
+        // Bounded manifest paths/environment_names lists.
+        if self.input_manifest.repo_paths.len() > MAX_FINAL_VERIFICATION_INPUTS {
+            return Err(EnvironmentConfigError::ListTooLong {
+                field: "lifecycle.final_verification.input_manifest.repo_paths".into(),
+                len: self.input_manifest.repo_paths.len(),
+                max: MAX_FINAL_VERIFICATION_INPUTS,
+            });
+        };
+        for p in &self.input_manifest.repo_paths {
+            validate_path("lifecycle.final_verification.input_manifest.repo_paths", p)?;
+        }
+        if self.input_manifest.environment_names.len() > MAX_ENV_ENTRIES {
+            return Err(EnvironmentConfigError::ListTooLong {
+                field: "lifecycle.final_verification.input_manifest.environment_names".into(),
+                len: self.input_manifest.environment_names.len(),
+                max: MAX_ENV_ENTRIES,
+            });
+        };
+        for env_name in &self.input_manifest.environment_names {
+            validate_identifier(
+                "lifecycle.final_verification.input_manifest.environment_names",
+                env_name,
+            )?;
+        }
+        // Bounded external inputs list with uniqueness checks.
+        if self.read_only_external_inputs.len() > MAX_FINAL_VERIFICATION_INPUTS {
+            return Err(EnvironmentConfigError::ListTooLong {
+                field: "lifecycle.final_verification.read_only_external_inputs".into(),
+                len: self.read_only_external_inputs.len(),
+                max: MAX_FINAL_VERIFICATION_INPUTS,
+            });
+        };
+        let mut input_ids = HashSet::new();
+        for input in &self.read_only_external_inputs {
+            validate_plain_string(
+                "lifecycle.final_verification.read_only_external_inputs.id",
+                &input.id,
+                MAX_STRING_LEN,
+            )?;
+            if !input_ids.insert(input.id.as_str()) {
+                return Err(EnvironmentConfigError::DuplicateName {
+                    field: "lifecycle.final_verification.read_only_external_inputs".into(),
+                    name: input.id.clone(),
+                });
+            };
+            validate_plain_string(
+                "lifecycle.final_verification.read_only_external_inputs.locator",
+                &input.locator,
+                MAX_STRING_LEN,
+            )?;
+        }
+        // Bounded output-only globs list with path safety.
+        if self.output_only_globs.len() > MAX_FINAL_VERIFICATION_OUTPUTS {
+            return Err(EnvironmentConfigError::ListTooLong {
+                field: "lifecycle.final_verification.output_only_globs".into(),
+                len: self.output_only_globs.len(),
+                max: MAX_FINAL_VERIFICATION_OUTPUTS,
+            });
+        };
+        for glob in &self.output_only_globs {
+            validate_glob("lifecycle.final_verification.output_only_globs", glob)?;
+        }
         if self.hermeticity.reusable
             && (!self.hermeticity.hermetic || self.hermeticity.network_access)
         {
@@ -1281,6 +1423,40 @@ fn validate_path(field: &str, value: &str) -> EnvResult<()> {
     if !value
         .chars()
         .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | '/'))
+    {
+        return Err(EnvironmentConfigError::UnsafeIdentifier {
+            field: field.into(),
+            value: value.into(),
+        });
+    }
+    Ok(())
+}
+
+/// Validate an output-only glob: like a repo-relative path but allows `*`
+/// and `**` wildcard segments. Rejects absolute paths, `..` segments, and
+/// unsafe characters. Globs must stay repo-relative.
+fn validate_glob(field: &str, value: &str) -> EnvResult<()> {
+    if value.is_empty() {
+        return Err(EnvironmentConfigError::EmptyValue {
+            field: field.into(),
+        });
+    }
+    if value.len() > MAX_STRING_LEN {
+        return Err(EnvironmentConfigError::TooLong {
+            field: field.into(),
+            len: value.len(),
+            max: MAX_STRING_LEN,
+        });
+    }
+    if value.starts_with('/') || value.split('/').any(|seg| seg == "..") {
+        return Err(EnvironmentConfigError::UnsafeIdentifier {
+            field: field.into(),
+            value: value.into(),
+        });
+    }
+    if !value
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | '/' | '*' | '?'))
     {
         return Err(EnvironmentConfigError::UnsafeIdentifier {
             field: field.into(),
@@ -2647,6 +2823,499 @@ mod tests {
         assert!(
             schema_str.contains("PreTaskFailurePolicy"),
             "schema should contain PreTaskFailurePolicy definition"
+        );
+    }
+
+    // ---- final_verification / pre_verification distinction tests -----------
+
+    /// Build a valid minimal `FinalVerificationPlan` for round-trip tests.
+    fn valid_final_verification_plan() -> FinalVerificationPlan {
+        FinalVerificationPlan {
+            version: 1,
+            profile_id: "ci-default".into(),
+            profile_revision: 1,
+            commands: vec![FinalVerificationCommand {
+                check_id: "cargo-test".into(),
+                executable: "cargo".into(),
+                argv: vec!["test".into(), "--workspace".into()],
+                working_directory: "server".into(),
+                environment_names: vec!["CI".into()],
+                timeout_seconds: 300,
+                descriptor_revision: 1,
+            }],
+            required_checks: vec!["cargo-test".into()],
+            input_manifest: VerificationInputManifest {
+                version: 1,
+                repo_paths: vec!["server".into()],
+                environment_names: vec!["CI".into()],
+            },
+            read_only_external_inputs: vec![ExternalInputDeclaration {
+                id: "base-image".into(),
+                locator: "docker://ghcr.io/djinn/base:latest".into(),
+            }],
+            output_only_globs: vec!["target/**/*.d".into()],
+            hermeticity: HermeticityDeclaration {
+                hermetic: true,
+                reusable: false,
+                network_access: false,
+            },
+        }
+    }
+
+    #[test]
+    fn final_verification_valid_plan_round_trips_through_json() {
+        let plan = valid_final_verification_plan();
+        let serialized = serde_json::to_string(&plan).unwrap();
+        let back: FinalVerificationPlan = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(back, plan);
+    }
+
+    #[test]
+    fn final_verification_validates_through_full_config() {
+        let mut cfg = EnvironmentConfig::empty();
+        cfg.lifecycle.final_verification = valid_final_verification_plan();
+        cfg.validate().unwrap();
+    }
+
+    #[test]
+    fn final_verification_defaults_to_empty_plan() {
+        let plan = FinalVerificationPlan::default();
+        // Manual Default sets version=1 (matches serde default function).
+        assert_eq!(plan.version, 1);
+        assert!(plan.commands.is_empty());
+        assert!(plan.profile_id.is_empty());
+        // An empty plan validates — it means "no final verification configured."
+        assert!(plan.validate().is_ok());
+    }
+
+    #[test]
+    fn final_verification_absent_key_defaults_to_empty() {
+        let raw = r#"{"schema_version": 1, "lifecycle": {}}"#;
+        let cfg: EnvironmentConfig = serde_json::from_str(raw).unwrap();
+        // serde default of final_verification_version() is 1, but when
+        // deserializing with #[serde(default = "...")] the version picks
+        // up the function default (1) when the key is absent.
+        assert!(cfg.lifecycle.final_verification.commands.is_empty());
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn final_verification_unsupported_version_rejected() {
+        let mut plan = valid_final_verification_plan();
+        plan.version = 2;
+        let err = plan.validate().unwrap_err();
+        assert!(
+            matches!(err, EnvironmentConfigError::OutOfRange { ref field, .. }
+                if field == "lifecycle.final_verification.version"),
+            "expected OutOfRange for version, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn final_verification_manifest_unsupported_version_rejected() {
+        let mut plan = valid_final_verification_plan();
+        plan.input_manifest.version = 2;
+        let err = plan.validate().unwrap_err();
+        assert!(
+            matches!(err, EnvironmentConfigError::OutOfRange { ref field, .. }
+                if field == "lifecycle.final_verification.input_manifest.version"),
+            "expected OutOfRange for manifest version, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn final_verification_duplicate_check_ids_rejected() {
+        let mut plan = valid_final_verification_plan();
+        plan.commands.push(plan.commands[0].clone());
+        let err = plan.validate().unwrap_err();
+        assert!(
+            matches!(err, EnvironmentConfigError::DuplicateName { ref field, ref name }
+                if field == "lifecycle.final_verification.commands" && name == "cargo-test"),
+            "expected DuplicateName for check_id, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn final_verification_empty_check_id_rejected() {
+        let mut plan = valid_final_verification_plan();
+        plan.commands[0].check_id.clear();
+        let err = plan.validate().unwrap_err();
+        assert!(
+            matches!(err, EnvironmentConfigError::EmptyValue { ref field }
+                if field == "lifecycle.final_verification.commands.check_id"),
+            "expected EmptyValue for check_id, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn final_verification_required_check_not_in_commands_rejected() {
+        let mut plan = valid_final_verification_plan();
+        plan.required_checks.push("nonexistent-check".into());
+        let err = plan.validate().unwrap_err();
+        assert!(
+            matches!(err, EnvironmentConfigError::UnsafeIdentifier { ref field, ref value }
+                if field == "lifecycle.final_verification.required_checks"
+                    && value == "nonexistent-check"),
+            "expected required_checks coverage error, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn final_verification_timeout_too_high_rejected() {
+        let mut plan = valid_final_verification_plan();
+        plan.commands[0].timeout_seconds = FINAL_VERIFICATION_TIMEOUT_MAX + 1;
+        let err = plan.validate().unwrap_err();
+        assert!(
+            matches!(err, EnvironmentConfigError::OutOfRange { ref field, value, max, .. }
+                if field == "lifecycle.final_verification.commands.timeout_seconds"
+                    && value == FINAL_VERIFICATION_TIMEOUT_MAX + 1
+                    && max == FINAL_VERIFICATION_TIMEOUT_MAX),
+            "expected OutOfRange for timeout too high, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn final_verification_descriptor_revision_zero_rejected() {
+        let mut plan = valid_final_verification_plan();
+        plan.commands[0].descriptor_revision = 0;
+        let err = plan.validate().unwrap_err();
+        assert!(
+            matches!(err, EnvironmentConfigError::EmptyValue { ref field }
+                if field == "lifecycle.final_verification.commands.descriptor_revision"),
+            "expected EmptyValue for descriptor_revision=0, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn final_verification_too_many_commands_rejected() {
+        let mut plan = valid_final_verification_plan();
+        plan.commands = (0..MAX_FINAL_VERIFICATION_COMMANDS + 1)
+            .map(|i| FinalVerificationCommand {
+                check_id: format!("check-{i}"),
+                executable: "cargo".into(),
+                argv: vec!["test".into()],
+                working_directory: String::new(),
+                environment_names: vec![],
+                timeout_seconds: 60,
+                descriptor_revision: 1,
+            })
+            .collect();
+        let err = plan.validate().unwrap_err();
+        assert!(
+            matches!(err, EnvironmentConfigError::ListTooLong { ref field, len, max }
+                if field == "lifecycle.final_verification.commands"
+                    && len == MAX_FINAL_VERIFICATION_COMMANDS + 1
+                    && max == MAX_FINAL_VERIFICATION_COMMANDS),
+            "expected ListTooLong for commands, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn final_verification_unsafe_working_directory_rejected() {
+        let mut plan = valid_final_verification_plan();
+        plan.commands[0].working_directory = "/etc/passwd".into();
+        let err = plan.validate().unwrap_err();
+        assert!(matches!(
+            err,
+            EnvironmentConfigError::UnsafeIdentifier { .. }
+        ));
+    }
+
+    #[test]
+    fn final_verification_dotdot_working_directory_rejected() {
+        let mut plan = valid_final_verification_plan();
+        plan.commands[0].working_directory = "../outside".into();
+        let err = plan.validate().unwrap_err();
+        assert!(matches!(
+            err,
+            EnvironmentConfigError::UnsafeIdentifier { .. }
+        ));
+    }
+
+    #[test]
+    fn final_verification_empty_executable_rejected() {
+        let mut plan = valid_final_verification_plan();
+        plan.commands[0].executable.clear();
+        let err = plan.validate().unwrap_err();
+        assert!(matches!(err, EnvironmentConfigError::EmptyValue { .. }));
+    }
+
+    #[test]
+    fn final_verification_duplicate_external_input_ids_rejected() {
+        let mut plan = valid_final_verification_plan();
+        plan.read_only_external_inputs
+            .push(ExternalInputDeclaration {
+                id: "base-image".into(), // duplicate
+                locator: "docker://other".into(),
+            });
+        let err = plan.validate().unwrap_err();
+        assert!(
+            matches!(err, EnvironmentConfigError::DuplicateName { ref field, ref name }
+                if field == "lifecycle.final_verification.read_only_external_inputs"
+                    && name == "base-image"),
+            "expected DuplicateName for external input id, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn final_verification_empty_external_input_id_rejected() {
+        let mut plan = valid_final_verification_plan();
+        plan.read_only_external_inputs[0].id.clear();
+        let err = plan.validate().unwrap_err();
+        assert!(matches!(err, EnvironmentConfigError::EmptyValue { .. }));
+    }
+
+    #[test]
+    fn final_verification_too_many_external_inputs_rejected() {
+        let mut plan = valid_final_verification_plan();
+        plan.read_only_external_inputs = (0..MAX_FINAL_VERIFICATION_INPUTS + 1)
+            .map(|i| ExternalInputDeclaration {
+                id: format!("input-{i}"),
+                locator: "loc".into(),
+            })
+            .collect();
+        let err = plan.validate().unwrap_err();
+        assert!(
+            matches!(err, EnvironmentConfigError::ListTooLong { ref field, .. }
+                if field == "lifecycle.final_verification.read_only_external_inputs"),
+            "expected ListTooLong for external inputs, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn final_verification_unsafe_glob_rejected() {
+        let mut plan = valid_final_verification_plan();
+        plan.output_only_globs = vec!["../escape/*".into()];
+        let err = plan.validate().unwrap_err();
+        assert!(matches!(
+            err,
+            EnvironmentConfigError::UnsafeIdentifier { .. }
+        ));
+    }
+
+    #[test]
+    fn final_verification_absolute_glob_rejected() {
+        let mut plan = valid_final_verification_plan();
+        plan.output_only_globs = vec!["/etc/*".into()];
+        let err = plan.validate().unwrap_err();
+        assert!(matches!(
+            err,
+            EnvironmentConfigError::UnsafeIdentifier { .. }
+        ));
+    }
+
+    #[test]
+    fn final_verification_empty_glob_rejected() {
+        let mut plan = valid_final_verification_plan();
+        plan.output_only_globs = vec![String::new()];
+        let err = plan.validate().unwrap_err();
+        assert!(matches!(err, EnvironmentConfigError::EmptyValue { .. }));
+    }
+
+    #[test]
+    fn final_verification_too_many_output_globs_rejected() {
+        let mut plan = valid_final_verification_plan();
+        plan.output_only_globs = (0..MAX_FINAL_VERIFICATION_OUTPUTS + 1)
+            .map(|i| format!("out-{i}/*"))
+            .collect();
+        let err = plan.validate().unwrap_err();
+        assert!(
+            matches!(err, EnvironmentConfigError::ListTooLong { ref field, .. }
+                if field == "lifecycle.final_verification.output_only_globs"),
+            "expected ListTooLong for output globs, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn final_verification_valid_glob_accepted() {
+        let mut plan = valid_final_verification_plan();
+        plan.output_only_globs = vec!["target/**/*.d".into(), "dist/*.js".into()];
+        assert!(plan.validate().is_ok());
+    }
+
+    #[test]
+    fn final_verification_non_hermetic_reusable_rejected() {
+        let mut plan = valid_final_verification_plan();
+        plan.hermeticity = HermeticityDeclaration {
+            hermetic: false,
+            reusable: true,
+            network_access: false,
+        };
+        let err = plan.validate().unwrap_err();
+        assert!(
+            matches!(err, EnvironmentConfigError::UnsafeIdentifier { ref field, .. }
+                if field == "lifecycle.final_verification.hermeticity.reusable"),
+            "expected reusable-without-hermetic error, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn final_verification_network_reusable_rejected() {
+        let mut plan = valid_final_verification_plan();
+        plan.hermeticity = HermeticityDeclaration {
+            hermetic: true,
+            reusable: true,
+            network_access: true,
+        };
+        let err = plan.validate().unwrap_err();
+        assert!(
+            matches!(err, EnvironmentConfigError::UnsafeIdentifier { ref field, .. }
+                if field == "lifecycle.final_verification.hermeticity.reusable"),
+            "expected reusable-with-network error, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn final_verification_profile_revision_zero_rejected() {
+        let mut plan = valid_final_verification_plan();
+        plan.profile_revision = 0;
+        let err = plan.validate().unwrap_err();
+        assert!(
+            matches!(err, EnvironmentConfigError::EmptyValue { ref field }
+                if field == "lifecycle.final_verification.profile_revision"),
+            "expected EmptyValue for profile_revision, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn final_verification_empty_plan_validates() {
+        // A FinalVerificationPlan with serde defaults (version=1 from the
+        // default function, empty commands, empty profile_id) is valid —
+        // it means "no final verification configured."
+        let raw = r#"{"version": 1}"#;
+        let plan: FinalVerificationPlan = serde_json::from_str(raw).unwrap();
+        assert!(plan.validate().is_ok());
+    }
+
+    #[test]
+    fn final_verification_unsafe_environment_name_rejected() {
+        let mut plan = valid_final_verification_plan();
+        plan.commands[0].environment_names = vec!["bad name!".into()];
+        let err = plan.validate().unwrap_err();
+        assert!(matches!(
+            err,
+            EnvironmentConfigError::UnsafeIdentifier { .. }
+        ));
+    }
+
+    #[test]
+    fn final_verification_unsafe_manifest_path_rejected() {
+        let mut plan = valid_final_verification_plan();
+        plan.input_manifest.repo_paths = vec!["../escape".into()];
+        let err = plan.validate().unwrap_err();
+        assert!(matches!(
+            err,
+            EnvironmentConfigError::UnsafeIdentifier { .. }
+        ));
+    }
+
+    // ---- pre_verification vs final_verification distinction tests -----------
+
+    #[test]
+    fn pre_verification_is_vec_of_hook_commands() {
+        // pre_verification must remain the unchanged setup-only Vec<HookCommand>.
+        let mut cfg = EnvironmentConfig::empty();
+        cfg.lifecycle.pre_verification = vec![
+            HookCommand::Shell("echo setup".into()),
+            HookCommand::Exec(vec!["bash".into(), "-lc".into(), "make build".into()]),
+        ];
+        // It validates as a standard lifecycle phase, not as a
+        // FinalVerificationPlan.
+        assert!(cfg.validate().is_ok());
+        // Confirm the type is Vec<HookCommand>, not FinalVerificationPlan.
+        let _hooks: &Vec<HookCommand> = &cfg.lifecycle.pre_verification;
+    }
+
+    #[test]
+    fn pre_verification_cannot_be_deserialized_as_final_verification() {
+        // A JSON shape that's valid for pre_verification (array of shell
+        // strings) cannot be deserialized into final_verification (which
+        // expects an object with specific fields).
+        let raw = r#"{
+            "schema_version": 1,
+            "lifecycle": {
+                "pre_verification": ["echo setup", "make build"],
+                "final_verification": "echo not-a-plan"
+            }
+        }"#;
+        // Deserialization must fail — a string is not a valid
+        // FinalVerificationPlan object.
+        assert!(
+            serde_json::from_str::<EnvironmentConfig>(raw).is_err(),
+            "string shape must not deserialize into final_verification plan object"
+        );
+    }
+
+    #[test]
+    fn pre_verification_shell_hook_validates_but_final_verification_requires_plan() {
+        // pre_verification accepts arbitrary shell strings as HookCommand::Shell.
+        let raw_pre = r#"{
+            "schema_version": 1,
+            "lifecycle": {
+                "pre_verification": ["echo hi"]
+            }
+        }"#;
+        let cfg: EnvironmentConfig = serde_json::from_str(raw_pre).unwrap();
+        assert_eq!(cfg.lifecycle.pre_verification.len(), 1);
+        assert!(matches!(
+            cfg.lifecycle.pre_verification[0],
+            HookCommand::Shell(_)
+        ));
+        assert!(cfg.validate().is_ok());
+
+        // final_verification with the same shell-string shape fails to
+        // deserialize — it must be a structured plan object, not an array
+        // of hook commands. The deserialization error proves that
+        // final_verification and pre_verification have distinct types.
+        let raw_fv = r#"{
+            "schema_version": 1,
+            "lifecycle": {
+                "final_verification": ["echo hi"]
+            }
+        }"#;
+        assert!(
+            serde_json::from_str::<EnvironmentConfig>(raw_fv).is_err(),
+            "array shape must not deserialize into final_verification plan object"
+        );
+    }
+
+    #[test]
+    fn final_verification_json_schema_exposes_all_types() {
+        let schema = schemars::schema_for!(EnvironmentConfig);
+        let schema_str = serde_json::to_string(&schema).unwrap();
+        assert!(
+            schema_str.contains("FinalVerificationPlan"),
+            "schema should contain FinalVerificationPlan definition"
+        );
+        assert!(
+            schema_str.contains("FinalVerificationCommand"),
+            "schema should contain FinalVerificationCommand definition"
+        );
+        assert!(
+            schema_str.contains("HermeticityDeclaration"),
+            "schema should contain HermeticityDeclaration definition"
+        );
+        assert!(
+            schema_str.contains("ExternalInputDeclaration"),
+            "schema should contain ExternalInputDeclaration definition"
+        );
+        assert!(
+            schema_str.contains("VerificationInputManifest"),
+            "schema should contain VerificationInputManifest definition"
+        );
+    }
+
+    #[test]
+    fn final_verification_round_trips_through_full_environment_config() {
+        let mut cfg = EnvironmentConfig::empty();
+        cfg.lifecycle.final_verification = valid_final_verification_plan();
+        let serialized = serde_json::to_string_pretty(&cfg).unwrap();
+        let back: EnvironmentConfig = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(back, cfg);
+        assert_eq!(back.lifecycle.final_verification.profile_id, "ci-default");
+        assert_eq!(
+            back.lifecycle.final_verification.commands[0].check_id,
+            "cargo-test"
         );
     }
 }
