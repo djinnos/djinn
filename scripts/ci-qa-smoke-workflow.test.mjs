@@ -41,24 +41,31 @@ test('qa-smoke workflow contract is deterministic, routed, and fail closed', () 
     'qa-smoke must be a restore-only server-quality cache consumer');
   assert.match(smoke, /^    services:\n      postgres:\n        image: postgres:16$/m,
     'qa-smoke must provision a disposable local Postgres service');
-  assert.match(smoke, /DJINN_TEST_DATABASE_URL: postgres:\/\/postgres:postgres@127\.0\.0\.1:5433\/postgres/,
-    'qa-smoke must use the maintenance database only to acquire isolated clones');
+  const maintenanceDatabaseMatch = smoke.match(/^      DJINN_TEST_DATABASE_URL: (\S+)$/m);
+  assert.ok(maintenanceDatabaseMatch,
+    'qa-smoke must expose a runtime database URL for isolated clone acquisition');
+  assert.equal(maintenanceDatabaseMatch[1], MAINTENANCE_DATABASE_URL,
+    'the runtime clone lifecycle must be owned by the postgres maintenance database');
   assert.match(smoke, /uses: taiki-e\/install-action@v2[\s\S]*?tool: sqlx-cli[\s\S]*?name: Build disposable Postgres test template[\s\S]*?CREATE DATABASE djinn_test_template[\s\S]*?DATABASE_URL=postgres:\/\/postgres:postgres@127\.0\.0\.1:5433\/djinn_test_template sqlx migrate run --source migrations_postgres[\s\S]*?UPDATE pg_database SET datistemplate = TRUE WHERE datname = 'djinn_test_template'/,
     'qa-smoke must migrate and mark the disposable clone template before scenarios run');
   assert.doesNotMatch(smoke, /\b(?:KUBECONFIG|kubectl|kubernetes|helm|tilt|kind|credentials|live[-_ ]?(?:provider|credential|scenario)|external[-_ ]?network)\b/i,
     'qa-smoke must not configure live, provider-network, or Kubernetes dependencies');
 
   const templateAt = smoke.indexOf('Build disposable Postgres test template');
+  const migrationAt = smoke.indexOf('sqlx migrate run --source migrations_postgres', templateAt);
+  const templateReadyAt = smoke.indexOf("UPDATE pg_database SET datistemplate = TRUE WHERE datname = 'djinn_test_template'", migrationAt);
   const smokeStepAt = smoke.indexOf('name: Run deterministic qa smoke evidence');
-  const compileDatabaseAt = smoke.indexOf(`DATABASE_URL: ${TEMPLATE_DATABASE_URL}`, smokeStepAt);
+  const compileDatabaseMatch = smoke.slice(smokeStepAt).match(/^          DATABASE_URL: (\S+)$/m);
   const runAt = smoke.indexOf(RUN_COMMAND);
   const coverageAt = smoke.indexOf(COVERAGE_COMMAND);
   assert.ok(runAt >= 0, 'qa-smoke must run the exact deterministic smoke command');
-  assert.ok(templateAt >= 0 && templateAt < runAt,
-    'the disposable migrated test template must exist before smoke scenarios run');
-  assert.ok(smokeStepAt >= 0 && compileDatabaseAt > smokeStepAt && compileDatabaseAt < runAt,
-    'the smoke execution step must compile SQLx macros against the migrated template');
-  assert.notEqual(MAINTENANCE_DATABASE_URL, TEMPLATE_DATABASE_URL,
+  assert.ok(templateAt >= 0 && migrationAt > templateAt && templateReadyAt > migrationAt && templateReadyAt < smokeStepAt && smokeStepAt < runAt,
+    'template migration and clone-template marking must complete before cargo smoke execution');
+  assert.ok(compileDatabaseMatch,
+    'the smoke execution step must provide SQLx a compile-time database URL');
+  assert.equal(compileDatabaseMatch[1], TEMPLATE_DATABASE_URL,
+    'cargo smoke and coverage must compile SQLx macros against the migrated template');
+  assert.notEqual(maintenanceDatabaseMatch[1], compileDatabaseMatch[1],
     'isolated clone acquisition and SQLx compile-time checks must use distinct databases');
   assert.ok(coverageAt > runAt, 'coverage must run after smoke evidence is emitted');
   assert.match(smoke, /--evidence \.\.\/qa\/evidence\/smoke-ci --output \.\.\/qa\/evidence\/smoke-ci\/coverage\.json/,
