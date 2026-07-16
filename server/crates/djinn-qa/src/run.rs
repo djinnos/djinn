@@ -118,16 +118,41 @@ impl ScenarioExecutor for CargoExecutor {
 pub struct TemplateCloneDatabase;
 impl DatabaseAcquirer for TemplateCloneDatabase {
     fn acquire(&self) -> Result<Box<dyn Send>, String> {
-        let database = djinn_db::Database::open_in_memory()
-            .map_err(|e| format!("dedicated test database acquisition failed: {e}"))?;
-        tokio::runtime::Builder::new_current_thread()
+        // The SQLx pool created by `Database::open_in_memory` spawns maintenance
+        // tasks (`PoolInner::new` → `spawn_maintenance_tasks`) at construction
+        // time. Those tasks must find a live Tokio handle via
+        // `Handle::try_current`, otherwise sqlx panics with "this functionality
+        // requires a Tokio context". Build the owning runtime first, enter its
+        // context, then create and initialize the database inside it.
+        let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
-            .map_err(|e| format!("dedicated test database runtime setup failed: {e}"))?
-            .block_on(database.ensure_initialized())
-            .map_err(|e| format!("dedicated test database acquisition failed: {e}"))?;
-        Ok(Box::new(database))
+            .map_err(|e| format!("dedicated test database runtime setup failed: {e}"))?;
+        let database = {
+            let _enter = runtime.enter();
+            let database = djinn_db::Database::open_in_memory()
+                .map_err(|e| format!("dedicated test database acquisition failed: {e}"))?;
+            runtime
+                .block_on(database.ensure_initialized())
+                .map_err(|e| format!("dedicated test database acquisition failed: {e}"))?;
+            database
+        };
+        Ok(Box::new(TemplateCloneDatabaseGuard { database, runtime }))
     }
+}
+
+/// Owns the dedicated Tokio runtime that backs a test-database SQLx pool so the
+/// pool's maintenance tasks stay associated with a live runtime for the guard's
+/// entire lifetime.
+///
+/// Field declaration order is load-bearing: `database` (and its `PgPool`) is
+/// dropped **before** `runtime`, ensuring pool cleanup and `TestDbInit` teardown
+/// happen while the owning runtime is still valid. The fields are never read —
+/// they exist solely for their drop-time cleanup ordering.
+#[allow(dead_code)]
+struct TemplateCloneDatabaseGuard {
+    database: djinn_db::Database,
+    runtime: tokio::runtime::Runtime,
 }
 
 /// Inventory is already sorted by ID; blocked entries remain unproven and are not
