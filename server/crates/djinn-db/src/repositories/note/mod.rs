@@ -101,7 +101,7 @@ pub use housekeeping::{
 pub use lifecycle::NoteStatus;
 pub use mutation::{
     NoteRevisionCreateState, NoteRevisionDesiredState, NoteRevisionEvent, NoteRevisionMutation,
-    NoteRevisionMutationResult,
+    NoteRevisionMutationResult, NoteRevisionUpdateState,
 };
 
 /// Compact scope-overlap candidate row returned by
