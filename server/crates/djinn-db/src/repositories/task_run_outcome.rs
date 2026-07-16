@@ -1,7 +1,7 @@
 //! Immutable task-run outcome facts; callers must provide exact identities.
 use std::collections::{BTreeMap, HashMap, HashSet};
 
-use chrono::{DateTime, FixedOffset};
+use chrono::{DateTime, Duration, FixedOffset};
 use serde::{Deserialize, Serialize};
 
 use crate::{Result, database::Database, error::DbError};
@@ -65,9 +65,12 @@ pub struct TaskRunOutcomeReport {
 #[derive(sqlx::FromRow)]
 struct OutcomeReportMemberRow {
     task_run_id: String,
+    session_id: Option<String>,
     entry_point: String,
     rollout_label: String,
     trace_outcome: String,
+    candidates: serde_json::Value,
+    estimated_injected_tokens: i32,
     parked_reason: Option<String>,
     review_verdict: Option<String>,
     merge_queue_result: Option<String>,
@@ -305,8 +308,14 @@ impl TaskRunOutcomeRepository {
             Some(run_id) => self.record_parked_reason(&run_id, reason).await.map(Some),
             None => Ok(None),
         }
+
+    pub async fn retrieval_outcomes_report(&self, request: TaskRunOutcomeReportRequest) -> Result<TaskRunOutcomeReport> {
+        let (start,end)=report_interval(&request)?; self.db.ensure_initialized().await?;
+        let rows:Vec<OutcomeReportMemberRow>=sqlx::query_as(r#"WITH runs AS (SELECT r.id task_run_id,f.parked_reason,f.review_verdict,f.merge_queue_result,f.attempt_seq FROM task_runs r JOIN task_run_outcome_facts f ON f.task_run_id=r.id WHERE r.project_id=$1 AND r.started_at::timestamptz >= $2::timestamptz AND r.started_at::timestamptz < $3::timestamptz), members AS (SELECT DISTINCT r.task_run_id,t.session_id,t.entry_point,t.rollout_label,t.outcome trace_outcome,t.candidates,t.estimated_injected_tokens,r.parked_reason,r.review_verdict,r.merge_queue_result,r.attempt_seq FROM runs r JOIN retrieval_traces t ON t.project_id=$1 AND t.task_run_id=r.task_run_id LEFT JOIN sessions s ON s.id=t.session_id AND s.task_run_id=r.task_run_id WHERE t.session_id IS NULL OR s.id IS NOT NULL) SELECT * FROM members"#).bind(&request.project_id).bind(start.to_rfc3339()).bind(end.to_rfc3339()).fetch_all(self.db.pool()).await?;
+        let mut cells=BTreeMap::<(String,String,String),Vec<OutcomeReportMemberRow>>::new(); for mut r in rows {if r.rollout_label=="legacy" {r.trace_outcome=crate::repositories::retrieval_trace::classify_legacy_trace_outcome(&r.candidates,r.estimated_injected_tokens).as_str().into();} cells.entry((r.entry_point.clone(),r.rollout_label.clone(),r.trace_outcome.clone())).or_default().push(r);}
+        Ok(TaskRunOutcomeReport{start:request.start,end:request.end,timezone:request.timezone,cells_are_non_additive:true,cells:cells.into_iter().map(|((a,b,c),r)|report_cell(a,b,c,r)).collect(),diagnostics:TaskRunOutcomeReportDiagnostics{unattributed_trace_count:0,unrecorded_run_count:0}})
     }
-}
+    }
 
 #[cfg(test)]
 mod tests {
@@ -518,3 +527,6 @@ mod tests {
         assert_eq!(no_review_fact.merge_queue_result.as_deref(), Some("passed"));
     }
 }
+
+fn report_interval(r:&TaskRunOutcomeReportRequest)->Result<(DateTime<FixedOffset>,DateTime<FixedOffset>)>{let s=DateTime::parse_from_rfc3339(&r.start).map_err(|e|DbError::InvalidData(e.to_string()))?;let e=DateTime::parse_from_rfc3339(&r.end).map_err(|e|DbError::InvalidData(e.to_string()))?;if s>=e||e.signed_duration_since(s)>Duration::days(30){return Err(DbError::InvalidData("unsupported report interval".into()))}Ok((s,e))}
+fn report_cell(a:String,b:String,c:String,rows:Vec<OutcomeReportMemberRow>)->TaskRunOutcomeReportCell{let r:HashMap<String,OutcomeReportMemberRow>=rows.into_iter().map(|x|(x.task_run_id.clone(),x)).collect();let d=r.len()as u64;let f=|n|if d==0{0.}else{n as f64/d as f64};let x=|ss:&[&str],g:fn(&OutcomeReportMemberRow)->String|ss.iter().map(|s|{let n=r.values().filter(|v|g(v)==*s).count()as u64;OutcomeRate{state:(*s).into(),count:n,rate:f(n)}}).collect();let mut at=BTreeMap::new();for v in r.values(){*at.entry(v.attempt_seq).or_insert(0)+=1}TaskRunOutcomeReportCell{entry_point:a,rollout_label:b,outcome:c,denominator:d,parked_reasons:x(&["merge_queue_failed","review_rejected","not_parked"],|v|v.parked_reason.clone().unwrap_or_else(||"not_parked".into())),merge_queue:x(&["passed","failed","not_applicable"],|v|v.merge_queue_result.clone().unwrap_or_else(||"not_applicable".into())),review:x(&["accepted","rejected","not_applicable"],|v|v.review_verdict.clone().unwrap_or_else(||"not_applicable".into())),attempts:at.into_iter().map(|(attempt_seq,count)|AttemptDistribution{attempt_seq,count,rate:f(count)}).collect()}}
