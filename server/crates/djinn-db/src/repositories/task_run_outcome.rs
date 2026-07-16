@@ -1,7 +1,7 @@
 //! Immutable task-run outcome facts; callers must provide exact identities.
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap};
 
-use chrono::{DateTime, Duration, FixedOffset};
+use chrono::{DateTime, Duration, FixedOffset, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::{Result, database::Database, error::DbError};
@@ -65,7 +65,6 @@ pub struct TaskRunOutcomeReport {
 #[derive(sqlx::FromRow)]
 struct OutcomeReportMemberRow {
     task_run_id: String,
-    session_id: Option<String>,
     entry_point: String,
     rollout_label: String,
     trace_outcome: String,
@@ -308,14 +307,112 @@ impl TaskRunOutcomeRepository {
             Some(run_id) => self.record_parked_reason(&run_id, reason).await.map(Some),
             None => Ok(None),
         }
+    }
 
-    pub async fn retrieval_outcomes_report(&self, request: TaskRunOutcomeReportRequest) -> Result<TaskRunOutcomeReport> {
-        let (start,end)=report_interval(&request)?; self.db.ensure_initialized().await?;
-        let rows:Vec<OutcomeReportMemberRow>=sqlx::query_as(r#"WITH runs AS (SELECT r.id task_run_id,f.parked_reason,f.review_verdict,f.merge_queue_result,f.attempt_seq FROM task_runs r JOIN task_run_outcome_facts f ON f.task_run_id=r.id WHERE r.project_id=$1 AND r.started_at::timestamptz >= $2::timestamptz AND r.started_at::timestamptz < $3::timestamptz), members AS (SELECT DISTINCT r.task_run_id,t.session_id,t.entry_point,t.rollout_label,t.outcome trace_outcome,t.candidates,t.estimated_injected_tokens,r.parked_reason,r.review_verdict,r.merge_queue_result,r.attempt_seq FROM runs r JOIN retrieval_traces t ON t.project_id=$1 AND t.task_run_id=r.task_run_id LEFT JOIN sessions s ON s.id=t.session_id AND s.task_run_id=r.task_run_id WHERE t.session_id IS NULL OR s.id IS NOT NULL) SELECT * FROM members"#).bind(&request.project_id).bind(start.to_rfc3339()).bind(end.to_rfc3339()).fetch_all(self.db.pool()).await?;
-        let mut cells=BTreeMap::<(String,String,String),Vec<OutcomeReportMemberRow>>::new(); for mut r in rows {if r.rollout_label=="legacy" {r.trace_outcome=crate::repositories::retrieval_trace::classify_legacy_trace_outcome(&r.candidates,r.estimated_injected_tokens).as_str().into();} cells.entry((r.entry_point.clone(),r.rollout_label.clone(),r.trace_outcome.clone())).or_default().push(r);}
-        Ok(TaskRunOutcomeReport{start:request.start,end:request.end,timezone:request.timezone,cells_are_non_additive:true,cells:cells.into_iter().map(|((a,b,c),r)|report_cell(a,b,c,r)).collect(),diagnostics:TaskRunOutcomeReportDiagnostics{unattributed_trace_count:0,unrecorded_run_count:0}})
+    /// Aggregate immutable per-run facts into observational trace cohorts.
+    /// Cells can overlap; a run is deduplicated only within a report cell.
+    pub async fn retrieval_outcomes_report(
+        &self,
+        request: TaskRunOutcomeReportRequest,
+    ) -> Result<TaskRunOutcomeReport> {
+        let (start, end) = report_interval(&request)?;
+        self.db.ensure_initialized().await?;
+        // Select immutable facts before any trace/session fan-out. `members`
+        // has the documented distinct task-run/session/cohort grain.
+        let rows: Vec<OutcomeReportMemberRow> = sqlx::query_as(
+            r#"
+            WITH selected_runs AS (
+                SELECT r.id AS task_run_id, f.parked_reason, f.review_verdict,
+                       f.merge_queue_result, f.attempt_seq
+                FROM task_runs r JOIN task_run_outcome_facts f ON f.task_run_id = r.id
+                WHERE r.project_id = $1
+                  AND r.started_at::timestamptz >= $2::timestamptz
+                  AND r.started_at::timestamptz < $3::timestamptz
+            ), members AS (
+                SELECT DISTINCT selected_runs.task_run_id, t.session_id,
+                       t.entry_point, t.rollout_label, t.outcome AS trace_outcome,
+                       t.candidates, t.estimated_injected_tokens,
+                       selected_runs.parked_reason, selected_runs.review_verdict,
+                       selected_runs.merge_queue_result, selected_runs.attempt_seq
+                FROM selected_runs JOIN retrieval_traces t
+                  ON t.project_id = $1 AND t.task_run_id = selected_runs.task_run_id
+                LEFT JOIN sessions s
+                  ON s.id = t.session_id AND s.task_run_id = selected_runs.task_run_id
+                WHERE t.session_id IS NULL OR s.id IS NOT NULL
+            ) SELECT * FROM members"#,
+        )
+        .bind(&request.project_id)
+        .bind(start.to_rfc3339())
+        .bind(end.to_rfc3339())
+        .fetch_all(self.db.pool())
+        .await?;
+        let unattributed_trace_count: i64 = sqlx::query_scalar(
+            r#"
+            SELECT count(*) FROM retrieval_traces
+            WHERE project_id = $1 AND task_run_id IS NULL
+              AND created_at::timestamptz >= $2::timestamptz
+              AND created_at::timestamptz < $3::timestamptz"#,
+        )
+        .bind(&request.project_id)
+        .bind(start.to_rfc3339())
+        .bind(end.to_rfc3339())
+        .fetch_one(self.db.pool())
+        .await?;
+        let unrecorded_run_count: i64 = sqlx::query_scalar(
+            r#"
+            SELECT count(*) FROM task_runs r
+            JOIN task_run_outcome_facts f ON f.task_run_id = r.id
+            WHERE r.project_id = $1
+              AND r.started_at::timestamptz >= $2::timestamptz
+              AND r.started_at::timestamptz < $3::timestamptz
+              AND NOT EXISTS (SELECT 1 FROM retrieval_traces t
+                              WHERE t.project_id = r.project_id AND t.task_run_id = r.id)"#,
+        )
+        .bind(&request.project_id)
+        .bind(start.to_rfc3339())
+        .bind(end.to_rfc3339())
+        .fetch_one(self.db.pool())
+        .await?;
+        let mut cells = BTreeMap::<(String, String, String), Vec<OutcomeReportMemberRow>>::new();
+        for mut row in rows {
+            // Shared migration-119 classifier keeps malformed/contradictory
+            // historical evidence out of injected cohorts.
+            if row.rollout_label == "legacy" {
+                row.trace_outcome =
+                    crate::repositories::retrieval_trace::classify_legacy_trace_outcome(
+                        &row.candidates,
+                        row.estimated_injected_tokens,
+                    )
+                    .as_str()
+                    .to_owned();
+            }
+            cells
+                .entry((
+                    row.entry_point.clone(),
+                    row.rollout_label.clone(),
+                    row.trace_outcome.clone(),
+                ))
+                .or_default()
+                .push(row);
+        }
+        Ok(TaskRunOutcomeReport {
+            start: request.start,
+            end: request.end,
+            timezone: request.timezone,
+            cells_are_non_additive: true,
+            cells: cells
+                .into_iter()
+                .map(|((entry_point, rollout_label, outcome), rows)| {
+                    report_cell(entry_point, rollout_label, outcome, rows)
+                })
+                .collect(),
+            diagnostics: TaskRunOutcomeReportDiagnostics {
+                unattributed_trace_count: unattributed_trace_count as u64,
+                unrecorded_run_count: unrecorded_run_count as u64,
+            },
+        })
     }
-    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -528,5 +625,97 @@ mod tests {
     }
 }
 
-fn report_interval(r:&TaskRunOutcomeReportRequest)->Result<(DateTime<FixedOffset>,DateTime<FixedOffset>)>{let s=DateTime::parse_from_rfc3339(&r.start).map_err(|e|DbError::InvalidData(e.to_string()))?;let e=DateTime::parse_from_rfc3339(&r.end).map_err(|e|DbError::InvalidData(e.to_string()))?;if s>=e||e.signed_duration_since(s)>Duration::days(30){return Err(DbError::InvalidData("unsupported report interval".into()))}Ok((s,e))}
-fn report_cell(a:String,b:String,c:String,rows:Vec<OutcomeReportMemberRow>)->TaskRunOutcomeReportCell{let r:HashMap<String,OutcomeReportMemberRow>=rows.into_iter().map(|x|(x.task_run_id.clone(),x)).collect();let d=r.len()as u64;let f=|n|if d==0{0.}else{n as f64/d as f64};let x=|ss:&[&str],g:fn(&OutcomeReportMemberRow)->String|ss.iter().map(|s|{let n=r.values().filter(|v|g(v)==*s).count()as u64;OutcomeRate{state:(*s).into(),count:n,rate:f(n)}}).collect();let mut at=BTreeMap::new();for v in r.values(){*at.entry(v.attempt_seq).or_insert(0)+=1}TaskRunOutcomeReportCell{entry_point:a,rollout_label:b,outcome:c,denominator:d,parked_reasons:x(&["merge_queue_failed","review_rejected","not_parked"],|v|v.parked_reason.clone().unwrap_or_else(||"not_parked".into())),merge_queue:x(&["passed","failed","not_applicable"],|v|v.merge_queue_result.clone().unwrap_or_else(||"not_applicable".into())),review:x(&["accepted","rejected","not_applicable"],|v|v.review_verdict.clone().unwrap_or_else(||"not_applicable".into())),attempts:at.into_iter().map(|(attempt_seq,count)|AttemptDistribution{attempt_seq,count,rate:f(count)}).collect()}}
+fn report_interval(
+    request: &TaskRunOutcomeReportRequest,
+) -> Result<(DateTime<FixedOffset>, DateTime<FixedOffset>)> {
+    let start = DateTime::parse_from_rfc3339(&request.start)
+        .map_err(|error| DbError::InvalidData(error.to_string()))?;
+    let end = DateTime::parse_from_rfc3339(&request.end)
+        .map_err(|error| DbError::InvalidData(error.to_string()))?;
+    let now = Utc::now();
+    if start >= end
+        || end.signed_duration_since(start) > Duration::days(30)
+        || start.with_timezone(&Utc) < now - Duration::days(30)
+        || end.with_timezone(&Utc) > now
+    {
+        return Err(DbError::InvalidData("unsupported report interval".into()));
+    }
+    Ok((start, end))
+}
+
+fn report_cell(
+    entry_point: String,
+    rollout_label: String,
+    outcome: String,
+    rows: Vec<OutcomeReportMemberRow>,
+) -> TaskRunOutcomeReportCell {
+    // A trace fan-out (including multiple sessions) cannot multiply facts.
+    let runs: HashMap<String, OutcomeReportMemberRow> = rows
+        .into_iter()
+        .map(|row| (row.task_run_id.clone(), row))
+        .collect();
+    let denominator = runs.len() as u64;
+    let rate = |count| {
+        if denominator == 0 {
+            0.0
+        } else {
+            count as f64 / denominator as f64
+        }
+    };
+    let states = |known: &[&str], state_for: fn(&OutcomeReportMemberRow) -> String| {
+        let mut counts = BTreeMap::<String, u64>::new();
+        for state in known {
+            counts.insert((*state).to_owned(), 0);
+        }
+        for row in runs.values() {
+            *counts.entry(state_for(row)).or_default() += 1;
+        }
+        counts
+            .into_iter()
+            .map(|(state, count)| OutcomeRate {
+                state,
+                count,
+                rate: rate(count),
+            })
+            .collect()
+    };
+    let parked_reasons = states(
+        &["merge_queue_failed", "review_rejected", "not_parked"],
+        |row| {
+            row.parked_reason
+                .clone()
+                .unwrap_or_else(|| "not_parked".to_owned())
+        },
+    );
+    let merge_queue = states(&["passed", "failed", "not_applicable"], |row| {
+        row.merge_queue_result
+            .clone()
+            .unwrap_or_else(|| "not_applicable".to_owned())
+    });
+    let review = states(&["accepted", "rejected", "not_applicable"], |row| {
+        row.review_verdict
+            .clone()
+            .unwrap_or_else(|| "not_applicable".to_owned())
+    });
+    let mut attempts = BTreeMap::new();
+    for row in runs.values() {
+        *attempts.entry(row.attempt_seq).or_insert(0) += 1;
+    }
+    TaskRunOutcomeReportCell {
+        entry_point,
+        rollout_label,
+        outcome,
+        denominator,
+        parked_reasons,
+        merge_queue,
+        review,
+        attempts: attempts
+            .into_iter()
+            .map(|(attempt_seq, count)| AttemptDistribution {
+                attempt_seq,
+                count,
+                rate: rate(count),
+            })
+            .collect(),
+    }
+}
