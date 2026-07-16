@@ -62,6 +62,12 @@ const NOVELTY_CANDIDATE_CONTENT_CHAR_CAP: usize = 4_000;
 /// semantically judged to be already known.
 const DUPLICATE_CONFIDENCE_SIGNAL: f64 = 0.65;
 
+/// Extraction may propose only a small confidence adjustment. The eventual
+/// repository mutation path applies its own policy; this bound prevents a
+/// model response from proposing an implausibly large change in the first
+/// place.
+const MAX_REVISION_CONFIDENCE_DELTA: f64 = 0.25;
+
 const EXTRACTION_SYSTEM_PROMPT: &str = SYSTEM_PROMPT;
 const NOVELTY_SYSTEM_PROMPT: &str = "You are a semantic novelty judge for extracted knowledge notes. Compare a proposed extracted note against existing candidate notes using their bounded full bodies. Respond with valid JSON only.";
 /// The evidence merge has its own strict response contract so malformed model
@@ -393,7 +399,8 @@ fn build_extraction_prompt(
          {{\n\
            \"cases\": [{{\"title\": \"...\", \"content\": \"Markdown note using the exact required case headings\", \"applies_when\": \"One sentence describing when this case applies.\", \"scope_paths\": [\"...\"]}}],\n\
            \"patterns\": [{{\"title\": \"...\", \"content\": \"Markdown note using the exact required pattern headings\", \"applies_when\": \"One sentence describing when this pattern applies.\", \"scope_paths\": [\"...\"]}}],\n\
-           \"pitfalls\": [{{\"title\": \"...\", \"content\": \"Markdown note using the exact required pitfall headings\", \"applies_when\": \"One sentence describing when this pitfall applies.\", \"scope_paths\": [\"...\"]}}]\n\
+           \"pitfalls\": [{{\"title\": \"...\", \"content\": \"Markdown note using the exact required pitfall headings\", \"applies_when\": \"One sentence describing when this pitfall applies.\", \"scope_paths\": [\"...\"]}}],\n\
+           \"revision_operations\": [{{\"kind\":\"patch\",\"target_note_id\":\"UUID\",\"before_text\":\"exact current note content\",\"after_text\":\"replacement content\",\"confidence_delta\":0.1,\"reason\":\"why this correction is supported\"}},{{\"kind\":\"deprecate_with_supersedes\",\"deprecated_note_id\":\"UUID\",\"superseding_note_id\":\"UUID\",\"reason\":\"why the replacement supersedes it\"}}]\n\
          }}\n\
          Required durable templates:\n\
          Pattern content must contain exactly these markdown headings in order:\n\
@@ -408,6 +415,7 @@ fn build_extraction_prompt(
          and must be one sentence ending in a period. If you cannot articulate a useful \
          applies_when for a note, omit that note instead of returning a vague one. \
          If you cannot fill every required section for a note type, omit that note instead of returning a shorter paragraph.\n\
+         \"revision_operations\" is optional and may be omitted or be []. When present, every item MUST use exactly one of the tagged \"kind\" shapes above; do not emit untagged or ad-hoc operation objects. IDs are proposals only: the server validates ID format, project, eligibility, current content, and policy before any mutation. For patch operations, before_text and after_text must be non-blank, reason must be non-blank, and confidence_delta must be between -0.25 and 0.25 inclusive. For deprecate_with_supersedes, both IDs and reason must be non-blank and the IDs must differ.\n\
          Return empty arrays if nothing significant was learned. \
          Maximum 3 cases, 3 patterns, 2 pitfalls.\n\
          Only extract if there is clear signal (high errors+files_changed suggests pitfalls; \
@@ -648,7 +656,95 @@ struct ExtractionResponse {
     patterns: Vec<ExtractedNote>,
     #[serde(default)]
     pitfalls: Vec<ExtractedNote>,
+    #[serde(default)]
+    revision_operations: Vec<RevisionOperation>,
 }
+#[derive(Debug, Deserialize, PartialEq)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+enum RevisionOperation {
+    Patch {
+        target_note_id: String,
+        before_text: String,
+        after_text: String,
+        confidence_delta: f64,
+        reason: String,
+    },
+    DeprecateWithSupersedes {
+        deprecated_note_id: String,
+        superseding_note_id: String,
+        reason: String,
+    },
+}
+
+/// Stable refusal vocabulary for syntactically invalid extraction revisions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RevisionOperationRefusalReason {
+    MalformedOperationShape,
+    BlankReason,
+    BlankRequiredText,
+    InvalidNoteId,
+    SelfReplacement,
+    ConfidenceDeltaOutOfRange,
+}
+
+impl std::fmt::Display for RevisionOperationRefusalReason {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+        let reason = match self {
+            Self::MalformedOperationShape => "malformed_operation_shape",
+            Self::BlankReason => "blank_reason",
+            Self::BlankRequiredText => "blank_required_text",
+            Self::InvalidNoteId => "invalid_note_id",
+            Self::SelfReplacement => "self_replacement",
+            Self::ConfidenceDeltaOutOfRange => "confidence_delta_out_of_range",
+        };
+        formatter.write_str(reason)
+    }
+}
+
+fn validate_revision_operations(operations: &mut [RevisionOperation]) -> Result<(), RevisionOperationRefusalReason> {
+    for operation in operations {
+        match operation {
+            RevisionOperation::Patch { target_note_id, before_text, after_text, confidence_delta, reason } => {
+                validate_note_id(target_note_id)?;
+                if before_text.trim().is_empty() || after_text.trim().is_empty() {
+                    return Err(RevisionOperationRefusalReason::BlankRequiredText);
+                }
+                if !confidence_delta.is_finite() || confidence_delta.abs() > MAX_REVISION_CONFIDENCE_DELTA {
+                    return Err(RevisionOperationRefusalReason::ConfidenceDeltaOutOfRange);
+                }
+                normalize_reason(reason)?;
+            }
+            RevisionOperation::DeprecateWithSupersedes { deprecated_note_id, superseding_note_id, reason } => {
+                validate_note_id(deprecated_note_id)?;
+                validate_note_id(superseding_note_id)?;
+                if deprecated_note_id == superseding_note_id {
+                    return Err(RevisionOperationRefusalReason::SelfReplacement);
+                }
+                normalize_reason(reason)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_note_id(note_id: &str) -> Result<(), RevisionOperationRefusalReason> {
+    match uuid::Uuid::parse_str(note_id) {
+        Ok(id) if !id.is_nil() => Ok(()),
+        _ => Err(RevisionOperationRefusalReason::InvalidNoteId),
+    }
+}
+
+fn normalize_reason(reason: &mut String) -> Result<(), RevisionOperationRefusalReason> {
+    let normalized = reason.trim();
+    if normalized.is_empty() {
+        return Err(RevisionOperationRefusalReason::BlankReason);
+    }
+    if normalized.len() != reason.len() {
+        *reason = normalized.to_owned();
+    }
+    Ok(())
+}
+
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -2467,7 +2563,21 @@ fn parse_extraction_response(text: &str) -> Result<ExtractionResponse, String> {
     } else {
         text
     };
-    serde_json::from_str::<ExtractionResponse>(text).map_err(|e| format!("JSON parse error: {e}"))
+    let value: serde_json::Value = serde_json::from_str(text)
+        .map_err(|error| format!("JSON parse error: {error}"))?;
+    let has_revision_operations = value
+        .as_object()
+        .is_some_and(|object| object.contains_key("revision_operations"));
+    let mut extracted: ExtractionResponse = serde_json::from_value(value).map_err(|error| {
+        if has_revision_operations {
+            RevisionOperationRefusalReason::MalformedOperationShape.to_string()
+        } else {
+            format!("JSON parse error: {error}")
+        }
+    })?;
+    validate_revision_operations(&mut extracted.revision_operations)
+        .map_err(|reason| reason.to_string())?;
+    Ok(extracted)
 }
 
 #[cfg(test)]
@@ -2988,6 +3098,53 @@ mod tests {
         assert!(!out.contains("line 0:"), "head should be dropped");
     }
     #[test]
+    fn parse_extraction_response_accepts_typed_revision_operations() {
+        let patch_id = "018f0000-0000-7000-8000-000000000001";
+        let replacement_id = "018f0000-0000-7000-8000-000000000002";
+        let json = format!(
+            r#"{{"cases":[{{"title":"T","content":"C"}}],"revision_operations":[{{"kind":"patch","target_note_id":"{patch_id}","before_text":"old","after_text":"new","confidence_delta":0.25,"reason":"  corrected evidence  "}},{{"kind":"deprecate_with_supersedes","deprecated_note_id":"{patch_id}","superseding_note_id":"{replacement_id}","reason":"replacement is authoritative"}}]}}"#
+        );
+        let response = parse_extraction_response(&json).expect("typed operations parse");
+        assert_eq!(response.cases.len(), 1);
+        assert_eq!(response.revision_operations.len(), 2);
+        assert!(matches!(
+            &response.revision_operations[0],
+            RevisionOperation::Patch { reason, confidence_delta, .. }
+                if reason == "corrected evidence" && *confidence_delta == 0.25
+        ));
+        assert!(matches!(
+            &response.revision_operations[1],
+            RevisionOperation::DeprecateWithSupersedes { .. }
+        ));
+    }
+
+    #[test]
+    fn parse_extraction_response_refuses_invalid_revision_operations() {
+        let id = "018f0000-0000-7000-8000-000000000001";
+        for (operation, expected) in [
+            (format!(r#"{{"kind":"patch","target_note_id":"bad","before_text":"old","after_text":"new","confidence_delta":0.0,"reason":"why"}}"#), "invalid_note_id"),
+            (format!(r#"{{"kind":"patch","target_note_id":"{id}","before_text":"old","after_text":" ","confidence_delta":0.0,"reason":"why"}}"#), "blank_required_text"),
+            (format!(r#"{{"kind":"patch","target_note_id":"{id}","before_text":"old","after_text":"new","confidence_delta":0.26,"reason":"why"}}"#), "confidence_delta_out_of_range"),
+            (format!(r#"{{"kind":"deprecate_with_supersedes","deprecated_note_id":"{id}","superseding_note_id":"{id}","reason":"why"}}"#), "self_replacement"),
+            (format!(r#"{{"kind":"deprecate_with_supersedes","deprecated_note_id":"{id}","superseding_note_id":"018f0000-0000-7000-8000-000000000002","reason":" "}}"#), "blank_reason"),
+            (r#"{"kind":"patch","target_note_id":"x"}"#.to_owned(), "malformed_operation_shape"),
+        ] {
+            let json = format!(r#"{{"revision_operations":[{operation}]}}"#);
+            assert_eq!(parse_extraction_response(&json).unwrap_err(), expected);
+        }
+    }
+
+    #[test]
+    fn revision_operations_do_not_participate_in_note_deduplication() {
+        let response = parse_extraction_response(r#"{"cases":[{"title":"same","content":"one"},{"title":" SAME ","content":"two"}],"revision_operations":[{"kind":"patch","target_note_id":"018f0000-0000-7000-8000-000000000001","before_text":"old","after_text":"new","confidence_delta":0.0,"reason":"why"}]}"#).expect("response parses");
+        let (notes, duplicates) = dedup_extracted_notes(&response);
+        assert_eq!(notes.len(), 1);
+        assert_eq!(duplicates, 1);
+        assert_eq!(response.revision_operations.len(), 1);
+    }
+
+
+    #[test]
     fn parse_extraction_response_valid_json() {
         let json = r#"{"cases":[{"title":"T","content":"C"}],"patterns":[],"pitfalls":[]}"#;
         let result = parse_extraction_response(json).expect("valid json");
@@ -3194,6 +3351,9 @@ mod tests {
         assert!(prompt.contains("## Approach taken"));
         // Anchor must be required to be distinct from the body.
         assert!(prompt.contains("DISTINCT from the markdown body"));
+        assert!(prompt.contains("\"revision_operations\""));
+        assert!(prompt.contains("deprecate_with_supersedes"));
+        assert!(prompt.contains("IDs are proposals only"));
     }
     #[test]
     fn extraction_quality_defaults_to_zero() {
@@ -3224,6 +3384,7 @@ mod tests {
             ],
             patterns: vec![],
             pitfalls: vec![],
+            revision_operations: vec![],
         };
         let (deduped, dupes) = dedup_extracted_notes(&extracted);
         assert_eq!(dupes, 1, "one intra-batch duplicate should be dropped");
@@ -3248,6 +3409,7 @@ mod tests {
                 retrieval_anchor: None,
                 scope_paths: vec![],
             }],
+            revision_operations: vec![],
         };
         let (deduped, dupes) = dedup_extracted_notes(&extracted);
         assert_eq!(dupes, 0);
