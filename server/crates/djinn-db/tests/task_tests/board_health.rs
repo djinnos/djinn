@@ -584,6 +584,18 @@ async fn board_health_stranded_ready_gate_evidence_fields() {
     let epic = create_test_epic(&db, &project.id).await;
     let repo = TaskRepository::new(db.clone(), event_bus_for(&tx));
 
+    // This fixture isolates an unhealthy inflight model, so give the task a
+    // real creator and that creator's active private credential. A legacy NULL
+    // creator correctly fails the credential gate and exercises another blocker.
+    let user_id = uuid::Uuid::now_v7().to_string();
+    sqlx::query("INSERT INTO users (id, github_id, github_login) VALUES ($1, $2, $3)")
+        .bind(&user_id)
+        .bind(rand_github_id())
+        .bind(format!("user-{user_id}"))
+        .execute(db.pool())
+        .await
+        .unwrap();
+
     let task = repo
         .create_in_project(
             &project.id,
@@ -599,6 +611,21 @@ async fn board_health_stranded_ready_gate_evidence_fields() {
         )
         .await
         .unwrap();
+    repo.set_created_by_user_id(&task.id, &user_id)
+        .await
+        .unwrap();
+    let cred_id = uuid::Uuid::now_v7().to_string();
+    sqlx::query(
+        "INSERT INTO credentials \
+         (id, provider_id, key_name, encrypted_value, owner_user_id) \
+         VALUES ($1, 'anthropic', $2, '\\x00'::bytea, $3)",
+    )
+    .bind(&cred_id)
+    .bind(format!("key-{cred_id}"))
+    .bind(&user_id)
+    .execute(db.pool())
+    .await
+    .unwrap();
     backdate_task_updated_at(&db, &task.id, "60 minutes").await;
     // An inflight model was chosen, but there is no model_health row for it.
     sqlx::query(

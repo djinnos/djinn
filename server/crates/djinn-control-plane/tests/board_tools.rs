@@ -8,9 +8,12 @@
 mod common;
 
 use djinn_control_plane::test_support::McpTestHarness;
+use djinn_core::events::EventBus;
 use djinn_db::LivenessEvidenceSnapshot;
 use djinn_db::LivenessRepository;
+use djinn_db::repositories::user::UserRepository;
 use djinn_db::{EpicRepository, ProposalCreateInput, ProposalRepository, TaskRepository};
+use djinn_provider::repos::CredentialRepository;
 use serde_json::json;
 
 #[tokio::test]
@@ -441,6 +444,27 @@ async fn board_health_stranded_ready_matches_seeded_task() {
     let epic = common::create_test_epic(harness.db(), &project.id).await;
     let task = common::create_test_task(harness.db(), &project.id, &epic.id).await;
 
+    // This fixture represents a dispatch-eligible task, not a legacy
+    // creator-less row. Persist both its attributed user and an active private
+    // credential so the dispatch-gate evidence remains credential-available.
+    let user = UserRepository::new(harness.db().clone())
+        .upsert_from_github(999_003, "board-health-stranded-test", None, None)
+        .await
+        .expect("create attributed task user");
+    TaskRepository::new(harness.db().clone(), EventBus::noop())
+        .set_created_by_user_id(&task.id, &user.id)
+        .await
+        .expect("attribute stranded task creator");
+    CredentialRepository::new(harness.db().clone(), EventBus::noop())
+        .set_with_owner(
+            "anthropic",
+            "ANTHROPIC_API_KEY",
+            "sk-board-health-test",
+            Some(&user.id),
+        )
+        .await
+        .expect("create attributed task credential");
+
     // Backdate the task's updated_at well past the 30-minute threshold.
     djinn_db::test_support::backdate_task_updated_at(harness.db(), &task.id, "90 minutes").await;
 
@@ -514,6 +538,11 @@ async fn board_health_stranded_ready_matches_seeded_task() {
         gate.get("gate_verdict").and_then(|v| v.as_str()),
         Some("stranded"),
         "gate_verdict must be stranded for an unblocked task"
+    );
+    assert_eq!(
+        gate.get("credential_available").and_then(|v| v.as_bool()),
+        Some(true),
+        "attributed task credential must be available"
     );
     assert_eq!(
         gate.get("evaluated_role").and_then(|v| v.as_str()),
