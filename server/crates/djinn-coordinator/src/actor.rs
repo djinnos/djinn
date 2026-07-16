@@ -48,6 +48,9 @@ pub(super) struct CoordinatorActor {
     pub(super) db: Database,
     pub(super) events_tx: broadcast::Sender<DjinnEventEnvelope>,
     pub(super) pool: SlotPoolHandle,
+    /// Durable build admission shared by every task-run dispatch route.
+    #[cfg(not(test))]
+    pub(super) build_admission: Option<Arc<crate::build_admission::BuildAdmissionController>>,
     #[cfg_attr(test, allow(dead_code))]
     pub(super) catalog: CatalogService,
     pub(super) health: HealthTracker,
@@ -425,6 +428,7 @@ impl CoordinatorActor {
             cancel,
             db,
             pool,
+            build_admission: _build_admission,
             catalog,
             health,
             role_registry,
@@ -479,6 +483,8 @@ impl CoordinatorActor {
             db: db.clone(),
             events_tx,
             pool,
+            #[cfg(not(test))]
+            build_admission: _build_admission,
             catalog,
             health,
             role_registry,
