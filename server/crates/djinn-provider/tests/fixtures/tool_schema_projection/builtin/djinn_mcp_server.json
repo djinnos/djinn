@@ -4951,7 +4951,26 @@
                 "post_build": [],
                 "pre_anything": [],
                 "pre_task": [],
-                "pre_verification": []
+                "pre_verification": [],
+                "final_verification": {
+                  "version": 1,
+                  "profile_id": "",
+                  "profile_revision": 0,
+                  "commands": [],
+                  "required_checks": [],
+                  "input_manifest": {
+                    "version": 1,
+                    "repo_paths": [],
+                    "environment_names": []
+                  },
+                  "read_only_external_inputs": [],
+                  "output_only_globs": [],
+                  "hermeticity": {
+                    "hermetic": false,
+                    "reusable": false,
+                    "network_access": false
+                  }
+                }
               }
             },
             "cargo_cache_policy": {
@@ -5278,6 +5297,29 @@
                 "$ref": "#/$defs/HookCommand"
               },
               "default": []
+            },
+            "final_verification": {
+              "description": "Authoritative post-authoring plan, distinct from setup-time hooks.",
+              "$ref": "#/$defs/FinalVerificationPlan",
+              "default": {
+                "version": 1,
+                "profile_id": "",
+                "profile_revision": 0,
+                "commands": [],
+                "required_checks": [],
+                "input_manifest": {
+                  "version": 1,
+                  "repo_paths": [],
+                  "environment_names": []
+                },
+                "read_only_external_inputs": [],
+                "output_only_globs": [],
+                "hermeticity": {
+                  "hermetic": false,
+                  "reusable": false,
+                  "network_access": false
+                }
+              }
             }
           }
         },
@@ -5339,6 +5381,173 @@
             "blocking",
             "best_effort"
           ]
+        },
+        "FinalVerificationPlan": {
+          "type": "object",
+          "properties": {
+            "version": {
+              "type": "integer",
+              "format": "int64",
+              "default": 1
+            },
+            "profile_id": {
+              "type": "string",
+              "default": ""
+            },
+            "profile_revision": {
+              "type": "integer",
+              "format": "int64",
+              "default": 0
+            },
+            "commands": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/FinalVerificationCommand"
+              },
+              "default": []
+            },
+            "required_checks": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "default": []
+            },
+            "input_manifest": {
+              "$ref": "#/$defs/VerificationInputManifest",
+              "default": {
+                "version": 1,
+                "repo_paths": [],
+                "environment_names": []
+              }
+            },
+            "read_only_external_inputs": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/ExternalInputDeclaration"
+              },
+              "default": []
+            },
+            "output_only_globs": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "default": []
+            },
+            "hermeticity": {
+              "$ref": "#/$defs/HermeticityDeclaration",
+              "default": {
+                "hermetic": false,
+                "reusable": false,
+                "network_access": false
+              }
+            }
+          },
+          "additionalProperties": false
+        },
+        "FinalVerificationCommand": {
+          "type": "object",
+          "properties": {
+            "check_id": {
+              "type": "string"
+            },
+            "executable": {
+              "type": "string"
+            },
+            "argv": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "default": []
+            },
+            "working_directory": {
+              "type": "string",
+              "default": ""
+            },
+            "environment_names": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "default": []
+            },
+            "timeout_seconds": {
+              "type": "integer",
+              "format": "int64"
+            },
+            "descriptor_revision": {
+              "type": "integer",
+              "format": "int64",
+              "default": 1
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "check_id",
+            "executable",
+            "timeout_seconds"
+          ]
+        },
+        "VerificationInputManifest": {
+          "type": "object",
+          "properties": {
+            "version": {
+              "type": "integer",
+              "format": "int64",
+              "default": 1
+            },
+            "repo_paths": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "default": []
+            },
+            "environment_names": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "default": []
+            }
+          },
+          "additionalProperties": false
+        },
+        "ExternalInputDeclaration": {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "locator": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "id",
+            "locator"
+          ]
+        },
+        "HermeticityDeclaration": {
+          "type": "object",
+          "properties": {
+            "hermetic": {
+              "type": "boolean",
+              "default": false
+            },
+            "reusable": {
+              "type": "boolean",
+              "default": false
+            },
+            "network_access": {
+              "type": "boolean",
+              "default": false
+            }
+          },
+          "additionalProperties": false
         },
         "CargoCachePolicy": {
           "description": "Per-project Cargo target-cache strategy override.\n\nThe default [`AutoDetected`](Self::AutoDetected) mode is detection-driven:\nconsumers resolve the policy by reading the project shape (Cargo workspace\nlayout, `.cargo/config.toml`, and configured setup command\npatterns) instead of hardcoding one universal compile set. That resolver is\nintentionally non-mutating. It may observe a project's `.cargo/config.toml`,\nincluding `rustc-wrapper = \"sccache\"` and feature-related settings, but it\nmust never create or modify `.cargo/config.toml`.",
@@ -5631,7 +5840,26 @@
                 "post_build": [],
                 "pre_anything": [],
                 "pre_task": [],
-                "pre_verification": []
+                "pre_verification": [],
+                "final_verification": {
+                  "version": 1,
+                  "profile_id": "",
+                  "profile_revision": 0,
+                  "commands": [],
+                  "required_checks": [],
+                  "input_manifest": {
+                    "version": 1,
+                    "repo_paths": [],
+                    "environment_names": []
+                  },
+                  "read_only_external_inputs": [],
+                  "output_only_globs": [],
+                  "hermeticity": {
+                    "hermetic": false,
+                    "reusable": false,
+                    "network_access": false
+                  }
+                }
               }
             },
             "cargo_cache_policy": {
@@ -5958,6 +6186,29 @@
                 "$ref": "#/$defs/HookCommand"
               },
               "default": []
+            },
+            "final_verification": {
+              "description": "Authoritative post-authoring plan, distinct from setup-time hooks.",
+              "$ref": "#/$defs/FinalVerificationPlan",
+              "default": {
+                "version": 1,
+                "profile_id": "",
+                "profile_revision": 0,
+                "commands": [],
+                "required_checks": [],
+                "input_manifest": {
+                  "version": 1,
+                  "repo_paths": [],
+                  "environment_names": []
+                },
+                "read_only_external_inputs": [],
+                "output_only_globs": [],
+                "hermeticity": {
+                  "hermetic": false,
+                  "reusable": false,
+                  "network_access": false
+                }
+              }
             }
           }
         },
@@ -6019,6 +6270,173 @@
             "blocking",
             "best_effort"
           ]
+        },
+        "FinalVerificationPlan": {
+          "type": "object",
+          "properties": {
+            "version": {
+              "type": "integer",
+              "format": "int64",
+              "default": 1
+            },
+            "profile_id": {
+              "type": "string",
+              "default": ""
+            },
+            "profile_revision": {
+              "type": "integer",
+              "format": "int64",
+              "default": 0
+            },
+            "commands": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/FinalVerificationCommand"
+              },
+              "default": []
+            },
+            "required_checks": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "default": []
+            },
+            "input_manifest": {
+              "$ref": "#/$defs/VerificationInputManifest",
+              "default": {
+                "version": 1,
+                "repo_paths": [],
+                "environment_names": []
+              }
+            },
+            "read_only_external_inputs": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/ExternalInputDeclaration"
+              },
+              "default": []
+            },
+            "output_only_globs": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "default": []
+            },
+            "hermeticity": {
+              "$ref": "#/$defs/HermeticityDeclaration",
+              "default": {
+                "hermetic": false,
+                "reusable": false,
+                "network_access": false
+              }
+            }
+          },
+          "additionalProperties": false
+        },
+        "FinalVerificationCommand": {
+          "type": "object",
+          "properties": {
+            "check_id": {
+              "type": "string"
+            },
+            "executable": {
+              "type": "string"
+            },
+            "argv": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "default": []
+            },
+            "working_directory": {
+              "type": "string",
+              "default": ""
+            },
+            "environment_names": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "default": []
+            },
+            "timeout_seconds": {
+              "type": "integer",
+              "format": "int64"
+            },
+            "descriptor_revision": {
+              "type": "integer",
+              "format": "int64",
+              "default": 1
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "check_id",
+            "executable",
+            "timeout_seconds"
+          ]
+        },
+        "VerificationInputManifest": {
+          "type": "object",
+          "properties": {
+            "version": {
+              "type": "integer",
+              "format": "int64",
+              "default": 1
+            },
+            "repo_paths": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "default": []
+            },
+            "environment_names": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "default": []
+            }
+          },
+          "additionalProperties": false
+        },
+        "ExternalInputDeclaration": {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "locator": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "id",
+            "locator"
+          ]
+        },
+        "HermeticityDeclaration": {
+          "type": "object",
+          "properties": {
+            "hermetic": {
+              "type": "boolean",
+              "default": false
+            },
+            "reusable": {
+              "type": "boolean",
+              "default": false
+            },
+            "network_access": {
+              "type": "boolean",
+              "default": false
+            }
+          },
+          "additionalProperties": false
         },
         "CargoCachePolicy": {
           "description": "Per-project Cargo target-cache strategy override.\n\nThe default [`AutoDetected`](Self::AutoDetected) mode is detection-driven:\nconsumers resolve the policy by reading the project shape (Cargo workspace\nlayout, `.cargo/config.toml`, and configured setup command\npatterns) instead of hardcoding one universal compile set. That resolver is\nintentionally non-mutating. It may observe a project's `.cargo/config.toml`,\nincluding `rustc-wrapper = \"sccache\"` and feature-related settings, but it\nmust never create or modify `.cargo/config.toml`.",
@@ -6253,7 +6671,26 @@
                 "post_build": [],
                 "pre_anything": [],
                 "pre_task": [],
-                "pre_verification": []
+                "pre_verification": [],
+                "final_verification": {
+                  "version": 1,
+                  "profile_id": "",
+                  "profile_revision": 0,
+                  "commands": [],
+                  "required_checks": [],
+                  "input_manifest": {
+                    "version": 1,
+                    "repo_paths": [],
+                    "environment_names": []
+                  },
+                  "read_only_external_inputs": [],
+                  "output_only_globs": [],
+                  "hermeticity": {
+                    "hermetic": false,
+                    "reusable": false,
+                    "network_access": false
+                  }
+                }
               }
             },
             "cargo_cache_policy": {
@@ -6580,6 +7017,29 @@
                 "$ref": "#/$defs/HookCommand"
               },
               "default": []
+            },
+            "final_verification": {
+              "description": "Authoritative post-authoring plan, distinct from setup-time hooks.",
+              "$ref": "#/$defs/FinalVerificationPlan",
+              "default": {
+                "version": 1,
+                "profile_id": "",
+                "profile_revision": 0,
+                "commands": [],
+                "required_checks": [],
+                "input_manifest": {
+                  "version": 1,
+                  "repo_paths": [],
+                  "environment_names": []
+                },
+                "read_only_external_inputs": [],
+                "output_only_globs": [],
+                "hermeticity": {
+                  "hermetic": false,
+                  "reusable": false,
+                  "network_access": false
+                }
+              }
             }
           }
         },
@@ -6641,6 +7101,173 @@
             "blocking",
             "best_effort"
           ]
+        },
+        "FinalVerificationPlan": {
+          "type": "object",
+          "properties": {
+            "version": {
+              "type": "integer",
+              "format": "int64",
+              "default": 1
+            },
+            "profile_id": {
+              "type": "string",
+              "default": ""
+            },
+            "profile_revision": {
+              "type": "integer",
+              "format": "int64",
+              "default": 0
+            },
+            "commands": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/FinalVerificationCommand"
+              },
+              "default": []
+            },
+            "required_checks": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "default": []
+            },
+            "input_manifest": {
+              "$ref": "#/$defs/VerificationInputManifest",
+              "default": {
+                "version": 1,
+                "repo_paths": [],
+                "environment_names": []
+              }
+            },
+            "read_only_external_inputs": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/ExternalInputDeclaration"
+              },
+              "default": []
+            },
+            "output_only_globs": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "default": []
+            },
+            "hermeticity": {
+              "$ref": "#/$defs/HermeticityDeclaration",
+              "default": {
+                "hermetic": false,
+                "reusable": false,
+                "network_access": false
+              }
+            }
+          },
+          "additionalProperties": false
+        },
+        "FinalVerificationCommand": {
+          "type": "object",
+          "properties": {
+            "check_id": {
+              "type": "string"
+            },
+            "executable": {
+              "type": "string"
+            },
+            "argv": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "default": []
+            },
+            "working_directory": {
+              "type": "string",
+              "default": ""
+            },
+            "environment_names": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "default": []
+            },
+            "timeout_seconds": {
+              "type": "integer",
+              "format": "int64"
+            },
+            "descriptor_revision": {
+              "type": "integer",
+              "format": "int64",
+              "default": 1
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "check_id",
+            "executable",
+            "timeout_seconds"
+          ]
+        },
+        "VerificationInputManifest": {
+          "type": "object",
+          "properties": {
+            "version": {
+              "type": "integer",
+              "format": "int64",
+              "default": 1
+            },
+            "repo_paths": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "default": []
+            },
+            "environment_names": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "default": []
+            }
+          },
+          "additionalProperties": false
+        },
+        "ExternalInputDeclaration": {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "locator": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "id",
+            "locator"
+          ]
+        },
+        "HermeticityDeclaration": {
+          "type": "object",
+          "properties": {
+            "hermetic": {
+              "type": "boolean",
+              "default": false
+            },
+            "reusable": {
+              "type": "boolean",
+              "default": false
+            },
+            "network_access": {
+              "type": "boolean",
+              "default": false
+            }
+          },
+          "additionalProperties": false
         },
         "CargoCachePolicy": {
           "description": "Per-project Cargo target-cache strategy override.\n\nThe default [`AutoDetected`](Self::AutoDetected) mode is detection-driven:\nconsumers resolve the policy by reading the project shape (Cargo workspace\nlayout, `.cargo/config.toml`, and configured setup command\npatterns) instead of hardcoding one universal compile set. That resolver is\nintentionally non-mutating. It may observe a project's `.cargo/config.toml`,\nincluding `rustc-wrapper = \"sccache\"` and feature-related settings, but it\nmust never create or modify `.cargo/config.toml`.",
@@ -11426,7 +12053,26 @@
                 "post_build": [],
                 "pre_anything": [],
                 "pre_task": [],
-                "pre_verification": []
+                "pre_verification": [],
+                "final_verification": {
+                  "version": 1,
+                  "profile_id": "",
+                  "profile_revision": 0,
+                  "commands": [],
+                  "required_checks": [],
+                  "input_manifest": {
+                    "version": 1,
+                    "repo_paths": [],
+                    "environment_names": []
+                  },
+                  "read_only_external_inputs": [],
+                  "output_only_globs": [],
+                  "hermeticity": {
+                    "hermetic": false,
+                    "reusable": false,
+                    "network_access": false
+                  }
+                }
               }
             },
             "cargo_cache_policy": {
@@ -11753,6 +12399,29 @@
                 "$ref": "#/$defs/HookCommand"
               },
               "default": []
+            },
+            "final_verification": {
+              "description": "Authoritative post-authoring plan, distinct from setup-time hooks.",
+              "$ref": "#/$defs/FinalVerificationPlan",
+              "default": {
+                "version": 1,
+                "profile_id": "",
+                "profile_revision": 0,
+                "commands": [],
+                "required_checks": [],
+                "input_manifest": {
+                  "version": 1,
+                  "repo_paths": [],
+                  "environment_names": []
+                },
+                "read_only_external_inputs": [],
+                "output_only_globs": [],
+                "hermeticity": {
+                  "hermetic": false,
+                  "reusable": false,
+                  "network_access": false
+                }
+              }
             }
           }
         },
@@ -11814,6 +12483,173 @@
             "blocking",
             "best_effort"
           ]
+        },
+        "FinalVerificationPlan": {
+          "type": "object",
+          "properties": {
+            "version": {
+              "type": "integer",
+              "format": "int64",
+              "default": 1
+            },
+            "profile_id": {
+              "type": "string",
+              "default": ""
+            },
+            "profile_revision": {
+              "type": "integer",
+              "format": "int64",
+              "default": 0
+            },
+            "commands": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/FinalVerificationCommand"
+              },
+              "default": []
+            },
+            "required_checks": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "default": []
+            },
+            "input_manifest": {
+              "$ref": "#/$defs/VerificationInputManifest",
+              "default": {
+                "version": 1,
+                "repo_paths": [],
+                "environment_names": []
+              }
+            },
+            "read_only_external_inputs": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/ExternalInputDeclaration"
+              },
+              "default": []
+            },
+            "output_only_globs": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "default": []
+            },
+            "hermeticity": {
+              "$ref": "#/$defs/HermeticityDeclaration",
+              "default": {
+                "hermetic": false,
+                "reusable": false,
+                "network_access": false
+              }
+            }
+          },
+          "additionalProperties": false
+        },
+        "FinalVerificationCommand": {
+          "type": "object",
+          "properties": {
+            "check_id": {
+              "type": "string"
+            },
+            "executable": {
+              "type": "string"
+            },
+            "argv": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "default": []
+            },
+            "working_directory": {
+              "type": "string",
+              "default": ""
+            },
+            "environment_names": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "default": []
+            },
+            "timeout_seconds": {
+              "type": "integer",
+              "format": "int64"
+            },
+            "descriptor_revision": {
+              "type": "integer",
+              "format": "int64",
+              "default": 1
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "check_id",
+            "executable",
+            "timeout_seconds"
+          ]
+        },
+        "VerificationInputManifest": {
+          "type": "object",
+          "properties": {
+            "version": {
+              "type": "integer",
+              "format": "int64",
+              "default": 1
+            },
+            "repo_paths": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "default": []
+            },
+            "environment_names": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "default": []
+            }
+          },
+          "additionalProperties": false
+        },
+        "ExternalInputDeclaration": {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "locator": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "id",
+            "locator"
+          ]
+        },
+        "HermeticityDeclaration": {
+          "type": "object",
+          "properties": {
+            "hermetic": {
+              "type": "boolean",
+              "default": false
+            },
+            "reusable": {
+              "type": "boolean",
+              "default": false
+            },
+            "network_access": {
+              "type": "boolean",
+              "default": false
+            }
+          },
+          "additionalProperties": false
         },
         "CargoCachePolicy": {
           "description": "Per-project Cargo target-cache strategy override.\n\nThe default [`AutoDetected`](Self::AutoDetected) mode is detection-driven:\nconsumers resolve the policy by reading the project shape (Cargo workspace\nlayout, `.cargo/config.toml`, and configured setup command\npatterns) instead of hardcoding one universal compile set. That resolver is\nintentionally non-mutating. It may observe a project's `.cargo/config.toml`,\nincluding `rustc-wrapper = \"sccache\"` and feature-related settings, but it\nmust never create or modify `.cargo/config.toml`.",
@@ -12024,7 +12860,26 @@
                 "post_build": [],
                 "pre_anything": [],
                 "pre_task": [],
-                "pre_verification": []
+                "pre_verification": [],
+                "final_verification": {
+                  "version": 1,
+                  "profile_id": "",
+                  "profile_revision": 0,
+                  "commands": [],
+                  "required_checks": [],
+                  "input_manifest": {
+                    "version": 1,
+                    "repo_paths": [],
+                    "environment_names": []
+                  },
+                  "read_only_external_inputs": [],
+                  "output_only_globs": [],
+                  "hermeticity": {
+                    "hermetic": false,
+                    "reusable": false,
+                    "network_access": false
+                  }
+                }
               }
             },
             "cargo_cache_policy": {
@@ -12351,6 +13206,29 @@
                 "$ref": "#/$defs/HookCommand"
               },
               "default": []
+            },
+            "final_verification": {
+              "description": "Authoritative post-authoring plan, distinct from setup-time hooks.",
+              "$ref": "#/$defs/FinalVerificationPlan",
+              "default": {
+                "version": 1,
+                "profile_id": "",
+                "profile_revision": 0,
+                "commands": [],
+                "required_checks": [],
+                "input_manifest": {
+                  "version": 1,
+                  "repo_paths": [],
+                  "environment_names": []
+                },
+                "read_only_external_inputs": [],
+                "output_only_globs": [],
+                "hermeticity": {
+                  "hermetic": false,
+                  "reusable": false,
+                  "network_access": false
+                }
+              }
             }
           }
         },
@@ -12412,6 +13290,173 @@
             "blocking",
             "best_effort"
           ]
+        },
+        "FinalVerificationPlan": {
+          "type": "object",
+          "properties": {
+            "version": {
+              "type": "integer",
+              "format": "int64",
+              "default": 1
+            },
+            "profile_id": {
+              "type": "string",
+              "default": ""
+            },
+            "profile_revision": {
+              "type": "integer",
+              "format": "int64",
+              "default": 0
+            },
+            "commands": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/FinalVerificationCommand"
+              },
+              "default": []
+            },
+            "required_checks": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "default": []
+            },
+            "input_manifest": {
+              "$ref": "#/$defs/VerificationInputManifest",
+              "default": {
+                "version": 1,
+                "repo_paths": [],
+                "environment_names": []
+              }
+            },
+            "read_only_external_inputs": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/ExternalInputDeclaration"
+              },
+              "default": []
+            },
+            "output_only_globs": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "default": []
+            },
+            "hermeticity": {
+              "$ref": "#/$defs/HermeticityDeclaration",
+              "default": {
+                "hermetic": false,
+                "reusable": false,
+                "network_access": false
+              }
+            }
+          },
+          "additionalProperties": false
+        },
+        "FinalVerificationCommand": {
+          "type": "object",
+          "properties": {
+            "check_id": {
+              "type": "string"
+            },
+            "executable": {
+              "type": "string"
+            },
+            "argv": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "default": []
+            },
+            "working_directory": {
+              "type": "string",
+              "default": ""
+            },
+            "environment_names": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "default": []
+            },
+            "timeout_seconds": {
+              "type": "integer",
+              "format": "int64"
+            },
+            "descriptor_revision": {
+              "type": "integer",
+              "format": "int64",
+              "default": 1
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "check_id",
+            "executable",
+            "timeout_seconds"
+          ]
+        },
+        "VerificationInputManifest": {
+          "type": "object",
+          "properties": {
+            "version": {
+              "type": "integer",
+              "format": "int64",
+              "default": 1
+            },
+            "repo_paths": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "default": []
+            },
+            "environment_names": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "default": []
+            }
+          },
+          "additionalProperties": false
+        },
+        "ExternalInputDeclaration": {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "locator": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "id",
+            "locator"
+          ]
+        },
+        "HermeticityDeclaration": {
+          "type": "object",
+          "properties": {
+            "hermetic": {
+              "type": "boolean",
+              "default": false
+            },
+            "reusable": {
+              "type": "boolean",
+              "default": false
+            },
+            "network_access": {
+              "type": "boolean",
+              "default": false
+            }
+          },
+          "additionalProperties": false
         },
         "CargoCachePolicy": {
           "description": "Per-project Cargo target-cache strategy override.\n\nThe default [`AutoDetected`](Self::AutoDetected) mode is detection-driven:\nconsumers resolve the policy by reading the project shape (Cargo workspace\nlayout, `.cargo/config.toml`, and configured setup command\npatterns) instead of hardcoding one universal compile set. That resolver is\nintentionally non-mutating. It may observe a project's `.cargo/config.toml`,\nincluding `rustc-wrapper = \"sccache\"` and feature-related settings, but it\nmust never create or modify `.cargo/config.toml`.",
@@ -12596,7 +13641,26 @@
                 "post_build": [],
                 "pre_anything": [],
                 "pre_task": [],
-                "pre_verification": []
+                "pre_verification": [],
+                "final_verification": {
+                  "version": 1,
+                  "profile_id": "",
+                  "profile_revision": 0,
+                  "commands": [],
+                  "required_checks": [],
+                  "input_manifest": {
+                    "version": 1,
+                    "repo_paths": [],
+                    "environment_names": []
+                  },
+                  "read_only_external_inputs": [],
+                  "output_only_globs": [],
+                  "hermeticity": {
+                    "hermetic": false,
+                    "reusable": false,
+                    "network_access": false
+                  }
+                }
               }
             },
             "cargo_cache_policy": {
@@ -12923,6 +13987,29 @@
                 "$ref": "#/$defs/HookCommand"
               },
               "default": []
+            },
+            "final_verification": {
+              "description": "Authoritative post-authoring plan, distinct from setup-time hooks.",
+              "$ref": "#/$defs/FinalVerificationPlan",
+              "default": {
+                "version": 1,
+                "profile_id": "",
+                "profile_revision": 0,
+                "commands": [],
+                "required_checks": [],
+                "input_manifest": {
+                  "version": 1,
+                  "repo_paths": [],
+                  "environment_names": []
+                },
+                "read_only_external_inputs": [],
+                "output_only_globs": [],
+                "hermeticity": {
+                  "hermetic": false,
+                  "reusable": false,
+                  "network_access": false
+                }
+              }
             }
           }
         },
@@ -12984,6 +14071,173 @@
             "blocking",
             "best_effort"
           ]
+        },
+        "FinalVerificationPlan": {
+          "type": "object",
+          "properties": {
+            "version": {
+              "type": "integer",
+              "format": "int64",
+              "default": 1
+            },
+            "profile_id": {
+              "type": "string",
+              "default": ""
+            },
+            "profile_revision": {
+              "type": "integer",
+              "format": "int64",
+              "default": 0
+            },
+            "commands": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/FinalVerificationCommand"
+              },
+              "default": []
+            },
+            "required_checks": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "default": []
+            },
+            "input_manifest": {
+              "$ref": "#/$defs/VerificationInputManifest",
+              "default": {
+                "version": 1,
+                "repo_paths": [],
+                "environment_names": []
+              }
+            },
+            "read_only_external_inputs": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/ExternalInputDeclaration"
+              },
+              "default": []
+            },
+            "output_only_globs": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "default": []
+            },
+            "hermeticity": {
+              "$ref": "#/$defs/HermeticityDeclaration",
+              "default": {
+                "hermetic": false,
+                "reusable": false,
+                "network_access": false
+              }
+            }
+          },
+          "additionalProperties": false
+        },
+        "FinalVerificationCommand": {
+          "type": "object",
+          "properties": {
+            "check_id": {
+              "type": "string"
+            },
+            "executable": {
+              "type": "string"
+            },
+            "argv": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "default": []
+            },
+            "working_directory": {
+              "type": "string",
+              "default": ""
+            },
+            "environment_names": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "default": []
+            },
+            "timeout_seconds": {
+              "type": "integer",
+              "format": "int64"
+            },
+            "descriptor_revision": {
+              "type": "integer",
+              "format": "int64",
+              "default": 1
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "check_id",
+            "executable",
+            "timeout_seconds"
+          ]
+        },
+        "VerificationInputManifest": {
+          "type": "object",
+          "properties": {
+            "version": {
+              "type": "integer",
+              "format": "int64",
+              "default": 1
+            },
+            "repo_paths": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "default": []
+            },
+            "environment_names": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "default": []
+            }
+          },
+          "additionalProperties": false
+        },
+        "ExternalInputDeclaration": {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "locator": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "id",
+            "locator"
+          ]
+        },
+        "HermeticityDeclaration": {
+          "type": "object",
+          "properties": {
+            "hermetic": {
+              "type": "boolean",
+              "default": false
+            },
+            "reusable": {
+              "type": "boolean",
+              "default": false
+            },
+            "network_access": {
+              "type": "boolean",
+              "default": false
+            }
+          },
+          "additionalProperties": false
         },
         "CargoCachePolicy": {
           "description": "Per-project Cargo target-cache strategy override.\n\nThe default [`AutoDetected`](Self::AutoDetected) mode is detection-driven:\nconsumers resolve the policy by reading the project shape (Cargo workspace\nlayout, `.cargo/config.toml`, and configured setup command\npatterns) instead of hardcoding one universal compile set. That resolver is\nintentionally non-mutating. It may observe a project's `.cargo/config.toml`,\nincluding `rustc-wrapper = \"sccache\"` and feature-related settings, but it\nmust never create or modify `.cargo/config.toml`.",

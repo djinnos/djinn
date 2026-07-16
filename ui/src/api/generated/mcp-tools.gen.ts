@@ -2729,6 +2729,7 @@ export namespace ImageCreateInputSchema {
   [k: string]: any
   }
   export interface LifecycleHooks {
+  final_verification?: FinalVerificationPlan
   /**
    * `RUN` lines appended to the generated Dockerfile. Bundle anything
    * you want baked into the image here (apt packages are the easy path;
@@ -2752,6 +2753,43 @@ export namespace ImageCreateInputSchema {
    */
   pre_verification?: HookCommand[]
   [k: string]: any
+  }
+  /**
+   * Authoritative post-authoring plan, distinct from setup-time hooks.
+   */
+  export interface FinalVerificationPlan {
+  commands?: FinalVerificationCommand[]
+  hermeticity?: HermeticityDeclaration
+  input_manifest?: VerificationInputManifest
+  output_only_globs?: string[]
+  profile_id?: string
+  profile_revision?: number
+  read_only_external_inputs?: ExternalInputDeclaration[]
+  required_checks?: string[]
+  version?: number
+  }
+  export interface FinalVerificationCommand {
+  argv?: string[]
+  check_id: string
+  descriptor_revision?: number
+  environment_names?: string[]
+  executable: string
+  timeout_seconds: number
+  working_directory?: string
+  }
+  export interface HermeticityDeclaration {
+  hermetic?: boolean
+  network_access?: boolean
+  reusable?: boolean
+  }
+  export interface VerificationInputManifest {
+  environment_names?: string[]
+  repo_paths?: string[]
+  version?: number
+  }
+  export interface ExternalInputDeclaration {
+  id: string
+  locator: string
   }
   /**
    * A named pre-task command declared in the project environment config.
@@ -3039,6 +3077,7 @@ export namespace ImageListOutputSchema {
   [k: string]: any
   }
   export interface LifecycleHooks {
+  final_verification?: FinalVerificationPlan
   /**
    * `RUN` lines appended to the generated Dockerfile. Bundle anything
    * you want baked into the image here (apt packages are the easy path;
@@ -3062,6 +3101,43 @@ export namespace ImageListOutputSchema {
    */
   pre_verification?: HookCommand[]
   [k: string]: any
+  }
+  /**
+   * Authoritative post-authoring plan, distinct from setup-time hooks.
+   */
+  export interface FinalVerificationPlan {
+  commands?: FinalVerificationCommand[]
+  hermeticity?: HermeticityDeclaration
+  input_manifest?: VerificationInputManifest
+  output_only_globs?: string[]
+  profile_id?: string
+  profile_revision?: number
+  read_only_external_inputs?: ExternalInputDeclaration[]
+  required_checks?: string[]
+  version?: number
+  }
+  export interface FinalVerificationCommand {
+  argv?: string[]
+  check_id: string
+  descriptor_revision?: number
+  environment_names?: string[]
+  executable: string
+  timeout_seconds: number
+  working_directory?: string
+  }
+  export interface HermeticityDeclaration {
+  hermetic?: boolean
+  network_access?: boolean
+  reusable?: boolean
+  }
+  export interface VerificationInputManifest {
+  environment_names?: string[]
+  repo_paths?: string[]
+  version?: number
+  }
+  export interface ExternalInputDeclaration {
+  id: string
+  locator: string
   }
   /**
    * A named pre-task command declared in the project environment config.
@@ -3325,6 +3401,7 @@ export namespace ImageUpdateInputSchema {
   [k: string]: any
   }
   export interface LifecycleHooks {
+  final_verification?: FinalVerificationPlan
   /**
    * `RUN` lines appended to the generated Dockerfile. Bundle anything
    * you want baked into the image here (apt packages are the easy path;
@@ -3348,6 +3425,43 @@ export namespace ImageUpdateInputSchema {
    */
   pre_verification?: HookCommand[]
   [k: string]: any
+  }
+  /**
+   * Authoritative post-authoring plan, distinct from setup-time hooks.
+   */
+  export interface FinalVerificationPlan {
+  commands?: FinalVerificationCommand[]
+  hermeticity?: HermeticityDeclaration
+  input_manifest?: VerificationInputManifest
+  output_only_globs?: string[]
+  profile_id?: string
+  profile_revision?: number
+  read_only_external_inputs?: ExternalInputDeclaration[]
+  required_checks?: string[]
+  version?: number
+  }
+  export interface FinalVerificationCommand {
+  argv?: string[]
+  check_id: string
+  descriptor_revision?: number
+  environment_names?: string[]
+  executable: string
+  timeout_seconds: number
+  working_directory?: string
+  }
+  export interface HermeticityDeclaration {
+  hermetic?: boolean
+  network_access?: boolean
+  reusable?: boolean
+  }
+  export interface VerificationInputManifest {
+  environment_names?: string[]
+  repo_paths?: string[]
+  version?: number
+  }
+  export interface ExternalInputDeclaration {
+  id: string
+  locator: string
   }
   /**
    * A named pre-task command declared in the project environment config.
@@ -5499,6 +5613,7 @@ export namespace ProjectEnvironmentConfigGetOutputSchema {
   [k: string]: any
   }
   export interface LifecycleHooks {
+  final_verification?: FinalVerificationPlan
   /**
    * `RUN` lines appended to the generated Dockerfile. Bundle anything
    * you want baked into the image here (apt packages are the easy path;
@@ -5522,6 +5637,43 @@ export namespace ProjectEnvironmentConfigGetOutputSchema {
    */
   pre_verification?: HookCommand[]
   [k: string]: any
+  }
+  /**
+   * Authoritative post-authoring plan, distinct from setup-time hooks.
+   */
+  export interface FinalVerificationPlan {
+  commands?: FinalVerificationCommand[]
+  hermeticity?: HermeticityDeclaration
+  input_manifest?: VerificationInputManifest
+  output_only_globs?: string[]
+  profile_id?: string
+  profile_revision?: number
+  read_only_external_inputs?: ExternalInputDeclaration[]
+  required_checks?: string[]
+  version?: number
+  }
+  export interface FinalVerificationCommand {
+  argv?: string[]
+  check_id: string
+  descriptor_revision?: number
+  environment_names?: string[]
+  executable: string
+  timeout_seconds: number
+  working_directory?: string
+  }
+  export interface HermeticityDeclaration {
+  hermetic?: boolean
+  network_access?: boolean
+  reusable?: boolean
+  }
+  export interface VerificationInputManifest {
+  environment_names?: string[]
+  repo_paths?: string[]
+  version?: number
+  }
+  export interface ExternalInputDeclaration {
+  id: string
+  locator: string
   }
   /**
    * A named pre-task command declared in the project environment config.
@@ -5769,6 +5921,7 @@ export namespace ProjectEnvironmentConfigResetOutputSchema {
   [k: string]: any
   }
   export interface LifecycleHooks {
+  final_verification?: FinalVerificationPlan
   /**
    * `RUN` lines appended to the generated Dockerfile. Bundle anything
    * you want baked into the image here (apt packages are the easy path;
@@ -5792,6 +5945,43 @@ export namespace ProjectEnvironmentConfigResetOutputSchema {
    */
   pre_verification?: HookCommand[]
   [k: string]: any
+  }
+  /**
+   * Authoritative post-authoring plan, distinct from setup-time hooks.
+   */
+  export interface FinalVerificationPlan {
+  commands?: FinalVerificationCommand[]
+  hermeticity?: HermeticityDeclaration
+  input_manifest?: VerificationInputManifest
+  output_only_globs?: string[]
+  profile_id?: string
+  profile_revision?: number
+  read_only_external_inputs?: ExternalInputDeclaration[]
+  required_checks?: string[]
+  version?: number
+  }
+  export interface FinalVerificationCommand {
+  argv?: string[]
+  check_id: string
+  descriptor_revision?: number
+  environment_names?: string[]
+  executable: string
+  timeout_seconds: number
+  working_directory?: string
+  }
+  export interface HermeticityDeclaration {
+  hermetic?: boolean
+  network_access?: boolean
+  reusable?: boolean
+  }
+  export interface VerificationInputManifest {
+  environment_names?: string[]
+  repo_paths?: string[]
+  version?: number
+  }
+  export interface ExternalInputDeclaration {
+  id: string
+  locator: string
   }
   /**
    * A named pre-task command declared in the project environment config.
@@ -6032,6 +6222,7 @@ export namespace ProjectEnvironmentConfigSetInputSchema {
   [k: string]: any
   }
   export interface LifecycleHooks {
+  final_verification?: FinalVerificationPlan
   /**
    * `RUN` lines appended to the generated Dockerfile. Bundle anything
    * you want baked into the image here (apt packages are the easy path;
@@ -6055,6 +6246,43 @@ export namespace ProjectEnvironmentConfigSetInputSchema {
    */
   pre_verification?: HookCommand[]
   [k: string]: any
+  }
+  /**
+   * Authoritative post-authoring plan, distinct from setup-time hooks.
+   */
+  export interface FinalVerificationPlan {
+  commands?: FinalVerificationCommand[]
+  hermeticity?: HermeticityDeclaration
+  input_manifest?: VerificationInputManifest
+  output_only_globs?: string[]
+  profile_id?: string
+  profile_revision?: number
+  read_only_external_inputs?: ExternalInputDeclaration[]
+  required_checks?: string[]
+  version?: number
+  }
+  export interface FinalVerificationCommand {
+  argv?: string[]
+  check_id: string
+  descriptor_revision?: number
+  environment_names?: string[]
+  executable: string
+  timeout_seconds: number
+  working_directory?: string
+  }
+  export interface HermeticityDeclaration {
+  hermetic?: boolean
+  network_access?: boolean
+  reusable?: boolean
+  }
+  export interface VerificationInputManifest {
+  environment_names?: string[]
+  repo_paths?: string[]
+  version?: number
+  }
+  export interface ExternalInputDeclaration {
+  id: string
+  locator: string
   }
   /**
    * A named pre-task command declared in the project environment config.
