@@ -1,4 +1,4 @@
--- Migration 121: durable final-verification verify-run contract.
+-- Migration 122: durable final-verification verify-run contract.
 -- This is deliberately additive: legacy audit columns remain readable.
 
 ALTER TABLE verify_runs
