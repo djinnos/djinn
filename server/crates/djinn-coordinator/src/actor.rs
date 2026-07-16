@@ -1345,11 +1345,14 @@ impl CoordinatorActor {
                 else {
                     return;
                 };
-                let task_repo = TaskRepository::new(self.db.clone(), self.events_tx.clone());
+                let task_repo = TaskRepository::new(
+                    self.db.clone(),
+                    crate::events::event_bus_for(&self.events_tx),
+                );
                 if let Ok(Some(task)) = task_repo.get(task_id).await {
                     self.live_task_run_build_admission(
                         task_id,
-                        i64::from(task.reopen_count.max(0)),
+                        task.reopen_count.max(0),
                         task_run_id,
                     )
                     .await;

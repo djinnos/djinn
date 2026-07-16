@@ -2736,7 +2736,7 @@ impl CoordinatorActor {
             .begin_task_run_build_admission(
                 "planner",
                 &review_task.id,
-                i64::from(review_task.reopen_count.max(0)),
+                review_task.reopen_count.max(0),
                 format!(
                     "task-run-{}-{}",
                     review_task.id,

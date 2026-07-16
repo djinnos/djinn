@@ -13,6 +13,7 @@ pub mod settings;
 pub mod task;
 pub mod task_attempt;
 pub mod task_run;
+pub mod task_run_outcome;
 pub mod user_settings;
 pub mod verify_run;
 
@@ -43,6 +44,7 @@ pub use task_attempt::{
     TaskAttemptHistoryRow, TaskAttemptLedgerRow, TaskAttemptOutcome, TaskAttemptPromptSummary,
 };
 pub use task_run::{TaskRunRecord, TaskRunStatus, TaskRunTrigger};
+pub use task_run_outcome::TaskRunOutcomeFact;
 pub use user_settings::{LaneMaxSessions, ModelLane, ModelLanes, UserSettings};
 pub use verify_run::{
     AutoSubmitReviewRecord, AutoSubmitTriggerReason, RejectedVerdictKind,

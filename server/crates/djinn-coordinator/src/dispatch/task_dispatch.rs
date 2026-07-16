@@ -2703,7 +2703,7 @@ impl CoordinatorActor {
                 .begin_task_run_build_admission(
                     role,
                     &task.id,
-                    i64::from(task.reopen_count.max(0)),
+                    task.reopen_count.max(0),
                     format!("task-run-{}-{}", task.id, task.reopen_count.max(0)),
                 )
                 .await
@@ -3318,6 +3318,7 @@ mod inflight_ledger_tests {
             db: db.clone(),
             events_tx: events_tx.clone(),
             pool: controlled_runtime.spawn_pool(db, cancel, max_slots),
+            build_admission: None,
             catalog: CatalogService::new(),
             health: djinn_provider::catalog::health::HealthTracker::new(),
             role_registry: std::sync::Arc::new(crate::roles::RoleRegistry::new()),
@@ -4522,6 +4523,7 @@ mod failover_chain_tests {
             db: db.clone(),
             events_tx: events_tx.clone(),
             pool: pool.clone(),
+            build_admission: None,
             catalog: CatalogService::new(),
             health: djinn_provider::catalog::health::HealthTracker::new(),
             role_registry: std::sync::Arc::new(crate::roles::RoleRegistry::new()),
@@ -7020,6 +7022,7 @@ mod monitored_reopen_no_eligible_model_tests {
             db: db.clone(),
             events_tx: events_tx.clone(),
             pool,
+            build_admission: None,
             catalog: CatalogService::new(),
             health: djinn_provider::catalog::health::HealthTracker::new(),
             role_registry: std::sync::Arc::new(crate::roles::RoleRegistry::new()),

@@ -43,6 +43,7 @@ pub mod task_attempt;
 #[cfg(test)]
 pub mod task_attempt_tests;
 pub mod task_run;
+pub mod task_run_outcome;
 pub mod test_support;
 pub mod tool_call_evaluator;
 #[cfg(test)]
