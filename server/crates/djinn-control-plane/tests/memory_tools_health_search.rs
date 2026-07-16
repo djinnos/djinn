@@ -14,7 +14,7 @@ async fn mcp_memory_health_orphans_and_broken_links_shapes() {
     let caller = TrustedRevisionCallerContext::authenticated_human("health-search-test-user")
         .expect("test revision caller must be non-blank");
 
-    REVISION_CALLER_CONTEXT
+    let health_write_response: serde_json::Value = REVISION_CALLER_CONTEXT
         .scope(
             Some(caller),
             harness.call_tool(
@@ -24,6 +24,10 @@ async fn mcp_memory_health_orphans_and_broken_links_shapes() {
         )
         .await
         .expect("memory_write should dispatch");
+    assert!(
+        health_write_response.get("error").is_none() || health_write_response["error"].is_null(),
+        "memory_write returned tool error: {health_write_response}"
+    );
 
     let health = harness
         .call_tool("memory_health", json!({"project": project}))
@@ -64,7 +68,7 @@ async fn no_regression_memory_search_ranking_notes_only() {
         .expect("proposal_create should dispatch");
     let _proposal_id = proposal["id"].as_str().expect("proposal id").to_string();
 
-    REVISION_CALLER_CONTEXT
+    let first_search_write_response: serde_json::Value = REVISION_CALLER_CONTEXT
         .scope(
             Some(caller.clone()),
             harness.call_tool(
@@ -74,7 +78,12 @@ async fn no_regression_memory_search_ranking_notes_only() {
         )
         .await
         .expect("memory_write one should dispatch");
-    REVISION_CALLER_CONTEXT
+    assert!(
+        first_search_write_response.get("error").is_none()
+            || first_search_write_response["error"].is_null(),
+        "memory_write returned tool error: {first_search_write_response}"
+    );
+    let second_search_write_response: serde_json::Value = REVISION_CALLER_CONTEXT
         .scope(
             Some(caller),
             harness.call_tool(
@@ -84,6 +93,11 @@ async fn no_regression_memory_search_ranking_notes_only() {
         )
         .await
         .expect("memory_write two should dispatch");
+    assert!(
+        second_search_write_response.get("error").is_none()
+            || second_search_write_response["error"].is_null(),
+        "memory_write returned tool error: {second_search_write_response}"
+    );
 
     let searched = harness
         .call_tool(
