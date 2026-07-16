@@ -14,7 +14,7 @@ use std::{
 use serde::Serialize;
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
-use crate::{Execution, Profile, Scenario, ScenarioInventory, Taxonomy};
+use crate::{Execution, Profile, Scenario, ScenarioInventory, Taxonomy, scenario::resolves};
 
 pub const RUNNER_NAME: &str = "djinn-qa";
 pub const RUNNER_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -116,9 +116,15 @@ impl ScenarioExecutor for CargoExecutor {
 pub struct TemplateCloneDatabase;
 impl DatabaseAcquirer for TemplateCloneDatabase {
     fn acquire(&self) -> Result<Box<dyn Send>, String> {
-        djinn_db::Database::open_in_memory()
-            .map(|db| Box::new(db) as Box<dyn Send>)
-            .map_err(|e| format!("dedicated test database acquisition failed: {e}"))
+        let database = djinn_db::Database::open_in_memory()
+            .map_err(|e| format!("dedicated test database acquisition failed: {e}"))?;
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|e| format!("dedicated test database runtime setup failed: {e}"))?
+            .block_on(database.ensure_initialized())
+            .map_err(|e| format!("dedicated test database acquisition failed: {e}"))?;
+        Ok(Box::new(database))
     }
 }
 
@@ -157,15 +163,25 @@ pub fn execute_selected(
                 let sender = sender.clone();
                 scope.spawn(move || {
                     let started_at = now();
-                    let (status, diagnostics) = match databases.acquire() {
-                        Ok(_db) => match executor.execute(root, &scenario.execution) {
-                            Ok(()) => (
-                                RunStatus::Passed,
-                                vec!["declared deterministic adapter completed".into()],
-                            ),
+                    let (status, diagnostics) = if !resolves(&scenario.execution, root) {
+                        (
+                            RunStatus::Failed,
+                            vec![format!(
+                                "declared executable target cannot be resolved from repository root `{}`",
+                                root.display()
+                            )],
+                        )
+                    } else {
+                        match databases.acquire() {
+                            Ok(_db) => match executor.execute(root, &scenario.execution) {
+                                Ok(()) => (
+                                    RunStatus::Passed,
+                                    vec!["declared deterministic adapter completed".into()],
+                                ),
+                                Err(error) => (RunStatus::Failed, vec![error]),
+                            },
                             Err(error) => (RunStatus::Failed, vec![error]),
-                        },
-                        Err(error) => (RunStatus::Failed, vec![error]),
+                        }
                     };
                     let _ = sender.send(ScenarioOutcome {
                         scenario_id: scenario.id.clone(),
@@ -288,7 +304,7 @@ mod tests {
             primary_coverage: "task.state-machine.legal-transitions".into(),
             secondary_coverage: vec![],
             execution: Execution::CargoPackage {
-                package: "fixture".into(),
+                package: "djinn-qa".into(),
                 test: None,
             },
             isolation: crate::Isolation {
@@ -324,6 +340,16 @@ mod tests {
             Ok(Box::new(()))
         }
     }
+    fn taxonomy() -> Taxonomy {
+        Taxonomy::from_yaml(include_str!("../tests/fixtures/valid-taxonomy.yaml")).unwrap()
+    }
+    fn repository_root() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .ancestors()
+            .nth(3)
+            .unwrap()
+            .to_path_buf()
+    }
     #[test]
     fn selection_excludes_blocked_and_disabled() {
         let mut blocked = scenario("a");
@@ -357,9 +383,65 @@ mod tests {
             calls: Mutex::new(0),
             peak: AtomicUsize::new(0),
         };
-        let result = execute_selected(Path::new("."), &[scenario("x")], 1, &e, &BadDb).unwrap();
+        let result = execute_selected(&repository_root(), &[scenario("x")], 1, &e, &BadDb).unwrap();
         assert_eq!(result[0].status, RunStatus::Failed);
         assert_eq!(*e.calls.lock().unwrap(), 0);
+    }
+
+    #[test]
+    fn unresolved_target_writes_failed_artifact_and_skips_adapter() {
+        let temp = tempfile::tempdir().unwrap();
+        let evidence = temp.path().join("evidence");
+        let executor = Executor {
+            calls: Mutex::new(0),
+            peak: AtomicUsize::new(0),
+        };
+        let inventory = ScenarioInventory {
+            version: 1,
+            scenarios: vec![scenario("missing.target")],
+        };
+
+        let summary = run_inventory(
+            temp.path(),
+            &taxonomy(),
+            &inventory,
+            Profile::SmokeCi,
+            1,
+            &evidence,
+            "a",
+            &executor,
+            &Db,
+        )
+        .unwrap();
+
+        assert!(!summary.succeeded());
+        assert_eq!(*executor.calls.lock().unwrap(), 0);
+        let json: serde_json::Value =
+            serde_json::from_slice(&fs::read(evidence.join("missing.target.json")).unwrap())
+                .unwrap();
+        assert_eq!(json["status"], "failed");
+        assert!(json["diagnostics"][0]
+            .as_str()
+            .unwrap()
+            .contains("cannot be resolved"));
+    }
+
+    #[test]
+    fn resolved_target_invokes_adapter_and_aggregate_passes() {
+        let executor = Executor {
+            calls: Mutex::new(0),
+            peak: AtomicUsize::new(0),
+        };
+        let mut item = scenario("adapter.invocation");
+        item.execution = Execution::CargoPackage {
+            package: "djinn-qa".into(),
+            test: None,
+        };
+        let result = execute_selected(&repository_root(), &[item], 1, &executor, &Db).unwrap();
+        assert_eq!(result[0].status, RunStatus::Passed);
+        assert_eq!(*executor.calls.lock().unwrap(), 1);
+        let summary = RunSummary { outcomes: result };
+        assert!(summary.succeeded());
     }
 
     struct SynchronizedExecutor {
@@ -386,7 +468,7 @@ mod tests {
         });
         let scenarios = vec![scenario("a"), scenario("b"), scenario("c"), scenario("d")];
         let outcomes =
-            execute_selected(Path::new("."), &scenarios, 2, executor.as_ref(), &Db).unwrap();
+            execute_selected(&repository_root(), &scenarios, 2, executor.as_ref(), &Db).unwrap();
         assert_eq!(outcomes.len(), 4);
         assert_eq!(executor.peak.load(Ordering::SeqCst), 2);
     }

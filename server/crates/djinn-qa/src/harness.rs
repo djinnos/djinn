@@ -7,6 +7,9 @@ use std::collections::VecDeque;
 
 use thiserror::Error;
 
+#[path = "database_harness.rs"]
+pub mod database;
+
 /// Provider scripts and typed observable results.
 pub mod provider {
     use super::{HarnessError, VecDeque};
