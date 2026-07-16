@@ -332,82 +332,24 @@ async fn sweep_stale_prs(db: &djinn_db::Database, app_state: &crate::context::Co
             }
 
             // Look up the backing task.
-            let task = match task_repo.get_by_short_id(short_id).await {
-                Ok(Some(task)) => task,
+            let (task, cleanup_target) = match task_repo.get_by_short_id(short_id).await {
+                Ok(Some(task)) => {
+                    let cleanup_target = super::pr_poller::pr_cleanup::PrCleanupTarget::from(&task);
+                    (Some(task), cleanup_target)
+                }
                 Ok(None) => {
-                    // Task not found. For the sweep, a missing task with an open
-                    // PR is considered stale — the PR is orphaned. We create a
-                    // synthetic minimal task record for the guardrail check.
-                    // Use epoch as timestamps so the grace period check passes
-                    // (the task is considered long-closed).
                     tracing::info!(
-                        project_id = %project.id,
-                        pr = pr.number,
-                        head = %head_branch,
-                        short_id,
+                        project_id = %project.id, pr = pr.number, head = %head_branch, short_id,
                         "CoordinatorActor: stale PR sweep found PR with missing backing task"
                     );
-                    djinn_core::models::Task {
-                        id: String::new(),
-                        project_id: project.id.clone(),
-                        short_id: short_id.to_string(),
-                        epic_id: None,
-                        title: String::new(),
-                        description: String::new(),
-                        design: String::new(),
-                        issue_type: String::new(),
-                        status: "closed".to_string(),
-                        priority: 0,
-                        owner: String::new(),
-                        labels: "[]".to_string(),
-                        acceptance_criteria: "[]".to_string(),
-                        reopen_count: 0,
-                        continuation_count: 0,
-                        total_reopen_count: 0,
-                        intervention_count: 0,
-                        last_intervention_at: None,
-                        created_at: "1970-01-01T00:00:00Z".to_string(),
-                        updated_at: "1970-01-01T00:00:00Z".to_string(),
-                        closed_at: Some("1970-01-01T00:00:00Z".to_string()),
-                        close_reason: None,
-                        merge_commit_sha: None,
-                        pr_url: Some(pr.html_url.clone()),
-                        merge_conflict_metadata: None,
-                        memory_refs: "[]".to_string(),
-                        agent_type: None,
-                        created_by_user_id: None,
-                        ci_status: djinn_core::models::CiStatus::Unknown.to_string(),
-                        ci_head_sha: None,
-                        ci_pr_number: None,
-                        ci_blocking_required_check_names: "[]".to_string(),
-                        ci_failure_fingerprint: None,
-                        ci_first_seen_at: None,
-                        ci_last_seen_at: None,
-                        ci_same_signature_count: 0,
-                        ci_last_remediation_base_sha: None,
-                        ci_mirror_head_sha: None,
-                        ci_github_head_sha: None,
-                        ci_heads_diverged: None,
-                        ci_head_observation_error: None,
-                        ci_mq_state: None,
-                        ci_mq_run_id: None,
-                        ci_mq_head_sha: None,
-                        ci_mq_failed_check_names: None,
-                        ci_mq_failure_fingerprint: None,
-                        ci_mq_same_signature_count: None,
-                        ci_mq_first_seen_at: None,
-                        ci_mq_last_seen_at: None,
-                        unresolved_blocker_count: 0,
-                    }
+                    (
+                        None,
+                        super::pr_poller::pr_cleanup::PrCleanupTarget::orphaned(short_id),
+                    )
                 }
                 Err(e) => {
-                    tracing::warn!(
-                        error = %e,
-                        project_id = %project.id,
-                        pr = pr.number,
-                        short_id,
-                        "CoordinatorActor: stale PR sweep failed to look up task"
-                    );
+                    tracing::warn!(error = %e, project_id = %project.id, pr = pr.number, short_id,
+                        "CoordinatorActor: stale PR sweep failed to look up task");
                     stats.errors += 1;
                     djinn_telemetry::stale_sweep::increment_pr_skipped(
                         djinn_telemetry::stale_sweep::REASON_API_ERROR,
@@ -416,14 +358,13 @@ async fn sweep_stale_prs(db: &djinn_db::Database, app_state: &crate::context::Co
                 }
             };
 
-            // Only reap PRs for tasks that are closed (or we created a synthetic
-            // closed one above).
-            if task.status != "closed" {
+            // Only reap PRs for closed persisted tasks; missing tasks are orphaned.
+            if task.as_ref().is_some_and(|task| task.status != "closed") {
                 tracing::debug!(
                     project_id = %project.id,
                     pr = pr.number,
                     head = %head_branch,
-                    task_status = %task.status,
+                    task_status = %task.as_ref().map(|task| task.status.as_str()).unwrap_or("unknown"),
                     "CoordinatorActor: stale PR sweep skipping PR whose task is still open"
                 );
                 stats.prs_skipped += 1;
@@ -434,7 +375,10 @@ async fn sweep_stale_prs(db: &djinn_db::Database, app_state: &crate::context::Co
             }
 
             // Run guardrail checks via PrCleanupPolicy.
-            match cleanup_policy.should_cleanup_pr(&task, pr).await {
+            match cleanup_policy
+                .should_cleanup_pr_for_target(&cleanup_target, pr)
+                .await
+            {
                 Ok(true) => {
                     // Guardrails passed — proceed with cleanup.
                 }
@@ -507,7 +451,7 @@ async fn sweep_stale_prs(db: &djinn_db::Database, app_state: &crate::context::Co
 
             // ── Delete the remote branch ────────────────────────────────
             match cleanup_policy
-                .delete_branch_if_allowed(&task, head_branch)
+                .delete_branch_if_allowed_for_target(&cleanup_target, head_branch)
                 .await
             {
                 Ok(super::pr_poller::pr_cleanup::BranchCleanupOutcome::Deleted) => {
@@ -580,7 +524,7 @@ async fn sweep_stale_prs(db: &djinn_db::Database, app_state: &crate::context::Co
             });
             if let Err(e) = task_repo
                 .log_activity(
-                    Some(&task.id),
+                    task.as_ref().map(|task| task.id.as_str()),
                     "system",
                     "system",
                     "stale_pr_swept",
@@ -591,7 +535,7 @@ async fn sweep_stale_prs(db: &djinn_db::Database, app_state: &crate::context::Co
                 tracing::warn!(
                     error = %e,
                     project_id = %project.id,
-                    task_id = %task.id,
+                    task_id = ?task.as_ref().map(|task| &task.id),
                     pr = pr.number,
                     "CoordinatorActor: stale PR sweep failed to write activity log; continuing"
                 );

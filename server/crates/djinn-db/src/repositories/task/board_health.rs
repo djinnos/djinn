@@ -350,12 +350,12 @@ pub(super) async fn stranded_ready_section(pool: &sqlx::PgPool) -> serde_json::V
             }
 
             // Owner-credential-blocked: the creator's credentials are all
-            // revoked and no org-shared fallback is available. Tasks with no
-            // creator or no credential rows are NOT treated as blocked.
+            // revoked and no org-shared fallback is available. A missing
+            // creator is never an implicit credential-capable identity.
             let created_by: Option<String> = row.try_get("created_by_user_id").ok().flatten();
             let has_active_credential: bool = row.try_get("has_active_credential").unwrap_or(false);
             let has_owner_credential: bool = row.try_get("has_owner_credential").unwrap_or(false);
-            let credential_available = created_by.is_none() || has_active_credential;
+            let credential_available = created_by.is_some() && has_active_credential;
             let credential_blocked =
                 created_by.is_some() && !has_active_credential && has_owner_credential;
             if credential_blocked {
@@ -398,6 +398,9 @@ pub(super) async fn stranded_ready_section(pool: &sqlx::PgPool) -> serde_json::V
             // ── Model / image readiness evidence ───────────────────────────
             let inflight_model_id: Option<String> = row.try_get("inflight_model_id").ok().flatten();
             let mut reasons: Vec<&str> = Vec::new();
+            if created_by.is_none() {
+                reasons.push("legacy_null_creator");
+            }
             let image_ready = match inflight_model_id.as_deref() {
                 // No model chosen yet — nothing model-specific to block on.
                 None => true,
