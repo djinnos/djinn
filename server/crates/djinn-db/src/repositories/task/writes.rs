@@ -1062,7 +1062,7 @@ mod created_by_tests {
         );
 
         // Unresolvable provenance must fail before INSERT instead of committing NULL.
-        let before: i64 = sqlx::query_scalar!("SELECT COUNT(*) AS \"count!\" FROM tasks")
+        let before: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM tasks")
             .fetch_one(db.pool())
             .await
             .unwrap();
@@ -1083,7 +1083,7 @@ mod created_by_tests {
             .await
             .unwrap_err();
         assert!(error.to_string().contains(EFFECTIVE_CREATOR_UNAVAILABLE));
-        let after: i64 = sqlx::query_scalar!("SELECT COUNT(*) AS \"count!\" FROM tasks")
+        let after: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM tasks")
             .fetch_one(db.pool())
             .await
             .unwrap();
