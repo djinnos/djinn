@@ -236,6 +236,91 @@ async fn revision_mutation_persists_every_repository_event_shape() {
 }
 
 #[tokio::test]
+async fn revision_mutation_replaces_wikilinks_and_rolls_back_failed_updates() {
+    let tmp = crate::database::test_tempdir().unwrap();
+    let db = Database::open_in_memory().unwrap();
+    let (tx, _rx) = broadcast::channel(8);
+    let project = make_project(&db, tmp.path()).await;
+    let repo = NoteRepository::new(db.clone(), event_bus_for(&tx));
+
+    let create_named = |title: &str, content: &str| {
+        let mut command = create_command(&project.id, uuid::Uuid::now_v7().to_string());
+        let NoteRevisionDesiredState::Create(state) = &mut command.desired else {
+            unreachable!("create_command has create state");
+        };
+        state.title = title.to_owned();
+        state.permalink = format!("reference/{}", title.to_lowercase());
+        state.content = content.to_owned();
+        command
+    };
+
+    let old_target = repo
+        .mutate_with_revision(create_named("OldTarget", "old target"))
+        .await
+        .unwrap()
+        .note
+        .unwrap();
+    let new_target = repo
+        .mutate_with_revision(create_named("NewTarget", "new target"))
+        .await
+        .unwrap()
+        .note
+        .unwrap();
+    let source = repo
+        .mutate_with_revision(create_named("Source", "links [[OldTarget]]"))
+        .await
+        .unwrap()
+        .note
+        .unwrap();
+
+    repo.mutate_with_revision(existing_command(
+        &project.id,
+        &source.id,
+        NoteRevisionEventKind::Updated,
+        "links [[NewTarget]]",
+        0.5,
+    ))
+    .await
+    .unwrap();
+    let graph = repo.graph(&project.id).await.unwrap();
+    assert!(graph
+        .edges
+        .iter()
+        .any(|edge| edge.source_id == source.id && edge.target_id == new_target.id));
+    assert!(!graph
+        .edges
+        .iter()
+        .any(|edge| edge.source_id == source.id && edge.target_id == old_target.id));
+
+    repo.set_revision_event_insertion_failure_for_test(true);
+    assert!(repo
+        .mutate_with_revision(existing_command(
+            &project.id,
+            &source.id,
+            NoteRevisionEventKind::Updated,
+            "links [[OldTarget]]",
+            0.5,
+        ))
+        .await
+        .is_err());
+    repo.set_revision_event_insertion_failure_for_test(false);
+
+    assert_eq!(
+        repo.get(&source.id).await.unwrap().unwrap().content,
+        "links [[NewTarget]]"
+    );
+    let graph_after_rollback = repo.graph(&project.id).await.unwrap();
+    assert!(graph_after_rollback
+        .edges
+        .iter()
+        .any(|edge| edge.source_id == source.id && edge.target_id == new_target.id));
+    assert!(!graph_after_rollback
+        .edges
+        .iter()
+        .any(|edge| edge.source_id == source.id && edge.target_id == old_target.id));
+}
+
+#[tokio::test]
 async fn concurrent_revision_updates_allocate_contiguous_sequences() {
     let tmp = crate::database::test_tempdir().unwrap();
     let db = Database::open_in_memory().unwrap();

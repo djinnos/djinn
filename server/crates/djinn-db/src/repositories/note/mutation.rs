@@ -305,20 +305,26 @@ impl NoteRepository {
                 .bind(&state.folder).bind(tags).bind(&state.retrieval_anchor).bind(confidence)
                 .bind(note_content_hash(content)).bind(note_id).bind(&command.project_id)
                 .execute(&mut **tx).await?;
-            index_links_for_note(tx, note_id, &command.project_id, content).await?;
-            resolve_links_for_note(
-                tx,
-                note_id,
-                &state.title,
-                &state.permalink,
-                &command.project_id,
-            )
-            .await?;
         } else {
             sqlx::query("UPDATE notes SET content = $1, confidence = $2, content_hash = $3, updated_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') WHERE id = $4 AND project_id = $5")
                 .bind(content).bind(confidence).bind(note_content_hash(content)).bind(note_id)
                 .bind(&command.project_id).execute(&mut **tx).await?;
         }
+        // Link replacement belongs to the same transaction as every content
+        // mutation, including metadata-free writers such as extraction.
+        // This removes stale outbound rows and makes newly authored links
+        // visible before the note revision commits.
+        index_links_for_note(tx, note_id, &command.project_id, content).await?;
+        let link_title = metadata.map_or(&before.title, |state| &state.title);
+        let link_permalink = metadata.map_or(&before.permalink, |state| &state.permalink);
+        resolve_links_for_note(
+            tx,
+            note_id,
+            link_title,
+            link_permalink,
+            &command.project_id,
+        )
+        .await?;
         let note = locked_note(tx, note_id, &command.project_id).await?;
         let seq = next_sequence(tx, &command.project_id, note_id).await?;
         let (content_before, content_after) =
