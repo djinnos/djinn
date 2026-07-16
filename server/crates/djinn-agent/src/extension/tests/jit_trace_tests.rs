@@ -150,6 +150,11 @@ async fn jit_pitfalls_trace_preserves_top_two_output_and_candidate_outcomes() {
     let trace = latest_jit_trace(&db, pid).await;
     assert_eq!(trace.entry_point, "jit_pitfalls");
     assert_eq!(trace.candidate_cap, 50);
+    assert_eq!(trace.rollout_label, "cohort");
+    assert_eq!(
+        trace.outcome,
+        djinn_db::repositories::retrieval_trace::RetrievalTraceOutcome::Injected
+    );
     assert!(!trace.candidate_cap_exceeded);
     assert!(trace.estimated_injected_tokens > 0);
     assert!(trace.durations_ms.get("search_elapsed_ms").is_some());
@@ -267,6 +272,11 @@ async fn jit_pitfalls_search_error_persists_error_trace_and_consumes_session() {
     assert!(!trace.candidate_cap_exceeded);
     assert_eq!(trace.estimated_injected_tokens, 0);
     assert!(trace.durations_ms.get("search_elapsed_ms").is_some());
+    assert_eq!(trace.rollout_label, "enabled");
+    assert_eq!(
+        trace.outcome,
+        djinn_db::repositories::retrieval_trace::RetrievalTraceOutcome::Error
+    );
     assert!(
         trace.durations_ms.get("trace_search_elapsed_ms").is_none(),
         "error path must not misrepresent an unrun candidate-universe search"
@@ -494,6 +504,14 @@ async fn jit_pitfalls_off_by_default_no_hint() {
         response.get("jit_pitfalls").is_none(),
         "gate OFF must not append jit_pitfalls, got {response:?}"
     );
+    let trace = latest_jit_trace(&db, pid).await;
+    assert_eq!(trace.rollout_label, "off");
+    assert_eq!(
+        trace.outcome,
+        djinn_db::repositories::retrieval_trace::RetrievalTraceOutcome::DisabledOff
+    );
+    assert_eq!(trace.estimated_injected_tokens, 0);
+    assert!(trace.candidates_typed().is_empty());
     assert_jit_pitfall_outcome_deltas(&telemetry_before, &[("disabled_default_off", 1)]);
 }
 
@@ -536,6 +554,14 @@ async fn jit_pitfalls_kill_switch_overrides_legacy_opt_in() {
         response.get("jit_pitfalls").is_none(),
         "kill switch must not append jit_pitfalls, got {response:?}"
     );
+    let trace = latest_jit_trace(&db, pid).await;
+    assert_eq!(trace.rollout_label, "kill_switch");
+    assert_eq!(
+        trace.outcome,
+        djinn_db::repositories::retrieval_trace::RetrievalTraceOutcome::DisabledKillSwitch
+    );
+    assert_eq!(trace.estimated_injected_tokens, 0);
+    assert!(trace.candidates_typed().is_empty());
     assert_jit_pitfall_outcome_deltas(&telemetry_before, &[("disabled_kill_switch", 1)]);
 
     unsafe {
@@ -662,6 +688,13 @@ async fn jit_pitfalls_on_miss_leaves_write_succeeding() {
         "miss must not append a hint, got {response:?}"
     );
 
+    let trace = latest_jit_trace(&db, pid).await;
+    assert_eq!(trace.rollout_label, "enabled");
+    assert_eq!(
+        trace.outcome,
+        djinn_db::repositories::retrieval_trace::RetrievalTraceOutcome::Empty
+    );
+    assert_eq!(trace.estimated_injected_tokens, 0);
     unsafe {
         std::env::remove_var("DJINN_JIT_PITFALLS_ROLLOUT");
         std::env::remove_var("DJINN_JIT_PITFALLS");
@@ -1001,4 +1034,51 @@ async fn read_readable_file_does_not_trigger_memory_hint() {
         content.contains("real content"),
         "readable file content must be returned, got: {content}"
     );
+}
+
+/// A legacy-disabled gate is recorded distinctly from deliberate operator off
+/// and kill-switch suppression while remaining invisible to the write caller.
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn jit_pitfalls_legacy_disabled_persists_distinct_suppression() {
+    let _guard = JIT_PITFALLS_ENV_LOCK.lock().unwrap();
+    unsafe {
+        std::env::remove_var("DJINN_JIT_PITFALLS_ROLLOUT");
+        std::env::set_var("DJINN_JIT_PITFALLS", "0");
+    }
+    let db = create_test_db();
+    let project = create_test_project(&db).await;
+    let pid = project.id.as_str();
+    let worktree = crate::test_helpers::test_tempdir("djinn-ext-jit-legacy-disabled-");
+    tokio::fs::create_dir_all(worktree.path().join("src"))
+        .await
+        .expect("mkdir src");
+    let args = Some(
+        serde_json::json!({ "path": "src/a.rs", "content": "// x\n" })
+            .as_object()
+            .expect("obj")
+            .clone(),
+    );
+    let state = crate::test_helpers::agent_context_from_db(db.clone(), CancellationToken::new());
+    let response = call_write(&state, &args, worktree.path(), Some(pid), None, None)
+        .await
+        .expect("legacy-disabled suppression must not fail write");
+    assert_eq!(
+        response.get("ok").and_then(|value| value.as_bool()),
+        Some(true)
+    );
+    assert!(response.get("jit_pitfalls").is_none());
+
+    let trace = latest_jit_trace(&db, pid).await;
+    assert_eq!(trace.rollout_label, "legacy_disabled");
+    assert_eq!(
+        trace.outcome,
+        djinn_db::repositories::retrieval_trace::RetrievalTraceOutcome::DisabledLegacy
+    );
+    assert_eq!(trace.estimated_injected_tokens, 0);
+    assert!(trace.candidates_typed().is_empty());
+
+    unsafe {
+        std::env::remove_var("DJINN_JIT_PITFALLS");
+    }
 }
