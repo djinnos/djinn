@@ -19,7 +19,6 @@ pub mod closed_parent_open_children;
 pub mod leader_tick;
 pub mod live_mover;
 pub mod stranded_ready;
-pub mod zombie_running_session;
 
 use std::sync::Arc;
 
@@ -35,23 +34,14 @@ pub use stranded_ready::{
     MemoryStrandedReadySource, STRANDED_READY_CHECK_NAME, StrandedReadyCandidate,
     StrandedReadyCheck, StrandedReadySource, TaskRepositoryStrandedReadySource,
 };
-pub use zombie_running_session::{
-    SnapshotZombieRunningSessionSource, ZOMBIE_RUNNING_SESSION_CHECK_NAME,
-    ZombieRunningSessionCandidate, ZombieRunningSessionCheck, ZombieRunningSessionSource,
-    check_from_coordinator_state,
-};
 
-/// Register all `djinn-agent`-side seed checks into `registry`.
+/// Register coordinator doctor checks into `registry`.
 ///
 /// Registers the `live_mover_predicate` and `stranded_ready` checks. Both
 /// sources are held via [`std::sync::Arc`] so the registry can store the
 /// checks as `'static` trait objects. Production code wraps long-lived adapters
 /// over the coordinator's evidence collector and DB repository; tests wrap
 /// in-memory doubles.
-///
-/// The control-plane wiring calls this after
-/// `djinn_core::doctor::register_default_checks(reg)` so both halves of
-/// the seed-check suite share a single [`DoctorRegistry`].
 ///
 /// Returns the list of check names that were replaced by this call
 /// (empty if every check was newly registered). Re-registering the same
