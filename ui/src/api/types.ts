@@ -133,6 +133,8 @@ export interface ProposalDebateTrailRow {
 export interface ProposalRefinementStatus {
   /** Whether refinement is currently active. */
   active: boolean;
+  /** Durable participant owner selected when this refinement run started. */
+  owner_user_id?: string | null;
   /** Current debate round (1-based). null when refinement has not started. */
   current_round?: number | null;
   /** Consecutive adversary dry rounds at the end of the trail. */
