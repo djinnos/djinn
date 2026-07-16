@@ -87,9 +87,11 @@ impl VerifyRunRepository {
         let row = sqlx::query_as::<_, VerifyRunRecord>(
             r#"SELECT id, task_run_id, verify_source, verify_run_id,
                 command_version, profile_version, completed_at,
-                result, diff_fingerprint,
-                check_coverage AS "check_coverage: serde_json::Value",
-                created_at
+                result, diff_fingerprint, check_coverage,
+                source_phase, verification_attempt_id, ordered_commands,
+                covered_checks, verification_input_fingerprint, manifest_version,
+                environment_identity_json, environment_identity_digest,
+                environment_identity_version, created_at
              FROM verify_runs WHERE id = $1"#,
         )
         .bind(params.id)
@@ -106,9 +108,11 @@ impl VerifyRunRepository {
         Ok(sqlx::query_as::<_, VerifyRunRecord>(
             r#"SELECT id, task_run_id, verify_source, verify_run_id,
                 command_version, profile_version, completed_at,
-                result, diff_fingerprint,
-                check_coverage AS "check_coverage: serde_json::Value",
-                created_at
+                result, diff_fingerprint, check_coverage,
+                source_phase, verification_attempt_id, ordered_commands,
+                covered_checks, verification_input_fingerprint, manifest_version,
+                environment_identity_json, environment_identity_digest,
+                environment_identity_version, created_at
              FROM verify_runs WHERE id = $1"#,
         )
         .bind(id)
@@ -127,9 +131,11 @@ impl VerifyRunRepository {
         Ok(sqlx::query_as::<_, VerifyRunRecord>(
             r#"SELECT id, task_run_id, verify_source, verify_run_id,
                 command_version, profile_version, completed_at,
-                result, diff_fingerprint,
-                check_coverage AS "check_coverage: serde_json::Value",
-                created_at
+                result, diff_fingerprint, check_coverage,
+                source_phase, verification_attempt_id, ordered_commands,
+                covered_checks, verification_input_fingerprint, manifest_version,
+                environment_identity_json, environment_identity_digest,
+                environment_identity_version, created_at
              FROM verify_runs
              WHERE task_run_id = $1
              ORDER BY created_at DESC
@@ -162,9 +168,11 @@ impl VerifyRunRepository {
         Ok(sqlx::query_as::<_, VerifyRunRecord>(
             r#"SELECT vr.id, vr.task_run_id, vr.verify_source, vr.verify_run_id,
                 vr.command_version, vr.profile_version, vr.completed_at,
-                vr.result, vr.diff_fingerprint,
-                vr.check_coverage AS "check_coverage: serde_json::Value",
-                vr.created_at
+                vr.result, vr.diff_fingerprint, vr.check_coverage,
+                vr.source_phase, vr.verification_attempt_id, vr.ordered_commands,
+                vr.covered_checks, vr.verification_input_fingerprint, vr.manifest_version,
+                vr.environment_identity_json, vr.environment_identity_digest,
+                vr.environment_identity_version, vr.created_at
              FROM verify_runs vr
              JOIN task_runs tr ON tr.id = vr.task_run_id
              WHERE tr.task_id = $1
@@ -186,9 +194,11 @@ impl VerifyRunRepository {
         Ok(sqlx::query_as::<_, VerifyRunRecord>(
             r#"SELECT id, task_run_id, verify_source, verify_run_id,
                 command_version, profile_version, completed_at,
-                result, diff_fingerprint,
-                check_coverage AS "check_coverage: serde_json::Value",
-                created_at
+                result, diff_fingerprint, check_coverage,
+                source_phase, verification_attempt_id, ordered_commands,
+                covered_checks, verification_input_fingerprint, manifest_version,
+                environment_identity_json, environment_identity_digest,
+                environment_identity_version, created_at
              FROM verify_runs
              WHERE task_run_id = $1
              ORDER BY created_at DESC"#,

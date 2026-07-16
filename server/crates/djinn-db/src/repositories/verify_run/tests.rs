@@ -176,6 +176,19 @@ async fn compatible_final_pass_lookup_is_task_and_fingerprint_scoped_and_newest(
     assert_eq!(hit.id, newest_id);
     assert!(
         repo.latest_compatible_passing_final_verification(
+            &task_id,
+            "fingerprint-other",
+            "manifest-v1",
+            "identity-v1",
+            &required_checks,
+        )
+        .await
+        .unwrap()
+        .is_none(),
+        "a different fingerprint on the same task must not reuse the pass"
+    );
+    assert!(
+        repo.latest_compatible_passing_final_verification(
             &other_task_id,
             "fingerprint-other",
             "manifest-v1",
@@ -250,6 +263,49 @@ async fn compatible_final_pass_lookup_does_not_reuse_another_tasks_pass() {
 // ── VerifyRunRepository tests ──────────────────────────────────────────────
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn eligible_final_pass_roundtrips_complete_generic_audit_projection() {
+    let db = test_db();
+    let (project_id, task_id) = create_task(&db, EventBus::noop()).await;
+    let task_run_id = create_run(&db, &project_id, &task_id).await;
+    let repo = VerifyRunRepository::new(db);
+    let id = new_id();
+
+    record_complete_final_pass(&repo, &task_run_id, &id, "fingerprint-v1").await;
+
+    let fetched = repo.get(&id).await.unwrap().expect("audit row must exist");
+    let expected_commands = serde_json::json!([
+        {"descriptor_id": "fmt", "result": "pass", "passed": true},
+        {"descriptor_id": "test", "result": "pass", "passed": true}
+    ]);
+    let expected_coverage = serde_json::json!(["format", "tests"]);
+    assert_eq!(fetched.source_phase.as_deref(), Some("final_verification"));
+    assert_eq!(
+        fetched.verification_attempt_id.as_deref(),
+        Some("attempt-1")
+    );
+    assert_eq!(fetched.ordered_commands.as_ref(), Some(&expected_commands));
+    assert_eq!(fetched.covered_checks.as_ref(), Some(&expected_coverage));
+    assert_eq!(fetched.check_coverage.as_ref(), Some(&expected_coverage));
+    assert_eq!(
+        fetched.verification_input_fingerprint.as_deref(),
+        Some("fingerprint-v1")
+    );
+    assert_eq!(fetched.manifest_version.as_deref(), Some("manifest-v1"));
+    assert_eq!(
+        fetched.environment_identity_json,
+        Some(serde_json::json!({"runner": "test"}))
+    );
+    assert_eq!(
+        fetched.environment_identity_digest.as_deref(),
+        Some("identity-digest-v1")
+    );
+    assert_eq!(
+        fetched.environment_identity_version.as_deref(),
+        Some("identity-v1")
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn verify_run_create_and_get_roundtrips() {
     let db = test_db();
     let (project_id, task_id) = create_task(&db, EventBus::noop()).await;
@@ -283,13 +339,13 @@ async fn verify_run_create_and_get_roundtrips() {
     assert_eq!(created.completed_at, "2025-01-15T10:30:00.000Z");
     assert_eq!(created.result, VerifyResult::Pass.as_str());
     assert_eq!(created.diff_fingerprint, "abc123def456");
-    assert!(created.check_coverage.is_some());
+    assert_eq!(created.check_coverage.as_ref(), Some(&coverage));
     assert!(!created.created_at.is_empty());
 
     let fetched = repo.get(&id).await.unwrap().expect("must exist");
     assert_eq!(fetched.id, created.id);
     assert_eq!(fetched.verify_source, created.verify_source);
-    assert_eq!(fetched.check_coverage, created.check_coverage);
+    assert_eq!(fetched.check_coverage.as_ref(), Some(&coverage));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
