@@ -26,6 +26,35 @@ async fn dispatch_as(
         .unwrap_or_else(|error| panic!("{tool} dispatch failed: {error}"))
 }
 
+fn assert_same_not_found_shape(
+    foreign: &Value,
+    absent: &Value,
+    foreign_identifier: &str,
+    absent_identifier: &str,
+) {
+    let mut foreign_shape = foreign
+        .as_object()
+        .expect("foreign not-found response must be an object")
+        .clone();
+    let mut absent_shape = absent
+        .as_object()
+        .expect("absent not-found response must be an object")
+        .clone();
+
+    assert_eq!(
+        foreign_shape.remove("error"),
+        Some(json!(format!("note not found: {foreign_identifier}")))
+    );
+    assert_eq!(
+        absent_shape.remove("error"),
+        Some(json!(format!("note not found: {absent_identifier}")))
+    );
+    assert_eq!(
+        foreign_shape, absent_shape,
+        "foreign and genuinely absent identifiers must expose identical response fields"
+    );
+}
+
 async fn assert_tenant_state_unchanged(
     repo: &NoteRepository,
     owner_project_id: &str,
@@ -207,17 +236,11 @@ async fn cross_project_mutations_and_revision_history_do_not_disclose_foreign_no
         }),
     )
     .await;
-    assert_eq!(
-        foreign_edit.as_object().unwrap().len(),
-        absent_edit.as_object().unwrap().len()
-    );
-    assert_eq!(
-        foreign_edit["error"],
-        format!("note not found: {owner_permalink}")
-    );
-    assert_eq!(
-        absent_edit["error"],
-        format!("note not found: {absent_permalink}")
+    assert_same_not_found_shape(
+        &foreign_edit,
+        &absent_edit,
+        &owner_permalink,
+        absent_permalink,
     );
 
     let foreign_delete = dispatch_as(
@@ -254,19 +277,13 @@ async fn cross_project_mutations_and_revision_history_do_not_disclose_foreign_no
         }),
     )
     .await;
-    assert_eq!(
-        foreign_delete.as_object().unwrap().len(),
-        absent_delete.as_object().unwrap().len()
+    assert_same_not_found_shape(
+        &foreign_delete,
+        &absent_delete,
+        &owner_permalink,
+        absent_permalink,
     );
     assert_eq!(foreign_delete["ok"], false);
-    assert_eq!(
-        foreign_delete["error"],
-        format!("note not found: {owner_permalink}")
-    );
-    assert_eq!(
-        absent_delete["error"],
-        format!("note not found: {absent_permalink}")
-    );
 
     // Cross-tenant immutable revision query/history through the production MCP
     // surface. The handler resolves the caller's project, so a foreign permalink
@@ -297,19 +314,13 @@ async fn cross_project_mutations_and_revision_history_do_not_disclose_foreign_no
         json!({"project": other_project_ref, "permalink": absent_permalink}),
     )
     .await;
-    assert_eq!(
-        foreign_revisions.as_object().unwrap().len(),
-        absent_revisions.as_object().unwrap().len()
+    assert_same_not_found_shape(
+        &foreign_revisions,
+        &absent_revisions,
+        &owner_permalink,
+        absent_permalink,
     );
     assert_eq!(foreign_revisions["revisions"], json!([]));
-    assert_eq!(
-        foreign_revisions["error"],
-        format!("note not found: {owner_permalink}")
-    );
-    assert_eq!(
-        absent_revisions["error"],
-        format!("note not found: {absent_permalink}")
-    );
 
     // The authorized tenant can query the exact owned immutable rows through the
     // same production MCP surface.
