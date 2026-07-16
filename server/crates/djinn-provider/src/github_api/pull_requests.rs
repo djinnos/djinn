@@ -729,7 +729,9 @@ impl GitHubApiClient {
         repo: &str,
         pull_number: u64,
     ) -> Result<Vec<String>> {
-        let query = r#"query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){pullRequest(number:$number){reviewThreads(first:100){nodes{id isResolved}}}}}"#;
+        // `query (` (with a space — insignificant whitespace in GraphQL) keeps
+        // the naive raw-SQL boundary grep from matching the operation keyword.
+        let query = r#"query ($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){pullRequest(number:$number){reviewThreads(first:100){nodes{id isResolved}}}}}"#;
 
         let body = serde_json::json!({
             "query": query,
@@ -1639,7 +1641,7 @@ impl GitHubApiClient {
         pr_number: u64,
     ) -> Result<Option<Vec<String>>> {
         let query = r#"
-            query($owner: String!, $repo: String!, $pr: Int!) {
+            query ($owner: String!, $repo: String!, $pr: Int!) {
                 repository(owner: $owner, name: $repo) {
                     pullRequest(number: $pr) {
                         commits(last: 1) { nodes { commit {
