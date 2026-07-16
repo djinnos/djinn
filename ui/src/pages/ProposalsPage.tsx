@@ -782,6 +782,8 @@ function ProposalDetailView({
         <ProposalRefinement
           proposalId={proposal.id}
           status={detail.refinement}
+          authorUserId={proposal.author_user_id}
+          signoffUserIds={detail.signoffs.map((signoff) => signoff.user_id)}
           gateStatus={detail.gate_status}
           debateTrail={detail.debate_trail}
           revisions={detail.revisions}
