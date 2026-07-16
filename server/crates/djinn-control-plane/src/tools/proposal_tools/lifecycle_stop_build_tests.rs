@@ -1,12 +1,30 @@
 #[cfg(test)]
 mod stop_build_tests {
     use super::*;
+    use std::sync::atomic::{AtomicI64, Ordering};
+
     use crate::server::DjinnMcpServer;
     use crate::state::stubs::test_mcp_state;
     use djinn_core::events::EventBus;
     use djinn_db::{
-        Database, EpicCreateInput, EpicRepository, ProjectRepository, ProposalCreateInput,
+        Database, EffectiveCreatorProvenance, EpicCreateInput, EpicRepository, ProjectRepository,
+        ProposalCreateInput, User, UserRepository,
     };
+
+    static NEXT_FIXTURE_GITHUB_ID: AtomicI64 = AtomicI64::new(9_510_000_000);
+
+    async fn fixture_creator(db: &Database) -> User {
+        let github_id = NEXT_FIXTURE_GITHUB_ID.fetch_add(1, Ordering::Relaxed);
+        UserRepository::new(db.clone())
+            .upsert_from_github(
+                github_id,
+                &format!("stop-build-fixture-{github_id}"),
+                Some("Stop Build Fixture"),
+                None,
+            )
+            .await
+            .unwrap()
+    }
 
     /// A `building` proposal: one graduated epic with two open worker tasks,
     /// plus a recorded breakdown task. The slot pool is the test stub (no live
@@ -59,12 +77,18 @@ mod stop_build_tests {
             .unwrap();
 
         let trepo = TaskRepository::new(db.clone(), bus.clone());
+        let creator = fixture_creator(&db).await;
         let mut task_ids = Vec::new();
         for i in 0..2 {
             let t = trepo
-                .create_in_project(
+                .create_in_project_with_provenance(
                     &project.id,
                     Some(&epic.id),
+                    EffectiveCreatorProvenance {
+                        explicit_user_id: Some(&creator.id),
+                        source_task_id: None,
+                        proposal_id: None,
+                    },
                     &format!("t{i}"),
                     "",
                     "",
@@ -79,9 +103,14 @@ mod stop_build_tests {
             task_ids.push(t.id);
         }
         let breakdown = trepo
-            .create_in_project(
+            .create_in_project_with_provenance(
                 &project.id,
                 None,
+                EffectiveCreatorProvenance {
+                    explicit_user_id: Some(&creator.id),
+                    source_task_id: None,
+                    proposal_id: None,
+                },
                 "breakdown",
                 "",
                 "",
@@ -240,10 +269,16 @@ mod stop_build_tests {
             .await
             .unwrap();
         let trepo = TaskRepository::new(db.clone(), bus.clone());
+        let creator = fixture_creator(&db).await;
         let other_task = trepo
-            .create_in_project(
+            .create_in_project_with_provenance(
                 &project.id,
                 Some(&other_epic.id),
+                EffectiveCreatorProvenance {
+                    explicit_user_id: Some(&creator.id),
+                    source_task_id: None,
+                    proposal_id: None,
+                },
                 "other-task",
                 "",
                 "",
@@ -499,10 +534,16 @@ mod stop_build_tests {
         title: &str,
     ) -> djinn_core::models::Task {
         let bus = EventBus::noop();
+        let creator = fixture_creator(db).await;
         TaskRepository::new(db.clone(), bus)
-            .create_in_project(
+            .create_in_project_with_provenance(
                 project_id,
                 Some(epic_id),
+                EffectiveCreatorProvenance {
+                    explicit_user_id: Some(&creator.id),
+                    source_task_id: None,
+                    proposal_id: None,
+                },
                 title,
                 "",
                 "",
