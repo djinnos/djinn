@@ -701,24 +701,27 @@ mod tests {
             .await
             .unwrap();
 
-        // A delayed duplicate callback for the already-terminal old generation
-        // is idempotent and cannot release the newer row.
-        controller
-            .transition(
-                &first,
-                WarmAdmissionTransition::Terminal {
-                    uid: "uid-one".into(),
-                },
-            )
-            .await
-            .unwrap();
+        // A delayed callback for the old generation is rejected as stale and
+        // cannot release the newer row.
+        assert!(
+            controller
+                .transition(
+                    &first,
+                    WarmAdmissionTransition::Terminal {
+                        uid: "uid-one".into(),
+                    },
+                )
+                .await
+                .is_err(),
+            "delayed old-generation callback must be rejected as stale"
+        );
         assert!(
             controller
                 .release_notifier()
                 .notified()
                 .now_or_never()
                 .is_none(),
-            "delayed old-generation duplicate must not wake dispatch"
+            "delayed old-generation callback must not wake dispatch"
         );
         let history = controller
             .journal
