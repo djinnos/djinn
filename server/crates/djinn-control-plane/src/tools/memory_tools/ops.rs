@@ -22,6 +22,7 @@ use super::{
     MemoryHealthResponse, MemoryListResponse, MemoryNoteResponse, MemoryOrphansResponse,
     MemoryProposalOverview, MemoryRecallTraceResponse, MemorySearchResponse,
     MemorySearchResultItem, OrphansParams, ReadParams, RecallTraceParams, ResolvedMention,
+    MemoryRetrievalOutcomesReportResponse, RetrievalOutcomesReportParams,
     RetrievalEntryPointHealthSummary, RetrievalHealthResponse, RetrievalHealthScope, SearchParams,
     note_to_view, parse_proposal_ref_item, parse_task_ref_item,
 };
@@ -32,6 +33,13 @@ pub async fn memory_recall_trace(
 ) -> MemoryRecallTraceResponse {
     super::recall_trace::recall(server, p).await
 }
+pub async fn memory_retrieval_outcomes_report(
+    server: &DjinnMcpServer,
+    p: RetrievalOutcomesReportParams,
+) -> MemoryRetrievalOutcomesReportResponse {
+    super::retrieval_outcomes_report::report(server, p).await
+}
+
 
 fn normalize_folder_filter(folder: Option<String>) -> Option<String> {
     folder.and_then(|value| {

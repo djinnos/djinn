@@ -102,6 +102,25 @@ pub struct MemoryRecallTraceResponse {
     pub error: Option<String>,
 }
 
+/// Explicit timezone-aware half-open interval for the observational report.
+#[derive(Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RetrievalOutcomesReportParams {
+    pub project: Option<String>,
+    pub project_id: Option<String>,
+    pub start: String,
+    pub end: String,
+    pub timezone: String,
+}
+
+/// The database aggregation is returned verbatim, including every count, rate,
+/// not-applicable state, attempt distribution, and diagnostic.
+#[derive(Serialize)]
+pub struct MemoryRetrievalOutcomesReportResponse {
+    pub report: Option<djinn_db::repositories::task_run_outcome::TaskRunOutcomeReport>,
+    pub error: Option<String>,
+}
+
 #[derive(Deserialize, schemars::JsonSchema)]
 pub struct RecallTraceParams {
     pub mode: String,
