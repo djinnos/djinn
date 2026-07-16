@@ -628,3 +628,59 @@ fn test_indexed_thinking_redacted_unknown_and_tool_blocks() {
         matches!(&unknown[..], [StreamEvent::Delta(ContentBlock::Unknown { content_type, extra })] if content_type == "vendor_block" && extra["vendor_id"] == "v1" && extra["cursor"] == "next")
     );
 }
+
+#[test]
+fn test_text_content_block_start_is_not_captured_as_unknown() {
+    // A text content_block_start (always `{"type":"text","text":""}` on the
+    // wire) must not be tracked as a pending Unknown block: the captured
+    // {"type":"text","text":""} would be replayed on the next request, which
+    // strict Anthropic-compatible endpoints reject with
+    // 400 "text content is empty" (kimi-for-coding/k3 incident, 2026-07-16).
+    let mut acc = ContentBlockAcc::default();
+    let mut input_tokens = 0u32;
+    let mut cache_read = 0u32;
+    let mut cache_write = 0u32;
+    let start_events = parse_anthropic_event(
+        "content_block_start",
+        r#"{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}"#,
+        &mut acc,
+        &mut input_tokens,
+        &mut cache_read,
+        &mut cache_write,
+    );
+    assert!(start_events.is_empty());
+    assert!(acc.is_empty());
+
+    let stop_events = parse_anthropic_event(
+        "content_block_stop",
+        r#"{"type":"content_block_stop","index":0}"#,
+        &mut acc,
+        &mut input_tokens,
+        &mut cache_read,
+        &mut cache_write,
+    );
+    assert!(stop_events.is_empty());
+}
+
+#[test]
+fn test_text_content_block_start_emits_initial_fragment() {
+    // A provider that front-loads text into the start frame must not lose it.
+    let mut acc = ContentBlockAcc::default();
+    let mut input_tokens = 0u32;
+    let mut cache_read = 0u32;
+    let mut cache_write = 0u32;
+    let events = parse_anthropic_event(
+        "content_block_start",
+        r#"{"type":"content_block_start","index":0,"content_block":{"type":"text","text":"head"}}"#,
+        &mut acc,
+        &mut input_tokens,
+        &mut cache_read,
+        &mut cache_write,
+    );
+    assert_eq!(events.len(), 1);
+    match &events[0] {
+        StreamEvent::Delta(ContentBlock::Text { text }) => assert_eq!(text, "head"),
+        other => panic!("expected text delta, got {other:?}"),
+    }
+    assert!(acc.is_empty());
+}
