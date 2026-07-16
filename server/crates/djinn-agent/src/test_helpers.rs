@@ -3,6 +3,7 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex, Once};
 
 use futures::stream;
@@ -13,7 +14,10 @@ use tokio_util::sync::CancellationToken;
 use djinn_core::events::EventBus;
 use djinn_core::models::Project;
 use djinn_core::models::{Epic, Task};
-use djinn_db::{Database, EpicCreateInput, EpicRepository, ProjectRepository, TaskRepository};
+use djinn_db::{
+    Database, EffectiveCreatorProvenance, EpicCreateInput, EpicRepository, ProjectRepository,
+    TaskRepository, UserRepository,
+};
 use djinn_provider::catalog::{CatalogService, HealthTracker};
 use djinn_provider::message::{ContentBlock, Conversation};
 use djinn_provider::provider::{LlmProvider, StreamEvent, ToolChoice};
@@ -72,6 +76,22 @@ pub fn create_test_db() -> Database {
 
 pub fn test_events() -> EventBus {
     EventBus::noop()
+}
+
+static NEXT_FIXTURE_GITHUB_ID: AtomicI64 = AtomicI64::new(9_100_000_000);
+
+/// Persist a real, collision-free user for task attribution fixtures.
+pub(crate) async fn create_test_creator(db: &Database) -> djinn_db::User {
+    let github_id = NEXT_FIXTURE_GITHUB_ID.fetch_add(1, Ordering::Relaxed);
+    UserRepository::new(db.clone())
+        .upsert_from_github(
+            github_id,
+            &format!("djinn-agent-fixture-{github_id}"),
+            Some("Djinn Agent Fixture"),
+            None,
+        )
+        .await
+        .expect("failed to create test task creator")
 }
 
 pub fn agent_context_from_db(db: Database, _cancel: CancellationToken) -> AgentContext {
@@ -236,10 +256,16 @@ pub async fn create_test_epic(db: &Database, project_id: &str) -> Epic {
 
 pub async fn create_test_task(db: &Database, project_id: &str, epic_id: &str) -> Task {
     let repo = TaskRepository::new(db.clone(), test_events());
+    let creator = create_test_creator(db).await;
     let task = repo
-        .create_in_project(
+        .create_in_project_with_provenance(
             project_id,
             Some(epic_id),
+            EffectiveCreatorProvenance {
+                explicit_user_id: Some(&creator.id),
+                source_task_id: None,
+                proposal_id: None,
+            },
             "test-task",
             "test task description",
             "test task design",
