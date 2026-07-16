@@ -1,5 +1,6 @@
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { render, screen, userEvent } from "@/test/test-utils";
+import { fetchUsers, type OrgUser } from "@/api/users";
 import type {
   ProposalDebateTrailRow,
   ProposalRefinementStatus,
@@ -13,6 +14,15 @@ vi.mock("@/api/mcpClient", () => ({
   callMcpTool: vi.fn(),
 }));
 
+vi.mock("@/api/users", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/api/users")>();
+  return { ...actual, fetchUsers: vi.fn() };
+});
+
+vi.mock("@/components/AuthGate", () => ({
+  useAuthUser: () => ({ id: "current" }),
+}));
+
 vi.mock("@/lib/toast", () => ({
   showToast: {
     success: vi.fn(),
@@ -22,6 +32,17 @@ vi.mock("@/lib/toast", () => ({
 
 describe("ProposalRefinement", () => {
   const proposalId = "test-proposal-id";
+  const participantUsers: OrgUser[] = [
+    { id: "author", github_login: "author", github_name: "Author Person", github_avatar_url: null, is_member_of_org: true, is_admin: false },
+    { id: "current", github_login: "current", github_name: "Current Person", github_avatar_url: null, is_member_of_org: true, is_admin: false },
+    { id: "signer", github_login: "signer", github_name: "Signer Person", github_avatar_url: null, is_member_of_org: true, is_admin: false },
+    { id: "outsider", github_login: "outsider", github_name: "Outsider Person", github_avatar_url: null, is_member_of_org: true, is_admin: true },
+  ];
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.mocked(fetchUsers).mockResolvedValue(participantUsers);
+  });
 
   it("renders nothing when status is null and canStart is false", () => {
     const { container } = render(
@@ -46,6 +67,69 @@ describe("ProposalRefinement", () => {
     );
     expect(screen.getByText("Proposal refinement")).toBeInTheDocument();
     expect(screen.getByText("Start refinement")).toBeInTheDocument();
+  });
+
+  it("limits the owner selector to author and sign-off participants", async () => {
+    const user = userEvent.setup();
+    render(<ProposalRefinement proposalId={proposalId} status={null} authorUserId="author" signoffUserIds={["current", "signer"]} canStart={true} onChanged={vi.fn()} />);
+
+    await screen.findByText("Current Person");
+    await user.click(screen.getByRole("combobox"));
+
+    expect(screen.getByRole("option", { name: "Author Person" })).toBeInTheDocument();
+    expect(screen.getByRole("option", { name: "Current Person" })).toBeInTheDocument();
+    expect(screen.getByRole("option", { name: "Signer Person" })).toBeInTheDocument();
+    expect(screen.queryByRole("option", { name: "Outsider Person" })).not.toBeInTheDocument();
+  });
+
+  it("defaults refinement ownership to the current participant", async () => {
+    vi.mocked(callMcpTool).mockResolvedValueOnce({ refinement: { active: true } } as never);
+    const user = userEvent.setup();
+    render(<ProposalRefinement proposalId={proposalId} status={null} authorUserId="author" signoffUserIds={["current"]} canStart={true} onChanged={vi.fn()} />);
+
+    await screen.findByText("Current Person");
+    await user.click(screen.getByRole("button", { name: "Start refinement" }));
+
+    expect(callMcpTool).toHaveBeenCalledWith("proposal_refinement_start", {
+      proposal_id: proposalId,
+      owner_user_id: "current",
+    });
+  });
+
+  it("uses the first participant when the current user is not a participant", async () => {
+    vi.mocked(callMcpTool).mockResolvedValueOnce({ refinement: { active: true } } as never);
+    const user = userEvent.setup();
+    render(<ProposalRefinement proposalId={proposalId} status={null} authorUserId="author" signoffUserIds={["signer"]} canStart={true} onChanged={vi.fn()} />);
+
+    await screen.findByText("Author Person");
+    await user.click(screen.getByRole("button", { name: "Start refinement" }));
+
+    expect(callMcpTool).toHaveBeenCalledWith("proposal_refinement_start", {
+      proposal_id: proposalId,
+      owner_user_id: "author",
+    });
+  });
+
+  it("sends the participant selected in the owner selector", async () => {
+    vi.mocked(callMcpTool).mockResolvedValueOnce({ refinement: { active: true } } as never);
+    const user = userEvent.setup();
+    render(<ProposalRefinement proposalId={proposalId} status={null} authorUserId="author" signoffUserIds={["current", "signer"]} canStart={true} onChanged={vi.fn()} />);
+
+    await screen.findByText("Current Person");
+    await user.click(screen.getByRole("combobox"));
+    await user.click(screen.getByRole("option", { name: "Signer Person" }));
+    await user.click(screen.getByRole("button", { name: "Start refinement" }));
+
+    expect(callMcpTool).toHaveBeenCalledWith("proposal_refinement_start", {
+      proposal_id: proposalId,
+      owner_user_id: "signer",
+    });
+  });
+
+  it("renders the durable owner returned by refreshed refinement status", async () => {
+    render(<ProposalRefinement proposalId={proposalId} status={{ active: true, owner_user_id: "signer", current_round: 1, dry_rounds: 0, total_entries: 1, stop_reason: null }} canStart={false} onChanged={vi.fn()} />);
+
+    expect(await screen.findByText("Signer Person")).toBeInTheDocument();
   });
 
   it("renders active in-progress status panel with ribbon and metrics", () => {
@@ -299,6 +383,7 @@ describe("ProposalRefinement", () => {
       <ProposalRefinement
         proposalId={proposalId}
         status={null}
+        authorUserId="author"
         canStart={true}
         onChanged={onChanged}
       />,
@@ -308,6 +393,7 @@ describe("ProposalRefinement", () => {
 
     expect(callMcpTool).toHaveBeenCalledWith("proposal_refinement_start", {
       proposal_id: proposalId,
+      owner_user_id: "author",
     });
     expect(showToast.success).toHaveBeenCalledWith("Refinement started");
     expect(onChanged).toHaveBeenCalledTimes(1);
@@ -324,6 +410,7 @@ describe("ProposalRefinement", () => {
       <ProposalRefinement
         proposalId={proposalId}
         status={null}
+        authorUserId="author"
         canStart={true}
         onChanged={onChanged}
       />,
