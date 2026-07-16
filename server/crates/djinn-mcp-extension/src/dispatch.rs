@@ -360,6 +360,9 @@ async fn dispatch_memory_tools(
         "memory_recall_trace" => {
             Some(memory_agent::call_memory_recall_trace(ctx, args, project_ref).await)
         }
+        "memory_retrieval_outcomes_report" => {
+            Some(memory_agent::call_memory_retrieval_outcomes_report(ctx, args, project_ref).await)
+        }
         "memory_build_context" => Some(
             memory_agent::call_memory_build_context(ctx, args, session_task_id, project_ref).await,
         ),

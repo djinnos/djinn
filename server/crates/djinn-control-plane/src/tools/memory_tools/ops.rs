@@ -20,11 +20,11 @@ use super::{
     BrokenLinksParams, BuildContextParams, ExtractedAuditParams, HealthParams, ListParams,
     MemoryBrokenLinksResponse, MemoryBuildContextResponse, MemoryExtractedAuditResponse,
     MemoryHealthResponse, MemoryListResponse, MemoryNoteResponse, MemoryOrphansResponse,
-    MemoryProposalOverview, MemoryRecallTraceResponse, MemorySearchResponse,
-    MemorySearchResultItem, OrphansParams, ReadParams, RecallTraceParams, ResolvedMention,
-    MemoryRetrievalOutcomesReportResponse, RetrievalOutcomesReportParams,
-    RetrievalEntryPointHealthSummary, RetrievalHealthResponse, RetrievalHealthScope, SearchParams,
-    note_to_view, parse_proposal_ref_item, parse_task_ref_item,
+    MemoryProposalOverview, MemoryRecallTraceResponse, MemoryRetrievalOutcomesReportResponse,
+    MemorySearchResponse, MemorySearchResultItem, OrphansParams, ReadParams, RecallTraceParams,
+    ResolvedMention, RetrievalEntryPointHealthSummary, RetrievalHealthResponse,
+    RetrievalHealthScope, RetrievalOutcomesReportParams, SearchParams, note_to_view,
+    parse_proposal_ref_item, parse_task_ref_item,
 };
 
 pub async fn memory_recall_trace(
@@ -39,7 +39,6 @@ pub async fn memory_retrieval_outcomes_report(
 ) -> MemoryRetrievalOutcomesReportResponse {
     super::retrieval_outcomes_report::report(server, p).await
 }
-
 
 fn normalize_folder_filter(folder: Option<String>) -> Option<String> {
     folder.and_then(|value| {
