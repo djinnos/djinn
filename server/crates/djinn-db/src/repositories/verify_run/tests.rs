@@ -62,7 +62,248 @@ fn new_id() -> String {
     uuid::Uuid::now_v7().to_string()
 }
 
+async fn record_complete_final_pass(
+    repo: &VerifyRunRepository,
+    task_run_id: &str,
+    id: &str,
+    fingerprint: &str,
+) {
+    let required_commands = [
+        RequiredFinalVerificationCommand {
+            descriptor_id: "fmt",
+        },
+        RequiredFinalVerificationCommand {
+            descriptor_id: "test",
+        },
+    ];
+    let ordered_commands = serde_json::json!([
+        {"descriptor_id": "fmt", "result": "pass", "passed": true},
+        {"descriptor_id": "test", "result": "pass", "passed": true}
+    ]);
+    let covered_checks = serde_json::json!(["format", "tests"]);
+    let required_checks = vec!["format".to_owned(), "tests".to_owned()];
+    let environment_identity = serde_json::json!({"runner": "test"});
+
+    repo.record_eligible_final_verification_pass(RecordEligibleFinalVerificationPassParams {
+        id,
+        task_run_id,
+        verify_source: VerifySource::Ci.as_str(),
+        verify_run_id: "final-run",
+        verification_attempt_id: "attempt-1",
+        required_commands: &required_commands,
+        ordered_commands: &ordered_commands,
+        covered_checks: &covered_checks,
+        required_checks: &required_checks,
+        verification_input_fingerprint: fingerprint,
+        manifest_version: "manifest-v1",
+        environment_identity_json: &environment_identity,
+        environment_identity_digest: "identity-digest-v1",
+        environment_identity_version: "identity-v1",
+        completed_at: "2025-01-15T10:00:00.000Z",
+        diff_fingerprint: "legacy-audit-fingerprint",
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn eligible_final_pass_rejects_partial_commands_without_a_row() {
+    let db = test_db();
+    let (project_id, task_id) = create_task(&db, EventBus::noop()).await;
+    let task_run_id = create_run(&db, &project_id, &task_id).await;
+    let repo = VerifyRunRepository::new(db);
+    let id = new_id();
+    let required_commands = [RequiredFinalVerificationCommand {
+        descriptor_id: "fmt",
+    }];
+    let partial_commands = serde_json::json!([{"result": "pass", "passed": true}]);
+    let covered_checks = serde_json::json!(["format"]);
+    let required_checks = vec!["format".to_owned()];
+    let identity = serde_json::json!({"runner": "test"});
+
+    assert!(
+        repo.record_eligible_final_verification_pass(RecordEligibleFinalVerificationPassParams {
+            id: &id,
+            task_run_id: &task_run_id,
+            verify_source: VerifySource::Ci.as_str(),
+            verify_run_id: "partial-run",
+            verification_attempt_id: "partial-attempt",
+            required_commands: &required_commands,
+            ordered_commands: &partial_commands,
+            covered_checks: &covered_checks,
+            required_checks: &required_checks,
+            verification_input_fingerprint: "fingerprint-v1",
+            manifest_version: "manifest-v1",
+            environment_identity_json: &identity,
+            environment_identity_digest: "digest-v1",
+            environment_identity_version: "identity-v1",
+            completed_at: "2025-01-15T10:00:00.000Z",
+            diff_fingerprint: "audit-fingerprint",
+        })
+        .await
+        .is_err()
+    );
+    assert!(repo.get(&id).await.unwrap().is_none());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn compatible_final_pass_lookup_is_task_and_fingerprint_scoped_and_newest() {
+    let db = test_db();
+    let (project_id, task_id) = create_task(&db, EventBus::noop()).await;
+    let task_run_id = create_run(&db, &project_id, &task_id).await;
+    let (_, other_task_id) = create_task(&db, EventBus::noop()).await;
+    let other_run_id = create_run(&db, &project_id, &other_task_id).await;
+    let repo = VerifyRunRepository::new(db);
+    let first_id = new_id();
+    record_complete_final_pass(&repo, &task_run_id, &first_id, "fingerprint-v1").await;
+    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    let newest_id = new_id();
+    record_complete_final_pass(&repo, &task_run_id, &newest_id, "fingerprint-v1").await;
+    record_complete_final_pass(&repo, &other_run_id, &new_id(), "fingerprint-v1").await;
+    let required_checks = vec!["format".to_owned(), "tests".to_owned()];
+
+    let hit = repo
+        .latest_compatible_passing_final_verification(
+            &task_id,
+            "fingerprint-v1",
+            "manifest-v1",
+            "identity-v1",
+            &required_checks,
+        )
+        .await
+        .unwrap()
+        .expect("matching final pass must be reusable");
+    assert_eq!(hit.id, newest_id);
+    assert!(
+        repo.latest_compatible_passing_final_verification(
+            &task_id,
+            "fingerprint-other",
+            "manifest-v1",
+            "identity-v1",
+            &required_checks,
+        )
+        .await
+        .unwrap()
+        .is_none(),
+        "a different fingerprint on the same task must not reuse the pass"
+    );
+    assert!(
+        repo.latest_compatible_passing_final_verification(
+            &other_task_id,
+            "fingerprint-other",
+            "manifest-v1",
+            "identity-v1",
+            &required_checks,
+        )
+        .await
+        .unwrap()
+        .is_none()
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn compatible_final_pass_lookup_rejects_legacy_identity_rows() {
+    let db = test_db();
+    let (project_id, task_id) = create_task(&db, EventBus::noop()).await;
+    let task_run_id = create_run(&db, &project_id, &task_id).await;
+    let repo = VerifyRunRepository::new(db);
+    repo.create(CreateVerifyRunParams {
+        id: &new_id(),
+        task_run_id: &task_run_id,
+        verify_source: VerifySource::Ci.as_str(),
+        verify_run_id: "legacy-run",
+        command_version: Some("legacy-command"),
+        profile_version: Some("legacy-profile"),
+        completed_at: "2025-01-15T10:00:00.000Z",
+        result: VerifyResult::Pass.as_str(),
+        diff_fingerprint: "fingerprint-v1",
+        check_coverage: None,
+    })
+    .await
+    .unwrap();
+    let required_checks = vec!["format".to_owned()];
+    assert!(
+        repo.latest_compatible_passing_final_verification(
+            &task_id,
+            "fingerprint-v1",
+            "manifest-v1",
+            "identity-v1",
+            &required_checks,
+        )
+        .await
+        .unwrap()
+        .is_none()
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn compatible_final_pass_lookup_does_not_reuse_another_tasks_pass() {
+    let db = test_db();
+    let (project_id, source_task_id) = create_task(&db, EventBus::noop()).await;
+    let source_run_id = create_run(&db, &project_id, &source_task_id).await;
+    let (_, target_task_id) = create_task(&db, EventBus::noop()).await;
+    let repo = VerifyRunRepository::new(db);
+    record_complete_final_pass(&repo, &source_run_id, &new_id(), "fingerprint-v1").await;
+    let required_checks = vec!["format".to_owned(), "tests".to_owned()];
+
+    assert!(
+        repo.latest_compatible_passing_final_verification(
+            &target_task_id,
+            "fingerprint-v1",
+            "manifest-v1",
+            "identity-v1",
+            &required_checks,
+        )
+        .await
+        .unwrap()
+        .is_none()
+    );
+}
+
 // ── VerifyRunRepository tests ──────────────────────────────────────────────
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn eligible_final_pass_roundtrips_complete_generic_audit_projection() {
+    let db = test_db();
+    let (project_id, task_id) = create_task(&db, EventBus::noop()).await;
+    let task_run_id = create_run(&db, &project_id, &task_id).await;
+    let repo = VerifyRunRepository::new(db);
+    let id = new_id();
+
+    record_complete_final_pass(&repo, &task_run_id, &id, "fingerprint-v1").await;
+
+    let fetched = repo.get(&id).await.unwrap().expect("audit row must exist");
+    let expected_commands = serde_json::json!([
+        {"descriptor_id": "fmt", "result": "pass", "passed": true},
+        {"descriptor_id": "test", "result": "pass", "passed": true}
+    ]);
+    let expected_coverage = serde_json::json!(["format", "tests"]);
+    assert_eq!(fetched.source_phase.as_deref(), Some("final_verification"));
+    assert_eq!(
+        fetched.verification_attempt_id.as_deref(),
+        Some("attempt-1")
+    );
+    assert_eq!(fetched.ordered_commands.as_ref(), Some(&expected_commands));
+    assert_eq!(fetched.covered_checks.as_ref(), Some(&expected_coverage));
+    assert_eq!(fetched.check_coverage.as_ref(), Some(&expected_coverage));
+    assert_eq!(
+        fetched.verification_input_fingerprint.as_deref(),
+        Some("fingerprint-v1")
+    );
+    assert_eq!(fetched.manifest_version.as_deref(), Some("manifest-v1"));
+    assert_eq!(
+        fetched.environment_identity_json,
+        Some(serde_json::json!({"runner": "test"}))
+    );
+    assert_eq!(
+        fetched.environment_identity_digest.as_deref(),
+        Some("identity-digest-v1")
+    );
+    assert_eq!(
+        fetched.environment_identity_version.as_deref(),
+        Some("identity-v1")
+    );
+}
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn verify_run_create_and_get_roundtrips() {
@@ -98,13 +339,13 @@ async fn verify_run_create_and_get_roundtrips() {
     assert_eq!(created.completed_at, "2025-01-15T10:30:00.000Z");
     assert_eq!(created.result, VerifyResult::Pass.as_str());
     assert_eq!(created.diff_fingerprint, "abc123def456");
-    assert!(created.check_coverage.is_some());
+    assert_eq!(created.check_coverage.as_ref(), Some(&coverage));
     assert!(!created.created_at.is_empty());
 
     let fetched = repo.get(&id).await.unwrap().expect("must exist");
     assert_eq!(fetched.id, created.id);
     assert_eq!(fetched.verify_source, created.verify_source);
-    assert_eq!(fetched.check_coverage, created.check_coverage);
+    assert_eq!(fetched.check_coverage.as_ref(), Some(&coverage));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
