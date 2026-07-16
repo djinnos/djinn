@@ -1206,6 +1206,10 @@ async fn dispatcher_failures_report_one_conservative_admission_outcome() {
             "Forbidden: status code 403",
             "DefinitiveFailure { diagnostic: \"Forbidden: status code 403\" }",
         ),
+        (
+            "ApiError: NotFound (status code 404)",
+            "DefinitiveFailure { diagnostic: \"ApiError: NotFound (status code 404)\" }",
+        ),
     ] {
         let db = Database::open_in_memory().expect("in-memory db");
         let project_id = seed_project_with_ready_image(&db, "proj-admission-post-error").await;
@@ -1284,6 +1288,9 @@ async fn unconfigured_admission_fails_closed_without_posting() {
 #[test]
 fn dispatcher_error_classification_is_conservative() {
     assert!(dispatcher_error_is_definitive("Forbidden: status code 403"));
+    assert!(dispatcher_error_is_definitive(
+        "ApiError: NotFound (status code 404)"
+    ));
     assert!(!dispatcher_error_is_definitive(
         "connection reset after POST"
     ));
