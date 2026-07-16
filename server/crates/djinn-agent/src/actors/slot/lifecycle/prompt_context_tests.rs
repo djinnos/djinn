@@ -9,7 +9,8 @@ use djinn_core::extension_diagnostics::{
 };
 use djinn_core::models::ActivityEntry;
 use djinn_db::repositories::retrieval_trace::{
-    RetrievalTraceEntryPoint, RetrievalTraceListFilter, RetrievalTraceRepository,
+    RetrievalTraceEntryPoint, RetrievalTraceListFilter, RetrievalTraceOutcome,
+    RetrievalTraceRepository,
 };
 use djinn_db::{Database, EpicRepository, NoteRepository, ProposalCreateInput, ProposalRepository};
 use tokio_util::sync::CancellationToken;
@@ -266,6 +267,7 @@ fn extension_diagnostic_byte_budget_omits_complete_records() {
 
 #[tokio::test]
 async fn epic_context_omits_sections_when_no_blockers_or_proposal() {
+    let _knowledge_context_env = knowledge_context_test_env_guard();
     let db = Database::ephemeral().await.expect("create ephemeral db");
     let events = EventBus::noop();
     let task = create_project_epic_task(&db, &events, "Standalone epic", "Standalone task").await;
@@ -283,6 +285,7 @@ async fn epic_context_omits_sections_when_no_blockers_or_proposal() {
 
 #[tokio::test]
 async fn missing_activity_yields_none_activity_text() {
+    let _knowledge_context_env = knowledge_context_test_env_guard();
     let db = Database::ephemeral().await.expect("create ephemeral db");
     let events = EventBus::noop();
     let task = create_project_epic_task(&db, &events, "No-activity epic", "No-activity task").await;
@@ -294,6 +297,7 @@ async fn missing_activity_yields_none_activity_text() {
 
 #[tokio::test]
 async fn conflict_context_formats_files_and_preserves_prompt_fields() {
+    let _knowledge_context_env = knowledge_context_test_env_guard();
     let db = Database::ephemeral().await.expect("create ephemeral db");
     let events = EventBus::noop();
     let task = create_project_epic_task(&db, &events, "Conflict epic", "Conflict task").await;
@@ -316,6 +320,7 @@ async fn conflict_context_formats_files_and_preserves_prompt_fields() {
 
 #[tokio::test]
 async fn prompt_sections_append_in_canonical_order() {
+    let _knowledge_context_env = knowledge_context_test_env_guard();
     let db = Database::ephemeral().await.expect("create ephemeral db");
     let events = EventBus::noop();
     let task =
@@ -475,6 +480,7 @@ static NO_EPIC_CONFIG: crate::roles::RoleConfig = crate::roles::RoleConfig {
 
 #[tokio::test]
 async fn epic_context_not_loaded_when_role_does_not_need_it() {
+    let _knowledge_context_env = knowledge_context_test_env_guard();
     let db = Database::ephemeral().await.expect("create ephemeral db");
     let events = EventBus::noop();
     let task = create_project_epic_task(&db, &events, "Epic", "Task").await;
@@ -488,6 +494,7 @@ async fn epic_context_not_loaded_when_role_does_not_need_it() {
 
 #[tokio::test]
 async fn load_epic_context_returns_context_when_epic_exists() {
+    let _knowledge_context_env = knowledge_context_test_env_guard();
     let db = Database::ephemeral().await.expect("create ephemeral db");
     let events = EventBus::noop();
     let task = create_project_epic_task(&db, &events, "Test Epic Title", "Test task").await;
@@ -508,6 +515,7 @@ async fn load_epic_context_returns_context_when_epic_exists() {
 
 #[tokio::test]
 async fn load_knowledge_context_returns_none_when_no_notes() {
+    let _knowledge_context_env = knowledge_context_test_env_guard();
     let db = Database::ephemeral().await.expect("create ephemeral db");
     let events = EventBus::noop();
     let task =
@@ -522,6 +530,7 @@ async fn load_knowledge_context_returns_none_when_no_notes() {
 
 #[tokio::test]
 async fn load_epic_context_includes_blocker_and_sibling_sections_in_order() {
+    let _knowledge_context_env = knowledge_context_test_env_guard();
     let db = Database::ephemeral().await.expect("create ephemeral db");
     let events = EventBus::noop();
     let project = create_test_project(&db).await;
@@ -673,6 +682,7 @@ fn resume_metadata_with_auto_submit() -> djinn_runtime::ResumeLifecycleMetadata 
 
 #[tokio::test]
 async fn worker_resume_note_injected_for_worker_role() {
+    let _knowledge_context_env = knowledge_context_test_env_guard();
     let db = Database::ephemeral().await.expect("create ephemeral db");
     let events = EventBus::noop();
     let task = create_project_epic_task(&db, &events, "Resume epic", "Resume task").await;
@@ -704,6 +714,7 @@ async fn worker_resume_note_injected_for_worker_role() {
 
 #[tokio::test]
 async fn worker_resume_note_included_for_auto_submit_source() {
+    let _knowledge_context_env = knowledge_context_test_env_guard();
     let db = Database::ephemeral().await.expect("create ephemeral db");
     let events = EventBus::noop();
     let _task =
@@ -848,6 +859,7 @@ fn worker_resume_note_failover_only_produces_note() {
 
 #[tokio::test]
 async fn empty_mcp_instructions_omits_section_from_prompt() {
+    let _knowledge_context_env = knowledge_context_test_env_guard();
     let db = Database::ephemeral().await.expect("create ephemeral db");
     let events = EventBus::noop();
     let task = create_project_epic_task(&db, &events, "No MCP epic", "No MCP task").await;
@@ -861,6 +873,7 @@ async fn empty_mcp_instructions_omits_section_from_prompt() {
 
 #[tokio::test]
 async fn single_server_instructions_rendered_in_prompt() {
+    let _knowledge_context_env = knowledge_context_test_env_guard();
     let db = Database::ephemeral().await.expect("create ephemeral db");
     let events = EventBus::noop();
     let task = create_project_epic_task(&db, &events, "MCP epic", "MCP task").await;
@@ -882,6 +895,7 @@ async fn single_server_instructions_rendered_in_prompt() {
 
 #[tokio::test]
 async fn multiple_servers_rendered_in_deterministic_name_order() {
+    let _knowledge_context_env = knowledge_context_test_env_guard();
     let db = Database::ephemeral().await.expect("create ephemeral db");
     let events = EventBus::noop();
     let task = create_project_epic_task(&db, &events, "Multi MCP epic", "Multi MCP task").await;
@@ -963,6 +977,7 @@ fn format_mcp_instructions_renders_sorted_subsections() {
 /// final prompt must always render sections in template order.
 #[tokio::test]
 async fn prompt_sections_in_template_order_when_all_populated() {
+    let _knowledge_context_env = knowledge_context_test_env_guard();
     let db = Database::ephemeral().await.expect("create ephemeral db");
     let events = EventBus::noop();
     let task = create_project_epic_task(&db, &events, "Ordering epic", "Ordering task").await;
@@ -996,6 +1011,7 @@ async fn prompt_sections_in_template_order_when_all_populated() {
 /// nondeterminism introduced by concurrent phases.
 #[tokio::test]
 async fn concurrent_assembly_is_deterministic() {
+    let _knowledge_context_env = knowledge_context_test_env_guard();
     let db = Database::ephemeral().await.expect("create ephemeral db");
     let events = EventBus::noop();
     let task = create_project_epic_task(&db, &events, "Determinism epic", "Determinism task").await;
@@ -1064,6 +1080,7 @@ async fn concurrent_assembly_is_deterministic() {
 /// still completes without error and all optional fields are None.
 #[tokio::test]
 async fn concurrent_assembly_empty_contexts_yield_none_fields() {
+    let _knowledge_context_env = knowledge_context_test_env_guard();
     let db = Database::ephemeral().await.expect("create ephemeral db");
     let events = EventBus::noop();
     // Create a standalone task with no epic (epic_context will be empty)
@@ -1249,6 +1266,7 @@ fn non_worker_roles_omit_resume_note_even_with_full_metadata() {
 /// final rendered prompt for the worker role.
 #[tokio::test]
 async fn resume_note_appears_in_rendered_prompt_for_worker() {
+    let _knowledge_context_env = knowledge_context_test_env_guard();
     let db = Database::ephemeral().await.expect("create ephemeral db");
     let events = EventBus::noop();
     let task = create_project_epic_task(&db, &events, "Pipeline epic", "Pipeline task").await;
@@ -1310,6 +1328,7 @@ async fn resume_note_appears_in_rendered_prompt_for_worker() {
 /// be for non-worker roles), the Resume Context section does not appear.
 #[tokio::test]
 async fn non_worker_role_prompt_omits_resume_context_section() {
+    let _knowledge_context_env = knowledge_context_test_env_guard();
     let db = Database::ephemeral().await.expect("create ephemeral db");
     let events = EventBus::noop();
     let task = create_project_epic_task(&db, &events, "No-resume epic", "No-resume task").await;
@@ -1330,6 +1349,7 @@ async fn non_worker_role_prompt_omits_resume_context_section() {
 /// appear in the correct template order: CI blocking before resume context.
 #[tokio::test]
 async fn ci_blocking_appears_before_resume_context_in_prompt() {
+    let _knowledge_context_env = knowledge_context_test_env_guard();
     let db = Database::ephemeral().await.expect("create ephemeral db");
     let events = EventBus::noop();
     let task = create_project_epic_task(&db, &events, "Order epic", "Order task").await;
@@ -1395,6 +1415,7 @@ async fn ci_blocking_appears_before_resume_context_in_prompt() {
 /// prompt. This guards the phase 2 concurrent join ordering.
 #[tokio::test]
 async fn activity_section_appears_after_knowledge_and_code_graph() {
+    let _knowledge_context_env = knowledge_context_test_env_guard();
     let db = Database::ephemeral().await.expect("create ephemeral db");
     let events = EventBus::noop();
     let task =
@@ -1480,6 +1501,7 @@ fn resume_note_checkpoint_takes_precedence_over_submit() {
 /// Context marker to verify it participates in the canonical ordering too.
 #[tokio::test]
 async fn resume_context_section_in_canonical_order_with_skills_and_sources() {
+    let _knowledge_context_env = knowledge_context_test_env_guard();
     let db = Database::ephemeral().await.expect("create ephemeral db");
     let events = EventBus::noop();
     let task = create_project_epic_task(&db, &events, "Full order epic", "Full order task").await;
@@ -1554,6 +1576,7 @@ async fn resume_context_section_in_canonical_order_with_skills_and_sources() {
 /// selection reason when a safe checkpoint is selected.
 #[tokio::test]
 async fn resume_context_renders_attempt_and_discontinuity_fields() {
+    let _knowledge_context_env = knowledge_context_test_env_guard();
     let db = Database::ephemeral().await.expect("create ephemeral db");
     let events = EventBus::noop();
     let task =
@@ -1733,6 +1756,7 @@ fn preservation_no_replay_clean_fallback_renders_fallback_source() {
 /// Running twice with identical inputs produces identical prompts.
 #[tokio::test]
 async fn resume_context_deterministic_with_discontinuity_metadata() {
+    let _knowledge_context_env = knowledge_context_test_env_guard();
     let db = Database::ephemeral().await.expect("create ephemeral db");
     let events = EventBus::noop();
     let task = create_project_epic_task(&db, &events, "Determinism epic", "Determinism task").await;
@@ -1819,6 +1843,7 @@ async fn resume_context_deterministic_with_discontinuity_metadata() {
 // standalone `tokio::join!` timing tests or telemetry-facade-only tests.
 
 mod prompt_context_instrumentation_tests {
+    use super::super::knowledge_context_test_env_guard;
     use super::super::test_support::{assemble_for_role, create_project_epic_task};
     use crate::roles::WorkerRole;
     use djinn_core::events::EventBus;
@@ -1841,6 +1866,7 @@ mod prompt_context_instrumentation_tests {
     /// should have a non-empty `system_prompt` and valid fields.
     #[tokio::test]
     async fn assemble_prompt_context_emits_total_and_child_span_metrics() {
+        let _knowledge_context_env = knowledge_context_test_env_guard();
         // Initialize telemetry under the guard, then drop before async work
         // to avoid holding a std::sync::Mutex across await points.
         {
@@ -2016,6 +2042,7 @@ macro_rules! planner_assembly_inputs {
 
 #[tokio::test]
 async fn planner_production_boundary_enabled_assembly_injects_and_attributes_trace() {
+    let _knowledge_context_env = knowledge_context_test_env_guard();
     let db = Database::ephemeral().await.expect("ephemeral db");
     let events = EventBus::noop();
     let mut task = create_project_epic_task(&db, &events, "Planner epic", "Planner title").await;
@@ -2135,6 +2162,7 @@ async fn planner_production_boundary_enabled_assembly_injects_and_attributes_tra
 
 #[tokio::test]
 async fn planner_production_boundary_disabled_is_byte_identical_and_does_no_host_or_search_work() {
+    let _knowledge_context_env = knowledge_context_test_env_guard();
     let db = Database::ephemeral().await.expect("ephemeral db");
     let events = EventBus::noop();
     let mut task = create_project_epic_task(&db, &events, "Planner epic", "Planner task").await;
@@ -2177,6 +2205,7 @@ async fn planner_production_boundary_disabled_is_byte_identical_and_does_no_host
 
 #[tokio::test]
 async fn planner_production_boundary_empty_host_payload_is_scope_only_without_search() {
+    let _knowledge_context_env = knowledge_context_test_env_guard();
     let db = Database::ephemeral().await.expect("ephemeral db");
     let events = EventBus::noop();
     let mut task = create_project_epic_task(&db, &events, "Planner epic", "Planner task").await;
@@ -2219,6 +2248,7 @@ async fn planner_production_boundary_empty_host_payload_is_scope_only_without_se
 
 #[tokio::test]
 async fn planner_production_boundary_scope_budget_runs_planner_without_injection() {
+    let _knowledge_context_env = knowledge_context_test_env_guard();
     let db = Database::ephemeral().await.expect("ephemeral db");
     let events = EventBus::noop();
     let mut task = create_project_epic_task(&db, &events, "Planner epic", "Planner task").await;
@@ -2290,6 +2320,7 @@ async fn planner_production_boundary_scope_budget_runs_planner_without_injection
 
 #[tokio::test]
 async fn planner_production_boundary_scope_first_dedup_caps_and_order_are_deterministic() {
+    let _knowledge_context_env = knowledge_context_test_env_guard();
     let db = Database::ephemeral().await.expect("ephemeral db");
     let events = EventBus::noop();
     let mut task = create_project_epic_task(&db, &events, "Planner epic", "Planner task").await;
@@ -2434,4 +2465,150 @@ async fn planner_production_boundary_scope_first_dedup_caps_and_order_are_determ
     }
     assert_eq!(host.requests.lock().expect("host work").len(), 2);
     assert_eq!(search.requests.lock().expect("search work").len(), 6);
+}
+
+async fn latest_knowledge_trace_for_assembly(
+    db: &Database,
+    project_id: &str,
+) -> djinn_db::repositories::retrieval_trace::RetrievalTraceRow {
+    RetrievalTraceRepository::new(db.clone())
+        .list_by_project(
+            project_id,
+            RetrievalTraceListFilter {
+                entry_point: Some(RetrievalTraceEntryPoint::LoadKnowledgeContext),
+                limit: Some(1),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("list knowledge traces")
+        .into_iter()
+        .next()
+        .expect("knowledge trace")
+}
+
+async fn assembly_with_rollout(db: Database, task: &Task, role: &dyn AgentRole) -> PromptContext {
+    assemble_for_role(db, task, role, None, "", &[], &[]).await
+}
+
+#[tokio::test]
+async fn assembly_rollout_default_enabled_and_cohort_persist_effective_labels() {
+    let mut env = knowledge_context_test_env_guard();
+    env.clear();
+    let db = Database::ephemeral().await.expect("ephemeral db");
+    let events = EventBus::noop();
+    let task = create_project_epic_task(&db, &events, "Rollout epic", "Rollout task").await;
+    let note_repo = NoteRepository::new(db.clone(), EventBus::noop());
+    let note = note_repo
+        .create(
+            &task.project_id,
+            "Assembly knowledge",
+            "content",
+            "pattern",
+            "[]",
+        )
+        .await
+        .expect("seed note");
+    note_repo
+        .set_confidence(&note.id, 0.9)
+        .await
+        .expect("set confidence");
+    let role = LeadRole;
+
+    let default_context = assembly_with_rollout(db.clone(), &task, &role).await;
+    assert!(
+        default_context.knowledge_context.is_some(),
+        "default remains enabled"
+    );
+    let default_trace = latest_knowledge_trace_for_assembly(&db, &task.project_id).await;
+    assert_eq!(default_trace.rollout_label, "enabled");
+    assert_eq!(default_trace.outcome, RetrievalTraceOutcome::Injected);
+
+    env.set_rollout("cohort:Blue Canary");
+    let cohort_context = assembly_with_rollout(db.clone(), &task, &role).await;
+    assert!(
+        cohort_context.knowledge_context.is_some(),
+        "cohort injects every session"
+    );
+    let cohort_trace = latest_knowledge_trace_for_assembly(&db, &task.project_id).await;
+    assert_eq!(cohort_trace.rollout_label, "cohort:Blue Canary");
+    assert_eq!(cohort_trace.outcome, RetrievalTraceOutcome::Injected);
+}
+
+#[tokio::test]
+async fn assembly_rollout_disabled_modes_omit_context_and_persist_suppression() {
+    let mut env = knowledge_context_test_env_guard();
+    let role = LeadRole;
+    for (rollout, legacy, label, outcome) in [
+        (Some("off"), None, "off", RetrievalTraceOutcome::DisabledOff),
+        (
+            Some("kill_switch"),
+            None,
+            "kill_switch",
+            RetrievalTraceOutcome::DisabledKillSwitch,
+        ),
+        (
+            None,
+            Some("0"),
+            "legacy_disabled",
+            RetrievalTraceOutcome::DisabledLegacy,
+        ),
+    ] {
+        env.clear();
+        if let Some(value) = rollout {
+            env.set_rollout(value);
+        }
+        if let Some(value) = legacy {
+            env.set_legacy(value);
+        }
+        let db = Database::ephemeral().await.expect("ephemeral db");
+        let events = EventBus::noop();
+        let task =
+            create_project_epic_task(&db, &events, "Suppression epic", "Suppression task").await;
+        let context = assembly_with_rollout(db.clone(), &task, &role).await;
+        assert!(
+            context.knowledge_context.is_none(),
+            "{label} omits knowledge context"
+        );
+        let trace = latest_knowledge_trace_for_assembly(&db, &task.project_id).await;
+        assert_eq!(trace.rollout_label, label);
+        assert_eq!(trace.outcome, outcome);
+        assert_eq!(trace.estimated_injected_tokens, 0);
+        assert!(trace.candidates_typed().is_empty());
+        assert_eq!(trace.task_id.as_deref(), Some(task.id.as_str()));
+    }
+}
+
+#[tokio::test]
+async fn assembly_suppression_write_failure_leaves_prompt_unchanged() {
+    let mut env = knowledge_context_test_env_guard();
+    env.clear();
+    env.set_rollout("off");
+    let role = LeadRole;
+    let db = Database::ephemeral().await.expect("ephemeral db");
+    let events = EventBus::noop();
+    let task = create_project_epic_task(&db, &events, "Failure epic", "Failure task").await;
+    let expected = assembly_with_rollout(db.clone(), &task, &role).await;
+    djinn_db::test_support::drop_table_for_test(&db, "retrieval_traces").await;
+    let actual = assembly_with_rollout(db, &task, &role).await;
+    assert_eq!(actual.knowledge_context, expected.knowledge_context);
+    let normalize_test_worktree = |prompt: &str| {
+        let workspace_line = prompt
+            .lines()
+            .find(|line| line.starts_with("- **Active workspace:** `"))
+            .expect("active workspace line");
+        assert!(
+            workspace_line.contains("prompt-context-worktree-"),
+            "only the randomized test worktree may differ: {workspace_line}"
+        );
+        prompt.replacen(
+            workspace_line,
+            "- **Active workspace:** `<test-worktree>`",
+            1,
+        )
+    };
+    assert_eq!(
+        normalize_test_worktree(&actual.system_prompt),
+        normalize_test_worktree(&expected.system_prompt)
+    );
 }

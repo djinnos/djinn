@@ -7,7 +7,7 @@
 use super::*;
 use crate::actors::slot::lifecycle::{
     mcp_resolve::persist_load_diagnostics,
-    prompt_context::{ReadSourceInfo, test_support},
+    prompt_context::{ReadSourceInfo, knowledge_context_test_env_guard, test_support},
 };
 use crate::roles::LeadRole;
 use crate::skills::ResolvedSkill;
@@ -102,6 +102,7 @@ async fn diagnostics_entry_point_keeps_runtime_disconnect_invocation_and_refresh
         slug: "existing-source".to_owned(),
         name: "Existing source".to_owned(),
     }];
+    let _knowledge_context_env = knowledge_context_test_env_guard();
     let prompt = test_support::assemble_for_role_with_extension_diagnostics(
         app_state.db.clone(),
         &task,
