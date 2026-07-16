@@ -417,10 +417,16 @@ mod tests {
         .await
         .unwrap();
 
+        let creator = crate::test_helpers::create_test_creator(&harness.db).await;
         let task = task_repo
-            .create_in_project(
+            .create_in_project_with_provenance(
                 &project.id,
                 None,
+                EffectiveCreatorProvenance {
+                    explicit_user_id: Some(&creator.id),
+                    source_task_id: None,
+                    proposal_id: None,
+                },
                 "Empty Memory Task",
                 "No refs",
                 "",
