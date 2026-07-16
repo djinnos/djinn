@@ -9,6 +9,7 @@ doctest = false
 
 [dependencies]
 djinn-core = { path = "../djinn-core" }
+globset.workspace = true
 anyhow = "1"
 git2 = "0.20"
 libc = "0.2"
