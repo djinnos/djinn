@@ -24,7 +24,7 @@ use std::path::{Path, PathBuf};
 
 use sha2::{Digest, Sha256};
 
-use crate::{CommandOutput, GitError, run_git_command, run_git_command_allow_failure};
+use crate::{CommandOutput, GitError, run_git_command_allow_failure, run_git_command_binary_in};
 
 // ─── Constants ──────────────────────────────────────────────────────────────
 
@@ -309,16 +309,16 @@ pub async fn compute_verification_input_fingerprint_with_config(
 
     // ── Collect index entries ───────────────────────────────────────────────
     let index_output =
-        git_stdout(worktree, vec!["ls-files".into(), "-s".into(), "-z".into()]).await?;
+        git_binary_stdout(worktree, vec!["ls-files".into(), "-s".into(), "-z".into()]).await?;
     let mut index_entries = parse_index_entries(&index_output);
 
     // Validate index modes before hashing.
     for entry in &index_entries {
-        if !is_supported_blob_mode(&entry.mode) {
+        if !is_supported_index_mode(&entry.mode) {
             return Ok(VerificationInputFingerprint::Unavailable(
                 VerificationInputUnavailable::UnsupportedIndexMode {
-                    path: entry.path.clone(),
-                    mode: entry.mode.clone(),
+                    path: lossy_path(&entry.path),
+                    mode: lossy_path(&entry.mode),
                 },
             ));
         }
@@ -348,9 +348,9 @@ pub async fn compute_verification_input_fingerprint_with_config(
     }
 
     // ── Build canonical stream ──────────────────────────────────────────────
-    index_entries.sort_by(|a, b| a.path.as_bytes().cmp(b.path.as_bytes()));
-    tracked_states.sort_by(|a, b| a.path.as_bytes().cmp(b.path.as_bytes()));
-    extra_states.sort_by(|a, b| a.path.as_bytes().cmp(b.path.as_bytes()));
+    index_entries.sort_by(|a, b| a.path.cmp(&b.path));
+    tracked_states.sort_by(|a, b| a.path.cmp(&b.path));
+    extra_states.sort_by(|a, b| a.path.cmp(&b.path));
 
     let tracked_count = tracked_states.len() as u64;
     let extra_count = extra_states.len() as u64;
@@ -381,10 +381,13 @@ pub async fn compute_verification_input_fingerprint_with_config(
 
 // ─── Internal: git command helpers ──────────────────────────────────────────
 
-async fn git_stdout(worktree: &Path, args: Vec<String>) -> Result<String, GitError> {
-    run_git_command(PathBuf::from(worktree), args)
-        .await
-        .map(|output| output.stdout)
+async fn git_binary_stdout(worktree: &Path, args: Vec<String>) -> Result<Vec<u8>, GitError> {
+    let worktree = worktree.to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        run_git_command_binary_in(&worktree, args).map(|output| output.stdout)
+    })
+    .await
+    .map_err(|e| GitError::Io(std::io::Error::other(e.to_string())))?
 }
 
 async fn git_allow_failure(worktree: &Path, args: Vec<String>) -> Result<CommandOutput, GitError> {
@@ -458,9 +461,10 @@ async fn try_merge_base(
 /// One entry from `git ls-files -s -z`.
 #[derive(Debug, Clone)]
 struct IndexEntry {
-    path: String,
-    /// Raw mode string, e.g. `"100644"`, `"100755"`, `"160000"`.
-    mode: String,
+    /// Repository-relative path as raw bytes (not lossy-decoded).
+    path: Vec<u8>,
+    /// Raw mode string, e.g. `b"100644"`, `b"100755"`, `b"120000"`, `b"160000"`.
+    mode: Vec<u8>,
     /// Index stage (0 = normal, nonzero = conflict).
     stage: u32,
     /// 40-character blob SHA hex.
@@ -471,25 +475,38 @@ struct IndexEntry {
 ///
 /// Each NUL-delimited record has the format:
 /// `"<mode> <sha> <stage>\t<path>"`
-fn parse_index_entries(output: &str) -> Vec<IndexEntry> {
+///
+/// Operates on raw bytes so that non-UTF-8 paths are preserved exactly as Git
+/// emitted them — never lossy-decoded.
+fn parse_index_entries(output: &[u8]) -> Vec<IndexEntry> {
     let mut entries = Vec::new();
-    for record in output.split('\0') {
+    for record in output.split(|&b| b == 0) {
         if record.is_empty() {
             continue;
         }
-        let Some((metadata, path)) = record.split_once('\t') else {
+        // The tab separates metadata from the path.
+        let Some(tab_pos) = record.iter().position(|&b| b == b'\t') else {
             continue;
         };
-        let parts: Vec<&str> = metadata.splitn(3, ' ').collect();
-        if parts.len() != 3 {
+        let metadata = &record[..tab_pos];
+        let path = &record[tab_pos + 1..];
+
+        // Split metadata into three space-delimited fields: mode, sha, stage.
+        let mut parts = metadata.splitn(3, |&b| b == b' ');
+        let Some(mode) = parts.next() else { continue };
+        let Some(blob_sha) = parts.next() else {
             continue;
-        }
-        let mode = parts[0].to_string();
-        let blob_sha = parts[1].to_string();
-        let stage = parts[2].parse::<u32>().unwrap_or(0);
+        };
+        let Some(stage) = parts.next() else { continue };
+
+        let blob_sha = std::str::from_utf8(blob_sha).unwrap_or("").to_string();
+        let stage = std::str::from_utf8(stage)
+            .ok()
+            .and_then(|s| s.parse::<u32>().ok())
+            .unwrap_or(0);
         entries.push(IndexEntry {
-            path: path.to_string(),
-            mode,
+            path: path.to_vec(),
+            mode: mode.to_vec(),
             stage,
             blob_sha,
         });
@@ -497,10 +514,14 @@ fn parse_index_entries(output: &str) -> Vec<IndexEntry> {
     entries
 }
 
-/// `true` for regular blob index modes (100644 / 100755).
-/// Gitlinks (160000) and tree modes (040000) are unsupported in V1.
-fn is_supported_blob_mode(mode: &str) -> bool {
-    matches!(mode, "100644" | "100755")
+/// `true` for supported blob/symlink index modes.
+///
+/// Regular blobs: `100644` (normal) and `100755` (executable).
+/// Symlinks: `120000`.
+/// Gitlinks/submodules (`160000`) and tree modes (`040000`) are unsupported
+/// in V1 — they cause identity to become unavailable.
+fn is_supported_index_mode(mode: &[u8]) -> bool {
+    matches!(mode, b"100644" | b"100755" | b"120000")
 }
 
 // ─── Internal: worktree entry classification ────────────────────────────────
@@ -508,7 +529,8 @@ fn is_supported_blob_mode(mode: &str) -> bool {
 /// Classified state of a single worktree entry for the canonical stream.
 #[derive(Debug, Clone)]
 struct WorktreeState {
-    path: String,
+    /// Repository-relative path as raw bytes (not lossy-decoded).
+    path: Vec<u8>,
     type_tag: &'static [u8],
     mode_tag: &'static [u8],
     /// File content for regular files, symlink target bytes for symlinks,
@@ -516,7 +538,32 @@ struct WorktreeState {
     content: Vec<u8>,
 }
 
-/// Classify a worktree entry at `worktree/path` and read its raw bytes.
+/// Convert raw path bytes into a platform path component without lossy UTF-8
+/// conversion.
+///
+/// On Unix, paths are arbitrary byte sequences; on non-Unix platforms we fall
+/// back to lossy decoding (the common case still works).
+fn path_from_bytes(bytes: &[u8]) -> std::path::PathBuf {
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        std::ffi::OsStr::from_bytes(bytes).into()
+    }
+    #[cfg(not(unix))]
+    {
+        std::path::PathBuf::from(String::from_utf8_lossy(bytes).into_owned())
+    }
+}
+
+/// Lossy-display a raw path bytes slice for error messages.
+fn lossy_path(bytes: &[u8]) -> String {
+    String::from_utf8_lossy(bytes).into_owned()
+}
+
+/// Classify a worktree entry at `worktree/rel_path` and read its raw bytes.
+///
+/// `rel_path` is raw bytes to preserve non-UTF-8 filenames. The resulting
+/// [`WorktreeState`] stores the same raw bytes.
 ///
 /// When `is_extra` is `false` (tracked file), a missing entry is recorded as
 /// [`TYPE_MISSING`] — a valid deterministic state (the file was deleted from
@@ -524,21 +571,21 @@ struct WorktreeState {
 /// entry is a traversal-race failure ([`VerificationInputUnavailable`]).
 fn classify_worktree_entry(
     worktree: &Path,
-    rel_path: &str,
+    rel_path: &[u8],
     is_extra: bool,
 ) -> Result<WorktreeState, VerificationInputUnavailable> {
-    let full_path = worktree.join(rel_path);
+    let full_path = worktree.join(path_from_bytes(rel_path));
 
     let metadata = match std::fs::symlink_metadata(&full_path) {
         Ok(m) => m,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             if is_extra {
                 return Err(VerificationInputUnavailable::MissingExtraEntry {
-                    path: rel_path.to_string(),
+                    path: lossy_path(rel_path),
                 });
             }
             return Ok(WorktreeState {
-                path: rel_path.to_string(),
+                path: rel_path.to_vec(),
                 type_tag: TYPE_MISSING,
                 mode_tag: MODE_NORMAL,
                 content: Vec::new(),
@@ -546,7 +593,7 @@ fn classify_worktree_entry(
         }
         Err(e) => {
             return Err(VerificationInputUnavailable::UnreadableFile {
-                path: rel_path.to_string(),
+                path: lossy_path(rel_path),
                 error: e.to_string(),
             });
         }
@@ -557,12 +604,12 @@ fn classify_worktree_entry(
     if file_type.is_symlink() {
         let target = std::fs::read_link(&full_path).map_err(|e| {
             VerificationInputUnavailable::UnreadableFile {
-                path: rel_path.to_string(),
+                path: lossy_path(rel_path),
                 error: e.to_string(),
             }
         })?;
         return Ok(WorktreeState {
-            path: rel_path.to_string(),
+            path: rel_path.to_vec(),
             type_tag: TYPE_SYMLINK,
             mode_tag: MODE_NORMAL,
             content: symlink_target_bytes(&target),
@@ -572,12 +619,12 @@ fn classify_worktree_entry(
     if file_type.is_file() {
         let content = std::fs::read(&full_path).map_err(|e| {
             VerificationInputUnavailable::UnreadableFile {
-                path: rel_path.to_string(),
+                path: lossy_path(rel_path),
                 error: e.to_string(),
             }
         })?;
         return Ok(WorktreeState {
-            path: rel_path.to_string(),
+            path: rel_path.to_vec(),
             type_tag: TYPE_REGULAR,
             mode_tag: if is_executable(&metadata) {
                 MODE_EXEC
@@ -591,14 +638,16 @@ fn classify_worktree_entry(
     // Remaining types: directory, FIFO, socket, block/char device.
     let kind = entry_kind_label(&file_type);
     Err(VerificationInputUnavailable::UnsupportedSpecialFile {
-        path: rel_path.to_string(),
+        path: lossy_path(rel_path),
         kind,
     })
 }
 
 /// Collect all untracked and ignored paths (deduplicated, not yet sorted).
-async fn collect_extra_paths(worktree: &Path) -> Result<Vec<String>, VerificationInputError> {
-    let untracked = git_stdout(
+///
+/// Uses the raw-byte git helper so non-UTF-8 path bytes are preserved exactly.
+async fn collect_extra_paths(worktree: &Path) -> Result<Vec<Vec<u8>>, VerificationInputError> {
+    let untracked = git_binary_stdout(
         worktree,
         vec![
             "ls-files".into(),
@@ -608,7 +657,7 @@ async fn collect_extra_paths(worktree: &Path) -> Result<Vec<String>, Verificatio
         ],
     )
     .await?;
-    let ignored = git_stdout(
+    let ignored = git_binary_stdout(
         worktree,
         vec![
             "ls-files".into(),
@@ -620,19 +669,19 @@ async fn collect_extra_paths(worktree: &Path) -> Result<Vec<String>, Verificatio
     )
     .await?;
 
-    let mut paths: Vec<String> = Vec::new();
-    paths.extend(split_nul_paths(&untracked));
-    paths.extend(split_nul_paths(&ignored));
+    let mut paths: Vec<Vec<u8>> = Vec::new();
+    paths.extend(split_nul_paths_bytes(&untracked));
+    paths.extend(split_nul_paths_bytes(&ignored));
     paths.sort();
     paths.dedup();
     Ok(paths)
 }
 
-fn split_nul_paths(output: &str) -> Vec<String> {
+fn split_nul_paths_bytes(output: &[u8]) -> Vec<Vec<u8>> {
     output
-        .split('\0')
+        .split(|&b| b == 0)
         .filter(|p| !p.is_empty())
-        .map(ToOwned::to_owned)
+        .map(|p| p.to_vec())
         .collect()
 }
 
@@ -739,8 +788,8 @@ impl CanonicalStream {
     fn write_index_entries(&mut self, entries: &[IndexEntry]) {
         self.u64(entries.len() as u64);
         for entry in entries {
-            self.field(entry.path.as_bytes());
-            self.field(entry.mode.as_bytes());
+            self.field(&entry.path);
+            self.field(&entry.mode);
             self.u32(entry.stage);
             self.field(entry.blob_sha.as_bytes());
         }
@@ -752,7 +801,7 @@ impl CanonicalStream {
     fn write_worktree_states(&mut self, states: &[WorktreeState]) {
         self.u64(states.len() as u64);
         for state in states {
-            self.field(state.path.as_bytes());
+            self.field(&state.path);
             self.field(state.type_tag);
             self.field(state.mode_tag);
             self.field(&state.content);
@@ -975,6 +1024,80 @@ mod tests {
         );
     }
 
+    // ── Tracked symlink (index mode 120000) ──────────────────────────────────
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[cfg(unix)]
+    async fn tracked_symlink_produces_available_digest_and_alters_on_change() {
+        let fixture = init_repo_with_main_commit();
+        write_str(fixture.path(), "target_a.txt", "a\n");
+        write_str(fixture.path(), "target_b.txt", "b\n");
+
+        // Create and commit a symlink so it is tracked with index mode 120000.
+        std::os::unix::fs::symlink("target_a.txt", fixture.path().join("tracked_link"))
+            .expect("create symlink");
+        git(fixture.path(), ["add", "tracked_link"]);
+        git(fixture.path(), ["commit", "-m", "add tracked symlink"]);
+
+        // The tracked symlink must produce an Available digest (not
+        // UnsupportedIndexMode).
+        let before = match fingerprint(fixture.path()).await {
+            VerificationInputFingerprint::Available(d) => d,
+            VerificationInputFingerprint::Unavailable(reason) => {
+                panic!("tracked symlink should produce Available, got: {reason}")
+            }
+        };
+
+        // Repoint the tracked symlink target — the worktree symlink state
+        // changes and the digest must change too.
+        std::fs::remove_file(fixture.path().join("tracked_link")).unwrap();
+        std::os::unix::fs::symlink("target_b.txt", fixture.path().join("tracked_link"))
+            .expect("recreate tracked symlink");
+
+        let after = digest(fingerprint(fixture.path()).await);
+
+        assert_ne!(
+            before.fingerprint, after.fingerprint,
+            "tracked symlink target change must alter digest"
+        );
+    }
+
+    // ── Non-UTF-8 pathname is preserved in the stream ───────────────────────
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[cfg(unix)]
+    async fn non_utf8_pathname_is_preserved_and_alters_digest() {
+        // A file with a raw 0xFF byte in its name is not valid UTF-8.
+        // It must not be silently mangled by lossy conversion.
+        let fixture = init_repo_with_main_commit();
+
+        // Create an untracked file with a non-UTF-8 name.
+        let non_utf8_name: &[u8] = b"bad\xffname.txt";
+        {
+            use std::os::unix::ffi::OsStrExt;
+            let os_name = std::ffi::OsStr::from_bytes(non_utf8_name);
+            let path = fixture.path().join(os_name);
+            std::fs::write(&path, b"content\n").expect("write non-utf8 named file");
+        }
+
+        let before = digest(fingerprint(fixture.path()).await);
+
+        // Change the content under the same non-UTF-8 name.
+        {
+            use std::os::unix::ffi::OsStrExt;
+            let os_name = std::ffi::OsStr::from_bytes(non_utf8_name);
+            let path = fixture.path().join(os_name);
+            std::fs::write(&path, b"changed\n").expect("rewrite non-utf8 named file");
+        }
+
+        let after = digest(fingerprint(fixture.path()).await);
+
+        assert_ne!(
+            before.fingerprint, after.fingerprint,
+            "content change under a non-UTF-8 path must alter digest"
+        );
+    }
+
     // ── Both untracked and ignored are included ─────────────────────────────
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1094,7 +1217,7 @@ mod tests {
         // Manually call the internal classifier after deleting the file to
         // simulate a traversal race.
         std::fs::remove_file(fixture.path().join("ephemeral.txt")).unwrap();
-        let result = classify_worktree_entry(fixture.path(), "ephemeral.txt", true);
+        let result = classify_worktree_entry(fixture.path(), b"ephemeral.txt", true);
         assert!(matches!(
             result,
             Err(VerificationInputUnavailable::MissingExtraEntry { .. })
@@ -1125,9 +1248,9 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn verification_does_not_depend_on_submission_diff() {
         // This is a structural guarantee: the verification_input module only
-        // imports run_git_command / run_git_command_allow_failure from the
-        // crate root, never compute_submission_diff_fingerprint. We verify
-        // the result shape is self-consistent.
+        // imports run_git_command_allow_failure / run_git_command_binary_in
+        // from the crate root, never compute_submission_diff_fingerprint. We
+        // verify the result shape is self-consistent.
         let fixture = init_repo_with_main_commit();
         write_str(fixture.path(), "extra.txt", "x\n");
 
@@ -1156,14 +1279,14 @@ mod tests {
             .unwrap()
             .unwrap();
 
-        let index_output = git_stdout(
+        let index_output = git_binary_stdout(
             fixture.path(),
             vec!["ls-files".into(), "-s".into(), "-z".into()],
         )
         .await
         .unwrap();
         let mut index_entries = parse_index_entries(&index_output);
-        index_entries.sort_by(|a, b| a.path.as_bytes().cmp(b.path.as_bytes()));
+        index_entries.sort_by(|a, b| a.path.cmp(&b.path));
 
         let mut stream = CanonicalStream::new();
         stream.write_header();
