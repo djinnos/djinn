@@ -899,6 +899,21 @@ impl CoordinatorActor {
                                 );
                                 self.delegated_to_github
                                     .insert(task.id.clone(), current_sha.clone());
+                                // A later merged poll runs before reviews are
+                                // fetched. Preserve this authoritative decision
+                                // now through the unique PR-to-attempt association;
+                                // apply_pr_merge will add `passed` to that run.
+                                self.record_pr_outcome_facts(
+                                    pr_url,
+                                    Some(if has_approved {
+                                        "accepted"
+                                    } else {
+                                        "not_applicable"
+                                    }),
+                                    None,
+                                    None,
+                                )
+                                .await;
                                 self.merge_fail_count.remove(&task.id);
                             }
                             // "Pull request is already in the queue": someone
@@ -919,6 +934,20 @@ impl CoordinatorActor {
                                 );
                                 self.delegated_to_github
                                     .insert(task.id.clone(), current_sha.clone());
+                                // Adoption is the same delegated lifecycle
+                                // boundary as enqueue: retain the review outcome
+                                // before a later merged poll loses this snapshot.
+                                self.record_pr_outcome_facts(
+                                    pr_url,
+                                    Some(if has_approved {
+                                        "accepted"
+                                    } else {
+                                        "not_applicable"
+                                    }),
+                                    None,
+                                    None,
+                                )
+                                .await;
                                 self.merge_fail_count.remove(&task.id);
                             }
                             Err(enqueue_err) => {

@@ -373,5 +373,60 @@ mod tests {
             second_fact.parked_reason.as_deref(),
             Some("merge_queue_failed")
         );
+
+        // Queue-405 delegation spans polls: retain the accepted review written
+        // at enqueue, then add the later successful queue observation.
+        outcomes
+            .record_merge_queue_result_for_attempt(&first.id, "passed")
+            .await
+            .unwrap();
+        let delegated_fact = outcomes.get(&run_one).await.unwrap().unwrap();
+        assert_eq!(delegated_fact.review_verdict.as_deref(), Some("accepted"));
+        assert_eq!(delegated_fact.merge_queue_result.as_deref(), Some("passed"));
+
+        // A genuinely review-inapplicable merge remains distinguishable after
+        // the same later queue-success write.
+        let third_id = uuid::Uuid::now_v7().to_string();
+        let third = attempts
+            .create_or_get_pending(CreateTaskAttemptParams {
+                id: &third_id,
+                task_id: &task_id,
+                role: "worker",
+                dispatch_key: "exact-run-no-review",
+                session_id: None,
+                attempt_seq: None,
+            })
+            .await
+            .unwrap();
+        let run_three = uuid::Uuid::now_v7().to_string();
+        outcomes
+            .create_run_for_attempt(
+                CreateTaskRunParams {
+                    id: &run_three,
+                    project_id: &project_id,
+                    task_id: &task_id,
+                    trigger_type: TaskRunTrigger::NewTask.as_str(),
+                    status: None,
+                    workspace_path: None,
+                    mirror_ref: None,
+                },
+                &third.id,
+            )
+            .await
+            .unwrap();
+        outcomes
+            .record_review_verdict_for_attempt(&third.id, "not_applicable")
+            .await
+            .unwrap();
+        outcomes
+            .record_merge_queue_result_for_attempt(&third.id, "passed")
+            .await
+            .unwrap();
+        let no_review_fact = outcomes.get(&run_three).await.unwrap().unwrap();
+        assert_eq!(
+            no_review_fact.review_verdict.as_deref(),
+            Some("not_applicable")
+        );
+        assert_eq!(no_review_fact.merge_queue_result.as_deref(), Some("passed"));
     }
 }
