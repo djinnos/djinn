@@ -1,0 +1,28 @@
+{
+   "must_not_duplicate_target" : null,
+   "id" : "archive-derived-09",
+   "messages" : [
+      {
+         "content" : "Summarize sanitized task evidence for discriminative replay fact 09.",
+         "role" : "user"
+      },
+      {
+         "content" : "Implemented a concise deterministic change and recorded the outcome.",
+         "role" : "assistant"
+      }
+   ],
+   "expected_duplicate_target" : null,
+   "injected_provider_response" : "{\"pitfalls\":[{\"applies_when\":\"offline replay fixture\",\"content\":\"## Trigger / smell\\ndiscriminative replay fact 09. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\\n\\n## Failure mode\\ndiscriminative replay fact 09. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\\n\\n## Observable symptoms\\ndiscriminative replay fact 09. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\\n\\n## Prevention\\ndiscriminative replay fact 09. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\\n\\n## Recovery\\ndiscriminative replay fact 09. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\\n\\n## Related\\ndiscriminative replay fact 09. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\",\"title\":\"Sanitized failed_pitfall 09\"}]}",
+   "provenance" : "sanitized_archived_transcript_derived",
+   "expect_adr_054_quality" : true,
+   "category" : "failed_pitfall",
+   "required_discriminative_text" : "discriminative replay fact 09",
+   "expected_note_type" : "pitfall",
+   "terminal_context" : {
+      "review_decision" : null,
+      "outcome" : {
+         "classification" : "sanitized_failure",
+         "kind" : "failed"
+      }
+   }
+}

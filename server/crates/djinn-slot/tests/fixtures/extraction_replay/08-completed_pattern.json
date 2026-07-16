@@ -1,0 +1,27 @@
+{
+   "expected_duplicate_target" : null,
+   "messages" : [
+      {
+         "role" : "user",
+         "content" : "Summarize sanitized task evidence for discriminative replay fact 08."
+      },
+      {
+         "role" : "assistant",
+         "content" : "Implemented a concise deterministic change and recorded the outcome."
+      }
+   ],
+   "id" : "archive-derived-08",
+   "must_not_duplicate_target" : null,
+   "provenance" : "sanitized_archived_transcript_derived",
+   "injected_provider_response" : "{\"patterns\":[{\"applies_when\":\"offline replay fixture\",\"title\":\"Sanitized completed_pattern 08\",\"content\":\"## Context\\ndiscriminative replay fact 08. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\\n\\n## Problem shape\\ndiscriminative replay fact 08. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\\n\\n## Recommended approach\\ndiscriminative replay fact 08. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\\n\\n## Why it works\\ndiscriminative replay fact 08. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\\n\\n## Tradeoffs / limits\\ndiscriminative replay fact 08. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\\n\\n## When to use\\ndiscriminative replay fact 08. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\\n\\n## When not to use\\ndiscriminative replay fact 08. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\\n\\n## Related\\ndiscriminative replay fact 08. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\"}]}",
+   "terminal_context" : {
+      "outcome" : {
+         "kind" : "completed"
+      },
+      "review_decision" : null
+   },
+   "required_discriminative_text" : "discriminative replay fact 08",
+   "expected_note_type" : "pattern",
+   "category" : "completed_pattern",
+   "expect_adr_054_quality" : true
+}

@@ -1,0 +1,27 @@
+{
+   "id" : "archive-derived-17",
+   "must_not_duplicate_target" : null,
+   "injected_provider_response" : "{\"patterns\":[{\"applies_when\":\"offline replay fixture\",\"title\":\"Sanitized true_duplicate 17\",\"content\":\"## Context\\ndiscriminative replay fact 17. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\\n\\n## Problem shape\\ndiscriminative replay fact 17. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\\n\\n## Recommended approach\\ndiscriminative replay fact 17. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\\n\\n## Why it works\\ndiscriminative replay fact 17. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\\n\\n## Tradeoffs / limits\\ndiscriminative replay fact 17. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\\n\\n## When to use\\ndiscriminative replay fact 17. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\\n\\n## When not to use\\ndiscriminative replay fact 17. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\\n\\n## Related\\ndiscriminative replay fact 17. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\"}]}",
+   "category" : "true_duplicate",
+   "expect_adr_054_quality" : true,
+   "expected_duplicate_target" : "candidate-duplicate-17",
+   "messages" : [
+      {
+         "content" : "Summarize sanitized task evidence for discriminative replay fact 17.",
+         "role" : "user"
+      },
+      {
+         "role" : "assistant",
+         "content" : "Implemented a concise deterministic change and recorded the outcome."
+      }
+   ],
+   "provenance" : "sanitized_archived_transcript_derived",
+   "terminal_context" : {
+      "review_decision" : null,
+      "outcome" : {
+         "kind" : "completed"
+      }
+   },
+   "expected_note_type" : "pattern",
+   "required_discriminative_text" : "discriminative replay fact 17"
+}
