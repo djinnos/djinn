@@ -35,14 +35,21 @@ test('qa-smoke workflow contract is deterministic, routed, and fail closed', () 
 
   assert.match(smoke, /uses: Swatinem\/rust-cache@v2[\s\S]*?workspaces: server[\s\S]*?shared-key: server-quality[\s\S]*?save-if: false/,
     'qa-smoke must be a restore-only server-quality cache consumer');
-  assert.doesNotMatch(smoke, /^    services:/m,
-    'qa-smoke must rely on the runner dedicated local database rather than CI services');
-  assert.doesNotMatch(smoke, /\b(?:DATABASE_URL|POSTGRES|KUBECONFIG|kubectl|kubernetes|helm|tilt|kind|credentials|live[-_ ]?(?:provider|credential|scenario)|external[-_ ]?network)\b/i,
-    'qa-smoke must not configure live, shared-database, provider-network, or Kubernetes dependencies');
+  assert.match(smoke, /^    services:\n      postgres:\n        image: postgres:16$/m,
+    'qa-smoke must provision a disposable local Postgres service');
+  assert.match(smoke, /DJINN_TEST_DATABASE_URL: postgres:\/\/postgres:postgres@127\.0\.0\.1:5433\/postgres/,
+    'qa-smoke must direct isolated scenarios to the dedicated local database');
+  assert.match(smoke, /uses: taiki-e\/install-action@v2[\s\S]*?tool: sqlx-cli[\s\S]*?name: Build disposable Postgres test template[\s\S]*?CREATE DATABASE djinn_test_template[\s\S]*?DATABASE_URL=postgres:\/\/postgres:postgres@127\.0\.0\.1:5433\/djinn_test_template sqlx migrate run --source migrations_postgres[\s\S]*?UPDATE pg_database SET datistemplate = TRUE WHERE datname = 'djinn_test_template'/,
+    'qa-smoke must migrate and mark the disposable clone template before scenarios run');
+  assert.doesNotMatch(smoke, /\b(?:KUBECONFIG|kubectl|kubernetes|helm|tilt|kind|credentials|live[-_ ]?(?:provider|credential|scenario)|external[-_ ]?network)\b/i,
+    'qa-smoke must not configure live, provider-network, or Kubernetes dependencies');
 
+  const templateAt = smoke.indexOf('Build disposable Postgres test template');
   const runAt = smoke.indexOf(RUN_COMMAND);
   const coverageAt = smoke.indexOf(COVERAGE_COMMAND);
   assert.ok(runAt >= 0, 'qa-smoke must run the exact deterministic smoke command');
+  assert.ok(templateAt >= 0 && templateAt < runAt,
+    'the disposable migrated test template must exist before smoke scenarios run');
   assert.ok(coverageAt > runAt, 'coverage must run after smoke evidence is emitted');
   assert.match(smoke, /set \+e[\s\S]*?run_status=\$\?[\s\S]*?coverage_status=\$\?/,
     'coverage must still run after scenario failure so evidence remains diagnosable');
