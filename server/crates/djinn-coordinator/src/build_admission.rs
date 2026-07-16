@@ -459,6 +459,7 @@ impl WarmAdmission for BuildAdmissionController {
 mod tests {
     use super::*;
     use djinn_db::{AdmissionState, Database};
+    use futures::FutureExt;
 
     fn controller(mode: BuildAdmissionMode, cap: i64) -> BuildAdmissionController {
         BuildAdmissionController::new(
@@ -647,6 +648,32 @@ mod tests {
             )
             .await
             .unwrap();
+        controller
+            .transition(
+                &first,
+                WarmAdmissionTransition::Terminal {
+                    uid: "uid-one".into(),
+                },
+            )
+            .await
+            .unwrap();
+        assert!(
+            controller
+                .release_notifier()
+                .notified()
+                .now_or_never()
+                .is_some(),
+            "generation one release must retain exactly one wakeup"
+        );
+        assert!(
+            controller
+                .release_notifier()
+                .notified()
+                .now_or_never()
+                .is_none(),
+            "generation one release must not retain a second wakeup"
+        );
+
         let second = controller
             .admit_task_run(
                 Some("worker"),
@@ -660,7 +687,6 @@ mod tests {
         let BuildAdmissionDecision::Permitted { permit: second, .. } = second else {
             panic!("task generation two must be admitted");
         };
-
         controller
             .transition(&second, WarmAdmissionTransition::CreateStarted)
             .await
@@ -675,18 +701,24 @@ mod tests {
             .await
             .unwrap();
 
-        // A delayed old-generation callback is rejected and cannot release the
-        // newer row.
+        // A delayed duplicate callback for the already-terminal old generation
+        // is idempotent and cannot release the newer row.
+        controller
+            .transition(
+                &first,
+                WarmAdmissionTransition::Terminal {
+                    uid: "uid-one".into(),
+                },
+            )
+            .await
+            .unwrap();
         assert!(
             controller
-                .transition(
-                    &first,
-                    WarmAdmissionTransition::Terminal {
-                        uid: "uid-one".into(),
-                    },
-                )
-                .await
-                .is_err()
+                .release_notifier()
+                .notified()
+                .now_or_never()
+                .is_none(),
+            "delayed old-generation duplicate must not wake dispatch"
         );
         let history = controller
             .journal
@@ -700,6 +732,15 @@ mod tests {
                 .unwrap()
                 .state,
             AdmissionState::Live
+        );
+        assert_eq!(
+            controller
+                .journal
+                .count_task_or_warm_occupancy()
+                .await
+                .unwrap(),
+            1,
+            "delayed old-generation duplicate must leave generation two occupied"
         );
 
         // A wrong UID and an unbound (UID-less) callback retain occupancy.
@@ -716,9 +757,34 @@ mod tests {
         );
         assert!(
             controller
+                .release_notifier()
+                .notified()
+                .now_or_never()
+                .is_none(),
+            "wrong generation-two UID must not wake dispatch"
+        );
+        assert!(
+            controller
                 .task_run_permit_for_runtime_id("missing-uid")
                 .await
                 .is_none()
+        );
+        assert_eq!(
+            controller
+                .journal
+                .count_task_or_warm_occupancy()
+                .await
+                .unwrap(),
+            1,
+            "UID-less terminal handling must retain generation-two occupancy"
+        );
+        assert!(
+            controller
+                .release_notifier()
+                .notified()
+                .now_or_never()
+                .is_none(),
+            "UID-less terminal handling must not wake dispatch"
         );
 
         controller
@@ -730,6 +796,23 @@ mod tests {
             )
             .await
             .unwrap();
+        assert!(
+            controller
+                .release_notifier()
+                .notified()
+                .now_or_never()
+                .is_some(),
+            "matching generation-two terminal must retain one wakeup"
+        );
+        assert!(
+            controller
+                .release_notifier()
+                .notified()
+                .now_or_never()
+                .is_none(),
+            "matching generation-two terminal must retain only one wakeup"
+        );
+
         // A duplicate matching terminal callback is idempotent.
         controller
             .transition(
@@ -740,5 +823,13 @@ mod tests {
             )
             .await
             .unwrap();
+        assert!(
+            controller
+                .release_notifier()
+                .notified()
+                .now_or_never()
+                .is_none(),
+            "duplicate generation-two terminal must not wake dispatch again"
+        );
     }
 }
