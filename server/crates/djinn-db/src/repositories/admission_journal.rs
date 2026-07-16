@@ -143,6 +143,36 @@ pub enum ReserveAdmissionResult {
     Denied { occupancy: i64, cap: i64 },
 }
 
+/// Identity verified and durably recorded before a Kubernetes POST.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CreateStartedInput {
+    pub key: AdmissionJournalKey,
+    pub creator_server_epoch: String,
+    pub object_name: String,
+}
+
+/// Kubernetes callback fenced by the observed object UID.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UidFencedAdmissionInput {
+    pub key: AdmissionJournalKey,
+    pub object_uid: String,
+}
+
+/// Terminal mutation input; a UID is required for a Live row.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TerminalAdmissionInput {
+    pub key: AdmissionJournalKey,
+    pub object_uid: Option<String>,
+}
+
+/// Atomic predecessor-epoch recovery report.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AdmissionRecoveryResult {
+    pub retired_reserved: u64,
+    pub marked_create_unknown: u64,
+    pub active_rows: Vec<AdmissionJournalRow>,
+}
+
 /// Atomic Postgres repository for admission reservations and journal history.
 pub struct AdmissionJournalRepository {
     db: Database,
