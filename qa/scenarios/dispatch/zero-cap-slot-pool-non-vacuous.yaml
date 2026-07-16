@@ -7,6 +7,6 @@ scenarios:
     sources: [{kind: incident, id: Zero-cap fake slot pool makes dispatcher race tests pass vacuously}]
     primary_coverage: dispatch.slot-pool-capacity
     secondary_coverage: [dispatch.race-test-non-vacuous]
-    execution: {kind: cargo-package, package: djinn-coordinator}
+    execution: {kind: cargo-package, package: djinn-coordinator, selector: dispatch::task_dispatch::inflight_ledger_tests::lane_cap_counts_running_plus_booting_across_models}
     isolation: {database: isolated, providers: isolated, channel: isolated}
     watch_paths: [server/crates/djinn-coordinator/src/dispatch/task_dispatch.rs]

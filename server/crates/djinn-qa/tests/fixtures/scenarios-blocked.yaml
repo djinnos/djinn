@@ -11,6 +11,7 @@ scenarios:
     execution:
       kind: cargo-package
       package: unavailable-runner-package
+      selector: scenario::tests::directory_loading_is_recursive_sorted_and_rejects_cross_file_duplicates
     isolation:
       database: isolated
       providers: isolated

@@ -7,6 +7,6 @@ scenarios:
     sources: [{kind: memory, id: pitfalls/57p01-test-db-flake-cascade-template-clone-advisory-lock-race-not-postgres-oom}]
     primary_coverage: test-infra.db-template-clone-lock
     secondary_coverage: [test-infra.deterministic-db-isolation]
-    execution: {kind: cargo-package, package: djinn-db}
+    execution: {kind: cargo-package, package: djinn-db, selector: database::tests::open_in_memory_generates_unique_isolation_containers}
     isolation: {database: isolated, providers: isolated, channel: isolated}
     watch_paths: [server/crates/djinn-db/src/template_bootstrap.rs, server/crates/djinn-db/src/database.rs]
