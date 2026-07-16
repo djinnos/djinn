@@ -199,14 +199,17 @@ impl ScenarioInventory {
         })
     }
 
-    /// Validate cross-inventory invariants and local targets against an explicit repository root.
+    /// Validate cross-inventory invariants against an explicit repository root.
+    ///
+    /// The runner resolves executable targets immediately before invocation.
+    /// Targets can disappear after inventory validation and must then produce
+    /// failed scenario evidence instead of invalidating the inventory.
     /// Diagnostics are sorted by scenario ID and then message, independent of YAML input order.
     pub fn validate(
         &self,
         taxonomy: &Taxonomy,
-        repository_root: impl AsRef<Path>,
+        _repository_root: impl AsRef<Path>,
     ) -> Result<(), ScenarioValidationErrors> {
-        let repository_root = repository_root.as_ref();
         let known_coverage = taxonomy
             .coverage
             .iter()
@@ -279,11 +282,6 @@ impl ScenarioInventory {
                     }
                 }
             }
-            if scenario.blocked_dependency.is_none()
-                && !resolves(&scenario.execution, repository_root)
-            {
-                diagnostics.push(format!("{prefix}: executable target cannot be resolved from repository root `{}`; declare blocked_dependency explicitly while it is unavailable", repository_root.display()));
-            }
         }
         diagnostics.sort();
         diagnostics.dedup();
@@ -311,7 +309,8 @@ fn validate_coverage(
     }
 }
 
-fn resolves(execution: &Execution, root: &Path) -> bool {
+/// Returns whether an executable target can be resolved at execution time.
+pub fn resolves(execution: &Execution, root: &Path) -> bool {
     match execution {
         Execution::CargoPackage { package, test } => {
             let manifests = cargo_manifests(root);
@@ -476,7 +475,6 @@ mod tests {
             "smoke-ci scenario may not request Kubernetes",
             "smoke-ci scenario may not request external network access",
             "smoke-ci scenario may not request wall-clock sleep dependency",
-            "executable target cannot be resolved",
         ] {
             assert!(
                 rendered.contains(expected),
