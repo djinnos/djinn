@@ -1,0 +1,27 @@
+{
+   "injected_provider_response" : "{\"cases\":[{\"applies_when\":\"offline replay fixture\",\"content\":\"## Situation\\ndiscriminative replay fact 07. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\\n\\n## Constraint\\ndiscriminative replay fact 07. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\\n\\n## Approach taken\\ndiscriminative replay fact 07. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\\n\\n## Result\\ndiscriminative replay fact 07. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\\n\\n## Why it worked / failed\\ndiscriminative replay fact 07. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\\n\\n## Reusable lesson\\ndiscriminative replay fact 07. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\\n\\n## Related\\ndiscriminative replay fact 07. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\",\"title\":\"Sanitized completed_case 07\"}]}",
+   "must_not_duplicate_target" : null,
+   "id" : "archive-derived-07",
+   "expect_adr_054_quality" : true,
+   "category" : "completed_case",
+   "provenance" : "sanitized_archived_transcript_derived",
+   "messages" : [
+      {
+         "content" : "Summarize sanitized task evidence for discriminative replay fact 07.",
+         "role" : "user"
+      },
+      {
+         "content" : "Implemented a concise deterministic change and recorded the outcome.",
+         "role" : "assistant"
+      }
+   ],
+   "expected_duplicate_target" : null,
+   "required_discriminative_text" : "discriminative replay fact 07",
+   "expected_note_type" : "case",
+   "terminal_context" : {
+      "review_decision" : null,
+      "outcome" : {
+         "kind" : "completed"
+      }
+   }
+}
