@@ -573,10 +573,25 @@ async fn supervisor_spike_runs_to_close_with_stubbed_provider() {
     // `spike` issue_type so the coordinator-side flow-for-task rules would
     // also pick SupervisorFlow::Spike — we set the spec.flow explicitly below
     // regardless, but keep the row consistent.
+    let github_id = NEXT_FIXTURE_GITHUB_ID.fetch_add(1, Ordering::Relaxed);
+    let creator = UserRepository::new(db.clone())
+        .upsert_from_github(
+            github_id,
+            &format!("phase1-supervisor-fixture-{github_id}"),
+            Some("Phase 1 Supervisor Fixture"),
+            None,
+        )
+        .await
+        .expect("create task creator");
     let task = task_repo
-        .create_in_project(
+        .create_in_project_with_provenance(
             &project.id,
             Some(&epic.id),
+            EffectiveCreatorProvenance {
+                explicit_user_id: Some(&creator.id),
+                source_task_id: None,
+                proposal_id: None,
+            },
             "phase1-stub-task",
             "phase1 stub task description",
             "phase1 stub task design",
