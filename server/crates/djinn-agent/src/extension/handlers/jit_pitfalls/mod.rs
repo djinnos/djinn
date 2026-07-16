@@ -56,6 +56,7 @@ use std::time::Instant;
 use djinn_core::clock::{Clock, SystemClock as SystemClockTrait};
 
 use crate::context::AgentContext;
+use crate::rollout::{DefaultPolicy, RolloutMode, parse as parse_rollout};
 
 use trace::{
     JIT_TRACE_PROD_MIN_CONFIDENCE, JIT_TRACE_PROD_NOTE_TYPES, JIT_TRACE_PROD_QUERY_LIMIT,
@@ -114,35 +115,12 @@ impl JitPitfallOutcome {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum JitPitfallRolloutMode {
-    DefaultOff,
-    Enabled,
-    Cohort,
-    KillSwitch,
-    LegacyOptIn,
-}
+type JitPitfallRolloutMode = RolloutMode;
 
-impl JitPitfallRolloutMode {
-    fn label(self) -> &'static str {
-        match self {
-            Self::DefaultOff => "default_off",
-            Self::Enabled => "enabled",
-            Self::Cohort => "cohort",
-            Self::KillSwitch => "kill_switch",
-            Self::LegacyOptIn => "legacy_opt_in",
-        }
-    }
-
-    fn enabled(self) -> bool {
-        matches!(self, Self::Enabled | Self::Cohort | Self::LegacyOptIn)
-    }
-
-    fn disabled_outcome(self) -> JitPitfallOutcome {
-        match self {
-            Self::KillSwitch => JitPitfallOutcome::DisabledKillSwitch,
-            _ => JitPitfallOutcome::DisabledDefaultOff,
-        }
+fn disabled_outcome(rollout_mode: &JitPitfallRolloutMode) -> JitPitfallOutcome {
+    match rollout_mode {
+        JitPitfallRolloutMode::KillSwitch => JitPitfallOutcome::DisabledKillSwitch,
+        _ => JitPitfallOutcome::DisabledDefaultOff,
     }
 }
 
@@ -166,21 +144,7 @@ fn rollout_mode_from_env() -> JitPitfallRolloutMode {
 }
 
 fn rollout_mode_from_values(rollout: Option<&str>, legacy: Option<&str>) -> JitPitfallRolloutMode {
-    if let Some(value) = rollout.map(str::trim).filter(|value| !value.is_empty()) {
-        match value.to_ascii_lowercase().replace('-', "_").as_str() {
-            "enabled" | "enable" | "on" | "true" | "1" => JitPitfallRolloutMode::Enabled,
-            "cohort" | "staging" | "rollout" | "controlled" => JitPitfallRolloutMode::Cohort,
-            "off" => JitPitfallRolloutMode::DefaultOff,
-            "disabled" | "disable" | "kill_switch" | "killswitch" | "false" | "0" => {
-                JitPitfallRolloutMode::KillSwitch
-            }
-            _ => JitPitfallRolloutMode::DefaultOff,
-        }
-    } else if legacy.map(str::trim) == Some("1") {
-        JitPitfallRolloutMode::LegacyOptIn
-    } else {
-        JitPitfallRolloutMode::DefaultOff
-    }
+    parse_rollout(rollout, legacy, DefaultPolicy::Off)
 }
 
 /// Process-wide set of session ids that have already had their first
@@ -286,8 +250,8 @@ pub(super) async fn maybe_pitfall_hint(
     let rollout_mode = rollout_mode_from_env();
     if !rollout_mode.enabled() {
         record_outcome(
-            rollout_mode.disabled_outcome(),
-            rollout_mode,
+            disabled_outcome(&rollout_mode),
+            rollout_mode.clone(),
             session_id,
             project_id,
             touched_paths,
@@ -300,7 +264,7 @@ pub(super) async fn maybe_pitfall_hint(
         None => {
             record_outcome(
                 JitPitfallOutcome::Error,
-                rollout_mode,
+                rollout_mode.clone(),
                 session_id,
                 None,
                 touched_paths,
@@ -311,7 +275,7 @@ pub(super) async fn maybe_pitfall_hint(
     if touched_paths.is_empty() {
         record_outcome(
             JitPitfallOutcome::Error,
-            rollout_mode,
+            rollout_mode.clone(),
             session_id,
             Some(project_id),
             touched_paths,
@@ -322,7 +286,7 @@ pub(super) async fn maybe_pitfall_hint(
     if !claim_first_modification(session_id) {
         record_outcome(
             JitPitfallOutcome::NonFirstModification,
-            rollout_mode,
+            rollout_mode.clone(),
             session_id,
             Some(project_id),
             touched_paths,
@@ -334,7 +298,7 @@ pub(super) async fn maybe_pitfall_hint(
 
     record_outcome(
         JitPitfallOutcome::EligibleSearch,
-        rollout_mode,
+        rollout_mode.clone(),
         session_id,
         Some(project_id),
         touched_paths,
@@ -373,7 +337,7 @@ pub(super) async fn maybe_pitfall_hint(
                 &state.db,
                 session_id,
                 project_id,
-                rollout_mode,
+                rollout_mode.clone(),
                 touched_paths,
                 elapsed_ms,
                 djinn_db::repositories::retrieval_trace::DEFAULT_CANDIDATE_CAP,
@@ -402,7 +366,7 @@ pub(super) async fn maybe_pitfall_hint(
                 &state.db,
                 session_id,
                 project_id,
-                rollout_mode,
+                rollout_mode.clone(),
                 touched_paths,
                 elapsed_ms,
                 &e.to_string(),
@@ -496,7 +460,7 @@ pub(super) async fn maybe_pitfall_hint(
                         let estimated_tokens = estimate_injected_tokens(block.chars().count());
 
                         let trigger = build_trace_trigger(
-                            rollout_mode,
+                            rollout_mode.clone(),
                             touched_paths,
                             rendered_note_count,
                             trace_universe_count,
@@ -555,7 +519,7 @@ pub(super) async fn maybe_pitfall_hint(
             let block = render_pitfall_block(&notes);
             let estimated_tokens = estimate_injected_tokens(block.chars().count());
             let trigger = build_trace_trigger(
-                rollout_mode,
+                rollout_mode.clone(),
                 touched_paths,
                 rendered_note_count,
                 0,
@@ -592,7 +556,7 @@ pub(super) async fn maybe_pitfall_hint(
             let block = render_pitfall_block(&notes);
             let estimated_tokens = estimate_injected_tokens(block.chars().count());
             let trigger = build_trace_trigger(
-                rollout_mode,
+                rollout_mode.clone(),
                 touched_paths,
                 rendered_note_count,
                 notes.len(),
@@ -775,27 +739,19 @@ mod tests {
     }
 
     #[test]
-    fn disabled_by_default() {
+    fn jit_parser_preserves_default_off_and_legacy_precedence() {
         assert_eq!(
             rollout_mode_from_values(None, None),
-            JitPitfallRolloutMode::DefaultOff
+            JitPitfallRolloutMode::Off
         );
         assert!(!rollout_mode_from_values(None, None).enabled());
-    }
-
-    #[test]
-    fn rollout_parser_supports_enable_cohort_kill_switch_and_legacy() {
         assert_eq!(
-            rollout_mode_from_values(Some("enabled"), None),
-            JitPitfallRolloutMode::Enabled
-        );
-        assert_eq!(
-            rollout_mode_from_values(Some("cohort"), None),
-            JitPitfallRolloutMode::Cohort
+            rollout_mode_from_values(Some("cohort:jit-canary"), None).label(),
+            "cohort:jit-canary"
         );
         assert_eq!(
             rollout_mode_from_values(Some("staging"), None),
-            JitPitfallRolloutMode::Cohort
+            JitPitfallRolloutMode::Cohort("cohort".to_owned())
         );
         assert_eq!(
             rollout_mode_from_values(Some("kill-switch"), Some("1")),
@@ -803,11 +759,11 @@ mod tests {
         );
         assert_eq!(
             rollout_mode_from_values(None, Some("1")),
-            JitPitfallRolloutMode::LegacyOptIn
+            JitPitfallRolloutMode::LegacyEnabled
         );
         assert_eq!(
             rollout_mode_from_values(Some("unknown"), Some("1")),
-            JitPitfallRolloutMode::DefaultOff
+            JitPitfallRolloutMode::LegacyDisabled
         );
     }
 }

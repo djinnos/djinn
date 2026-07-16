@@ -580,7 +580,7 @@ mod tests {
     fn build_trace_trigger_includes_rollout_paths_and_optional_search_error() {
         let touched = vec!["src/a.rs".to_owned(), "src/b.rs".to_owned()];
         let trigger = build_trace_trigger(
-            JitPitfallRolloutMode::Cohort,
+            JitPitfallRolloutMode::Cohort("cohort".to_owned()),
             &touched,
             2,
             5,
