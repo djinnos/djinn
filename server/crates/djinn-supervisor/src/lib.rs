@@ -1074,6 +1074,7 @@ impl TaskRunSupervisor {
             .services
             .create_task_run(SerializableCreateTaskRunParams {
                 id: run_id.clone(),
+                task_attempt_id: spec.task_attempt_id.clone(),
                 project_id: spec.project_id.clone(),
                 task_id: spec.task_id.clone(),
                 trigger_type: trigger_str.clone(),
@@ -3384,6 +3385,7 @@ mod tests {
         let supervisor = TaskRunSupervisor::new(Arc::clone(&mirror), services);
         let spec = TaskRunSpec {
             task_run_id: "run-claim-guard".into(),
+            task_attempt_id: None,
             task_id: task_id.into(),
             project_id: project_id.into(),
             trigger: TaskRunTrigger::NewTask,
@@ -3454,6 +3456,7 @@ mod tests {
         let supervisor = TaskRunSupervisor::new(Arc::clone(&mirror), services);
         let spec = TaskRunSpec {
             task_run_id: "run-claim-idem".into(),
+            task_attempt_id: None,
             task_id: task_id.into(),
             project_id: project_id.into(),
             trigger: TaskRunTrigger::NewTask,
@@ -3614,6 +3617,7 @@ mod tests {
         let supervisor = TaskRunSupervisor::new(Arc::clone(&mirror), services);
         let spec = TaskRunSpec {
             task_run_id: task_run_id.into(),
+            task_attempt_id: None,
             task_id: task_id.into(),
             project_id: project_id.into(),
             trigger: TaskRunTrigger::NewTask,
@@ -3689,6 +3693,7 @@ mod tests {
         let provider_supervisor = TaskRunSupervisor::new(Arc::clone(&mirror), provider_services);
         let provider_spec = TaskRunSpec {
             task_run_id: "run-provider-failure".into(),
+            task_attempt_id: None,
             task_id: task_id.into(),
             project_id: project_id.into(),
             trigger: TaskRunTrigger::NewTask,
@@ -3790,6 +3795,7 @@ mod tests {
         let supervisor = TaskRunSupervisor::new(Arc::clone(&mirror), services);
         let spec = TaskRunSpec {
             task_run_id: "run-budget-ignored".into(),
+            task_attempt_id: None,
             task_id: task_id.into(),
             project_id: project_id.into(),
             trigger: TaskRunTrigger::NewTask,
@@ -3856,6 +3862,7 @@ mod tests {
         let summary_supervisor = TaskRunSupervisor::new(Arc::clone(&mirror), summary_services);
         let summary_spec = TaskRunSpec {
             task_run_id: "run-budget-summary".into(),
+            task_attempt_id: None,
             task_id: task_id.into(),
             project_id: project_id.into(),
             trigger: TaskRunTrigger::NewTask,
@@ -6218,6 +6225,7 @@ mod tests {
         let supervisor = TaskRunSupervisor::new(Arc::clone(&mirror), services);
         let spec = TaskRunSpec {
             task_run_id: "run-push-fail".into(),
+            task_attempt_id: None,
             task_id: task_id.into(),
             project_id: project_id.into(),
             trigger: TaskRunTrigger::NewTask,
@@ -6814,6 +6822,7 @@ mod tests {
         let supervisor = TaskRunSupervisor::new(std::sync::Arc::clone(&mirror), services);
         let spec = TaskRunSpec {
             task_run_id: format!("run-arbiter-{task_id}"),
+            task_attempt_id: None,
             task_id: task_id.into(),
             project_id: project_id.into(),
             trigger: TaskRunTrigger::NewTask,
@@ -6897,6 +6906,7 @@ mod tests {
         let supervisor = TaskRunSupervisor::new(std::sync::Arc::clone(&mirror), services);
         let spec = TaskRunSpec {
             task_run_id: format!("run-worker-{task_id}"),
+            task_attempt_id: None,
             task_id: task_id.into(),
             project_id: project_id.into(),
             trigger: TaskRunTrigger::NewTask,
@@ -7329,6 +7339,7 @@ mod tests {
         let supervisor = TaskRunSupervisor::new(std::sync::Arc::clone(&mirror), services);
         let spec = TaskRunSpec {
             task_run_id: format!("run-reviewer-{task_id}"),
+            task_attempt_id: None,
             task_id: task_id.into(),
             project_id: project_id.into(),
             trigger: TaskRunTrigger::NewTask,
@@ -7587,6 +7598,7 @@ mod tests {
         let supervisor = TaskRunSupervisor::new(std::sync::Arc::clone(&mirror), services);
         let spec = TaskRunSpec {
             task_run_id: "run-park-cancel".into(),
+            task_attempt_id: None,
             task_id: "T-park-cancel".into(),
             project_id: "proj-park-cancel".into(),
             trigger: TaskRunTrigger::NewTask,
@@ -7796,6 +7808,7 @@ mod tests {
         let supervisor = TaskRunSupervisor::new(std::sync::Arc::clone(&mirror), services);
         let spec = TaskRunSpec {
             task_run_id: "run-interrupted".into(),
+            task_attempt_id: None,
             task_id: "T-interrupted".into(),
             project_id: "proj-interrupted".into(),
             trigger: TaskRunTrigger::NewTask,
@@ -8125,6 +8138,7 @@ mod tests {
     fn commit_path_spec(task_id: &str, project_id: &str, run_id: &str) -> TaskRunSpec {
         TaskRunSpec {
             task_run_id: run_id.into(),
+            task_attempt_id: None,
             task_id: task_id.into(),
             project_id: project_id.into(),
             trigger: TaskRunTrigger::NewTask,
@@ -8642,6 +8656,7 @@ mod tests {
     ) -> TaskRunSpec {
         TaskRunSpec {
             task_run_id: run_id.into(),
+            task_attempt_id: None,
             task_id: task_id.into(),
             project_id: project_id.into(),
             trigger: TaskRunTrigger::NewTask,

@@ -46,8 +46,9 @@ use djinn_agent::supervisor::{
 use djinn_core::events::EventBus;
 use djinn_core::models::TaskRunTrigger;
 use djinn_db::{
-    Database, EpicCreateInput, EpicRepository, ProjectRepository, SessionMessageRepository,
-    SessionRepository, TaskRepository, TaskRunRepository,
+    CreateTaskAttemptParams, Database, EpicCreateInput, EpicRepository, ProjectRepository,
+    SessionMessageRepository, SessionRepository, TaskAttemptRepository, TaskRepository,
+    TaskRunRepository,
 };
 use djinn_provider::catalog::{CatalogService, HealthTracker};
 use djinn_provider::message::{ContentBlock, Conversation, Role};
@@ -102,6 +103,23 @@ fn test_agent_context(db: Database) -> AgentContext {
         memory_intent_planner: djinn_agent::context::MemoryIntentPlannerConfig::default(),
         compaction_cs: djinn_slot::reply_loop::CompactionCriticalSection::default(),
     }
+}
+
+async fn create_dispatch_attempt(db: &Database, task_id: &str) -> String {
+    let attempt_id = uuid::Uuid::now_v7().to_string();
+    let dispatch_key = format!("phase1-supervisor-{attempt_id}");
+    TaskAttemptRepository::new(db.clone())
+        .create_or_get_pending(CreateTaskAttemptParams {
+            id: &attempt_id,
+            task_id,
+            role: "worker",
+            dispatch_key: &dispatch_key,
+            session_id: None,
+            attempt_seq: None,
+        })
+        .await
+        .expect("create exact dispatch attempt")
+        .id
 }
 
 #[derive(Clone, Debug, Default)]
@@ -301,8 +319,10 @@ async fn supervisor_clones_from_mirror_without_worktrees() {
     let supervisor = TaskRunSupervisor::new(mirror.clone(), services);
 
     // 5. Spike flow = single Architect stage — minimizes reply_loop surface.
+    let task_attempt_id = create_dispatch_attempt(&db, &task.id).await;
     let spec = TaskRunSpec {
         task_run_id: uuid::Uuid::now_v7().to_string(),
+        task_attempt_id: Some(task_attempt_id),
         task_id: task.id.clone(),
         project_id: project.id.clone(),
         trigger: TaskRunTrigger::NewTask,
@@ -578,8 +598,10 @@ async fn supervisor_spike_runs_to_close_with_stubbed_provider() {
     );
     let supervisor = TaskRunSupervisor::new(mirror.clone(), services);
 
+    let task_attempt_id = create_dispatch_attempt(&db, &task.id).await;
     let spec = TaskRunSpec {
         task_run_id: uuid::Uuid::now_v7().to_string(),
+        task_attempt_id: Some(task_attempt_id),
         task_id: task.id.clone(),
         project_id: project.id.clone(),
         trigger: TaskRunTrigger::NewTask,
@@ -891,8 +913,10 @@ async fn proactive_sync_merges_advanced_base_into_behind_task_branch() {
     );
     let supervisor = TaskRunSupervisor::new(mirror.clone(), services);
 
+    let task_attempt_id = create_dispatch_attempt(&db, &task.id).await;
     let spec = TaskRunSpec {
         task_run_id: uuid::Uuid::now_v7().to_string(),
+        task_attempt_id: Some(task_attempt_id),
         task_id: task.id.clone(),
         project_id: project.id.clone(),
         trigger: TaskRunTrigger::NewTask,

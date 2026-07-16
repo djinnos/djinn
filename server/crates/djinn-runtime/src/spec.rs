@@ -206,6 +206,9 @@ pub struct TaskRunSpec {
     /// `Uuid`, leaving the host's report id pointing at a row that never
     /// existed (the bug that silently disabled post-session extraction).
     pub task_run_id: String,
+    // Exact dispatch attempt identity; never inferred from mutable state.
+    #[serde(default)]
+    pub task_attempt_id: Option<String>,
     pub task_id: String,
     pub project_id: String,
     pub trigger: TaskRunTrigger,
@@ -671,6 +674,7 @@ mod tests {
 
         let spec = TaskRunSpec {
             task_run_id: "019e6a03-8aef-7201-9c9d-d7ba17613a0b".to_string(),
+            task_attempt_id: None,
             task_id: "task-abc".to_string(),
             project_id: "proj-xyz".to_string(),
             trigger: TaskRunTrigger::NewTask,
@@ -721,6 +725,7 @@ mod tests {
 
         let spec = TaskRunSpec {
             task_run_id: "019f1a03-8aef-7201-9c9d-d7ba17613a0b".to_string(),
+            task_attempt_id: None,
             task_id: "task-resume".to_string(),
             project_id: "proj-xyz".to_string(),
             trigger: TaskRunTrigger::NewTask,
@@ -830,6 +835,7 @@ mod tests {
     fn task_run_spec_default_off_has_no_resume_lifecycle_metadata() {
         let spec = TaskRunSpec {
             task_run_id: "run-default".to_string(),
+            task_attempt_id: None,
             task_id: "task-default".to_string(),
             project_id: "proj-1".to_string(),
             trigger: TaskRunTrigger::NewTask,
@@ -859,6 +865,7 @@ mod tests {
     fn task_run_spec_evidence_spike_flag_roundtrips_through_bincode() {
         let mut spec = TaskRunSpec {
             task_run_id: "run-ev".to_string(),
+            task_attempt_id: None,
             task_id: "task-ev".to_string(),
             project_id: "proj-1".to_string(),
             trigger: TaskRunTrigger::NewTask,
@@ -901,6 +908,7 @@ mod tests {
         // spec must carry it through serialization.
         let mut spec = TaskRunSpec {
             task_run_id: "run-evidence".to_string(),
+            task_attempt_id: None,
             task_id: "task-evidence".to_string(),
             project_id: "proj-1".to_string(),
             trigger: TaskRunTrigger::NewTask,
