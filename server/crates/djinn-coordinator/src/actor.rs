@@ -48,6 +48,8 @@ pub(super) struct CoordinatorActor {
     pub(super) db: Database,
     pub(super) events_tx: broadcast::Sender<DjinnEventEnvelope>,
     pub(super) pool: SlotPoolHandle,
+    /// Durable build admission shared by every task-run dispatch route.
+    pub(super) build_admission: Option<Arc<crate::build_admission::BuildAdmissionController>>,
     #[cfg_attr(test, allow(dead_code))]
     pub(super) catalog: CatalogService,
     pub(super) health: HealthTracker,
@@ -425,6 +427,7 @@ impl CoordinatorActor {
             cancel,
             db,
             pool,
+            build_admission,
             catalog,
             health,
             role_registry,
@@ -479,6 +482,7 @@ impl CoordinatorActor {
             db: db.clone(),
             events_tx,
             pool,
+            build_admission,
             catalog,
             health,
             role_registry,
@@ -760,6 +764,20 @@ impl CoordinatorActor {
         }
     }
 
+    pub(super) async fn run_build_admission_release_pass(&mut self) {
+        // Keep the release arm's state small. `dispatch_ready_tasks` is also
+        // reachable through event handling, and embedding another copy of its
+        // large future directly in `run` made the coordinator future overflow
+        // a Tokio worker stack while processing rapid status-change events.
+        // Boxing bounds this arm without changing dispatch or watchdog
+        // semantics.
+        Self::run_pass_with_watchdog(
+            "build-admission-release",
+            Box::pin(self.dispatch_ready_tasks(None)),
+        )
+        .await;
+    }
+
     pub(super) async fn run(mut self) {
         tracing::info!("CoordinatorActor started");
 
@@ -811,6 +829,17 @@ impl CoordinatorActor {
                 _ = self.cancel.cancelled() => {
                     tracing::info!("CoordinatorActor: cancellation token fired, stopping");
                     break;
+                }
+
+                // A terminal admission transition releases durable capacity.
+                _ = async {
+                    if let Some(controller) = self.build_admission.as_ref() {
+                        controller.release_notifier().notified().await;
+                    } else {
+                        std::future::pending::<()>().await;
+                    }
+                } => {
+                    self.run_build_admission_release_pass().await;
                 }
 
                 // 2. Incoming API messages.
@@ -1320,6 +1349,32 @@ impl CoordinatorActor {
             // exit while the task remains nonterminal is a protocol
             // violation and must count as a failed attempt for retry
             // accounting.
+            // SessionRepository emits `started` both when a runtime session is
+            // created and when it is subsequently observed running. Binding
+            // here makes the UID available to the terminal callback below.
+            ("session", "started") => {
+                let Some(session) = envelope.parse_payload::<djinn_core::models::SessionRecord>()
+                else {
+                    return;
+                };
+                let (Some(task_id), Some(task_run_id)) =
+                    (session.task_id.as_deref(), session.task_run_id.as_deref())
+                else {
+                    return;
+                };
+                let task_repo = TaskRepository::new(
+                    self.db.clone(),
+                    crate::events::event_bus_for(&self.events_tx),
+                );
+                if let Ok(Some(task)) = task_repo.get(task_id).await {
+                    self.live_task_run_build_admission(
+                        task_id,
+                        task.reopen_count.max(0),
+                        task_run_id,
+                    )
+                    .await;
+                }
+            }
             ("session", "completed" | "interrupted" | "failed") => {
                 let Some(session) = envelope.parse_payload::<djinn_core::models::SessionRecord>()
                 else {
@@ -1336,6 +1391,9 @@ impl CoordinatorActor {
                 // the respawn guard does not defer the (task, role) pair
                 // forever on an orphaned pending attempt.
                 if let Some(task_id) = session.task_id.as_deref() {
+                    if let Some(task_run_id) = session.task_run_id.as_deref() {
+                        self.terminal_task_run_build_admission(task_run_id).await;
+                    }
                     let _ = self
                         .classify_session_exit_liveness(
                             &session.id,
