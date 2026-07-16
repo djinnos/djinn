@@ -44,6 +44,13 @@ pub trait WarmJobWatcher: Send + Sync {
     /// [`WarmTerminalOutcome`] tells the caller whether a fresh graph blob was
     /// persisted (→ trigger in-process cache convergence).
     async fn wait_terminal(&self, namespace: &str, job_name: &str) -> WarmTerminalOutcome;
+
+    /// Return the UID observed for a Job after its create request. This keeps
+    /// `WarmJobDispatcher`'s raw public result unchanged while allowing the
+    /// admission lifecycle to fence its facts with Kubernetes object identity.
+    async fn job_uid(&self, _namespace: &str, _job_name: &str) -> Option<String> {
+        None
+    }
 }
 
 /// Production watcher backed by `kube::Api::<Job>::get`. Polls on
@@ -146,6 +153,17 @@ impl WarmJobWatcher for KubeClientJobWatcher {
                 return outcome;
             }
             tokio::time::sleep(WATCH_POLL_INTERVAL).await;
+        }
+    }
+
+    async fn job_uid(&self, namespace: &str, job_name: &str) -> Option<String> {
+        let api: Api<Job> = Api::namespaced(self.client.clone(), namespace);
+        match api.get(job_name).await {
+            Ok(job) => job.metadata.uid,
+            Err(error) => {
+                warn!(job = %job_name, error = %error, "K8sGraphWarmer: could not observe Job UID");
+                None
+            }
         }
     }
 }
