@@ -522,6 +522,28 @@ pub fn render_extraction_replay_markdown(
     output
 }
 
+/// Replace disposable database candidate IDs with stable fixture labels before
+/// an offline report is serialized. The production novelty path continues to
+/// use database IDs returned by the repository candidate lookup; translation
+/// happens only at this reporting boundary.
+#[cfg(any(test, feature = "test-support"))]
+fn normalize_offline_duplicate_targets(
+    report: &mut ExtractionReplayReport,
+    stable_target_by_database_id: &BTreeMap<String, String>,
+) {
+    for case in &mut report.cases {
+        for observation in &mut case.observations {
+            if let Some(stable_target) = observation
+                .duplicate_of
+                .as_ref()
+                .and_then(|database_id| stable_target_by_database_id.get(database_id))
+            {
+                observation.duplicate_of = Some(stable_target.clone());
+            }
+        }
+    }
+}
+
 #[cfg(feature = "test-support")]
 struct FixtureResponseProvider {
     responses: Mutex<VecDeque<String>>,
@@ -598,6 +620,9 @@ pub async fn run_offline_fixture_replay(
         .map_err(|error| error.to_string())?;
     let notes = NoteRepository::new(db.clone(), events.clone());
     let mut cases = Vec::with_capacity(fixtures.len());
+    // Fixture target labels are stable report values, while note creation
+    // assigns disposable UUIDs required by production-path candidate matching.
+    let mut stable_target_by_database_id = BTreeMap::new();
     for mut fixture in fixtures {
         for target in [
             &mut fixture.expected_duplicate_target,
@@ -617,6 +642,7 @@ pub async fn run_offline_fixture_replay(
                 )
                 .await
                 .map_err(|error| error.to_string())?;
+            stable_target_by_database_id.insert(candidate.id.clone(), target.clone());
             *target = candidate.id;
         }
         let task = djinn_db::TaskRepository::new(db.clone(), events.clone())
@@ -705,7 +731,9 @@ pub async fn run_offline_fixture_replay(
         extraction_provider: Arc::new(FixtureResponseProvider::new(extractions)),
         novelty_provider: Arc::new(FixtureResponseProvider::new(novelty)),
     };
-    Ok(run_database_extraction_replay(db, events, &eval.id, &cases, &seam).await)
+    let mut report = run_database_extraction_replay(db, events, &eval.id, &cases, &seam).await;
+    normalize_offline_duplicate_targets(&mut report, &stable_target_by_database_id);
+    Ok(report)
 }
 
 /// Score captured observations. Quality is deliberately re-evaluated through
@@ -897,6 +925,39 @@ mod tests {
         );
         assert_eq!(report.total_cases, 2);
         assert_eq!(report.rubric_satisfaction_rate, 0.0);
+    }
+
+    #[test]
+    fn offline_report_serialization_normalizes_disposable_duplicate_ids() {
+        let report_for = |database_id: &str| {
+            let mut fixture = fixture("duplicate-case");
+            fixture.expected_duplicate_target = Some(database_id.to_string());
+            let observation = ExtractionObservation {
+                fixture_id: "duplicate-case".to_string(),
+                note_type: "case".to_string(),
+                title: "candidate".to_string(),
+                content: "stable candidate seam".to_string(),
+                adr_054_quality_passed: false,
+                duplicate_of: Some(database_id.to_string()),
+            };
+            let mut report = score_extraction_replay(&[fixture], &[observation]);
+            normalize_offline_duplicate_targets(
+                &mut report,
+                &BTreeMap::from([(database_id.to_string(), "candidate-duplicate".to_string())]),
+            );
+            report
+        };
+
+        let first = report_for("019f0000-0000-7000-8000-000000000001");
+        let second = report_for("019f0000-0000-7000-8000-000000000002");
+        assert_eq!(
+            serde_json::to_string(&first).unwrap(),
+            serde_json::to_string(&second).unwrap()
+        );
+        assert_eq!(
+            first.cases[0].observations[0].duplicate_of.as_deref(),
+            Some("candidate-duplicate")
+        );
     }
 
     #[test]
