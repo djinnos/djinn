@@ -144,6 +144,17 @@ fn join_drain(handle: thread::JoinHandle<Vec<u8>>) -> Vec<u8> {
         .unwrap_or_default()
 }
 
+fn command_failure_detail(stdout: &[u8], stderr: &[u8]) -> String {
+    let stdout = String::from_utf8_lossy(stdout);
+    let stderr = String::from_utf8_lossy(stderr);
+    match (stdout.trim(), stderr.trim()) {
+        ("", "") => String::new(),
+        (stdout, "") => format!("stdout:\n{stdout}"),
+        ("", stderr) => format!("stderr:\n{stderr}"),
+        (stdout, stderr) => format!("stdout:\n{stdout}\nstderr:\n{stderr}"),
+    }
+}
+
 #[cfg(unix)]
 fn isolate_process_group(command: &mut Command) {
     // SAFETY: this callback only invokes the async-signal-safe setpgid syscall
@@ -200,14 +211,14 @@ fn execute_command(command: &mut Command, timeout: Duration, package: &str) -> R
             // Reaping is bounded too, so uninterruptible I/O cannot replace the
             // execution hang with a cleanup hang.
             let _ = child.wait_timeout(Duration::from_secs(3));
-            let _ = join_drain(stdout);
+            let stdout = join_drain(stdout);
             let stderr = join_drain(stderr);
-            let detail = String::from_utf8_lossy(&stderr);
+            let detail = command_failure_detail(&stdout, &stderr);
             return Err(format!(
                 "cargo adapter timed out for package `{package}` after {} seconds{}{}",
                 timeout.as_secs_f64(),
-                if detail.trim().is_empty() { "" } else { ": " },
-                detail.trim()
+                if detail.is_empty() { "" } else { ":\n" },
+                detail
             ));
         }
         Err(error) => {
@@ -220,14 +231,14 @@ fn execute_command(command: &mut Command, timeout: Duration, package: &str) -> R
             ));
         }
     };
-    let _ = join_drain(stdout);
+    let stdout = join_drain(stdout);
     let stderr = join_drain(stderr);
     if status.success() {
         Ok(())
     } else {
         Err(format!(
-            "cargo adapter failed for package `{package}` (exit {status}): {}",
-            String::from_utf8_lossy(&stderr).trim()
+            "cargo adapter failed for package `{package}` (exit {status}):\n{}",
+            command_failure_detail(&stdout, &stderr)
         ))
     }
 }
@@ -784,6 +795,22 @@ mod tests {
                 .unwrap()
                 .contains("timed out")
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn nonzero_exit_diagnostic_includes_stdout_and_stderr() {
+        let mut command = Command::new("sh");
+        command.args([
+            "-c",
+            "printf 'failing test: assertion details\\n'; printf 'compiler note\\n' >&2; exit 1",
+        ]);
+
+        let diagnostic =
+            execute_command(&mut command, Duration::from_secs(1), "djinn-qa").unwrap_err();
+
+        assert!(diagnostic.contains("stdout:\nfailing test: assertion details"));
+        assert!(diagnostic.contains("stderr:\ncompiler note"));
     }
 
     #[test]

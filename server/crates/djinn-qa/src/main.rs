@@ -82,6 +82,15 @@ fn run_smoke(args: Vec<String>) -> Result<ExitCode, String> {
         &CargoExecutor,
         &TemplateCloneDatabase,
     )?;
+    for outcome in &summary.outcomes {
+        eprintln!(
+            "qa-smoke scenario {}: {:?}",
+            outcome.scenario_id, outcome.status
+        );
+        for diagnostic in &outcome.diagnostics {
+            eprintln!("  diagnostic: {diagnostic}");
+        }
+    }
     Ok(if summary.succeeded() {
         ExitCode::SUCCESS
     } else {
