@@ -4,6 +4,8 @@ use std::sync::Arc;
 
 use djinn_core::doctor::DoctorRegistry;
 use djinn_db::TaskRepository;
+use djinn_db::repositories::user::UserRepository;
+use djinn_provider::repos::CredentialRepository;
 use tokio::sync::broadcast;
 
 use super::create_task_with_note;
@@ -31,6 +33,25 @@ async fn stranded_ready_consistency_across_doctor_and_board_health() {
 
     // ── 1. Fixture: open task with no active session, backdated ────────
     let (task, _note) = create_task_with_note(&db, &tx, "consistency-stranded").await;
+    // This consistency fixture represents an attributed, credential-eligible
+    // task. Creator-less legacy rows are intentionally blocked by board health.
+    let user = UserRepository::new(db.clone())
+        .upsert_from_github(999_004, "doctor-stranded-test", None, None)
+        .await
+        .expect("create attributed task user");
+    TaskRepository::new(db.clone(), event_bus_for(&tx))
+        .set_created_by_user_id(&task.id, &user.id)
+        .await
+        .expect("attribute stranded task creator");
+    CredentialRepository::new(db.clone(), event_bus_for(&tx))
+        .set_with_owner(
+            "anthropic",
+            "ANTHROPIC_API_KEY",
+            "sk-doctor-stranded-test",
+            Some(&user.id),
+        )
+        .await
+        .expect("create attributed task credential");
     // The task is already "open" with no session.  Backdate its updated_at
     // well past the 30-minute threshold so board_health surfaces it.
     djinn_db::test_support::backdate_task_updated_at(&db, &task.id, "90 minutes").await;
