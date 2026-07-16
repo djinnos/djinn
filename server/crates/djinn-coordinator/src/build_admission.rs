@@ -721,20 +721,17 @@ mod tests {
             .await
             .unwrap();
 
-        // A delayed callback for the old generation is rejected as stale and
-        // cannot release the newer row.
-        assert!(
-            controller
-                .transition(
-                    &first,
-                    WarmAdmissionTransition::Terminal {
-                        uid: "uid-one".into(),
-                    },
-                )
-                .await
-                .is_err(),
-            "delayed old-generation callback must be rejected as stale"
-        );
+        // A delayed callback for the already-terminal old generation is an
+        // idempotent success and cannot release the newer row.
+        controller
+            .transition(
+                &first,
+                WarmAdmissionTransition::Terminal {
+                    uid: "uid-one".into(),
+                },
+            )
+            .await
+            .unwrap();
         assert!(
             controller
                 .release_notifier()

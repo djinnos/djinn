@@ -765,8 +765,17 @@ impl CoordinatorActor {
     }
 
     pub(super) async fn run_build_admission_release_pass(&mut self) {
-        Self::run_pass_with_watchdog("build-admission-release", self.dispatch_ready_tasks(None))
-            .await;
+        // Keep the release arm's state small. `dispatch_ready_tasks` is also
+        // reachable through event handling, and embedding another copy of its
+        // large future directly in `run` made the coordinator future overflow
+        // a Tokio worker stack while processing rapid status-change events.
+        // Boxing bounds this arm without changing dispatch or watchdog
+        // semantics.
+        Self::run_pass_with_watchdog(
+            "build-admission-release",
+            Box::pin(self.dispatch_ready_tasks(None)),
+        )
+        .await;
     }
 
     pub(super) async fn run(mut self) {
