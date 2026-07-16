@@ -414,6 +414,22 @@ fn memory_recall_trace_schema_discriminates_list_and_detail_modes() {
     );
     assert_eq!(variants[0]["properties"]["limit"]["minimum"], 1);
     assert_eq!(variants[0]["properties"]["limit"]["maximum"], 100);
+    assert_eq!(
+        variants[0]["properties"]["trace_outcome"]["enum"],
+        serde_json::json!([
+            "injected",
+            "empty",
+            "error",
+            "legacy_unknown",
+            "disabled_off",
+            "disabled_kill_switch",
+            "disabled_legacy"
+        ])
+    );
+    assert_eq!(
+        variants[0]["properties"]["rollout_label"]["description"],
+        "Exact recorded rollout label filter."
+    );
     assert!(variants[1]["not"]["anyOf"].is_array());
 }
 

@@ -380,6 +380,8 @@ mod tests {
         assert_eq!(list_resp.traces.len(), 1);
         let trace_summary = &list_resp.traces[0];
         assert_eq!(trace_summary.entry_point, "load_knowledge_context");
+        assert_eq!(trace_summary.rollout_label, "enabled");
+        assert_eq!(trace_summary.trace_outcome, "injected");
         assert_eq!(trace_summary.candidate_count, 12);
         assert_eq!(trace_summary.injected_count, 10);
         assert_eq!(trace_summary.skipped_count, 2);
@@ -422,6 +424,8 @@ mod tests {
         assert_eq!(detail.trace_id, trace_id);
         assert_eq!(detail.candidates.len(), 12);
         assert_eq!(detail.entry_point, "load_knowledge_context");
+        assert_eq!(detail.rollout_label, "enabled");
+        assert_eq!(detail.trace_outcome, "injected");
         assert_eq!(detail.candidate_cap, 50);
         assert!(!detail.candidate_cap_exceeded);
 
