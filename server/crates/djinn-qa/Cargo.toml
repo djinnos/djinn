@@ -8,6 +8,7 @@ edition = "2024"
 doctest = false
 
 [dependencies]
+djinn-db = { path = "../djinn-db" }
 djinn-git = { path = "../djinn-git" }
 serde = { version = "1", features = ["derive"] }
 serde_yaml = "0.9"

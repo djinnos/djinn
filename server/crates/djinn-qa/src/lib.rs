@@ -5,6 +5,7 @@
 pub mod evidence;
 pub mod harness;
 pub mod report;
+pub mod run;
 pub mod scenario;
 pub mod taxonomy;
 
@@ -18,6 +19,11 @@ pub use harness::provider::{MockProvider, ProviderOutcome, ProviderScript};
 pub use report::{
     CoverageReportRow, ReportError, coverage_report, discovered_root, empty_evidence,
     empty_inventory, required_gap,
+};
+pub use run::{
+    CargoExecutor, DatabaseAcquirer, RunStatus, RunSummary, ScenarioEvidenceArtifact,
+    ScenarioExecutor, ScenarioOutcome, TemplateCloneDatabase, execute_selected, run_inventory,
+    select_scenarios,
 };
 pub use scenario::{
     Execution, Isolation, IsolationMode, Scenario, ScenarioError, ScenarioInventory,
