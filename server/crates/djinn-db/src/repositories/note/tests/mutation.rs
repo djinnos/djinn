@@ -462,7 +462,10 @@ async fn deprecate_with_supersedes_is_atomic_and_returns_auditable_metadata() {
     let db = Database::open_in_memory().unwrap();
     let (tx, _rx) = broadcast::channel(8);
     let project = make_project(&db, tmp.path()).await;
-    let other_project = make_project(&db, tmp.path()).await;
+    // Notes are unique by `(project_id, permalink)`, so the foreign-note
+    // fixture needs an independent project root while retaining this database.
+    let other_project_root = crate::database::test_tempdir().unwrap();
+    let other_project = make_project(&db, other_project_root.path()).await;
     let repo = NoteRepository::new(db.clone(), event_bus_for(&tx));
     // Reverse creation order so this command proves locking is by ID rather
     // than by old/new role: `old_id` is deterministically locked second.

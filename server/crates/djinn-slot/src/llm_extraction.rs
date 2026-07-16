@@ -701,20 +701,34 @@ impl std::fmt::Display for RevisionOperationRefusalReason {
     }
 }
 
-fn validate_revision_operations(operations: &mut [RevisionOperation]) -> Result<(), RevisionOperationRefusalReason> {
+fn validate_revision_operations(
+    operations: &mut [RevisionOperation],
+) -> Result<(), RevisionOperationRefusalReason> {
     for operation in operations {
         match operation {
-            RevisionOperation::Patch { target_note_id, before_text, after_text, confidence_delta, reason } => {
+            RevisionOperation::Patch {
+                target_note_id,
+                before_text,
+                after_text,
+                confidence_delta,
+                reason,
+            } => {
                 validate_note_id(target_note_id)?;
                 if before_text.trim().is_empty() || after_text.trim().is_empty() {
                     return Err(RevisionOperationRefusalReason::BlankRequiredText);
                 }
-                if !confidence_delta.is_finite() || confidence_delta.abs() > MAX_REVISION_CONFIDENCE_DELTA {
+                if !confidence_delta.is_finite()
+                    || confidence_delta.abs() > MAX_REVISION_CONFIDENCE_DELTA
+                {
                     return Err(RevisionOperationRefusalReason::ConfidenceDeltaOutOfRange);
                 }
                 normalize_reason(reason)?;
             }
-            RevisionOperation::DeprecateWithSupersedes { deprecated_note_id, superseding_note_id, reason } => {
+            RevisionOperation::DeprecateWithSupersedes {
+                deprecated_note_id,
+                superseding_note_id,
+                reason,
+            } => {
                 validate_note_id(deprecated_note_id)?;
                 validate_note_id(superseding_note_id)?;
                 if deprecated_note_id == superseding_note_id {
@@ -744,7 +758,6 @@ fn normalize_reason(reason: &mut String) -> Result<(), RevisionOperationRefusalR
     }
     Ok(())
 }
-
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -2563,8 +2576,8 @@ fn parse_extraction_response(text: &str) -> Result<ExtractionResponse, String> {
     } else {
         text
     };
-    let value: serde_json::Value = serde_json::from_str(text)
-        .map_err(|error| format!("JSON parse error: {error}"))?;
+    let value: serde_json::Value =
+        serde_json::from_str(text).map_err(|error| format!("JSON parse error: {error}"))?;
     let has_revision_operations = value
         .as_object()
         .is_some_and(|object| object.contains_key("revision_operations"));
@@ -3122,12 +3135,40 @@ mod tests {
     fn parse_extraction_response_refuses_invalid_revision_operations() {
         let id = "018f0000-0000-7000-8000-000000000001";
         for (operation, expected) in [
-            (format!(r#"{{"kind":"patch","target_note_id":"bad","before_text":"old","after_text":"new","confidence_delta":0.0,"reason":"why"}}"#), "invalid_note_id"),
-            (format!(r#"{{"kind":"patch","target_note_id":"{id}","before_text":"old","after_text":" ","confidence_delta":0.0,"reason":"why"}}"#), "blank_required_text"),
-            (format!(r#"{{"kind":"patch","target_note_id":"{id}","before_text":"old","after_text":"new","confidence_delta":0.26,"reason":"why"}}"#), "confidence_delta_out_of_range"),
-            (format!(r#"{{"kind":"deprecate_with_supersedes","deprecated_note_id":"{id}","superseding_note_id":"{id}","reason":"why"}}"#), "self_replacement"),
-            (format!(r#"{{"kind":"deprecate_with_supersedes","deprecated_note_id":"{id}","superseding_note_id":"018f0000-0000-7000-8000-000000000002","reason":" "}}"#), "blank_reason"),
-            (r#"{"kind":"patch","target_note_id":"x"}"#.to_owned(), "malformed_operation_shape"),
+            (
+                format!(
+                    r#"{{"kind":"patch","target_note_id":"bad","before_text":"old","after_text":"new","confidence_delta":0.0,"reason":"why"}}"#
+                ),
+                "invalid_note_id",
+            ),
+            (
+                format!(
+                    r#"{{"kind":"patch","target_note_id":"{id}","before_text":"old","after_text":" ","confidence_delta":0.0,"reason":"why"}}"#
+                ),
+                "blank_required_text",
+            ),
+            (
+                format!(
+                    r#"{{"kind":"patch","target_note_id":"{id}","before_text":"old","after_text":"new","confidence_delta":0.26,"reason":"why"}}"#
+                ),
+                "confidence_delta_out_of_range",
+            ),
+            (
+                format!(
+                    r#"{{"kind":"deprecate_with_supersedes","deprecated_note_id":"{id}","superseding_note_id":"{id}","reason":"why"}}"#
+                ),
+                "self_replacement",
+            ),
+            (
+                format!(
+                    r#"{{"kind":"deprecate_with_supersedes","deprecated_note_id":"{id}","superseding_note_id":"018f0000-0000-7000-8000-000000000002","reason":" "}}"#
+                ),
+                "blank_reason",
+            ),
+            (
+                r#"{"kind":"patch","target_note_id":"x"}"#.to_owned(),
+                "malformed_operation_shape",
+            ),
         ] {
             let json = format!(r#"{{"revision_operations":[{operation}]}}"#);
             assert_eq!(parse_extraction_response(&json).unwrap_err(), expected);
@@ -3142,7 +3183,6 @@ mod tests {
         assert_eq!(duplicates, 1);
         assert_eq!(response.revision_operations.len(), 1);
     }
-
 
     #[test]
     fn parse_extraction_response_valid_json() {
