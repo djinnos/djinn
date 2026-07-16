@@ -65,6 +65,20 @@ pub enum FinalVerificationViolation {
     OverlappingOutputDirectories { first: PathBuf, second: PathBuf },
 }
 
+/// A kernel-enforced access denial observed while the child was executing.
+///
+/// Landlock and network namespaces report denied operations to the child via
+/// errno; they do not provide a parent-side notification channel. The launcher
+/// classifies the platform's unambiguous denial diagnostics from a failed child
+/// and preserves ordinary failed commands as [`FinalVerificationResult`]s.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum FinalVerificationRuntimeViolation {
+    #[error("undeclared filesystem access was denied")]
+    FilesystemAccessDenied,
+    #[error("network access was denied")]
+    NetworkAccessDenied,
+}
+
 /// Launcher failures are typed so callers can mark attempts ineligible without
 /// treating a weaker execution as reusable evidence.
 #[derive(Debug, thiserror::Error)]
@@ -73,6 +87,13 @@ pub enum FinalVerificationError {
     BackendUnavailable { reason: &'static str },
     #[error("final-verification sandbox violation: {0}")]
     Violation(#[from] FinalVerificationViolation),
+    #[error("final-verification runtime sandbox violation: {violation}")]
+    RuntimeViolation {
+        violation: FinalVerificationRuntimeViolation,
+        /// Captured output lets callers audit the failed command without
+        /// treating it as reusable verification evidence.
+        result: FinalVerificationResult,
+    },
     #[error("failed to prepare output directory {path}: {source}")]
     OutputPreparation { path: PathBuf, source: io::Error },
     #[error("failed to launch isolated final verification: {0}")]
@@ -83,12 +104,16 @@ pub enum FinalVerificationError {
 ///
 /// Availability is checked before filesystem mutation.  There is deliberately
 /// no fallback path: lack of Landlock or an isolated network namespace returns
-/// [`FinalVerificationError::BackendUnavailable`].
+/// [`FinalVerificationError::BackendUnavailable`]. Kernel-enforced runtime
+/// denials return [`FinalVerificationError::RuntimeViolation`], while ordinary
+/// command failures remain [`FinalVerificationResult`] values.
 pub fn launch_final_verification(
     request: FinalVerificationRequest,
 ) -> Result<FinalVerificationResult, FinalVerificationError> {
-    ensure_backend_available()?;
     let prepared = PreparedRequest::new(request)?;
+    // Request validation performs no mutation, so report a pre-existing output
+    // as a policy violation even if the host cannot provide the backend.
+    ensure_backend_available()?;
     prepared.create_empty_output_directories()?;
 
     let mut command = Command::new(&prepared.argv[0]);
@@ -121,11 +146,40 @@ pub fn launch_final_verification(
         stdout,
         stderr,
     } = command.output().map_err(FinalVerificationError::Launch)?;
-    Ok(FinalVerificationResult {
+    let result = FinalVerificationResult {
         exit_code: status.code(),
         stdout,
         stderr,
-    })
+    };
+    if let Some(violation) = classify_runtime_violation(&result) {
+        return Err(FinalVerificationError::RuntimeViolation { violation, result });
+    }
+    Ok(result)
+}
+
+fn classify_runtime_violation(
+    result: &FinalVerificationResult,
+) -> Option<FinalVerificationRuntimeViolation> {
+    if result.succeeded() {
+        return None;
+    }
+    let stderr = String::from_utf8_lossy(&result.stderr).to_ascii_lowercase();
+    // A network namespace without configured interfaces uses these diagnostics
+    // for outbound connection attempts. Check first because some systems use
+    // EPERM for denied sockets.
+    if ["network is unreachable", "no route to host", "network is down"]
+        .iter()
+        .any(|diagnostic| stderr.contains(diagnostic))
+    {
+        return Some(FinalVerificationRuntimeViolation::NetworkAccessDenied);
+    }
+    if ["permission denied", "operation not permitted", "access denied"]
+        .iter()
+        .any(|diagnostic| stderr.contains(diagnostic))
+    {
+        return Some(FinalVerificationRuntimeViolation::FilesystemAccessDenied);
+    }
+    None
 }
 
 /// Whether the two kernel mechanisms required by this launcher are available.
@@ -336,13 +390,18 @@ mod tests {
     }
 
     #[test]
-    fn preexisting_output_is_a_typed_sandbox_violation() {
+    fn preexisting_output_content_is_a_public_typed_sandbox_violation() {
         let worktree = TempDir::new().unwrap();
         std::fs::create_dir(worktree.path().join("outputs")).unwrap();
-        let error = PreparedRequest::new(request(worktree.path())).unwrap_err();
+        std::fs::write(worktree.path().join("outputs/stale"), b"old output").unwrap();
+        let mut req = request(worktree.path());
+        req.argv[2] = "cat outputs/stale".into();
+        let error = launch_final_verification(req).unwrap_err();
         assert!(matches!(
             error,
-            FinalVerificationViolation::OutputOnlyPreexisting { .. }
+            FinalVerificationError::Violation(FinalVerificationViolation::OutputOnlyPreexisting {
+                ..
+            })
         ));
     }
 
@@ -402,12 +461,13 @@ mod tests {
         std::fs::write(&secret, b"must not be readable").unwrap();
         let mut req = request(worktree.path());
         req.argv[2] = format!("cat {}", secret.display());
-        let result = launch_final_verification(req).unwrap();
-        assert!(
-            !result.succeeded(),
-            "undeclared host file was readable: {}",
-            String::from_utf8_lossy(&result.stdout)
-        );
+        assert!(matches!(
+            launch_final_verification(req),
+            Err(FinalVerificationError::RuntimeViolation {
+                violation: FinalVerificationRuntimeViolation::FilesystemAccessDenied,
+                ..
+            })
+        ));
     }
 
     #[test]
@@ -422,10 +482,15 @@ mod tests {
             "-c".into(),
             "exec 3<>/dev/tcp/1.1.1.1/80".into(),
         ];
-        let result = launch_final_verification(req).unwrap();
         assert!(
-            !result.succeeded(),
-            "network namespace unexpectedly allowed a TCP connection"
+            matches!(
+                launch_final_verification(req),
+                Err(FinalVerificationError::RuntimeViolation {
+                    violation: FinalVerificationRuntimeViolation::NetworkAccessDenied,
+                    ..
+                })
+            ),
+            "network namespace unexpectedly allowed a TCP connection or failed without a denial diagnostic"
         );
     }
 }
