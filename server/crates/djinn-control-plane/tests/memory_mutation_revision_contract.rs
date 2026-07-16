@@ -12,6 +12,7 @@ use djinn_core::{
     events::EventBus,
 };
 use djinn_db::{NoteRepository, NoteRevisionEvent};
+use djinn_memory::Note;
 use serde_json::{Value, json};
 
 async fn dispatch_as(
@@ -55,6 +56,31 @@ fn assert_same_not_found_shape(
     );
 }
 
+/// Capture durable mutation semantics while excluding fields owned by the
+/// detached summary-regeneration lifecycle (`abstract`, `overview`, and
+/// `updated_at`).
+fn stable_note_projection(note: &Note) -> Value {
+    json!({
+        "id": note.id,
+        "project_id": note.project_id,
+        "permalink": note.permalink,
+        "title": note.title,
+        "file_path": note.file_path,
+        "storage": note.storage,
+        "note_type": note.note_type,
+        "folder": note.folder,
+        "status": note.status,
+        "tags": note.parsed_tags(),
+        "content": note.content,
+        "retrieval_anchor": note.retrieval_anchor,
+        "created_at": note.created_at,
+        "last_accessed": note.last_accessed,
+        "access_count": note.access_count,
+        "confidence": note.confidence,
+        "scope_paths": note.parsed_scope_paths(),
+    })
+}
+
 async fn assert_tenant_state_unchanged(
     repo: &NoteRepository,
     owner_project_id: &str,
@@ -76,8 +102,8 @@ async fn assert_tenant_state_unchanged(
         .await
         .expect("reload other note")
         .expect("other note remains present");
-    assert_eq!(&owner_note.to_value(), owner_note_before);
-    assert_eq!(&other_note.to_value(), other_note_before);
+    assert_eq!(&stable_note_projection(&owner_note), owner_note_before);
+    assert_eq!(&stable_note_projection(&other_note), other_note_before);
     assert_eq!(
         repo.revision_events(owner_project_id)
             .await
@@ -188,14 +214,14 @@ async fn cross_project_mutations_and_revision_history_do_not_disclose_foreign_no
         .get(&owner_note_id)
         .await
         .expect("capture owner note")
-        .expect("owner note exists")
-        .to_value();
+        .expect("owner note exists");
+    let owner_note_before = stable_note_projection(&owner_note_before);
     let other_note_before = repo
         .get(&other_note_id)
         .await
         .expect("capture other note")
-        .expect("other note exists")
-        .to_value();
+        .expect("other note exists");
+    let other_note_before = stable_note_projection(&other_note_before);
 
     let absent_permalink = "reference/no-such-owner-note";
     let foreign_edit = dispatch_as(
