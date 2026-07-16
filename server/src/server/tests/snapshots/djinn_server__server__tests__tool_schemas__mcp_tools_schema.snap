@@ -5030,6 +5030,25 @@ expression: signatures
             "lifecycle": {
               "$ref": "#/$defs/LifecycleHooks",
               "default": {
+                "final_verification": {
+                  "commands": [],
+                  "hermeticity": {
+                    "hermetic": false,
+                    "network_access": false,
+                    "reusable": false
+                  },
+                  "input_manifest": {
+                    "environment_names": [],
+                    "repo_paths": [],
+                    "version": 1
+                  },
+                  "output_only_globs": [],
+                  "profile_id": "",
+                  "profile_revision": 0,
+                  "read_only_external_inputs": [],
+                  "required_checks": [],
+                  "version": 1
+                },
                 "post_build": [],
                 "pre_anything": [],
                 "pre_task": [],
@@ -5064,6 +5083,134 @@ expression: signatures
           },
           "type": "object"
         },
+        "ExternalInputDeclaration": {
+          "additionalProperties": false,
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "locator": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "locator"
+          ],
+          "type": "object"
+        },
+        "FinalVerificationCommand": {
+          "additionalProperties": false,
+          "properties": {
+            "argv": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "check_id": {
+              "type": "string"
+            },
+            "descriptor_revision": {
+              "default": 1,
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "environment_names": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "executable": {
+              "type": "string"
+            },
+            "timeout_seconds": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "working_directory": {
+              "default": "",
+              "type": "string"
+            }
+          },
+          "required": [
+            "check_id",
+            "executable",
+            "timeout_seconds"
+          ],
+          "type": "object"
+        },
+        "FinalVerificationPlan": {
+          "additionalProperties": false,
+          "properties": {
+            "commands": {
+              "default": [],
+              "items": {
+                "$ref": "#/$defs/FinalVerificationCommand"
+              },
+              "type": "array"
+            },
+            "hermeticity": {
+              "$ref": "#/$defs/HermeticityDeclaration",
+              "default": {
+                "hermetic": false,
+                "network_access": false,
+                "reusable": false
+              }
+            },
+            "input_manifest": {
+              "$ref": "#/$defs/VerificationInputManifest",
+              "default": {
+                "environment_names": [],
+                "repo_paths": [],
+                "version": 1
+              }
+            },
+            "output_only_globs": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "profile_id": {
+              "default": "",
+              "type": "string"
+            },
+            "profile_revision": {
+              "default": 0,
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "read_only_external_inputs": {
+              "default": [],
+              "items": {
+                "$ref": "#/$defs/ExternalInputDeclaration"
+              },
+              "type": "array"
+            },
+            "required_checks": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "version": {
+              "default": 1,
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "type": "object"
+        },
         "GoLanguage": {
           "properties": {
             "default_version": {
@@ -5073,6 +5220,24 @@ expression: signatures
           "required": [
             "default_version"
           ],
+          "type": "object"
+        },
+        "HermeticityDeclaration": {
+          "additionalProperties": false,
+          "properties": {
+            "hermetic": {
+              "default": false,
+              "type": "boolean"
+            },
+            "network_access": {
+              "default": false,
+              "type": "boolean"
+            },
+            "reusable": {
+              "default": false,
+              "type": "boolean"
+            }
+          },
           "type": "object"
         },
         "HookCommand": {
@@ -5202,6 +5367,29 @@ expression: signatures
         },
         "LifecycleHooks": {
           "properties": {
+            "final_verification": {
+              "$ref": "#/$defs/FinalVerificationPlan",
+              "default": {
+                "commands": [],
+                "hermeticity": {
+                  "hermetic": false,
+                  "network_access": false,
+                  "reusable": false
+                },
+                "input_manifest": {
+                  "environment_names": [],
+                  "repo_paths": [],
+                  "version": 1
+                },
+                "output_only_globs": [],
+                "profile_id": "",
+                "profile_revision": 0,
+                "read_only_external_inputs": [],
+                "required_checks": [],
+                "version": 1
+              },
+              "description": "Authoritative post-authoring plan, distinct from setup-time hooks."
+            },
             "post_build": {
               "default": [],
               "description": "`RUN` lines appended to the generated Dockerfile. Bundle anything\nyou want baked into the image here (apt packages are the easy path;\ncurl-installs like `protoc` go here).",
@@ -5325,6 +5513,32 @@ expression: signatures
           "required": [
             "default_toolchain"
           ],
+          "type": "object"
+        },
+        "VerificationInputManifest": {
+          "additionalProperties": false,
+          "properties": {
+            "environment_names": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "repo_paths": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "version": {
+              "default": 1,
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
           "type": "object"
         },
         "Workspace": {
@@ -5669,6 +5883,25 @@ expression: signatures
             "lifecycle": {
               "$ref": "#/$defs/LifecycleHooks",
               "default": {
+                "final_verification": {
+                  "commands": [],
+                  "hermeticity": {
+                    "hermetic": false,
+                    "network_access": false,
+                    "reusable": false
+                  },
+                  "input_manifest": {
+                    "environment_names": [],
+                    "repo_paths": [],
+                    "version": 1
+                  },
+                  "output_only_globs": [],
+                  "profile_id": "",
+                  "profile_revision": 0,
+                  "read_only_external_inputs": [],
+                  "required_checks": [],
+                  "version": 1
+                },
                 "post_build": [],
                 "pre_anything": [],
                 "pre_task": [],
@@ -5703,6 +5936,134 @@ expression: signatures
           },
           "type": "object"
         },
+        "ExternalInputDeclaration": {
+          "additionalProperties": false,
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "locator": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "locator"
+          ],
+          "type": "object"
+        },
+        "FinalVerificationCommand": {
+          "additionalProperties": false,
+          "properties": {
+            "argv": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "check_id": {
+              "type": "string"
+            },
+            "descriptor_revision": {
+              "default": 1,
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "environment_names": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "executable": {
+              "type": "string"
+            },
+            "timeout_seconds": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "working_directory": {
+              "default": "",
+              "type": "string"
+            }
+          },
+          "required": [
+            "check_id",
+            "executable",
+            "timeout_seconds"
+          ],
+          "type": "object"
+        },
+        "FinalVerificationPlan": {
+          "additionalProperties": false,
+          "properties": {
+            "commands": {
+              "default": [],
+              "items": {
+                "$ref": "#/$defs/FinalVerificationCommand"
+              },
+              "type": "array"
+            },
+            "hermeticity": {
+              "$ref": "#/$defs/HermeticityDeclaration",
+              "default": {
+                "hermetic": false,
+                "network_access": false,
+                "reusable": false
+              }
+            },
+            "input_manifest": {
+              "$ref": "#/$defs/VerificationInputManifest",
+              "default": {
+                "environment_names": [],
+                "repo_paths": [],
+                "version": 1
+              }
+            },
+            "output_only_globs": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "profile_id": {
+              "default": "",
+              "type": "string"
+            },
+            "profile_revision": {
+              "default": 0,
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "read_only_external_inputs": {
+              "default": [],
+              "items": {
+                "$ref": "#/$defs/ExternalInputDeclaration"
+              },
+              "type": "array"
+            },
+            "required_checks": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "version": {
+              "default": 1,
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "type": "object"
+        },
         "GoLanguage": {
           "properties": {
             "default_version": {
@@ -5712,6 +6073,24 @@ expression: signatures
           "required": [
             "default_version"
           ],
+          "type": "object"
+        },
+        "HermeticityDeclaration": {
+          "additionalProperties": false,
+          "properties": {
+            "hermetic": {
+              "default": false,
+              "type": "boolean"
+            },
+            "network_access": {
+              "default": false,
+              "type": "boolean"
+            },
+            "reusable": {
+              "default": false,
+              "type": "boolean"
+            }
+          },
           "type": "object"
         },
         "HookCommand": {
@@ -5880,6 +6259,29 @@ expression: signatures
         },
         "LifecycleHooks": {
           "properties": {
+            "final_verification": {
+              "$ref": "#/$defs/FinalVerificationPlan",
+              "default": {
+                "commands": [],
+                "hermeticity": {
+                  "hermetic": false,
+                  "network_access": false,
+                  "reusable": false
+                },
+                "input_manifest": {
+                  "environment_names": [],
+                  "repo_paths": [],
+                  "version": 1
+                },
+                "output_only_globs": [],
+                "profile_id": "",
+                "profile_revision": 0,
+                "read_only_external_inputs": [],
+                "required_checks": [],
+                "version": 1
+              },
+              "description": "Authoritative post-authoring plan, distinct from setup-time hooks."
+            },
             "post_build": {
               "default": [],
               "description": "`RUN` lines appended to the generated Dockerfile. Bundle anything\nyou want baked into the image here (apt packages are the easy path;\ncurl-installs like `protoc` go here).",
@@ -6003,6 +6405,32 @@ expression: signatures
           "required": [
             "default_toolchain"
           ],
+          "type": "object"
+        },
+        "VerificationInputManifest": {
+          "additionalProperties": false,
+          "properties": {
+            "environment_names": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "repo_paths": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "version": {
+              "default": 1,
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
           "type": "object"
         },
         "Workspace": {
@@ -6328,6 +6756,25 @@ expression: signatures
             "lifecycle": {
               "$ref": "#/$defs/LifecycleHooks",
               "default": {
+                "final_verification": {
+                  "commands": [],
+                  "hermeticity": {
+                    "hermetic": false,
+                    "network_access": false,
+                    "reusable": false
+                  },
+                  "input_manifest": {
+                    "environment_names": [],
+                    "repo_paths": [],
+                    "version": 1
+                  },
+                  "output_only_globs": [],
+                  "profile_id": "",
+                  "profile_revision": 0,
+                  "read_only_external_inputs": [],
+                  "required_checks": [],
+                  "version": 1
+                },
                 "post_build": [],
                 "pre_anything": [],
                 "pre_task": [],
@@ -6362,6 +6809,134 @@ expression: signatures
           },
           "type": "object"
         },
+        "ExternalInputDeclaration": {
+          "additionalProperties": false,
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "locator": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "locator"
+          ],
+          "type": "object"
+        },
+        "FinalVerificationCommand": {
+          "additionalProperties": false,
+          "properties": {
+            "argv": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "check_id": {
+              "type": "string"
+            },
+            "descriptor_revision": {
+              "default": 1,
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "environment_names": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "executable": {
+              "type": "string"
+            },
+            "timeout_seconds": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "working_directory": {
+              "default": "",
+              "type": "string"
+            }
+          },
+          "required": [
+            "check_id",
+            "executable",
+            "timeout_seconds"
+          ],
+          "type": "object"
+        },
+        "FinalVerificationPlan": {
+          "additionalProperties": false,
+          "properties": {
+            "commands": {
+              "default": [],
+              "items": {
+                "$ref": "#/$defs/FinalVerificationCommand"
+              },
+              "type": "array"
+            },
+            "hermeticity": {
+              "$ref": "#/$defs/HermeticityDeclaration",
+              "default": {
+                "hermetic": false,
+                "network_access": false,
+                "reusable": false
+              }
+            },
+            "input_manifest": {
+              "$ref": "#/$defs/VerificationInputManifest",
+              "default": {
+                "environment_names": [],
+                "repo_paths": [],
+                "version": 1
+              }
+            },
+            "output_only_globs": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "profile_id": {
+              "default": "",
+              "type": "string"
+            },
+            "profile_revision": {
+              "default": 0,
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "read_only_external_inputs": {
+              "default": [],
+              "items": {
+                "$ref": "#/$defs/ExternalInputDeclaration"
+              },
+              "type": "array"
+            },
+            "required_checks": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "version": {
+              "default": 1,
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "type": "object"
+        },
         "GoLanguage": {
           "properties": {
             "default_version": {
@@ -6371,6 +6946,24 @@ expression: signatures
           "required": [
             "default_version"
           ],
+          "type": "object"
+        },
+        "HermeticityDeclaration": {
+          "additionalProperties": false,
+          "properties": {
+            "hermetic": {
+              "default": false,
+              "type": "boolean"
+            },
+            "network_access": {
+              "default": false,
+              "type": "boolean"
+            },
+            "reusable": {
+              "default": false,
+              "type": "boolean"
+            }
+          },
           "type": "object"
         },
         "HookCommand": {
@@ -6500,6 +7093,29 @@ expression: signatures
         },
         "LifecycleHooks": {
           "properties": {
+            "final_verification": {
+              "$ref": "#/$defs/FinalVerificationPlan",
+              "default": {
+                "commands": [],
+                "hermeticity": {
+                  "hermetic": false,
+                  "network_access": false,
+                  "reusable": false
+                },
+                "input_manifest": {
+                  "environment_names": [],
+                  "repo_paths": [],
+                  "version": 1
+                },
+                "output_only_globs": [],
+                "profile_id": "",
+                "profile_revision": 0,
+                "read_only_external_inputs": [],
+                "required_checks": [],
+                "version": 1
+              },
+              "description": "Authoritative post-authoring plan, distinct from setup-time hooks."
+            },
             "post_build": {
               "default": [],
               "description": "`RUN` lines appended to the generated Dockerfile. Bundle anything\nyou want baked into the image here (apt packages are the easy path;\ncurl-installs like `protoc` go here).",
@@ -6623,6 +7239,32 @@ expression: signatures
           "required": [
             "default_toolchain"
           ],
+          "type": "object"
+        },
+        "VerificationInputManifest": {
+          "additionalProperties": false,
+          "properties": {
+            "environment_names": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "repo_paths": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "version": {
+              "default": 1,
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
           "type": "object"
         },
         "Workspace": {
@@ -11463,6 +12105,25 @@ expression: signatures
             "lifecycle": {
               "$ref": "#/$defs/LifecycleHooks",
               "default": {
+                "final_verification": {
+                  "commands": [],
+                  "hermeticity": {
+                    "hermetic": false,
+                    "network_access": false,
+                    "reusable": false
+                  },
+                  "input_manifest": {
+                    "environment_names": [],
+                    "repo_paths": [],
+                    "version": 1
+                  },
+                  "output_only_globs": [],
+                  "profile_id": "",
+                  "profile_revision": 0,
+                  "read_only_external_inputs": [],
+                  "required_checks": [],
+                  "version": 1
+                },
                 "post_build": [],
                 "pre_anything": [],
                 "pre_task": [],
@@ -11497,6 +12158,134 @@ expression: signatures
           },
           "type": "object"
         },
+        "ExternalInputDeclaration": {
+          "additionalProperties": false,
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "locator": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "locator"
+          ],
+          "type": "object"
+        },
+        "FinalVerificationCommand": {
+          "additionalProperties": false,
+          "properties": {
+            "argv": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "check_id": {
+              "type": "string"
+            },
+            "descriptor_revision": {
+              "default": 1,
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "environment_names": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "executable": {
+              "type": "string"
+            },
+            "timeout_seconds": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "working_directory": {
+              "default": "",
+              "type": "string"
+            }
+          },
+          "required": [
+            "check_id",
+            "executable",
+            "timeout_seconds"
+          ],
+          "type": "object"
+        },
+        "FinalVerificationPlan": {
+          "additionalProperties": false,
+          "properties": {
+            "commands": {
+              "default": [],
+              "items": {
+                "$ref": "#/$defs/FinalVerificationCommand"
+              },
+              "type": "array"
+            },
+            "hermeticity": {
+              "$ref": "#/$defs/HermeticityDeclaration",
+              "default": {
+                "hermetic": false,
+                "network_access": false,
+                "reusable": false
+              }
+            },
+            "input_manifest": {
+              "$ref": "#/$defs/VerificationInputManifest",
+              "default": {
+                "environment_names": [],
+                "repo_paths": [],
+                "version": 1
+              }
+            },
+            "output_only_globs": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "profile_id": {
+              "default": "",
+              "type": "string"
+            },
+            "profile_revision": {
+              "default": 0,
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "read_only_external_inputs": {
+              "default": [],
+              "items": {
+                "$ref": "#/$defs/ExternalInputDeclaration"
+              },
+              "type": "array"
+            },
+            "required_checks": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "version": {
+              "default": 1,
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "type": "object"
+        },
         "GoLanguage": {
           "properties": {
             "default_version": {
@@ -11506,6 +12295,24 @@ expression: signatures
           "required": [
             "default_version"
           ],
+          "type": "object"
+        },
+        "HermeticityDeclaration": {
+          "additionalProperties": false,
+          "properties": {
+            "hermetic": {
+              "default": false,
+              "type": "boolean"
+            },
+            "network_access": {
+              "default": false,
+              "type": "boolean"
+            },
+            "reusable": {
+              "default": false,
+              "type": "boolean"
+            }
+          },
           "type": "object"
         },
         "HookCommand": {
@@ -11635,6 +12442,29 @@ expression: signatures
         },
         "LifecycleHooks": {
           "properties": {
+            "final_verification": {
+              "$ref": "#/$defs/FinalVerificationPlan",
+              "default": {
+                "commands": [],
+                "hermeticity": {
+                  "hermetic": false,
+                  "network_access": false,
+                  "reusable": false
+                },
+                "input_manifest": {
+                  "environment_names": [],
+                  "repo_paths": [],
+                  "version": 1
+                },
+                "output_only_globs": [],
+                "profile_id": "",
+                "profile_revision": 0,
+                "read_only_external_inputs": [],
+                "required_checks": [],
+                "version": 1
+              },
+              "description": "Authoritative post-authoring plan, distinct from setup-time hooks."
+            },
             "post_build": {
               "default": [],
               "description": "`RUN` lines appended to the generated Dockerfile. Bundle anything\nyou want baked into the image here (apt packages are the easy path;\ncurl-installs like `protoc` go here).",
@@ -11758,6 +12588,32 @@ expression: signatures
           "required": [
             "default_toolchain"
           ],
+          "type": "object"
+        },
+        "VerificationInputManifest": {
+          "additionalProperties": false,
+          "properties": {
+            "environment_names": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "repo_paths": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "version": {
+              "default": 1,
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
           "type": "object"
         },
         "Workspace": {
@@ -12060,6 +12916,25 @@ expression: signatures
             "lifecycle": {
               "$ref": "#/$defs/LifecycleHooks",
               "default": {
+                "final_verification": {
+                  "commands": [],
+                  "hermeticity": {
+                    "hermetic": false,
+                    "network_access": false,
+                    "reusable": false
+                  },
+                  "input_manifest": {
+                    "environment_names": [],
+                    "repo_paths": [],
+                    "version": 1
+                  },
+                  "output_only_globs": [],
+                  "profile_id": "",
+                  "profile_revision": 0,
+                  "read_only_external_inputs": [],
+                  "required_checks": [],
+                  "version": 1
+                },
                 "post_build": [],
                 "pre_anything": [],
                 "pre_task": [],
@@ -12094,6 +12969,134 @@ expression: signatures
           },
           "type": "object"
         },
+        "ExternalInputDeclaration": {
+          "additionalProperties": false,
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "locator": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "locator"
+          ],
+          "type": "object"
+        },
+        "FinalVerificationCommand": {
+          "additionalProperties": false,
+          "properties": {
+            "argv": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "check_id": {
+              "type": "string"
+            },
+            "descriptor_revision": {
+              "default": 1,
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "environment_names": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "executable": {
+              "type": "string"
+            },
+            "timeout_seconds": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "working_directory": {
+              "default": "",
+              "type": "string"
+            }
+          },
+          "required": [
+            "check_id",
+            "executable",
+            "timeout_seconds"
+          ],
+          "type": "object"
+        },
+        "FinalVerificationPlan": {
+          "additionalProperties": false,
+          "properties": {
+            "commands": {
+              "default": [],
+              "items": {
+                "$ref": "#/$defs/FinalVerificationCommand"
+              },
+              "type": "array"
+            },
+            "hermeticity": {
+              "$ref": "#/$defs/HermeticityDeclaration",
+              "default": {
+                "hermetic": false,
+                "network_access": false,
+                "reusable": false
+              }
+            },
+            "input_manifest": {
+              "$ref": "#/$defs/VerificationInputManifest",
+              "default": {
+                "environment_names": [],
+                "repo_paths": [],
+                "version": 1
+              }
+            },
+            "output_only_globs": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "profile_id": {
+              "default": "",
+              "type": "string"
+            },
+            "profile_revision": {
+              "default": 0,
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "read_only_external_inputs": {
+              "default": [],
+              "items": {
+                "$ref": "#/$defs/ExternalInputDeclaration"
+              },
+              "type": "array"
+            },
+            "required_checks": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "version": {
+              "default": 1,
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "type": "object"
+        },
         "GoLanguage": {
           "properties": {
             "default_version": {
@@ -12103,6 +13106,24 @@ expression: signatures
           "required": [
             "default_version"
           ],
+          "type": "object"
+        },
+        "HermeticityDeclaration": {
+          "additionalProperties": false,
+          "properties": {
+            "hermetic": {
+              "default": false,
+              "type": "boolean"
+            },
+            "network_access": {
+              "default": false,
+              "type": "boolean"
+            },
+            "reusable": {
+              "default": false,
+              "type": "boolean"
+            }
+          },
           "type": "object"
         },
         "HookCommand": {
@@ -12232,6 +13253,29 @@ expression: signatures
         },
         "LifecycleHooks": {
           "properties": {
+            "final_verification": {
+              "$ref": "#/$defs/FinalVerificationPlan",
+              "default": {
+                "commands": [],
+                "hermeticity": {
+                  "hermetic": false,
+                  "network_access": false,
+                  "reusable": false
+                },
+                "input_manifest": {
+                  "environment_names": [],
+                  "repo_paths": [],
+                  "version": 1
+                },
+                "output_only_globs": [],
+                "profile_id": "",
+                "profile_revision": 0,
+                "read_only_external_inputs": [],
+                "required_checks": [],
+                "version": 1
+              },
+              "description": "Authoritative post-authoring plan, distinct from setup-time hooks."
+            },
             "post_build": {
               "default": [],
               "description": "`RUN` lines appended to the generated Dockerfile. Bundle anything\nyou want baked into the image here (apt packages are the easy path;\ncurl-installs like `protoc` go here).",
@@ -12355,6 +13399,32 @@ expression: signatures
           "required": [
             "default_toolchain"
           ],
+          "type": "object"
+        },
+        "VerificationInputManifest": {
+          "additionalProperties": false,
+          "properties": {
+            "environment_names": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "repo_paths": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "version": {
+              "default": 1,
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
           "type": "object"
         },
         "Workspace": {
@@ -12631,6 +13701,25 @@ expression: signatures
             "lifecycle": {
               "$ref": "#/$defs/LifecycleHooks",
               "default": {
+                "final_verification": {
+                  "commands": [],
+                  "hermeticity": {
+                    "hermetic": false,
+                    "network_access": false,
+                    "reusable": false
+                  },
+                  "input_manifest": {
+                    "environment_names": [],
+                    "repo_paths": [],
+                    "version": 1
+                  },
+                  "output_only_globs": [],
+                  "profile_id": "",
+                  "profile_revision": 0,
+                  "read_only_external_inputs": [],
+                  "required_checks": [],
+                  "version": 1
+                },
                 "post_build": [],
                 "pre_anything": [],
                 "pre_task": [],
@@ -12665,6 +13754,134 @@ expression: signatures
           },
           "type": "object"
         },
+        "ExternalInputDeclaration": {
+          "additionalProperties": false,
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "locator": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "locator"
+          ],
+          "type": "object"
+        },
+        "FinalVerificationCommand": {
+          "additionalProperties": false,
+          "properties": {
+            "argv": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "check_id": {
+              "type": "string"
+            },
+            "descriptor_revision": {
+              "default": 1,
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "environment_names": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "executable": {
+              "type": "string"
+            },
+            "timeout_seconds": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "working_directory": {
+              "default": "",
+              "type": "string"
+            }
+          },
+          "required": [
+            "check_id",
+            "executable",
+            "timeout_seconds"
+          ],
+          "type": "object"
+        },
+        "FinalVerificationPlan": {
+          "additionalProperties": false,
+          "properties": {
+            "commands": {
+              "default": [],
+              "items": {
+                "$ref": "#/$defs/FinalVerificationCommand"
+              },
+              "type": "array"
+            },
+            "hermeticity": {
+              "$ref": "#/$defs/HermeticityDeclaration",
+              "default": {
+                "hermetic": false,
+                "network_access": false,
+                "reusable": false
+              }
+            },
+            "input_manifest": {
+              "$ref": "#/$defs/VerificationInputManifest",
+              "default": {
+                "environment_names": [],
+                "repo_paths": [],
+                "version": 1
+              }
+            },
+            "output_only_globs": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "profile_id": {
+              "default": "",
+              "type": "string"
+            },
+            "profile_revision": {
+              "default": 0,
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "read_only_external_inputs": {
+              "default": [],
+              "items": {
+                "$ref": "#/$defs/ExternalInputDeclaration"
+              },
+              "type": "array"
+            },
+            "required_checks": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "version": {
+              "default": 1,
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "type": "object"
+        },
         "GoLanguage": {
           "properties": {
             "default_version": {
@@ -12674,6 +13891,24 @@ expression: signatures
           "required": [
             "default_version"
           ],
+          "type": "object"
+        },
+        "HermeticityDeclaration": {
+          "additionalProperties": false,
+          "properties": {
+            "hermetic": {
+              "default": false,
+              "type": "boolean"
+            },
+            "network_access": {
+              "default": false,
+              "type": "boolean"
+            },
+            "reusable": {
+              "default": false,
+              "type": "boolean"
+            }
+          },
           "type": "object"
         },
         "HookCommand": {
@@ -12803,6 +14038,29 @@ expression: signatures
         },
         "LifecycleHooks": {
           "properties": {
+            "final_verification": {
+              "$ref": "#/$defs/FinalVerificationPlan",
+              "default": {
+                "commands": [],
+                "hermeticity": {
+                  "hermetic": false,
+                  "network_access": false,
+                  "reusable": false
+                },
+                "input_manifest": {
+                  "environment_names": [],
+                  "repo_paths": [],
+                  "version": 1
+                },
+                "output_only_globs": [],
+                "profile_id": "",
+                "profile_revision": 0,
+                "read_only_external_inputs": [],
+                "required_checks": [],
+                "version": 1
+              },
+              "description": "Authoritative post-authoring plan, distinct from setup-time hooks."
+            },
             "post_build": {
               "default": [],
               "description": "`RUN` lines appended to the generated Dockerfile. Bundle anything\nyou want baked into the image here (apt packages are the easy path;\ncurl-installs like `protoc` go here).",
@@ -12926,6 +14184,32 @@ expression: signatures
           "required": [
             "default_toolchain"
           ],
+          "type": "object"
+        },
+        "VerificationInputManifest": {
+          "additionalProperties": false,
+          "properties": {
+            "environment_names": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "repo_paths": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "version": {
+              "default": 1,
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
           "type": "object"
         },
         "Workspace": {

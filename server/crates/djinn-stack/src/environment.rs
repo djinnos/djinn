@@ -1020,10 +1020,8 @@ pub struct FinalVerificationPlan {
 }
 
 /// Manual `Default` so that `version` matches the serde default (1) rather
-/// than the zero the derive would produce.  This ensures an empty
-/// `FinalVerificationPlan` validates (the empty-plan early-return path in
-/// `validate()` skips when `commands` and `profile_id` are both empty, but
-/// `version` must still be the supported schema version).
+/// than the zero the derive would produce. This is the sole unconfigured
+/// declaration accepted by validation; partial declarations must be complete.
 impl Default for FinalVerificationPlan {
     fn default() -> Self {
         FinalVerificationPlan {
@@ -1105,15 +1103,24 @@ impl FinalVerificationPlan {
                 max: 1,
             });
         };
-        if self.commands.is_empty() && self.profile_id.is_empty() {
+        // Preserve the serde default as an unconfigured lifecycle. Do not
+        // treat any partial declaration as empty: independent declarations
+        // such as a manifest, external inputs, outputs, or hermeticity must
+        // still be validated rather than bypassing the contract.
+        if self == &Self::default() {
             return Ok(());
-        };
+        }
         validate_identifier("lifecycle.final_verification.profile_id", &self.profile_id)?;
         if self.profile_revision == 0 {
             return Err(EnvironmentConfigError::EmptyValue {
                 field: "lifecycle.final_verification.profile_revision".into(),
             });
-        };
+        }
+        if self.commands.is_empty() {
+            return Err(EnvironmentConfigError::EmptyValue {
+                field: "lifecycle.final_verification.commands".into(),
+            });
+        }
         // Bounded commands list.
         if self.commands.len() > MAX_FINAL_VERIFICATION_COMMANDS {
             return Err(EnvironmentConfigError::ListTooLong {
@@ -1186,7 +1193,22 @@ impl FinalVerificationPlan {
                 });
             };
         }
+        if self.required_checks.len() > MAX_FINAL_VERIFICATION_COMMANDS {
+            return Err(EnvironmentConfigError::ListTooLong {
+                field: "lifecycle.final_verification.required_checks".into(),
+                len: self.required_checks.len(),
+                max: MAX_FINAL_VERIFICATION_COMMANDS,
+            });
+        }
+        let mut required_ids = HashSet::new();
         for x in &self.required_checks {
+            validate_identifier("lifecycle.final_verification.required_checks", x)?;
+            if !required_ids.insert(x.as_str()) {
+                return Err(EnvironmentConfigError::DuplicateName {
+                    field: "lifecycle.final_verification.required_checks".into(),
+                    name: x.clone(),
+                });
+            }
             if !ids.contains(x.as_str()) {
                 return Err(EnvironmentConfigError::UnsafeIdentifier {
                     field: "lifecycle.final_verification.required_checks".into(),
@@ -2114,6 +2136,111 @@ mod tests {
             Some("install-deps")
         );
         assert!(cfg.validate().is_ok());
+    }
+
+    fn final_verification_fixture() -> serde_json::Value {
+        json!({
+            "version": 1,
+            "profile_id": "default",
+            "profile_revision": 1,
+            "commands": [{
+                "check_id": "cargo-test",
+                "executable": "cargo",
+                "argv": ["test", "--locked"],
+                "working_directory": "server",
+                "environment_names": ["RUST_LOG"],
+                "timeout_seconds": 600,
+                "descriptor_revision": 1
+            }],
+            "required_checks": ["cargo-test"],
+            "input_manifest": {
+                "version": 1,
+                "repo_paths": ["server/Cargo.lock"],
+                "environment_names": ["RUST_LOG"]
+            },
+            "read_only_external_inputs": [{"id": "rust-toolchain", "locator": "rustup:stable"}],
+            "output_only_globs": ["server/target/**"],
+            "hermeticity": {"hermetic": true, "reusable": true, "network_access": false}
+        })
+    }
+
+    #[test]
+    fn final_verification_round_trips_separately_from_pre_verification() {
+        let raw = json!({
+            "schema_version": 1,
+            "lifecycle": {
+                "pre_verification": ["pnpm install --frozen-lockfile"],
+                "final_verification": final_verification_fixture()
+            }
+        });
+        let config: EnvironmentConfig = serde_json::from_value(raw).unwrap();
+        assert!(matches!(
+            config.lifecycle.pre_verification.as_slice(),
+            [HookCommand::Shell(command)] if command == "pnpm install --frozen-lockfile"
+        ));
+        assert_eq!(
+            config.lifecycle.final_verification.commands[0].check_id,
+            "cargo-test"
+        );
+        config.validate().unwrap();
+
+        let json_round_trip: EnvironmentConfig =
+            serde_json::from_str(&serde_json::to_string(&config).unwrap()).unwrap();
+        let yaml_round_trip: EnvironmentConfig =
+            serde_yaml::from_str(&serde_yaml::to_string(&config).unwrap()).unwrap();
+        assert_eq!(json_round_trip, config);
+        assert_eq!(yaml_round_trip, config);
+    }
+
+    #[test]
+    fn pre_verification_hook_list_cannot_deserialize_as_final_verification_plan() {
+        let raw = json!({
+            "schema_version": 1,
+            "lifecycle": {"final_verification": ["cargo test"]}
+        });
+        let error = serde_json::from_value::<EnvironmentConfig>(raw).unwrap_err();
+        assert!(
+            error.to_string().contains("final_verification"),
+            "expected final_verification type error, got: {error}"
+        );
+    }
+
+    #[test]
+    fn partial_final_verification_declarations_do_not_bypass_validation() {
+        let raw = json!({
+            "schema_version": 1,
+            "lifecycle": {
+                "final_verification": {
+                    "input_manifest": {"version": 2},
+                    "output_only_globs": ["../outside/**"],
+                    "read_only_external_inputs": [{"id": "same", "locator": "one"}, {"id": "same", "locator": "two"}],
+                    "hermeticity": {"reusable": true}
+                }
+            }
+        });
+        let config: EnvironmentConfig = serde_json::from_value(raw).unwrap();
+        let error = config.validate().unwrap_err();
+        assert!(
+            matches!(error, EnvironmentConfigError::EmptyValue { ref field } if field == "lifecycle.final_verification.profile_id"),
+            "partial final-verification declarations must not be accepted: {error}"
+        );
+    }
+
+    #[test]
+    fn final_verification_rejects_duplicate_required_check_ids() {
+        let mut config = EnvironmentConfig::empty();
+        config.lifecycle.final_verification =
+            serde_json::from_value(final_verification_fixture()).unwrap();
+        config
+            .lifecycle
+            .final_verification
+            .required_checks
+            .push("cargo-test".into());
+        let error = config.validate().unwrap_err();
+        assert!(
+            matches!(error, EnvironmentConfigError::DuplicateName { ref field, .. } if field == "lifecycle.final_verification.required_checks"),
+            "expected duplicate required-check error, got: {error}"
+        );
     }
 
     #[test]
