@@ -29,6 +29,17 @@ pub struct CanonicalCommandDescriptorV1 {
     pub descriptor_revision: u32,
 }
 
+/// Resolved execution-isolation declaration from the final-verification plan.
+/// Its values are identity material: different network or reuse guarantees
+/// cannot safely share a verification result.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CanonicalHermeticityV1 {
+    pub hermetic: bool,
+    pub reusable: bool,
+    pub network_access: bool,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CanonicalFinalVerificationPlanV1 {
@@ -39,6 +50,8 @@ pub struct CanonicalFinalVerificationPlanV1 {
     pub commands: Vec<CanonicalCommandDescriptorV1>,
     /// Set-like: normalized lexicographically.
     pub required_checks: Vec<String>,
+    /// Resolved isolation and reuse guarantees for this plan.
+    pub hermeticity: CanonicalHermeticityV1,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -147,7 +160,9 @@ pub enum EnvironmentIdentityError {
 impl EnvironmentIdentityV1 {
     /// Validate, normalize all set-like fields, serialize stable JSON, and hash
     /// it. No filesystem access or command execution occurs here.
-    pub fn derive(input: ResolvedEnvironmentIdentityInputV1) -> Result<Self, EnvironmentIdentityError> {
+    pub fn derive(
+        input: ResolvedEnvironmentIdentityInputV1,
+    ) -> Result<Self, EnvironmentIdentityError> {
         let normalized = input.canonicalized()?;
         let canonical_json = serde_json::to_string(&normalized)
             .expect("canonical identity types are always serializable");
@@ -163,13 +178,35 @@ impl EnvironmentIdentityV1 {
 
 impl ResolvedEnvironmentIdentityInputV1 {
     pub fn canonicalized(mut self) -> Result<Self, EnvironmentIdentityError> {
-        supported("environment identity schema", self.schema_version, ENVIRONMENT_IDENTITY_SCHEMA_VERSION_V1)?;
-        supported("environment identity canonicalization", self.canonicalization_version, ENVIRONMENT_IDENTITY_CANONICALIZATION_VERSION_V1)?;
-        supported("final verification plan", self.plan.version, FINAL_VERIFICATION_PLAN_VERSION_V1)?;
-        supported("verification input manifest", self.input_manifest.version, VERIFICATION_INPUT_MANIFEST_VERSION_V1)?;
+        supported(
+            "environment identity schema",
+            self.schema_version,
+            ENVIRONMENT_IDENTITY_SCHEMA_VERSION_V1,
+        )?;
+        supported(
+            "environment identity canonicalization",
+            self.canonicalization_version,
+            ENVIRONMENT_IDENTITY_CANONICALIZATION_VERSION_V1,
+        )?;
+        supported(
+            "final verification plan",
+            self.plan.version,
+            FINAL_VERIFICATION_PLAN_VERSION_V1,
+        )?;
+        supported(
+            "verification input manifest",
+            self.input_manifest.version,
+            VERIFICATION_INPUT_MANIFEST_VERSION_V1,
+        )?;
         nonempty("profile_id", &self.plan.profile_id)?;
-        if self.plan.profile_revision == 0 { return Err(EnvironmentIdentityError::MissingResolved { field: "profile_revision" }); }
-        if self.plan.commands.is_empty() { return Err(EnvironmentIdentityError::MissingResolved { field: "commands" }); }
+        if self.plan.profile_revision == 0 {
+            return Err(EnvironmentIdentityError::MissingResolved {
+                field: "profile_revision",
+            });
+        }
+        if self.plan.commands.is_empty() {
+            return Err(EnvironmentIdentityError::MissingResolved { field: "commands" });
+        }
         nonempty("image reference", &self.image.reference)?;
         validate_digest("image", &self.image.digest)?;
         nonempty("runner_version", &self.runner_version)?;
@@ -179,45 +216,86 @@ impl ResolvedEnvironmentIdentityInputV1 {
         for command in &mut self.plan.commands {
             nonempty("command check_id", &command.check_id)?;
             nonempty("command executable", &command.executable)?;
-            if command.descriptor_revision == 0 { return Err(EnvironmentIdentityError::MissingResolved { field: "descriptor_revision" }); }
+            if command.descriptor_revision == 0 {
+                return Err(EnvironmentIdentityError::MissingResolved {
+                    field: "descriptor_revision",
+                });
+            }
             normalize_strings(&mut command.environment_names, "command environment name")?;
             if !command_ids.insert(command.check_id.clone()) {
-                return Err(EnvironmentIdentityError::Duplicate { kind: "command check ID", value: command.check_id.clone() });
+                return Err(EnvironmentIdentityError::Duplicate {
+                    kind: "command check ID",
+                    value: command.check_id.clone(),
+                });
             }
         }
         normalize_strings(&mut self.plan.required_checks, "required check")?;
         for check in &self.plan.required_checks {
-            if !command_ids.contains(check) { return Err(EnvironmentIdentityError::UncoveredRequiredCheck { check_id: check.clone() }); }
+            if !command_ids.contains(check) {
+                return Err(EnvironmentIdentityError::UncoveredRequiredCheck {
+                    check_id: check.clone(),
+                });
+            }
         }
 
         normalize_strings(&mut self.input_manifest.repo_paths, "manifest repo path")?;
-        normalize_strings(&mut self.input_manifest.environment_names, "manifest environment name")?;
-        normalize_strings(&mut self.input_manifest.output_only_globs, "output-only glob")?;
+        normalize_strings(
+            &mut self.input_manifest.environment_names,
+            "manifest environment name",
+        )?;
+        normalize_strings(
+            &mut self.input_manifest.output_only_globs,
+            "output-only glob",
+        )?;
         let input_paths: BTreeSet<_> = self.input_manifest.repo_paths.iter().collect();
         for output in &self.input_manifest.output_only_globs {
             if input_paths.contains(output) {
-                return Err(EnvironmentIdentityError::AmbiguousDeclaration { detail: format!("{output} is both an input path and output-only glob") });
+                return Err(EnvironmentIdentityError::AmbiguousDeclaration {
+                    detail: format!("{output} is both an input path and output-only glob"),
+                });
             }
         }
-        sort_unique_by(&mut self.input_manifest.read_only_external_inputs, |entry| entry.id.clone(), "external input ID")?;
+        sort_unique_by(
+            &mut self.input_manifest.read_only_external_inputs,
+            |entry| entry.id.clone(),
+            "external input ID",
+        )?;
         for entry in &self.input_manifest.read_only_external_inputs {
             nonempty("external input ID", &entry.id)?;
             nonempty("external input locator", &entry.locator)?;
         }
 
-        sort_unique_by(&mut self.tool_probes, |probe| probe.tool.clone(), "tool probe")?;
+        sort_unique_by(
+            &mut self.tool_probes,
+            |probe| probe.tool.clone(),
+            "tool probe",
+        )?;
         for probe in &self.tool_probes {
             nonempty("tool probe tool", &probe.tool)?;
             nonempty("tool probe version", &probe.version)?;
             validate_digest("tool executable", &probe.executable_digest)?;
-            if probe.status != ToolProbeStatus::Passed { return Err(EnvironmentIdentityError::FailedToolProbe { tool: probe.tool.clone() }); }
-        }
-        for command in &self.plan.commands {
-            if !self.tool_probes.iter().any(|probe| probe.tool == command.executable) {
-                return Err(EnvironmentIdentityError::MissingToolProbe { executable: command.executable.clone() });
+            if probe.status != ToolProbeStatus::Passed {
+                return Err(EnvironmentIdentityError::FailedToolProbe {
+                    tool: probe.tool.clone(),
+                });
             }
         }
-        sort_unique_by(&mut self.lockfile_digests, |entry| entry.path.clone(), "lockfile path")?;
+        for command in &self.plan.commands {
+            if !self
+                .tool_probes
+                .iter()
+                .any(|probe| probe.tool == command.executable)
+            {
+                return Err(EnvironmentIdentityError::MissingToolProbe {
+                    executable: command.executable.clone(),
+                });
+            }
+        }
+        sort_unique_by(
+            &mut self.lockfile_digests,
+            |entry| entry.path.clone(),
+            "lockfile path",
+        )?;
         for lockfile in &self.lockfile_digests {
             nonempty("lockfile path", &lockfile.path)?;
             validate_digest("lockfile", &lockfile.digest)?;
@@ -231,32 +309,75 @@ impl ResolvedEnvironmentIdentityInputV1 {
     }
 }
 
-fn supported(kind: &'static str, actual: u32, expected: u32) -> Result<(), EnvironmentIdentityError> {
-    if actual == expected { Ok(()) } else { Err(EnvironmentIdentityError::UnsupportedVersion { kind, version: actual }) }
+fn supported(
+    kind: &'static str,
+    actual: u32,
+    expected: u32,
+) -> Result<(), EnvironmentIdentityError> {
+    if actual == expected {
+        Ok(())
+    } else {
+        Err(EnvironmentIdentityError::UnsupportedVersion {
+            kind,
+            version: actual,
+        })
+    }
 }
 
 fn nonempty(field: &'static str, value: &str) -> Result<(), EnvironmentIdentityError> {
-    if value.trim().is_empty() { Err(EnvironmentIdentityError::MissingResolved { field }) } else { Ok(()) }
+    if value.trim().is_empty() {
+        Err(EnvironmentIdentityError::MissingResolved { field })
+    } else {
+        Ok(())
+    }
 }
 
 fn validate_digest(kind: &'static str, digest: &str) -> Result<(), EnvironmentIdentityError> {
-    let valid = digest.len() == 71 && digest.starts_with("sha256:") && digest[7..].bytes().all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte));
-    if valid { Ok(()) } else { Err(EnvironmentIdentityError::MalformedDigest { kind, value: digest.to_owned() }) }
+    let valid = digest.len() == 71
+        && digest.starts_with("sha256:")
+        && digest[7..]
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte));
+    if valid {
+        Ok(())
+    } else {
+        Err(EnvironmentIdentityError::MalformedDigest {
+            kind,
+            value: digest.to_owned(),
+        })
+    }
 }
 
-fn normalize_strings(values: &mut Vec<String>, kind: &'static str) -> Result<(), EnvironmentIdentityError> {
+fn normalize_strings(
+    values: &mut Vec<String>,
+    kind: &'static str,
+) -> Result<(), EnvironmentIdentityError> {
     values.sort();
-    for value in values.iter() { nonempty(kind, value)?; }
+    for value in values.iter() {
+        nonempty(kind, value)?;
+    }
     if let Some(duplicate) = values.windows(2).find(|pair| pair[0] == pair[1]) {
-        return Err(EnvironmentIdentityError::Duplicate { kind, value: duplicate[0].clone() });
+        return Err(EnvironmentIdentityError::Duplicate {
+            kind,
+            value: duplicate[0].clone(),
+        });
     }
     Ok(())
 }
 
-fn sort_unique_by<T>(values: &mut Vec<T>, key: impl Fn(&T) -> String, kind: &'static str) -> Result<(), EnvironmentIdentityError> {
+fn sort_unique_by<T>(
+    values: &mut Vec<T>,
+    key: impl Fn(&T) -> String,
+    kind: &'static str,
+) -> Result<(), EnvironmentIdentityError> {
     values.sort_by_key(&key);
     for pair in values.windows(2) {
-        if key(&pair[0]) == key(&pair[1]) { return Err(EnvironmentIdentityError::Duplicate { kind, value: key(&pair[0]) }); }
+        if key(&pair[0]) == key(&pair[1]) {
+            return Err(EnvironmentIdentityError::Duplicate {
+                kind,
+                value: key(&pair[0]),
+            });
+        }
     }
     Ok(())
 }
@@ -273,48 +394,297 @@ mod tests {
 
     fn input() -> ResolvedEnvironmentIdentityInputV1 {
         ResolvedEnvironmentIdentityInputV1 {
-            schema_version: 1, canonicalization_version: 1,
-            plan: CanonicalFinalVerificationPlanV1 { version: 1, profile_id: "ci".into(), profile_revision: 3,
-                commands: vec![CanonicalCommandDescriptorV1 { check_id: "test".into(), executable: "cargo".into(), argv: vec!["test".into()], working_directory: ".".into(), environment_names: vec!["RUSTFLAGS".into(), "CI".into()], timeout_seconds: 60, descriptor_revision: 1 }], required_checks: vec!["test".into()] },
-            input_manifest: VerificationInputManifestV1 { version: 1, repo_paths: vec!["Cargo.lock".into(), "Cargo.toml".into()], environment_names: vec!["CI".into()], read_only_external_inputs: vec![DeclaredExternalInputV1 { id: "registry".into(), locator: "https://registry.example".into() }], output_only_globs: vec!["target/**".into()] },
-            image: ImmutableImageV1 { reference: "rust:1.85".into(), digest: DIGEST.into() },
-            tool_probes: vec![ToolProbeV1 { tool: "cargo".into(), version: "1.85.0".into(), executable_digest: DIGEST.into(), status: ToolProbeStatus::Passed }],
-            runner_version: "runner-1".into(), lockfile_digests: vec![LockfileDigestV1 { path: "Cargo.lock".into(), digest: DIGEST.into() }], target: "x86_64-unknown-linux-gnu".into(), features: vec!["serde".into(), "sqlx".into()], allowlisted_environment: BTreeMap::from([("CI".into(), "true".into())]),
+            schema_version: 1,
+            canonicalization_version: 1,
+            plan: CanonicalFinalVerificationPlanV1 {
+                version: 1,
+                profile_id: "ci".into(),
+                profile_revision: 3,
+                commands: vec![CanonicalCommandDescriptorV1 {
+                    check_id: "test".into(),
+                    executable: "cargo".into(),
+                    argv: vec!["test".into()],
+                    working_directory: ".".into(),
+                    environment_names: vec!["RUSTFLAGS".into(), "CI".into()],
+                    timeout_seconds: 60,
+                    descriptor_revision: 1,
+                }],
+                required_checks: vec!["test".into()],
+                hermeticity: CanonicalHermeticityV1 {
+                    hermetic: true,
+                    reusable: true,
+                    network_access: false,
+                },
+            },
+            input_manifest: VerificationInputManifestV1 {
+                version: 1,
+                repo_paths: vec!["Cargo.lock".into(), "Cargo.toml".into()],
+                environment_names: vec!["CI".into()],
+                read_only_external_inputs: vec![DeclaredExternalInputV1 {
+                    id: "registry".into(),
+                    locator: "https://registry.example".into(),
+                }],
+                output_only_globs: vec!["target/**".into()],
+            },
+            image: ImmutableImageV1 {
+                reference: "rust:1.85".into(),
+                digest: DIGEST.into(),
+            },
+            tool_probes: vec![ToolProbeV1 {
+                tool: "cargo".into(),
+                version: "1.85.0".into(),
+                executable_digest: DIGEST.into(),
+                status: ToolProbeStatus::Passed,
+            }],
+            runner_version: "runner-1".into(),
+            lockfile_digests: vec![LockfileDigestV1 {
+                path: "Cargo.lock".into(),
+                digest: DIGEST.into(),
+            }],
+            target: "x86_64-unknown-linux-gnu".into(),
+            features: vec!["serde".into(), "sqlx".into()],
+            allowlisted_environment: BTreeMap::from([("CI".into(), "true".into())]),
         }
     }
 
     #[test]
     fn set_permutations_are_normalized_but_command_order_is_preserved() {
-        let first = EnvironmentIdentityV1::derive(input()).unwrap();
-        let mut permuted = input();
-        permuted.plan.commands[0].environment_names.reverse(); permuted.input_manifest.repo_paths.reverse(); permuted.features.reverse();
+        let mut unordered = input();
+        unordered.plan.commands.push(CanonicalCommandDescriptorV1 {
+            check_id: "lint".into(),
+            executable: "clippy".into(),
+            argv: vec!["--all-targets".into()],
+            working_directory: ".".into(),
+            environment_names: vec![],
+            timeout_seconds: 60,
+            descriptor_revision: 1,
+        });
+        unordered.plan.required_checks.push("lint".into());
+        unordered
+            .input_manifest
+            .environment_names
+            .push("TERM".into());
+        unordered
+            .input_manifest
+            .read_only_external_inputs
+            .push(DeclaredExternalInputV1 {
+                id: "mirror".into(),
+                locator: "https://mirror.example".into(),
+            });
+        unordered
+            .input_manifest
+            .output_only_globs
+            .push("reports/**".into());
+        unordered.tool_probes.push(ToolProbeV1 {
+            tool: "clippy".into(),
+            version: "1.85.0".into(),
+            executable_digest: DIGEST.into(),
+            status: ToolProbeStatus::Passed,
+        });
+        unordered.lockfile_digests.push(LockfileDigestV1 {
+            path: "pnpm-lock.yaml".into(),
+            digest: DIGEST.into(),
+        });
+        let first = EnvironmentIdentityV1::derive(unordered.clone()).unwrap();
+        let mut permuted = unordered;
+        permuted.plan.commands[0].environment_names.reverse();
+        permuted.plan.required_checks.reverse();
+        permuted.input_manifest.repo_paths.reverse();
+        permuted.input_manifest.environment_names.reverse();
+        permuted.input_manifest.read_only_external_inputs.reverse();
+        permuted.input_manifest.output_only_globs.reverse();
+        permuted.tool_probes.reverse();
+        permuted.lockfile_digests.reverse();
+        permuted.features.reverse();
         let second = EnvironmentIdentityV1::derive(permuted).unwrap();
         assert_eq!(first, second);
         let mut reordered = input();
-        reordered.plan.commands.push(CanonicalCommandDescriptorV1 { check_id: "lint".into(), executable: "cargo".into(), argv: vec!["clippy".into()], working_directory: ".".into(), environment_names: vec![], timeout_seconds: 60, descriptor_revision: 1 });
-        let a = EnvironmentIdentityV1::derive(reordered.clone()).unwrap(); reordered.plan.commands.reverse();
-        assert_ne!(a.digest, EnvironmentIdentityV1::derive(reordered).unwrap().digest);
+        reordered.plan.commands.push(CanonicalCommandDescriptorV1 {
+            check_id: "lint".into(),
+            executable: "cargo".into(),
+            argv: vec!["clippy".into()],
+            working_directory: ".".into(),
+            environment_names: vec![],
+            timeout_seconds: 60,
+            descriptor_revision: 1,
+        });
+        let a = EnvironmentIdentityV1::derive(reordered.clone()).unwrap();
+        reordered.plan.commands.reverse();
+        assert_ne!(
+            a.digest,
+            EnvironmentIdentityV1::derive(reordered).unwrap().digest
+        );
     }
 
     #[test]
     fn every_identity_dimension_changes_digest() {
         let baseline = EnvironmentIdentityV1::derive(input()).unwrap();
-        let variants: Vec<Box<dyn Fn(&mut ResolvedEnvironmentIdentityInputV1)>> = vec![
-            Box::new(|v| v.schema_version = 2), Box::new(|v| v.canonicalization_version = 2), Box::new(|v| v.plan.profile_revision = 4), Box::new(|v| v.plan.commands[0].argv.push("--locked".into())), Box::new(|v| v.plan.required_checks.clear()), Box::new(|v| v.input_manifest.repo_paths.push("src".into())), Box::new(|v| v.image.reference = "rust:1.86".into()), Box::new(|v| v.tool_probes[0].version = "1.86.0".into()), Box::new(|v| v.runner_version = "runner-2".into()), Box::new(|v| v.lockfile_digests[0].path = "pnpm-lock.yaml".into()), Box::new(|v| v.target = "aarch64-unknown-linux-gnu".into()), Box::new(|v| v.features.push("extra".into())), Box::new(|v| { v.allowlisted_environment.insert("CI".into(), "false".into()); }),
+        let variants: Vec<(&str, Box<dyn Fn(&mut ResolvedEnvironmentIdentityInputV1)>)> = vec![
+            (
+                "profile ID",
+                Box::new(|v| v.plan.profile_id = "strict-ci".into()),
+            ),
+            (
+                "profile revision",
+                Box::new(|v| v.plan.profile_revision = 4),
+            ),
+            (
+                "command check ID",
+                Box::new(|v| {
+                    v.plan.commands[0].check_id = "unit".into();
+                    v.plan.required_checks[0] = "unit".into();
+                }),
+            ),
+            (
+                "command executable",
+                Box::new(|v| {
+                    v.plan.commands[0].executable = "nextest".into();
+                    v.tool_probes[0].tool = "nextest".into();
+                }),
+            ),
+            (
+                "command argv",
+                Box::new(|v| v.plan.commands[0].argv.push("--locked".into())),
+            ),
+            (
+                "command working directory",
+                Box::new(|v| v.plan.commands[0].working_directory = "server".into()),
+            ),
+            (
+                "command environment names",
+                Box::new(|v| v.plan.commands[0].environment_names.push("TERM".into())),
+            ),
+            (
+                "command timeout",
+                Box::new(|v| v.plan.commands[0].timeout_seconds = 61),
+            ),
+            (
+                "command descriptor revision",
+                Box::new(|v| v.plan.commands[0].descriptor_revision = 2),
+            ),
+            (
+                "required checks",
+                Box::new(|v| v.plan.required_checks.clear()),
+            ),
+            (
+                "hermetic",
+                Box::new(|v| v.plan.hermeticity.hermetic = false),
+            ),
+            (
+                "reusable",
+                Box::new(|v| v.plan.hermeticity.reusable = false),
+            ),
+            (
+                "network access",
+                Box::new(|v| v.plan.hermeticity.network_access = true),
+            ),
+            (
+                "manifest repo paths",
+                Box::new(|v| v.input_manifest.repo_paths.push("src".into())),
+            ),
+            (
+                "manifest environment names",
+                Box::new(|v| v.input_manifest.environment_names.push("TERM".into())),
+            ),
+            (
+                "external input ID",
+                Box::new(|v| v.input_manifest.read_only_external_inputs[0].id = "mirror".into()),
+            ),
+            (
+                "external input locator",
+                Box::new(|v| {
+                    v.input_manifest.read_only_external_inputs[0].locator =
+                        "https://mirror.example".into()
+                }),
+            ),
+            (
+                "output-only globs",
+                Box::new(|v| v.input_manifest.output_only_globs.push("reports/**".into())),
+            ),
+            (
+                "image reference",
+                Box::new(|v| v.image.reference = "rust:1.86".into()),
+            ),
+            (
+                "image digest",
+                Box::new(|v| v.image.digest = alternate_digest('1')),
+            ),
+            (
+                "tool probe version",
+                Box::new(|v| v.tool_probes[0].version = "1.86.0".into()),
+            ),
+            (
+                "tool executable digest",
+                Box::new(|v| v.tool_probes[0].executable_digest = alternate_digest('2')),
+            ),
+            (
+                "runner version",
+                Box::new(|v| v.runner_version = "runner-2".into()),
+            ),
+            (
+                "lockfile path",
+                Box::new(|v| v.lockfile_digests[0].path = "pnpm-lock.yaml".into()),
+            ),
+            (
+                "lockfile digest",
+                Box::new(|v| v.lockfile_digests[0].digest = alternate_digest('3')),
+            ),
+            (
+                "target",
+                Box::new(|v| v.target = "aarch64-unknown-linux-gnu".into()),
+            ),
+            ("features", Box::new(|v| v.features.push("extra".into()))),
+            (
+                "allowlisted environment",
+                Box::new(|v| {
+                    v.allowlisted_environment
+                        .insert("CI".into(), "false".into());
+                }),
+            ),
         ];
-        for mutate in variants { let mut variant = input(); mutate(&mut variant); match EnvironmentIdentityV1::derive(variant) { Ok(value) => assert_ne!(baseline.digest, value.digest), Err(EnvironmentIdentityError::UnsupportedVersion { .. }) => {}, Err(error) => panic!("unexpected validation error: {error}"), } }
+        for (dimension, mutate) in variants {
+            let mut variant = input();
+            mutate(&mut variant);
+            let value = EnvironmentIdentityV1::derive(variant).unwrap_or_else(|error| {
+                panic!("{dimension} unexpectedly failed validation: {error}")
+            });
+            assert_ne!(baseline.canonical_json, value.canonical_json, "{dimension}");
+            assert_ne!(baseline.digest, value.digest, "{dimension}");
+        }
+    }
+
+    fn alternate_digest(hex: char) -> String {
+        format!("sha256:{}", hex.to_string().repeat(64))
     }
 
     #[test]
     fn rejects_unresolved_mutable_or_ambiguous_inputs() {
-        let mut bad = input(); bad.plan.required_checks.push("missing".into());
-        assert!(matches!(EnvironmentIdentityV1::derive(bad), Err(EnvironmentIdentityError::UncoveredRequiredCheck { .. })));
-        let mut bad = input(); bad.image.digest = "rust:latest".into();
-        assert!(matches!(EnvironmentIdentityV1::derive(bad), Err(EnvironmentIdentityError::MalformedDigest { .. })));
-        let mut bad = input(); bad.tool_probes[0].status = ToolProbeStatus::Failed;
-        assert!(matches!(EnvironmentIdentityV1::derive(bad), Err(EnvironmentIdentityError::FailedToolProbe { .. })));
-        let mut bad = input(); bad.input_manifest.output_only_globs.push("Cargo.lock".into());
-        assert!(matches!(EnvironmentIdentityV1::derive(bad), Err(EnvironmentIdentityError::AmbiguousDeclaration { .. })));
+        let mut bad = input();
+        bad.plan.required_checks.push("missing".into());
+        assert!(matches!(
+            EnvironmentIdentityV1::derive(bad),
+            Err(EnvironmentIdentityError::UncoveredRequiredCheck { .. })
+        ));
+        let mut bad = input();
+        bad.image.digest = "rust:latest".into();
+        assert!(matches!(
+            EnvironmentIdentityV1::derive(bad),
+            Err(EnvironmentIdentityError::MalformedDigest { .. })
+        ));
+        let mut bad = input();
+        bad.tool_probes[0].status = ToolProbeStatus::Failed;
+        assert!(matches!(
+            EnvironmentIdentityV1::derive(bad),
+            Err(EnvironmentIdentityError::FailedToolProbe { .. })
+        ));
+        let mut bad = input();
+        bad.input_manifest
+            .output_only_globs
+            .push("Cargo.lock".into());
+        assert!(matches!(
+            EnvironmentIdentityV1::derive(bad),
+            Err(EnvironmentIdentityError::AmbiguousDeclaration { .. })
+        ));
     }
 
     #[test]

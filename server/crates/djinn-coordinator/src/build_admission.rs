@@ -34,10 +34,14 @@ pub enum BuildAdmissionMode {
 /// Typed classification captured before dispatch; only the audited bypass weighs zero.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BuildWorkloadKind {
-    TaskRun { role: TaskRunRole },
+    TaskRun {
+        role: TaskRunRole,
+    },
     GraphWarmJob,
     /// Explicit, auditable non-build work. This is the only zero-slot class.
-    NonBuild { audit_reason: &'static str },
+    NonBuild {
+        audit_reason: &'static str,
+    },
 }
 
 /// All currently dispatchable task-run roles are build-producing work.
@@ -84,8 +88,14 @@ pub struct BuildAdmissionRequest {
 /// Admission decision returned to task dispatch callers.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum BuildAdmissionDecision {
-    Permitted { permit: WarmAdmissionPermit, idempotent: bool },
-    Denied { occupancy: i64, cap: i64 },
+    Permitted {
+        permit: WarmAdmissionPermit,
+        idempotent: bool,
+    },
+    Denied {
+        occupancy: i64,
+        cap: i64,
+    },
     /// Classification was absent or unrecognized. The observation counter is bounded.
     Unclassified,
 }
@@ -148,7 +158,10 @@ impl BuildAdmissionController {
         *self.would_defer_observations.lock().await
     }
 
-    pub async fn admit(&self, request: BuildAdmissionRequest) -> Result<BuildAdmissionDecision, WarmAdmissionError> {
+    pub async fn admit(
+        &self,
+        request: BuildAdmissionRequest,
+    ) -> Result<BuildAdmissionDecision, WarmAdmissionError> {
         let workload_kind = match request.kind {
             BuildWorkloadKind::TaskRun { .. } => match request.domain {
                 AdmissionDomain::TaskObservation => AdmissionWorkloadKind::Task,
@@ -157,7 +170,10 @@ impl BuildAdmissionController {
             },
             BuildWorkloadKind::GraphWarmJob => AdmissionWorkloadKind::Warm,
             BuildWorkloadKind::NonBuild { audit_reason } if !audit_reason.is_empty() => {
-                return Ok(BuildAdmissionDecision::Permitted { permit: WarmAdmissionPermit::new(), idempotent: false });
+                return Ok(BuildAdmissionDecision::Permitted {
+                    permit: WarmAdmissionPermit::new(),
+                    idempotent: false,
+                });
             }
             BuildWorkloadKind::NonBuild { .. } => {
                 self.observe_unclassified().await;
@@ -171,38 +187,64 @@ impl BuildAdmissionController {
         };
         let permit_key = permit_key(&key);
         let durable = self.mode != BuildAdmissionMode::Off;
-        let idempotent_permit = self
-            .permits_by_key
-            .lock()
-            .await
-            .get(&permit_key)
-            .cloned();
+        let idempotent_permit = self.permits_by_key.lock().await.get(&permit_key).cloned();
         if let Some(permit) = idempotent_permit {
-            return Ok(BuildAdmissionDecision::Permitted { permit, idempotent: true });
+            return Ok(BuildAdmissionDecision::Permitted {
+                permit,
+                idempotent: true,
+            });
         }
         let mut idempotent = false;
         if durable {
             let reservation = if self.mode == BuildAdmissionMode::Observe {
-                let observed = self.journal.reserve_observed(&ReserveAdmissionInput {
-                    key: key.clone(), workload_kind, creator_server_epoch: self.creator_server_epoch.clone(), object_name: request.object_name.clone(),
-                }, self.cap).await.map_err(unavailable)?;
+                let observed = self
+                    .journal
+                    .reserve_observed(
+                        &ReserveAdmissionInput {
+                            key: key.clone(),
+                            workload_kind,
+                            creator_server_epoch: self.creator_server_epoch.clone(),
+                            object_name: request.object_name.clone(),
+                        },
+                        self.cap,
+                    )
+                    .await
+                    .map_err(unavailable)?;
                 if observed.would_defer {
                     let mut count = self.would_defer_observations.lock().await;
                     *count = count.saturating_add(1).min(1024);
                 }
                 observed.reservation
             } else {
-                self.journal.reserve(&ReserveAdmissionInput {
-                    key: key.clone(), workload_kind, creator_server_epoch: self.creator_server_epoch.clone(), object_name: request.object_name.clone(),
-                }, self.cap).await.map_err(unavailable)?
+                self.journal
+                    .reserve(
+                        &ReserveAdmissionInput {
+                            key: key.clone(),
+                            workload_kind,
+                            creator_server_epoch: self.creator_server_epoch.clone(),
+                            object_name: request.object_name.clone(),
+                        },
+                        self.cap,
+                    )
+                    .await
+                    .map_err(unavailable)?
             };
             match reservation {
-                ReserveAdmissionResult::Denied { occupancy, cap } => return Ok(BuildAdmissionDecision::Denied { occupancy, cap }),
-                ReserveAdmissionResult::Reserved { idempotent: value, .. } => idempotent = value,
+                ReserveAdmissionResult::Denied { occupancy, cap } => {
+                    return Ok(BuildAdmissionDecision::Denied { occupancy, cap });
+                }
+                ReserveAdmissionResult::Reserved {
+                    idempotent: value, ..
+                } => idempotent = value,
             }
         }
         let permit = WarmAdmissionPermit::new();
-        let state = PermitState { key: key.clone(), creator_server_epoch: self.creator_server_epoch.clone(), object_name: request.object_name, durable };
+        let state = PermitState {
+            key: key.clone(),
+            creator_server_epoch: self.creator_server_epoch.clone(),
+            object_name: request.object_name,
+            durable,
+        };
         self.permits.lock().await.insert(permit.clone(), state);
         self.permits_by_key
             .lock()
@@ -213,39 +255,105 @@ impl BuildAdmissionController {
 
     /// A missing or unknown task role is a fail-closed classification result.
     pub async fn admit_task_run(
-        &self, role: Option<&str>, domain: AdmissionDomain, work_id: String, generation: i64, object_name: String,
+        &self,
+        role: Option<&str>,
+        domain: AdmissionDomain,
+        work_id: String,
+        generation: i64,
+        object_name: String,
     ) -> Result<BuildAdmissionDecision, WarmAdmissionError> {
         let Some(role) = TaskRunRole::parse(role) else {
             self.observe_unclassified().await;
             return Ok(BuildAdmissionDecision::Unclassified);
         };
-        self.admit(BuildAdmissionRequest { domain, work_id, generation, object_name, kind: BuildWorkloadKind::TaskRun { role } }).await
+        self.admit(BuildAdmissionRequest {
+            domain,
+            work_id,
+            generation,
+            object_name,
+            kind: BuildWorkloadKind::TaskRun { role },
+        })
+        .await
     }
 
     async fn observe_unclassified(&self) {
         let mut count = self.unclassified_observations.lock().await;
         *count = count.saturating_add(1).min(1024);
-        tracing::warn!(observations = *count, "build admission classification missing or unknown; denying dispatch");
+        tracing::warn!(
+            observations = *count,
+            "build admission classification missing or unknown; denying dispatch"
+        );
     }
 
-    async fn transition_permit(&self, permit: &WarmAdmissionPermit, transition: WarmAdmissionTransition) -> Result<(), WarmAdmissionError> {
-        let Some(state) = self.permits.lock().await.get(permit).cloned() else { return Err(WarmAdmissionError::UnknownPermit); };
-        if !state.durable { return Ok(()); }
-        let terminal = matches!(transition, WarmAdmissionTransition::DefinitiveFailure { .. } | WarmAdmissionTransition::Terminal { .. });
-        match transition {
-            WarmAdmissionTransition::CreateStarted => self.journal.mark_create_started(&CreateStartedInput { key: state.key.clone(), creator_server_epoch: state.creator_server_epoch, object_name: state.object_name }).await.map(|_| ()).map_err(unavailable)?,
-            WarmAdmissionTransition::Live { uid } => self.journal.mark_live(&UidFencedAdmissionInput { key: state.key.clone(), object_uid: uid }).await.map(|_| ()).map_err(unavailable)?,
-            WarmAdmissionTransition::CreateUnknown { .. } => self.journal.mark_create_unknown(&state.key).await.map(|_| ()).map_err(unavailable)?,
-            WarmAdmissionTransition::DefinitiveFailure { .. } => self.journal.mark_definitive_create_failure(&state.key).await.map(|_| ()).map_err(unavailable)?,
-            WarmAdmissionTransition::Terminal { uid } => self.journal.mark_terminal(&TerminalAdmissionInput { key: state.key.clone(), object_uid: Some(uid) }).await.map(|_| ()).map_err(unavailable)?,
+    async fn transition_permit(
+        &self,
+        permit: &WarmAdmissionPermit,
+        transition: WarmAdmissionTransition,
+    ) -> Result<(), WarmAdmissionError> {
+        let Some(state) = self.permits.lock().await.get(permit).cloned() else {
+            return Err(WarmAdmissionError::UnknownPermit);
+        };
+        if !state.durable {
+            return Ok(());
         }
-        if terminal { self.released.notify_waiters(); }
+        let terminal = matches!(
+            transition,
+            WarmAdmissionTransition::DefinitiveFailure { .. }
+                | WarmAdmissionTransition::Terminal { .. }
+        );
+        match transition {
+            WarmAdmissionTransition::CreateStarted => self
+                .journal
+                .mark_create_started(&CreateStartedInput {
+                    key: state.key.clone(),
+                    creator_server_epoch: state.creator_server_epoch,
+                    object_name: state.object_name,
+                })
+                .await
+                .map(|_| ())
+                .map_err(unavailable)?,
+            WarmAdmissionTransition::Live { uid } => self
+                .journal
+                .mark_live(&UidFencedAdmissionInput {
+                    key: state.key.clone(),
+                    object_uid: uid,
+                })
+                .await
+                .map(|_| ())
+                .map_err(unavailable)?,
+            WarmAdmissionTransition::CreateUnknown { .. } => self
+                .journal
+                .mark_create_unknown(&state.key)
+                .await
+                .map(|_| ())
+                .map_err(unavailable)?,
+            WarmAdmissionTransition::DefinitiveFailure { .. } => self
+                .journal
+                .mark_definitive_create_failure(&state.key)
+                .await
+                .map(|_| ())
+                .map_err(unavailable)?,
+            WarmAdmissionTransition::Terminal { uid } => self
+                .journal
+                .mark_terminal(&TerminalAdmissionInput {
+                    key: state.key.clone(),
+                    object_uid: Some(uid),
+                })
+                .await
+                .map(|_| ())
+                .map_err(unavailable)?,
+        }
+        if terminal {
+            self.released.notify_waiters();
+        }
         Ok(())
     }
 }
 
 fn unavailable(error: impl std::fmt::Display) -> WarmAdmissionError {
-    WarmAdmissionError::Unavailable { diagnostic: error.to_string() }
+    WarmAdmissionError::Unavailable {
+        diagnostic: error.to_string(),
+    }
 }
 
 fn permit_key(key: &AdmissionJournalKey) -> String {
@@ -254,16 +362,35 @@ fn permit_key(key: &AdmissionJournalKey) -> String {
 
 #[async_trait]
 impl WarmAdmission for BuildAdmissionController {
-    async fn admit(&self, request: WarmAdmissionRequest) -> Result<WarmAdmissionPermit, WarmAdmissionError> {
-        let decision = self.admit(BuildAdmissionRequest { domain: AdmissionDomain::WarmBuild, work_id: request.work_id, generation: request.generation, object_name: request.object_name, kind: BuildWorkloadKind::GraphWarmJob }).await?;
+    async fn admit(
+        &self,
+        request: WarmAdmissionRequest,
+    ) -> Result<WarmAdmissionPermit, WarmAdmissionError> {
+        let decision = self
+            .admit(BuildAdmissionRequest {
+                domain: AdmissionDomain::WarmBuild,
+                work_id: request.work_id,
+                generation: request.generation,
+                object_name: request.object_name,
+                kind: BuildWorkloadKind::GraphWarmJob,
+            })
+            .await?;
         match decision {
             BuildAdmissionDecision::Permitted { permit, .. } => Ok(permit),
-            BuildAdmissionDecision::Denied { occupancy, cap } => Err(WarmAdmissionError::Denied { diagnostic: format!("occupancy {occupancy} reached cap {cap}") }),
-            BuildAdmissionDecision::Unclassified => Err(WarmAdmissionError::Denied { diagnostic: "unclassified build workload".into() }),
+            BuildAdmissionDecision::Denied { occupancy, cap } => Err(WarmAdmissionError::Denied {
+                diagnostic: format!("occupancy {occupancy} reached cap {cap}"),
+            }),
+            BuildAdmissionDecision::Unclassified => Err(WarmAdmissionError::Denied {
+                diagnostic: "unclassified build workload".into(),
+            }),
         }
     }
 
-    async fn transition(&self, permit: &WarmAdmissionPermit, transition: WarmAdmissionTransition) -> Result<(), WarmAdmissionError> {
+    async fn transition(
+        &self,
+        permit: &WarmAdmissionPermit,
+        transition: WarmAdmissionTransition,
+    ) -> Result<(), WarmAdmissionError> {
         self.transition_permit(permit, transition).await
     }
 }
@@ -274,13 +401,38 @@ mod tests {
     use djinn_db::{AdmissionState, Database};
 
     fn controller(mode: BuildAdmissionMode, cap: i64) -> BuildAdmissionController {
-        BuildAdmissionController::new(Arc::new(AdmissionJournalRepository::new(Database::open_in_memory().unwrap())), mode, cap, "epoch")
+        BuildAdmissionController::new(
+            Arc::new(AdmissionJournalRepository::new(
+                Database::open_in_memory().unwrap(),
+            )),
+            mode,
+            cap,
+            "epoch",
+        )
     }
-    fn warm(id: &str) -> WarmAdmissionRequest { WarmAdmissionRequest { domain: "ignored".into(), work_id: id.into(), generation: 0, object_name: format!("job-{id}") } }
+    fn warm(id: &str) -> WarmAdmissionRequest {
+        WarmAdmissionRequest {
+            domain: "ignored".into(),
+            work_id: id.into(),
+            generation: 0,
+            object_name: format!("job-{id}"),
+        }
+    }
 
     #[test]
     fn classification_covers_every_dispatch_role_and_rejects_unknown() {
-        for role in ["worker", "reviewer", "lead", "planner", "architect", "advocate", "adversary", "judge"] { assert!(TaskRunRole::parse(Some(role)).is_some()); }
+        for role in [
+            "worker",
+            "reviewer",
+            "lead",
+            "planner",
+            "architect",
+            "advocate",
+            "adversary",
+            "judge",
+        ] {
+            assert!(TaskRunRole::parse(Some(role)).is_some());
+        }
         assert_eq!(TaskRunRole::parse(None), None);
         assert_eq!(TaskRunRole::parse(Some("mystery")), None);
     }
@@ -288,10 +440,32 @@ mod tests {
     #[tokio::test]
     async fn off_is_noop_and_unknown_is_bounded() {
         let controller = controller(BuildAdmissionMode::Off, 0);
-        let permit = WarmAdmission::admit(&controller, warm("off")).await.unwrap();
-        controller.transition(&permit, WarmAdmissionTransition::CreateStarted).await.unwrap();
-        assert_eq!(controller.journal.count_task_or_warm_occupancy().await.unwrap(), 0);
-        for _ in 0..1025 { let _ = controller.admit_task_run(None, AdmissionDomain::TaskObservation, "x".into(), 0, "x".into()).await; }
+        let permit = WarmAdmission::admit(&controller, warm("off"))
+            .await
+            .unwrap();
+        controller
+            .transition(&permit, WarmAdmissionTransition::CreateStarted)
+            .await
+            .unwrap();
+        assert_eq!(
+            controller
+                .journal
+                .count_task_or_warm_occupancy()
+                .await
+                .unwrap(),
+            0
+        );
+        for _ in 0..1025 {
+            let _ = controller
+                .admit_task_run(
+                    None,
+                    AdmissionDomain::TaskObservation,
+                    "x".into(),
+                    0,
+                    "x".into(),
+                )
+                .await;
+        }
         assert_eq!(controller.unclassified_observation_count().await, 1024);
     }
 
@@ -319,22 +493,68 @@ mod tests {
         assert!(second.await.unwrap().is_ok());
         assert_eq!(observed.would_defer_observation_count().await, 1);
         let enforced = controller(BuildAdmissionMode::Enforce, 1);
-        let _ = enforced.admit_task_run(Some("worker"), AdmissionDomain::TaskObservation, "task".into(), 0, "task-job".into()).await.unwrap();
-        assert!(matches!(WarmAdmission::admit(&enforced, warm("warm")).await, Err(WarmAdmissionError::Denied { .. })));
+        let _ = enforced
+            .admit_task_run(
+                Some("worker"),
+                AdmissionDomain::TaskObservation,
+                "task".into(),
+                0,
+                "task-job".into(),
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            WarmAdmission::admit(&enforced, warm("warm")).await,
+            Err(WarmAdmissionError::Denied { .. })
+        ));
     }
 
     #[tokio::test]
     async fn permits_are_idempotent_and_terminal_notifies_and_is_uid_fenced() {
         let controller = controller(BuildAdmissionMode::Enforce, 2);
-        let first = WarmAdmission::admit(&controller, warm("same")).await.unwrap();
-        let second = WarmAdmission::admit(&controller, warm("same")).await.unwrap();
+        let first = WarmAdmission::admit(&controller, warm("same"))
+            .await
+            .unwrap();
+        let second = WarmAdmission::admit(&controller, warm("same"))
+            .await
+            .unwrap();
         assert_eq!(first, second);
-        controller.transition(&first, WarmAdmissionTransition::CreateStarted).await.unwrap();
-        controller.transition(&first, WarmAdmissionTransition::Live { uid: "uid".into() }).await.unwrap();
-        assert!(controller.transition(&first, WarmAdmissionTransition::Terminal { uid: "wrong".into() }).await.is_err());
+        controller
+            .transition(&first, WarmAdmissionTransition::CreateStarted)
+            .await
+            .unwrap();
+        controller
+            .transition(&first, WarmAdmissionTransition::Live { uid: "uid".into() })
+            .await
+            .unwrap();
+        assert!(
+            controller
+                .transition(
+                    &first,
+                    WarmAdmissionTransition::Terminal {
+                        uid: "wrong".into()
+                    }
+                )
+                .await
+                .is_err()
+        );
         let notified = controller.release_notifier().notified();
-        controller.transition(&first, WarmAdmissionTransition::Terminal { uid: "uid".into() }).await.unwrap();
+        controller
+            .transition(
+                &first,
+                WarmAdmissionTransition::Terminal { uid: "uid".into() },
+            )
+            .await
+            .unwrap();
         notified.await;
-        assert_eq!(controller.journal.list_history(AdmissionDomain::WarmBuild, "same").await.unwrap()[0].state, AdmissionState::Terminal);
+        assert_eq!(
+            controller
+                .journal
+                .list_history(AdmissionDomain::WarmBuild, "same")
+                .await
+                .unwrap()[0]
+                .state,
+            AdmissionState::Terminal
+        );
     }
 }
