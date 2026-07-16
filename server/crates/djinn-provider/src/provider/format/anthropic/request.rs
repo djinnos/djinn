@@ -141,6 +141,10 @@ impl AnthropicProvider {
     /// omitted rather than turned into an empty text placeholder.
     fn serialize_content_block(block: &ContentBlock, assistant_replay: bool) -> Option<Value> {
         match block {
+            // Anthropic and Anthropic-compatible endpoints reject empty text
+            // blocks (Moonshot/Kimi: 400 "Invalid request: text content is
+            // empty"), so blocks with no usable text are omitted from replay.
+            ContentBlock::Text { text } if text.trim().is_empty() => None,
             ContentBlock::Text { text } => Some(json!({"type": "text", "text": text})),
             ContentBlock::ToolUse { id, name, input } => Some(json!({
                 "type": "tool_use", "id": id, "name": name, "input": input,
@@ -149,14 +153,24 @@ impl AnthropicProvider {
                 tool_use_id,
                 content,
                 is_error,
-            } => Some(json!({
-                "type": "tool_result",
-                "tool_use_id": tool_use_id,
-                "content": content.iter()
+            } => {
+                let mut inner = content
+                    .iter()
                     .filter_map(|block| Self::serialize_content_block(block, false))
-                    .collect::<Vec<_>>(),
-                "is_error": is_error,
-            })),
+                    .collect::<Vec<_>>();
+                // A tool that produced no output must not serialize an empty
+                // text block (or an empty content array, which some strict
+                // Anthropic-compatible endpoints also reject) — say so instead.
+                if inner.is_empty() {
+                    inner.push(json!({"type": "text", "text": "(no output)"}));
+                }
+                Some(json!({
+                    "type": "tool_result",
+                    "tool_use_id": tool_use_id,
+                    "content": inner,
+                    "is_error": is_error,
+                }))
+            }
             ContentBlock::Image { media_type, data } => Some(json!({
                 "type": "image",
                 "source": {"type": "base64", "media_type": media_type, "data": data}
@@ -188,6 +202,19 @@ impl AnthropicProvider {
                 content_type,
                 extra,
             } if assistant_replay => {
+                // Sessions captured before the streaming parser grew a "text"
+                // arm persisted text blocks as Unknown { content_type: "text",
+                // extra: {"text": ""} }. Replaying that serializes to
+                // {"type":"text","text":""}, which Anthropic-compatible
+                // endpoints reject — drop it like any other empty text block.
+                if content_type == "text"
+                    && extra
+                        .get("text")
+                        .and_then(Value::as_str)
+                        .is_none_or(|text| text.trim().is_empty())
+                {
+                    return None;
+                }
                 // Insert opaque fields first so Djinn's owned discriminant cannot
                 // be overridden by a persisted/foreign `extra.type` value.
                 let mut object = extra.clone();
@@ -218,6 +245,12 @@ impl AnthropicProvider {
                     .iter()
                     .filter_map(|block| Self::serialize_content_block(block, assistant_replay))
                     .collect::<Vec<_>>();
+                // A message whose every block was filtered out (empty text,
+                // unsigned thinking, …) must be omitted entirely: Anthropic
+                // rejects messages with empty content.
+                if content.is_empty() {
+                    return None;
+                }
                 Some(json!({"role": role, "content": content}))
             })
             .collect()
