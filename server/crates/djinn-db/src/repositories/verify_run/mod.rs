@@ -25,6 +25,15 @@ pub struct CreateVerifyRunParams<'a> {
     pub check_coverage: Option<&'a serde_json::Value>,
 }
 
+/// One command descriptor required by a final-verification plan, in plan order.
+///
+/// The identifier is supplied independently from the persisted JSON result so a
+/// caller cannot claim an arbitrary passing result object is a complete plan.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RequiredFinalVerificationCommand<'a> {
+    pub descriptor_id: &'a str,
+}
+
 /// Complete data required to create one reusable final-verification pass.
 pub struct RecordEligibleFinalVerificationPassParams<'a> {
     pub id: &'a str,
@@ -32,6 +41,8 @@ pub struct RecordEligibleFinalVerificationPassParams<'a> {
     pub verify_source: &'a str,
     pub verify_run_id: &'a str,
     pub verification_attempt_id: &'a str,
+    /// Required plan descriptors, in the exact order in which they must run.
+    pub required_commands: &'a [RequiredFinalVerificationCommand<'a>],
     pub ordered_commands: &'a serde_json::Value,
     pub covered_checks: &'a serde_json::Value,
     pub required_checks: &'a [String],
@@ -240,19 +251,45 @@ fn validate_eligible_final_pass(p: &RecordEligibleFinalVerificationPassParams<'_
             return Err(DbError::InvalidData(format!("{name} is required")));
         }
     }
+    if p.required_commands.is_empty()
+        || p.required_commands
+            .iter()
+            .enumerate()
+            .any(|(index, command)| {
+                command.descriptor_id.trim().is_empty()
+                    || p.required_commands[index + 1..]
+                        .iter()
+                        .any(|other| other.descriptor_id == command.descriptor_id)
+            })
+    {
+        return Err(DbError::InvalidData(
+            "required command descriptor IDs must be non-empty and unique".to_owned(),
+        ));
+    }
     let commands = p
         .ordered_commands
         .as_array()
         .ok_or_else(|| DbError::InvalidData("ordered commands must be an array".to_owned()))?;
-    if commands.is_empty()
-        || commands.iter().any(|c| {
-            !c.is_object()
-                || !(c.get("result").and_then(serde_json::Value::as_str) == Some("pass")
-                    || c.get("passed").and_then(serde_json::Value::as_bool) == Some(true))
+    if commands.len() != p.required_commands.len() {
+        return Err(DbError::InvalidData(
+            "ordered commands do not match the required command plan".to_owned(),
+        ));
+    }
+    if commands
+        .iter()
+        .zip(p.required_commands)
+        .any(|(command, required)| {
+            !command.is_object()
+                || command
+                    .get("descriptor_id")
+                    .and_then(serde_json::Value::as_str)
+                    != Some(required.descriptor_id)
+                || command.get("result").and_then(serde_json::Value::as_str) != Some("pass")
+                || command.get("passed").and_then(serde_json::Value::as_bool) != Some(true)
         })
     {
         return Err(DbError::InvalidData(
-            "every ordered command must pass".to_owned(),
+            "ordered command descriptors must match the required plan and pass".to_owned(),
         ));
     }
     let covered = p
