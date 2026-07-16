@@ -349,7 +349,7 @@ fn validate_digest(kind: &'static str, digest: &str) -> Result<(), EnvironmentId
 }
 
 fn normalize_strings(
-    values: &mut Vec<String>,
+    values: &mut [String],
     kind: &'static str,
 ) -> Result<(), EnvironmentIdentityError> {
     values.sort();
@@ -366,7 +366,7 @@ fn normalize_strings(
 }
 
 fn sort_unique_by<T>(
-    values: &mut Vec<T>,
+    values: &mut [T],
     key: impl Fn(&T) -> String,
     kind: &'static str,
 ) -> Result<(), EnvironmentIdentityError> {
