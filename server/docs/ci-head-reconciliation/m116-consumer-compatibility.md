@@ -65,11 +65,11 @@ Durable regression tests in `TaskCard.test.tsx` and
 all four additive fields populated) and confirm that existing rendering
 (`head_sha`, `status`, badge text) is unaffected.
 
-#### Patrol / doctor / health surfaces
+#### Doctor and health surfaces
 
 A targeted search for `CiGateSnapshot`, `ci_head`, or `head_sha` references
-within `server/crates/` modules that import `patrol`, `doctor`, or `health`
-return **zero matches**.  While a broad `grep` for `patrol|doctor|health` in
+within `server/crates/` modules that import `doctor` or `health`
+return **zero matches**.  While a broad `grep` for `doctor|health` in
 `server/` does return many results (health-check endpoints, DB repository
 modules like `doctor_finding.rs` and `board_health.rs`, and telemetry
 labels), **none of these surfaces reference `CiGateSnapshot` or task CI

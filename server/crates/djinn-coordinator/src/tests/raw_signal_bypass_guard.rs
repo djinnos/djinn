@@ -11,9 +11,6 @@
 /// Source of the primary session recovery consumers (stall, zombie, idle, kill).
 const SESSION_RECOVERY_SRC: &str = include_str!("../dispatch/session_recovery.rs");
 
-/// Source of the doctor zombie-running-session check (surfaces liveness verdicts).
-const ZOMBIE_DOCTOR_SRC: &str = include_str!("../doctor/zombie_running_session.rs");
-
 // ── Session recovery classifier integration guards ────────────────────────
 
 /// The stall-timeout consumer must call `classify_task_liveness` to consult
@@ -84,35 +81,5 @@ fn session_recovery_imports_verdict_enum() {
         SESSION_RECOVERY_SRC.contains("super::liveness::")
             && SESSION_RECOVERY_SRC.contains("Verdict"),
         "session_recovery.rs must import Verdict from the liveness module"
-    );
-}
-
-// ── Doctor zombie-running-session liveness surface guards ──────────────────
-
-/// The doctor zombie-running-session check must surface liveness verdicts
-/// from the persisted classifier.
-#[test]
-fn doctor_zombie_surfaces_liveness_verdicts() {
-    assert!(
-        ZOMBIE_DOCTOR_SRC.contains("liveness_verdict"),
-        "zombie_running_session.rs must surface liveness_verdict in findings"
-    );
-    assert!(
-        ZOMBIE_DOCTOR_SRC.contains("liveness_outcome_kind"),
-        "zombie_running_session.rs must surface liveness_outcome_kind in findings"
-    );
-}
-
-/// The doctor zombie check must load `CurrentLivenessState` from the
-/// `LivenessRepository` — not independently evaluate raw signals.
-#[test]
-fn doctor_zombie_reads_from_liveness_repository() {
-    assert!(
-        ZOMBIE_DOCTOR_SRC.contains("CurrentLivenessState"),
-        "zombie_running_session.rs must use CurrentLivenessState from the liveness repository"
-    );
-    assert!(
-        ZOMBIE_DOCTOR_SRC.contains("LivenessRepository"),
-        "zombie_running_session.rs must read from LivenessRepository"
     );
 }

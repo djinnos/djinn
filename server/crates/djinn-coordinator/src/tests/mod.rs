@@ -1395,7 +1395,7 @@ async fn planner_intervention_markers(
 
 mod deploy_interruptions_environmental;
 mod dispatch_flow;
-mod doctor_zombie_e2e;
+mod doctor_stranded_ready_e2e;
 mod intervention;
 mod pause_is_not_fault;
 mod session_reaping;
