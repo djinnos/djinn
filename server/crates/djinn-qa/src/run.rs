@@ -6,7 +6,7 @@
 use std::{
     fs,
     path::{Path, PathBuf},
-    process::Command,
+    process::{Command, Output},
     sync::mpsc,
     thread,
 };
@@ -82,7 +82,33 @@ pub trait DatabaseAcquirer: Sync {
     fn acquire(&self) -> Result<Box<dyn Send>, String>;
 }
 
-pub struct CargoExecutor;
+/// The process runner is injected by focused tests so command construction and
+/// evidence validation are tested on the same production execution path.
+type CommandRunner = dyn Fn(&mut Command) -> std::io::Result<Output> + Send + Sync;
+
+pub struct CargoExecutor {
+    run_command: Box<CommandRunner>,
+}
+
+impl Default for CargoExecutor {
+    fn default() -> Self {
+        Self {
+            run_command: Box::new(Command::output),
+        }
+    }
+}
+
+#[cfg(test)]
+impl CargoExecutor {
+    fn with_process(
+        run_command: impl Fn(&mut Command) -> std::io::Result<Output> + Send + Sync + 'static,
+    ) -> Self {
+        Self {
+            run_command: Box::new(run_command),
+        }
+    }
+}
+
 impl ScenarioExecutor for CargoExecutor {
     fn execute(&self, root: &Path, execution: &Execution) -> Result<(), String> {
         let Execution::CargoPackage {
@@ -110,8 +136,7 @@ impl ScenarioExecutor for CargoExecutor {
             command.arg("--test").arg(test);
         }
         command.arg("--").arg("--exact").arg(selector);
-        let output = command
-            .output()
+        let output = (self.run_command)(&mut command)
             .map_err(|e| format!("cargo adapter could not start `{package}`: {e}"))?;
         if !output.status.success() {
             return Err(format!(
@@ -602,21 +627,56 @@ scenarios:
     }
 
     #[test]
-    fn cargo_executor_rejects_successful_process_with_zero_executed_tests() {
-        // Simulate libtest output with no matching tests: `running 0 tests`
-        // and no `test result:` line with passing tests.
-        let zero_match_output = "running 0 tests\ntest result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n";
-        assert!(
-            !ran_at_least_one_test(zero_match_output),
-            "zero-match output must not count as executed tests"
-        );
+    fn cargo_executor_constructs_exact_targeted_command_and_accepts_match() {
+        use std::{os::unix::process::ExitStatusExt, sync::Arc};
 
-        // A valid run with at least one passing test must be accepted.
-        let valid_output = "running 1 tests\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n";
-        assert!(
-            ran_at_least_one_test(valid_output),
-            "valid output with 1 passed must count as executed tests"
+        let captured_args = Arc::new(Mutex::new(Vec::new()));
+        let captured_args_for_process = captured_args.clone();
+        let executor = CargoExecutor::with_process(move |command| {
+            *captured_args_for_process.lock().unwrap() = command
+                .get_args()
+                .map(|argument| argument.to_string_lossy().into_owned())
+                .collect();
+            Ok(Output {
+                status: std::process::ExitStatus::from_raw(0),
+                stdout: b"running 1 tests\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n".to_vec(),
+                stderr: Vec::new(),
+            })
+        });
+        let execution = Execution::CargoPackage {
+            package: "djinn-qa".into(),
+            test: Some("scenario_contract".into()),
+            selector: "scenario::tests::exact_match".into(),
+        };
+
+        executor.execute(Path::new("."), &execution).unwrap();
+        assert_eq!(
+            *captured_args.lock().unwrap(),
+            vec![
+                "test", "-p", "djinn-qa", "--test", "scenario_contract", "--", "--exact",
+                "scenario::tests::exact_match",
+            ]
         );
+    }
+
+    #[test]
+    fn cargo_executor_rejects_successful_process_with_zero_executed_tests() {
+        use std::os::unix::process::ExitStatusExt;
+
+        let executor = CargoExecutor::with_process(|_| {
+            Ok(Output {
+                status: std::process::ExitStatus::from_raw(0),
+                stdout: b"running 0 tests\ntest result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n".to_vec(),
+                stderr: Vec::new(),
+            })
+        });
+        let execution = Execution::CargoPackage {
+            package: "djinn-qa".into(),
+            test: None,
+            selector: "scenario::tests::missing".into(),
+        };
+        let error = executor.execute(Path::new("."), &execution).unwrap_err();
+        assert!(error.contains("executed zero tests"), "unexpected error: {error}");
     }
 
     #[test]
@@ -657,7 +717,7 @@ scenarios:
 
     #[test]
     fn cargo_executor_empty_selector_fails_before_invocation() {
-        let executor = CargoExecutor;
+        let executor = CargoExecutor::default();
         let execution = Execution::CargoPackage {
             package: "djinn-qa".into(),
             test: None,
