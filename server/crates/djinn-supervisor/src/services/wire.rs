@@ -1305,6 +1305,7 @@ mod tests {
                     failure_policy: Default::default(),
                 }],
                 pre_verification: vec![],
+                ..Default::default()
             },
             ..EnvironmentConfig::empty()
         };
