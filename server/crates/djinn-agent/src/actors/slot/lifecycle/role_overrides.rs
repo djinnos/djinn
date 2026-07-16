@@ -189,7 +189,7 @@ mod tests {
     use djinn_core::events::EventBus;
     use djinn_db::TaskRepository;
     use djinn_db::repositories::agent::AgentCreateInput;
-    use djinn_db::{Database, ProjectRepository};
+    use djinn_db::{Database, EffectiveCreatorProvenance, ProjectRepository};
     use tokio_util::sync::CancellationToken;
     async fn setup_project(db: &Database) -> String {
         db.ensure_initialized().await.unwrap();
@@ -200,10 +200,16 @@ mod tests {
     }
     async fn make_task(db: &Database, project_id: &str, agent_type: Option<&str>) -> Task {
         let repo = TaskRepository::new(db.clone(), EventBus::noop());
+        let creator = crate::test_helpers::create_test_creator(db).await;
         let task = repo
-            .create_in_project(
+            .create_in_project_with_provenance(
                 project_id,
                 None,
+                EffectiveCreatorProvenance {
+                    explicit_user_id: Some(&creator.id),
+                    source_task_id: None,
+                    proposal_id: None,
+                },
                 "role-overrides-test",
                 "test",
                 "test",

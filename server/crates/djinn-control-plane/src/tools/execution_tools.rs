@@ -353,6 +353,7 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use async_trait::async_trait;
+    use djinn_db::{EffectiveCreatorProvenance, UserRepository};
     use rmcp::handler::server::wrapper::Parameters;
 
     use super::*;
@@ -681,11 +682,20 @@ mod tests {
             .create("test-proj-noop", "test-owner", "test-repo")
             .await
             .expect("create project");
+        let user = UserRepository::new(db.clone())
+            .upsert_from_github(999_990, "execution-kill-terminal-fixture", None, None)
+            .await
+            .expect("create fixture user");
         let task_repo = djinn_db::TaskRepository::new(db.clone(), events.clone());
         let task = task_repo
-            .create_in_project(
+            .create_in_project_with_provenance(
                 &project.id,
                 None,
+                EffectiveCreatorProvenance {
+                    explicit_user_id: Some(&user.id),
+                    source_task_id: None,
+                    proposal_id: None,
+                },
                 "Terminal kill noop task",
                 "desc",
                 "",

@@ -29,7 +29,7 @@ use crate::tools::task_tools::types::{
     task_ci_gate_state, task_ci_status,
 };
 use djinn_core::models::{ActivityEntry, Task, TaskStatus, TransitionAction};
-use djinn_db::{EpicRepository, TaskRepository};
+use djinn_db::{EffectiveCreatorProvenance, EpicRepository, TaskRepository};
 
 const IMPACT_CHECK_WARNING: &str = "This task appears to involve a removal or rename. Consider calling `impact_check` before proceeding to avoid breaking compile-time consumers in other crates. See the planner prompt contract for details.";
 const DESTRUCTIVE_TASK_KEYWORDS: [&str; 8] = [
@@ -284,6 +284,14 @@ pub async fn create_task(
         .create_in_project_with_blockers(
             project_id,
             epic_id.as_deref(),
+            // Authenticated MCP task creation: the current session user is the
+            // explicit creator. If no session is present, resolution falls back
+            // to parent-epic / proposal provenance inside the insert transaction.
+            EffectiveCreatorProvenance {
+                explicit_user_id: djinn_core::auth_context::current_user_id().as_deref(),
+                source_task_id: None,
+                proposal_id: None,
+            },
             &request.title,
             &request.description,
             &request.design,
