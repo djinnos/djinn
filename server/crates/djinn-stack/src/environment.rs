@@ -48,6 +48,12 @@ const MAX_PRE_TASK_COMMAND_LEN: usize = 4096;
 const PRE_TASK_TIMEOUT_DEFAULT: u64 = 300;
 const PRE_TASK_TIMEOUT_MIN: u64 = 1;
 const PRE_TASK_TIMEOUT_MAX: u64 = 1800;
+const FINAL_VERIFICATION_VERSION: u32 = 1;
+const MAX_FINAL_VERIFICATION_COMMANDS: usize = 64;
+const MAX_FINAL_VERIFICATION_INPUTS: usize = 128;
+const MAX_FINAL_VERIFICATION_OUTPUTS: usize = 128;
+const FINAL_VERIFICATION_TIMEOUT_MIN: u64 = 1;
+const FINAL_VERIFICATION_TIMEOUT_MAX: u64 = 3600;
 
 #[derive(Debug, Error)]
 pub enum EnvironmentConfigError {
@@ -974,6 +980,9 @@ pub struct LifecycleHooks {
     /// — commands that prepare the workspace for the agent session.
     #[serde(default)]
     pub pre_verification: Vec<HookCommand>,
+    /// Authoritative post-authoring plan, distinct from setup-time hooks.
+    #[serde(default)]
+    pub final_verification: FinalVerificationPlan,
 }
 
 impl LifecycleHooks {
@@ -982,10 +991,148 @@ impl LifecycleHooks {
         validate_lifecycle_phase("lifecycle.pre_anything", &self.pre_anything)?;
         validate_pre_task_commands("lifecycle.pre_task", &self.pre_task)?;
         validate_lifecycle_phase("lifecycle.pre_verification", &self.pre_verification)?;
+        self.final_verification.validate()?;
         Ok(())
     }
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct FinalVerificationPlan {
+    #[serde(default = "final_verification_version")]
+    pub version: u32,
+    #[serde(default)]
+    pub profile_id: String,
+    #[serde(default)]
+    pub profile_revision: u32,
+    #[serde(default)]
+    pub commands: Vec<FinalVerificationCommand>,
+    #[serde(default)]
+    pub required_checks: Vec<String>,
+    #[serde(default)]
+    pub input_manifest: VerificationInputManifest,
+    #[serde(default)]
+    pub read_only_external_inputs: Vec<ExternalInputDeclaration>,
+    #[serde(default)]
+    pub output_only_globs: Vec<String>,
+    #[serde(default)]
+    pub hermeticity: HermeticityDeclaration,
+}
+fn final_verification_version() -> u32 {
+    1
+}
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct FinalVerificationCommand {
+    pub check_id: String,
+    pub executable: String,
+    #[serde(default)]
+    pub argv: Vec<String>,
+    #[serde(default)]
+    pub working_directory: String,
+    #[serde(default)]
+    pub environment_names: Vec<String>,
+    pub timeout_seconds: u64,
+    #[serde(default = "final_verification_version")]
+    pub descriptor_revision: u32,
+}
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct VerificationInputManifest {
+    #[serde(default = "final_verification_version")]
+    pub version: u32,
+    #[serde(default)]
+    pub repo_paths: Vec<String>,
+    #[serde(default)]
+    pub environment_names: Vec<String>,
+}
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ExternalInputDeclaration {
+    pub id: String,
+    pub locator: String,
+}
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct HermeticityDeclaration {
+    #[serde(default)]
+    pub hermetic: bool,
+    #[serde(default)]
+    pub reusable: bool,
+    #[serde(default)]
+    pub network_access: bool,
+}
+impl FinalVerificationPlan {
+    fn validate(&self) -> EnvResult<()> {
+        if self.version != 1 {
+            return Err(EnvironmentConfigError::OutOfRange {
+                field: "lifecycle.final_verification.version".into(),
+                value: self.version as u64,
+                min: 1,
+                max: 1,
+            });
+        };
+        if self.commands.is_empty() && self.profile_id.is_empty() {
+            return Ok(());
+        };
+        validate_identifier("lifecycle.final_verification.profile_id", &self.profile_id)?;
+        if self.profile_revision == 0 {
+            return Err(EnvironmentConfigError::EmptyValue {
+                field: "lifecycle.final_verification.profile_revision".into(),
+            });
+        };
+        let mut ids = HashSet::new();
+        for c in &self.commands {
+            validate_identifier(
+                "lifecycle.final_verification.commands.check_id",
+                &c.check_id,
+            )?;
+            if !ids.insert(c.check_id.as_str()) {
+                return Err(EnvironmentConfigError::DuplicateName {
+                    field: "lifecycle.final_verification.commands".into(),
+                    name: c.check_id.clone(),
+                });
+            };
+            validate_path(
+                "lifecycle.final_verification.commands.working_directory",
+                &c.working_directory,
+            )?;
+            if c.timeout_seconds == 0 {
+                return Err(EnvironmentConfigError::OutOfRange {
+                    field: "lifecycle.final_verification.commands.timeout_seconds".into(),
+                    value: 0,
+                    min: 1,
+                    max: 3600,
+                });
+            }
+        }
+        for x in &self.required_checks {
+            if !ids.contains(x.as_str()) {
+                return Err(EnvironmentConfigError::UnsafeIdentifier {
+                    field: "lifecycle.final_verification.required_checks".into(),
+                    value: x.clone(),
+                });
+            }
+        }
+        if self.input_manifest.version != 1 {
+            return Err(EnvironmentConfigError::OutOfRange {
+                field: "lifecycle.final_verification.input_manifest.version".into(),
+                value: self.input_manifest.version as u64,
+                min: 1,
+                max: 1,
+            });
+        };
+        if self.hermeticity.reusable
+            && (!self.hermeticity.hermetic || self.hermeticity.network_access)
+        {
+            return Err(EnvironmentConfigError::UnsafeIdentifier {
+                field: "lifecycle.final_verification.hermeticity.reusable".into(),
+                value: "reusable plans must be hermetic and deny network access".into(),
+            });
+        };
+        Ok(())
+    }
+}
 /// Validate one lifecycle phase: cap the list length, then validate each hook
 /// with its indexed field path.  Preserves exact field strings and early-return
 /// order.
