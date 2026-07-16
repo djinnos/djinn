@@ -39,6 +39,19 @@ fn assert_tool_success(response: &Value, operation: &str) {
     );
 }
 
+/// Extract a required response string before using it in a new tool request.
+///
+/// Passing `response["field"]` directly into `json!` converts a missing field
+/// into JSON `null`, which bypasses the fixture's setup failure and instead
+/// trips strict request deserialization in the next dispatch.
+fn required_response_string(response: &Value, field: &str, operation: &str) -> String {
+    response
+        .get(field)
+        .and_then(Value::as_str)
+        .unwrap_or_else(|| panic!("{operation} response must contain string {field}: {response}"))
+        .to_owned()
+}
+
 #[tokio::test]
 async fn mcp_memory_write_success_shape_and_duplicate_permalink_error() {
     let caller = TrustedRevisionCallerContext::authenticated_human("memory-tools-test-user")
@@ -128,11 +141,7 @@ async fn mcp_memory_write_and_move_accept_case_and_pitfall_types() {
     assert_eq!(created["note_type"], "case");
     assert_eq!(created["folder"], "cases");
     assert_eq!(created["permalink"], "cases/recovered-incident");
-    let created_permalink = created
-        .get("permalink")
-        .and_then(Value::as_str)
-        .expect("case memory_write permalink")
-        .to_string();
+    let created_permalink = required_response_string(&created, "permalink", "case memory_write");
 
     let moved = harness
         .call_tool(
@@ -146,6 +155,7 @@ async fn mcp_memory_write_and_move_accept_case_and_pitfall_types() {
         .await
         .expect("memory_move should dispatch");
 
+    assert_tool_success(&moved, "memory move");
     assert_eq!(moved["note_type"], "pitfall");
     assert_eq!(moved["folder"], "pitfalls");
     assert_eq!(moved["permalink"], "pitfalls/recovered-incident");
@@ -173,11 +183,12 @@ async fn mcp_memory_read_by_permalink_by_title_and_not_found_error() {
     .await
     .expect("memory_write should dispatch");
     assert_tool_success(&created, "memory mutation");
+    let created_permalink = required_response_string(&created, "permalink", "memory_write");
 
     let by_permalink = harness
         .call_tool(
             "memory_read",
-            json!({ "project": project, "identifier": created["permalink"] }),
+            json!({ "project": project, "identifier": created_permalink }),
         )
         .await
         .expect("memory_read by permalink should dispatch");
@@ -435,26 +446,30 @@ async fn mcp_memory_graph_returns_wikilink_edges() {
     let (proj, _dir) = common::create_test_project_with_dir(harness.db()).await;
     let project = proj.slug();
 
-    dispatch_as_authenticated_human(&caller, &harness, "memory_write",
+    let node_b = dispatch_as_authenticated_human(&caller, &harness, "memory_write",
             json!({"project": project, "title": "Node B", "content": "b", "reason": "create fixture note for memory tool coverage", "type": "reference"}),
         )
         .await
         .expect("seed node B should dispatch");
-    dispatch_as_authenticated_human(&caller, &harness, "memory_write",
+    assert_tool_success(&node_b, "seed node B mutation");
+    let node_a = dispatch_as_authenticated_human(&caller, &harness, "memory_write",
             json!({"project": project, "title": "Node A", "content": "links [[Node B]] [[Node C]]", "reason": "create fixture note for memory tool coverage", "type": "reference"}),
         )
         .await
         .expect("seed node A should dispatch");
-    dispatch_as_authenticated_human(&caller, &harness, "memory_write",
+    assert_tool_success(&node_a, "seed node A mutation");
+    let node_c = dispatch_as_authenticated_human(&caller, &harness, "memory_write",
             json!({"project": project, "title": "Node C", "content": "links [[Node B]] [[NonExistent]]", "reason": "create fixture note for memory tool coverage", "type": "reference"}),
         )
         .await
         .expect("seed node C should dispatch");
-    dispatch_as_authenticated_human(&caller, &harness, "memory_write",
+    assert_tool_success(&node_c, "seed node C mutation");
+    let node_d = dispatch_as_authenticated_human(&caller, &harness, "memory_write",
             json!({"project": project, "title": "Node D", "content": "isolated", "reason": "create fixture note for memory tool coverage", "type": "reference"}),
         )
         .await
         .expect("seed node D should dispatch");
+    assert_tool_success(&node_d, "seed node D mutation");
 
     let graph = harness
         .call_tool("memory_graph", json!({"project": project}))
@@ -595,7 +610,7 @@ async fn mcp_memory_history_and_diff_round_trip() {
     let history = harness
         .call_tool(
             "memory_history",
-            json!({"project": project, "permalink": created["permalink"], "limit": 10}),
+            json!({"project": project, "permalink": permalink, "limit": 10}),
         )
         .await
         .expect("memory_history should dispatch");
@@ -604,7 +619,7 @@ async fn mcp_memory_history_and_diff_round_trip() {
     let diff = harness
         .call_tool(
             "memory_diff",
-            json!({"project": project, "permalink": created["permalink"]}),
+            json!({"project": project, "permalink": permalink}),
         )
         .await
         .expect("memory_diff should dispatch");
@@ -628,17 +643,19 @@ async fn mcp_memory_build_context_follows_wikilinks() {
         .await
         .expect("memory_write target should dispatch");
     assert_tool_success(&target, "memory mutation");
+    let target_permalink = required_response_string(&target, "permalink", "target memory_write");
     let seed = dispatch_as_authenticated_human(&caller, &harness, "memory_write",
             json!({"project": project, "title": "Context Seed", "content": "see [[Context Target]]", "reason": "create fixture note for memory tool coverage", "type": "reference"}),
         )
         .await
         .expect("memory_write seed should dispatch");
     assert_tool_success(&seed, "memory mutation");
+    let seed_permalink = required_response_string(&seed, "permalink", "seed memory_write");
 
     let built = harness
         .call_tool(
             "memory_build_context",
-            json!({"project": project, "url": seed["permalink"], "depth": 1, "max_related": 5}),
+            json!({"project": project, "url": seed_permalink, "depth": 1, "max_related": 5}),
         )
         .await
         .expect("memory_build_context should dispatch");
@@ -646,14 +663,14 @@ async fn mcp_memory_build_context_follows_wikilinks() {
     let primary = built["primary"].as_array().unwrap();
     let related_l1 = built["related_l1"].as_array().unwrap();
     let related_l0 = built["related_l0"].as_array().unwrap();
-    assert_eq!(primary[0]["permalink"], seed["permalink"]);
+    assert_eq!(primary[0]["permalink"], seed_permalink);
     // Check both L1 and L0 tiered fields for the target note
     let in_l1 = related_l1
         .iter()
-        .any(|n| n["permalink"] == target["permalink"]);
+        .any(|n| n["permalink"] == target_permalink);
     let in_l0 = related_l0
         .iter()
-        .any(|n| n["permalink"] == target["permalink"]);
+        .any(|n| n["permalink"] == target_permalink);
     assert!(
         in_l1 || in_l0,
         "target permalink should be in related_l1 or related_l0"
@@ -693,7 +710,7 @@ async fn mcp_memory_task_refs_returns_tasks_for_permalink() {
     let refs = harness
         .call_tool(
             "memory_task_refs",
-            json!({"project": project, "permalink": note["permalink"]}),
+            json!({"project": project, "permalink": note_permalink}),
         )
         .await
         .expect("memory_task_refs should dispatch");
@@ -1221,10 +1238,11 @@ async fn memory_read_regression_resolved_mentions_still_works() {
     );
 
     // memory_read should resolve the short_id mention.
+    let note_permalink = required_response_string(&note, "permalink", "memory_write");
     let read = harness
         .call_tool(
             "memory_read",
-            json!({"project": project, "identifier": note["permalink"]}),
+            json!({"project": project, "identifier": note_permalink}),
         )
         .await
         .expect("memory_read should dispatch");
@@ -1353,10 +1371,11 @@ async fn memory_read_resolves_short_id_mentions() {
     );
 
     // memory_read should resolve the short_id mention.
+    let note_permalink = required_response_string(&note, "permalink", "memory_write");
     let read = harness
         .call_tool(
             "memory_read",
-            json!({"project": project, "identifier": note["permalink"]}),
+            json!({"project": project, "identifier": note_permalink}),
         )
         .await
         .expect("memory_read should dispatch");
@@ -1456,7 +1475,7 @@ async fn no_regression_memory_refs_autolink() {
     let refs = harness
         .call_tool(
             "memory_task_refs",
-            json!({"project": project, "permalink": note["permalink"]}),
+            json!({"project": project, "permalink": note_permalink}),
         )
         .await
         .expect("memory_task_refs should dispatch");
