@@ -7,6 +7,6 @@ scenarios:
     sources: [{kind: incident, id: "dispatch failover chain exhaustion terminal effects"}]
     primary_coverage: dispatch.exhaustion-terminality
     secondary_coverage: [task-lifecycle.terminal-side-effects]
-    execution: {kind: cargo-package, package: djinn-coordinator}
+    execution: {kind: cargo-package, package: djinn-coordinator, selector: dispatch::task_dispatch::failover_chain_tests::failover_chain_exhaustion_applies_terminal_side_effects}
     isolation: {database: isolated, providers: isolated, channel: isolated}
     watch_paths: [server/crates/djinn-coordinator/src/dispatch/task_dispatch.rs]

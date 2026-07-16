@@ -7,6 +7,6 @@ scenarios:
     sources: [{kind: incident, id: "xh6f zombie zero-token stall-kill cascade"}]
     primary_coverage: reaper.slow-vs-crashed-discrimination
     secondary_coverage: [heartbeat.liveness-semantics]
-    execution: {kind: cargo-package, package: djinn-coordinator}
+    execution: {kind: cargo-package, package: djinn-coordinator, selector: tests::session_reaping::zombie_zero_token_session_is_reaped_on_db_truth}
     isolation: {database: isolated, providers: isolated, channel: isolated}
     watch_paths: [server/crates/djinn-coordinator/src/tests/session_reaping.rs]
