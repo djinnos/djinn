@@ -252,7 +252,7 @@ mod tests {
     use djinn_core::events::DjinnEventEnvelope;
     use djinn_db::repositories::task::ActivityQuery;
     use djinn_db::test_support::event_bus_for;
-    use djinn_db::{NoteRepository, TaskRepository};
+    use djinn_db::{EffectiveCreatorProvenance, NoteRepository, TaskRepository};
     use tokio::sync::broadcast;
     use tokio::time::timeout;
 
@@ -569,10 +569,16 @@ mod tests {
             .unwrap();
         let _ = project_path;
 
+        let creator = crate::test_helpers::create_test_creator(&harness.db).await;
         let task = task_repo
-            .create_in_project(
+            .create_in_project_with_provenance(
                 &project.id,
                 None,
+                EffectiveCreatorProvenance {
+                    explicit_user_id: Some(&creator.id),
+                    source_task_id: None,
+                    proposal_id: None,
+                },
                 "Duplicate Delivery Task",
                 "Emit duplicate events",
                 "",
