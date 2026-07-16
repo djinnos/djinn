@@ -149,8 +149,14 @@ impl CoordinatorActor {
                     pr = pull_number,
                     "PR poller: PR merged → closing task"
                 );
-                self.apply_pr_merge(&task.id, pr.merge_commit_sha.as_deref())
-                    .await;
+                self.apply_pr_merge(
+                    &task.id,
+                    task.pr_url.as_deref().unwrap_or_default(),
+                    pr.merge_commit_sha.as_deref(),
+                    Some("not_applicable"),
+                    "not_applicable",
+                )
+                .await;
                 self.pr_status_cache.remove(&task.id);
                 self.pr_draft_first_seen.remove(&task.id);
                 self.review_stuck_sha_first_seen.remove(&task.id);

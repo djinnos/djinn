@@ -424,6 +424,8 @@ impl CoordinatorActor {
         // `ci_mq_*` projection carries the fresh lane facts that
         // `escalate_ci_failure_and_park` surfaces in the escalation text.
         if mq_rejection_requires_park(mq_strike_count) {
+            self.record_pr_outcome_facts(pr_url, None, Some("failed"), Some("merge_queue_failed"))
+                .await;
             match self.task_repo().get(task_id).await {
                 Ok(Some(task)) => {
                     let checks_display = if mq_escalation_checks.is_empty() {
@@ -462,7 +464,7 @@ impl CoordinatorActor {
         let transition_reason =
             format!("merge queue rejected PR (reason: {reason}) — re-run with fresh CI feedback");
         if let Ok(Some(attempt)) = TaskAttemptRepository::new(self.db.clone())
-            .latest_pending_or_submitted(task_id, Some("worker"))
+            .submitted_worker_for_pr_url(pr_url)
             .await
         {
             let outcomes = TaskRunOutcomeRepository::new(self.db.clone());

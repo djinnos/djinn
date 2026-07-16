@@ -106,8 +106,18 @@ impl CoordinatorActor {
                     pr = pull_number,
                     "PR poller: PR merged → closing task"
                 );
-                self.apply_pr_merge(&task.id, pr.merge_commit_sha.as_deref())
-                    .await;
+                self.apply_pr_merge(
+                    &task.id,
+                    pr_url,
+                    pr.merge_commit_sha.as_deref(),
+                    None,
+                    if self.delegated_to_github.contains_key(&task.id) {
+                        "passed"
+                    } else {
+                        "not_applicable"
+                    },
+                )
+                .await;
                 self.pr_status_cache.remove(&task.id);
                 self.review_stuck_sha_first_seen.remove(&task.id);
                 self.merge_fail_count.remove(&task.id);
@@ -274,6 +284,13 @@ impl CoordinatorActor {
                 // changes.
                 self.record_pr_rejection_fingerprint(&task.id).await;
 
+                self.record_pr_outcome_facts(
+                    pr_url,
+                    Some("rejected"),
+                    None,
+                    Some("review_rejected"),
+                )
+                .await;
                 self.apply_pr_transition(
                     &task.id,
                     TransitionAction::PrChangesRequested,
@@ -844,8 +861,18 @@ impl CoordinatorActor {
                         sha = merge_commit_sha.as_deref().unwrap_or("<unknown>"),
                         "PR poller: merge succeeded → closing task"
                     );
-                    self.apply_pr_merge(&task.id, merge_commit_sha.as_deref())
-                        .await;
+                    self.apply_pr_merge(
+                        &task.id,
+                        pr_url,
+                        merge_commit_sha.as_deref(),
+                        Some(if has_approved {
+                            "accepted"
+                        } else {
+                            "not_applicable"
+                        }),
+                        "not_applicable",
+                    )
+                    .await;
                     self.pr_status_cache.remove(&task.id);
                     self.review_stuck_sha_first_seen.remove(&task.id);
                     self.merge_fail_count.remove(&task.id);

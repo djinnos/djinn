@@ -2,6 +2,7 @@ use super::*;
 use crate::dispatch::attempt_lifecycle::{TerminalAdvancementParams, advance_latest_to_terminal};
 use crate::pr_poller::pr_cleanup::CloseKind;
 use djinn_core::models::task_attempt::TaskAttemptOutcome;
+use djinn_db::{TaskAttemptRepository, repositories::task_run_outcome::TaskRunOutcomeRepository};
 
 impl CoordinatorActor {
     pub(crate) async fn attach_pr_review_feedback(
@@ -336,6 +337,51 @@ impl CoordinatorActor {
         }
     }
 
+    pub(crate) async fn record_pr_outcome_facts(
+        &self,
+        pr_url: &str,
+        review: Option<&str>,
+        merge_queue: Option<&str>,
+        parked: Option<&str>,
+    ) {
+        let attempt = match TaskAttemptRepository::new(self.db.clone())
+            .submitted_worker_for_pr_url(pr_url)
+            .await
+        {
+            Ok(Some(attempt)) => attempt,
+            Ok(None) => return,
+            Err(e) => {
+                tracing::warn!(pr_url, error = %e, "PR poller: unable to resolve exact submitted attempt for outcome facts");
+                return;
+            }
+        };
+        let outcomes = TaskRunOutcomeRepository::new(self.db.clone());
+        if let Some(value) = review {
+            if let Err(e) = outcomes
+                .record_review_verdict_for_attempt(&attempt.id, value)
+                .await
+            {
+                tracing::warn!(pr_url, attempt_id = %attempt.id, error = %e, "PR poller: failed to record exact PR review fact");
+            }
+        }
+        if let Some(value) = merge_queue {
+            if let Err(e) = outcomes
+                .record_merge_queue_result_for_attempt(&attempt.id, value)
+                .await
+            {
+                tracing::warn!(pr_url, attempt_id = %attempt.id, error = %e, "PR poller: failed to record exact PR merge-queue fact");
+            }
+        }
+        if let Some(value) = parked {
+            if let Err(e) = outcomes
+                .record_parked_reason_for_attempt(&attempt.id, value)
+                .await
+            {
+                tracing::warn!(pr_url, attempt_id = %attempt.id, error = %e, "PR poller: failed to record exact PR parked fact");
+            }
+        }
+    }
+
     /// Close a task whose PR has merged, recording the landed merge-commit SHA.
     ///
     /// The SHA is persisted *before* the `PrMerge` transition so the
@@ -345,7 +391,16 @@ impl CoordinatorActor {
     /// `merge_commit_sha IS NOT NULL`). An empty/absent SHA degrades to a plain
     /// `PrMerge` (task still closes; it just won't show as merged) rather than
     /// blocking the close.
-    pub(crate) async fn apply_pr_merge(&self, task_id: &str, merge_commit_sha: Option<&str>) {
+    pub(crate) async fn apply_pr_merge(
+        &self,
+        task_id: &str,
+        pr_url: &str,
+        merge_commit_sha: Option<&str>,
+        review: Option<&str>,
+        merge_queue: &str,
+    ) {
+        self.record_pr_outcome_facts(pr_url, review, Some(merge_queue), None)
+            .await;
         if let Some(sha) = merge_commit_sha.filter(|s| !s.is_empty()) {
             if let Err(e) = self.task_repo().set_merge_commit_sha(task_id, sha).await {
                 tracing::warn!(
