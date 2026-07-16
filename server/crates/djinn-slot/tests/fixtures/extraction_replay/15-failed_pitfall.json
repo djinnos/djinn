@@ -1,0 +1,28 @@
+{
+   "expected_note_type" : "pitfall",
+   "required_discriminative_text" : "discriminative replay fact 15",
+   "terminal_context" : {
+      "review_decision" : null,
+      "outcome" : {
+         "kind" : "failed",
+         "classification" : "sanitized_failure"
+      }
+   },
+   "messages" : [
+      {
+         "content" : "Summarize sanitized task evidence for discriminative replay fact 15.",
+         "role" : "user"
+      },
+      {
+         "content" : "Implemented a concise deterministic change and recorded the outcome.",
+         "role" : "assistant"
+      }
+   ],
+   "expected_duplicate_target" : null,
+   "provenance" : "sanitized_archived_transcript_derived",
+   "expect_adr_054_quality" : true,
+   "category" : "failed_pitfall",
+   "must_not_duplicate_target" : null,
+   "id" : "archive-derived-15",
+   "injected_provider_response" : "{\"pitfalls\":[{\"content\":\"## Trigger / smell\\ndiscriminative replay fact 15. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\\n\\n## Failure mode\\ndiscriminative replay fact 15. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\\n\\n## Observable symptoms\\ndiscriminative replay fact 15. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\\n\\n## Prevention\\ndiscriminative replay fact 15. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\\n\\n## Recovery\\ndiscriminative replay fact 15. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\\n\\n## Related\\ndiscriminative replay fact 15. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\",\"title\":\"Sanitized failed_pitfall 15\",\"applies_when\":\"offline replay fixture\"}]}"
+}
