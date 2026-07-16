@@ -40,6 +40,12 @@ use tracing::{debug, info, warn};
 use crate::config::KubernetesConfig;
 use crate::warm_job::{LABEL_PROJECT_ID, LABEL_WARM, build_warm_job};
 
+mod warm_admission;
+pub use warm_admission::{
+    WarmAdmission, WarmAdmissionError, WarmAdmissionPermit, WarmAdmissionRequest,
+    WarmAdmissionTransition,
+};
+
 /// Default quiet-window for the merge-storm debounce (`DJINN_WARM_DEBOUNCE_SECONDS`).
 /// A few minutes: long enough that a burst of PRs landing on `main` every
 /// couple of minutes collapses into a single warm run, short enough that a
@@ -356,6 +362,11 @@ struct WarmDispatch {
     db: Database,
     dispatcher: Arc<dyn WarmJobDispatcher>,
     watcher: Arc<dyn WarmJobWatcher>,
+    /// Coordinator-owned admission boundary. This is intentionally absent by
+    /// default: no allow-all implementation lives in `djinn-k8s`. The
+    /// lifecycle-ordering integration consumes this explicit seam and treats an
+    /// unconfigured boundary as no-dispatch.
+    admission: Option<Arc<dyn WarmAdmission>>,
     /// Cluster-side dedupe: lists non-terminal warm Jobs for a project so
     /// triggers from any process can coalesce against in-flight Jobs created
     /// by any other process (rolling update overlap, server restart mid-warm,
@@ -770,6 +781,7 @@ impl K8sGraphWarmer {
                 db,
                 dispatcher,
                 watcher,
+                admission: None,
                 lister,
                 completion_sink: None,
                 in_flight: Arc::new(Mutex::new(HashMap::new())),
@@ -789,6 +801,27 @@ impl K8sGraphWarmer {
     pub fn with_completion_sink(mut self, sink: Arc<dyn WarmCompletionSink>) -> Self {
         self.dispatch.completion_sink = Some(sink);
         self
+    }
+
+    /// Attach the coordinator-owned warm-admission boundary (builder style).
+    ///
+    /// This crate deliberately supplies no default admission implementation:
+    /// callers that need admission-controlled dispatch must inject one. The
+    /// lifecycle-ordering integration is responsible for consuming this seam
+    /// before a Kubernetes POST, preserving the current dispatcher and watcher
+    /// behaviour until then.
+    #[must_use]
+    pub fn with_warm_admission(mut self, admission: Arc<dyn WarmAdmission>) -> Self {
+        self.dispatch.admission = Some(admission);
+        self
+    }
+
+    /// Return the explicitly injected admission boundary, if configured.
+    ///
+    /// `None` is deliberately not equivalent to allow-all; integrations must
+    /// fail closed rather than dispatching without an admission decision.
+    pub fn warm_admission(&self) -> Option<Arc<dyn WarmAdmission>> {
+        self.dispatch.admission.clone()
     }
 
     /// Override the merge-storm debounce policy (builder style). Production
@@ -1057,6 +1090,9 @@ impl GraphWarmerService for K8sGraphWarmer {
     }
 }
 
+#[cfg(test)]
+#[path = "graph_warmer_admission_tests.rs"]
+mod admission_tests;
 #[cfg(test)]
 #[path = "graph_warmer_tests.rs"]
 mod tests;

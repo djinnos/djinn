@@ -1,0 +1,27 @@
+{
+   "expect_adr_054_quality" : true,
+   "category" : "near_neighbor",
+   "id" : "archive-derived-12",
+   "must_not_duplicate_target" : "candidate-neighbor-12",
+   "injected_provider_response" : "{\"pitfalls\":[{\"title\":\"Sanitized near_neighbor 12\",\"content\":\"## Trigger / smell\\ndiscriminative replay fact 12. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\\n\\n## Failure mode\\ndiscriminative replay fact 12. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\\n\\n## Observable symptoms\\ndiscriminative replay fact 12. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\\n\\n## Prevention\\ndiscriminative replay fact 12. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\\n\\n## Recovery\\ndiscriminative replay fact 12. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\\n\\n## Related\\ndiscriminative replay fact 12. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\",\"applies_when\":\"offline replay fixture\"}]}",
+   "required_discriminative_text" : "discriminative replay fact 12",
+   "expected_note_type" : "pitfall",
+   "terminal_context" : {
+      "outcome" : {
+         "kind" : "completed"
+      },
+      "review_decision" : null
+   },
+   "messages" : [
+      {
+         "role" : "user",
+         "content" : "Summarize sanitized task evidence for discriminative replay fact 12."
+      },
+      {
+         "role" : "assistant",
+         "content" : "Implemented a concise deterministic change and recorded the outcome."
+      }
+   ],
+   "expected_duplicate_target" : null,
+   "provenance" : "sanitized_archived_transcript_derived"
+}

@@ -1,0 +1,27 @@
+{
+   "expect_adr_054_quality" : true,
+   "category" : "true_duplicate",
+   "required_discriminative_text" : "discriminative replay fact 23",
+   "expected_note_type" : "pattern",
+   "terminal_context" : {
+      "outcome" : {
+         "kind" : "completed"
+      },
+      "review_decision" : null
+   },
+   "injected_provider_response" : "{\"patterns\":[{\"applies_when\":\"offline replay fixture\",\"title\":\"Sanitized true_duplicate 23\",\"content\":\"## Context\\ndiscriminative replay fact 23. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\\n\\n## Problem shape\\ndiscriminative replay fact 23. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\\n\\n## Recommended approach\\ndiscriminative replay fact 23. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\\n\\n## Why it works\\ndiscriminative replay fact 23. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\\n\\n## Tradeoffs / limits\\ndiscriminative replay fact 23. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\\n\\n## When to use\\ndiscriminative replay fact 23. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\\n\\n## When not to use\\ndiscriminative replay fact 23. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\\n\\n## Related\\ndiscriminative replay fact 23. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\"}]}",
+   "provenance" : "sanitized_archived_transcript_derived",
+   "must_not_duplicate_target" : null,
+   "messages" : [
+      {
+         "role" : "user",
+         "content" : "Summarize sanitized task evidence for discriminative replay fact 23."
+      },
+      {
+         "role" : "assistant",
+         "content" : "Implemented a concise deterministic change and recorded the outcome."
+      }
+   ],
+   "id" : "archive-derived-23",
+   "expected_duplicate_target" : "candidate-duplicate-23"
+}
