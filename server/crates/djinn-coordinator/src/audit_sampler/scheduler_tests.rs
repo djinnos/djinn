@@ -756,6 +756,14 @@ async fn atomic_materialization_creates_task_and_links_in_one_tx() {
         .find(|item| item.selection_id == sel.id)
         .and_then(|item| item.task_id)
         .expect("seeded selection has source task provenance");
+    let source_creator_id = sqlx::query_scalar::<_, Option<String>>(
+        "SELECT created_by_user_id FROM tasks WHERE id = $1",
+    )
+    .bind(&source_task_id)
+    .fetch_one(db.pool())
+    .await
+    .unwrap()
+    .expect("seeded source task has a creator");
     let task_id = audit_repo
         .materialize_audit_task_atomic(
             &sel.id,
@@ -772,6 +780,10 @@ async fn atomic_materialization_creates_task_and_links_in_one_tx() {
     let task = task_repo.get(&task_id).await.unwrap().unwrap();
     assert_eq!(task.issue_type, "task");
     assert_eq!(task.description, "test description");
+    assert_eq!(
+        task.created_by_user_id.as_deref(),
+        Some(source_creator_id.as_str())
+    );
 
     // Verify the selection is linked.
     let updated = audit_repo

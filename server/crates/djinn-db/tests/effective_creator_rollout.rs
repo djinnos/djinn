@@ -56,10 +56,15 @@ fn extract_function_body(source: &str, symbol: &str) -> Option<String> {
     None
 }
 
-fn function_symbols(source: &str) -> Vec<String> {
+fn function_symbols(source: &str) -> Vec<(String, usize)> {
     source
         .lines()
-        .filter_map(|line| {
+        .scan(0, |offset, line| {
+            let line_offset = *offset;
+            *offset += line.len() + 1;
+            Some((line, line_offset))
+        })
+        .filter_map(|(line, offset)| {
             let before = line.split("fn ").next()?;
             if before.contains("//") {
                 return None;
@@ -69,9 +74,51 @@ fn function_symbols(source: &str) -> Vec<String> {
                 .chars()
                 .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
                 .collect();
-            (!name.is_empty()).then_some(name)
+            (!name.is_empty()).then_some((name, offset))
         })
         .collect()
+}
+
+fn contains_task_insert(source: &str) -> bool {
+    source
+        .split_whitespace()
+        .collect::<String>()
+        .to_ascii_uppercase()
+        .contains("INSERTINTOTASKS")
+}
+
+/// Discover named SQL statements generically, rather than recognizing one
+/// audit-specific constant name.
+fn direct_task_insert_constants(source: &str) -> Vec<(String, String)> {
+    let mut constants = Vec::new();
+    let mut search_from = 0;
+    while let Some(relative) = source[search_from..].find("const ") {
+        let start = search_from + relative;
+        let tail = &source[start + "const ".len()..];
+        let name: String = tail
+            .chars()
+            .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+            .collect();
+        let Some(relative_end) = tail.find(";\n") else {
+            break;
+        };
+        let declaration = tail[..relative_end + 1].to_owned();
+        if !name.is_empty() && contains_task_insert(&declaration) {
+            constants.push((name, declaration));
+        }
+        search_from = start + "const ".len() + relative_end + 2;
+    }
+    constants
+}
+
+fn production_source(source: &str) -> &str {
+    let Some(test_module) = source.rfind("\nmod tests {") else {
+        return source;
+    };
+    let prefix = &source[..test_module];
+    prefix
+        .rfind("#[cfg(test)]")
+        .map_or(source, |attribute| &source[..attribute])
 }
 
 fn production_sources(dir: &Path, root: &Path, result: &mut Vec<PathBuf>) {
@@ -86,6 +133,7 @@ fn production_sources(dir: &Path, root: &Path, result: &mut Vec<PathBuf>) {
         if path.extension().is_some_and(|ext| ext == "rs")
             && text.contains("/src/")
             && !text.contains("/tests/")
+            && !text.ends_with("/tests.rs")
             && !text.ends_with("_tests.rs")
             && !text.contains("test_support")
         {
@@ -108,14 +156,23 @@ fn discover_production_writers(root: &Path) -> BTreeSet<String> {
             .to_string_lossy()
             .into_owned();
         let is_db_repository = path.contains("djinn-db/src/repositories/");
-        let direct_insert_constant =
-            source.contains("INSERT INTO tasks") && source.contains("MATERIALIZED_TASK_INSERT");
-        for symbol in function_symbols(&source) {
-            let Some(body) = extract_function_body(&source, &symbol) else {
+        let is_shared_task_boundary = path.ends_with("repositories/task/writes.rs")
+            || path.ends_with("repositories/task/reads.rs");
+        // Test modules are conventionally appended to a repository file. Their
+        // fixture SQL is intentionally outside the production discovery set;
+        // inline `#[cfg(test)]` hooks in production methods remain visible.
+        let source = production_source(&source);
+        let direct_constants = direct_task_insert_constants(source);
+        for (symbol, _) in function_symbols(source) {
+            let Some(body) = extract_function_body(source, &symbol) else {
                 continue;
             };
+            let direct_insert = contains_task_insert(&body)
+                || direct_constants
+                    .iter()
+                    .any(|(constant, _)| body.contains(constant));
             if (!is_db_repository && BOUNDARIES.iter().any(|boundary| body.contains(boundary)))
-                || (direct_insert_constant && body.contains("MATERIALIZED_TASK_INSERT"))
+                || (direct_insert && !is_shared_task_boundary)
             {
                 discovered.insert(format!("{path}::{symbol}"));
             }
@@ -176,13 +233,21 @@ fn inventoried_producers_reach_the_transactional_provenance_boundary() {
 
         // Direct SQL writers must visibly insert the resolved concrete creator,
         // not merely invoke a resolver before a NULL-capable statement.
-        if body.contains("MATERIALIZED_TASK_INSERT") {
+        let direct_inserts: Vec<_> = direct_task_insert_constants(&source)
+            .into_iter()
+            .filter(|(constant, _)| body.contains(constant))
+            .collect();
+        if !direct_inserts.is_empty() || contains_task_insert(&body) {
+            let insert_sql = direct_inserts
+                .iter()
+                .map(|(_, sql)| sql.as_str())
+                .collect::<String>();
             assert!(
-                source.contains("created_by_user_id\n    ) VALUES"),
+                insert_sql.contains("created_by_user_id") || body.contains("created_by_user_id"),
                 "{key}: INSERT must name created_by_user_id"
             );
             assert!(
-                source.contains("'[]'::jsonb, $7"),
+                !insert_sql.to_ascii_uppercase().contains("NULL"),
                 "{key}: INSERT must bind concrete creator, not NULL"
             );
             assert!(
