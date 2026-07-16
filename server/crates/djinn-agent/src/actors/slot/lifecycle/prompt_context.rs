@@ -15,6 +15,7 @@ use crate::actors::slot::helpers::{
 use crate::actors::slot::lifecycle::attempt_context;
 use crate::context::AgentContext;
 use crate::prompts::{TaskContext, apply_role_extensions, apply_skills};
+use crate::rollout::{DefaultPolicy, RolloutMode, parse as parse_rollout};
 use crate::skills::ResolvedSkill;
 use djinn_db::{NoteRepository, ProposalRepository, TaskRepository};
 use tracing::Instrument;
@@ -211,7 +212,7 @@ async fn append_blocker_deliveries(
     {
         Ok(tasks) => tasks,
         Err(e) => {
-            tracing::debug!(
+            tracing::warn!(
                 epic_id = %epic_id,
                 blocking_epic_id = %blocker.epic_id,
                 error = %e,
@@ -291,7 +292,7 @@ async fn append_proposal_sibling_epic(
         }
         Ok(None) => {}
         Err(e) => {
-            tracing::debug!(
+            tracing::warn!(
                 epic_id = %epic_id,
                 sibling_epic_id = %sibling_id,
                 error = %e,
@@ -342,6 +343,30 @@ const KNOWLEDGE_BUDGET_CHARS: usize = 2000;
 /// Note types queried for knowledge-context injection.
 const KNOWLEDGE_NOTE_TYPES: &[&str] = &["pattern", "pitfall", "case"];
 
+const KNOWLEDGE_CONTEXT_ROLLOUT_ENV: &str = "DJINN_KNOWLEDGE_CONTEXT_ROLLOUT";
+const KNOWLEDGE_CONTEXT_LEGACY_ENV: &str = "DJINN_KNOWLEDGE_CONTEXT";
+
+/// Parse the operator-owned knowledge-context gate once at the assembly boundary.
+/// Cohorts are deployment labels only; no session assignment occurs here.
+fn knowledge_context_rollout_from_env() -> RolloutMode {
+    let rollout = std::env::var(KNOWLEDGE_CONTEXT_ROLLOUT_ENV).ok();
+    let legacy = std::env::var(KNOWLEDGE_CONTEXT_LEGACY_ENV).ok();
+    parse_rollout(rollout.as_deref(), legacy.as_deref(), DefaultPolicy::Enabled)
+}
+
+fn disabled_knowledge_outcome(
+    rollout: &RolloutMode,
+) -> djinn_db::repositories::retrieval_trace::RetrievalTraceOutcome {
+    use djinn_db::repositories::retrieval_trace::RetrievalTraceOutcome;
+
+    match rollout {
+        RolloutMode::Off => RetrievalTraceOutcome::DisabledOff,
+        RolloutMode::KillSwitch => RetrievalTraceOutcome::DisabledKillSwitch,
+        RolloutMode::LegacyDisabled => RetrievalTraceOutcome::DisabledLegacy,
+        _ => unreachable!("only disabled rollout modes request a suppression trace"),
+    }
+}
+
 /// Load knowledge context from scope-matched notes. Returns None on error/empty.
 ///
 /// Instruments retrieval with a fail-open `LoadKnowledgeContext` trace row. The
@@ -366,7 +391,8 @@ pub(crate) async fn load_knowledge_context(
     epic_context: Option<&str>,
     app_state: &AgentContext,
 ) -> Option<String> {
-    load_knowledge_context_with_planner(task, epic_context, app_state, None).await
+    let rollout = knowledge_context_rollout_from_env();
+    load_knowledge_context_with_planner(task, epic_context, app_state, None, &rollout).await
 }
 
 async fn load_knowledge_context_with_planner(
@@ -374,9 +400,14 @@ async fn load_knowledge_context_with_planner(
     epic_context: Option<&str>,
     app_state: &AgentContext,
     planner: Option<&MemoryIntentPlannerInvocation<'_>>,
+    rollout: &RolloutMode,
 ) -> Option<String> {
-    let note_repo = NoteRepository::new(app_state.db.clone(), app_state.event_bus.clone());
     let task_paths = derive_task_scope_paths(task, epic_context);
+    if !rollout.enabled() {
+        persist_knowledge_trace(task, &task_paths, &[], 0, KnowledgeTraceDurations::default(), false, &app_state.db, planner.map(|p| (p.session_id, p.task_run_id)), rollout, disabled_knowledge_outcome(rollout)).await;
+        return None;
+    }
+    let note_repo = NoteRepository::new(app_state.db.clone(), app_state.event_bus.clone());
 
     let fetch_start = tokio::time::Instant::now();
 
@@ -404,7 +435,7 @@ async fn load_knowledge_context_with_planner(
     let notes = match production_result {
         Ok(notes) => notes,
         Err(e) => {
-            tracing::debug!(
+            tracing::warn!(
                 task_id = %task.short_id,
                 error = %e,
                 "Lifecycle: failed to query knowledge context"
@@ -429,6 +460,8 @@ async fn load_knowledge_context_with_planner(
                     cap_exceeded,
                     &app_state.db,
                     planner.map(|p| (p.session_id, p.task_run_id)),
+                    rollout,
+                    djinn_db::repositories::retrieval_trace::RetrievalTraceOutcome::Error,
                 )
                 .await;
             }
@@ -482,6 +515,8 @@ async fn load_knowledge_context_with_planner(
         candidate_cap_exceeded,
         &app_state.db,
         planner.map(|p| (p.session_id, p.task_run_id)),
+        rollout,
+        if estimated_injected_tokens > 0 && trace_candidates_final.iter().any(|c| c.outcome == djinn_db::repositories::retrieval_trace::CandidateOutcome::Injected) { djinn_db::repositories::retrieval_trace::RetrievalTraceOutcome::Injected } else { djinn_db::repositories::retrieval_trace::RetrievalTraceOutcome::Empty },
     )
     .await;
 
@@ -628,6 +663,7 @@ fn apply_budget_outcomes(
 }
 
 /// Per-phase durations (milliseconds) for the knowledge-context retrieval trace.
+#[derive(Default)]
 struct KnowledgeTraceDurations {
     candidate_fetch_ms: i64,
     classify_ms: i64,
@@ -647,19 +683,17 @@ async fn persist_knowledge_trace(
     candidate_cap_exceeded: bool,
     db: &djinn_db::Database,
     attribution: Option<(&str, &str)>,
+    rollout: &RolloutMode,
+    outcome: djinn_db::repositories::retrieval_trace::RetrievalTraceOutcome,
 ) {
     use djinn_db::repositories::retrieval_trace::{
-        CreateRetrievalTraceParams, RetrievalTraceEntryPoint, RetrievalTraceRepository,
+        CreateRetrievalTraceParams, CreateRetrievalTraceWithSemanticsParams, RetrievalTraceEntryPoint, RetrievalTraceRepository,
         validate_candidates,
     };
 
-    if candidates.is_empty() {
-        return;
-    }
-
     // Validate candidate invariants before serialization.
     if let Err(e) = validate_candidates(candidates) {
-        tracing::debug!(
+        tracing::warn!(
             task_id = %task.short_id,
             error = %e,
             "Lifecycle: retrieval trace candidate validation failed; skipping trace persistence"
@@ -670,7 +704,7 @@ async fn persist_knowledge_trace(
     let candidates_json = match serde_json::to_value(candidates) {
         Ok(v) => v,
         Err(e) => {
-            tracing::debug!(
+            tracing::warn!(
                 task_id = %task.short_id,
                 error = %e,
                 "Lifecycle: failed to serialize retrieval trace candidates; skipping trace persistence"
@@ -708,8 +742,8 @@ async fn persist_knowledge_trace(
         estimated_injected_tokens,
     };
 
-    if let Err(e) = repo.insert(params).await {
-        tracing::debug!(
+    if let Err(e) = repo.insert_with_semantics(CreateRetrievalTraceWithSemanticsParams { trace: params, rollout_label: rollout.label(), outcome }).await {
+        tracing::warn!(
             task_id = %task.short_id,
             error = %e,
             "Lifecycle: failed to persist retrieval trace for knowledge context; continuing (fail-open)"
@@ -754,6 +788,7 @@ pub(crate) async fn assemble_prompt_context(inputs: PromptContextInputs<'_>) -> 
     let ci_blocking_directive = build_ci_blocking_directive(task);
     let needs_epic_context = role_for_epic_check.needs_epic_context();
     let role_name = runtime_role.config().name;
+    let knowledge_rollout = knowledge_context_rollout_from_env();
 
     // ── Phase 1: activity + epic context concurrently ──
     // Each child measures its own wall-clock time so the child-span
@@ -831,6 +866,7 @@ pub(crate) async fn assemble_prompt_context(inputs: PromptContextInputs<'_>) -> 
                     epic_context_ref,
                     app_state,
                     memory_intent_planner.as_ref(),
+                                    &knowledge_rollout,
                 )
                 .await;
                 (result, child_start.elapsed())
