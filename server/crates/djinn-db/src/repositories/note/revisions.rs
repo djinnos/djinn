@@ -365,6 +365,9 @@ impl RevisionCursor {
             .get("s")
             .and_then(|s| s.as_i64())
             .ok_or(RevisionCursorError::Malformed)?;
+        if note_seq <= 0 {
+            return Err(RevisionCursorError::Malformed);
+        }
         Ok(Self::NoteHistory { note_seq })
     }
 
@@ -380,6 +383,9 @@ impl RevisionCursor {
             .and_then(|s| s.as_str())
             .ok_or(RevisionCursorError::Malformed)?
             .to_owned();
+        if created_at.trim().is_empty() || id.trim().is_empty() {
+            return Err(RevisionCursorError::Malformed);
+        }
         Ok(Self::Session { created_at, id })
     }
 }
@@ -508,5 +514,23 @@ mod tests {
         assert_eq!(provenance.session_id(), Some("session"));
         assert_eq!(provenance.task_id(), Some("task"));
         assert_eq!(provenance.task_run_id(), Some("run"));
+    }
+
+    #[test]
+    fn cursor_rejects_invalid_sort_keys() {
+        use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+
+        let invalid_note_cursor = URL_SAFE_NO_PAD.encode(r#"{"k":"note_history","v":{"s":0}}"#);
+        assert_eq!(
+            RevisionCursor::decode_note_history(&invalid_note_cursor),
+            Err(RevisionCursorError::Malformed)
+        );
+
+        let invalid_session_cursor =
+            URL_SAFE_NO_PAD.encode(r#"{"k":"session","v":{"c":" ","i":""}}"#);
+        assert_eq!(
+            RevisionCursor::decode_session(&invalid_session_cursor),
+            Err(RevisionCursorError::Malformed)
+        );
     }
 }
