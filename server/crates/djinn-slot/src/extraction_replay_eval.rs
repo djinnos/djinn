@@ -649,9 +649,7 @@ mod tests {
     }
 
     /// Deterministic LLM provider that returns pre-scripted responses in order.
-    /// Each `stream()` call pops one response from the front of the queue. Used
-    /// for both the extraction completion (response 0) and the novelty decision
-    /// (response 1) in `ProductionReplaySeam`.
+    /// Each `stream()` call pops one response from the front of its queue.
     struct ScriptedProvider {
         responses: Mutex<VecDeque<String>>,
     }
@@ -1102,21 +1100,22 @@ mod tests {
             for target in [
                 &mut fixture.expected_duplicate_target,
                 &mut fixture.must_not_duplicate_target,
-            ] {
-                if let Some(target) = target {
-                    let candidate = notes
-                        .create_db_note_with_permalink(
-                            &eval.id,
-                            target,
-                            target,
-                            &fixture.required_discriminative_text,
-                            &fixture.expected_note_type,
-                            "[]",
-                        )
-                        .await
-                        .unwrap();
-                    *target = candidate.id;
-                }
+            ]
+            .into_iter()
+            .flatten()
+            {
+                let candidate = notes
+                    .create_db_note_with_permalink(
+                        &eval.id,
+                        target,
+                        target,
+                        &fixture.required_discriminative_text,
+                        &fixture.expected_note_type,
+                        "[]",
+                    )
+                    .await
+                    .unwrap();
+                *target = candidate.id;
             }
             let session_id =
                 create_fixture_replay_session(&db, events.clone(), &eval.id, &fixture).await;
@@ -1127,22 +1126,29 @@ mod tests {
             });
         }
 
-        let mut responses = Vec::new();
-        for case in &replay_cases {
-            responses.push(case.fixture.injected_provider_response.clone());
-            if case.fixture.expect_adr_054_quality {
-                responses.push(match case.fixture.expected_duplicate_target.as_deref() {
+        let extraction_responses = replay_cases
+            .iter()
+            .map(|case| case.fixture.injected_provider_response.clone())
+            .collect();
+        let novelty_responses = replay_cases
+            .iter()
+            .filter(|case| {
+                case.fixture.expect_adr_054_quality
+                    && (case.fixture.expected_duplicate_target.is_some()
+                        || case.fixture.must_not_duplicate_target.is_some())
+            })
+            .map(
+                |case| match case.fixture.expected_duplicate_target.as_deref() {
                     Some(target) => {
                         format!(r#"{{"decision":"already_known","existing_note_id":"{target}"}}"#)
                     }
                     None => r#"{"decision":"novel","existing_note_id":null}"#.to_string(),
-                });
-            }
-        }
-        let provider = Arc::new(ScriptedProvider::new(responses));
+                },
+            )
+            .collect();
         let seam = ProductionReplaySeam {
-            extraction_provider: provider.clone(),
-            novelty_provider: provider,
+            extraction_provider: Arc::new(ScriptedProvider::new(extraction_responses)),
+            novelty_provider: Arc::new(ScriptedProvider::new(novelty_responses)),
         };
         let report =
             run_database_extraction_replay(db, events, &eval.id, &replay_cases, &seam).await;
