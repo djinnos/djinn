@@ -49,7 +49,6 @@ pub(super) struct CoordinatorActor {
     pub(super) events_tx: broadcast::Sender<DjinnEventEnvelope>,
     pub(super) pool: SlotPoolHandle,
     /// Durable build admission shared by every task-run dispatch route.
-    #[cfg(not(test))]
     pub(super) build_admission: Option<Arc<crate::build_admission::BuildAdmissionController>>,
     #[cfg_attr(test, allow(dead_code))]
     pub(super) catalog: CatalogService,
@@ -483,7 +482,6 @@ impl CoordinatorActor {
             db: db.clone(),
             events_tx,
             pool,
-            #[cfg(not(test))]
             build_admission: _build_admission,
             catalog,
             health,
@@ -1342,6 +1340,10 @@ impl CoordinatorActor {
                 // the respawn guard does not defer the (task, role) pair
                 // forever on an orphaned pending attempt.
                 if let Some(task_id) = session.task_id.as_deref() {
+                    if let Some(task_run_id) = session.task_run_id.as_deref() {
+                        self.terminal_task_run_build_admission(task_id, task_run_id)
+                            .await;
+                    }
                     let _ = self
                         .classify_session_exit_liveness(
                             &session.id,

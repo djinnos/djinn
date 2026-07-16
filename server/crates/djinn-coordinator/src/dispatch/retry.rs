@@ -2732,12 +2732,19 @@ impl CoordinatorActor {
             );
             return;
         };
-        let build_admission = match self.begin_task_run_build_admission(
-            "planner",
-            &review_task.id,
-            i64::from(review_task.reopen_count.max(0)),
-            format!("task-run-{}-{}", review_task.id, review_task.reopen_count.max(0)),
-        ).await {
+        let build_admission = match self
+            .begin_task_run_build_admission(
+                "planner",
+                &review_task.id,
+                i64::from(review_task.reopen_count.max(0)),
+                format!(
+                    "task-run-{}-{}",
+                    review_task.id,
+                    review_task.reopen_count.max(0)
+                ),
+            )
+            .await
+        {
             Ok(permit) => permit,
             Err(()) => return,
         };
@@ -2759,7 +2766,11 @@ impl CoordinatorActor {
                 },
             )
             .await;
-        self.finish_task_run_build_admission(build_admission, matches!(outcome, DispatchOutcome::Dispatched)).await;
+        self.finish_task_run_build_admission(
+            build_admission,
+            matches!(outcome, DispatchOutcome::Dispatched),
+        )
+        .await;
 
         match outcome {
             DispatchOutcome::Dispatched => {

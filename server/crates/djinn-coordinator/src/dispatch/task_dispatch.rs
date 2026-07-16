@@ -12,14 +12,14 @@ use super::admission::{
     overlay_inflight_ledger,
 };
 use super::post_intervention_lane;
+use crate::build_admission::BuildAdmissionDecision;
 use crate::dispatch_pause::{load_dispatch_pause_state, matching_task_dispatch_pause};
 use crate::roles::DispatchContext;
-use crate::build_admission::BuildAdmissionDecision;
-use djinn_db::AdmissionDomain;
-use djinn_k8s::{WarmAdmission, WarmAdmissionPermit, WarmAdmissionTransition};
 use djinn_core::clock::{Clock, SystemClock};
+use djinn_db::AdmissionDomain;
 use djinn_db::repositories::task_arbitration::TaskArbitrationRepository;
 use djinn_db::{DispatchStateRepository, DispatchStateUpsert};
+use djinn_k8s::{WarmAdmission, WarmAdmissionPermit, WarmAdmissionTransition};
 
 fn record_dispatch_attempt(outcome: &'static str) {
     djinn_telemetry::dispatch::increment_attempt(outcome);
@@ -664,23 +664,32 @@ impl CoordinatorActor {
     // dispatch_next_refinement_phase`, so refinement tribunal dispatch and
     // normal task dispatch go through the exact same cap/ledger code path.
 
-    #[cfg(not(test))]
     fn admission_controller(&self) -> Option<&crate::build_admission::BuildAdmissionController> {
         self.build_admission.as_deref()
-    }
-
-    #[cfg(test)]
-    fn admission_controller(&self) -> Option<&crate::build_admission::BuildAdmissionController> {
-        None
     }
 
     /// Reserve and durably mark a task-run create before the pool side effect.
     /// A controller denial is deliberately neutral: callers leave the task queued.
     pub(crate) async fn begin_task_run_build_admission(
-        &self, role: &str, task_id: &str, generation: i64, object_name: String,
+        &self,
+        role: &str,
+        task_id: &str,
+        generation: i64,
+        object_name: String,
     ) -> Result<Option<WarmAdmissionPermit>, ()> {
-        let Some(controller) = self.admission_controller() else { return Ok(None); };
-        match controller.admit_task_run(Some(role), AdmissionDomain::TaskObservation, task_id.to_owned(), generation, object_name).await {
+        let Some(controller) = self.admission_controller() else {
+            return Ok(None);
+        };
+        match controller
+            .admit_task_run(
+                Some(role),
+                AdmissionDomain::TaskObservation,
+                task_id.to_owned(),
+                generation,
+                object_name,
+            )
+            .await
+        {
             Ok(BuildAdmissionDecision::Permitted { permit, .. }) => {
                 controller.transition(&permit, WarmAdmissionTransition::CreateStarted).await.map_err(|error| {
                     tracing::warn!(task_id, role, %error, "build admission CreateStarted failed; deferring pool create");
@@ -688,11 +697,21 @@ impl CoordinatorActor {
                 Ok(Some(permit))
             }
             Ok(BuildAdmissionDecision::Denied { occupancy, cap }) => {
-                tracing::info!(task_id, role, occupancy, cap, "build admission denied; leaving task queued");
+                tracing::info!(
+                    task_id,
+                    role,
+                    occupancy,
+                    cap,
+                    "build admission denied; leaving task queued"
+                );
                 Err(())
             }
             Ok(BuildAdmissionDecision::Unclassified) => {
-                tracing::warn!(task_id, role, "unclassified build admission; leaving task queued");
+                tracing::warn!(
+                    task_id,
+                    role,
+                    "unclassified build admission; leaving task queued"
+                );
                 Err(())
             }
             Err(error) => {
@@ -706,16 +725,57 @@ impl CoordinatorActor {
     /// does not return a Kubernetes UID, so even an accepted request remains
     /// CreateUnknown until a UID-bearing runtime callback is wired.
     pub(crate) async fn finish_task_run_build_admission(
-        &self, permit: Option<WarmAdmissionPermit>, dispatched: bool,
+        &self,
+        permit: Option<WarmAdmissionPermit>,
+        dispatched: bool,
     ) {
-        let (Some(controller), Some(permit)) = (self.admission_controller(), permit) else { return; };
+        let (Some(controller), Some(permit)) = (self.admission_controller(), permit) else {
+            return;
+        };
         let transition = if dispatched {
-            WarmAdmissionTransition::CreateUnknown { diagnostic: "slot-pool accepted create without object UID".to_owned() }
+            WarmAdmissionTransition::CreateUnknown {
+                diagnostic: "slot-pool accepted create without object UID".to_owned(),
+            }
         } else {
-            WarmAdmissionTransition::DefinitiveFailure { diagnostic: "slot-pool rejected before task-run creation".to_owned() }
+            WarmAdmissionTransition::DefinitiveFailure {
+                diagnostic: "slot-pool rejected before task-run creation".to_owned(),
+            }
         };
         if let Err(error) = controller.transition(&permit, transition).await {
             tracing::warn!(%error, "failed to persist task-run build-admission outcome; retaining capacity conservatively");
+        }
+    }
+
+    /// Translate a terminal runtime task-run identity into a UID-fenced release.
+    pub(crate) async fn terminal_task_run_build_admission(&self, task_id: &str, task_run_id: &str) {
+        let Some(controller) = self.admission_controller() else {
+            return;
+        };
+        let Some(permit) = controller.task_run_permit(task_id).await else {
+            return;
+        };
+        if let Err(error) = controller
+            .transition(
+                &permit,
+                WarmAdmissionTransition::Live {
+                    uid: task_run_id.to_owned(),
+                },
+            )
+            .await
+        {
+            tracing::warn!(task_id, task_run_id, %error, "failed to mark task-run admission live; retaining capacity conservatively");
+            return;
+        }
+        if let Err(error) = controller
+            .transition(
+                &permit,
+                WarmAdmissionTransition::Terminal {
+                    uid: task_run_id.to_owned(),
+                },
+            )
+            .await
+        {
+            tracing::warn!(task_id, task_run_id, %error, "failed to terminalize task-run admission; retaining capacity conservatively");
         }
     }
 
@@ -2593,12 +2653,15 @@ impl CoordinatorActor {
                     .await;
             }
 
-            let build_admission = match self.begin_task_run_build_admission(
-                role,
-                &task.id,
-                i64::from(task.reopen_count.max(0)),
-                format!("task-run-{}-{}", task.id, task.reopen_count.max(0)),
-            ).await {
+            let build_admission = match self
+                .begin_task_run_build_admission(
+                    role,
+                    &task.id,
+                    i64::from(task.reopen_count.max(0)),
+                    format!("task-run-{}-{}", task.id, task.reopen_count.max(0)),
+                )
+                .await
+            {
                 Ok(permit) => permit,
                 Err(()) => continue,
             };
@@ -2664,7 +2727,11 @@ impl CoordinatorActor {
                 )
                 .await;
 
-            self.finish_task_run_build_admission(build_admission, matches!(outcome, DispatchOutcome::Dispatched)).await;
+            self.finish_task_run_build_admission(
+                build_admission,
+                matches!(outcome, DispatchOutcome::Dispatched),
+            )
+            .await;
 
             match outcome {
                 DispatchOutcome::Dispatched => {
