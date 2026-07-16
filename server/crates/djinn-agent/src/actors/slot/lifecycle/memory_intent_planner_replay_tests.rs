@@ -12,7 +12,7 @@ use tokio_util::sync::CancellationToken;
 use super::prompt_context::test_support::create_project_epic_task;
 use super::prompt_context::{
     MemoryIntentPlannerHost, MemoryIntentPlannerInvocation, PlannedNoteSearch, PromptContext,
-    PromptContextInputs, assemble_prompt_context,
+    PromptContextInputs, assemble_prompt_context, knowledge_context_test_env_guard,
 };
 use crate::context::{AgentContext, MemoryIntentPlannerConfig};
 use crate::roles::LeadRole;
@@ -257,6 +257,7 @@ async fn assemble(
 
 #[tokio::test]
 async fn checked_in_replays_enter_the_production_assemble_prompt_context_boundary() {
+    let _knowledge_context_env = knowledge_context_test_env_guard();
     let cases: Vec<ReplayCase> = serde_json::from_str(FIXTURES).expect("checked-in replay corpus");
     assert_eq!(cases.len(), 13, "keep the rollout matrix exhaustive");
 
