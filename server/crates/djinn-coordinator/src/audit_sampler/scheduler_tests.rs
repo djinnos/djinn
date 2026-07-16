@@ -6,6 +6,9 @@ use djinn_db::{
     CreateSelectionParams, Database, EpicRepository, SelectionRow,
 };
 use serde_json::json;
+use std::sync::atomic::{AtomicI64, Ordering};
+
+static NEXT_SOURCE_GITHUB_ID: AtomicI64 = AtomicI64::new(9_000_000_000);
 
 fn test_config() -> AuditSchedulerConfig {
     AuditSchedulerConfig {
@@ -32,9 +35,10 @@ async fn seed_selection(
 ) -> SelectionRow {
     let repo = AuditSamplerRepository::new(db.clone());
     let source_user_id = uuid::Uuid::now_v7().to_string();
+    let source_github_id = NEXT_SOURCE_GITHUB_ID.fetch_add(1, Ordering::Relaxed);
     sqlx::query("INSERT INTO users (id, github_id, github_login) VALUES ($1, $2, $3)")
         .bind(&source_user_id)
-        .bind(100_000_i64)
+        .bind(source_github_id)
         .bind(format!("audit-source-{source_user_id}"))
         .execute(db.pool())
         .await
