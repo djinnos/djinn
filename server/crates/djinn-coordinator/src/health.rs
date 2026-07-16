@@ -2731,6 +2731,13 @@ async fn reap_stale_task_runs_with_threshold(
     let repo = djinn_db::repositories::task_run::TaskRunRepository::new(db.clone());
     match repo.reap_stale_running(&threshold_iso).await {
         Ok(ids) if !ids.is_empty() => {
+            let outcomes =
+                djinn_db::repositories::task_run_outcome::TaskRunOutcomeRepository::new(db.clone());
+            for task_run_id in &ids {
+                if let Err(e) = outcomes.record_parked_reason(task_run_id, "orphaned").await {
+                    tracing::warn!(task_run_id, error = %e, "CoordinatorActor: failed to record stale reaper parked reason");
+                }
+            }
             tracing::warn!(
                 count = ids.len(),
                 threshold = %threshold_iso,
