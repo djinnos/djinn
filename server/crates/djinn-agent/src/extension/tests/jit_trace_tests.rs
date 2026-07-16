@@ -150,6 +150,11 @@ async fn jit_pitfalls_trace_preserves_top_two_output_and_candidate_outcomes() {
     let trace = latest_jit_trace(&db, pid).await;
     assert_eq!(trace.entry_point, "jit_pitfalls");
     assert_eq!(trace.candidate_cap, 50);
+    assert_eq!(trace.rollout_label, "cohort");
+    assert_eq!(
+        trace.outcome,
+        djinn_db::repositories::retrieval_trace::RetrievalTraceOutcome::Injected
+    );
     assert!(!trace.candidate_cap_exceeded);
     assert!(trace.estimated_injected_tokens > 0);
     assert!(trace.durations_ms.get("search_elapsed_ms").is_some());
@@ -267,6 +272,11 @@ async fn jit_pitfalls_search_error_persists_error_trace_and_consumes_session() {
     assert!(!trace.candidate_cap_exceeded);
     assert_eq!(trace.estimated_injected_tokens, 0);
     assert!(trace.durations_ms.get("search_elapsed_ms").is_some());
+    assert_eq!(trace.rollout_label, "enabled");
+    assert_eq!(
+        trace.outcome,
+        djinn_db::repositories::retrieval_trace::RetrievalTraceOutcome::Error
+    );
     assert!(
         trace.durations_ms.get("trace_search_elapsed_ms").is_none(),
         "error path must not misrepresent an unrun candidate-universe search"
@@ -450,6 +460,140 @@ async fn jit_pitfalls_trace_serialization_failure_is_fail_open() {
     }
 }
 
+/// A failed disabled-path suppression insert is strictly observational: the
+/// unchanged write response, file mutation, once-per-session guard, and
+/// Prometheus outcomes must remain exactly as they are when suppression is
+/// persisted successfully.
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn jit_pitfalls_suppression_insert_failure_is_fail_open() {
+    let _guard = JIT_PITFALLS_ENV_LOCK.lock().unwrap();
+    unsafe {
+        std::env::remove_var("DJINN_JIT_PITFALLS");
+        std::env::set_var("DJINN_JIT_PITFALLS_ROLLOUT", "off");
+    }
+
+    let db = create_test_db();
+    let project = create_test_project(&db).await;
+    let pid = project.id.as_str();
+    let worktree = crate::test_helpers::test_tempdir("djinn-ext-jit-suppress-insert-fail-");
+    let baseline_worktree = crate::test_helpers::test_tempdir("djinn-ext-jit-suppress-insert-ok-");
+    for path in [worktree.path(), baseline_worktree.path()] {
+        tokio::fs::create_dir_all(path.join("src"))
+            .await
+            .expect("mkdir src");
+    }
+
+    let state = crate::test_helpers::agent_context_from_db(db.clone(), CancellationToken::new());
+    const BASELINE_TASK_RUN_ID: &str = "jit-suppression-insert-baseline";
+    const FAILURE_TASK_RUN_ID: &str = "jit-suppression-insert-failure";
+    let args = Some(
+        serde_json::json!({ "path": "src/a.rs", "content": "// first\n" })
+            .as_object()
+            .expect("obj")
+            .clone(),
+    );
+
+    // Establish the ordinary disabled response before making persistence fail.
+    let baseline = call_write(
+        &state,
+        &args,
+        baseline_worktree.path(),
+        Some(pid),
+        Some(BASELINE_TASK_RUN_ID),
+        None,
+    )
+    .await
+    .expect("successful suppression must not fail write");
+    assert!(baseline.get("jit_pitfalls").is_none());
+
+    // This uses the real repository failure mode, rather than bypassing the
+    // suppression helper, so insert_with_semantics attempts the missing table.
+    djinn_db::test_support::drop_table_for_test(&db, "retrieval_traces").await;
+
+    let telemetry_before = jit_pitfall_outcome_snapshot();
+    let response = call_write(
+        &state,
+        &args,
+        worktree.path(),
+        Some(pid),
+        Some(FAILURE_TASK_RUN_ID),
+        None,
+    )
+    .await
+    .expect("failed suppression insert must not fail write");
+    // `path` necessarily identifies each distinct fixture worktree. Compare
+    // every other response field to prove the failed observational write did
+    // not alter the underlying tool response.
+    let mut normalized_response = response.clone();
+    let mut normalized_baseline = baseline.clone();
+    normalized_response
+        .as_object_mut()
+        .expect("write response object")
+        .remove("path");
+    normalized_baseline
+        .as_object_mut()
+        .expect("baseline write response object")
+        .remove("path");
+    assert_eq!(
+        normalized_response, normalized_baseline,
+        "suppression persistence failure must preserve the underlying write result"
+    );
+    assert_eq!(
+        response["path"],
+        serde_json::Value::String(worktree.path().join("src/a.rs").display().to_string()),
+        "failed suppression insert must still return the written file path"
+    );
+    assert_eq!(
+        tokio::fs::read_to_string(worktree.path().join("src/a.rs"))
+            .await
+            .expect("failed suppression insert must still write file"),
+        "// first\n"
+    );
+
+    // The first disabled modification still consumes the once-per-session
+    // attempt even when its observational persistence write fails. Re-enable
+    // the gate so this follow-up proves that the same worktree/session is now
+    // classified as non-first instead of recording another disabled outcome.
+    unsafe {
+        std::env::set_var("DJINN_JIT_PITFALLS_ROLLOUT", "enabled");
+    }
+    let second_args = Some(
+        serde_json::json!({ "path": "src/b.rs", "content": "// second\n" })
+            .as_object()
+            .expect("obj")
+            .clone(),
+    );
+    let second = call_write(
+        &state,
+        &second_args,
+        worktree.path(),
+        Some(pid),
+        Some(FAILURE_TASK_RUN_ID),
+        None,
+    )
+    .await
+    .expect("second write after failed suppression insert");
+    assert!(
+        second.get("jit_pitfalls").is_none(),
+        "once-per-session guard must remain unchanged after suppression failure"
+    );
+    assert_eq!(
+        tokio::fs::read_to_string(worktree.path().join("src/b.rs"))
+            .await
+            .expect("second write must still mutate file"),
+        "// second\n"
+    );
+    assert_jit_pitfall_outcome_deltas(
+        &telemetry_before,
+        &[("disabled_default_off", 1), ("non_first_modification", 1)],
+    );
+
+    unsafe {
+        std::env::remove_var("DJINN_JIT_PITFALLS_ROLLOUT");
+    }
+}
+
 /// With the gate OFF (default), a write must produce byte-identical output:
 /// no scoped search, no `jit_pitfalls` field — even when matching pitfall
 /// notes exist for the touched path.
@@ -494,6 +638,14 @@ async fn jit_pitfalls_off_by_default_no_hint() {
         response.get("jit_pitfalls").is_none(),
         "gate OFF must not append jit_pitfalls, got {response:?}"
     );
+    let trace = latest_jit_trace(&db, pid).await;
+    assert_eq!(trace.rollout_label, "off");
+    assert_eq!(
+        trace.outcome,
+        djinn_db::repositories::retrieval_trace::RetrievalTraceOutcome::DisabledOff
+    );
+    assert_eq!(trace.estimated_injected_tokens, 0);
+    assert!(trace.candidates_typed().is_empty());
     assert_jit_pitfall_outcome_deltas(&telemetry_before, &[("disabled_default_off", 1)]);
 }
 
@@ -536,6 +688,14 @@ async fn jit_pitfalls_kill_switch_overrides_legacy_opt_in() {
         response.get("jit_pitfalls").is_none(),
         "kill switch must not append jit_pitfalls, got {response:?}"
     );
+    let trace = latest_jit_trace(&db, pid).await;
+    assert_eq!(trace.rollout_label, "kill_switch");
+    assert_eq!(
+        trace.outcome,
+        djinn_db::repositories::retrieval_trace::RetrievalTraceOutcome::DisabledKillSwitch
+    );
+    assert_eq!(trace.estimated_injected_tokens, 0);
+    assert!(trace.candidates_typed().is_empty());
     assert_jit_pitfall_outcome_deltas(&telemetry_before, &[("disabled_kill_switch", 1)]);
 
     unsafe {
@@ -662,6 +822,13 @@ async fn jit_pitfalls_on_miss_leaves_write_succeeding() {
         "miss must not append a hint, got {response:?}"
     );
 
+    let trace = latest_jit_trace(&db, pid).await;
+    assert_eq!(trace.rollout_label, "enabled");
+    assert_eq!(
+        trace.outcome,
+        djinn_db::repositories::retrieval_trace::RetrievalTraceOutcome::Empty
+    );
+    assert_eq!(trace.estimated_injected_tokens, 0);
     unsafe {
         std::env::remove_var("DJINN_JIT_PITFALLS_ROLLOUT");
         std::env::remove_var("DJINN_JIT_PITFALLS");
@@ -1001,4 +1168,51 @@ async fn read_readable_file_does_not_trigger_memory_hint() {
         content.contains("real content"),
         "readable file content must be returned, got: {content}"
     );
+}
+
+/// A legacy-disabled gate is recorded distinctly from deliberate operator off
+/// and kill-switch suppression while remaining invisible to the write caller.
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn jit_pitfalls_legacy_disabled_persists_distinct_suppression() {
+    let _guard = JIT_PITFALLS_ENV_LOCK.lock().unwrap();
+    unsafe {
+        std::env::remove_var("DJINN_JIT_PITFALLS_ROLLOUT");
+        std::env::set_var("DJINN_JIT_PITFALLS", "0");
+    }
+    let db = create_test_db();
+    let project = create_test_project(&db).await;
+    let pid = project.id.as_str();
+    let worktree = crate::test_helpers::test_tempdir("djinn-ext-jit-legacy-disabled-");
+    tokio::fs::create_dir_all(worktree.path().join("src"))
+        .await
+        .expect("mkdir src");
+    let args = Some(
+        serde_json::json!({ "path": "src/a.rs", "content": "// x\n" })
+            .as_object()
+            .expect("obj")
+            .clone(),
+    );
+    let state = crate::test_helpers::agent_context_from_db(db.clone(), CancellationToken::new());
+    let response = call_write(&state, &args, worktree.path(), Some(pid), None, None)
+        .await
+        .expect("legacy-disabled suppression must not fail write");
+    assert_eq!(
+        response.get("ok").and_then(|value| value.as_bool()),
+        Some(true)
+    );
+    assert!(response.get("jit_pitfalls").is_none());
+
+    let trace = latest_jit_trace(&db, pid).await;
+    assert_eq!(trace.rollout_label, "legacy_disabled");
+    assert_eq!(
+        trace.outcome,
+        djinn_db::repositories::retrieval_trace::RetrievalTraceOutcome::DisabledLegacy
+    );
+    assert_eq!(trace.estimated_injected_tokens, 0);
+    assert!(trace.candidates_typed().is_empty());
+
+    unsafe {
+        std::env::remove_var("DJINN_JIT_PITFALLS");
+    }
 }

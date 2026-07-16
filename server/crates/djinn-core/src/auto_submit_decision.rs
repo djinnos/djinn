@@ -476,6 +476,15 @@ mod tests {
             result: result.to_owned(),
             diff_fingerprint: diff_fingerprint.to_owned(),
             check_coverage,
+            source_phase: None,
+            verification_attempt_id: None,
+            ordered_commands: None,
+            covered_checks: None,
+            verification_input_fingerprint: None,
+            manifest_version: None,
+            environment_identity_json: None,
+            environment_identity_digest: None,
+            environment_identity_version: None,
             created_at: "2025-01-15T10:30:00.000Z".to_owned(),
         }
     }
