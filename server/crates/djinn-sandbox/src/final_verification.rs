@@ -7,8 +7,8 @@
 
 #![cfg(target_os = "linux")]
 
-use std::collections::{BTreeMap, HashMap};
-use std::io::{self, Read};
+use std::collections::BTreeMap;
+use std::io;
 use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Stdio};
 
@@ -65,20 +65,6 @@ pub enum FinalVerificationViolation {
     OverlappingOutputDirectories { first: PathBuf, second: PathBuf },
 }
 
-/// A kernel-enforced access denial observed while the child was executing.
-///
-/// The launcher observes the child's syscall results with `ptrace`; this is an
-/// enforcement-side signal, not a diagnostic supplied by the command. This
-/// makes a violation impossible to forge by printing an error and impossible
-/// to suppress by redirecting stderr.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
-pub enum FinalVerificationRuntimeViolation {
-    #[error("undeclared filesystem access was denied")]
-    FilesystemAccessDenied,
-    #[error("network access was denied")]
-    NetworkAccessDenied,
-}
-
 /// Launcher failures are typed so callers can mark attempts ineligible without
 /// treating a weaker execution as reusable evidence.
 #[derive(Debug, thiserror::Error)]
@@ -87,29 +73,21 @@ pub enum FinalVerificationError {
     BackendUnavailable { reason: &'static str },
     #[error("final-verification sandbox violation: {0}")]
     Violation(#[from] FinalVerificationViolation),
-    #[error("final-verification runtime sandbox violation: {violation}")]
-    RuntimeViolation {
-        violation: FinalVerificationRuntimeViolation,
-        /// Captured output lets callers audit the failed command without
-        /// treating it as reusable verification evidence.
-        result: FinalVerificationResult,
-    },
     #[error("failed to prepare output directory {path}: {source}")]
     OutputPreparation { path: PathBuf, source: io::Error },
     #[error("failed to launch isolated final verification: {0}")]
     Launch(#[source] io::Error),
-    #[error("failed to observe isolated final verification: {0}")]
-    Observation(#[source] io::Error),
 }
 
 /// Execute a final-verification command under the strict reusable policy.
 ///
 /// Availability is checked before filesystem mutation.  There is deliberately
 /// no fallback path: lack of Landlock or an isolated network namespace returns
-/// [`FinalVerificationError::BackendUnavailable`]. Kernel-enforced runtime
-/// denials return [`FinalVerificationError::RuntimeViolation`] based on an
-/// observed denied syscall, while ordinary command failures remain
-/// [`FinalVerificationResult`] values.
+/// [`FinalVerificationError::BackendUnavailable`]. Landlock and network
+/// namespace denials are represented by the child's ordinary non-success
+/// result. Linux does not expose an attributable Landlock-denial signal here,
+/// so stderr text and generic permission errors are deliberately not classified
+/// as typed sandbox violations.
 pub fn launch_final_verification(
     request: FinalVerificationRequest,
 ) -> Result<FinalVerificationResult, FinalVerificationError> {
@@ -140,170 +118,21 @@ pub fn launch_final_verification(
         command.pre_exec(move || {
             enter_isolated_network_namespace()?;
             apply_filesystem_policy(&worktree, &runtimes, &externals, &outputs)
-                .map_err(|e| io::Error::new(io::ErrorKind::PermissionDenied, e.to_string()))?;
-            begin_syscall_observation()
+                .map_err(|e| io::Error::new(io::ErrorKind::PermissionDenied, e.to_string()))
         });
     }
 
-    let mut child = command.spawn().map_err(FinalVerificationError::Launch)?;
-    let stdout = child.stdout.take().expect("stdout was piped");
-    let stderr = child.stderr.take().expect("stderr was piped");
-    let stdout_reader = std::thread::spawn(move || read_pipe(stdout));
-    let stderr_reader = std::thread::spawn(move || read_pipe(stderr));
-    let (status, runtime_violation) = observe_child(child.id() as libc::pid_t)?;
-    let result = FinalVerificationResult {
-        exit_code: exit_code(status),
-        stdout: stdout_reader
-            .join()
-            .map_err(|_| FinalVerificationError::Observation(io::Error::other("stdout reader panicked")))??,
-        stderr: stderr_reader
-            .join()
-            .map_err(|_| FinalVerificationError::Observation(io::Error::other("stderr reader panicked")))??,
-    };
-    if let Some(violation) = runtime_violation {
-        return Err(FinalVerificationError::RuntimeViolation { violation, result });
-    }
-    Ok(result)
-}
-
-fn read_pipe(mut pipe: impl Read) -> io::Result<Vec<u8>> {
-    let mut bytes = Vec::new();
-    pipe.read_to_end(&mut bytes)?;
-    Ok(bytes)
-}
-
-fn begin_syscall_observation() -> io::Result<()> {
-    if unsafe {
-        libc::ptrace(
-            libc::PTRACE_TRACEME,
-            0,
-            std::ptr::null_mut::<libc::c_void>(),
-            std::ptr::null_mut::<libc::c_void>(),
-        )
-    } == -1
-    {
-        return Err(io::Error::last_os_error());
-    }
-    if unsafe { libc::raise(libc::SIGSTOP) } != 0 {
-        return Err(io::Error::last_os_error());
-    }
-    Ok(())
-}
-
-fn exit_code(status: libc::c_int) -> Option<i32> {
-    libc::WIFEXITED(status).then(|| libc::WEXITSTATUS(status))
-}
-
-#[cfg(target_arch = "x86_64")]
-fn observe_child(
-    root: libc::pid_t,
-) -> Result<(libc::c_int, Option<FinalVerificationRuntimeViolation>), FinalVerificationError> {
-    let mut status = 0;
-    if unsafe { libc::waitpid(root, &mut status, libc::WUNTRACED) } != root || !libc::WIFSTOPPED(status) {
-        return Err(FinalVerificationError::Observation(io::Error::last_os_error()));
-    }
-    let options = libc::PTRACE_O_TRACESYSGOOD
-        | libc::PTRACE_O_TRACEFORK
-        | libc::PTRACE_O_TRACEVFORK
-        | libc::PTRACE_O_TRACECLONE;
-    ptrace(root, libc::PTRACE_SETOPTIONS, 0, options as usize)?;
-    ptrace(root, libc::PTRACE_SYSCALL, 0, 0)?;
-
-    let mut tracees = HashMap::from([(root, None)]);
-    let mut root_status = None;
-    let mut violation = None;
-    while !tracees.is_empty() {
-        let pid = unsafe { libc::waitpid(-1, &mut status, libc::__WALL) };
-        if pid < 0 {
-            return Err(FinalVerificationError::Observation(io::Error::last_os_error()));
-        }
-        if libc::WIFEXITED(status) || libc::WIFSIGNALED(status) {
-            tracees.remove(&pid);
-            if pid == root {
-                root_status = Some(status);
-            }
-            continue;
-        }
-        if !libc::WIFSTOPPED(status) {
-            continue;
-        }
-        let signal = libc::WSTOPSIG(status);
-        let event = (status as u32) >> 16;
-        if matches!(event, libc::PTRACE_EVENT_FORK | libc::PTRACE_EVENT_VFORK | libc::PTRACE_EVENT_CLONE) {
-            let mut child = 0usize;
-            ptrace(pid, libc::PTRACE_GETEVENTMSG, 0, &mut child as *mut usize as usize)?;
-            tracees.entry(child as libc::pid_t).or_insert(None);
-        }
-        if signal == (libc::SIGTRAP | 0x80) {
-            let entry = tracees.get_mut(&pid).expect("traced process must be registered");
-            let number = syscall_number(pid)?;
-            if let Some(syscall) = *entry {
-                if let Some(found) = denied_syscall_violation(syscall, syscall_result(pid)?) {
-                    violation.get_or_insert(found);
-                }
-                *entry = None;
-            } else {
-                *entry = Some(number);
-            }
-        }
-        let deliver = if signal == libc::SIGTRAP || signal == libc::SIGSTOP || signal == (libc::SIGTRAP | 0x80) { 0 } else { signal };
-        ptrace(pid, libc::PTRACE_SYSCALL, 0, deliver as usize)?;
-    }
-    Ok((root_status.unwrap_or(status), violation))
-}
-
-#[cfg(not(target_arch = "x86_64"))]
-fn observe_child(
-    _: libc::pid_t,
-) -> Result<(libc::c_int, Option<FinalVerificationRuntimeViolation>), FinalVerificationError> {
-    Err(FinalVerificationError::Observation(io::Error::new(
-        io::ErrorKind::Unsupported,
-        "syscall observation requires x86_64",
-    )))
-}
-
-#[cfg(target_arch = "x86_64")]
-fn ptrace(pid: libc::pid_t, request: libc::c_uint, address: usize, data: usize) -> io::Result<()> {
-    if unsafe { libc::ptrace(request, pid, address as *mut libc::c_void, data as *mut libc::c_void) } == -1 {
-        Err(io::Error::last_os_error())
-    } else {
-        Ok(())
-    }
-}
-
-#[cfg(target_arch = "x86_64")]
-fn syscall_number(pid: libc::pid_t) -> io::Result<i64> {
-    let mut registers: libc::user_regs_struct = unsafe { std::mem::zeroed() };
-    ptrace(pid, libc::PTRACE_GETREGS, &mut registers as *mut _ as usize, 0)?;
-    Ok(registers.orig_rax as i64)
-}
-
-#[cfg(target_arch = "x86_64")]
-fn syscall_result(pid: libc::pid_t) -> io::Result<i64> {
-    let mut registers: libc::user_regs_struct = unsafe { std::mem::zeroed() };
-    ptrace(pid, libc::PTRACE_GETREGS, &mut registers as *mut _ as usize, 0)?;
-    Ok(registers.rax as i64)
-}
-
-#[cfg(target_arch = "x86_64")]
-fn denied_syscall_violation(syscall: i64, result: i64) -> Option<FinalVerificationRuntimeViolation> {
-    let errno = (-result) as libc::c_int;
-    if [libc::ENETUNREACH, libc::EHOSTUNREACH, libc::ENETDOWN, libc::EACCES, libc::EPERM].contains(&errno)
-        && [libc::SYS_connect, libc::SYS_sendto, libc::SYS_sendmsg].contains(&syscall)
-    {
-        return Some(FinalVerificationRuntimeViolation::NetworkAccessDenied);
-    }
-    if [libc::EACCES, libc::EPERM].contains(&errno)
-        && [libc::SYS_open, libc::SYS_openat, 437, libc::SYS_execve, libc::SYS_execveat].contains(&syscall)
-    {
-        return Some(FinalVerificationRuntimeViolation::FilesystemAccessDenied);
-    }
-    None
+    let output = command.output().map_err(FinalVerificationError::Launch)?;
+    Ok(FinalVerificationResult {
+        exit_code: output.status.code(),
+        stdout: output.stdout,
+        stderr: output.stderr,
+    })
 }
 
 /// Whether the two kernel mechanisms required by this launcher are available.
 pub fn final_verification_backend_available() -> bool {
-    crate::probe_landlock() && probe_network_namespace() && syscall_observation_available()
+    crate::probe_landlock() && probe_network_namespace()
 }
 
 fn ensure_backend_available() -> Result<(), FinalVerificationError> {
@@ -317,42 +146,7 @@ fn ensure_backend_available() -> Result<(), FinalVerificationError> {
             reason: "network namespaces are unavailable",
         });
     }
-    if !syscall_observation_available() {
-        return Err(FinalVerificationError::BackendUnavailable {
-            reason: "syscall observation is unavailable",
-        });
-    }
     Ok(())
-}
-
-#[cfg(target_arch = "x86_64")]
-fn syscall_observation_available() -> bool {
-    let pid = unsafe { libc::fork() };
-    if pid < 0 {
-        return false;
-    }
-    if pid == 0 {
-        let ok = begin_syscall_observation().is_ok();
-        unsafe { libc::_exit(if ok { 0 } else { 1 }) };
-    }
-    let mut status = 0;
-    if unsafe { libc::waitpid(pid, &mut status, libc::WUNTRACED) } != pid || !libc::WIFSTOPPED(status) {
-        return false;
-    }
-    let detached = unsafe {
-        libc::ptrace(
-            libc::PTRACE_DETACH,
-            pid,
-            std::ptr::null_mut::<libc::c_void>(),
-            std::ptr::null_mut::<libc::c_void>(),
-        )
-    } == 0;
-    detached && unsafe { libc::waitpid(pid, &mut status, 0) } == pid && libc::WIFEXITED(status)
-}
-
-#[cfg(not(target_arch = "x86_64"))]
-fn syscall_observation_available() -> bool {
-    false
 }
 
 #[derive(Debug)]
@@ -368,11 +162,8 @@ struct PreparedRequest {
 
 impl PreparedRequest {
     fn new(request: FinalVerificationRequest) -> Result<Self, FinalVerificationViolation> {
-        if request.argv.is_empty()
-            || request
-                .argv
-                .iter()
-                .any(|arg| arg.is_empty() || arg.contains('\0'))
+        if request.argv.first().is_none_or(String::is_empty)
+            || request.argv.iter().any(|arg| arg.contains('\0'))
         {
             return Err(FinalVerificationViolation::InvalidArgv);
         }
@@ -411,8 +202,21 @@ impl PreparedRequest {
                 return Err(FinalVerificationViolation::InvalidOutputDirectory { path: output });
             }
             let path = worktree.join(&output);
-            if path.exists() {
-                return Err(FinalVerificationViolation::OutputOnlyPreexisting { path });
+            match std::fs::symlink_metadata(&path) {
+                Ok(_) => {
+                    return Err(FinalVerificationViolation::OutputOnlyPreexisting { path });
+                }
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(_) => {
+                    return Err(FinalVerificationViolation::InvalidOutputDirectory { path });
+                }
+            }
+            let parent = path
+                .parent()
+                .and_then(|parent| parent.canonicalize().ok())
+                .filter(|parent| parent.starts_with(&worktree));
+            if parent.is_none() {
+                return Err(FinalVerificationViolation::InvalidOutputDirectory { path });
             }
             output_directories.push(path);
         }
@@ -509,8 +313,9 @@ fn probe_network_namespace() -> bool {
         unsafe { libc::_exit(if ok { 0 } else { 1 }) };
     }
     let mut status = 0;
-    unsafe { libc::waitpid(pid, &mut status, 0) >= 0 }
-    &&libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0
+    (unsafe { libc::waitpid(pid, &mut status, 0) >= 0 })
+        && libc::WIFEXITED(status)
+        && libc::WEXITSTATUS(status) == 0
 }
 
 fn enter_isolated_network_namespace() -> io::Result<()> {
@@ -553,10 +358,14 @@ mod tests {
         let error = launch_final_verification(req).unwrap_err();
         assert!(matches!(
             error,
-            FinalVerificationError::Violation(FinalVerificationViolation::OutputOnlyPreexisting {
-                ..
-            })
+            FinalVerificationError::Violation(
+                FinalVerificationViolation::OutputOnlyPreexisting { .. }
+            )
         ));
+        assert_eq!(
+            std::fs::read(worktree.path().join("outputs/stale")).unwrap(),
+            b"old output"
+        );
     }
 
     #[test]
@@ -605,7 +414,7 @@ mod tests {
     }
 
     #[test]
-    fn suppressed_undeclared_host_reads_are_typed_violations() {
+    fn suppressed_undeclared_host_reads_are_non_success_results() {
         if !final_verification_backend_available() {
             return;
         }
@@ -615,17 +424,13 @@ mod tests {
         std::fs::write(&secret, b"must not be readable").unwrap();
         let mut req = request(worktree.path());
         req.argv[2] = format!("cat {} >/dev/null 2>&1; exit 7", secret.display());
-        assert!(matches!(
-            launch_final_verification(req),
-            Err(FinalVerificationError::RuntimeViolation {
-                violation: FinalVerificationRuntimeViolation::FilesystemAccessDenied,
-                ..
-            })
-        ));
+        let result = launch_final_verification(req).unwrap();
+        assert!(!result.succeeded());
+        assert!(result.stderr.is_empty());
     }
 
     #[test]
-    fn suppressed_network_access_is_a_typed_violation() {
+    fn suppressed_network_access_is_a_non_success_result() {
         if !final_verification_backend_available() || !Path::new("/bin/bash").is_file() {
             return;
         }
@@ -634,18 +439,14 @@ mod tests {
         req.argv = vec![
             "/bin/bash".into(),
             "-c".into(),
-            "exec 3<>/dev/tcp/1.1.1.1/80 2>/dev/null".into(),
+            "{ exec 3<>/dev/tcp/1.1.1.1/80; } 2>/dev/null".into(),
         ];
+        let result = launch_final_verification(req).unwrap();
         assert!(
-            matches!(
-                launch_final_verification(req),
-                Err(FinalVerificationError::RuntimeViolation {
-                    violation: FinalVerificationRuntimeViolation::NetworkAccessDenied,
-                    ..
-                })
-            ),
-            "network namespace unexpectedly allowed a TCP connection"
+            !result.succeeded(),
+            "network namespace allowed a TCP connection"
         );
+        assert!(result.stderr.is_empty());
     }
 
     #[test]
@@ -659,5 +460,41 @@ mod tests {
         let result = launch_final_verification(req).unwrap();
         assert_eq!(result.exit_code, Some(9));
         assert_eq!(result.stderr, b"permission denied\n");
+    }
+
+    #[test]
+    fn ordinary_mode_permission_failure_is_an_ordinary_result() {
+        use std::os::unix::fs::PermissionsExt;
+
+        if !final_verification_backend_available() {
+            return;
+        }
+        let worktree = TempDir::new().unwrap();
+        let locked = worktree.path().join("locked");
+        std::fs::write(&locked, b"allowed path, denied by Unix mode").unwrap();
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let mut req = request(worktree.path());
+        req.argv[2] = "cat locked >/dev/null 2>&1; exit 7".into();
+        let result = launch_final_verification(req).unwrap();
+        assert_eq!(result.exit_code, Some(7));
+        assert!(result.stderr.is_empty());
+    }
+
+    #[test]
+    fn empty_non_executable_argument_is_passed_faithfully() {
+        if !final_verification_backend_available() {
+            return;
+        }
+        let worktree = TempDir::new().unwrap();
+        let mut req = request(worktree.path());
+        req.argv = vec![
+            "/bin/sh".into(),
+            "-c".into(),
+            "test \"$1\" = \"\"".into(),
+            "--".into(),
+            "".into(),
+        ];
+        let result = launch_final_verification(req).unwrap();
+        assert!(result.succeeded());
     }
 }
