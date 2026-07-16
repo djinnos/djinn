@@ -1,4 +1,7 @@
-use super::{MemoryRetrievalOutcomesReportResponse, RetrievalOutcomesReportParams};
+use super::{
+    MemoryRetrievalOutcomesReportResponse, MemoryRetrievalOutcomesReportSchemaResponse,
+    RetrievalOutcomesReportParams,
+};
 use crate::server::DjinnMcpServer;
 use djinn_db::repositories::task_run_outcome::{
     TaskRunOutcomeReportRequest, TaskRunOutcomeRepository,
@@ -12,10 +15,8 @@ impl DjinnMcpServer {
     pub async fn memory_retrieval_outcomes_report(
         &self,
         Parameters(p): Parameters<RetrievalOutcomesReportParams>,
-    ) -> Json<serde_json::Value> {
-        Json(serde_json::to_value(report(self, p).await).unwrap_or_else(
-            |_| serde_json::json!({ "error": "failed to serialize retrieval outcomes report" }),
-        ))
+    ) -> Json<MemoryRetrievalOutcomesReportSchemaResponse> {
+        Json(report(self, p).await.into())
     }
 }
 fn err(error: impl Into<String>) -> MemoryRetrievalOutcomesReportResponse {

@@ -1238,6 +1238,43 @@
   },
   {
     "concurrent_safe": true,
+    "description": "Read an observational retrieval-injection outcomes report for an explicit project-scoped, timezone-aware RFC-3339 [start,end) interval. This operation is read-only and observational only: it makes no causal or randomized-experiment claim. A task run is deduplicated within each entry_point/rollout_label/outcome cell; cells with different cohort keys can overlap and are non-additive. The response returns the applied interval/timezone plus every database denominator, count, rate, not-applicable state, attempt-number distribution, and unattributed/unrecorded diagnostic. Traces without task_run_id are unattributed and excluded from rates; no fallback through task_id is used. Invalid intervals and requests outside the protected 30-day trace window are rejected without clipping.",
+    "destructive": false,
+    "idempotent": true,
+    "inputSchema": {
+      "properties": {
+        "end": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "project": {
+          "type": "string"
+        },
+        "project_id": {
+          "type": "string"
+        },
+        "start": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "timezone": {
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "start",
+        "end",
+        "timezone"
+      ],
+      "type": "object"
+    },
+    "name": "memory_retrieval_outcomes_report",
+    "openWorld": false,
+    "readOnly": true
+  },
+  {
+    "concurrent_safe": true,
     "description": "Search notes and proposals in project memory. Query formulation rules: (1) write a declarative statement, not an interrogative question; (2) express one information need per query; (3) make each query self-contained; (4) omit retrieval-meta wording such as `find`, `information about`, and `search for`; (5) preserve discriminative symbol names, exact error strings, and config keys verbatim. Good query: `Authentication timeout handling for E_CONNRESET`. Bad query: `Can you find information about authentication timeout errors?` Worker-issued searches remain lexical/BM25-only until proposal 72iu supplies worker embeddings. Returns a unified result set interleaved by relevance.",
     "destructive": false,
     "idempotent": true,
