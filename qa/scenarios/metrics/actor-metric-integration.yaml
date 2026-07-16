@@ -7,6 +7,6 @@ scenarios:
     sources: [{kind: memory, id: pitfalls/actor-local-metric-tests-can-miss-missing-metrics-integration}]
     primary_coverage: telemetry.actor-metrics-export
     secondary_coverage: [agent-loop.metrics-integration]
-    execution: {kind: cargo-package, package: djinn-coordinator}
+    execution: {kind: cargo-package, package: djinn-coordinator, selector: actor::tests::record_live_metrics_publishes_synthetic_cooldown_and_inflight_state}
     isolation: {database: isolated, providers: isolated, channel: isolated}
     watch_paths: [server/crates/djinn-coordinator/src/actor.rs]
