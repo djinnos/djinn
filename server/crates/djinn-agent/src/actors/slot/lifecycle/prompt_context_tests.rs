@@ -2592,5 +2592,23 @@ async fn assembly_suppression_write_failure_leaves_prompt_unchanged() {
     djinn_db::test_support::drop_table_for_test(&db, "retrieval_traces").await;
     let actual = assembly_with_rollout(db, &task, &role).await;
     assert_eq!(actual.knowledge_context, expected.knowledge_context);
-    assert_eq!(actual.system_prompt, expected.system_prompt);
+    let normalize_test_worktree = |prompt: &str| {
+        let workspace_line = prompt
+            .lines()
+            .find(|line| line.starts_with("- **Active workspace:** `"))
+            .expect("active workspace line");
+        assert!(
+            workspace_line.contains("prompt-context-worktree-"),
+            "only the randomized test worktree may differ: {workspace_line}"
+        );
+        prompt.replacen(
+            workspace_line,
+            "- **Active workspace:** `<test-worktree>`",
+            1,
+        )
+    };
+    assert_eq!(
+        normalize_test_worktree(&actual.system_prompt),
+        normalize_test_worktree(&expected.system_prompt)
+    );
 }
