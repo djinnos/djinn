@@ -1,3 +1,4 @@
+pub mod advisory_lock;
 pub mod background;
 pub mod crypto;
 pub mod database;

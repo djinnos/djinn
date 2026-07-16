@@ -251,8 +251,9 @@ pub struct TaskRunSpec {
     /// Git author `name` for commits the supervisor creates on the task
     /// branch. Resolved host-side at dispatch from the task's
     /// `created_by_user_id` (the human who triggered the task). `None` for
-    /// system/patrol tasks with no human creator, or for host/worker version
-    /// skew during a rolling deploy — the supervisor falls back to the bot
+    /// older specs or host/worker version skew during a rolling deploy — the
+    /// supervisor falls back to the bot identity. `#[serde(default)]` keeps older
+    /// specs deserializable.
     /// identity. `#[serde(default)]` keeps older specs deserializable.
     #[serde(default)]
     pub commit_author_name: Option<String>,

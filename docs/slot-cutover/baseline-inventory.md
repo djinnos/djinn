@@ -319,19 +319,23 @@ Search command:
 grep -rn "use djinn_slot::" server/crates/ server/src/ | grep -v "\.djinn/" | grep -v "djinn-agent/src/actors/slot/" | grep -v "djinn-agent/src/lib.rs"
 ```
 
-Results:
+Results (refreshed after removal of the coordinator doctor check):
 
 | File | Import path | Items used |
 |------|-------------|------------|
-| `server/crates/djinn-coordinator/src/wave.rs:209` | `djinn_slot::{ModelSlotConfig, SlotPoolConfig, SlotPoolHandle}` | Coordinator wave logic. |
-| `server/crates/djinn-coordinator/src/lib.rs:29` | `djinn_slot::{PoolError, SlotPoolHandle}` | Library surface. |
-| `server/crates/djinn-coordinator/src/consolidation.rs:370` | `djinn_slot::{ModelSlotConfig, SlotPoolConfig, SlotPoolHandle}` | Consolidation logic. |
-| `server/crates/djinn-coordinator/src/doctor/zombie_running_session.rs:19` | `djinn_slot::SlotPoolHandle` | Doctor checks. |
-| `server/crates/djinn-coordinator/src/actor.rs:27,1775` | `djinn_slot::SlotPoolHandle`, `djinn_slot::{ModelSlotConfig, SlotPoolConfig}` | Coordinator actor. |
-| `server/crates/djinn-coordinator/src/rules.rs:811,851,1263,1325` | `djinn_slot::{ModelSlotConfig, SlotPoolConfig, SlotPoolHandle}` | Rule engine (multiple test blocks). |
-| `server/crates/djinn-coordinator/src/test_helpers.rs:15` | `djinn_slot::host::SlotContext` | Test helpers. |
-| `server/crates/djinn-coordinator/src/tests/mod.rs:22` | `djinn_slot::{ModelSlotConfig, SlotHandle, SlotPoolConfig, SlotPoolHandle}` | Integration tests. |
-| `server/crates/djinn-coordinator/src/types.rs:13` | `djinn_slot::SlotPoolHandle` | Types module. |
+| `server/crates/djinn-agent-worker/src/worker_services.rs:54` | `djinn_slot::helpers::{…}` | Worker host helpers. |
+| `server/crates/djinn-agent/src/context.rs:32` | `djinn_slot::reply_loop::CompactionCriticalSection` | Agent context. |
+| `server/crates/djinn-coordinator/src/dispatch/task_dispatch.rs:4276,6783` | `djinn_slot::{ModelSlotConfig, SlotPoolConfig}` | Dispatch test blocks. |
+| `server/crates/djinn-coordinator/src/dispatch/session_recovery.rs:9,2839` | `djinn_slot::RunningTaskInfo` | Session recovery and its tests. |
+| `server/crates/djinn-coordinator/src/wave.rs:215` | `djinn_slot::{ModelSlotConfig, SlotPoolConfig, SlotPoolHandle}` | Coordinator wave logic. |
+| `server/crates/djinn-coordinator/src/lib.rs:43` | `djinn_slot::{PoolError, SlotPoolHandle}` | Library surface. |
+| `server/crates/djinn-coordinator/src/refinement_pool_watchdog_tests.rs:12` | `djinn_slot::{PoolMessage, PoolStatus, RunningTaskInfo, SlotPoolHandle}` | Refinement pool watchdog tests. |
+| `server/crates/djinn-coordinator/src/consolidation.rs:377` | `djinn_slot::{ModelSlotConfig, SlotPoolConfig, SlotPoolHandle}` | Consolidation logic. |
+| `server/crates/djinn-coordinator/src/actor.rs:29,2030` | `djinn_slot::SlotPoolHandle`, `djinn_slot::{ModelSlotConfig, SlotPoolConfig}` | Coordinator actor. |
+| `server/crates/djinn-coordinator/src/rules.rs:1026,1066,1568,1630` | `djinn_slot::{ModelSlotConfig, SlotPoolConfig, SlotPoolHandle}` | Rule engine test blocks. |
+| `server/crates/djinn-coordinator/src/test_helpers.rs:15,16` | `djinn_slot::host::SlotContext`, `djinn_slot::reply_loop::CompactionCriticalSection` | Test helpers. |
+| `server/crates/djinn-coordinator/src/tests/mod.rs:28` | `djinn_slot::{ModelSlotConfig, SlotHandle, SlotPoolConfig, SlotPoolHandle}` | Integration tests. |
+| `server/crates/djinn-coordinator/src/types.rs:14` | `djinn_slot::SlotPoolHandle` | Types module. |
 
 **Compatibility implications:**  
 `djinn-coordinator` is already a direct consumer of `djinn_slot`. These call sites are **not** blocked by removing the agent slot tree; they are the intended long-term pattern. Preserving them is trivial as long as `djinn_slot` public API remains stable.
