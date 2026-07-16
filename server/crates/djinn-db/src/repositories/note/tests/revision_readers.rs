@@ -11,6 +11,16 @@ use djinn_core::events::EventBus;
 const FIXTURE: &str =
     include_str!("../../../../../djinn-control-plane/tests/fixtures/memory_revision_contract.json");
 
+const EQUAL_TIME_CREATED_AT: &str = "2026-01-01T00:00:00.000Z";
+const EQUAL_TIME_EVENT_IDS: [&str; 4] = [
+    "00000000-0000-7000-8000-000000000001",
+    "00000000-0000-7000-8000-000000000002",
+    "00000000-0000-7000-8000-000000000003",
+    "00000000-0000-7000-8000-000000000004",
+];
+const EQUAL_TIME_SESSION_ID: &str = "00000000-0000-7000-8000-000000000005";
+const EQUAL_TIME_TASK_RUN_ID: &str = "00000000-0000-7000-8000-000000000006";
+
 fn fixture() -> serde_json::Value {
     serde_json::from_str(FIXTURE).expect("valid contract fixture")
 }
@@ -253,6 +263,33 @@ async fn seed_full_fixture() -> (String, Database, NoteRepository) {
     ))
     .await
     .unwrap();
+
+    (project, db, repo)
+}
+
+/// Insert controlled-time rows as an immutable ledger fixture. Supplying
+/// `created_at` at insert time exercises timestamp ties without updating rows
+/// or disabling the append-only trigger.
+async fn seed_equal_time_scoped_events() -> (String, Database, NoteRepository) {
+    let project = uuid::Uuid::now_v7().to_string();
+    let (db, repo) = setup(&project).await;
+
+    for id in EQUAL_TIME_EVENT_IDS {
+        sqlx::query(
+            "INSERT INTO note_revision_events \
+             (id, project_id, event_kind, actor_kind, subsystem, session_id, task_run_id, reason, created_at) \
+             VALUES ($1, $2, 'extraction_skipped', 'system', 'extraction', $3, $4, $5, $6)",
+        )
+        .bind(id)
+        .bind(&project)
+        .bind(EQUAL_TIME_SESSION_ID)
+        .bind(EQUAL_TIME_TASK_RUN_ID)
+        .bind(format!("equal-time pagination fixture {id}"))
+        .bind(EQUAL_TIME_CREATED_AT)
+        .execute(db.pool())
+        .await
+        .expect("insert immutable equal-time ledger fixture");
+    }
 
     (project, db, repo)
 }
@@ -771,8 +808,8 @@ async fn session_history_returns_newest_first_with_all_event_kinds() {
         .await
         .unwrap();
 
-    // All events except the unscoped note have the fixture session_id (9 events).
-    assert_eq!(page.events.len(), 9);
+    // All seeded events except the unscoped note have the fixture session_id.
+    assert_eq!(page.events.len(), 8);
     // Includes extraction_skipped (no note_id).
     assert!(
         page.events
@@ -792,65 +829,67 @@ async fn session_history_returns_newest_first_with_all_event_kinds() {
 
 #[tokio::test]
 async fn session_history_pagination_cursor_round_trip() {
-    let (project, _db, repo) = seed_full_fixture().await;
-    let f = fixture();
-    let session_id = f["ids"]["session_id"].as_str().unwrap();
+    let (project, _db, repo) = seed_equal_time_scoped_events().await;
+    let expected_ids: Vec<&str> = EQUAL_TIME_EVENT_IDS.iter().rev().copied().collect();
 
     let page1 = repo
         .session_revision_history(
-            session_id,
+            EQUAL_TIME_SESSION_ID,
             SessionRevisionRequest {
                 project_id: &project,
-                limit: 3,
+                limit: 2,
                 before: None,
             },
         )
         .await
         .unwrap();
-    assert_eq!(page1.events.len(), 3);
+    assert_eq!(
+        page1
+            .events
+            .iter()
+            .map(|event| event.id.as_str())
+            .collect::<Vec<_>>(),
+        expected_ids[..2]
+    );
+    assert!(
+        page1
+            .events
+            .iter()
+            .all(|event| event.created_at == EQUAL_TIME_CREATED_AT)
+    );
     assert!(page1.next_cursor.is_some());
 
     let cursor = page1.next_cursor.unwrap();
     let page2 = repo
         .session_revision_history(
-            session_id,
+            EQUAL_TIME_SESSION_ID,
             SessionRevisionRequest {
                 project_id: &project,
-                limit: 3,
+                limit: 2,
                 before: Some(&cursor),
             },
         )
         .await
         .unwrap();
-    assert_eq!(page2.events.len(), 3);
+    assert_eq!(
+        page2
+            .events
+            .iter()
+            .map(|event| event.id.as_str())
+            .collect::<Vec<_>>(),
+        expected_ids[2..]
+    );
+    assert!(page2.next_cursor.is_none());
 
-    let cursor2 = page2.next_cursor.unwrap();
-    let page3 = repo
-        .session_revision_history(
-            session_id,
-            SessionRevisionRequest {
-                project_id: &project,
-                limit: 3,
-                before: Some(&cursor2),
-            },
-        )
-        .await
-        .unwrap();
-    assert_eq!(page3.events.len(), 3);
-    assert!(page3.next_cursor.is_none());
-
-    // Total: 9 events.
     let all_ids: Vec<&str> = page1
         .events
         .iter()
         .chain(page2.events.iter())
-        .chain(page3.events.iter())
-        .map(|e| e.id.as_str())
+        .map(|event| event.id.as_str())
         .collect();
-    assert_eq!(all_ids.len(), 9);
-    // No duplicates.
+    assert_eq!(all_ids, expected_ids);
     let unique: std::collections::HashSet<&str> = all_ids.iter().copied().collect();
-    assert_eq!(unique.len(), 9);
+    assert_eq!(unique.len(), EQUAL_TIME_EVENT_IDS.len());
 }
 
 #[tokio::test]
@@ -946,48 +985,67 @@ async fn session_history_cross_project_isolation() {
 
 #[tokio::test]
 async fn task_run_history_returns_events_with_cursor_pagination() {
-    let (project, _db, repo) = seed_full_fixture().await;
-    let f = fixture();
-    let task_run_id = f["ids"]["task_run_id"].as_str().unwrap();
+    let (project, _db, repo) = seed_equal_time_scoped_events().await;
+    let expected_ids: Vec<&str> = EQUAL_TIME_EVENT_IDS.iter().rev().copied().collect();
 
     let page1 = repo
         .task_run_revision_history(
-            task_run_id,
+            EQUAL_TIME_TASK_RUN_ID,
             SessionRevisionRequest {
                 project_id: &project,
-                limit: 5,
+                limit: 2,
                 before: None,
             },
         )
         .await
         .unwrap();
-    assert_eq!(page1.events.len(), 5);
+    assert_eq!(
+        page1
+            .events
+            .iter()
+            .map(|event| event.id.as_str())
+            .collect::<Vec<_>>(),
+        expected_ids[..2]
+    );
+    assert!(
+        page1
+            .events
+            .iter()
+            .all(|event| event.created_at == EQUAL_TIME_CREATED_AT)
+    );
     assert!(page1.next_cursor.is_some());
 
     let cursor = page1.next_cursor.unwrap();
     let page2 = repo
         .task_run_revision_history(
-            task_run_id,
+            EQUAL_TIME_TASK_RUN_ID,
             SessionRevisionRequest {
                 project_id: &project,
-                limit: 100,
+                limit: 2,
                 before: Some(&cursor),
             },
         )
         .await
         .unwrap();
-    // 9 total, 5 on page1, so 4 remaining.
-    assert_eq!(page2.events.len(), 4);
+    assert_eq!(
+        page2
+            .events
+            .iter()
+            .map(|event| event.id.as_str())
+            .collect::<Vec<_>>(),
+        expected_ids[2..]
+    );
     assert!(page2.next_cursor.is_none());
 
-    // All events across both pages unique.
-    let all_ids: std::collections::HashSet<&str> = page1
+    let all_ids: Vec<&str> = page1
         .events
         .iter()
         .chain(page2.events.iter())
-        .map(|e| e.id.as_str())
+        .map(|event| event.id.as_str())
         .collect();
-    assert_eq!(all_ids.len(), 9);
+    assert_eq!(all_ids, expected_ids);
+    let unique: std::collections::HashSet<&str> = all_ids.iter().copied().collect();
+    assert_eq!(unique.len(), EQUAL_TIME_EVENT_IDS.len());
 }
 
 #[tokio::test]
