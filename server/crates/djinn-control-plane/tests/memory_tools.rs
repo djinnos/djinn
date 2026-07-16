@@ -14,30 +14,55 @@
 mod common;
 
 use djinn_control_plane::test_support::McpTestHarness;
-use djinn_core::events::EventBus;
+use djinn_core::{
+    auth_context::{REVISION_CALLER_CONTEXT, TrustedRevisionCallerContext},
+    events::EventBus,
+};
 use djinn_db::{NoteRepository, ProjectRepository};
-use serde_json::json;
+use serde_json::{Value, json};
+
+async fn dispatch_as_authenticated_human(
+    caller: &TrustedRevisionCallerContext,
+    harness: &McpTestHarness,
+    tool: &str,
+    arguments: Value,
+) -> anyhow::Result<Value> {
+    REVISION_CALLER_CONTEXT
+        .scope(Some(caller.clone()), harness.call_tool(tool, arguments))
+        .await
+}
+
+fn assert_tool_success(response: &Value, operation: &str) {
+    assert!(
+        response.get("error").is_none() || response["error"].is_null(),
+        "{operation} returned error: {response}"
+    );
+}
 
 #[tokio::test]
 async fn mcp_memory_write_success_shape_and_duplicate_permalink_error() {
+    let caller = TrustedRevisionCallerContext::authenticated_human("memory-tools-test-user")
+        .expect("test revision caller must be non-blank");
     let harness = McpTestHarness::new().await;
     let db = harness.db().clone();
     let (proj, _dir) = common::create_test_project_with_dir(&db).await;
     let project = proj.slug();
 
-    let created = harness
-        .call_tool(
-            "memory_write",
-            json!({
-                "project": project,
-                "title": "Write Contract Note",
-                "content": "body",
-                "reason": "create note for memory write contract",
-                "type": "adr"
-            }),
-        )
-        .await
-        .expect("memory_write should dispatch");
+    let created = dispatch_as_authenticated_human(
+        &caller,
+        &harness,
+        "memory_write",
+        json!({
+            "project": project,
+            "title": "Write Contract Note",
+            "content": "body",
+            "reason": "create note for memory write contract",
+            "type": "adr"
+        }),
+    )
+    .await
+    .expect("memory_write should dispatch");
+    assert_tool_success(&created, "memory mutation");
 
     assert!(created.get("id").and_then(|v| v.as_str()).is_some());
     assert_eq!(created["title"], "Write Contract Note");
@@ -59,52 +84,62 @@ async fn mcp_memory_write_success_shape_and_duplicate_permalink_error() {
     assert_eq!(note.storage, "db");
     assert_eq!(note.file_path, "");
 
-    let duplicate = harness
-        .call_tool(
-            "memory_write",
-            json!({
-                "project": project,
-                "title": "Write Contract Note",
-                "content": "body-2",
-                "reason": "verify duplicate permalink rejection",
-                "type": "adr"
-            }),
-        )
-        .await
-        .expect("duplicate memory_write should dispatch");
+    let duplicate = dispatch_as_authenticated_human(
+        &caller,
+        &harness,
+        "memory_write",
+        json!({
+            "project": project,
+            "title": "Write Contract Note",
+            "content": "body-2",
+            "reason": "verify duplicate permalink rejection",
+            "type": "adr"
+        }),
+    )
+    .await
+    .expect("duplicate memory_write should dispatch");
 
     assert!(duplicate.get("error").is_some());
 }
 
 #[tokio::test]
 async fn mcp_memory_write_and_move_accept_case_and_pitfall_types() {
+    let caller = TrustedRevisionCallerContext::authenticated_human("memory-tools-test-user")
+        .expect("test revision caller must be non-blank");
     let harness = McpTestHarness::new().await;
     let (proj, _dir) = common::create_test_project_with_dir(harness.db()).await;
     let project = proj.slug();
 
-    let created = harness
-        .call_tool(
-            "memory_write",
-            json!({
-                "project": project,
-                "title": "Recovered Incident",
-                "content": "body",
-                "reason": "create fixture note for memory tool coverage", "type": "case"
-            }),
-        )
-        .await
-        .expect("memory_write should dispatch");
+    let created = dispatch_as_authenticated_human(
+        &caller,
+        &harness,
+        "memory_write",
+        json!({
+            "project": project,
+            "title": "Recovered Incident",
+            "content": "body",
+            "reason": "create fixture note for memory tool coverage", "type": "case"
+        }),
+    )
+    .await
+    .expect("memory_write should dispatch");
+    assert_tool_success(&created, "memory mutation");
 
     assert_eq!(created["note_type"], "case");
     assert_eq!(created["folder"], "cases");
     assert_eq!(created["permalink"], "cases/recovered-incident");
+    let created_permalink = created
+        .get("permalink")
+        .and_then(Value::as_str)
+        .expect("case memory_write permalink")
+        .to_string();
 
     let moved = harness
         .call_tool(
             "memory_move",
             json!({
                 "project": project,
-                "identifier": created["permalink"],
+                "identifier": created_permalink,
                 "type": "pitfall"
             }),
         )
@@ -118,22 +153,26 @@ async fn mcp_memory_write_and_move_accept_case_and_pitfall_types() {
 
 #[tokio::test]
 async fn mcp_memory_read_by_permalink_by_title_and_not_found_error() {
+    let caller = TrustedRevisionCallerContext::authenticated_human("memory-tools-test-user")
+        .expect("test revision caller must be non-blank");
     let harness = McpTestHarness::new().await;
     let (proj, _dir) = common::create_test_project_with_dir(harness.db()).await;
     let project = proj.slug();
 
-    let created = harness
-        .call_tool(
-            "memory_write",
-            json!({
-                "project": project,
-                "title": "Read Contract Note",
-                "content": "read me",
-                "reason": "create fixture note for memory tool coverage", "type": "reference"
-            }),
-        )
-        .await
-        .expect("memory_write should dispatch");
+    let created = dispatch_as_authenticated_human(
+        &caller,
+        &harness,
+        "memory_write",
+        json!({
+            "project": project,
+            "title": "Read Contract Note",
+            "content": "read me",
+            "reason": "create fixture note for memory tool coverage", "type": "reference"
+        }),
+    )
+    .await
+    .expect("memory_write should dispatch");
+    assert_tool_success(&created, "memory mutation");
 
     let by_permalink = harness
         .call_tool(
@@ -165,27 +204,23 @@ async fn mcp_memory_read_by_permalink_by_title_and_not_found_error() {
 
 #[tokio::test]
 async fn mcp_memory_search_returns_ranked_results_with_snippets_and_filters() {
+    let caller = TrustedRevisionCallerContext::authenticated_human("memory-tools-test-user")
+        .expect("test revision caller must be non-blank");
     let harness = McpTestHarness::new().await;
     let (proj, _dir) = common::create_test_project_with_dir(harness.db()).await;
     let project = proj.slug();
 
-    harness
-        .call_tool(
-            "memory_write",
+    dispatch_as_authenticated_human(&caller, &harness, "memory_write",
             json!({"project": project, "title": "Rust Alpha", "content": "rust rust rust memory", "reason": "create fixture note for memory tool coverage", "type": "reference"}),
         )
         .await
         .expect("memory_write alpha should dispatch");
-    harness
-        .call_tool(
-            "memory_write",
+    dispatch_as_authenticated_human(&caller, &harness, "memory_write",
             json!({"project": project, "title": "Rust Beta", "content": "rust memory", "reason": "create fixture note for memory tool coverage", "type": "reference"}),
         )
         .await
         .expect("memory_write beta should dispatch");
-    harness
-        .call_tool(
-            "memory_write",
+    dispatch_as_authenticated_human(&caller, &harness, "memory_write",
             json!({"project": project, "title": "ADR Gamma", "content": "rust decision", "reason": "create fixture note for memory tool coverage", "type": "adr"}),
         )
         .await
@@ -227,48 +262,43 @@ async fn mcp_memory_search_returns_ranked_results_with_snippets_and_filters() {
 
 #[tokio::test]
 async fn mcp_memory_edit_append_prepend_replace_and_missing_note_error() {
+    let caller = TrustedRevisionCallerContext::authenticated_human("memory-tools-test-user")
+        .expect("test revision caller must be non-blank");
     let harness = McpTestHarness::new().await;
     let (proj, _dir) = common::create_test_project_with_dir(harness.db()).await;
     let project = proj.slug();
 
-    harness
-        .call_tool(
-            "memory_write",
+    dispatch_as_authenticated_human(&caller, &harness, "memory_write",
             json!({"project": project, "title": "Edit Note", "content": "middle", "reason": "create fixture note for memory tool coverage", "type": "reference"}),
         )
         .await
         .expect("seed memory_write should dispatch");
 
-    let appended = harness
-        .call_tool(
-            "memory_edit",
+    let appended = dispatch_as_authenticated_human(&caller, &harness, "memory_edit",
             json!({"project": project, "identifier": "Edit Note", "reason": "modify fixture note for memory tool coverage", "operation": "append", "content": "tail"}),
         )
         .await
         .expect("memory_edit append should dispatch");
+    assert_tool_success(&appended, "memory mutation");
     assert!(appended["content"].as_str().unwrap().contains("tail"));
 
-    let prepended = harness
-        .call_tool(
-            "memory_edit",
+    let prepended = dispatch_as_authenticated_human(&caller, &harness, "memory_edit",
             json!({"project": project, "identifier": "Edit Note", "reason": "modify fixture note for memory tool coverage", "operation": "prepend", "content": "head"}),
         )
         .await
         .expect("memory_edit prepend should dispatch");
+    assert_tool_success(&prepended, "memory mutation");
     assert!(prepended["content"].as_str().unwrap().starts_with("head"));
 
-    let replaced = harness
-        .call_tool(
-            "memory_edit",
+    let replaced = dispatch_as_authenticated_human(&caller, &harness, "memory_edit",
             json!({"project": project, "identifier": "Edit Note", "reason": "modify fixture note for memory tool coverage", "operation": "find_replace", "find_text": "middle", "content": "center"}),
         )
         .await
         .expect("memory_edit find_replace should dispatch");
+    assert_tool_success(&replaced, "memory mutation");
     assert!(replaced["content"].as_str().unwrap().contains("center"));
 
-    let missing = harness
-        .call_tool(
-            "memory_edit",
+    let missing = dispatch_as_authenticated_human(&caller, &harness, "memory_edit",
             json!({"project": project, "identifier": "Missing", "reason": "modify fixture note for memory tool coverage", "operation": "append", "content": "x"}),
         )
         .await
@@ -278,22 +308,28 @@ async fn mcp_memory_edit_append_prepend_replace_and_missing_note_error() {
 
 #[tokio::test]
 async fn mcp_memory_move_changes_folder_title_and_permalink() {
+    let caller = TrustedRevisionCallerContext::authenticated_human("memory-tools-test-user")
+        .expect("test revision caller must be non-blank");
     let harness = McpTestHarness::new().await;
     let (proj, _dir) = common::create_test_project_with_dir(harness.db()).await;
     let project = proj.slug();
 
-    let created = harness
-        .call_tool(
-            "memory_write",
+    let created = dispatch_as_authenticated_human(&caller, &harness, "memory_write",
             json!({"project": project, "title": "Move Me", "content": "content", "reason": "create fixture note for memory tool coverage", "type": "reference"}),
         )
         .await
         .expect("memory_write should dispatch");
+    assert_tool_success(&created, "memory mutation");
+    let created_permalink = created
+        .get("permalink")
+        .and_then(Value::as_str)
+        .expect("memory_write permalink")
+        .to_string();
 
     let moved = harness
         .call_tool(
             "memory_move",
-            json!({"project": project, "identifier": created["permalink"], "title": "Moved Title", "type": "research"}),
+            json!({"project": project, "identifier": created_permalink, "title": "Moved Title", "type": "research"}),
         )
         .await
         .expect("memory_move should dispatch");
@@ -304,59 +340,62 @@ async fn mcp_memory_move_changes_folder_title_and_permalink() {
 
 #[tokio::test]
 async fn mcp_memory_delete_success_and_missing_note_error() {
+    let caller = TrustedRevisionCallerContext::authenticated_human("memory-tools-test-user")
+        .expect("test revision caller must be non-blank");
     let harness = McpTestHarness::new().await;
     let (proj, _dir) = common::create_test_project_with_dir(harness.db()).await;
     let project = proj.slug();
 
-    harness
-        .call_tool(
-            "memory_write",
+    dispatch_as_authenticated_human(&caller, &harness, "memory_write",
             json!({"project": project, "title": "Delete Me", "content": "bye", "reason": "create fixture note for memory tool coverage", "type": "reference"}),
         )
         .await
         .expect("seed memory_write should dispatch");
 
-    let deleted = harness
-        .call_tool(
-            "memory_delete",
-            json!({"project": project, "reason": "remove test note", "identifier": "Delete Me"}),
-        )
-        .await
-        .expect("memory_delete should dispatch");
+    let deleted = dispatch_as_authenticated_human(
+        &caller,
+        &harness,
+        "memory_delete",
+        json!({"project": project, "reason": "remove test note", "identifier": "Delete Me"}),
+    )
+    .await
+    .expect("memory_delete should dispatch");
+    assert_tool_success(&deleted, "memory mutation");
     assert_eq!(deleted["ok"], true);
 
-    let missing = harness
-        .call_tool(
-            "memory_delete",
-            json!({"project": project, "reason": "remove test note", "identifier": "Delete Me"}),
-        )
-        .await
-        .expect("memory_delete missing should dispatch");
+    let missing = dispatch_as_authenticated_human(
+        &caller,
+        &harness,
+        "memory_delete",
+        json!({"project": project, "reason": "remove test note", "identifier": "Delete Me"}),
+    )
+    .await
+    .expect("memory_delete missing should dispatch");
     assert_eq!(missing["ok"], false);
     assert!(missing.get("error").is_some());
 }
 
 #[tokio::test]
 async fn mcp_memory_list_all_and_filters_by_folder_and_type() {
+    let caller = TrustedRevisionCallerContext::authenticated_human("memory-tools-test-user")
+        .expect("test revision caller must be non-blank");
     let harness = McpTestHarness::new().await;
     let (proj, _dir) = common::create_test_project_with_dir(harness.db()).await;
     let project = proj.slug();
 
-    let adr = harness
-        .call_tool(
-            "memory_write",
+    let adr = dispatch_as_authenticated_human(&caller, &harness, "memory_write",
             json!({"project": project, "title": "A", "content": "x", "reason": "create fixture note for memory tool coverage", "type": "adr"}),
         )
         .await
         .expect("memory_write adr should dispatch");
+    assert_tool_success(&adr, "memory mutation");
     assert_eq!(adr["deduplicated"], false);
-    let reference = harness
-        .call_tool(
-            "memory_write",
+    let reference = dispatch_as_authenticated_human(&caller, &harness, "memory_write",
             json!({"project": project, "title": "B", "content": "different content", "reason": "create fixture note for memory tool coverage", "type": "reference"}),
         )
         .await
         .expect("memory_write reference should dispatch");
+    assert_tool_success(&reference, "memory mutation");
     assert_eq!(reference["deduplicated"], false);
 
     let all = harness
@@ -390,34 +429,28 @@ async fn mcp_memory_list_all_and_filters_by_folder_and_type() {
 
 #[tokio::test]
 async fn mcp_memory_graph_returns_wikilink_edges() {
+    let caller = TrustedRevisionCallerContext::authenticated_human("memory-tools-test-user")
+        .expect("test revision caller must be non-blank");
     let harness = McpTestHarness::new().await;
     let (proj, _dir) = common::create_test_project_with_dir(harness.db()).await;
     let project = proj.slug();
 
-    harness
-        .call_tool(
-            "memory_write",
+    dispatch_as_authenticated_human(&caller, &harness, "memory_write",
             json!({"project": project, "title": "Node B", "content": "b", "reason": "create fixture note for memory tool coverage", "type": "reference"}),
         )
         .await
         .expect("seed node B should dispatch");
-    harness
-        .call_tool(
-            "memory_write",
+    dispatch_as_authenticated_human(&caller, &harness, "memory_write",
             json!({"project": project, "title": "Node A", "content": "links [[Node B]] [[Node C]]", "reason": "create fixture note for memory tool coverage", "type": "reference"}),
         )
         .await
         .expect("seed node A should dispatch");
-    harness
-        .call_tool(
-            "memory_write",
+    dispatch_as_authenticated_human(&caller, &harness, "memory_write",
             json!({"project": project, "title": "Node C", "content": "links [[Node B]] [[NonExistent]]", "reason": "create fixture note for memory tool coverage", "type": "reference"}),
         )
         .await
         .expect("seed node C should dispatch");
-    harness
-        .call_tool(
-            "memory_write",
+    dispatch_as_authenticated_human(&caller, &harness, "memory_write",
             json!({"project": project, "title": "Node D", "content": "isolated", "reason": "create fixture note for memory tool coverage", "type": "reference"}),
         )
         .await
@@ -452,13 +485,13 @@ async fn mcp_memory_graph_returns_wikilink_edges() {
 
 #[tokio::test]
 async fn mcp_memory_recent_orders_by_last_accessed() {
+    let caller = TrustedRevisionCallerContext::authenticated_human("memory-tools-test-user")
+        .expect("test revision caller must be non-blank");
     let harness = McpTestHarness::new().await;
     let (proj, _dir) = common::create_test_project_with_dir(harness.db()).await;
     let project = proj.slug();
 
-    harness
-        .call_tool(
-            "memory_write",
+    dispatch_as_authenticated_human(&caller, &harness, "memory_write",
             json!({"project": project, "title": "Older", "content": "o", "reason": "create fixture note for memory tool coverage", "type": "reference"}),
         )
         .await
@@ -469,9 +502,7 @@ async fn mcp_memory_recent_orders_by_last_accessed() {
     // 100ms is tight — 500ms gives the DB a clear timestamp boundary while
     // still keeping total runtime sub-second.
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-    harness
-        .call_tool(
-            "memory_write",
+    dispatch_as_authenticated_human(&caller, &harness, "memory_write",
             json!({"project": project, "title": "Newer", "content": "n", "reason": "create fixture note for memory tool coverage", "type": "reference"}),
         )
         .await
@@ -509,13 +540,13 @@ async fn mcp_memory_recent_orders_by_last_accessed() {
 
 #[tokio::test]
 async fn mcp_memory_catalog_returns_structured_catalog() {
+    let caller = TrustedRevisionCallerContext::authenticated_human("memory-tools-test-user")
+        .expect("test revision caller must be non-blank");
     let harness = McpTestHarness::new().await;
     let (proj, _dir) = common::create_test_project_with_dir(harness.db()).await;
     let project = proj.slug();
 
-    harness
-        .call_tool(
-            "memory_write",
+    dispatch_as_authenticated_human(&caller, &harness, "memory_write",
             json!({"project": project, "title": "Catalog Item", "content": "c", "reason": "create fixture note for memory tool coverage", "type": "reference"}),
         )
         .await
@@ -534,26 +565,26 @@ async fn mcp_memory_catalog_returns_structured_catalog() {
 
 #[tokio::test]
 async fn mcp_memory_history_and_diff_round_trip() {
+    let caller = TrustedRevisionCallerContext::authenticated_human("memory-tools-test-user")
+        .expect("test revision caller must be non-blank");
     let harness = McpTestHarness::new().await;
     let (proj, _dir) = common::create_test_project_with_dir(harness.db()).await;
     let project = proj.slug();
 
-    let created = harness
-        .call_tool(
-            "memory_write",
+    let created = dispatch_as_authenticated_human(&caller, &harness, "memory_write",
             json!({"project": project, "title": "History Diff", "content": "line one", "reason": "create fixture note for memory tool coverage", "type": "reference"}),
         )
         .await
         .expect("memory_write should dispatch");
+    assert_tool_success(&created, "memory mutation");
     let permalink = created["permalink"].as_str().unwrap().to_string();
 
-    let edited = harness
-        .call_tool(
-            "memory_edit",
+    let edited = dispatch_as_authenticated_human(&caller, &harness, "memory_edit",
             json!({"project": project, "identifier": permalink, "reason": "modify fixture note for memory tool coverage", "operation": "append", "content": "line two"}),
         )
         .await
         .expect("memory_edit should dispatch");
+    assert_tool_success(&edited, "memory mutation");
     assert!(edited.get("error").is_none() || edited["error"].is_null());
 
     // memory_history and memory_diff: with the db-only KB cut-over both
@@ -585,24 +616,24 @@ async fn mcp_memory_history_and_diff_round_trip() {
 
 #[tokio::test]
 async fn mcp_memory_build_context_follows_wikilinks() {
+    let caller = TrustedRevisionCallerContext::authenticated_human("memory-tools-test-user")
+        .expect("test revision caller must be non-blank");
     let harness = McpTestHarness::new().await;
     let (proj, _dir) = common::create_test_project_with_dir(harness.db()).await;
     let project = proj.slug();
 
-    let target = harness
-        .call_tool(
-            "memory_write",
+    let target = dispatch_as_authenticated_human(&caller, &harness, "memory_write",
             json!({"project": project, "title": "Context Target", "content": "target body", "reason": "create fixture note for memory tool coverage", "type": "reference"}),
         )
         .await
         .expect("memory_write target should dispatch");
-    let seed = harness
-        .call_tool(
-            "memory_write",
+    assert_tool_success(&target, "memory mutation");
+    let seed = dispatch_as_authenticated_human(&caller, &harness, "memory_write",
             json!({"project": project, "title": "Context Seed", "content": "see [[Context Target]]", "reason": "create fixture note for memory tool coverage", "type": "reference"}),
         )
         .await
         .expect("memory_write seed should dispatch");
+    assert_tool_success(&seed, "memory mutation");
 
     let built = harness
         .call_tool(
@@ -631,24 +662,29 @@ async fn mcp_memory_build_context_follows_wikilinks() {
 
 #[tokio::test]
 async fn mcp_memory_task_refs_returns_tasks_for_permalink() {
+    let caller = TrustedRevisionCallerContext::authenticated_human("memory-tools-test-user")
+        .expect("test revision caller must be non-blank");
     let harness = McpTestHarness::new().await;
     let db = harness.db();
     let (project_row, _dir) = common::create_test_project_with_dir(db).await;
     let epic = common::create_test_epic(db, &project_row.id).await;
     let project = project_row.slug();
 
-    let note = harness
-        .call_tool(
-            "memory_write",
+    let note = dispatch_as_authenticated_human(&caller, &harness, "memory_write",
             json!({"project": project, "title": "Task Ref Note", "content": "task refs seed", "reason": "create fixture note for memory tool coverage", "type": "reference"}),
         )
         .await
         .expect("memory_write should dispatch");
-
+    assert_tool_success(&note, "memory mutation");
+    let note_permalink = note
+        .get("permalink")
+        .and_then(Value::as_str)
+        .expect("memory_write permalink")
+        .to_string();
     let task = harness
         .call_tool(
             "task_create",
-            json!({"project": project, "epic_id": epic.id, "title": "Task referencing memory note", "issue_type": "task", "priority": 2, "status": "open", "memory_refs": [note["permalink"]], "acceptance_criteria": ["note is attached to task"]}),
+            json!({"project": project, "epic_id": epic.id, "title": "Task referencing memory note", "issue_type": "task", "priority": 2, "status": "open", "memory_refs": [&note_permalink], "acceptance_criteria": ["note is attached to task"]}),
         )
         .await
         .expect("task_create should dispatch");
@@ -787,41 +823,40 @@ struct GraduatedProposalFixture {
 }
 
 async fn build_graduated_proposal_fixture(harness: &McpTestHarness) -> GraduatedProposalFixture {
+    let caller = TrustedRevisionCallerContext::authenticated_human("memory-tools-test-user")
+        .expect("test revision caller must be non-blank");
     let (project_row, _dir) = common::create_test_project_with_dir(harness.db()).await;
     let project = project_row.slug();
 
     // Three notes: one on an epic, one on a task, one shared across both.
-    let epic_note = harness
-        .call_tool(
-            "memory_write",
+    let epic_note = dispatch_as_authenticated_human(&caller, &harness, "memory_write",
             json!({"project": project, "title": "Epic Ref Note", "content": "epic level note", "reason": "create fixture note for memory tool coverage", "type": "adr"}),
         )
         .await
         .expect("memory_write epic_note should dispatch");
+    assert_tool_success(&epic_note, "memory mutation");
     let epic_note_permalink = epic_note["permalink"]
         .as_str()
         .expect("epic note permalink")
         .to_string();
 
-    let task_note = harness
-        .call_tool(
-            "memory_write",
+    let task_note = dispatch_as_authenticated_human(&caller, &harness, "memory_write",
             json!({"project": project, "title": "Task Ref Note", "content": "task level note", "reason": "create fixture note for memory tool coverage", "type": "pitfall"}),
         )
         .await
         .expect("memory_write task_note should dispatch");
+    assert_tool_success(&task_note, "memory mutation");
     let task_note_permalink = task_note["permalink"]
         .as_str()
         .expect("task note permalink")
         .to_string();
 
-    let shared_note = harness
-        .call_tool(
-            "memory_write",
+    let shared_note = dispatch_as_authenticated_human(&caller, &harness, "memory_write",
             json!({"project": project, "title": "Shared Ref Note", "content": "shared across epic and task", "reason": "create fixture note for memory tool coverage", "type": "reference"}),
         )
         .await
         .expect("memory_write shared_note should dispatch");
+    assert_tool_success(&shared_note, "memory mutation");
     let shared_note_permalink = shared_note["permalink"]
         .as_str()
         .expect("shared note permalink")
@@ -1159,6 +1194,8 @@ async fn memory_read_surfaces_tasks_and_proposals_for_note_under_graduated_propo
 
 #[tokio::test]
 async fn memory_read_regression_resolved_mentions_still_works() {
+    let caller = TrustedRevisionCallerContext::authenticated_human("memory-tools-test-user")
+        .expect("test revision caller must be non-blank");
     let harness = McpTestHarness::new().await;
     let fixture = build_graduated_proposal_fixture(&harness).await;
 
@@ -1167,9 +1204,7 @@ async fn memory_read_regression_resolved_mentions_still_works() {
     // Use a fresh project so the note body mention resolution is clean.
     let (project_row, _dir) = common::create_test_project_with_dir(harness.db()).await;
     let project = project_row.slug();
-    let note = harness
-        .call_tool(
-            "memory_write",
+    let note = dispatch_as_authenticated_human(&caller, &harness, "memory_write",
             json!({
                 "project": project,
                 "title": "Note Mentioning Proposal",
@@ -1179,6 +1214,7 @@ async fn memory_read_regression_resolved_mentions_still_works() {
         )
         .await
         .expect("memory_write should dispatch");
+    assert_tool_success(&note, "memory mutation");
     assert!(
         note.get("error").is_none() || note["error"].is_null(),
         "memory_write returned error: {note}"
@@ -1290,6 +1326,8 @@ async fn memory_read_regression_memory_task_refs_behavior_unchanged() {
 
 #[tokio::test]
 async fn memory_read_resolves_short_id_mentions() {
+    let caller = TrustedRevisionCallerContext::authenticated_human("memory-tools-test-user")
+        .expect("test revision caller must be non-blank");
     let harness = McpTestHarness::new().await;
     let fixture = build_graduated_proposal_fixture(&harness).await;
 
@@ -1298,9 +1336,7 @@ async fn memory_read_resolves_short_id_mentions() {
     // Use a fresh project so the note body mention resolution is clean.
     let (project_row, _dir) = common::create_test_project_with_dir(harness.db()).await;
     let project = project_row.slug();
-    let note = harness
-        .call_tool(
-            "memory_write",
+    let note = dispatch_as_authenticated_human(&caller, &harness, "memory_write",
             json!({
                 "project": project,
                 "title": "Note Mentioning Proposal",
@@ -1310,6 +1346,7 @@ async fn memory_read_resolves_short_id_mentions() {
         )
         .await
         .expect("memory_write should dispatch");
+    assert_tool_success(&note, "memory mutation");
     assert!(
         note.get("error").is_none() || note["error"].is_null(),
         "memory_write returned error: {note}"
@@ -1374,6 +1411,8 @@ async fn memory_read_resolves_short_id_mentions() {
 
 #[tokio::test]
 async fn no_regression_memory_refs_autolink() {
+    let caller = TrustedRevisionCallerContext::authenticated_human("memory-tools-test-user")
+        .expect("test revision caller must be non-blank");
     // Regression guard: the existing task↔note memory_refs autolink behavior
     // (memory_task_refs returns tasks whose memory_refs contain the permalink)
     // must still work. This duplicates the core assertion of
@@ -1385,14 +1424,17 @@ async fn no_regression_memory_refs_autolink() {
     let epic = common::create_test_epic(db, &project_row.id).await;
     let project = project_row.slug();
 
-    let note = harness
-        .call_tool(
-            "memory_write",
+    let note = dispatch_as_authenticated_human(&caller, &harness, "memory_write",
             json!({"project": project, "title": "Autolink Note", "content": "autolink seed", "reason": "create fixture note for memory tool coverage", "type": "reference"}),
         )
         .await
         .expect("memory_write should dispatch");
-
+    assert_tool_success(&note, "memory mutation");
+    let note_permalink = note
+        .get("permalink")
+        .and_then(Value::as_str)
+        .expect("memory_write permalink")
+        .to_string();
     let task = harness
         .call_tool(
             "task_create",
@@ -1403,7 +1445,7 @@ async fn no_regression_memory_refs_autolink() {
                 "issue_type": "task",
                 "priority": 2,
                 "status": "open",
-                "memory_refs": [note["permalink"]],
+                "memory_refs": [&note_permalink],
                 "acceptance_criteria": ["note attached"],
             }),
         )

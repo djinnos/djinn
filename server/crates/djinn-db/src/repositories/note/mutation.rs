@@ -10,27 +10,48 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use super::{
     NoteRepository, NoteRevisionEventKind, NoteRevisionReason, TrustedNoteRevisionAttribution,
-    TrustedNoteRevisionProvenance,
+    TrustedNoteRevisionProvenance, index_links_for_note, resolve_links_for_note,
 };
 use crate::error::{DbError as Error, DbResult as Result};
 use crate::note_hash::note_content_hash;
 use djinn_memory::Note;
 
-/// Test-only projection of a persisted revision event.
+/// Immutable revision row returned by the production query surface.
 ///
-/// Keeping the SQL projection in `djinn-db` lets downstream writer tests prove
-/// ledger attribution without reaching around the repository boundary.
-#[cfg(any(test, feature = "test-support"))]
+/// This mirrors the ledger columns so callers can verify authorization without
+/// bypassing the repository boundary with direct SQL.
 #[derive(Debug, Clone, PartialEq, sqlx::FromRow)]
-pub struct NoteRevisionEventForTest {
+pub struct NoteRevisionEvent {
+    pub id: String,
+    pub project_id: String,
+    pub note_id: Option<String>,
+    pub note_seq: Option<i64>,
     pub actor_kind: String,
+    pub actor_id: Option<String>,
     pub subsystem: Option<String>,
     pub event_kind: String,
     pub content_before: Option<String>,
     pub content_after: Option<String>,
     pub confidence_before: Option<f64>,
     pub confidence_after: Option<f64>,
+    pub session_id: Option<String>,
+    pub task_id: Option<String>,
+    pub task_run_id: Option<String>,
     pub reason: String,
+    pub created_at: String,
+}
+
+/// Canonical final values for an MCP edit, including optional move metadata.
+#[derive(Debug, Clone, PartialEq)]
+pub struct NoteRevisionUpdateState {
+    pub title: String,
+    pub permalink: String,
+    pub content: String,
+    pub note_type: String,
+    pub folder: String,
+    pub tags: String,
+    pub retrieval_anchor: Option<String>,
+    pub confidence: f64,
 }
 
 /// Canonical final values for a created note. Updates intentionally use only
@@ -60,6 +81,7 @@ pub enum NoteRevisionDesiredState {
         content: String,
         confidence: f64,
     },
+    ExistingWithMetadata(NoteRevisionUpdateState),
     /// Delete the locked note after retaining its before snapshot in the ledger.
     Delete,
     /// Record an extraction run which intentionally produced no note.
@@ -100,6 +122,8 @@ impl NoteRepository {
         self.db.ensure_initialized().await?;
         validate_command(&command)?;
 
+        let event_kind = command.event_kind;
+        let note_id = command.note_id.clone();
         let mut tx = self.db.pool().begin().await?;
         let result = match command.event_kind {
             NoteRevisionEventKind::ExtractionSkipped => {
@@ -112,6 +136,32 @@ impl NoteRepository {
             NoteRevisionEventKind::Deleted => self.delete_with_revision(&mut tx, &command).await?,
         };
         tx.commit().await?;
+        if result.changed {
+            match event_kind {
+                NoteRevisionEventKind::Created => {
+                    if let Some(note) = result.note.as_ref() {
+                        self.spawn_note_embedding_sync(note);
+                        self.events.send(djinn_memory::events::note_created(note));
+                    }
+                }
+                NoteRevisionEventKind::Updated | NoteRevisionEventKind::ConfidenceChanged => {
+                    if let Some(note) = result.note.as_ref() {
+                        self.spawn_note_embedding_sync(note);
+                        self.events.send(djinn_memory::events::note_updated(note));
+                    }
+                }
+                NoteRevisionEventKind::Deleted => {
+                    if let Some(note_id) = note_id.as_deref() {
+                        if let Err(error) = self.delete_embedding(note_id).await {
+                            tracing::warn!(%note_id, %error, "failed to delete note embedding during revision-backed removal");
+                        }
+                        self.events
+                            .send(djinn_memory::events::note_deleted(note_id));
+                    }
+                }
+                NoteRevisionEventKind::ExtractionSkipped => {}
+            }
+        }
         Ok(result)
     }
 
@@ -177,6 +227,15 @@ impl NoteRepository {
         .bind(desired.confidence)
         .execute(&mut **tx)
         .await?;
+        index_links_for_note(tx, note_id, &command.project_id, &desired.content).await?;
+        resolve_links_for_note(
+            tx,
+            note_id,
+            &desired.title,
+            &desired.permalink,
+            &command.project_id,
+        )
+        .await?;
         let note = locked_note(tx, note_id, &command.project_id).await?;
         let revision_id = self
             .insert_revision(
@@ -205,14 +264,25 @@ impl NoteRepository {
     ) -> Result<NoteRevisionMutationResult> {
         let note_id = command.note_id.as_deref().expect("validated note identity");
         let before = locked_note(tx, note_id, &command.project_id).await?;
-        let NoteRevisionDesiredState::Existing {
-            content,
-            confidence,
-        } = &command.desired
-        else {
-            unreachable!("validated update command")
+        let (content, confidence, metadata) = match &command.desired {
+            NoteRevisionDesiredState::Existing {
+                content,
+                confidence,
+            } => (content, confidence, None),
+            NoteRevisionDesiredState::ExistingWithMetadata(state) => {
+                (&state.content, &state.confidence, Some(state))
+            }
+            _ => unreachable!("validated update command"),
         };
-        if before.content == *content && before.confidence == *confidence {
+        let metadata_changed = metadata.is_some_and(|state| {
+            before.title != state.title
+                || before.permalink != state.permalink
+                || before.note_type != state.note_type
+                || before.folder != state.folder
+                || before.tags != state.tags
+                || before.retrieval_anchor != state.retrieval_anchor
+        });
+        if before.content == *content && before.confidence == *confidence && !metadata_changed {
             return Ok(NoteRevisionMutationResult {
                 changed: false,
                 note: Some(before),
@@ -227,8 +297,28 @@ impl NoteRepository {
                 "confidence_changed must not alter content".to_owned(),
             ));
         }
-        sqlx::query("UPDATE notes SET content = $1, confidence = $2, content_hash = $3, updated_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') WHERE id = $4")
-            .bind(content).bind(confidence).bind(note_content_hash(content)).bind(note_id).execute(&mut **tx).await?;
+        if let Some(state) = metadata {
+            let tags: serde_json::Value = serde_json::from_str(&state.tags)
+                .map_err(|e| Error::InvalidData(format!("invalid json for notes.tags: {e}")))?;
+            sqlx::query("UPDATE notes SET title = $1, permalink = $2, content = $3, note_type = $4, folder = $5, tags = $6, retrieval_anchor = $7, confidence = $8, content_hash = $9, updated_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') WHERE id = $10 AND project_id = $11")
+                .bind(&state.title).bind(&state.permalink).bind(content).bind(&state.note_type)
+                .bind(&state.folder).bind(tags).bind(&state.retrieval_anchor).bind(confidence)
+                .bind(note_content_hash(content)).bind(note_id).bind(&command.project_id)
+                .execute(&mut **tx).await?;
+            index_links_for_note(tx, note_id, &command.project_id, content).await?;
+            resolve_links_for_note(
+                tx,
+                note_id,
+                &state.title,
+                &state.permalink,
+                &command.project_id,
+            )
+            .await?;
+        } else {
+            sqlx::query("UPDATE notes SET content = $1, confidence = $2, content_hash = $3, updated_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') WHERE id = $4 AND project_id = $5")
+                .bind(content).bind(confidence).bind(note_content_hash(content)).bind(note_id)
+                .bind(&command.project_id).execute(&mut **tx).await?;
+        }
         let note = locked_note(tx, note_id, &command.project_id).await?;
         let seq = next_sequence(tx, &command.project_id, note_id).await?;
         let (content_before, content_after) =
@@ -336,18 +426,35 @@ impl NoteRepository {
         self.revision_event_failure.store(enabled, Ordering::SeqCst);
     }
 
-    /// Returns a stable ledger projection for focused downstream writer tests.
-    #[cfg(any(test, feature = "test-support"))]
-    pub async fn revision_events_for_test(
-        &self,
-        project_id: &str,
-    ) -> Result<Vec<NoteRevisionEventForTest>> {
+    /// Returns immutable revision rows for one project in creation order.
+    pub async fn revision_events(&self, project_id: &str) -> Result<Vec<NoteRevisionEvent>> {
         sqlx::query_as(
-            "SELECT actor_kind, subsystem, event_kind, content_before, content_after, \
-             confidence_before, confidence_after, reason \
-             FROM note_revision_events WHERE project_id = $1 ORDER BY reason",
+            "SELECT id, project_id, note_id, note_seq, actor_kind, actor_id, subsystem, \
+             event_kind, content_before, content_after, confidence_before, confidence_after, \
+             session_id, task_id, task_run_id, reason, created_at::text AS created_at \
+             FROM note_revision_events WHERE project_id = $1 ORDER BY created_at, id",
         )
         .bind(project_id)
+        .fetch_all(self.db.pool())
+        .await
+        .map_err(Into::into)
+    }
+
+    /// Returns immutable revision rows for one note, scoped to its project.
+    pub async fn revision_events_for_note(
+        &self,
+        project_id: &str,
+        note_id: &str,
+    ) -> Result<Vec<NoteRevisionEvent>> {
+        sqlx::query_as(
+            "SELECT id, project_id, note_id, note_seq, actor_kind, actor_id, subsystem, \
+             event_kind, content_before, content_after, confidence_before, confidence_after, \
+             session_id, task_id, task_run_id, reason, created_at::text AS created_at \
+             FROM note_revision_events WHERE project_id = $1 AND note_id = $2 \
+             ORDER BY note_seq, created_at, id",
+        )
+        .bind(project_id)
+        .bind(note_id)
         .fetch_all(self.db.pool())
         .await
         .map_err(Into::into)
@@ -388,6 +495,9 @@ fn validate_command(command: &NoteRevisionMutation) -> Result<()> {
         ) | (
             NoteRevisionEventKind::Updated | NoteRevisionEventKind::ConfidenceChanged,
             NoteRevisionDesiredState::Existing { .. }
+        ) | (
+            NoteRevisionEventKind::Updated,
+            NoteRevisionDesiredState::ExistingWithMetadata(_)
         ) | (
             NoteRevisionEventKind::Deleted,
             NoteRevisionDesiredState::Delete
