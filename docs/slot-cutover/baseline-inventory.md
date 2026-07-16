@@ -326,7 +326,6 @@ Results:
 | `server/crates/djinn-coordinator/src/wave.rs:209` | `djinn_slot::{ModelSlotConfig, SlotPoolConfig, SlotPoolHandle}` | Coordinator wave logic. |
 | `server/crates/djinn-coordinator/src/lib.rs:29` | `djinn_slot::{PoolError, SlotPoolHandle}` | Library surface. |
 | `server/crates/djinn-coordinator/src/consolidation.rs:370` | `djinn_slot::{ModelSlotConfig, SlotPoolConfig, SlotPoolHandle}` | Consolidation logic. |
-| `server/crates/djinn-coordinator/src/doctor/zombie_running_session.rs:19` | `djinn_slot::SlotPoolHandle` | Doctor checks. |
 | `server/crates/djinn-coordinator/src/actor.rs:27,1775` | `djinn_slot::SlotPoolHandle`, `djinn_slot::{ModelSlotConfig, SlotPoolConfig}` | Coordinator actor. |
 | `server/crates/djinn-coordinator/src/rules.rs:811,851,1263,1325` | `djinn_slot::{ModelSlotConfig, SlotPoolConfig, SlotPoolHandle}` | Rule engine (multiple test blocks). |
 | `server/crates/djinn-coordinator/src/test_helpers.rs:15` | `djinn_slot::host::SlotContext` | Test helpers. |
