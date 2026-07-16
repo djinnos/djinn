@@ -362,10 +362,9 @@ struct WarmDispatch {
     db: Database,
     dispatcher: Arc<dyn WarmJobDispatcher>,
     watcher: Arc<dyn WarmJobWatcher>,
-    /// Coordinator-owned admission boundary. This is intentionally absent by
-    /// default: no allow-all implementation lives in `djinn-k8s`. The
-    /// lifecycle-ordering integration consumes this explicit seam and treats an
-    /// unconfigured boundary as no-dispatch.
+    /// Coordinator-owned admission boundary. It is optional to preserve the
+    /// existing non-coordinator deployment path; when supplied it fences every
+    /// Kubernetes POST with the durable admission lifecycle below.
     admission: Option<Arc<dyn WarmAdmission>>,
     /// Cluster-side dedupe: lists non-terminal warm Jobs for a project so
     /// triggers from any process can coalesce against in-flight Jobs created
@@ -384,6 +383,21 @@ struct WarmDispatch {
 }
 
 impl WarmDispatch {
+    async fn admission_request(&self, project_id: &str) -> WarmAdmissionRequest {
+        let revision = discover_mirror_main_tip(project_id)
+            .await
+            .unwrap_or_else(|| "unknown".to_string());
+        let work_id = format!("graph-warm:{project_id}:{revision}");
+        WarmAdmissionRequest {
+            domain: "graph-warm".to_string(),
+            object_name: deterministic_warm_job_name(project_id, &work_id),
+            work_id,
+            // The immutable source revision is part of work_id; retries are
+            // therefore the first incarnation of the same work.
+            generation: 1,
+        }
+    }
+
     /// Resolve the image the warm Job should run in, honouring catalog-image
     /// precedence (migration 46): a project on a shared catalog image warms
     /// inside that image; otherwise its own per-project build. Returns `None`
@@ -640,13 +654,40 @@ impl WarmDispatch {
             }
         };
 
-        let job = build_warm_job(
+        let admission_request = self.admission_request(project_id).await;
+        let mut job = build_warm_job(
             &self.config,
             project_id,
             &image_tag,
             cargo_cache_policy.as_ref(),
         );
+        if self.admission.is_some() {
+            job.metadata.name = Some(admission_request.object_name.clone());
+        }
         let namespace = self.config.namespace.clone();
+        let permit = match self.admission.as_ref() {
+            Some(admission) => match admission.admit(admission_request).await {
+                Ok(permit) => {
+                    if let Err(error) = admission
+                        .transition(&permit, WarmAdmissionTransition::CreateStarted)
+                        .await
+                    {
+                        warn!(project_id, error = %error, "K8sGraphWarmer: CreateStarted was not durable; skipping Job POST");
+                        self.release_in_flight(project_id).await;
+                        return;
+                    }
+                    Some(permit)
+                }
+                Err(error) => {
+                    // This is not a failed warm: the deterministic identity is
+                    // retained by the admission implementation for retry.
+                    warn!(project_id, error = %error, "K8sGraphWarmer: admission denied or unavailable; skipping Job POST");
+                    self.release_in_flight(project_id).await;
+                    return;
+                }
+            },
+            None => None,
+        };
         let job_name = match self.dispatcher.dispatch(&namespace, job).await {
             Ok(name) => name,
             Err(e) => {
@@ -655,15 +696,39 @@ impl WarmDispatch {
                     error = %e,
                     "K8sGraphWarmer: Job dispatch failed"
                 );
-                // Drop the in-flight slot + wake any waiters so await_fresh
-                // doesn't hang on our failure.
-                let mut guard = self.in_flight.lock().await;
-                if let Some(n) = guard.remove(project_id) {
-                    n.notify_waiters();
+                if let (Some(admission), Some(permit)) = (self.admission.as_ref(), permit.as_ref())
+                {
+                    let transition = if dispatcher_error_is_definitive(&e) {
+                        WarmAdmissionTransition::DefinitiveFailure {
+                            diagnostic: e.clone(),
+                        }
+                    } else {
+                        WarmAdmissionTransition::CreateUnknown {
+                            diagnostic: e.clone(),
+                        }
+                    };
+                    if let Err(error) = admission.transition(permit, transition).await {
+                        warn!(project_id, error = %error, "K8sGraphWarmer: failed to record dispatcher outcome");
+                    }
                 }
+                self.release_in_flight(project_id).await;
                 return;
             }
         };
+
+        let uid = self.watcher.job_uid(&namespace, &job_name).await;
+        if let (Some(admission), Some(permit)) = (self.admission.as_ref(), permit.as_ref()) {
+            let transition = match uid.as_ref() {
+                Some(uid) => WarmAdmissionTransition::Live { uid: uid.clone() },
+                None => WarmAdmissionTransition::CreateUnknown {
+                    diagnostic: "Kubernetes create succeeded but Job UID could not be observed"
+                        .to_string(),
+                },
+            };
+            if let Err(error) = admission.transition(permit, transition).await {
+                warn!(project_id, error = %error, "K8sGraphWarmer: failed to record create outcome");
+            }
+        }
 
         info!(
             project_id,
@@ -676,6 +741,9 @@ impl WarmDispatch {
         let watcher = self.watcher.clone();
         let in_flight = self.in_flight.clone();
         let completion_sink = self.completion_sink.clone();
+        let admission = self.admission.clone();
+        let permit = permit.clone();
+        let uid = uid.clone();
         let project_id_owned = project_id.to_string();
         let namespace_owned = namespace.clone();
         let job_name_owned = job_name.clone();
@@ -693,6 +761,17 @@ impl WarmDispatch {
             // the map still holds (in case a re-trigger happened mid-flight
             // and reassigned the slot).
             notify_owned.notify_waiters();
+            if let (Some(admission), Some(permit), Some(uid)) =
+                (admission.as_ref(), permit.as_ref(), uid.as_ref())
+                && let Err(error) = admission
+                    .transition(
+                        permit,
+                        WarmAdmissionTransition::Terminal { uid: uid.clone() },
+                    )
+                    .await
+            {
+                warn!(project_id = %project_id_owned, error = %error, "K8sGraphWarmer: failed to record terminal Job");
+            }
             // Event-driven convergence: on success the warm pod has already
             // rewritten `repo_graph_cache`, so invalidate the server's RAM slot
             // now (fast path). The read-path revalidation TTL is the backstop
@@ -709,6 +788,52 @@ impl WarmDispatch {
             );
         });
     }
+
+    async fn release_in_flight(&self, project_id: &str) {
+        let mut guard = self.in_flight.lock().await;
+        if let Some(notify) = guard.remove(project_id) {
+            notify.notify_waiters();
+        }
+    }
+}
+
+/// With the legacy string-only dispatcher contract, classify only explicit
+/// client rejections as definitive. Transport and unrecognised errors remain
+/// conservatively occupying `CreateUnknown` outcomes.
+fn dispatcher_error_is_definitive(error: &str) -> bool {
+    let error = error.to_ascii_lowercase();
+    [
+        "bad request",
+        "unauthorized",
+        "forbidden",
+        "unprocessable entity",
+        "status code 400",
+        "status code 401",
+        "status code 403",
+        "status code 422",
+    ]
+    .iter()
+    .any(|marker| error.contains(marker))
+}
+
+fn deterministic_warm_job_name(project_id: &str, work_id: &str) -> String {
+    let project: String = project_id
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' {
+                c.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
+        .take(36)
+        .collect();
+    let mut hash = 0xcbf29ce484222325_u64;
+    for byte in work_id.bytes() {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    format!("djinn-warm-{project}-g1-{hash:016x}")
 }
 
 /// Kubernetes-backed canonical-graph warmer.

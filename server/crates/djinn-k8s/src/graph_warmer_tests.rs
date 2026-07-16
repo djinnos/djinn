@@ -1043,5 +1043,147 @@ async fn trigger_skips_completion_sink_when_job_disappears() {
     );
 }
 
+struct AdmissionRecording {
+    events: Arc<Mutex<Vec<String>>>,
+    admit_error: Option<WarmAdmissionError>,
+    fail_create_started: bool,
+}
+
+#[async_trait]
+impl WarmAdmission for AdmissionRecording {
+    async fn admit(
+        &self,
+        request: WarmAdmissionRequest,
+    ) -> Result<WarmAdmissionPermit, WarmAdmissionError> {
+        self.events
+            .lock()
+            .await
+            .push(format!("reserve:{}", request.object_name));
+        match &self.admit_error {
+            Some(error) => Err(error.clone()),
+            None => Ok(WarmAdmissionPermit::new()),
+        }
+    }
+
+    async fn transition(
+        &self,
+        _permit: &WarmAdmissionPermit,
+        transition: WarmAdmissionTransition,
+    ) -> Result<(), WarmAdmissionError> {
+        self.events.lock().await.push(format!("{transition:?}"));
+        if self.fail_create_started && transition == WarmAdmissionTransition::CreateStarted {
+            Err(WarmAdmissionError::Unavailable {
+                diagnostic: "journal unavailable".to_string(),
+            })
+        } else {
+            Ok(())
+        }
+    }
+}
+
+struct LifecycleRecordingDispatcher {
+    events: Arc<Mutex<Vec<String>>>,
+    result: Result<String, String>,
+}
+
+#[async_trait]
+impl WarmJobDispatcher for LifecycleRecordingDispatcher {
+    async fn dispatch(&self, _namespace: &str, _job: Job) -> Result<String, String> {
+        self.events.lock().await.push("post".to_string());
+        self.result.clone()
+    }
+}
+
+struct UidWatcher;
+
+#[async_trait]
+impl WarmJobWatcher for UidWatcher {
+    async fn wait_terminal(&self, _namespace: &str, _job_name: &str) -> WarmTerminalOutcome {
+        WarmTerminalOutcome::Succeeded
+    }
+
+    async fn job_uid(&self, _namespace: &str, _job_name: &str) -> Option<String> {
+        Some("uid-123".to_string())
+    }
+}
+
+#[tokio::test]
+async fn admission_is_reserved_and_create_started_before_post_then_reports_uid_lifecycle() {
+    let db = Database::open_in_memory().expect("in-memory db");
+    let project_id = seed_project_with_ready_image(&db, "proj-admission-order").await;
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let warmer = K8sGraphWarmer::with_dispatcher(
+        test_config(),
+        db,
+        Arc::new(LifecycleRecordingDispatcher {
+            events: events.clone(),
+            result: Ok("admitted-warm".to_string()),
+        }),
+        Arc::new(UidWatcher),
+    )
+    .with_warm_admission(Arc::new(AdmissionRecording {
+        events: events.clone(),
+        admit_error: None,
+        fail_create_started: false,
+    }));
+
+    warmer.trigger(&project_id).await;
+    tokio::task::yield_now().await;
+    tokio::time::sleep(Duration::from_millis(10)).await;
+
+    let events = events.lock().await;
+    assert!(events[0].starts_with("reserve:djinn-warm-"));
+    assert_eq!(events[1], "CreateStarted");
+    assert_eq!(events[2], "post");
+    assert_eq!(events[3], "Live { uid: \"uid-123\" }");
+    assert_eq!(events[4], "Terminal { uid: \"uid-123\" }");
+}
+
+#[tokio::test]
+async fn admission_denial_or_failed_create_started_never_posts_and_is_retryable() {
+    for (admit_error, fail_create_started) in [
+        (
+            Some(WarmAdmissionError::Denied {
+                diagnostic: "at capacity".to_string(),
+            }),
+            false,
+        ),
+        (None, true),
+    ] {
+        let db = Database::open_in_memory().expect("in-memory db");
+        let project_id = seed_project_with_ready_image(&db, "proj-admission-denied").await;
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let warmer = K8sGraphWarmer::with_dispatcher(
+            test_config(),
+            db,
+            Arc::new(LifecycleRecordingDispatcher {
+                events: events.clone(),
+                result: Ok("must-not-post".to_string()),
+            }),
+            Arc::new(UidWatcher),
+        )
+        .with_warm_admission(Arc::new(AdmissionRecording {
+            events: events.clone(),
+            admit_error,
+            fail_create_started,
+        }));
+        warmer.trigger(&project_id).await;
+        warmer.trigger(&project_id).await;
+        assert!(
+            !events.lock().await.iter().any(|event| event == "post"),
+            "a denial or non-durable CreateStarted must perform zero POSTs"
+        );
+    }
+}
+
+#[test]
+fn dispatcher_error_classification_is_conservative() {
+    assert!(dispatcher_error_is_definitive("Forbidden: status code 403"));
+    assert!(!dispatcher_error_is_definitive(
+        "connection reset after POST"
+    ));
+    assert!(!dispatcher_error_is_definitive("already exists"));
+}
+
 #[path = "graph_warmer_overlap_tests.rs"]
 mod overlap;
