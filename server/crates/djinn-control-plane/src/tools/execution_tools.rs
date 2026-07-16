@@ -360,6 +360,9 @@ mod tests {
     use crate::bridge::{PoolStatus, RunningTaskInfo, SlotPoolOps};
     use crate::state::McpState;
 
+    // Kept distinct from the user IDs used by other control-plane fixtures.
+    const EXECUTION_KILL_TERMINAL_FIXTURE_GITHUB_ID: i64 = 999_990;
+
     struct RecordingSlotPool {
         killed: Mutex<Vec<String>>,
         terminated: Mutex<Vec<String>>,
@@ -683,7 +686,12 @@ mod tests {
             .await
             .expect("create project");
         let user = UserRepository::new(db.clone())
-            .upsert_from_github(999_990, "execution-kill-terminal-fixture", None, None)
+            .upsert_from_github(
+                EXECUTION_KILL_TERMINAL_FIXTURE_GITHUB_ID,
+                "execution-kill-terminal-fixture",
+                None,
+                None,
+            )
             .await
             .expect("create fixture user");
         let task_repo = djinn_db::TaskRepository::new(db.clone(), events.clone());
