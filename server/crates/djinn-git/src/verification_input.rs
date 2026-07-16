@@ -14,6 +14,10 @@
 
 use std::path::{Path, PathBuf};
 
+use djinn_core::canonical_verify::{
+    VERIFICATION_INPUT_MANIFEST_VERSION_V1, VerificationInputManifestV1,
+};
+use globset::{Glob, GlobSet, GlobSetBuilder};
 use sha2::{Digest, Sha256};
 
 use crate::{CommandOutput, GitError, run_git_command_allow_failure, run_git_command_binary_in};
@@ -52,20 +56,56 @@ pub struct VerificationInputFingerprintConfig {
     /// Base branch/ref used to find the merge-base via
     /// `git merge-base <base_ref> HEAD`.
     pub base_ref: String,
+    /// Resolved V1 declarations controlling external inputs and output cleanup.
+    pub manifest: VerificationInputManifestV1,
+    /// Concrete mounts corresponding one-to-one with logical declarations.
+    pub external_inputs: Vec<ResolvedExternalInputV1>,
+}
+
+#[cfg(unix)]
+fn path_bytes(path: &Path) -> Vec<u8> {
+    use std::os::unix::ffi::OsStrExt;
+    path.as_os_str().as_bytes().to_vec()
+}
+
+#[cfg(not(unix))]
+fn path_bytes(path: &Path) -> Vec<u8> {
+    path.to_string_lossy().into_owned().into_bytes()
+}
+
+/// Concrete filesystem mount for one logical external input declaration.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedExternalInputV1 {
+    pub id: String,
+    pub path: PathBuf,
+}
+
+fn empty_manifest() -> VerificationInputManifestV1 {
+    VerificationInputManifestV1 {
+        version: VERIFICATION_INPUT_MANIFEST_VERSION_V1,
+        repo_paths: Vec::new(),
+        environment_names: Vec::new(),
+        read_only_external_inputs: Vec::new(),
+        output_only_globs: Vec::new(),
+    }
 }
 
 impl Default for VerificationInputFingerprintConfig {
     fn default() -> Self {
         Self {
             base_ref: DEFAULT_VERIFICATION_BASE_REF.to_string(),
+            manifest: empty_manifest(),
+            external_inputs: Vec::new(),
         }
     }
+
 }
 
 impl VerificationInputFingerprintConfig {
     pub fn new(base_ref: impl Into<String>) -> Self {
         Self {
             base_ref: base_ref.into(),
+            ..Self::default()
         }
     }
 }
@@ -146,6 +186,10 @@ pub enum VerificationInputUnavailable {
         /// The base ref that was attempted (e.g. `"main"` or `"origin/main"`).
         base_ref: String,
     },
+    /// V1 declarations or their resolved mounts were unsafe or ambiguous.
+    MalformedManifest { detail: String },
+    /// A logical external declaration has no usable resolved mount.
+    MissingExternalInput { id: String },
     /// HEAD could not be resolved (e.g. a repository with no commits).
     UnresolvedHead,
     /// An index entry has an unsupported mode (e.g. gitlink `160000` for
@@ -187,6 +231,12 @@ impl std::fmt::Display for VerificationInputUnavailable {
                     f,
                     "verification input unavailable: unresolved base ref {base_ref}"
                 )
+            }
+            Self::MalformedManifest { detail } => {
+                write!(f, "verification input unavailable: malformed manifest: {detail}")
+            }
+            Self::MissingExternalInput { id } => {
+                write!(f, "verification input unavailable: missing external input {id}")
             }
             Self::UnresolvedHead => {
                 write!(f, "verification input unavailable: unresolved HEAD")
@@ -253,6 +303,13 @@ pub async fn compute_verification_input_fingerprint_with_config(
     config: &VerificationInputFingerprintConfig,
 ) -> Result<VerificationInputFingerprint, VerificationInputError> {
     let worktree = worktree.as_ref();
+    let output_only = match validate_manifest(config) {
+        Ok(globs) => globs,
+        Err(reason) => return Ok(VerificationInputFingerprint::Unavailable(reason)),
+    };
+    if let Err(reason) = cleanup_output_only(worktree, &output_only) {
+        return Ok(VerificationInputFingerprint::Unavailable(reason));
+    }
     let base_ref = config.base_ref.trim();
     let base_ref = if base_ref.is_empty() {
         DEFAULT_VERIFICATION_BASE_REF
@@ -296,6 +353,7 @@ pub async fn compute_verification_input_fingerprint_with_config(
     let index_output =
         git_binary_stdout(worktree, vec!["ls-files".into(), "-s".into(), "-z".into()]).await?;
     let mut index_entries = parse_index_entries(&index_output);
+    index_entries.retain(|entry| !output_only.is_match(path_from_bytes(&entry.path)));
 
     // Validate index modes before hashing.
     for entry in &index_entries {
@@ -321,7 +379,8 @@ pub async fn compute_verification_input_fingerprint_with_config(
     }
 
     // ── Collect extra (untracked + ignored) entries ─────────────────────────
-    let extra_paths = collect_extra_paths(worktree).await?;
+    let mut extra_paths = collect_extra_paths(worktree).await?;
+    extra_paths.retain(|path| !output_only.is_match(path_from_bytes(path)));
     let mut extra_states = Vec::with_capacity(extra_paths.len());
     for path in &extra_paths {
         match classify_worktree_entry(worktree, path, true) {
@@ -336,6 +395,10 @@ pub async fn compute_verification_input_fingerprint_with_config(
     index_entries.sort_by(|a, b| a.path.cmp(&b.path));
     tracked_states.sort_by(|a, b| a.path.cmp(&b.path));
     extra_states.sort_by(|a, b| a.path.cmp(&b.path));
+    let external_states = match collect_external_states(config) {
+        Ok(states) => states,
+        Err(reason) => return Ok(VerificationInputFingerprint::Unavailable(reason)),
+    };
 
     let tracked_count = tracked_states.len() as u64;
     let extra_count = extra_states.len() as u64;
@@ -346,6 +409,7 @@ pub async fn compute_verification_input_fingerprint_with_config(
     stream.write_index_entries(&index_entries);
     stream.write_worktree_states(&tracked_states);
     stream.write_worktree_states(&extra_states);
+    stream.write_external_states(&external_states);
     let canonical_bytes = stream.finalize();
     let canonical_stream_len = canonical_bytes.len() as u64;
 
@@ -362,6 +426,109 @@ pub async fn compute_verification_input_fingerprint_with_config(
             extra_entry_count: extra_count,
         },
     ))
+}
+
+fn unavailable_manifest(detail: impl Into<String>) -> VerificationInputUnavailable {
+    VerificationInputUnavailable::MalformedManifest { detail: detail.into() }
+}
+
+fn validate_manifest(config: &VerificationInputFingerprintConfig) -> Result<GlobSet, VerificationInputUnavailable> {
+    let manifest = &config.manifest;
+    if manifest.version != VERIFICATION_INPUT_MANIFEST_VERSION_V1 {
+        return Err(unavailable_manifest("unsupported manifest version"));
+    }
+    let mut repo_paths = std::collections::BTreeSet::new();
+    for path in &manifest.repo_paths {
+        if !safe_relative(path) || !repo_paths.insert(path) {
+            return Err(unavailable_manifest("invalid or duplicate repo input path"));
+        }
+    }
+    let mut declared = std::collections::BTreeSet::new();
+    for input in &manifest.read_only_external_inputs {
+        if input.id.trim().is_empty() || input.locator.trim().is_empty() || !declared.insert(input.id.as_str()) {
+            return Err(unavailable_manifest("ambiguous external input declaration"));
+        }
+    }
+    if config.external_inputs.len() != manifest.read_only_external_inputs.len() {
+        return Err(unavailable_manifest("external declarations do not match resolved mounts"));
+    }
+    let mut resolved = std::collections::BTreeSet::new();
+    for mount in &config.external_inputs {
+        if mount.id.trim().is_empty() || mount.path.as_os_str().is_empty()
+            || !declared.contains(mount.id.as_str()) || !resolved.insert(mount.id.as_str()) {
+            return Err(unavailable_manifest("undeclared or ambiguous external mount"));
+        }
+    }
+    let mut builder = GlobSetBuilder::new();
+    let mut outputs = std::collections::BTreeSet::new();
+    for pattern in &manifest.output_only_globs {
+        if !safe_relative(pattern) || !outputs.insert(pattern) {
+            return Err(unavailable_manifest("invalid or ambiguous output-only glob"));
+        }
+        let glob = Glob::new(pattern).map_err(|_| unavailable_manifest("invalid output-only glob"))?;
+        let matcher = glob.compile_matcher();
+        if repo_paths.iter().any(|path| matcher.is_match(path)) || matcher.is_match(".git") || matcher.is_match(".git/config") {
+            return Err(unavailable_manifest("output-only glob overlaps declared input or repository metadata"));
+        }
+        builder.add(glob);
+    }
+    builder.build().map_err(|_| unavailable_manifest("invalid output-only glob"))
+}
+
+fn safe_relative(value: &str) -> bool {
+    !value.is_empty() && !Path::new(value).is_absolute()
+        && !value.split('/').any(|part| part.is_empty() || part == "." || part == "..")
+}
+
+fn cleanup_output_only(worktree: &Path, globs: &GlobSet) -> Result<(), VerificationInputUnavailable> {
+    if globs.is_empty() { return Ok(()); }
+    let root = std::fs::canonicalize(worktree).map_err(|e| VerificationInputUnavailable::UnreadableFile { path: ".".into(), error: e.to_string() })?;
+    cleanup_output_dir(&root, &root, globs)
+}
+
+fn cleanup_output_dir(root: &Path, dir: &Path, globs: &GlobSet) -> Result<(), VerificationInputUnavailable> {
+    for entry in std::fs::read_dir(dir).map_err(|e| VerificationInputUnavailable::UnreadableFile { path: dir.display().to_string(), error: e.to_string() })? {
+        let entry = entry.map_err(|e| VerificationInputUnavailable::UnreadableFile { path: dir.display().to_string(), error: e.to_string() })?;
+        if entry.file_name() == ".git" { continue; }
+        let path = entry.path();
+        let rel = path.strip_prefix(root).map_err(|_| unavailable_manifest("output-only path escaped worktree"))?;
+        let meta = std::fs::symlink_metadata(&path).map_err(|_| unavailable_manifest("output-only traversal changed"))?;
+        if globs.is_match(rel) {
+            if meta.file_type().is_dir() { std::fs::remove_dir_all(&path) } else { std::fs::remove_file(&path) }
+                .map_err(|e| VerificationInputUnavailable::UnreadableFile { path: rel.display().to_string(), error: e.to_string() })?;
+        } else if meta.file_type().is_dir() { cleanup_output_dir(root, &path, globs)?; }
+    }
+    Ok(())
+}
+
+struct ExternalState { id: Vec<u8>, locator: Vec<u8>, path: Vec<u8>, state: WorktreeState }
+
+fn collect_external_states(config: &VerificationInputFingerprintConfig) -> Result<Vec<ExternalState>, VerificationInputUnavailable> {
+    let mut states = Vec::new();
+    for declaration in &config.manifest.read_only_external_inputs {
+        let mount = config.external_inputs.iter().find(|mount| mount.id == declaration.id)
+            .ok_or_else(|| VerificationInputUnavailable::MissingExternalInput { id: declaration.id.clone() })?;
+        if !std::fs::symlink_metadata(&mount.path).map(|m| m.file_type().is_dir()).unwrap_or(false) {
+            return Err(VerificationInputUnavailable::MissingExternalInput { id: declaration.id.clone() });
+        }
+        collect_external_dir(&mount.path, &mount.path, declaration, &mut states)?;
+    }
+    states.sort_by(|a, b| (&a.id, &a.locator, &a.path).cmp(&(&b.id, &b.locator, &b.path)));
+    Ok(states)
+}
+
+fn collect_external_dir(root: &Path, dir: &Path, declaration: &djinn_core::canonical_verify::DeclaredExternalInputV1, states: &mut Vec<ExternalState>) -> Result<(), VerificationInputUnavailable> {
+    let mut entries: Vec<_> = std::fs::read_dir(dir).map_err(|e| VerificationInputUnavailable::UnreadableFile { path: dir.display().to_string(), error: e.to_string() })?.collect::<Result<_, _>>().map_err(|e| VerificationInputUnavailable::UnreadableFile { path: dir.display().to_string(), error: e.to_string() })?;
+    entries.sort_by_key(|entry| path_bytes(&entry.file_name().into()));
+    for entry in entries {
+        let path = entry.path(); let rel = path.strip_prefix(root).map_err(|_| unavailable_manifest("external path escaped mount"))?;
+        let meta = std::fs::symlink_metadata(&path).map_err(|_| unavailable_manifest("external traversal changed"))?;
+        if meta.file_type().is_dir() { collect_external_dir(root, &path, declaration, states)?; } else {
+            let bytes = path_bytes(rel);
+            states.push(ExternalState { id: declaration.id.as_bytes().to_vec(), locator: declaration.locator.as_bytes().to_vec(), path: bytes.clone(), state: classify_worktree_entry(root, &bytes, false)? });
+        }
+    }
+    Ok(())
 }
 
 // ─── Internal: git command helpers ──────────────────────────────────────────
@@ -790,6 +957,18 @@ impl CanonicalStream {
             self.field(state.type_tag);
             self.field(state.mode_tag);
             self.field(&state.content);
+        }
+    }
+
+    fn write_external_states(&mut self, states: &[ExternalState]) {
+        self.u64(states.len() as u64);
+        for external in states {
+            self.field(&external.id);
+            self.field(&external.locator);
+            self.field(&external.path);
+            self.field(external.state.type_tag);
+            self.field(external.state.mode_tag);
+            self.field(&external.state.content);
         }
     }
 
