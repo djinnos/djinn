@@ -10,8 +10,8 @@ use crate::types::{
 use djinn_core::events::{DjinnEventEnvelope, EventBus};
 use djinn_core::models::{Model, Pricing, Provider};
 use djinn_db::{
-    ProposalCreateInput, ProposalRepository, SessionRepository, TaskRepository, UserRepository,
-    UserSettingsRepository,
+    AdmissionDomain, AdmissionJournalRepository, AdmissionState, ProposalCreateInput,
+    ProposalRepository, SessionRepository, TaskRepository, UserRepository, UserSettingsRepository,
 };
 use djinn_provider::catalog::CatalogService;
 use djinn_provider::catalog::health::HealthTracker;
@@ -305,6 +305,15 @@ async fn at_cap_refinement_defers_and_repeated_ticks_are_noops() {
     set_user_cap(&db, &fixture.user_id, TEST_MODEL, 1).await;
 
     let mut actor = build_refinement_actor(&db, &events_tx, pool.clone());
+    let journal = Arc::new(AdmissionJournalRepository::new(db.clone()));
+    actor.build_admission = Some(Arc::new(
+        crate::build_admission::BuildAdmissionController::new(
+            journal.clone(),
+            crate::build_admission::BuildAdmissionMode::Enforce,
+            2,
+            "refinement-route-test",
+        ),
+    ));
     seed_refinement_state(
         &mut actor,
         &fixture.proposal_id,
@@ -378,6 +387,14 @@ async fn at_cap_refinement_defers_and_repeated_ticks_are_noops() {
         refinement_tasks.is_empty(),
         "no refinement tasks should have been created during at-cap deferrals"
     );
+    assert_eq!(
+        journal
+            .count_task_or_warm_occupancy()
+            .await
+            .expect("count admission occupancy"),
+        0,
+        "cap denial must not create an admission journal row",
+    );
 
     // Clean up: release the blocking session.
     SessionRepository::new(db.clone(), EventBus::noop())
@@ -413,6 +430,15 @@ async fn capacity_free_retry_dispatches_exactly_one_refinement() {
     set_user_cap(&db, &fixture.user_id, TEST_MODEL, 1).await;
 
     let mut actor = build_refinement_actor(&db, &events_tx, pool.clone());
+    let journal = Arc::new(AdmissionJournalRepository::new(db.clone()));
+    actor.build_admission = Some(Arc::new(
+        crate::build_admission::BuildAdmissionController::new(
+            journal.clone(),
+            crate::build_admission::BuildAdmissionMode::Enforce,
+            2,
+            "refinement-route-test",
+        ),
+    ));
     seed_refinement_state(
         &mut actor,
         &fixture.proposal_id,
@@ -469,6 +495,18 @@ async fn capacity_free_retry_dispatches_exactly_one_refinement() {
         1,
         "exactly one refinement task should exist"
     );
+
+    // The durable journal must be CreateStarted before the pool accepts the request.
+    let journal_rows = journal
+        .list_history(AdmissionDomain::TaskObservation, &refinement_tasks[0].id)
+        .await
+        .expect("read refinement admission history");
+    assert_eq!(
+        journal_rows.len(),
+        1,
+        "refinement route reserves exactly one generation"
+    );
+    assert_eq!(journal_rows[0].state, AdmissionState::CreateUnknown);
 
     // The state machine should have recorded one spawn.
     let state = &actor.active_refinements[&fixture.proposal_id];

@@ -690,7 +690,15 @@ impl CoordinatorActor {
             )
             .await
         {
-            Ok(BuildAdmissionDecision::Permitted { permit, .. }) => {
+            Ok(BuildAdmissionDecision::Permitted { permit, idempotent }) => {
+                // A deterministic retry retains the original permit and its
+                // CreateUnknown/Live journal state. Replaying CreateStarted is
+                // only valid while the original create is in flight, so do not
+                // turn an ambiguous accepted create into a false pre-create
+                // failure before the retry reaches the pool.
+                if idempotent {
+                    return Ok(Some(permit));
+                }
                 if let Err(error) = controller
                     .transition(&permit, WarmAdmissionTransition::CreateStarted)
                     .await
