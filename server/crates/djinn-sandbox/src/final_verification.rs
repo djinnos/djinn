@@ -110,8 +110,7 @@ fn launch_with_backend_check(
         backend_check,
         |worktree, runtimes, externals, outputs| {
             enter_isolated_network_namespace().map_err(|_| ())?;
-            apply_filesystem_policy(worktree, runtimes, externals, outputs)
-                .map_err(|_| ())
+            apply_filesystem_policy(worktree, runtimes, externals, outputs).map_err(|_| ())
         },
     )
 }
@@ -120,9 +119,9 @@ fn launch_with_backend_and_setup(
     request: FinalVerificationRequest,
     backend_check: impl FnOnce() -> Result<(), FinalVerificationError>,
     isolation_setup: impl Fn(&Path, &[PathBuf], &[PathBuf], &[PathBuf]) -> Result<(), ()>
-        + Send
-        + Sync
-        + 'static,
+    + Send
+    + Sync
+    + 'static,
 ) -> Result<FinalVerificationResult, FinalVerificationError> {
     let prepared = PreparedRequest::new(request)?;
     // Request validation performs no mutation, so report a pre-existing output
@@ -518,9 +517,11 @@ mod tests {
     #[test]
     fn actual_isolation_setup_failure_is_backend_unavailable() {
         let worktree = TempDir::new().unwrap();
-        let error = launch_with_backend_and_setup(request(worktree.path()), || Ok(()), |_, _, _, _| {
-            Err(())
-        })
+        let error = launch_with_backend_and_setup(
+            request(worktree.path()),
+            || Ok(()),
+            |_, _, _, _| Err(()),
+        )
         .unwrap_err();
 
         assert!(matches!(
