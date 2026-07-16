@@ -177,6 +177,55 @@ impl StrandedReadyCheck {
                 .with_evidence(evidence),
         )
     }
+
+    fn attribution_finding_for(raw: &serde_json::Value) -> Option<Finding> {
+        let reason = raw.get("reason")?.as_str()?;
+        if !matches!(
+            reason,
+            "legacy_null_creator" | "unresolvable_creation_provenance"
+        ) || raw.get("gate_verdict").and_then(|value| value.as_str()) != Some("blocked")
+        {
+            return None;
+        }
+        let id = raw.get("id")?.as_str()?.to_owned();
+        let short_id = raw.get("short_id")?.as_str()?.to_owned();
+        let title = raw.get("title")?.as_str()?.to_owned();
+        let status = raw.get("status")?.as_str()?.to_owned();
+        let provenance = raw.get("creation_provenance")?.clone();
+        let inputs = json!({
+            "id": id.clone(),
+            "short_id": short_id.clone(),
+            "status": status.clone(),
+            "reason": reason,
+            "gate_verdict": "blocked",
+            "creation_provenance": provenance.clone(),
+        });
+        let snapshot = ResolverSnapshot::new(
+            "resolve_task_creator_attribution",
+            inputs,
+            json!({ "dispatchable": false, "reason": reason }),
+        );
+        let evidence = json!({
+            "task_id": id,
+            "short_id": short_id,
+            "title": title,
+            "status": status,
+            "reason": reason,
+            "gate_verdict": "blocked",
+            "creation_provenance": provenance,
+        });
+        Some(
+            Finding::new(
+                FindingSeverity::Error,
+                STRANDED_READY_CHECK_NAME,
+                snapshot,
+                format!("task {short_id} ({title}) has blocked creation attribution: {reason}"),
+            )
+            .with_entity_id("task_id", id)
+            .with_entity_id("short_id", short_id)
+            .with_evidence(evidence),
+        )
+    }
 }
 
 impl DoctorCheck for StrandedReadyCheck {
@@ -194,7 +243,8 @@ impl DoctorCheck for StrandedReadyCheck {
 
     fn run(&self) -> DoctorResult<Vec<Finding>> {
         let snapshot = self.source.snapshot();
-        let findings_array = snapshot
+        let stranded_snapshot = snapshot.get("stranded_ready").unwrap_or(&snapshot);
+        let findings_array = stranded_snapshot
             .get("findings")
             .and_then(|v| v.as_array())
             .map(|a| a.as_slice())
@@ -213,6 +263,21 @@ impl DoctorCheck for StrandedReadyCheck {
                         "stranded_ready doctor: skipping malformed stranded-ready candidate"
                     );
                 }
+            }
+        }
+        let attribution_findings = snapshot
+            .get("attribution_findings")
+            .and_then(|section| section.get("findings"))
+            .and_then(|findings| findings.as_array())
+            .map(|findings| findings.as_slice())
+            .unwrap_or(&[]);
+        for raw in attribution_findings {
+            match Self::attribution_finding_for(raw) {
+                Some(finding) => findings.push(finding),
+                None => warn!(
+                    raw = %raw,
+                    "stranded_ready doctor: skipping malformed attribution candidate"
+                ),
             }
         }
         Ok(findings)
@@ -271,10 +336,10 @@ impl TaskRepositoryStrandedReadySource {
             crate::events::event_bus_for(&self.events_tx),
         );
         let snapshot = match task_repo.board_health(30).await {
-            Ok(report) => report
-                .get("stranded_ready")
-                .cloned()
-                .unwrap_or_else(|| json!({})),
+            Ok(report) => json!({
+                "stranded_ready": report.get("stranded_ready").cloned().unwrap_or_else(|| json!({})),
+                "attribution_findings": report.get("attribution_findings").cloned().unwrap_or_else(|| json!({})),
+            }),
             Err(error) => {
                 warn!(
                     error = %error,
@@ -458,6 +523,35 @@ mod tests {
             findings.is_empty(),
             "a candidate with a non-stranded gate verdict must be skipped"
         );
+    }
+
+    #[test]
+    fn blocked_attribution_finding_is_reported_without_stranded_age() {
+        let source = Arc::new(MemoryStrandedReadySource::new(json!({
+            "stranded_ready": snapshot_with(Vec::new()),
+            "attribution_findings": {
+                "findings": [{
+                    "id": "task-id-legacy",
+                    "short_id": "legacy",
+                    "title": "Legacy task",
+                    "status": "open",
+                    "reason": "legacy_null_creator",
+                    "gate_verdict": "blocked",
+                    "creation_provenance": {
+                        "source": "tasks.created_by_user_id",
+                        "creator_user_id": null,
+                        "creator_resolved": false,
+                        "resolution": "unresolved",
+                    },
+                }],
+            },
+        })));
+        let findings = StrandedReadyCheck::new(source).run().expect("run");
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].severity, FindingSeverity::Error);
+        assert_eq!(findings[0].resolver_snapshot.outputs["reason"], "legacy_null_creator");
+        assert_eq!(findings[0].evidence["gate_verdict"], "blocked");
+        assert_eq!(findings[0].evidence["creation_provenance"]["creator_resolved"], false);
     }
 
     #[test]

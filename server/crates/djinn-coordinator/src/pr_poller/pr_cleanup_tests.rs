@@ -11,7 +11,7 @@ use djinn_provider::github_api::{
 use time::OffsetDateTime;
 
 use super::pr_cleanup::{
-    BranchCleanupOutcome, PrCleanupGitHub, PrCleanupPolicy, PrCleanupPolicyConfig,
+    BranchCleanupOutcome, PrCleanupGitHub, PrCleanupPolicy, PrCleanupPolicyConfig, PrCleanupTarget,
 };
 
 #[derive(Clone, Default)]
@@ -107,58 +107,11 @@ fn policy(
     )
 }
 
-fn task(closed_at: Option<&str>, updated_at: &str) -> djinn_core::models::Task {
-    djinn_core::models::Task {
-        id: "019ee79c-b0fc-78e1-9fc4-581236e47df5".to_string(),
-        project_id: "project".to_string(),
+fn target(closed_at: Option<&str>, updated_at: &str) -> PrCleanupTarget {
+    PrCleanupTarget {
         short_id: "b111".to_string(),
-        epic_id: Some("5rqu".to_string()),
-        title: "task".to_string(),
-        description: String::new(),
-        design: String::new(),
-        issue_type: "task".to_string(),
-        status: "closed".to_string(),
-        priority: 0,
-        owner: String::new(),
-        labels: "[]".to_string(),
-        acceptance_criteria: "[]".to_string(),
-        reopen_count: 0,
-        continuation_count: 0,
-        total_reopen_count: 0,
-        intervention_count: 0,
-        last_intervention_at: None,
-        created_at: "2026-06-20T12:00:00Z".to_string(),
         updated_at: updated_at.to_string(),
         closed_at: closed_at.map(str::to_string),
-        close_reason: Some("force_close".to_string()),
-        merge_commit_sha: None,
-        pr_url: Some("https://github.com/djinnos/djinn/pull/1".to_string()),
-        merge_conflict_metadata: None,
-        memory_refs: "[]".to_string(),
-        agent_type: None,
-        created_by_user_id: None,
-        ci_status: "unknown".to_string(),
-        ci_head_sha: None,
-        ci_pr_number: None,
-        ci_blocking_required_check_names: "[]".to_string(),
-        ci_failure_fingerprint: None,
-        ci_first_seen_at: None,
-        ci_last_seen_at: None,
-        ci_same_signature_count: 0,
-        ci_last_remediation_base_sha: None,
-        ci_mirror_head_sha: None,
-        ci_github_head_sha: None,
-        ci_heads_diverged: None,
-        ci_head_observation_error: None,
-        ci_mq_state: None,
-        ci_mq_run_id: None,
-        ci_mq_head_sha: None,
-        ci_mq_failed_check_names: None,
-        ci_mq_failure_fingerprint: None,
-        ci_mq_same_signature_count: None,
-        ci_mq_first_seen_at: None,
-        ci_mq_last_seen_at: None,
-        unresolved_blocker_count: 0,
     }
 }
 
@@ -198,8 +151,8 @@ async fn pr_cleanup_skips_when_policy_disabled() {
 
     assert!(
         !cleanup
-            .should_cleanup_pr(
-                &task(Some("2026-06-21T11:00:00Z"), "2026-06-21T11:00:00Z"),
+            .should_cleanup_pr_for_target(
+                &target(Some("2026-06-21T11:00:00Z"), "2026-06-21T11:00:00Z"),
                 &pr(1, "djinn-bot[bot]", "task/b111", "main"),
             )
             .await
@@ -213,8 +166,8 @@ async fn pr_cleanup_skips_within_grace_period_using_closed_at() {
 
     assert!(
         !cleanup
-            .should_cleanup_pr(
-                &task(Some("2026-06-21T11:55:00Z"), "2026-06-21T10:00:00Z"),
+            .should_cleanup_pr_for_target(
+                &target(Some("2026-06-21T11:55:00Z"), "2026-06-21T10:00:00Z"),
                 &pr(1, "djinn-bot[bot]", "task/b111", "main"),
             )
             .await
@@ -228,8 +181,8 @@ async fn pr_cleanup_uses_updated_at_when_closed_at_missing() {
 
     assert!(
         !cleanup
-            .should_cleanup_pr(
-                &task(None, "2026-06-21T11:55:00Z"),
+            .should_cleanup_pr_for_target(
+                &target(None, "2026-06-21T11:55:00Z"),
                 &pr(1, "djinn-bot[bot]", "task/b111", "main"),
             )
             .await
@@ -243,8 +196,8 @@ async fn pr_cleanup_skips_human_authored_prs() {
 
     assert!(
         !cleanup
-            .should_cleanup_pr(
-                &task(Some("2026-06-21T10:00:00Z"), "2026-06-21T10:00:00Z"),
+            .should_cleanup_pr_for_target(
+                &target(Some("2026-06-21T10:00:00Z"), "2026-06-21T10:00:00Z"),
                 &pr(1, "alice", "task/b111", "main"),
             )
             .await
@@ -260,8 +213,8 @@ async fn pr_cleanup_skips_merge_queue_prs() {
 
     assert!(
         !cleanup
-            .should_cleanup_pr(
-                &task(Some("2026-06-21T10:00:00Z"), "2026-06-21T10:00:00Z"),
+            .should_cleanup_pr_for_target(
+                &target(Some("2026-06-21T10:00:00Z"), "2026-06-21T10:00:00Z"),
                 &pr(1, "djinn-bot[bot]", "task/b111", "main"),
             )
             .await
@@ -275,8 +228,8 @@ async fn pr_cleanup_allows_bot_pr_after_guardrails_pass() {
 
     assert!(
         cleanup
-            .should_cleanup_pr(
-                &task(Some("2026-06-21T10:00:00Z"), "2026-06-21T10:00:00Z"),
+            .should_cleanup_pr_for_target(
+                &target(Some("2026-06-21T10:00:00Z"), "2026-06-21T10:00:00Z"),
                 &pr(1, "djinn-bot[bot]", "task/b111", "main"),
             )
             .await
@@ -290,8 +243,8 @@ async fn branch_cleanup_skips_protected_branches() {
 
     assert!(
         !cleanup
-            .should_delete_branch(
-                &task(Some("2026-06-21T10:00:00Z"), "2026-06-21T10:00:00Z"),
+            .delete_branch_if_allowed_for_target(
+                &target(Some("2026-06-21T10:00:00Z"), "2026-06-21T10:00:00Z"),
                 "main",
             )
             .await
@@ -312,8 +265,8 @@ async fn branch_cleanup_skips_branch_used_as_base_of_open_pr() {
 
     assert!(
         !cleanup
-            .should_delete_branch(
-                &task(Some("2026-06-21T10:00:00Z"), "2026-06-21T10:00:00Z"),
+            .delete_branch_if_allowed_for_target(
+                &target(Some("2026-06-21T10:00:00Z"), "2026-06-21T10:00:00Z"),
                 "task/b111",
             )
             .await
@@ -329,8 +282,8 @@ async fn branch_cleanup_dry_run_does_not_delete_ref() {
     let cleanup = policy(github.clone(), cfg);
 
     let outcome = cleanup
-        .delete_branch_if_allowed(
-            &task(Some("2026-06-21T10:00:00Z"), "2026-06-21T10:00:00Z"),
+        .delete_branch_if_allowed_for_target(
+            &target(Some("2026-06-21T10:00:00Z"), "2026-06-21T10:00:00Z"),
             "refs/heads/task/b111",
         )
         .await
@@ -346,8 +299,8 @@ async fn branch_cleanup_deletes_ref_when_guardrails_pass() {
     let cleanup = policy(github.clone(), config());
 
     let outcome = cleanup
-        .delete_branch_if_allowed(
-            &task(Some("2026-06-21T10:00:00Z"), "2026-06-21T10:00:00Z"),
+        .delete_branch_if_allowed_for_target(
+            &target(Some("2026-06-21T10:00:00Z"), "2026-06-21T10:00:00Z"),
             "task/b111",
         )
         .await

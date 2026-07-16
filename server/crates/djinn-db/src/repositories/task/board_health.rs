@@ -22,6 +22,8 @@ use sqlx::Row;
 const LIVENESS_OUTCOMES_LIMIT: i64 = 25;
 /// Bounded number of recent protocol-violation rows surfaced.
 const PROTOCOL_VIOLATIONS_LIMIT: i64 = 15;
+/// Bounded number of nullable-era creator-attribution findings surfaced.
+const ATTRIBUTION_FINDINGS_LIMIT: i64 = 100;
 /// Base stranded-ready threshold: a ready task unclaimed for this many minutes
 /// is `warning`; ≥2× is `error`; ≥6× is `critical`.
 const STRANDED_THRESHOLD_MINUTES: i64 = 30;
@@ -210,6 +212,66 @@ pub(super) async fn protocol_violations_section(pool: &sqlx::PgPool) -> serde_js
         "total":  total,
         "recent": recent,
     })
+}
+
+/// Nullable-era creation attribution that cannot safely be dispatched.
+///
+/// This is independent of stranded-ready age: updating a legacy task must not
+/// hide its missing creator until it crosses an age threshold. The task creator
+/// is the durable creation-provenance pointer; NULL is a legacy row, while a
+/// dangling pointer is unresolvable provenance from an import or restore.
+pub(super) async fn attribution_findings_section(pool: &sqlx::PgPool) -> serde_json::Value {
+    let rows = sqlx::query(
+        r#"SELECT t.id, t.short_id, t.title, t.status, t.created_at, t.updated_at,
+                  t.created_by_user_id, u.id AS resolved_creator_user_id
+           FROM tasks t
+           LEFT JOIN users u ON u.id = t.created_by_user_id
+           WHERE t.status NOT IN ('closed', 'approved')
+             AND (t.created_by_user_id IS NULL OR u.id IS NULL)
+           ORDER BY t.updated_at DESC
+           LIMIT $1"#,
+    )
+    .bind(ATTRIBUTION_FINDINGS_LIMIT)
+    .fetch_all(pool)
+    .await
+    .unwrap_or_default();
+
+    let findings: Vec<serde_json::Value> = rows
+        .into_iter()
+        .map(|row| {
+            let creator_user_id: Option<String> =
+                row.try_get("created_by_user_id").ok().flatten();
+            let creator_resolved = row
+                .try_get::<Option<String>, _>("resolved_creator_user_id")
+                .ok()
+                .flatten()
+                .is_some();
+            let reason = if creator_user_id.is_none() {
+                "legacy_null_creator"
+            } else {
+                "unresolvable_creation_provenance"
+            };
+            serde_json::json!({
+                "id": row.get::<String, _>("id"),
+                "short_id": row.get::<String, _>("short_id"),
+                "title": row.get::<String, _>("title"),
+                "status": row.get::<String, _>("status"),
+                "created_at": row.get::<String, _>("created_at"),
+                "updated_at": row.get::<String, _>("updated_at"),
+                "reason": reason,
+                "gate_verdict": "blocked",
+                "dispatchable": false,
+                "creation_provenance": {
+                    "source": "tasks.created_by_user_id",
+                    "creator_user_id": creator_user_id,
+                    "creator_resolved": creator_resolved,
+                    "resolution": "unresolved",
+                },
+            })
+        })
+        .collect();
+
+    serde_json::json!({ "total": findings.len(), "findings": findings })
 }
 
 /// Ready/dispatchable tasks with no active running session whose unclaimed
@@ -713,6 +775,34 @@ mod tests {
         .await
         .unwrap();
         id
+    }
+
+    #[tokio::test]
+    async fn attribution_section_reports_null_creator_without_age_threshold() {
+        let db = Database::open_in_memory().unwrap();
+        let project = project(&db).await;
+        let epic = epic(&db, &project, "open").await;
+        let task_id = task(&db, &epic, "open").await;
+
+        let section = attribution_findings_section(db.pool()).await;
+        let finding = section["findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|finding| finding["id"] == task_id)
+            .expect("fresh nullable-era task must be reported");
+        assert_eq!(finding["reason"], "legacy_null_creator");
+        assert_eq!(finding["gate_verdict"], "blocked");
+        assert_eq!(finding["dispatchable"], false);
+        assert_eq!(
+            finding["creation_provenance"]["source"],
+            "tasks.created_by_user_id"
+        );
+        assert_eq!(
+            finding["creation_provenance"]["creator_user_id"],
+            serde_json::Value::Null
+        );
+        assert_eq!(finding["creation_provenance"]["creator_resolved"], false);
     }
 
     async fn proposal(db: &Database, status: &str) -> String {
