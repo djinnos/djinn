@@ -317,14 +317,8 @@ impl NoteRepository {
         index_links_for_note(tx, note_id, &command.project_id, content).await?;
         let link_title = metadata.map_or(&before.title, |state| &state.title);
         let link_permalink = metadata.map_or(&before.permalink, |state| &state.permalink);
-        resolve_links_for_note(
-            tx,
-            note_id,
-            link_title,
-            link_permalink,
-            &command.project_id,
-        )
-        .await?;
+        resolve_links_for_note(tx, note_id, link_title, link_permalink, &command.project_id)
+            .await?;
         let note = locked_note(tx, note_id, &command.project_id).await?;
         let seq = next_sequence(tx, &command.project_id, note_id).await?;
         let (content_before, content_after) =

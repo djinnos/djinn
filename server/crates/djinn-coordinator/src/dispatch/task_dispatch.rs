@@ -3143,17 +3143,17 @@ mod inflight_ledger_tests {
         }
     }
 
-    const WND1_READY_TASK_COUNT: usize = 10;
-    const WND1_STABLE_MODEL_ID: &str = "test/mock";
+    pub(super) const WND1_READY_TASK_COUNT: usize = 10;
+    pub(super) const WND1_STABLE_MODEL_ID: &str = "test/mock";
     const WND1_DISPATCH_SETTLE_TIMEOUT: Duration = Duration::from_secs(10);
-    const WND1_CONTROLLED_RUNTIME_GUARD: Duration = Duration::from_secs(60);
+    pub(super) const WND1_CONTROLLED_RUNTIME_GUARD: Duration = Duration::from_secs(60);
 
-    struct Wnd1DispatchFixture {
-        project_id: String,
-        project_path: String,
-        created_by_user_id: String,
-        model_id: String,
-        task_ids: Vec<String>,
+    pub(super) struct Wnd1DispatchFixture {
+        pub(super) project_id: String,
+        pub(super) project_path: String,
+        pub(super) created_by_user_id: String,
+        pub(super) model_id: String,
+        pub(super) task_ids: Vec<String>,
     }
 
     #[derive(Clone)]
@@ -3242,7 +3242,7 @@ mod inflight_ledger_tests {
         }
     }
 
-    async fn seed_wnd1_ready_worker_tasks(
+    pub(super) async fn seed_wnd1_ready_worker_tasks(
         db: &djinn_db::Database,
         count: usize,
     ) -> Wnd1DispatchFixture {
@@ -3392,7 +3392,7 @@ mod inflight_ledger_tests {
         }
     }
 
-    async fn configure_wnd1_user_max_sessions(
+    pub(super) async fn configure_wnd1_user_max_sessions(
         db: &djinn_db::Database,
         user_id: &str,
         model_id: &str,
@@ -7501,5 +7501,1005 @@ mod throttle_deprioritization_tests {
         deprioritize_throttle_cooling(&health, SCOPE, &mut model_ids);
         // No candidate is lost; order among the cooling group is preserved.
         assert_eq!(model_ids, ids(&["model-a", "model-b"]));
+    }
+}
+
+/// Deterministic injected-controller route tests for the task-run admission
+/// lifecycle.
+///
+/// These tests exercise the **actual** coordinator dispatch/resume/escalation
+/// routes with an injected [`BuildAdmissionController`] and a controlled slot
+/// pool. They prove that each route durably records reservation/CreateStarted
+/// in the admission journal **before** the slot pool create side effect is
+/// observed, and that the Observe/Off/Enforce controller modes and lifecycle
+/// callbacks behave correctly through the wired route.
+#[cfg(test)]
+mod build_admission_route_tests {
+    use super::inflight_ledger_tests::{
+        WND1_CONTROLLED_RUNTIME_GUARD, WND1_READY_TASK_COUNT, WND1_STABLE_MODEL_ID,
+        Wnd1DispatchFixture, configure_wnd1_user_max_sessions, seed_wnd1_ready_worker_tasks,
+    };
+    use super::*;
+    use crate::build_admission::{BuildAdmissionController, BuildAdmissionMode};
+    use djinn_db::{AdmissionDomain, AdmissionJournalRepository, AdmissionState, TaskRepository};
+    use futures::FutureExt;
+    use std::sync::{Arc as StdArc, Mutex as StdMutex};
+
+    // ─── Fixtures ─────────────────────────────────────────────────────────
+
+    /// Whether an occupying admission row existed at the moment the controlled
+    /// slot-pool runner callback fired.
+    ///
+    /// The exact state (CreateInFlight vs CreateUnknown) depends on whether
+    /// `finish_task_run_build_admission` raced ahead of the runner's first
+    /// await point, but the existence of ANY occupying row is the invariant:
+    /// it proves the reservation happened before the pool create side effect.
+    #[derive(Clone, Default)]
+    struct CreateTimeSnapshot {
+        row_existed: bool,
+    }
+
+    /// Controlled runtime that snapshots the admission journal at create time.
+    struct AdmissionRouteRuntime {
+        started_tx: tokio::sync::mpsc::UnboundedSender<String>,
+        releases: StdArc<StdMutex<HashMap<String, tokio::sync::oneshot::Sender<()>>>>,
+        snapshots: StdArc<StdMutex<HashMap<String, CreateTimeSnapshot>>>,
+        journal: StdArc<AdmissionJournalRepository>,
+    }
+
+    impl AdmissionRouteRuntime {
+        fn new(
+            journal: StdArc<AdmissionJournalRepository>,
+        ) -> (Self, tokio::sync::mpsc::UnboundedReceiver<String>) {
+            let (started_tx, started_rx) = tokio::sync::mpsc::unbounded_channel();
+            (
+                Self {
+                    started_tx,
+                    releases: StdArc::new(StdMutex::new(HashMap::new())),
+                    snapshots: StdArc::new(StdMutex::new(HashMap::new())),
+                    journal,
+                },
+                started_rx,
+            )
+        }
+
+        fn spawn_pool(
+            &self,
+            db: &djinn_db::Database,
+            cancel: tokio_util::sync::CancellationToken,
+            max_slots: u32,
+        ) -> djinn_slot::SlotPoolHandle {
+            let started_tx = self.started_tx.clone();
+            let releases = self.releases.clone();
+            let snapshots = self.snapshots.clone();
+            let journal = self.journal.clone();
+            djinn_slot::SlotPoolHandle::spawn_with_factory(
+                crate::test_helpers::agent_context_from_db(db.clone(), cancel.clone()),
+                cancel,
+                djinn_slot::SlotPoolConfig {
+                    models: vec![djinn_slot::ModelSlotConfig {
+                        model_id: WND1_STABLE_MODEL_ID.to_owned(),
+                        max_slots,
+                        roles: ["worker".to_owned(), "planner".to_owned()]
+                            .into_iter()
+                            .collect(),
+                    }],
+                    role_priorities: HashMap::new(),
+                },
+                StdArc::new(move |slot_id, model_id, event_tx, app_state, cancel| {
+                    let started_tx = started_tx.clone();
+                    let releases = releases.clone();
+                    let snapshots = snapshots.clone();
+                    let journal = journal.clone();
+                    let runner: djinn_slot::TestLifecycleRunner = StdArc::new(
+                        move |task_id,
+                              _project_path,
+                              _model_id,
+                              _app_state,
+                              kill,
+                              _pause,
+                              _resume_lifecycle_metadata| {
+                            let started_tx = started_tx.clone();
+                            let releases = releases.clone();
+                            let snapshots = snapshots.clone();
+                            let journal = journal.clone();
+                            Box::pin(async move {
+                                // ── CREATE-TIME SNAPSHOT ──
+                                // If a journal row exists for this task, the
+                                // reservation/CreateStarted happened before the
+                                // pool runner fired.
+                                let row_existed = journal
+                                    .list_history(AdmissionDomain::TaskObservation, &task_id)
+                                    .await
+                                    .map(|rows| {
+                                        rows.iter().any(|r| {
+                                            matches!(
+                                                r.state,
+                                                AdmissionState::CreateInFlight
+                                                    | AdmissionState::CreateUnknown
+                                                    | AdmissionState::Live
+                                                    | AdmissionState::Reserved
+                                            )
+                                        })
+                                    })
+                                    .unwrap_or(false);
+                                snapshots
+                                    .lock()
+                                    .expect("snapshot map mutex")
+                                    .insert(task_id.clone(), CreateTimeSnapshot { row_existed });
+
+                                let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+                                releases
+                                    .lock()
+                                    .expect("release map mutex")
+                                    .insert(task_id.clone(), release_tx);
+                                let _ = started_tx.send(task_id.clone());
+                                tokio::select! {
+                                    _ = release_rx => {}
+                                    _ = kill.cancelled() => {}
+                                    _ = tokio::time::sleep(WND1_CONTROLLED_RUNTIME_GUARD) => {}
+                                }
+                                Ok(())
+                            })
+                        },
+                    );
+                    djinn_slot::SlotHandle::spawn_with_test_runner(
+                        slot_id, model_id, event_tx, app_state, cancel, runner,
+                    )
+                }),
+            )
+        }
+
+        async fn release(&self, task_id: &str) {
+            let sender = self
+                .releases
+                .lock()
+                .expect("release map mutex")
+                .remove(task_id);
+            if let Some(sender) = sender {
+                let _ = sender.send(());
+            }
+        }
+
+        fn snapshot(&self, task_id: &str) -> CreateTimeSnapshot {
+            self.snapshots
+                .lock()
+                .expect("snapshot map mutex")
+                .get(task_id)
+                .cloned()
+                .unwrap_or_default()
+        }
+    }
+
+    fn build_route_actor(
+        db: &djinn_db::Database,
+        events_tx: &tokio::sync::broadcast::Sender<DjinnEventEnvelope>,
+        runtime: &AdmissionRouteRuntime,
+        max_slots: u32,
+    ) -> CoordinatorActor {
+        let cancel = tokio_util::sync::CancellationToken::new();
+        CoordinatorActor {
+            receiver: tokio::sync::mpsc::channel(1).1,
+            events: events_tx.subscribe(),
+            cancel: cancel.clone(),
+            tick: tokio::time::interval(STUCK_INTERVAL),
+            db: db.clone(),
+            events_tx: events_tx.clone(),
+            pool: runtime.spawn_pool(db, cancel, max_slots),
+            build_admission: None,
+            catalog: CatalogService::new(),
+            health: djinn_provider::catalog::health::HealthTracker::new(),
+            role_registry: std::sync::Arc::new(crate::roles::RoleRegistry::new()),
+            lsp: djinn_lsp::LspManager::new(),
+            self_sender: tokio::sync::mpsc::channel(1).0,
+            status_tx: tokio::sync::watch::channel(SharedCoordinatorState {
+                dispatched: 0,
+                recovered: 0,
+                epic_throughput: HashMap::new(),
+                pr_errors: HashMap::new(),
+                rate_limited_until: None,
+            })
+            .0,
+            dispatch_limit: 50,
+            model_priorities: HashMap::new(),
+            #[cfg(test)]
+            test_use_live_credential_resolution: false,
+            pr_errors: HashMap::new(),
+            last_dispatched: HashMap::new(),
+            inflight_dispatches: HashMap::new(),
+            provisional_admissions: HashMap::new(),
+            dispatch_cooldowns: HashMap::new(),
+            dispatch_failure_streak: HashMap::new(),
+            background_work_tracker: BackgroundWorkTracker::default(),
+            stranded_ready_source: None,
+            closed_parent_open_children_source: None,
+            auto_merge_tracker: AutoMergeTracker::default(),
+            consolidation_runner: std::sync::Arc::new(
+                crate::consolidation::DbConsolidationRunner::new(db.clone()),
+            ),
+            last_stale_sweep: StdInstant::now(),
+            last_auto_dispatch_sweep: StdInstant::now(),
+            last_proposal_review_sweep: StdInstant::now(),
+            last_graph_refresh: StdInstant::now(),
+            graph_warmer: None,
+            mirror: None,
+            runtime_ops: None,
+            rpc_registry: None,
+            prune_tick_counter: 0,
+            throughput_events: HashMap::new(),
+            pr_status_cache: HashMap::new(),
+            pr_draft_first_seen: HashMap::new(),
+            review_stuck_sha_first_seen: HashMap::new(),
+            merge_fail_count: HashMap::new(),
+            auto_approve_attempted: HashMap::new(),
+            delegated_to_github: HashMap::new(),
+            conversations_resolved: HashMap::new(),
+            handled_dequeues: HashMap::new(),
+            stall_killed: HashSet::new(),
+            stall_progress_watermark: HashMap::new(),
+            stall_cancel_streak: HashMap::new(),
+            stall_extension_count: HashMap::new(),
+            provider_failure_streak: HashMap::new(),
+            last_idle_consolidation: None,
+            idle_consolidation_cancel: None,
+            idle_consolidation_handle: None,
+            pr_cleanup_config: PrCleanupConfig::default(),
+            worker_lifecycle_config: crate::WorkerLifecycleConfig::default(),
+            active_refinements: HashMap::new(),
+            refinement_sessions: HashMap::new(),
+            dispatched: 0,
+            recovered: 0,
+        }
+    }
+
+    fn route_journal(db: &djinn_db::Database) -> StdArc<AdmissionJournalRepository> {
+        StdArc::new(AdmissionJournalRepository::new(db.clone()))
+    }
+
+    fn route_controller(
+        journal: &StdArc<AdmissionJournalRepository>,
+        mode: BuildAdmissionMode,
+        cap: i64,
+    ) -> StdArc<BuildAdmissionController> {
+        StdArc::new(BuildAdmissionController::new(
+            journal.clone(),
+            mode,
+            cap,
+            "route-test",
+        ))
+    }
+
+    /// Close every fixture task except `keep`, so only one task is ready for
+    /// dispatch.
+    async fn close_all_except(db: &djinn_db::Database, fixture: &Wnd1DispatchFixture, keep: &str) {
+        let task_repo = TaskRepository::new(db.clone(), djinn_core::events::EventBus::noop());
+        for id in fixture.task_ids.iter().filter(|id| *id != keep) {
+            task_repo
+                .set_status(id, "closed")
+                .await
+                .expect("close non-target fixture task");
+        }
+    }
+
+    // ─── AC1: Normal worker dispatch route ────────────────────────────────
+
+    /// Prove the normal worker dispatch route records an admission row BEFORE
+    /// the slot-pool create side effect fires.
+    ///
+    /// This test calls `dispatch_ready_tasks` (the actual production route)
+    /// without manually reserving admission first. The snapshot captured inside
+    /// the pool runner proves the journal already had an occupying admission
+    /// row when the create happened.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn normal_worker_route_reserves_before_pool_create() {
+        let db = crate::test_helpers::create_test_db();
+        let (events_tx, _events_rx) = tokio::sync::broadcast::channel(256);
+        let fixture = seed_wnd1_ready_worker_tasks(&db, WND1_READY_TASK_COUNT).await;
+        configure_wnd1_user_max_sessions(&db, &fixture.created_by_user_id, &fixture.model_id, 1)
+            .await;
+
+        let journal = route_journal(&db);
+        let controller = route_controller(&journal, BuildAdmissionMode::Enforce, 1);
+        let (runtime, mut started_rx) = AdmissionRouteRuntime::new(journal.clone());
+
+        let mut actor = build_route_actor(&db, &events_tx, &runtime, 1);
+        actor.build_admission = Some(controller.clone());
+
+        let task_id = fixture.task_ids[0].clone();
+        close_all_except(&db, &fixture, &task_id).await;
+
+        // Dispatch through the actual production route — no manual
+        // begin_task_run_build_admission call.
+        actor.dispatch_ready_tasks(Some(&fixture.project_id)).await;
+        assert_eq!(
+            actor.dispatched, 1,
+            "task must dispatch on the normal route"
+        );
+
+        let dispatched_id = started_rx
+            .recv()
+            .await
+            .expect("pool runner must fire for the dispatched task");
+        assert_eq!(dispatched_id, task_id);
+
+        // ── Proof: an occupying admission row existed in the journal BEFORE
+        // the pool runner fired ──
+        let snapshot = runtime.snapshot(&task_id);
+        assert!(
+            snapshot.row_existed,
+            "admission journal must have an occupying row when the pool runner \
+             fires — proving reservation/CreateStarted precedes the slot-pool \
+             create side effect on the normal worker route"
+        );
+
+        // After the pool accepted, the journal shows CreateUnknown.
+        let history = journal
+            .list_history(AdmissionDomain::TaskObservation, &task_id)
+            .await
+            .expect("read task admission history");
+        assert_eq!(history.len(), 1, "exactly one admission generation");
+        assert_eq!(
+            history[0].state,
+            AdmissionState::CreateUnknown,
+            "accepted pool create transitions to CreateUnknown"
+        );
+
+        runtime.release(&task_id).await;
+    }
+
+    // ─── AC1: Controlled resume route ─────────────────────────────────────
+
+    /// Prove a controlled-resume dispatch (worker with resume metadata) still
+    /// records an admission row before the pool create.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn controlled_resume_route_reserves_before_pool_create() {
+        let db = crate::test_helpers::create_test_db();
+        let (events_tx, _events_rx) = tokio::sync::broadcast::channel(256);
+        let fixture = seed_wnd1_ready_worker_tasks(&db, WND1_READY_TASK_COUNT).await;
+        configure_wnd1_user_max_sessions(&db, &fixture.created_by_user_id, &fixture.model_id, 1)
+            .await;
+
+        let journal = route_journal(&db);
+        let controller = route_controller(&journal, BuildAdmissionMode::Enforce, 1);
+        let (runtime, mut started_rx) = AdmissionRouteRuntime::new(journal.clone());
+
+        let mut actor = build_route_actor(&db, &events_tx, &runtime, 1);
+        actor.build_admission = Some(controller.clone());
+        // Enable resume-via-git so dispatch routes through
+        // dispatch_with_resume_metadata.
+        actor.worker_lifecycle_config.resume.enabled = true;
+
+        let task_id = fixture.task_ids[0].clone();
+        close_all_except(&db, &fixture, &task_id).await;
+
+        // Seed a checkpoint activity row so the resume selector produces
+        // non-None metadata → dispatch uses dispatch_with_resume_metadata.
+        let task_repo = TaskRepository::new(db.clone(), djinn_core::events::EventBus::noop());
+        let checkpoint_payload = serde_json::json!({
+            "event": "preservation_checkpoint_created",
+            "preservation_commit_sha": "abc123",
+            "preservation_ref_name": format!("task/checks/{}", "task"),
+        });
+        task_repo
+            .log_activity(
+                Some(&task_id),
+                "coordinator",
+                "system",
+                "comment",
+                &checkpoint_payload.to_string(),
+            )
+            .await
+            .expect("seed checkpoint activity");
+
+        actor.dispatch_ready_tasks(Some(&fixture.project_id)).await;
+        assert_eq!(
+            actor.dispatched, 1,
+            "task must dispatch on the resume route"
+        );
+
+        let dispatched_id = started_rx
+            .recv()
+            .await
+            .expect("pool runner must fire for the resumed task");
+        assert_eq!(dispatched_id, task_id);
+
+        let snapshot = runtime.snapshot(&task_id);
+        assert!(
+            snapshot.row_existed,
+            "controlled-resume route must have an admission row before the \
+             pool create fires"
+        );
+
+        runtime.release(&task_id).await;
+    }
+
+    // ─── AC1: Retry / planner-escalation route ────────────────────────────
+
+    /// Prove the planner-escalation dispatch route records an admission row
+    /// before the pool create.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn planner_escalation_route_reserves_before_pool_create() {
+        let db = crate::test_helpers::create_test_db();
+        let (events_tx, _events_rx) = tokio::sync::broadcast::channel(256);
+        let fixture = seed_wnd1_ready_worker_tasks(&db, WND1_READY_TASK_COUNT).await;
+        configure_wnd1_user_max_sessions(&db, &fixture.created_by_user_id, &fixture.model_id, 1)
+            .await;
+
+        let journal = route_journal(&db);
+        let controller = route_controller(&journal, BuildAdmissionMode::Enforce, 1);
+        let (runtime, mut started_rx) = AdmissionRouteRuntime::new(journal.clone());
+
+        let mut actor = build_route_actor(&db, &events_tx, &runtime, 1);
+        actor.build_admission = Some(controller.clone());
+
+        // Close all fixture tasks so the source task doesn't also dispatch.
+        let source_task_id = fixture.task_ids[0].clone();
+        close_all_except(&db, &fixture, &source_task_id).await;
+        // Also close the source so it doesn't dispatch as a worker — the
+        // planner escalation creates its OWN review task.
+        let task_repo = TaskRepository::new(db.clone(), djinn_core::events::EventBus::noop());
+        task_repo
+            .set_status(&source_task_id, "closed")
+            .await
+            .expect("close source task");
+
+        // Dispatch through the actual planner-escalation route.
+        actor
+            .dispatch_planner_escalation(
+                &source_task_id,
+                "test planner escalation reason",
+                &fixture.project_id,
+            )
+            .await;
+        assert_eq!(
+            actor.dispatched, 1,
+            "planner escalation must dispatch through the route"
+        );
+
+        let dispatched_id = started_rx
+            .recv()
+            .await
+            .expect("pool runner must fire for the planner task");
+        assert_ne!(
+            dispatched_id, source_task_id,
+            "planner escalation creates a new review task"
+        );
+
+        let snapshot = runtime.snapshot(&dispatched_id);
+        assert!(
+            snapshot.row_existed,
+            "planner-escalation route must have an admission row before the \
+             pool create fires"
+        );
+
+        // The review task's admission history must show exactly one generation.
+        let history = journal
+            .list_history(AdmissionDomain::TaskObservation, &dispatched_id)
+            .await
+            .expect("read planner admission history");
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].state, AdmissionState::CreateUnknown);
+
+        runtime.release(&dispatched_id).await;
+    }
+
+    // ─── AC2: Enforce denial leaves task queued without failure attribution ─
+
+    /// Prove Enforce cap denial performs zero slot-pool creates and leaves the
+    /// task queued/ready with no provider/model failure attribution, dispatch-
+    /// failure streak increment, or cooldown.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn enforce_denial_no_create_no_failure_attribution() {
+        let db = crate::test_helpers::create_test_db();
+        let (events_tx, _events_rx) = tokio::sync::broadcast::channel(256);
+        let fixture = seed_wnd1_ready_worker_tasks(&db, WND1_READY_TASK_COUNT).await;
+        configure_wnd1_user_max_sessions(&db, &fixture.created_by_user_id, &fixture.model_id, 1)
+            .await;
+
+        let journal = route_journal(&db);
+        // cap=0 → first admission is denied.
+        let controller = route_controller(&journal, BuildAdmissionMode::Enforce, 0);
+        let (runtime, _started_rx) = AdmissionRouteRuntime::new(journal.clone());
+
+        let mut actor = build_route_actor(&db, &events_tx, &runtime, 5);
+        actor.build_admission = Some(controller.clone());
+
+        let task_id = fixture.task_ids[0].clone();
+        close_all_except(&db, &fixture, &task_id).await;
+
+        actor.dispatch_ready_tasks(Some(&fixture.project_id)).await;
+        assert_eq!(
+            actor.dispatched, 0,
+            "Enforce denial must not dispatch the task"
+        );
+
+        // Zero occupancy — no admission row was created.
+        assert_eq!(
+            journal.count_task_or_warm_occupancy().await.expect("count"),
+            0,
+            "Enforce denial must create no admission journal row"
+        );
+
+        // ── No failure attribution ──
+        assert!(
+            !actor.dispatch_failure_streak.contains_key(&task_id),
+            "Enforce denial must not increment the dispatch-failure streak"
+        );
+        assert!(
+            !actor.provider_failure_streak.contains_key(&task_id),
+            "Enforce denial must not increment the provider-failure streak"
+        );
+        assert!(
+            !actor.dispatch_cooldowns.contains_key(&task_id),
+            "Enforce denial must not apply a dispatch cooldown"
+        );
+        assert!(
+            actor
+                .health
+                .is_available(Some(&fixture.created_by_user_id), &fixture.model_id),
+            "Enforce denial must not mark the model unhealthy"
+        );
+
+        // ── Task remains queued/ready ──
+        let task_repo = TaskRepository::new(db.clone(), djinn_core::events::EventBus::noop());
+        let task = task_repo
+            .get(&task_id)
+            .await
+            .expect("fetch denied task")
+            .expect("task exists");
+        assert_eq!(
+            task.status, "open",
+            "Enforce denial must leave the task queued/open"
+        );
+    }
+
+    // ─── AC2: Observe mode creates and records would-defer ────────────────
+
+    /// Prove Observe mode never cap-denies: dispatch proceeds at/over cap and
+    /// the would-defer observation is recorded.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn observe_mode_dispatches_and_records_would_defer() {
+        let db = crate::test_helpers::create_test_db();
+        let (events_tx, _events_rx) = tokio::sync::broadcast::channel(256);
+        let fixture = seed_wnd1_ready_worker_tasks(&db, WND1_READY_TASK_COUNT).await;
+        // Per-user cap=2 so two tasks dispatch, the Observe controller cap=1
+        // records would-defer for the second.
+        configure_wnd1_user_max_sessions(&db, &fixture.created_by_user_id, &fixture.model_id, 2)
+            .await;
+
+        let journal = route_journal(&db);
+        let controller = route_controller(&journal, BuildAdmissionMode::Observe, 1);
+        let (runtime, mut started_rx) = AdmissionRouteRuntime::new(journal.clone());
+
+        let mut actor = build_route_actor(&db, &events_tx, &runtime, 2);
+        actor.build_admission = Some(controller.clone());
+
+        let first_task = fixture.task_ids[0].clone();
+        let second_task = fixture.task_ids[1].clone();
+        // Close all except first two so only two tasks are ready.
+        let task_repo = TaskRepository::new(db.clone(), djinn_core::events::EventBus::noop());
+        for id in fixture
+            .task_ids
+            .iter()
+            .filter(|id| **id != first_task && **id != second_task)
+        {
+            task_repo
+                .set_status(id, "closed")
+                .await
+                .expect("close non-target fixture task");
+        }
+
+        actor.dispatch_ready_tasks(Some(&fixture.project_id)).await;
+        assert!(
+            actor.dispatched >= 1,
+            "Observe mode must dispatch at least one task"
+        );
+
+        // Consume all started signals.
+        for _ in 0..actor.dispatched {
+            let started = started_rx.recv().await.expect("pool create fires");
+            let snap = runtime.snapshot(&started);
+            assert!(
+                snap.row_existed,
+                "Observe mode must have an admission row before pool create \
+                 for task {started}"
+            );
+        }
+
+        // Observe mode records would-defer when occupancy >= cap (the second
+        // admission sees occupancy 1 >= cap 1).
+        let would_defer = controller.would_defer_observation_count().await;
+        assert!(
+            would_defer >= 1,
+            "Observe mode must record at least one would-defer observation when \
+             occupancy reaches cap"
+        );
+
+        // Observe creates durable rows.
+        let occupancy = journal.count_task_or_warm_occupancy().await.expect("count");
+        assert!(
+            occupancy >= 1,
+            "Observe mode must create durable admission rows for dispatched tasks"
+        );
+
+        // Release all dispatched tasks.
+        for i in 0..actor.dispatched {
+            let id = if i == 0 { &first_task } else { &second_task };
+            runtime.release(id).await;
+        }
+    }
+
+    // ─── AC2: Off mode dispatches and leaves journal unchanged ────────────
+
+    /// Prove Off mode dispatches normally while leaving the admission journal
+    /// empty (no durable rows, no occupancy).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn off_mode_dispatches_and_leaves_journal_empty() {
+        let db = crate::test_helpers::create_test_db();
+        let (events_tx, _events_rx) = tokio::sync::broadcast::channel(256);
+        let fixture = seed_wnd1_ready_worker_tasks(&db, WND1_READY_TASK_COUNT).await;
+        configure_wnd1_user_max_sessions(&db, &fixture.created_by_user_id, &fixture.model_id, 1)
+            .await;
+
+        let journal = route_journal(&db);
+        let controller = route_controller(&journal, BuildAdmissionMode::Off, 0);
+        let (runtime, mut started_rx) = AdmissionRouteRuntime::new(journal.clone());
+
+        let mut actor = build_route_actor(&db, &events_tx, &runtime, 1);
+        actor.build_admission = Some(controller.clone());
+
+        let task_id = fixture.task_ids[0].clone();
+        close_all_except(&db, &fixture, &task_id).await;
+
+        actor.dispatch_ready_tasks(Some(&fixture.project_id)).await;
+        assert_eq!(actor.dispatched, 1, "Off mode must not prevent dispatch");
+
+        let dispatched_id = started_rx
+            .recv()
+            .await
+            .expect("pool runner must fire under Off mode");
+        assert_eq!(dispatched_id, task_id);
+
+        // ── The admission journal must be empty ──
+        let snapshot = runtime.snapshot(&task_id);
+        assert!(
+            !snapshot.row_existed,
+            "Off mode must not create a durable admission row at create time"
+        );
+
+        assert_eq!(
+            journal.count_task_or_warm_occupancy().await.expect("count"),
+            0,
+            "Off mode must leave zero admission journal occupancy"
+        );
+
+        let history = journal
+            .list_history(AdmissionDomain::TaskObservation, &task_id)
+            .await
+            .expect("read admission history");
+        assert!(
+            history.is_empty(),
+            "Off mode must not mutate the admission journal"
+        );
+
+        runtime.release(&task_id).await;
+    }
+
+    // ─── AC3: Lifecycle — CreateUnknown retains occupancy ─────────────────
+
+    /// Prove accepted ambiguous results (CreateUnknown) retain one occupancy
+    /// slot and that a deterministic retry is idempotent (exactly one create).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn create_unknown_retains_occupancy_and_retry_is_idempotent() {
+        let db = crate::test_helpers::create_test_db();
+        let (events_tx, _events_rx) = tokio::sync::broadcast::channel(256);
+        let fixture = seed_wnd1_ready_worker_tasks(&db, WND1_READY_TASK_COUNT).await;
+        configure_wnd1_user_max_sessions(&db, &fixture.created_by_user_id, &fixture.model_id, 1)
+            .await;
+
+        let journal = route_journal(&db);
+        let controller = route_controller(&journal, BuildAdmissionMode::Enforce, 2);
+        let (runtime, mut started_rx) = AdmissionRouteRuntime::new(journal.clone());
+
+        let mut actor = build_route_actor(&db, &events_tx, &runtime, 1);
+        actor.build_admission = Some(controller.clone());
+
+        let task_id = fixture.task_ids[0].clone();
+        close_all_except(&db, &fixture, &task_id).await;
+
+        // First dispatch → CreateUnknown (ambiguous accepted create).
+        actor.dispatch_ready_tasks(Some(&fixture.project_id)).await;
+        assert_eq!(actor.dispatched, 1);
+        let _ = started_rx.recv().await;
+
+        assert_eq!(
+            journal.count_task_or_warm_occupancy().await.expect("count"),
+            1,
+            "accepted ambiguous create must retain one occupancy slot"
+        );
+
+        // Simulate a deterministic retry: kill the session so the pool forgets
+        // the task, then re-dispatch. The controller's idempotent permit means
+        // begin_task_run_build_admission returns the existing permit without
+        // re-reserving.
+        runtime.release(&task_id).await;
+        actor
+            .pool
+            .kill_session(&task_id)
+            .await
+            .expect("kill session to simulate crash");
+
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            if !actor.pool.has_session(&task_id).await.expect("check pool") {
+                break;
+            }
+            assert!(tokio::time::Instant::now() < deadline);
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+
+        actor.dispatch_ready_tasks(Some(&fixture.project_id)).await;
+
+        // The journal must still have exactly one admission generation for this
+        // task — the idempotent retry did not create a second row.
+        let history = journal
+            .list_history(AdmissionDomain::TaskObservation, &task_id)
+            .await
+            .expect("read admission history");
+        assert_eq!(
+            history.len(),
+            1,
+            "deterministic retry must be idempotent — exactly one admission generation"
+        );
+
+        assert_eq!(
+            journal.count_task_or_warm_occupancy().await.expect("count"),
+            1,
+            "idempotent retry must not double-count occupancy"
+        );
+
+        if actor.dispatched == 2 {
+            let _ = started_rx.recv().await;
+            runtime.release(&task_id).await;
+        }
+    }
+
+    // ─── AC3: Terminal release via actor route — uid-fenced and idempotent ─
+
+    /// Prove a matching generation/UID terminal callback releases exactly once
+    /// through the actor's `handle_event` route, and that wrong-UID and
+    /// duplicate callbacks cannot release occupancy or produce a second wakeup.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn terminal_release_via_actor_route_is_uid_fenced_and_idempotent() {
+        let db = crate::test_helpers::create_test_db();
+        let (events_tx, _events_rx) = tokio::sync::broadcast::channel(256);
+        let fixture = seed_wnd1_ready_worker_tasks(&db, WND1_READY_TASK_COUNT).await;
+        configure_wnd1_user_max_sessions(&db, &fixture.created_by_user_id, &fixture.model_id, 1)
+            .await;
+
+        let journal = route_journal(&db);
+        let controller = route_controller(&journal, BuildAdmissionMode::Enforce, 2);
+        let (runtime, mut started_rx) = AdmissionRouteRuntime::new(journal.clone());
+
+        let mut actor = build_route_actor(&db, &events_tx, &runtime, 1);
+        actor.build_admission = Some(controller.clone());
+
+        let task_id = fixture.task_ids[0].clone();
+        close_all_except(&db, &fixture, &task_id).await;
+
+        // ── Dispatch → CreateUnknown (pool accepted) ──
+        actor.dispatch_ready_tasks(Some(&fixture.project_id)).await;
+        assert_eq!(actor.dispatched, 1);
+        let _ = started_rx.recv().await;
+
+        assert_eq!(
+            journal.count_task_or_warm_occupancy().await.unwrap(),
+            1,
+            "dispatched task occupies one slot"
+        );
+
+        // ── Bind a Live UID via the session.started event route ──
+        let runtime_uid = "route-test-uid-1";
+        let session_repo =
+            djinn_db::SessionRepository::new(db.clone(), djinn_core::events::EventBus::noop());
+        let mut session = session_repo
+            .create(djinn_db::CreateSessionParams {
+                project_id: &fixture.project_id,
+                task_id: Some(&task_id),
+                model: &fixture.model_id,
+                agent_type: "worker",
+                metadata_json: None,
+                task_run_id: None,
+                pricing: None,
+                cost_basis: None,
+            })
+            .await
+            .expect("create session");
+        session.task_run_id = Some(runtime_uid.to_owned());
+        session.status = "running".to_owned();
+
+        actor
+            .handle_event(DjinnEventEnvelope {
+                entity_type: "session",
+                action: "started",
+                payload: serde_json::to_value(&session).expect("serialize session"),
+                id: None,
+                project_id: None,
+                from_sync: false,
+            })
+            .await;
+
+        let history = journal
+            .list_history(AdmissionDomain::TaskObservation, &task_id)
+            .await
+            .unwrap();
+        assert_eq!(
+            history[0].state,
+            AdmissionState::Live,
+            "session.started event must mark admission Live"
+        );
+        assert_eq!(
+            history[0].object_uid.as_deref(),
+            Some(runtime_uid),
+            "Live admission must bind the runtime UID"
+        );
+
+        // ── Wrong-UID terminal callback must NOT release ──
+        let mut stale_session = session.clone();
+        stale_session.task_run_id = Some("wrong-uid-nonexistent".to_owned());
+        stale_session.status = "completed".to_owned();
+        actor
+            .handle_event(DjinnEventEnvelope {
+                entity_type: "session",
+                action: "completed",
+                payload: serde_json::to_value(&stale_session).expect("serialize"),
+                id: None,
+                project_id: None,
+                from_sync: false,
+            })
+            .await;
+
+        assert_eq!(
+            journal.count_task_or_warm_occupancy().await.unwrap(),
+            1,
+            "wrong-UID terminal callback must not release occupancy"
+        );
+
+        // ── Matching UID terminal callback releases exactly once ──
+        session.status = "completed".to_owned();
+        actor
+            .handle_event(DjinnEventEnvelope {
+                entity_type: "session",
+                action: "completed",
+                payload: serde_json::to_value(&session).expect("serialize"),
+                id: None,
+                project_id: None,
+                from_sync: false,
+            })
+            .await;
+
+        tokio::time::timeout(
+            Duration::from_millis(100),
+            controller.release_notifier().notified(),
+        )
+        .await
+        .expect("matching terminal callback must retain a release wakeup");
+
+        assert_eq!(
+            journal.count_task_or_warm_occupancy().await.unwrap(),
+            0,
+            "matching UID terminal callback must release the occupancy slot"
+        );
+
+        // ── Duplicate matching terminal callback is idempotent ──
+        actor
+            .handle_event(DjinnEventEnvelope {
+                entity_type: "session",
+                action: "completed",
+                payload: serde_json::to_value(&session).expect("serialize"),
+                id: None,
+                project_id: None,
+                from_sync: false,
+            })
+            .await;
+
+        assert!(
+            controller
+                .release_notifier()
+                .notified()
+                .now_or_never()
+                .is_none(),
+            "duplicate terminal callback must not produce a second wakeup"
+        );
+
+        assert_eq!(
+            journal.count_task_or_warm_occupancy().await.unwrap(),
+            0,
+            "duplicate terminal must not re-release or re-occupy"
+        );
+
+        runtime.release(&task_id).await;
+    }
+
+    // ─── AC3: UID-less terminal callback does not release ─────────────────
+
+    /// Prove a UID-less terminal callback (session without task_run_id) cannot
+    /// release occupancy through the actor route.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn uid_less_terminal_callback_does_not_release() {
+        let db = crate::test_helpers::create_test_db();
+        let (events_tx, _events_rx) = tokio::sync::broadcast::channel(256);
+        let fixture = seed_wnd1_ready_worker_tasks(&db, WND1_READY_TASK_COUNT).await;
+        configure_wnd1_user_max_sessions(&db, &fixture.created_by_user_id, &fixture.model_id, 1)
+            .await;
+
+        let journal = route_journal(&db);
+        let controller = route_controller(&journal, BuildAdmissionMode::Enforce, 2);
+        let (runtime, mut started_rx) = AdmissionRouteRuntime::new(journal.clone());
+
+        let mut actor = build_route_actor(&db, &events_tx, &runtime, 1);
+        actor.build_admission = Some(controller.clone());
+
+        let task_id = fixture.task_ids[0].clone();
+        close_all_except(&db, &fixture, &task_id).await;
+
+        // Dispatch and get to CreateUnknown.
+        actor.dispatch_ready_tasks(Some(&fixture.project_id)).await;
+        assert_eq!(actor.dispatched, 1);
+        let _ = started_rx.recv().await;
+
+        assert_eq!(
+            journal.count_task_or_warm_occupancy().await.unwrap(),
+            1,
+            "dispatched task occupies one slot"
+        );
+
+        // A session.completed event with NO task_run_id (UID-less) must not
+        // release the admission slot.
+        let session_repo =
+            djinn_db::SessionRepository::new(db.clone(), djinn_core::events::EventBus::noop());
+        let mut session = session_repo
+            .create(djinn_db::CreateSessionParams {
+                project_id: &fixture.project_id,
+                task_id: Some(&task_id),
+                model: &fixture.model_id,
+                agent_type: "worker",
+                metadata_json: None,
+                task_run_id: None,
+                pricing: None,
+                cost_basis: None,
+            })
+            .await
+            .expect("create session");
+        session.task_run_id = None; // UID-less
+        session.status = "completed".to_owned();
+
+        actor
+            .handle_event(DjinnEventEnvelope {
+                entity_type: "session",
+                action: "completed",
+                payload: serde_json::to_value(&session).expect("serialize"),
+                id: None,
+                project_id: None,
+                from_sync: false,
+            })
+            .await;
+
+        assert_eq!(
+            journal.count_task_or_warm_occupancy().await.unwrap(),
+            1,
+            "UID-less terminal callback must not release admission occupancy"
+        );
+
+        assert!(
+            controller
+                .release_notifier()
+                .notified()
+                .now_or_never()
+                .is_none(),
+            "UID-less terminal callback must not wake dispatch"
+        );
+
+        runtime.release(&task_id).await;
     }
 }
