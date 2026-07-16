@@ -969,7 +969,7 @@ impl NoteRepository {
     /// blocking the response on the embedding-provider round-trip
     /// (sometimes seconds). Move to a background task — embeddings catching
     /// up async is fine; lexical search still works without them.
-    fn spawn_note_embedding_sync(&self, note: &Note) {
+    pub(super) fn spawn_note_embedding_sync(&self, note: &Note) {
         if self.embedding_provider().is_none() {
             return;
         }

@@ -1,5 +1,7 @@
 use super::*;
 
+use djinn_core::auth_context::{REVISION_CALLER_CONTEXT, TrustedRevisionCallerContext};
+
 #[tokio::test]
 async fn call_tool_dispatches_memory_ops_through_shared_memory_seam() {
     let db = create_test_db();
@@ -385,94 +387,100 @@ async fn call_tool_memory_singletons_target_canonical_project_root_from_worktree
 
     let state = agent_context_from_db(db.clone(), CancellationToken::new());
 
-    let created = call_tool(
-        &state,
-        &crate::test_helpers::test_services(),
-        "memory_write",
-        Some(
-            serde_json::json!({
-                "project": project.slug(),
-                "title": "Project Roadmap",
-                "content": "tracks [[ADR-043 Repo Graph]]",
-                "type": "roadmap",
-                "reason": "create canonical roadmap singleton"
-            })
-            .as_object()
-            .expect("memory_write args object")
-            .clone(),
-        ),
-        &worktree,
-        None,
-        Some("planner"),
-        None,
-        None,
-        &crate::extension::ToolCancellation::never(),
-    )
-    .await
-    .expect("memory_write dispatch should succeed");
-
-    assert_eq!(
-        created.get("permalink").and_then(|v| v.as_str()),
-        Some("roadmap")
-    );
-
-    let edited = call_tool(
-        &state,
-        &crate::test_helpers::test_services(),
-        "memory_edit",
-        Some(
-            serde_json::json!({
-                "project": project.slug(),
-                "identifier": "roadmap",
-                "operation": "append",
-                "content": "next wave",
-                "reason": "append canonical singleton"
-            })
-            .as_object()
-            .expect("memory_edit args object")
-            .clone(),
-        ),
-        &worktree,
-        None,
-        Some("planner"),
-        None,
-        None,
-        &crate::extension::ToolCancellation::never(),
-    )
-    .await
-    .expect("memory_edit dispatch should succeed");
-
-    assert!(
-        edited
-            .get("content")
-            .and_then(|v| v.as_str())
-            .unwrap_or_default()
-            .contains("next wave")
-    );
-
-    let note_repo = NoteRepository::new(db.clone(), EventBus::noop());
-    let note = note_repo
-        .get_by_permalink(&project.id, "roadmap")
-        .await
-        .expect("load roadmap")
-        .expect("roadmap note exists");
-
-    assert_eq!(note.note_type, "roadmap");
-    assert_eq!(note.permalink, "roadmap");
-    assert_eq!(note.storage, "db");
-    assert!(note.content.contains("ADR-043 Repo Graph"));
-    assert!(note.content.contains("next wave"));
-
-    assert!(
-        note_repo
-            .get_by_permalink(
-                &project.id,
-                "reference/adr-043-roadmap-active-decomposition-status"
+    let caller = TrustedRevisionCallerContext::authenticated_agent("dispatch-test-agent")
+        .expect("valid test revision caller");
+    REVISION_CALLER_CONTEXT
+        .scope(Some(caller), async {
+            let created = call_tool(
+                &state,
+                &crate::test_helpers::test_services(),
+                "memory_write",
+                Some(
+                    serde_json::json!({
+                        "project": project.slug(),
+                        "title": "Project Roadmap",
+                        "content": "tracks [[ADR-043 Repo Graph]]",
+                        "type": "roadmap",
+                        "reason": "create canonical roadmap singleton"
+                    })
+                    .as_object()
+                    .expect("memory_write args object")
+                    .clone(),
+                ),
+                &worktree,
+                None,
+                Some("planner"),
+                None,
+                None,
+                &crate::extension::ToolCancellation::never(),
             )
             .await
-            .expect("check duplicate roadmap note")
-            .is_none()
-    );
+            .expect("memory_write dispatch should succeed");
+
+            assert_eq!(
+                created.get("permalink").and_then(|v| v.as_str()),
+                Some("roadmap")
+            );
+
+            let edited = call_tool(
+                &state,
+                &crate::test_helpers::test_services(),
+                "memory_edit",
+                Some(
+                    serde_json::json!({
+                        "project": project.slug(),
+                        "identifier": "roadmap",
+                        "operation": "append",
+                        "content": "next wave",
+                        "reason": "append canonical singleton"
+                    })
+                    .as_object()
+                    .expect("memory_edit args object")
+                    .clone(),
+                ),
+                &worktree,
+                None,
+                Some("planner"),
+                None,
+                None,
+                &crate::extension::ToolCancellation::never(),
+            )
+            .await
+            .expect("memory_edit dispatch should succeed");
+
+            assert!(
+                edited
+                    .get("content")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .contains("next wave")
+            );
+
+            let note_repo = NoteRepository::new(db.clone(), EventBus::noop());
+            let note = note_repo
+                .get_by_permalink(&project.id, "roadmap")
+                .await
+                .expect("load roadmap")
+                .expect("roadmap note exists");
+
+            assert_eq!(note.note_type, "roadmap");
+            assert_eq!(note.permalink, "roadmap");
+            assert_eq!(note.storage, "db");
+            assert!(note.content.contains("ADR-043 Repo Graph"));
+            assert!(note.content.contains("next wave"));
+
+            assert!(
+                note_repo
+                    .get_by_permalink(
+                        &project.id,
+                        "reference/adr-043-roadmap-active-decomposition-status"
+                    )
+                    .await
+                    .expect("check duplicate roadmap note")
+                    .is_none()
+            );
+        })
+        .await;
 }
 
 #[tokio::test]
@@ -488,91 +496,97 @@ async fn call_tool_memory_brief_singleton_targets_canonical_project_root_from_wo
 
     let state = agent_context_from_db(db.clone(), CancellationToken::new());
 
-    let created = call_tool(
-        &state,
-        &crate::test_helpers::test_services(),
-        "memory_write",
-        Some(
-            serde_json::json!({
-                "project": project.slug(),
-                "title": "Project Brief",
-                "content": "tracks [[decisions/adr-008-agent-harness-—-goose-library-over-summon-subprocess-spawning]]",
-                "type": "brief",
-                "reason": "create canonical brief singleton"
-            })
-            .as_object()
-            .expect("memory_write args object")
-            .clone(),
-        ),
-        &worktree,
-        None,
-        Some("planner"),
-        None,
-        None,
-        &crate::extension::ToolCancellation::never(),
-    )
-    .await
-    .expect("memory_write dispatch should succeed");
-
-    assert_eq!(
-        created.get("permalink").and_then(|v| v.as_str()),
-        Some("brief")
-    );
-
-    let edited = call_tool(
-        &state,
-        &crate::test_helpers::test_services(),
-        "memory_edit",
-        Some(
-            serde_json::json!({
-                "project": project.slug(),
-                "identifier": "brief",
-                "operation": "append",
-                "content": "next wave",
-                "reason": "append canonical singleton"
-            })
-            .as_object()
-            .expect("memory_edit args object")
-            .clone(),
-        ),
-        &worktree,
-        None,
-        Some("planner"),
-        None,
-        None,
-        &crate::extension::ToolCancellation::never(),
-    )
-    .await
-    .expect("memory_edit dispatch should succeed");
-
-    assert!(
-        edited
-            .get("content")
-            .and_then(|v| v.as_str())
-            .unwrap_or_default()
-            .contains("next wave")
-    );
-
-    let note_repo = NoteRepository::new(db.clone(), EventBus::noop());
-    let note = note_repo
-        .get_by_permalink(&project.id, "brief")
-        .await
-        .expect("load brief")
-        .expect("brief note exists");
-
-    assert_eq!(note.note_type, "brief");
-    assert_eq!(note.permalink, "brief");
-    assert_eq!(note.storage, "db");
-    assert!(note.content.contains("adr-008-agent-harness"));
-    assert!(note.content.contains("next wave"));
-
-    assert!(
-        note_repo
-            .get_by_permalink(&project.id, "reference/project-brief")
+    let caller = TrustedRevisionCallerContext::authenticated_agent("dispatch-test-agent")
+        .expect("valid test revision caller");
+    REVISION_CALLER_CONTEXT
+        .scope(Some(caller), async {
+            let created = call_tool(
+                &state,
+                &crate::test_helpers::test_services(),
+                "memory_write",
+                Some(
+                    serde_json::json!({
+                        "project": project.slug(),
+                        "title": "Project Brief",
+                        "content": "tracks [[decisions/adr-008-agent-harness-—-goose-library-over-summon-subprocess-spawning]]",
+                        "type": "brief",
+                        "reason": "create canonical brief singleton"
+                    })
+                    .as_object()
+                    .expect("memory_write args object")
+                    .clone(),
+                ),
+                &worktree,
+                None,
+                Some("planner"),
+                None,
+                None,
+                &crate::extension::ToolCancellation::never(),
+            )
             .await
-            .expect("check duplicate brief note")
-            .is_none()
-    );
+            .expect("memory_write dispatch should succeed");
+
+            assert_eq!(
+                created.get("permalink").and_then(|v| v.as_str()),
+                Some("brief")
+            );
+
+            let edited = call_tool(
+                &state,
+                &crate::test_helpers::test_services(),
+                "memory_edit",
+                Some(
+                    serde_json::json!({
+                        "project": project.slug(),
+                        "identifier": "brief",
+                        "operation": "append",
+                        "content": "next wave",
+                        "reason": "append canonical singleton"
+                    })
+                    .as_object()
+                    .expect("memory_edit args object")
+                    .clone(),
+                ),
+                &worktree,
+                None,
+                Some("planner"),
+                None,
+                None,
+                &crate::extension::ToolCancellation::never(),
+            )
+            .await
+            .expect("memory_edit dispatch should succeed");
+
+            assert!(
+                edited
+                    .get("content")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .contains("next wave")
+            );
+
+            let note_repo = NoteRepository::new(db.clone(), EventBus::noop());
+            let note = note_repo
+                .get_by_permalink(&project.id, "brief")
+                .await
+                .expect("load brief")
+                .expect("brief note exists");
+
+            assert_eq!(note.note_type, "brief");
+            assert_eq!(note.permalink, "brief");
+            assert_eq!(note.storage, "db");
+            assert!(note.content.contains("adr-008-agent-harness"));
+            assert!(note.content.contains("next wave"));
+
+            assert!(
+                note_repo
+                    .get_by_permalink(&project.id, "reference/project-brief")
+                    .await
+                    .expect("check duplicate brief note")
+                    .is_none()
+            );
+        })
+        .await;
 }
 
 #[tokio::test]
@@ -657,62 +671,68 @@ async fn call_tool_memory_current_requirement_targets_canonical_project_root_fro
 
     let state = agent_context_from_db(db.clone(), CancellationToken::new());
 
-    let edited = call_tool(
-        &state,
-        &crate::test_helpers::test_services(),
-        "memory_edit",
-        Some(
-            serde_json::json!({
-                "project": project.slug(),
-                "identifier": "requirements/v1-requirements",
-                "operation": "find_replace",
-                "find_text": "[[Cognitive Memory Scope]]",
-                "content": "[[reference/cognitive-memory-scope]]",
-                "reason": "update canonical requirements reference"
-            })
-            .as_object()
-            .expect("memory_edit args object")
-            .clone(),
-        ),
-        &worktree,
-        None,
-        Some("planner"),
-        None,
-        None,
-        &crate::extension::ToolCancellation::never(),
-    )
-    .await
-    .expect("memory_edit dispatch should succeed");
-
-    assert!(
-        edited
-            .get("content")
-            .and_then(|v| v.as_str())
-            .unwrap_or_default()
-            .contains("[[reference/cognitive-memory-scope]]")
-    );
-
-    let note = note_repo
-        .get_by_permalink(&project.id, "requirements/v1-requirements")
-        .await
-        .expect("load requirements")
-        .expect("requirements note exists");
-
-    assert_eq!(note.note_type, "requirement");
-    assert_eq!(note.permalink, "requirements/v1-requirements");
-    assert_eq!(note.storage, "db");
-    assert!(
-        note.content
-            .contains("[[reference/cognitive-memory-scope]]")
-    );
-
-    assert!(
-        note_repo
-            .get_by_permalink(&project.id, "reference/v1-requirements")
+    let caller = TrustedRevisionCallerContext::authenticated_agent("dispatch-test-agent")
+        .expect("valid test revision caller");
+    REVISION_CALLER_CONTEXT
+        .scope(Some(caller), async {
+            let edited = call_tool(
+                &state,
+                &crate::test_helpers::test_services(),
+                "memory_edit",
+                Some(
+                    serde_json::json!({
+                        "project": project.slug(),
+                        "identifier": "requirements/v1-requirements",
+                        "operation": "find_replace",
+                        "find_text": "[[Cognitive Memory Scope]]",
+                        "content": "[[reference/cognitive-memory-scope]]",
+                        "reason": "update canonical requirements reference"
+                    })
+                    .as_object()
+                    .expect("memory_edit args object")
+                    .clone(),
+                ),
+                &worktree,
+                None,
+                Some("planner"),
+                None,
+                None,
+                &crate::extension::ToolCancellation::never(),
+            )
             .await
-            .expect("check duplicate requirements note")
-            .is_none()
-    );
+            .expect("memory_edit dispatch should succeed");
+
+            assert!(
+                edited
+                    .get("content")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .contains("[[reference/cognitive-memory-scope]]")
+            );
+
+            let note = note_repo
+                .get_by_permalink(&project.id, "requirements/v1-requirements")
+                .await
+                .expect("load requirements")
+                .expect("requirements note exists");
+
+            assert_eq!(note.note_type, "requirement");
+            assert_eq!(note.permalink, "requirements/v1-requirements");
+            assert_eq!(note.storage, "db");
+            assert!(
+                note.content
+                    .contains("[[reference/cognitive-memory-scope]]")
+            );
+
+            assert!(
+                note_repo
+                    .get_by_permalink(&project.id, "reference/v1-requirements")
+                    .await
+                    .expect("check duplicate requirements note")
+                    .is_none()
+            );
+        })
+        .await;
 }
 
 #[tokio::test]

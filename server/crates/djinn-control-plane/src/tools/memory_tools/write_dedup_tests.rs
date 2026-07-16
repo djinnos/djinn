@@ -133,7 +133,13 @@ mod tests {
         let repo = NoteRepository::new(db.clone(), EventBus::noop());
 
         let existing = repo
-            .create(&project.id, "Async Pattern", "tokio spawn", "pattern", "[]")
+            .create(
+                &project.id,
+                "Async Pattern",
+                "tokio spawn",
+                "pattern",
+                r#"["existing"]"#,
+            )
             .await
             .unwrap();
 
@@ -146,7 +152,7 @@ mod tests {
                 content: "tokio spawn joinset",
                 note_type: "pattern",
                 status: None,
-                tags_json: "[]",
+                tags_json: r#"["merged"]"#,
             },
             MemoryWriteDedupDecision::MergeIntoExisting {
                 candidate_id: existing.id.clone(),
@@ -162,7 +168,58 @@ mod tests {
 
         let updated = repo.get(&existing.id).await.unwrap().unwrap();
         assert_eq!(response.id.as_deref(), Some(existing.id.as_str()));
+        assert_eq!(updated.title, "Async Pattern");
         assert_eq!(updated.content, "tokio spawn\njoinset");
+        assert_eq!(updated.tags, r#"["merged"]"#);
+
+        let revisions = repo
+            .revision_events_for_note(&project.id, &existing.id)
+            .await
+            .unwrap();
+        assert_eq!(revisions.len(), 1);
+        let revision = &revisions[0];
+        assert_eq!(revision.event_kind, "updated");
+        assert_eq!(revision.actor_kind, "system");
+        assert_eq!(revision.actor_id, None);
+        assert_eq!(revision.subsystem.as_deref(), Some("dedup"));
+        assert_eq!(revision.reason, "merge memory write into deduplicated note");
+        assert_eq!(revision.session_id, None);
+        assert_eq!(revision.task_id, None);
+        assert_eq!(revision.task_run_id, None);
+        assert_eq!(revision.content_before.as_deref(), Some("tokio spawn"));
+        assert_eq!(
+            revision.content_after.as_deref(),
+            Some("tokio spawn\njoinset")
+        );
+
+        let repeat = apply_dedup_decision(
+            &repo,
+            PendingWriteDedup {
+                project_path: tmp.path().to_str().unwrap(),
+                project_id: &project.id,
+                title: "Async Pattern Updated",
+                content: "tokio spawn joinset",
+                note_type: "pattern",
+                status: None,
+                tags_json: r#"["merged"]"#,
+            },
+            MemoryWriteDedupDecision::MergeIntoExisting {
+                candidate_id: existing.id.clone(),
+                merged_title: "Async Pattern".to_string(),
+                merged_content: "tokio spawn\njoinset".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+        assert!(matches!(repeat, WriteDedupOutcome::Respond(_)));
+        assert_eq!(
+            repo.revision_events_for_note(&project.id, &existing.id)
+                .await
+                .unwrap()
+                .len(),
+            1,
+            "an identical merge must not append a revision"
+        );
     }
 
     #[tokio::test]
