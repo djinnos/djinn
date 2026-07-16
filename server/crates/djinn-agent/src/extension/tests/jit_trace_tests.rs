@@ -460,6 +460,101 @@ async fn jit_pitfalls_trace_serialization_failure_is_fail_open() {
     }
 }
 
+/// A failed disabled-path suppression insert is strictly observational: the
+/// unchanged write response, file mutation, once-per-session guard, and
+/// Prometheus outcomes must remain exactly as they are when suppression is
+/// persisted successfully.
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn jit_pitfalls_suppression_insert_failure_is_fail_open() {
+    let _guard = JIT_PITFALLS_ENV_LOCK.lock().unwrap();
+    unsafe {
+        std::env::remove_var("DJINN_JIT_PITFALLS");
+        std::env::set_var("DJINN_JIT_PITFALLS_ROLLOUT", "off");
+    }
+
+    let db = create_test_db();
+    let project = create_test_project(&db).await;
+    let pid = project.id.as_str();
+    let worktree = crate::test_helpers::test_tempdir("djinn-ext-jit-suppress-insert-fail-");
+    let baseline_worktree = crate::test_helpers::test_tempdir("djinn-ext-jit-suppress-insert-ok-");
+    for path in [worktree.path(), baseline_worktree.path()] {
+        tokio::fs::create_dir_all(path.join("src"))
+            .await
+            .expect("mkdir src");
+    }
+
+    let state = crate::test_helpers::agent_context_from_db(db.clone(), CancellationToken::new());
+    let args = Some(
+        serde_json::json!({ "path": "src/a.rs", "content": "// first\n" })
+            .as_object()
+            .expect("obj")
+            .clone(),
+    );
+
+    // Establish the ordinary disabled response before making persistence fail.
+    let baseline = call_write(
+        &state,
+        &args,
+        baseline_worktree.path(),
+        Some(pid),
+        None,
+        None,
+    )
+    .await
+    .expect("successful suppression must not fail write");
+    assert!(baseline.get("jit_pitfalls").is_none());
+
+    // This uses the real repository failure mode, rather than bypassing the
+    // suppression helper, so insert_with_semantics attempts the missing table.
+    djinn_db::test_support::drop_table_for_test(&db, "retrieval_traces").await;
+
+    let telemetry_before = jit_pitfall_outcome_snapshot();
+    let response = call_write(&state, &args, worktree.path(), Some(pid), None, None)
+        .await
+        .expect("failed suppression insert must not fail write");
+    assert_eq!(
+        response, baseline,
+        "suppression persistence failure must preserve the underlying write result"
+    );
+    assert_eq!(
+        tokio::fs::read_to_string(worktree.path().join("src/a.rs"))
+            .await
+            .expect("failed suppression insert must still write file"),
+        "// first\n"
+    );
+
+    // The first disabled modification still consumes the once-per-session
+    // attempt even when its observational persistence write fails.
+    let second_args = Some(
+        serde_json::json!({ "path": "src/b.rs", "content": "// second\n" })
+            .as_object()
+            .expect("obj")
+            .clone(),
+    );
+    let second = call_write(&state, &second_args, worktree.path(), Some(pid), None, None)
+        .await
+        .expect("second write after failed suppression insert");
+    assert!(
+        second.get("jit_pitfalls").is_none(),
+        "once-per-session guard must remain unchanged after suppression failure"
+    );
+    assert_eq!(
+        tokio::fs::read_to_string(worktree.path().join("src/b.rs"))
+            .await
+            .expect("second write must still mutate file"),
+        "// second\n"
+    );
+    assert_jit_pitfall_outcome_deltas(
+        &telemetry_before,
+        &[("disabled_default_off", 1), ("non_first_modification", 1)],
+    );
+
+    unsafe {
+        std::env::remove_var("DJINN_JIT_PITFALLS_ROLLOUT");
+    }
+}
+
 /// With the gate OFF (default), a write must produce byte-identical output:
 /// no scoped search, no `jit_pitfalls` field — even when matching pitfall
 /// notes exist for the touched path.
