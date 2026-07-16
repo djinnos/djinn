@@ -5,14 +5,6 @@
 //! ([`crate::compute_submission_diff_fingerprint`]) and must never call or
 //! alter it.
 //!
-//! The canonical stream covers, in fixed order:
-//! 1. A versioned header.
-//! 2. Resolved merge-base and HEAD SHAs.
-//! 3. Index entries (`git ls-files -s`): path, mode, stage, blob SHA.
-//! 4. Tracked worktree state: path, entry type, executable mode, raw bytes.
-//! 5. Every untracked and ignored worktree entry (including binary files and
-//!    symlink target bytes) with the same per-entry framing.
-//!
 //! Every variable-length field is length-delimited (u64 LE prefix + bytes) so
 //! the framing is unambiguous and stable across versions. Paths are sorted
 //! bytewise. Unsupported/special entries (FIFOs, sockets, devices, gitlinks)
@@ -146,10 +138,7 @@ pub struct VerificationInputDigestV1 {
     pub extra_entry_count: u64,
 }
 
-/// Stable reason why a verification-input identity could not be established.
-///
-/// Every variant is a **fail-closed** outcome: the caller must run normal
-/// verification and must not write a reusable row.
+/// Stable fail-closed reason a verification-input identity is unavailable.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum VerificationInputUnavailable {
     /// The configured base ref could not be resolved, so no merge-base exists.
@@ -230,11 +219,7 @@ impl std::fmt::Display for VerificationInputUnavailable {
     }
 }
 
-/// Infrastructure-level error during fingerprint computation.
-///
-/// This is distinct from [`VerificationInputUnavailable`]: an `Err` here means
-/// a git subprocess could not be spawned or communication failed, not that the
-/// repository state is unhashable.
+/// Infrastructure-level fingerprint computation error.
 #[derive(Debug, thiserror::Error)]
 pub enum VerificationInputError {
     /// A git command could not be spawned or exited with an unexpected failure.
