@@ -106,6 +106,7 @@ async fn task_with_structured_red_ci_and_audit_activity(
 
 #[tokio::test]
 async fn prompt_context_has_one_promoted_structured_ci_directive_per_role() {
+    let _knowledge_context_env = knowledge_context_test_env_guard();
     for (role_name, role) in [
         ("worker", &WorkerRole as &dyn AgentRole),
         ("reviewer", &ReviewerRole as &dyn AgentRole),

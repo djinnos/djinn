@@ -592,13 +592,15 @@ impl TaskRepository {
             }));
         }
 
-        // ── Additive liveness / protocol / stranded-ready sections ────────
+        // ── Additive liveness / protocol / attribution / stranded sections ─
         // These bounded JSON sections live in the sibling `board_health`
         // module to keep this file under the repository size guard.
         let liveness_outcomes =
             super::board_health::liveness_outcomes_section(self.db.pool()).await;
         let protocol_violations =
             super::board_health::protocol_violations_section(self.db.pool()).await;
+        let attribution_findings =
+            super::board_health::attribution_findings_section(self.db.pool()).await;
         let stranded_ready = super::board_health::stranded_ready_section(self.db.pool()).await;
         let closed_parent_open_children =
             super::board_health::closed_parent_open_children_section(self.db.pool()).await;
@@ -611,6 +613,7 @@ impl TaskRepository {
             "stale_threshold_hours": stale_hours,
             "liveness_outcomes":     liveness_outcomes,
             "protocol_violations":   protocol_violations,
+            "attribution_findings":  attribution_findings,
             "stranded_ready":        stranded_ready,
             "closed_parent_open_children": closed_parent_open_children,
         }))
