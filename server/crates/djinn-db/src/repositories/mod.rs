@@ -1,3 +1,4 @@
+pub mod admission_journal;
 pub mod agent;
 pub mod audit_sampler;
 pub mod chat_interruption_notice;

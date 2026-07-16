@@ -1,0 +1,27 @@
+{
+   "injected_provider_response" : "{\"pitfalls\":[{\"content\":\"## Trigger / smell\\ndiscriminative replay fact 24. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\\n\\n## Failure mode\\ndiscriminative replay fact 24. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\\n\\n## Observable symptoms\\ndiscriminative replay fact 24. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\\n\\n## Prevention\\ndiscriminative replay fact 24. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\\n\\n## Recovery\\ndiscriminative replay fact 24. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\\n\\n## Related\\ndiscriminative replay fact 24. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\",\"title\":\"Sanitized near_neighbor 24\",\"applies_when\":\"offline replay fixture\"}]}",
+   "provenance" : "sanitized_archived_transcript_derived",
+   "must_not_duplicate_target" : "candidate-neighbor-24",
+   "expected_duplicate_target" : null,
+   "id" : "archive-derived-24",
+   "messages" : [
+      {
+         "role" : "user",
+         "content" : "Summarize sanitized task evidence for discriminative replay fact 24."
+      },
+      {
+         "content" : "Implemented a concise deterministic change and recorded the outcome.",
+         "role" : "assistant"
+      }
+   ],
+   "category" : "near_neighbor",
+   "expect_adr_054_quality" : true,
+   "terminal_context" : {
+      "outcome" : {
+         "kind" : "completed"
+      },
+      "review_decision" : null
+   },
+   "required_discriminative_text" : "discriminative replay fact 24",
+   "expected_note_type" : "pitfall"
+}

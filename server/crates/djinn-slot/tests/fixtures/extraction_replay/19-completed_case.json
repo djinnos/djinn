@@ -1,0 +1,27 @@
+{
+   "expected_duplicate_target" : null,
+   "messages" : [
+      {
+         "content" : "Summarize sanitized task evidence for discriminative replay fact 19.",
+         "role" : "user"
+      },
+      {
+         "role" : "assistant",
+         "content" : "Implemented a concise deterministic change and recorded the outcome."
+      }
+   ],
+   "id" : "archive-derived-19",
+   "must_not_duplicate_target" : null,
+   "provenance" : "sanitized_archived_transcript_derived",
+   "injected_provider_response" : "{\"cases\":[{\"applies_when\":\"offline replay fixture\",\"content\":\"## Situation\\ndiscriminative replay fact 19. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\\n\\n## Constraint\\ndiscriminative replay fact 19. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\\n\\n## Approach taken\\ndiscriminative replay fact 19. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\\n\\n## Result\\ndiscriminative replay fact 19. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\\n\\n## Why it worked / failed\\ndiscriminative replay fact 19. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\\n\\n## Reusable lesson\\ndiscriminative replay fact 19. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\\n\\n## Related\\ndiscriminative replay fact 19. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\",\"title\":\"Sanitized completed_case 19\"}]}",
+   "terminal_context" : {
+      "review_decision" : null,
+      "outcome" : {
+         "kind" : "completed"
+      }
+   },
+   "expected_note_type" : "case",
+   "required_discriminative_text" : "discriminative replay fact 19",
+   "category" : "completed_case",
+   "expect_adr_054_quality" : true
+}

@@ -4,6 +4,7 @@
 //! fixture annotations, captured production decisions, and rubric scoring.
 
 use std::collections::BTreeMap;
+use std::path::Path;
 
 use async_trait::async_trait;
 use djinn_core::{events::EventBus, message::Conversation};
@@ -12,6 +13,12 @@ use djinn_db::{
     folder_for_type,
 };
 use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ReplayTranscriptMessage {
+    pub role: String,
+    pub content: String,
+}
 
 /// Annotation supplied by an archived-transcript replay fixture.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -27,6 +34,133 @@ pub struct ExtractionReplayFixture {
     /// Optional positive duplicate expectation, used when evaluating dedup precision.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expected_duplicate_target: Option<String>,
+    #[serde(default)]
+    pub provenance: String,
+    #[serde(default)]
+    pub messages: Vec<ReplayTranscriptMessage>,
+    #[serde(default)]
+    pub terminal_context: crate::llm_extraction::TerminalExtractionContext,
+    #[serde(default)]
+    pub injected_provider_response: String,
+}
+
+/// Load the committed corpus in stable filename order and reject unsafe rows.
+pub fn load_extraction_replay_fixtures(
+    directory: impl AsRef<Path>,
+) -> Result<Vec<ExtractionReplayFixture>, String> {
+    let mut paths = std::fs::read_dir(directory.as_ref())
+        .map_err(|error| error.to_string())?
+        .map(|entry| entry.map(|entry| entry.path()))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())?;
+    paths.sort();
+    let fixtures = paths
+        .into_iter()
+        .filter(|path| {
+            path.extension()
+                .is_some_and(|extension| extension == "json")
+        })
+        .map(|path| {
+            serde_json::from_str(
+                &std::fs::read_to_string(&path).map_err(|error| error.to_string())?,
+            )
+            .map_err(|error| format!("{}: {error}", path.display()))
+        })
+        .collect::<Result<Vec<ExtractionReplayFixture>, String>>()?;
+    validate_extraction_replay_fixtures(&fixtures)?;
+    Ok(fixtures)
+}
+
+/// Enforce typed replay, dedup-target, ADR-054, and repository-safety contracts.
+pub fn validate_extraction_replay_fixtures(
+    fixtures: &[ExtractionReplayFixture],
+) -> Result<(), String> {
+    if !(20..=50).contains(&fixtures.len()) {
+        return Err(format!(
+            "fixture count {} is outside 20..=50",
+            fixtures.len()
+        ));
+    }
+
+    let mut ids = std::collections::BTreeSet::new();
+    for fixture in fixtures {
+        if fixture.id.trim().is_empty() || !ids.insert(fixture.id.as_str()) {
+            return Err(format!("missing or duplicate ID: {}", fixture.id));
+        }
+        if fixture.required_discriminative_text.trim().is_empty() {
+            return Err(format!("{} has empty discriminative fact", fixture.id));
+        }
+        if !matches!(
+            fixture.expected_note_type.as_str(),
+            "case" | "pattern" | "pitfall"
+        ) {
+            return Err(format!("{} has unsupported note type", fixture.id));
+        }
+        if fixture.messages.is_empty()
+            || fixture.messages.iter().any(|message| {
+                !matches!(
+                    message.role.as_str(),
+                    "system" | "user" | "assistant" | "tool"
+                ) || message.content.trim().is_empty()
+            })
+        {
+            return Err(format!("{} has malformed messages", fixture.id));
+        }
+        if fixture.provenance != "sanitized_archived_transcript_derived" {
+            return Err(format!("{} has unsafe provenance", fixture.id));
+        }
+        let serialized = serde_json::to_string(fixture).map_err(|error| error.to_string())?;
+        let lower = serialized.to_ascii_lowercase();
+        if [
+            "api_key",
+            "password",
+            "secret",
+            "bearer ",
+            "sk-",
+            "session-",
+            "postgres://",
+            "production",
+        ]
+        .iter()
+        .any(|needle| lower.contains(needle))
+            || serialized.contains("T00:")
+        {
+            return Err(format!("{} contains prohibited data", fixture.id));
+        }
+        let response: serde_json::Value = serde_json::from_str(&fixture.injected_provider_response)
+            .map_err(|_| format!("{} has malformed response", fixture.id))?;
+        let response_key = match fixture.expected_note_type.as_str() {
+            "case" => "cases",
+            "pattern" => "patterns",
+            "pitfall" => "pitfalls",
+            _ => unreachable!("note type was validated above"),
+        };
+        let content = response
+            .get(response_key)
+            .and_then(serde_json::Value::as_array)
+            .and_then(|notes| notes.first())
+            .and_then(|note| note.get("content"))
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| format!("{} response lacks accepted note", fixture.id))?;
+        if !content.contains(&fixture.required_discriminative_text)
+            || (!assess_note_quality(&fixture.expected_note_type, content).is_underspecified)
+                != fixture.expect_adr_054_quality
+        {
+            return Err(format!("{} response cannot satisfy rubric", fixture.id));
+        }
+        for target in [
+            &fixture.must_not_duplicate_target,
+            &fixture.expected_duplicate_target,
+        ]
+        .into_iter()
+        .flatten()
+        {
+            if target.trim().is_empty() || !target.starts_with("candidate-") {
+                return Err(format!("{} has unresolved dedup target", fixture.id));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Load transcripts through the production message repository, perform the
@@ -419,12 +553,46 @@ mod tests {
             expect_adr_054_quality: false,
             must_not_duplicate_target: None,
             expected_duplicate_target: None,
+            provenance: String::new(),
+            messages: Vec::new(),
+            terminal_context: crate::llm_extraction::TerminalExtractionContext::default(),
+            injected_provider_response: String::new(),
         }
     }
 
     #[test]
     fn zero_predicted_duplicates_has_zero_precision() {
         assert_eq!(DedupConfusionCounts::default().precision(), 0.0);
+    }
+
+    #[test]
+    fn committed_sanitized_corpus_is_valid() {
+        let fixtures = load_extraction_replay_fixtures(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/extraction_replay"
+        ))
+        .expect("committed replay corpus must validate");
+        assert_eq!(fixtures.len(), 24);
+        assert!(
+            fixtures
+                .iter()
+                .any(|fixture| fixture.expect_adr_054_quality)
+        );
+        assert!(
+            fixtures
+                .iter()
+                .any(|fixture| !fixture.expect_adr_054_quality)
+        );
+        assert!(
+            fixtures
+                .iter()
+                .any(|fixture| fixture.expected_duplicate_target.is_some())
+        );
+        assert!(
+            fixtures
+                .iter()
+                .any(|fixture| fixture.must_not_duplicate_target.is_some())
+        );
     }
 
     #[test]
@@ -481,9 +649,7 @@ mod tests {
     }
 
     /// Deterministic LLM provider that returns pre-scripted responses in order.
-    /// Each `stream()` call pops one response from the front of the queue. Used
-    /// for both the extraction completion (response 0) and the novelty decision
-    /// (response 1) in `ProductionReplaySeam`.
+    /// Each `stream()` call pops one response from the front of its queue.
     struct ScriptedProvider {
         responses: Mutex<VecDeque<String>>,
     }
@@ -638,6 +804,64 @@ mod tests {
         session.id
     }
 
+    /// Persist the complete committed fixture transcript and retain its typed
+    /// terminal context in session metadata for the database-backed replay.
+    async fn create_fixture_replay_session(
+        db: &Database,
+        events: EventBus,
+        project_id: &str,
+        fixture: &ExtractionReplayFixture,
+    ) -> String {
+        let task = TaskRepository::new(db.clone(), events.clone())
+            .create_in_project(
+                project_id,
+                None,
+                &format!("replay {}", fixture.id),
+                "committed replay fixture task",
+                "",
+                "task",
+                1,
+                "eval",
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        let terminal_context = serde_json::to_string(&fixture.terminal_context).unwrap();
+        let session = SessionRepository::new(db.clone(), events.clone())
+            .create(CreateSessionParams {
+                project_id,
+                task_id: Some(&task.id),
+                model: "deterministic/replay",
+                agent_type: "worker",
+                metadata_json: Some(&terminal_context),
+                task_run_id: None,
+                pricing: None,
+                cost_basis: None,
+            })
+            .await
+            .unwrap();
+        let messages = fixture
+            .messages
+            .iter()
+            .map(|message| djinn_core::message::Message {
+                role: match message.role.as_str() {
+                    "system" => djinn_core::message::Role::System,
+                    "user" => djinn_core::message::Role::User,
+                    "assistant" => djinn_core::message::Role::Assistant,
+                    unsupported => panic!("unsupported persisted fixture role: {unsupported}"),
+                },
+                content: vec![ContentBlock::text(&message.content)],
+                metadata: None,
+            })
+            .collect::<Vec<_>>();
+        SessionMessageRepository::new(db.clone(), events)
+            .insert_messages_batch(&session.id, &task.id, &messages)
+            .await
+            .unwrap();
+        session.id
+    }
+
     #[tokio::test]
     async fn database_replay_drives_production_seam_with_dedup_and_non_dedup_outcomes() {
         let db = Database::open_in_memory().unwrap();
@@ -704,28 +928,6 @@ mod tests {
         )
         .await;
 
-        // Fixture A: expects the extracted note to duplicate duplicate_candidate
-        // (positive dedup — provider says "already_known").
-        let dedup_fixture = ExtractionReplayFixture {
-            id: "dedup-case".to_string(),
-            required_discriminative_text: "extraction merge".to_string(),
-            expected_note_type: "case".to_string(),
-            expect_adr_054_quality: true,
-            must_not_duplicate_target: None,
-            expected_duplicate_target: Some(duplicate_candidate.id.clone()),
-        };
-
-        // Fixture B: expects the extracted note to be novel relative to all
-        // supplied candidates (must-not-duplicate — provider says "novel").
-        let nondup_fixture = ExtractionReplayFixture {
-            id: "nondup-case".to_string(),
-            required_discriminative_text: "extraction merge".to_string(),
-            expected_note_type: "case".to_string(),
-            expect_adr_054_quality: true,
-            must_not_duplicate_target: Some(nondup_candidate.id.clone()),
-            expected_duplicate_target: None,
-        };
-
         // Extraction response JSON — a single ADR-054-compliant case note. The
         // same extraction response is used for both cases; the difference is
         // only in the novelty decision.
@@ -739,6 +941,42 @@ mod tests {
             "pitfalls": [],
         })
         .to_string();
+
+        // Fixture A: expects the extracted note to duplicate duplicate_candidate
+        // (positive dedup — provider says "already_known").
+        let dedup_fixture = ExtractionReplayFixture {
+            id: "dedup-case".to_string(),
+            required_discriminative_text: "extraction merge".to_string(),
+            expected_note_type: "case".to_string(),
+            expect_adr_054_quality: true,
+            must_not_duplicate_target: None,
+            expected_duplicate_target: Some(duplicate_candidate.id.clone()),
+            provenance: "sanitized_archived_transcript_derived".to_string(),
+            messages: vec![ReplayTranscriptMessage {
+                role: "user".to_string(),
+                content: "dedup fixture transcript".to_string(),
+            }],
+            terminal_context: crate::llm_extraction::TerminalExtractionContext::default(),
+            injected_provider_response: extraction_json.clone(),
+        };
+
+        // Fixture B: expects the extracted note to be novel relative to all
+        // supplied candidates (must-not-duplicate — provider says "novel").
+        let nondup_fixture = ExtractionReplayFixture {
+            id: "nondup-case".to_string(),
+            required_discriminative_text: "extraction merge".to_string(),
+            expected_note_type: "case".to_string(),
+            expect_adr_054_quality: true,
+            must_not_duplicate_target: Some(nondup_candidate.id.clone()),
+            expected_duplicate_target: None,
+            provenance: "sanitized_archived_transcript_derived".to_string(),
+            messages: vec![ReplayTranscriptMessage {
+                role: "user".to_string(),
+                content: "non-dedup fixture transcript".to_string(),
+            }],
+            terminal_context: crate::llm_extraction::TerminalExtractionContext::default(),
+            injected_provider_response: extraction_json.clone(),
+        };
 
         // The novelty provider for the dedup case returns "already_known"
         // pointing at duplicate_candidate. For the non-dedup case it returns
@@ -841,6 +1079,88 @@ mod tests {
             eval_note_count_before,
             "replay must not persist generated notes"
         );
+    }
+
+    #[tokio::test]
+    async fn committed_corpus_replays_every_fixture_through_the_database_runner() {
+        let fixtures = load_extraction_replay_fixtures(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/extraction_replay"
+        ))
+        .expect("committed replay corpus must validate");
+        let db = Database::open_in_memory().unwrap();
+        let events = EventBus::noop();
+        let eval = ProjectRepository::new(db.clone(), events.clone())
+            .create("eval", "test", "committed-corpus")
+            .await
+            .unwrap();
+        let notes = NoteRepository::new(db.clone(), events.clone());
+        let mut replay_cases = Vec::with_capacity(fixtures.len());
+        for mut fixture in fixtures {
+            for target in [
+                &mut fixture.expected_duplicate_target,
+                &mut fixture.must_not_duplicate_target,
+            ]
+            .into_iter()
+            .flatten()
+            {
+                let candidate = notes
+                    .create_db_note_with_permalink(
+                        &eval.id,
+                        target,
+                        target,
+                        &fixture.required_discriminative_text,
+                        &fixture.expected_note_type,
+                        "[]",
+                    )
+                    .await
+                    .unwrap();
+                *target = candidate.id;
+            }
+            let session_id =
+                create_fixture_replay_session(&db, events.clone(), &eval.id, &fixture).await;
+            replay_cases.push(DatabaseReplayCase {
+                candidate_lookup_text: fixture.required_discriminative_text.clone(),
+                fixture,
+                session_id,
+            });
+        }
+
+        let extraction_responses = replay_cases
+            .iter()
+            .map(|case| case.fixture.injected_provider_response.clone())
+            .collect();
+        let novelty_responses = replay_cases
+            .iter()
+            .filter(|case| {
+                case.fixture.expect_adr_054_quality
+                    && (case.fixture.expected_duplicate_target.is_some()
+                        || case.fixture.must_not_duplicate_target.is_some())
+            })
+            .map(
+                |case| match case.fixture.expected_duplicate_target.as_deref() {
+                    Some(target) => {
+                        format!(r#"{{"decision":"already_known","existing_note_id":"{target}"}}"#)
+                    }
+                    None => r#"{"decision":"novel","existing_note_id":null}"#.to_string(),
+                },
+            )
+            .collect();
+        let seam = ProductionReplaySeam {
+            extraction_provider: Arc::new(ScriptedProvider::new(extraction_responses)),
+            novelty_provider: Arc::new(ScriptedProvider::new(novelty_responses)),
+        };
+        let report =
+            run_database_extraction_replay(db, events, &eval.id, &replay_cases, &seam).await;
+
+        assert_eq!(report.total_cases, 24);
+        assert_eq!(report.cases.len(), replay_cases.len());
+        assert_eq!(report.satisfied_cases, report.total_cases);
+        assert_eq!(report.rubric_satisfaction_rate, 1.0);
+        assert_eq!(report.dedup.false_positive, 0);
+        assert_eq!(report.dedup.false_negative, 0);
+        assert_eq!(report.dedup_precision, 1.0);
+        assert!(report.failures.is_empty(), "{:#?}", report.failures);
     }
 
     #[tokio::test]

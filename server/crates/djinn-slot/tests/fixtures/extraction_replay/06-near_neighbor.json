@@ -1,0 +1,27 @@
+{
+   "expected_note_type" : "pitfall",
+   "required_discriminative_text" : "discriminative replay fact 06",
+   "terminal_context" : {
+      "review_decision" : null,
+      "outcome" : {
+         "kind" : "completed"
+      }
+   },
+   "provenance" : "sanitized_archived_transcript_derived",
+   "messages" : [
+      {
+         "role" : "user",
+         "content" : "Summarize sanitized task evidence for discriminative replay fact 06."
+      },
+      {
+         "role" : "assistant",
+         "content" : "Implemented a concise deterministic change and recorded the outcome."
+      }
+   ],
+   "expected_duplicate_target" : null,
+   "expect_adr_054_quality" : true,
+   "category" : "near_neighbor",
+   "injected_provider_response" : "{\"pitfalls\":[{\"title\":\"Sanitized near_neighbor 06\",\"content\":\"## Trigger / smell\\ndiscriminative replay fact 06. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\\n\\n## Failure mode\\ndiscriminative replay fact 06. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\\n\\n## Observable symptoms\\ndiscriminative replay fact 06. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\\n\\n## Prevention\\ndiscriminative replay fact 06. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\\n\\n## Recovery\\ndiscriminative replay fact 06. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\\n\\n## Related\\ndiscriminative replay fact 06. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\",\"applies_when\":\"offline replay fixture\"}]}",
+   "id" : "archive-derived-06",
+   "must_not_duplicate_target" : "candidate-neighbor-06"
+}
