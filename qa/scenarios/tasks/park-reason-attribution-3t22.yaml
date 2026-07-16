@@ -7,6 +7,6 @@ scenarios:
     sources: [{kind: incident, id: "Park misattribution 3t22"}]
     primary_coverage: task-lifecycle.park-reason-attribution
     secondary_coverage: [task-lifecycle.park-event-causality]
-    execution: {kind: cargo-package, package: djinn-coordinator}
+    execution: {kind: cargo-package, package: djinn-coordinator, selector: dispatch::park_reason_tests::merge_queue_failed_park_reason_names_merge_queue_failure_and_checks}
     isolation: {database: isolated, providers: isolated, channel: isolated}
     watch_paths: [server/crates/djinn-coordinator/src/dispatch/park_reason_tests.rs]

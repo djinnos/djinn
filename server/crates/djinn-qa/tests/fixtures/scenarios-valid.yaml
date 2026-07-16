@@ -12,6 +12,7 @@ scenarios:
     execution:
       kind: cargo-package
       package: djinn-qa
+      selector: scenario::tests::directory_loading_is_recursive_sorted_and_rejects_cross_file_duplicates
     isolation:
       database: isolated
       providers: isolated
@@ -29,6 +30,7 @@ scenarios:
       kind: cargo-package
       package: djinn-core
       test: cargo_target_runs_fixtures
+      selector: cargo_target_runs_fixture_contract
     isolation:
       database: isolated
       providers: isolated

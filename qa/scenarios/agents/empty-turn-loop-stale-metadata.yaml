@@ -7,6 +7,6 @@ scenarios:
     sources: [{kind: memory, id: pitfalls/acting-on-stale-loop-detection-metadata}]
     primary_coverage: agent-loop.empty-turn-detection
     secondary_coverage: [agent-loop.loop-metadata-freshness]
-    execution: {kind: cargo-package, package: djinn-slot}
+    execution: {kind: cargo-package, package: djinn-slot, selector: reply_loop::tests::codex_empty_turn_error_is_empty_completion_throttle}
     isolation: {database: isolated, providers: isolated, channel: isolated}
     watch_paths: [server/crates/djinn-slot/src/reply_loop]

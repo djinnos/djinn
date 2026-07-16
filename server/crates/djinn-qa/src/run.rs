@@ -6,7 +6,7 @@
 use std::{
     fs,
     path::{Path, PathBuf},
-    process::Command,
+    process::{Command, Output},
     sync::mpsc,
     thread,
 };
@@ -82,10 +82,45 @@ pub trait DatabaseAcquirer: Sync {
     fn acquire(&self) -> Result<Box<dyn Send>, String>;
 }
 
-pub struct CargoExecutor;
+/// The process runner is injected by focused tests so command construction and
+/// evidence validation are tested on the same production execution path.
+type CommandRunner = dyn Fn(&mut Command) -> std::io::Result<Output> + Send + Sync;
+
+pub struct CargoExecutor {
+    run_command: Box<CommandRunner>,
+}
+
+impl Default for CargoExecutor {
+    fn default() -> Self {
+        Self {
+            run_command: Box::new(Command::output),
+        }
+    }
+}
+
+#[cfg(test)]
+impl CargoExecutor {
+    fn with_process(
+        run_command: impl Fn(&mut Command) -> std::io::Result<Output> + Send + Sync + 'static,
+    ) -> Self {
+        Self {
+            run_command: Box::new(run_command),
+        }
+    }
+}
+
 impl ScenarioExecutor for CargoExecutor {
     fn execute(&self, root: &Path, execution: &Execution) -> Result<(), String> {
-        let Execution::CargoPackage { package, test } = execution;
+        let Execution::CargoPackage {
+            package,
+            test,
+            selector,
+        } = execution;
+        if selector.trim().is_empty() {
+            return Err(format!(
+                "cargo adapter for package `{package}` declares an empty libtest selector"
+            ));
+        }
         let workspace = if root.join("server/Cargo.toml").is_file() {
             root.join("server")
         } else {
@@ -100,19 +135,41 @@ impl ScenarioExecutor for CargoExecutor {
         if let Some(test) = test {
             command.arg("--test").arg(test);
         }
-        let output = command
-            .output()
+        command.arg("--").arg("--exact").arg(selector);
+        let output = (self.run_command)(&mut command)
             .map_err(|e| format!("cargo adapter could not start `{package}`: {e}"))?;
-        if output.status.success() {
-            Ok(())
-        } else {
-            Err(format!(
+        if !output.status.success() {
+            return Err(format!(
                 "cargo adapter failed for package `{package}` (exit {}): {}",
                 output.status,
                 String::from_utf8_lossy(&output.stderr).trim()
-            ))
+            ));
         }
+        // Fail closed: a successful child process that executed zero tests is
+        // rejected as failed evidence so a typo'd selector cannot pass.
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        if !ran_at_least_one_test(&stdout) {
+            return Err(format!(
+                "cargo adapter for package `{package}` selector `{selector}` executed zero tests"
+            ));
+        }
+        Ok(())
     }
+}
+
+/// Parse libtest output to confirm at least one test was actually executed.
+///
+/// libtest prints a summary line such as `running 3 tests` and, when tests
+/// match, reports per-test results followed by a `test result: ok. N passed`.
+/// When a `--exact` selector matches nothing the per-binary `running 0 tests`
+/// line appears and no `test result:` line is emitted for that binary.
+fn ran_at_least_one_test(stdout: &str) -> bool {
+    stdout.lines().any(|line| {
+        let trimmed = line.trim();
+        trimmed.starts_with("test result:")
+            && !trimmed.contains(" 0 passed")
+            && !trimmed.contains(" 0 run")
+    })
 }
 
 pub struct TemplateCloneDatabase;
@@ -333,6 +390,7 @@ mod tests {
             execution: Execution::CargoPackage {
                 package: "djinn-qa".into(),
                 test: None,
+                selector: "scenario::tests::directory_loading_is_recursive_sorted_and_rejects_cross_file_duplicates".into(),
             },
             isolation: crate::Isolation {
                 database: crate::IsolationMode::Isolated,
@@ -465,6 +523,7 @@ mod tests {
         item.execution = Execution::CargoPackage {
             package: "djinn-qa".into(),
             test: None,
+            selector: "scenario::tests::directory_loading_is_recursive_sorted_and_rejects_cross_file_duplicates".into(),
         };
         let result = execute_selected(&repository_root(), &[item], 1, &executor, &Db).unwrap();
         assert_eq!(result[0].status, RunStatus::Passed);
@@ -536,5 +595,140 @@ mod tests {
         assert_eq!(value["sources"][0]["id"], "pitfalls/source");
         assert_eq!(value["watch_paths"][0], "src/lib.rs");
         assert_eq!(value["status"], "passed");
+    }
+
+    #[test]
+    fn empty_selector_is_rejected_by_schema_validation() {
+        let yaml = "\
+version: 1
+scenarios:
+  - id: qa.empty-selector
+    version: 1
+    enabled: true
+    profiles: [smoke-ci]
+    sources: [{kind: memory, id: fixture}]
+    primary_coverage: task.state-machine.legal-transitions
+    execution: {kind: cargo-package, package: djinn-qa, selector: ''}
+    isolation: {database: isolated, providers: isolated, channel: isolated}
+    watch_paths: [src/lib.rs]
+";
+        let inventory = ScenarioInventory::from_yaml(yaml).unwrap();
+        let errors = inventory
+            .validate(&taxonomy(), repository_root())
+            .unwrap_err();
+        assert!(
+            errors
+                .0
+                .iter()
+                .any(|d| d.contains("libtest selector must not be empty")),
+            "empty selector must be rejected by validation: {:?}",
+            errors.0
+        );
+    }
+
+    #[test]
+    fn cargo_executor_constructs_exact_targeted_command_and_accepts_match() {
+        use std::{os::unix::process::ExitStatusExt, sync::Arc};
+
+        let captured_args = Arc::new(Mutex::new(Vec::new()));
+        let captured_args_for_process = captured_args.clone();
+        let executor = CargoExecutor::with_process(move |command| {
+            *captured_args_for_process.lock().unwrap() = command
+                .get_args()
+                .map(|argument| argument.to_string_lossy().into_owned())
+                .collect();
+            Ok(Output {
+                status: std::process::ExitStatus::from_raw(0),
+                stdout: b"running 1 tests\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n".to_vec(),
+                stderr: Vec::new(),
+            })
+        });
+        let execution = Execution::CargoPackage {
+            package: "djinn-qa".into(),
+            test: Some("scenario_contract".into()),
+            selector: "scenario::tests::exact_match".into(),
+        };
+
+        executor.execute(Path::new("."), &execution).unwrap();
+        assert_eq!(
+            *captured_args.lock().unwrap(),
+            vec![
+                "test", "-p", "djinn-qa", "--test", "scenario_contract", "--", "--exact",
+                "scenario::tests::exact_match",
+            ]
+        );
+    }
+
+    #[test]
+    fn cargo_executor_rejects_successful_process_with_zero_executed_tests() {
+        use std::os::unix::process::ExitStatusExt;
+
+        let executor = CargoExecutor::with_process(|_| {
+            Ok(Output {
+                status: std::process::ExitStatus::from_raw(0),
+                stdout: b"running 0 tests\ntest result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n".to_vec(),
+                stderr: Vec::new(),
+            })
+        });
+        let execution = Execution::CargoPackage {
+            package: "djinn-qa".into(),
+            test: None,
+            selector: "scenario::tests::missing".into(),
+        };
+        let error = executor.execute(Path::new("."), &execution).unwrap_err();
+        assert!(error.contains("executed zero tests"), "unexpected error: {error}");
+    }
+
+    #[test]
+    fn execution_identity_distinguishes_distinct_selectors() {
+        let base = Execution::CargoPackage {
+            package: "djinn-coordinator".into(),
+            test: None,
+            selector: "dispatch::park_reason_tests::merge_queue_failed".into(),
+        };
+        let different_selector = Execution::CargoPackage {
+            package: "djinn-coordinator".into(),
+            test: None,
+            selector: "actor::tests::record_live_metrics".into(),
+        };
+        let with_target = Execution::CargoPackage {
+            package: "djinn-coordinator".into(),
+            test: Some("integration".into()),
+            selector: "dispatch::park_reason_tests::merge_queue_failed".into(),
+        };
+        assert_ne!(base.identity(), different_selector.identity());
+        assert_ne!(base.identity(), with_target.identity());
+        assert!(
+            base.identity().contains("merge_queue_failed"),
+            "identity must include selector: {}",
+            base.identity()
+        );
+        assert!(
+            with_target.identity().contains("integration"),
+            "identity must include test target: {}",
+            with_target.identity()
+        );
+        assert!(
+            with_target.identity().contains("merge_queue_failed"),
+            "identity must include selector even with test target: {}",
+            with_target.identity()
+        );
+    }
+
+    #[test]
+    fn cargo_executor_empty_selector_fails_before_invocation() {
+        let executor = CargoExecutor::default();
+        let execution = Execution::CargoPackage {
+            package: "djinn-qa".into(),
+            test: None,
+            selector: "   ".into(),
+        };
+        let result = executor.execute(Path::new("."), &execution);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("empty libtest selector"),
+            "whitespace-only selector must be rejected: {err}"
+        );
     }
 }

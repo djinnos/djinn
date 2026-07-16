@@ -79,7 +79,7 @@ fn run_smoke(args: Vec<String>) -> Result<ExitCode, String> {
         concurrency,
         &evidence_dir,
         &sha,
-        &CargoExecutor,
+        &CargoExecutor::default(),
         &TemplateCloneDatabase,
     )?;
     Ok(if summary.succeeded() {
