@@ -3,7 +3,7 @@ use std::{collections::BTreeSet, env, fs, path::PathBuf, process::ExitCode};
 use djinn_qa::{
     CargoExecutor, CoverageContext, EvidenceSet, Profile, ScenarioInventory, Taxonomy,
     TemplateCloneDatabase, coverage_report, discovered_root, empty_evidence, empty_inventory,
-    required_gap, run_inventory,
+    load_runner_artifacts, required_gap, run_inventory,
 };
 
 fn main() -> ExitCode {
@@ -166,12 +166,16 @@ fn coverage(args: Vec<String>) -> Result<ExitCode, String> {
     let evidence_path = evidence.unwrap_or_else(|| root.join("qa/evidence.yaml"));
     let evidence_set = if evidence_path.is_file() {
         EvidenceSet::load(&evidence_path).map_err(|error| error.to_string())?
+    } else if evidence_path.is_dir() {
+        load_runner_artifacts(&evidence_path, &inventory, profile)
     } else {
         empty_evidence()
     };
-    evidence_set
-        .validate(&taxonomy, &inventory)
-        .map_err(|error| error.to_string())?;
+    if evidence_path.is_file() {
+        evidence_set
+            .validate(&taxonomy, &inventory)
+            .map_err(|error| error.to_string())?;
+    }
     let rows = coverage_report(
         &taxonomy,
         &inventory,
@@ -182,7 +186,7 @@ fn coverage(args: Vec<String>) -> Result<ExitCode, String> {
             accepted_baseline_shas: baselines,
             ..Default::default()
         },
-        evidence_path.is_file().then_some(evidence_path.as_path()),
+        (evidence_path.is_file() || evidence_path.is_dir()).then_some(evidence_path.as_path()),
     );
     let rendered = if format == "json" {
         serde_json::to_string_pretty(&rows).map_err(|error| error.to_string())? + "\n"
@@ -192,6 +196,12 @@ fn coverage(args: Vec<String>) -> Result<ExitCode, String> {
     if let Some(path) = output {
         if format != "json" {
             return Err("--output is supported only with --format json".into());
+        }
+        if let Some(parent) = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+        {
+            fs::create_dir_all(parent).map_err(|error| error.to_string())?;
         }
         fs::write(path, rendered).map_err(|error| error.to_string())?;
     } else {
