@@ -14,6 +14,10 @@ pub use evidence::{
 };
 pub use harness::HarnessError;
 pub use harness::channel::{ChannelAction, ChannelEvent, ChannelScript, ChannelState, FakeChannel};
+pub use harness::database::{
+    DatabaseAcquisitionError, DatabaseLease, DatabaseLeaseFactory, DatabaseLeaseIdentity,
+    DatabaseScenarioOutcome, DjinnDatabaseLeaseFactory, acquire_for_scenario,
+};
 pub use harness::provider::{MockProvider, ProviderOutcome, ProviderScript};
 pub use report::{
     CoverageReportRow, ReportError, coverage_report, discovered_root, empty_evidence,

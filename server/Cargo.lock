@@ -1597,6 +1597,8 @@ dependencies = [
 name = "djinn-qa"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
+ "djinn-db",
  "djinn-git",
  "serde",
  "serde_json",
@@ -1604,6 +1606,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
  "time",
+ "tokio",
  "workspace-hack",
 ]
 
