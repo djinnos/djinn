@@ -1601,6 +1601,7 @@ dependencies = [
  "async-trait",
  "djinn-db",
  "djinn-git",
+ "libc",
  "serde",
  "serde_json",
  "serde_yaml",
@@ -1608,6 +1609,7 @@ dependencies = [
  "thiserror 2.0.18",
  "time",
  "tokio",
+ "wait-timeout",
  "workspace-hack",
 ]
 

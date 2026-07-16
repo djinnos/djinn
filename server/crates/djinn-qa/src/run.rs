@@ -4,15 +4,22 @@
 //! tested without wall-clock sleeps or a live database.
 
 use std::{
+    collections::BTreeMap,
     fs,
+    io::{self, Read},
     path::{Path, PathBuf},
-    process::Command,
+    process::{Command, Stdio},
     sync::mpsc,
     thread,
+    time::Duration,
 };
+
+#[cfg(unix)]
+use std::os::unix::process::CommandExt;
 
 use serde::{Deserialize, Serialize};
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
+use wait_timeout::ChildExt;
 
 use crate::{Execution, Profile, Scenario, ScenarioInventory, Taxonomy, scenario::resolves};
 
@@ -83,6 +90,8 @@ pub trait DatabaseAcquirer: Sync {
 }
 
 pub struct CargoExecutor;
+const CARGO_EXECUTION_TIMEOUT: Duration = Duration::from_secs(30 * 60);
+
 impl ScenarioExecutor for CargoExecutor {
     fn execute(&self, root: &Path, execution: &Execution) -> Result<(), String> {
         let Execution::CargoPackage { package, test } = execution;
@@ -100,18 +109,115 @@ impl ScenarioExecutor for CargoExecutor {
         if let Some(test) = test {
             command.arg("--test").arg(test);
         }
-        let output = command
-            .output()
-            .map_err(|e| format!("cargo adapter could not start `{package}`: {e}"))?;
-        if output.status.success() {
-            Ok(())
-        } else {
-            Err(format!(
-                "cargo adapter failed for package `{package}` (exit {}): {}",
-                output.status,
-                String::from_utf8_lossy(&output.stderr).trim()
-            ))
+        execute_command(&mut command, CARGO_EXECUTION_TIMEOUT, package)
+    }
+}
+
+fn drain<T: Read + Send + 'static>(stream: Option<T>) -> thread::JoinHandle<Vec<u8>> {
+    thread::spawn(move || {
+        let mut bytes = Vec::new();
+        if let Some(mut stream) = stream {
+            let _ = stream.read_to_end(&mut bytes);
         }
+        bytes
+    })
+}
+
+fn join_drain(handle: thread::JoinHandle<Vec<u8>>) -> Vec<u8> {
+    let (sender, receiver) = mpsc::channel();
+    thread::spawn(move || {
+        let _ = sender.send(handle.join().unwrap_or_default());
+    });
+    receiver
+        .recv_timeout(Duration::from_secs(2))
+        .unwrap_or_default()
+}
+
+#[cfg(unix)]
+fn isolate_process_group(command: &mut Command) {
+    // SAFETY: this callback only invokes the async-signal-safe setpgid syscall
+    // between fork and exec. The separate group includes cargo's descendants.
+    unsafe {
+        command.pre_exec(|| {
+            if libc::setpgid(0, 0) == 0 {
+                Ok(())
+            } else {
+                Err(io::Error::last_os_error())
+            }
+        });
+    }
+}
+
+#[cfg(not(unix))]
+fn isolate_process_group(_: &mut Command) {}
+
+#[cfg(unix)]
+fn terminate_descendants(child: &mut std::process::Child) {
+    let process_group = -(child.id() as i32);
+    // SAFETY: the child was placed in a process group whose id is its pid.
+    unsafe {
+        libc::kill(process_group, libc::SIGTERM);
+    }
+    thread::sleep(Duration::from_millis(200));
+    // Always escalate the group. Cargo may exit after SIGTERM while a test
+    // descendant ignores it; checking only the direct child would orphan that
+    // descendant and keep its output pipes open.
+    // SAFETY: as above; SIGKILL makes termination non-cooperative.
+    unsafe {
+        libc::kill(process_group, libc::SIGKILL);
+    }
+}
+
+#[cfg(not(unix))]
+fn terminate_descendants(child: &mut std::process::Child) {
+    let _ = child.kill();
+}
+
+fn execute_command(command: &mut Command, timeout: Duration, package: &str) -> Result<(), String> {
+    command.stdout(Stdio::piped()).stderr(Stdio::piped());
+    isolate_process_group(command);
+    let mut child = command
+        .spawn()
+        .map_err(|error| format!("cargo adapter could not start `{package}`: {error}"))?;
+    let stdout = drain(child.stdout.take());
+    let stderr = drain(child.stderr.take());
+
+    let status = match child.wait_timeout(timeout) {
+        Ok(Some(status)) => status,
+        Ok(None) => {
+            terminate_descendants(&mut child);
+            // Reaping is bounded too, so uninterruptible I/O cannot replace the
+            // execution hang with a cleanup hang.
+            let _ = child.wait_timeout(Duration::from_secs(3));
+            let _ = join_drain(stdout);
+            let stderr = join_drain(stderr);
+            let detail = String::from_utf8_lossy(&stderr);
+            return Err(format!(
+                "cargo adapter timed out for package `{package}` after {} seconds{}{}",
+                timeout.as_secs_f64(),
+                if detail.trim().is_empty() { "" } else { ": " },
+                detail.trim()
+            ));
+        }
+        Err(error) => {
+            terminate_descendants(&mut child);
+            let _ = child.wait_timeout(Duration::from_secs(3));
+            let _ = join_drain(stdout);
+            let _ = join_drain(stderr);
+            return Err(format!(
+                "cargo adapter wait failed for package `{package}`: {error}"
+            ));
+        }
+    };
+    let _ = join_drain(stdout);
+    let stderr = join_drain(stderr);
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!(
+            "cargo adapter failed for package `{package}` (exit {status}): {}",
+            String::from_utf8_lossy(&stderr).trim()
+        ))
     }
 }
 
@@ -166,7 +272,8 @@ pub fn select_scenarios(inventory: &ScenarioInventory, profile: Profile) -> Vec<
         .collect()
 }
 
-/// Runs batches no larger than `concurrency`, collecting outcomes in stable ID order.
+/// Runs distinct execution targets in bounded batches and fans each result out to
+/// every declaring scenario, collecting outcomes in stable scenario-ID order.
 pub fn execute_selected(
     root: &Path,
     selected: &[Scenario],
@@ -182,13 +289,23 @@ pub fn execute_selected(
             "no enabled, executable scenarios are eligible for the requested profile".into(),
         );
     }
+    let mut planned = BTreeMap::<(&str, Option<&str>), Vec<&Scenario>>::new();
+    for scenario in selected {
+        let Execution::CargoPackage { package, test } = &scenario.execution;
+        planned
+            .entry((package.as_str(), test.as_deref()))
+            .or_default()
+            .push(scenario);
+    }
+    let planned = planned.into_values().collect::<Vec<_>>();
     let mut outcomes = Vec::with_capacity(selected.len());
-    for batch in selected.chunks(concurrency) {
+    for batch in planned.chunks(concurrency) {
         let (sender, receiver) = mpsc::channel();
         thread::scope(|scope| {
-            for scenario in batch {
+            for scenarios in batch {
                 let sender = sender.clone();
                 scope.spawn(move || {
+                    let scenario = scenarios[0];
                     let started_at = now();
                     let (status, diagnostics) = if !resolves(&scenario.execution, root) {
                         (
@@ -210,13 +327,16 @@ pub fn execute_selected(
                             Err(error) => (RunStatus::Failed, vec![error]),
                         }
                     };
-                    let _ = sender.send(ScenarioOutcome {
-                        scenario_id: scenario.id.clone(),
-                        status,
-                        diagnostics,
-                        started_at,
-                        finished_at: now(),
-                    });
+                    let finished_at = now();
+                    for scenario in scenarios {
+                        let _ = sender.send(ScenarioOutcome {
+                            scenario_id: scenario.id.clone(),
+                            status,
+                            diagnostics: diagnostics.clone(),
+                            started_at: started_at.clone(),
+                            finished_at: finished_at.clone(),
+                        });
+                    }
                 });
             }
         });
@@ -348,6 +468,13 @@ mod tests {
             blocked_dependency: None,
         }
     }
+    fn with_package(mut scenario: Scenario, package: &str) -> Scenario {
+        scenario.execution = Execution::CargoPackage {
+            package: package.into(),
+            test: None,
+        };
+        scenario
+    }
     struct Executor {
         calls: Mutex<usize>,
         peak: AtomicUsize,
@@ -473,6 +600,56 @@ mod tests {
         assert!(summary.succeeded());
     }
 
+    #[test]
+    fn identical_targets_execute_once_and_fan_out_in_scenario_id_order() {
+        let executor = Executor {
+            calls: Mutex::new(0),
+            peak: AtomicUsize::new(0),
+        };
+        let scenarios = ["h", "f", "d", "b", "g", "e", "c", "a"]
+            .map(|id| with_package(scenario(id), "djinn-coordinator"));
+
+        let outcomes = execute_selected(&repository_root(), &scenarios, 8, &executor, &Db).unwrap();
+
+        assert_eq!(*executor.calls.lock().unwrap(), 1);
+        assert_eq!(
+            outcomes
+                .iter()
+                .map(|outcome| outcome.scenario_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["a", "b", "c", "d", "e", "f", "g", "h"]
+        );
+        assert!(outcomes.windows(2).all(|pair| {
+            pair[0].started_at == pair[1].started_at
+                && pair[0].finished_at == pair[1].finished_at
+                && pair[0].diagnostics == pair[1].diagnostics
+        }));
+    }
+
+    struct TrackingDatabase {
+        acquisitions: AtomicUsize,
+        active: Arc<AtomicUsize>,
+        peak: Arc<AtomicUsize>,
+    }
+    struct TrackingGuard {
+        active: Arc<AtomicUsize>,
+    }
+    impl Drop for TrackingGuard {
+        fn drop(&mut self) {
+            self.active.fetch_sub(1, Ordering::SeqCst);
+        }
+    }
+    impl DatabaseAcquirer for TrackingDatabase {
+        fn acquire(&self) -> Result<Box<dyn Send>, String> {
+            self.acquisitions.fetch_add(1, Ordering::SeqCst);
+            let active = self.active.fetch_add(1, Ordering::SeqCst) + 1;
+            self.peak.fetch_max(active, Ordering::SeqCst);
+            Ok(Box::new(TrackingGuard {
+                active: Arc::clone(&self.active),
+            }))
+        }
+    }
+
     struct SynchronizedExecutor {
         entered: AtomicUsize,
         peak: AtomicUsize,
@@ -495,11 +672,82 @@ mod tests {
             peak: AtomicUsize::new(0),
             barrier: Barrier::new(2),
         });
-        let scenarios = vec![scenario("a"), scenario("b"), scenario("c"), scenario("d")];
-        let outcomes =
-            execute_selected(&repository_root(), &scenarios, 2, executor.as_ref(), &Db).unwrap();
+        let database = TrackingDatabase {
+            acquisitions: AtomicUsize::new(0),
+            active: Arc::new(AtomicUsize::new(0)),
+            peak: Arc::new(AtomicUsize::new(0)),
+        };
+        let scenarios = vec![
+            with_package(scenario("d"), "djinn-slot"),
+            with_package(scenario("b"), "djinn-db"),
+            with_package(scenario("c"), "djinn-coordinator"),
+            with_package(scenario("a"), "djinn-qa"),
+        ];
+        let outcomes = execute_selected(
+            &repository_root(),
+            &scenarios,
+            2,
+            executor.as_ref(),
+            &database,
+        )
+        .unwrap();
         assert_eq!(outcomes.len(), 4);
         assert_eq!(executor.peak.load(Ordering::SeqCst), 2);
+        assert_eq!(database.acquisitions.load(Ordering::SeqCst), 4);
+        assert_eq!(database.peak.load(Ordering::SeqCst), 2);
+        assert_eq!(database.active.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            outcomes
+                .iter()
+                .map(|outcome| outcome.scenario_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["a", "b", "c", "d"]
+        );
+    }
+
+    struct TimeoutExecutor;
+    impl ScenarioExecutor for TimeoutExecutor {
+        fn execute(&self, _: &Path, _: &Execution) -> Result<(), String> {
+            let mut command = Command::new("sh");
+            command.args(["-c", "sleep 10"]);
+            execute_command(&mut command, Duration::from_millis(20), "djinn-qa")
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn timeout_is_failed_scenario_evidence() {
+        let temp = tempfile::tempdir().unwrap();
+        let evidence = temp.path().join("evidence");
+        let inventory = ScenarioInventory {
+            version: 1,
+            scenarios: vec![scenario("adapter.timeout")],
+        };
+        let summary = run_inventory(
+            &repository_root(),
+            &taxonomy(),
+            &inventory,
+            Profile::SmokeCi,
+            1,
+            &evidence,
+            "a",
+            &TimeoutExecutor,
+            &Db,
+        )
+        .unwrap();
+
+        assert!(!summary.succeeded());
+        assert!(summary.outcomes[0].diagnostics[0].contains("timed out"));
+        let json: serde_json::Value =
+            serde_json::from_slice(&fs::read(evidence.join("adapter.timeout.json")).unwrap())
+                .unwrap();
+        assert_eq!(json["status"], "failed");
+        assert!(
+            json["diagnostics"][0]
+                .as_str()
+                .unwrap()
+                .contains("timed out")
+        );
     }
 
     #[test]

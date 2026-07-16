@@ -11,12 +11,14 @@ doctest = false
 async-trait = "0.1"
 djinn-db = { path = "../djinn-db" }
 djinn-git = { path = "../djinn-git" }
+libc = "0.2"
 serde = { version = "1", features = ["derive"] }
 serde_yaml = "0.9"
 serde_json = "1"
 thiserror = "2"
 time = { version = "0.3", features = ["parsing"] }
 tokio = { version = "1", features = ["rt"] }
+wait-timeout = "0.2"
 workspace-hack.workspace = true
 
 [dev-dependencies]
