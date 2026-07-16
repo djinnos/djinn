@@ -169,6 +169,55 @@ impl TaskRunOutcomeRepository {
         }
         self.write_once(run_id, "merge_queue_result", result).await
     }
+
+    /// Resolve only through the supplied attempt's durable association. There
+    /// is intentionally no task-id, current-state, or temporal fallback.
+    async fn run_id_for_attempt(&self, attempt_id: &str) -> Result<Option<String>> {
+        self.db.ensure_initialized().await?;
+        Ok(
+            sqlx::query_scalar("SELECT task_run_id FROM task_attempts WHERE id = $1")
+                .bind(attempt_id)
+                .fetch_optional(self.db.pool())
+                .await?
+                .flatten(),
+        )
+    }
+
+    pub async fn record_review_verdict_for_attempt(
+        &self,
+        attempt_id: &str,
+        verdict: &str,
+    ) -> Result<Option<TaskRunOutcomeFact>> {
+        match self.run_id_for_attempt(attempt_id).await? {
+            Some(run_id) => self.record_review_verdict(&run_id, verdict).await.map(Some),
+            None => Ok(None),
+        }
+    }
+
+    pub async fn record_merge_queue_result_for_attempt(
+        &self,
+        attempt_id: &str,
+        result: &str,
+    ) -> Result<Option<TaskRunOutcomeFact>> {
+        match self.run_id_for_attempt(attempt_id).await? {
+            Some(run_id) => self
+                .record_merge_queue_result(&run_id, result)
+                .await
+                .map(Some),
+            None => Ok(None),
+        }
+    }
+
+    pub async fn record_parked_reason_for_attempt(
+        &self,
+        attempt_id: &str,
+        reason: &str,
+    ) -> Result<Option<TaskRunOutcomeFact>> {
+        match self.run_id_for_attempt(attempt_id).await? {
+            Some(run_id) => self.record_parked_reason(&run_id, reason).await.map(Some),
+            None => Ok(None),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -186,6 +235,7 @@ mod tests {
             .create("outcome facts", "", "", "", "", None)
             .await
             .unwrap();
+
         let task_id = uuid::Uuid::now_v7().to_string();
         let short_id = format!("t{}{}", &task_id[..6], &task_id[task_id.len() - 6..]);
         sqlx::query(
@@ -267,6 +317,31 @@ mod tests {
             .await
             .unwrap();
 
+        // Each writer receives an authoritative attempt and follows only its
+        // durable association. Retry is idempotent; contradiction is rejected.
+        outcomes
+            .record_review_verdict_for_attempt(&first.id, "accepted")
+            .await
+            .unwrap();
+        outcomes
+            .record_review_verdict_for_attempt(&first.id, "accepted")
+            .await
+            .unwrap();
+        assert!(
+            outcomes
+                .record_review_verdict_for_attempt(&first.id, "rejected")
+                .await
+                .is_err()
+        );
+        outcomes
+            .record_merge_queue_result_for_attempt(&second.id, "failed")
+            .await
+            .unwrap();
+        outcomes
+            .record_parked_reason_for_attempt(&second.id, "merge_queue_failed")
+            .await
+            .unwrap();
+
         assert_eq!(
             outcomes.get(&run_one).await.unwrap().unwrap().attempt_seq,
             Some(1)
@@ -289,5 +364,14 @@ mod tests {
                 .unwrap();
         assert_eq!(first_run.as_deref(), Some(run_one.as_str()));
         assert_eq!(second_run.as_deref(), Some(run_two.as_str()));
+        let first_fact = outcomes.get(&run_one).await.unwrap().unwrap();
+        let second_fact = outcomes.get(&run_two).await.unwrap().unwrap();
+        assert_eq!(first_fact.review_verdict.as_deref(), Some("accepted"));
+        assert!(first_fact.merge_queue_result.is_none());
+        assert_eq!(second_fact.merge_queue_result.as_deref(), Some("failed"));
+        assert_eq!(
+            second_fact.parked_reason.as_deref(),
+            Some("merge_queue_failed")
+        );
     }
 }
