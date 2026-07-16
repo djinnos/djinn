@@ -11,7 +11,8 @@ pub mod taxonomy;
 
 pub use evidence::{
     CoverageContext, CoverageResult, CoverageState, Evidence, EvidenceError, EvidenceSet,
-    EvidenceStatus, EvidenceValidationErrors, RunnerIdentity, classify_coverage, load_runner_artifacts,
+    EvidenceStatus, EvidenceValidationErrors, RunnerIdentity, classify_coverage,
+    load_runner_artifacts,
 };
 pub use harness::HarnessError;
 pub use harness::channel::{ChannelAction, ChannelEvent, ChannelScript, ChannelState, FakeChannel};

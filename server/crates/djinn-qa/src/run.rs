@@ -422,10 +422,12 @@ mod tests {
             serde_json::from_slice(&fs::read(evidence.join("missing.target.json")).unwrap())
                 .unwrap();
         assert_eq!(json["status"], "failed");
-        assert!(json["diagnostics"][0]
-            .as_str()
-            .unwrap()
-            .contains("cannot be resolved"));
+        assert!(
+            json["diagnostics"][0]
+                .as_str()
+                .unwrap()
+                .contains("cannot be resolved")
+        );
     }
 
     #[test]

@@ -172,7 +172,9 @@ fn coverage(args: Vec<String>) -> Result<ExitCode, String> {
         empty_evidence()
     };
     if evidence_path.is_file() {
-        evidence_set.validate(&taxonomy, &inventory).map_err(|error| error.to_string())?;
+        evidence_set
+            .validate(&taxonomy, &inventory)
+            .map_err(|error| error.to_string())?;
     }
     let rows = coverage_report(
         &taxonomy,
@@ -195,7 +197,10 @@ fn coverage(args: Vec<String>) -> Result<ExitCode, String> {
         if format != "json" {
             return Err("--output is supported only with --format json".into());
         }
-        if let Some(parent) = path.parent().filter(|parent| !parent.as_os_str().is_empty()) {
+        if let Some(parent) = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+        {
             fs::create_dir_all(parent).map_err(|error| error.to_string())?;
         }
         fs::write(path, rendered).map_err(|error| error.to_string())?;

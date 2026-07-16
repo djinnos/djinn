@@ -102,7 +102,11 @@ impl EvidenceSet {
                             "{prefix}: scenario version does not match registered scenario"
                         ));
                     }
-                    if record.requirement_id != scenario.primary_coverage { errors.push(format!("{prefix}: requirement id does not match registered scenario")); }
+                    if record.requirement_id != scenario.primary_coverage {
+                        errors.push(format!(
+                            "{prefix}: requirement id does not match registered scenario"
+                        ));
+                    }
                     let expected = covered_by(scenario);
                     if !same_ids(&record.covered_ids, &expected) {
                         errors.push(format!(
@@ -172,13 +176,53 @@ impl EvidenceSet {
     }
 }
 
-pub fn load_runner_artifacts(directory: impl AsRef<Path>, inventory: &ScenarioInventory, profile: Profile) -> EvidenceSet {
-    let evidence = inventory.scenarios.iter().filter(|s| s.enabled && s.profiles.contains(&profile) && s.blocked_dependency.is_none()).filter_map(|s| {
-        let artifact = serde_json::from_slice::<crate::ScenarioEvidenceArtifact>(&fs::read(directory.as_ref().join(format!("{}.json", s.id))).ok()?).ok()?;
-        if artifact.scenario_id != s.id || parse_rfc3339(&artifact.started_at)? > parse_rfc3339(&artifact.finished_at)? || !is_git_sha(&artifact.git_sha) || artifact.runner.name.is_empty() || artifact.runner.version.is_empty() { return None; }
-        Some(Evidence { scenario_id: artifact.scenario_id, scenario_version: artifact.scenario_version, taxonomy_version: artifact.taxonomy_version, requirement_id: artifact.requirement_id, covered_ids: artifact.covered_ids, profile: artifact.profile, status: match artifact.status { crate::RunStatus::Passed => EvidenceStatus::Passed, crate::RunStatus::Failed => EvidenceStatus::Failed }, evidence_sha: artifact.git_sha, started_at: artifact.started_at, finished_at: artifact.finished_at, runner: RunnerIdentity { name: artifact.runner.name, version: artifact.runner.version } })
-    }).collect();
-    EvidenceSet { version: 1, evidence }
+pub fn load_runner_artifacts(
+    directory: impl AsRef<Path>,
+    inventory: &ScenarioInventory,
+    profile: Profile,
+) -> EvidenceSet {
+    let evidence = inventory
+        .scenarios
+        .iter()
+        .filter(|s| s.enabled && s.profiles.contains(&profile) && s.blocked_dependency.is_none())
+        .filter_map(|s| {
+            let artifact = serde_json::from_slice::<crate::ScenarioEvidenceArtifact>(
+                &fs::read(directory.as_ref().join(format!("{}.json", s.id))).ok()?,
+            )
+            .ok()?;
+            if artifact.scenario_id != s.id
+                || parse_rfc3339(&artifact.started_at)? > parse_rfc3339(&artifact.finished_at)?
+                || !is_git_sha(&artifact.git_sha)
+                || artifact.runner.name.is_empty()
+                || artifact.runner.version.is_empty()
+            {
+                return None;
+            }
+            Some(Evidence {
+                scenario_id: artifact.scenario_id,
+                scenario_version: artifact.scenario_version,
+                taxonomy_version: artifact.taxonomy_version,
+                requirement_id: artifact.requirement_id,
+                covered_ids: artifact.covered_ids,
+                profile: artifact.profile,
+                status: match artifact.status {
+                    crate::RunStatus::Passed => EvidenceStatus::Passed,
+                    crate::RunStatus::Failed => EvidenceStatus::Failed,
+                },
+                evidence_sha: artifact.git_sha,
+                started_at: artifact.started_at,
+                finished_at: artifact.finished_at,
+                runner: RunnerIdentity {
+                    name: artifact.runner.name,
+                    version: artifact.runner.version,
+                },
+            })
+        })
+        .collect();
+    EvidenceSet {
+        version: 1,
+        evidence,
+    }
 }
 
 /// All non-filesystem classifier inputs. Callers populate this from git and source inspection.
