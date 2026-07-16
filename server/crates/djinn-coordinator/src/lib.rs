@@ -47,6 +47,7 @@ use actor::CoordinatorActor;
 use types::*;
 
 pub mod audit_sampler;
+pub mod build_admission;
 pub mod cargo_warm_base_gc;
 pub(crate) mod ci_preflight_gate;
 pub mod ci_reproduction;
