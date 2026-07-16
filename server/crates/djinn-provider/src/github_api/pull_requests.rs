@@ -69,19 +69,53 @@ impl GitHubApiClient {
             // failing the whole flow — otherwise the caller loops
             // reopen→create→422 forever. Mirrors create_ref's
             // "422 already exists → success" idempotency.
+            //
+            // The adoption list is retried: only an OPEN PR triggers this 422,
+            // yet a single-shot list can still miss it — the list endpoint
+            // lags a just-created PR (read-after-write), and during degraded
+            // GitHub-API incidents the list 5xxs while the POST's 422 got
+            // through (2026-07-16, task mbfw). An escaped 422 fails the whole
+            // PR-open run for a PR that exists.
             if status.as_u16() == 422 && body.contains("already exists") {
+                const ADOPT_LIST_ATTEMPTS: u32 = 3;
                 let head_filter = format!("{owner}:{}", params.head);
-                if let Ok(prs) = self.list_pulls_by_head(owner, repo, &head_filter).await
-                    && let Some(pr) = prs.into_iter().next()
-                {
-                    tracing::info!(
-                        owner,
-                        repo,
-                        head = %params.head,
-                        pr = pr.number,
-                        "create_pull_request: PR already exists for head — adopting existing"
-                    );
-                    return Ok(pr);
+                for attempt in 1..=ADOPT_LIST_ATTEMPTS {
+                    match self.list_pulls_by_head(owner, repo, &head_filter).await {
+                        Ok(prs) => {
+                            if let Some(pr) = prs.into_iter().next() {
+                                tracing::info!(
+                                    owner,
+                                    repo,
+                                    head = %params.head,
+                                    pr = pr.number,
+                                    attempt,
+                                    "create_pull_request: PR already exists for head — adopting existing"
+                                );
+                                return Ok(pr);
+                            }
+                            tracing::warn!(
+                                owner,
+                                repo,
+                                head = %params.head,
+                                attempt,
+                                "create_pull_request: 422 says a PR exists but the list shows none yet"
+                            );
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                owner,
+                                repo,
+                                head = %params.head,
+                                attempt,
+                                error = %e,
+                                "create_pull_request: adoption list failed after 422"
+                            );
+                        }
+                    }
+                    if attempt < ADOPT_LIST_ATTEMPTS {
+                        tokio::time::sleep(std::time::Duration::from_secs(1 << (attempt - 1)))
+                            .await;
+                    }
                 }
             }
             return Err(github_pr_write_error(
