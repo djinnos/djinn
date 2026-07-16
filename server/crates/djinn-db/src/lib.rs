@@ -46,6 +46,12 @@ pub use repositories::tool_call_metrics::{
     retry_after_edit_failure, wilson_difference_interval, wilson_interval,
 };
 pub use repositories::{
+    admission_journal::{
+        AdmissionDomain, AdmissionJournalKey, AdmissionJournalRepository, AdmissionJournalRow,
+        AdmissionRecoveryResult, AdmissionState, AdmissionWorkloadKind, CreateStartedInput,
+        ReserveAdmissionInput, ReserveAdmissionResult, TerminalAdmissionInput,
+        UidFencedAdmissionInput,
+    },
     agent::{
         AgentCreateInput, AgentListQuery, AgentListResult, AgentMetrics, AgentRepository,
         AgentUpdateInput, VALID_BASE_ROLES,

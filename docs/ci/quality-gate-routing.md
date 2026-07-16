@@ -25,6 +25,25 @@ A documentation-only **pull request** intentionally has no selected product lane
 
 `quality-gate` is the protected aggregate check. It is fail closed: preflight must succeed, every selected job must report `success`, and an unselected job must report only `skipped`. For server tests this explicitly includes the planner (`nextest-plan`), the shard family (`server-test`), and the timing publisher (`nextest-timing-publish`). A failed, cancelled, absent, or unexpected result is a gate failure; a neutral skip is acceptable only when the manifest explicitly did not select that work.
 
+## qa-smoke deterministic evidence gate
+
+`qa-smoke` is a named, required quality-gate lane for deterministic behavioral smoke evidence. Its routing inputs are the QA taxonomy (`qa/taxonomy.yaml`), scenario definitions (`qa/scenarios/**`), the QA runner and coverage implementation (`server/crates/djinn-qa/**`), and the deterministic test-harness code exercised by those scenarios. Workflow changes and fail-closed/full-validation routing also select it. This keeps changes to the declared behavioral contract, scenario pack, runner, or its deterministic harness from silently bypassing the evidence gate; unrelated changes follow the normal safe-routing policy.
+
+Run the lane locally from `server` in this order:
+
+```sh
+cargo run -p djinn-qa -- run --qa-profile smoke-ci --concurrency 8 --evidence-dir qa/evidence/smoke-ci
+cargo run -p djinn-qa -- coverage --profile smoke-ci --format json --evidence qa/evidence/smoke-ci --output qa/evidence/smoke-ci/coverage.json
+```
+
+Although the commands are invoked from `server`, the `qa/evidence/smoke-ci` arguments identify a **repository-relative** evidence location. The runner discovers the repository root and resolves them to `<repository-root>/qa/evidence/smoke-ci`, not to a hand-maintained `server/qa` tree. The runner writes per-scenario evidence there; the coverage command consumes that runner-produced evidence and writes `coverage.json` alongside it. Delete or regenerate this directory when reproducing a run; it is generated diagnostic data, not hand-authored source.
+
+The CI job uploads `qa/evidence/smoke-ci` as the `qa-smoke` evidence artifact, including `coverage.json`, for diagnosis. Upload is attempted even when one or more scenarios fail so their per-scenario diagnostics remain available. A missing evidence directory or missing required evidence is an error, not an empty or silently skipped artifact; scenario failure, a coverage gap, or an upload/evidence-presence failure fails the `qa-smoke` lane and therefore the aggregate when selected.
+
+The `smoke-ci` profile has a deterministic-only dependency boundary. It permits only local deterministic dependencies: mock providers, the fake channel driver, and a dedicated isolated test database. It admits **no** live credentials, external provider network access, shared developer database, or Kubernetes-only scenario. Nightly-only and live-only scenarios are excluded from this required PR/merge-queue lane; do not add them as a smoke workaround.
+
+Branch-protection administration (making the visible `qa-smoke` check required) and collecting two consecutive green default-branch observations are operator coordination steps. They are not repository-verifiable implementation acceptance criteria and must not be substituted for the routing, command, deterministic-boundary, evidence, or fail-closed behavior described above.
+
 ## Cache ownership policy
 
 The only saving owners are deliberately isolated warmers:

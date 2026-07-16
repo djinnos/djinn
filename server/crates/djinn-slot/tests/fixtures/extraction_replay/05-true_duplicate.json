@@ -1,0 +1,27 @@
+{
+   "expected_note_type" : "pattern",
+   "required_discriminative_text" : "discriminative replay fact 05",
+   "terminal_context" : {
+      "review_decision" : null,
+      "outcome" : {
+         "kind" : "completed"
+      }
+   },
+   "messages" : [
+      {
+         "content" : "Summarize sanitized task evidence for discriminative replay fact 05.",
+         "role" : "user"
+      },
+      {
+         "role" : "assistant",
+         "content" : "Implemented a concise deterministic change and recorded the outcome."
+      }
+   ],
+   "expected_duplicate_target" : "candidate-duplicate-05",
+   "provenance" : "sanitized_archived_transcript_derived",
+   "expect_adr_054_quality" : true,
+   "category" : "true_duplicate",
+   "must_not_duplicate_target" : null,
+   "id" : "archive-derived-05",
+   "injected_provider_response" : "{\"patterns\":[{\"content\":\"## Context\\ndiscriminative replay fact 05. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\\n\\n## Problem shape\\ndiscriminative replay fact 05. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\\n\\n## Recommended approach\\ndiscriminative replay fact 05. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\\n\\n## Why it works\\ndiscriminative replay fact 05. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\\n\\n## Tradeoffs / limits\\ndiscriminative replay fact 05. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\\n\\n## When to use\\ndiscriminative replay fact 05. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\\n\\n## When not to use\\ndiscriminative replay fact 05. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\\n\\n## Related\\ndiscriminative replay fact 05. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\",\"title\":\"Sanitized true_duplicate 05\",\"applies_when\":\"offline replay fixture\"}]}"
+}

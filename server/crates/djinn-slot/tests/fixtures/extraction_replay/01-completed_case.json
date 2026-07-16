@@ -1,0 +1,27 @@
+{
+   "terminal_context" : {
+      "outcome" : {
+         "kind" : "completed"
+      },
+      "review_decision" : null
+   },
+   "required_discriminative_text" : "discriminative replay fact 01",
+   "expected_note_type" : "case",
+   "category" : "completed_case",
+   "expect_adr_054_quality" : true,
+   "expected_duplicate_target" : null,
+   "id" : "archive-derived-01",
+   "messages" : [
+      {
+         "content" : "Summarize sanitized task evidence for discriminative replay fact 01.",
+         "role" : "user"
+      },
+      {
+         "role" : "assistant",
+         "content" : "Implemented a concise deterministic change and recorded the outcome."
+      }
+   ],
+   "must_not_duplicate_target" : null,
+   "provenance" : "sanitized_archived_transcript_derived",
+   "injected_provider_response" : "{\"cases\":[{\"content\":\"## Situation\\ndiscriminative replay fact 01. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\\n\\n## Constraint\\ndiscriminative replay fact 01. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\\n\\n## Approach taken\\ndiscriminative replay fact 01. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\\n\\n## Result\\ndiscriminative replay fact 01. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\\n\\n## Why it worked / failed\\ndiscriminative replay fact 01. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\\n\\n## Reusable lesson\\ndiscriminative replay fact 01. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\\n\\n## Related\\ndiscriminative replay fact 01. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\",\"title\":\"Sanitized completed_case 01\",\"applies_when\":\"offline replay fixture\"}]}"
+}
