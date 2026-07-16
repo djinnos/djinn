@@ -9,8 +9,8 @@ use super::*;
 use djinn_core::events::EventBus;
 use djinn_db::NoteRepository;
 use djinn_db::repositories::retrieval_trace::{
-    CandidateOutcome, RetrievalTraceEntryPoint, RetrievalTraceListFilter, RetrievalTraceRepository,
-    SkippedReason,
+    CandidateOutcome, RetrievalTraceEntryPoint, RetrievalTraceListFilter, RetrievalTraceOutcome,
+    RetrievalTraceRepository, SkippedReason,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -86,6 +86,8 @@ fn candidate_outcomes(
 
 #[tokio::test]
 async fn load_knowledge_context_prompt_output_unchanged_with_tracing() {
+    let mut env = knowledge_context_test_env_guard();
+    env.clear();
     let db = djinn_db::Database::ephemeral().await.expect("ephemeral db");
     let events = EventBus::noop();
     let task = create_project_epic_task(&db, &events, "Trace epic", "Trace task").await;
@@ -131,6 +133,8 @@ async fn load_knowledge_context_prompt_output_unchanged_with_tracing() {
 
 #[tokio::test]
 async fn load_knowledge_context_returns_none_when_no_matching_notes() {
+    let mut env = knowledge_context_test_env_guard();
+    env.clear();
     let db = djinn_db::Database::ephemeral().await.expect("ephemeral db");
     let events = EventBus::noop();
     let task = create_project_epic_task(&db, &events, "Empty epic", "Empty task").await;
@@ -144,6 +148,8 @@ async fn load_knowledge_context_returns_none_when_no_matching_notes() {
 
 #[tokio::test]
 async fn trace_classifies_below_threshold_as_min_confidence() {
+    let mut env = knowledge_context_test_env_guard();
+    env.clear();
     let db = djinn_db::Database::ephemeral().await.expect("ephemeral db");
     let events = EventBus::noop();
     let task = create_project_epic_task(&db, &events, "MinCnf epic", "MinCnf task").await;
@@ -176,6 +182,8 @@ async fn trace_classifies_below_threshold_as_min_confidence() {
 
 #[tokio::test]
 async fn trace_classifies_over_limit_as_not_top_k() {
+    let mut env = knowledge_context_test_env_guard();
+    env.clear();
     let db = djinn_db::Database::ephemeral().await.expect("ephemeral db");
     let events = EventBus::noop();
     let task = create_project_epic_task(&db, &events, "TopK epic", "TopK task").await;
@@ -222,6 +230,8 @@ async fn trace_classifies_over_limit_as_not_top_k() {
 
 #[tokio::test]
 async fn trace_classifies_injected_and_budget_pruned() {
+    let mut env = knowledge_context_test_env_guard();
+    env.clear();
     let db = djinn_db::Database::ephemeral().await.expect("ephemeral db");
     let events = EventBus::noop();
     let task = create_project_epic_task(&db, &events, "Budget epic", "Budget task").await;
@@ -279,6 +289,8 @@ async fn trace_classifies_injected_and_budget_pruned() {
 
 #[tokio::test]
 async fn trace_includes_estimated_injected_tokens_and_cap_metadata() {
+    let mut env = knowledge_context_test_env_guard();
+    env.clear();
     let db = djinn_db::Database::ephemeral().await.expect("ephemeral db");
     let events = EventBus::noop();
     let task = create_project_epic_task(&db, &events, "Meta epic", "Meta task").await;
@@ -334,6 +346,8 @@ async fn trace_includes_estimated_injected_tokens_and_cap_metadata() {
 
 #[tokio::test]
 async fn trace_persistence_failure_does_not_change_prompt_output() {
+    let mut env = knowledge_context_test_env_guard();
+    env.clear();
     let db = djinn_db::Database::ephemeral().await.expect("ephemeral db");
     let events = EventBus::noop();
     let task = create_project_epic_task(&db, &events, "Fail epic", "Fail task").await;
@@ -375,6 +389,8 @@ async fn trace_persistence_failure_does_not_change_prompt_output() {
 
 #[tokio::test]
 async fn trace_trigger_uses_scope_paths_shape() {
+    let mut env = knowledge_context_test_env_guard();
+    env.clear();
     let db = djinn_db::Database::ephemeral().await.expect("ephemeral db");
     let events = EventBus::noop();
     let task = create_project_epic_task(&db, &events, "Shape epic", "Shape task").await;
@@ -555,6 +571,8 @@ fn classify_candidates_for_error_marks_all_search_error() {
 
 #[tokio::test]
 async fn trace_candidate_search_failure_does_not_change_prompt_output() {
+    let mut env = knowledge_context_test_env_guard();
+    env.clear();
     let db = djinn_db::Database::ephemeral().await.expect("ephemeral db");
     let events = EventBus::noop();
     let task =
@@ -587,6 +605,9 @@ async fn trace_candidate_search_failure_does_not_change_prompt_output() {
         !prompt.contains("TC fail A"),
         "NULL-confidence note excluded from production results"
     );
+    let trace = latest_trace(&db, &project_id).await.expect("error trace");
+    assert_eq!(trace.outcome, RetrievalTraceOutcome::Error);
+    assert!(trace.candidates_typed().is_empty());
 }
 
 // ── Fail-open: production search error returns None and persists error trace ──
@@ -601,6 +622,8 @@ async fn trace_candidate_search_failure_does_not_change_prompt_output() {
 
 #[tokio::test]
 async fn production_search_error_returns_none_fail_open() {
+    let mut env = knowledge_context_test_env_guard();
+    env.clear();
     let db = djinn_db::Database::ephemeral().await.expect("ephemeral db");
     let events = EventBus::noop();
     let task = create_project_epic_task(&db, &events, "Prod fail epic", "Prod fail task").await;
@@ -624,6 +647,9 @@ async fn production_search_error_returns_none_fail_open() {
         result.is_none(),
         "production search error must return None (fail-open)"
     );
+    let trace = latest_trace(&db, &project_id).await.expect("error trace");
+    assert_eq!(trace.outcome, RetrievalTraceOutcome::Error);
+    assert!(trace.candidates_typed().is_empty());
 }
 
 // ── Rendered output unchanged by trace instrumentation ─────────────────────
@@ -636,6 +662,8 @@ async fn production_search_error_returns_none_fail_open() {
 
 #[tokio::test]
 async fn load_knowledge_context_rendered_matches_pack_knowledge_notes() {
+    let mut env = knowledge_context_test_env_guard();
+    env.clear();
     use crate::actors::slot::helpers::pack_knowledge_notes;
 
     let db = djinn_db::Database::ephemeral().await.expect("ephemeral db");

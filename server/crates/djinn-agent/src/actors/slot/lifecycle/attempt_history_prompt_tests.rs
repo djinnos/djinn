@@ -62,6 +62,7 @@ async fn seed_terminal_attempt(
 
 #[tokio::test]
 async fn load_prior_attempts_returns_terminal_newest_first_bounded_to_three() {
+    let _knowledge_context_env = knowledge_context_test_env_guard();
     let db = Database::ephemeral().await.expect("create ephemeral db");
     let events = EventBus::noop();
     let task = create_project_epic_task(&db, &events, "Attempt epic", "Attempt task").await;
@@ -96,6 +97,7 @@ async fn load_prior_attempts_returns_terminal_newest_first_bounded_to_three() {
 
 #[tokio::test]
 async fn load_prior_attempts_excludes_non_terminal_rows() {
+    let _knowledge_context_env = knowledge_context_test_env_guard();
     let db = Database::ephemeral().await.expect("create ephemeral db");
     let events = EventBus::noop();
     let task = create_project_epic_task(&db, &events, "Filter epic", "Filter task").await;
@@ -159,6 +161,7 @@ async fn load_prior_attempts_excludes_non_terminal_rows() {
 
 #[tokio::test]
 async fn load_prior_attempts_returns_none_when_empty() {
+    let _knowledge_context_env = knowledge_context_test_env_guard();
     let db = Database::ephemeral().await.expect("create ephemeral db");
     let events = EventBus::noop();
     let task = create_project_epic_task(&db, &events, "Empty epic", "Empty task").await;
@@ -173,6 +176,7 @@ async fn load_prior_attempts_returns_none_when_empty() {
 
 #[tokio::test]
 async fn load_prior_attempts_exposes_dto_fields_without_log_tail() {
+    let _knowledge_context_env = knowledge_context_test_env_guard();
     let db = Database::ephemeral().await.expect("create ephemeral db");
     let events = EventBus::noop();
     let task = create_project_epic_task(&db, &events, "DTO epic", "DTO task").await;
@@ -226,6 +230,7 @@ async fn load_prior_attempts_exposes_dto_fields_without_log_tail() {
 
 #[tokio::test]
 async fn load_completed_dependency_parents_returns_none_when_no_blockers() {
+    let _knowledge_context_env = knowledge_context_test_env_guard();
     let db = Database::ephemeral().await.expect("create ephemeral db");
     let events = EventBus::noop();
     let task = create_project_epic_task(&db, &events, "No-dep epic", "No-dep task").await;
@@ -240,6 +245,7 @@ async fn load_completed_dependency_parents_returns_none_when_no_blockers() {
 
 #[tokio::test]
 async fn load_completed_dependency_parents_includes_closed_blocker_with_completed_attempt() {
+    let _knowledge_context_env = knowledge_context_test_env_guard();
     let db = Database::ephemeral().await.expect("create ephemeral db");
     let events = EventBus::noop();
     let project = create_test_project(&db).await;
@@ -281,6 +287,7 @@ async fn load_completed_dependency_parents_includes_closed_blocker_with_complete
 
 #[tokio::test]
 async fn load_completed_dependency_parents_excludes_open_blocker() {
+    let _knowledge_context_env = knowledge_context_test_env_guard();
     let db = Database::ephemeral().await.expect("create ephemeral db");
     let events = EventBus::noop();
     let project = create_test_project(&db).await;
@@ -305,6 +312,7 @@ async fn load_completed_dependency_parents_excludes_open_blocker() {
 
 #[tokio::test]
 async fn assemble_prompt_context_loads_attempt_context_non_fatally() {
+    let _knowledge_context_env = knowledge_context_test_env_guard();
     // End-to-end: assemble_prompt_context should populate prior_attempts and
     // completed_dependency_parents, and remain non-fatal when rows are absent.
     let db = Database::ephemeral().await.expect("create ephemeral db");
@@ -337,6 +345,7 @@ async fn assemble_prompt_context_loads_attempt_context_non_fatally() {
 
 #[tokio::test]
 async fn assemble_prompt_context_omits_attempt_context_when_no_rows() {
+    let _knowledge_context_env = knowledge_context_test_env_guard();
     let db = Database::ephemeral().await.expect("create ephemeral db");
     let events = EventBus::noop();
     let task = create_project_epic_task(&db, &events, "No-attempt epic", "No-attempt task").await;
@@ -433,6 +442,7 @@ async fn seed_attempt_with_meta(
 /// with role, outcome, and refs metadata.
 #[tokio::test]
 async fn prompt_renders_prior_attempts_capped_at_3_newest_first() {
+    let _knowledge_context_env = knowledge_context_test_env_guard();
     let db = Database::ephemeral().await.expect("create ephemeral db");
     let events = EventBus::noop();
     let task = create_project_epic_task(&db, &events, "Cap epic", "Cap task").await;
@@ -506,6 +516,7 @@ async fn prompt_renders_prior_attempts_capped_at_3_newest_first() {
 /// AC1 supplement: guard decision/reason and checkpoint refs are rendered.
 #[tokio::test]
 async fn prompt_renders_guard_decision_and_checkpoint_refs() {
+    let _knowledge_context_env = knowledge_context_test_env_guard();
     let db = Database::ephemeral().await.expect("create ephemeral db");
     let events = EventBus::noop();
     let task = create_project_epic_task(&db, &events, "Guard epic", "Guard task").await;
@@ -561,6 +572,7 @@ async fn prompt_renders_guard_decision_and_checkpoint_refs() {
 /// use each parent's latest completed attempt.
 #[tokio::test]
 async fn prompt_renders_dependency_parents_capped_at_5_ordered() {
+    let _knowledge_context_env = knowledge_context_test_env_guard();
     let db = Database::ephemeral().await.expect("create ephemeral db");
     let events = EventBus::noop();
     let project = create_test_project(&db).await;
@@ -656,6 +668,7 @@ async fn prompt_renders_dependency_parents_capped_at_5_ordered() {
 /// AC2 supplement: Open (non-closed) blocker parents are excluded.
 #[tokio::test]
 async fn prompt_excludes_open_blocker_from_dependency_parents() {
+    let _knowledge_context_env = knowledge_context_test_env_guard();
     let db = Database::ephemeral().await.expect("create ephemeral db");
     let events = EventBus::noop();
     let project = create_test_project(&db).await;
@@ -684,6 +697,7 @@ async fn prompt_excludes_open_blocker_from_dependency_parents() {
 /// AC2 supplement: dependency parents use each parent's latest completed attempt.
 #[tokio::test]
 async fn prompt_uses_latest_completed_attempt_for_parent() {
+    let _knowledge_context_env = knowledge_context_test_env_guard();
     let db = Database::ephemeral().await.expect("create ephemeral db");
     let events = EventBus::noop();
     let project = create_test_project(&db).await;
@@ -746,6 +760,7 @@ async fn prompt_uses_latest_completed_attempt_for_parent() {
 /// outcomes. No raw `log_tail` leaks into rendered prompts.
 #[tokio::test]
 async fn prompt_renders_fallback_text_for_missing_summaries() {
+    let _knowledge_context_env = knowledge_context_test_env_guard();
     let db = Database::ephemeral().await.expect("create ephemeral db");
     let events = EventBus::noop();
     let task = create_project_epic_task(&db, &events, "Fallback epic", "Fallback task").await;
@@ -804,6 +819,7 @@ async fn prompt_renders_fallback_text_for_missing_summaries() {
 /// AC3: Raw `log_tail` content does not leak into rendered prompts.
 #[tokio::test]
 async fn prompt_does_not_leak_log_tail_content() {
+    let _knowledge_context_env = knowledge_context_test_env_guard();
     let db = Database::ephemeral().await.expect("create ephemeral db");
     let events = EventBus::noop();
     let task = create_project_epic_task(&db, &events, "Logtail epic", "Logtail task").await;
@@ -869,6 +885,7 @@ async fn prompt_does_not_leak_log_tail_content() {
 /// AC3 supplement: `summary_json` `log_tail` field is never rendered.
 #[tokio::test]
 async fn prompt_does_not_leak_log_tail_from_summary_json() {
+    let _knowledge_context_env = knowledge_context_test_env_guard();
     let db = Database::ephemeral().await.expect("create ephemeral db");
     let events = EventBus::noop();
     let task =
@@ -915,6 +932,7 @@ async fn prompt_does_not_leak_log_tail_from_summary_json() {
 /// AC3 supplement: summary_json fields (failure_class, last_verify) are rendered.
 #[tokio::test]
 async fn prompt_renders_summary_json_fields() {
+    let _knowledge_context_env = knowledge_context_test_env_guard();
     let db = Database::ephemeral().await.expect("create ephemeral db");
     let events = EventBus::noop();
     let task = create_project_epic_task(&db, &events, "JSON epic", "JSON task").await;
@@ -952,6 +970,7 @@ async fn prompt_renders_summary_json_fields() {
 /// AC4: Duplicate rejection text is not repeated in rendered prompts.
 #[tokio::test]
 async fn prompt_deduplicates_rejection_text_against_activity() {
+    let _knowledge_context_env = knowledge_context_test_env_guard();
     let db = Database::ephemeral().await.expect("create ephemeral db");
     let events = EventBus::noop();
     let task = create_project_epic_task(&db, &events, "Dedup epic", "Dedup task").await;
@@ -995,6 +1014,7 @@ async fn prompt_deduplicates_rejection_text_against_activity() {
 /// note while preserving the current (newest) feedback.
 #[tokio::test]
 async fn prompt_budget_truncation_drops_oldest_preserves_newest() {
+    let _knowledge_context_env = knowledge_context_test_env_guard();
     let db = Database::ephemeral().await.expect("create ephemeral db");
     let events = EventBus::noop();
     let task = create_project_epic_task(&db, &events, "Budget epic", "Budget task").await;
@@ -1043,6 +1063,7 @@ async fn prompt_budget_truncation_drops_oldest_preserves_newest() {
 /// AC4: Attempts are dropped before dependency parents when over budget.
 #[tokio::test]
 async fn prompt_budget_drops_attempts_before_parents() {
+    let _knowledge_context_env = knowledge_context_test_env_guard();
     let db = Database::ephemeral().await.expect("create ephemeral db");
     let events = EventBus::noop();
     let project = create_test_project(&db).await;
@@ -1106,6 +1127,7 @@ async fn prompt_budget_drops_attempts_before_parents() {
 /// AC4: Zero remaining budget yields no attempt history in prompt.
 #[tokio::test]
 async fn prompt_zero_budget_yields_no_attempt_history() {
+    let _knowledge_context_env = knowledge_context_test_env_guard();
     let attempts = vec![TaskAttemptPromptSummary {
         attempt_seq: 1,
         role: "worker".to_string(),
@@ -1128,6 +1150,7 @@ async fn prompt_zero_budget_yields_no_attempt_history() {
 /// are present, with the correct section structure.
 #[tokio::test]
 async fn prompt_renders_combined_attempts_and_parents() {
+    let _knowledge_context_env = knowledge_context_test_env_guard();
     let db = Database::ephemeral().await.expect("create ephemeral db");
     let events = EventBus::noop();
     let project = create_test_project(&db).await;
@@ -1210,6 +1233,7 @@ async fn prompt_renders_combined_attempts_and_parents() {
 /// even when attempt history is populated.
 #[tokio::test]
 async fn prompt_assembly_nonfatal_with_attempt_history() {
+    let _knowledge_context_env = knowledge_context_test_env_guard();
     let db = Database::ephemeral().await.expect("create ephemeral db");
     let events = EventBus::noop();
     let task = create_project_epic_task(&db, &events, "Nonfatal epic", "Nonfatal task").await;
@@ -1254,6 +1278,7 @@ async fn prompt_assembly_nonfatal_with_attempt_history() {
 /// (not as a new competing top-level prompt section).
 #[tokio::test]
 async fn attempt_history_appears_in_activity_log_section() {
+    let _knowledge_context_env = knowledge_context_test_env_guard();
     let db = Database::ephemeral().await.expect("create ephemeral db");
     let events = EventBus::noop();
     let task = create_project_epic_task(&db, &events, "Section epic", "Section task").await;

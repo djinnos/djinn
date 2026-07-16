@@ -1,3 +1,4 @@
+// djinn:allow-oversize — cohesive prompt assembly; follow-up modularization is out of scope.
 //! Role-specific prompt-context assembly: conflict, activity, epic, knowledge,
 //! code-graph, and CI directives → rendered system prompt with extensions + skills.
 
@@ -15,9 +16,76 @@ use crate::actors::slot::helpers::{
 use crate::actors::slot::lifecycle::attempt_context;
 use crate::context::AgentContext;
 use crate::prompts::{TaskContext, apply_role_extensions, apply_skills};
+use crate::rollout::{DefaultPolicy, RolloutMode, parse as parse_rollout};
 use crate::skills::ResolvedSkill;
 use djinn_db::{NoteRepository, ProposalRepository, TaskRepository};
 use tracing::Instrument;
+
+// Environment variables are process-global. Keep the test guard here, rather
+// than in an individual test module, so every knowledge-context test that
+// reads or changes the rollout configuration serializes with assembly tests.
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) static KNOWLEDGE_CONTEXT_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) struct KnowledgeContextTestEnvGuard {
+    _lock: std::sync::MutexGuard<'static, ()>,
+    rollout: Option<std::ffi::OsString>,
+    legacy: Option<std::ffi::OsString>,
+}
+
+// Only in-crate unit tests mutate the rollout variables. Test-support callers
+// still use the guard to serialize production reads, but do not need setters.
+#[cfg(test)]
+impl KnowledgeContextTestEnvGuard {
+    pub(super) fn clear(&mut self) {
+        // SAFETY: this guard serializes all knowledge-context rollout tests.
+        unsafe {
+            std::env::remove_var(KNOWLEDGE_CONTEXT_ROLLOUT_ENV);
+            std::env::remove_var(KNOWLEDGE_CONTEXT_LEGACY_ENV);
+        }
+    }
+
+    pub(super) fn set_rollout(&mut self, value: &str) {
+        // SAFETY: this guard serializes all knowledge-context rollout tests.
+        unsafe { std::env::set_var(KNOWLEDGE_CONTEXT_ROLLOUT_ENV, value) }
+    }
+
+    pub(super) fn set_legacy(&mut self, value: &str) {
+        // SAFETY: this guard serializes all knowledge-context rollout tests.
+        unsafe { std::env::set_var(KNOWLEDGE_CONTEXT_LEGACY_ENV, value) }
+    }
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl Drop for KnowledgeContextTestEnvGuard {
+    fn drop(&mut self) {
+        // SAFETY: the guard is still held while the original process environment
+        // is restored, including during unwinding from a failed assertion.
+        unsafe {
+            match &self.rollout {
+                Some(value) => std::env::set_var(KNOWLEDGE_CONTEXT_ROLLOUT_ENV, value),
+                None => std::env::remove_var(KNOWLEDGE_CONTEXT_ROLLOUT_ENV),
+            }
+            match &self.legacy {
+                Some(value) => std::env::set_var(KNOWLEDGE_CONTEXT_LEGACY_ENV, value),
+                None => std::env::remove_var(KNOWLEDGE_CONTEXT_LEGACY_ENV),
+            }
+        }
+    }
+}
+
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) fn knowledge_context_test_env_guard() -> KnowledgeContextTestEnvGuard {
+    let lock = KNOWLEDGE_CONTEXT_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    KnowledgeContextTestEnvGuard {
+        rollout: std::env::var_os(KNOWLEDGE_CONTEXT_ROLLOUT_ENV),
+        legacy: std::env::var_os(KNOWLEDGE_CONTEXT_LEGACY_ENV),
+        _lock: lock,
+    }
+}
 
 mod ci_directive;
 mod diagnostics;
@@ -211,7 +279,7 @@ async fn append_blocker_deliveries(
     {
         Ok(tasks) => tasks,
         Err(e) => {
-            tracing::debug!(
+            tracing::warn!(
                 epic_id = %epic_id,
                 blocking_epic_id = %blocker.epic_id,
                 error = %e,
@@ -291,7 +359,7 @@ async fn append_proposal_sibling_epic(
         }
         Ok(None) => {}
         Err(e) => {
-            tracing::debug!(
+            tracing::warn!(
                 epic_id = %epic_id,
                 sibling_epic_id = %sibling_id,
                 error = %e,
@@ -342,6 +410,34 @@ const KNOWLEDGE_BUDGET_CHARS: usize = 2000;
 /// Note types queried for knowledge-context injection.
 const KNOWLEDGE_NOTE_TYPES: &[&str] = &["pattern", "pitfall", "case"];
 
+const KNOWLEDGE_CONTEXT_ROLLOUT_ENV: &str = "DJINN_KNOWLEDGE_CONTEXT_ROLLOUT";
+const KNOWLEDGE_CONTEXT_LEGACY_ENV: &str = "DJINN_KNOWLEDGE_CONTEXT";
+
+/// Parse the operator-owned knowledge-context gate once at the assembly boundary.
+/// Cohorts are deployment labels only; no session assignment occurs here.
+fn knowledge_context_rollout_from_env() -> RolloutMode {
+    let rollout = std::env::var(KNOWLEDGE_CONTEXT_ROLLOUT_ENV).ok();
+    let legacy = std::env::var(KNOWLEDGE_CONTEXT_LEGACY_ENV).ok();
+    parse_rollout(
+        rollout.as_deref(),
+        legacy.as_deref(),
+        DefaultPolicy::Enabled,
+    )
+}
+
+fn disabled_knowledge_outcome(
+    rollout: &RolloutMode,
+) -> djinn_db::repositories::retrieval_trace::RetrievalTraceOutcome {
+    use djinn_db::repositories::retrieval_trace::RetrievalTraceOutcome;
+
+    match rollout {
+        RolloutMode::Off => RetrievalTraceOutcome::DisabledOff,
+        RolloutMode::KillSwitch => RetrievalTraceOutcome::DisabledKillSwitch,
+        RolloutMode::LegacyDisabled => RetrievalTraceOutcome::DisabledLegacy,
+        _ => unreachable!("only disabled rollout modes request a suppression trace"),
+    }
+}
+
 /// Load knowledge context from scope-matched notes. Returns None on error/empty.
 ///
 /// Instruments retrieval with a fail-open `LoadKnowledgeContext` trace row. The
@@ -366,7 +462,8 @@ pub(crate) async fn load_knowledge_context(
     epic_context: Option<&str>,
     app_state: &AgentContext,
 ) -> Option<String> {
-    load_knowledge_context_with_planner(task, epic_context, app_state, None).await
+    let rollout = knowledge_context_rollout_from_env();
+    load_knowledge_context_with_planner(task, epic_context, app_state, None, &rollout).await
 }
 
 async fn load_knowledge_context_with_planner(
@@ -374,9 +471,26 @@ async fn load_knowledge_context_with_planner(
     epic_context: Option<&str>,
     app_state: &AgentContext,
     planner: Option<&MemoryIntentPlannerInvocation<'_>>,
+    rollout: &RolloutMode,
 ) -> Option<String> {
-    let note_repo = NoteRepository::new(app_state.db.clone(), app_state.event_bus.clone());
     let task_paths = derive_task_scope_paths(task, epic_context);
+    if !rollout.enabled() {
+        persist_knowledge_trace(
+            task,
+            &task_paths,
+            &[],
+            0,
+            KnowledgeTraceDurations::default(),
+            false,
+            &app_state.db,
+            planner.map(|p| (p.session_id, p.task_run_id)),
+            rollout,
+            disabled_knowledge_outcome(rollout),
+        )
+        .await;
+        return None;
+    }
+    let note_repo = NoteRepository::new(app_state.db.clone(), app_state.event_bus.clone());
 
     let fetch_start = tokio::time::Instant::now();
 
@@ -404,40 +518,96 @@ async fn load_knowledge_context_with_planner(
     let notes = match production_result {
         Ok(notes) => notes,
         Err(e) => {
-            tracing::debug!(
+            tracing::warn!(
                 task_id = %task.short_id,
                 error = %e,
                 "Lifecycle: failed to query knowledge context"
             );
-            // Even on production-query error, attempt to persist a trace with the
-            // candidates we have (if any) classifying them as search_error.
-            if let Ok(ref candidates) = trace_candidates_result {
-                let error_candidates = classify_knowledge_candidates_for_error(candidates);
-                let cap_exceeded = candidates.len()
-                    >= djinn_db::repositories::retrieval_trace::DEFAULT_CANDIDATE_CAP as usize;
-                persist_knowledge_trace(
-                    task,
-                    &task_paths,
-                    &error_candidates,
-                    0,
-                    KnowledgeTraceDurations {
-                        candidate_fetch_ms,
-                        classify_ms: 0,
-                        prompt_pack_ms: 0,
-                        persist_ms: 0,
-                    },
-                    cap_exceeded,
-                    &app_state.db,
-                    planner.map(|p| (p.session_id, p.task_run_id)),
-                )
-                .await;
-            }
+            // Even when either query failed, attempt an explicit error trace.
+            // Trace candidates are useful diagnostic evidence when available;
+            // otherwise the empty array records that the candidate universe was
+            // unavailable without changing the production fail-open behavior.
+            let (error_candidates, cap_exceeded) = match trace_candidates_result {
+                Ok(candidates) => {
+                    let cap_exceeded = candidates.len()
+                        >= djinn_db::repositories::retrieval_trace::DEFAULT_CANDIDATE_CAP as usize;
+                    (
+                        classify_knowledge_candidates_for_error(&candidates),
+                        cap_exceeded,
+                    )
+                }
+                Err(trace_error) => {
+                    tracing::warn!(
+                        task_id = %task.short_id,
+                        error = %trace_error,
+                        "Lifecycle: failed to query knowledge trace candidates"
+                    );
+                    (Vec::new(), false)
+                }
+            };
+            persist_knowledge_trace(
+                task,
+                &task_paths,
+                &error_candidates,
+                0,
+                KnowledgeTraceDurations {
+                    candidate_fetch_ms,
+                    classify_ms: 0,
+                    prompt_pack_ms: 0,
+                    persist_ms: 0,
+                },
+                cap_exceeded,
+                &app_state.db,
+                planner.map(|p| (p.session_id, p.task_run_id)),
+                rollout,
+                djinn_db::repositories::retrieval_trace::RetrievalTraceOutcome::Error,
+            )
+            .await;
             return None;
         }
     };
 
+    // Trace candidate query failures are trace failures, even if the production
+    // prompt query succeeded. Persist an Error attempt with no candidates while
+    // returning the production-rendered prompt unchanged.
+    if let Err(trace_error) = trace_candidates_result {
+        tracing::warn!(
+            task_id = %task.short_id,
+            error = %trace_error,
+            "Lifecycle: failed to query knowledge trace candidates"
+        );
+        let pack_start = tokio::time::Instant::now();
+        let packed = pack_knowledge_notes(&notes, KNOWLEDGE_BUDGET_CHARS);
+        let pack_ms = pack_start.elapsed().as_millis() as i64;
+        let rendered = if notes.is_empty() {
+            None
+        } else {
+            Some(packed.rendered)
+        };
+        let rendered = merge_planned_knowledge(rendered, &notes, &note_repo, task, planner).await;
+        persist_knowledge_trace(
+            task,
+            &task_paths,
+            &[],
+            0,
+            KnowledgeTraceDurations {
+                candidate_fetch_ms,
+                classify_ms: 0,
+                prompt_pack_ms: pack_ms,
+                persist_ms: 0,
+            },
+            false,
+            &app_state.db,
+            planner.map(|p| (p.session_id, p.task_run_id)),
+            rollout,
+            djinn_db::repositories::retrieval_trace::RetrievalTraceOutcome::Error,
+        )
+        .await;
+        return rendered;
+    }
+
     let classification_start = tokio::time::Instant::now();
-    let trace_candidates = trace_candidates_result.unwrap_or_default();
+    let trace_candidates = trace_candidates_result.expect("trace candidate result checked above");
     let candidate_cap_exceeded = trace_candidates.len()
         >= djinn_db::repositories::retrieval_trace::DEFAULT_CANDIDATE_CAP as usize;
 
@@ -482,6 +652,16 @@ async fn load_knowledge_context_with_planner(
         candidate_cap_exceeded,
         &app_state.db,
         planner.map(|p| (p.session_id, p.task_run_id)),
+        rollout,
+        if estimated_injected_tokens > 0
+            && trace_candidates_final.iter().any(|c| {
+                c.outcome == djinn_db::repositories::retrieval_trace::CandidateOutcome::Injected
+            })
+        {
+            djinn_db::repositories::retrieval_trace::RetrievalTraceOutcome::Injected
+        } else {
+            djinn_db::repositories::retrieval_trace::RetrievalTraceOutcome::Empty
+        },
     )
     .await;
 
@@ -628,6 +808,7 @@ fn apply_budget_outcomes(
 }
 
 /// Per-phase durations (milliseconds) for the knowledge-context retrieval trace.
+#[derive(Default)]
 struct KnowledgeTraceDurations {
     candidate_fetch_ms: i64,
     classify_ms: i64,
@@ -647,19 +828,17 @@ async fn persist_knowledge_trace(
     candidate_cap_exceeded: bool,
     db: &djinn_db::Database,
     attribution: Option<(&str, &str)>,
+    rollout: &RolloutMode,
+    outcome: djinn_db::repositories::retrieval_trace::RetrievalTraceOutcome,
 ) {
     use djinn_db::repositories::retrieval_trace::{
-        CreateRetrievalTraceParams, RetrievalTraceEntryPoint, RetrievalTraceRepository,
-        validate_candidates,
+        CreateRetrievalTraceParams, CreateRetrievalTraceWithSemanticsParams,
+        RetrievalTraceEntryPoint, RetrievalTraceRepository, validate_candidates,
     };
-
-    if candidates.is_empty() {
-        return;
-    }
 
     // Validate candidate invariants before serialization.
     if let Err(e) = validate_candidates(candidates) {
-        tracing::debug!(
+        tracing::warn!(
             task_id = %task.short_id,
             error = %e,
             "Lifecycle: retrieval trace candidate validation failed; skipping trace persistence"
@@ -670,7 +849,7 @@ async fn persist_knowledge_trace(
     let candidates_json = match serde_json::to_value(candidates) {
         Ok(v) => v,
         Err(e) => {
-            tracing::debug!(
+            tracing::warn!(
                 task_id = %task.short_id,
                 error = %e,
                 "Lifecycle: failed to serialize retrieval trace candidates; skipping trace persistence"
@@ -708,8 +887,15 @@ async fn persist_knowledge_trace(
         estimated_injected_tokens,
     };
 
-    if let Err(e) = repo.insert(params).await {
-        tracing::debug!(
+    if let Err(e) = repo
+        .insert_with_semantics(CreateRetrievalTraceWithSemanticsParams {
+            trace: params,
+            rollout_label: rollout.label(),
+            outcome,
+        })
+        .await
+    {
+        tracing::warn!(
             task_id = %task.short_id,
             error = %e,
             "Lifecycle: failed to persist retrieval trace for knowledge context; continuing (fail-open)"
@@ -754,6 +940,7 @@ pub(crate) async fn assemble_prompt_context(inputs: PromptContextInputs<'_>) -> 
     let ci_blocking_directive = build_ci_blocking_directive(task);
     let needs_epic_context = role_for_epic_check.needs_epic_context();
     let role_name = runtime_role.config().name;
+    let knowledge_rollout = knowledge_context_rollout_from_env();
 
     // ── Phase 1: activity + epic context concurrently ──
     // Each child measures its own wall-clock time so the child-span
@@ -831,6 +1018,7 @@ pub(crate) async fn assemble_prompt_context(inputs: PromptContextInputs<'_>) -> 
                     epic_context_ref,
                     app_state,
                     memory_intent_planner.as_ref(),
+                    &knowledge_rollout,
                 )
                 .await;
                 (result, child_start.elapsed())
