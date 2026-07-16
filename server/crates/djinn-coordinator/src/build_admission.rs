@@ -116,6 +116,9 @@ pub struct BuildAdmissionController {
     creator_server_epoch: String,
     permits: Mutex<HashMap<WarmAdmissionPermit, PermitState>>,
     permits_by_key: Mutex<HashMap<String, WarmAdmissionPermit>>,
+    /// Runtime task-run IDs are learned when a session starts. This binding
+    /// prevents a delayed terminal callback from selecting a later generation.
+    permits_by_task_run: Mutex<HashMap<String, WarmAdmissionPermit>>,
     unclassified_observations: Mutex<u64>,
     would_defer_observations: Mutex<u64>,
     released: Notify,
@@ -136,6 +139,7 @@ impl BuildAdmissionController {
             creator_server_epoch: creator_server_epoch.into(),
             permits: Mutex::new(HashMap::new()),
             permits_by_key: Mutex::new(HashMap::new()),
+            permits_by_task_run: Mutex::new(HashMap::new()),
             unclassified_observations: Mutex::new(0),
             would_defer_observations: Mutex::new(0),
             released: Notify::new(),
@@ -276,19 +280,43 @@ impl BuildAdmissionController {
         .await
     }
 
-    /// Return the retained permit for the active task-run, if this controller
-    /// admitted it in this process. The journal key includes the generation, so
-    /// a later reopened run cannot be released by an earlier callback.
-    pub async fn task_run_permit(&self, task_id: &str) -> Option<WarmAdmissionPermit> {
+    /// Return the retained permit for this exact task generation.
+    pub async fn task_run_permit(
+        &self,
+        task_id: &str,
+        generation: i64,
+    ) -> Option<WarmAdmissionPermit> {
         self.permits
             .lock()
             .await
             .iter()
-            .filter(|(_, state)| {
-                state.key.domain == AdmissionDomain::TaskObservation && state.key.work_id == task_id
+            .find(|(_, state)| {
+                state.key.domain == AdmissionDomain::TaskObservation
+                    && state.key.work_id == task_id
+                    && state.key.generation == generation
             })
-            .max_by_key(|(_, state)| state.key.generation)
             .map(|(permit, _)| permit.clone())
+    }
+
+    /// Bind a UID-bearing runtime task-run to a permit already made Live.
+    pub async fn bind_task_run(&self, task_run_id: String, permit: WarmAdmissionPermit) {
+        self.permits_by_task_run
+            .lock()
+            .await
+            .insert(task_run_id, permit);
+    }
+
+    /// Return only the permit bound to this runtime task-run UID. There is no
+    /// task-ID fallback because that could release a newer reopened generation.
+    pub async fn task_run_permit_for_runtime_id(
+        &self,
+        task_run_id: &str,
+    ) -> Option<WarmAdmissionPermit> {
+        self.permits_by_task_run
+            .lock()
+            .await
+            .get(task_run_id)
+            .cloned()
     }
 
     async fn observe_unclassified(&self) {

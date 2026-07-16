@@ -427,7 +427,7 @@ impl CoordinatorActor {
             cancel,
             db,
             pool,
-            build_admission: _build_admission,
+            build_admission,
             catalog,
             health,
             role_registry,
@@ -482,7 +482,7 @@ impl CoordinatorActor {
             db: db.clone(),
             events_tx,
             pool,
-            build_admission: _build_admission,
+            build_admission,
             catalog,
             health,
             role_registry,
@@ -815,6 +815,17 @@ impl CoordinatorActor {
                 _ = self.cancel.cancelled() => {
                     tracing::info!("CoordinatorActor: cancellation token fired, stopping");
                     break;
+                }
+
+                // A terminal admission transition releases durable capacity.
+                _ = async {
+                    if let Some(controller) = self.build_admission.as_ref() {
+                        controller.release_notifier().notified().await;
+                    } else {
+                        std::future::pending::<()>().await;
+                    }
+                } => {
+                    Self::run_pass_with_watchdog("build-admission-release", self.dispatch_ready_tasks(None)).await;
                 }
 
                 // 2. Incoming API messages.
@@ -1324,6 +1335,26 @@ impl CoordinatorActor {
             // exit while the task remains nonterminal is a protocol
             // violation and must count as a failed attempt for retry
             // accounting.
+            ("session", "created") => {
+                let Some(session) = envelope.parse_payload::<djinn_core::models::SessionRecord>()
+                else {
+                    return;
+                };
+                let (Some(task_id), Some(task_run_id)) =
+                    (session.task_id.as_deref(), session.task_run_id.as_deref())
+                else {
+                    return;
+                };
+                let task_repo = TaskRepository::new(self.db.clone(), self.events_tx.clone());
+                if let Ok(Some(task)) = task_repo.get(task_id).await {
+                    self.live_task_run_build_admission(
+                        task_id,
+                        i64::from(task.reopen_count.max(0)),
+                        task_run_id,
+                    )
+                    .await;
+                }
+            }
             ("session", "completed" | "interrupted" | "failed") => {
                 let Some(session) = envelope.parse_payload::<djinn_core::models::SessionRecord>()
                 else {
@@ -1341,8 +1372,7 @@ impl CoordinatorActor {
                 // forever on an orphaned pending attempt.
                 if let Some(task_id) = session.task_id.as_deref() {
                     if let Some(task_run_id) = session.task_run_id.as_deref() {
-                        self.terminal_task_run_build_admission(task_id, task_run_id)
-                            .await;
+                        self.terminal_task_run_build_admission(task_run_id).await;
                     }
                     let _ = self
                         .classify_session_exit_liveness(

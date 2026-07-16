@@ -746,12 +746,18 @@ impl CoordinatorActor {
         }
     }
 
-    /// Translate a terminal runtime task-run identity into a UID-fenced release.
-    pub(crate) async fn terminal_task_run_build_admission(&self, task_id: &str, task_run_id: &str) {
+    /// Mark a runtime task-run live and bind its UID to this exact generation.
+    /// Terminal events must use this UID binding rather than a task-ID lookup.
+    pub(crate) async fn live_task_run_build_admission(
+        &self,
+        task_id: &str,
+        generation: i64,
+        task_run_id: &str,
+    ) {
         let Some(controller) = self.admission_controller() else {
             return;
         };
-        let Some(permit) = controller.task_run_permit(task_id).await else {
+        let Some(permit) = controller.task_run_permit(task_id, generation).await else {
             return;
         };
         if let Err(error) = controller
@@ -763,9 +769,27 @@ impl CoordinatorActor {
             )
             .await
         {
-            tracing::warn!(task_id, task_run_id, %error, "failed to mark task-run admission live; retaining capacity conservatively");
+            tracing::warn!(task_id, task_run_id, generation, %error, "failed to mark task-run admission live; retaining capacity conservatively");
             return;
         }
+        controller
+            .bind_task_run(task_run_id.to_owned(), permit)
+            .await;
+    }
+
+    /// Terminal callbacks without a live UID binding are ambiguous and retain
+    /// capacity rather than accidentally releasing a newer task generation.
+    pub(crate) async fn terminal_task_run_build_admission(&self, task_run_id: &str) {
+        let Some(controller) = self.admission_controller() else {
+            return;
+        };
+        let Some(permit) = controller.task_run_permit_for_runtime_id(task_run_id).await else {
+            tracing::debug!(
+                task_run_id,
+                "unbound terminal task-run callback; retaining admission capacity"
+            );
+            return;
+        };
         if let Err(error) = controller
             .transition(
                 &permit,
@@ -775,7 +799,7 @@ impl CoordinatorActor {
             )
             .await
         {
-            tracing::warn!(task_id, task_run_id, %error, "failed to terminalize task-run admission; retaining capacity conservatively");
+            tracing::warn!(task_run_id, %error, "failed to terminalize task-run admission; retaining capacity conservatively");
         }
     }
 
