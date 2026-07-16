@@ -82,6 +82,7 @@ async fn task_with_structured_red_ci_and_audit_activity(
             1,
             "test-owner",
             None,
+            None,
         )
         .await
         .expect("create CI prompt task");
