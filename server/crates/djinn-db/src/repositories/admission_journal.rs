@@ -250,6 +250,165 @@ impl AdmissionJournalRepository {
         })
     }
 
+    pub async fn mark_create_started(
+        &self,
+        input: &CreateStartedInput,
+    ) -> DbResult<AdmissionJournalRow> {
+        self.db.ensure_initialized().await?;
+        let mut tx = self.db.pool().begin().await?;
+        let row = current_row_for_update(&mut tx, &input.key).await?;
+        if row.creator_server_epoch != input.creator_server_epoch
+            || row.object_name != input.object_name
+        {
+            return Err(DbError::InvalidTransition(
+                "create identity differs from reservation".into(),
+            ));
+        }
+        let result = match row.state {
+            AdmissionState::Reserved => {
+                update_state(&mut tx, &input.key, "create_in_flight", None).await?
+            }
+            AdmissionState::CreateInFlight => row,
+            state => return Err(invalid_state("mark create started", state)),
+        };
+        tx.commit().await?;
+        Ok(result)
+    }
+
+    pub async fn mark_create_unknown(
+        &self,
+        key: &AdmissionJournalKey,
+    ) -> DbResult<AdmissionJournalRow> {
+        self.db.ensure_initialized().await?;
+        let mut tx = self.db.pool().begin().await?;
+        let row = current_row_for_update(&mut tx, key).await?;
+        let result = match row.state {
+            AdmissionState::CreateInFlight => {
+                update_state(&mut tx, key, "create_unknown", None).await?
+            }
+            AdmissionState::CreateUnknown => row,
+            state => return Err(invalid_state("mark create unknown", state)),
+        };
+        tx.commit().await?;
+        Ok(result)
+    }
+
+    pub async fn mark_live(
+        &self,
+        input: &UidFencedAdmissionInput,
+    ) -> DbResult<AdmissionJournalRow> {
+        self.db.ensure_initialized().await?;
+        let mut tx = self.db.pool().begin().await?;
+        let row = current_row_for_update(&mut tx, &input.key).await?;
+        if row
+            .object_uid
+            .as_deref()
+            .is_some_and(|uid| uid != input.object_uid)
+        {
+            return Err(DbError::InvalidTransition(
+                "Kubernetes UID does not match admission row".into(),
+            ));
+        }
+        let result = match row.state {
+            AdmissionState::CreateInFlight | AdmissionState::CreateUnknown => {
+                update_state(&mut tx, &input.key, "live", Some(&input.object_uid)).await?
+            }
+            AdmissionState::Live => row,
+            state => return Err(invalid_state("mark live", state)),
+        };
+        tx.commit().await?;
+        Ok(result)
+    }
+
+    pub async fn mark_definitive_create_failure(
+        &self,
+        key: &AdmissionJournalKey,
+    ) -> DbResult<AdmissionJournalRow> {
+        self.mark_terminal_from_states(
+            key,
+            &[AdmissionState::Reserved, AdmissionState::CreateInFlight],
+            "mark definitive create failure",
+        )
+        .await
+    }
+
+    pub async fn cancel_reserved(
+        &self,
+        key: &AdmissionJournalKey,
+    ) -> DbResult<AdmissionJournalRow> {
+        self.mark_terminal_from_states(key, &[AdmissionState::Reserved], "cancel reserved")
+            .await
+    }
+
+    pub async fn mark_terminal(
+        &self,
+        input: &TerminalAdmissionInput,
+    ) -> DbResult<AdmissionJournalRow> {
+        self.db.ensure_initialized().await?;
+        let mut tx = self.db.pool().begin().await?;
+        let row = current_row_for_update(&mut tx, &input.key).await?;
+        let result = match row.state {
+            AdmissionState::Live if row.object_uid.as_deref() == input.object_uid.as_deref() => {
+                update_state(&mut tx, &input.key, "terminal", row.object_uid.as_deref()).await?
+            }
+            AdmissionState::Terminal
+                if row.object_uid.as_deref() == input.object_uid.as_deref() =>
+            {
+                row
+            }
+            AdmissionState::Live | AdmissionState::Terminal => {
+                return Err(DbError::InvalidTransition(
+                    "Kubernetes UID does not match admission row".into(),
+                ));
+            }
+            state => return Err(invalid_state("mark terminal", state)),
+        };
+        tx.commit().await?;
+        Ok(result)
+    }
+
+    async fn mark_terminal_from_states(
+        &self,
+        key: &AdmissionJournalKey,
+        allowed: &[AdmissionState],
+        operation: &str,
+    ) -> DbResult<AdmissionJournalRow> {
+        self.db.ensure_initialized().await?;
+        let mut tx = self.db.pool().begin().await?;
+        let row = current_row_for_update(&mut tx, key).await?;
+        let result = if allowed.contains(&row.state) {
+            update_state(&mut tx, key, "terminal", None).await?
+        } else if row.state == AdmissionState::Terminal {
+            row
+        } else {
+            return Err(invalid_state(operation, row.state));
+        };
+        tx.commit().await?;
+        Ok(result)
+    }
+
+    pub async fn list_active_rows(&self) -> DbResult<Vec<AdmissionJournalRow>> {
+        self.db.ensure_initialized().await?;
+        active_rows(self.db.pool()).await
+    }
+
+    pub async fn recover_predecessor_epoch(
+        &self,
+        predecessor_epoch: &str,
+    ) -> DbResult<AdmissionRecoveryResult> {
+        self.db.ensure_initialized().await?;
+        let mut tx = self.db.pool().begin().await?;
+        let retired_reserved = sqlx::query("UPDATE admission_journal SET state = 'terminal', terminal_at = now(), updated_at = now() WHERE creator_server_epoch = $1 AND state = 'reserved'").bind(predecessor_epoch).execute(&mut *tx).await?.rows_affected();
+        let marked_create_unknown = sqlx::query("UPDATE admission_journal SET state = 'create_unknown', updated_at = now() WHERE creator_server_epoch = $1 AND state = 'create_in_flight'").bind(predecessor_epoch).execute(&mut *tx).await?.rows_affected();
+        let rows = active_rows(&mut *tx).await?;
+        tx.commit().await?;
+        Ok(AdmissionRecoveryResult {
+            retired_reserved,
+            marked_create_unknown,
+            active_rows: rows,
+        })
+    }
+
     /// Count rows that currently occupy task-or-warm capacity.
     pub async fn count_task_or_warm_occupancy(&self) -> DbResult<i64> {
         self.db.ensure_initialized().await?;
@@ -403,6 +562,50 @@ async fn fetch_row(
     .fetch_optional(&mut **tx)
     .await?;
     row.map(TryInto::try_into).transpose()
+}
+
+const JOURNAL_COLUMNS: &str = "domain, work_id, generation, workload_kind, state, creator_server_epoch, object_name, object_uid, created_at::text, updated_at::text, terminal_at::text";
+
+fn invalid_state(operation: &str, state: AdmissionState) -> DbError {
+    DbError::InvalidTransition(format!("cannot {operation} from {state:?}"))
+}
+
+async fn current_row_for_update(
+    tx: &mut Transaction<'_, Postgres>,
+    key: &AdmissionJournalKey,
+) -> DbResult<AdmissionJournalRow> {
+    lock_work(tx, key.domain, &key.work_id).await?;
+    let latest: Option<i64> = sqlx::query_scalar("SELECT generation FROM admission_journal WHERE domain = $1 AND work_id = $2 ORDER BY generation DESC LIMIT 1")
+        .bind(key.domain.as_str()).bind(&key.work_id).fetch_optional(&mut **tx).await?;
+    if latest != Some(key.generation) {
+        return Err(DbError::InvalidTransition(format!(
+            "stale admission generation {} for {}",
+            key.generation, key.work_id
+        )));
+    }
+    let row = sqlx::query_as::<_, JournalDbRow>(&format!("SELECT {JOURNAL_COLUMNS} FROM admission_journal WHERE domain = $1 AND work_id = $2 AND generation = $3 FOR UPDATE"))
+        .bind(key.domain.as_str()).bind(&key.work_id).bind(key.generation).fetch_one(&mut **tx).await?;
+    row.try_into()
+}
+
+async fn update_state(
+    tx: &mut Transaction<'_, Postgres>,
+    key: &AdmissionJournalKey,
+    state: &str,
+    object_uid: Option<&str>,
+) -> DbResult<AdmissionJournalRow> {
+    let row = sqlx::query_as::<_, JournalDbRow>(&format!("UPDATE admission_journal SET state = $1, object_uid = COALESCE($2, object_uid), updated_at = now(), terminal_at = CASE WHEN $3 THEN now() ELSE terminal_at END WHERE domain = $4 AND work_id = $5 AND generation = $6 RETURNING {JOURNAL_COLUMNS}"))
+        .bind(state).bind(object_uid).bind(state == "terminal").bind(key.domain.as_str()).bind(&key.work_id).bind(key.generation).fetch_one(&mut **tx).await?;
+    row.try_into()
+}
+
+async fn active_rows<'e, E>(executor: E) -> DbResult<Vec<AdmissionJournalRow>>
+where
+    E: sqlx::Executor<'e, Database = Postgres>,
+{
+    let rows = sqlx::query_as::<_, JournalDbRow>(&format!("SELECT {JOURNAL_COLUMNS} FROM admission_journal WHERE state = ANY($1) ORDER BY domain, work_id, generation"))
+        .bind(OCCUPYING_STATES.as_slice()).fetch_all(executor).await?;
+    rows.into_iter().map(TryInto::try_into).collect()
 }
 
 #[cfg(test)]
