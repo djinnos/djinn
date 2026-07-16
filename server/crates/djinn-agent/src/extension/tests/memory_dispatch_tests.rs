@@ -2,6 +2,16 @@ use super::*;
 
 use djinn_core::auth_context::{REVISION_CALLER_CONTEXT, TrustedRevisionCallerContext};
 
+fn assert_no_memory_mutation_error(response: &serde_json::Value) {
+    assert!(
+        response.get("error").is_none()
+            || response
+                .get("error")
+                .is_some_and(serde_json::Value::is_null),
+        "direct memory mutation returned tool error: {response}"
+    );
+}
+
 #[tokio::test]
 async fn call_tool_dispatches_memory_ops_through_shared_memory_seam() {
     let db = create_test_db();
@@ -387,8 +397,8 @@ async fn call_tool_memory_singletons_target_canonical_project_root_from_worktree
 
     let state = agent_context_from_db(db.clone(), CancellationToken::new());
 
-    let caller = TrustedRevisionCallerContext::authenticated_agent("dispatch-test-agent")
-        .expect("valid test revision caller");
+    let caller = TrustedRevisionCallerContext::authenticated_human("singleton-fixture-user")
+        .expect("valid authenticated human caller");
     REVISION_CALLER_CONTEXT
         .scope(Some(caller), async {
             let created = call_tool(
@@ -416,6 +426,8 @@ async fn call_tool_memory_singletons_target_canonical_project_root_from_worktree
             )
             .await
             .expect("memory_write dispatch should succeed");
+
+            assert_no_memory_mutation_error(&created);
 
             assert_eq!(
                 created.get("permalink").and_then(|v| v.as_str()),
@@ -447,6 +459,8 @@ async fn call_tool_memory_singletons_target_canonical_project_root_from_worktree
             )
             .await
             .expect("memory_edit dispatch should succeed");
+
+            assert_no_memory_mutation_error(&edited);
 
             assert!(
                 edited
@@ -496,8 +510,8 @@ async fn call_tool_memory_brief_singleton_targets_canonical_project_root_from_wo
 
     let state = agent_context_from_db(db.clone(), CancellationToken::new());
 
-    let caller = TrustedRevisionCallerContext::authenticated_agent("dispatch-test-agent")
-        .expect("valid test revision caller");
+    let caller = TrustedRevisionCallerContext::authenticated_human("singleton-fixture-user")
+        .expect("valid authenticated human caller");
     REVISION_CALLER_CONTEXT
         .scope(Some(caller), async {
             let created = call_tool(
@@ -525,6 +539,8 @@ async fn call_tool_memory_brief_singleton_targets_canonical_project_root_from_wo
             )
             .await
             .expect("memory_write dispatch should succeed");
+
+            assert_no_memory_mutation_error(&created);
 
             assert_eq!(
                 created.get("permalink").and_then(|v| v.as_str()),
@@ -556,6 +572,8 @@ async fn call_tool_memory_brief_singleton_targets_canonical_project_root_from_wo
             )
             .await
             .expect("memory_edit dispatch should succeed");
+
+            assert_no_memory_mutation_error(&edited);
 
             assert!(
                 edited
@@ -671,8 +689,8 @@ async fn call_tool_memory_current_requirement_targets_canonical_project_root_fro
 
     let state = agent_context_from_db(db.clone(), CancellationToken::new());
 
-    let caller = TrustedRevisionCallerContext::authenticated_agent("dispatch-test-agent")
-        .expect("valid test revision caller");
+    let caller = TrustedRevisionCallerContext::authenticated_human("requirement-fixture-user")
+        .expect("valid authenticated human caller");
     REVISION_CALLER_CONTEXT
         .scope(Some(caller), async {
             let edited = call_tool(
@@ -701,6 +719,8 @@ async fn call_tool_memory_current_requirement_targets_canonical_project_root_fro
             )
             .await
             .expect("memory_edit dispatch should succeed");
+
+            assert_no_memory_mutation_error(&edited);
 
             assert!(
                 edited
