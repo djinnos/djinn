@@ -35,6 +35,32 @@ test('UI-only selects only UI', () => {
   assertOnlyJobs(result, ['ui']);
 });
 
+test('QA taxonomy, scenarios, and runner inputs select qa-smoke', () => {
+  for (const path of [
+    'qa/taxonomy.yaml',
+    'qa/scenarios/dispatch/exhaustion-terminal-side-effects.yaml',
+    'server/crates/djinn-qa/Cargo.toml',
+    'server/crates/djinn-qa/src/harness.rs',
+    'server/crates/djinn-qa/src/database_harness.rs',
+    'server/crates/djinn-qa/src/run.rs',
+    'server/crates/djinn-qa/src/evidence.rs',
+    'server/crates/djinn-qa/tests/coverage_cli.rs',
+  ]) {
+    const result = plan([path]);
+    assert.equal(result.lanes.qaSmoke, true, path);
+    assert.equal(result.jobs.qaSmoke, true, path);
+    assert.equal(result.lanes.unknown, false, path);
+  }
+});
+
+test('qa-smoke stays unselected for unrelated narrow lanes', () => {
+  for (const path of ['README.md', 'ui/src/App.tsx', 'scripts/tilt/build-ui.sh']) {
+    const result = plan([path]);
+    assert.equal(result.lanes.qaSmoke, false, path);
+    assert.equal(result.jobs.qaSmoke, false, path);
+  }
+});
+
 test('local Tilt inputs select the dedicated contract lane', () => {
   for (const path of [
     'Tiltfile',
@@ -99,11 +125,13 @@ test('memory ranking selects memory evaluation and server policy', () => {
 test('workflow CI changes route every job', () => {
   const result = plan(['.github/workflows/quality-gate.yml']);
   assert.equal(result.lanes.workflowCi, true);
+  assert.equal(result.jobs.qaSmoke, true);
   assertOnlyJobs(result, Object.keys(result.jobs));
 });
 
 test('full validation selects every job regardless of a docs-only diff', () => {
   const result = plan(['docs/guide.md'], { fullValidation: true });
+  assert.equal(result.jobs.qaSmoke, true);
   assertOnlyJobs(result, Object.keys(result.jobs));
 });
 
@@ -113,6 +141,7 @@ test('docs-only merge_group selects every protected server policy job, not UI', 
   for (const name of protectedJobs) assert.equal(result.jobs[name], true, name);
   assert.equal(result.jobs.ui, false);
   assert.equal(result.jobs.aarch64, false);
+  assert.equal(result.jobs.qaSmoke, false);
 });
 
 test('unknown executable and configuration paths fail closed', () => {
@@ -123,6 +152,7 @@ test('unknown executable and configuration paths fail closed', () => {
   ]) {
     const result = plan([path]);
     assert.equal(result.lanes.unknown, true, path);
+    assert.equal(result.jobs.qaSmoke, true, path);
     assertOnlyJobs(result, Object.keys(result.jobs));
   }
 });
@@ -137,11 +167,12 @@ test('CLI JSON and GitHub output are derived from the same deterministic result'
   const outputFile = join(mkdtempSync(join(tmpdir(), 'changed-scope-')), 'github-output');
   const invocation = spawnSync(process.execPath, [
     'scripts/ci-changed-scope.mjs', '--event', 'merge_group', '--base', 'base', '--head', 'head',
-    '--file', 'docs/guide.md', '--github-output', outputFile,
+    '--file', 'qa/scenarios/dispatch/exhaustion-terminal-side-effects.yaml', '--github-output', outputFile,
   ], { encoding: 'utf8' });
   assert.equal(invocation.status, 0, invocation.stderr);
   const result = JSON.parse(invocation.stdout);
-  assert.deepEqual(result, plan(['docs/guide.md'], { event: 'merge_group', base: 'base', head: 'head' }));
+  assert.deepEqual(result, plan(['qa/scenarios/dispatch/exhaustion-terminal-side-effects.yaml'], { event: 'merge_group', base: 'base', head: 'head' }));
+  assert.equal(result.outputs.qaSmoke, 'true');
   const githubOutputs = Object.fromEntries(readFileSync(outputFile, 'utf8').trim().split('\n').map((line) => line.split('=')));
   assert.deepEqual(githubOutputs, result.outputs);
 });
