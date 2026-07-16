@@ -78,7 +78,29 @@ pub enum Execution {
         package: String,
         #[serde(default)]
         test: Option<String>,
+        /// Exact libtest selector passed after `-- --exact`. Required and
+        /// non-empty so a typo cannot generate passing evidence from a
+        /// package-wide run that executes zero matching tests.
+        selector: String,
     },
+}
+
+impl Execution {
+    /// Stable canonical identity for this executable target, incorporating
+    /// package, optional Cargo integration-test target, and exact selector.
+    /// Distinct selectors must never collide.
+    pub fn identity(&self) -> String {
+        match self {
+            Execution::CargoPackage {
+                package,
+                test,
+                selector,
+            } => match test {
+                Some(target) => format!("cargo-package:{package}:{target}:{selector}"),
+                None => format!("cargo-package:{package}::{selector}"),
+            },
+        }
+    }
 }
 
 /// Isolation declarations for runner resources and smoke-CI safety.
@@ -247,6 +269,10 @@ impl ScenarioInventory {
                     "{prefix}: at least one staleness watch path is required"
                 ));
             }
+            let Execution::CargoPackage { selector, .. } = &scenario.execution;
+            if selector.trim().is_empty() {
+                diagnostics.push(format!("{prefix}: libtest selector must not be empty"));
+            }
             validate_coverage(
                 &known_coverage,
                 &prefix,
@@ -312,7 +338,14 @@ fn validate_coverage(
 /// Returns whether an executable target can be resolved at execution time.
 pub fn resolves(execution: &Execution, root: &Path) -> bool {
     match execution {
-        Execution::CargoPackage { package, test } => {
+        Execution::CargoPackage {
+            package,
+            test,
+            selector,
+        } => {
+            if selector.trim().is_empty() {
+                return false;
+            }
             let manifests = cargo_manifests(root);
             let package_manifest = manifests
                 .iter()
@@ -485,7 +518,7 @@ mod tests {
 
     fn directory_scenario(id: &str, primary: &str) -> String {
         format!(
-            "version: 1\nscenarios:\n- id: {id}\n  version: 1\n  enabled: true\n  profiles: [smoke-ci]\n  sources: [{{kind: memory, id: fixture}}]\n  primary_coverage: {primary}\n  execution: {{kind: cargo-package, package: djinn-qa}}\n  isolation: {{database: isolated, providers: isolated, channel: isolated}}\n  watch_paths: [src/scenario.rs]\n"
+            "version: 1\nscenarios:\n- id: {id}\n  version: 1\n  enabled: true\n  profiles: [smoke-ci]\n  sources: [{{kind: memory, id: fixture}}]\n  primary_coverage: {primary}\n  execution: {{kind: cargo-package, package: djinn-qa, selector: scenario::tests::directory_loading_is_recursive_sorted_and_rejects_cross_file_duplicates}}\n  isolation: {{database: isolated, providers: isolated, channel: isolated}}\n  watch_paths: [src/scenario.rs]\n"
         )
     }
 
