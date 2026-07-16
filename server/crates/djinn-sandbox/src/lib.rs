@@ -8,6 +8,10 @@ use std::sync::LazyLock;
 
 use anyhow::Result;
 
+/// Strict reusable-final-verification launcher. Unlike [`SANDBOX`], this
+/// module never selects the heuristic fallback backend.
+#[cfg(target_os = "linux")]
+pub mod final_verification;
 pub mod linux;
 #[cfg(target_os = "macos")]
 pub mod macos;
@@ -189,7 +193,7 @@ fn _detect() -> Box<dyn Sandbox> {
 // ─── Linux Landlock probe ─────────────────────────────────────────────────────
 
 #[cfg(target_os = "linux")]
-fn probe_landlock() -> bool {
+pub(crate) fn probe_landlock() -> bool {
     // landlock_create_ruleset(NULL, 0, LANDLOCK_CREATE_RULESET_VERSION=1)
     // Returns the Landlock ABI version (> 0) if the kernel supports it,
     // or -ENOSYS if Landlock is not available. Syscall 444 is stable on
