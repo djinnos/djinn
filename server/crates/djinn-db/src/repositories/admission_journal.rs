@@ -143,6 +143,17 @@ pub enum ReserveAdmissionResult {
     Denied { occupancy: i64, cap: i64 },
 }
 
+/// An Observe-mode reservation and its reference-cap decision.
+///
+/// The reservation is always admitted, but `would_defer` is calculated while
+/// holding the same capacity lock as the insert so telemetry cannot miss a
+/// concurrent admission.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ObserveAdmissionResult {
+    pub reservation: ReserveAdmissionResult,
+    pub would_defer: bool,
+}
+
 /// Identity verified and durably recorded before a Kubernetes POST.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CreateStartedInput {
@@ -247,6 +258,71 @@ impl AdmissionJournalRepository {
         Ok(ReserveAdmissionResult::Reserved {
             row: row.try_into()?,
             idempotent: false,
+        })
+    }
+
+    /// Atomically record an Observe-mode reservation and reference-cap result.
+    ///
+    /// Unlike [`Self::reserve`], this never denies a new task/warm row. The
+    /// reference-cap decision and insert share the advisory-lock transaction.
+    pub async fn reserve_observed(
+        &self,
+        input: &ReserveAdmissionInput,
+        reference_cap: i64,
+    ) -> DbResult<ObserveAdmissionResult> {
+        if reference_cap < 0 {
+            return Err(DbError::InvalidData(
+                "admission cap must be non-negative".into(),
+            ));
+        }
+        if input.key.generation < 0 {
+            return Err(DbError::InvalidData(
+                "admission generation must be non-negative".into(),
+            ));
+        }
+        self.db.ensure_initialized().await?;
+
+        let mut tx = self.db.pool().begin().await?;
+        lock_capacity(&mut tx).await?;
+        if let Some(row) = fetch_row(&mut tx, &input.key).await? {
+            tx.commit().await?;
+            return Ok(ObserveAdmissionResult {
+                reservation: ReserveAdmissionResult::Reserved {
+                    row,
+                    idempotent: true,
+                },
+                would_defer: false,
+            });
+        }
+
+        let occupancy = count_occupancy_tx(&mut tx).await?;
+        let would_defer = matches!(
+            input.key.domain,
+            AdmissionDomain::TaskObservation | AdmissionDomain::WarmBuild
+        ) && occupancy >= reference_cap;
+        let row = sqlx::query_as::<_, JournalDbRow>(
+            "INSERT INTO admission_journal \
+             (domain, work_id, generation, workload_kind, state, creator_server_epoch, object_name) \
+             VALUES ($1, $2, $3, $4, 'reserved', $5, $6) \
+             RETURNING domain, work_id, generation, workload_kind, state, creator_server_epoch, \
+                       object_name, object_uid, created_at::text, updated_at::text, terminal_at::text",
+        )
+        .bind(input.key.domain.as_str())
+        .bind(&input.key.work_id)
+        .bind(input.key.generation)
+        .bind(input.workload_kind.as_str())
+        .bind(&input.creator_server_epoch)
+        .bind(&input.object_name)
+        .fetch_one(&mut *tx)
+        .await?;
+        tx.commit().await?;
+
+        Ok(ObserveAdmissionResult {
+            reservation: ReserveAdmissionResult::Reserved {
+                row: row.try_into()?,
+                idempotent: false,
+            },
+            would_defer,
         })
     }
 
