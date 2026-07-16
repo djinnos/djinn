@@ -14,7 +14,11 @@ fn test_config() -> AuditSchedulerConfig {
     AuditSchedulerConfig {
         enabled: true,
         max_open_audits: 3,
-        slo_age_hours: 168, // 7 days
+        // Disable wall-clock SLO in the shared base config. Selection
+        // timestamps in tests are hardcoded, so a fixed SLO would eventually
+        // expire as wall-clock advances past them. Tests that exercise the SLO
+        // gate set a positive value explicitly.
+        slo_age_hours: 0,
         per_tick_budget: 2,
         min_materialization_interval_hours: 0,
     }
