@@ -3,8 +3,11 @@
 mod tests {
     use std::{sync::Arc, time::Duration};
 
-    use djinn_core::events::{DjinnEventEnvelope, EventBus};
-    use djinn_core::models::DispatchPause;
+    use djinn_core::{
+        auth_context::{REVISION_CALLER_CONTEXT, TrustedRevisionCallerContext},
+        events::{DjinnEventEnvelope, EventBus},
+        models::DispatchPause,
+    };
     use djinn_db::repositories::dispatch_pause::{DispatchPauseRepository, DispatchPauseTarget};
     use djinn_db::{Database, NoteRepository, ProjectRepository};
     use rmcp::{Json, ServerHandler, handler::server::wrapper::Parameters};
@@ -98,73 +101,85 @@ mod tests {
         let server = DjinnMcpServer::new(state);
         let repo = NoteRepository::new(db.clone(), EventBus::noop());
 
-        let Json(created) = server
-            .memory_write(Parameters(WriteParams {
-                reason: "test mutation".to_string(),
-                project: project.slug(),
-                title: "Summary Note".to_string(),
-                content: "Sentence one. Sentence two.\n\nMore context follows here.".to_string(),
-                note_type: "reference".to_string(),
-                status: None,
-                tags: None,
-                scope_paths: None,
-                retrieval_anchor: None,
-            }))
+        let caller = TrustedRevisionCallerContext::authenticated_human("summary-test-user")
+            .expect("valid test caller");
+        REVISION_CALLER_CONTEXT
+            .scope(Some(caller), async {
+                let Json(created) = server
+                    .memory_write(Parameters(WriteParams {
+                        reason: "test mutation".to_string(),
+                        project: project.slug(),
+                        title: "Summary Note".to_string(),
+                        content: "Sentence one. Sentence two.\n\nMore context follows here."
+                            .to_string(),
+                        note_type: "reference".to_string(),
+                        status: None,
+                        tags: None,
+                        scope_paths: None,
+                        retrieval_anchor: None,
+                    }))
+                    .await;
+
+                assert!(
+                    created.error.is_none(),
+                    "memory_write failed: {:?}",
+                    created.error
+                );
+                let note_id = created.id.clone().expect("memory_write returns note id");
+
+                // The non-blocking guarantee is structural: `memory_write` returns a
+                // `MemoryNoteResponse` that carries no summary fields and merely spawns
+                // `schedule_summary_regeneration`. We intentionally do NOT assert the
+                // DB row's summaries are still `None` right after the write returns:
+                // the spawned fallback runs deterministic first-sentence extraction in
+                // microseconds, so on a multi-thread runtime it can populate the row
+                // before this code observes it — and crucially, a *blocking* write
+                // would leave the row in the exact same populated state, so the check
+                // has no power to distinguish blocking from non-blocking. It only
+                // flakes. The async path is instead proven below by the summaries
+                // appearing (and re-appearing after an edit) without the write/edit
+                // calls themselves having awaited them.
+                let generated = wait_for_summaries_change(&repo, &note_id, None).await;
+                assert!(
+                    generated
+                        .abstract_
+                        .as_deref()
+                        .is_some_and(|v| v.contains("Sentence one"))
+                );
+                assert!(
+                    generated
+                        .overview
+                        .as_deref()
+                        .is_some_and(|v| v.contains("Sentence one"))
+                );
+
+                let previous_overview = generated.overview.clone();
+
+                let Json(edited) = server
+                    .memory_edit(Parameters(EditParams {
+                        reason: "test mutation".to_string(),
+                        project: project.slug(),
+                        identifier: note_id.clone(),
+                        operation: "append".to_string(),
+                        content: "Fresh closing details.".to_string(),
+                        find_text: None,
+                        section: None,
+                        note_type: None,
+                        retrieval_anchor: None,
+                    }))
+                    .await;
+
+                assert!(edited.error.is_none());
+                let regenerated =
+                    wait_for_summaries_change(&repo, &note_id, previous_overview).await;
+                assert!(
+                    regenerated
+                        .overview
+                        .as_deref()
+                        .is_some_and(|v| v.contains("Fresh closing details."))
+                );
+            })
             .await;
-
-        assert!(created.error.is_none());
-        let note_id = created.id.clone().expect("memory_write returns note id");
-
-        // The non-blocking guarantee is structural: `memory_write` returns a
-        // `MemoryNoteResponse` that carries no summary fields and merely spawns
-        // `schedule_summary_regeneration`. We intentionally do NOT assert the
-        // DB row's summaries are still `None` right after the write returns:
-        // the spawned fallback runs deterministic first-sentence extraction in
-        // microseconds, so on a multi-thread runtime it can populate the row
-        // before this code observes it — and crucially, a *blocking* write
-        // would leave the row in the exact same populated state, so the check
-        // has no power to distinguish blocking from non-blocking. It only
-        // flakes. The async path is instead proven below by the summaries
-        // appearing (and re-appearing after an edit) without the write/edit
-        // calls themselves having awaited them.
-        let generated = wait_for_summaries_change(&repo, &note_id, None).await;
-        assert!(
-            generated
-                .abstract_
-                .as_deref()
-                .is_some_and(|v| v.contains("Sentence one"))
-        );
-        assert!(
-            generated
-                .overview
-                .as_deref()
-                .is_some_and(|v| v.contains("Sentence one"))
-        );
-
-        let previous_overview = generated.overview.clone();
-
-        let Json(edited) = server
-            .memory_edit(Parameters(EditParams {
-                reason: "test mutation".to_string(),
-                project: project.slug(),
-                identifier: note_id.clone(),
-                operation: "append".to_string(),
-                content: "Fresh closing details.".to_string(),
-                find_text: None,
-                section: None,
-                note_type: None,
-                retrieval_anchor: None,
-            }))
-            .await;
-
-        assert!(edited.error.is_none());
-        let regenerated = wait_for_summaries_change(&repo, &note_id, previous_overview).await;
-        assert!(
-            regenerated
-                .overview
-                .as_deref()
-                .is_some_and(|v| v.contains("Fresh closing details."))
-        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
