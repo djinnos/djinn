@@ -81,6 +81,7 @@ pub fn validate_extraction_replay_fixtures(
             fixtures.len()
         ));
     }
+
     let mut ids = std::collections::BTreeSet::new();
     for fixture in fixtures {
         if fixture.id.trim().is_empty() || !ids.insert(fixture.id.as_str()) {
@@ -150,11 +151,12 @@ pub fn validate_extraction_replay_fixtures(
         for target in [
             &fixture.must_not_duplicate_target,
             &fixture.expected_duplicate_target,
-        ] {
-            if let Some(target) = target {
-                if target.trim().is_empty() || !target.starts_with("candidate-") {
-                    return Err(format!("{} has unresolved dedup target", fixture.id));
-                }
+        ]
+        .into_iter()
+        .flatten()
+        {
+            if target.trim().is_empty() || !target.starts_with("candidate-") {
+                return Err(format!("{} has unresolved dedup target", fixture.id));
             }
         }
     }
@@ -804,6 +806,64 @@ mod tests {
         session.id
     }
 
+    /// Persist the complete committed fixture transcript and retain its typed
+    /// terminal context in session metadata for the database-backed replay.
+    async fn create_fixture_replay_session(
+        db: &Database,
+        events: EventBus,
+        project_id: &str,
+        fixture: &ExtractionReplayFixture,
+    ) -> String {
+        let task = TaskRepository::new(db.clone(), events.clone())
+            .create_in_project(
+                project_id,
+                None,
+                &format!("replay {}", fixture.id),
+                "committed replay fixture task",
+                "",
+                "task",
+                1,
+                "eval",
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        let terminal_context = serde_json::to_string(&fixture.terminal_context).unwrap();
+        let session = SessionRepository::new(db.clone(), events.clone())
+            .create(CreateSessionParams {
+                project_id,
+                task_id: Some(&task.id),
+                model: "deterministic/replay",
+                agent_type: "worker",
+                metadata_json: Some(&terminal_context),
+                task_run_id: None,
+                pricing: None,
+                cost_basis: None,
+            })
+            .await
+            .unwrap();
+        let messages = fixture
+            .messages
+            .iter()
+            .map(|message| djinn_core::message::Message {
+                role: match message.role.as_str() {
+                    "system" => djinn_core::message::Role::System,
+                    "user" => djinn_core::message::Role::User,
+                    "assistant" => djinn_core::message::Role::Assistant,
+                    unsupported => panic!("unsupported persisted fixture role: {unsupported}"),
+                },
+                content: vec![ContentBlock::text(&message.content)],
+                metadata: None,
+            })
+            .collect::<Vec<_>>();
+        SessionMessageRepository::new(db.clone(), events)
+            .insert_messages_batch(&session.id, &task.id, &messages)
+            .await
+            .unwrap();
+        session.id
+    }
+
     #[tokio::test]
     async fn database_replay_drives_production_seam_with_dedup_and_non_dedup_outcomes() {
         let db = Database::open_in_memory().unwrap();
@@ -1021,6 +1081,80 @@ mod tests {
             eval_note_count_before,
             "replay must not persist generated notes"
         );
+    }
+
+    #[tokio::test]
+    async fn committed_corpus_replays_every_fixture_through_the_database_runner() {
+        let fixtures = load_extraction_replay_fixtures(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/extraction_replay"
+        ))
+        .expect("committed replay corpus must validate");
+        let db = Database::open_in_memory().unwrap();
+        let events = EventBus::noop();
+        let eval = ProjectRepository::new(db.clone(), events.clone())
+            .create("eval", "test", "committed-corpus")
+            .await
+            .unwrap();
+        let notes = NoteRepository::new(db.clone(), events.clone());
+        let mut replay_cases = Vec::with_capacity(fixtures.len());
+        for mut fixture in fixtures {
+            for target in [
+                &mut fixture.expected_duplicate_target,
+                &mut fixture.must_not_duplicate_target,
+            ] {
+                if let Some(target) = target {
+                    let candidate = notes
+                        .create_db_note_with_permalink(
+                            &eval.id,
+                            target,
+                            target,
+                            &fixture.required_discriminative_text,
+                            &fixture.expected_note_type,
+                            "[]",
+                        )
+                        .await
+                        .unwrap();
+                    *target = candidate.id;
+                }
+            }
+            let session_id =
+                create_fixture_replay_session(&db, events.clone(), &eval.id, &fixture).await;
+            replay_cases.push(DatabaseReplayCase {
+                candidate_lookup_text: fixture.required_discriminative_text.clone(),
+                fixture,
+                session_id,
+            });
+        }
+
+        let mut responses = Vec::new();
+        for case in &replay_cases {
+            responses.push(case.fixture.injected_provider_response.clone());
+            if case.fixture.expect_adr_054_quality {
+                responses.push(match case.fixture.expected_duplicate_target.as_deref() {
+                    Some(target) => {
+                        format!(r#"{{"decision":"already_known","existing_note_id":"{target}"}}"#)
+                    }
+                    None => r#"{"decision":"novel","existing_note_id":null}"#.to_string(),
+                });
+            }
+        }
+        let provider = Arc::new(ScriptedProvider::new(responses));
+        let seam = ProductionReplaySeam {
+            extraction_provider: provider.clone(),
+            novelty_provider: provider,
+        };
+        let report =
+            run_database_extraction_replay(db, events, &eval.id, &replay_cases, &seam).await;
+
+        assert_eq!(report.total_cases, 24);
+        assert_eq!(report.cases.len(), replay_cases.len());
+        assert_eq!(report.satisfied_cases, report.total_cases);
+        assert_eq!(report.rubric_satisfaction_rate, 1.0);
+        assert_eq!(report.dedup.false_positive, 0);
+        assert_eq!(report.dedup.false_negative, 0);
+        assert_eq!(report.dedup_precision, 1.0);
+        assert!(report.failures.is_empty(), "{:#?}", report.failures);
     }
 
     #[tokio::test]
