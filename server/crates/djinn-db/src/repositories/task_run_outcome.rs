@@ -1,6 +1,78 @@
 //! Immutable task-run outcome facts; callers must provide exact identities.
+use std::collections::{BTreeMap, HashMap, HashSet};
+
+use chrono::{DateTime, FixedOffset};
+use serde::{Deserialize, Serialize};
+
 use crate::{Result, database::Database, error::DbError};
 use djinn_core::models::TaskRunOutcomeFact;
+
+/// Request for the observational retrieval-outcomes report. `start` and `end`
+/// are RFC-3339 timestamps; timezone is echoed presentation metadata.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct TaskRunOutcomeReportRequest {
+    pub project_id: String,
+    pub start: String,
+    pub end: String,
+    pub timezone: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct OutcomeRate {
+    pub state: String,
+    pub count: u64,
+    pub rate: f64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct AttemptDistribution {
+    pub attempt_seq: Option<i32>,
+    pub count: u64,
+    pub rate: f64,
+}
+
+/// A cell is observational, not an experiment arm: cells can overlap.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct TaskRunOutcomeReportCell {
+    pub entry_point: String,
+    pub rollout_label: String,
+    pub outcome: String,
+    pub denominator: u64,
+    pub parked_reasons: Vec<OutcomeRate>,
+    pub merge_queue: Vec<OutcomeRate>,
+    pub review: Vec<OutcomeRate>,
+    pub attempts: Vec<AttemptDistribution>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct TaskRunOutcomeReportDiagnostics {
+    /// Traces with no exact run identity; never joined through task_id.
+    pub unattributed_trace_count: u64,
+    /// Eligible exact runs that have no durable trace and no synthetic cohort.
+    pub unrecorded_run_count: u64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct TaskRunOutcomeReport {
+    pub start: String,
+    pub end: String,
+    pub timezone: String,
+    pub cells_are_non_additive: bool,
+    pub cells: Vec<TaskRunOutcomeReportCell>,
+    pub diagnostics: TaskRunOutcomeReportDiagnostics,
+}
+
+#[derive(sqlx::FromRow)]
+struct OutcomeReportMemberRow {
+    task_run_id: String,
+    entry_point: String,
+    rollout_label: String,
+    trace_outcome: String,
+    parked_reason: Option<String>,
+    review_verdict: Option<String>,
+    merge_queue_result: Option<String>,
+    attempt_seq: Option<i32>,
+}
 
 pub struct TaskRunOutcomeRepository {
     db: Database,
