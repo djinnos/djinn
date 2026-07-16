@@ -114,6 +114,8 @@ pub async fn run_load_knowledge_context_for_test(
     epic_context: Option<&str>,
     app_state: &AgentContext,
 ) -> Option<String> {
+    let _knowledge_context_env =
+        crate::actors::slot::lifecycle::prompt_context::knowledge_context_test_env_guard();
     crate::actors::slot::lifecycle::prompt_context::load_knowledge_context(
         task,
         epic_context,
