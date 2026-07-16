@@ -485,6 +485,8 @@ async fn jit_pitfalls_suppression_insert_failure_is_fail_open() {
     }
 
     let state = crate::test_helpers::agent_context_from_db(db.clone(), CancellationToken::new());
+    const BASELINE_TASK_RUN_ID: &str = "jit-suppression-insert-baseline";
+    const FAILURE_TASK_RUN_ID: &str = "jit-suppression-insert-failure";
     let args = Some(
         serde_json::json!({ "path": "src/a.rs", "content": "// first\n" })
             .as_object()
@@ -498,7 +500,7 @@ async fn jit_pitfalls_suppression_insert_failure_is_fail_open() {
         &args,
         baseline_worktree.path(),
         Some(pid),
-        None,
+        Some(BASELINE_TASK_RUN_ID),
         None,
     )
     .await
@@ -510,9 +512,16 @@ async fn jit_pitfalls_suppression_insert_failure_is_fail_open() {
     djinn_db::test_support::drop_table_for_test(&db, "retrieval_traces").await;
 
     let telemetry_before = jit_pitfall_outcome_snapshot();
-    let response = call_write(&state, &args, worktree.path(), Some(pid), None, None)
-        .await
-        .expect("failed suppression insert must not fail write");
+    let response = call_write(
+        &state,
+        &args,
+        worktree.path(),
+        Some(pid),
+        Some(FAILURE_TASK_RUN_ID),
+        None,
+    )
+    .await
+    .expect("failed suppression insert must not fail write");
     // `path` necessarily identifies each distinct fixture worktree. Compare
     // every other response field to prove the failed observational write did
     // not alter the underlying tool response.
@@ -543,16 +552,28 @@ async fn jit_pitfalls_suppression_insert_failure_is_fail_open() {
     );
 
     // The first disabled modification still consumes the once-per-session
-    // attempt even when its observational persistence write fails.
+    // attempt even when its observational persistence write fails. Re-enable
+    // the gate so this follow-up proves that the same worktree/session is now
+    // classified as non-first instead of recording another disabled outcome.
+    unsafe {
+        std::env::set_var("DJINN_JIT_PITFALLS_ROLLOUT", "enabled");
+    }
     let second_args = Some(
         serde_json::json!({ "path": "src/b.rs", "content": "// second\n" })
             .as_object()
             .expect("obj")
             .clone(),
     );
-    let second = call_write(&state, &second_args, worktree.path(), Some(pid), None, None)
-        .await
-        .expect("second write after failed suppression insert");
+    let second = call_write(
+        &state,
+        &second_args,
+        worktree.path(),
+        Some(pid),
+        Some(FAILURE_TASK_RUN_ID),
+        None,
+    )
+    .await
+    .expect("second write after failed suppression insert");
     assert!(
         second.get("jit_pitfalls").is_none(),
         "once-per-session guard must remain unchanged after suppression failure"
