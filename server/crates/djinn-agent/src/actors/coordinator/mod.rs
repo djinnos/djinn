@@ -10,6 +10,7 @@
 // bridges that gap.
 
 // Re-export everything except the items we shadow.
+pub use djinn_coordinator::build_admission::{BuildAdmissionController, BuildAdmissionMode};
 pub use djinn_coordinator::{
     AutoMergeTracker, BackgroundWorkTracker, BreakerDebugEntry, CoordinatorDebugSnapshot,
     CoordinatorError, CoordinatorHandle, CoordinatorStatus, DebugCooldown, DebugDispatchState,
@@ -73,6 +74,14 @@ impl CoordinatorDeps {
         warmer: std::sync::Arc<dyn djinn_runtime::GraphWarmerService>,
     ) -> Self {
         self.inner = self.inner.with_graph_warmer(warmer);
+        self
+    }
+
+    pub fn with_build_admission(
+        mut self,
+        controller: std::sync::Arc<BuildAdmissionController>,
+    ) -> Self {
+        self.inner = self.inner.with_build_admission(controller);
         self
     }
 

@@ -193,6 +193,14 @@ fn fake_extraction_provider() -> Arc<FakeProvider> {
         "pitfalls": [{
             "title": "Test Pitfall Note",
             "content": "## Trigger / smell\nSemantic duplicate checks become flaky when summaries change between runs.\n## Failure mode\nExtraction creates noisy sibling notes instead of recognizing the same durable knowledge.\n## Observable symptoms\nRepeated runs alternate between merging and writing new notes with nearly identical content.\n## Prevention\nInject stable summaries and keep the comparison contract narrow and explicit.\n## Recovery\nReplace unstable inputs with deterministic fixtures and rerun the novelty gate.\n## Related\n- duplicate notes\n- extraction quality gates"
+        }],
+        "revision_operations": [{
+            "kind": "patch",
+            "target_note_id": "018f0000-0000-7000-8000-000000000001",
+            "before_text": "old",
+            "after_text": "new",
+            "confidence_delta": 0.1,
+            "reason": "new session evidence corrects the note"
         }]
     })
     .to_string();

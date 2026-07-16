@@ -106,6 +106,7 @@ struct PermitState {
     creator_server_epoch: String,
     object_name: String,
     durable: bool,
+    released: bool,
 }
 
 /// A single controller shared by task-run dispatch and graph warming.
@@ -116,6 +117,9 @@ pub struct BuildAdmissionController {
     creator_server_epoch: String,
     permits: Mutex<HashMap<WarmAdmissionPermit, PermitState>>,
     permits_by_key: Mutex<HashMap<String, WarmAdmissionPermit>>,
+    /// Runtime task-run IDs are learned when a session starts. This binding
+    /// prevents a delayed terminal callback from selecting a later generation.
+    permits_by_task_run: Mutex<HashMap<String, WarmAdmissionPermit>>,
     unclassified_observations: Mutex<u64>,
     would_defer_observations: Mutex<u64>,
     released: Notify,
@@ -136,6 +140,7 @@ impl BuildAdmissionController {
             creator_server_epoch: creator_server_epoch.into(),
             permits: Mutex::new(HashMap::new()),
             permits_by_key: Mutex::new(HashMap::new()),
+            permits_by_task_run: Mutex::new(HashMap::new()),
             unclassified_observations: Mutex::new(0),
             would_defer_observations: Mutex::new(0),
             released: Notify::new(),
@@ -244,6 +249,7 @@ impl BuildAdmissionController {
             creator_server_epoch: self.creator_server_epoch.clone(),
             object_name: request.object_name,
             durable,
+            released: false,
         };
         self.permits.lock().await.insert(permit.clone(), state);
         self.permits_by_key
@@ -274,6 +280,45 @@ impl BuildAdmissionController {
             kind: BuildWorkloadKind::TaskRun { role },
         })
         .await
+    }
+
+    /// Return the retained permit for this exact task generation.
+    pub async fn task_run_permit(
+        &self,
+        task_id: &str,
+        generation: i64,
+    ) -> Option<WarmAdmissionPermit> {
+        self.permits
+            .lock()
+            .await
+            .iter()
+            .find(|(_, state)| {
+                state.key.domain == AdmissionDomain::TaskObservation
+                    && state.key.work_id == task_id
+                    && state.key.generation == generation
+            })
+            .map(|(permit, _)| permit.clone())
+    }
+
+    /// Bind a UID-bearing runtime task-run to a permit already made Live.
+    pub async fn bind_task_run(&self, task_run_id: String, permit: WarmAdmissionPermit) {
+        self.permits_by_task_run
+            .lock()
+            .await
+            .insert(task_run_id, permit);
+    }
+
+    /// Return only the permit bound to this runtime task-run UID. There is no
+    /// task-ID fallback because that could release a newer reopened generation.
+    pub async fn task_run_permit_for_runtime_id(
+        &self,
+        task_run_id: &str,
+    ) -> Option<WarmAdmissionPermit> {
+        self.permits_by_task_run
+            .lock()
+            .await
+            .get(task_run_id)
+            .cloned()
     }
 
     async fn observe_unclassified(&self) {
@@ -344,7 +389,22 @@ impl BuildAdmissionController {
                 .map_err(unavailable)?,
         }
         if terminal {
-            self.released.notify_waiters();
+            let newly_released = {
+                let mut permits = self.permits.lock().await;
+                match permits.get_mut(permit) {
+                    Some(state) if !state.released => {
+                        state.released = true;
+                        true
+                    }
+                    Some(_) | None => false,
+                }
+            };
+            if newly_released {
+                // Retain one wakeup when the actor is currently handling the event
+                // that performed this release and therefore has no `notified()`
+                // future registered in its select loop.
+                self.released.notify_one();
+            }
         }
         Ok(())
     }
@@ -399,6 +459,7 @@ impl WarmAdmission for BuildAdmissionController {
 mod tests {
     use super::*;
     use djinn_db::{AdmissionState, Database};
+    use futures::FutureExt;
 
     fn controller(mode: BuildAdmissionMode, cap: i64) -> BuildAdmissionController {
         BuildAdmissionController::new(
@@ -555,6 +616,246 @@ mod tests {
                 .unwrap()[0]
                 .state,
             AdmissionState::Terminal
+        );
+    }
+
+    #[tokio::test]
+    async fn task_generations_and_runtime_uids_fence_terminal_release() {
+        let controller = controller(BuildAdmissionMode::Enforce, 3);
+        let first = controller
+            .admit_task_run(
+                Some("worker"),
+                AdmissionDomain::TaskObservation,
+                "task".into(),
+                1,
+                "task-run-task-1".into(),
+            )
+            .await
+            .unwrap();
+        let BuildAdmissionDecision::Permitted { permit: first, .. } = first else {
+            panic!("task generation one must be admitted");
+        };
+        controller
+            .transition(&first, WarmAdmissionTransition::CreateStarted)
+            .await
+            .unwrap();
+        controller
+            .transition(
+                &first,
+                WarmAdmissionTransition::Live {
+                    uid: "uid-one".into(),
+                },
+            )
+            .await
+            .unwrap();
+        controller
+            .transition(
+                &first,
+                WarmAdmissionTransition::Terminal {
+                    uid: "uid-one".into(),
+                },
+            )
+            .await
+            .unwrap();
+        assert!(
+            controller
+                .release_notifier()
+                .notified()
+                .now_or_never()
+                .is_some(),
+            "generation one release must retain exactly one wakeup"
+        );
+        assert!(
+            controller
+                .release_notifier()
+                .notified()
+                .now_or_never()
+                .is_none(),
+            "generation one release must not retain a second wakeup"
+        );
+
+        // Repeating the matching terminal callback while generation one is
+        // still current is idempotent and does not emit another wakeup.
+        controller
+            .transition(
+                &first,
+                WarmAdmissionTransition::Terminal {
+                    uid: "uid-one".into(),
+                },
+            )
+            .await
+            .unwrap();
+        assert!(
+            controller
+                .release_notifier()
+                .notified()
+                .now_or_never()
+                .is_none(),
+            "duplicate generation-one terminal must not wake dispatch again"
+        );
+
+        let second = controller
+            .admit_task_run(
+                Some("worker"),
+                AdmissionDomain::TaskObservation,
+                "task".into(),
+                2,
+                "task-run-task-2".into(),
+            )
+            .await
+            .unwrap();
+        let BuildAdmissionDecision::Permitted { permit: second, .. } = second else {
+            panic!("task generation two must be admitted");
+        };
+        controller
+            .transition(&second, WarmAdmissionTransition::CreateStarted)
+            .await
+            .unwrap();
+        controller
+            .transition(
+                &second,
+                WarmAdmissionTransition::Live {
+                    uid: "uid-two".into(),
+                },
+            )
+            .await
+            .unwrap();
+
+        // Once generation two exists, a delayed callback for the old
+        // generation is stale and cannot release the newer row.
+        let error = controller
+            .transition(
+                &first,
+                WarmAdmissionTransition::Terminal {
+                    uid: "uid-one".into(),
+                },
+            )
+            .await
+            .expect_err("generation-one callback must be rejected as stale");
+        assert_eq!(
+            error,
+            WarmAdmissionError::Unavailable {
+                diagnostic: "invalid transition: stale admission generation 1 for task".into(),
+            }
+        );
+        assert!(
+            controller
+                .release_notifier()
+                .notified()
+                .now_or_never()
+                .is_none(),
+            "delayed old-generation callback must not wake dispatch"
+        );
+        let history = controller
+            .journal
+            .list_history(AdmissionDomain::TaskObservation, "task")
+            .await
+            .unwrap();
+        assert_eq!(
+            history
+                .iter()
+                .find(|row| row.key.generation == 2)
+                .unwrap()
+                .state,
+            AdmissionState::Live
+        );
+        assert_eq!(
+            controller
+                .journal
+                .count_task_or_warm_occupancy()
+                .await
+                .unwrap(),
+            1,
+            "delayed old-generation duplicate must leave generation two occupied"
+        );
+
+        // A wrong UID and an unbound (UID-less) callback retain occupancy.
+        assert!(
+            controller
+                .transition(
+                    &second,
+                    WarmAdmissionTransition::Terminal {
+                        uid: "uid-one".into(),
+                    },
+                )
+                .await
+                .is_err()
+        );
+        assert!(
+            controller
+                .release_notifier()
+                .notified()
+                .now_or_never()
+                .is_none(),
+            "wrong generation-two UID must not wake dispatch"
+        );
+        assert!(
+            controller
+                .task_run_permit_for_runtime_id("missing-uid")
+                .await
+                .is_none()
+        );
+        assert_eq!(
+            controller
+                .journal
+                .count_task_or_warm_occupancy()
+                .await
+                .unwrap(),
+            1,
+            "UID-less terminal handling must retain generation-two occupancy"
+        );
+        assert!(
+            controller
+                .release_notifier()
+                .notified()
+                .now_or_never()
+                .is_none(),
+            "UID-less terminal handling must not wake dispatch"
+        );
+
+        controller
+            .transition(
+                &second,
+                WarmAdmissionTransition::Terminal {
+                    uid: "uid-two".into(),
+                },
+            )
+            .await
+            .unwrap();
+        assert!(
+            controller
+                .release_notifier()
+                .notified()
+                .now_or_never()
+                .is_some(),
+            "matching generation-two terminal must retain one wakeup"
+        );
+        assert!(
+            controller
+                .release_notifier()
+                .notified()
+                .now_or_never()
+                .is_none(),
+            "matching generation-two terminal must retain only one wakeup"
+        );
+
+        // A duplicate matching terminal callback is idempotent.
+        controller
+            .transition(
+                &second,
+                WarmAdmissionTransition::Terminal {
+                    uid: "uid-two".into(),
+                },
+            )
+            .await
+            .unwrap();
+        assert!(
+            controller
+                .release_notifier()
+                .notified()
+                .now_or_never()
+                .is_none(),
+            "duplicate generation-two terminal must not wake dispatch again"
         );
     }
 }
