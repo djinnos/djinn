@@ -179,8 +179,10 @@ use pr_commands::enable_auto_merge_best_effort;
 pub(crate) use pr_commands::{
     AutoMergeTickDecision, decide_auto_merge_tick, record_auto_merge_decision_metrics,
 };
-use pr_review_handlers::effective_review_decision;
 pub use pr_review_handlers::parse_pr_url;
+use pr_review_handlers::{
+    delegated_review_verdict, effective_review_decision, merged_review_outcome,
+};
 use pr_undraft::{should_undraft_before_merge, warn_pr_merge_failed};
 #[cfg(test)]
 pub(crate) use pr_watcher::{
