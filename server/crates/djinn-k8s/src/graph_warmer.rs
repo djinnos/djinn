@@ -40,111 +40,11 @@ use tracing::{debug, info, warn};
 use crate::config::KubernetesConfig;
 use crate::warm_job::{LABEL_PROJECT_ID, LABEL_WARM, build_warm_job};
 
-/// Immutable identity for one admission-controlled warm Job.
-///
-/// The caller fixes all of these values before asking an admission controller
-/// to reserve capacity. In particular, `object_name` is the deterministic
-/// Kubernetes object name for this generation; an admission implementation
-/// must never need to infer it from a later dispatch attempt.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct WarmAdmissionRequest {
-    /// Admission namespace/domain that owns this work identity.
-    pub domain: String,
-    /// Stable identity of the work being warmed.
-    pub work_id: String,
-    /// Monotonically increasing incarnation of `work_id`.
-    pub generation: i64,
-    /// Deterministic Kubernetes Job name for this generation.
-    pub object_name: String,
-}
-
-/// Opaque, admission-controller-issued capability for one warm lifecycle.
-///
-/// Its token is deliberately private: callers may retain, clone, and return a
-/// permit to its issuing controller, but cannot inspect or manufacture ledger
-/// identity from its contents. Controllers must recognize only permits they
-/// issued; a new token is not an admission decision by itself.
-#[derive(Clone, PartialEq, Eq, Hash)]
-pub struct WarmAdmissionPermit {
-    token: uuid::Uuid,
-}
-
-impl WarmAdmissionPermit {
-    /// Create an opaque token for an admission implementation to associate
-    /// with its private ledger state.
-    ///
-    /// This does not grant admission. It exists so implementations in crates
-    /// above `djinn-k8s` can issue a capability after recording their own
-    /// reservation, while keeping that reservation identity private.
-    #[must_use]
-    pub fn new() -> Self {
-        Self {
-            token: uuid::Uuid::now_v7(),
-        }
-    }
-}
-
-impl Default for WarmAdmissionPermit {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl std::fmt::Debug for WarmAdmissionPermit {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str("WarmAdmissionPermit(..)")
-    }
-}
-
-/// Durable lifecycle facts reported for an admitted warm Job.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum WarmAdmissionTransition {
-    /// The durable create intent has been recorded before Kubernetes POST.
-    CreateStarted,
-    /// Kubernetes confirmed the object exists and assigned this UID.
-    Live { uid: String },
-    /// The create result is ambiguous; retain occupancy and diagnostic detail.
-    CreateUnknown { diagnostic: String },
-    /// Kubernetes definitively rejected or failed the create operation.
-    DefinitiveFailure { diagnostic: String },
-    /// The observed Job reached a terminal state with this Kubernetes UID.
-    Terminal { uid: String },
-}
-
-/// Failure returned by a [`WarmAdmission`] implementation.
-#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
-pub enum WarmAdmissionError {
-    /// Policy or capacity denied the requested admission.
-    #[error("warm admission denied: {diagnostic}")]
-    Denied { diagnostic: String },
-    /// The admission ledger could not durably process the operation.
-    #[error("warm admission unavailable: {diagnostic}")]
-    Unavailable { diagnostic: String },
-    /// A permit was not issued by this controller or is no longer valid.
-    #[error("warm admission permit is not recognized")]
-    UnknownPermit,
-}
-
-/// Coordinator-owned admission boundary for graph warm Jobs.
-///
-/// `djinn-k8s` owns only this data-only protocol. The coordinator may implement
-/// it using its durable admission ledger and inject that implementation into a
-/// [`K8sGraphWarmer`] without introducing a reverse crate dependency.
-#[async_trait]
-pub trait WarmAdmission: Send + Sync {
-    /// Reserve admission for a deterministic warm Job identity.
-    async fn admit(
-        &self,
-        request: WarmAdmissionRequest,
-    ) -> Result<WarmAdmissionPermit, WarmAdmissionError>;
-
-    /// Persist a lifecycle fact for a permit previously returned by `admit`.
-    async fn transition(
-        &self,
-        permit: &WarmAdmissionPermit,
-        transition: WarmAdmissionTransition,
-    ) -> Result<(), WarmAdmissionError>;
-}
+mod warm_admission;
+pub use warm_admission::{
+    WarmAdmission, WarmAdmissionError, WarmAdmissionPermit, WarmAdmissionRequest,
+    WarmAdmissionTransition,
+};
 
 /// Default quiet-window for the merge-storm debounce (`DJINN_WARM_DEBOUNCE_SECONDS`).
 /// A few minutes: long enough that a burst of PRs landing on `main` every
