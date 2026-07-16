@@ -600,4 +600,109 @@ mod tests {
             AdmissionState::Terminal
         );
     }
+
+    #[tokio::test]
+    async fn task_generations_and_runtime_uids_fence_terminal_release() {
+        let controller = controller(BuildAdmissionMode::Enforce, 3);
+        let first = controller
+            .admit_task_run(
+                Some("worker"),
+                AdmissionDomain::TaskObservation,
+                "task".into(),
+                1,
+                "task-run-task-1".into(),
+            )
+            .await
+            .unwrap();
+        let BuildAdmissionDecision::Permitted { permit: first, .. } = first else {
+            panic!("task generation one must be admitted");
+        };
+        let second = controller
+            .admit_task_run(
+                Some("worker"),
+                AdmissionDomain::TaskObservation,
+                "task".into(),
+                2,
+                "task-run-task-2".into(),
+            )
+            .await
+            .unwrap();
+        let BuildAdmissionDecision::Permitted { permit: second, .. } = second else {
+            panic!("task generation two must be admitted");
+        };
+
+        for (permit, uid) in [(&first, "uid-one"), (&second, "uid-two")] {
+            controller
+                .transition(permit, WarmAdmissionTransition::CreateStarted)
+                .await
+                .unwrap();
+            controller
+                .transition(permit, WarmAdmissionTransition::Live { uid: uid.into() })
+                .await
+                .unwrap();
+        }
+
+        // A delayed old-generation callback cannot release the newer row.
+        controller
+            .transition(
+                &first,
+                WarmAdmissionTransition::Terminal {
+                    uid: "uid-one".into(),
+                },
+            )
+            .await
+            .unwrap();
+        let history = controller
+            .journal
+            .list_history(AdmissionDomain::TaskObservation, "task")
+            .await
+            .unwrap();
+        assert_eq!(
+            history
+                .iter()
+                .find(|row| row.key.generation == 2)
+                .unwrap()
+                .state,
+            AdmissionState::Live
+        );
+
+        // A wrong UID and an unbound (UID-less) callback retain occupancy.
+        assert!(
+            controller
+                .transition(
+                    &second,
+                    WarmAdmissionTransition::Terminal {
+                        uid: "uid-one".into(),
+                    },
+                )
+                .await
+                .is_err()
+        );
+        assert!(
+            controller
+                .task_run_permit_for_runtime_id("missing-uid")
+                .await
+                .is_none()
+        );
+
+        controller
+            .transition(
+                &second,
+                WarmAdmissionTransition::Terminal {
+                    uid: "uid-two".into(),
+                },
+            )
+            .await
+            .unwrap();
+        // A duplicate matching terminal callback is idempotent.
+        controller
+            .transition(
+                &second,
+                WarmAdmissionTransition::Terminal {
+                    uid: "uid-two".into(),
+                },
+            )
+            .await
+            .unwrap();
+    }
 }

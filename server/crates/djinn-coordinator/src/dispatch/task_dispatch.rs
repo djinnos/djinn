@@ -691,9 +691,31 @@ impl CoordinatorActor {
             .await
         {
             Ok(BuildAdmissionDecision::Permitted { permit, .. }) => {
-                controller.transition(&permit, WarmAdmissionTransition::CreateStarted).await.map_err(|error| {
+                if let Err(error) = controller
+                    .transition(&permit, WarmAdmissionTransition::CreateStarted)
+                    .await
+                {
+                    // No pool create was attempted. A reservation that cannot
+                    // enter CreateStarted is definitive pre-create failure, not
+                    // an ambiguous runtime outcome. Best-effort terminalization
+                    // prevents a valid reservation from leaking; persistence
+                    // unavailability deliberately retains capacity.
+                    if let Err(terminal_error) = controller
+                        .transition(
+                            &permit,
+                            WarmAdmissionTransition::DefinitiveFailure {
+                                diagnostic:
+                                    "CreateStarted could not be recorded before pool create"
+                                        .to_owned(),
+                            },
+                        )
+                        .await
+                    {
+                        tracing::warn!(task_id, role, %terminal_error, "failed to terminalize pre-create admission after CreateStarted failure; retaining capacity conservatively");
+                    }
                     tracing::warn!(task_id, role, %error, "build admission CreateStarted failed; deferring pool create");
-                })?;
+                    return Err(());
+                }
                 Ok(Some(permit))
             }
             Ok(BuildAdmissionDecision::Denied { occupancy, cap }) => {
