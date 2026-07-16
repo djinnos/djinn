@@ -18,6 +18,10 @@ use landlock::{
 };
 
 const REQUIRED_LANDLOCK_ABI: i32 = ABI::V3 as i32;
+// `Command` reports a `pre_exec` failure to its parent as an OS error. Reserve
+// an errno which the launcher itself never otherwise returns so isolation setup
+// remains distinguishable from an ordinary spawn error.
+const ISOLATION_SETUP_ERROR: i32 = libc::ENOTRECOVERABLE;
 
 /// An argv invocation and the complete set of host paths it may use.
 ///
@@ -101,6 +105,25 @@ fn launch_with_backend_check(
     request: FinalVerificationRequest,
     backend_check: impl FnOnce() -> Result<(), FinalVerificationError>,
 ) -> Result<FinalVerificationResult, FinalVerificationError> {
+    launch_with_backend_and_setup(
+        request,
+        backend_check,
+        |worktree, runtimes, externals, outputs| {
+            enter_isolated_network_namespace().map_err(|_| ())?;
+            apply_filesystem_policy(worktree, runtimes, externals, outputs)
+                .map_err(|_| ())
+        },
+    )
+}
+
+fn launch_with_backend_and_setup(
+    request: FinalVerificationRequest,
+    backend_check: impl FnOnce() -> Result<(), FinalVerificationError>,
+    isolation_setup: impl Fn(&Path, &[PathBuf], &[PathBuf], &[PathBuf]) -> Result<(), ()>
+        + Send
+        + Sync
+        + 'static,
+) -> Result<FinalVerificationResult, FinalVerificationError> {
     let prepared = PreparedRequest::new(request)?;
     // Request validation performs no mutation, so report a pre-existing output
     // as a policy violation even if the host cannot provide the backend.
@@ -126,18 +149,29 @@ fn launch_with_backend_check(
     unsafe {
         use std::os::unix::process::CommandExt;
         command.pre_exec(move || {
-            enter_isolated_network_namespace()?;
-            apply_filesystem_policy(&worktree, &runtimes, &externals, &outputs)
-                .map_err(|e| io::Error::new(io::ErrorKind::PermissionDenied, e.to_string()))
+            isolation_setup(&worktree, &runtimes, &externals, &outputs)
+                .map_err(|_| isolation_setup_error())
         });
     }
 
-    let output = command.output().map_err(FinalVerificationError::Launch)?;
+    let output = command.output().map_err(|source| {
+        if source.raw_os_error() == Some(ISOLATION_SETUP_ERROR) {
+            FinalVerificationError::BackendUnavailable {
+                reason: "final-verification isolation setup failed",
+            }
+        } else {
+            FinalVerificationError::Launch(source)
+        }
+    })?;
     Ok(FinalVerificationResult {
         exit_code: output.status.code(),
         stdout: output.stdout,
         stderr: output.stderr,
     })
+}
+
+fn isolation_setup_error() -> io::Error {
+    io::Error::from_raw_os_error(ISOLATION_SETUP_ERROR)
 }
 
 /// Whether the two kernel mechanisms required by this launcher are available.
@@ -164,25 +198,24 @@ fn landlock_abi_supports_final_verification(abi: Option<i32>) -> bool {
 }
 
 /// Verify that the exact V3 filesystem access set used for final verification
-/// can be created and installed. Installation happens in a disposable child
-/// because Landlock restrictions cannot be removed from the calling thread.
+/// can be created and installed. Installation happens in a disposable thread
+/// because Landlock restrictions cannot be removed from that thread.
 fn probe_required_filesystem_policy() -> bool {
-    if !landlock_abi_supports_final_verification(crate::landlock_abi()) {
-        return false;
-    }
-
-    let pid = unsafe { libc::fork() };
-    if pid < 0 {
-        return false;
-    }
-    if pid == 0 {
+    probe_required_filesystem_policy_with(crate::landlock_abi(), || {
         // Using `/` as the read root exercises apply_filesystem_policy's exact
-        // handled-access set, device rules, ruleset creation, and installation
-        // without granting the probe child any new privileges.
-        let ok = apply_filesystem_policy(Path::new("/"), &[], &[], &[]).is_ok();
-        unsafe { libc::_exit(if ok { 0 } else { 1 }) };
-    }
-    child_exited_successfully(pid)
+        // handled-access set, device rules, ruleset creation, installation,
+        // and `RulesetStatus::FullyEnforced` check without granting the probe
+        // thread any new privileges.
+        apply_filesystem_policy(Path::new("/"), &[], &[], &[])
+    })
+}
+
+fn probe_required_filesystem_policy_with(
+    abi: Option<i32>,
+    install_policy: impl FnOnce() -> anyhow::Result<()> + Send + 'static,
+) -> bool {
+    landlock_abi_supports_final_verification(abi)
+        && matches!(std::thread::spawn(install_policy).join(), Ok(Ok(())))
 }
 
 #[derive(Debug)]
@@ -444,6 +477,27 @@ mod tests {
     }
 
     #[test]
+    fn required_policy_probe_installs_on_a_disposable_thread() {
+        let caller = std::thread::current().id();
+        let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+        assert!(probe_required_filesystem_policy_with(
+            Some(REQUIRED_LANDLOCK_ABI),
+            move || {
+                sender.send(std::thread::current().id()).unwrap();
+                Ok(())
+            }
+        ));
+        assert_ne!(receiver.recv().unwrap(), caller);
+    }
+
+    #[test]
+    fn unsupported_abi_does_not_start_a_policy_probe_thread() {
+        assert!(!probe_required_filesystem_policy_with(Some(2), || {
+            panic!("unsupported ABI must not install a policy")
+        }));
+    }
+
+    #[test]
     fn unavailable_required_policy_does_not_create_output() {
         let worktree = TempDir::new().unwrap();
         let output = worktree.path().join("outputs");
@@ -459,6 +513,20 @@ mod tests {
             FinalVerificationError::BackendUnavailable { .. }
         ));
         assert!(!output.exists());
+    }
+
+    #[test]
+    fn actual_isolation_setup_failure_is_backend_unavailable() {
+        let worktree = TempDir::new().unwrap();
+        let error = launch_with_backend_and_setup(request(worktree.path()), || Ok(()), |_, _, _, _| {
+            Err(())
+        })
+        .unwrap_err();
+
+        assert!(matches!(
+            error,
+            FinalVerificationError::BackendUnavailable { .. }
+        ));
     }
 
     #[test]
