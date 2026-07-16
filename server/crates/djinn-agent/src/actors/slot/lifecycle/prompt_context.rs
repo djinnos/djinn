@@ -34,7 +34,9 @@ pub(crate) struct KnowledgeContextTestEnvGuard {
     legacy: Option<std::ffi::OsString>,
 }
 
-#[cfg(any(test, feature = "test-support"))]
+// Only in-crate unit tests mutate the rollout variables. Test-support callers
+// still use the guard to serialize production reads, but do not need setters.
+#[cfg(test)]
 impl KnowledgeContextTestEnvGuard {
     pub(super) fn clear(&mut self) {
         // SAFETY: this guard serializes all knowledge-context rollout tests.
