@@ -443,6 +443,7 @@ mod tests {
                     role_priorities: std::collections::HashMap::new(),
                 },
             ),
+            build_admission: None,
             catalog: CatalogService::new(),
             health: HealthTracker::new(),
             role_registry: Arc::new(RoleRegistry::new()),
