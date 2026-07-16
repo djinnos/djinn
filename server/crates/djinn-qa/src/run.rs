@@ -94,23 +94,34 @@ const CARGO_EXECUTION_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 
 impl ScenarioExecutor for CargoExecutor {
     fn execute(&self, root: &Path, execution: &Execution) -> Result<(), String> {
-        let Execution::CargoPackage { package, test } = execution;
-        let workspace = if root.join("server/Cargo.toml").is_file() {
-            root.join("server")
-        } else {
-            root.to_path_buf()
-        };
-        let mut command = Command::new("cargo");
-        command
-            .current_dir(workspace)
-            .arg("test")
-            .arg("-p")
-            .arg(package);
-        if let Some(test) = test {
-            command.arg("--test").arg(test);
-        }
+        let Execution::CargoPackage { package, .. } = execution;
+        let mut command = cargo_command(root, execution);
         execute_command(&mut command, CARGO_EXECUTION_TIMEOUT, package)
     }
+}
+
+fn cargo_command(root: &Path, execution: &Execution) -> Command {
+    let Execution::CargoPackage { package, test } = execution;
+    let workspace = if root.join("server/Cargo.toml").is_file() {
+        root.join("server")
+    } else {
+        root.to_path_buf()
+    };
+    let mut command = Command::new("cargo");
+    command
+        .current_dir(workspace)
+        .arg("test")
+        .arg("-p")
+        .arg(package);
+    if let Some(test) = test {
+        command.arg("--test").arg(test);
+    }
+    // These suites deliberately manipulate process-global environment/config
+    // seams. The default in-process parallel harness makes otherwise
+    // deterministic tests race. Distinct targets still run concurrently under
+    // execute_selected's bound; serialize only tests within each target.
+    command.args(["--", "--test-threads=1"]);
+    command
 }
 
 fn drain<T: Read + Send + 'static>(stream: Option<T>) -> thread::JoinHandle<Vec<u8>> {
@@ -503,6 +514,31 @@ mod tests {
             .nth(3)
             .unwrap()
             .to_path_buf()
+    }
+    #[test]
+    fn cargo_target_uses_serial_test_harness() {
+        let execution = Execution::CargoPackage {
+            package: "djinn-slot".into(),
+            test: Some("reply_loop".into()),
+        };
+        let command = cargo_command(&repository_root(), &execution);
+        let args = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            args,
+            [
+                "test",
+                "-p",
+                "djinn-slot",
+                "--test",
+                "reply_loop",
+                "--",
+                "--test-threads=1"
+            ]
+        );
     }
     #[test]
     fn selection_excludes_blocked_and_disabled() {
