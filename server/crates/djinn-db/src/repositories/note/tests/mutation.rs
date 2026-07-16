@@ -472,12 +472,18 @@ async fn deprecate_with_supersedes_is_atomic_and_returns_auditable_metadata() {
     let new_id = uuid::Uuid::now_v7().to_string();
     let old_id = uuid::Uuid::now_v7().to_string();
     let foreign_id = uuid::Uuid::now_v7().to_string();
-    repo.mutate_with_revision(create_command(&project.id, old_id.clone()))
-        .await
-        .unwrap();
-    repo.mutate_with_revision(create_command(&project.id, new_id.clone()))
-        .await
-        .unwrap();
+    let mut old_create = create_command(&project.id, old_id.clone());
+    let NoteRevisionDesiredState::Create(state) = &mut old_create.desired else {
+        unreachable!("create_command has create state");
+    };
+    state.permalink = "reference/old-ledger-note".to_owned();
+    repo.mutate_with_revision(old_create).await.unwrap();
+    let mut new_create = create_command(&project.id, new_id.clone());
+    let NoteRevisionDesiredState::Create(state) = &mut new_create.desired else {
+        unreachable!("create_command has create state");
+    };
+    state.permalink = "reference/new-ledger-note".to_owned();
+    repo.mutate_with_revision(new_create).await.unwrap();
     repo.mutate_with_revision(create_command(&other_project.id, foreign_id.clone()))
         .await
         .unwrap();
