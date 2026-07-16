@@ -147,3 +147,60 @@ Generated Rust files are skipped defensively: paths matching `**/generated/**` a
 ```sh
 sh scripts/test-check-file-size.sh
 ```
+
+## Phase 1 retirement manifest generator
+
+`djinn-retirement-manifest.mjs` is the hermetic retirement manifest generator
+for Phase 1 knowledge retirement (epic h1w2 / proposal qiy6). It consumes
+NUL-delimited `git ls-files -z` output plus explicit hermetic DB-selection and
+DB-guidance fixture input and writes two deterministic JSON manifests under
+`target/djinn-retirement/`:
+
+- `knowledge-manifest.json` — one entry per tracked `.djinn` knowledge file,
+  carrying repository path, committed blob SHA-256, normalized-content SHA-256,
+  detected permalink, selected DB identity (UUID/permalink/status/normalized
+  hash), and exactly one disposition (`equivalent`, `db_supersedes_file`, or
+  `approved_discard`).
+- `db-guidance-manifest.json` — one entry per affected DB guidance record,
+  carrying selected identity, classification, disposition, rationale, status,
+  hashes, and supersession linkage fields for the follow-up DB reconciliation
+  task.
+
+Normalization only removes YAML front matter and canonicalizes CRLF/CR to LF;
+committed blob SHA-256 is computed over the exact stored bytes (`git show
+HEAD:<path>`).
+
+### Hermetic fixtures
+
+Committed under `scripts/fixtures/djinn-retirement/`:
+
+- `db-selection.json` — synthetic DB-selection records keyed by detected
+  permalink (uuids are deterministic sha256 derivatives, not real DB uuids).
+- `db-guidance.json` — synthetic DB-guidance records with classification and
+  supersession linkage fields.
+
+Regenerate from the current HEAD:
+
+```sh
+node scripts/fixtures/djinn-retirement/generate.mjs
+```
+
+### Strict reconciliation guard
+
+```sh
+make check-retirement-manifest
+# or directly:
+./scripts/check-djinn-retirement-manifest.sh
+```
+
+The guard runs the generator against live HEAD with the committed fixtures and
+enforces strict invariants: ambiguous DB matches, duplicate paths,
+tracked/deletion count or set mismatch, missing preserved identity, empty
+discard reason or approving task id, missing guidance disposition, and
+unresolved entries are all hard failures.
+
+### Tests
+
+```sh
+node --test scripts/test-djinn-retirement-manifest.mjs
+```
