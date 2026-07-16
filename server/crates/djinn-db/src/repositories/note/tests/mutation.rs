@@ -283,18 +283,22 @@ async fn revision_mutation_replaces_wikilinks_and_rolls_back_failed_updates() {
     .await
     .unwrap();
     let graph = repo.graph(&project.id).await.unwrap();
-    assert!(graph
-        .edges
-        .iter()
-        .any(|edge| edge.source_id == source.id && edge.target_id == new_target.id));
-    assert!(!graph
-        .edges
-        .iter()
-        .any(|edge| edge.source_id == source.id && edge.target_id == old_target.id));
+    assert!(
+        graph
+            .edges
+            .iter()
+            .any(|edge| edge.source_id == source.id && edge.target_id == new_target.id)
+    );
+    assert!(
+        !graph
+            .edges
+            .iter()
+            .any(|edge| edge.source_id == source.id && edge.target_id == old_target.id)
+    );
 
     repo.set_revision_event_insertion_failure_for_test(true);
-    assert!(repo
-        .mutate_with_revision(existing_command(
+    assert!(
+        repo.mutate_with_revision(existing_command(
             &project.id,
             &source.id,
             NoteRevisionEventKind::Updated,
@@ -302,7 +306,8 @@ async fn revision_mutation_replaces_wikilinks_and_rolls_back_failed_updates() {
             0.5,
         ))
         .await
-        .is_err());
+        .is_err()
+    );
     repo.set_revision_event_insertion_failure_for_test(false);
 
     assert_eq!(
@@ -310,14 +315,18 @@ async fn revision_mutation_replaces_wikilinks_and_rolls_back_failed_updates() {
         "links [[NewTarget]]"
     );
     let graph_after_rollback = repo.graph(&project.id).await.unwrap();
-    assert!(graph_after_rollback
-        .edges
-        .iter()
-        .any(|edge| edge.source_id == source.id && edge.target_id == new_target.id));
-    assert!(!graph_after_rollback
-        .edges
-        .iter()
-        .any(|edge| edge.source_id == source.id && edge.target_id == old_target.id));
+    assert!(
+        graph_after_rollback
+            .edges
+            .iter()
+            .any(|edge| edge.source_id == source.id && edge.target_id == new_target.id)
+    );
+    assert!(
+        !graph_after_rollback
+            .edges
+            .iter()
+            .any(|edge| edge.source_id == source.id && edge.target_id == old_target.id)
+    );
 }
 
 #[tokio::test]
@@ -356,4 +365,119 @@ async fn concurrent_revision_updates_allocate_contiguous_sequences() {
     let persisted: Vec<i64> = sqlx::query_scalar("SELECT note_seq FROM note_revision_events WHERE project_id = $1 AND note_id = $2 ORDER BY note_seq")
         .bind(&project.id).bind(&note_id).fetch_all(db.pool()).await.unwrap();
     assert_eq!(persisted, (1..=9).collect::<Vec<_>>());
+}
+
+#[tokio::test]
+async fn guarded_patch_rejects_stale_and_unbounded_confidence_without_ledger_write() {
+    let tmp = crate::database::test_tempdir().unwrap();
+    let db = Database::open_in_memory().unwrap();
+    let (tx, _rx) = broadcast::channel(8);
+    let project = make_project(&db, tmp.path()).await;
+    let repo = NoteRepository::new(db.clone(), event_bus_for(&tx));
+    let note_id = uuid::Uuid::now_v7().to_string();
+    repo.mutate_with_revision(create_command(&project.id, note_id.clone()))
+        .await
+        .unwrap();
+    for (expected_content, confidence) in [("stale", 0.7), ("initial content", 1.0)] {
+        assert!(
+            repo.mutate_with_revision(NoteRevisionMutation {
+                project_id: project.id.clone(),
+                note_id: Some(note_id.clone()),
+                event_kind: NoteRevisionEventKind::Updated,
+                desired: NoteRevisionDesiredState::GuardedPatch {
+                    expected_content: expected_content.into(),
+                    content: "patched".into(),
+                    confidence
+                },
+                attribution: TrustedNoteRevisionAttribution::system(
+                    NoteRevisionSubsystem::Extraction
+                ),
+                provenance: TrustedNoteRevisionProvenance::new(
+                    Some("session".into()),
+                    Some("task".into()),
+                    Some("run".into())
+                )
+                .unwrap(),
+                reason: NoteRevisionReason::new("guarded extraction patch").unwrap(),
+            })
+            .await
+            .is_err()
+        );
+    }
+    assert_eq!(
+        repo.get(&note_id).await.unwrap().unwrap().content,
+        "initial content"
+    );
+    assert_eq!(
+        repo.revision_events_for_note(&project.id, &note_id)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn deprecate_with_supersedes_is_atomic_and_returns_auditable_metadata() {
+    let tmp = crate::database::test_tempdir().unwrap();
+    let db = Database::open_in_memory().unwrap();
+    let (tx, _rx) = broadcast::channel(8);
+    let project = make_project(&db, tmp.path()).await;
+    let repo = NoteRepository::new(db.clone(), event_bus_for(&tx));
+    let old_id = uuid::Uuid::now_v7().to_string();
+    let new_id = uuid::Uuid::now_v7().to_string();
+    repo.mutate_with_revision(create_command(&project.id, old_id.clone()))
+        .await
+        .unwrap();
+    repo.mutate_with_revision(create_command(&project.id, new_id.clone()))
+        .await
+        .unwrap();
+    let command = || NoteRevisionMutation {
+        project_id: project.id.clone(),
+        note_id: Some(old_id.clone()),
+        event_kind: NoteRevisionEventKind::Updated,
+        desired: NoteRevisionDesiredState::DeprecateWithSupersedes {
+            superseding_note_id: new_id.clone(),
+            association_weight: 0.9,
+        },
+        attribution: TrustedNoteRevisionAttribution::system(NoteRevisionSubsystem::Extraction),
+        provenance: TrustedNoteRevisionProvenance::new(
+            Some("session".into()),
+            Some("task".into()),
+            Some("run".into()),
+        )
+        .unwrap(),
+        reason: NoteRevisionReason::new("superseded by canonical extraction").unwrap(),
+    };
+    repo.set_supersedes_association_failure_for_test(true);
+    assert!(repo.mutate_with_revision(command()).await.is_err());
+    repo.set_supersedes_association_failure_for_test(false);
+    assert_eq!(repo.get(&old_id).await.unwrap().unwrap().status, "active");
+    assert!(
+        repo.get_association_kind(&old_id, &new_id)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    repo.set_revision_event_insertion_failure_for_test(true);
+    assert!(repo.mutate_with_revision(command()).await.is_err());
+    repo.set_revision_event_insertion_failure_for_test(false);
+    assert_eq!(repo.get(&old_id).await.unwrap().unwrap().status, "active");
+    assert!(
+        repo.get_association_kind(&old_id, &new_id)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let result = repo.mutate_with_revision(command()).await.unwrap();
+    assert_eq!(result.deprecated_note_id.as_deref(), Some(old_id.as_str()));
+    assert_eq!(result.superseding_note_id.as_deref(), Some(new_id.as_str()));
+    assert_eq!(
+        result.supersedes_association.unwrap().kind,
+        NoteAssociationKind::Supersedes
+    );
+    assert_eq!(
+        repo.get(&old_id).await.unwrap().unwrap().status,
+        "deprecated"
+    );
 }

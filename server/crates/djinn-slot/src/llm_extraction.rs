@@ -3725,6 +3725,9 @@ mod evidence_merge_regression_tests {
                 note: committed_note,
                 note_seq: changed.then_some(1),
                 revision_id,
+                deprecated_note_id: None,
+                superseding_note_id: None,
+                supersedes_association: None,
             })
         }
         async fn get(&self, id: &str) -> djinn_db::Result<Option<djinn_memory::Note>> {
