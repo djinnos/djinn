@@ -870,28 +870,6 @@ mod tests {
         )
         .await;
 
-        // Fixture A: expects the extracted note to duplicate duplicate_candidate
-        // (positive dedup — provider says "already_known").
-        let dedup_fixture = ExtractionReplayFixture {
-            id: "dedup-case".to_string(),
-            required_discriminative_text: "extraction merge".to_string(),
-            expected_note_type: "case".to_string(),
-            expect_adr_054_quality: true,
-            must_not_duplicate_target: None,
-            expected_duplicate_target: Some(duplicate_candidate.id.clone()),
-        };
-
-        // Fixture B: expects the extracted note to be novel relative to all
-        // supplied candidates (must-not-duplicate — provider says "novel").
-        let nondup_fixture = ExtractionReplayFixture {
-            id: "nondup-case".to_string(),
-            required_discriminative_text: "extraction merge".to_string(),
-            expected_note_type: "case".to_string(),
-            expect_adr_054_quality: true,
-            must_not_duplicate_target: Some(nondup_candidate.id.clone()),
-            expected_duplicate_target: None,
-        };
-
         // Extraction response JSON — a single ADR-054-compliant case note. The
         // same extraction response is used for both cases; the difference is
         // only in the novelty decision.
@@ -905,6 +883,42 @@ mod tests {
             "pitfalls": [],
         })
         .to_string();
+
+        // Fixture A: expects the extracted note to duplicate duplicate_candidate
+        // (positive dedup — provider says "already_known").
+        let dedup_fixture = ExtractionReplayFixture {
+            id: "dedup-case".to_string(),
+            required_discriminative_text: "extraction merge".to_string(),
+            expected_note_type: "case".to_string(),
+            expect_adr_054_quality: true,
+            must_not_duplicate_target: None,
+            expected_duplicate_target: Some(duplicate_candidate.id.clone()),
+            provenance: "sanitized_archived_transcript_derived".to_string(),
+            messages: vec![ReplayTranscriptMessage {
+                role: "user".to_string(),
+                content: "dedup fixture transcript".to_string(),
+            }],
+            terminal_context: crate::llm_extraction::TerminalExtractionContext::default(),
+            injected_provider_response: extraction_json.clone(),
+        };
+
+        // Fixture B: expects the extracted note to be novel relative to all
+        // supplied candidates (must-not-duplicate — provider says "novel").
+        let nondup_fixture = ExtractionReplayFixture {
+            id: "nondup-case".to_string(),
+            required_discriminative_text: "extraction merge".to_string(),
+            expected_note_type: "case".to_string(),
+            expect_adr_054_quality: true,
+            must_not_duplicate_target: Some(nondup_candidate.id.clone()),
+            expected_duplicate_target: None,
+            provenance: "sanitized_archived_transcript_derived".to_string(),
+            messages: vec![ReplayTranscriptMessage {
+                role: "user".to_string(),
+                content: "non-dedup fixture transcript".to_string(),
+            }],
+            terminal_context: crate::llm_extraction::TerminalExtractionContext::default(),
+            injected_provider_response: extraction_json.clone(),
+        };
 
         // The novelty provider for the dedup case returns "already_known"
         // pointing at duplicate_candidate. For the non-dedup case it returns
