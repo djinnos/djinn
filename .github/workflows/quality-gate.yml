@@ -1082,6 +1082,7 @@ jobs:
     needs: preflight
     if: needs.preflight.outputs.qaSmoke == 'true' && (github.event_name == 'pull_request' || github.event_name == 'merge_group' || github.event_name == 'workflow_dispatch')
     runs-on: ubuntu-latest
+    timeout-minutes: 90
     env:
       # The runner clones isolated databases from the disposable migrated
       # template below; this never points at a developer or provider database.
@@ -1128,10 +1129,11 @@ jobs:
           # runner keeps using DJINN_TEST_DATABASE_URL to clone isolated DBs.
           DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5433/djinn_test_template
         run: |
+          cargo build -p djinn-qa
           set +e
-          cargo run -p djinn-qa -- run --qa-profile smoke-ci --concurrency 8 --evidence-dir qa/evidence/smoke-ci
+          target/debug/djinn-qa run --qa-profile smoke-ci --concurrency 8 --evidence-dir qa/evidence/smoke-ci
           run_status=$?
-          cargo run -p djinn-qa -- coverage --profile smoke-ci --format json --evidence ../qa/evidence/smoke-ci --output ../qa/evidence/smoke-ci/coverage.json
+          target/debug/djinn-qa coverage --profile smoke-ci --format json --evidence ../qa/evidence/smoke-ci --output ../qa/evidence/smoke-ci/coverage.json
           coverage_status=$?
           if [ "$run_status" -ne 0 ]; then exit "$run_status"; fi
           exit "$coverage_status"

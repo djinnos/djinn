@@ -4,12 +4,13 @@ import { resolve } from 'node:path';
 import test from 'node:test';
 
 const WORKFLOW = resolve('.github/workflows/quality-gate.yml');
-const RUN_COMMAND = 'cargo run -p djinn-qa -- run --qa-profile smoke-ci --concurrency 8 --evidence-dir qa/evidence/smoke-ci';
+const BUILD_COMMAND = 'cargo build -p djinn-qa';
+const RUN_COMMAND = 'target/debug/djinn-qa run --qa-profile smoke-ci --concurrency 8 --evidence-dir qa/evidence/smoke-ci';
 const MAINTENANCE_DATABASE_URL = 'postgres://postgres:postgres@127.0.0.1:5433/postgres';
 const TEMPLATE_DATABASE_URL = 'postgres://postgres:postgres@127.0.0.1:5433/djinn_test_template';
 // qa-smoke runs from server, while the runner emits evidence at the repository
 // root. Coverage must use that emitted directory, not server/qa/evidence.
-const COVERAGE_COMMAND = 'cargo run -p djinn-qa -- coverage --profile smoke-ci --format json --evidence ../qa/evidence/smoke-ci --output ../qa/evidence/smoke-ci/coverage.json';
+const COVERAGE_COMMAND = 'target/debug/djinn-qa coverage --profile smoke-ci --format json --evidence ../qa/evidence/smoke-ci --output ../qa/evidence/smoke-ci/coverage.json';
 
 function job(source, id) {
   const match = source.match(new RegExp(`^  ${id}:\\n([\\s\\S]*?)(?=^  [A-Za-z0-9_-]+:|$(?![\\s\\S]))`, 'm'));
@@ -30,6 +31,8 @@ test('qa-smoke workflow contract is deterministic, routed, and fail closed', () 
 
   assert.match(smoke, /^    name: qa-smoke$/m, 'the smoke check must be visible as qa-smoke');
   assert.match(smoke, /^    needs: preflight$/m);
+  assert.match(smoke, /^    timeout-minutes: 90$/m,
+    'qa-smoke must have a finite job deadline in addition to subprocess deadlines');
   assert.match(smoke, /needs\.preflight\.outputs\.qaSmoke == 'true'/);
   for (const event of ['pull_request', 'merge_group', 'workflow_dispatch']) {
     assert.match(smoke, new RegExp(`github\\.event_name == '${event}'`), `${event} must select qa-smoke`);
@@ -58,15 +61,21 @@ test('qa-smoke workflow contract is deterministic, routed, and fail closed', () 
   const uploadStepAt = smoke.indexOf('name: Upload qa-smoke evidence', smokeStepAt);
   const executionStep = smoke.slice(smokeStepAt, uploadStepAt);
   const compileDatabaseMatches = [...executionStep.matchAll(/^          DATABASE_URL: (\S+)$/gm)];
+  const buildAt = smoke.indexOf(BUILD_COMMAND);
   const runAt = smoke.indexOf(RUN_COMMAND);
   const coverageAt = smoke.indexOf(COVERAGE_COMMAND);
+  assert.doesNotMatch(executionStep, /cargo run -p djinn-qa/,
+    'the runner must not retain the Cargo build lock while it launches cargo test children');
+  assert.equal(executionStep.split(BUILD_COMMAND).length - 1, 1,
+    'qa-smoke must build djinn-qa exactly once before execution');
+  assert.ok(buildAt >= 0, 'the djinn-qa build must be present');
   assert.ok(runAt >= 0, 'qa-smoke must run the exact deterministic smoke command');
-  assert.ok(templateAt >= 0 && migrationAt > templateAt && templateReadyAt > migrationAt && templateReadyAt < smokeStepAt && smokeStepAt < runAt,
-    'template migration and clone-template marking must complete before cargo smoke execution');
+  assert.ok(templateAt >= 0 && migrationAt > templateAt && templateReadyAt > migrationAt && templateReadyAt < smokeStepAt && smokeStepAt < buildAt && buildAt < runAt,
+    'template migration and clone-template marking must complete before building and directly executing qa smoke');
   assert.equal(compileDatabaseMatches.length, 1,
     'the smoke and coverage execution step must own exactly one SQLx compile-time database URL');
   assert.equal(compileDatabaseMatches[0][1], TEMPLATE_DATABASE_URL,
-    'cargo smoke and coverage must compile SQLx macros against the migrated template');
+    'the djinn-qa build must compile SQLx macros against the migrated template');
   assert.notEqual(maintenanceDatabaseMatch[1], compileDatabaseMatches[0][1],
     'isolated clone acquisition and SQLx compile-time checks must use distinct databases');
   assert.ok(coverageAt > runAt, 'coverage must run after smoke evidence is emitted');
