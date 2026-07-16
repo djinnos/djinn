@@ -1203,6 +1203,10 @@ async fn dispatcher_failures_report_one_conservative_admission_outcome() {
             "CreateUnknown { diagnostic: \"connection reset after POST\" }",
         ),
         (
+            "transport: proxy host not found after POST",
+            "CreateUnknown { diagnostic: \"transport: proxy host not found after POST\" }",
+        ),
+        (
             "Forbidden: status code 403",
             "DefinitiveFailure { diagnostic: \"Forbidden: status code 403\" }",
         ),
@@ -1293,6 +1297,9 @@ fn dispatcher_error_classification_is_conservative() {
     ));
     assert!(!dispatcher_error_is_definitive(
         "connection reset after POST"
+    ));
+    assert!(!dispatcher_error_is_definitive(
+        "transport: proxy host not found after POST"
     ));
     assert!(!dispatcher_error_is_definitive("already exists"));
 }

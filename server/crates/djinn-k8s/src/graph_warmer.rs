@@ -871,15 +871,6 @@ impl WarmDispatch {
 fn dispatcher_error_is_definitive(error: &str) -> bool {
     let error = error.to_ascii_lowercase();
     [
-        "bad request",
-        "unauthorized",
-        "forbidden",
-        "not found",
-        "method not allowed",
-        "not acceptable",
-        "request entity too large",
-        "unsupported media type",
-        "unprocessable entity",
         "status code 400",
         "status code 401",
         "status code 403",
