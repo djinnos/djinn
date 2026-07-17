@@ -27,7 +27,7 @@ use djinn_db::repositories::{
 };
 use djinn_git::{
     VerificationInputDigestV1, VerificationInputFingerprint, VerificationInputFingerprintConfig,
-    compute_verification_input_fingerprint,
+    compute_verification_input_fingerprint, run_git_command_in,
 };
 use djinn_sandbox::final_verification_execution::{
     FinalVerificationCommandEvidence, FinalVerificationExecutionEvidence,
@@ -764,28 +764,30 @@ async fn cancellation_precedes_injected_stored_outcome() {
 
 /// Initialize a real git worktree whose `main` ref and HEAD make the V1
 /// verification-input fingerprint computable by the production path.
-fn init_verifiable_repo(prefix: &str) -> tempfile::TempDir {
+async fn init_verifiable_repo(prefix: &str) -> tempfile::TempDir {
     let tree = crate::test_helpers::test_tempdir(prefix);
-    let run_git = |args: &[&str]| {
-        let output = std::process::Command::new("git")
-            .args(args)
-            .current_dir(tree.path())
-            .output()
-            .expect("run git");
-        assert!(
-            output.status.success(),
-            "git {args:?} failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-    };
-    run_git(&["init"]);
-    run_git(&["config", "--local", "user.email", "test@test.com"]);
-    run_git(&["config", "--local", "user.name", "Test User"]);
-    run_git(&["config", "--local", "commit.gpgsign", "false"]);
+    run_git_command_in(tree.path(), vec!["init".into()])
+        .await
+        .expect("initialize git repository");
+    for args in [
+        vec!["config", "--local", "user.email", "test@test.com"],
+        vec!["config", "--local", "user.name", "Test User"],
+        vec!["config", "--local", "commit.gpgsign", "false"],
+    ] {
+        run_git_command_in(tree.path(), args.into_iter().map(String::from).collect())
+            .await
+            .expect("configure git repository");
+    }
     std::fs::write(tree.path().join("authored.txt"), "setup state").unwrap();
-    run_git(&["add", "authored.txt"]);
-    run_git(&["commit", "-m", "init"]);
-    run_git(&["branch", "-m", "main"]);
+    for args in [
+        vec!["add", "authored.txt"],
+        vec!["commit", "-m", "init"],
+        vec!["branch", "-m", "main"],
+    ] {
+        run_git_command_in(tree.path(), args.into_iter().map(String::from).collect())
+            .await
+            .expect("populate git repository");
+    }
     tree
 }
 
@@ -806,7 +808,7 @@ async fn post_authoring_digest(tree: &Path) -> VerificationInputDigestV1 {
 #[tokio::test]
 async fn setup_pre_verification_records_nothing_and_stores_only_post_authoring_fingerprint() {
     // A real worktree in its setup-time state.
-    let tree = init_verifiable_repo("setup-vs-final-");
+    let tree = init_verifiable_repo("setup-vs-final-").await;
     // The completion fixture; the injected executor evidence is supplied after
     // the post-setup edit so it must carry the real post-authoring digest.
     let rig = build_rig(&["lint", "test"], |_probe| {}).await;
