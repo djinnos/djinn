@@ -157,8 +157,17 @@ impl BuildAdmissionController {
 
     /// Construct an Enforce controller which cannot admit work until recovery opens it.
     #[must_use]
-    pub fn new_closed(journal: Arc<AdmissionJournalRepository>, cap: i64, creator_server_epoch: impl Into<String>) -> Self {
-        let controller = Self::new(journal, BuildAdmissionMode::Enforce, cap, creator_server_epoch);
+    pub fn new_closed(
+        journal: Arc<AdmissionJournalRepository>,
+        cap: i64,
+        creator_server_epoch: impl Into<String>,
+    ) -> Self {
+        let controller = Self::new(
+            journal,
+            BuildAdmissionMode::Enforce,
+            cap,
+            creator_server_epoch,
+        );
         controller.ready.store(false, Ordering::Release);
         controller
     }
@@ -200,7 +209,10 @@ impl BuildAdmissionController {
         request: BuildAdmissionRequest,
     ) -> Result<BuildAdmissionDecision, WarmAdmissionError> {
         if self.mode == BuildAdmissionMode::Enforce && !self.is_ready() {
-            return Ok(BuildAdmissionDecision::Denied { occupancy: 0, cap: self.cap });
+            return Ok(BuildAdmissionDecision::Denied {
+                occupancy: 0,
+                cap: self.cap,
+            });
         }
         let workload_kind = match request.kind {
             BuildWorkloadKind::TaskRun { .. } => match request.domain {
@@ -254,7 +266,9 @@ impl BuildAdmissionController {
                     Err(error) => {
                         // Observe is telemetry-only: a journal outage must not become a dispatch denial.
                         tracing::warn!(%error, "build admission observation unavailable; permitting without journal telemetry");
-                        return self.permit_without_reservation(key, permit_key, request.object_name).await;
+                        return self
+                            .permit_without_reservation(key, permit_key, request.object_name)
+                            .await;
                     }
                 };
                 if observed.would_defer {
@@ -308,15 +322,24 @@ impl BuildAdmissionController {
         object_name: String,
     ) -> Result<BuildAdmissionDecision, WarmAdmissionError> {
         let permit = WarmAdmissionPermit::new();
-        self.permits.lock().await.insert(permit.clone(), PermitState {
-            key,
-            creator_server_epoch: self.creator_server_epoch.clone(),
-            object_name,
-            durable: false,
-            released: false,
-        });
-        self.permits_by_key.lock().await.insert(permit_key, permit.clone());
-        Ok(BuildAdmissionDecision::Permitted { permit, idempotent: false })
+        self.permits.lock().await.insert(
+            permit.clone(),
+            PermitState {
+                key,
+                creator_server_epoch: self.creator_server_epoch.clone(),
+                object_name,
+                durable: false,
+                released: false,
+            },
+        );
+        self.permits_by_key
+            .lock()
+            .await
+            .insert(permit_key, permit.clone());
+        Ok(BuildAdmissionDecision::Permitted {
+            permit,
+            idempotent: false,
+        })
     }
 
     /// A missing or unknown task role is a fail-closed classification result.
@@ -1179,7 +1202,9 @@ mod tests {
     #[tokio::test]
     async fn closed_enforce_controller_denies_until_recovery_marks_ready() {
         let controller = BuildAdmissionController::new_closed(
-            Arc::new(AdmissionJournalRepository::new(Database::open_in_memory().unwrap())),
+            Arc::new(AdmissionJournalRepository::new(
+                Database::open_in_memory().unwrap(),
+            )),
             1,
             "epoch",
         );
@@ -1189,7 +1214,10 @@ mod tests {
             Err(WarmAdmissionError::Denied { .. })
         ));
         controller.mark_ready();
-        assert!(WarmAdmission::admit(&controller, warm("open")).await.is_ok());
+        assert!(
+            WarmAdmission::admit(&controller, warm("open"))
+                .await
+                .is_ok()
+        );
     }
-
 }

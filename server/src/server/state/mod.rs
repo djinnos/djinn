@@ -3301,8 +3301,8 @@ mod build_admission_config_tests {
         }
     }
 
-    #[test]
-    fn off_state_composition_has_no_admission_dependency_to_inject() {
+    #[tokio::test]
+    async fn off_state_composition_has_no_admission_dependency_to_inject() {
         let state = state_for_admission_config(BuildAdmissionConfig {
             mode: BuildAdmissionMode::Off,
             cap: 3,
@@ -3331,8 +3331,8 @@ mod build_admission_config_tests {
         );
     }
 
-    #[test]
-    fn environment_rollback_requires_a_new_app_state() {
+    #[tokio::test]
+    async fn environment_rollback_requires_a_new_app_state() {
         let _guard = BUILD_ADMISSION_ENV_LOCK.lock().expect("environment lock");
         let old_mode = std::env::var_os(BUILD_ADMISSION_MODE_ENV);
         let old_cap = std::env::var_os(MAX_BUILD_TASKRUNS_ENV);
