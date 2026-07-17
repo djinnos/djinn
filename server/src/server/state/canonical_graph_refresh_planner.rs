@@ -78,7 +78,7 @@ impl CanonicalGraphRefreshPlanner {
 }
 
 fn canonical_graph_index_tree_path(project_root: &Path) -> PathBuf {
-    project_root.join(".djinn").join("worktrees").join("_index")
+    djinn_core::index_tree::index_tree_path(project_root)
 }
 
 #[cfg(test)]

@@ -603,7 +603,7 @@ async fn architect_spike_with_real_adr_file_routes_through_pr_flow_via_worktree_
     // Real worktree directory inside the project, initialized as a git repo
     // so git2 status() actually has something to read.
     let worktree_path = Path::new(&project_path)
-        .join(".djinn")
+        .join(".task-runtime")
         .join("worktrees")
         .join(&task.short_id);
     init_git_repo(&worktree_path).await;
