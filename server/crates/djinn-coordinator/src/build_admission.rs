@@ -556,7 +556,7 @@ mod tests {
         }
     }
 
-    #[tokio::test(start_paused = true)]
+    #[tokio::test]
     async fn concrete_k8s_warmer_shares_task_cap_and_retries_after_fenced_release() {
         let db = Database::open_in_memory().unwrap();
         let journal = Arc::new(AdmissionJournalRepository::new(db.clone()));
@@ -636,9 +636,9 @@ mod tests {
 
         let post = posted.notified();
         tokio::pin!(post);
-        tokio::task::yield_now().await;
-        tokio::time::advance(std::time::Duration::from_secs(1)).await;
-        post.await;
+        tokio::time::timeout(std::time::Duration::from_secs(3), post)
+            .await
+            .expect("pending warm should retry after the admission backoff");
         assert_eq!(
             posts.load(Ordering::SeqCst),
             1,
@@ -646,7 +646,7 @@ mod tests {
         );
     }
 
-    #[tokio::test(start_paused = true)]
+    #[tokio::test]
     async fn concrete_k8s_warmer_keeps_failed_create_started_pending_without_posting() {
         let db = Database::open_in_memory().unwrap();
         let journal = Arc::new(AdmissionJournalRepository::new(db.clone()));
@@ -702,9 +702,9 @@ mod tests {
         reject_admission_create_started_for_test(&db, false).await;
         let post = posted.notified();
         tokio::pin!(post);
-        tokio::task::yield_now().await;
-        tokio::time::advance(std::time::Duration::from_secs(1)).await;
-        post.await;
+        tokio::time::timeout(std::time::Duration::from_secs(3), post)
+            .await
+            .expect("pending warm should retry after the admission backoff");
         assert_eq!(
             posts.load(Ordering::SeqCst),
             1,
