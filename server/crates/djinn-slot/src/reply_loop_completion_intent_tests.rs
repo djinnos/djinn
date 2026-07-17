@@ -8,13 +8,13 @@
 //! No verify-run cache lookup or C1/C2 reuse check is exercised — those are
 //! owned by sibling epic `0i1s`.
 
+use std::collections::VecDeque;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::Arc;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use crate::final_verification::{
-    FinalVerificationInvocationLease, FinalVerificationResolvedMaterial,
+    FinalVerificationCoordinatorRequest, FinalVerificationRecordingOutcome,
 };
 use crate::host::{ResolvedMcpTools, SlotContext, SlotHostCallbacks};
 use crate::reply_loop::{ReplyLoopContext, run_reply_loop};
@@ -24,7 +24,7 @@ use crate::test_helpers::{
 };
 use djinn_core::models::Task;
 use djinn_db::repositories::task_run::{CreateTaskRunParams, TaskRunRepository};
-use djinn_provider::message::{ContentBlock, Conversation, Message, Role};
+use djinn_provider::message::{ContentBlock, Conversation, Message};
 use djinn_provider::provider::StreamEvent;
 use tokio_util::sync::CancellationToken;
 
@@ -32,114 +32,42 @@ use tokio_util::sync::CancellationToken;
 // Mock host callbacks for completion-intent tests
 // ---------------------------------------------------------------------------
 
-/// A mock `SlotHostCallbacks` that controls final-verification outcomes.
-///
-/// `resolve_final_verification` is the first callback the coordinator calls.
-/// Returning `Err` causes the coordinator to emit
-/// `FinalVerificationRecordingOutcome::Error`, which `verify_completion_intent`
-/// maps to `Err`. The error string is then injected as an error `ToolResult`
-/// correlated to the original `submit_work` tool-use ID.
+/// A mock `SlotHostCallbacks` that supplies final typed outcomes at the
+/// coordinator's execution/persistence boundary. It deliberately implements no
+/// resolution, lease, sandbox, persistence, or verify-run reuse behavior.
 struct CompletionIntentCallbacks {
-    /// Error string to return from `resolve_final_verification`. When `None`,
-    /// returns `Ok` with empty material (the execution will then proceed to the
-    /// real sandbox, which is unavailable in unit tests and will produce
-    /// `Ineligible`/`Error` downstream — but the coordinator boundary is still
-    /// exercised).
-    resolve_error: Arc<Mutex<Option<String>>>,
-    /// Track how many times `resolve_final_verification` was called.
-    resolve_call_count: Arc<Mutex<usize>>,
-    /// Track how many times `acquire_final_verification_lease` was called.
-    lease_call_count: Arc<Mutex<usize>>,
-    /// Track how many times the lease was released.
-    release_count: Arc<Mutex<usize>>,
+    outcomes: Mutex<VecDeque<FinalVerificationRecordingOutcome>>,
+    coordinator_calls: Mutex<usize>,
+    expected_task_id: String,
 }
 
 impl CompletionIntentCallbacks {
-    fn new(resolve_error: Option<String>) -> Self {
+    fn new(expected_task_id: String, outcomes: Vec<FinalVerificationRecordingOutcome>) -> Self {
         Self {
-            resolve_error: Arc::new(Mutex::new(resolve_error)),
-            resolve_call_count: Arc::new(Mutex::new(0)),
-            lease_call_count: Arc::new(Mutex::new(0)),
-            release_count: Arc::new(Mutex::new(0)),
+            outcomes: Mutex::new(outcomes.into()),
+            coordinator_calls: Mutex::new(0),
+            expected_task_id,
         }
     }
 
-    fn resolve_count(&self) -> usize {
-        *self.resolve_call_count.lock().unwrap()
-    }
-    fn lease_count(&self) -> usize {
-        *self.lease_call_count.lock().unwrap()
-    }
-    fn release_total(&self) -> usize {
-        *self.release_count.lock().unwrap()
-    }
-}
-
-/// A mock lease that tracks release calls.
-struct MockLease {
-    release_count: Arc<Mutex<usize>>,
-}
-
-impl FinalVerificationInvocationLease for MockLease {
-    fn release<'a>(&'a mut self) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>> {
-        let count = self.release_count.clone();
-        Box::pin(async move {
-            *count.lock().unwrap() += 1;
-            Ok(())
-        })
+    fn coordinator_count(&self) -> usize {
+        *self.coordinator_calls.lock().unwrap()
     }
 }
 
 impl SlotHostCallbacks for CompletionIntentCallbacks {
-    fn resolve_final_verification<'a>(
-        &'a self,
-        _task_id: &'a str,
-        _task_run_id: &'a str,
-        _verification_attempt_id: &'a str,
-        _verify_run_id: &'a str,
-        _ctx: &'a SlotContext,
-    ) -> Pin<Box<dyn Future<Output = Result<FinalVerificationResolvedMaterial, String>> + Send + 'a>>
-    {
-        let count = self.resolve_call_count.clone();
-        let error = self.resolve_error.clone();
-        Box::pin(async move {
-            *count.lock().unwrap() += 1;
-            // No cache/reuse lookup is performed — the completion-intent path
-            // always resolves and executes the writer path independently of the
-            // reuse feature flag.
-            let err = error.lock().unwrap().clone();
-            if let Some(e) = err {
-                return Err(e);
-            }
-            // Returning Ok would proceed to execution. In a unit test without
-            // the real sandbox, execution will fail. This is acceptable: the
-            // important assertion is that the coordinator boundary was crossed.
-            Err("final-verification plan is not configured".to_owned())
-        })
+    fn final_verification_outcome_for_test(
+        &self,
+        request: &FinalVerificationCoordinatorRequest,
+    ) -> Option<FinalVerificationRecordingOutcome> {
+        assert_eq!(
+            request.task_id, self.expected_task_id,
+            "fixture task ID reached completion-intent verification"
+        );
+        *self.coordinator_calls.lock().unwrap() += 1;
+        self.outcomes.lock().unwrap().pop_front()
     }
 
-    fn acquire_final_verification_lease<'a>(
-        &'a self,
-        _task_id: &'a str,
-        _task_run_id: &'a str,
-        _verification_attempt_id: &'a str,
-        _ctx: &'a SlotContext,
-    ) -> Pin<
-        Box<
-            dyn Future<Output = Result<Box<dyn FinalVerificationInvocationLease>, String>>
-                + Send
-                + 'a,
-        >,
-    > {
-        let count = self.lease_call_count.clone();
-        let release = self.release_count.clone();
-        Box::pin(async move {
-            *count.lock().unwrap() += 1;
-            Ok(Box::new(MockLease {
-                release_count: release,
-            }) as Box<dyn FinalVerificationInvocationLease>)
-        })
-    }
     fn interrupt_paused_worker_session<'a>(
         &'a self,
         _task_id: &'a str,
@@ -256,7 +184,7 @@ struct TestFixture {
     callbacks: Arc<CompletionIntentCallbacks>,
 }
 
-async fn make_fixture(resolve_error: Option<String>) -> TestFixture {
+async fn make_fixture(outcomes: Vec<FinalVerificationRecordingOutcome>) -> TestFixture {
     let cancel = CancellationToken::new();
     let db = create_test_db();
     let project = create_test_project(&db).await;
@@ -282,7 +210,7 @@ async fn make_fixture(resolve_error: Option<String>) -> TestFixture {
         .await
         .expect("create task run");
 
-    let callbacks = Arc::new(CompletionIntentCallbacks::new(resolve_error));
+    let callbacks = Arc::new(CompletionIntentCallbacks::new(task.id.clone(), outcomes));
     let slot_ctx = agent_context_from_db_with_callbacks(db, callbacks.clone());
 
     TestFixture {
@@ -345,181 +273,145 @@ async fn run_with_provider(
 // Tests
 // ---------------------------------------------------------------------------
 
-/// AC: A syntactically valid model-called worker `submit_work` becomes a typed
-/// `CompletionIntent`; it is not copied into successful final output and does
-/// not end the session before authoritative final verification resolves.
-///
-/// This test verifies that when final verification fails (the coordinator
-/// returns an error), the payload is NOT finalized and an error tool result is
-/// injected. The `CompletionIntent` was captured (resolve was called) but the
-/// session continues rather than ending successfully.
-#[tokio::test]
-async fn completion_intent_not_finalized_when_verification_fails() {
-    let tools = vec![dummy_tool_schema("submit_work")];
-    let provider = FakeProvider::script(vec![vec![
-        StreamEvent::Delta(ContentBlock::ToolUse {
-            id: "fin-1".into(),
-            name: "submit_work".into(),
-            input: serde_json::json!({"task_id": "t1", "summary": "done"}),
-        }),
-        StreamEvent::Done,
-    ]]);
-
-    let fixture = make_fixture(Some("verification rejected: command failed".to_owned())).await;
-    let mut conversation = base_conversation();
-    let (result, output, _, _, _, _) = run_with_provider(
-        &provider,
-        &tools,
-        &mut conversation,
-        &fixture.slot_ctx,
-        &fixture.project_path,
-        &fixture.task_id,
-        "session-not-finalized",
-        &fixture.cancel,
-    )
-    .await;
-
-    // The completion-intent coordinator was invoked.
-    assert!(
-        fixture.callbacks.resolve_count() >= 1,
-        "verify_completion_intent should call resolve_final_verification"
-    );
-    // The finalize payload must NOT be set — verification failed.
-    assert!(
-        output.finalize_payload.is_none(),
-        "finalize_payload must be None when verification fails"
-    );
-    // The conversation has an error tool result correlated to the submit_work.
-    let has_error_tool_result = conversation.messages.iter().any(|msg| {
-        msg.role == Role::User
-            && msg.content.iter().any(|block| {
-                matches!(
-                    block,
-                    ContentBlock::ToolResult {
-                        tool_use_id,
-                        is_error: true,
-                        ..
-                    } if tool_use_id == "fin-1"
-                )
-            })
-    });
-    assert!(
-        has_error_tool_result,
-        "submit_work must produce an error ToolResult correlated to fin-1"
-    );
-    let _ = result;
+fn stored() -> FinalVerificationRecordingOutcome {
+    FinalVerificationRecordingOutcome::Stored {
+        verification_attempt_id: "attempt-stored".into(),
+        verify_run_id: "run-stored".into(),
+    }
 }
 
-/// AC: A recoverable verification failure is persisted and injected as an error
-/// `ToolResult` correlated to the original `submit_work` tool-use ID, after
-/// which the live worker conversation can continue and resubmit.
-#[tokio::test]
-async fn recoverable_failure_injects_error_tool_result_and_allows_resubmission() {
-    let tools = vec![dummy_tool_schema("submit_work")];
-    // First turn: submit_work → fails verification → error tool result injected.
-    // Second turn: worker resubmits → fails again.
-    let provider = FakeProvider::script(vec![
-        vec![
-            StreamEvent::Delta(ContentBlock::ToolUse {
-                id: "fin-1".into(),
-                name: "submit_work".into(),
-                input: serde_json::json!({"task_id": "t1", "summary": "first attempt"}),
-            }),
-            StreamEvent::Done,
-        ],
-        vec![
-            StreamEvent::Delta(ContentBlock::ToolUse {
-                id: "fin-2".into(),
-                name: "submit_work".into(),
-                input: serde_json::json!({"task_id": "t1", "summary": "second attempt"}),
-            }),
-            StreamEvent::Done,
-        ],
-    ]);
+fn ineligible(reason: &str) -> FinalVerificationRecordingOutcome {
+    FinalVerificationRecordingOutcome::Ineligible {
+        verification_attempt_id: "attempt-ineligible".into(),
+        reason: reason.into(),
+    }
+}
 
-    let fixture = make_fixture(Some("verification rejected: command failed".to_owned())).await;
-    let mut conversation = base_conversation();
-    let (result, _output, _, _, _, _) = run_with_provider(
-        &provider,
-        &tools,
-        &mut conversation,
-        &fixture.slot_ctx,
-        &fixture.project_path,
-        &fixture.task_id,
-        "session-recoverable",
-        &fixture.cancel,
-    )
-    .await;
+fn coordinator_error(detail: &str) -> FinalVerificationRecordingOutcome {
+    FinalVerificationRecordingOutcome::Error {
+        verification_attempt_id: "attempt-error".into(),
+        detail: detail.into(),
+    }
+}
 
-    // The coordinator should have been called for each submit_work.
-    assert!(
-        fixture.callbacks.resolve_count() >= 2,
-        "both submit_work attempts must trigger final verification; got {}",
-        fixture.callbacks.resolve_count()
-    );
-    // The conversation should contain error tool results for both attempts.
-    let error_results: Vec<&str> = conversation
+fn submit_turn(id: &str, task_id: &str, summary: &str) -> Vec<StreamEvent> {
+    vec![
+        StreamEvent::Delta(ContentBlock::ToolUse {
+            id: id.into(),
+            name: "submit_work".into(),
+            input: serde_json::json!({
+                "task_id": task_id,
+                "commit_title": format!("complete {summary}"),
+                "summary": summary,
+            }),
+        }),
+        StreamEvent::Done,
+    ]
+}
+
+fn error_ids(conversation: &Conversation) -> Vec<&str> {
+    conversation
         .messages
         .iter()
-        .flat_map(|msg| msg.content.iter())
-        .filter_map(|block| {
-            if let ContentBlock::ToolResult {
+        .flat_map(|message| &message.content)
+        .filter_map(|block| match block {
+            ContentBlock::ToolResult {
                 tool_use_id,
                 is_error: true,
                 ..
-            } = block
-            {
-                Some(tool_use_id.as_str())
-            } else {
-                None
-            }
+            } => Some(tool_use_id.as_str()),
+            _ => None,
         })
-        .collect();
-    assert!(
-        error_results.contains(&"fin-1"),
-        "first submit_work must produce an error ToolResult correlated to fin-1"
-    );
-    assert!(
-        error_results.contains(&"fin-2"),
-        "second submit_work must produce an error ToolResult correlated to fin-2"
-    );
-    let _ = result;
+        .collect()
 }
 
-/// AC: A terminal verification failure does not log successful `work_submitted`
-/// or advance the task attempt to submitted. The error tool result is injected
-/// and the loop continues, but repeated failures never produce successful
-/// finalization.
 #[tokio::test]
-async fn terminal_failure_does_not_finalize_as_success() {
-    let tools = vec![dummy_tool_schema("submit_work")];
-    let provider = FakeProvider::script(vec![
-        vec![
-            StreamEvent::Delta(ContentBlock::ToolUse {
-                id: "fin-1".into(),
-                name: "submit_work".into(),
-                input: serde_json::json!({"task_id": "t1", "summary": "attempt"}),
-            }),
-            StreamEvent::Done,
-        ],
-        vec![
-            StreamEvent::Delta(ContentBlock::ToolUse {
-                id: "fin-2".into(),
-                name: "submit_work".into(),
-                input: serde_json::json!({"task_id": "t1", "summary": "attempt 2"}),
-            }),
-            StreamEvent::Done,
-        ],
-    ]);
-
-    let fixture = make_fixture(Some(
-        "terminal verification error: coordinator failed".to_owned(),
-    ))
-    .await;
+async fn stored_verification_forwards_original_payload_exactly_once() {
+    let fixture = make_fixture(vec![stored()]).await;
+    let expected = serde_json::json!({
+        "task_id": fixture.task_id,
+        "commit_title": "complete finished work",
+        "summary": "finished work",
+    });
+    let provider = FakeProvider::script(vec![submit_turn(
+        "submit-1",
+        &fixture.task_id,
+        "finished work",
+    )]);
     let mut conversation = base_conversation();
     let (result, output, _, _, _, _) = run_with_provider(
         &provider,
-        &tools,
+        &[dummy_tool_schema("submit_work")],
+        &mut conversation,
+        &fixture.slot_ctx,
+        &fixture.project_path,
+        &fixture.task_id,
+        "session-stored",
+        &fixture.cancel,
+    )
+    .await;
+
+    assert!(result.is_ok());
+    assert_eq!(fixture.callbacks.coordinator_count(), 1);
+    assert_eq!(output.finalize_payload.as_ref(), Some(&expected));
+    assert_eq!(output.finalize_tool_name.as_deref(), Some("submit_work"));
+    let intent = output
+        .completion_intent
+        .expect("valid payload reached completion-intent verification");
+    assert_eq!(intent.finalize_payload, expected);
+    assert_eq!(intent.tool_use_id, "submit-1");
+    assert!(error_ids(&conversation).is_empty());
+}
+
+#[tokio::test]
+async fn ineligible_result_is_persisted_and_valid_resubmission_is_reverified() {
+    let fixture = make_fixture(vec![ineligible("command failed"), stored()]).await;
+    let provider = FakeProvider::script(vec![
+        submit_turn("submit-failed", &fixture.task_id, "first attempt"),
+        submit_turn("submit-stored", &fixture.task_id, "corrected attempt"),
+    ]);
+    let mut conversation = base_conversation();
+    let (result, output, _, _, _, _) = run_with_provider(
+        &provider,
+        &[dummy_tool_schema("submit_work")],
+        &mut conversation,
+        &fixture.slot_ctx,
+        &fixture.project_path,
+        &fixture.task_id,
+        "session-resubmit",
+        &fixture.cancel,
+    )
+    .await;
+
+    assert!(result.is_ok());
+    assert_eq!(fixture.callbacks.coordinator_count(), 2);
+    assert_eq!(error_ids(&conversation), vec!["submit-failed"]);
+    assert_eq!(
+        output.finalize_payload.as_ref().unwrap()["summary"],
+        "corrected attempt"
+    );
+    let persisted = djinn_db::SessionMessageRepository::new(
+        fixture.slot_ctx.db.clone(),
+        fixture.slot_ctx.event_bus.clone(),
+    )
+    .load_conversation("session-resubmit")
+    .await
+    .expect("load persisted conversation");
+    assert_eq!(error_ids(&persisted), vec!["submit-failed"]);
+}
+
+#[tokio::test]
+async fn terminal_error_exhausts_conversation_without_success_or_submission() {
+    let fixture = make_fixture(vec![coordinator_error("persistence unavailable")]).await;
+    let provider = FakeProvider::script(vec![submit_turn(
+        "submit-error",
+        &fixture.task_id,
+        "attempt",
+    )]);
+    let mut conversation = base_conversation();
+    let (result, output, _, _, _, _) = run_with_provider(
+        &provider,
+        &[dummy_tool_schema("submit_work")],
         &mut conversation,
         &fixture.slot_ctx,
         &fixture.project_path,
@@ -529,191 +421,48 @@ async fn terminal_failure_does_not_finalize_as_success() {
     )
     .await;
 
-    // Both submit_work attempts triggered verification.
     assert!(
-        fixture.callbacks.resolve_count() >= 2,
-        "both submit_work attempts must trigger final verification; got {}",
-        fixture.callbacks.resolve_count()
+        result.is_err(),
+        "script exhaustion terminates the real reply loop"
     );
-    // The finalize payload must NOT be set — terminal failure does not finalize.
-    assert!(
-        output.finalize_payload.is_none(),
-        "terminal failure must not set finalize_payload"
-    );
-    let _ = result;
+    assert_eq!(fixture.callbacks.coordinator_count(), 1);
+    assert!(output.finalize_payload.is_none());
+    assert!(output.completion_intent.is_none());
+    assert_eq!(error_ids(&conversation), vec!["submit-error"]);
 }
 
-/// AC: Repeated resubmission keeps re-invoking the coordinator on each new
-/// `submit_work`. This proves the worker conversation can continue after each
-/// failure and the coordinator boundary is not bypassed on resubmission.
 #[tokio::test]
-async fn repeated_resubmission_re_invokes_coordinator_each_time() {
-    let tools = vec![dummy_tool_schema("submit_work")];
+async fn three_non_stored_attempts_each_reach_verification_and_never_succeed() {
+    let fixture = make_fixture(vec![
+        ineligible("command one failed"),
+        coordinator_error("writer failed"),
+        ineligible("command three failed"),
+    ])
+    .await;
     let provider = FakeProvider::script(vec![
-        vec![
-            StreamEvent::Delta(ContentBlock::ToolUse {
-                id: "fin-1".into(),
-                name: "submit_work".into(),
-                input: serde_json::json!({"task_id": "t1", "summary": "attempt 1"}),
-            }),
-            StreamEvent::Done,
-        ],
-        vec![
-            StreamEvent::Delta(ContentBlock::ToolUse {
-                id: "fin-2".into(),
-                name: "submit_work".into(),
-                input: serde_json::json!({"task_id": "t1", "summary": "attempt 2"}),
-            }),
-            StreamEvent::Done,
-        ],
-        vec![
-            StreamEvent::Delta(ContentBlock::ToolUse {
-                id: "fin-3".into(),
-                name: "submit_work".into(),
-                input: serde_json::json!({"task_id": "t1", "summary": "attempt 3"}),
-            }),
-            StreamEvent::Done,
-        ],
+        submit_turn("submit-1", &fixture.task_id, "attempt one"),
+        submit_turn("submit-2", &fixture.task_id, "attempt two"),
+        submit_turn("submit-3", &fixture.task_id, "attempt three"),
     ]);
-
-    let fixture = make_fixture(Some("verification rejected: command failed".to_owned())).await;
     let mut conversation = base_conversation();
-    let (result, _output, _, _, _, _) = run_with_provider(
+    let (result, output, _, _, _, _) = run_with_provider(
         &provider,
-        &tools,
+        &[dummy_tool_schema("submit_work")],
         &mut conversation,
         &fixture.slot_ctx,
         &fixture.project_path,
         &fixture.task_id,
-        "session-repeated",
+        "session-three-attempts",
         &fixture.cancel,
     )
     .await;
 
-    // All three submit_work attempts triggered verification.
+    assert!(result.is_err());
+    assert_eq!(fixture.callbacks.coordinator_count(), 3);
+    assert!(output.finalize_payload.is_none());
+    assert!(output.completion_intent.is_none());
     assert_eq!(
-        fixture.callbacks.resolve_count(),
-        3,
-        "all three submit_work attempts must trigger final verification exactly once each"
-    );
-    // Each attempt produced an error tool result.
-    let error_results: Vec<&str> = conversation
-        .messages
-        .iter()
-        .flat_map(|msg| msg.content.iter())
-        .filter_map(|block| {
-            if let ContentBlock::ToolResult {
-                tool_use_id,
-                is_error: true,
-                ..
-            } = block
-            {
-                Some(tool_use_id.as_str())
-            } else {
-                None
-            }
-        })
-        .collect();
-    for expected in &["fin-1", "fin-2", "fin-3"] {
-        assert!(
-            error_results.contains(expected),
-            "submit_work {expected} must produce an error ToolResult"
-        );
-    }
-    let _ = result;
-}
-
-/// AC: The no-progress submission guard runs before completion-intent capture.
-/// When no tool calls are present, the completion-intent path is not reached.
-#[tokio::test]
-async fn no_progress_guard_runs_before_completion_intent_capture() {
-    let tools = vec![dummy_tool_schema("submit_work")];
-    // Text-only response — no tool calls at all.
-    let provider = FakeProvider::script(vec![vec![
-        StreamEvent::Delta(ContentBlock::Text {
-            text: "I am still working.".into(),
-        }),
-        StreamEvent::Done,
-    ]]);
-
-    let fixture = make_fixture(None).await;
-    let mut conversation = base_conversation();
-    let (_result, _output, _, _, _, _) = run_with_provider(
-        &provider,
-        &tools,
-        &mut conversation,
-        &fixture.slot_ctx,
-        &fixture.project_path,
-        &fixture.task_id,
-        "session-no-progress",
-        &fixture.cancel,
-    )
-    .await;
-
-    // No tool calls means no submit_work, so the completion-intent coordinator
-    // should NOT have been invoked.
-    assert_eq!(
-        fixture.callbacks.resolve_count(),
-        0,
-        "completion-intent coordinator must not be invoked when no submit_work tool call is present"
-    );
-}
-
-/// AC: A coordinator `stored` result allows the original payload to reach
-/// `handle_submit_work` exactly once. The session ends as successful completion
-/// after authoritative final verification resolves.
-///
-/// This test verifies that when the coordinator resolve succeeds (returns Ok),
-/// the lease is acquired. In the unit-test environment the execution will fail
-/// (no sandbox), producing `Ineligible`, but the key assertion is that the
-/// lease was acquired (the stored path can only be reached after lease
-/// acquisition). The actual `Stored` row requires the production sandbox which
-/// runs in the post-session verification pod.
-#[tokio::test]
-async fn stored_path_acquires_lease_before_execution() {
-    let tools = vec![dummy_tool_schema("submit_work")];
-    let provider = FakeProvider::script(vec![vec![
-        StreamEvent::Delta(ContentBlock::ToolUse {
-            id: "fin-1".into(),
-            name: "submit_work".into(),
-            input: serde_json::json!({"task_id": "t1", "summary": "done"}),
-        }),
-        StreamEvent::Done,
-    ]]);
-
-    // resolve returns Ok (None error) so the coordinator proceeds to lease.
-    let fixture = make_fixture(None).await;
-    let mut conversation = base_conversation();
-    let (_result, output, _, _, _, _) = run_with_provider(
-        &provider,
-        &tools,
-        &mut conversation,
-        &fixture.slot_ctx,
-        &fixture.project_path,
-        &fixture.task_id,
-        "session-stored-lease",
-        &fixture.cancel,
-    )
-    .await;
-
-    // The completion-intent coordinator was invoked and resolve succeeded.
-    assert!(
-        fixture.callbacks.resolve_count() >= 1,
-        "resolve_final_verification should be called"
-    );
-    // Since resolve returned Ok, the coordinator should have acquired the lease.
-    assert!(
-        fixture.callbacks.lease_count() >= 1,
-        "acquire_final_verification_lease should be called when resolve succeeds"
-    );
-    // The lease was released (coordinator always releases before returning).
-    assert!(
-        fixture.callbacks.release_total() >= 1,
-        "lease should be released after the coordinator returns"
-    );
-    // Without the real sandbox, execution fails and the payload is not finalized.
-    assert!(
-        output.finalize_payload.is_none(),
-        "finalize_payload must be None when execution fails without the real sandbox"
+        error_ids(&conversation),
+        vec!["submit-1", "submit-2", "submit-3"]
     );
 }
