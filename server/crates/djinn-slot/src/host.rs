@@ -26,6 +26,10 @@ use djinn_orchestration_types::coordinator::BackgroundWorkTracker;
 use djinn_orchestration_types::trigger::CoordinatorTrigger;
 use djinn_provider::catalog::{CatalogService, HealthTracker};
 
+#[cfg(test)]
+use crate::final_verification::{
+    FinalVerificationCoordinatorRequest, FinalVerificationRecordingOutcome,
+};
 use crate::final_verification::{
     FinalVerificationInvocationLease, FinalVerificationResolvedMaterial,
 };
@@ -67,6 +71,15 @@ pub type ActivityTracker = Arc<Mutex<HashMap<String, Arc<AtomicU64>>>>;
 /// `djinn-slot` depending on `djinn-agent` modules like `prompts`,
 /// `mcp_client`, `task_merge`, `runtime_bridge`, `supervisor`, etc.
 pub trait SlotHostCallbacks: Send + Sync + 'static {
+    /// Deterministic coordinator boundary used only by reply-loop unit tests.
+    /// Production builds always execute `coordinate_final_verification` in full.
+    #[cfg(test)]
+    fn final_verification_outcome_for_test(
+        &self,
+        _request: &FinalVerificationCoordinatorRequest,
+    ) -> Option<FinalVerificationRecordingOutcome> {
+        None
+    }
     /// Resolve canonical material for an authoritative final-verification call.
     /// The default fails closed until a host wires completion intent.
     fn resolve_final_verification<'a>(

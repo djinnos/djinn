@@ -63,6 +63,8 @@ mod helpers_tests;
 #[cfg(test)]
 mod llm_extraction_tests;
 #[cfg(test)]
+mod reply_loop_completion_intent_tests;
+#[cfg(test)]
 mod reply_loop_tests;
 #[cfg(test)]
 pub(crate) mod test_helpers;

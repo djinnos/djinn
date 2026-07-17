@@ -2,14 +2,137 @@
 // extraction adapters to build a [`djinn_slot::host::SlotContext`] from an
 // [`AgentContext`].
 
+use std::collections::BTreeMap;
 use std::future::Future;
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
 
+use djinn_core::canonical_verify::{
+    CanonicalCommandDescriptorV1, CanonicalFinalVerificationPlanV1, CanonicalHermeticityV1,
+    DeclaredExternalInputV1, ImmutableImageV1, ResolvedEnvironmentIdentityInputV1, ToolProbeStatus,
+    ToolProbeV1, VerificationInputManifestV1,
+};
 use djinn_core::clock::SystemClock;
+use djinn_core::models::VerifySource;
+use djinn_db::TaskRunRepository;
+use djinn_db::advisory_lock;
+use djinn_git::verification_input::{ResolvedExternalInputV1, VerificationInputFingerprintConfig};
+use djinn_sandbox::final_verification_execution::{
+    EnvironmentIdentityResolver, FinalVerificationExecutionRequest,
+};
 use djinn_supervisor::SupervisorServices;
 
 use crate::context::AgentContext;
+
+const UNKNOWN_IMAGE_DIGEST: &str =
+    "sha256:0000000000000000000000000000000000000000000000000000000000000000";
+
+/// Advisory-lock class id for final-verification invocation leases. Chosen from
+/// the application-specific range to avoid collisions with the migrator and
+/// template-bootstrap locks.
+const FINAL_VERIFICATION_LOCK_CLASS: i32 = 0x4656_5246; // "FVRF"
+/// Per-attempt object id derived by hashing the verification attempt id, so
+/// distinct concurrent attempts do not contend for the same lock row.
+fn final_verification_lock_object(verification_attempt_id: &str) -> i32 {
+    let hash = verification_attempt_id
+        .as_bytes()
+        .iter()
+        .fold(0u32, |acc, byte| {
+            acc.wrapping_mul(31).wrapping_add(*byte as u32)
+        });
+    hash as i32
+}
+
+/// Production invocation lease backed by a dedicated Postgres connection holding
+/// a session-scoped advisory lock. The coordinator explicitly releases it before
+/// persistence; releasing drops the connection, which also releases the lock.
+struct HostFinalVerificationLease {
+    conn: Option<sqlx::postgres::PgConnection>,
+    class_id: i32,
+    object_id: i32,
+}
+impl HostFinalVerificationLease {
+    async fn acquire(
+        db: &djinn_db::Database,
+        verification_attempt_id: &str,
+    ) -> Result<Box<dyn djinn_slot::final_verification::FinalVerificationInvocationLease>, String>
+    {
+        let class_id = FINAL_VERIFICATION_LOCK_CLASS;
+        let object_id = final_verification_lock_object(verification_attempt_id);
+        // Open a dedicated connection (not a pooled one) so the session-scoped
+        // advisory lock persists until the connection is dropped on release.
+        let opts = db.pool().connect_options();
+        let mut conn = sqlx::Connection::connect_with(&*opts)
+            .await
+            .map_err(|e| format!("final-verification lease connection failed: {e}"))?;
+        let acquired = advisory_lock::try_acquire(&mut conn, class_id, object_id)
+            .await
+            .map_err(|e| format!("final-verification lock query failed: {e}"))?;
+        if !acquired {
+            return Err("final-verification invocation lock is held by another attempt".to_owned());
+        }
+        Ok(Box::new(Self {
+            conn: Some(conn),
+            class_id,
+            object_id,
+        })
+            as Box<
+                dyn djinn_slot::final_verification::FinalVerificationInvocationLease,
+            >)
+    }
+}
+impl djinn_slot::final_verification::FinalVerificationInvocationLease
+    for HostFinalVerificationLease
+{
+    fn release<'a>(&'a mut self) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>> {
+        let class_id = self.class_id;
+        let object_id = self.object_id;
+        Box::pin(async move {
+            if let Some(mut conn) = self.conn.take() {
+                advisory_lock::release(&mut conn, class_id, object_id)
+                    .await
+                    .map_err(|e| format!("final-verification lock release failed: {e}"))?;
+            }
+            Ok(())
+        })
+    }
+}
+
+fn output_directories(globs: &[String]) -> Result<Vec<PathBuf>, String> {
+    let mut directories = std::collections::BTreeSet::new();
+    for glob in globs {
+        let mut prefix = PathBuf::new();
+        for component in Path::new(glob).components() {
+            let std::path::Component::Normal(component) = component else {
+                return Err("final-verification output glob is not a safe relative path".into());
+            };
+            let component = component.to_string_lossy();
+            if component.contains(['*', '?', '[', '{']) {
+                break;
+            }
+            prefix.push(component.as_ref());
+        }
+        if prefix.as_os_str().is_empty() {
+            return Err("final-verification output glob has no literal directory prefix".into());
+        }
+        directories.insert(prefix);
+    }
+    Ok(directories.into_iter().collect())
+}
+
+/// Canonical host runtime directories that the strict Landlock launcher must
+/// grant read/execute access to for final-verification commands. The launcher
+/// requires `tool_runtime` to include the executable and every runtime
+/// directory it needs (`/usr`, `/bin`, `/lib`, `/lib64`). Only existing
+/// directories are included so symlink-free hosts are handled correctly.
+fn canonical_tool_runtime() -> Vec<PathBuf> {
+    ["/usr", "/bin", "/lib", "/lib64"]
+        .into_iter()
+        .filter(|path| Path::new(path).is_dir())
+        .map(PathBuf::from)
+        .collect()
+}
 
 pub(crate) fn build_slot_context(
     agent: &AgentContext,
@@ -98,6 +221,163 @@ impl AgentHostCallbacks {
 }
 
 impl djinn_slot::host::SlotHostCallbacks for AgentHostCallbacks {
+    fn resolve_final_verification<'a>(
+        &'a self,
+        _task_id: &'a str,
+        task_run_id: &'a str,
+        _attempt: &'a str,
+        _verify_run: &'a str,
+        _ctx: &'a djinn_slot::host::SlotContext,
+    ) -> Pin<
+        Box<
+            dyn Future<
+                    Output = Result<
+                        djinn_slot::final_verification::FinalVerificationResolvedMaterial,
+                        String,
+                    >,
+                > + Send
+                + 'a,
+        >,
+    > {
+        let agent = self.agent.clone();
+        let id = task_run_id.to_owned();
+        Box::pin(async move {
+            let run = TaskRunRepository::new(agent.db.clone())
+                .get(&id)
+                .await
+                .map_err(|e| e.to_string())?
+                .ok_or("task run missing")?;
+            let worktree = run
+                .workspace_path
+                .map(PathBuf::from)
+                .ok_or("task run has no worktree")?;
+            let plan =
+                crate::environment::environment_config_for_project_id(&agent.db, &run.project_id)
+                    .await
+                    .lifecycle
+                    .final_verification;
+            if plan.commands.is_empty() {
+                return Err("final-verification plan is not configured".into());
+            }
+            let commands: Vec<_> = plan
+                .commands
+                .iter()
+                .map(|c| CanonicalCommandDescriptorV1 {
+                    check_id: c.check_id.clone(),
+                    executable: c.executable.clone(),
+                    argv: c.argv.clone(),
+                    working_directory: c.working_directory.clone(),
+                    environment_names: c.environment_names.clone(),
+                    timeout_seconds: c.timeout_seconds,
+                    descriptor_revision: c.descriptor_revision,
+                })
+                .collect();
+            let manifest = VerificationInputManifestV1 {
+                version: plan.input_manifest.version,
+                repo_paths: plan.input_manifest.repo_paths.clone(),
+                environment_names: plan.input_manifest.environment_names.clone(),
+                read_only_external_inputs: plan
+                    .read_only_external_inputs
+                    .iter()
+                    .map(|i| DeclaredExternalInputV1 {
+                        id: i.id.clone(),
+                        locator: i.locator.clone(),
+                    })
+                    .collect(),
+                output_only_globs: plan.output_only_globs.clone(),
+            };
+            let external_inputs: Vec<_> = plan
+                .read_only_external_inputs
+                .iter()
+                .map(|i| {
+                    Ok(ResolvedExternalInputV1 {
+                        id: i.id.clone(),
+                        path: PathBuf::from(&i.locator),
+                    })
+                })
+                .collect::<Result<_, String>>()?;
+            let identity = ResolvedEnvironmentIdentityInputV1 {
+                schema_version: 1,
+                canonicalization_version: 1,
+                plan: CanonicalFinalVerificationPlanV1 {
+                    version: plan.version,
+                    profile_id: plan.profile_id.clone(),
+                    profile_revision: plan.profile_revision,
+                    commands: commands.clone(),
+                    required_checks: plan.required_checks.clone(),
+                    hermeticity: CanonicalHermeticityV1 {
+                        hermetic: plan.hermeticity.hermetic,
+                        reusable: plan.hermeticity.reusable,
+                        network_access: plan.hermeticity.network_access,
+                    },
+                },
+                input_manifest: manifest.clone(),
+                image: ImmutableImageV1 {
+                    reference: "host".into(),
+                    digest: UNKNOWN_IMAGE_DIGEST.into(),
+                },
+                tool_probes: commands
+                    .iter()
+                    .map(|c| ToolProbeV1 {
+                        tool: c.executable.clone(),
+                        version: "host".into(),
+                        executable_digest: UNKNOWN_IMAGE_DIGEST.into(),
+                        status: ToolProbeStatus::Passed,
+                    })
+                    .collect(),
+                runner_version: env!("CARGO_PKG_VERSION").into(),
+                lockfile_digests: Vec::new(),
+                target: std::env::consts::ARCH.into(),
+                features: Vec::new(),
+                allowlisted_environment: BTreeMap::new(),
+            };
+            let resolver: EnvironmentIdentityResolver = Arc::new(move || Ok(identity.clone()));
+            let output_directories = output_directories(&manifest.output_only_globs)?;
+            Ok(
+                djinn_slot::final_verification::FinalVerificationResolvedMaterial {
+                    execution_request: FinalVerificationExecutionRequest {
+                        worktree,
+                        resolve_environment_identity: resolver,
+                        fingerprint_config: VerificationInputFingerprintConfig {
+                            base_ref: "main".into(),
+                            manifest,
+                            external_inputs: external_inputs.clone(),
+                        },
+                        tool_runtime: canonical_tool_runtime(),
+                        read_only_external_mounts: external_inputs
+                            .into_iter()
+                            .map(|i| i.path)
+                            .collect(),
+                        output_directories,
+                    },
+                    verify_source: VerifySource::Worker,
+                    required_checks: plan.required_checks,
+                    diff_fingerprint: String::new(),
+                },
+            )
+        })
+    }
+    fn acquire_final_verification_lease<'a>(
+        &'a self,
+        _task_id: &'a str,
+        _task_run_id: &'a str,
+        attempt: &'a str,
+        ctx: &'a djinn_slot::host::SlotContext,
+    ) -> Pin<
+        Box<
+            dyn Future<
+                    Output = Result<
+                        Box<dyn djinn_slot::final_verification::FinalVerificationInvocationLease>,
+                        String,
+                    >,
+                > + Send
+                + 'a,
+        >,
+    > {
+        let db = ctx.db.clone();
+        let attempt = attempt.to_owned();
+        Box::pin(async move { HostFinalVerificationLease::acquire(&db, &attempt).await })
+    }
     fn interrupt_paused_worker_session<'a>(
         &'a self,
         _task_id: &'a str,
