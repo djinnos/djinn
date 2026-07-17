@@ -6,7 +6,6 @@
 //! every `board_health` call, which the UI polls continuously. As the closed
 //! backlog grew the calls reached 6–9 s, starving the coordinator tick and
 //! the liveness probe. Closed tasks must appear in NEITHER section.
-use super::*;
 use crate::database::Database;
 use crate::repositories::epic::EpicCreateInput;
 use crate::repositories::task::TaskRepository;
