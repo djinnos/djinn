@@ -1122,6 +1122,10 @@ jobs:
           runner_status=$?
           target/debug/djinn-qa coverage --profile smoke-ci --format json --repo-root .. --evidence ../qa/evidence/smoke-ci --output ../qa/evidence/smoke-ci/coverage.json
           coverage_status=$?
+          if [ "$coverage_status" -ne 0 ]; then
+            echo "::error::Required smoke coverage gaps remain:"
+            jq -r '.[] | select((.required_profiles | index("smoke-ci")) and .state != "proven") | "\(.coverage_id): state=\(.state), scenarios=\(.scenario_ids | join(",")), stale_reasons=\(.stale_reasons | join(","))"' ../qa/evidence/smoke-ci/coverage.json
+          fi
           if [ "$runner_status" -ne 0 ] || [ "$coverage_status" -ne 0 ]; then
             exit 1
           fi
