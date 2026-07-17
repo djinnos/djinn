@@ -505,7 +505,8 @@ async fn call_tool_memory_brief_singleton_targets_canonical_project_root_from_wo
         .to_string_lossy()
         .into_owned();
     std::fs::create_dir_all(&project_path).expect("create project dir");
-    let worktree = Path::new(&project_path).join(".task-runtime/worktrees/test-brief-singleton-worktree");
+    let worktree =
+        Path::new(&project_path).join(".task-runtime/worktrees/test-brief-singleton-worktree");
     std::fs::create_dir_all(worktree.join(".git")).expect("create worktree dir");
 
     let state = agent_context_from_db(db.clone(), CancellationToken::new());

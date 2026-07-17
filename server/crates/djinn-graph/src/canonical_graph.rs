@@ -695,9 +695,10 @@ pub async fn ensure_canonical_graph<C: WarmContext>(
 > {
     use djinn_db::{RepoGraphCacheInsert, RepoGraphCacheRepository};
 
-    let mut handle = crate::index_tree::IndexTree::ensure(project_id, project_root)
-        .await
-        .map_err(|e| format!("ensure index tree: {e}"))?;
+    let mut handle =
+        crate::index_tree::IndexTree::ensure_with_migration(project_id, project_root, ctx.db())
+            .await
+            .map_err(|e| format!("ensure index tree: {e}"))?;
     let _ = handle
         .fetch_if_stale(crate::index_tree::DEFAULT_FETCH_COOLDOWN)
         .await;

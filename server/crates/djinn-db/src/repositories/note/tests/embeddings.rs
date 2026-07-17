@@ -103,7 +103,9 @@ fn worktree_root_infers_task_embedding_branch() {
         Some("task/exen")
     );
     assert_eq!(
-        infer_embedding_branch_from_worktree(std::path::Path::new("/tmp/.task-runtime/worktrees/_index")),
+        infer_embedding_branch_from_worktree(std::path::Path::new(
+            "/tmp/.task-runtime/worktrees/_index"
+        )),
         None
     );
 }

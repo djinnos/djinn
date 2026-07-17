@@ -25,13 +25,19 @@
 //! spawning, but `IndexTree` itself only governs git state.
 
 use std::collections::HashMap;
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow};
 use djinn_core::clock::{Clock, SystemClock};
+use djinn_core::live_state_migration::{ProjectLiveStateMigrationLock, atomic_rename};
+use djinn_db::{
+    BeginProjectLiveStateMigration, Database, MigrationKey, ProjectLiveStateMigrationRepository,
+};
 use djinn_git::CommandOutput;
+use serde_json::json;
 
 /// Reserved file-name prefix for server-managed entries under
 /// `.task-runtime/worktrees/`.  Task-worktree enumeration paths must skip any entry
@@ -82,6 +88,67 @@ fn resolve_indexer_target_dir_override(
         None
     } else {
         Some(isolated_target_dir.to_path_buf())
+    }
+}
+
+async fn migrate_legacy_index_tree(
+    project_id: &str,
+    project_root: &Path,
+    db: &Database,
+    destination_parent: &Path,
+) -> Result<()> {
+    if std::env::var("DJINN_PROJECT_ROOT").is_ok() {
+        return Ok(());
+    }
+    let source = project_root.join(".djinn/worktrees/_index");
+    let destination = destination_parent.join(INDEX_TREE_DIR_NAME);
+    let source_state = classify_worktree_path(&source)?;
+    let destination_state = classify_worktree_path(&destination)?;
+    let repository = ProjectLiveStateMigrationRepository::new(db.clone());
+    let destination_text = destination.display().to_string();
+    let inventory = json!({"sources": [{"kind":"legacy_index_worktree", "path":source.display().to_string(), "state":source_state}], "destination":destination_text});
+    let key = MigrationKey {
+        project_id,
+        family: "worktree:index",
+        release: "N",
+    };
+    repository.begin(BeginProjectLiveStateMigration { project_id, family: "worktree:index", release: "N", source_inventory: &inventory, destination: &destination_text, pre_hash: None, rollback_instruction: "During the Release N rollback window, atomically rename .task-runtime/worktrees/_index back to .djinn/worktrees/_index under the project migration lock." }).await?;
+    let outcome = match (source_state.as_str(), destination_state.as_str()) {
+        ("missing", "missing") | ("missing", "directory") => Ok(()),
+        ("directory", "missing") => {
+            fs::create_dir_all(destination_parent)?;
+            let _lock = ProjectLiveStateMigrationLock::try_acquire(destination_parent, project_id)?;
+            atomic_rename(&source, &destination).map_err(anyhow::Error::from)
+        }
+        ("directory", "directory") => Err(anyhow!(
+            "legacy and destination index worktrees both exist; preserving both"
+        )),
+        _ => Err(anyhow!(
+            "refusing index-worktree migration for source={} destination={}",
+            source_state,
+            destination_state
+        )),
+    };
+    match outcome {
+        Ok(()) => repository
+            .finalize(key, None, Some("destination published or already present"))
+            .await
+            .map_err(anyhow::Error::from),
+        Err(error) => {
+            let _ = repository.fail(key, &error.to_string()).await;
+            Err(error)
+        }
+    }
+}
+
+fn classify_worktree_path(path: &Path) -> Result<String> {
+    match fs::symlink_metadata(path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok("missing".to_owned()),
+        Err(error) => Err(error.into()),
+        Ok(metadata) if metadata.file_type().is_symlink() => Ok("symlink".to_owned()),
+        Ok(metadata) if metadata.is_dir() => Ok("directory".to_owned()),
+        Ok(metadata) if metadata.is_file() => Ok("file".to_owned()),
+        Ok(_) => Ok("special".to_owned()),
     }
 }
 
@@ -231,7 +298,33 @@ impl IndexTree {
     /// redundant — the Pod's whole filesystem is already the "index
     /// tree" for the warm run.
     pub async fn ensure(project_id: &str, project_root: &Path) -> Result<IndexTreeHandle> {
+        Self::ensure_inner(project_id, project_root).await
+    }
+
+    pub async fn ensure_with_migration(
+        project_id: &str,
+        project_root: &Path,
+        db: &Database,
+    ) -> Result<IndexTreeHandle> {
         let worktrees_dir = djinn_core::index_tree::worktrees_path(project_root);
+        let lock = ensure_lock_for(project_id).await;
+        let _permit = lock.lock().await;
+        migrate_legacy_index_tree(project_id, project_root, db, &worktrees_dir).await?;
+        Self::ensure_locked(project_id, project_root, worktrees_dir).await
+    }
+
+    async fn ensure_inner(project_id: &str, project_root: &Path) -> Result<IndexTreeHandle> {
+        let worktrees_dir = djinn_core::index_tree::worktrees_path(project_root);
+        let lock = ensure_lock_for(project_id).await;
+        let _permit = lock.lock().await;
+        Self::ensure_locked(project_id, project_root, worktrees_dir).await
+    }
+
+    async fn ensure_locked(
+        project_id: &str,
+        project_root: &Path,
+        worktrees_dir: PathBuf,
+    ) -> Result<IndexTreeHandle> {
         let target_dir = worktrees_dir.join(INDEX_TREE_TARGET_DIR_NAME);
 
         let pod_workspace_mode = std::env::var("DJINN_PROJECT_ROOT").is_ok();
@@ -244,9 +337,6 @@ impl IndexTree {
         // Serialise concurrent `ensure` calls for the same project so we
         // do not race the initial `git worktree add`.  Different projects
         // remain independent.
-        let lock = ensure_lock_for(project_id).await;
-        let _permit = lock.lock().await;
-
         if pod_workspace_mode {
             // Validate that the caller did actually clone into this path.
             // If not, fail clearly instead of silently running against an
