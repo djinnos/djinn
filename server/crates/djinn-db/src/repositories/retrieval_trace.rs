@@ -6,7 +6,7 @@ use sqlx::{Decode, Postgres, Type};
 use crate::Result;
 use crate::database::Database;
 use crate::error::DbError;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 /// Maximum rows returned per `list_by_project` page when the caller does not
 /// provide an explicit limit.
@@ -677,6 +677,43 @@ pub struct RetrievalTraceRepository {
 }
 
 impl RetrievalTraceRepository {
+    /// Return only positively injected candidate IDs for one exact emitting
+    /// attribution tuple. Skipped candidates, including legacy candidates
+    /// without an explicit outcome, are never eligibility evidence.
+    pub async fn injected_candidate_note_ids_for_attribution(
+        &self,
+        project_id: &str,
+        session_id: &str,
+        task_id: &str,
+        task_run_id: Option<&str>,
+    ) -> Result<HashSet<String>> {
+        self.db.ensure_initialized().await?;
+        let rows: Vec<RetrievalTraceRow> = sqlx::query_as(
+            r#"SELECT id, schema_version, project_id, session_id, task_run_id, task_id,
+                entry_point, rollout_label, outcome, trigger, candidates,
+                candidate_cap, candidate_cap_exceeded, sampling_metadata,
+                durations_ms, estimated_injected_tokens, created_at
+            FROM retrieval_traces
+            WHERE project_id = $1 AND session_id = $2 AND task_id = $3
+              AND task_run_id IS NOT DISTINCT FROM $4
+            ORDER BY created_at DESC, id DESC
+            LIMIT $5"#,
+        )
+        .bind(project_id)
+        .bind(session_id)
+        .bind(task_id)
+        .bind(task_run_id)
+        .bind(DEFAULT_RETRIEVAL_TRACE_LIMIT)
+        .fetch_all(self.db.pool())
+        .await?;
+        Ok(rows
+            .into_iter()
+            .flat_map(|row| row.candidates_typed())
+            .filter(|candidate| candidate.outcome == CandidateOutcome::Injected)
+            .map(|candidate| candidate.note_id)
+            .collect())
+    }
+
     pub fn new(db: Database) -> Self {
         Self { db }
     }

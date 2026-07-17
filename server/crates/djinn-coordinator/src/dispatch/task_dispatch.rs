@@ -7641,18 +7641,15 @@ mod build_admission_route_tests {
                                     .count_task_or_warm_occupancy()
                                     .await
                                     .unwrap_or_default();
-                                snapshots
-                                    .lock()
-                                    .expect("snapshot map mutex")
-                                    .insert(
-                                        task_id.clone(),
-                                        CreateTimeSnapshot {
-                                            row_existed,
-                                            generation,
-                                            history_len,
-                                            occupancy,
-                                        },
-                                    );
+                                snapshots.lock().expect("snapshot map mutex").insert(
+                                    task_id.clone(),
+                                    CreateTimeSnapshot {
+                                        row_existed,
+                                        generation,
+                                        history_len,
+                                        occupancy,
+                                    },
+                                );
 
                                 let (release_tx, release_rx) = tokio::sync::oneshot::channel();
                                 releases
@@ -7827,8 +7824,7 @@ mod build_admission_route_tests {
 
         let journal = route_journal(&db);
         let controller = route_controller(&journal, BuildAdmissionMode::Enforce, 1);
-        let (runtime, mut started_rx, _completed_rx) =
-            AdmissionRouteRuntime::new(journal.clone());
+        let (runtime, mut started_rx, _completed_rx) = AdmissionRouteRuntime::new(journal.clone());
 
         let mut actor = build_route_actor(&db, &events_tx, &runtime, 1);
         actor.build_admission = Some(controller.clone());
@@ -7889,8 +7885,7 @@ mod build_admission_route_tests {
 
         let journal = route_journal(&db);
         let controller = route_controller(&journal, BuildAdmissionMode::Enforce, 1);
-        let (runtime, mut started_rx, _completed_rx) =
-            AdmissionRouteRuntime::new(journal.clone());
+        let (runtime, mut started_rx, _completed_rx) = AdmissionRouteRuntime::new(journal.clone());
 
         let mut actor = build_route_actor(&db, &events_tx, &runtime, 1);
         actor.build_admission = Some(controller.clone());
@@ -7956,8 +7951,7 @@ mod build_admission_route_tests {
 
         let journal = route_journal(&db);
         let controller = route_controller(&journal, BuildAdmissionMode::Enforce, 1);
-        let (runtime, mut started_rx, _completed_rx) =
-            AdmissionRouteRuntime::new(journal.clone());
+        let (runtime, mut started_rx, _completed_rx) = AdmissionRouteRuntime::new(journal.clone());
 
         let mut actor = build_route_actor(&db, &events_tx, &runtime, 1);
         actor.build_admission = Some(controller.clone());
@@ -8029,8 +8023,7 @@ mod build_admission_route_tests {
         let journal = route_journal(&db);
         // cap=0 → first admission is denied.
         let controller = route_controller(&journal, BuildAdmissionMode::Enforce, 0);
-        let (runtime, _started_rx, _completed_rx) =
-            AdmissionRouteRuntime::new(journal.clone());
+        let (runtime, _started_rx, _completed_rx) = AdmissionRouteRuntime::new(journal.clone());
 
         let mut actor = build_route_actor(&db, &events_tx, &runtime, 5);
         actor.build_admission = Some(controller.clone());
@@ -8100,8 +8093,7 @@ mod build_admission_route_tests {
 
         let journal = route_journal(&db);
         let controller = route_controller(&journal, BuildAdmissionMode::Observe, 1);
-        let (runtime, mut started_rx, _completed_rx) =
-            AdmissionRouteRuntime::new(journal.clone());
+        let (runtime, mut started_rx, _completed_rx) = AdmissionRouteRuntime::new(journal.clone());
 
         let mut actor = build_route_actor(&db, &events_tx, &runtime, 2);
         actor.build_admission = Some(controller.clone());
@@ -8175,8 +8167,7 @@ mod build_admission_route_tests {
 
         let journal = route_journal(&db);
         let controller = route_controller(&journal, BuildAdmissionMode::Off, 0);
-        let (runtime, mut started_rx, _completed_rx) =
-            AdmissionRouteRuntime::new(journal.clone());
+        let (runtime, mut started_rx, _completed_rx) = AdmissionRouteRuntime::new(journal.clone());
 
         let mut actor = build_route_actor(&db, &events_tx, &runtime, 1);
         actor.build_admission = Some(controller.clone());
@@ -8320,7 +8311,10 @@ mod build_admission_route_tests {
             "idempotent retry must not double-count occupancy"
         );
 
-        assert_eq!(actor.dispatched, 2, "retry must execute a second pool create");
+        assert_eq!(
+            actor.dispatched, 2,
+            "retry must execute a second pool create"
+        );
         assert_eq!(
             started_rx.recv().await.as_deref(),
             Some(task_id.as_str()),
@@ -8348,8 +8342,7 @@ mod build_admission_route_tests {
 
         let journal = route_journal(&db);
         let controller = route_controller(&journal, BuildAdmissionMode::Enforce, 2);
-        let (runtime, mut started_rx, _completed_rx) =
-            AdmissionRouteRuntime::new(journal.clone());
+        let (runtime, mut started_rx, _completed_rx) = AdmissionRouteRuntime::new(journal.clone());
 
         let mut actor = build_route_actor(&db, &events_tx, &runtime, 1);
         actor.build_admission = Some(controller.clone());
@@ -8505,8 +8498,7 @@ mod build_admission_route_tests {
 
         let journal = route_journal(&db);
         let controller = route_controller(&journal, BuildAdmissionMode::Enforce, 2);
-        let (runtime, mut started_rx, _completed_rx) =
-            AdmissionRouteRuntime::new(journal.clone());
+        let (runtime, mut started_rx, _completed_rx) = AdmissionRouteRuntime::new(journal.clone());
 
         let mut actor = build_route_actor(&db, &events_tx, &runtime, 1);
         actor.build_admission = Some(controller.clone());
@@ -8584,8 +8576,7 @@ mod build_admission_route_tests {
         let fixture = seed_wnd1_ready_worker_tasks(&db, WND1_READY_TASK_COUNT).await;
         let journal = route_journal(&db);
         let controller = route_controller(&journal, BuildAdmissionMode::Enforce, 2);
-        let (runtime, _started_rx, _completed_rx) =
-            AdmissionRouteRuntime::new(journal.clone());
+        let (runtime, _started_rx, _completed_rx) = AdmissionRouteRuntime::new(journal.clone());
         let mut actor = build_route_actor(&db, &events_tx, &runtime, 1);
         actor.build_admission = Some(controller.clone());
 
@@ -8595,12 +8586,7 @@ mod build_admission_route_tests {
             djinn_db::SessionRepository::new(db.clone(), djinn_core::events::EventBus::noop());
 
         let first_permit = actor
-            .begin_task_run_build_admission(
-                "worker",
-                &task_id,
-                0,
-                format!("task-run-{task_id}-0"),
-            )
+            .begin_task_run_build_admission("worker", &task_id, 0, format!("task-run-{task_id}-0"))
             .await
             .expect("generation zero admission");
         actor
@@ -8642,7 +8628,13 @@ mod build_admission_route_tests {
                 from_sync: false,
             })
             .await;
-        assert!(controller.release_notifier().notified().now_or_never().is_some());
+        assert!(
+            controller
+                .release_notifier()
+                .notified()
+                .now_or_never()
+                .is_some()
+        );
 
         let task_repo = TaskRepository::new(db.clone(), djinn_core::events::EventBus::noop());
         task_repo
@@ -8656,12 +8648,7 @@ mod build_admission_route_tests {
         assert_eq!(reopened.reopen_count, 1);
 
         let second_permit = actor
-            .begin_task_run_build_admission(
-                "worker",
-                &task_id,
-                1,
-                format!("task-run-{task_id}-1"),
-            )
+            .begin_task_run_build_admission("worker", &task_id, 1, format!("task-run-{task_id}-1"))
             .await
             .expect("generation one admission");
         actor
@@ -8719,7 +8706,10 @@ mod build_admission_route_tests {
             AdmissionState::Live,
         );
         assert_eq!(
-            journal.count_task_or_warm_occupancy().await.expect("count occupancy"),
+            journal
+                .count_task_or_warm_occupancy()
+                .await
+                .expect("count occupancy"),
             1,
             "stale actor callback must retain the current generation"
         );

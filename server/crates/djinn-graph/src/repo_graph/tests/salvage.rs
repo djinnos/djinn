@@ -6,9 +6,9 @@ use std::collections::BTreeMap;
 
 use super::*;
 use crate::repo_graph::{
-    RepoGraphArtifact, RepoGraphArtifactEdge, RepoGraphArtifactSymbolRange, RepoGraphEdgeKind,
-    RepoGraphNode, RepoGraphNodeKind, RepoNodeKey, RouteExclusionConfig,
-    REPO_GRAPH_ARTIFACT_VERSION,
+    REPO_GRAPH_ARTIFACT_VERSION, RepoGraphArtifact, RepoGraphArtifactEdge,
+    RepoGraphArtifactSymbolRange, RepoGraphEdgeKind, RepoGraphNode, RepoGraphNodeKind, RepoNodeKey,
+    RouteExclusionConfig,
 };
 
 fn node(key: RepoNodeKey, kind: RepoGraphNodeKind, name: &str, workspace: &str) -> RepoGraphNode {
