@@ -21,6 +21,7 @@ use time::format_description::well_known::Rfc3339;
 use tokio_util::sync::CancellationToken;
 
 use crate::host::SlotContext;
+use crate::output_parser::CompletionIntent;
 
 /// Material the host resolves from the current canonical plan, manifest, and
 /// environment. It is intentionally an execution request rather than a second
@@ -62,6 +63,51 @@ pub enum FinalVerificationRecordingOutcome {
         verification_attempt_id: String,
         detail: String,
     },
+}
+
+/// Run the one authoritative completion boundary for either a model tool call
+/// or a lifecycle-generated auto-submit settlement.
+pub(crate) async fn verify_completion_intent(
+    _intent: &CompletionIntent,
+    task_id: &str,
+    task_run_id: Option<&str>,
+    cancellation: CancellationToken,
+    slot_ctx: &SlotContext,
+) -> Result<(), String> {
+    let task_run_id = match task_run_id {
+        Some(task_run_id) => task_run_id.to_owned(),
+        None => {
+            let runs =
+                djinn_db::repositories::task_run::TaskRunRepository::new(slot_ctx.db.clone())
+                    .list_for_task(task_id)
+                    .await
+                    .map_err(|e| format!("could not resolve task run: {e}"))?;
+            runs.into_iter()
+                .find(|run| matches!(run.status.as_str(), "starting" | "running"))
+                .map(|run| run.id)
+                .ok_or_else(|| {
+                    "no active task run is available for final verification".to_owned()
+                })?
+        }
+    };
+    match coordinate_final_verification(
+        FinalVerificationCoordinatorRequest {
+            task_id: task_id.to_owned(),
+            task_run_id,
+            cancellation,
+        },
+        slot_ctx,
+    )
+    .await
+    {
+        FinalVerificationRecordingOutcome::Stored { .. } => Ok(()),
+        FinalVerificationRecordingOutcome::Ineligible { reason, .. } => Err(format!(
+            "Final verification rejected this submit_work request: {reason}. Fix the worktree and resubmit."
+        )),
+        FinalVerificationRecordingOutcome::Error { detail, .. } => Err(format!(
+            "Final verification could not complete: {detail}. Inspect the worktree and resubmit."
+        )),
+    }
 }
 
 /// Resolve, lease, execute once, and conditionally record exactly one pass.
