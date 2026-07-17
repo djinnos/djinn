@@ -40,17 +40,36 @@ async fn make_context() -> (
     let project = create_test_project(&db).await;
     let epic = create_test_epic(&db, &project.id).await;
     let task = create_test_task(&db, &project.id, &epic.id).await;
+    let task_run_id = uuid::Uuid::now_v7().to_string();
+    djinn_db::repositories::task_run::TaskRunRepository::new(db.clone())
+        .create(djinn_db::repositories::task_run::CreateTaskRunParams {
+            id: &task_run_id,
+            project_id: &project.id,
+            task_id: &task.id,
+            trigger_type: "dispatch",
+            status: Some("running"),
+            workspace_path: Some("/tmp"),
+            mirror_ref: None,
+        })
+        .await
+        .expect("create active task run");
+    let session = djinn_db::SessionRepository::new(db.clone(), ctx.event_bus.clone())
+        .create(djinn_db::repositories::session::CreateSessionParams {
+            project_id: &project.id,
+            task_id: Some(&task.id),
+            model: "synthetic/test-model",
+            agent_type: "worker",
+            metadata_json: None,
+            task_run_id: Some(&task_run_id),
+            pricing: None,
+            cost_basis: None,
+        })
+        .await
+        .expect("create reply-loop smoke session");
     let project_path = djinn_core::paths::project_dir(&project.github_owner, &project.github_repo)
         .to_string_lossy()
         .into_owned();
-    // Use a dummy session id (session is not created in these smoke tests).
-    (
-        ctx,
-        project_path,
-        task.id,
-        "session-smoke".to_string(),
-        cancel,
-    )
+    (ctx, project_path, task.id, session.id, cancel)
 }
 
 fn base_conversation() -> Conversation {
@@ -183,6 +202,7 @@ async fn text_only_completion_path_ends_without_nudge_when_no_tools_exist() {
 #[tokio::test]
 async fn tool_call_execution_adds_tool_result_and_continues_to_next_turn() {
     let tools = vec![dummy_tool_schema("output_view")];
+    let (slot_ctx, project_path, task_id, session_id, cancel) = make_context().await;
     let provider = FakeProvider::script(vec![
         vec![
             StreamEvent::Delta(ContentBlock::ToolUse {
@@ -196,12 +216,15 @@ async fn tool_call_execution_adds_tool_result_and_continues_to_next_turn() {
             StreamEvent::Delta(ContentBlock::ToolUse {
                 id: "fin-1".into(),
                 name: "submit_work".into(),
-                input: serde_json::json!({"task_id": "t1", "summary": "finished after tool call"}),
+                input: serde_json::json!({
+                    "task_id": task_id,
+                    "commit_title": "complete tool-call test work",
+                    "summary": "finished after tool call"
+                }),
             }),
             StreamEvent::Done,
         ],
     ]);
-    let (slot_ctx, project_path, task_id, session_id, cancel) = make_context().await;
     let mut conversation = base_conversation();
     let (result, _output, _, _, _, _) = run_with_provider(
         &provider,
@@ -239,15 +262,19 @@ async fn tool_call_execution_adds_tool_result_and_continues_to_next_turn() {
 #[tokio::test]
 async fn finalize_tool_detection_ends_loop_without_extra_provider_turn() {
     let tools = vec![dummy_tool_schema("submit_work")];
+    let (slot_ctx, project_path, task_id, session_id, cancel) = make_context().await;
     let provider = FakeProvider::script(vec![vec![
         StreamEvent::Delta(ContentBlock::ToolUse {
             id: "fin-1".into(),
             name: "submit_work".into(),
-            input: serde_json::json!({"task_id": "t1", "summary": "done"}),
+            input: serde_json::json!({
+                "task_id": task_id,
+                "commit_title": "complete finalize detection test",
+                "summary": "done"
+            }),
         }),
         StreamEvent::Done,
     ]]);
-    let (slot_ctx, project_path, task_id, session_id, cancel) = make_context().await;
     let mut conversation = base_conversation();
     let (result, output, _, _, _, _) = run_with_provider(
         &provider,
@@ -281,6 +308,7 @@ async fn finalize_tool_detection_ends_loop_without_extra_provider_turn() {
 #[tokio::test]
 async fn empty_response_retries_then_injects_nudge_into_second_turn_history() {
     let tools = vec![dummy_tool_schema("submit_work")];
+    let (slot_ctx, project_path, task_id, session_id, cancel) = make_context().await;
     let provider = FakeProvider::script(vec![
         vec![],
         vec![
@@ -293,12 +321,15 @@ async fn empty_response_retries_then_injects_nudge_into_second_turn_history() {
             StreamEvent::Delta(ContentBlock::ToolUse {
                 id: "fin-1".into(),
                 name: "submit_work".into(),
-                input: serde_json::json!({"task_id": "t1", "summary": "done after nudge"}),
+                input: serde_json::json!({
+                    "task_id": task_id,
+                    "commit_title": "complete empty-response test",
+                    "summary": "done after nudge"
+                }),
             }),
             StreamEvent::Done,
         ],
     ]);
-    let (slot_ctx, project_path, task_id, session_id, cancel) = make_context().await;
     let mut conversation = base_conversation();
     // Use a Codex-family model so that empty-stream retries are allowed
     // (non-Codex models now fail immediately on terminal empty turns).
@@ -487,6 +518,7 @@ async fn metadata_drives_streaming_dispatch_for_safe_tools() {
         dummy_tool_schema_with_safety("output_view", true),
         dummy_tool_schema_with_safety("submit_work", false),
     ];
+    let (slot_ctx, project_path, task_id, session_id, cancel) = make_context().await;
     let provider = FakeProvider::script(vec![
         vec![
             StreamEvent::Delta(ContentBlock::ToolUse {
@@ -500,12 +532,15 @@ async fn metadata_drives_streaming_dispatch_for_safe_tools() {
             StreamEvent::Delta(ContentBlock::ToolUse {
                 id: "fin-1".into(),
                 name: "submit_work".into(),
-                input: serde_json::json!({"task_id": "t1", "summary": "done"}),
+                input: serde_json::json!({
+                    "task_id": task_id,
+                    "commit_title": "complete reply-loop fixture",
+                    "summary": "done"
+                }),
             }),
             StreamEvent::Done,
         ],
     ]);
-    let (slot_ctx, project_path, task_id, session_id, cancel) = make_context().await;
     let mut conversation = base_conversation();
     let (result, output, _, _, _, _) = run_with_provider(
         &provider,
@@ -538,6 +573,7 @@ async fn missing_metadata_defaults_to_unsafe_dispatch() {
         }),
         dummy_tool_schema("submit_work"),
     ];
+    let (slot_ctx, project_path, task_id, session_id, cancel) = make_context().await;
     let provider = FakeProvider::script(vec![
         vec![
             StreamEvent::Delta(ContentBlock::ToolUse {
@@ -551,12 +587,15 @@ async fn missing_metadata_defaults_to_unsafe_dispatch() {
             StreamEvent::Delta(ContentBlock::ToolUse {
                 id: "fin-1".into(),
                 name: "submit_work".into(),
-                input: serde_json::json!({"task_id": "t1", "summary": "done"}),
+                input: serde_json::json!({
+                    "task_id": task_id,
+                    "commit_title": "complete reply-loop fixture",
+                    "summary": "done"
+                }),
             }),
             StreamEvent::Done,
         ],
     ]);
-    let (slot_ctx, project_path, task_id, session_id, cancel) = make_context().await;
     let mut conversation = base_conversation();
     let (result, output, _, _, _, _) = run_with_provider(
         &provider,
@@ -591,6 +630,7 @@ async fn side_query_tools_share_normal_tool_result_turn_and_keep_order() {
         dummy_tool_schema_with_safety("shell", false),
         dummy_tool_schema("submit_work"),
     ];
+    let (slot_ctx, project_path, task_id, session_id, cancel) = make_context().await;
     let provider = FakeProvider::script(vec![
         vec![
             StreamEvent::Delta(ContentBlock::Text {
@@ -612,12 +652,15 @@ async fn side_query_tools_share_normal_tool_result_turn_and_keep_order() {
             StreamEvent::Delta(ContentBlock::ToolUse {
                 id: "fin-1".into(),
                 name: "submit_work".into(),
-                input: serde_json::json!({"task_id": "t1", "summary": "done"}),
+                input: serde_json::json!({
+                    "task_id": task_id,
+                    "commit_title": "complete reply-loop fixture",
+                    "summary": "done"
+                }),
             }),
             StreamEvent::Done,
         ],
     ]);
-    let (slot_ctx, project_path, task_id, session_id, cancel) = make_context().await;
     let mut conversation = base_conversation();
     let (result, output, _, _, _, _) = run_with_provider(
         &provider,
