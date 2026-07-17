@@ -5,7 +5,10 @@
 //! the data-only graph-warmer protocol.
 
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 
 use async_trait::async_trait;
 use djinn_db::{
@@ -122,6 +125,10 @@ pub struct BuildAdmissionController {
     permits_by_task_run: Mutex<HashMap<String, WarmAdmissionPermit>>,
     unclassified_observations: Mutex<u64>,
     would_defer_observations: Mutex<u64>,
+    /// Enforce starts closed in production until recovery establishes durable
+    /// occupancy. Observe deliberately remains available throughout telemetry
+    /// degradation.
+    ready: AtomicBool,
     released: Notify,
 }
 
@@ -143,8 +150,36 @@ impl BuildAdmissionController {
             permits_by_task_run: Mutex::new(HashMap::new()),
             unclassified_observations: Mutex::new(0),
             would_defer_observations: Mutex::new(0),
+            ready: AtomicBool::new(true),
             released: Notify::new(),
         }
+    }
+
+    /// Construct an Enforce controller which cannot admit work until recovery opens it.
+    #[must_use]
+    pub fn new_closed(
+        journal: Arc<AdmissionJournalRepository>,
+        cap: i64,
+        creator_server_epoch: impl Into<String>,
+    ) -> Self {
+        let controller = Self::new(
+            journal,
+            BuildAdmissionMode::Enforce,
+            cap,
+            creator_server_epoch,
+        );
+        controller.ready.store(false, Ordering::Release);
+        controller
+    }
+
+    /// Open the controller after recovery has established authoritative inventory.
+    pub fn mark_ready(&self) {
+        self.ready.store(true, Ordering::Release);
+    }
+
+    #[must_use]
+    pub fn is_ready(&self) -> bool {
+        self.ready.load(Ordering::Acquire)
     }
 
     /// Queue consumers may wait here after a terminal release instead of polling.
@@ -173,6 +208,12 @@ impl BuildAdmissionController {
         &self,
         request: BuildAdmissionRequest,
     ) -> Result<BuildAdmissionDecision, WarmAdmissionError> {
+        if self.mode == BuildAdmissionMode::Enforce && !self.is_ready() {
+            return Ok(BuildAdmissionDecision::Denied {
+                occupancy: 0,
+                cap: self.cap,
+            });
+        }
         let workload_kind = match request.kind {
             BuildWorkloadKind::TaskRun { .. } => match request.domain {
                 AdmissionDomain::TaskObservation => AdmissionWorkloadKind::Task,
@@ -219,8 +260,17 @@ impl BuildAdmissionController {
                         },
                         self.cap,
                     )
-                    .await
-                    .map_err(unavailable)?;
+                    .await;
+                let observed = match observed {
+                    Ok(observed) => observed,
+                    Err(error) => {
+                        // Observe is telemetry-only: a journal outage must not become a dispatch denial.
+                        tracing::warn!(%error, "build admission observation unavailable; permitting without journal telemetry");
+                        return self
+                            .permit_without_reservation(key, permit_key, request.object_name)
+                            .await;
+                    }
+                };
                 if observed.would_defer {
                     let mut count = self.would_defer_observations.lock().await;
                     *count = count.saturating_add(1).min(1024);
@@ -263,6 +313,33 @@ impl BuildAdmissionController {
             .await
             .insert(permit_key, permit.clone());
         Ok(BuildAdmissionDecision::Permitted { permit, idempotent })
+    }
+
+    async fn permit_without_reservation(
+        &self,
+        key: AdmissionJournalKey,
+        permit_key: String,
+        object_name: String,
+    ) -> Result<BuildAdmissionDecision, WarmAdmissionError> {
+        let permit = WarmAdmissionPermit::new();
+        self.permits.lock().await.insert(
+            permit.clone(),
+            PermitState {
+                key,
+                creator_server_epoch: self.creator_server_epoch.clone(),
+                object_name,
+                durable: false,
+                released: false,
+            },
+        );
+        self.permits_by_key
+            .lock()
+            .await
+            .insert(permit_key, permit.clone());
+        Ok(BuildAdmissionDecision::Permitted {
+            permit,
+            idempotent: false,
+        })
     }
 
     /// A missing or unknown task role is a fail-closed classification result.
@@ -352,7 +429,7 @@ impl BuildAdmissionController {
             WarmAdmissionTransition::DefinitiveFailure { .. }
                 | WarmAdmissionTransition::Terminal { .. }
         );
-        match transition {
+        let result = match transition {
             WarmAdmissionTransition::CreateStarted => self
                 .journal
                 .mark_create_started(&CreateStartedInput {
@@ -362,7 +439,7 @@ impl BuildAdmissionController {
                 })
                 .await
                 .map(|_| ())
-                .map_err(unavailable)?,
+                .map_err(unavailable),
             WarmAdmissionTransition::Live { uid } => self
                 .journal
                 .mark_live(&UidFencedAdmissionInput {
@@ -371,19 +448,19 @@ impl BuildAdmissionController {
                 })
                 .await
                 .map(|_| ())
-                .map_err(unavailable)?,
+                .map_err(unavailable),
             WarmAdmissionTransition::CreateUnknown { .. } => self
                 .journal
                 .mark_create_unknown(&state.key)
                 .await
                 .map(|_| ())
-                .map_err(unavailable)?,
+                .map_err(unavailable),
             WarmAdmissionTransition::DefinitiveFailure { .. } => self
                 .journal
                 .mark_definitive_create_failure(&state.key)
                 .await
                 .map(|_| ())
-                .map_err(unavailable)?,
+                .map_err(unavailable),
             WarmAdmissionTransition::Terminal { uid } => self
                 .journal
                 .mark_terminal(&TerminalAdmissionInput {
@@ -392,7 +469,13 @@ impl BuildAdmissionController {
                 })
                 .await
                 .map(|_| ())
-                .map_err(unavailable)?,
+                .map_err(unavailable),
+        };
+        if let Err(error) = result {
+            if self.mode != BuildAdmissionMode::Observe {
+                return Err(error);
+            }
+            tracing::warn!(%error, "build admission observation transition unavailable; continuing without journal telemetry");
         }
         if terminal {
             let newly_released = {
@@ -768,6 +851,26 @@ mod tests {
         assert_eq!(controller.unclassified_observation_count().await, 1024);
     }
 
+    #[tokio::test]
+    async fn observe_permits_when_journal_reservation_is_unavailable() {
+        let db = Database::open_in_memory().unwrap();
+        db.ensure_initialized().await.unwrap();
+        db.pool().close().await;
+        let controller = BuildAdmissionController::new(
+            Arc::new(AdmissionJournalRepository::new(db)),
+            BuildAdmissionMode::Observe,
+            1,
+            "epoch",
+        );
+
+        assert!(
+            WarmAdmission::admit(&controller, warm("journal-down"))
+                .await
+                .is_ok(),
+            "Observe journal failures are telemetry-only and must not defer dispatch"
+        );
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn observe_records_serialized_would_defer_without_denial_and_enforce_combines_domains() {
         let observed = Arc::new(controller(BuildAdmissionMode::Observe, 1));
@@ -1094,6 +1197,27 @@ mod tests {
                 .now_or_never()
                 .is_none(),
             "duplicate generation-two terminal must not wake dispatch again"
+        );
+    }
+    #[tokio::test]
+    async fn closed_enforce_controller_denies_until_recovery_marks_ready() {
+        let controller = BuildAdmissionController::new_closed(
+            Arc::new(AdmissionJournalRepository::new(
+                Database::open_in_memory().unwrap(),
+            )),
+            1,
+            "epoch",
+        );
+        assert!(!controller.is_ready());
+        assert!(matches!(
+            WarmAdmission::admit(&controller, warm("closed")).await,
+            Err(WarmAdmissionError::Denied { .. })
+        ));
+        controller.mark_ready();
+        assert!(
+            WarmAdmission::admit(&controller, warm("open"))
+                .await
+                .is_ok()
         );
     }
 }
