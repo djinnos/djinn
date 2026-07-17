@@ -23,6 +23,7 @@ use crate::test_helpers::{
     create_test_project, create_test_task, test_path,
 };
 use djinn_core::models::Task;
+use djinn_db::repositories::session::{CreateSessionParams, SessionRepository};
 use djinn_db::repositories::task_run::{CreateTaskRunParams, TaskRunRepository};
 use djinn_provider::message::{ContentBlock, Conversation, Message};
 use djinn_provider::provider::StreamEvent;
@@ -180,6 +181,7 @@ struct TestFixture {
     slot_ctx: SlotContext,
     project_path: String,
     task_id: String,
+    session_id: String,
     cancel: CancellationToken,
     callbacks: Arc<CompletionIntentCallbacks>,
 }
@@ -212,11 +214,25 @@ async fn make_fixture(outcomes: Vec<FinalVerificationRecordingOutcome>) -> TestF
 
     let callbacks = Arc::new(CompletionIntentCallbacks::new(task.id.clone(), outcomes));
     let slot_ctx = agent_context_from_db_with_callbacks(db, callbacks.clone());
+    let session = SessionRepository::new(slot_ctx.db.clone(), slot_ctx.event_bus.clone())
+        .create(CreateSessionParams {
+            project_id: &project.id,
+            task_id: Some(&task.id),
+            model: "synthetic/test-model",
+            agent_type: "worker",
+            metadata_json: None,
+            task_run_id: Some(&run_id),
+            pricing: None,
+            cost_basis: None,
+        })
+        .await
+        .expect("create completion-intent test session");
 
     TestFixture {
         slot_ctx,
         project_path,
         task_id: task.id,
+        session_id: session.id,
         cancel,
         callbacks,
     }
@@ -346,7 +362,7 @@ async fn stored_verification_forwards_original_payload_exactly_once() {
         &fixture.slot_ctx,
         &fixture.project_path,
         &fixture.task_id,
-        "session-stored",
+        &fixture.session_id,
         &fixture.cancel,
     )
     .await;
@@ -378,7 +394,7 @@ async fn ineligible_result_is_persisted_and_valid_resubmission_is_reverified() {
         &fixture.slot_ctx,
         &fixture.project_path,
         &fixture.task_id,
-        "session-resubmit",
+        &fixture.session_id,
         &fixture.cancel,
     )
     .await;
@@ -394,7 +410,7 @@ async fn ineligible_result_is_persisted_and_valid_resubmission_is_reverified() {
         fixture.slot_ctx.db.clone(),
         fixture.slot_ctx.event_bus.clone(),
     )
-    .load_conversation("session-resubmit")
+    .load_conversation(&fixture.session_id)
     .await
     .expect("load persisted conversation");
     assert_eq!(error_ids(&persisted), vec!["submit-failed"]);
@@ -416,7 +432,7 @@ async fn terminal_error_exhausts_conversation_without_success_or_submission() {
         &fixture.slot_ctx,
         &fixture.project_path,
         &fixture.task_id,
-        "session-terminal",
+        &fixture.session_id,
         &fixture.cancel,
     )
     .await;
@@ -452,7 +468,7 @@ async fn three_non_stored_attempts_each_reach_verification_and_never_succeed() {
         &fixture.slot_ctx,
         &fixture.project_path,
         &fixture.task_id,
-        "session-three-attempts",
+        &fixture.session_id,
         &fixture.cancel,
     )
     .await;
