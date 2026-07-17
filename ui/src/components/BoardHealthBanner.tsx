@@ -56,7 +56,11 @@ function useBoardHealth(projectSlugs: string[]): BoardHealthData | null {
     };
 
     fetch();
-    const interval = setInterval(fetch, 15_000);
+    // 60 s: board_health aggregates several board-wide queries server-side and
+    // is fetched once per project per tick — a health banner does not need
+    // 15 s freshness, and the tighter interval multiplied across open tabs
+    // kept the server's heaviest read path continuously hot.
+    const interval = setInterval(fetch, 60_000);
     return () => {
       active = false;
       clearInterval(interval);
