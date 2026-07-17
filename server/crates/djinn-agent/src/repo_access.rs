@@ -131,19 +131,22 @@ async fn grep_at(
     Ok(hits)
 }
 
-/// Lazily check out a project's mirror into `dest` (a `git clone --local
-/// --shared` hardlink clone — essentially free) so `shell` can run arbitrary
-/// commands against a real working tree. Idempotent: a no-op when `dest/.git`
-/// already exists (cached for the task-run). `git_ref` is the branch to check
-/// out (default branch); when it doesn't exist in the mirror we fall back to
-/// the mirror's default HEAD.
-pub async fn ensure_worktree(
+/// Materialize an immutable owner-project read-source cache from a bare mirror.
+///
+/// A checkout is built in a sibling staging directory, detached at `git_ref`,
+/// then atomically published. Existing destinations are never reset, cleaned,
+/// or replaced: partial, dirty, or unknown state fails closed and remains
+/// visible for operator inspection.
+pub async fn materialize_read_source(
     project_id: &str,
     git_ref: &str,
     dest: &std::path::Path,
 ) -> Result<(), String> {
-    if dest.join(".git").exists() {
-        return Ok(());
+    if dest.exists() {
+        return Err(format!(
+            "read-source destination already exists and will not be replaced: {}",
+            dest.display()
+        ));
     }
     let mirror = mirror_path(project_id);
     if !mirror.exists() {
@@ -151,23 +154,42 @@ pub async fn ensure_worktree(
             "no mirror for project {project_id} on this host — cannot check it out"
         ));
     }
-    // Clear any partial leftover (a clone that died mid-copy leaves a non-empty,
-    // `.git`-less dir that would make `git clone` exit 128).
-    let _ = tokio::fs::remove_dir_all(dest).await;
-    if let Some(parent) = dest.parent() {
-        let _ = tokio::fs::create_dir_all(parent).await;
+    let parent = dest
+        .parent()
+        .ok_or_else(|| format!("read-source destination has no parent: {}", dest.display()))?;
+    tokio::fs::create_dir_all(parent)
+        .await
+        .map_err(|e| format!("create read-source parent failed: {e}"))?;
+    let staging = parent.join(format!(
+        ".{}.staging-{}",
+        dest.file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("read-source"),
+        uuid::Uuid::now_v7()
+    ));
+    let args: Vec<String> = vec![
+        "clone".into(),
+        "--local".into(),
+        "--shared".into(),
+        "--no-checkout".into(),
+        mirror.display().to_string(),
+        staging.display().to_string(),
+    ];
+    run_git_command(mirror_root(), args)
+        .await
+        .map_err(|e| format!("git clone --local failed: {e}"))?;
+    if let Err(e) = run_git_command(
+        staging.clone(),
+        vec!["checkout".into(), "--detach".into(), git_ref.to_string()],
+    )
+    .await
+    {
+        let _ = tokio::fs::remove_dir_all(&staging).await;
+        return Err(format!("git checkout --detach failed: {e}"));
     }
-    let mut args: Vec<String> = vec!["clone".into(), "--local".into(), "--shared".into()];
-    if !git_ref.is_empty() && git_ref != "HEAD" {
-        args.push("--branch".into());
-        args.push(git_ref.to_string());
-    }
-    args.push(mirror.display().to_string());
-    args.push(dest.display().to_string());
-    match run_git_command(mirror_root(), args).await {
-        Ok(_) => Ok(()),
-        Err(e) => Err(format!("git clone --local failed: {e}")),
-    }
+    tokio::fs::rename(&staging, dest)
+        .await
+        .map_err(|e| format!("atomic read-source publish failed: {e}"))
 }
 
 /// Parse one `git grep -n` line of the form `<ref>:<file>:<line>:<text>`.
