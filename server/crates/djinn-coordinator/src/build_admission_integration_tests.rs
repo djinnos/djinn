@@ -25,11 +25,15 @@ fn controller(mode: BuildAdmissionMode, cap: i64) -> BuildAdmissionController {
 }
 
 fn warm(id: &str) -> WarmAdmissionRequest {
+    warm_generation(id, 0)
+}
+
+fn warm_generation(id: &str, generation: i64) -> WarmAdmissionRequest {
     WarmAdmissionRequest {
         domain: "ignored".into(),
         work_id: id.into(),
-        generation: 0,
-        object_name: format!("warm-{id}"),
+        generation,
+        object_name: format!("warm-{id}-{generation}"),
     }
 }
 
@@ -296,11 +300,103 @@ async fn paused_post_reconciliation_and_callbacks_keep_fenced_capacity_correct()
         )
         .await
         .unwrap();
+    // A delayed terminal for generation zero cannot release the successor.
+    let next_generation = WarmAdmission::admit(
+        controller.as_ref(),
+        warm_generation("deterministic-name", 1),
+    )
+    .await
+    .unwrap();
+    controller
+        .transition(&next_generation, WarmAdmissionTransition::CreateStarted)
+        .await
+        .unwrap();
     controller
         .transition(
-            &retry,
+            &next_generation,
+            WarmAdmissionTransition::Live {
+                uid: "next-generation-uid".into(),
+            },
+        )
+        .await
+        .unwrap();
+    assert!(
+        controller
+            .transition(
+                &retry,
+                WarmAdmissionTransition::Terminal {
+                    uid: "looked-up-by-name".into(),
+                },
+            )
+            .await
+            .is_err(),
+        "stale generation callback must not release current occupancy"
+    );
+    assert_eq!(
+        controller
+            .journal()
+            .count_task_or_warm_occupancy()
+            .await
+            .unwrap(),
+        1
+    );
+    controller
+        .transition(
+            &next_generation,
             WarmAdmissionTransition::Terminal {
-                uid: "looked-up-by-name".into(),
+                uid: "next-generation-uid".into(),
+            },
+        )
+        .await
+        .unwrap();
+
+    // A barrier holds cancellation after reservation and before POST. Its
+    // definitive failure releases once; duplicate cancellation cannot leak or
+    // double-release capacity.
+    let cancellation_reserved = Arc::new(Barrier::new(2));
+    let (cancel_post, cancel_gate) = tokio::sync::oneshot::channel();
+    let cancelled_create = {
+        let controller = Arc::clone(&controller);
+        let cancellation_reserved = Arc::clone(&cancellation_reserved);
+        tokio::spawn(async move {
+            let permit = WarmAdmission::admit(controller.as_ref(), warm("cancelled-before-post"))
+                .await
+                .unwrap();
+            controller
+                .transition(&permit, WarmAdmissionTransition::CreateStarted)
+                .await
+                .unwrap();
+            cancellation_reserved.wait().await;
+            cancel_gate.await.unwrap();
+            controller
+                .transition(
+                    &permit,
+                    WarmAdmissionTransition::DefinitiveFailure {
+                        diagnostic: "dispatch cancelled before POST".into(),
+                    },
+                )
+                .await
+                .unwrap();
+            permit
+        })
+    };
+    cancellation_reserved.wait().await;
+    assert_eq!(
+        controller
+            .journal()
+            .count_task_or_warm_occupancy()
+            .await
+            .unwrap(),
+        1,
+        "paused cancellation retains its reservation"
+    );
+    cancel_post.send(()).unwrap();
+    let cancelled = cancelled_create.await.unwrap();
+    controller
+        .transition(
+            &cancelled,
+            WarmAdmissionTransition::DefinitiveFailure {
+                diagnostic: "duplicate cancellation".into(),
             },
         )
         .await
@@ -311,7 +407,8 @@ async fn paused_post_reconciliation_and_callbacks_keep_fenced_capacity_correct()
             .count_task_or_warm_occupancy()
             .await
             .unwrap(),
-        0
+        0,
+        "cancellation and duplicate cancellation release capacity exactly once"
     );
 }
 
