@@ -391,21 +391,6 @@ pub struct RecentParams {
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
-pub struct HistoryParams {
-    pub project: String,
-    pub permalink: String,
-    pub limit: Option<i64>,
-}
-
-#[derive(Deserialize, schemars::JsonSchema)]
-pub struct DiffParams {
-    pub project: String,
-    pub permalink: String,
-    /// Specific commit SHA. Omit to get the diff for the most recent change.
-    pub sha: Option<String>,
-}
-
-#[derive(Deserialize, schemars::JsonSchema)]
 pub struct BuildContextParams {
     pub project: String,
     /// Memory URI: "memory://folder/note", "folder/note", or "folder/*" for all
@@ -789,18 +774,6 @@ pub struct MemoryCatalogResponse {
 #[derive(Serialize, schemars::JsonSchema)]
 pub struct MemoryRecentResponse {
     pub notes: Vec<djinn_memory::NoteCompact>,
-    pub error: Option<String>,
-}
-
-#[derive(Serialize, schemars::JsonSchema)]
-pub struct MemoryHistoryResponse {
-    pub history: Vec<GitLogEntry>,
-    pub error: Option<String>,
-}
-
-#[derive(Serialize, schemars::JsonSchema)]
-pub struct MemoryDiffResponse {
-    pub diff: String,
     pub error: Option<String>,
 }
 
