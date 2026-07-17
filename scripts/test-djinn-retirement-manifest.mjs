@@ -29,6 +29,7 @@ import {
   generateDbGuidanceManifest,
   validateKnowledgeManifest,
   validateDbGuidanceManifest,
+  validateRetirementCutover,
   generateAll,
 } from './djinn-retirement-manifest.mjs';
 
@@ -176,6 +177,51 @@ test('generator derives the complete tracked knowledge set from NUL-delimited in
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test('durable ledger matches the source revision and current tracked knowledge is empty', () => {
+  const fixtureDir = join(REPO_ROOT, 'scripts', 'fixtures', 'djinn-retirement');
+  const ledger = JSON.parse(readFileSync(join(fixtureDir, 'deletion-ledger.json'), 'utf8'));
+  const guidance = loadDbGuidanceFixture(join(fixtureDir, 'db-guidance.json'));
+  const currentPaths = execFileSync('git', ['ls-files', '-z', '.djinn/*'], {
+    cwd: REPO_ROOT,
+    maxBuffer: 64 * 1024 * 1024,
+  });
+  const result = validateRetirementCutover(currentPaths, ledger, guidance, { cwd: REPO_ROOT });
+  assert.equal(result.ledger.knowledge_count, result.ledger.entries.length);
+  assert.equal(result.guidanceManifest.record_count, result.ledger.knowledge_count);
+  assert.deepEqual(splitNulPaths(currentPaths).filter(isKnowledgePath), []);
+});
+
+test('post-cutover guard rejects a newly invented tracked knowledge path', () => {
+  const fixtureDir = join(REPO_ROOT, 'scripts', 'fixtures', 'djinn-retirement');
+  const ledger = JSON.parse(readFileSync(join(fixtureDir, 'deletion-ledger.json'), 'utf8'));
+  const guidance = loadDbGuidanceFixture(join(fixtureDir, 'db-guidance.json'));
+  const paths = nulBytes([...NON_KNOWLEDGE_TRACKED, '.djinn/patterns/newly-invented.md']);
+  assert.throws(
+    () => validateRetirementCutover(paths, ledger, guidance, { cwd: REPO_ROOT }),
+    (err) => err instanceof ManifestError && err.code === 'knowledge_reintroduced',
+  );
+});
+
+test('post-cutover guard rejects durable deletion count and set drift', () => {
+  const fixtureDir = join(REPO_ROOT, 'scripts', 'fixtures', 'djinn-retirement');
+  const original = JSON.parse(readFileSync(join(fixtureDir, 'deletion-ledger.json'), 'utf8'));
+  const guidance = loadDbGuidanceFixture(join(fixtureDir, 'db-guidance.json'));
+  const current = nulBytes([...NON_KNOWLEDGE_TRACKED]);
+  const missing = structuredClone(original);
+  missing.entries.pop();
+  assert.throws(
+    () => validateRetirementCutover(current, missing, guidance, { cwd: REPO_ROOT }),
+    (err) => err instanceof ManifestError && err.code === 'count_mismatch',
+  );
+  const drifted = structuredClone(original);
+  drifted.entries[0].repository_path = '.djinn/patterns/not-in-source.md';
+  assert.throws(
+    () => validateRetirementCutover(current, drifted, guidance, { cwd: REPO_ROOT }),
+    (err) => err instanceof ManifestError &&
+      (err.code === 'set_mismatch_missing' || err.code === 'set_mismatch_extra'),
+  );
 });
 
 test('every knowledge entry carries all specified identity, hash, status, classification, rationale, supersession-link, and disposition fields', () => {
