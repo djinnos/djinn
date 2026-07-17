@@ -5,10 +5,13 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::Ordering;
 
+use crate::final_verification::{
+    FinalVerificationCoordinatorRequest, FinalVerificationRecordingOutcome,
+    coordinate_final_verification,
+};
+use crate::finalize_types::SubmitWork;
 use crate::helpers::{runtime_env_diagnostics, runtime_fs_diagnostics};
 use crate::host::SlotContext;
-use crate::final_verification::{coordinate_final_verification, FinalVerificationCoordinatorRequest, FinalVerificationRecordingOutcome};
-use crate::finalize_types::SubmitWork;
 use crate::output_parser::{CompletionIntent, ParsedAgentOutput};
 use djinn_compaction::{
     COMPACTION_SUMMARY_END_MARKER, CompactionContext, compact_conversation, needs_compaction,
@@ -330,13 +333,37 @@ fn tool_result_text(content: &[ContentBlock]) -> String {
         .join("\n")
 }
 
-async fn verify_completion_intent(task_id: &str, cancellation: &tokio_util::sync::CancellationToken, slot_ctx: &SlotContext) -> Result<(), String> {
-    let runs = djinn_db::repositories::task_run::TaskRunRepository::new(slot_ctx.db.clone()).list_for_task(task_id).await.map_err(|e| format!("could not resolve task run: {e}"))?;
-    let task_run_id = runs.into_iter().find(|run| matches!(run.status.as_str(), "starting" | "running")).map(|run| run.id).ok_or_else(|| "no active task run is available for final verification".to_owned())?;
-    match coordinate_final_verification(FinalVerificationCoordinatorRequest { task_id: task_id.to_owned(), task_run_id, cancellation: cancellation.clone() }, slot_ctx).await {
+async fn verify_completion_intent(
+    task_id: &str,
+    cancellation: &tokio_util::sync::CancellationToken,
+    slot_ctx: &SlotContext,
+) -> Result<(), String> {
+    let runs = djinn_db::repositories::task_run::TaskRunRepository::new(slot_ctx.db.clone())
+        .list_for_task(task_id)
+        .await
+        .map_err(|e| format!("could not resolve task run: {e}"))?;
+    let task_run_id = runs
+        .into_iter()
+        .find(|run| matches!(run.status.as_str(), "starting" | "running"))
+        .map(|run| run.id)
+        .ok_or_else(|| "no active task run is available for final verification".to_owned())?;
+    match coordinate_final_verification(
+        FinalVerificationCoordinatorRequest {
+            task_id: task_id.to_owned(),
+            task_run_id,
+            cancellation: cancellation.clone(),
+        },
+        slot_ctx,
+    )
+    .await
+    {
         FinalVerificationRecordingOutcome::Stored { .. } => Ok(()),
-        FinalVerificationRecordingOutcome::Ineligible { reason, .. } => Err(format!("Final verification rejected this submit_work request: {reason}. Fix the worktree and resubmit.")),
-        FinalVerificationRecordingOutcome::Error { detail, .. } => Err(format!("Final verification could not complete: {detail}. Inspect the worktree and resubmit.")),
+        FinalVerificationRecordingOutcome::Ineligible { reason, .. } => Err(format!(
+            "Final verification rejected this submit_work request: {reason}. Fix the worktree and resubmit."
+        )),
+        FinalVerificationRecordingOutcome::Error { detail, .. } => Err(format!(
+            "Final verification could not complete: {detail}. Inspect the worktree and resubmit."
+        )),
     }
 }
 
