@@ -351,7 +351,8 @@ async fn missing_untracked_entry_is_traversal_race() {
     let fixture = init_repo_with_main_commit();
     write_str(fixture.path(), "ephemeral.txt", "gone soon\n");
     std::fs::remove_file(fixture.path().join("ephemeral.txt")).unwrap();
-    let result = classify_worktree_entry(fixture.path(), b"ephemeral.txt", true);
+    let anchor = PermittedRootAnchor::capture(fixture.path(), b".").expect("anchor fixture");
+    let result = classify_worktree_entry(&anchor, b"ephemeral.txt", true);
     assert!(matches!(
         result,
         Err(VerificationInputUnavailable::MissingExtraEntry { .. })
@@ -687,6 +688,70 @@ async fn configured_public_traversal_rejects_read_boundary_replacement() {
         &VerificationInputFingerprintConfig::default(),
     )
     .await;
+    set_test_read_mutation_hook(None);
+    assert_unavailable(result);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[cfg(unix)]
+async fn configured_submodule_traversal_rejects_root_replacement() {
+    let _hook_guard = lock_read_mutation_test();
+    let fixture = make_submodule_fixture("vendor");
+    let submodule = fixture.outer.path().join("vendor");
+    let inspected = submodule.join("README.md");
+    let original = fixture.outer.path().join("vendor-approved-original");
+    let outside = tempfile::tempdir().expect("create outside tree");
+    write_str(outside.path(), "README.md", "outside input\n");
+    let outside_path = outside.path().to_path_buf();
+    set_test_read_mutation_hook(Some(std::sync::Arc::new(move |candidate| {
+        if candidate == inspected {
+            std::fs::rename(&submodule, &original).expect("rename approved submodule");
+            std::os::unix::fs::symlink(&outside_path, &submodule)
+                .expect("replace submodule with outside symlink");
+        }
+    })));
+    let result = configured_fingerprint(
+        fixture.outer.path(),
+        &VerificationInputFingerprintConfig::default(),
+    )
+    .await;
+    set_test_read_mutation_hook(None);
+    assert_unavailable(result);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[cfg(unix)]
+async fn configured_external_traversal_rejects_mount_root_replacement() {
+    let _hook_guard = lock_read_mutation_test();
+    let fixture = init_repo_with_main_commit();
+    let mounts = tempfile::tempdir().expect("create mount parent");
+    let mount = mounts.path().join("input");
+    std::fs::create_dir(&mount).expect("create mount");
+    write_str(&mount, "input.txt", "approved input\n");
+    let outside = tempfile::tempdir().expect("create outside tree");
+    write_str(outside.path(), "input.txt", "outside input\n");
+    let mut config = VerificationInputFingerprintConfig::default();
+    config.manifest.read_only_external_inputs.push(
+        djinn_core::canonical_verify::DeclaredExternalInputV1 {
+            id: "external".into(),
+            locator: "host://external".into(),
+        },
+    );
+    config.external_inputs.push(ResolvedExternalInputV1 {
+        id: "external".into(),
+        path: mount.clone(),
+    });
+    let inspected = mount.join("input.txt");
+    let original = mounts.path().join("approved-original");
+    let outside_path = outside.path().to_path_buf();
+    set_test_read_mutation_hook(Some(std::sync::Arc::new(move |candidate| {
+        if candidate == inspected {
+            std::fs::rename(&mount, &original).expect("rename approved mount");
+            std::os::unix::fs::symlink(&outside_path, &mount)
+                .expect("replace mount with outside symlink");
+        }
+    })));
+    let result = configured_fingerprint(fixture.path(), &config).await;
     set_test_read_mutation_hook(None);
     assert_unavailable(result);
 }
