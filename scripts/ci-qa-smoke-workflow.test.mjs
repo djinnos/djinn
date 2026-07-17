@@ -174,6 +174,7 @@ test('qa-smoke owns only a restore-only test cache and a disposable database', (
 test('qa-smoke builds, precompiles, and directly executes in deterministic order', () => {
   const qa = parseJobs(readFileSync(WORKFLOW, 'utf8')).jobs.get('qa-smoke');
   assert.ok(qa, 'qa-smoke job must exist');
+  const source = qa.lines.map(({ text }) => text).join('\n');
   assertStepOrder(qa, [
     'Build migrated Postgres template',
     'Build qa runner once',
@@ -198,7 +199,8 @@ test('qa-smoke builds, precompiles, and directly executes in deterministic order
     'qa-smoke must directly execute coverage after the runner');
   assert.ok(run.indexOf('target/debug/djinn-qa run') < run.indexOf('target/debug/djinn-qa coverage'),
     'coverage must run after smoke execution');
-  assert.doesNotMatch(run, /\bcargo run\b/, 'qa-smoke must reject nested cargo-run lock execution');
+  assert.doesNotMatch(source, /\bcargo\s+run\b/,
+    'no qa-smoke step may use nested cargo-run lock execution');
 });
 
 test('qa-smoke preserves rooted evidence and uploads it even after failures', () => {
