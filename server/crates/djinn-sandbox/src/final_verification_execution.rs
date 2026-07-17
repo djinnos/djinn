@@ -482,9 +482,8 @@ fn now_millis() -> u128 {
 mod tests {
     use super::*;
     use std::fs;
-    use std::process::Command as ProcessCommand;
-    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Mutex;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     use djinn_core::canonical_verify::{
         CanonicalFinalVerificationPlanV1, CanonicalHermeticityV1, ImmutableImageV1,
@@ -512,7 +511,10 @@ mod tests {
         commands: Vec<CanonicalCommandDescriptorV1>,
         output_only_globs: Vec<String>,
     ) -> ResolvedEnvironmentIdentityInputV1 {
-        let required_checks = commands.iter().map(|command| command.check_id.clone()).collect();
+        let required_checks = commands
+            .iter()
+            .map(|command| command.check_id.clone())
+            .collect();
         ResolvedEnvironmentIdentityInputV1 {
             schema_version: 1,
             canonicalization_version: 1,
@@ -566,12 +568,11 @@ mod tests {
             ["add", "input.txt"].as_slice(),
             ["commit", "-m", "initial"].as_slice(),
         ] {
-            let status = ProcessCommand::new("git")
-                .args(args)
-                .current_dir(directory.path())
-                .status()
-                .expect("run git");
-            assert!(status.success(), "git command failed: {args:?}");
+            djinn_git::run_git_command_binary_in(
+                directory.path(),
+                args.iter().map(ToString::to_string).collect(),
+            )
+            .unwrap_or_else(|error| panic!("git command failed: {args:?}: {error}"));
         }
         directory
     }
@@ -664,7 +665,8 @@ mod tests {
         });
         let request = request(worktree.path(), initial, resolver);
 
-        let evidence = execute_final_verification_with_launcher(request, |_, _| Ok(succeeded())).await;
+        let evidence =
+            execute_final_verification_with_launcher(request, |_, _| Ok(succeeded())).await;
 
         assert_eq!(calls.load(Ordering::SeqCst), 2);
         assert_eq!(
@@ -687,7 +689,10 @@ mod tests {
         let evidence = execute_final_verification_with_launcher(request, move |launch, _| {
             launcher_calls.fetch_add(1, Ordering::SeqCst);
             let path = launch.worktree.join(&launch.output_directories[0]);
-            assert!(path.exists(), "strict launcher observes the pre-existing output");
+            assert!(
+                path.exists(),
+                "strict launcher observes the pre-existing output"
+            );
             Err(FinalVerificationError::Violation(
                 FinalVerificationViolation::OutputOnlyPreexisting { path },
             ))
@@ -695,7 +700,10 @@ mod tests {
         .await;
 
         assert_eq!(launches.load(Ordering::SeqCst), 1);
-        assert!(evidence.commands.is_empty(), "child never produced command evidence");
+        assert!(
+            evidence.commands.is_empty(),
+            "child never produced command evidence"
+        );
         assert!(matches!(
             evidence.eligibility_reason,
             Some(FinalVerificationIneligibilityReason::SandboxViolation { .. })
@@ -705,17 +713,17 @@ mod tests {
     #[tokio::test]
     async fn commands_launch_in_order_and_each_must_pass() {
         let worktree = git_worktree();
-        let input = identity_input(
-            vec![descriptor("first"), descriptor("second")],
-            Vec::new(),
-        );
+        let input = identity_input(vec![descriptor("first"), descriptor("second")], Vec::new());
         let request = request(worktree.path(), input.clone(), static_resolver(input));
         let launched = Arc::new(Mutex::new(Vec::new()));
         let observed = Arc::clone(&launched);
 
         let evidence = execute_final_verification_with_launcher(request, move |launch, _| {
             let check = launch.argv[1].clone();
-            observed.lock().expect("lock observed commands").push(check.clone());
+            observed
+                .lock()
+                .expect("lock observed commands")
+                .push(check.clone());
             Ok(FinalVerificationResult {
                 exit_code: if check == "second" { Some(1) } else { Some(0) },
                 timed_out: false,
