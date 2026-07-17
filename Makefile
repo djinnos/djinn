@@ -9,7 +9,7 @@ SERVER_DIR := $(CURDIR)/server
 # Postgres (docker-compose.yml → `postgres-test` service at :5433) plus the
 # test harness targets that depend on it.
 
-.PHONY: help dev test-db-migrate test-db-postgres-template test-vault test-db-reset sqlx-prepare sqlx-check sqlx-verify skills-manifest-generate skills-manifest-check test test-all validate-taskrun-backstop check-boundaries verify-cache-cleanup
+.PHONY: help dev test-db-migrate test-db-postgres-template test-vault test-db-reset sqlx-prepare sqlx-check sqlx-verify skills-manifest-generate skills-manifest-check test test-all validate-taskrun-backstop check-boundaries verify-cache-cleanup check-retirement-manifest
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*##' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*##"}; {printf "  \033[36m%-15s\033[0m %s\n", $$1, $$2}'
@@ -155,3 +155,6 @@ validate-taskrun-backstop: ## Run epic 8451 full Postgres-backed validation
 
 check-boundaries: ## Run architectural boundary checks against the server workspace (no DB / no graph warm)
 	python3 scripts/check_boundaries.py
+
+check-retirement-manifest: ## Run the Phase 1 hermetic retirement manifest generator and strict reconciliation guard
+	@./scripts/check-djinn-retirement-manifest.sh
