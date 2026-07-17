@@ -828,6 +828,26 @@ mod tests {
         assert_eq!(controller.unclassified_observation_count().await, 1024);
     }
 
+    #[tokio::test]
+    async fn observe_permits_when_journal_reservation_is_unavailable() {
+        let db = Database::open_in_memory().unwrap();
+        db.ensure_initialized().await.unwrap();
+        db.pool().close().await;
+        let controller = BuildAdmissionController::new(
+            Arc::new(AdmissionJournalRepository::new(db)),
+            BuildAdmissionMode::Observe,
+            1,
+            "epoch",
+        );
+
+        assert!(
+            WarmAdmission::admit(&controller, warm("journal-down"))
+                .await
+                .is_ok(),
+            "Observe journal failures are telemetry-only and must not defer dispatch"
+        );
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn observe_records_serialized_would_defer_without_denial_and_enforce_combines_domains() {
         let observed = Arc::new(controller(BuildAdmissionMode::Observe, 1));

@@ -3248,6 +3248,23 @@ mod retention_preflight_tests {
 mod build_admission_config_tests {
     use super::*;
 
+    static BUILD_ADMISSION_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn state_for_admission_config(config: BuildAdmissionConfig) -> AppState {
+        let db = Database::open_in_memory().expect("test database");
+        let runtime = DatabaseRuntimeManager::new(
+            crate::db::runtime::DatabaseRuntimeConfig::postgres(db.bootstrap_info().target.clone()),
+        );
+        AppState::new_inner(
+            db,
+            runtime,
+            CancellationToken::new(),
+            djinn_core::doctor::RetrievalHealthConfig::default(),
+            Arc::new(djinn_telemetry::memory_retrieval::MemoryRetrievalMetrics::new()),
+            config,
+        )
+    }
+
     #[test]
     fn build_admission_defaults_and_legacy_zero_are_deterministic() {
         assert_eq!(
@@ -3269,7 +3286,7 @@ mod build_admission_config_tests {
     }
 
     #[test]
-    fn build_admission_rejects_invalid_startup_values_and_is_restart_only() {
+    fn build_admission_rejects_invalid_startup_values() {
         for cap in ["", "-1", "not-a-number", "65"] {
             assert!(
                 BuildAdmissionConfig::parse(None, Some(cap)).is_err(),
@@ -3282,15 +3299,79 @@ mod build_admission_config_tests {
                 "{mode:?}"
             );
         }
-        let configured = BuildAdmissionConfig::parse(Some("enforce"), Some("4")).unwrap();
-        // Parsed configuration is a copied value retained by AppState; changing
-        // process environment cannot mutate this instance before restart.
-        assert_eq!(
-            configured,
-            BuildAdmissionConfig {
-                mode: BuildAdmissionMode::Enforce,
-                cap: 4
-            }
+    }
+
+    #[test]
+    fn off_state_composition_has_no_admission_dependency_to_inject() {
+        let state = state_for_admission_config(BuildAdmissionConfig {
+            mode: BuildAdmissionMode::Off,
+            cap: 3,
+        });
+
+        // This is the actual AppState composition root used by both the
+        // coordinator and K8s graph-warmer injection branches. No controller
+        // means no journal repository or warm-admission object exists to pass
+        // to either `.with_build_admission` or `.with_warm_admission`.
+        assert!(state.inner.build_admission.is_none());
+        assert!(
+            state
+                .inner
+                .coordinator
+                .try_lock()
+                .expect("unstarted")
+                .is_none()
         );
+        assert!(
+            state
+                .inner
+                .graph_warmer
+                .try_read()
+                .expect("unstarted")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn environment_rollback_requires_a_new_app_state() {
+        let _guard = BUILD_ADMISSION_ENV_LOCK.lock().expect("environment lock");
+        let old_mode = std::env::var_os(BUILD_ADMISSION_MODE_ENV);
+        let old_cap = std::env::var_os(MAX_BUILD_TASKRUNS_ENV);
+
+        // SAFETY: this test serializes its admission-environment mutations and
+        // restores both variables before returning.
+        unsafe {
+            std::env::set_var(BUILD_ADMISSION_MODE_ENV, "enforce");
+            std::env::set_var(MAX_BUILD_TASKRUNS_ENV, "4");
+        }
+        let running = state_for_admission_config(BuildAdmissionConfig::from_env().unwrap());
+        let running_admission = running
+            .inner
+            .build_admission
+            .as_ref()
+            .expect("enforce composes a controller");
+        assert!(!running_admission.is_ready(), "enforce begins closed");
+
+        // A rollback changes the process environment but cannot replace the
+        // controller retained by the already constructed process state.
+        unsafe {
+            std::env::set_var(BUILD_ADMISSION_MODE_ENV, "off");
+            std::env::set_var(MAX_BUILD_TASKRUNS_ENV, "3");
+        }
+        assert!(running.inner.build_admission.is_some());
+        let restarted = state_for_admission_config(BuildAdmissionConfig::from_env().unwrap());
+        assert!(restarted.inner.build_admission.is_none());
+
+        // SAFETY: restore the inherited process environment before releasing
+        // the serialization lock.
+        unsafe {
+            match old_mode {
+                Some(value) => std::env::set_var(BUILD_ADMISSION_MODE_ENV, value),
+                None => std::env::remove_var(BUILD_ADMISSION_MODE_ENV),
+            }
+            match old_cap {
+                Some(value) => std::env::set_var(MAX_BUILD_TASKRUNS_ENV, value),
+                None => std::env::remove_var(MAX_BUILD_TASKRUNS_ENV),
+            }
+        }
     }
 }
