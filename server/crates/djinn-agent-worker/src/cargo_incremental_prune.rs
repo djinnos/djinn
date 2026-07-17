@@ -443,6 +443,7 @@ mod tests {
             .expect("spawn lock-contract process")
     }
 
+    #[allow(clippy::disallowed_methods)] // test-only: real time for a cross-process spin-wait deadline
     fn wait_for(path: &Path) {
         let deadline = Instant::now() + Duration::from_secs(5);
         while !path.exists() {
@@ -1021,6 +1022,7 @@ fn probe_advisory_lock(lock_dir: &Path) -> io::Result<()> {
         .read(true)
         .write(true)
         .create(true)
+        .truncate(false)
         .open(&path)?;
     flock_exclusive_nonblocking(&file)?;
     // Explicit unlock verifies both lock operations on this filesystem. Closing

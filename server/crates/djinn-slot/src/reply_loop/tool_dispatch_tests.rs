@@ -1,3 +1,5 @@
+// The telemetry guard mutex is intentionally held across awaits to serialize tests.
+#![allow(clippy::await_holding_lock)]
 use super::super::turn_budget::{
     DEFAULT_TURN_INLINE_CHAR_BUDGET, DEFAULT_TURN_INLINE_PREVIEW_FLOOR, TurnInlineBudgetConfig,
     apply_turn_inline_budget_pass_with_config, read_positive_env_usize,
