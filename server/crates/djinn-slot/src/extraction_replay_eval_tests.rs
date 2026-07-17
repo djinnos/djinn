@@ -1,7 +1,10 @@
 use std::sync::{Arc, Mutex};
 
 use djinn_core::{events::EventBus, message::ContentBlock};
-use djinn_db::{CreateSessionParams, ProjectRepository, SessionRepository, TaskRepository};
+use djinn_db::{
+    CreateSessionParams, EffectiveCreatorProvenance, ProjectRepository, SessionRepository,
+    TaskRepository, UserRepository,
+};
 use djinn_provider::message::Conversation;
 use djinn_provider::provider::{StreamEvent, ToolChoice};
 use futures::{Future, Stream};
@@ -253,16 +256,35 @@ const DURABLE_CASE_CONTENT: &str = "## Situation\n\
         - extraction merge\n\
         - provenance";
 
+/// Replay fixtures have no authenticated request scope. Persist a distinct real
+/// user at the insertion boundary rather than relying on ambient identity.
+async fn persist_replay_fixture_user(db: &Database) -> String {
+    let identity = uuid::Uuid::now_v7();
+    let github_id = (identity.as_u128() % 9_000_000_000_000_000_000) as i64;
+    UserRepository::new(db.clone())
+        .upsert_from_github(
+            github_id,
+            &format!("replay-fixture-{identity}"),
+            Some("Extraction replay fixture"),
+            None,
+        )
+        .await
+        .expect("persist replay fixture user")
+        .id
+}
+
 async fn create_replay_session(
     db: &Database,
     events: EventBus,
     project_id: &str,
     transcript_text: &str,
 ) -> String {
+    let user_id = persist_replay_fixture_user(db).await;
     let task = TaskRepository::new(db.clone(), events.clone())
-        .create_in_project(
+        .create_in_project_with_provenance(
             project_id,
             None,
+            EffectiveCreatorProvenance::explicit_user_id(&user_id),
             "replay task",
             "replay fixture task",
             "",
@@ -310,10 +332,12 @@ async fn create_fixture_replay_session(
     project_id: &str,
     fixture: &ExtractionReplayFixture,
 ) -> String {
+    let user_id = persist_replay_fixture_user(db).await;
     let task = TaskRepository::new(db.clone(), events.clone())
-        .create_in_project(
+        .create_in_project_with_provenance(
             project_id,
             None,
+            EffectiveCreatorProvenance::explicit_user_id(&user_id),
             &format!("replay {}", fixture.id),
             "committed replay fixture task",
             "",

@@ -264,25 +264,66 @@ fn inventoried_producers_reach_the_transactional_provenance_boundary() {
     );
 }
 
-/// Regression guard for fixture boundaries which do not establish a
-/// `SESSION_USER_ID` scope. These helpers are reused by behavioral tests, so a
-/// creator-less convenience insert here would fail only after setup has already
-/// hidden the provenance error. Session-scoped resolver tests intentionally use
-/// the convenience API elsewhere and are not fixture boundaries.
-#[test]
-fn unscoped_fixture_boundaries_use_insertion_time_provenance() {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../");
-    let fixture_sources = [
-        "server/crates/djinn-slot/src/test_helpers.rs",
-        "server/crates/djinn-coordinator/src/refinement_evidence_resume_tests.rs",
-        "server/crates/djinn-coordinator/src/refinement_e2e_evidence_regression_tests.rs",
-    ];
-
-    for path in fixture_sources {
-        let source = std::fs::read_to_string(root.join(path)).expect("fixture source readable");
-        assert!(
-            !source.contains(".create_in_project("),
-            "{path}: unscoped fixture inserts must use create_in_project_with_provenance with a persisted user"
-        );
+/// Recursively collect Rust test and shared-test-helper sources.
+fn fixture_test_sources(dir: &Path, root: &Path, result: &mut Vec<PathBuf>) {
+    for entry in std::fs::read_dir(dir).expect("source tree readable") {
+        let path = entry.expect("directory entry readable").path();
+        if path.is_dir() {
+            fixture_test_sources(&path, root, result);
+            continue;
+        }
+        let relative = path.strip_prefix(root).expect("under repository root");
+        let text = relative.to_string_lossy();
+        if path.extension().is_some_and(|ext| ext == "rs")
+            && (text.contains("/tests/")
+                || text.ends_with("_tests.rs")
+                || text.ends_with("/tests.rs")
+                || text.ends_with("/test_helpers.rs"))
+        {
+            result.push(path);
+        }
     }
+}
+
+/// Fixture builders and fixture-bearing direct tests must not use the
+/// creator-less convenience insertion API. The only permitted uses are
+/// deliberately session-scoped tests and intentional
+/// `effective_creator_unavailable` resolver tests; both are recognized from
+/// the enclosing callsite body, not from a file allowlist.
+#[test]
+fn fixture_task_creation_callsites_have_creator_provenance() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../");
+    let mut files = Vec::new();
+    fixture_test_sources(&root.join("server"), &root, &mut files);
+    let mut violations = Vec::new();
+
+    for file in files {
+        let source = std::fs::read_to_string(&file).expect("fixture source readable");
+        let relative = file.strip_prefix(&root).unwrap().display().to_string();
+        for (symbol, _) in function_symbols(&source) {
+            let Some(body) = extract_function_body(&source, &symbol) else {
+                continue;
+            };
+            if !body.contains(".create_in_project(") {
+                continue;
+            }
+            let fixture_boundary = relative.ends_with("/test_helpers.rs")
+                || symbol.contains("fixture")
+                || symbol.contains("replay")
+                || symbol.contains("seed_");
+            if !fixture_boundary {
+                continue;
+            }
+            let deliberately_scoped = body.contains("SESSION_USER_ID") && body.contains(".scope(");
+            let intentional_negative = body.contains("effective_creator_unavailable");
+            if !deliberately_scoped && !intentional_negative {
+                violations.push(format!("{relative}::{symbol}"));
+            }
+        }
+    }
+
+    assert!(
+        violations.is_empty(),
+        "fixture task insertion requires persisted explicit provenance; unscoped callsites: {violations:?}"
+    );
 }
