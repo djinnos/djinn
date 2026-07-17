@@ -26,7 +26,7 @@ pub use graph_warmer::{
     K8sGraphWarmer, KubeClientDispatcher, KubeClientJobWatcher, KubeClientWarmJobLister,
     NoopJobWatcher, NoopWarmJobLister, WarmAdmission, WarmAdmissionError, WarmAdmissionPermit,
     WarmAdmissionRequest, WarmAdmissionTransition, WarmCompletionSink, WarmJobDispatcher,
-    WarmJobLister, WarmJobWatcher, WarmTerminalOutcome,
+    WarmJobLister, WarmJobManifest, WarmJobWatcher, WarmTerminalOutcome,
 };
 pub use runtime::KubernetesRuntime;
 pub use token_review::TokenReviewer;

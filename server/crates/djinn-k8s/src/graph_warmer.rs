@@ -18,6 +18,13 @@ use tracing::{debug, info, warn};
 use crate::config::KubernetesConfig;
 use crate::warm_job::{LABEL_PROJECT_ID, LABEL_WARM, build_warm_job};
 
+/// Warm Job manifest accepted by [`WarmJobDispatcher`].
+///
+/// Consumers can implement the dispatcher boundary without depending directly
+/// on Kubernetes crates; ownership of those capability dependencies remains in
+/// `djinn-k8s`.
+pub type WarmJobManifest = Job;
+
 mod warm_admission;
 pub use warm_admission::{
     WarmAdmission, WarmAdmissionError, WarmAdmissionPermit, WarmAdmissionRequest,
@@ -198,7 +205,7 @@ pub trait WarmJobDispatcher: Send + Sync {
     /// `kube::Error` in-place; the dispatcher trait intentionally doesn't
     /// surface Kubernetes types so the test-dispatcher doesn't have to
     /// reach for a full `kube::Client`.
-    async fn dispatch(&self, namespace: &str, job: Job) -> Result<String, String>;
+    async fn dispatch(&self, namespace: &str, job: WarmJobManifest) -> Result<String, String>;
 }
 
 /// Production dispatcher backed by a live `kube::Client`.
