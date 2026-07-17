@@ -1757,8 +1757,8 @@ async fn persist_workspace_graph_freshness_best_effort<C: WarmContext>(
 
     let mut rows: Vec<_> = workspaces
         .iter()
-        .map(|workspace_slug| {
-            match salvaged.get(workspace_slug.as_str()) {
+        .map(
+            |workspace_slug| match salvaged.get(workspace_slug.as_str()) {
                 Some(report) => ProjectWorkspaceGraphUpsert {
                     project_id,
                     workspace_slug,
@@ -1771,8 +1771,8 @@ async fn persist_workspace_graph_freshness_best_effort<C: WarmContext>(
                     commit_sha,
                     status: "ready",
                 },
-            }
-        })
+            },
+        )
         .collect();
 
     // A workspace whose indexer failed (or timed out) contributes no nodes,
