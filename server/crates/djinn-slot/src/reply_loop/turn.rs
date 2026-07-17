@@ -5,10 +5,7 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::Ordering;
 
-use crate::final_verification::{
-    FinalVerificationCoordinatorRequest, FinalVerificationRecordingOutcome,
-    coordinate_final_verification,
-};
+use crate::final_verification::verify_completion_intent;
 use crate::finalize_types::SubmitWork;
 use crate::helpers::{runtime_env_diagnostics, runtime_fs_diagnostics};
 use crate::host::SlotContext;
@@ -331,40 +328,6 @@ fn tool_result_text(content: &[ContentBlock]) -> String {
         .filter_map(ContentBlock::as_text)
         .collect::<Vec<_>>()
         .join("\n")
-}
-
-async fn verify_completion_intent(
-    task_id: &str,
-    cancellation: &tokio_util::sync::CancellationToken,
-    slot_ctx: &SlotContext,
-) -> Result<(), String> {
-    let runs = djinn_db::repositories::task_run::TaskRunRepository::new(slot_ctx.db.clone())
-        .list_for_task(task_id)
-        .await
-        .map_err(|e| format!("could not resolve task run: {e}"))?;
-    let task_run_id = runs
-        .into_iter()
-        .find(|run| matches!(run.status.as_str(), "starting" | "running"))
-        .map(|run| run.id)
-        .ok_or_else(|| "no active task run is available for final verification".to_owned())?;
-    match coordinate_final_verification(
-        FinalVerificationCoordinatorRequest {
-            task_id: task_id.to_owned(),
-            task_run_id,
-            cancellation: cancellation.clone(),
-        },
-        slot_ctx,
-    )
-    .await
-    {
-        FinalVerificationRecordingOutcome::Stored { .. } => Ok(()),
-        FinalVerificationRecordingOutcome::Ineligible { reason, .. } => Err(format!(
-            "Final verification rejected this submit_work request: {reason}. Fix the worktree and resubmit."
-        )),
-        FinalVerificationRecordingOutcome::Error { detail, .. } => Err(format!(
-            "Final verification could not complete: {detail}. Inspect the worktree and resubmit."
-        )),
-    }
 }
 
 fn classify_tool_failure(content: &[ContentBlock]) -> ToolFailureClass {
@@ -1309,7 +1272,7 @@ pub async fn run_reply_loop(
                         Ok(work) if work.task_id == task_id => {
                             let intent = CompletionIntent { finalize_payload: payload, tool_use_id };
                             output.completion_intent = Some(intent.clone());
-                            match verify_completion_intent(task_id, cancel, slot_ctx).await {
+                            match verify_completion_intent(&intent, task_id, None, cancel.clone(), slot_ctx).await {
                                 Ok(()) => { output.finalize_payload = Some(intent.finalize_payload); output.finalize_tool_name = Some(primary_finalize.to_string()); break; }
                                 Err(error) => {
                                     output.completion_intent = None;

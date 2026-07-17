@@ -48,8 +48,10 @@ pub static SANDBOX: LazyLock<Box<dyn Sandbox>> = LazyLock::new(detect_backend);
 /// Fallback sandbox: heuristic path validation for kernels that do not support
 /// Landlock (< 5.13, WSL1) or non-Linux/macOS platforms.
 ///
-/// Validates that `worktree_path` is inside a `.djinn/worktrees/` subtree or a
-/// well-known temp directory. Does not apply OS-level access controls.
+/// Validates that `worktree_path` is inside a Release N task-worktree subtree
+/// (`.task-runtime/worktrees/`, or `.djinn/worktrees/` for an active legacy
+/// worktree) or a well-known temp directory. Does not apply OS-level access
+/// controls.
 pub struct FallbackSandbox;
 
 impl Sandbox for FallbackSandbox {
@@ -111,12 +113,12 @@ fn is_worktree_path(path: &Path) -> bool {
         .collect();
     parts
         .windows(2)
-        .any(|w| w[0] == ".djinn" && w[1] == "worktrees")
+        .any(|w| (w[0] == ".task-runtime" || w[0] == ".djinn") && w[1] == "worktrees")
 }
 
 // ─── Git worktree metadata resolution ─────────────────────────────────────────
 
-/// Resolve the git worktree metadata directory for a `.djinn/worktrees/{id}/` path.
+/// Resolve the git worktree metadata directory for a `.task-runtime/worktrees/{id}/` path.
 ///
 /// Git stores per-worktree state (HEAD, ORIG_HEAD, index, refs) under
 /// `<repo>/.git/worktrees/{id}/`. Operations like `git merge` need write
@@ -286,6 +288,19 @@ mod tests {
         with_env(&[("XDG_CACHE_HOME", None), ("HOME", None)], || {
             assert_eq!(djinn_cache_dir(), None);
         });
+    }
+
+    #[test]
+    fn worktree_path_accepts_destination_and_active_legacy_paths() {
+        assert!(is_worktree_path(Path::new(
+            "/projects/acme/repo/.task-runtime/worktrees/task-1"
+        )));
+        assert!(is_worktree_path(Path::new(
+            "/projects/acme/repo/.djinn/worktrees/task-1"
+        )));
+        assert!(!is_worktree_path(Path::new(
+            "/projects/acme/repo/.task-runtime/read-sources/other"
+        )));
     }
 
     #[test]

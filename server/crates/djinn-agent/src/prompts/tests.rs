@@ -110,7 +110,7 @@ fn make_task() -> Task {
 fn make_ctx() -> TaskContext {
     TaskContext {
         project_path: "/home/user/project".into(),
-        workspace_path: "/home/user/project/.djinn/worktrees/t123".into(),
+        workspace_path: "/home/user/project/.task-runtime/worktrees/t123".into(),
         diff: None,
         commits: None,
         start_commit: None,
@@ -183,7 +183,7 @@ fn worker_prompt_contains_task_fields() {
     assert!(prompt.contains("- [ ] Widget exists"));
     assert!(prompt.contains("- [x] Tests pass"));
     assert!(prompt.contains("/home/user/project"));
-    assert!(prompt.contains("/home/user/project/.djinn/worktrees/t123"));
+    assert!(prompt.contains("/home/user/project/.task-runtime/worktrees/t123"));
     assert!(prompt.contains("memory_write"));
     assert!(prompt.contains("memory_edit"));
     // A plain `task` runs the implement flow — no research/spike section.

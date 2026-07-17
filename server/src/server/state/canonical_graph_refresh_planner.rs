@@ -78,7 +78,7 @@ impl CanonicalGraphRefreshPlanner {
 }
 
 fn canonical_graph_index_tree_path(project_root: &Path) -> PathBuf {
-    project_root.join(".djinn").join("worktrees").join("_index")
+    djinn_core::index_tree::index_tree_path(project_root)
 }
 
 #[cfg(test)]
@@ -187,7 +187,7 @@ mod tests {
         let snapshot = probe.snapshot().await;
         assert_eq!(
             snapshot.observed_index_tree_paths,
-            vec![PathBuf::from("/tmp/project/.djinn/worktrees/_index")]
+            vec![PathBuf::from("/tmp/project/.task-runtime/worktrees/_index")]
         );
         assert!(snapshot.observed_commit_checks.is_empty());
     }
