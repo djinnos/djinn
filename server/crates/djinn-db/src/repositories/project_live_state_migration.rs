@@ -164,46 +164,184 @@ const SELECT_RECORD: &str = "SELECT project_id, family, release, source_inventor
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    async fn fresh() -> ProjectLiveStateMigrationRepository {
+        ProjectLiveStateMigrationRepository::new(Database::open_in_memory().expect("in-memory db"))
+    }
+
+    async fn seed_project(repo: &ProjectLiveStateMigrationRepository, project_id: &str) {
+        repo.db.ensure_initialized().await.expect("initialize db");
+        sqlx::query(
+            "INSERT INTO projects (id, name, github_owner, github_repo) VALUES ($1, $2, 'test', $2)",
+        )
+        .bind(project_id)
+        .bind(project_id)
+        .execute(repo.db.pool())
+        .await
+        .expect("seed project");
+    }
+
+    fn key<'a>(project_id: &'a str, family: &'a str) -> MigrationKey<'a> {
+        MigrationKey { project_id, family, release: "N" }
+    }
+
+    async fn begin_read_source(
+        repo: &ProjectLiveStateMigrationRepository,
+        owner: &str,
+        target: &str,
+        inventory: &Value,
+    ) -> ProjectLiveStateMigration {
+        repo.begin(BeginProjectLiveStateMigration {
+            project_id: owner,
+            family: &format!("read_source:{target}"),
+            release: "N",
+            source_inventory: inventory,
+            destination: &format!(".task-runtime/read-sources/{target}"),
+            pre_hash: Some("pre"),
+            rollback_instruction: "retain old inputs",
+        })
+        .await
+        .expect("begin migration")
+    }
+
     #[tokio::test]
-    async fn begin_finalizes_and_reconciles_structured_read_sources() {
-        let db = Database::open_in_memory().unwrap();
-        let repo = ProjectLiveStateMigrationRepository::new(db);
-        let inventory = serde_json::json!({"sources":[{"kind":"read_source","owner_project_id":"owner","target_project_id":"a","path":"old-a"},{"kind":"read_source","owner_project_id":"owner","target_project_id":"b","path":"old-b"}]});
-        let row = repo
-            .begin(BeginProjectLiveStateMigration {
-                project_id: "owner",
-                family: "read_source:a",
-                release: "N",
-                source_inventory: &inventory,
-                destination: ".task-runtime/read-sources/a",
-                pre_hash: Some("pre"),
-                rollback_instruction: "retain old inputs",
-            })
-            .await
-            .unwrap();
+    async fn lifecycle_covers_pending_failure_restart_finalize_and_rollback() {
+        let repo = fresh().await;
+        seed_project(&repo, "owner").await;
+        let inventory = serde_json::json!({"sources":[{"path":"old-a"}]});
+        let row = begin_read_source(&repo, "owner", "a", &inventory).await;
         assert_eq!(row.result, RESULT_PENDING);
+        let persisted = sqlx::query!(
+            "SELECT result FROM project_live_state_migrations WHERE project_id = $1 AND family = $2 AND release = $3",
+            "owner",
+            "read_source:a",
+            "N",
+        )
+        .fetch_one(repo.db.pool())
+        .await
+        .expect("read persisted pending migration");
+        assert_eq!(persisted.result, RESULT_PENDING);
+
+        repo.mark_pending(key("owner", "read_source:a"), Some("restart inspection"))
+            .await
+            .expect("mark pending");
+        assert_eq!(repo.pending_for_project("owner").await.unwrap().len(), 1);
+
+        repo.fail(key("owner", "read_source:a"), "copy failed")
+            .await
+            .expect("record failure");
+        let failed = repo.get(key("owner", "read_source:a")).await.unwrap().unwrap();
+        assert_eq!(failed.result, RESULT_FAILED);
+        assert_eq!(failed.detail.as_deref(), Some("copy failed"));
+
+        let restarted = begin_read_source(&repo, "owner", "a", &inventory).await;
+        assert_eq!(restarted.result, RESULT_PENDING);
+        assert!(restarted.detail.is_none());
+
         repo.finalize(
-            MigrationKey {
-                project_id: "owner",
-                family: "read_source:a",
-                release: "N",
-            },
+            key("owner", "read_source:a"),
             Some("post"),
             None,
         )
         .await
-        .unwrap();
+        .expect("finalize migration");
         let final_row = repo
-            .get(MigrationKey {
-                project_id: "owner",
-                family: "read_source:a",
-                release: "N",
-            })
+            .get(key("owner", "read_source:a"))
             .await
             .unwrap()
             .unwrap();
         assert_eq!(final_row.result, RESULT_SUCCEEDED);
         assert_eq!(final_row.post_hash.as_deref(), Some("post"));
         assert!(repo.pending_for_project("owner").await.unwrap().is_empty());
+
+        repo.rollback(key("owner", "read_source:a"), Some("restore retained input"))
+            .await
+            .expect("record rollback");
+        let rolled_back = repo.get(key("owner", "read_source:a")).await.unwrap().unwrap();
+        assert_eq!(rolled_back.result, RESULT_ROLLED_BACK);
+        assert_eq!(rolled_back.detail.as_deref(), Some("restore retained input"));
+    }
+
+    #[tokio::test]
+    async fn completed_reentry_is_idempotent_and_retains_its_audit_inputs() {
+        let repo = fresh().await;
+        seed_project(&repo, "owner").await;
+        let original = serde_json::json!({"sources":[{"path":"old-a"}]});
+        begin_read_source(&repo, "owner", "a", &original).await;
+        repo.finalize(key("owner", "read_source:a"), Some("post"), Some("published"))
+            .await
+            .expect("finalize migration");
+
+        let replacement = serde_json::json!({"sources":[{"path":"different-input"}]});
+        let row = begin_read_source(&repo, "owner", "a", &replacement).await;
+        assert_eq!(row.result, RESULT_SUCCEEDED);
+        assert_eq!(row.source_inventory, original);
+        assert_eq!(row.destination, ".task-runtime/read-sources/a");
+        assert_eq!(row.post_hash.as_deref(), Some("post"));
+    }
+
+    #[tokio::test]
+    async fn read_source_records_distinguish_targets_owners_and_dual_inputs() {
+        let repo = fresh().await;
+        seed_project(&repo, "owner-one").await;
+        seed_project(&repo, "owner-two").await;
+        let dual_source_inventory = serde_json::json!({"sources":[
+            {"kind":"project_legacy","owner_project_id":"owner-one","target_project_id":"target-a","path":".djinn/read-sources/target-a"},
+            {"kind":"task_legacy","owner_project_id":"owner-one","target_project_id":"target-a","path":"worktree/.djinn-read-sources/target-a"}
+        ]});
+        let target_b_inventory = serde_json::json!({"sources":[
+            {"kind":"read_source","owner_project_id":"owner-one","target_project_id":"target-b","path":"old-b"}
+        ]});
+        let second_owner_inventory = serde_json::json!({"sources":[
+            {"kind":"read_source","owner_project_id":"owner-two","target_project_id":"target-a","path":"other-old-a"}
+        ]});
+
+        let dual = begin_read_source(&repo, "owner-one", "target-a", &dual_source_inventory).await;
+        begin_read_source(&repo, "owner-one", "target-b", &target_b_inventory).await;
+        begin_read_source(&repo, "owner-two", "target-a", &second_owner_inventory).await;
+
+        assert_eq!(dual.source_inventory["sources"].as_array().unwrap().len(), 2);
+        assert_eq!(repo.pending_for_project("owner-one").await.unwrap().len(), 2);
+        assert_eq!(repo.pending_for_project("owner-two").await.unwrap().len(), 1);
+        assert_eq!(
+            repo.get(key("owner-two", "read_source:target-a"))
+                .await
+                .unwrap()
+                .unwrap()
+                .destination,
+            ".task-runtime/read-sources/target-a"
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_finalization_remains_pending_and_can_be_reconciled() {
+        let repo = fresh().await;
+        seed_project(&repo, "owner").await;
+        let inventory = serde_json::json!({"sources":[{"path":"old-a"}]});
+        begin_read_source(&repo, "owner", "a", &inventory).await;
+
+        sqlx::query(
+            "ALTER TABLE project_live_state_migrations ADD CONSTRAINT reject_success_for_test CHECK (result <> 'succeeded')",
+        )
+        .execute(repo.db.pool())
+        .await
+        .expect("inject finalization failure");
+        assert!(repo
+            .finalize(key("owner", "read_source:a"), Some("post"), None)
+            .await
+            .is_err());
+        let pending = repo.get(key("owner", "read_source:a")).await.unwrap().unwrap();
+        assert_eq!(pending.result, RESULT_PENDING);
+        assert!(pending.post_hash.is_none());
+
+        sqlx::query(
+            "ALTER TABLE project_live_state_migrations DROP CONSTRAINT reject_success_for_test",
+        )
+        .execute(repo.db.pool())
+        .await
+        .expect("remove injected failure");
+        repo.finalize(key("owner", "read_source:a"), Some("post"), None)
+            .await
+            .expect("restart reconciliation finalizes pending record");
     }
 }
