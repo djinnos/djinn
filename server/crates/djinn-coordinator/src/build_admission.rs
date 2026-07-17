@@ -460,14 +460,16 @@ mod tests {
     use super::*;
     use async_trait::async_trait;
     use djinn_core::events::EventBus;
-    use djinn_db::{AdmissionState, Database, ImageRepository, ProjectRepository};
+    use djinn_db::{
+        AdmissionState, Database, ImageRepository, ProjectRepository,
+        test_support::reject_admission_create_started_for_test,
+    };
     use djinn_k8s::{
         K8sGraphWarmer, KubernetesConfig, WarmJobDispatcher, WarmJobManifest, WarmJobWatcher,
         WarmTerminalOutcome,
     };
     use djinn_runtime::GraphWarmerService;
     use futures::FutureExt;
-    use sqlx::Executor;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use tokio::sync::Notify;
 
@@ -673,27 +675,7 @@ mod tests {
 
         // Fail the real controller durable state transition after it reserves
         // the warm row, rather than substituting a fake WarmAdmission.
-        db.pool()
-            .execute(
-                "CREATE FUNCTION reject_warm_create_started() RETURNS trigger AS $$ \
-                 BEGIN \
-                   IF NEW.state = 'create_in_flight' THEN \
-                     RAISE EXCEPTION 'journal temporarily unavailable'; \
-                   END IF; \
-                   RETURN NEW; \
-                 END; \
-                 $$ LANGUAGE plpgsql;",
-            )
-            .await
-            .unwrap();
-        db.pool()
-            .execute(
-                "CREATE TRIGGER reject_warm_create_started \
-                 BEFORE UPDATE ON admission_journal \
-                 FOR EACH ROW EXECUTE FUNCTION reject_warm_create_started();",
-            )
-            .await
-            .unwrap();
+        reject_admission_create_started_for_test(&db, true).await;
 
         warmer.trigger(&project_id).await;
         assert_eq!(
@@ -717,14 +699,7 @@ mod tests {
             "an immediate retrigger coalesces onto the pending warm"
         );
 
-        db.pool()
-            .execute("DROP TRIGGER reject_warm_create_started ON admission_journal;")
-            .await
-            .unwrap();
-        db.pool()
-            .execute("DROP FUNCTION reject_warm_create_started();")
-            .await
-            .unwrap();
+        reject_admission_create_started_for_test(&db, false).await;
         let post = posted.notified();
         tokio::pin!(post);
         tokio::task::yield_now().await;

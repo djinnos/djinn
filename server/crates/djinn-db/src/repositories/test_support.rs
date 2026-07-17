@@ -259,6 +259,47 @@ pub async fn reject_new_task_arbitrations_for_test(db: &Database) {
     .expect("failed to add task_arbitrations reject-insert constraint");
 }
 
+/// Toggle a test-only trigger that rejects admission-journal transitions to
+/// `create_in_flight`. This lets composition tests exercise an unavailable
+/// durable CreateStarted transition through the database-owner boundary.
+///
+/// **Not for production use.** Panics on SQL errors.
+pub async fn reject_admission_create_started_for_test(db: &Database, reject: bool) {
+    db.ensure_initialized().await.unwrap();
+    if reject {
+        sqlx::query(
+            "CREATE FUNCTION reject_admission_create_started_for_test() RETURNS trigger AS $$ \
+             BEGIN \
+               IF NEW.state = 'create_in_flight' THEN \
+                 RAISE EXCEPTION 'journal temporarily unavailable'; \
+               END IF; \
+               RETURN NEW; \
+             END; \
+             $$ LANGUAGE plpgsql",
+        )
+        .execute(db.pool())
+        .await
+        .expect("failed to create admission CreateStarted rejection function");
+        sqlx::query(
+            "CREATE TRIGGER reject_admission_create_started_for_test \
+             BEFORE UPDATE ON admission_journal \
+             FOR EACH ROW EXECUTE FUNCTION reject_admission_create_started_for_test()",
+        )
+        .execute(db.pool())
+        .await
+        .expect("failed to create admission CreateStarted rejection trigger");
+    } else {
+        sqlx::query("DROP TRIGGER reject_admission_create_started_for_test ON admission_journal")
+            .execute(db.pool())
+            .await
+            .expect("failed to drop admission CreateStarted rejection trigger");
+        sqlx::query("DROP FUNCTION reject_admission_create_started_for_test()")
+            .execute(db.pool())
+            .await
+            .expect("failed to drop admission CreateStarted rejection function");
+    }
+}
+
 /// Backdate a task's `updated_at` by a PostgreSQL `interval` string
 /// (e.g. `'20 minutes'`).
 ///
