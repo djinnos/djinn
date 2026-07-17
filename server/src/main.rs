@@ -167,7 +167,11 @@ async fn async_main() {
         cancel.clone(),
         retrieval_config,
         retrieval_metrics,
-    );
+    )
+    .unwrap_or_else(|e| {
+        tracing::error!(error = %e, "invalid build admission configuration");
+        std::process::exit(1);
+    });
 
     // NOTE: the periodic housekeeping + mirror-fetch loops, the coordinator,
     // and the worker RPC listener no longer start here unconditionally — they
