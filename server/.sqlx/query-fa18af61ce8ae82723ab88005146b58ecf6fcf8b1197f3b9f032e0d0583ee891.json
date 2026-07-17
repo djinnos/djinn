@@ -1,0 +1,24 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT result FROM project_live_state_migrations WHERE project_id = $1 AND family = $2 AND release = $3",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "result",
+        "type_info": "Varchar"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "fa18af61ce8ae82723ab88005146b58ecf6fcf8b1197f3b9f032e0d0583ee891"
+}
