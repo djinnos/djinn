@@ -493,3 +493,131 @@ fn test_build_request_replays_all_anthropic_thinking_blocks() {
         ]
     );
 }
+
+#[test]
+fn test_build_request_drops_empty_text_blocks_from_replay() {
+    // kimi-for-coding/k3 emits an empty text block mid-turn; replaying it
+    // verbatim gets 400 "Invalid request: text content is empty" from
+    // Anthropic-compatible endpoints. Empty/whitespace text blocks must be
+    // filtered from both assistant and user replay.
+    let provider = test_provider();
+    let mut conv = Conversation::default();
+    conv.push(crate::message::Message {
+        role: djinn_core::message::Role::Assistant,
+        content: vec![
+            ContentBlock::text(""),
+            ContentBlock::text("   \n"),
+            ContentBlock::text("visible output"),
+        ],
+        metadata: None,
+    });
+
+    let req = provider.build_request(&conv, &[], None);
+    let content = req["messages"][0]["content"].as_array().unwrap();
+    assert_eq!(
+        content,
+        &vec![json!({"type": "text", "text": "visible output"})]
+    );
+}
+
+#[test]
+fn test_build_request_drops_captured_empty_text_unknown_block() {
+    // Sessions persisted before the streaming parser grew a "text" arm carry
+    // text blocks captured as Unknown { content_type: "text", extra: {"text": ""} }.
+    // Those must not be replayed as {"type":"text","text":""}.
+    let provider = test_provider();
+    let mut empty_extra = serde_json::Map::new();
+    empty_extra.insert("text".to_string(), json!(""));
+    let mut populated_extra = serde_json::Map::new();
+    populated_extra.insert("text".to_string(), json!("legacy captured text"));
+    let mut conv = Conversation::default();
+    conv.push(crate::message::Message {
+        role: djinn_core::message::Role::Assistant,
+        content: vec![
+            ContentBlock::Unknown {
+                content_type: "text".to_string(),
+                extra: empty_extra,
+            },
+            ContentBlock::Unknown {
+                content_type: "text".to_string(),
+                extra: populated_extra,
+            },
+            ContentBlock::ToolUse {
+                id: "tool_1".to_string(),
+                name: "shell".to_string(),
+                input: json!({"command": "ls"}),
+            },
+        ],
+        metadata: None,
+    });
+
+    let req = provider.build_request(&conv, &[], None);
+    let content = req["messages"][0]["content"].as_array().unwrap();
+    assert_eq!(content.len(), 2);
+    assert_eq!(
+        content[0],
+        json!({"type": "text", "text": "legacy captured text"})
+    );
+    assert_eq!(content[1]["type"], "tool_use");
+}
+
+#[test]
+fn test_build_request_omits_message_with_no_serializable_content() {
+    // An assistant message whose every block filters out (unsigned thinking,
+    // empty text) must be omitted entirely — Anthropic rejects messages with
+    // empty content arrays.
+    let provider = test_provider();
+    let mut conv = Conversation::default();
+    conv.push(crate::message::Message {
+        role: djinn_core::message::Role::User,
+        content: vec![ContentBlock::text("do the thing")],
+        metadata: None,
+    });
+    conv.push(crate::message::Message {
+        role: djinn_core::message::Role::Assistant,
+        content: vec![
+            ContentBlock::text(""),
+            ContentBlock::Thinking {
+                thinking: "unsigned".to_string(),
+                signature: None,
+            },
+        ],
+        metadata: None,
+    });
+    conv.push(crate::message::Message {
+        role: djinn_core::message::Role::User,
+        content: vec![ContentBlock::text("still there?")],
+        metadata: None,
+    });
+
+    let req = provider.build_request(&conv, &[], None);
+    let messages = req["messages"].as_array().unwrap();
+    assert_eq!(messages.len(), 2);
+    assert_eq!(messages[0]["role"], "user");
+    assert_eq!(messages[1]["role"], "user");
+}
+
+#[test]
+fn test_build_request_tool_result_with_no_output_gets_placeholder() {
+    // A tool that produced no output must not serialize an empty text block
+    // (or an empty content array) inside its tool_result.
+    let provider = test_provider();
+    let mut conv = Conversation::default();
+    conv.push(crate::message::Message {
+        role: djinn_core::message::Role::User,
+        content: vec![ContentBlock::ToolResult {
+            tool_use_id: "tool_1".to_string(),
+            content: vec![ContentBlock::text("")],
+            is_error: false,
+        }],
+        metadata: None,
+    });
+
+    let req = provider.build_request(&conv, &[], None);
+    let content = req["messages"][0]["content"].as_array().unwrap();
+    assert_eq!(content.len(), 1);
+    assert_eq!(
+        content[0]["content"],
+        json!([{"type": "text", "text": "(no output)"}])
+    );
+}
