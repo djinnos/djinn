@@ -171,8 +171,16 @@ pub async fn coordinate_final_verification(
         ))
     } else {
         // The delivered executor performs every descriptor in order and returns
-        // evidence rather than persistence side effects.
-        let evidence = execute_final_verification(material.execution_request.clone()).await;
+        // evidence rather than persistence side effects. Tests inject evidence
+        // here while retaining the real resolve/lease/validate/write boundary.
+        #[cfg(test)]
+        let injected_evidence = ctx.callbacks.final_verification_evidence_for_test(&request);
+        #[cfg(not(test))]
+        let injected_evidence: Option<FinalVerificationExecutionEvidence> = None;
+        let evidence = match injected_evidence {
+            Some(evidence) => evidence,
+            None => execute_final_verification(material.execution_request.clone()).await,
+        };
         if request.cancellation.is_cancelled() {
             Err(ineligible_outcome(
                 &verification_attempt_id,
@@ -501,3 +509,6 @@ mod tests {
         assert!(!writer_started.load(Ordering::SeqCst));
     }
 }
+
+#[cfg(test)]
+mod recording_tests;
