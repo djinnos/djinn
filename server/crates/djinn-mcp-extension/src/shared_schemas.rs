@@ -155,7 +155,7 @@ pub fn annotate_tool_safety(value: &mut serde_json::Value, annotations: ToolSafe
 pub fn tool_memory_move() -> RmcpTool {
     RmcpTool::new(
         "memory_move".to_string(),
-        "Move a memory note to a different type via memory_* MCP tools. Do not assume .djinn/memory/ paths are readable from the worker filesystem; do not attempt filesystem rename. Updates the permalink and resolves inbound links automatically.".to_string(),
+        "Move a memory note to a different type via memory_* MCP tools. Notes are stored in the project database; use this tool rather than filesystem operations. Updates the permalink and resolves inbound links automatically.".to_string(),
         object!({
             "type": "object",
             "required": ["identifier", "type"],
@@ -705,7 +705,7 @@ pub fn tool_memory_list() -> RmcpTool {
 pub fn tool_memory_write() -> RmcpTool {
     RmcpTool::new(
         "memory_write".to_string(),
-        "Create a new memory note via the memory_* MCP tools. Do not attempt filesystem writes; .djinn/memory/ paths are not readable from the worker filesystem. `type` is required and routes the note (adr, pattern, case, pitfall, research, requirement, reference, design, tech_spike, session, brief, roadmap). Use [[wikilinks]] in content to connect notes.".to_string(),
+        "Create a new memory note via the memory_* MCP tools. Notes are stored in the project database; do not use filesystem writes. `type` is required and routes the note (adr, pattern, case, pitfall, research, requirement, reference, design, tech_spike, session, brief, roadmap). Use [[wikilinks]] in content to connect notes.".to_string(),
         object!({
             "type": "object",
             "additionalProperties": false,
@@ -725,7 +725,7 @@ pub fn tool_memory_write() -> RmcpTool {
 pub fn tool_memory_edit() -> RmcpTool {
     RmcpTool::new(
         "memory_edit".to_string(),
-        "Edit an existing memory note in-place via memory_* MCP tools. Do not assume .djinn/memory/ paths are readable from the worker filesystem. Operations: append, prepend, find_replace (requires find_text), replace_section (requires section).".to_string(),
+        "Edit an existing memory note in-place via memory_* MCP tools. Notes are stored in the project database; do not use filesystem operations. Operations: append, prepend, find_replace (requires find_text), replace_section (requires section).".to_string(),
         object!({
             "type": "object",
             "additionalProperties": false,

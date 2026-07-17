@@ -2582,8 +2582,7 @@ export namespace ImageCreateInputSchema {
    */
   export interface EnvironmentConfig {
   /**
-   * Per-agent-role MCP server defaults. Moved here from the pre-cut-over
-   * `.djinn/settings.json`'s `agent_mcp_defaults` field. The key is a role
+   * Per-agent-role MCP server defaults. The key is a role
    * name (e.g. `"worker"`, `"chat"`) or `"*"` for the fallback applied to
    * any role with no explicit entry. The value is the list of MCP server
    * names (from root `mcp.json`) that sessions for that role should
@@ -2613,9 +2612,8 @@ export namespace ImageCreateInputSchema {
   [k: string]: string
   }
   /**
-   * Skills injected into every agent prompt regardless of role. Moved here
-   * from the pre-cut-over `.djinn/settings.json`'s `global_skills` field.
-   * Each entry is a skill file stem (resolved against `.djinn/skills/`).
+   * Skills injected into every agent prompt regardless of role. Each entry
+   * is a registered skill identifier.
    */
   global_skills?: string[]
   languages?: Languages
@@ -2930,8 +2928,7 @@ export namespace ImageListOutputSchema {
    */
   export interface EnvironmentConfig {
   /**
-   * Per-agent-role MCP server defaults. Moved here from the pre-cut-over
-   * `.djinn/settings.json`'s `agent_mcp_defaults` field. The key is a role
+   * Per-agent-role MCP server defaults. The key is a role
    * name (e.g. `"worker"`, `"chat"`) or `"*"` for the fallback applied to
    * any role with no explicit entry. The value is the list of MCP server
    * names (from root `mcp.json`) that sessions for that role should
@@ -2961,9 +2958,8 @@ export namespace ImageListOutputSchema {
   [k: string]: string
   }
   /**
-   * Skills injected into every agent prompt regardless of role. Moved here
-   * from the pre-cut-over `.djinn/settings.json`'s `global_skills` field.
-   * Each entry is a skill file stem (resolved against `.djinn/skills/`).
+   * Skills injected into every agent prompt regardless of role. Each entry
+   * is a registered skill identifier.
    */
   global_skills?: string[]
   languages?: Languages
@@ -3254,8 +3250,7 @@ export namespace ImageUpdateInputSchema {
    */
   export interface EnvironmentConfig {
   /**
-   * Per-agent-role MCP server defaults. Moved here from the pre-cut-over
-   * `.djinn/settings.json`'s `agent_mcp_defaults` field. The key is a role
+   * Per-agent-role MCP server defaults. The key is a role
    * name (e.g. `"worker"`, `"chat"`) or `"*"` for the fallback applied to
    * any role with no explicit entry. The value is the list of MCP server
    * names (from root `mcp.json`) that sessions for that role should
@@ -3285,9 +3280,8 @@ export namespace ImageUpdateInputSchema {
   [k: string]: string
   }
   /**
-   * Skills injected into every agent prompt regardless of role. Moved here
-   * from the pre-cut-over `.djinn/settings.json`'s `global_skills` field.
-   * Each entry is a skill file stem (resolved against `.djinn/skills/`).
+   * Skills injected into every agent prompt regardless of role. Each entry
+   * is a registered skill identifier.
    */
   global_skills?: string[]
   languages?: Languages
@@ -4238,7 +4232,7 @@ export namespace MemoryMoveInputSchema {
   title?: string
   /**
    * New note type to move the note to. Use `proposed_adr` to recover a
-   * mis-routed ADR draft into `.djinn/decisions/proposed/`.
+   * mis-routed ADR draft to proposed status in the project database.
    */
   type: string
   [k: string]: any
@@ -4896,7 +4890,7 @@ export namespace MemoryWriteInputSchema {
   scope_paths?: string[]
   /**
    * Optional explicit status for routed note types. For ADRs, `proposed`
-   * writes into `.djinn/decisions/proposed/`.
+   * records the ADR with proposed status in the project database.
    */
   status?: string
   tags?: string[]
@@ -5484,8 +5478,7 @@ export namespace ProjectEnvironmentConfigGetOutputSchema {
   }
   export interface EnvironmentConfig {
   /**
-   * Per-agent-role MCP server defaults. Moved here from the pre-cut-over
-   * `.djinn/settings.json`'s `agent_mcp_defaults` field. The key is a role
+   * Per-agent-role MCP server defaults. The key is a role
    * name (e.g. `"worker"`, `"chat"`) or `"*"` for the fallback applied to
    * any role with no explicit entry. The value is the list of MCP server
    * names (from root `mcp.json`) that sessions for that role should
@@ -5515,9 +5508,8 @@ export namespace ProjectEnvironmentConfigGetOutputSchema {
   [k: string]: string
   }
   /**
-   * Skills injected into every agent prompt regardless of role. Moved here
-   * from the pre-cut-over `.djinn/settings.json`'s `global_skills` field.
-   * Each entry is a skill file stem (resolved against `.djinn/skills/`).
+   * Skills injected into every agent prompt regardless of role. Each entry
+   * is a registered skill identifier.
    */
   global_skills?: string[]
   languages?: Languages
@@ -5792,8 +5784,7 @@ export namespace ProjectEnvironmentConfigResetOutputSchema {
   }
   export interface EnvironmentConfig {
   /**
-   * Per-agent-role MCP server defaults. Moved here from the pre-cut-over
-   * `.djinn/settings.json`'s `agent_mcp_defaults` field. The key is a role
+   * Per-agent-role MCP server defaults. The key is a role
    * name (e.g. `"worker"`, `"chat"`) or `"*"` for the fallback applied to
    * any role with no explicit entry. The value is the list of MCP server
    * names (from root `mcp.json`) that sessions for that role should
@@ -5823,9 +5814,8 @@ export namespace ProjectEnvironmentConfigResetOutputSchema {
   [k: string]: string
   }
   /**
-   * Skills injected into every agent prompt regardless of role. Moved here
-   * from the pre-cut-over `.djinn/settings.json`'s `global_skills` field.
-   * Each entry is a skill file stem (resolved against `.djinn/skills/`).
+   * Skills injected into every agent prompt regardless of role. Each entry
+   * is a registered skill identifier.
    */
   global_skills?: string[]
   languages?: Languages
@@ -6093,8 +6083,7 @@ export namespace ProjectEnvironmentConfigSetInputSchema {
    */
   export interface EnvironmentConfig {
   /**
-   * Per-agent-role MCP server defaults. Moved here from the pre-cut-over
-   * `.djinn/settings.json`'s `agent_mcp_defaults` field. The key is a role
+   * Per-agent-role MCP server defaults. The key is a role
    * name (e.g. `"worker"`, `"chat"`) or `"*"` for the fallback applied to
    * any role with no explicit entry. The value is the list of MCP server
    * names (from root `mcp.json`) that sessions for that role should
@@ -6124,9 +6113,8 @@ export namespace ProjectEnvironmentConfigSetInputSchema {
   [k: string]: string
   }
   /**
-   * Skills injected into every agent prompt regardless of role. Moved here
-   * from the pre-cut-over `.djinn/settings.json`'s `global_skills` field.
-   * Each entry is a skill file stem (resolved against `.djinn/skills/`).
+   * Skills injected into every agent prompt regardless of role. Each entry
+   * is a registered skill identifier.
    */
   global_skills?: string[]
   languages?: Languages
