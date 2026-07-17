@@ -8,8 +8,6 @@ pub mod git_maintenance;
 pub mod leadership;
 pub mod logging;
 mod mcp_bridge;
-pub mod memory_fs;
-pub mod memory_mount;
 pub mod mirror_fetcher;
 pub mod server;
 pub mod sse;

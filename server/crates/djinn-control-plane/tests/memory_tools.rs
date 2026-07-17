@@ -588,56 +588,8 @@ async fn mcp_memory_catalog_returns_structured_catalog() {
 }
 
 #[tokio::test]
-async fn mcp_memory_history_and_diff_round_trip() {
-    let caller = TrustedRevisionCallerContext::authenticated_human("memory-tools-test-user")
-        .expect("test revision caller must be non-blank");
-    let harness = McpTestHarness::new().await;
-    let (proj, _dir) = common::create_test_project_with_dir(harness.db()).await;
-    let project = proj.slug();
-
-    let created = dispatch_as_authenticated_human(&caller, &harness, "memory_write",
-            json!({"project": project, "title": "History Diff", "content": "line one", "reason": "create fixture note for memory tool coverage", "type": "reference"}),
-        )
-        .await
-        .expect("memory_write should dispatch");
-    assert_tool_success(&created, "memory mutation");
-    let permalink = created["permalink"].as_str().unwrap().to_string();
-
-    let edited = dispatch_as_authenticated_human(&caller, &harness, "memory_edit",
-            json!({"project": project, "identifier": permalink, "reason": "modify fixture note for memory tool coverage", "operation": "append", "content": "line two"}),
-        )
-        .await
-        .expect("memory_edit should dispatch");
-    assert_tool_success(&edited, "memory mutation");
-    assert!(edited.get("error").is_none() || edited["error"].is_null());
-
-    // memory_history and memory_diff: with the db-only KB cut-over both
-    // tools return an empty payload and an explanatory error string for
-    // db-stored notes (the only kind that exists now). Just confirm they
-    // dispatch and shape-check; the git-backed history/diff content path
-    // is gone.
-    let history = harness
-        .call_tool(
-            "memory_history",
-            json!({"project": project, "permalink": permalink, "limit": 10}),
-        )
-        .await
-        .expect("memory_history should dispatch");
-    assert!(history["history"].is_array());
-
-    let diff = harness
-        .call_tool(
-            "memory_diff",
-            json!({"project": project, "permalink": permalink}),
-        )
-        .await
-        .expect("memory_diff should dispatch");
-    assert!(diff.get("diff").is_some());
-}
-
 // memory_reindex tool was deleted alongside the on-disk reindex pipeline
 // (notes are db-only now). Removing the contract shape test.
-
 #[tokio::test]
 async fn mcp_memory_build_context_follows_wikilinks() {
     let caller = TrustedRevisionCallerContext::authenticated_human("memory-tools-test-user")

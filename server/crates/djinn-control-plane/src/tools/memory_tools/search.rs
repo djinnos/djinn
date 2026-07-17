@@ -48,30 +48,6 @@ impl DjinnMcpServer {
         })
     }
 
-    /// Get unified diff for a specific commit of a .djinn/ file. No SHA = returns
-    /// diff for most recent change.
-    ///
-    /// As of the db-only knowledge-base cut-over, notes no longer have a
-    /// physical .md file under git, so this tool now always returns an empty
-    /// diff with an error message. Kept on the surface for backward-compat;
-    /// callers should switch to `memory_history` against db row updates.
-    #[tool(
-        description = "Get unified diff for a specific commit of a .djinn/ file. No SHA = returns diff for most recent change. Note: with db-only KB storage, this tool no longer returns a meaningful diff."
-    )]
-    pub async fn memory_diff(
-        &self,
-        Parameters(p): Parameters<DiffParams>,
-    ) -> Json<MemoryDiffResponse> {
-        let _ = p;
-        Json(MemoryDiffResponse {
-            diff: String::new(),
-            error: Some(
-                "memory_diff: notes are now stored db-only; on-disk git history is unavailable"
-                    .to_string(),
-            ),
-        })
-    }
-
     /// Build context from a seed note with progressive disclosure and token budget
     /// awareness. Returns full content for primary notes, overview for direct (L1)
     /// linked notes, abstract for discovered (L0) related notes, plus supersedes

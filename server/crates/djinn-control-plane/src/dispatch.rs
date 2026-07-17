@@ -725,11 +725,6 @@ impl DjinnMcpServer {
                 self.memory_recent(Parameters(decode_args::<RecentParams>(name, args)?))
                     .await,
             ),
-            "memory_history" => map_json(
-                name,
-                self.memory_history(Parameters(decode_args::<HistoryParams>(name, args)?))
-                    .await,
-            ),
             "memory_task_refs" => map_json(
                 name,
                 self.memory_task_refs(Parameters(decode_args::<TaskRefsParams>(name, args)?))
@@ -753,11 +748,6 @@ impl DjinnMcpServer {
             "memory_graph" => map_json(
                 name,
                 self.memory_graph(Parameters(decode_args::<GraphParams>(name, args)?))
-                    .await,
-            ),
-            "memory_diff" => map_json(
-                name,
-                self.memory_diff(Parameters(decode_args::<DiffParams>(name, args)?))
                     .await,
             ),
             "memory_build_context" => map_json(

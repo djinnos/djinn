@@ -7,7 +7,6 @@ use tokio::time::{Duration, timeout};
 const GIT_CMD_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Run `git log --format="%H|||%s|||%an|||%ai" -n <limit> -- <path>` and parse
-/// entries.  Returns an empty vector on any failure so the memory_history tool
 /// degrades gracefully.
 pub async fn git_log_for_file(file_path: &str, limit: i64) -> Vec<djinn_memory::GitLogEntry> {
     let args = vec![

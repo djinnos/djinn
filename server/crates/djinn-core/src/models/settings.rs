@@ -87,10 +87,6 @@ pub struct DjinnSettings {
     /// `settings.raw` rows still parse under `deny_unknown_fields`.
     #[schemars(with = "Option<HashMap<String, i64>>")]
     pub max_sessions: Option<HashMap<String, u32>>,
-    /// Enable the ADR-057 Linux memory mount for filesystem-first note workflows. Disabled by default; requires a Linux build with the `memory-mount` cargo feature. The mounted path serves the current session-selected task/worktree view when available and otherwise falls back to the canonical `main` view.
-    pub memory_mount_enabled: Option<bool>,
-    /// Absolute filesystem path where the Linux FUSE mount should be attached. The directory must already exist and be empty at startup. This path hosts the current session-selected memory view; Djinn does not expose additional branch directories in this slice.
-    pub memory_mount_path: Option<String>,
     /// Global emergency stop for task dispatch. Missing in older settings rows means unpaused.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dispatch_pause: Option<DispatchPause>,
@@ -167,8 +163,6 @@ impl DjinnSettings {
             dispatch_limit,
             models,
             max_sessions,
-            memory_mount_enabled: None,
-            memory_mount_path: None,
             dispatch_pause: None,
         }
     }
@@ -255,13 +249,10 @@ mod tests {
 
     #[test]
     fn from_db_value_parses_typed_format() {
-        let raw = r#"{"dispatch_limit":100,"models":["openai/gpt-4o"],"memory_mount_enabled":true,"memory_mount_path":"/tmp/djinn-memory"}"#;
         let s = DjinnSettings::from_db_value(raw);
         assert_eq!(s.dispatch_limit, Some(100));
         assert_eq!(s.models.as_ref().unwrap(), &vec!["openai/gpt-4o"]);
         assert!(s.max_sessions.is_none());
-        assert_eq!(s.memory_mount_enabled, Some(true));
-        assert_eq!(s.memory_mount_path.as_deref(), Some("/tmp/djinn-memory"));
     }
 
     #[test]
@@ -292,12 +283,8 @@ mod tests {
         // DB rows written under the prior schema carried langfuse_* keys.
         // Ensure the strip path preserves the other typed fields instead of
         // falling through to the lossy legacy migrator (which would drop
-        // memory_mount_*).
-        let raw = r#"{"dispatch_limit":42,"langfuse_public_key":"pk","langfuse_secret_key":"sk","langfuse_endpoint":"http://x","memory_mount_enabled":true,"memory_mount_path":"/tmp/m"}"#;
         let s = DjinnSettings::from_db_value(raw);
         assert_eq!(s.dispatch_limit, Some(42));
-        assert_eq!(s.memory_mount_enabled, Some(true));
-        assert_eq!(s.memory_mount_path.as_deref(), Some("/tmp/m"));
     }
 
     #[test]

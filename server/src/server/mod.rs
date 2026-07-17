@@ -113,7 +113,6 @@ struct HealthResponse {
     status: &'static str,
     version: &'static str,
     database: crate::db::runtime::DatabaseRuntimeHealth,
-    memory_mount: MemoryMountHealth,
     provider_catalog: ProviderCatalogHealth,
 }
 
@@ -165,77 +164,6 @@ pub(crate) struct ProviderCatalogHealth {
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum MemoryMountLifecycleState {
-    Disabled,
-    Configured,
-    Mounted,
-    Degraded,
-}
-
-/// Describes which mounted-memory view ADR-057 is currently serving.
-///
-/// Operators should read this alongside `fallback`: a `canonical` view with no
-/// fallback means the mount is intentionally serving the canonical repository
-/// view, while a populated fallback explains why task-scoped resolution could
-/// not be used for the current filesystem-first session.
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub(crate) enum MemoryMountViewKind {
-    Canonical,
-    TaskScoped,
-}
-
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub(crate) enum MemoryMountViewFallbackReason {
-    AmbiguousActiveTasks,
-    ActiveTaskNotFound,
-    TaskProjectMismatch,
-    NoActiveSession,
-    MissingSessionWorktree,
-    CanonicalProjectRoot,
-}
-
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
-pub(crate) struct MemoryMountViewFallback {
-    pub(crate) reason: MemoryMountViewFallbackReason,
-    pub(crate) detail: Option<String>,
-    pub(crate) active_task_count: Option<usize>,
-    pub(crate) task_id: Option<String>,
-    pub(crate) task_short_id: Option<String>,
-    pub(crate) task_project_id: Option<String>,
-    pub(crate) mount_project_id: Option<String>,
-    pub(crate) session_workspace_path: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
-pub(crate) struct MemoryMountViewHealth {
-    pub(crate) kind: MemoryMountViewKind,
-    pub(crate) task_short_id: Option<String>,
-    pub(crate) worktree_root: Option<String>,
-    pub(crate) fallback: Option<MemoryMountViewFallback>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct MemoryMountViewResolution {
-    pub(crate) selection: crate::memory_fs::MemoryViewSelection,
-    pub(crate) health: MemoryMountViewHealth,
-}
-
-#[derive(Serialize)]
-pub(crate) struct MemoryMountHealth {
-    enabled: bool,
-    active: bool,
-    lifecycle: MemoryMountLifecycleState,
-    configured: bool,
-    mount_path: Option<String>,
-    project_id: Option<String>,
-    detail: Option<String>,
-    view: MemoryMountViewHealth,
-    pending_writes: usize,
-    last_error: Option<String>,
-}
-
 /// Format a `SystemTime` as RFC3339, degrading to `None` on out-of-range or
 /// formatting errors so the health endpoint cannot panic.
 fn format_system_time_rfc3339(ts: SystemTime) -> Option<String> {
@@ -262,7 +190,6 @@ async fn health(State(state): State<AppState>) -> axum::Json<HealthResponse> {
         status: "ok",
         version: env!("CARGO_PKG_VERSION"),
         database: state.database_health(),
-        memory_mount: state.memory_mount_health().await,
         provider_catalog: ProviderCatalogHealth {
             source_tier,
             fetched_at,
