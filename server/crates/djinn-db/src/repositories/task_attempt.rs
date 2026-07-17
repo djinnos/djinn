@@ -25,6 +25,13 @@ pub struct TaskAttemptRepository {
     db: Database,
 }
 
+/// Bound on re-allocations when an auto-allocated `attempt_seq` loses the
+/// `(task_id, attempt_seq)` unique race to a concurrent inserter.  Every
+/// conflict round has exactly one winner, so a writer needs at most
+/// (concurrent writers) tries; the bound only backstops a pathological storm,
+/// and hitting it surfaces the underlying unique-violation error unchanged.
+const ATTEMPT_SEQ_ALLOC_RETRIES: usize = 16;
+
 /// A `pending` attempt row identified as orphaned by
 /// [`TaskAttemptRepository::list_orphaned_pending`]: older than the caller's
 /// threshold with no live `task_run` and no `running` session for its task.
@@ -220,31 +227,54 @@ impl TaskAttemptRepository {
             ));
         }
 
-        let attempt_seq = match params.attempt_seq {
-            Some(seq) => seq,
-            None => self.next_attempt_seq(params.task_id).await?,
-        };
+        let mut tries = 0;
+        loop {
+            let attempt_seq = match params.attempt_seq {
+                Some(seq) => seq,
+                None => self.next_attempt_seq(params.task_id).await?,
+            };
 
-        sqlx::query!(
-            r#"INSERT INTO task_attempts
-                (id, task_id, role, attempt_seq, dispatch_key, session_id, outcome)
-             VALUES ($1, $2, $3, $4, $5, $6, 'pending')
-             ON CONFLICT (dispatch_key) DO NOTHING"#,
-            params.id,
-            params.task_id,
-            params.role,
-            attempt_seq,
-            params.dispatch_key,
-            params.session_id,
-        )
-        .execute(self.db.pool())
-        .await?;
+            let insert = sqlx::query!(
+                r#"INSERT INTO task_attempts
+                    (id, task_id, role, attempt_seq, dispatch_key, session_id, outcome)
+                 VALUES ($1, $2, $3, $4, $5, $6, 'pending')
+                 ON CONFLICT (dispatch_key) DO NOTHING"#,
+                params.id,
+                params.task_id,
+                params.role,
+                attempt_seq,
+                params.dispatch_key,
+                params.session_id,
+            )
+            .execute(self.db.pool())
+            .await;
+
+            match insert {
+                Ok(_) => break,
+                Err(e)
+                    if params.attempt_seq.is_none()
+                        && Self::is_attempt_seq_conflict(&e)
+                        && tries + 1 < ATTEMPT_SEQ_ALLOC_RETRIES =>
+                {
+                    tries += 1;
+                }
+                Err(e) => return Err(e.into()),
+            }
+        }
 
         let row = self.get_by_dispatch_key(params.dispatch_key).await?;
         row.ok_or_else(|| DbError::Internal("task_attempt row disappeared after insert".to_owned()))
     }
 
     /// Allocate the next monotonic `attempt_seq` for a task.
+    ///
+    /// `MAX + 1` is read outside the INSERT's snapshot, so two concurrent
+    /// allocators for the same task (the coordinator's `record_dispatch_start`
+    /// and the slot supervisor's exact-attempt allocation race on every
+    /// dispatch) can compute the same value and one loses on
+    /// `task_attempts_task_id_attempt_seq_unique`.  Every auto-allocating
+    /// insert therefore retries via [`Self::is_attempt_seq_conflict`], and the
+    /// loser recomputes against the winner's committed row.
     async fn next_attempt_seq(&self, task_id: &str) -> Result<i32> {
         let max: Option<i32> = sqlx::query_scalar!(
             "SELECT MAX(attempt_seq) FROM task_attempts WHERE task_id = $1",
@@ -253,6 +283,18 @@ impl TaskAttemptRepository {
         .fetch_one(self.db.pool())
         .await?;
         Ok(max.unwrap_or(0) + 1)
+    }
+
+    /// `true` when the error is the losing side of a concurrent per-task
+    /// `attempt_seq` allocation: a unique violation on
+    /// `task_attempts_task_id_attempt_seq_unique`.
+    fn is_attempt_seq_conflict(err: &sqlx::Error) -> bool {
+        match err {
+            sqlx::Error::Database(db) => {
+                db.constraint() == Some("task_attempts_task_id_attempt_seq_unique")
+            }
+            _ => false,
+        }
     }
 
     pub async fn get(&self, id: &str) -> Result<Option<TaskAttempt>> {
@@ -407,29 +449,44 @@ impl TaskAttemptRepository {
         let decision_str = params.decision.as_str();
         let reason_str = params.reason.as_str();
         let outcome_str = TaskAttemptOutcome::Deferred.as_str();
-        let attempt_seq = self.next_attempt_seq(params.task_id).await?;
 
-        sqlx::query!(
-            r#"INSERT INTO task_attempts
-                (id, task_id, role, attempt_seq, dispatch_key, session_id, outcome,
-                 guard_decision, guard_reason, summary, summary_json, log_tail, terminal_at)
-             VALUES ($1, $2, $3, $4, $5, NULL, $6, $7, $8, $9, $10::text::jsonb, $11,
-                     to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'))
-             ON CONFLICT (dispatch_key) DO NOTHING"#,
-            params.id,
-            params.task_id,
-            params.role,
-            attempt_seq,
-            params.dispatch_key,
-            outcome_str,
-            decision_str,
-            reason_str,
-            params.summary,
-            params.summary_json,
-            params.log_tail,
-        )
-        .execute(self.db.pool())
-        .await?;
+        let mut tries = 0;
+        loop {
+            let attempt_seq = self.next_attempt_seq(params.task_id).await?;
+
+            let insert = sqlx::query!(
+                r#"INSERT INTO task_attempts
+                    (id, task_id, role, attempt_seq, dispatch_key, session_id, outcome,
+                     guard_decision, guard_reason, summary, summary_json, log_tail, terminal_at)
+                 VALUES ($1, $2, $3, $4, $5, NULL, $6, $7, $8, $9, $10::text::jsonb, $11,
+                         to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'))
+                 ON CONFLICT (dispatch_key) DO NOTHING"#,
+                params.id,
+                params.task_id,
+                params.role,
+                attempt_seq,
+                params.dispatch_key,
+                outcome_str,
+                decision_str,
+                reason_str,
+                params.summary,
+                params.summary_json,
+                params.log_tail,
+            )
+            .execute(self.db.pool())
+            .await;
+
+            match insert {
+                Ok(_) => break,
+                Err(e)
+                    if Self::is_attempt_seq_conflict(&e)
+                        && tries + 1 < ATTEMPT_SEQ_ALLOC_RETRIES =>
+                {
+                    tries += 1;
+                }
+                Err(e) => return Err(e.into()),
+            }
+        }
 
         let row = self.get_by_dispatch_key(params.dispatch_key).await?;
         row.ok_or_else(|| {
@@ -454,31 +511,46 @@ impl TaskAttemptRepository {
         let outcome_str = TaskAttemptOutcome::AdoptedPr.as_str();
         let decision_str = GuardDecision::Allow.as_str();
         let reason_str = GuardReason::OpenPrAdoption.as_str();
-        let attempt_seq = self.next_attempt_seq(params.task_id).await?;
 
-        // Runtime-checked query: avoids sqlx compile-time cache dependency for
-        // this new query.  The column/parameter types mirror `insert_guard_deferred`.
-        sqlx::query(
-            r#"INSERT INTO task_attempts
-                (id, task_id, role, attempt_seq, dispatch_key, session_id, outcome,
-                 guard_decision, guard_reason, pr_url, summary, summary_json, terminal_at)
-             VALUES ($1, $2, $3, $4, $5, NULL, $6, $7, $8, $9, $10, $11::text::jsonb,
-                     to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'))
-             ON CONFLICT (dispatch_key) DO NOTHING"#,
-        )
-        .bind(params.id)
-        .bind(params.task_id)
-        .bind(params.role)
-        .bind(attempt_seq)
-        .bind(params.dispatch_key)
-        .bind(outcome_str)
-        .bind(decision_str)
-        .bind(reason_str)
-        .bind(params.pr_url)
-        .bind(params.summary)
-        .bind(params.summary_json)
-        .execute(self.db.pool())
-        .await?;
+        let mut tries = 0;
+        loop {
+            let attempt_seq = self.next_attempt_seq(params.task_id).await?;
+
+            // Runtime-checked query: avoids sqlx compile-time cache dependency for
+            // this new query.  The column/parameter types mirror `insert_guard_deferred`.
+            let insert = sqlx::query(
+                r#"INSERT INTO task_attempts
+                    (id, task_id, role, attempt_seq, dispatch_key, session_id, outcome,
+                     guard_decision, guard_reason, pr_url, summary, summary_json, terminal_at)
+                 VALUES ($1, $2, $3, $4, $5, NULL, $6, $7, $8, $9, $10, $11::text::jsonb,
+                         to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'))
+                 ON CONFLICT (dispatch_key) DO NOTHING"#,
+            )
+            .bind(params.id)
+            .bind(params.task_id)
+            .bind(params.role)
+            .bind(attempt_seq)
+            .bind(params.dispatch_key)
+            .bind(outcome_str)
+            .bind(decision_str)
+            .bind(reason_str)
+            .bind(params.pr_url)
+            .bind(params.summary)
+            .bind(params.summary_json)
+            .execute(self.db.pool())
+            .await;
+
+            match insert {
+                Ok(_) => break,
+                Err(e)
+                    if Self::is_attempt_seq_conflict(&e)
+                        && tries + 1 < ATTEMPT_SEQ_ALLOC_RETRIES =>
+                {
+                    tries += 1;
+                }
+                Err(e) => return Err(e.into()),
+            }
+        }
 
         let row = self.get_by_dispatch_key(params.dispatch_key).await?;
         row.ok_or_else(|| {
@@ -523,34 +595,49 @@ impl TaskAttemptRepository {
         Self::validate_summary_json(params.summary_json)?;
 
         let outcome_str = TaskAttemptOutcome::Reopened.as_str();
-        let attempt_seq = self.next_attempt_seq(params.task_id).await?;
 
-        // Runtime-checked query: avoids sqlx compile-time cache dependency for
-        // this new query.  The column/parameter types mirror `insert_guard_deferred`.
-        sqlx::query(
-            r#"INSERT INTO task_attempts
-                (id, task_id, role, attempt_seq, dispatch_key, session_id, outcome,
-                 summary, summary_json, terminal_at)
-             VALUES ($1, $2, $3, $4, $5, NULL, $6, $7, $8::text::jsonb,
-                     to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'))
-             ON CONFLICT (dispatch_key) DO UPDATE SET
-                 outcome = EXCLUDED.outcome,
-                 summary = EXCLUDED.summary,
-                 summary_json = EXCLUDED.summary_json,
-                 created_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
-                 terminal_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
-                 updated_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')"#,
-        )
-        .bind(params.id)
-        .bind(params.task_id)
-        .bind(params.role)
-        .bind(attempt_seq)
-        .bind(params.dispatch_key)
-        .bind(outcome_str)
-        .bind(params.summary)
-        .bind(params.summary_json)
-        .execute(self.db.pool())
-        .await?;
+        let mut tries = 0;
+        loop {
+            let attempt_seq = self.next_attempt_seq(params.task_id).await?;
+
+            // Runtime-checked query: avoids sqlx compile-time cache dependency for
+            // this new query.  The column/parameter types mirror `insert_guard_deferred`.
+            let insert = sqlx::query(
+                r#"INSERT INTO task_attempts
+                    (id, task_id, role, attempt_seq, dispatch_key, session_id, outcome,
+                     summary, summary_json, terminal_at)
+                 VALUES ($1, $2, $3, $4, $5, NULL, $6, $7, $8::text::jsonb,
+                         to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'))
+                 ON CONFLICT (dispatch_key) DO UPDATE SET
+                     outcome = EXCLUDED.outcome,
+                     summary = EXCLUDED.summary,
+                     summary_json = EXCLUDED.summary_json,
+                     created_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
+                     terminal_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
+                     updated_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')"#,
+            )
+            .bind(params.id)
+            .bind(params.task_id)
+            .bind(params.role)
+            .bind(attempt_seq)
+            .bind(params.dispatch_key)
+            .bind(outcome_str)
+            .bind(params.summary)
+            .bind(params.summary_json)
+            .execute(self.db.pool())
+            .await;
+
+            match insert {
+                Ok(_) => break,
+                Err(e)
+                    if Self::is_attempt_seq_conflict(&e)
+                        && tries + 1 < ATTEMPT_SEQ_ALLOC_RETRIES =>
+                {
+                    tries += 1;
+                }
+                Err(e) => return Err(e.into()),
+            }
+        }
 
         let row = self.get_by_dispatch_key(params.dispatch_key).await?;
         row.ok_or_else(|| {
