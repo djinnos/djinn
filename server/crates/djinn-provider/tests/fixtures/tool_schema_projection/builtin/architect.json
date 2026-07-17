@@ -22,13 +22,12 @@
   },
   {
     "name": "task_list",
-    "description": "List tasks with optional filters for status, priority, label, and text search. Supports pagination.",
+    "description": "List tasks with optional filters and pagination.",
     "inputSchema": {
       "type": "object",
       "properties": {
         "status": {
-          "type": "string",
-          "description": "Positive (\"open\") or negative (\"!closed\") status filter. A leading \"!\" matches every task whose status differs from the given value. The pseudo-status \"merged\" matches closed tasks that actually merged (have a merge-commit SHA, or opened a PR and closed as completed) — this is what backs the Kanban Merged column."
+          "type": "string"
         },
         "issue_type": {
           "type": "string"
@@ -48,8 +47,7 @@
           "description": "Epic ID to filter by"
         },
         "sort": {
-          "type": "string",
-          "description": "priority (default), created, created_desc, updated, updated_desc, closed (closed_at DESC then created_at DESC)."
+          "type": "string"
         },
         "limit": {
           "type": "integer"
@@ -100,7 +98,7 @@
   },
   {
     "name": "memory_read",
-    "description": "Read a memory note by permalink or title from the database-backed memory store. Returns full content and metadata.",
+    "description": "Read a note by permalink or title.",
     "inputSchema": {
       "type": "object",
       "required": [
@@ -121,7 +119,7 @@
   },
   {
     "name": "memory_search",
-    "description": "Search notes and proposals in project memory. Query formulation rules: (1) write a declarative statement, not an interrogative question; (2) express one information need per query; (3) make each query self-contained; (4) omit retrieval-meta wording such as `find`, `information about`, and `search for`; (5) preserve discriminative symbol names, exact error strings, and config keys verbatim. Good query: `Authentication timeout handling for E_CONNRESET`. Bad query: `Can you find information about authentication timeout errors?` Worker-issued searches remain lexical/BM25-only until proposal 72iu supplies worker embeddings. Returns a unified result set interleaved by relevance.",
+    "description": "Search notes and proposals in project memory. Returns a unified result set interleaved by relevance.",
     "inputSchema": {
       "type": "object",
       "required": [
@@ -255,7 +253,7 @@
   },
   {
     "name": "code_search",
-    "description": "Search code across registered repos with `git grep` (basic regex). Pass `project` to search one repo, or omit it to search ALL projects at once. Served from each repo's default branch (no checkout); use shell grep for local changes.",
+    "description": "Search code across registered repos with `git grep` (basic regex). Pass `project` (UUID or owner/repo slug) to search one repo, or omit it (or pass \"*\") to search ALL registered projects at once — e.g. find every caller of a gRPC service org-wide. Served from each repo's default branch (no checkout). For your own task repo's working tree (your uncommitted changes), use shell grep instead.",
     "inputSchema": {
       "type": "object",
       "required": [
@@ -372,7 +370,7 @@
   },
   {
     "name": "code_graph",
-    "description": "Query the SCIP-built repository dependency graph. Prefer `uid` as the stable exact node input; fall back to `name` + `file_path` + `kind` when a UID is unavailable; ambiguous names return ranked candidates. Agent-boundary traversal triage controls: `limit`, `offset`, `pageLimit`, `summaryOnly`, `byDepthCounts`. Partial pages and capped summaries are triage views; absence from a page or summary is NOT evidence a node/edge/pair is absent from the full graph. `workspaces` lists available-workspace slugs plus name/node_count/commit_sha/warmed_at/status; unknown workspace degradation includes `workspace_hint`. STALENESS: pass `current_head` (your current git commit SHA) when known — every successful response will then include an additive `graph_staleness` object comparing your commit against the cached graph blob. The flag is serve-stale-with-warning only: it NEVER blocks the query and NEVER triggers re-warming; you decide whether to trust the result, retry later, or ask the user to re-warm. WHEN TO USE: capabilities = cheap discovery of supported ops/params/defaults before spending graph budget; query_subgraph = ask a natural-language question in `query` and get a token-budgeted focused subgraph with narrowing hints; search = find candidate files/symbols by substring when you do not know a key; describe = inspect one exact file/symbol key; neighbors = direct callers/callees/imports around a known key; impact = bounded transitive dependents for what-breaks-if-this-changes; context = compact bucketed incoming/outgoing context for a symbol; ranked/cycles/orphans/path/edges = broader structural queries; symbols_at/diff_touches/detect_changes = line range to touched symbols; status/metrics_at/snapshot/workspaces = graph health/introspection; api_surface/dead_symbols/deprecated_callers = public surface health; boundary_check/blast_radius/touches_hot_path = change-impact analysis; hotspots/cochange/churn/coupling_hubs = git-coupling × PageRank centrality; complexity/refactor_candidates = budget-conscious discovery of code that may be costly to maintain; crate_graph = workspace dependency graph with crates as nodes and aggregated cross-crate edges, including per-crate rollups (LOC, node count, fan-in/out, edge weights); coverage = per-(workspace, language) INDEX COVERAGE table + per-language rollup + discovered-but-unindexed source roots — the graph is best-effort and this op names exactly which workspaces are NOT indexed so you do not read a silent false negative (dead_symbols/impact/search under-report for an unindexed workspace). AFTER THIS: after capabilities call the chosen op with only required fields; after query_subgraph inspect returned seeds/budget/truncation and retry with context_filter, file_filter, edge_filters, max_depth/max_seeds, or token_budget if too broad; after search pass a returned key to describe, neighbors, context, or impact; after describe call neighbors or context for relationships, or impact for dependents; after neighbors call describe on important nodes or impact to expand beyond direct edges; after impact call blast_radius or boundary_check for review/test planning; after context call describe/impact on highlighted neighbors.",
+    "description": "Query the SCIP-built repository dependency graph. Prefer `uid` as the stable exact node input; fall back to `name` + `file_path` + `kind` when a UID is unavailable; ambiguous names return ranked candidates. Agent-boundary traversal triage controls: `limit`, `offset`, `pageLimit`, `summaryOnly`, `byDepthCounts`. Partial pages and capped summaries are triage views; absence from a page or summary is NOT evidence a node/edge/pair is absent from the full graph. `workspaces` lists available-workspace slugs plus name/node_count/commit_sha/warmed_at/status; unknown workspace degradation includes `workspace_hint`. STALENESS: pass `current_head` (your current git commit SHA) when known — every successful response will then include an additive `graph_staleness` object comparing your commit against the cached graph blob. The flag is serve-stale-with-warning only: it NEVER blocks the query and NEVER triggers re-warming; you decide whether to trust the result, retry later, or ask the user to re-warm. WHEN TO USE: capabilities = cheap discovery of supported ops/params/defaults before spending graph budget; query_subgraph = ask a natural-language question in `query` and get a token-budgeted focused subgraph with narrowing hints; search = find candidate files/symbols by substring when you do not know a key; describe = inspect one exact file/symbol key; neighbors = direct callers/callees/imports around a known key; impact = bounded transitive dependents for what-breaks-if-this-changes; context = compact bucketed incoming/outgoing context for a symbol; ranked/cycles/orphans/path/edges = broader structural queries; symbols_at/diff_touches/detect_changes = line range to touched symbols; status/metrics_at/snapshot/workspaces = graph health/introspection; api_surface/dead_symbols/deprecated_callers/route_map/shape_check/api_impact/flow = public surface and route/flow health; boundary_check/blast_radius/touches_hot_path = change-impact analysis; hotspots/cochange/churn/coupling_hubs = git-coupling × PageRank centrality; complexity/refactor_candidates = budget-conscious discovery of risky/refactorable code; crate_graph = workspace dependency graph with crates as nodes and aggregated cross-crate edges, including per-crate rollups (LOC, node count, fan-in/out, edge weights). AFTER THIS: after capabilities call the chosen op with only required fields; after query_subgraph inspect returned seeds/budget/truncation and retry with context_filter, file_filter, edge_filters, max_depth/max_seeds, or token_budget if too broad; after search pass a returned key to describe, neighbors, context, or impact; after describe call neighbors or context for relationships, or impact for dependents; after neighbors call describe on important nodes or impact to expand beyond direct edges; after impact call blast_radius or boundary_check for review/test planning; after context call describe/impact on highlighted neighbors.",
     "inputSchema": {
       "type": "object",
       "required": [
@@ -415,10 +413,9 @@
             "snapshot",
             "workspaces",
             "capabilities",
-            "crate_graph",
-            "coverage"
+            "crate_graph"
           ],
-          "description": "Graph query to perform. Start with capabilities for cheap supported-op discovery; use query_subgraph with natural-language query for a focused token-budgeted subgraph; use search when you need a key, describe/context for one key, neighbors for direct edges, and impact for bounded transitive dependents. Use coverage to see which workspaces/languages are NOT indexed before trusting a 'no callers / unused / safe to remove' result."
+          "description": "Graph query to perform. Start with capabilities for cheap supported-op discovery; use query_subgraph with natural-language query for a focused token-budgeted subgraph; use search when you need a key, describe/context for one key, neighbors for direct edges, and impact for bounded transitive dependents."
         },
         "project": {
           "type": "string",
@@ -430,7 +427,7 @@
         },
         "key": {
           "type": "string",
-          "description": "Node key: file path or SCIP symbol string (required for neighbors, impact, implementations, describe, context)"
+          "description": "Node key: file path or SCIP symbol string (required for neighbors, impact, implementations, describe)"
         },
         "direction": {
           "type": "string",
@@ -563,12 +560,6 @@
         "edge_kind": {
           "type": "string",
           "description": "Edge-kind filter for edges; for query_subgraph, a single-kind compatibility alias when edge_filters is omitted"
-        },
-        "min_confidence": {
-          "type": "number",
-          "minimum": 0.0,
-          "maximum": 1.0,
-          "description": "Minimum edge-confidence threshold for operation='impact'. Edges below this value are skipped during BFS traversal. Omit for the default (0.85), which excludes synthesized trait-dispatch edges (confidence ~0.70); lower to ~0.70 to include trait-dispatch callers in the blast radius."
         },
         "file": {
           "type": "string",
@@ -818,17 +809,16 @@
   },
   {
     "name": "ci_job_log",
-    "description": "Fetch the failing GitHub Actions CI log for this task's PR. Call with NO arguments to auto-discover the currently-failing jobs from the task's recorded CI state — it checks the PR-head lane first, then falls back to the merge-queue (merge_group) lane, so it stays accurate even after a new push makes old job ids stale. When several jobs fail it returns the first job's log with a header listing the others (name + job_id); pass `job_id` to fetch a specific one, and `step` to narrow to a single failed step. `pr_number` targets another PR in the same project's repo (e.g. planner escalation tasks whose description names the source PR). If the output is large, use output_view or output_grep to navigate it.",
+    "description": "Fetch the full log for a GitHub Actions CI job. When CI fails, the activity log tells you the job_id. Call this tool to see the actual error output. Optionally filter to a specific failed step name. If the output is large, use output_view or output_grep to navigate it.",
     "inputSchema": {
       "type": "object",
+      "required": [
+        "job_id"
+      ],
       "properties": {
         "job_id": {
           "type": "integer",
-          "description": "Optional. A specific GitHub Actions job ID to fetch directly. Omit to auto-discover the failing jobs."
-        },
-        "pr_number": {
-          "type": "integer",
-          "description": "Optional. Target this PR number in the same project's repo instead of the task's own PR (for escalation tasks that reference a source PR)."
+          "description": "The GitHub Actions job ID from the CI failure activity"
         },
         "step": {
           "type": "string",
@@ -1100,7 +1090,7 @@
   },
   {
     "name": "epic_show",
-    "description": "Show full details of an epic by UUID or short ID, including its task breakdown and blocker status.",
+    "description": "Show details for an epic by UUID or short ID.",
     "inputSchema": {
       "type": "object",
       "required": [
@@ -1177,7 +1167,7 @@
   },
   {
     "name": "epic_tasks",
-    "description": "List tasks belonging to an epic, showing status and assignee. Supports pagination.",
+    "description": "List tasks for an epic with pagination.",
     "inputSchema": {
       "type": "object",
       "required": [
@@ -1204,7 +1194,7 @@
   },
   {
     "name": "epic_close",
-    "description": "Close an epic when all work is complete and no further task waves are needed. Marks the epic as done.",
+    "description": "Close an epic. Use when all work is complete and no further waves are needed.",
     "inputSchema": {
       "type": "object",
       "required": [
@@ -1283,7 +1273,7 @@
   },
   {
     "name": "task_transition",
-    "description": "Transition a task to a new status using a named workflow action. Valid transitions depend on the current status.",
+    "description": "Transition a task using a named workflow action.",
     "inputSchema": {
       "type": "object",
       "required": [
@@ -1444,226 +1434,6 @@
     "concurrent_safe": true
   },
   {
-    "name": "memory_recall_trace",
-    "description": "Inspect persisted memory-retrieval traces for the current project. Use mode=list to triage compact trace summaries with optional filters and bounded pagination, or mode=detail with trace_id to inspect one trace and its bounded note excerpts. List/detail expose rollout_label and trace_outcome separately from candidate outcome: rollout_label is the recorded deployment label, trace_outcome is injected, empty, error, legacy_unknown, disabled_off, disabled_kill_switch, or disabled_legacy, while candidate outcomes are injected or skipped. Allowed entry points: dispatch, jit_pitfalls, load_knowledge_context, format_knowledge_notes, memory_recall_trace. Allowed skipped reasons: not_top_k, min_confidence, budget_pruned, superseded_pruned, dedupe, search_error.",
-    "inputSchema": {
-      "type": "object",
-      "oneOf": [
-        {
-          "required": [
-            "mode"
-          ],
-          "properties": {
-            "mode": {
-              "const": "list"
-            },
-            "project": {
-              "type": "string",
-              "description": "Optional project UUID or slug for direct control-plane callers; agent calls are always scoped to the current project."
-            },
-            "project_id": {
-              "type": "string",
-              "description": "Optional project UUID compatibility alias for direct control-plane callers."
-            },
-            "session_id": {
-              "type": "string"
-            },
-            "task_id": {
-              "type": "string"
-            },
-            "task_run_id": {
-              "type": "string"
-            },
-            "entry_point": {
-              "type": "string",
-              "enum": [
-                "dispatch",
-                "jit_pitfalls",
-                "load_knowledge_context",
-                "format_knowledge_notes",
-                "memory_recall_trace"
-              ],
-              "description": "Retrieval entry point."
-            },
-            "rollout_label": {
-              "type": "string",
-              "description": "Exact recorded rollout label filter."
-            },
-            "trace_outcome": {
-              "type": "string",
-              "enum": [
-                "injected",
-                "empty",
-                "error",
-                "legacy_unknown",
-                "disabled_off",
-                "disabled_kill_switch",
-                "disabled_legacy"
-              ],
-              "description": "Trace-level outcome filter, distinct from candidate outcome."
-            },
-            "outcome": {
-              "type": "string",
-              "enum": [
-                "injected",
-                "skipped"
-              ],
-              "description": "Candidate outcome filter."
-            },
-            "skipped_reason": {
-              "type": "string",
-              "enum": [
-                "not_top_k",
-                "min_confidence",
-                "budget_pruned",
-                "superseded_pruned",
-                "dedupe",
-                "search_error"
-              ],
-              "description": "Skipped-candidate reason filter."
-            },
-            "limit": {
-              "type": "integer",
-              "minimum": 1,
-              "maximum": 100,
-              "description": "Maximum compact trace summaries to return (1-100; default is server-defined)."
-            },
-            "offset": {
-              "type": "integer",
-              "minimum": 0,
-              "description": "Zero-based summary page offset."
-            }
-          },
-          "not": {
-            "required": [
-              "trace_id"
-            ]
-          }
-        },
-        {
-          "required": [
-            "mode",
-            "trace_id"
-          ],
-          "properties": {
-            "mode": {
-              "const": "detail"
-            },
-            "trace_id": {
-              "type": "string",
-              "minLength": 1,
-              "description": "Trace ID returned from a list call."
-            },
-            "project": {
-              "type": "string",
-              "description": "Optional project UUID or slug for direct control-plane callers; agent calls are always scoped to the current project."
-            },
-            "project_id": {
-              "type": "string",
-              "description": "Optional project UUID compatibility alias for direct control-plane callers."
-            }
-          },
-          "not": {
-            "anyOf": [
-              {
-                "required": [
-                  "session_id"
-                ]
-              },
-              {
-                "required": [
-                  "task_id"
-                ]
-              },
-              {
-                "required": [
-                  "task_run_id"
-                ]
-              },
-              {
-                "required": [
-                  "entry_point"
-                ]
-              },
-              {
-                "required": [
-                  "rollout_label"
-                ]
-              },
-              {
-                "required": [
-                  "trace_outcome"
-                ]
-              },
-              {
-                "required": [
-                  "outcome"
-                ]
-              },
-              {
-                "required": [
-                  "skipped_reason"
-                ]
-              },
-              {
-                "required": [
-                  "limit"
-                ]
-              },
-              {
-                "required": [
-                  "offset"
-                ]
-              }
-            ]
-          }
-        }
-      ]
-    },
-    "readOnly": true,
-    "destructive": false,
-    "idempotent": true,
-    "openWorld": false,
-    "concurrent_safe": true
-  },
-  {
-    "name": "memory_retrieval_outcomes_report",
-    "description": "Read an observational retrieval-injection outcomes report for an explicit project-scoped, timezone-aware RFC-3339 [start,end) interval. This operation is read-only and observational only: it makes no causal or randomized-experiment claim. A task run is deduplicated within each entry_point/rollout_label/outcome cell; cells with different cohort keys can overlap and are non-additive. The response returns the applied interval/timezone plus every database denominator, count, rate, not-applicable state, attempt-number distribution, and unattributed/unrecorded diagnostic. Traces without task_run_id are unattributed and excluded from rates; no fallback through task_id is used. Invalid intervals and requests outside the protected 30-day trace window are rejected without clipping.",
-    "inputSchema": {
-      "type": "object",
-      "required": [
-        "start",
-        "end",
-        "timezone"
-      ],
-      "properties": {
-        "project": {
-          "type": "string"
-        },
-        "project_id": {
-          "type": "string"
-        },
-        "start": {
-          "type": "string",
-          "format": "date-time"
-        },
-        "end": {
-          "type": "string",
-          "format": "date-time"
-        },
-        "timezone": {
-          "type": "string",
-          "minLength": 1
-        }
-      }
-    },
-    "readOnly": true,
-    "destructive": false,
-    "idempotent": true,
-    "openWorld": false,
-    "concurrent_safe": true
-  },
-  {
     "name": "agent_metrics",
     "description": "Show execution quality metrics for a role to support prompt tuning and intervention decisions.",
     "inputSchema": {
@@ -1724,21 +1494,15 @@
   },
   {
     "name": "memory_write",
-    "description": "Create a new memory note via the memory_* MCP tools. Do not attempt filesystem writes; .djinn/memory/ paths are not readable from the worker filesystem. `type` is required and routes the note (adr, pattern, case, pitfall, research, requirement, reference, design, tech_spike, session, brief, roadmap). Use [[wikilinks]] in content to connect notes.",
+    "description": "Create a new memory note via the memory_* MCP tools. Notes are stored in the project database; do not use filesystem writes. `type` is required and routes the note (adr, pattern, case, pitfall, research, requirement, reference, design, tech_spike, session, brief, roadmap). Use [[wikilinks]] in content to connect notes.",
     "inputSchema": {
       "type": "object",
-      "additionalProperties": false,
       "required": [
-        "reason",
         "title",
         "content",
         "type"
       ],
       "properties": {
-        "reason": {
-          "type": "string",
-          "description": "Required audit reason. Unicode whitespace is trimmed and blank values are rejected."
-        },
         "title": {
           "type": "string",
           "description": "Note title"
@@ -1772,21 +1536,15 @@
   },
   {
     "name": "memory_edit",
-    "description": "Edit an existing memory note in-place via memory_* MCP tools. Do not assume .djinn/memory/ paths are readable from the worker filesystem. Operations: append, prepend, find_replace (requires find_text), replace_section (requires section).",
+    "description": "Edit an existing memory note in-place via the memory_* MCP tools. Notes are stored in the project database; do not use filesystem writes. Operations: \"append\" (add to end), \"prepend\" (add after frontmatter), \"find_replace\" (exact text replacement, requires find_text), \"replace_section\" (replace content under a markdown heading, requires section).",
     "inputSchema": {
       "type": "object",
-      "additionalProperties": false,
       "required": [
-        "reason",
         "identifier",
         "operation",
         "content"
       ],
       "properties": {
-        "reason": {
-          "type": "string",
-          "description": "Required audit reason. Unicode whitespace is trimmed and blank values are rejected."
-        },
         "identifier": {
           "type": "string",
           "description": "Note permalink or title"
@@ -1821,7 +1579,7 @@
   },
   {
     "name": "memory_move",
-    "description": "Move a memory note to a different type via memory_* MCP tools. Do not assume .djinn/memory/ paths are readable from the worker filesystem; do not attempt filesystem rename. Updates the permalink and resolves inbound links automatically.",
+    "description": "Move a memory note to a different type via the memory_* MCP tools. Do not attempt filesystem rename. Updates the permalink and resolves inbound links automatically. Use type=\"proposed_adr\" to recover a mis-routed ADR draft.",
     "inputSchema": {
       "type": "object",
       "required": [

@@ -4999,7 +4999,7 @@
               "default": {}
             },
             "global_skills": {
-              "description": "Skills injected into every agent prompt regardless of role. Moved here\nfrom the pre-cut-over `.djinn/settings.json`'s `global_skills` field.\nEach entry is a skill file stem (resolved against `.djinn/skills/`).",
+              "description": "Skills injected into every agent prompt regardless of role are configured by the server.",
               "type": "array",
               "items": {
                 "type": "string"
@@ -5888,7 +5888,7 @@
               "default": {}
             },
             "global_skills": {
-              "description": "Skills injected into every agent prompt regardless of role. Moved here\nfrom the pre-cut-over `.djinn/settings.json`'s `global_skills` field.\nEach entry is a skill file stem (resolved against `.djinn/skills/`).",
+              "description": "Skills injected into every agent prompt regardless of role are configured by the server.",
               "type": "array",
               "items": {
                 "type": "string"
@@ -6719,7 +6719,7 @@
               "default": {}
             },
             "global_skills": {
-              "description": "Skills injected into every agent prompt regardless of role. Moved here\nfrom the pre-cut-over `.djinn/settings.json`'s `global_skills` field.\nEach entry is a skill file stem (resolved against `.djinn/skills/`).",
+              "description": "Skills injected into every agent prompt regardless of role are configured by the server.",
               "type": "array",
               "items": {
                 "type": "string"
@@ -12190,7 +12190,7 @@
               "default": {}
             },
             "global_skills": {
-              "description": "Skills injected into every agent prompt regardless of role. Moved here\nfrom the pre-cut-over `.djinn/settings.json`'s `global_skills` field.\nEach entry is a skill file stem (resolved against `.djinn/skills/`).",
+              "description": "Skills injected into every agent prompt regardless of role are configured by the server.",
               "type": "array",
               "items": {
                 "type": "string"
@@ -12997,7 +12997,7 @@
               "default": {}
             },
             "global_skills": {
-              "description": "Skills injected into every agent prompt regardless of role. Moved here\nfrom the pre-cut-over `.djinn/settings.json`'s `global_skills` field.\nEach entry is a skill file stem (resolved against `.djinn/skills/`).",
+              "description": "Skills injected into every agent prompt regardless of role are configured by the server.",
               "type": "array",
               "items": {
                 "type": "string"
@@ -13778,7 +13778,7 @@
               "default": {}
             },
             "global_skills": {
-              "description": "Skills injected into every agent prompt regardless of role. Moved here\nfrom the pre-cut-over `.djinn/settings.json`'s `global_skills` field.\nEach entry is a skill file stem (resolved against `.djinn/skills/`).",
+              "description": "Skills injected into every agent prompt regardless of role are configured by the server.",
               "type": "array",
               "items": {
                 "type": "string"

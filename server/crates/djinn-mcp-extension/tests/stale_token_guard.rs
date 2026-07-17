@@ -57,7 +57,7 @@ fn no_stale_token_in_tool_descriptions() {
 }
 
 #[test]
-fn memory_tool_descriptions_include_filesystem_caution() {
+fn memory_tool_descriptions_use_database_mcp_semantics() {
     let memory_tools = all_role_schemas()
         .into_iter()
         .flat_map(|(_, schemas)| schemas)
@@ -74,28 +74,16 @@ fn memory_tool_descriptions_include_filesystem_caution() {
         "expected at least one memory_* tool in the schema surface"
     );
 
-    // Only write/edit/move are mutation-capable memory tools that should
-    // carry the filesystem caution. Read/search/list are read-only and
-    // don't write, so the caution is optional for them.
-    let should_caution = ["memory_write", "memory_edit", "memory_move"];
-
     for schema in &memory_tools {
         let name = schema.get("name").and_then(|n| n.as_str()).unwrap_or("");
         let desc = schema
             .get("description")
             .and_then(|d| d.as_str())
             .unwrap_or("");
-
-        if should_caution.contains(&name) {
-            assert!(
-                desc.contains(".djinn/memory/"),
-                "tool '{name}' description should caution about .djinn/memory/ paths; got: {desc}"
-            );
-            assert!(
-                desc.contains("worker filesystem"),
-                "tool '{name}' description should warn about worker filesystem; got: {desc}"
-            );
-        }
+        assert!(
+            desc.contains("project database"),
+            "tool '{name}' must describe database-backed memory: {desc}"
+        );
     }
 }
 
