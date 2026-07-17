@@ -467,6 +467,7 @@ mod tests {
     use djinn_runtime::GraphWarmerService;
     use futures::FutureExt;
     use k8s_openapi::api::batch::v1::Job;
+    use sqlx::Executor;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use tokio::sync::Notify;
 
@@ -636,6 +637,99 @@ mod tests {
             posts.load(Ordering::SeqCst),
             1,
             "released capacity retries the pending warm"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn concrete_k8s_warmer_keeps_failed_create_started_pending_without_posting() {
+        let db = Database::open_in_memory().unwrap();
+        let journal = Arc::new(AdmissionJournalRepository::new(db.clone()));
+        let controller = Arc::new(BuildAdmissionController::new(
+            Arc::clone(&journal),
+            BuildAdmissionMode::Enforce,
+            1,
+            "epoch",
+        ));
+        let project_id = seed_project_with_ready_image(&db, "create-started-failure").await;
+        let work_id = format!("graph-warm:{project_id}:unknown");
+        let posts = Arc::new(AtomicUsize::new(0));
+        let posted = Arc::new(Notify::new());
+        let warmer = K8sGraphWarmer::with_dispatcher(
+            KubernetesConfig::for_testing(),
+            db.clone(),
+            Arc::new(AdmissionStateRecordingDispatcher {
+                journal: Arc::clone(&journal),
+                work_id: work_id.clone(),
+                posts: Arc::clone(&posts),
+                posted: Arc::clone(&posted),
+            }),
+            Arc::new(FencedTerminalWatcher),
+        )
+        .with_warm_admission(controller);
+
+        // Fail the real controller durable state transition after it reserves
+        // the warm row, rather than substituting a fake WarmAdmission.
+        db.pool()
+            .execute(
+                "CREATE FUNCTION reject_warm_create_started() RETURNS trigger AS $$ \
+                 BEGIN \
+                   IF NEW.state = 'create_in_flight' THEN \
+                     RAISE EXCEPTION 'journal temporarily unavailable'; \
+                   END IF; \
+                   RETURN NEW; \
+                 END; \
+                 $$ LANGUAGE plpgsql;",
+            )
+            .await
+            .unwrap();
+        db.pool()
+            .execute(
+                "CREATE TRIGGER reject_warm_create_started \
+                 BEFORE UPDATE ON admission_journal \
+                 FOR EACH ROW EXECUTE FUNCTION reject_warm_create_started();",
+            )
+            .await
+            .unwrap();
+
+        warmer.trigger(&project_id).await;
+        assert_eq!(
+            posts.load(Ordering::SeqCst),
+            0,
+            "a real-controller CreateStarted failure must perform zero POSTs"
+        );
+        assert_eq!(
+            journal
+                .list_history(AdmissionDomain::WarmBuild, &work_id)
+                .await
+                .unwrap()[0]
+                .state,
+            AdmissionState::Reserved,
+            "the failed transition retains the coalesced warm reservation"
+        );
+        warmer.trigger(&project_id).await;
+        assert_eq!(
+            posts.load(Ordering::SeqCst),
+            0,
+            "an immediate retrigger coalesces onto the pending warm"
+        );
+
+        db.pool()
+            .execute("DROP TRIGGER reject_warm_create_started ON admission_journal;")
+            .await
+            .unwrap();
+        db.pool()
+            .execute("DROP FUNCTION reject_warm_create_started();")
+            .await
+            .unwrap();
+        let post = posted.notified();
+        tokio::pin!(post);
+        tokio::task::yield_now().await;
+        tokio::time::advance(std::time::Duration::from_secs(1)).await;
+        post.await;
+        assert_eq!(
+            posts.load(Ordering::SeqCst),
+            1,
+            "the retained warm retries after the journal transition becomes durable"
         );
     }
 
