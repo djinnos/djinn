@@ -785,6 +785,22 @@ impl FakeProvider {
             scripted_turns: Arc::new(StdMutex::new(scripted_turns)),
         }
     }
+    /// Create a provider whose scripted turns are followed by an explicit
+    /// terminal stream error. This lets reply-loop tests exercise recoverable
+    /// turns before terminating without relying on script-exhaustion panic.
+    pub fn script_with_terminal_error(
+        turns: Vec<Vec<StreamEvent>>,
+        message: impl Into<String>,
+    ) -> Self {
+        let mut scripted_turns: VecDeque<Vec<anyhow::Result<StreamEvent>>> = turns
+            .into_iter()
+            .map(|turn| turn.into_iter().map(Ok).collect())
+            .collect();
+        scripted_turns.push_back(vec![Err(anyhow::anyhow!(message.into()))]);
+        Self {
+            scripted_turns: Arc::new(StdMutex::new(scripted_turns)),
+        }
+    }
     /// How many scripted turns remain.
     pub fn remaining(&self) -> usize {
         self.scripted_turns.lock().unwrap().len()

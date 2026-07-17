@@ -419,11 +419,10 @@ async fn ineligible_result_is_persisted_and_valid_resubmission_is_reverified() {
 #[tokio::test]
 async fn terminal_error_exhausts_conversation_without_success_or_submission() {
     let fixture = make_fixture(vec![coordinator_error("persistence unavailable")]).await;
-    let provider = FakeProvider::script(vec![submit_turn(
-        "submit-error",
-        &fixture.task_id,
-        "attempt",
-    )]);
+    let provider = FakeProvider::script_with_terminal_error(
+        vec![submit_turn("submit-error", &fixture.task_id, "attempt")],
+        "terminal provider failure after submit-error",
+    );
     let mut conversation = base_conversation();
     let (result, output, _, _, _, _) = run_with_provider(
         &provider,
@@ -439,8 +438,9 @@ async fn terminal_error_exhausts_conversation_without_success_or_submission() {
 
     assert!(
         result.is_err(),
-        "script exhaustion terminates the real reply loop"
+        "explicit provider failure terminates the real reply loop"
     );
+    assert_eq!(provider.remaining(), 0, "terminal provider turn consumed");
     assert_eq!(fixture.callbacks.coordinator_count(), 1);
     assert!(output.finalize_payload.is_none());
     assert!(output.completion_intent.is_none());
@@ -455,11 +455,14 @@ async fn three_non_stored_attempts_each_reach_verification_and_never_succeed() {
         ineligible("command three failed"),
     ])
     .await;
-    let provider = FakeProvider::script(vec![
-        submit_turn("submit-1", &fixture.task_id, "attempt one"),
-        submit_turn("submit-2", &fixture.task_id, "attempt two"),
-        submit_turn("submit-3", &fixture.task_id, "attempt three"),
-    ]);
+    let provider = FakeProvider::script_with_terminal_error(
+        vec![
+            submit_turn("submit-1", &fixture.task_id, "attempt one"),
+            submit_turn("submit-2", &fixture.task_id, "attempt two"),
+            submit_turn("submit-3", &fixture.task_id, "attempt three"),
+        ],
+        "terminal provider failure after three non-stored attempts",
+    );
     let mut conversation = base_conversation();
     let (result, output, _, _, _, _) = run_with_provider(
         &provider,
@@ -474,6 +477,7 @@ async fn three_non_stored_attempts_each_reach_verification_and_never_succeed() {
     .await;
 
     assert!(result.is_err());
+    assert_eq!(provider.remaining(), 0, "terminal provider turn consumed");
     assert_eq!(fixture.callbacks.coordinator_count(), 3);
     assert!(output.finalize_payload.is_none());
     assert!(output.completion_intent.is_none());
