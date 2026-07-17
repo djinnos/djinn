@@ -1263,6 +1263,7 @@ dependencies = [
  "hex",
  "hmac",
  "insta",
+ "k8s-openapi",
  "libc",
  "regex",
  "reqwest 0.13.4",
