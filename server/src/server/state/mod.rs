@@ -53,6 +53,74 @@ const EVENT_CHANNEL_CAPACITY: usize = 1024;
 const SETTINGS_RAW_KEY: &str = "settings.raw";
 const MODEL_HEALTH_STATE_KEY: &str = "model_health.state";
 
+const BUILD_ADMISSION_MODE_ENV: &str = "DJINN_BUILD_ADMISSION_MODE";
+const MAX_BUILD_TASKRUNS_ENV: &str = "DJINN_MAX_BUILD_TASKRUNS";
+
+/// Immutable build-admission startup policy. It is parsed before composition,
+/// so an environment change only takes effect after a process restart.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct BuildAdmissionConfig {
+    mode: BuildAdmissionMode,
+    cap: i64,
+}
+
+impl BuildAdmissionConfig {
+    const DEFAULT_CAP: i64 = 3;
+    const MAX_CAP: i64 = 64;
+
+    fn from_env() -> Result<Self, String> {
+        Self::parse(
+            std::env::var(BUILD_ADMISSION_MODE_ENV).ok().as_deref(),
+            std::env::var(MAX_BUILD_TASKRUNS_ENV).ok().as_deref(),
+        )
+    }
+
+    fn parse(mode: Option<&str>, cap: Option<&str>) -> Result<Self, String> {
+        let explicit_mode = match mode {
+            None => None,
+            Some("off") => Some(BuildAdmissionMode::Off),
+            Some("observe") => Some(BuildAdmissionMode::Observe),
+            Some("enforce") => Some(BuildAdmissionMode::Enforce),
+            Some("") => return Err(format!("{BUILD_ADMISSION_MODE_ENV} must not be empty")),
+            Some(value) => {
+                return Err(format!(
+                    "{BUILD_ADMISSION_MODE_ENV} must be exactly off, observe, or enforce (got {value:?})"
+                ));
+            }
+        };
+        let parsed_cap = match cap {
+            None => None,
+            Some("") => return Err(format!("{MAX_BUILD_TASKRUNS_ENV} must not be empty")),
+            Some(value) => Some(value.parse::<i64>().map_err(|_| {
+                format!(
+                    "{MAX_BUILD_TASKRUNS_ENV} must be an integer from 1 through 64 (got {value:?})"
+                )
+            })?),
+        };
+        if parsed_cap == Some(0) {
+            return match explicit_mode {
+                Some(BuildAdmissionMode::Observe | BuildAdmissionMode::Enforce) => Err(format!(
+                    "{MAX_BUILD_TASKRUNS_ENV}=0 conflicts with explicit {BUILD_ADMISSION_MODE_ENV}"
+                )),
+                _ => Ok(Self {
+                    mode: BuildAdmissionMode::Off,
+                    cap: 0,
+                }),
+            };
+        }
+        let cap = parsed_cap.unwrap_or(Self::DEFAULT_CAP);
+        if !(1..=Self::MAX_CAP).contains(&cap) {
+            return Err(format!(
+                "{MAX_BUILD_TASKRUNS_ENV} must be an integer from 1 through 64 (got {cap})"
+            ));
+        }
+        Ok(Self {
+            mode: explicit_mode.unwrap_or(BuildAdmissionMode::Observe),
+            cap,
+        })
+    }
+}
+
 /// Production [`WarmCompletionSink`]: converge the server's in-memory
 /// canonical-graph slot after an *out-of-pod* warm Job succeeds.
 ///
@@ -350,11 +418,8 @@ struct Inner {
     /// dispatch through this handle rather than constructing a warmer
     /// per-call.
     pub graph_warmer: tokio::sync::RwLock<Option<Arc<dyn GraphWarmerService>>>,
-    /// The one admission controller for this server process. It is shared by
-    /// task-run dispatch and the concrete K8s graph warmer before either is
-    /// erased behind `GraphWarmerService`, so both workloads reserve from one
-    /// atomic durable cap.
-    pub build_admission: Arc<BuildAdmissionController>,
+    /// The admission controller for this server process when admission is enabled.
+    pub build_admission: Option<Arc<BuildAdmissionController>>,
 }
 
 /// Result of a boot token exchange attempt.
@@ -378,6 +443,10 @@ impl AppState {
             cancel,
             djinn_core::doctor::RetrievalHealthConfig::default(),
             Arc::new(djinn_telemetry::memory_retrieval::MemoryRetrievalMetrics::new()),
+            BuildAdmissionConfig {
+                mode: BuildAdmissionMode::Observe,
+                cap: BuildAdmissionConfig::DEFAULT_CAP,
+            },
         )
     }
 
@@ -387,8 +456,16 @@ impl AppState {
         cancel: CancellationToken,
         retrieval_config: djinn_core::doctor::RetrievalHealthConfig,
         retrieval_metrics: Arc<djinn_telemetry::memory_retrieval::MemoryRetrievalMetrics>,
-    ) -> Self {
-        Self::new_inner(db, db_runtime, cancel, retrieval_config, retrieval_metrics)
+    ) -> Result<Self, String> {
+        let admission_config = BuildAdmissionConfig::from_env()?;
+        Ok(Self::new_inner(
+            db,
+            db_runtime,
+            cancel,
+            retrieval_config,
+            retrieval_metrics,
+            admission_config,
+        ))
     }
 
     fn new_inner(
@@ -397,19 +474,19 @@ impl AppState {
         cancel: CancellationToken,
         retrieval_config: djinn_core::doctor::RetrievalHealthConfig,
         retrieval_metrics: Arc<djinn_telemetry::memory_retrieval::MemoryRetrievalMetrics>,
+        admission_config: BuildAdmissionConfig,
     ) -> Self {
         let (events, _) = broadcast::channel(EVENT_CHANNEL_CAPACITY);
         let mirror = Arc::new(MirrorManager::new(mirrors_root()));
         let workspace_store = Arc::new(WorkspaceStore::new(workspaces_root(), Arc::clone(&mirror)));
-        let build_admission = Arc::new(BuildAdmissionController::new(
-            Arc::new(djinn_db::AdmissionJournalRepository::new(db.clone())),
-            BuildAdmissionMode::Enforce,
-            std::env::var("DJINN_BUILD_ADMISSION_CAP")
-                .ok()
-                .and_then(|value| value.parse().ok())
-                .unwrap_or(50),
-            std::env::var("HOSTNAME").unwrap_or_else(|_| "coordinator".to_owned()),
-        ));
+        let build_admission = (admission_config.mode != BuildAdmissionMode::Off).then(|| {
+            Arc::new(BuildAdmissionController::new(
+                Arc::new(djinn_db::AdmissionJournalRepository::new(db.clone())),
+                admission_config.mode,
+                admission_config.cap,
+                std::env::var("HOSTNAME").unwrap_or_else(|_| "coordinator".to_owned()),
+            ))
+        });
         Self {
             inner: Arc::new(Inner {
                 db,
@@ -670,8 +747,11 @@ impl AppState {
                         "graph_warmer: wiring K8sGraphWarmer"
                     );
                     let warmer = K8sGraphWarmer::new(client, config, self.db().clone())
-                        .with_completion_sink(Arc::new(CanonicalGraphInvalidationSink))
-                        .with_warm_admission(self.inner.build_admission.clone());
+                        .with_completion_sink(Arc::new(CanonicalGraphInvalidationSink));
+                    let warmer = match self.inner.build_admission.clone() {
+                        Some(admission) => warmer.with_warm_admission(admission),
+                        None => warmer,
+                    };
                     Arc::new(warmer) as Arc<dyn GraphWarmerService>
                 }
                 Err(e) => {
@@ -724,13 +804,14 @@ impl AppState {
         let db = db_runtime
             .bootstrap()
             .map_err(|e| anyhow::anyhow!("open database runtime: {e}"))?;
-        Ok(Self::new_with_runtime(
+        Self::new_with_runtime(
             db,
             db_runtime,
             cancel,
             djinn_core::doctor::RetrievalHealthConfig::default(),
             Arc::new(djinn_telemetry::memory_retrieval::MemoryRetrievalMetrics::new()),
-        ))
+        )
+        .map_err(anyhow::Error::msg)
     }
 
     /// Read-only snapshot of the active GitHub App configuration, if any.
@@ -1463,24 +1544,26 @@ impl AppState {
                 role_priorities: std::collections::HashMap::new(),
             },
         );
-        let coordinator = djinn_agent::actors::coordinator::spawn_coordinator(
-            djinn_agent::actors::coordinator::CoordinatorDeps::new(
-                self.events().clone(),
-                self.cancel().clone(),
-                self.db().clone(),
-                pool.clone(),
-                self.catalog().clone(),
-                self.health_tracker().clone(),
-                self.inner.role_registry.clone(),
-                self.inner.background_work_tasks.clone(),
-                self.inner.lsp.clone(),
-            )
-            .with_build_admission(self.inner.build_admission.clone())
-            .with_graph_warmer(self.graph_warmer().await)
-            .with_mirror(self.inner.mirror.clone())
-            .with_runtime_ops(Arc::new(self.clone()))
-            .with_rpc_registry(self.inner.rpc_registry.clone()),
-        );
+        let deps = djinn_agent::actors::coordinator::CoordinatorDeps::new(
+            self.events().clone(),
+            self.cancel().clone(),
+            self.db().clone(),
+            pool.clone(),
+            self.catalog().clone(),
+            self.health_tracker().clone(),
+            self.inner.role_registry.clone(),
+            self.inner.background_work_tasks.clone(),
+            self.inner.lsp.clone(),
+        )
+        .with_graph_warmer(self.graph_warmer().await)
+        .with_mirror(self.inner.mirror.clone())
+        .with_runtime_ops(Arc::new(self.clone()))
+        .with_rpc_registry(self.inner.rpc_registry.clone());
+        let deps = match self.inner.build_admission.clone() {
+            Some(admission) => deps.with_build_admission(admission),
+            None => deps,
+        };
+        let coordinator = djinn_agent::actors::coordinator::spawn_coordinator(deps);
 
         *self.inner.pool.lock().await = Some(pool.clone());
         *self.inner.coordinator.lock().await = Some(coordinator.clone());
