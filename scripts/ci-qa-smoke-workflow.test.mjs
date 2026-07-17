@@ -5,6 +5,14 @@ import test from 'node:test';
 
 const WORKFLOW = resolve('.github/workflows/quality-gate.yml');
 
+// qa-smoke may use only its local Postgres service and deterministic mocks. Do
+// not enumerate providers here: the catalog can gain providers independently of
+// this contract. Credential-shaped names catch both catalog API keys and OAuth
+// tokens, while explicitly permitting names reserved for local test doubles.
+const LIVE_PROVIDER_CREDENTIAL = /\$\{\{\s*(?:secrets|vars|env)\.|\b(?![A-Z0-9_]*(?:TEST|MOCK|FAKE)[A-Z0-9_]*\b)[A-Z][A-Z0-9_]*(?:_(?:API|ACCESS|SECRET|AUTH|BEARER)_?(?:KEY|TOKEN)|_ACCESS_KEY(?:_ID)?|_TOKEN|_KEY)\b/i;
+const EXTERNAL_NETWORK_URL = /\bhttps?:\/\//i;
+const EXTERNAL_NETWORK_CLIENT = /\b(?:curl|wget|invoke-webrequest)\b/i;
+
 function fail(message) {
   throw new Error(`ci-qa-smoke-workflow: ${message}`);
 }
@@ -100,11 +108,26 @@ function assertQaJobHasNoLiveDependencies(job) {
     'qa-smoke must not depend on Kubernetes or local-cluster tooling');
   assert.doesNotMatch(source, /\b(?:nightly[-_ ]live|live[-_ ](?:provider|credential|scenario|execution))\b/i,
     'qa-smoke must not run nightly/live-only work');
-  assert.doesNotMatch(source, /\$\{\{\s*secrets\.|\b(?:OPENAI|ANTHROPIC|GOOGLE|AWS)_API(?:_|-)?KEY\b/i,
-    'qa-smoke must not receive live provider credentials');
+  assert.doesNotMatch(source, LIVE_PROVIDER_CREDENTIAL,
+    'qa-smoke must not receive live provider credentials or credential expressions');
+  assert.doesNotMatch(source, EXTERNAL_NETWORK_URL,
+    'qa-smoke must not call external provider endpoints');
+  assert.doesNotMatch(source, EXTERNAL_NETWORK_CLIENT,
+    'qa-smoke must not use external-network clients');
   assert.doesNotMatch(source, /127\.0\.0\.1:543[2-9]\/(?!postgres\b|djinn_test_template\b)/,
     'qa-smoke must not target a shared or developer database');
 }
+
+test('qa-smoke live dependency guards cover catalog additions and provider URLs', () => {
+  assert.match('MINIMAX_API_KEY: ${{ env.MINIMAX_API_KEY }}', LIVE_PROVIDER_CREDENTIAL,
+    'provider credential names must fail closed even when sourced from env');
+  assert.match('https://api.minimax.io/anthropic/v1', EXTERNAL_NETWORK_URL,
+    'direct provider endpoints must fail closed');
+  assert.match('curl https://api.minimax.io/anthropic/v1', EXTERNAL_NETWORK_CLIENT,
+    'provider endpoint clients must fail closed');
+  assert.doesNotMatch('MOCK_PROVIDER_API_KEY', LIVE_PROVIDER_CREDENTIAL,
+    'deterministic mock credentials may remain local');
+});
 
 test('qa-smoke consumes the routed output and is event-safe', () => {
   const parsed = parseJobs(readFileSync(WORKFLOW, 'utf8'));
