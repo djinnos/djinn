@@ -50,6 +50,8 @@ jobs:
         run: node --test scripts/ci-changed-scope.test.mjs
       - name: Verify cache ownership policy
         run: node --test scripts/ci-cache-policy.test.mjs
+      - name: Verify qa-smoke workflow contract
+        run: node --test scripts/ci-qa-smoke-workflow.test.mjs
       - name: Verify retirement manifest generator contract
         run: node --test scripts/test-djinn-retirement-manifest.mjs
       - name: Run retirement manifest strict reconciliation guard
