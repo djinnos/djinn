@@ -653,7 +653,13 @@ scenarios:
         assert_eq!(
             *captured_args.lock().unwrap(),
             vec![
-                "test", "-p", "djinn-qa", "--test", "scenario_contract", "--", "--exact",
+                "test",
+                "-p",
+                "djinn-qa",
+                "--test",
+                "scenario_contract",
+                "--",
+                "--exact",
                 "scenario::tests::exact_match",
             ]
         );
@@ -676,7 +682,10 @@ scenarios:
             selector: "scenario::tests::missing".into(),
         };
         let error = executor.execute(Path::new("."), &execution).unwrap_err();
-        assert!(error.contains("executed zero tests"), "unexpected error: {error}");
+        assert!(
+            error.contains("executed zero tests"),
+            "unexpected error: {error}"
+        );
     }
 
     #[test]
