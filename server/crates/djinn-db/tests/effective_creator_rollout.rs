@@ -264,66 +264,152 @@ fn inventoried_producers_reach_the_transactional_provenance_boundary() {
     );
 }
 
-/// Recursively collect Rust test and shared-test-helper sources.
-fn fixture_test_sources(dir: &Path, root: &Path, result: &mut Vec<PathBuf>) {
+/// Collect every Rust file; test code is selected syntactically below so inline
+/// `#[cfg(test)]` modules in production-named files cannot be omitted.
+fn rust_sources(dir: &Path, result: &mut Vec<PathBuf>) {
     for entry in std::fs::read_dir(dir).expect("source tree readable") {
         let path = entry.expect("directory entry readable").path();
         if path.is_dir() {
-            fixture_test_sources(&path, root, result);
+            rust_sources(&path, result);
             continue;
         }
-        let relative = path.strip_prefix(root).expect("under repository root");
-        let text = relative.to_string_lossy();
-        if path.extension().is_some_and(|ext| ext == "rs")
-            && (text.contains("/tests/")
-                || text.ends_with("_tests.rs")
-                || text.ends_with("/tests.rs")
-                || text.ends_with("/test_helpers.rs"))
-        {
+        if path.extension().is_some_and(|ext| ext == "rs") {
             result.push(path);
         }
     }
 }
 
-/// Fixture builders and fixture-bearing direct tests must not use the
-/// creator-less convenience insertion API. The only permitted uses are
-/// deliberately session-scoped tests and intentional
-/// `effective_creator_unavailable` resolver tests; both are recognized from
-/// the enclosing callsite body, not from a file allowlist.
+fn brace_end(source: &str, open: usize) -> Option<usize> {
+    let mut depth = 0_i32;
+    for (relative, byte) in source[open..].bytes().enumerate() {
+        match byte {
+            b'{' => depth += 1,
+            b'}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(open + relative + 1);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn inline_test_ranges(source: &str) -> Vec<std::ops::Range<usize>> {
+    let mut ranges = Vec::new();
+    let mut from = 0;
+    while let Some(relative) = source[from..].find("#[cfg(test)]") {
+        let attribute = from + relative;
+        let after_attribute = &source[attribute + "#[cfg(test)]".len()..];
+        let trimmed = after_attribute.trim_start();
+        let Some(after_mod) = trimmed.strip_prefix("mod ") else {
+            from = attribute + "#[cfg(test)]".len();
+            continue;
+        };
+        let module = source.len() - after_mod.len();
+        let Some(open_relative) = source[module..].find('{') else {
+            break;
+        };
+        let open = module + open_relative;
+        let Some(end) = brace_end(source, open) else {
+            break;
+        };
+        ranges.push(attribute..end);
+        from = end;
+    }
+    ranges
+}
+
+fn external_test_source(relative: &str) -> bool {
+    relative.contains("/tests/")
+        || relative.ends_with("/tests.rs")
+        || relative.ends_with("_tests.rs")
+        || relative.ends_with("_test.rs")
+        || relative.ends_with("/test_helpers.rs")
+}
+
+fn test_function_callsites(relative: &str, source: &str) -> Vec<(String, String)> {
+    let inline_ranges = inline_test_ranges(source);
+    let external = external_test_source(relative);
+    function_symbols(source)
+        .into_iter()
+        .filter(|(_, offset)| external || inline_ranges.iter().any(|range| range.contains(offset)))
+        .filter_map(|(symbol, _)| extract_function_body(source, &symbol).map(|body| (symbol, body)))
+        .filter(|(_, body)| {
+            LEGACY_CREATE_METHODS
+                .iter()
+                .any(|method| body.contains(method))
+        })
+        .collect()
+}
+
+/// Exceptions are proven by their exact enclosing function, never inferred
+/// from a filename or test name. A scoped call establishes `SESSION_USER_ID`;
+/// a negative resolver case names its structured unavailable-creator failure.
+fn permitted_creatorless_callsite(body: &str) -> bool {
+    (body.contains("SESSION_USER_ID") && body.contains(".scope("))
+        || body.contains("effective_creator_unavailable")
+}
+
+fn unscoped_test_task_callsites(relative: &str, source: &str) -> Vec<String> {
+    test_function_callsites(relative, source)
+        .into_iter()
+        .filter(|(_, body)| !permitted_creatorless_callsite(body))
+        .map(|(symbol, _)| format!("{relative}::{symbol}"))
+        .collect()
+}
+
+/// Every test-only convenience insertion is rejected by default. The only
+/// exceptions are exact callsites whose body establishes `SESSION_USER_ID` or
+/// intentionally asserts `effective_creator_unavailable`; persisted fixtures
+/// must call `create_in_project_with_provenance` at insertion time.
 #[test]
 fn fixture_task_creation_callsites_have_creator_provenance() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../");
     let mut files = Vec::new();
-    fixture_test_sources(&root.join("server"), &root, &mut files);
+    rust_sources(&root.join("server"), &mut files);
     let mut violations = Vec::new();
 
     for file in files {
         let source = std::fs::read_to_string(&file).expect("fixture source readable");
         let relative = file.strip_prefix(&root).unwrap().display().to_string();
-        for (symbol, _) in function_symbols(&source) {
-            let Some(body) = extract_function_body(&source, &symbol) else {
-                continue;
-            };
-            if !body.contains(".create_in_project(") {
-                continue;
-            }
-            let fixture_boundary = relative.ends_with("/test_helpers.rs")
-                || symbol.contains("fixture")
-                || symbol.contains("replay")
-                || symbol.contains("seed_");
-            if !fixture_boundary {
-                continue;
-            }
-            let deliberately_scoped = body.contains("SESSION_USER_ID") && body.contains(".scope(");
-            let intentional_negative = body.contains("effective_creator_unavailable");
-            if !deliberately_scoped && !intentional_negative {
-                violations.push(format!("{relative}::{symbol}"));
-            }
-        }
+        violations.extend(unscoped_test_task_callsites(&relative, &source));
     }
 
     assert!(
         violations.is_empty(),
         "fixture task insertion requires persisted explicit provenance; unscoped callsites: {violations:?}"
+    );
+}
+
+#[test]
+fn callsite_classifier_rejects_ordinary_inline_and_external_tests() {
+    let inline = r#"
+        #[cfg(test)]
+        mod tests { #[test] fn ordinary_case() { repo.create_in_project(); } }
+    "#;
+    assert_eq!(
+        unscoped_test_task_callsites("server/crates/example/src/ordinary.rs", inline),
+        vec!["server/crates/example/src/ordinary.rs::ordinary_case"]
+    );
+    let external = r#"#[test] fn ordinary_case() { repo.create_in_project(); }"#;
+    assert_eq!(
+        unscoped_test_task_callsites("server/crates/example/tests/ordinary.rs", external),
+        vec!["server/crates/example/tests/ordinary.rs::ordinary_case"]
+    );
+}
+
+#[test]
+fn callsite_classifier_accepts_exact_scoped_and_unavailable_cases() {
+    let source = r#"
+        #[cfg(test)]
+        mod tests {
+            fn scoped() { let _scope = SESSION_USER_ID.scope(Some("real-user".into()), async {}); repo.create_in_project(); }
+            fn unavailable() { let error = "effective_creator_unavailable"; repo.create_in_project(); assert!(error.contains("effective_creator_unavailable")); }
+        }
+    "#;
+    assert!(
+        unscoped_test_task_callsites("server/crates/example/src/ordinary.rs", source).is_empty()
     );
 }
