@@ -263,3 +263,26 @@ fn inventoried_producers_reach_the_transactional_provenance_boundary() {
         "fixture must exactly cover every discovered production task writer"
     );
 }
+
+/// Regression guard for fixture boundaries which do not establish a
+/// `SESSION_USER_ID` scope. These helpers are reused by behavioral tests, so a
+/// creator-less convenience insert here would fail only after setup has already
+/// hidden the provenance error. Session-scoped resolver tests intentionally use
+/// the convenience API elsewhere and are not fixture boundaries.
+#[test]
+fn unscoped_fixture_boundaries_use_insertion_time_provenance() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../");
+    let fixture_sources = [
+        "server/crates/djinn-slot/src/test_helpers.rs",
+        "server/crates/djinn-coordinator/src/refinement_evidence_resume_tests.rs",
+        "server/crates/djinn-coordinator/src/refinement_e2e_evidence_regression_tests.rs",
+    ];
+
+    for path in fixture_sources {
+        let source = std::fs::read_to_string(root.join(path)).expect("fixture source readable");
+        assert!(
+            !source.contains(".create_in_project("),
+            "{path}: unscoped fixture inserts must use create_in_project_with_provenance with a persisted user"
+        );
+    }
+}

@@ -5,7 +5,9 @@ use crate::refinement_dispatch::refinement_cap_tests::{
     TEST_MODEL, build_refinement_actor, seed_refinement_fixture, spawn_test_pool,
 };
 use djinn_core::events::{DjinnEventEnvelope, EventBus};
-use djinn_db::{ProposalDebateTrailCreateInput, ProposalRepository, TaskRepository};
+use djinn_db::{
+    EffectiveCreatorProvenance, ProposalDebateTrailCreateInput, ProposalRepository, TaskRepository,
+};
 
 /// Successful evidence receipt clears the linked spike/claim and resumes with
 /// the next Advocate task, carrying the findings adjacent to proposal/debate context.
@@ -19,9 +21,14 @@ async fn evidence_receipt_clears_link_and_dispatches_advocate_with_findings_cont
     let task_repo = TaskRepository::new(db.clone(), EventBus::noop());
 
     let spike_task_id = task_repo
-        .create_in_project(
+        .create_in_project_with_provenance(
             &fixture.project_id,
             None,
+            EffectiveCreatorProvenance {
+                explicit_user_id: Some(&fixture.user_id),
+                source_task_id: None,
+                proposal_id: None,
+            },
             "Evidence spike",
             "Investigate the load-bearing claim",
             "",
@@ -152,9 +159,14 @@ async fn evidence_receipt_respects_freeze_without_auto_dispatch() {
     let task_repo = TaskRepository::new(db.clone(), EventBus::noop());
 
     let spike_task_id = task_repo
-        .create_in_project(
+        .create_in_project_with_provenance(
             &fixture.project_id,
             None,
+            EffectiveCreatorProvenance {
+                explicit_user_id: Some(&fixture.user_id),
+                source_task_id: None,
+                proposal_id: None,
+            },
             "Frozen evidence spike",
             "Investigate while frozen",
             "",
