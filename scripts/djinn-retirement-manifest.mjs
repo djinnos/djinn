@@ -700,6 +700,13 @@ export function validateKnowledgeManifest(manifest, expected) {
       );
     }
 
+    if (entry.disposition !== 'approved_discard' &&
+        (typeof entry.rationale !== 'string' || entry.rationale.trim().length === 0)) {
+      throw new ManifestError(`entry ${p} has an empty rationale`, {
+        code: 'empty_rationale', entry: { repository_path: p },
+      });
+    }
+
     // equivalent / db_supersedes_file require a preserved DB identity.
     if (
       (entry.disposition === 'equivalent' || entry.disposition === 'db_supersedes_file') &&
@@ -742,6 +749,44 @@ export function validateKnowledgeManifest(manifest, expected) {
         code: 'invalid_normalized_hash',
         entry: { repository_path: p },
       });
+    }
+    if (typeof entry.permalink !== 'string' || entry.permalink.length === 0) {
+      throw new ManifestError(`entry ${p} is missing permalink`, {
+        code: 'entry_missing_permalink', entry: { repository_path: p },
+      });
+    }
+    if (entry.db_selection !== null) {
+      const db = entry.db_selection;
+      if (!db || typeof db !== 'object' || typeof db.uuid !== 'string' || db.uuid.length === 0) {
+        throw new ManifestError(`entry ${p} has an invalid DB identity`, {
+          code: 'invalid_db_identity', entry: { repository_path: p },
+        });
+      }
+      if (db.permalink !== entry.permalink) {
+        throw new ManifestError(`entry ${p} DB permalink does not match its permalink`, {
+          code: 'db_permalink_mismatch', entry: { repository_path: p },
+        });
+      }
+      if (!['active', 'archived', 'deprecated'].includes(db.status)) {
+        throw new ManifestError(`entry ${p} has an invalid DB status`, {
+          code: 'invalid_db_status', entry: { repository_path: p },
+        });
+      }
+      if (!/^[0-9a-f]{64}$/.test(db.normalized_sha256 || '')) {
+        throw new ManifestError(`entry ${p} has an invalid DB normalized hash`, {
+          code: 'invalid_db_hash', entry: { repository_path: p },
+        });
+      }
+      if (entry.disposition === 'equivalent' && db.normalized_sha256 !== entry.normalized_sha256) {
+        throw new ManifestError(`entry ${p} is equivalent but its normalized hashes differ`, {
+          code: 'equivalent_hash_mismatch', entry: { repository_path: p },
+        });
+      }
+      if (entry.disposition === 'db_supersedes_file' && db.normalized_sha256 === entry.normalized_sha256) {
+        throw new ManifestError(`entry ${p} is superseded but its normalized hashes match`, {
+          code: 'superseded_hash_match', entry: { repository_path: p },
+        });
+      }
     }
   }
 
@@ -842,8 +887,132 @@ export function validateDbGuidanceManifest(guidanceManifest) {
         code: 'guidance_invalid_hash', entry: { uuid: entry.uuid },
       });
     }
+    if (!['active', 'archived', 'deprecated'].includes(entry.status)) {
+      throw new ManifestError(`guidance entry ${entry.uuid} has invalid status`, {
+        code: 'guidance_invalid_status', entry: { uuid: entry.uuid },
+      });
+    }
+    if (!['preserve', 'archive', 'deprecate', 'rewrite'].includes(entry.classification)) {
+      throw new ManifestError(`guidance entry ${entry.uuid} has invalid classification`, {
+        code: 'guidance_invalid_classification', entry: { uuid: entry.uuid },
+      });
+    }
   }
   return guidanceManifest;
+}
+
+/** Validate the durable deletion ledger and enforce the post-cutover state. */
+export function validateRetirementCutover(currentPathBytes, ledger, guidanceFixture, opts = {}) {
+  if (!ledger || ledger.schema !== 'djinn-retirement-deletion-ledger/v1') {
+    throw new ManifestError('deletion ledger has an unsupported schema', { code: 'ledger_schema' });
+  }
+  const revision = ledger.generated_from_revision;
+  if (typeof revision !== 'string' || !/^[0-9a-f]{40,64}$/.test(revision)) {
+    throw new ManifestError('deletion ledger is missing an immutable source revision', {
+      code: 'ledger_revision',
+    });
+  }
+  let sourcePathBytes;
+  try {
+    sourcePathBytes = execFileSync(opts.git || 'git', [
+      'ls-tree', '-rz', '--name-only', revision, '--', '.djinn',
+    ], { cwd: opts.cwd, maxBuffer: 64 * 1024 * 1024 });
+  } catch (err) {
+    throw new ManifestError(`failed to inspect deletion source revision ${revision}: ${err.message}`, {
+      code: 'ledger_source_revision',
+    });
+  }
+  const sourceKnowledge = new Set(splitNulPaths(sourcePathBytes).filter(isKnowledgePath));
+  validateKnowledgeManifest(ledger, {
+    knowledgeCount: sourceKnowledge.size,
+    knowledgeSet: sourceKnowledge,
+  });
+  if (ledger.knowledge_count !== ledger.entries.length) {
+    throw new ManifestError('deletion ledger knowledge_count does not match its entries', {
+      code: 'ledger_count_mismatch',
+    });
+  }
+  for (const entry of ledger.entries) {
+    if (!isKnowledgePath(entry.repository_path)) {
+      throw new ManifestError(`ledger path is not classified knowledge: ${entry.repository_path}`, {
+        code: 'ledger_non_knowledge_path', entry: { repository_path: entry.repository_path },
+      });
+    }
+    const blob = readCommittedBlob(entry.repository_path, revision, opts);
+    if (sha256Hex(blob) !== entry.blob_sha256 ||
+        sha256Hex(normalizeContent(blob)) !== entry.normalized_sha256) {
+      throw new ManifestError(`ledger hashes do not match source blob: ${entry.repository_path}`, {
+        code: 'ledger_source_hash_mismatch', entry: { repository_path: entry.repository_path },
+      });
+    }
+    if (detectPermalink(entry.repository_path) !== entry.permalink) {
+      throw new ManifestError(`ledger permalink does not match source path: ${entry.repository_path}`, {
+        code: 'ledger_permalink_mismatch', entry: { repository_path: entry.repository_path },
+      });
+    }
+  }
+
+  const guidanceManifest = generateDbGuidanceManifest(guidanceFixture);
+  validateDbGuidanceManifest(guidanceManifest);
+  const guidanceByPath = new Map();
+  for (const guidance of guidanceManifest.entries) {
+    if (typeof guidance.source_repository_path !== 'string' ||
+        guidanceByPath.has(guidance.source_repository_path)) {
+      throw new ManifestError('guidance source paths must be present and unique', {
+        code: 'guidance_source_path', entry: { uuid: guidance.uuid },
+      });
+    }
+    guidanceByPath.set(guidance.source_repository_path, guidance);
+  }
+  for (const entry of ledger.entries) {
+    const guidance = guidanceByPath.get(entry.repository_path);
+    if (!guidance) {
+      throw new ManifestError(`ledger entry has no DB guidance: ${entry.repository_path}`, {
+        code: 'ledger_missing_guidance', entry: { repository_path: entry.repository_path },
+      });
+    }
+    if (entry.db_selection) {
+      const db = entry.db_selection;
+      if (guidance.uuid !== db.uuid || guidance.permalink !== db.permalink ||
+          guidance.status !== db.status || guidance.normalized_sha256 !== db.normalized_sha256 ||
+          guidance.disposition !== entry.disposition) {
+        throw new ManifestError(`ledger DB identity disagrees with guidance: ${entry.repository_path}`, {
+          code: 'ledger_guidance_mismatch', entry: { repository_path: entry.repository_path },
+        });
+      }
+    }
+  }
+  if (guidanceByPath.size !== ledger.entries.length) {
+    throw new ManifestError('guidance/deletion count mismatch', {
+      code: 'guidance_deletion_count_mismatch',
+    });
+  }
+
+  const currentPaths = splitNulPaths(
+    Buffer.isBuffer(currentPathBytes) ? currentPathBytes : Buffer.from(currentPathBytes || '', 'binary'),
+  );
+  const currentKnowledge = currentPaths.filter(isKnowledgePath);
+  if (currentKnowledge.length > 0) {
+    throw new ManifestError(`tracked project-local knowledge was reintroduced: ${currentKnowledge[0]}`, {
+      code: 'knowledge_reintroduced', entry: { repository_path: currentKnowledge[0] },
+    });
+  }
+  const currentSet = new Set(currentPaths);
+  for (const operationalPath of NON_KNOWLEDGE_TRACKED) {
+    if (!currentSet.has(operationalPath)) {
+      throw new ManifestError(`required operational path is missing: ${operationalPath}`, {
+        code: 'operational_path_missing', entry: { repository_path: operationalPath },
+      });
+    }
+    const sourceBlob = readCommittedBlob(operationalPath, revision, opts);
+    const currentBlob = readCommittedBlob(operationalPath, opts.currentRevision || 'HEAD', opts);
+    if (!sourceBlob.equals(currentBlob)) {
+      throw new ManifestError(`operational path changed during cutover: ${operationalPath}`, {
+        code: 'operational_path_changed', entry: { repository_path: operationalPath },
+      });
+    }
+  }
+  return { ledger, guidanceManifest };
 }
 
 // ── Top-level generation ─────────────────────────────────────────────────────
@@ -908,6 +1077,7 @@ function parseCliArgs(argv) {
       revision: { type: 'string', short: 'r' },
       'db-selection': { type: 'string' },
       'db-guidance': { type: 'string' },
+      'deletion-ledger': { type: 'string' },
       'output-dir': { type: 'string', short: 'o' },
       'paths-file': { type: 'string' },
       help: { type: 'boolean', short: 'h' },
@@ -932,6 +1102,7 @@ function main(argv) {
         '  -r, --revision <rev>        git revision for committed blob reads (default HEAD)',
         '      --db-selection <path>   hermetic DB-selection fixture JSON',
         '      --db-guidance <path>    hermetic DB-guidance fixture JSON',
+        '      --deletion-ledger <path> validate durable ledger and post-cutover state',
         '  -o, --output-dir <dir>      output directory (default target/djinn-retirement)',
         '      --paths-file <path>     read NUL-delimited paths from a file instead of stdin',
         '  -h, --help                  show this help',
@@ -963,6 +1134,24 @@ function main(argv) {
       chunks.push(Buffer.from(buf.subarray(0, n)));
     }
     pathBytes = Buffer.concat(chunks);
+  }
+
+  if (values['deletion-ledger']) {
+    let ledger;
+    try {
+      ledger = JSON.parse(readFileSync(values['deletion-ledger'], 'utf8'));
+    } catch (err) {
+      throw new ManifestError(`deletion ledger is not valid JSON: ${err.message}`, {
+        code: 'ledger_invalid_json',
+      });
+    }
+    const guidance = loadDbGuidanceFixture(values['db-guidance']);
+    const result = validateRetirementCutover(pathBytes, ledger, guidance);
+    process.stderr.write(
+      `validated ${result.ledger.knowledge_count} durable deletion entries and ` +
+        `${result.guidanceManifest.record_count} guidance entries; tracked knowledge set is empty\n`,
+    );
+    return;
   }
 
   const result = generateAll(pathBytes, {
