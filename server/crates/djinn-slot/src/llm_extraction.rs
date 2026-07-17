@@ -1224,6 +1224,10 @@ pub async fn capture_llm_extraction_replay(
     candidates: &[djinn_db::NoteDedupCandidate],
 ) -> Result<Vec<crate::extraction_replay_eval::ExtractionObservation>, String> {
     let extracted = parse_extraction_response(extraction_response)?;
+    let revision_operations = extracted.revision_operations.iter().map(|operation| match operation {
+        RevisionOperation::Patch { reason, .. } => crate::extraction_replay_eval::ReplayRevisionOperation { shape: "patch".to_string(), outcome: "emitted".to_string(), reason: Some(reason.clone()) },
+        RevisionOperation::DeprecateWithSupersedes { reason, .. } => crate::extraction_replay_eval::ReplayRevisionOperation { shape: "deprecate_with_supersedes".to_string(), outcome: "emitted".to_string(), reason: Some(reason.clone()) },
+    }).collect::<Vec<_>>();
     let (notes, _) = dedup_extracted_notes(&extracted);
     let mut observations = Vec::with_capacity(notes.len());
     for (note_type, note) in notes {
@@ -1245,7 +1249,11 @@ pub async fn capture_llm_extraction_replay(
             content: note.content.clone(),
             adr_054_quality_passed: quality_passed,
             duplicate_of,
+            revision_operations: Vec::new(),
         });
+    }
+    if let Some(observation) = observations.first_mut() {
+        observation.revision_operations = revision_operations;
     }
     Ok(observations)
 }

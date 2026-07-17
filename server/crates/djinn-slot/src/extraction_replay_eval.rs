@@ -272,6 +272,25 @@ pub struct ExtractionObservation {
     /// Candidate selected by the production novelty decision, if any.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub duplicate_of: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub revision_operations: Vec<ReplayRevisionOperation>,
+}
+
+/// A guarded revision proposal observed before replay reaches persistence.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ReplayRevisionOperation {
+    pub shape: String,
+    /// `emitted`, `applied`, or `refused`.
+    pub outcome: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RevisionOperationSummary {
+    pub emitted_by_shape: BTreeMap<String, u32>,
+    pub applied_by_shape: BTreeMap<String, u32>,
+    pub refused_by_shape_and_reason: BTreeMap<String, u32>,
 }
 
 /// Satisfaction for one fixture dimension.
@@ -427,6 +446,7 @@ pub struct ExtractionReplayReport {
     pub rubric_satisfaction_rate: f64,
     pub dedup: DedupConfusionCounts,
     pub dedup_precision: f64,
+    pub revision_operations: RevisionOperationSummary,
     pub failures: Vec<ReplayFailureDiagnostic>,
 }
 
@@ -485,6 +505,7 @@ pub fn render_extraction_replay_markdown(
          - Cases: {}/{} ({:.4})\n\
          - Dedup precision: {:.4}\n\
          - Dedup confusion: TP={} FP={} TN={} FN={}\n\
+         - Revision operations: emitted={:?}; applied={:?}; refused={:?}\n\
          - Thresholds: rubric >= {:.4}; dedup precision >= {:.4}\n\n\
          ## Per fixture\n\n",
         report.satisfied_cases,
@@ -495,6 +516,9 @@ pub fn render_extraction_replay_markdown(
         report.dedup.false_positive,
         report.dedup.true_negative,
         report.dedup.false_negative,
+        report.revision_operations.emitted_by_shape,
+        report.revision_operations.applied_by_shape,
+        report.revision_operations.refused_by_shape_and_reason,
         thresholds.minimum_rubric_satisfaction,
         thresholds.minimum_dedup_precision,
     );
@@ -755,9 +779,21 @@ pub fn score_extraction_replay(
     let mut cases = Vec::with_capacity(fixtures.len());
     let mut failures = Vec::new();
     let mut dedup = DedupConfusionCounts::default();
+    let mut revision_operations = RevisionOperationSummary::default();
 
     for fixture in fixtures {
         let captured = by_fixture.remove(fixture.id.as_str()).unwrap_or_default();
+        for operation in captured.iter().flat_map(|observation| &observation.revision_operations) {
+            match operation.outcome.as_str() {
+                "emitted" => *revision_operations.emitted_by_shape.entry(operation.shape.clone()).or_default() += 1,
+                "applied" => *revision_operations.applied_by_shape.entry(operation.shape.clone()).or_default() += 1,
+                "refused" => {
+                    let key = format!("{}:{}", operation.shape, operation.reason.as_deref().unwrap_or("unspecified"));
+                    *revision_operations.refused_by_shape_and_reason.entry(key).or_default() += 1;
+                }
+                _ => {}
+            }
+        }
         let required_text = captured.iter().any(|observation| {
             observation
                 .content
@@ -841,6 +877,7 @@ pub fn score_extraction_replay(
         rubric_satisfaction_rate,
         dedup,
         dedup_precision,
+        revision_operations,
         failures,
     }
 }

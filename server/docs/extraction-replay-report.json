@@ -1,0 +1,21 @@
+{
+  "report_kind": "offline_extraction_replay",
+  "fixture_corpus": "crates/djinn-slot/tests/fixtures/extraction_replay",
+  "total_cases": 24,
+  "satisfied_cases": 24,
+  "rubric_satisfaction_rate": 1.0,
+  "dedup": {
+    "true_positive": 0,
+    "false_positive": 0,
+    "true_negative": 24,
+    "false_negative": 0
+  },
+  "dedup_precision": 1.0,
+  "revision_operations": {
+    "emitted_by_shape": {},
+    "applied_by_shape": {},
+    "refused_by_shape_and_reason": {}
+  },
+  "isolation": "Replay captures production parsing and scoring before guarded persistence; no live-corpus writes are performed.",
+  "failures": []
+}

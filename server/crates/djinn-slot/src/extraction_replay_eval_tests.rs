@@ -90,6 +90,7 @@ fn offline_report_serialization_normalizes_disposable_duplicate_ids() {
             content: "stable candidate seam".to_string(),
             adr_054_quality_passed: false,
             duplicate_of: Some(database_id.to_string()),
+        revision_operations: Vec::new(),
         };
         let mut report = score_extraction_replay(&[fixture], &[observation]);
         normalize_offline_duplicate_targets(
@@ -122,7 +123,8 @@ fn dedup_counts_false_duplicate_prediction() {
         content: "stable candidate seam".to_string(),
         adr_054_quality_passed: false,
         duplicate_of: Some("live-note".to_string()),
-    };
+    revision_operations: Vec::new(),
+        };
     let report = score_extraction_replay(&[fixture], &[observation]);
     assert_eq!(report.dedup.false_positive, 1);
     assert_eq!(report.dedup_precision, 0.0);
@@ -140,7 +142,8 @@ fn dedup_counts_true_duplicate_prediction() {
         content: "stable candidate seam".to_string(),
         adr_054_quality_passed: false,
         duplicate_of: Some("existing-note".to_string()),
-    };
+    revision_operations: Vec::new(),
+        };
     let report = score_extraction_replay(&[fixture], &[observation]);
     assert_eq!(report.dedup.true_positive, 1);
     assert_eq!(report.dedup_precision, 1.0);
@@ -228,7 +231,8 @@ impl ReplayExtractionSeam for RecordingCaptureSeam {
             title: "replayed extraction".to_string(),
             content: "stable candidate seam".to_string(),
             adr_054_quality_passed: false,
-            duplicate_of: None,
+             duplicate_of: None,
+        revision_operations: Vec::new(),
         }])
     }
 }
