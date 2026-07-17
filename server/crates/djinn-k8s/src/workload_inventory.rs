@@ -79,38 +79,18 @@ fn job_record(j: Job) -> Option<WorkloadRecord> {
         commands,
     })
 }
-fn pod_record(p: Pod) -> Option<WorkloadRecord> {
-    let (images, commands) = containers(p.spec.as_ref());
-    let terminal = matches!(
-        p.status.as_ref().and_then(|s| s.phase.as_deref()),
-        Some("Succeeded" | "Failed")
-    );
-    Some(WorkloadRecord {
-        kind: WorkloadObjectKind::Pod,
-        name: p.metadata.name?,
-        uid: p.metadata.uid,
-        labels: p.metadata.labels.unwrap_or_default(),
-        terminal,
-        images,
-        commands,
-    })
-}
 #[async_trait]
 impl WorkloadInventory for KubeWorkloadInventory {
     async fn list(&self) -> Result<Vec<WorkloadRecord>, String> {
         let jobs: Api<Job> = Api::namespaced(self.client.clone(), &self.namespace);
-        let pods: Api<Pod> = Api::namespaced(self.client.clone(), &self.namespace);
-        let (jobs, pods) = tokio::try_join!(
-            jobs.list(&ListParams::default()),
-            pods.list(&ListParams::default())
-        )
-        .map_err(|e| e.to_string())?;
-        Ok(jobs
-            .items
-            .into_iter()
-            .filter_map(job_record)
-            .chain(pods.items.into_iter().filter_map(pod_record))
-            .collect())
+        // Child Pods inherit the Job's admission labels. Treating both as
+        // independent workloads duplicates task identities and double-counts
+        // warm jobs, while the Job is the UID-fenced lifecycle object.
+        let jobs = jobs
+            .list(&ListParams::default())
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok(jobs.items.into_iter().filter_map(job_record).collect())
     }
     async fn get_uid(&self, kind: WorkloadObjectKind, name: &str, uid: &str) -> UidGetResult {
         let result = match kind {

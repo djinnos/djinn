@@ -422,6 +422,15 @@ impl AdmissionJournalRepository {
                 tx.commit().await?;
                 return Ok(row);
             }
+            if row.state == AdmissionState::CreateUnknown
+                && row.object_name == input.object_name
+                && row.object_uid.is_none()
+            {
+                let adopted =
+                    update_state(&mut tx, &input.key, "live", Some(&input.object_uid)).await?;
+                tx.commit().await?;
+                return Ok(adopted);
+            }
             return Err(DbError::InvalidTransition(
                 "inventory identity collision".into(),
             ));

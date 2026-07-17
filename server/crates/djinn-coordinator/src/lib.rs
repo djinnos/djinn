@@ -175,6 +175,8 @@ pub use djinn_orchestration_types::coordinator::PR_REVIEW_FEEDBACK_EVENT;
 #[cfg(test)]
 mod build_admission_integration_tests;
 #[cfg(test)]
+mod build_admission_inventory_tests;
+#[cfg(test)]
 pub(crate) mod test_helpers;
 #[cfg(test)]
 mod tests;
