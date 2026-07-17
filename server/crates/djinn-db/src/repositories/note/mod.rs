@@ -95,7 +95,10 @@ pub use file_helpers::{
 };
 use indexing::{index_links_for_note, resolve_links_for_note};
 
-pub use guidance::FileEraGuidanceDiscovery;
+pub use guidance::{
+    FileEraGuidanceClassification, FileEraGuidanceDiscovery, FileEraGuidanceManifest,
+    FileEraGuidanceManifestRecord,
+};
 pub use housekeeping::{
     AnchorProposerKind, BackfillRetrievalAnchorOptions, BackfillRetrievalAnchorReport,
     LlmAnchorProposer, ProposedBackfillAnchor, propose_anchor_deterministic,
