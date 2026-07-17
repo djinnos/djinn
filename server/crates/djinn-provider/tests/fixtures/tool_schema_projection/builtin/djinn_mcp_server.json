@@ -10448,8 +10448,7 @@
             "denominator": {
               "description": "Distinct task runs in this cohort cell.",
               "type": "integer",
-              "format": "uint64",
-              "minimum": 0
+              "format": "int64"
             },
             "parked_reasons": {
               "type": "array",
@@ -10495,8 +10494,7 @@
             },
             "count": {
               "type": "integer",
-              "format": "uint64",
-              "minimum": 0
+              "format": "int64"
             },
             "rate": {
               "type": "number",
@@ -10521,8 +10519,7 @@
             },
             "count": {
               "type": "integer",
-              "format": "uint64",
-              "minimum": 0
+              "format": "int64"
             },
             "rate": {
               "type": "number",
@@ -10540,14 +10537,12 @@
             "unattributed_trace_count": {
               "description": "Traces without exact task_run_id; excluded from rates and never task_id-joined.",
               "type": "integer",
-              "format": "uint64",
-              "minimum": 0
+              "format": "int64"
             },
             "unrecorded_run_count": {
               "description": "Eligible runs with no durable trace.",
               "type": "integer",
-              "format": "uint64",
-              "minimum": 0
+              "format": "int64"
             }
           },
           "required": [

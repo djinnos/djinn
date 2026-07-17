@@ -147,6 +147,7 @@ pub struct RetrievalOutcomesReportCellSchema {
     pub rollout_label: String,
     pub outcome: String,
     /// Distinct task runs in this cohort cell.
+    #[schemars(with = "i64")]
     pub denominator: u64,
     pub parked_reasons: Vec<RetrievalOutcomesRateSchema>,
     pub merge_queue: Vec<RetrievalOutcomesRateSchema>,
@@ -157,6 +158,7 @@ pub struct RetrievalOutcomesReportCellSchema {
 #[derive(Serialize, schemars::JsonSchema)]
 pub struct RetrievalOutcomesRateSchema {
     pub state: String,
+    #[schemars(with = "i64")]
     pub count: u64,
     pub rate: f64,
 }
@@ -164,6 +166,7 @@ pub struct RetrievalOutcomesRateSchema {
 #[derive(Serialize, schemars::JsonSchema)]
 pub struct RetrievalOutcomesAttemptSchema {
     pub attempt_seq: Option<i32>,
+    #[schemars(with = "i64")]
     pub count: u64,
     pub rate: f64,
 }
@@ -171,8 +174,10 @@ pub struct RetrievalOutcomesAttemptSchema {
 #[derive(Serialize, schemars::JsonSchema)]
 pub struct RetrievalOutcomesReportDiagnosticsSchema {
     /// Traces without exact task_run_id; excluded from rates and never task_id-joined.
+    #[schemars(with = "i64")]
     pub unattributed_trace_count: u64,
     /// Eligible runs with no durable trace.
+    #[schemars(with = "i64")]
     pub unrecorded_run_count: u64,
 }
 
