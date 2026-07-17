@@ -24,6 +24,7 @@ use crate::{Execution, Profile, Scenario, ScenarioInventory, Taxonomy, scenario:
 
 pub const RUNNER_NAME: &str = "djinn-qa";
 pub const RUNNER_VERSION: &str = env!("CARGO_PKG_VERSION");
+#[cfg(not(test))]
 const CHILD_DEADLINE: Duration = Duration::from_secs(10 * 60);
 const TERMINATION_GRACE: Duration = Duration::from_secs(2);
 const STREAM_TAIL_BYTES: usize = 64 * 1024;
@@ -227,7 +228,7 @@ pub trait DatabaseAcquirer: Sync {
 /// The process runner is injected by focused tests so command construction and
 /// evidence validation are tested on the same production execution path.
 #[cfg(test)]
-type CommandRunner = dyn Fn(&mut Command) -> std::io::Result<Output> + Send + Sync;
+type CommandRunner = dyn Fn(&mut Command) -> Result<BoundedOutput, String> + Send + Sync;
 
 pub struct CargoExecutor {
     #[cfg(test)]
@@ -239,7 +240,12 @@ impl Default for CargoExecutor {
     fn default() -> Self {
         Self {
             #[cfg(test)]
-            run_command: Box::new(Command::output),
+            run_command: Box::new(|command| {
+                command
+                    .output()
+                    .map(BoundedOutput::from)
+                    .map_err(|error| error.to_string())
+            }),
         }
     }
 }
@@ -248,6 +254,18 @@ impl Default for CargoExecutor {
 impl CargoExecutor {
     fn with_process(
         run_command: impl Fn(&mut Command) -> std::io::Result<Output> + Send + Sync + 'static,
+    ) -> Self {
+        Self {
+            run_command: Box::new(move |command| {
+                run_command(command)
+                    .map(BoundedOutput::from)
+                    .map_err(|error| error.to_string())
+            }),
+        }
+    }
+
+    fn with_bounded_process(
+        run_command: impl Fn(&mut Command) -> Result<BoundedOutput, String> + Send + Sync + 'static,
     ) -> Self {
         Self {
             run_command: Box::new(run_command),
@@ -296,7 +314,6 @@ impl ScenarioExecutor for CargoExecutor {
         command.arg("--").arg("--exact").arg(selector);
         #[cfg(test)]
         let output = (self.run_command)(&mut command)
-            .map(BoundedOutput::from)
             .map_err(|e| format!("cargo adapter could not start `{package}`: {e}"))?;
         #[cfg(not(test))]
         let output = run_bounded(&mut command, CHILD_DEADLINE)
@@ -923,10 +940,26 @@ scenarios:
     }
     #[test]
     fn identical_execution_fans_out_once_in_scenario_id_order() {
-        let executor = Executor { calls: Mutex::new(0), peak: AtomicUsize::new(0) };
-        let outcomes = execute_selected(&repository_root(), &[scenario("z"), scenario("a")], 2, &executor, &Db).unwrap();
+        let executor = Executor {
+            calls: Mutex::new(0),
+            peak: AtomicUsize::new(0),
+        };
+        let outcomes = execute_selected(
+            &repository_root(),
+            &[scenario("z"), scenario("a")],
+            2,
+            &executor,
+            &Db,
+        )
+        .unwrap();
         assert_eq!(*executor.calls.lock().unwrap(), 1);
-        assert_eq!(outcomes.iter().map(|outcome| outcome.scenario_id.as_str()).collect::<Vec<_>>(), vec!["a", "z"]);
+        assert_eq!(
+            outcomes
+                .iter()
+                .map(|outcome| outcome.scenario_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["a", "z"]
+        );
     }
 
     #[test]
@@ -935,28 +968,66 @@ scenarios:
         let (tail, truncated) = read_tail(std::io::Cursor::new(payload)).join().unwrap();
         assert!(truncated);
         assert_eq!(tail.len(), STREAM_TAIL_BYTES);
-        assert!(format_stream_tail("stdout", &tail, truncated).contains("truncated to final 65536 bytes"));
+        assert!(
+            format_stream_tail("stdout", &tail, truncated)
+                .contains("truncated to final 65536 bytes")
+        );
         assert!(tail.ends_with(b"final"));
     }
 
     #[test]
     fn stdout_only_child_failure_keeps_both_labeled_diagnostics() {
         use std::os::unix::process::ExitStatusExt;
-        let executor = CargoExecutor::with_process(|_| Ok(Output { status: std::process::ExitStatus::from_raw(1 << 8), stdout: b"failure detail".to_vec(), stderr: Vec::new() }));
-        let error = executor.execute(Path::new("."), &scenario("failure").execution).unwrap_err();
+        let executor = CargoExecutor::with_process(|_| {
+            Ok(Output {
+                status: std::process::ExitStatus::from_raw(1 << 8),
+                stdout: b"failure detail".to_vec(),
+                stderr: Vec::new(),
+            })
+        });
+        let error = executor
+            .execute(Path::new("."), &scenario("failure").execution)
+            .unwrap_err();
         assert!(error.contains("stdout tail"));
         assert!(error.contains("failure detail"));
         assert!(error.contains("stderr tail (0 bytes)"));
     }
 
+    #[test]
+    fn nonzero_child_failure_labels_truncated_stream_tails() {
+        use std::os::unix::process::ExitStatusExt;
+
+        let executor = CargoExecutor::with_bounded_process(|_| {
+            Ok(BoundedOutput {
+                status: std::process::ExitStatus::from_raw(1 << 8),
+                stdout: vec![b'x'; STREAM_TAIL_BYTES],
+                stderr: Vec::new(),
+                stdout_truncated: true,
+                stderr_truncated: false,
+            })
+        });
+        let error = executor
+            .execute(Path::new("."), &scenario("failure").execution)
+            .unwrap_err();
+        assert!(error.contains("stdout tail (65536 bytes; truncated to final 65536 bytes)"));
+    }
+
     #[cfg(unix)]
     #[test]
     fn deadline_terminates_the_child_process_group() {
+        let temp = tempfile::tempdir().unwrap();
+        let marker = temp.path().join("descendant-survived");
         let mut command = Command::new("sh");
-        command.arg("-c").arg("sleep 30 & wait");
-        let error = run_bounded_with_grace(&mut command, Duration::from_millis(20), Duration::from_millis(20)).unwrap_err();
+        command
+            .arg("-c")
+            .arg(format!("sleep 0.25; touch {} & wait", marker.display()));
+        let error = run_bounded(&mut command, Duration::from_millis(20)).unwrap_err();
         assert!(error.contains("timed out"));
         assert!(error.contains("process group terminated"));
+        thread::sleep(Duration::from_millis(300));
+        assert!(
+            !marker.exists(),
+            "the descendant survived deadline process-group termination"
+        );
     }
-
 }
