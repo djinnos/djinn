@@ -7,7 +7,9 @@ use std::sync::atomic::Ordering;
 
 use crate::helpers::{runtime_env_diagnostics, runtime_fs_diagnostics};
 use crate::host::SlotContext;
-use crate::output_parser::ParsedAgentOutput;
+use crate::final_verification::{coordinate_final_verification, FinalVerificationCoordinatorRequest, FinalVerificationRecordingOutcome};
+use crate::finalize_types::SubmitWork;
+use crate::output_parser::{CompletionIntent, ParsedAgentOutput};
 use djinn_compaction::{
     COMPACTION_SUMMARY_END_MARKER, CompactionContext, compact_conversation, needs_compaction,
     strip_compaction_markers,
@@ -326,6 +328,16 @@ fn tool_result_text(content: &[ContentBlock]) -> String {
         .filter_map(ContentBlock::as_text)
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+async fn verify_completion_intent(task_id: &str, cancellation: &tokio_util::sync::CancellationToken, slot_ctx: &SlotContext) -> Result<(), String> {
+    let runs = djinn_db::repositories::task_run::TaskRunRepository::new(slot_ctx.db.clone()).list_for_task(task_id).await.map_err(|e| format!("could not resolve task run: {e}"))?;
+    let task_run_id = runs.into_iter().find(|run| matches!(run.status.as_str(), "starting" | "running")).map(|run| run.id).ok_or_else(|| "no active task run is available for final verification".to_owned())?;
+    match coordinate_final_verification(FinalVerificationCoordinatorRequest { task_id: task_id.to_owned(), task_run_id, cancellation: cancellation.clone() }, slot_ctx).await {
+        FinalVerificationRecordingOutcome::Stored { .. } => Ok(()),
+        FinalVerificationRecordingOutcome::Ineligible { reason, .. } => Err(format!("Final verification rejected this submit_work request: {reason}. Fix the worktree and resubmit.")),
+        FinalVerificationRecordingOutcome::Error { detail, .. } => Err(format!("Final verification could not complete: {detail}. Inspect the worktree and resubmit.")),
+    }
 }
 
 fn classify_tool_failure(content: &[ContentBlock]) -> ToolFailureClass {
@@ -1264,11 +1276,27 @@ pub async fn run_reply_loop(
                 .iter()
                 .find(|tc| matches!(tc, ContentBlock::ToolUse { name, .. } if name == primary_finalize))
             {
-                let payload = if let ContentBlock::ToolUse { input, .. } = finalize_call {
-                    input.clone()
-                } else {
-                    serde_json::Value::Null
-                };
+                let (payload, tool_use_id) = if let ContentBlock::ToolUse { id, input, .. } = finalize_call { (input.clone(), id.clone()) } else { (serde_json::Value::Null, String::new()) };
+                if role_name == "worker" && primary_finalize == "submit_work" {
+                    match serde_json::from_value::<SubmitWork>(payload.clone()) {
+                        Ok(work) if work.task_id == task_id => {
+                            let intent = CompletionIntent { finalize_payload: payload, tool_use_id };
+                            output.completion_intent = Some(intent.clone());
+                            match verify_completion_intent(task_id, cancel, slot_ctx).await {
+                                Ok(()) => { output.finalize_payload = Some(intent.finalize_payload); output.finalize_tool_name = Some(primary_finalize.to_string()); break; }
+                                Err(error) => {
+                                    output.completion_intent = None;
+                                    let result_msg = Message { role: Role::User, content: vec![ContentBlock::ToolResult { tool_use_id: intent.tool_use_id, content: vec![ContentBlock::Text { text: error }], is_error: true }], metadata: None };
+                                    persist_session_message(&msg_repo, session_id, task_id, &result_msg).await; conversation.push(result_msg); continue;
+                                }
+                            }
+                        }
+                        Ok(_) | Err(_) => {
+                            let result_msg = Message::user("submit_work payload is invalid for this task; correct it and resubmit.");
+                            persist_session_message(&msg_repo, session_id, task_id, &result_msg).await; conversation.push(result_msg); continue;
+                        }
+                    }
+                }
                 tracing::info!(
                     task_id = %task_id,
                     agent_type = %role_name,

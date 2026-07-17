@@ -1761,6 +1761,7 @@ dependencies = [
  "djinn-provider",
  "djinn-roles",
  "djinn-runtime",
+ "djinn-sandbox",
  "djinn-stack",
  "djinn-supervisor",
  "djinn-telemetry",

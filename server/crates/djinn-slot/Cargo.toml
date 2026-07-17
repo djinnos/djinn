@@ -20,6 +20,7 @@ test-support = []
 djinn-core = { path = "../djinn-core" }
 djinn-db = { path = "../djinn-db" }
 djinn-git = { path = "../djinn-git" }
+djinn-sandbox = { path = "../djinn-sandbox" }
 djinn-memory = { path = "../djinn-memory" }
 djinn-provider = { path = "../djinn-provider" }
 djinn-control-plane = { path = "../djinn-control-plane" }
