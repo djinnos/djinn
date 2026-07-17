@@ -35,6 +35,7 @@ expression: section
 - `memory_broken_links(folder?)`
 - `memory_orphans(folder?)`
 - `memory_recall_trace()`
+- `memory_retrieval_outcomes_report(end, start, timezone, project?, project_id?)`
 - `agent_metrics(role)`
 - `agent_create(base_role, name, description?, model_preference?, system_prompt_extensions?)`
 - `memory_write(content, reason, title, type, status?, tags?)`

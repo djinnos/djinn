@@ -42,6 +42,7 @@ expression: section
 - `memory_broken_links(folder?)`
 - `memory_orphans(folder?)`
 - `memory_recall_trace()`
+- `memory_retrieval_outcomes_report(end, start, timezone, project?, project_id?)`
 - `memory_write(content, reason, title, type, status?, tags?)`
 - `memory_edit(content, identifier, operation, reason, find_text?, section?, type?)`
 - `agent_metrics(role)`

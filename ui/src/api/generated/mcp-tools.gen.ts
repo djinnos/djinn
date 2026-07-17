@@ -4651,6 +4651,75 @@ export namespace MemoryRepairEmbeddingsOutputSchema {
 
 }
 export type MemoryRepairEmbeddingsOutput = MemoryRepairEmbeddingsOutputSchema.MemoryRepairEmbeddingsOutput;
+export namespace MemoryRetrievalOutcomesReportInputSchema {
+  export interface MemoryRetrievalOutcomesReportInput {
+  end: string
+  project?: string
+  project_id?: string
+  start: string
+  timezone: string
+  }
+
+}
+export type MemoryRetrievalOutcomesReportInput = MemoryRetrievalOutcomesReportInputSchema.MemoryRetrievalOutcomesReportInput;
+export namespace MemoryRetrievalOutcomesReportOutputSchema {
+  export interface MemoryRetrievalOutcomesReportOutput {
+  error?: string
+  report?: (RetrievalOutcomesReportSchema | null)
+  [k: string]: any
+  }
+  export interface RetrievalOutcomesReportSchema {
+  cells: RetrievalOutcomesReportCellSchema[]
+  /**
+   * Different cohort-key cells can overlap and must not be summed.
+   */
+  cells_are_non_additive: boolean
+  diagnostics: RetrievalOutcomesReportDiagnosticsSchema
+  end: string
+  start: string
+  timezone: string
+  [k: string]: any
+  }
+  export interface RetrievalOutcomesReportCellSchema {
+  attempts: RetrievalOutcomesAttemptSchema[]
+  /**
+   * Distinct task runs in this cohort cell.
+   */
+  denominator: number
+  entry_point: string
+  merge_queue: RetrievalOutcomesRateSchema[]
+  outcome: string
+  parked_reasons: RetrievalOutcomesRateSchema[]
+  review: RetrievalOutcomesRateSchema[]
+  rollout_label: string
+  [k: string]: any
+  }
+  export interface RetrievalOutcomesAttemptSchema {
+  attempt_seq?: number
+  count: number
+  rate: number
+  [k: string]: any
+  }
+  export interface RetrievalOutcomesRateSchema {
+  count: number
+  rate: number
+  state: string
+  [k: string]: any
+  }
+  export interface RetrievalOutcomesReportDiagnosticsSchema {
+  /**
+   * Traces without exact task_run_id; excluded from rates and never task_id-joined.
+   */
+  unattributed_trace_count: number
+  /**
+   * Eligible runs with no durable trace.
+   */
+  unrecorded_run_count: number
+  [k: string]: any
+  }
+
+}
+export type MemoryRetrievalOutcomesReportOutput = MemoryRetrievalOutcomesReportOutputSchema.MemoryRetrievalOutcomesReportOutput;
 export namespace MemoryRunEnrichmentInputSchema {
   export interface MemoryRunEnrichmentInput {
   /**
@@ -11823,7 +11892,7 @@ export namespace UserSettingsSetOutputSchema {
 }
 export type UserSettingsSetOutput = UserSettingsSetOutputSchema.UserSettingsSetOutput;
 
-export type McpToolName = "agent_create" | "agent_list" | "agent_metrics" | "agent_show" | "agent_update" | "board_health" | "board_reconcile" | "code_graph" | "credential_delete" | "credential_list" | "credential_set" | "dispatch_pause" | "dispatch_pause_status" | "dispatch_resume" | "doctor_fix" | "doctor_list_findings" | "doctor_run" | "epic_add_read_source" | "epic_blocked_list" | "epic_blockers_list" | "epic_close" | "epic_count" | "epic_create" | "epic_delete" | "epic_list" | "epic_list_read_sources" | "epic_remove_read_source" | "epic_reopen" | "epic_show" | "epic_tasks" | "epic_update" | "execution_kill_task" | "get_block_catalog" | "get_project_devcontainer_status" | "get_project_stack" | "github_app_install_url" | "github_app_installations" | "github_fetch_file" | "github_list_repos" | "github_search" | "image_create" | "image_delete" | "image_list" | "image_set_services" | "image_update" | "memory_associations" | "memory_broken_links" | "memory_build_context" | "memory_catalog" | "memory_confirm" | "memory_delete" | "memory_diff" | "memory_edit" | "memory_extracted_audit" | "memory_graph" | "memory_health" | "memory_history" | "memory_list" | "memory_move" | "memory_orphans" | "memory_read" | "memory_recall_trace" | "memory_recent" | "memory_repair_embeddings" | "memory_run_enrichment" | "memory_search" | "memory_task_refs" | "memory_write" | "model_health" | "org_policy_get" | "org_policy_set" | "pr_review_context" | "project_add_from_github" | "project_branches" | "project_config_get" | "project_config_set" | "project_environment_config_get" | "project_environment_config_reset" | "project_environment_config_set" | "project_graph_exclusions_get" | "project_graph_exclusions_set" | "project_list" | "project_remove" | "project_set_image" | "proposal_add_target" | "proposal_block_patch" | "proposal_blocks" | "proposal_create" | "proposal_debate_append" | "proposal_debate_list" | "proposal_debate_reopen" | "proposal_debate_resolve" | "proposal_delete" | "proposal_export" | "proposal_feedback_add" | "proposal_feedback_resolve" | "proposal_graduate" | "proposal_import" | "proposal_list" | "proposal_reconcile_obsolete_epic" | "proposal_refinement_demand_evidence" | "proposal_refinement_demand_round" | "proposal_refinement_resolve" | "proposal_refinement_start" | "proposal_refinement_status" | "proposal_remove_target" | "proposal_show" | "proposal_signoff" | "proposal_signoff_clear" | "proposal_stop_build" | "proposal_update" | "proposal_verdict_override" | "provider_catalog" | "provider_connected" | "provider_model_lookup" | "provider_models" | "provider_models_connected" | "provider_oauth_start" | "provider_remove" | "provider_validate" | "retrigger_image_build" | "service_preset_list" | "session_active" | "session_for_task" | "session_list" | "session_messages" | "session_show" | "settings_get" | "settings_reset" | "settings_set" | "system_ping" | "task_activity_list" | "task_blocked_list" | "task_blockers_list" | "task_claim" | "task_comment_add" | "task_count" | "task_create" | "task_list" | "task_memory_refs" | "task_ready" | "task_show" | "task_timeline" | "task_transition" | "task_update" | "toolchain_versions" | "user_settings_get" | "user_settings_set";
+export type McpToolName = "agent_create" | "agent_list" | "agent_metrics" | "agent_show" | "agent_update" | "board_health" | "board_reconcile" | "code_graph" | "credential_delete" | "credential_list" | "credential_set" | "dispatch_pause" | "dispatch_pause_status" | "dispatch_resume" | "doctor_fix" | "doctor_list_findings" | "doctor_run" | "epic_add_read_source" | "epic_blocked_list" | "epic_blockers_list" | "epic_close" | "epic_count" | "epic_create" | "epic_delete" | "epic_list" | "epic_list_read_sources" | "epic_remove_read_source" | "epic_reopen" | "epic_show" | "epic_tasks" | "epic_update" | "execution_kill_task" | "get_block_catalog" | "get_project_devcontainer_status" | "get_project_stack" | "github_app_install_url" | "github_app_installations" | "github_fetch_file" | "github_list_repos" | "github_search" | "image_create" | "image_delete" | "image_list" | "image_set_services" | "image_update" | "memory_associations" | "memory_broken_links" | "memory_build_context" | "memory_catalog" | "memory_confirm" | "memory_delete" | "memory_diff" | "memory_edit" | "memory_extracted_audit" | "memory_graph" | "memory_health" | "memory_history" | "memory_list" | "memory_move" | "memory_orphans" | "memory_read" | "memory_recall_trace" | "memory_recent" | "memory_repair_embeddings" | "memory_retrieval_outcomes_report" | "memory_run_enrichment" | "memory_search" | "memory_task_refs" | "memory_write" | "model_health" | "org_policy_get" | "org_policy_set" | "pr_review_context" | "project_add_from_github" | "project_branches" | "project_config_get" | "project_config_set" | "project_environment_config_get" | "project_environment_config_reset" | "project_environment_config_set" | "project_graph_exclusions_get" | "project_graph_exclusions_set" | "project_list" | "project_remove" | "project_set_image" | "proposal_add_target" | "proposal_block_patch" | "proposal_blocks" | "proposal_create" | "proposal_debate_append" | "proposal_debate_list" | "proposal_debate_reopen" | "proposal_debate_resolve" | "proposal_delete" | "proposal_export" | "proposal_feedback_add" | "proposal_feedback_resolve" | "proposal_graduate" | "proposal_import" | "proposal_list" | "proposal_reconcile_obsolete_epic" | "proposal_refinement_demand_evidence" | "proposal_refinement_demand_round" | "proposal_refinement_resolve" | "proposal_refinement_start" | "proposal_refinement_status" | "proposal_remove_target" | "proposal_show" | "proposal_signoff" | "proposal_signoff_clear" | "proposal_stop_build" | "proposal_update" | "proposal_verdict_override" | "provider_catalog" | "provider_connected" | "provider_model_lookup" | "provider_models" | "provider_models_connected" | "provider_oauth_start" | "provider_remove" | "provider_validate" | "retrigger_image_build" | "service_preset_list" | "session_active" | "session_for_task" | "session_list" | "session_messages" | "session_show" | "settings_get" | "settings_reset" | "settings_set" | "system_ping" | "task_activity_list" | "task_blocked_list" | "task_blockers_list" | "task_claim" | "task_comment_add" | "task_count" | "task_create" | "task_list" | "task_memory_refs" | "task_ready" | "task_show" | "task_timeline" | "task_transition" | "task_update" | "toolchain_versions" | "user_settings_get" | "user_settings_set";
 
 export interface McpToolMap {
   "agent_create": { input: AgentCreateInput; output: AgentCreateOutput };
@@ -11890,6 +11959,7 @@ export interface McpToolMap {
   "memory_recall_trace": { input: MemoryRecallTraceInput; output: MemoryRecallTraceOutput };
   "memory_recent": { input: MemoryRecentInput; output: MemoryRecentOutput };
   "memory_repair_embeddings": { input: MemoryRepairEmbeddingsInput; output: MemoryRepairEmbeddingsOutput };
+  "memory_retrieval_outcomes_report": { input: MemoryRetrievalOutcomesReportInput; output: MemoryRetrievalOutcomesReportOutput };
   "memory_run_enrichment": { input: MemoryRunEnrichmentInput; output: MemoryRunEnrichmentOutput };
   "memory_search": { input: MemorySearchInput; output: MemorySearchOutput };
   "memory_task_refs": { input: MemoryTaskRefsInput; output: MemoryTaskRefsOutput };

@@ -10,6 +10,18 @@ pub struct ToolSafetyAnnotations {
     pub concurrent_safe: bool,
 }
 
+pub fn tool_memory_retrieval_outcomes_report() -> RmcpTool {
+    RmcpTool::new(
+        "memory_retrieval_outcomes_report".to_string(),
+        "Read an observational retrieval-injection outcomes report for an explicit project-scoped, timezone-aware RFC-3339 [start,end) interval. This operation is read-only and observational only: it makes no causal or randomized-experiment claim. A task run is deduplicated within each entry_point/rollout_label/outcome cell; cells with different cohort keys can overlap and are non-additive. The response returns the applied interval/timezone plus every database denominator, count, rate, not-applicable state, attempt-number distribution, and unattributed/unrecorded diagnostic. Traces without task_run_id are unattributed and excluded from rates; no fallback through task_id is used. Invalid intervals and requests outside the protected 30-day trace window are rejected without clipping.".to_string(),
+        object!({"type":"object", "required":["start","end","timezone"], "properties": {
+            "project":{"type":"string"}, "project_id":{"type":"string"},
+            "start":{"type":"string", "format":"date-time"}, "end":{"type":"string", "format":"date-time"},
+            "timezone":{"type":"string", "minLength":1}
+        }}),
+    )
+}
+
 /// Inspect persisted memory retrieval traces for the current project.
 ///
 /// The two request forms deliberately live in one tool: list calls stay small
