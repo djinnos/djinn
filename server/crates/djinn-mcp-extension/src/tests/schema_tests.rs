@@ -259,8 +259,10 @@ fn tool_schemas_include_role_specific_tools() {
         advocate.iter().any(|n| n == "proposal_ac_set"),
         "advocate should have proposal_ac_set (silent AC update)"
     );
-    // The advocate ONLY revises the spec. Resolution + rebuttal are the
-    // Judge's job, and `proposal_ac_amend` spams AI feedback comments.
+    // The advocate revises the spec and may REBUT objections on the debate
+    // trail (kind="rebuttal") — the tribunal's counterweight against scope
+    // ratchet. Resolution stays the Judge's job, and `proposal_ac_amend`
+    // spams AI feedback comments.
     assert!(
         !advocate.iter().any(|n| n == "proposal_ac_amend"),
         "advocate must NOT have proposal_ac_amend (it persists AI feedback noise)"
@@ -270,8 +272,10 @@ fn tool_schemas_include_role_specific_tools() {
         "advocate must NOT resolve objections — the Judge adjudicates resolution"
     );
     assert!(
-        !advocate.iter().any(|n| n == "proposal_debate_append"),
-        "advocate must NOT write the debate trail — it only revises the spec"
+        advocate.iter().any(|n| n == "proposal_debate_append"),
+        "advocate must have proposal_debate_append — its rebuttal channel \
+         (kind=\"rebuttal\"); without it every objection can only be resolved \
+         by growing the spec"
     );
     assert!(
         advocate.iter().any(|n| n == "proposal_block_patch"),

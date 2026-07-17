@@ -24,6 +24,7 @@ expression: section
 - `memory_edit(content, identifier, operation, reason, find_text?, section?, type?)`
 - `proposal_show(id, fields?, revision_bodies?)`
 - `proposal_debate_list(proposal_id)`
+- `proposal_debate_append(against_revision_seq, agent_role, body, kind, proposal_id, round, blocking?)`
 - `proposal_update(id, acceptance_criteria?, body?, body_format?, status?, superseded_by?, title?)`
 - `proposal_ac_set(acceptance_criteria, id)`
 - `proposal_block_patch(block_mdx, id, operation, selector, expected_latest_revision_seq?, native_skill_name?, native_skill_version?, note?)`
