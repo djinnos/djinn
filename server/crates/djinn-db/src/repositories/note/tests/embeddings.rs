@@ -97,13 +97,13 @@ fn embedding_content_hash_follows_selected_document_text() {
 
 #[test]
 fn worktree_root_infers_task_embedding_branch() {
-    let worktree = std::path::Path::new("/tmp/.djinn/worktrees/exen");
+    let worktree = std::path::Path::new("/tmp/.task-runtime/worktrees/exen");
     assert_eq!(
         infer_embedding_branch_from_worktree(worktree).as_deref(),
         Some("task/exen")
     );
     assert_eq!(
-        infer_embedding_branch_from_worktree(std::path::Path::new("/tmp/.djinn/worktrees/_index")),
+        infer_embedding_branch_from_worktree(std::path::Path::new("/tmp/.task-runtime/worktrees/_index")),
         None
     );
 }

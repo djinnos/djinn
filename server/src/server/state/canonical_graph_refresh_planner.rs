@@ -187,7 +187,7 @@ mod tests {
         let snapshot = probe.snapshot().await;
         assert_eq!(
             snapshot.observed_index_tree_paths,
-            vec![PathBuf::from("/tmp/project/.djinn/worktrees/_index")]
+            vec![PathBuf::from("/tmp/project/.task-runtime/worktrees/_index")]
         );
         assert!(snapshot.observed_commit_checks.is_empty());
     }

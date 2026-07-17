@@ -1,6 +1,6 @@
 //! ADR-050 Chunk C: server-managed canonical indexing worktree.
 //!
-//! Maintains a dedicated `.djinn/worktrees/_index/` checkout per project,
+//! Maintains a dedicated `.task-runtime/worktrees/_index/` checkout per project,
 //! pinned to `origin/main` HEAD.  This is the only location used for SCIP
 //! indexing under ADR-050: workers, the user's project root, and per-task
 //! worktrees never run the indexer themselves.  The Architect and Chat
@@ -10,9 +10,9 @@
 //! ## Lifecycle
 //!
 //! - First use per project: `git -C <project_root> worktree add
-//!   .djinn/worktrees/_index <origin/main>`.
+//!   .task-runtime/worktrees/_index <origin/main>`.
 //! - Subsequent uses: `git fetch origin main` (subject to a 60s cooldown
-//!   per project) followed by `git -C .djinn/worktrees/_index reset --hard
+//!   per project) followed by `git -C .task-runtime/worktrees/_index reset --hard
 //!   origin/main`.
 //! - The reserved `_`-prefix marks the directory as server infrastructure
 //!   so it is excluded from task worktree enumeration.
@@ -34,11 +34,11 @@ use djinn_core::clock::{Clock, SystemClock};
 use djinn_git::CommandOutput;
 
 /// Reserved file-name prefix for server-managed entries under
-/// `.djinn/worktrees/`.  Task-worktree enumeration paths must skip any entry
+/// `.task-runtime/worktrees/`.  Task-worktree enumeration paths must skip any entry
 /// whose name starts with this character (ADR-050 §3).
 pub const RESERVED_WORKTREE_PREFIX: char = '_';
 
-/// Subdirectory under a project's `.djinn/worktrees/` that hosts the
+/// Subdirectory under a project's `.task-runtime/worktrees/` that hosts the
 /// canonical-main indexing checkout.
 pub const INDEX_TREE_DIR_NAME: &str = "_index";
 
@@ -60,7 +60,7 @@ pub const INDEX_TREE_TARGET_DIR_NAME: &str = "_index-target";
 pub const DEFAULT_FETCH_COOLDOWN: Duration = Duration::from_secs(60);
 
 /// Returns `true` when `entry_name` should be treated as a reserved server
-/// infrastructure entry under `.djinn/worktrees/` (ADR-050 §3).
+/// infrastructure entry under `.task-runtime/worktrees/` (ADR-050 §3).
 #[inline]
 pub fn is_reserved_worktree_entry(entry_name: &str) -> bool {
     entry_name.starts_with(RESERVED_WORKTREE_PREFIX)
@@ -216,22 +216,22 @@ impl IndexTreeHandle {
 }
 
 /// API entry point: idempotently ensure a project has a managed indexing
-/// worktree at `<project_root>/.djinn/worktrees/_index/`.
+/// worktree at `<project_root>/.task-runtime/worktrees/_index/`.
 pub struct IndexTree;
 
 impl IndexTree {
     /// Ensure the index tree exists for `project_id` rooted at `project_root`.
-    /// Creates `.djinn/worktrees/_index/` via `git worktree add` on first use.
+    /// Creates `.task-runtime/worktrees/_index/` via `git worktree add` on first use.
     ///
     /// When `DJINN_PROJECT_ROOT` is set (the K8s warm-Pod path: the Pod
     /// clones the mirror directly into an emptyDir workspace before
     /// invoking the binary), we treat `project_root` as the canonical
-    /// index location and skip the `.djinn/worktrees/_index` worktree
+    /// index location and skip the `.task-runtime/worktrees/_index` worktree
     /// dance entirely. Pod-per-task isolation makes the nested worktree
     /// redundant — the Pod's whole filesystem is already the "index
     /// tree" for the warm run.
     pub async fn ensure(project_id: &str, project_root: &Path) -> Result<IndexTreeHandle> {
-        let worktrees_dir = project_root.join(".djinn").join("worktrees");
+        let worktrees_dir = djinn_core::index_tree::worktrees_path(project_root);
         let target_dir = worktrees_dir.join(INDEX_TREE_TARGET_DIR_NAME);
 
         let pod_workspace_mode = std::env::var("DJINN_PROJECT_ROOT").is_ok();
@@ -348,7 +348,7 @@ mod tests {
         // Dev/peer (in-process) mode: always isolate into `_index-target` so
         // an indexer run can't corrupt the host server's own target dir. This
         // holds regardless of whether the ambient CARGO_TARGET_DIR is set.
-        let isolated = PathBuf::from("/proj/.djinn/worktrees/_index-target");
+        let isolated = PathBuf::from("/proj/.task-runtime/worktrees/_index-target");
         assert_eq!(
             resolve_indexer_target_dir_override(false, false, &isolated),
             Some(isolated.clone()),
@@ -367,7 +367,7 @@ mod tests {
         // /cache/cargo-target/<project>): inherit it (None) so the indexer
         // reuses the pre-warmed target instead of recompiling into the Pod's
         // ephemeral `_index-target` every warm.
-        let isolated = PathBuf::from("/workspace/proj/.djinn/worktrees/_index-target");
+        let isolated = PathBuf::from("/workspace/proj/.task-runtime/worktrees/_index-target");
         assert_eq!(
             resolve_indexer_target_dir_override(true, true, &isolated),
             None,

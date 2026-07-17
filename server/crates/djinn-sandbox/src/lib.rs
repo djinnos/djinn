@@ -48,7 +48,7 @@ pub static SANDBOX: LazyLock<Box<dyn Sandbox>> = LazyLock::new(detect_backend);
 /// Fallback sandbox: heuristic path validation for kernels that do not support
 /// Landlock (< 5.13, WSL1) or non-Linux/macOS platforms.
 ///
-/// Validates that `worktree_path` is inside a `.djinn/worktrees/` subtree or a
+/// Validates that `worktree_path` is inside a `.task-runtime/worktrees/` subtree or a
 /// well-known temp directory. Does not apply OS-level access controls.
 pub struct FallbackSandbox;
 
@@ -116,7 +116,7 @@ fn is_worktree_path(path: &Path) -> bool {
 
 // ─── Git worktree metadata resolution ─────────────────────────────────────────
 
-/// Resolve the git worktree metadata directory for a `.djinn/worktrees/{id}/` path.
+/// Resolve the git worktree metadata directory for a `.task-runtime/worktrees/{id}/` path.
 ///
 /// Git stores per-worktree state (HEAD, ORIG_HEAD, index, refs) under
 /// `<repo>/.git/worktrees/{id}/`. Operations like `git merge` need write

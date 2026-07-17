@@ -8,20 +8,28 @@
 use std::path::{Path, PathBuf};
 
 /// Reserved file-name prefix marking server infrastructure entries under
-/// `.djinn/worktrees/`.  Task-worktree enumeration paths must skip any entry
-/// whose name starts with this character.
+/// `.task-runtime/worktrees/`. Task-worktree enumeration paths must skip any
+/// entry whose name starts with this character.
 pub const RESERVED_WORKTREE_PREFIX: char = '_';
 
 /// Subdirectory name of the canonical-main indexing checkout.
 pub const INDEX_TREE_DIR_NAME: &str = "_index";
 
+/// Destination-only parent for Release N task and infrastructure worktrees.
+pub const TASK_RUNTIME_DIR_NAME: &str = ".task-runtime";
+pub const WORKTREES_DIR_NAME: &str = "worktrees";
+
+/// Returns the destination-only worktree parent for a project.
+pub fn worktrees_path(project_root: &Path) -> PathBuf {
+    project_root
+        .join(TASK_RUNTIME_DIR_NAME)
+        .join(WORKTREES_DIR_NAME)
+}
+
 /// Returns the absolute path of the canonical-main index tree for a project
 /// rooted at `project_root`.
 pub fn index_tree_path(project_root: &Path) -> PathBuf {
-    project_root
-        .join(".djinn")
-        .join("worktrees")
-        .join(INDEX_TREE_DIR_NAME)
+    worktrees_path(project_root).join(INDEX_TREE_DIR_NAME)
 }
 
 /// Returns `true` when `entry_name` should be treated as reserved server
@@ -36,11 +44,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn index_tree_path_resolves_under_djinn_worktrees() {
+    fn index_tree_path_resolves_under_task_runtime_worktrees() {
         let root = Path::new("/tmp/example/project");
         assert_eq!(
             index_tree_path(root),
-            Path::new("/tmp/example/project/.djinn/worktrees/_index"),
+            Path::new("/tmp/example/project/.task-runtime/worktrees/_index"),
         );
     }
 
