@@ -244,8 +244,8 @@ fn spawn_admission_observing_pool(
             let observed_tx = observed_tx.clone();
             let journal = journal.clone();
             let release = release_for_factory.clone();
-            let runner: djinn_slot::TestLifecycleRunner = Arc::new(
-                move |task_id, _, _, _, kill, _, _| {
+            let runner: djinn_slot::TestLifecycleRunner =
+                Arc::new(move |task_id, _, _, _, kill, _, _| {
                     let observed_tx = observed_tx.clone();
                     let journal = journal.clone();
                     let release = release.clone();
@@ -269,8 +269,7 @@ fn spawn_admission_observing_pool(
                         }
                         Ok(())
                     })
-                },
-            );
+                });
             djinn_slot::SlotHandle::spawn_with_test_runner(
                 slot_id, model_id, event_tx, app_state, cancel, runner,
             )
@@ -538,7 +537,11 @@ async fn capacity_free_retry_dispatches_exactly_one_refinement() {
         .recv()
         .await
         .expect("controlled refinement create callback must execute");
-    assert_eq!(create_time_history.len(), 1, "one durable generation at create time");
+    assert_eq!(
+        create_time_history.len(),
+        1,
+        "one durable generation at create time"
+    );
     assert_eq!(create_time_history[0].key.work_id, created_task_id);
     assert!(
         matches!(
@@ -547,7 +550,10 @@ async fn capacity_free_retry_dispatches_exactly_one_refinement() {
         ),
         "CreateStarted must be durable before the refinement pool create callback"
     );
-    assert_eq!(create_time_occupancy, 1, "reservation occupies capacity at create time");
+    assert_eq!(
+        create_time_occupancy, 1,
+        "reservation occupies capacity at create time"
+    );
 
     assert!(
         actor.refinement_sessions.contains_key(&fixture.proposal_id),
