@@ -76,9 +76,14 @@
             "Refinement judge — \"Test Proposal\" (round 1) [{proposal_id}]"
         );
         let task = task_repo
-            .create_in_project(
+            .create_in_project_with_provenance(
                 project_id,
                 None,
+                djinn_db::EffectiveCreatorProvenance {
+                    explicit_user_id: Some(user_id),
+                    source_task_id: None,
+                    proposal_id: None,
+                },
                 &title,
                 &format!("Proposal refinement session: judge role for proposal {proposal_id}, round 1, against revision 1."),
                 "",
@@ -92,10 +97,6 @@
             .unwrap();
         task_repo
             .update_agent_type(&task.id, Some("judge"))
-            .await
-            .unwrap();
-        task_repo
-            .set_created_by_user_id(&task.id, user_id)
             .await
             .unwrap();
         task.id
