@@ -1287,6 +1287,7 @@ name = "djinn-core"
 version = "0.1.0"
 dependencies = [
  "dirs 5.0.1",
+ "libc",
  "schemars 1.2.1",
  "serde",
  "serde_json",
@@ -1306,6 +1307,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "base64 0.22.1",
  "chrono",
  "dirs 6.0.0",
  "djinn-core",

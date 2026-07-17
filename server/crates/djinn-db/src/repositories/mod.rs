@@ -23,6 +23,7 @@ pub mod oauth;
 pub mod org_ai_policy;
 pub mod org_config;
 pub mod project;
+pub mod project_live_state_migration;
 pub mod project_workspace_coverage;
 pub mod project_workspace_graph;
 pub mod proposal;
