@@ -26,8 +26,15 @@ use djinn_orchestration_types::coordinator::BackgroundWorkTracker;
 use djinn_orchestration_types::trigger::CoordinatorTrigger;
 use djinn_provider::catalog::{CatalogService, HealthTracker};
 
+use crate::final_verification::{
+    FinalVerificationInvocationLease, FinalVerificationResolvedMaterial,
+};
 use crate::helpers::ProviderCredential;
 use crate::reply_loop::compaction_guard::CompactionCriticalSection;
+
+type FinalVerificationLeaseFuture<'a> = Pin<
+    Box<dyn Future<Output = Result<Box<dyn FinalVerificationInvocationLease>, String>> + Send + 'a>,
+>;
 
 /// Identifies the knowledge-write target for a session.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -60,6 +67,29 @@ pub type ActivityTracker = Arc<Mutex<HashMap<String, Arc<AtomicU64>>>>;
 /// `djinn-slot` depending on `djinn-agent` modules like `prompts`,
 /// `mcp_client`, `task_merge`, `runtime_bridge`, `supervisor`, etc.
 pub trait SlotHostCallbacks: Send + Sync + 'static {
+    /// Resolve canonical material for an authoritative final-verification call.
+    /// The default fails closed until a host wires completion intent.
+    fn resolve_final_verification<'a>(
+        &'a self,
+        _task_id: &'a str,
+        _task_run_id: &'a str,
+        _verification_attempt_id: &'a str,
+        _verify_run_id: &'a str,
+        _ctx: &'a SlotContext,
+    ) -> Pin<Box<dyn Future<Output = Result<FinalVerificationResolvedMaterial, String>> + Send + 'a>>
+    {
+        Box::pin(async { Err("final verification resolution is not available".to_owned()) })
+    }
+    /// Acquire the ordinary per-invocation verification lease.
+    fn acquire_final_verification_lease<'a>(
+        &'a self,
+        _task_id: &'a str,
+        _task_run_id: &'a str,
+        _verification_attempt_id: &'a str,
+        _ctx: &'a SlotContext,
+    ) -> FinalVerificationLeaseFuture<'a> {
+        Box::pin(async { Err("final verification lease is not available".to_owned()) })
+    }
     /// Interrupt a paused worker session.
     fn interrupt_paused_worker_session<'a>(
         &'a self,
