@@ -1,5 +1,5 @@
-// MCP tools for knowledge base operations: CRUD, search, graph, git history,
-// health reporting, and memory↔task reference tracking.
+// MCP tools for knowledge base operations: CRUD, search, graph, ledger
+// revision history, health reporting, and memory↔task reference tracking.
 
 use std::path::Path;
 
@@ -25,6 +25,7 @@ mod reads;
 mod recall_trace;
 mod repair_embeddings;
 mod retrieval_outcomes_report;
+pub(crate) mod revision_readers;
 mod run_enrichment;
 mod search;
 pub(crate) mod summaries;

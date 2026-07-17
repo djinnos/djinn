@@ -32,9 +32,10 @@ use crate::tools::image_tools::{
 };
 use crate::tools::memory_tools::{
     AssociationsParams, BrokenLinksParams, BuildContextParams, CatalogParams, DeleteParams,
-    EditParams, ExtractedAuditParams, GraphParams, HealthParams, ListParams, MemoryConfirmParams,
-    MoveParams, OrphansParams, ReadParams, RecallTraceParams, RecentParams, RepairEmbeddingsParams,
-    RetrievalOutcomesReportParams, RunEnrichmentParams, SearchParams, TaskRefsParams, WriteParams,
+    DiffParams, EditParams, ExtractedAuditParams, GraphParams, HealthParams, HistoryParams,
+    ListParams, MemoryConfirmParams, MoveParams, OrphansParams, ReadParams, RecallTraceParams,
+    RecentParams, RepairEmbeddingsParams, RetrievalOutcomesReportParams, RunEnrichmentParams,
+    SearchParams, SessionDiffParams, TaskRefsParams, WriteParams,
 };
 use crate::tools::org_policy_tools::{OrgPolicyGetParams, OrgPolicySetParams};
 use crate::tools::pr_review_tools::PrReviewContextParams;
@@ -690,6 +691,21 @@ impl DjinnMcpServer {
             "memory_read" => map_json(
                 name,
                 self.memory_read(Parameters(decode_args::<ReadParams>(name, args)?))
+                    .await,
+            ),
+            "memory_history" => map_json(
+                name,
+                self.memory_history(Parameters(decode_args::<HistoryParams>(name, args)?))
+                    .await,
+            ),
+            "memory_diff" => map_json(
+                name,
+                self.memory_diff(Parameters(decode_args::<DiffParams>(name, args)?))
+                    .await,
+            ),
+            "memory_session_diff" => map_json(
+                name,
+                self.memory_session_diff(Parameters(decode_args::<SessionDiffParams>(name, args)?))
                     .await,
             ),
             "memory_confirm" => map_json(
