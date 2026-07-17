@@ -9,7 +9,10 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use super::{
-    NoteAssociationKind, NoteRepository, NoteRevisionEventKind, NoteRevisionReason,
+    NoteAssociationKind, NoteHistoryRequest, NoteRepository, NoteRevisionEventKind,
+    NoteRevisionEventRow, NoteRevisionReason, NoteRevisionSnapshot, NoteRevisionSubsystem,
+    REVISION_PAGE_MAX, RevisionCursor, RevisionHistoryPage, RevisionLookupRequest,
+    RevisionRangeRequest, SessionRevisionPage, SessionRevisionRequest,
     TrustedNoteRevisionAttribution, TrustedNoteRevisionProvenance, index_links_for_note,
     resolve_links_for_note,
 };
@@ -584,6 +587,351 @@ impl NoteRepository {
         .await
         .map_err(Into::into)
     }
+
+    // ── Bounded read boundary ────────────────────────────────────────────────
+
+    /// Returns one note's revision history ordered newest-first by
+    /// `note_seq`, with stable before-cursor pagination.
+    ///
+    /// Queries `limit + 1` rows to derive `next_cursor`.  All SQL requires
+    /// `project_id` scope.  Deleted-note events are retained.  The
+    /// `note_exists` flag distinguishes a live pre-migration note with zero
+    /// events from an unknown/deleted note.
+    pub async fn note_revision_history(
+        &self,
+        request: NoteHistoryRequest<'_>,
+    ) -> Result<RevisionHistoryPage> {
+        self.db.ensure_initialized().await?;
+        let limit = request.limit.clamp(1, REVISION_PAGE_MAX);
+        let before_seq = match request.before {
+            Some(raw) => match RevisionCursor::decode_note_history(raw) {
+                Ok(RevisionCursor::NoteHistory { note_seq }) => Some(note_seq),
+                Ok(_) => unreachable!("decode_note_history returns NoteHistory"),
+                Err(_) => return Err(Error::InvalidData("invalid cursor".to_owned())),
+            },
+            None => None,
+        };
+        let fetch = limit + 1;
+        let rows: Vec<NoteRevisionDbRow> = if let Some(seq) = before_seq {
+            sqlx::query_as(
+                "SELECT id, project_id, note_id, note_seq, event_kind, content_before, content_after, \
+                 confidence_before, confidence_after, actor_kind, actor_id, subsystem, session_id, \
+                 task_id, task_run_id, reason, created_at \
+                 FROM note_revision_events \
+                 WHERE project_id = $1 AND note_id = $2 AND note_seq < $3 \
+                 ORDER BY note_seq DESC, created_at DESC, id DESC \
+                 LIMIT $4",
+            )
+            .bind(request.project_id)
+            .bind(request.note_id)
+            .bind(seq)
+            .bind(fetch as i64)
+            .fetch_all(self.db.pool())
+            .await?
+        } else {
+            sqlx::query_as(
+                "SELECT id, project_id, note_id, note_seq, event_kind, content_before, content_after, \
+                 confidence_before, confidence_after, actor_kind, actor_id, subsystem, session_id, \
+                 task_id, task_run_id, reason, created_at \
+                 FROM note_revision_events \
+                 WHERE project_id = $1 AND note_id = $2 \
+                 ORDER BY note_seq DESC, created_at DESC, id DESC \
+                 LIMIT $3",
+            )
+            .bind(request.project_id)
+            .bind(request.note_id)
+            .bind(fetch as i64)
+            .fetch_all(self.db.pool())
+            .await?
+        };
+        let note_exists: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM notes WHERE id = $1 AND project_id = $2)",
+        )
+        .bind(request.note_id)
+        .bind(request.project_id)
+        .fetch_one(self.db.pool())
+        .await?;
+        let next_cursor = if rows.len() > limit {
+            let last = &rows[limit - 1];
+            Some(RevisionCursor::encode_note_history(
+                last.note_seq.unwrap_or(0),
+            ))
+        } else {
+            None
+        };
+        let events = rows
+            .into_iter()
+            .take(limit)
+            .map(map_db_row_to_event_row)
+            .collect::<Result<Vec<_>>>()?;
+        Ok(RevisionHistoryPage {
+            events,
+            next_cursor,
+            note_exists,
+        })
+    }
+
+    /// Returns an explicit single revision, scoped to project and note so
+    /// inaccessible or cross-project IDs are indistinguishable to callers.
+    ///
+    /// Returns `Ok(None)` when the revision does not exist within the scoped
+    /// project/note pair.
+    pub async fn revision_lookup(
+        &self,
+        request: RevisionLookupRequest<'_>,
+    ) -> Result<Option<NoteRevisionEventRow>> {
+        self.db.ensure_initialized().await?;
+        let row: Option<NoteRevisionDbRow> = sqlx::query_as(
+            "SELECT id, project_id, note_id, note_seq, event_kind, content_before, content_after, \
+             confidence_before, confidence_after, actor_kind, actor_id, subsystem, session_id, \
+             task_id, task_run_id, reason, created_at \
+             FROM note_revision_events \
+             WHERE project_id = $1 AND note_id = $2 AND id = $3",
+        )
+        .bind(request.project_id)
+        .bind(request.note_id)
+        .bind(request.revision_id)
+        .fetch_optional(self.db.pool())
+        .await?;
+        row.map(map_db_row_to_event_row).transpose()
+    }
+
+    /// Returns an inclusive revision range between two `note_seq` endpoints,
+    /// ordered newest-first.  Both endpoints and all intervening events are
+    /// included regardless of event kind, so callers can build deterministic
+    /// pairwise diffs from explicit snapshots without inferring neighboring
+    /// state.
+    pub async fn revision_range(
+        &self,
+        request: RevisionRangeRequest<'_>,
+    ) -> Result<Vec<NoteRevisionEventRow>> {
+        self.db.ensure_initialized().await?;
+        let (to_seq, from_seq) = if request.to_seq >= request.from_seq {
+            (request.to_seq, request.from_seq)
+        } else {
+            (request.from_seq, request.to_seq)
+        };
+        let rows: Vec<NoteRevisionDbRow> = sqlx::query_as(
+            "SELECT id, project_id, note_id, note_seq, event_kind, content_before, content_after, \
+             confidence_before, confidence_after, actor_kind, actor_id, subsystem, session_id, \
+             task_id, task_run_id, reason, created_at \
+             FROM note_revision_events \
+             WHERE project_id = $1 AND note_id = $2 AND note_seq BETWEEN $3 AND $4 \
+             ORDER BY note_seq DESC, created_at DESC, id DESC",
+        )
+        .bind(request.project_id)
+        .bind(request.note_id)
+        .bind(from_seq)
+        .bind(to_seq)
+        .fetch_all(self.db.pool())
+        .await?;
+        rows.into_iter()
+            .map(map_db_row_to_event_row)
+            .collect::<Result<Vec<_>>>()
+    }
+
+    /// Returns one session's revision events ordered newest-first by
+    /// `(created_at DESC, id DESC)`, with stable before-cursor pagination.
+    /// Includes every ledger event kind.
+    pub async fn session_revision_history(
+        &self,
+        session_id: &str,
+        request: SessionRevisionRequest<'_>,
+    ) -> Result<SessionRevisionPage> {
+        self.session_or_task_run_history("session_id", session_id, request)
+            .await
+    }
+
+    /// Returns one task-run's revision events ordered newest-first by
+    /// `(created_at DESC, id DESC)`, with stable before-cursor pagination.
+    /// Includes every ledger event kind.
+    pub async fn task_run_revision_history(
+        &self,
+        task_run_id: &str,
+        request: SessionRevisionRequest<'_>,
+    ) -> Result<SessionRevisionPage> {
+        self.session_or_task_run_history("task_run_id", task_run_id, request)
+            .await
+    }
+
+    async fn session_or_task_run_history(
+        &self,
+        scope_column: &'static str,
+        scope_value: &str,
+        request: SessionRevisionRequest<'_>,
+    ) -> Result<SessionRevisionPage> {
+        self.db.ensure_initialized().await?;
+        let limit = request.limit.clamp(1, REVISION_PAGE_MAX);
+        let before = match request.before {
+            Some(raw) => match RevisionCursor::decode_session(raw) {
+                Ok(RevisionCursor::Session { created_at, id }) => Some((created_at, id)),
+                Ok(_) => unreachable!("decode_session returns Session"),
+                Err(_) => return Err(Error::InvalidData("invalid cursor".to_owned())),
+            },
+            None => None,
+        };
+        let fetch = limit + 1;
+        // The scope column is a compile-time constant, not user input, so
+        // interpolation into the SQL string is safe.
+        let rows: Vec<NoteRevisionDbRow> = if let Some((cursor_created_at, cursor_id)) = before {
+            let sql = format!(
+                "SELECT id, project_id, note_id, note_seq, event_kind, content_before, content_after, \
+                 confidence_before, confidence_after, actor_kind, actor_id, subsystem, session_id, \
+                 task_id, task_run_id, reason, created_at \
+                 FROM note_revision_events \
+                 WHERE project_id = $1 AND {scope_column} = $2 \
+                 AND (created_at, id) < ($3, $4) \
+                 ORDER BY created_at DESC, id DESC \
+                 LIMIT $5"
+            );
+            sqlx::query_as(&sql)
+                .bind(request.project_id)
+                .bind(scope_value)
+                .bind(cursor_created_at)
+                .bind(cursor_id)
+                .bind(fetch as i64)
+                .fetch_all(self.db.pool())
+                .await?
+        } else {
+            let sql = format!(
+                "SELECT id, project_id, note_id, note_seq, event_kind, content_before, content_after, \
+                 confidence_before, confidence_after, actor_kind, actor_id, subsystem, session_id, \
+                 task_id, task_run_id, reason, created_at \
+                 FROM note_revision_events \
+                 WHERE project_id = $1 AND {scope_column} = $2 \
+                 ORDER BY created_at DESC, id DESC \
+                 LIMIT $3"
+            );
+            sqlx::query_as(&sql)
+                .bind(request.project_id)
+                .bind(scope_value)
+                .bind(fetch as i64)
+                .fetch_all(self.db.pool())
+                .await?
+        };
+        let next_cursor = if rows.len() > limit {
+            let last = &rows[limit - 1];
+            Some(RevisionCursor::encode_session(&last.created_at, &last.id))
+        } else {
+            None
+        };
+        let events = rows
+            .into_iter()
+            .take(limit)
+            .map(map_db_row_to_event_row)
+            .collect::<Result<Vec<_>>>()?;
+        Ok(SessionRevisionPage {
+            events,
+            next_cursor,
+        })
+    }
+}
+
+// ── Read-row mapping ─────────────────────────────────────────────────────────
+
+/// Raw DB row shape matching the physical `note_revision_events` columns.
+#[derive(Debug, Clone, sqlx::FromRow)]
+struct NoteRevisionDbRow {
+    id: String,
+    project_id: String,
+    note_id: Option<String>,
+    note_seq: Option<i64>,
+    event_kind: String,
+    content_before: Option<String>,
+    content_after: Option<String>,
+    confidence_before: Option<f64>,
+    confidence_after: Option<f64>,
+    actor_kind: String,
+    actor_id: Option<String>,
+    subsystem: Option<String>,
+    session_id: Option<String>,
+    task_id: Option<String>,
+    task_run_id: Option<String>,
+    reason: String,
+    created_at: String,
+}
+
+/// Maps a raw DB row to the typed [`NoteRevisionEventRow`], reconstructing the
+/// trusted attribution/provenance and validated reason from persisted values.
+fn map_db_row_to_event_row(row: NoteRevisionDbRow) -> Result<NoteRevisionEventRow> {
+    let event_kind = parse_event_kind(&row.event_kind)?;
+    let attribution = reconstruct_attribution(&row)?;
+    let provenance = TrustedNoteRevisionProvenance::new(
+        row.session_id.clone(),
+        row.task_id.clone(),
+        row.task_run_id.clone(),
+    )
+    .map_err(|_| Error::Internal("invalid persisted provenance".to_owned()))?;
+    let reason = NoteRevisionReason::new(&row.reason)
+        .map_err(|_| Error::Internal(format!("invalid persisted reason: {}", row.reason)))?;
+    Ok(NoteRevisionEventRow {
+        id: row.id,
+        project_id: row.project_id,
+        note_id: row.note_id,
+        note_seq: row.note_seq,
+        event_kind,
+        snapshot: NoteRevisionSnapshot {
+            content_before: row.content_before,
+            content_after: row.content_after,
+            confidence_before: row.confidence_before,
+            confidence_after: row.confidence_after,
+        },
+        attribution,
+        provenance,
+        reason,
+        created_at: row.created_at,
+    })
+}
+
+fn parse_event_kind(raw: &str) -> Result<NoteRevisionEventKind> {
+    Ok(match raw {
+        "created" => NoteRevisionEventKind::Created,
+        "updated" => NoteRevisionEventKind::Updated,
+        "deleted" => NoteRevisionEventKind::Deleted,
+        "confidence_changed" => NoteRevisionEventKind::ConfidenceChanged,
+        "extraction_skipped" => NoteRevisionEventKind::ExtractionSkipped,
+        other => {
+            return Err(Error::Internal(format!(
+                "unknown persisted event kind: {other}"
+            )));
+        }
+    })
+}
+
+fn reconstruct_attribution(row: &NoteRevisionDbRow) -> Result<TrustedNoteRevisionAttribution> {
+    Ok(match row.actor_kind.as_str() {
+        "human" => {
+            TrustedNoteRevisionAttribution::human(row.actor_id.as_deref().unwrap_or_default())
+                .map_err(|_| Error::Internal("invalid persisted human attribution".to_owned()))?
+        }
+        "agent" => {
+            TrustedNoteRevisionAttribution::agent(row.actor_id.as_deref().unwrap_or_default())
+                .map_err(|_| Error::Internal("invalid persisted agent attribution".to_owned()))?
+        }
+        "system" => {
+            let subsystem = row.subsystem.as_deref().ok_or_else(|| {
+                Error::Internal("system attribution missing subsystem".to_owned())
+            })?;
+            let subsystem_enum = match subsystem {
+                "mcp" => NoteRevisionSubsystem::Mcp,
+                "dedup" => NoteRevisionSubsystem::Dedup,
+                "consolidation" => NoteRevisionSubsystem::Consolidation,
+                "enrichment" => NoteRevisionSubsystem::Enrichment,
+                "extraction" => NoteRevisionSubsystem::Extraction,
+                other => {
+                    return Err(Error::Internal(format!(
+                        "unknown persisted subsystem: {other}"
+                    )));
+                }
+            };
+            TrustedNoteRevisionAttribution::system(subsystem_enum)
+        }
+        other => {
+            return Err(Error::Internal(format!(
+                "unknown persisted actor kind: {other}"
+            )));
+        }
+    })
 }
 
 async fn locked_note(

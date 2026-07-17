@@ -3945,6 +3945,99 @@ async fn reentry_with_unconsumed_arbiter_does_not_create_second_arbiter() {
     );
 }
 
+/// Monitored-reopen starvation regression (incident v1ej, 2026-07-17): when
+/// the current hold cycle's unconsumed arbitration row carries a `reopen`
+/// decision, the arbiter has ALREADY decided and the one monitored worker
+/// attempt is what must run next.  `route_planner_intervention` must yield
+/// (return `false`) so the normal dispatch pass can run that worker — instead
+/// of treating the row as "arbiter in flight" on every tick, which starves the
+/// monitored attempt until the 24h arbitration deadline.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn pending_monitored_reopen_yields_to_normal_dispatch() {
+    use djinn_db::repositories::task_arbitration::UpdateDispatchLedgerParams;
+
+    let db = test_helpers::create_test_db();
+    let (tx, _rx) = broadcast::channel(256);
+    let mut actor = coordinator_actor_for_tests(&db, &tx);
+    let repo = TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx));
+
+    let task = make_task_with_reopen_count(&db, &tx, REOPEN_INTERVENTION_THRESHOLD).await;
+    repo.reset_intervention_counters(&task.id).await.unwrap();
+    for _ in 0..REOPEN_INTERVENTION_THRESHOLD {
+        repo.set_status(&task.id, "closed").await.unwrap();
+        repo.set_status(&task.id, "open").await.unwrap();
+    }
+    let task = repo.get(&task.id).await.unwrap().unwrap();
+    assert_eq!(task.intervention_count, MAX_PLANNER_INTERVENTIONS);
+
+    seed_terminated_post_intervention_sessions(&db, &tx, &task.id, &["m-a", "m-b"]).await;
+
+    // First dispatch creates the arbitration row (arbiter routed).
+    let first_handled = actor
+        .route_planner_intervention(&task, "worker", "second strike first dispatch", None, 5)
+        .await;
+    assert!(first_handled, "first dispatch must handle the task");
+
+    let arb_repo = TaskArbitrationRepository::new(db.clone());
+    let all_arbs = arb_repo.list_for_task(&task.id).await.unwrap();
+    assert_eq!(all_arbs.len(), 1, "one arbitration row after first dispatch");
+    let cycle = all_arbs[0].hold_cycle;
+
+    // Simulate the Lead arbiter's `reopen` decision: persist the directive on
+    // the unconsumed row, record the monitored-reopen start, and return the
+    // task to `open` (the reopen transition the arbiter's decision applies).
+    let reopen_directive = serde_json::json!({
+        "decision": "reopen",
+        "directive": "repair the failing fixtures and push so CI reruns",
+    });
+    arb_repo
+        .update_dispatch_ledger(UpdateDispatchLedgerParams {
+            task_id: &task.id,
+            hold_cycle: cycle,
+            mirror_head_sha: None,
+            github_head_sha: None,
+            pr_url: None,
+            failing_ci_job_ids: None,
+            dossier: None,
+            directive: Some(&reopen_directive),
+            verification_command: None,
+            excluded_models: None,
+        })
+        .await
+        .unwrap();
+    arb_repo
+        .record_monitored_reopen(&task.id, cycle)
+        .await
+        .unwrap();
+    repo.set_status(&task.id, "open").await.unwrap();
+
+    // Re-entry with the monitored reopen pending must YIELD to normal
+    // dispatch — not spin "arbiter already in flight".
+    let refreshed = repo.get(&task.id).await.unwrap().unwrap();
+    let handled = actor
+        .route_planner_intervention(&refreshed, "worker", "second strike reentry", None, 5)
+        .await;
+    assert!(
+        !handled,
+        "a pending monitored reopen must yield to normal dispatch so the \
+         monitored worker attempt can run (incident v1ej: returning true here \
+         starved the worker until the 24h arbitration deadline)"
+    );
+
+    // No second arbitration row, and the reopen row stays unconsumed for the
+    // monitored worker to pick up.
+    let all_arbs_after = arb_repo.list_for_task(&task.id).await.unwrap();
+    assert_eq!(
+        all_arbs_after.len(),
+        1,
+        "yielding must not create a second arbitration row"
+    );
+    assert_eq!(
+        all_arbs_after[0].state, "unconsumed",
+        "the monitored-reopen row must remain unconsumed for the worker dispatch"
+    );
+}
+
 /// Recovery/replay after a transition-before-activity partial failure.
 ///
 /// The arbiter dispatch commits its durable state in two steps that are NOT in
@@ -7069,7 +7162,9 @@ async fn reentry_with_stale_decided_arbitration_self_consumes_and_dispatches_fre
 
 /// A monitored-reopen row (directive decision "reopen") keeps its unconsumed
 /// state by design until `complete_monitored_reopen` — the self-recovery path
-/// must NOT consume it.
+/// must NOT consume it.  Since the v1ej starvation fix, the re-entry also
+/// YIELDS (returns `false`) so the normal dispatch pass can run the monitored
+/// worker instead of spinning "arbiter already in flight" every tick.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn reentry_with_monitored_reopen_directive_does_not_self_consume() {
     let db = test_helpers::create_test_db();
@@ -7112,7 +7207,11 @@ async fn reentry_with_monitored_reopen_directive_does_not_self_consume() {
     let handled = actor
         .route_planner_intervention(&task, "worker", "monitored reopen reentry", None, 5)
         .await;
-    assert!(handled, "monitored-reopen re-entry must be handled");
+    assert!(
+        !handled,
+        "monitored-reopen re-entry must YIELD to normal dispatch so the \
+         monitored worker attempt can run (v1ej starvation fix)"
+    );
 
     // The single row survives unconsumed — no self-consume, no second row.
     let all_arbs = arb_repo.list_for_task(&task.id).await.unwrap();
