@@ -153,6 +153,12 @@ impl BuildAdmissionController {
         &self.released
     }
 
+    /// Durable inspection seam used by coordinator integration tests.
+    #[cfg(test)]
+    pub(crate) fn journal(&self) -> &Arc<AdmissionJournalRepository> {
+        &self.journal
+    }
+
     /// Bounded count suitable for a telemetry exporter; values saturate at 1024.
     pub async fn unclassified_observation_count(&self) -> u64 {
         *self.unclassified_observations.lock().await
