@@ -652,9 +652,25 @@ fn assert_unavailable(result: VerificationInputFingerprint) {
     );
 }
 
+// The mutation seam is process-global test infrastructure. Hold this guard
+// from installation through traversal and clearing so parallel Tokio tests
+// cannot exchange callbacks.
+#[cfg(unix)]
+static READ_MUTATION_TEST_SERIAL_LOCK: std::sync::OnceLock<std::sync::Mutex<()>> =
+    std::sync::OnceLock::new();
+
+#[cfg(unix)]
+fn lock_read_mutation_test() -> std::sync::MutexGuard<'static, ()> {
+    READ_MUTATION_TEST_SERIAL_LOCK
+        .get_or_init(|| std::sync::Mutex::new(()))
+        .lock()
+        .expect("read mutation test serial lock")
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[cfg(unix)]
 async fn configured_public_traversal_rejects_read_boundary_replacement() {
+    let _hook_guard = lock_read_mutation_test();
     let fixture = init_repo_with_main_commit();
     let path = fixture.path().join("README.md");
     set_test_read_mutation_hook(Some(std::sync::Arc::new({
@@ -678,6 +694,7 @@ async fn configured_public_traversal_rejects_read_boundary_replacement() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[cfg(unix)]
 async fn configured_public_traversal_rejects_read_boundary_content_mutation() {
+    let _hook_guard = lock_read_mutation_test();
     let fixture = init_repo_with_main_commit();
     let path = fixture.path().join("README.md");
     set_test_read_mutation_hook(Some(std::sync::Arc::new({
@@ -701,6 +718,7 @@ async fn configured_public_traversal_rejects_read_boundary_content_mutation() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[cfg(unix)]
 async fn configured_external_traversal_rejects_read_boundary_type_mutation() {
+    let _hook_guard = lock_read_mutation_test();
     let fixture = init_repo_with_main_commit();
     let external = tempfile::tempdir().expect("create external mount");
     write_str(external.path(), "input.txt", "input\n");
@@ -730,6 +748,7 @@ async fn configured_external_traversal_rejects_read_boundary_type_mutation() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[cfg(unix)]
 async fn configured_submodule_traversal_rejects_read_boundary_disappearance() {
+    let _hook_guard = lock_read_mutation_test();
     let fixture = make_submodule_fixture("vendor");
     let path = fixture.outer.path().join("vendor/README.md");
     set_test_read_mutation_hook(Some(std::sync::Arc::new(move |candidate| {
@@ -749,6 +768,7 @@ async fn configured_submodule_traversal_rejects_read_boundary_disappearance() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[cfg(unix)]
 async fn symlink_escape_and_replacement_fail_closed() {
+    let _hook_guard = lock_read_mutation_test();
     let fixture = init_repo_with_main_commit();
     std::os::unix::fs::symlink("/etc/passwd", fixture.path().join("escape"))
         .expect("create escaping symlink");
@@ -831,4 +851,45 @@ async fn unreadable_untracked_file_makes_identity_unavailable_when_enforced() {
     if enforced {
         assert_unavailable(result);
     }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[cfg(unix)]
+async fn intermediate_symlink_escape_fails_closed_for_repo_and_external_walks() {
+    let fixture = init_repo_with_main_commit();
+    write_str(fixture.path(), "nested/input.txt", "tracked input\n");
+    git(fixture.path(), ["add", "nested/input.txt"]);
+    git(fixture.path(), ["commit", "add nested input"]);
+    let outside = tempfile::tempdir().expect("create outside directory");
+    write_str(outside.path(), "input.txt", "outside input\n");
+    std::fs::remove_dir_all(fixture.path().join("nested")).expect("remove nested directory");
+    std::os::unix::fs::symlink(outside.path(), fixture.path().join("nested"))
+        .expect("replace nested directory with escaping link");
+    assert_unavailable(
+        configured_fingerprint(
+            fixture.path(),
+            &VerificationInputFingerprintConfig::default(),
+        )
+        .await,
+    );
+    std::fs::remove_file(fixture.path().join("nested")).expect("remove escaping repo link");
+    write_str(fixture.path(), "nested/input.txt", "tracked input\n");
+
+    let external = tempfile::tempdir().expect("create external mount");
+    write_str(external.path(), "nested/input.txt", "external input\n");
+    std::fs::remove_dir_all(external.path().join("nested")).expect("remove external nested dir");
+    std::os::unix::fs::symlink(outside.path(), external.path().join("nested"))
+        .expect("replace external nested dir with escaping link");
+    let mut config = VerificationInputFingerprintConfig::default();
+    config.manifest.read_only_external_inputs.push(
+        djinn_core::canonical_verify::DeclaredExternalInputV1 {
+            id: "external".into(),
+            locator: "host://external".into(),
+        },
+    );
+    config.external_inputs.push(ResolvedExternalInputV1 {
+        id: "external".into(),
+        path: external.path().into(),
+    });
+    assert_unavailable(configured_fingerprint(fixture.path(), &config).await);
 }

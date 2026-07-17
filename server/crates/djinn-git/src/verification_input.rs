@@ -564,6 +564,11 @@ fn collect_external_dir(
     declaration: &djinn_core::canonical_verify::DeclaredExternalInputV1,
     states: &mut Vec<ExternalState>,
 ) -> Result<(), VerificationInputUnavailable> {
+    let dir_rel = dir
+        .strip_prefix(root)
+        .map_err(|_| unavailable_manifest("external path escaped mount"))?;
+    let dir_bytes = path_bytes(dir_rel);
+    canonical_path_within_root(root, dir, &dir_bytes)?;
     let mut entries: Vec<_> = std::fs::read_dir(dir)
         .map_err(|e| VerificationInputUnavailable::UnreadableFile {
             path: dir.display().to_string(),
@@ -597,6 +602,7 @@ fn collect_external_dir(
             });
         }
     }
+    canonical_path_within_root(root, dir, &dir_bytes)?;
     Ok(())
 }
 async fn git_binary_stdout(worktree: &Path, args: Vec<String>) -> Result<Vec<u8>, GitError> {
@@ -759,6 +765,58 @@ fn traversal_changed(path: &[u8]) -> VerificationInputUnavailable {
         error: "entry changed during verification input traversal".into(),
     }
 }
+/// Resolve an entry before consuming it. `symlink_metadata` reports only the
+/// final entry, while opening a nested path follows intermediate symlinks.
+/// Every object inspected by this traversal must remain below its walk root.
+fn canonical_path_within_root(
+    root: &Path,
+    path: &Path,
+    rel_path: &[u8],
+) -> Result<PathBuf, VerificationInputUnavailable> {
+    let canonical_root = std::fs::canonicalize(root).map_err(|e| {
+        VerificationInputUnavailable::UnreadableFile {
+            path: lossy_path(rel_path),
+            error: e.to_string(),
+        }
+    })?;
+    let canonical_path = std::fs::canonicalize(path).map_err(|e| {
+        VerificationInputUnavailable::UnreadableFile {
+            path: lossy_path(rel_path),
+            error: e.to_string(),
+        }
+    })?;
+    if !canonical_path.starts_with(&canonical_root) {
+        return Err(VerificationInputUnavailable::UnreadableFile {
+            path: lossy_path(rel_path),
+            error: "path escaped permitted root".into(),
+        });
+    }
+    Ok(canonical_path)
+}
+
+#[cfg(unix)]
+fn opened_file_within_root(
+    root: &Path,
+    file: &std::fs::File,
+    rel_path: &[u8],
+) -> Result<(), VerificationInputUnavailable> {
+    use std::os::unix::io::AsRawFd;
+
+    let opened_path = PathBuf::from(format!("/proc/self/fd/{}", file.as_raw_fd()));
+    canonical_path_within_root(root, &opened_path, rel_path).map(|_| ())
+}
+
+#[cfg(not(unix))]
+fn opened_file_within_root(
+    root: &Path,
+    file: &std::fs::File,
+    rel_path: &[u8],
+) -> Result<(), VerificationInputUnavailable> {
+    // Non-Unix platforms have no portable descriptor-to-path API. The caller
+    // re-canonicalizes the pathname after reading as a conservative check.
+    let _ = (root, file, rel_path);
+    Ok(())
+}
 #[cfg(test)]
 type ReadMutationHook = std::sync::Arc<dyn Fn(&Path) + Send + Sync>;
 #[cfg(test)]
@@ -844,24 +902,7 @@ fn classify_worktree_entry(
                 error: e.to_string(),
             }
         })?;
-        let canonical_root = std::fs::canonicalize(worktree).map_err(|e| {
-            VerificationInputUnavailable::UnreadableFile {
-                path: lossy_path(rel_path),
-                error: e.to_string(),
-            }
-        })?;
-        let canonical_target = std::fs::canonicalize(&full_path).map_err(|e| {
-            VerificationInputUnavailable::UnreadableFile {
-                path: lossy_path(rel_path),
-                error: e.to_string(),
-            }
-        })?;
-        if !canonical_target.starts_with(&canonical_root) {
-            return Err(VerificationInputUnavailable::UnreadableFile {
-                path: lossy_path(rel_path),
-                error: "symlink target escaped permitted root".into(),
-            });
-        }
+        canonical_path_within_root(worktree, &full_path, rel_path)?;
         let after =
             std::fs::symlink_metadata(&full_path).map_err(|_| traversal_changed(rel_path))?;
         if entry_identity(&after) != before {
@@ -872,6 +913,7 @@ fn classify_worktree_entry(
         if target_after != target {
             return Err(traversal_changed(rel_path));
         }
+        canonical_path_within_root(worktree, &full_path, rel_path)?;
         return Ok(WorktreeState {
             path: rel_path.to_vec(),
             type_tag: TYPE_SYMLINK,
@@ -881,6 +923,7 @@ fn classify_worktree_entry(
     }
     if file_type.is_file() {
         let before = entry_identity(&metadata);
+        canonical_path_within_root(worktree, &full_path, rel_path)?;
         run_test_read_mutation_hook(&full_path);
         let mut file = std::fs::File::open(&full_path).map_err(|e| {
             VerificationInputUnavailable::UnreadableFile {
@@ -897,6 +940,7 @@ fn classify_worktree_entry(
         if !opened_before.file_type().is_file() || entry_identity(&opened_before) != before {
             return Err(traversal_changed(rel_path));
         }
+        opened_file_within_root(worktree, &file, rel_path)?;
         let mut content = Vec::new();
         file.read_to_end(&mut content).map_err(|e| {
             VerificationInputUnavailable::UnreadableFile {
@@ -915,6 +959,7 @@ fn classify_worktree_entry(
         if entry_identity(&opened_after) != before || entry_identity(&path_after) != before {
             return Err(traversal_changed(rel_path));
         }
+        canonical_path_within_root(worktree, &full_path, rel_path)?;
         return Ok(WorktreeState {
             path: rel_path.to_vec(),
             type_tag: TYPE_REGULAR,
