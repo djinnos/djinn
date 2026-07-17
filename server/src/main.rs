@@ -231,6 +231,12 @@ async fn async_main() {
 
     server::run(router, cli.port, cancel).await;
 
+    // Graceful shutdown: block new Enforce build-admission reservations
+    // before draining in-flight work. Enforce admission begins draining so
+    // no new task/warm create can start during the teardown window; in-flight
+    // permits may still transition to terminal. Observe/Off are unaffected.
+    state_for_shutdown.begin_build_admission_draining().await;
+
     // Graceful RPC teardown: cancel the TCP accept loop + join it so any
     // in-flight worker RPCs drain cleanly.  Matches the HTTP server's
     // `with_graceful_shutdown` semantics.

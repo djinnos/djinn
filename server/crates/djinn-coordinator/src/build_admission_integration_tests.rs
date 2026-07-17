@@ -5,12 +5,19 @@
 
 use std::sync::Arc;
 
-use djinn_db::{AdmissionDomain, AdmissionJournalRepository, AdmissionState, Database};
-use djinn_k8s::{WarmAdmission, WarmAdmissionError, WarmAdmissionRequest, WarmAdmissionTransition};
+use djinn_db::{
+    AdmissionDomain, AdmissionJournalKey, AdmissionJournalRepository, AdmissionState,
+    AdmissionWorkloadKind, Database, ReserveAdmissionInput,
+};
+use djinn_k8s::{
+    WarmAdmission, WarmAdmissionError, WarmAdmissionPermit, WarmAdmissionRequest,
+    WarmAdmissionTransition,
+};
 use tokio::sync::Barrier;
 
 use crate::build_admission::{
-    BuildAdmissionController, BuildAdmissionDecision, BuildAdmissionMode,
+    AdmissionSeedReport, BuildAdmissionController, BuildAdmissionDecision, BuildAdmissionMode,
+    BuildAdmissionReadiness,
 };
 
 fn controller(mode: BuildAdmissionMode, cap: i64) -> BuildAdmissionController {
@@ -496,4 +503,342 @@ async fn invocation_children_are_durable_but_do_not_self_block_the_parent_cap() 
         WarmAdmission::admit(&controller, warm("real-warm-is-blocked")).await,
         Err(WarmAdmissionError::Denied { .. })
     ));
+}
+
+/// Deterministic cap-one forced-restart harness using barriers/channels.
+///
+/// Scenario (acceptance criterion 4):
+/// 1. The predecessor process reserves a warm slot, commits CreateInFlight, and
+///    issues a paused POST (the process is killed before the POST result
+///    resolves).
+/// 2. The replacement process starts with EMPTY initial inventory (no
+///    Kubernetes list has run yet) and recovers the durable journal.
+/// 3. Recovery converts the predecessor CreateInFlight row to occupying
+///    CreateUnknown.
+/// 4. A competitor warm is DENIED while the predecessor CreateUnknown occupies
+///    the single cap-one slot.
+/// 5. The late predecessor create resolves (the Kubernetes object exists) and
+///    is adopted into the SAME generation (Live with the looked-up UID).
+/// Occupancy never exceeds one throughout.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cap_one_forced_restart_denies_competitor_and_adopts_late_create() {
+    let journal = Arc::new(AdmissionJournalRepository::new(
+        Database::open_in_memory().unwrap(),
+    ));
+    let work_id = "restart-warm";
+    let predecessor_epoch = "predecessor-epoch";
+    let replacement_epoch = "replacement-epoch";
+
+    // --- Phase 1: predecessor commits CreateInFlight and issues a paused POST ---
+    // The predecessor is a healthy controller whose own startup gates completed
+    // long ago. It reserves the cap-one slot, durably commits CreateStarted
+    // (the pre-POST state that survives forced process loss), and issues the
+    // Kubernetes POST — modelled as a spawned task that signals "CreateInFlight
+    // committed, POST issued" on a barrier and then parks on a oneshot gate so
+    // the POST result never resolves for the predecessor process.
+    let predecessor = Arc::new(BuildAdmissionController::new(
+        Arc::clone(&journal),
+        BuildAdmissionMode::Enforce,
+        1,
+        predecessor_epoch,
+    ));
+    let create_committed = Arc::new(Barrier::new(2));
+    let (post_result, post_result_gate) = tokio::sync::oneshot::channel::<String>();
+    let paused_post = {
+        let predecessor = Arc::clone(&predecessor);
+        let create_committed = Arc::clone(&create_committed);
+        tokio::spawn(async move {
+            let permit = WarmAdmission::admit(predecessor.as_ref(), warm(work_id))
+                .await
+                .expect("predecessor reserves the single cap-one slot");
+            predecessor
+                .transition(&permit, WarmAdmissionTransition::CreateStarted)
+                .await
+                .expect("predecessor durably commits CreateInFlight before POST");
+            // The POST is issued at this point. The barrier proves the durable
+            // pre-POST state is committed before the replacement may start;
+            // the oneshot keeps the POST unresolved while the process is lost.
+            create_committed.wait().await;
+            // Forced process loss: the predecessor never records the create
+            // result. Only the Kubernetes object — its UID — survives, which
+            // the replacement later discovers through the authoritative GET.
+            post_result_gate.await.expect("the late POST resolves")
+        })
+    };
+    create_committed.wait().await;
+    assert_eq!(
+        journal.count_task_or_warm_occupancy().await.unwrap(),
+        1,
+        "predecessor CreateInFlight occupies the single slot"
+    );
+    let committed = journal
+        .list_history(AdmissionDomain::WarmBuild, work_id)
+        .await
+        .unwrap();
+    assert_eq!(committed.len(), 1);
+    assert_eq!(
+        committed[0].state,
+        AdmissionState::CreateInFlight,
+        "the durable pre-POST state survives the forced loss"
+    );
+    assert_eq!(committed[0].creator_server_epoch, predecessor_epoch);
+
+    // --- Phase 2: replacement starts with EMPTY initial inventory and recovers ---
+    // The replacement controller is constructed closed (JournalRecoveryIncomplete)
+    // with a fresh, unique epoch. It has not performed any Kubernetes inventory.
+    let replacement =
+        BuildAdmissionController::new_closed(Arc::clone(&journal), 1, replacement_epoch);
+    assert_eq!(
+        replacement.readiness(),
+        BuildAdmissionReadiness::JournalRecoveryIncomplete,
+        "replacement Enforce starts fail-closed before recovery"
+    );
+
+    // --- Phase 3: recovery converts CreateInFlight to occupying CreateUnknown ---
+    let report: AdmissionSeedReport = replacement
+        .recover_all_predecessors_and_seed()
+        .await
+        .unwrap();
+    assert_eq!(report.retired_reserved, 0, "no predecessor Reserved rows");
+    assert_eq!(
+        report.marked_create_unknown, 1,
+        "predecessor CreateInFlight converted to CreateUnknown"
+    );
+    assert_eq!(report.seeded_rows, 1, "the CreateUnknown row is seeded");
+    assert_eq!(
+        report.readiness,
+        BuildAdmissionReadiness::CreateUnknownHealth,
+        "CreateUnknown gates readiness until the late create is adopted"
+    );
+    assert!(!replacement.is_ready());
+    let history = journal
+        .list_history(AdmissionDomain::WarmBuild, work_id)
+        .await
+        .unwrap();
+    assert_eq!(
+        history[0].state,
+        AdmissionState::CreateUnknown,
+        "recovery converted the durable row to CreateUnknown"
+    );
+    assert_eq!(
+        journal.count_task_or_warm_occupancy().await.unwrap(),
+        1,
+        "CreateUnknown still occupies the single slot"
+    );
+
+    // --- Phase 4: a competitor is DENIED while predecessor CreateUnknown occupies ---
+    // Even though the replacement's Kubernetes inventory is empty, the durable
+    // journal occupancy is one, so a competitor warm cannot reserve.
+    let competitor =
+        WarmAdmission::admit(&replacement, warm_generation("competitor-warm", 0)).await;
+    // The controller is not ready (CreateUnknownHealth), so admission fails
+    // closed. Even if it were ready, the durable occupancy would deny.
+    assert!(
+        matches!(competitor, Err(WarmAdmissionError::Denied { .. })),
+        "competitor must be denied while predecessor CreateUnknown occupies the cap-one slot"
+    );
+    assert_eq!(
+        journal.count_task_or_warm_occupancy().await.unwrap(),
+        1,
+        "denied competitor does not consume a slot"
+    );
+
+    // --- Phase 5: the late predecessor create is adopted into the same generation ---
+    // The paused POST finally resolves cluster-side: the Kubernetes object the
+    // predecessor created actually exists. The predecessor process is gone, so
+    // it cannot record the result; the replacement discovers the object UID
+    // through the authoritative GET (here: the resolved POST response) and
+    // adopts the row into the SAME generation (CreateUnknown -> Live) through
+    // the seeded permit, reached via the domain-appropriate recovered-permit
+    // lookup keyed on `AdmissionDomain::WarmBuild`.
+    post_result
+        .send("looked-up-late-create-uid".to_string())
+        .expect("release the paused POST result");
+    let object_uid = paused_post
+        .await
+        .expect("the paused POST task reports the created object UID");
+    let seeded_permit: WarmAdmissionPermit = replacement
+        .permit_for_key(AdmissionDomain::WarmBuild, work_id, 0)
+        .await
+        .expect("the recovered CreateUnknown row seeded an addressable permit");
+    assert!(
+        replacement.task_run_permit(work_id, 0).await.is_none(),
+        "the task-run accessor deliberately filters to TaskObservation and must \
+         not return this warm-build row"
+    );
+
+    // Adoption does not wait for readiness: resolving CreateUnknown rows is
+    // what lets readiness advance. CreateUnknown -> Live with the looked-up
+    // UID adopts the predecessor create without allocating a new slot.
+    replacement
+        .transition(
+            &seeded_permit,
+            WarmAdmissionTransition::Live {
+                uid: object_uid.clone(),
+            },
+        )
+        .await
+        .unwrap();
+    let history = journal
+        .list_history(AdmissionDomain::WarmBuild, work_id)
+        .await
+        .unwrap();
+    assert_eq!(
+        history[0].state,
+        AdmissionState::Live,
+        "late predecessor create adopted into the same generation"
+    );
+    assert_eq!(
+        history[0].key.generation, 0,
+        "the adopted create is in generation zero (same generation)"
+    );
+    assert_eq!(
+        journal.count_task_or_warm_occupancy().await.unwrap(),
+        1,
+        "adopting the late create does not add occupancy"
+    );
+
+    // Adoption cleared the CreateUnknown gate; readiness falls through to the
+    // still-pending inventory gate, so admission is STILL fail-closed.
+    assert_eq!(
+        replacement.readiness(),
+        BuildAdmissionReadiness::InventoryPending,
+        "adoption advances readiness to inventory-pending, never straight to healthy"
+    );
+    assert!(matches!(
+        WarmAdmission::admit(
+            &replacement,
+            warm_generation("competitor-before-inventory", 0)
+        )
+        .await,
+        Err(WarmAdmissionError::Denied { .. })
+    ));
+
+    // The real startup gates then complete in order: the broad Kubernetes
+    // inventory LIST succeeds, then the single-active topology check passes.
+    replacement.mark_inventory_ready();
+    assert_eq!(
+        replacement.readiness(),
+        BuildAdmissionReadiness::TopologyPending
+    );
+    assert!(matches!(
+        WarmAdmission::admit(
+            &replacement,
+            warm_generation("competitor-before-topology", 0)
+        )
+        .await,
+        Err(WarmAdmissionError::Denied { .. })
+    ));
+    replacement.mark_topology_ready();
+    assert_eq!(replacement.readiness(), BuildAdmissionReadiness::Healthy);
+
+    // Healthy now, the single slot is Live: a competitor is still denied, this
+    // time by the durable cap (occupancy one) rather than by a closed gate.
+    assert!(matches!(
+        WarmAdmission::admit(&replacement, warm_generation("competitor-after-adopt", 0)).await,
+        Err(WarmAdmissionError::Denied { .. })
+    ));
+    assert_eq!(
+        journal.count_task_or_warm_occupancy().await.unwrap(),
+        1,
+        "occupancy is never above one"
+    );
+
+    // Releasing the adopted create frees the slot.
+    replacement
+        .transition(
+            &seeded_permit,
+            WarmAdmissionTransition::Terminal { uid: object_uid },
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        journal.count_task_or_warm_occupancy().await.unwrap(),
+        0,
+        "terminal release frees the single slot"
+    );
+    assert!(
+        WarmAdmission::admit(&replacement, warm_generation("competitor-after-release", 0))
+            .await
+            .is_ok(),
+        "the freed slot admits at most one successor"
+    );
+    assert_eq!(
+        journal.count_task_or_warm_occupancy().await.unwrap(),
+        1,
+        "occupancy returns to exactly one, never above"
+    );
+}
+
+/// Forced process loss safety: the durable pre-POST state (CreateInFlight
+/// committed before POST) is what survives, not cooperative shutdown. This test
+/// proves that a predecessor killed mid-POST leaves a recoverable CreateUnknown
+/// row that a replacement adopts, without relying on any graceful shutdown.
+#[tokio::test]
+async fn forced_loss_safety_depends_on_durable_pre_post_state_not_cooperative_shutdown() {
+    let journal = Arc::new(AdmissionJournalRepository::new(
+        Database::open_in_memory().unwrap(),
+    ));
+    let work_id = "forced-loss-warm";
+    let predecessor_epoch = "forced-predecessor";
+
+    // Predecessor commits CreateInFlight durably, then is KILLED (no graceful
+    // shutdown, no POST result, no CreateUnknown transition from the
+    // predecessor itself). Only the durable pre-POST state survives.
+    journal
+        .reserve(
+            &ReserveAdmissionInput {
+                key: AdmissionJournalKey {
+                    domain: AdmissionDomain::WarmBuild,
+                    work_id: work_id.into(),
+                    generation: 0,
+                },
+                workload_kind: AdmissionWorkloadKind::Warm,
+                creator_server_epoch: predecessor_epoch.into(),
+                object_name: format!("warm-{work_id}-0"),
+            },
+            1,
+        )
+        .await
+        .unwrap();
+    journal
+        .mark_create_started(&djinn_db::CreateStartedInput {
+            key: AdmissionJournalKey {
+                domain: AdmissionDomain::WarmBuild,
+                work_id: work_id.into(),
+                generation: 0,
+            },
+            creator_server_epoch: predecessor_epoch.into(),
+            object_name: format!("warm-{work_id}-0"),
+        })
+        .await
+        .unwrap();
+
+    // Replacement recovers WITHOUT any cooperative shutdown from the
+    // predecessor. The CreateInFlight row is converted to CreateUnknown.
+    let replacement =
+        BuildAdmissionController::new_closed(Arc::clone(&journal), 1, "forced-replacement");
+    let report = replacement
+        .recover_all_predecessors_and_seed()
+        .await
+        .unwrap();
+    assert_eq!(report.marked_create_unknown, 1);
+    assert_eq!(report.seeded_rows, 1);
+    assert_eq!(
+        report.readiness,
+        BuildAdmissionReadiness::CreateUnknownHealth
+    );
+    // The durable occupancy is one: a competitor cannot slip in during the gap.
+    assert_eq!(
+        journal.count_task_or_warm_occupancy().await.unwrap(),
+        1,
+        "forced loss leaves durable occupancy that a replacement recovers"
+    );
+    assert!(
+        matches!(
+            WarmAdmission::admit(&replacement, warm("competitor-forced-loss")).await,
+            Err(WarmAdmissionError::Denied { .. })
+        ),
+        "safety depends on durable state, not cooperative shutdown"
+    );
 }
