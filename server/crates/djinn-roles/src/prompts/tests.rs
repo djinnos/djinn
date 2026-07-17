@@ -73,7 +73,7 @@ fn make_task() -> Task {
 fn make_ctx() -> TaskContext {
     TaskContext {
         project_path: "/home/user/project".into(),
-        workspace_path: "/home/user/project/.djinn/worktrees/t123".into(),
+        workspace_path: "/home/user/project/.task-runtime/worktrees/t123".into(),
         diff: None,
         commits: None,
         start_commit: None,

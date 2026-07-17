@@ -9,7 +9,7 @@
 //!      `TaskRunRecord` in the DB, drives `clone_ephemeral` against the mirror,
 //!      and steps into `stage::execute_stage` far enough to prove the
 //!      infrastructure wiring.
-//!   3. Zero `.djinn/worktrees/` directories materialize anywhere under the
+//!   3. Zero `.task-runtime/worktrees/` directories materialize anywhere under the
 //!      test-controlled roots.
 //!
 //! ## What is stubbed vs. real
@@ -199,7 +199,7 @@ async fn make_source_repo(path: &Path) {
     run_git(&["git", "commit", "-m", "init"], path).await;
 }
 
-/// Walk `root` recursively and assert no `.djinn/worktrees` directory exists.
+/// Walk `root` recursively and assert no `.task-runtime/worktrees` directory exists.
 ///
 /// Phase 1 invariant: the mirror → supervisor path must never materialize a
 /// worktree on disk.  A match anywhere under the test-controlled roots is a
@@ -214,14 +214,14 @@ fn assert_no_worktrees(root: &Path) {
             if !path.is_dir() {
                 continue;
             }
-            // Match `.djinn/worktrees` as an adjacent pair to avoid false
-            // positives from a bare directory named "worktrees".
+            // Match `.task-runtime/worktrees` as an adjacent pair to avoid
+            // false positives from a bare directory named "worktrees".
             if path.file_name().and_then(|n| n.to_str()) == Some("worktrees")
                 && path
                     .parent()
                     .and_then(|p| p.file_name())
                     .and_then(|n| n.to_str())
-                    == Some(".djinn")
+                    == Some(".task-runtime")
             {
                 hits.push(path.clone());
             }
@@ -233,7 +233,7 @@ fn assert_no_worktrees(root: &Path) {
     walk(root, &mut hits);
     assert!(
         hits.is_empty(),
-        "expected no .djinn/worktrees under {}; found: {hits:?}",
+        "expected no .task-runtime/worktrees under {}; found: {hits:?}",
         root.display()
     );
 }
