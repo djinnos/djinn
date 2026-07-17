@@ -1,3 +1,4 @@
+// djinn:allow-oversize — durable controller, restart recovery, readiness gates, and focused tests share lifecycle invariants.
 //! Coordinator-owned durable admission policy for build-producing workloads.
 //!
 //! The journal supplies serialization and lifecycle fencing; this module fixes
