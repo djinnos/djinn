@@ -62,7 +62,6 @@ const FOLDER_TREE_SKIP: &[&str] = &[
     "node_modules",
     "dist",
     "build",
-    ".djinn",
     ".idea",
     ".vscode",
     "__pycache__",

@@ -1,8 +1,8 @@
 //! Platform-owned native skill registry.
 //!
 //! Native skills are compiled into the `djinn-agent` artifact and cannot be
-//! modified through project files (`.djinn/skills`, `.claude/skills`,
-//! `.opencode/skills`) or the user-editable agent skills manifest.  They are
+//! modified through project-provided skills or the user-editable agent skills
+//! manifest. They are
 //! immutable at runtime and carry an explicit version stamp per skill.
 //!
 //! The registry exposes lookup, listing, and role-recommendation helpers that

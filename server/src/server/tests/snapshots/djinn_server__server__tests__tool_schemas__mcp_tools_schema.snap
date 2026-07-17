@@ -4982,7 +4982,7 @@ expression: signatures
                 "type": "array"
               },
               "default": {},
-              "description": "Per-agent-role MCP server defaults. Moved here from the pre-cut-over\n`.djinn/settings.json`'s `agent_mcp_defaults` field. The key is a role\nname (e.g. `\"worker\"`, `\"chat\"`) or `\"*\"` for the fallback applied to\nany role with no explicit entry. The value is the list of MCP server\nnames (from root `mcp.json`) that sessions for that role should\nconnect to by default. Specialist role assignments override these.",
+              "description": "Per-agent-role MCP server defaults. The key is a role\nname (e.g. `\"worker\"`, `\"chat\"`) or `\"*\"` for the fallback applied to\nany role with no explicit entry. The value is the list of MCP server\nnames (from root `mcp.json`) that sessions for that role should\nconnect to by default. Specialist role assignments override these.",
               "type": "object"
             },
             "cargo_cache_policy": {
@@ -5008,7 +5008,7 @@ expression: signatures
             },
             "global_skills": {
               "default": [],
-              "description": "Skills injected into every agent prompt regardless of role. Moved here\nfrom the pre-cut-over `.djinn/settings.json`'s `global_skills` field.\nEach entry is a skill file stem (resolved against `.djinn/skills/`).",
+              "description": "Skills injected into every agent prompt regardless of role. Each entry\nis a registered skill identifier.",
               "items": {
                 "type": "string"
               },
@@ -5830,7 +5830,7 @@ expression: signatures
                 "type": "array"
               },
               "default": {},
-              "description": "Per-agent-role MCP server defaults. Moved here from the pre-cut-over\n`.djinn/settings.json`'s `agent_mcp_defaults` field. The key is a role\nname (e.g. `\"worker\"`, `\"chat\"`) or `\"*\"` for the fallback applied to\nany role with no explicit entry. The value is the list of MCP server\nnames (from root `mcp.json`) that sessions for that role should\nconnect to by default. Specialist role assignments override these.",
+              "description": "Per-agent-role MCP server defaults. The key is a role\nname (e.g. `\"worker\"`, `\"chat\"`) or `\"*\"` for the fallback applied to\nany role with no explicit entry. The value is the list of MCP server\nnames (from root `mcp.json`) that sessions for that role should\nconnect to by default. Specialist role assignments override these.",
               "type": "object"
             },
             "cargo_cache_policy": {
@@ -5856,7 +5856,7 @@ expression: signatures
             },
             "global_skills": {
               "default": [],
-              "description": "Skills injected into every agent prompt regardless of role. Moved here\nfrom the pre-cut-over `.djinn/settings.json`'s `global_skills` field.\nEach entry is a skill file stem (resolved against `.djinn/skills/`).",
+              "description": "Skills injected into every agent prompt regardless of role. Each entry\nis a registered skill identifier.",
               "items": {
                 "type": "string"
               },
@@ -6698,7 +6698,7 @@ expression: signatures
                 "type": "array"
               },
               "default": {},
-              "description": "Per-agent-role MCP server defaults. Moved here from the pre-cut-over\n`.djinn/settings.json`'s `agent_mcp_defaults` field. The key is a role\nname (e.g. `\"worker\"`, `\"chat\"`) or `\"*\"` for the fallback applied to\nany role with no explicit entry. The value is the list of MCP server\nnames (from root `mcp.json`) that sessions for that role should\nconnect to by default. Specialist role assignments override these.",
+              "description": "Per-agent-role MCP server defaults. The key is a role\nname (e.g. `\"worker\"`, `\"chat\"`) or `\"*\"` for the fallback applied to\nany role with no explicit entry. The value is the list of MCP server\nnames (from root `mcp.json`) that sessions for that role should\nconnect to by default. Specialist role assignments override these.",
               "type": "object"
             },
             "cargo_cache_policy": {
@@ -6724,7 +6724,7 @@ expression: signatures
             },
             "global_skills": {
               "default": [],
-              "description": "Skills injected into every agent prompt regardless of role. Moved here\nfrom the pre-cut-over `.djinn/settings.json`'s `global_skills` field.\nEach entry is a skill file stem (resolved against `.djinn/skills/`).",
+              "description": "Skills injected into every agent prompt regardless of role. Each entry\nis a registered skill identifier.",
               "items": {
                 "type": "string"
               },
@@ -9089,7 +9089,7 @@ expression: signatures
           ]
         },
         "type": {
-          "description": "New note type to move the note to. Use `proposed_adr` to recover a\nmis-routed ADR draft into `.djinn/decisions/proposed/`.",
+          "description": "New note type to move the note to. Use `proposed_adr` to recover a\nmis-routed ADR draft to proposed status in the project database.",
           "type": "string"
         }
       },
@@ -10851,7 +10851,7 @@ expression: signatures
           ]
         },
         "status": {
-          "description": "Optional explicit status for routed note types. For ADRs, `proposed`\nwrites into `.djinn/decisions/proposed/`.",
+          "description": "Optional explicit status for routed note types. For ADRs, `proposed`\nrecords the ADR with proposed status in the project database.",
           "type": [
             "string",
             "null"
@@ -12132,7 +12132,7 @@ expression: signatures
                 "type": "array"
               },
               "default": {},
-              "description": "Per-agent-role MCP server defaults. Moved here from the pre-cut-over\n`.djinn/settings.json`'s `agent_mcp_defaults` field. The key is a role\nname (e.g. `\"worker\"`, `\"chat\"`) or `\"*\"` for the fallback applied to\nany role with no explicit entry. The value is the list of MCP server\nnames (from root `mcp.json`) that sessions for that role should\nconnect to by default. Specialist role assignments override these.",
+              "description": "Per-agent-role MCP server defaults. The key is a role\nname (e.g. `\"worker\"`, `\"chat\"`) or `\"*\"` for the fallback applied to\nany role with no explicit entry. The value is the list of MCP server\nnames (from root `mcp.json`) that sessions for that role should\nconnect to by default. Specialist role assignments override these.",
               "type": "object"
             },
             "cargo_cache_policy": {
@@ -12158,7 +12158,7 @@ expression: signatures
             },
             "global_skills": {
               "default": [],
-              "description": "Skills injected into every agent prompt regardless of role. Moved here\nfrom the pre-cut-over `.djinn/settings.json`'s `global_skills` field.\nEach entry is a skill file stem (resolved against `.djinn/skills/`).",
+              "description": "Skills injected into every agent prompt regardless of role. Each entry\nis a registered skill identifier.",
               "items": {
                 "type": "string"
               },
@@ -12938,7 +12938,7 @@ expression: signatures
                 "type": "array"
               },
               "default": {},
-              "description": "Per-agent-role MCP server defaults. Moved here from the pre-cut-over\n`.djinn/settings.json`'s `agent_mcp_defaults` field. The key is a role\nname (e.g. `\"worker\"`, `\"chat\"`) or `\"*\"` for the fallback applied to\nany role with no explicit entry. The value is the list of MCP server\nnames (from root `mcp.json`) that sessions for that role should\nconnect to by default. Specialist role assignments override these.",
+              "description": "Per-agent-role MCP server defaults. The key is a role\nname (e.g. `\"worker\"`, `\"chat\"`) or `\"*\"` for the fallback applied to\nany role with no explicit entry. The value is the list of MCP server\nnames (from root `mcp.json`) that sessions for that role should\nconnect to by default. Specialist role assignments override these.",
               "type": "object"
             },
             "cargo_cache_policy": {
@@ -12964,7 +12964,7 @@ expression: signatures
             },
             "global_skills": {
               "default": [],
-              "description": "Skills injected into every agent prompt regardless of role. Moved here\nfrom the pre-cut-over `.djinn/settings.json`'s `global_skills` field.\nEach entry is a skill file stem (resolved against `.djinn/skills/`).",
+              "description": "Skills injected into every agent prompt regardless of role. Each entry\nis a registered skill identifier.",
               "items": {
                 "type": "string"
               },
@@ -13718,7 +13718,7 @@ expression: signatures
                 "type": "array"
               },
               "default": {},
-              "description": "Per-agent-role MCP server defaults. Moved here from the pre-cut-over\n`.djinn/settings.json`'s `agent_mcp_defaults` field. The key is a role\nname (e.g. `\"worker\"`, `\"chat\"`) or `\"*\"` for the fallback applied to\nany role with no explicit entry. The value is the list of MCP server\nnames (from root `mcp.json`) that sessions for that role should\nconnect to by default. Specialist role assignments override these.",
+              "description": "Per-agent-role MCP server defaults. The key is a role\nname (e.g. `\"worker\"`, `\"chat\"`) or `\"*\"` for the fallback applied to\nany role with no explicit entry. The value is the list of MCP server\nnames (from root `mcp.json`) that sessions for that role should\nconnect to by default. Specialist role assignments override these.",
               "type": "object"
             },
             "cargo_cache_policy": {
@@ -13744,7 +13744,7 @@ expression: signatures
             },
             "global_skills": {
               "default": [],
-              "description": "Skills injected into every agent prompt regardless of role. Moved here\nfrom the pre-cut-over `.djinn/settings.json`'s `global_skills` field.\nEach entry is a skill file stem (resolved against `.djinn/skills/`).",
+              "description": "Skills injected into every agent prompt regardless of role. Each entry\nis a registered skill identifier.",
               "items": {
                 "type": "string"
               },

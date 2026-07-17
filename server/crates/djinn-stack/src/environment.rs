@@ -150,17 +150,15 @@ pub struct EnvironmentConfig {
     /// default auto-detected policy by consumers.
     #[serde(default = "default_cargo_cache_policy")]
     pub cargo_cache_policy: Option<CargoCachePolicy>,
-    /// Per-agent-role MCP server defaults. Moved here from the pre-cut-over
-    /// `.djinn/settings.json`'s `agent_mcp_defaults` field. The key is a role
+    /// Per-agent-role MCP server defaults. The key is a role
     /// name (e.g. `"worker"`, `"chat"`) or `"*"` for the fallback applied to
     /// any role with no explicit entry. The value is the list of MCP server
     /// names (from root `mcp.json`) that sessions for that role should
     /// connect to by default. Specialist role assignments override these.
     #[serde(default)]
     pub agent_mcp_defaults: BTreeMap<String, Vec<String>>,
-    /// Skills injected into every agent prompt regardless of role. Moved here
-    /// from the pre-cut-over `.djinn/settings.json`'s `global_skills` field.
-    /// Each entry is a skill file stem (resolved against `.djinn/skills/`).
+    /// Skills injected into every agent prompt regardless of role. Each entry
+    /// is a registered skill identifier.
     #[serde(default)]
     pub global_skills: Vec<String>,
 }

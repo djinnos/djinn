@@ -1427,9 +1427,9 @@ fn lead_schema_does_not_expose_request_planner_or_escalate() {
 // Ensures no tool description in the canonical schema surfaces contains the
 // stale DB-system reference. If this test fails, a tool description was
 // reintroduced with the old wording instead of accurate memory_* MCP
-// guidance. The comprehensive agent-facing-file guard lives in the
-// integration test at tests/stale_token_guard.rs (outside src/, so the
-// AC-required grep over src/ stays clean).
+// guidance. The comprehensive runtime and serialized-surface guard lives in
+// djinn-agent beside production prompt-context assembly, where it can execute
+// both prompt renderers and recursively inspect these schemas.
 
 #[test]
 fn no_stale_db_token_in_tool_descriptions() {
