@@ -131,6 +131,28 @@ impl MockProvider {
     fn remaining(&self) -> usize {
         self.responses.lock().unwrap().len()
     }
+
+    /// Complete success-path submit fixtures with the generated task identity.
+    /// Payloads without a summary remain untouched for validation tests.
+    fn bind_valid_submit_work_fixtures(&self, task_id: &str) {
+        for response in self.responses.lock().unwrap().iter_mut() {
+            for block in &mut response.tool_calls {
+                let ContentBlock::ToolUse { name, input, .. } = block else {
+                    continue;
+                };
+                if name != "submit_work" || input.get("summary").is_none() {
+                    continue;
+                }
+                let Some(object) = input.as_object_mut() else {
+                    continue;
+                };
+                object.insert("task_id".into(), serde_json::Value::String(task_id.into()));
+                object
+                    .entry("commit_title")
+                    .or_insert_with(|| serde_json::Value::String("complete test work".into()));
+            }
+        }
+    }
 }
 
 impl LlmProvider for MockProvider {
@@ -213,6 +235,19 @@ async fn make_context_with_task() -> (
     let project = test_helpers::create_test_project(&db).await;
     let epic = test_helpers::create_test_epic(&db, &project.id).await;
     let task = test_helpers::create_test_task(&db, &project.id, &epic.id).await;
+    let task_run_id = uuid::Uuid::now_v7().to_string();
+    djinn_db::repositories::task_run::TaskRunRepository::new(db.clone())
+        .create(djinn_db::repositories::task_run::CreateTaskRunParams {
+            id: &task_run_id,
+            project_id: &project.id,
+            task_id: &task.id,
+            trigger_type: "dispatch",
+            status: Some("running"),
+            workspace_path: Some("/tmp"),
+            mirror_ref: None,
+        })
+        .await
+        .expect("create active task run");
     // Create a real session row so session_messages FK constraint is satisfied.
     let session_repo = SessionRepository::new(db.clone(), ctx.event_bus.clone());
     let session = session_repo
@@ -915,6 +950,19 @@ async fn run_scripted_reply_loop_with_dispatcher(
     let project = test_helpers::create_test_project(&db).await;
     let epic = test_helpers::create_test_epic(&db, &project.id).await;
     let task = test_helpers::create_test_task(&db, &project.id, &epic.id).await;
+    let task_run_id = uuid::Uuid::now_v7().to_string();
+    djinn_db::repositories::task_run::TaskRunRepository::new(db.clone())
+        .create(djinn_db::repositories::task_run::CreateTaskRunParams {
+            id: &task_run_id,
+            project_id: &project.id,
+            task_id: &task.id,
+            trigger_type: "dispatch",
+            status: Some("running"),
+            workspace_path: Some("/tmp"),
+            mirror_ref: None,
+        })
+        .await
+        .expect("create active task run");
     let session_repo = SessionRepository::new(db.clone(), slot_ctx.event_bus.clone());
     let session = session_repo
         .create(CreateSessionParams {
@@ -933,6 +981,7 @@ async fn run_scripted_reply_loop_with_dispatcher(
         .to_string_lossy()
         .into_owned();
     let task_id = task.id;
+    provider.bind_valid_submit_work_fixtures(&task_id);
     let session_id = session.id;
     let worktree_path = std::path::PathBuf::from("/tmp");
     let mut conv = Conversation::new();
@@ -976,13 +1025,18 @@ async fn finalize_tool_call_ends_session_and_captures_payload() {
         tool_calls: vec![ContentBlock::ToolUse {
             id: "fin1".to_string(),
             name: "submit_work".to_string(),
-            input: serde_json::json!({"task_id": "t1", "summary": "done"}),
+            input: serde_json::json!({
+                "task_id": "t1",
+                "commit_title": "complete test work",
+                "summary": "done"
+            }),
         }],
         input_tokens: 100,
         output_tokens: 10,
         _error: None,
     }]);
     let mut h = ReplyLoopHarness::new().await;
+    provider.bind_valid_submit_work_fixtures(&h.task_id);
     let (result, output, _tokens_in, _tokens_out, _cr, _cw) = h.run(&provider, &tools).await;
     assert!(result.is_ok(), "expected ok, got: {:?}", result);
     assert_eq!(provider.remaining(), 0, "finalize response consumed");
@@ -1042,7 +1096,11 @@ async fn nudge_count_resets_after_tool_call() {
             tool_calls: vec![ContentBlock::ToolUse {
                 id: "fin1".to_string(),
                 name: "submit_work".to_string(),
-                input: serde_json::json!({"task_id": "t1", "summary": "all done"}),
+                input: serde_json::json!({
+                    "task_id": "t1",
+                    "commit_title": "complete test work",
+                    "summary": "all done"
+                }),
             }],
             input_tokens: 130,
             output_tokens: 10,
@@ -1050,6 +1108,7 @@ async fn nudge_count_resets_after_tool_call() {
         },
     ]);
     let mut h = ReplyLoopHarness::new().await;
+    provider.bind_valid_submit_work_fixtures(&h.task_id);
     let (result, output, _tokens_in, _tokens_out, _cr, _cw) = h.run(&provider, &tools).await;
     assert!(result.is_ok(), "expected ok, got: {:?}", result);
     assert_eq!(provider.remaining(), 0, "all responses consumed");
@@ -1096,7 +1155,7 @@ async fn tool_choice_required_for_supported_providers() {
             tool_calls: vec![ContentBlock::ToolUse {
                 id: "fin1".to_string(),
                 name: "submit_work".to_string(),
-                input: serde_json::json!({"task_id": "t1", "summary": "done"}),
+                input: serde_json::json!({"task_id": "t1", "commit_title": "complete test work", "summary": "done"}),
             }],
             input_tokens: 110,
             output_tokens: 10,
@@ -1109,6 +1168,7 @@ async fn tool_choice_required_for_supported_providers() {
         inner,
     };
     let (slot_ctx, project_path, task_id, session_id, cancel) = make_context().await;
+    provider.inner.bind_valid_submit_work_fixtures(&task_id);
     let worktree_path = std::path::PathBuf::from("/tmp");
     let mut conv = Conversation::new();
     conv.push(Message::system("You are a worker."));
@@ -1705,7 +1765,7 @@ async fn successful_novel_tool_call_resets_failure_pressure() {
         MockResponse::tool_call_with_input(
             "done",
             "submit_work",
-            serde_json::json!({"task_id": "t1", "summary": "done"}),
+            serde_json::json!({"task_id": "t1", "commit_title": "complete test work", "summary": "done"}),
             150,
         ),
     ]);
@@ -1776,7 +1836,7 @@ async fn mixed_successful_tool_batch_resets_consecutive_failure_pressure() {
     responses.push(MockResponse::tool_call_with_input(
         "done",
         "submit_work",
-        serde_json::json!({"task_id": "t1", "summary": "done"}),
+        serde_json::json!({"task_id": "t1", "commit_title": "complete test work", "summary": "done"}),
         140,
     ));
     let provider = MockProvider::new(responses);
@@ -1896,7 +1956,7 @@ async fn soft_budget_threshold_triggers_one_shot_converge_reminder() {
             tool_calls: vec![ContentBlock::ToolUse {
                 id: "fin".to_string(),
                 name: "submit_work".to_string(),
-                input: serde_json::json!({"task_id": "t1", "summary": "done"}),
+                input: serde_json::json!({"task_id": "t1", "commit_title": "complete test work", "summary": "done"}),
             }],
             input_tokens: 10,
             output_tokens: 5,
@@ -1904,6 +1964,7 @@ async fn soft_budget_threshold_triggers_one_shot_converge_reminder() {
         },
     ]);
     let (slot_ctx, project_path, task_id, session_id, cancel) = make_context().await;
+    provider.bind_valid_submit_work_fixtures(&task_id);
     let worktree_path = std::path::PathBuf::from("/tmp");
     let mut conv = Conversation::new();
     conv.push(Message::system("You are a worker."));
@@ -2032,7 +2093,7 @@ async fn soft_budget_below_threshold_no_injection() {
             tool_calls: vec![ContentBlock::ToolUse {
                 id: "fin".to_string(),
                 name: "submit_work".to_string(),
-                input: serde_json::json!({"task_id": "t1", "summary": "done"}),
+                input: serde_json::json!({"task_id": "t1", "commit_title": "complete test work", "summary": "done"}),
             }],
             input_tokens: 5,
             output_tokens: 5,
@@ -2040,6 +2101,7 @@ async fn soft_budget_below_threshold_no_injection() {
         },
     ]);
     let mut h = ReplyLoopHarness::new().await;
+    provider.bind_valid_submit_work_fixtures(&h.task_id);
     let (result, _output, _tokens_in, _tokens_out, _cr, _cw) = h.run(&provider, &tools).await;
     // SAFETY: SESSION_BUDGET_ENV_LOCK held; restore baseline before asserting.
     clear_session_budget_env();
@@ -2306,7 +2368,7 @@ async fn dangling_tool_call_is_sanitized_before_reaching_provider() {
         tool_calls: vec![ContentBlock::ToolUse {
             id: "fin1".to_string(),
             name: "submit_work".to_string(),
-            input: serde_json::json!({"task_id": "t1", "summary": "done"}),
+            input: serde_json::json!({"task_id": "t1", "commit_title": "complete test work", "summary": "done"}),
         }],
         input_tokens: 50,
         output_tokens: 10,
@@ -2318,6 +2380,7 @@ async fn dangling_tool_call_is_sanitized_before_reaching_provider() {
         inner,
     };
     let (slot_ctx, project_path, task_id, session_id, cancel) = make_context().await;
+    provider.inner.bind_valid_submit_work_fixtures(&task_id);
     let worktree_path = std::path::PathBuf::from("/tmp");
     // Seed a transcript ending in an UNANSWERED assistant tool call, exactly as
     // a prior session's persisted history would on a rework continuation.
@@ -2453,7 +2516,7 @@ async fn first_no_progress_submit_intercepted_returns_corrective_and_continues()
         MockResponse::tool_call_with_input(
             "submit-1",
             "submit_work",
-            serde_json::json!({"task_id": task_id, "summary": "done", "files_changed": []}),
+            serde_json::json!({"task_id": task_id, "commit_title": "complete test work", "summary": "done", "files_changed": []}),
             100,
         ),
         // Turn 2: model responds to the corrective message with text-only.
@@ -2539,7 +2602,7 @@ async fn missing_rejected_fingerprint_skips_comparison_and_allows_finalize() {
     let provider = MockProvider::new(vec![MockResponse::tool_call_with_input(
         "submit-1",
         "submit_work",
-        serde_json::json!({"task_id": task_id, "summary": "done", "files_changed": []}),
+        serde_json::json!({"task_id": task_id, "commit_title": "complete test work", "summary": "done", "files_changed": []}),
         100,
     )]);
     let mut conv = Conversation::new();
@@ -2612,7 +2675,7 @@ async fn non_worker_role_bypasses_guard() {
     let provider = MockProvider::new(vec![MockResponse::tool_call_with_input(
         "submit-1",
         "submit_work",
-        serde_json::json!({"task_id": task_id, "summary": "done", "files_changed": []}),
+        serde_json::json!({"task_id": task_id, "commit_title": "complete test work", "summary": "done", "files_changed": []}),
         100,
     )]);
     let mut conv = Conversation::new();
@@ -2680,7 +2743,7 @@ async fn different_fingerprint_allows_finalize() {
     let provider = MockProvider::new(vec![MockResponse::tool_call_with_input(
         "submit-1",
         "submit_work",
-        serde_json::json!({"task_id": task_id, "summary": "done", "files_changed": []}),
+        serde_json::json!({"task_id": task_id, "commit_title": "complete test work", "summary": "done", "files_changed": []}),
         100,
     )]);
     let mut conv = Conversation::new();
@@ -2777,7 +2840,7 @@ async fn empty_worktree_skips_guard_and_allows_finalize() {
     let provider = MockProvider::new(vec![MockResponse::tool_call_with_input(
         "submit-1",
         "submit_work",
-        serde_json::json!({"task_id": task_id, "summary": "done", "files_changed": []}),
+        serde_json::json!({"task_id": task_id, "commit_title": "complete test work", "summary": "done", "files_changed": []}),
         100,
     )]);
     let mut conv = Conversation::new();
@@ -2864,7 +2927,7 @@ async fn second_strike_no_progress_submission_settles_session() {
         MockResponse::tool_call_with_input(
             "submit-1",
             "submit_work",
-            serde_json::json!({"task_id": task_id, "summary": "done", "files_changed": []}),
+            serde_json::json!({"task_id": task_id, "commit_title": "complete test work", "summary": "done", "files_changed": []}),
             100,
         ),
         // Turn 2: text response to the corrective message.
@@ -3080,7 +3143,7 @@ async fn gs37_no_edit_submit_after_rejection_keeps_one_quality_strike_and_prompt
         MockResponse::tool_call_with_input(
             "submit-1",
             "submit_work",
-            serde_json::json!({"task_id": task_id, "summary": "done", "files_changed": []}),
+            serde_json::json!({"task_id": task_id, "commit_title": "complete test work", "summary": "done", "files_changed": []}),
             100,
         ),
         MockResponse::text_only("I'll try resubmitting anyway.", 100),
@@ -3249,7 +3312,7 @@ async fn changed_diff_fingerprint_does_not_trigger_no_progress_submission() {
     let provider = MockProvider::new(vec![MockResponse::tool_call_with_input(
         "submit-1",
         "submit_work",
-        serde_json::json!({"task_id": task_id, "summary": "done", "files_changed": []}),
+        serde_json::json!({"task_id": task_id, "commit_title": "complete test work", "summary": "done", "files_changed": []}),
         100,
     )]);
     let mut conv = Conversation::new();
@@ -4386,7 +4449,7 @@ async fn productive_turns_persisted_normally() {
             tool_calls: vec![ContentBlock::ToolUse {
                 id: "fin".to_string(),
                 name: "submit_work".to_string(),
-                input: serde_json::json!({"task_id": "t1", "summary": "done"}),
+                input: serde_json::json!({"task_id": "t1", "commit_title": "complete test work", "summary": "done"}),
             }],
             input_tokens: 110,
             output_tokens: 10,
@@ -4394,6 +4457,7 @@ async fn productive_turns_persisted_normally() {
         },
     ]);
     let mut h = ReplyLoopHarness::new().await;
+    provider.bind_valid_submit_work_fixtures(&h.task_id);
     let (result, _output, _, _, _, _) = h.run(&provider, &tools).await;
     assert!(
         result.is_ok(),
@@ -4556,6 +4620,7 @@ async fn provider_tool_schemas_preserve_name_description_and_input_schema() {
     ]);
     let provider = RecordingProvider::new(inner);
     let mut h = ReplyLoopHarness::new_with_worker_prompt().await;
+    provider.inner.bind_valid_submit_work_fixtures(&h.task_id);
 
     // ── Prompt-side assertion: the rendered system prompt must be
     // signature-only — tool description bodies must NOT appear on the
@@ -4700,6 +4765,7 @@ async fn provider_declared_tool_dispatch_completes_successfully() {
     ]);
     let provider = RecordingProvider::new(inner);
     let mut h = ReplyLoopHarness::new_with_worker_prompt().await;
+    provider.inner.bind_valid_submit_work_fixtures(&h.task_id);
     let (result, output, _ti, _to, _cr, _cw) = h.run(&provider, &schemas).await;
 
     // Session completes — both tool dispatches succeeded.
@@ -4854,6 +4920,7 @@ async fn dispatch_semantics_unchanged_after_description_shortening() {
     ]);
     let provider = RecordingProvider::new(inner);
     let mut h = ReplyLoopHarness::new_with_worker_prompt().await;
+    provider.inner.bind_valid_submit_work_fixtures(&h.task_id);
     let (result, output, _ti, _to, _cr, _cw) = h.run(&provider, &schemas).await;
     assert!(result.is_ok(), "expected ok, got: {result:?}");
     assert!(output.finalize_payload.is_some());
