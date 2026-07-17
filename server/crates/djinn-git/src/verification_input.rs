@@ -6,7 +6,7 @@ use globset::{Glob, GlobSet, GlobSetBuilder};
 use sha2::{Digest, Sha256};
 use std::{
     io::Read,
-    path::{Component, Path, PathBuf},
+    path::{Path, PathBuf},
 };
 pub const VERIFICATION_INPUT_FINGERPRINT_VERSION_V1: u32 = 1;
 pub const DEFAULT_VERIFICATION_BASE_REF: &str = "main";
@@ -717,37 +717,70 @@ struct EntryIdentity {
     is_symlink: bool,
     len: u64,
     modified: Option<std::time::SystemTime>,
-    #[cfg(unix)] dev: u64,
-    #[cfg(unix)] ino: u64,
-    #[cfg(unix)] mode: u32,
-    #[cfg(unix)] ctime: i64,
-    #[cfg(unix)] ctime_nsec: i64,
+    #[cfg(unix)]
+    dev: u64,
+    #[cfg(unix)]
+    ino: u64,
+    #[cfg(unix)]
+    mode: u32,
+    #[cfg(unix)]
+    ctime: i64,
+    #[cfg(unix)]
+    ctime_nsec: i64,
 }
 fn entry_identity(metadata: &std::fs::Metadata) -> EntryIdentity {
     let kind = metadata.file_type();
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
-        EntryIdentity { is_file: kind.is_file(), is_symlink: kind.is_symlink(), len: metadata.len(), modified: metadata.modified().ok(), dev: metadata.dev(), ino: metadata.ino(), mode: metadata.mode(), ctime: metadata.ctime(), ctime_nsec: metadata.ctime_nsec() }
+        EntryIdentity {
+            is_file: kind.is_file(),
+            is_symlink: kind.is_symlink(),
+            len: metadata.len(),
+            modified: metadata.modified().ok(),
+            dev: metadata.dev(),
+            ino: metadata.ino(),
+            mode: metadata.mode(),
+            ctime: metadata.ctime(),
+            ctime_nsec: metadata.ctime_nsec(),
+        }
     }
     #[cfg(not(unix))]
-    EntryIdentity { is_file: kind.is_file(), is_symlink: kind.is_symlink(), len: metadata.len(), modified: metadata.modified().ok() }
+    EntryIdentity {
+        is_file: kind.is_file(),
+        is_symlink: kind.is_symlink(),
+        len: metadata.len(),
+        modified: metadata.modified().ok(),
+    }
 }
 fn traversal_changed(path: &[u8]) -> VerificationInputUnavailable {
-    VerificationInputUnavailable::UnreadableFile { path: lossy_path(path), error: "entry changed during verification input traversal".into() }
+    VerificationInputUnavailable::UnreadableFile {
+        path: lossy_path(path),
+        error: "entry changed during verification input traversal".into(),
+    }
 }
 #[cfg(test)]
 type ReadMutationHook = std::sync::Arc<dyn Fn(&Path) + Send + Sync>;
 #[cfg(test)]
-static READ_MUTATION_HOOK: std::sync::OnceLock<std::sync::Mutex<Option<ReadMutationHook>>> = std::sync::OnceLock::new();
+static READ_MUTATION_HOOK: std::sync::OnceLock<std::sync::Mutex<Option<ReadMutationHook>>> =
+    std::sync::OnceLock::new();
 #[cfg(test)]
 fn set_test_read_mutation_hook(hook: Option<ReadMutationHook>) {
-    *READ_MUTATION_HOOK.get_or_init(|| std::sync::Mutex::new(None)).lock().expect("test mutation hook lock") = hook;
+    *READ_MUTATION_HOOK
+        .get_or_init(|| std::sync::Mutex::new(None))
+        .lock()
+        .expect("test mutation hook lock") = hook;
 }
 #[cfg(test)]
 fn run_test_read_mutation_hook(path: &Path) {
-    let hook = READ_MUTATION_HOOK.get_or_init(|| std::sync::Mutex::new(None)).lock().expect("test mutation hook lock").clone();
-    if let Some(hook) = hook { hook(path); }
+    let hook = READ_MUTATION_HOOK
+        .get_or_init(|| std::sync::Mutex::new(None))
+        .lock()
+        .expect("test mutation hook lock")
+        .clone();
+    if let Some(hook) = hook {
+        hook(path);
+    }
 }
 #[cfg(not(test))]
 fn run_test_read_mutation_hook(_path: &Path) {}
@@ -801,12 +834,44 @@ fn classify_worktree_entry(
     };
     let file_type = metadata.file_type();
     if file_type.is_symlink() {
+        let before = entry_identity(&metadata);
+        // Link text is an input only while the inspected link remains stable
+        // and resolves beneath the traversal's permitted root.
+        run_test_read_mutation_hook(&full_path);
         let target = std::fs::read_link(&full_path).map_err(|e| {
             VerificationInputUnavailable::UnreadableFile {
                 path: lossy_path(rel_path),
                 error: e.to_string(),
             }
         })?;
+        let canonical_root = std::fs::canonicalize(worktree).map_err(|e| {
+            VerificationInputUnavailable::UnreadableFile {
+                path: lossy_path(rel_path),
+                error: e.to_string(),
+            }
+        })?;
+        let canonical_target = std::fs::canonicalize(&full_path).map_err(|e| {
+            VerificationInputUnavailable::UnreadableFile {
+                path: lossy_path(rel_path),
+                error: e.to_string(),
+            }
+        })?;
+        if !canonical_target.starts_with(&canonical_root) {
+            return Err(VerificationInputUnavailable::UnreadableFile {
+                path: lossy_path(rel_path),
+                error: "symlink target escaped permitted root".into(),
+            });
+        }
+        let after =
+            std::fs::symlink_metadata(&full_path).map_err(|_| traversal_changed(rel_path))?;
+        if entry_identity(&after) != before {
+            return Err(traversal_changed(rel_path));
+        }
+        let target_after =
+            std::fs::read_link(&full_path).map_err(|_| traversal_changed(rel_path))?;
+        if target_after != target {
+            return Err(traversal_changed(rel_path));
+        }
         return Ok(WorktreeState {
             path: rel_path.to_vec(),
             type_tag: TYPE_SYMLINK,
@@ -818,15 +883,38 @@ fn classify_worktree_entry(
         let before = entry_identity(&metadata);
         run_test_read_mutation_hook(&full_path);
         let mut file = std::fs::File::open(&full_path).map_err(|e| {
-            VerificationInputUnavailable::UnreadableFile { path: lossy_path(rel_path), error: e.to_string() }
+            VerificationInputUnavailable::UnreadableFile {
+                path: lossy_path(rel_path),
+                error: e.to_string(),
+            }
         })?;
-        let opened_before = file.metadata().map_err(|e| VerificationInputUnavailable::UnreadableFile { path: lossy_path(rel_path), error: e.to_string() })?;
-        if !opened_before.file_type().is_file() || entry_identity(&opened_before) != before { return Err(traversal_changed(rel_path)); }
+        let opened_before =
+            file.metadata()
+                .map_err(|e| VerificationInputUnavailable::UnreadableFile {
+                    path: lossy_path(rel_path),
+                    error: e.to_string(),
+                })?;
+        if !opened_before.file_type().is_file() || entry_identity(&opened_before) != before {
+            return Err(traversal_changed(rel_path));
+        }
         let mut content = Vec::new();
-        file.read_to_end(&mut content).map_err(|e| VerificationInputUnavailable::UnreadableFile { path: lossy_path(rel_path), error: e.to_string() })?;
-        let opened_after = file.metadata().map_err(|e| VerificationInputUnavailable::UnreadableFile { path: lossy_path(rel_path), error: e.to_string() })?;
-        let path_after = std::fs::symlink_metadata(&full_path).map_err(|_| traversal_changed(rel_path))?;
-        if entry_identity(&opened_after) != before || entry_identity(&path_after) != before { return Err(traversal_changed(rel_path)); }
+        file.read_to_end(&mut content).map_err(|e| {
+            VerificationInputUnavailable::UnreadableFile {
+                path: lossy_path(rel_path),
+                error: e.to_string(),
+            }
+        })?;
+        let opened_after =
+            file.metadata()
+                .map_err(|e| VerificationInputUnavailable::UnreadableFile {
+                    path: lossy_path(rel_path),
+                    error: e.to_string(),
+                })?;
+        let path_after =
+            std::fs::symlink_metadata(&full_path).map_err(|_| traversal_changed(rel_path))?;
+        if entry_identity(&opened_after) != before || entry_identity(&path_after) != before {
+            return Err(traversal_changed(rel_path));
+        }
         return Ok(WorktreeState {
             path: rel_path.to_vec(),
             type_tag: TYPE_REGULAR,
