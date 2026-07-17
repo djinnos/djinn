@@ -85,13 +85,13 @@ jobs:
           git cat-file -e "$base^{commit}"
           git cat-file -e "$head^{commit}"
           if [ "$full_validation" = true ]; then
-            git ls-tree -r --name-only "$head" > changed-files.txt
+            git ls-tree -rz --name-only "$head" > changed-files.z
           elif [ "$EVENT_NAME" = pull_request ] || [ "$EVENT_NAME" = merge_group ]; then
-            git diff --name-only "$base...$head" > changed-files.txt
+            git diff -z --name-only "$base...$head" > changed-files.z
           else
-            git diff --name-only "$base..$head" > changed-files.txt
+            git diff -z --name-only "$base..$head" > changed-files.z
           fi
-          args=(--event "$EVENT_NAME" --base "$base" --head "$head" --files-file changed-files.txt --github-output "$GITHUB_OUTPUT")
+          args=(--event "$EVENT_NAME" --base "$base" --head "$head" --files0-file changed-files.z --github-output "$GITHUB_OUTPUT")
           if [ "$full_validation" = true ]; then args+=(--full-validation); fi
           mkdir -p preflight
           node scripts/ci-changed-scope.mjs "${args[@]}" > preflight/manifest.json
