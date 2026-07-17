@@ -35,7 +35,7 @@ pub struct WriteParams {
     #[schemars(rename = "type")]
     pub note_type: String,
     /// Optional explicit status for routed note types. For ADRs, `proposed`
-    /// writes into `.djinn/decisions/proposed/`.
+    /// records the ADR with proposed status in the project database.
     pub status: Option<String>,
     pub tags: Option<Vec<String>>,
     /// Crate/module path prefixes this note applies to. Empty array means global.
@@ -358,7 +358,7 @@ pub struct MoveParams {
     pub project: String,
     pub identifier: String,
     /// New note type to move the note to. Use `proposed_adr` to recover a
-    /// mis-routed ADR draft into `.djinn/decisions/proposed/`.
+    /// mis-routed ADR draft to proposed status in the project database.
     #[serde(rename = "type")]
     #[schemars(rename = "type")]
     pub note_type: String,
