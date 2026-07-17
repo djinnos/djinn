@@ -29,7 +29,7 @@
 
 use std::collections::HashSet;
 use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use djinn_db::repositories::task_run::TaskRunRepository;
 use djinn_db::{
@@ -648,10 +648,7 @@ impl ExtractionContext<'_> {
             })
             .await?;
         if let Some(note) = result.note.as_ref() {
-            self.created_note_ids
-                .lock()
-                .unwrap()
-                .insert(note.id.clone());
+            recover_created_note_ids_lock(&self.created_note_ids).insert(note.id.clone());
         }
         Ok(result)
     }
@@ -1307,6 +1304,24 @@ impl ExtractionNoteRepository for NoteRepository {
     }
 }
 
+/// Acquire the `created_note_ids` mutex guard, recovering from poison with a
+/// warning. Poison only happens if a previous holder panicked — the tracked
+/// note-ID set remains structurally valid, so we log and continue rather than
+/// cascading the panic.
+fn recover_created_note_ids_lock(
+    mutex: &Mutex<HashSet<String>>,
+) -> MutexGuard<'_, HashSet<String>> {
+    match mutex.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => {
+            tracing::warn!(
+                "llm_extraction: created_note_ids mutex poisoned by prior panic; recovering with data"
+            );
+            poisoned.into_inner()
+        }
+    }
+}
+
 struct ExtractionContext<'a> {
     note_repo: &'a dyn ExtractionNoteRepository,
     provider: &'a dyn LlmProvider,
@@ -1905,10 +1920,7 @@ async fn run_llm_extraction_inner(
         }
     }
     eligible_note_ids.extend(
-        extraction_context
-            .created_note_ids
-            .lock()
-            .unwrap()
+        recover_created_note_ids_lock(&extraction_context.created_note_ids)
             .iter()
             .cloned(),
     );
@@ -3414,9 +3426,8 @@ mod tests {
         let id = "018f0000-0000-7000-8000-000000000001";
         for (operation, expected) in [
             (
-                format!(
-                    r#"{{"kind":"patch","target_note_id":"bad","before_text":"old","after_text":"new","confidence_delta":0.0,"reason":"why"}}"#
-                ),
+                r#"{"kind":"patch","target_note_id":"bad","before_text":"old","after_text":"new","confidence_delta":0.0,"reason":"why"}"#
+                    .to_owned(),
                 "invalid_note_id",
             ),
             (
