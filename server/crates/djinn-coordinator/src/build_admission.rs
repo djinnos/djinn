@@ -462,11 +462,11 @@ mod tests {
     use djinn_core::events::EventBus;
     use djinn_db::{AdmissionState, Database, ImageRepository, ProjectRepository};
     use djinn_k8s::{
-        K8sGraphWarmer, KubernetesConfig, WarmJobDispatcher, WarmJobWatcher, WarmTerminalOutcome,
+        K8sGraphWarmer, KubernetesConfig, WarmJobDispatcher, WarmJobManifest, WarmJobWatcher,
+        WarmTerminalOutcome,
     };
     use djinn_runtime::GraphWarmerService;
     use futures::FutureExt;
-    use k8s_openapi::api::batch::v1::Job;
     use sqlx::Executor;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use tokio::sync::Notify;
@@ -520,7 +520,11 @@ mod tests {
 
     #[async_trait]
     impl WarmJobDispatcher for AdmissionStateRecordingDispatcher {
-        async fn dispatch(&self, _namespace: &str, _job: Job) -> Result<String, String> {
+        async fn dispatch(
+            &self,
+            _namespace: &str,
+            _job: WarmJobManifest,
+        ) -> Result<String, String> {
             let history = self
                 .journal
                 .list_history(AdmissionDomain::WarmBuild, &self.work_id)
