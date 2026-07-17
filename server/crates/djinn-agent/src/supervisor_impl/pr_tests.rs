@@ -1,5 +1,6 @@
 use super::{
-    PR_ALREADY_EXISTS_HINT, TASK_OUTCOME_BODY_EXCERPT_BYTES, handle_noop_disposition,
+    PR_ALREADY_EXISTS_HINT, TASK_OUTCOME_BODY_EXCERPT_BYTES,
+    adopt_recorded_pr_after_create_conflict, handle_noop_disposition,
     handle_settled_noop_without_live_mover, is_concurrent_push_race, pr_open_failure_outcome,
     pr_open_untyped_failure_outcome, should_route_settled_noop_without_live_mover,
 };
@@ -522,6 +523,78 @@ fn github_pr_error(status: u16, body: &str) -> GitHubApiError {
         reqwest::StatusCode::from_u16(status).expect("valid test status"),
         body.to_string(),
     )
+}
+
+/// A create that 422s "already exists" while a concurrent PR-open has already
+/// recorded pr_url on the task must heal to `PrOpened` instead of surfacing a
+/// `Failed { pr_open }` conflict envelope (task mbfw, 2026-07-16).
+#[tokio::test]
+async fn create_conflict_heals_to_pr_opened_when_task_has_recorded_pr_url() {
+    let db = test_helpers::create_test_db();
+    let project = test_helpers::create_test_project(&db).await;
+    let epic = test_helpers::create_test_epic(&db, &project.id).await;
+    let repo = TaskRepository::new(db.clone(), test_helpers::test_events());
+    let task = test_helpers::create_test_task(&db, &project.id, &epic.id).await;
+    repo.set_pr_url(&task.id, "https://github.com/djinnos/server/pull/7")
+        .await
+        .expect("set pr_url");
+
+    let err = github_pr_error(422, CAPTURED_CREATE_PR_422_ALREADY_EXISTS);
+    let outcome = adopt_recorded_pr_after_create_conflict(&err, &repo, &task, "deadbeef")
+        .await
+        .expect("conflict with a recorded pr_url must heal");
+
+    match outcome {
+        TaskRunOutcome::PrOpened { url, sha } => {
+            assert_eq!(url, "https://github.com/djinnos/server/pull/7");
+            assert_eq!(sha, "deadbeef");
+        }
+        other => panic!("expected PrOpened, got {other:?}"),
+    }
+}
+
+/// Without a recorded pr_url there is nothing to adopt — the conflict must
+/// fall through to the normal failure path (which is retried next cycle).
+#[tokio::test]
+async fn create_conflict_heal_declines_without_recorded_pr_url() {
+    let db = test_helpers::create_test_db();
+    let project = test_helpers::create_test_project(&db).await;
+    let epic = test_helpers::create_test_epic(&db, &project.id).await;
+    let repo = TaskRepository::new(db.clone(), test_helpers::test_events());
+    let task = test_helpers::create_test_task(&db, &project.id, &epic.id).await;
+
+    let err = github_pr_error(422, CAPTURED_CREATE_PR_422_ALREADY_EXISTS);
+    assert!(
+        adopt_recorded_pr_after_create_conflict(&err, &repo, &task, "deadbeef")
+            .await
+            .is_none(),
+        "no recorded pr_url means nothing to adopt"
+    );
+}
+
+/// The heal only applies to the "already exists" conflict — every other
+/// create failure (e.g. no-commits 422) must keep its typed failure outcome.
+#[tokio::test]
+async fn create_conflict_heal_ignores_non_conflict_errors() {
+    let db = test_helpers::create_test_db();
+    let project = test_helpers::create_test_project(&db).await;
+    let epic = test_helpers::create_test_epic(&db, &project.id).await;
+    let repo = TaskRepository::new(db.clone(), test_helpers::test_events());
+    let task = test_helpers::create_test_task(&db, &project.id, &epic.id).await;
+    repo.set_pr_url(&task.id, "https://github.com/djinnos/server/pull/7")
+        .await
+        .expect("set pr_url");
+
+    let err = github_pr_error(
+        422,
+        r#"{"message":"Validation Failed: No commits between main and task/demo"}"#,
+    );
+    assert!(
+        adopt_recorded_pr_after_create_conflict(&err, &repo, &task, "deadbeef")
+            .await
+            .is_none(),
+        "non-already-exists failures must not be healed"
+    );
 }
 
 fn failed_parts(outcome: TaskRunOutcome) -> (Option<ErrorClass>, Option<String>, Option<String>) {

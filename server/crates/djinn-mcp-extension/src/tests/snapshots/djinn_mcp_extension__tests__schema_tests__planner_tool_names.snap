@@ -43,6 +43,7 @@ expression: names
   "memory_broken_links",
   "memory_orphans",
   "memory_recall_trace",
+  "memory_retrieval_outcomes_report",
   "memory_write",
   "memory_edit",
   "agent_metrics",

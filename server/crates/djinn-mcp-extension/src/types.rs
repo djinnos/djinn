@@ -5,6 +5,12 @@
 //! no domain logic, no database access.
 
 use serde::Deserialize;
+#[derive(Deserialize)]
+pub struct MemoryRetrievalOutcomesReportParams {
+    pub start: String,
+    pub end: String,
+    pub timezone: String,
+}
 
 #[derive(Deserialize)]
 pub struct IncomingToolCall {

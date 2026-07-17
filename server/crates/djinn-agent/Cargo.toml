@@ -77,6 +77,9 @@ tracing-subscriber = { version = "0.3", features = ["fmt"] }
 # test-only methods (e.g. `SlotPoolHandle::test_set_token_override`)
 # on the canonical djinn-slot pool handle.
 djinn-slot = { path = "../djinn-slot", features = ["test-support"] }
+# Self dev-dependency so integration tests under tests/ can use the
+# cfg-gated `djinn_agent::test_helpers` module.
+djinn-agent = { path = ".", features = ["test-support"] }
 
 [lints]
 workspace = true
