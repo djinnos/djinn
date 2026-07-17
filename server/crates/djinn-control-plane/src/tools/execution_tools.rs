@@ -361,6 +361,7 @@ mod tests {
     use crate::state::McpState;
 
     // Kept distinct from the user IDs used by other control-plane fixtures.
+    const EXECUTION_KILL_LIVE_FIXTURE_GITHUB_ID: i64 = 999_991;
     const EXECUTION_KILL_TERMINAL_FIXTURE_GITHUB_ID: i64 = 999_990;
 
     struct RecordingSlotPool {
@@ -578,13 +579,27 @@ mod tests {
             .create("test-proj", "test-owner", "test-repo")
             .await
             .expect("create project");
+        let user = UserRepository::new(db.clone())
+            .upsert_from_github(
+                EXECUTION_KILL_LIVE_FIXTURE_GITHUB_ID,
+                "execution-kill-live-fixture",
+                None,
+                None,
+            )
+            .await
+            .expect("create fixture user");
 
         // Create an in-progress task.
         let task_repo = djinn_db::TaskRepository::new(db.clone(), events.clone());
         let task = task_repo
-            .create_in_project(
+            .create_in_project_with_provenance(
                 &project.id,
                 None,
+                EffectiveCreatorProvenance {
+                    explicit_user_id: Some(&user.id),
+                    source_task_id: None,
+                    proposal_id: None,
+                },
                 "Kill test task",
                 "desc",
                 "",
