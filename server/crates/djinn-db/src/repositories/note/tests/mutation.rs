@@ -601,3 +601,76 @@ async fn deprecate_with_supersedes_is_atomic_and_returns_auditable_metadata() {
     assert_eq!(event.confidence_before, Some(0.5));
     assert_eq!(event.confidence_after, Some(0.5));
 }
+
+#[tokio::test]
+async fn guarded_deprecation_is_not_resurrected_by_decay_or_archive_housekeeping() {
+    let tmp = crate::database::test_tempdir().unwrap();
+    let db = Database::open_in_memory().unwrap();
+    let (tx, _rx) = broadcast::channel(8);
+    let project = make_project(&db, tmp.path()).await;
+    let repo = NoteRepository::new(db.clone(), event_bus_for(&tx));
+    let deprecated_id = uuid::Uuid::now_v7().to_string();
+    let replacement_id = uuid::Uuid::now_v7().to_string();
+
+    let mut deprecated = create_command(&project.id, deprecated_id.clone());
+    let NoteRevisionDesiredState::Create(state) = &mut deprecated.desired else {
+        unreachable!()
+    };
+    state.note_type = "case".to_owned();
+    state.folder = "cases".to_owned();
+    state.permalink = "cases/deprecated-guarded-note".to_owned();
+    state.content =
+        "One short extracted paragraph.\n\n*Extracted from session fixture.*".to_owned();
+    repo.mutate_with_revision(deprecated).await.unwrap();
+    let mut replacement = create_command(&project.id, replacement_id.clone());
+    let NoteRevisionDesiredState::Create(state) = &mut replacement.desired else {
+        unreachable!()
+    };
+    state.note_type = "case".to_owned();
+    state.folder = "cases".to_owned();
+    state.permalink = "cases/guarded-replacement-note".to_owned();
+    repo.mutate_with_revision(replacement).await.unwrap();
+
+    assert!(
+        repo.mutate_with_revision(NoteRevisionMutation {
+            project_id: project.id.clone(),
+            note_id: Some(deprecated_id.clone()),
+            event_kind: NoteRevisionEventKind::Updated,
+            desired: NoteRevisionDesiredState::DeprecateWithSupersedes {
+                superseding_note_id: replacement_id,
+                association_weight: 1.0
+            },
+            attribution: TrustedNoteRevisionAttribution::system(NoteRevisionSubsystem::Extraction),
+            provenance: TrustedNoteRevisionProvenance::new(
+                Some("session".into()),
+                Some("task".into()),
+                Some("run".into())
+            )
+            .unwrap(),
+            reason: NoteRevisionReason::new("guarded extraction replacement").unwrap(),
+        })
+        .await
+        .unwrap()
+        .changed
+    );
+    assert_eq!(
+        repo.get(&deprecated_id).await.unwrap().unwrap().status,
+        "deprecated"
+    );
+    assert_eq!(
+        repo.decay_stale_extracted_notes(&project.id, 30)
+            .await
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        repo.archive_audit_candidates(&project.id, 30)
+            .await
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        repo.get(&deprecated_id).await.unwrap().unwrap().status,
+        "deprecated"
+    );
+}

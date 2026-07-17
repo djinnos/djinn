@@ -1,21 +1,14 @@
 {
-   "terminal_context" : {
-      "review_decision" : null,
-      "outcome" : {
-         "classification" : "sanitized_failure",
-         "kind" : "failed"
-      }
-   },
-   "expected_note_type" : "case",
-   "required_discriminative_text" : "discriminative replay fact 04",
    "category" : "underspecified",
    "expect_adr_054_quality" : false,
    "expected_duplicate_target" : null,
+   "expected_note_type" : "case",
    "id" : "archive-derived-04",
+   "injected_provider_response" : "{\"revision_operations\":[{\"deprecated_note_id\":\"018f0000-0000-7000-8000-000000000005\",\"kind\":\"deprecate_with_supersedes\",\"reason\":\"fixture lifecycle evidence\",\"superseding_note_id\":\"018f0000-0000-7000-8000-000000000006\"}],\"cases\":[{\"applies_when\":\"offline replay fixture\",\"content\":\"## Situation\\ndiscriminative replay fact 04.\",\"title\":\"Sanitized underspecified 04\"}]}",
    "messages" : [
       {
-         "role" : "user",
-         "content" : "Summarize sanitized task evidence for discriminative replay fact 04."
+         "content" : "Summarize sanitized task evidence for discriminative replay fact 04.",
+         "role" : "user"
       },
       {
          "content" : "Implemented a concise deterministic change and recorded the outcome.",
@@ -24,5 +17,19 @@
    ],
    "must_not_duplicate_target" : null,
    "provenance" : "sanitized_archived_transcript_derived",
-   "injected_provider_response" : "{\"cases\":[{\"content\":\"## Situation\\ndiscriminative replay fact 04.\",\"title\":\"Sanitized underspecified 04\",\"applies_when\":\"offline replay fixture\"}]}"
+   "required_discriminative_text" : "discriminative replay fact 04",
+   "revision_operation_simulations" : [
+      {
+         "outcome" : "refused",
+         "reason" : "lifecycle_invalid",
+         "shape" : "deprecate_with_supersedes"
+      }
+   ],
+   "terminal_context" : {
+      "outcome" : {
+         "classification" : "sanitized_failure",
+         "kind" : "failed"
+      },
+      "review_decision" : null
+   }
 }
