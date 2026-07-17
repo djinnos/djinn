@@ -110,38 +110,95 @@ pub async fn coordinate_final_verification(
         Err(detail) => return emit_error(&request, &verification_attempt_id, &detail),
     };
 
-    let outcome = if request.cancellation.is_cancelled() {
-        ineligible_outcome(&verification_attempt_id, "cancelled before execution")
+    let execution_result = if request.cancellation.is_cancelled() {
+        Err(ineligible_outcome(
+            &verification_attempt_id,
+            "cancelled before execution",
+        ))
     } else {
         // The delivered executor performs every descriptor in order and returns
         // evidence rather than persistence side effects.
         let evidence = execute_final_verification(material.execution_request.clone()).await;
         if request.cancellation.is_cancelled() {
-            ineligible_outcome(&verification_attempt_id, "cancelled during execution")
-        } else if !evidence.eligible() {
-            ineligible_outcome(&verification_attempt_id, &format_evidence_reason(&evidence))
-        } else {
-            persist_evidence(
-                &request,
+            Err(ineligible_outcome(
                 &verification_attempt_id,
-                &verify_run_id,
-                &material,
-                &evidence,
-                ctx,
+                "cancelled during execution",
+            ))
+        } else if !evidence.eligible() {
+            Err(ineligible_outcome(
+                &verification_attempt_id,
+                &format_evidence_reason(&evidence),
+            ))
+        } else {
+            Ok(evidence)
+        }
+    };
+
+    // Releasing is deliberately before opening the independently committed
+    // repository transaction. If it fails, no transaction has begun and so no
+    // passing row can survive a failed invocation lease release.
+    let outcome = match execution_result {
+        Err(outcome) => release_then_return(&mut *lease, &verification_attempt_id, outcome).await,
+        Ok(evidence) => {
+            release_then_persist(
+                &mut *lease,
+                &request.cancellation,
+                &verification_attempt_id,
+                || {
+                    persist_evidence(
+                        &request,
+                        &verification_attempt_id,
+                        &verify_run_id,
+                        &material,
+                        &evidence,
+                        ctx,
+                    )
+                },
             )
             .await
         }
     };
+    emit_outcome(&request, outcome)
+}
 
-    // A release failure cannot turn execution into a successful record. A row
-    // may only be reported stored after the lease has also released normally.
+/// Release before any durable write. This is the commit protocol boundary: the
+/// repository insert is permitted only after the normal invocation lease has
+/// successfully released.
+async fn release_then_return(
+    lease: &mut dyn FinalVerificationInvocationLease,
+    attempt_id: &str,
+    outcome: FinalVerificationRecordingOutcome,
+) -> FinalVerificationRecordingOutcome {
     match lease.release().await {
-        Ok(()) => emit_outcome(&request, outcome),
-        Err(detail) => emit_error(
-            &request,
-            &verification_attempt_id,
-            &format!("lease release failed: {detail}"),
-        ),
+        Ok(()) => outcome,
+        Err(detail) => error_outcome(attempt_id, &format!("lease release failed: {detail}")),
+    }
+}
+
+/// Run the durable write only after a successful release and while observing
+/// cancellation. `biased` gives cancellation precedence at the write boundary.
+async fn release_then_persist<F, Fut>(
+    lease: &mut dyn FinalVerificationInvocationLease,
+    cancellation: &CancellationToken,
+    attempt_id: &str,
+    persist: F,
+) -> FinalVerificationRecordingOutcome
+where
+    F: FnOnce() -> Fut,
+    Fut: Future<Output = FinalVerificationRecordingOutcome>,
+{
+    match lease.release().await {
+        Err(detail) => error_outcome(attempt_id, &format!("lease release failed: {detail}")),
+        Ok(()) if cancellation.is_cancelled() => {
+            ineligible_outcome(attempt_id, "cancelled before persistence")
+        }
+        Ok(()) => tokio::select! {
+            biased;
+            _ = cancellation.cancelled() => {
+                ineligible_outcome(attempt_id, "cancelled during persistence")
+            }
+            outcome = persist() => outcome,
+        },
     }
 }
 
@@ -153,6 +210,11 @@ async fn persist_evidence(
     evidence: &FinalVerificationExecutionEvidence,
     ctx: &SlotContext,
 ) -> FinalVerificationRecordingOutcome {
+    // This covers cancellation while evidence is being encoded, before the
+    // cancellation-aware select directly around the insert below.
+    if request.cancellation.is_cancelled() {
+        return ineligible_outcome(attempt_id, "cancelled before persistence");
+    }
     let (Some(f0), Some(f1), Some(pre), Some(post)) = (
         evidence.fingerprint_f0.as_ref(),
         evidence.fingerprint_f1.as_ref(),
@@ -203,8 +265,9 @@ async fn persist_evidence(
     };
     let repo = VerifyRunRepository::new(ctx.db.clone());
     let id = uuid::Uuid::now_v7().to_string();
-    match repo
-        .record_eligible_final_verification_pass(RecordEligibleFinalVerificationPassParams {
+    let manifest_version = format!("manifest-v{}", evidence.manifest_version);
+    let insert =
+        repo.record_eligible_final_verification_pass(RecordEligibleFinalVerificationPassParams {
             id: &id,
             task_run_id: &request.task_run_id,
             verify_source: material.verify_source.as_str(),
@@ -215,15 +278,23 @@ async fn persist_evidence(
             covered_checks: &covered_checks,
             required_checks: &required_checks,
             verification_input_fingerprint: &f0.fingerprint,
-            manifest_version: &format!("manifest-v{}", evidence.manifest_version),
+            manifest_version: &manifest_version,
             environment_identity_json: &identity_json,
             environment_identity_digest: &pre.digest,
             environment_identity_version: "identity-v1",
             completed_at: &completed_at,
             diff_fingerprint: &material.diff_fingerprint,
-        })
-        .await
-    {
+        });
+    // Do not poll the insert future until cancellation has had priority at the
+    // last coordinator boundary before SQL.
+    let insert_result = tokio::select! {
+        biased;
+        _ = request.cancellation.cancelled() => {
+            return ineligible_outcome(attempt_id, "cancelled during persistence");
+        }
+        result = insert => result,
+    };
+    match insert_result {
         Ok(_) => FinalVerificationRecordingOutcome::Stored {
             verification_attempt_id: attempt_id.to_owned(),
             verify_run_id: verify_run_id.to_owned(),
@@ -309,4 +380,70 @@ fn emit_outcome(
         ),
     }
     outcome
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    use super::*;
+
+    struct TestLease(Result<(), String>);
+
+    impl FinalVerificationInvocationLease for TestLease {
+        fn release<'a>(
+            &'a mut self,
+        ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>> {
+            Box::pin(async { self.0.clone() })
+        }
+    }
+
+    fn stored() -> FinalVerificationRecordingOutcome {
+        FinalVerificationRecordingOutcome::Stored {
+            verification_attempt_id: "attempt".to_owned(),
+            verify_run_id: "run".to_owned(),
+        }
+    }
+
+    #[tokio::test]
+    async fn cancellation_at_persistence_boundary_never_starts_writer() {
+        let cancellation = CancellationToken::new();
+        cancellation.cancel();
+        let mut lease = TestLease(Ok(()));
+        let writer_started = Arc::new(AtomicBool::new(false));
+        let started = Arc::clone(&writer_started);
+
+        let outcome = release_then_persist(&mut lease, &cancellation, "attempt", move || {
+            started.store(true, Ordering::SeqCst);
+            async { stored() }
+        })
+        .await;
+
+        assert!(matches!(
+            outcome,
+            FinalVerificationRecordingOutcome::Ineligible { .. }
+        ));
+        assert!(!writer_started.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn lease_release_failure_never_starts_writer() {
+        let cancellation = CancellationToken::new();
+        let mut lease = TestLease(Err("release failed".to_owned()));
+        let writer_started = Arc::new(AtomicBool::new(false));
+        let started = Arc::clone(&writer_started);
+
+        let outcome = release_then_persist(&mut lease, &cancellation, "attempt", move || {
+            started.store(true, Ordering::SeqCst);
+            async { stored() }
+        })
+        .await;
+
+        assert!(matches!(
+            outcome,
+            FinalVerificationRecordingOutcome::Error { .. }
+        ));
+        assert!(!writer_started.load(Ordering::SeqCst));
+    }
 }
