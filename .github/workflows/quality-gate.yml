@@ -682,8 +682,6 @@ jobs:
           echo "cache-hit=${{ steps.rust-cache.outputs.cache-hit }}"
           echo "::notice::cache-family=server-test shared-key=server-test cache-hit=${{ steps.rust-cache.outputs.cache-hit }}"
       - uses: taiki-e/install-action@nextest
-      - name: Build test binaries (concurrent with planner discovery)
-        run: cargo nextest run --workspace --all-targets --features qdrant --no-run
       - uses: taiki-e/install-action@v2
         with:
           tool: sqlx-cli
@@ -710,6 +708,13 @@ jobs:
         run: |
           git config --global user.email "ci@test.local"
           git config --global user.name "CI Test"
+      # DB setup must precede this build: the sqlx macros compile against
+      # the live migrated database (server/.env DATABASE_URL), not the
+      # offline cache. The build overlaps the planner's discovery compile
+      # of the same crates — that concurrency is the whole point of the
+      # shards not depending on nextest-plan.
+      - name: Build test binaries (concurrent with planner discovery)
+        run: cargo nextest run --workspace --all-targets --features qdrant --no-run
       - name: Wait for and download full shard plan
         env:
           GH_TOKEN: ${{ github.token }}
