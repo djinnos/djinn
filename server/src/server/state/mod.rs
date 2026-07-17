@@ -2459,7 +2459,7 @@ fn build_in_process_graph_warmer(state: AppState) -> djinn_agent::warmer::InProc
     let warm: djinn_agent::warmer::WarmCallback = Arc::new(move |project_id, project_root| {
         let state = warm_state.clone();
         Box::pin(async move {
-            let index_tree_path = project_root.join(".djinn").join("worktrees").join("_index");
+            let index_tree_path = djinn_core::index_tree::index_tree_path(&project_root);
             let planner = CanonicalGraphRefreshPlanner;
             let warm_plan = planner.plan_warm(WarmPlanInputs {
                 cache_has_entry: djinn_graph::canonical_graph::canonical_graph_cache_has_entry_for(

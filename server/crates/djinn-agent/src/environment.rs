@@ -35,7 +35,7 @@ async fn resolve_project_id_for_path(db: &Database, worktree_path: &Path) -> Opt
     let path_str = worktree_path.to_string_lossy();
     // The server-managed clone path has the shape
     // `{projects_root}/{owner}/{repo}` — but workers operate on worktrees
-    // rooted *under* that path (e.g. `{projects_root}/{owner}/{repo}/.djinn/worktrees/<id>`),
+    // rooted *under* that path (e.g. `{projects_root}/{owner}/{repo}/.task-runtime/worktrees/<id>`),
     // so an exact last-two-components parse misses anything deeper than
     // the clone root. Walk the ancestry: at each ancestor, take its last
     // two components and try a GitHub lookup. First hit wins.

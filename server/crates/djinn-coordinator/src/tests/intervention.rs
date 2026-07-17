@@ -3980,7 +3980,11 @@ async fn pending_monitored_reopen_yields_to_normal_dispatch() {
 
     let arb_repo = TaskArbitrationRepository::new(db.clone());
     let all_arbs = arb_repo.list_for_task(&task.id).await.unwrap();
-    assert_eq!(all_arbs.len(), 1, "one arbitration row after first dispatch");
+    assert_eq!(
+        all_arbs.len(),
+        1,
+        "one arbitration row after first dispatch"
+    );
     let cycle = all_arbs[0].hold_cycle;
 
     // Simulate the Lead arbiter's `reopen` decision: persist the directive on

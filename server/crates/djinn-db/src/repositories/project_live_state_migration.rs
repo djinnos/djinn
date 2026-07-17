@@ -182,7 +182,11 @@ mod tests {
     }
 
     fn key<'a>(project_id: &'a str, family: &'a str) -> MigrationKey<'a> {
-        MigrationKey { project_id, family, release: "N" }
+        MigrationKey {
+            project_id,
+            family,
+            release: "N",
+        }
     }
 
     async fn begin_read_source(
@@ -230,7 +234,11 @@ mod tests {
         repo.fail(key("owner", "read_source:a"), "copy failed")
             .await
             .expect("record failure");
-        let failed = repo.get(key("owner", "read_source:a")).await.unwrap().unwrap();
+        let failed = repo
+            .get(key("owner", "read_source:a"))
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(failed.result, RESULT_FAILED);
         assert_eq!(failed.detail.as_deref(), Some("copy failed"));
 
@@ -238,13 +246,9 @@ mod tests {
         assert_eq!(restarted.result, RESULT_PENDING);
         assert!(restarted.detail.is_none());
 
-        repo.finalize(
-            key("owner", "read_source:a"),
-            Some("post"),
-            None,
-        )
-        .await
-        .expect("finalize migration");
+        repo.finalize(key("owner", "read_source:a"), Some("post"), None)
+            .await
+            .expect("finalize migration");
         let final_row = repo
             .get(key("owner", "read_source:a"))
             .await
@@ -254,12 +258,22 @@ mod tests {
         assert_eq!(final_row.post_hash.as_deref(), Some("post"));
         assert!(repo.pending_for_project("owner").await.unwrap().is_empty());
 
-        repo.rollback(key("owner", "read_source:a"), Some("restore retained input"))
+        repo.rollback(
+            key("owner", "read_source:a"),
+            Some("restore retained input"),
+        )
+        .await
+        .expect("record rollback");
+        let rolled_back = repo
+            .get(key("owner", "read_source:a"))
             .await
-            .expect("record rollback");
-        let rolled_back = repo.get(key("owner", "read_source:a")).await.unwrap().unwrap();
+            .unwrap()
+            .unwrap();
         assert_eq!(rolled_back.result, RESULT_ROLLED_BACK);
-        assert_eq!(rolled_back.detail.as_deref(), Some("restore retained input"));
+        assert_eq!(
+            rolled_back.detail.as_deref(),
+            Some("restore retained input")
+        );
     }
 
     #[tokio::test]
@@ -268,9 +282,13 @@ mod tests {
         seed_project(&repo, "owner").await;
         let original = serde_json::json!({"sources":[{"path":"old-a"}]});
         begin_read_source(&repo, "owner", "a", &original).await;
-        repo.finalize(key("owner", "read_source:a"), Some("post"), Some("published"))
-            .await
-            .expect("finalize migration");
+        repo.finalize(
+            key("owner", "read_source:a"),
+            Some("post"),
+            Some("published"),
+        )
+        .await
+        .expect("finalize migration");
 
         let replacement = serde_json::json!({"sources":[{"path":"different-input"}]});
         let row = begin_read_source(&repo, "owner", "a", &replacement).await;
@@ -300,9 +318,18 @@ mod tests {
         begin_read_source(&repo, "owner-one", "target-b", &target_b_inventory).await;
         begin_read_source(&repo, "owner-two", "target-a", &second_owner_inventory).await;
 
-        assert_eq!(dual.source_inventory["sources"].as_array().unwrap().len(), 2);
-        assert_eq!(repo.pending_for_project("owner-one").await.unwrap().len(), 2);
-        assert_eq!(repo.pending_for_project("owner-two").await.unwrap().len(), 1);
+        assert_eq!(
+            dual.source_inventory["sources"].as_array().unwrap().len(),
+            2
+        );
+        assert_eq!(
+            repo.pending_for_project("owner-one").await.unwrap().len(),
+            2
+        );
+        assert_eq!(
+            repo.pending_for_project("owner-two").await.unwrap().len(),
+            1
+        );
         assert_eq!(
             repo.get(key("owner-two", "read_source:target-a"))
                 .await
@@ -326,11 +353,16 @@ mod tests {
         .execute(repo.db.pool())
         .await
         .expect("inject finalization failure");
-        assert!(repo
-            .finalize(key("owner", "read_source:a"), Some("post"), None)
+        assert!(
+            repo.finalize(key("owner", "read_source:a"), Some("post"), None)
+                .await
+                .is_err()
+        );
+        let pending = repo
+            .get(key("owner", "read_source:a"))
             .await
-            .is_err());
-        let pending = repo.get(key("owner", "read_source:a")).await.unwrap().unwrap();
+            .unwrap()
+            .unwrap();
         assert_eq!(pending.result, RESULT_PENDING);
         assert!(pending.post_hash.is_none());
 
