@@ -593,6 +593,10 @@ pub fn tool_schemas_planner() -> Vec<serde_json::Value> {
         shared_schemas::tool_memory_recall_trace(),
         read_only(),
     ));
+    tool_values.push(serialize_tool(
+        shared_schemas::tool_memory_retrieval_outcomes_report(),
+        read_only(),
+    ));
     // The Planner may curate the knowledge base directly (annotate/fix notes during
     // the Memory Health Review), so expose write + edit alongside the read tools.
     tool_values.push(serialize_tool(
@@ -690,6 +694,10 @@ pub fn tool_schemas_architect() -> Vec<serde_json::Value> {
         read_only(),
     ));
     tool_values.push(serialize_tool(
+        shared_schemas::tool_memory_retrieval_outcomes_report(),
+        read_only(),
+    ));
+    tool_values.push(serialize_tool(
         shared_schemas::tool_role_metrics(),
         read_only(),
     ));
@@ -751,11 +759,20 @@ pub fn tool_schemas_advocate() -> Vec<serde_json::Value> {
         read_only(),
     ));
     // Read the debate trail to see exactly which adversary objections this
-    // revision must address. The advocate only READS the trail — it does not
-    // rebut or resolve. The Judge adjudicates and resolves objections.
+    // revision must address. The advocate may also REBUT an objection it can
+    // show is wrong or disproportionate (kind="rebuttal" via
+    // proposal_debate_append below) — it still never resolves objections or
+    // files verdicts. The Judge adjudicates objection vs rebuttal and resolves.
     tool_values.push(serialize_tool(
         shared_schemas::tool_proposal_debate_list(),
         read_only(),
+    ));
+    // The Advocate's rebuttal channel (kind="rebuttal" ONLY). Rebutting with
+    // evidence is the sanctioned alternative to resolving an objection by
+    // growing the design — the tribunal's counterweight against scope ratchet.
+    tool_values.push(serialize_tool(
+        shared_schemas::tool_proposal_debate_append(),
+        mutation(),
     ));
     tool_values.push(serialize_tool(
         shared_schemas::tool_proposal_update(),

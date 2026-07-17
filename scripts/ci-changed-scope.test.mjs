@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -175,4 +175,21 @@ test('CLI JSON and GitHub output are derived from the same deterministic result'
   assert.equal(result.outputs.qaSmoke, 'true');
   const githubOutputs = Object.fromEntries(readFileSync(outputFile, 'utf8').trim().split('\n').map((line) => line.split('=')));
   assert.deepEqual(githubOutputs, result.outputs);
+});
+
+test('CLI reads NUL-delimited git paths without core.quotePath corruption', () => {
+  const directory = mkdtempSync(join(tmpdir(), 'changed-scope-nul-'));
+  const filesFile = join(directory, 'changed-files.z');
+  const unicodePath = '.djinn/decisions/agent-harness-—-library.md';
+  writeFileSync(filesFile, `${unicodePath}\0scripts/check.sh\0`);
+
+  const invocation = spawnSync(process.execPath, [
+    'scripts/ci-changed-scope.mjs', '--event', 'pull_request', '--base', 'base', '--head', 'head',
+    '--files0-file', filesFile,
+  ], { encoding: 'utf8' });
+
+  assert.equal(invocation.status, 0, invocation.stderr);
+  const result = JSON.parse(invocation.stdout);
+  assert.deepEqual(result.files, [unicodePath, 'scripts/check.sh'].sort());
+  assert.equal(result.lanes.unknown, true);
 });

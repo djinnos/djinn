@@ -18,12 +18,19 @@ use std::path::PathBuf;
 /// 3. `/tmp/.djinn/projects` — last-ditch fallback when `$HOME`
 ///    isn't set (rare; mostly paranoia for init-container scenarios).
 pub fn projects_root() -> PathBuf {
-    if let Ok(djinn_home) = std::env::var("DJINN_HOME")
-        && !djinn_home.is_empty()
+    projects_root_from(
+        std::env::var_os("DJINN_HOME").map(PathBuf::from),
+        dirs::home_dir(),
+    )
+}
+
+fn projects_root_from(djinn_home: Option<PathBuf>, home_dir: Option<PathBuf>) -> PathBuf {
+    if let Some(djinn_home) = djinn_home
+        && !djinn_home.as_os_str().is_empty()
     {
-        return PathBuf::from(djinn_home).join("projects");
+        return djinn_home.join("projects");
     }
-    dirs::home_dir()
+    home_dir
         .unwrap_or_else(|| PathBuf::from("/tmp"))
         .join(".djinn")
         .join("projects")
@@ -72,4 +79,29 @@ pub fn cargo_target_runs_root() -> PathBuf {
 /// is a derivation, not persisted state.
 pub fn project_dir(owner: &str, repo: &str) -> PathBuf {
     projects_root().join(owner).join(repo)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn isolated_djinn_home_keeps_project_clone_under_projects_namespace() {
+        let home = PathBuf::from("/isolated/djinn-home");
+        let projects = projects_root_from(Some(home.clone()), None);
+        assert_eq!(
+            projects.join("octo").join("repo"),
+            home.join("projects/octo/repo")
+        );
+        assert_eq!(projects, home.join("projects"));
+    }
+
+    #[test]
+    fn projects_root_keeps_home_djinn_projects_fallback() {
+        let home = PathBuf::from("/isolated/home");
+        assert_eq!(
+            projects_root_from(None, Some(home.clone())),
+            home.join(".djinn/projects")
+        );
+    }
 }

@@ -10,6 +10,18 @@ pub struct ToolSafetyAnnotations {
     pub concurrent_safe: bool,
 }
 
+pub fn tool_memory_retrieval_outcomes_report() -> RmcpTool {
+    RmcpTool::new(
+        "memory_retrieval_outcomes_report".to_string(),
+        "Read an observational retrieval-injection outcomes report for an explicit project-scoped, timezone-aware RFC-3339 [start,end) interval. This operation is read-only and observational only: it makes no causal or randomized-experiment claim. A task run is deduplicated within each entry_point/rollout_label/outcome cell; cells with different cohort keys can overlap and are non-additive. The response returns the applied interval/timezone plus every database denominator, count, rate, not-applicable state, attempt-number distribution, and unattributed/unrecorded diagnostic. Traces without task_run_id are unattributed and excluded from rates; no fallback through task_id is used. Invalid intervals and requests outside the protected 30-day trace window are rejected without clipping.".to_string(),
+        object!({"type":"object", "required":["start","end","timezone"], "properties": {
+            "project":{"type":"string"}, "project_id":{"type":"string"},
+            "start":{"type":"string", "format":"date-time"}, "end":{"type":"string", "format":"date-time"},
+            "timezone":{"type":"string", "minLength":1}
+        }}),
+    )
+}
+
 /// Inspect persisted memory retrieval traces for the current project.
 ///
 /// The two request forms deliberately live in one tool: list calls stay small
@@ -143,7 +155,7 @@ pub fn annotate_tool_safety(value: &mut serde_json::Value, annotations: ToolSafe
 pub fn tool_memory_move() -> RmcpTool {
     RmcpTool::new(
         "memory_move".to_string(),
-        "Move a memory note to a different type via memory_* MCP tools. Do not assume .djinn/memory/ paths are readable from the worker filesystem; do not attempt filesystem rename. Updates the permalink and resolves inbound links automatically.".to_string(),
+        "Move a memory note to a different type via memory_* MCP tools. Notes are stored in the project database; use this tool rather than filesystem operations. Updates the permalink and resolves inbound links automatically.".to_string(),
         object!({
             "type": "object",
             "required": ["identifier", "type"],
@@ -693,7 +705,7 @@ pub fn tool_memory_list() -> RmcpTool {
 pub fn tool_memory_write() -> RmcpTool {
     RmcpTool::new(
         "memory_write".to_string(),
-        "Create a new memory note via the memory_* MCP tools. Do not attempt filesystem writes; .djinn/memory/ paths are not readable from the worker filesystem. `type` is required and routes the note (adr, pattern, case, pitfall, research, requirement, reference, design, tech_spike, session, brief, roadmap). Use [[wikilinks]] in content to connect notes.".to_string(),
+        "Create a new memory note via the memory_* MCP tools. Notes are stored in the project database; do not use filesystem writes. `type` is required and routes the note (adr, pattern, case, pitfall, research, requirement, reference, design, tech_spike, session, brief, roadmap). Use [[wikilinks]] in content to connect notes.".to_string(),
         object!({
             "type": "object",
             "additionalProperties": false,
@@ -713,7 +725,7 @@ pub fn tool_memory_write() -> RmcpTool {
 pub fn tool_memory_edit() -> RmcpTool {
     RmcpTool::new(
         "memory_edit".to_string(),
-        "Edit an existing memory note in-place via memory_* MCP tools. Do not assume .djinn/memory/ paths are readable from the worker filesystem. Operations: append, prepend, find_replace (requires find_text), replace_section (requires section).".to_string(),
+        "Edit an existing memory note in-place via memory_* MCP tools. Notes are stored in the project database; do not use filesystem operations. Operations: append, prepend, find_replace (requires find_text), replace_section (requires section).".to_string(),
         object!({
             "type": "object",
             "additionalProperties": false,

@@ -6,9 +6,9 @@
 //! never needed the server's test harness — only `djinn_control_plane`'s public types.
 
 use djinn_control_plane::tools::memory_tools::{
-    BrokenLinksParams, BuildContextParams, CatalogParams, DeleteParams, DiffParams, EditParams,
-    GraphParams, HealthParams, HistoryParams, ListParams, MoveParams, OrphansParams, ReadParams,
-    RecentParams, SearchParams, TaskRefsParams, WriteParams,
+    BrokenLinksParams, BuildContextParams, CatalogParams, DeleteParams, EditParams, GraphParams,
+    HealthParams, ListParams, MoveParams, OrphansParams, ReadParams, RecentParams, SearchParams,
+    TaskRefsParams, WriteParams,
 };
 
 // ── Param deserialization ─────────────────────────────────────────────────
@@ -157,28 +157,6 @@ fn broken_links_params_deserialize() {
     let p: BrokenLinksParams =
         serde_json::from_value(serde_json::json!({"project":"/tmp/p"})).unwrap();
     assert_eq!(p.project, "/tmp/p");
-}
-
-#[test]
-fn history_params_deserialize() {
-    let p: HistoryParams = serde_json::from_value(
-        serde_json::json!({"project":"/tmp/p","permalink":"decisions/a","limit":10}),
-    )
-    .unwrap();
-    assert_eq!(p.project, "/tmp/p");
-    assert_eq!(p.permalink, "decisions/a");
-    assert_eq!(p.limit, Some(10));
-}
-
-#[test]
-fn diff_params_deserialize() {
-    let p: DiffParams = serde_json::from_value(
-        serde_json::json!({"project":"/tmp/p","permalink":"decisions/a","sha":"abc"}),
-    )
-    .unwrap();
-    assert_eq!(p.project, "/tmp/p");
-    assert_eq!(p.permalink, "decisions/a");
-    assert_eq!(p.sha.as_deref(), Some("abc"));
 }
 
 #[test]

@@ -1631,6 +1631,43 @@ expression: tool_schemas_architect()
     "concurrent_safe": true
   },
   {
+    "name": "memory_retrieval_outcomes_report",
+    "description": "Read an observational retrieval-injection outcomes report for an explicit project-scoped, timezone-aware RFC-3339 [start,end) interval. This operation is read-only and observational only: it makes no causal or randomized-experiment claim. A task run is deduplicated within each entry_point/rollout_label/outcome cell; cells with different cohort keys can overlap and are non-additive. The response returns the applied interval/timezone plus every database denominator, count, rate, not-applicable state, attempt-number distribution, and unattributed/unrecorded diagnostic. Traces without task_run_id are unattributed and excluded from rates; no fallback through task_id is used. Invalid intervals and requests outside the protected 30-day trace window are rejected without clipping.",
+    "inputSchema": {
+      "type": "object",
+      "required": [
+        "start",
+        "end",
+        "timezone"
+      ],
+      "properties": {
+        "project": {
+          "type": "string"
+        },
+        "project_id": {
+          "type": "string"
+        },
+        "start": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "end": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "timezone": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "readOnly": true,
+    "destructive": false,
+    "idempotent": true,
+    "openWorld": false,
+    "concurrent_safe": true
+  },
+  {
     "name": "agent_metrics",
     "description": "Show execution quality metrics for a role to support prompt tuning and intervention decisions.",
     "inputSchema": {
@@ -1691,7 +1728,7 @@ expression: tool_schemas_architect()
   },
   {
     "name": "memory_write",
-    "description": "Create a new memory note via the memory_* MCP tools. Do not attempt filesystem writes; .djinn/memory/ paths are not readable from the worker filesystem. `type` is required and routes the note (adr, pattern, case, pitfall, research, requirement, reference, design, tech_spike, session, brief, roadmap). Use [[wikilinks]] in content to connect notes.",
+    "description": "Create a new memory note via the memory_* MCP tools. Notes are stored in the project database; do not use filesystem writes. `type` is required and routes the note (adr, pattern, case, pitfall, research, requirement, reference, design, tech_spike, session, brief, roadmap). Use [[wikilinks]] in content to connect notes.",
     "inputSchema": {
       "type": "object",
       "additionalProperties": false,
@@ -1739,7 +1776,7 @@ expression: tool_schemas_architect()
   },
   {
     "name": "memory_edit",
-    "description": "Edit an existing memory note in-place via memory_* MCP tools. Do not assume .djinn/memory/ paths are readable from the worker filesystem. Operations: append, prepend, find_replace (requires find_text), replace_section (requires section).",
+    "description": "Edit an existing memory note in-place via memory_* MCP tools. Notes are stored in the project database; do not use filesystem operations. Operations: append, prepend, find_replace (requires find_text), replace_section (requires section).",
     "inputSchema": {
       "type": "object",
       "additionalProperties": false,
@@ -1788,7 +1825,7 @@ expression: tool_schemas_architect()
   },
   {
     "name": "memory_move",
-    "description": "Move a memory note to a different type via memory_* MCP tools. Do not assume .djinn/memory/ paths are readable from the worker filesystem; do not attempt filesystem rename. Updates the permalink and resolves inbound links automatically.",
+    "description": "Move a memory note to a different type via memory_* MCP tools. Notes are stored in the project database; use this tool rather than filesystem operations. Updates the permalink and resolves inbound links automatically.",
     "inputSchema": {
       "type": "object",
       "required": [

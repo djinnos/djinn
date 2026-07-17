@@ -147,3 +147,57 @@ Generated Rust files are skipped defensively: paths matching `**/generated/**` a
 ```sh
 sh scripts/test-check-file-size.sh
 ```
+
+## Phase 1 retirement deletion guard
+
+`djinn-retirement-manifest.mjs` generated and validated the pre-cutover
+knowledge manifest. The validated result is retained permanently as
+`scripts/fixtures/djinn-retirement/deletion-ledger.json`. Each ledger entry
+records its repository path, exact blob and normalized-content SHA-256 hashes,
+permalink, selected DB UUID/permalink/status/hash, rationale, approval, and one
+resolved disposition (`equivalent`, `db_supersedes_file`, or
+`approved_discard`). The ledger also records the immutable source commit so its
+blobs remain independently auditable after deletion.
+
+Normalization only removes YAML front matter and canonicalizes CRLF/CR to LF;
+committed blob SHA-256 is computed over the exact stored bytes.
+
+### Hermetic fixtures
+
+Committed under `scripts/fixtures/djinn-retirement/`:
+
+- `deletion-ledger.json` — durable, deterministic evidence for the exact deleted
+  knowledge-path set.
+- `db-selection.json` — the selected DB identity for each detected permalink.
+- `db-guidance.json` — reconciled DB guidance classifications, dispositions,
+  rationales, hashes, statuses, and supersession links.
+
+Fixture regeneration is deliberately anchored to the source revision recorded
+in the ledger; live HEAD has no tracked knowledge paths after cutover:
+
+```sh
+node scripts/fixtures/djinn-retirement/generate.mjs --revision <ledger-source-sha>
+```
+
+### Strict post-cutover guard
+
+```sh
+make check-retirement-manifest
+# or directly:
+./scripts/check-djinn-retirement-manifest.sh
+```
+
+The guard validates the durable ledger against source-revision blobs and the DB
+guidance fixture, including uniqueness, hashes, identities, statuses,
+classifications, dispositions, rationales, approvals, count, and exact source
+set. It separately classifies current NUL-delimited `git ls-files -z` output and
+fails for every tracked project-local knowledge path, including paths never
+present in the old ledger. The three explicit operational files
+`.djinn/.gitignore`, `.djinn/settings.json`, and `.djinn/skills.json` must remain
+present and byte-identical to the source revision.
+
+### Tests
+
+```sh
+node --test scripts/test-djinn-retirement-manifest.mjs
+```

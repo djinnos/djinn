@@ -3,6 +3,7 @@ use super::*;
 use std::collections::HashSet;
 
 use djinn_db::{MemoryEntityKind, MemoryEntityRef, MemoryEntityType, ProposalRepository};
+use djinn_memory::Note;
 
 /// The entity that the seed `identifier` resolved to.
 enum ResolvedEntity {

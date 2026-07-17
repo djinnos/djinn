@@ -7,6 +7,6 @@ scenarios:
     sources: [{kind: incident, id: "gton merge-queue requeue loop"}]
     primary_coverage: github.merge-queue-reopen
     secondary_coverage: [task-lifecycle.pr-reopen-requeue]
-    execution: {kind: cargo-package, package: djinn-coordinator}
+    execution: {kind: cargo-package, package: djinn-coordinator, selector: dispatch::respawn_guard::mergequeue_tests::mergequeue_reopen_after_completed_worker_re_asserts_rework_not_adopt}
     isolation: {database: isolated, providers: isolated, channel: isolated}
     watch_paths: [server/crates/djinn-coordinator/src/dispatch/respawn_guard_mergequeue_tests.rs]

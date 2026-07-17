@@ -1,0 +1,531 @@
+{
+   "cases" : [
+      {
+         "failed_dimensions" : [],
+         "fixture_id" : "archive-derived-01",
+         "observations" : [
+            {
+               "adr_054_quality_passed" : true,
+               "content" : "## Situation\ndiscriminative replay fact 01. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\n\n## Constraint\ndiscriminative replay fact 01. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\n\n## Approach taken\ndiscriminative replay fact 01. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\n\n## Result\ndiscriminative replay fact 01. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\n\n## Why it worked / failed\ndiscriminative replay fact 01. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\n\n## Reusable lesson\ndiscriminative replay fact 01. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\n\n## Related\ndiscriminative replay fact 01. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.",
+               "fixture_id" : "archive-derived-01",
+               "note_type" : "case",
+               "revision_operations" : [
+                  {
+                     "outcome" : "emitted",
+                     "reason" : "fixture correction is supported",
+                     "shape" : "patch"
+                  },
+                  {
+                     "outcome" : "applied",
+                     "shape" : "patch"
+                  }
+               ],
+               "title" : "Sanitized completed_case 01"
+            }
+         ],
+         "rubric" : {
+            "adr_054_quality" : true,
+            "must_not_duplicate" : true,
+            "note_type" : true,
+            "required_text" : true
+         }
+      },
+      {
+         "failed_dimensions" : [],
+         "fixture_id" : "archive-derived-02",
+         "observations" : [
+            {
+               "adr_054_quality_passed" : true,
+               "content" : "## Context\ndiscriminative replay fact 02. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\n\n## Problem shape\ndiscriminative replay fact 02. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\n\n## Recommended approach\ndiscriminative replay fact 02. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\n\n## Why it works\ndiscriminative replay fact 02. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\n\n## Tradeoffs / limits\ndiscriminative replay fact 02. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\n\n## When to use\ndiscriminative replay fact 02. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\n\n## When not to use\ndiscriminative replay fact 02. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\n\n## Related\ndiscriminative replay fact 02. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.",
+               "fixture_id" : "archive-derived-02",
+               "note_type" : "pattern",
+               "revision_operations" : [
+                  {
+                     "outcome" : "emitted",
+                     "reason" : "fixture replacement is authoritative",
+                     "shape" : "deprecate_with_supersedes"
+                  },
+                  {
+                     "outcome" : "applied",
+                     "shape" : "deprecate_with_supersedes"
+                  }
+               ],
+               "title" : "Sanitized completed_pattern 02"
+            }
+         ],
+         "rubric" : {
+            "adr_054_quality" : true,
+            "must_not_duplicate" : true,
+            "note_type" : true,
+            "required_text" : true
+         }
+      },
+      {
+         "failed_dimensions" : [],
+         "fixture_id" : "archive-derived-03",
+         "observations" : [
+            {
+               "adr_054_quality_passed" : true,
+               "content" : "## Trigger / smell\ndiscriminative replay fact 03. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\n\n## Failure mode\ndiscriminative replay fact 03. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\n\n## Observable symptoms\ndiscriminative replay fact 03. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\n\n## Prevention\ndiscriminative replay fact 03. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\n\n## Recovery\ndiscriminative replay fact 03. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\n\n## Related\ndiscriminative replay fact 03. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.",
+               "fixture_id" : "archive-derived-03",
+               "note_type" : "pitfall",
+               "revision_operations" : [
+                  {
+                     "outcome" : "emitted",
+                     "reason" : "fixture refusal evidence",
+                     "shape" : "patch"
+                  },
+                  {
+                     "outcome" : "refused",
+                     "reason" : "ineligible",
+                     "shape" : "patch"
+                  }
+               ],
+               "title" : "Sanitized failed_pitfall 03"
+            }
+         ],
+         "rubric" : {
+            "adr_054_quality" : true,
+            "must_not_duplicate" : true,
+            "note_type" : true,
+            "required_text" : true
+         }
+      },
+      {
+         "failed_dimensions" : [],
+         "fixture_id" : "archive-derived-04",
+         "observations" : [
+            {
+               "adr_054_quality_passed" : false,
+               "content" : "## Situation\ndiscriminative replay fact 04.",
+               "fixture_id" : "archive-derived-04",
+               "note_type" : "case",
+               "revision_operations" : [
+                  {
+                     "outcome" : "emitted",
+                     "reason" : "fixture lifecycle evidence",
+                     "shape" : "deprecate_with_supersedes"
+                  },
+                  {
+                     "outcome" : "refused",
+                     "reason" : "lifecycle_invalid",
+                     "shape" : "deprecate_with_supersedes"
+                  }
+               ],
+               "title" : "Sanitized underspecified 04"
+            }
+         ],
+         "rubric" : {
+            "adr_054_quality" : true,
+            "must_not_duplicate" : true,
+            "note_type" : true,
+            "required_text" : true
+         }
+      },
+      {
+         "failed_dimensions" : [],
+         "fixture_id" : "archive-derived-05",
+         "observations" : [
+            {
+               "adr_054_quality_passed" : true,
+               "content" : "## Context\ndiscriminative replay fact 05. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\n\n## Problem shape\ndiscriminative replay fact 05. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\n\n## Recommended approach\ndiscriminative replay fact 05. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\n\n## Why it works\ndiscriminative replay fact 05. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\n\n## Tradeoffs / limits\ndiscriminative replay fact 05. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\n\n## When to use\ndiscriminative replay fact 05. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\n\n## When not to use\ndiscriminative replay fact 05. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\n\n## Related\ndiscriminative replay fact 05. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.",
+               "fixture_id" : "archive-derived-05",
+               "note_type" : "pattern",
+               "title" : "Sanitized true_duplicate 05"
+            }
+         ],
+         "rubric" : {
+            "adr_054_quality" : true,
+            "must_not_duplicate" : true,
+            "note_type" : true,
+            "required_text" : true
+         }
+      },
+      {
+         "failed_dimensions" : [],
+         "fixture_id" : "archive-derived-06",
+         "observations" : [
+            {
+               "adr_054_quality_passed" : true,
+               "content" : "## Trigger / smell\ndiscriminative replay fact 06. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\n\n## Failure mode\ndiscriminative replay fact 06. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\n\n## Observable symptoms\ndiscriminative replay fact 06. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\n\n## Prevention\ndiscriminative replay fact 06. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\n\n## Recovery\ndiscriminative replay fact 06. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\n\n## Related\ndiscriminative replay fact 06. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.",
+               "fixture_id" : "archive-derived-06",
+               "note_type" : "pitfall",
+               "title" : "Sanitized near_neighbor 06"
+            }
+         ],
+         "rubric" : {
+            "adr_054_quality" : true,
+            "must_not_duplicate" : true,
+            "note_type" : true,
+            "required_text" : true
+         }
+      },
+      {
+         "failed_dimensions" : [],
+         "fixture_id" : "archive-derived-07",
+         "observations" : [
+            {
+               "adr_054_quality_passed" : true,
+               "content" : "## Situation\ndiscriminative replay fact 07. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\n\n## Constraint\ndiscriminative replay fact 07. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\n\n## Approach taken\ndiscriminative replay fact 07. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\n\n## Result\ndiscriminative replay fact 07. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\n\n## Why it worked / failed\ndiscriminative replay fact 07. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\n\n## Reusable lesson\ndiscriminative replay fact 07. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\n\n## Related\ndiscriminative replay fact 07. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.",
+               "fixture_id" : "archive-derived-07",
+               "note_type" : "case",
+               "title" : "Sanitized completed_case 07"
+            }
+         ],
+         "rubric" : {
+            "adr_054_quality" : true,
+            "must_not_duplicate" : true,
+            "note_type" : true,
+            "required_text" : true
+         }
+      },
+      {
+         "failed_dimensions" : [],
+         "fixture_id" : "archive-derived-08",
+         "observations" : [
+            {
+               "adr_054_quality_passed" : true,
+               "content" : "## Context\ndiscriminative replay fact 08. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\n\n## Problem shape\ndiscriminative replay fact 08. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\n\n## Recommended approach\ndiscriminative replay fact 08. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\n\n## Why it works\ndiscriminative replay fact 08. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\n\n## Tradeoffs / limits\ndiscriminative replay fact 08. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\n\n## When to use\ndiscriminative replay fact 08. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\n\n## When not to use\ndiscriminative replay fact 08. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\n\n## Related\ndiscriminative replay fact 08. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.",
+               "fixture_id" : "archive-derived-08",
+               "note_type" : "pattern",
+               "title" : "Sanitized completed_pattern 08"
+            }
+         ],
+         "rubric" : {
+            "adr_054_quality" : true,
+            "must_not_duplicate" : true,
+            "note_type" : true,
+            "required_text" : true
+         }
+      },
+      {
+         "failed_dimensions" : [],
+         "fixture_id" : "archive-derived-09",
+         "observations" : [
+            {
+               "adr_054_quality_passed" : true,
+               "content" : "## Trigger / smell\ndiscriminative replay fact 09. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\n\n## Failure mode\ndiscriminative replay fact 09. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\n\n## Observable symptoms\ndiscriminative replay fact 09. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\n\n## Prevention\ndiscriminative replay fact 09. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\n\n## Recovery\ndiscriminative replay fact 09. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\n\n## Related\ndiscriminative replay fact 09. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.",
+               "fixture_id" : "archive-derived-09",
+               "note_type" : "pitfall",
+               "title" : "Sanitized failed_pitfall 09"
+            }
+         ],
+         "rubric" : {
+            "adr_054_quality" : true,
+            "must_not_duplicate" : true,
+            "note_type" : true,
+            "required_text" : true
+         }
+      },
+      {
+         "failed_dimensions" : [],
+         "fixture_id" : "archive-derived-10",
+         "observations" : [
+            {
+               "adr_054_quality_passed" : false,
+               "content" : "## Situation\ndiscriminative replay fact 10.",
+               "fixture_id" : "archive-derived-10",
+               "note_type" : "case",
+               "title" : "Sanitized underspecified 10"
+            }
+         ],
+         "rubric" : {
+            "adr_054_quality" : true,
+            "must_not_duplicate" : true,
+            "note_type" : true,
+            "required_text" : true
+         }
+      },
+      {
+         "failed_dimensions" : [],
+         "fixture_id" : "archive-derived-11",
+         "observations" : [
+            {
+               "adr_054_quality_passed" : true,
+               "content" : "## Context\ndiscriminative replay fact 11. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\n\n## Problem shape\ndiscriminative replay fact 11. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\n\n## Recommended approach\ndiscriminative replay fact 11. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\n\n## Why it works\ndiscriminative replay fact 11. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\n\n## Tradeoffs / limits\ndiscriminative replay fact 11. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\n\n## When to use\ndiscriminative replay fact 11. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\n\n## When not to use\ndiscriminative replay fact 11. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\n\n## Related\ndiscriminative replay fact 11. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.",
+               "fixture_id" : "archive-derived-11",
+               "note_type" : "pattern",
+               "title" : "Sanitized true_duplicate 11"
+            }
+         ],
+         "rubric" : {
+            "adr_054_quality" : true,
+            "must_not_duplicate" : true,
+            "note_type" : true,
+            "required_text" : true
+         }
+      },
+      {
+         "failed_dimensions" : [],
+         "fixture_id" : "archive-derived-12",
+         "observations" : [
+            {
+               "adr_054_quality_passed" : true,
+               "content" : "## Trigger / smell\ndiscriminative replay fact 12. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\n\n## Failure mode\ndiscriminative replay fact 12. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\n\n## Observable symptoms\ndiscriminative replay fact 12. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\n\n## Prevention\ndiscriminative replay fact 12. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\n\n## Recovery\ndiscriminative replay fact 12. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\n\n## Related\ndiscriminative replay fact 12. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.",
+               "fixture_id" : "archive-derived-12",
+               "note_type" : "pitfall",
+               "title" : "Sanitized near_neighbor 12"
+            }
+         ],
+         "rubric" : {
+            "adr_054_quality" : true,
+            "must_not_duplicate" : true,
+            "note_type" : true,
+            "required_text" : true
+         }
+      },
+      {
+         "failed_dimensions" : [],
+         "fixture_id" : "archive-derived-13",
+         "observations" : [
+            {
+               "adr_054_quality_passed" : true,
+               "content" : "## Situation\ndiscriminative replay fact 13. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\n\n## Constraint\ndiscriminative replay fact 13. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\n\n## Approach taken\ndiscriminative replay fact 13. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\n\n## Result\ndiscriminative replay fact 13. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\n\n## Why it worked / failed\ndiscriminative replay fact 13. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\n\n## Reusable lesson\ndiscriminative replay fact 13. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\n\n## Related\ndiscriminative replay fact 13. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.",
+               "fixture_id" : "archive-derived-13",
+               "note_type" : "case",
+               "title" : "Sanitized completed_case 13"
+            }
+         ],
+         "rubric" : {
+            "adr_054_quality" : true,
+            "must_not_duplicate" : true,
+            "note_type" : true,
+            "required_text" : true
+         }
+      },
+      {
+         "failed_dimensions" : [],
+         "fixture_id" : "archive-derived-14",
+         "observations" : [
+            {
+               "adr_054_quality_passed" : true,
+               "content" : "## Context\ndiscriminative replay fact 14. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\n\n## Problem shape\ndiscriminative replay fact 14. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\n\n## Recommended approach\ndiscriminative replay fact 14. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\n\n## Why it works\ndiscriminative replay fact 14. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\n\n## Tradeoffs / limits\ndiscriminative replay fact 14. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\n\n## When to use\ndiscriminative replay fact 14. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\n\n## When not to use\ndiscriminative replay fact 14. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\n\n## Related\ndiscriminative replay fact 14. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.",
+               "fixture_id" : "archive-derived-14",
+               "note_type" : "pattern",
+               "title" : "Sanitized completed_pattern 14"
+            }
+         ],
+         "rubric" : {
+            "adr_054_quality" : true,
+            "must_not_duplicate" : true,
+            "note_type" : true,
+            "required_text" : true
+         }
+      },
+      {
+         "failed_dimensions" : [],
+         "fixture_id" : "archive-derived-15",
+         "observations" : [
+            {
+               "adr_054_quality_passed" : true,
+               "content" : "## Trigger / smell\ndiscriminative replay fact 15. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\n\n## Failure mode\ndiscriminative replay fact 15. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\n\n## Observable symptoms\ndiscriminative replay fact 15. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\n\n## Prevention\ndiscriminative replay fact 15. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\n\n## Recovery\ndiscriminative replay fact 15. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\n\n## Related\ndiscriminative replay fact 15. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.",
+               "fixture_id" : "archive-derived-15",
+               "note_type" : "pitfall",
+               "title" : "Sanitized failed_pitfall 15"
+            }
+         ],
+         "rubric" : {
+            "adr_054_quality" : true,
+            "must_not_duplicate" : true,
+            "note_type" : true,
+            "required_text" : true
+         }
+      },
+      {
+         "failed_dimensions" : [],
+         "fixture_id" : "archive-derived-16",
+         "observations" : [
+            {
+               "adr_054_quality_passed" : false,
+               "content" : "## Situation\ndiscriminative replay fact 16.",
+               "fixture_id" : "archive-derived-16",
+               "note_type" : "case",
+               "title" : "Sanitized underspecified 16"
+            }
+         ],
+         "rubric" : {
+            "adr_054_quality" : true,
+            "must_not_duplicate" : true,
+            "note_type" : true,
+            "required_text" : true
+         }
+      },
+      {
+         "failed_dimensions" : [],
+         "fixture_id" : "archive-derived-17",
+         "observations" : [
+            {
+               "adr_054_quality_passed" : true,
+               "content" : "## Context\ndiscriminative replay fact 17. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\n\n## Problem shape\ndiscriminative replay fact 17. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\n\n## Recommended approach\ndiscriminative replay fact 17. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\n\n## Why it works\ndiscriminative replay fact 17. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\n\n## Tradeoffs / limits\ndiscriminative replay fact 17. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\n\n## When to use\ndiscriminative replay fact 17. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\n\n## When not to use\ndiscriminative replay fact 17. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\n\n## Related\ndiscriminative replay fact 17. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.",
+               "fixture_id" : "archive-derived-17",
+               "note_type" : "pattern",
+               "title" : "Sanitized true_duplicate 17"
+            }
+         ],
+         "rubric" : {
+            "adr_054_quality" : true,
+            "must_not_duplicate" : true,
+            "note_type" : true,
+            "required_text" : true
+         }
+      },
+      {
+         "failed_dimensions" : [],
+         "fixture_id" : "archive-derived-18",
+         "observations" : [
+            {
+               "adr_054_quality_passed" : true,
+               "content" : "## Trigger / smell\ndiscriminative replay fact 18. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\n\n## Failure mode\ndiscriminative replay fact 18. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\n\n## Observable symptoms\ndiscriminative replay fact 18. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\n\n## Prevention\ndiscriminative replay fact 18. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\n\n## Recovery\ndiscriminative replay fact 18. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\n\n## Related\ndiscriminative replay fact 18. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.",
+               "fixture_id" : "archive-derived-18",
+               "note_type" : "pitfall",
+               "title" : "Sanitized near_neighbor 18"
+            }
+         ],
+         "rubric" : {
+            "adr_054_quality" : true,
+            "must_not_duplicate" : true,
+            "note_type" : true,
+            "required_text" : true
+         }
+      },
+      {
+         "failed_dimensions" : [],
+         "fixture_id" : "archive-derived-19",
+         "observations" : [
+            {
+               "adr_054_quality_passed" : true,
+               "content" : "## Situation\ndiscriminative replay fact 19. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\n\n## Constraint\ndiscriminative replay fact 19. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\n\n## Approach taken\ndiscriminative replay fact 19. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\n\n## Result\ndiscriminative replay fact 19. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\n\n## Why it worked / failed\ndiscriminative replay fact 19. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\n\n## Reusable lesson\ndiscriminative replay fact 19. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\n\n## Related\ndiscriminative replay fact 19. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.",
+               "fixture_id" : "archive-derived-19",
+               "note_type" : "case",
+               "title" : "Sanitized completed_case 19"
+            }
+         ],
+         "rubric" : {
+            "adr_054_quality" : true,
+            "must_not_duplicate" : true,
+            "note_type" : true,
+            "required_text" : true
+         }
+      },
+      {
+         "failed_dimensions" : [],
+         "fixture_id" : "archive-derived-20",
+         "observations" : [
+            {
+               "adr_054_quality_passed" : true,
+               "content" : "## Context\ndiscriminative replay fact 20. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\n\n## Problem shape\ndiscriminative replay fact 20. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\n\n## Recommended approach\ndiscriminative replay fact 20. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\n\n## Why it works\ndiscriminative replay fact 20. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\n\n## Tradeoffs / limits\ndiscriminative replay fact 20. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\n\n## When to use\ndiscriminative replay fact 20. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\n\n## When not to use\ndiscriminative replay fact 20. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\n\n## Related\ndiscriminative replay fact 20. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.",
+               "fixture_id" : "archive-derived-20",
+               "note_type" : "pattern",
+               "title" : "Sanitized completed_pattern 20"
+            }
+         ],
+         "rubric" : {
+            "adr_054_quality" : true,
+            "must_not_duplicate" : true,
+            "note_type" : true,
+            "required_text" : true
+         }
+      },
+      {
+         "failed_dimensions" : [],
+         "fixture_id" : "archive-derived-21",
+         "observations" : [
+            {
+               "adr_054_quality_passed" : true,
+               "content" : "## Trigger / smell\ndiscriminative replay fact 21. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\n\n## Failure mode\ndiscriminative replay fact 21. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\n\n## Observable symptoms\ndiscriminative replay fact 21. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\n\n## Prevention\ndiscriminative replay fact 21. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\n\n## Recovery\ndiscriminative replay fact 21. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\n\n## Related\ndiscriminative replay fact 21. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.",
+               "fixture_id" : "archive-derived-21",
+               "note_type" : "pitfall",
+               "title" : "Sanitized failed_pitfall 21"
+            }
+         ],
+         "rubric" : {
+            "adr_054_quality" : true,
+            "must_not_duplicate" : true,
+            "note_type" : true,
+            "required_text" : true
+         }
+      },
+      {
+         "failed_dimensions" : [],
+         "fixture_id" : "archive-derived-22",
+         "observations" : [
+            {
+               "adr_054_quality_passed" : false,
+               "content" : "## Situation\ndiscriminative replay fact 22.",
+               "fixture_id" : "archive-derived-22",
+               "note_type" : "case",
+               "title" : "Sanitized underspecified 22"
+            }
+         ],
+         "rubric" : {
+            "adr_054_quality" : true,
+            "must_not_duplicate" : true,
+            "note_type" : true,
+            "required_text" : true
+         }
+      },
+      {
+         "failed_dimensions" : [],
+         "fixture_id" : "archive-derived-23",
+         "observations" : [
+            {
+               "adr_054_quality_passed" : true,
+               "content" : "## Context\ndiscriminative replay fact 23. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\n\n## Problem shape\ndiscriminative replay fact 23. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\n\n## Recommended approach\ndiscriminative replay fact 23. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\n\n## Why it works\ndiscriminative replay fact 23. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\n\n## Tradeoffs / limits\ndiscriminative replay fact 23. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\n\n## When to use\ndiscriminative replay fact 23. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\n\n## When not to use\ndiscriminative replay fact 23. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\n\n## Related\ndiscriminative replay fact 23. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.",
+               "fixture_id" : "archive-derived-23",
+               "note_type" : "pattern",
+               "title" : "Sanitized true_duplicate 23"
+            }
+         ],
+         "rubric" : {
+            "adr_054_quality" : true,
+            "must_not_duplicate" : true,
+            "note_type" : true,
+            "required_text" : true
+         }
+      },
+      {
+         "failed_dimensions" : [],
+         "fixture_id" : "archive-derived-24",
+         "observations" : [
+            {
+               "adr_054_quality_passed" : true,
+               "content" : "## Trigger / smell\ndiscriminative replay fact 24. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\n\n## Failure mode\ndiscriminative replay fact 24. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\n\n## Observable symptoms\ndiscriminative replay fact 24. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\n\n## Prevention\ndiscriminative replay fact 24. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\n\n## Recovery\ndiscriminative replay fact 24. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\n\n## Related\ndiscriminative replay fact 24. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.",
+               "fixture_id" : "archive-derived-24",
+               "note_type" : "pitfall",
+               "title" : "Sanitized near_neighbor 24"
+            }
+         ],
+         "rubric" : {
+            "adr_054_quality" : true,
+            "must_not_duplicate" : true,
+            "note_type" : true,
+            "required_text" : true
+         }
+      }
+   ],
+   "dedup" : {
+      "false_negative" : 0,
+      "false_positive" : 0,
+      "true_negative" : 24,
+      "true_positive" : 0
+   },
+   "dedup_precision" : 1,
+   "failures" : [],
+   "revision_operations" : {
+      "applied_by_shape" : {
+         "deprecate_with_supersedes" : 1,
+         "patch" : 1
+      },
+      "emitted_by_shape" : {
+         "deprecate_with_supersedes" : 2,
+         "patch" : 2
+      },
+      "refused_by_shape_and_reason" : {
+         "deprecate_with_supersedes:lifecycle_invalid" : 1,
+         "patch:ineligible" : 1
+      }
+   },
+   "rubric_satisfaction_rate" : 1,
+   "satisfied_cases" : 24,
+   "total_cases" : 24
+}

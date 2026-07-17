@@ -387,7 +387,7 @@ async fn load_epic_context(
         format!("**Epic:** {} ({})", epic.title, epic.short_id),
         format!("**Description:** {}", epic.description),
         format!(
-            "**Memory refs:** call `epic_show({})` then `memory_read(identifier=<ref>)` for each — use the memory_* MCP tools; do not read `.djinn/memory/` files from the worker filesystem.",
+            "**Memory refs:** call `epic_show({})` then `memory_read(identifier=<ref>)` for each — notes are stored in the project database and accessed through the memory_* MCP tools.",
             epic.short_id
         ),
     ];
@@ -1417,6 +1417,10 @@ pub(crate) mod test_support;
 #[cfg(test)]
 #[path = "prompt_context_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "rendered_surface_guard_tests.rs"]
+mod rendered_surface_guard_tests;
 
 #[cfg(test)]
 #[path = "attempt_history_prompt_tests.rs"]

@@ -1489,16 +1489,59 @@
     "concurrent_safe": true
   },
   {
-    "name": "memory_write",
-    "description": "Create a new memory note via the memory_* MCP tools. Do not attempt filesystem writes; .djinn/memory/ paths are not readable from the worker filesystem. `type` is required and routes the note (adr, pattern, case, pitfall, research, requirement, reference, design, tech_spike, session, brief, roadmap). Use [[wikilinks]] in content to connect notes.",
+    "name": "memory_retrieval_outcomes_report",
+    "description": "Read an observational retrieval-injection outcomes report for an explicit project-scoped, timezone-aware RFC-3339 [start,end) interval. This operation is read-only and observational only: it makes no causal or randomized-experiment claim. A task run is deduplicated within each entry_point/rollout_label/outcome cell; cells with different cohort keys can overlap and are non-additive. The response returns the applied interval/timezone plus every database denominator, count, rate, not-applicable state, attempt-number distribution, and unattributed/unrecorded diagnostic. Traces without task_run_id are unattributed and excluded from rates; no fallback through task_id is used. Invalid intervals and requests outside the protected 30-day trace window are rejected without clipping.",
     "inputSchema": {
       "type": "object",
       "required": [
+        "start",
+        "end",
+        "timezone"
+      ],
+      "properties": {
+        "project": {
+          "type": "string"
+        },
+        "project_id": {
+          "type": "string"
+        },
+        "start": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "end": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "timezone": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "readOnly": true,
+    "destructive": false,
+    "idempotent": true,
+    "openWorld": false,
+    "concurrent_safe": true
+  },
+  {
+    "name": "memory_write",
+    "description": "Create a new memory note via the memory_* MCP tools. Notes are stored in the project database; do not use filesystem writes. `type` is required and routes the note (adr, pattern, case, pitfall, research, requirement, reference, design, tech_spike, session, brief, roadmap). Use [[wikilinks]] in content to connect notes.",
+    "inputSchema": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "reason",
         "title",
         "content",
         "type"
       ],
       "properties": {
+        "reason": {
+          "type": "string",
+          "description": "Required audit reason. Unicode whitespace is trimmed and blank values are rejected."
+        },
         "title": {
           "type": "string",
           "description": "Note title"
@@ -1532,15 +1575,21 @@
   },
   {
     "name": "memory_edit",
-    "description": "Edit an existing memory note in-place via memory_* MCP tools. Do not assume .djinn/memory/ paths are readable from the worker filesystem. Operations: append, prepend, find_replace (requires find_text), replace_section (requires section).",
+    "description": "Edit an existing memory note in-place via memory_* MCP tools. Notes are stored in the project database; do not use filesystem operations. Operations: append, prepend, find_replace (requires find_text), replace_section (requires section).",
     "inputSchema": {
       "type": "object",
+      "additionalProperties": false,
       "required": [
+        "reason",
         "identifier",
         "operation",
         "content"
       ],
       "properties": {
+        "reason": {
+          "type": "string",
+          "description": "Required audit reason. Unicode whitespace is trimmed and blank values are rejected."
+        },
         "identifier": {
           "type": "string",
           "description": "Note permalink or title"

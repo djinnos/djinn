@@ -50,6 +50,21 @@ pub struct ExtractionReplayFixture {
     pub terminal_context: crate::llm_extraction::TerminalExtractionContext,
     #[serde(default)]
     pub injected_provider_response: String,
+    // Expected result of the non-persisting guarded-operation simulation.
+    // Rows are paired with `revision_operations` in the injected response.
+    #[serde(default)]
+    pub revision_operation_simulations: Vec<ReplayRevisionOperationSimulation>,
+}
+
+/// Fixture-side result of evaluating a guarded operation before persistence.
+/// `applied` means the operation would cross the guard; replay never writes it.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ReplayRevisionOperationSimulation {
+    pub shape: String,
+    /// `applied` or `refused`.
+    pub outcome: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
 }
 
 /// Load the committed corpus in stable filename order and reject unsafe rows.
@@ -151,10 +166,36 @@ pub fn validate_extraction_replay_fixtures(
             .and_then(serde_json::Value::as_str)
             .ok_or_else(|| format!("{} response lacks accepted note", fixture.id))?;
         if !content.contains(&fixture.required_discriminative_text)
-            || (!assess_note_quality(&fixture.expected_note_type, content).is_underspecified)
-                != fixture.expect_adr_054_quality
+            || assess_note_quality(&fixture.expected_note_type, content).is_underspecified
+                == fixture.expect_adr_054_quality
         {
             return Err(format!("{} response cannot satisfy rubric", fixture.id));
+        }
+        let operations = response
+            .get("revision_operations")
+            .and_then(serde_json::Value::as_array)
+            .map_or(&[][..], Vec::as_slice);
+        if operations.len() != fixture.revision_operation_simulations.len() {
+            return Err(format!(
+                "{} has unpaired revision operation simulation",
+                fixture.id
+            ));
+        }
+        for (operation, simulation) in operations
+            .iter()
+            .zip(&fixture.revision_operation_simulations)
+        {
+            let shape = operation.get("kind").and_then(serde_json::Value::as_str);
+            if shape != Some(simulation.shape.as_str())
+                || !matches!(simulation.outcome.as_str(), "applied" | "refused")
+                || (simulation.outcome == "refused"
+                    && simulation.reason.as_deref().is_none_or(str::is_empty))
+            {
+                return Err(format!(
+                    "{} has invalid revision operation simulation",
+                    fixture.id
+                ));
+            }
         }
         for target in [
             &fixture.must_not_duplicate_target,
@@ -222,10 +263,7 @@ pub async fn run_database_extraction_replay(
                 continue;
             }
         };
-        match seam
-            .capture(&case.fixture.id, &transcript, &candidates)
-            .await
-        {
+        match seam.capture(&case.fixture, &transcript, &candidates).await {
             Ok(captured) => observations.extend(captured),
             Err(_) => stage_failures
                 .entry(case.fixture.id.clone())
@@ -272,6 +310,25 @@ pub struct ExtractionObservation {
     /// Candidate selected by the production novelty decision, if any.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub duplicate_of: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub revision_operations: Vec<ReplayRevisionOperation>,
+}
+
+/// A guarded revision proposal observed before replay reaches persistence.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ReplayRevisionOperation {
+    pub shape: String,
+    /// `emitted`, `applied`, or `refused`.
+    pub outcome: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RevisionOperationSummary {
+    pub emitted_by_shape: BTreeMap<String, u32>,
+    pub applied_by_shape: BTreeMap<String, u32>,
+    pub refused_by_shape_and_reason: BTreeMap<String, u32>,
 }
 
 /// Satisfaction for one fixture dimension.
@@ -325,7 +382,7 @@ pub struct DatabaseReplayCase {
 pub trait ReplayExtractionSeam: Send + Sync {
     async fn capture(
         &self,
-        fixture_id: &str,
+        fixture: &ExtractionReplayFixture,
         transcript: &Conversation,
         candidates: &[NoteDedupCandidate],
     ) -> Result<Vec<ExtractionObservation>, String>;
@@ -353,7 +410,7 @@ pub struct ProductionReplaySeam {
 impl ReplayExtractionSeam for ProductionReplaySeam {
     async fn capture(
         &self,
-        fixture_id: &str,
+        fixture: &ExtractionReplayFixture,
         transcript: &Conversation,
         candidates: &[NoteDedupCandidate],
     ) -> Result<Vec<ExtractionObservation>, String> {
@@ -388,10 +445,11 @@ impl ReplayExtractionSeam for ProductionReplaySeam {
         .await
         .map_err(|e| format!("extraction completion failed: {e}"))?;
         crate::capture_llm_extraction_replay(
-            fixture_id.to_string(),
+            fixture.id.clone(),
             &extraction_response.text,
             self.novelty_provider.as_ref(),
             candidates,
+            &fixture.revision_operation_simulations,
         )
         .await
     }
@@ -427,6 +485,7 @@ pub struct ExtractionReplayReport {
     pub rubric_satisfaction_rate: f64,
     pub dedup: DedupConfusionCounts,
     pub dedup_precision: f64,
+    pub revision_operations: RevisionOperationSummary,
     pub failures: Vec<ReplayFailureDiagnostic>,
 }
 
@@ -485,6 +544,7 @@ pub fn render_extraction_replay_markdown(
          - Cases: {}/{} ({:.4})\n\
          - Dedup precision: {:.4}\n\
          - Dedup confusion: TP={} FP={} TN={} FN={}\n\
+         - Revision operations: emitted={:?}; applied={:?}; refused={:?}\n\
          - Thresholds: rubric >= {:.4}; dedup precision >= {:.4}\n\n\
          ## Per fixture\n\n",
         report.satisfied_cases,
@@ -495,6 +555,9 @@ pub fn render_extraction_replay_markdown(
         report.dedup.false_positive,
         report.dedup.true_negative,
         report.dedup.false_negative,
+        report.revision_operations.emitted_by_shape,
+        report.revision_operations.applied_by_shape,
+        report.revision_operations.refused_by_shape_and_reason,
         thresholds.minimum_rubric_satisfaction,
         thresholds.minimum_dedup_precision,
     );
@@ -755,9 +818,41 @@ pub fn score_extraction_replay(
     let mut cases = Vec::with_capacity(fixtures.len());
     let mut failures = Vec::new();
     let mut dedup = DedupConfusionCounts::default();
+    let mut revision_operations = RevisionOperationSummary::default();
 
     for fixture in fixtures {
         let captured = by_fixture.remove(fixture.id.as_str()).unwrap_or_default();
+        for operation in captured
+            .iter()
+            .flat_map(|observation| &observation.revision_operations)
+        {
+            match operation.outcome.as_str() {
+                "emitted" => {
+                    *revision_operations
+                        .emitted_by_shape
+                        .entry(operation.shape.clone())
+                        .or_default() += 1
+                }
+                "applied" => {
+                    *revision_operations
+                        .applied_by_shape
+                        .entry(operation.shape.clone())
+                        .or_default() += 1
+                }
+                "refused" => {
+                    let key = format!(
+                        "{}:{}",
+                        operation.shape,
+                        operation.reason.as_deref().unwrap_or("unspecified")
+                    );
+                    *revision_operations
+                        .refused_by_shape_and_reason
+                        .entry(key)
+                        .or_default() += 1;
+                }
+                _ => {}
+            }
+        }
         let required_text = captured.iter().any(|observation| {
             observation
                 .content
@@ -768,9 +863,9 @@ pub fn score_extraction_replay(
             .any(|observation| observation.note_type == fixture.expected_note_type);
         let adr_054_quality = captured.iter().any(|observation| {
             observation.note_type == fixture.expected_note_type
-                && (!assess_note_quality(&observation.note_type, &observation.content)
-                    .is_underspecified)
-                    == fixture.expect_adr_054_quality
+                && assess_note_quality(&observation.note_type, &observation.content)
+                    .is_underspecified
+                    != fixture.expect_adr_054_quality
         });
         let must_not_duplicate = fixture
             .must_not_duplicate_target
@@ -841,6 +936,7 @@ pub fn score_extraction_replay(
         rubric_satisfaction_rate,
         dedup,
         dedup_precision,
+        revision_operations,
         failures,
     }
 }

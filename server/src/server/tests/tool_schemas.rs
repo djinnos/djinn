@@ -91,6 +91,43 @@ async fn all_tool_schemas_includes_cross_domain_tools() {
     }
 }
 
+/// The file-era diff/history tools and ADR-057 mount settings were removed as
+/// one public-schema cutover. Keep this assertion alongside the positive
+/// registration check so clients cannot rediscover either compatibility
+/// surface through serialized MCP schemas.
+#[tokio::test]
+async fn all_tool_schemas_excludes_retired_file_era_memory_surfaces() {
+    let state = AppState::new(test_helpers::create_test_db(), CancellationToken::new());
+    let mcp = djinn_control_plane::server::DjinnMcpServer::new(state.mcp_state());
+    let tools = mcp.all_tool_schemas();
+
+    let names = tools
+        .iter()
+        .filter_map(|tool| tool.get("name").and_then(Value::as_str))
+        .collect::<std::collections::HashSet<_>>();
+    for retired in ["memory_diff", "memory_history"] {
+        assert!(
+            !names.contains(retired),
+            "retired file-era tool remains registered: {retired}"
+        );
+    }
+
+    for retained in ["memory_read", "memory_search", "memory_write"] {
+        assert!(
+            names.contains(retained),
+            "DB-backed memory tool should remain registered: {retained}"
+        );
+    }
+
+    let serialized = serde_json::to_string(&tools).expect("tool schemas serialize");
+    for retired in ["memory_mount_enabled", "memory_mount_path"] {
+        assert!(
+            !serialized.contains(retired),
+            "retired ADR-057 mount setting remains serialized: {retired}"
+        );
+    }
+}
+
 #[tokio::test]
 async fn all_tool_schemas_default_safety_annotations_fail_closed() {
     let state = AppState::new(test_helpers::create_test_db(), CancellationToken::new());

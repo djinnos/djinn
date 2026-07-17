@@ -19,9 +19,9 @@ pub mod test_support {
         corrupt_credential_encrypted_value, delete_session_row, drop_table_cascade_for_test,
         drop_table_for_test, ensure_doctor_findings_schema, event_bus_for, make_project,
         nullify_note_confidence_for_test, override_debate_trail_body_metadata,
-        reject_new_task_arbitrations_for_test, rename_note_confidence_column_for_test,
-        seed_chat_session_row, seed_project, seed_session_row, seed_session_row_with_id,
-        seed_task_row,
+        reject_admission_create_started_for_test, reject_new_task_arbitrations_for_test,
+        rename_note_confidence_column_for_test, seed_chat_session_row, seed_project,
+        seed_session_row, seed_session_row_with_id, seed_task_row,
     };
 }
 
@@ -117,11 +117,12 @@ pub use repositories::{
         NoteRevisionEventInput, NoteRevisionEventKind, NoteRevisionEventRow, NoteRevisionMutation,
         NoteRevisionMutationResult, NoteRevisionReason, NoteRevisionSnapshot,
         NoteRevisionSubsystem, NoteRevisionUpdateState, NoteRevisionValidationError,
-        NoteSearchParams, NoteStatus, NoteVectorStore, PromptBudgetReport, ProposedBackfillAnchor,
-        QdrantConfig, QdrantNoteVectorStore, QueryReplayReport, REVISION_PAGE_MAX, RankingReport,
-        ReplayCriteria, ReplayFixture, ReplayNote, ReplayQuery, ReplayReport, RevisionCursor,
-        RevisionCursorError, RevisionHistoryPage, RevisionLookupRequest, RevisionRangeRequest,
-        STALE_CITATION, STALE_DECAY_SIGNAL, SessionRevisionPage, SessionRevisionRequest,
+        NoteSearchParams, NoteStatus, NoteSupersedesAssociation, NoteVectorStore,
+        PromptBudgetReport, ProposedBackfillAnchor, QdrantConfig, QdrantNoteVectorStore,
+        QueryReplayReport, REVISION_PAGE_MAX, RankingReport, ReplayCriteria, ReplayFixture,
+        ReplayNote, ReplayQuery, ReplayReport, RevisionCursor, RevisionCursorError,
+        RevisionHistoryPage, RevisionLookupRequest, RevisionRangeRequest, STALE_CITATION,
+        STALE_DECAY_SIGNAL, SessionRevisionPage, SessionRevisionRequest,
         TrustedNoteRevisionAttribution, TrustedNoteRevisionProvenance, UpsertNoteEmbedding,
         anchor_embedding_replay_fixture, assess_note_quality, build_lexical_search_plan,
         decay_signal_for_elapsed_days, embedding_content_hash, embedding_document_text,
@@ -144,6 +145,11 @@ pub use repositories::{
     project::{
         DispatchImage, ProjectConfig, ProjectDispatchReadiness, ProjectImage, ProjectImageStatus,
         ProjectRepository,
+    },
+    project_live_state_migration::{
+        BeginProjectLiveStateMigration, MigrationKey, ProjectLiveStateMigration,
+        ProjectLiveStateMigrationRepository, RESULT_FAILED, RESULT_PENDING, RESULT_ROLLED_BACK,
+        RESULT_SUCCEEDED,
     },
     project_workspace_coverage::{
         COVERAGE_STATUS_EXCLUDED, COVERAGE_STATUS_INDEXED, COVERAGE_STATUS_INDEXER_FAILED,

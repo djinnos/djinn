@@ -1257,7 +1257,7 @@ async fn dispatcher_failures_report_one_conservative_admission_outcome() {
 }
 
 #[tokio::test]
-async fn unconfigured_admission_fails_closed_without_posting() {
+async fn no_admission_bypasses_admission_and_posts_once() {
     let db = Database::open_in_memory().expect("in-memory db");
     let project_id = seed_project_with_ready_image(&db, "proj-admission-unconfigured").await;
     let events = Arc::new(Mutex::new(Vec::new()));
@@ -1266,26 +1266,20 @@ async fn unconfigured_admission_fails_closed_without_posting() {
         db,
         Arc::new(LifecycleRecordingDispatcher {
             events: events.clone(),
-            result: Ok("must-not-post".to_string()),
+            result: Ok("off-mode-warm".to_string()),
         }),
         Arc::new(UidWatcher),
     );
     warmer.dispatch.admission = None;
 
     warmer.trigger(&project_id).await;
-    warmer.trigger(&project_id).await;
-    assert!(
-        events.lock().await.is_empty(),
-        "no admission means no dispatcher POST"
-    );
-    assert!(
-        warmer
-            .dispatch
-            .in_flight
-            .lock()
-            .await
-            .contains_key(&project_id),
-        "the unconfigured dispatch remains coalesced instead of retrying a POST"
+    tokio::task::yield_now().await;
+    tokio::time::sleep(Duration::from_millis(10)).await;
+
+    assert_eq!(
+        *events.lock().await,
+        vec!["post"],
+        "Off mode must bypass admission and dispatch exactly one warm Job"
     );
 }
 

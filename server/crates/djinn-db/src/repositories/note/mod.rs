@@ -22,6 +22,7 @@ pub use embedding_associations::EmbeddingAssociationRefreshStats;
 mod entity_association;
 mod file_helpers;
 mod graph;
+mod guidance;
 mod housekeeping;
 mod indexing;
 mod lexical_search;
@@ -96,6 +97,10 @@ pub use file_helpers::{
 };
 use indexing::{index_links_for_note, resolve_links_for_note};
 
+pub use guidance::{
+    FileEraGuidanceClassification, FileEraGuidanceDiscovery, FileEraGuidanceManifest,
+    FileEraGuidanceManifestRecord,
+};
 pub use housekeeping::{
     AnchorProposerKind, BackfillRetrievalAnchorOptions, BackfillRetrievalAnchorReport,
     LlmAnchorProposer, ProposedBackfillAnchor, propose_anchor_deterministic,
@@ -103,7 +108,7 @@ pub use housekeeping::{
 pub use lifecycle::NoteStatus;
 pub use mutation::{
     NoteRevisionCreateState, NoteRevisionDesiredState, NoteRevisionEvent, NoteRevisionMutation,
-    NoteRevisionMutationResult, NoteRevisionUpdateState,
+    NoteRevisionMutationResult, NoteRevisionUpdateState, NoteSupersedesAssociation,
 };
 
 /// Compact scope-overlap candidate row returned by
@@ -239,6 +244,7 @@ pub struct NoteRepository {
     embedding_branch: String,
     vector_store: Arc<dyn NoteVectorStore>,
     revision_event_failure: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    association_failure: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl NoteRepository {
@@ -250,6 +256,7 @@ impl NoteRepository {
             embedding_branch: "main".to_string(),
             vector_store: Arc::new(NoopNoteVectorStore) as Arc<dyn NoteVectorStore>,
             revision_event_failure: mutation::revision_failure_flag(),
+            association_failure: mutation::revision_failure_flag(),
         }
     }
 

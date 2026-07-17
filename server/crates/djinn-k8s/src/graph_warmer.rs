@@ -18,6 +18,13 @@ use tracing::{debug, info, warn};
 use crate::config::KubernetesConfig;
 use crate::warm_job::{LABEL_PROJECT_ID, LABEL_WARM, build_warm_job};
 
+/// Warm Job manifest accepted by [`WarmJobDispatcher`].
+///
+/// Consumers can implement the dispatcher boundary without depending directly
+/// on Kubernetes crates; ownership of those capability dependencies remains in
+/// `djinn-k8s`.
+pub type WarmJobManifest = Job;
+
 mod warm_admission;
 pub use warm_admission::{
     WarmAdmission, WarmAdmissionError, WarmAdmissionPermit, WarmAdmissionRequest,
@@ -198,7 +205,7 @@ pub trait WarmJobDispatcher: Send + Sync {
     /// `kube::Error` in-place; the dispatcher trait intentionally doesn't
     /// surface Kubernetes types so the test-dispatcher doesn't have to
     /// reach for a full `kube::Client`.
-    async fn dispatch(&self, namespace: &str, job: Job) -> Result<String, String>;
+    async fn dispatch(&self, namespace: &str, job: WarmJobManifest) -> Result<String, String>;
 }
 
 /// Production dispatcher backed by a live `kube::Client`.
@@ -364,9 +371,8 @@ struct WarmDispatch {
     db: Database,
     dispatcher: Arc<dyn WarmJobDispatcher>,
     watcher: Arc<dyn WarmJobWatcher>,
-    /// Coordinator-owned admission boundary. Its absence is deliberately a
-    /// fail-closed state: no Kubernetes POST may occur without a durable
-    /// admission decision.
+    /// Coordinator-owned admission boundary. Its absence means build admission
+    /// is Off, so warm Jobs bypass admission while retaining normal dispatch.
     admission: Option<Arc<dyn WarmAdmission>>,
     /// Cluster-side dedupe: lists non-terminal warm Jobs for a project so
     /// triggers from any process can coalesce against in-flight Jobs created
@@ -629,13 +635,7 @@ impl WarmDispatch {
                     return;
                 }
             },
-            None => {
-                warn!(
-                    project_id,
-                    "K8sGraphWarmer: no warm admission configured; skipping Job POST"
-                );
-                return;
-            }
+            None => None,
         };
         let job_name = match self.dispatcher.dispatch(&namespace, job).await {
             Ok(name) => name,
@@ -902,8 +902,8 @@ impl K8sGraphWarmer {
 
     /// Return the explicitly injected admission boundary, if configured.
     ///
-    /// `None` is deliberately not equivalent to allow-all; integrations must
-    /// fail closed rather than dispatching without an admission decision.
+    /// `None` represents Off mode: the warmer bypasses admission and dispatches
+    /// normally without manufacturing a no-op admission controller.
     pub fn warm_admission(&self) -> Option<Arc<dyn WarmAdmission>> {
         self.dispatch.admission.clone()
     }

@@ -35,7 +35,7 @@ pub struct WriteParams {
     #[schemars(rename = "type")]
     pub note_type: String,
     /// Optional explicit status for routed note types. For ADRs, `proposed`
-    /// writes into `.djinn/decisions/proposed/`.
+    /// records the ADR with proposed status in the project database.
     pub status: Option<String>,
     pub tags: Option<Vec<String>>,
     /// Crate/module path prefixes this note applies to. Empty array means global.
@@ -100,6 +100,149 @@ pub struct MemoryRecallTraceResponse {
     pub traces: Vec<MemoryRecallTraceSummary>,
     pub trace: Option<MemoryRecallTraceDetail>,
     pub error: Option<String>,
+}
+
+/// Explicit timezone-aware half-open interval for the observational report.
+#[derive(Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RetrievalOutcomesReportParams {
+    pub project: Option<String>,
+    pub project_id: Option<String>,
+    pub start: String,
+    pub end: String,
+    pub timezone: String,
+}
+
+/// The database aggregation is returned verbatim, including every count, rate,
+/// not-applicable state, attempt distribution, and diagnostic.
+#[derive(Serialize)]
+pub struct MemoryRetrievalOutcomesReportResponse {
+    pub report: Option<djinn_db::repositories::task_run_outcome::TaskRunOutcomeReport>,
+    pub error: Option<String>,
+}
+
+/// Typed MCP projection of the observational report. The runtime response keeps
+/// the DB aggregation verbatim; this mirror makes every returned field visible
+/// in the direct control-plane tool's output schema.
+#[derive(Serialize, schemars::JsonSchema)]
+pub struct MemoryRetrievalOutcomesReportSchemaResponse {
+    pub report: Option<RetrievalOutcomesReportSchema>,
+    pub error: Option<String>,
+}
+
+#[derive(Serialize, schemars::JsonSchema)]
+pub struct RetrievalOutcomesReportSchema {
+    pub start: String,
+    pub end: String,
+    pub timezone: String,
+    /// Different cohort-key cells can overlap and must not be summed.
+    pub cells_are_non_additive: bool,
+    pub cells: Vec<RetrievalOutcomesReportCellSchema>,
+    pub diagnostics: RetrievalOutcomesReportDiagnosticsSchema,
+}
+
+#[derive(Serialize, schemars::JsonSchema)]
+pub struct RetrievalOutcomesReportCellSchema {
+    pub entry_point: String,
+    pub rollout_label: String,
+    pub outcome: String,
+    /// Distinct task runs in this cohort cell.
+    #[schemars(with = "i64")]
+    pub denominator: u64,
+    pub parked_reasons: Vec<RetrievalOutcomesRateSchema>,
+    pub merge_queue: Vec<RetrievalOutcomesRateSchema>,
+    pub review: Vec<RetrievalOutcomesRateSchema>,
+    pub attempts: Vec<RetrievalOutcomesAttemptSchema>,
+}
+
+#[derive(Serialize, schemars::JsonSchema)]
+pub struct RetrievalOutcomesRateSchema {
+    pub state: String,
+    #[schemars(with = "i64")]
+    pub count: u64,
+    pub rate: f64,
+}
+
+#[derive(Serialize, schemars::JsonSchema)]
+pub struct RetrievalOutcomesAttemptSchema {
+    pub attempt_seq: Option<i32>,
+    #[schemars(with = "i64")]
+    pub count: u64,
+    pub rate: f64,
+}
+
+#[derive(Serialize, schemars::JsonSchema)]
+pub struct RetrievalOutcomesReportDiagnosticsSchema {
+    /// Traces without exact task_run_id; excluded from rates and never task_id-joined.
+    #[schemars(with = "i64")]
+    pub unattributed_trace_count: u64,
+    /// Eligible runs with no durable trace.
+    #[schemars(with = "i64")]
+    pub unrecorded_run_count: u64,
+}
+
+impl From<MemoryRetrievalOutcomesReportResponse> for MemoryRetrievalOutcomesReportSchemaResponse {
+    fn from(response: MemoryRetrievalOutcomesReportResponse) -> Self {
+        Self {
+            report: response.report.map(|report| RetrievalOutcomesReportSchema {
+                start: report.start,
+                end: report.end,
+                timezone: report.timezone,
+                cells_are_non_additive: report.cells_are_non_additive,
+                cells: report
+                    .cells
+                    .into_iter()
+                    .map(|cell| RetrievalOutcomesReportCellSchema {
+                        entry_point: cell.entry_point,
+                        rollout_label: cell.rollout_label,
+                        outcome: cell.outcome,
+                        denominator: cell.denominator,
+                        parked_reasons: cell
+                            .parked_reasons
+                            .into_iter()
+                            .map(|rate| RetrievalOutcomesRateSchema {
+                                state: rate.state,
+                                count: rate.count,
+                                rate: rate.rate,
+                            })
+                            .collect(),
+                        merge_queue: cell
+                            .merge_queue
+                            .into_iter()
+                            .map(|rate| RetrievalOutcomesRateSchema {
+                                state: rate.state,
+                                count: rate.count,
+                                rate: rate.rate,
+                            })
+                            .collect(),
+                        review: cell
+                            .review
+                            .into_iter()
+                            .map(|rate| RetrievalOutcomesRateSchema {
+                                state: rate.state,
+                                count: rate.count,
+                                rate: rate.rate,
+                            })
+                            .collect(),
+                        attempts: cell
+                            .attempts
+                            .into_iter()
+                            .map(|attempt| RetrievalOutcomesAttemptSchema {
+                                attempt_seq: attempt.attempt_seq,
+                                count: attempt.count,
+                                rate: attempt.rate,
+                            })
+                            .collect(),
+                    })
+                    .collect(),
+                diagnostics: RetrievalOutcomesReportDiagnosticsSchema {
+                    unattributed_trace_count: report.diagnostics.unattributed_trace_count,
+                    unrecorded_run_count: report.diagnostics.unrecorded_run_count,
+                },
+            }),
+            error: response.error,
+        }
+    }
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -215,7 +358,7 @@ pub struct MoveParams {
     pub project: String,
     pub identifier: String,
     /// New note type to move the note to. Use `proposed_adr` to recover a
-    /// mis-routed ADR draft into `.djinn/decisions/proposed/`.
+    /// mis-routed ADR draft to proposed status in the project database.
     #[serde(rename = "type")]
     #[schemars(rename = "type")]
     pub note_type: String,
@@ -245,21 +388,6 @@ pub struct RecentParams {
     /// Timeframe string, e.g. "7d", "24h", "today", "last week". Default: "7d".
     pub timeframe: Option<String>,
     pub limit: Option<i64>,
-}
-
-#[derive(Deserialize, schemars::JsonSchema)]
-pub struct HistoryParams {
-    pub project: String,
-    pub permalink: String,
-    pub limit: Option<i64>,
-}
-
-#[derive(Deserialize, schemars::JsonSchema)]
-pub struct DiffParams {
-    pub project: String,
-    pub permalink: String,
-    /// Specific commit SHA. Omit to get the diff for the most recent change.
-    pub sha: Option<String>,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -646,18 +774,6 @@ pub struct MemoryCatalogResponse {
 #[derive(Serialize, schemars::JsonSchema)]
 pub struct MemoryRecentResponse {
     pub notes: Vec<djinn_memory::NoteCompact>,
-    pub error: Option<String>,
-}
-
-#[derive(Serialize, schemars::JsonSchema)]
-pub struct MemoryHistoryResponse {
-    pub history: Vec<GitLogEntry>,
-    pub error: Option<String>,
-}
-
-#[derive(Serialize, schemars::JsonSchema)]
-pub struct MemoryDiffResponse {
-    pub diff: String,
     pub error: Option<String>,
 }
 

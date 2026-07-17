@@ -16,6 +16,21 @@ An operator can make the same non-destructive override with
 This Helm contract does not change direct-binary behavior: an unset or invalid
 `DJINN_CACHE_CLEANUP_MODE` remains fail-safe `dry_run` there.
 
+## Build admission mode
+
+`buildAdmission.mode` selects the literal `DJINN_BUILD_ADMISSION_MODE` emitted
+on `djinn-server`: `off`, `observe` (the default), or `enforce`.
+`buildAdmission.maxBuildTaskRuns` emits the literal
+`DJINN_MAX_BUILD_TASKRUNS` cap and defaults to `3`; the chart accepts only
+integers from `1` through `64`.
+
+Enforce is a single-active-controller deployment mode. It requires
+`server.replicas: 1` and either `server.strategy.type: Recreate`, or a
+`RollingUpdate` with exactly `maxSurge: 0` and `maxUnavailable: 1`. Helm rejects
+an Enforce release that does not meet this topology. Off and Observe retain the
+configured server replica and rollout settings, so their normal default is the
+availability-first rolling update (`maxSurge: 1`, `maxUnavailable: 0`).
+
 ## Node prerequisites
 
 The image pipeline runs BuildKit **rootless** via user namespaces. Every

@@ -4982,7 +4982,7 @@ expression: signatures
                 "type": "array"
               },
               "default": {},
-              "description": "Per-agent-role MCP server defaults. Moved here from the pre-cut-over\n`.djinn/settings.json`'s `agent_mcp_defaults` field. The key is a role\nname (e.g. `\"worker\"`, `\"chat\"`) or `\"*\"` for the fallback applied to\nany role with no explicit entry. The value is the list of MCP server\nnames (from root `mcp.json`) that sessions for that role should\nconnect to by default. Specialist role assignments override these.",
+              "description": "Per-agent-role MCP server defaults. The key is a role\nname (e.g. `\"worker\"`, `\"chat\"`) or `\"*\"` for the fallback applied to\nany role with no explicit entry. The value is the list of MCP server\nnames (from root `mcp.json`) that sessions for that role should\nconnect to by default. Specialist role assignments override these.",
               "type": "object"
             },
             "cargo_cache_policy": {
@@ -5008,7 +5008,7 @@ expression: signatures
             },
             "global_skills": {
               "default": [],
-              "description": "Skills injected into every agent prompt regardless of role. Moved here\nfrom the pre-cut-over `.djinn/settings.json`'s `global_skills` field.\nEach entry is a skill file stem (resolved against `.djinn/skills/`).",
+              "description": "Skills injected into every agent prompt regardless of role. Each entry\nis a registered skill identifier.",
               "items": {
                 "type": "string"
               },
@@ -5830,7 +5830,7 @@ expression: signatures
                 "type": "array"
               },
               "default": {},
-              "description": "Per-agent-role MCP server defaults. Moved here from the pre-cut-over\n`.djinn/settings.json`'s `agent_mcp_defaults` field. The key is a role\nname (e.g. `\"worker\"`, `\"chat\"`) or `\"*\"` for the fallback applied to\nany role with no explicit entry. The value is the list of MCP server\nnames (from root `mcp.json`) that sessions for that role should\nconnect to by default. Specialist role assignments override these.",
+              "description": "Per-agent-role MCP server defaults. The key is a role\nname (e.g. `\"worker\"`, `\"chat\"`) or `\"*\"` for the fallback applied to\nany role with no explicit entry. The value is the list of MCP server\nnames (from root `mcp.json`) that sessions for that role should\nconnect to by default. Specialist role assignments override these.",
               "type": "object"
             },
             "cargo_cache_policy": {
@@ -5856,7 +5856,7 @@ expression: signatures
             },
             "global_skills": {
               "default": [],
-              "description": "Skills injected into every agent prompt regardless of role. Moved here\nfrom the pre-cut-over `.djinn/settings.json`'s `global_skills` field.\nEach entry is a skill file stem (resolved against `.djinn/skills/`).",
+              "description": "Skills injected into every agent prompt regardless of role. Each entry\nis a registered skill identifier.",
               "items": {
                 "type": "string"
               },
@@ -6698,7 +6698,7 @@ expression: signatures
                 "type": "array"
               },
               "default": {},
-              "description": "Per-agent-role MCP server defaults. Moved here from the pre-cut-over\n`.djinn/settings.json`'s `agent_mcp_defaults` field. The key is a role\nname (e.g. `\"worker\"`, `\"chat\"`) or `\"*\"` for the fallback applied to\nany role with no explicit entry. The value is the list of MCP server\nnames (from root `mcp.json`) that sessions for that role should\nconnect to by default. Specialist role assignments override these.",
+              "description": "Per-agent-role MCP server defaults. The key is a role\nname (e.g. `\"worker\"`, `\"chat\"`) or `\"*\"` for the fallback applied to\nany role with no explicit entry. The value is the list of MCP server\nnames (from root `mcp.json`) that sessions for that role should\nconnect to by default. Specialist role assignments override these.",
               "type": "object"
             },
             "cargo_cache_policy": {
@@ -6724,7 +6724,7 @@ expression: signatures
             },
             "global_skills": {
               "default": [],
-              "description": "Skills injected into every agent prompt regardless of role. Moved here\nfrom the pre-cut-over `.djinn/settings.json`'s `global_skills` field.\nEach entry is a skill file stem (resolved against `.djinn/skills/`).",
+              "description": "Skills injected into every agent prompt regardless of role. Each entry\nis a registered skill identifier.",
               "items": {
                 "type": "string"
               },
@@ -8065,55 +8065,6 @@ expression: signatures
     }
   },
   {
-    "name": "memory_diff",
-    "read_only": false,
-    "destructive": true,
-    "idempotent": false,
-    "open_world": false,
-    "concurrent_safe": false,
-    "input_schema": {
-      "$schema": "https://json-schema.org/draft/2020-12/schema",
-      "properties": {
-        "permalink": {
-          "type": "string"
-        },
-        "project": {
-          "type": "string"
-        },
-        "sha": {
-          "description": "Specific commit SHA. Omit to get the diff for the most recent change.",
-          "type": [
-            "string",
-            "null"
-          ]
-        }
-      },
-      "required": [
-        "project",
-        "permalink"
-      ],
-      "type": "object"
-    },
-    "output_schema": {
-      "$schema": "https://json-schema.org/draft/2020-12/schema",
-      "properties": {
-        "diff": {
-          "type": "string"
-        },
-        "error": {
-          "type": [
-            "string",
-            "null"
-          ]
-        }
-      },
-      "required": [
-        "diff"
-      ],
-      "type": "object"
-    }
-  },
-  {
     "name": "memory_edit",
     "read_only": false,
     "destructive": true,
@@ -9003,84 +8954,6 @@ expression: signatures
     }
   },
   {
-    "name": "memory_history",
-    "read_only": false,
-    "destructive": true,
-    "idempotent": false,
-    "open_world": false,
-    "concurrent_safe": false,
-    "input_schema": {
-      "$schema": "https://json-schema.org/draft/2020-12/schema",
-      "properties": {
-        "limit": {
-          "format": "int64",
-          "type": [
-            "integer",
-            "null"
-          ]
-        },
-        "permalink": {
-          "type": "string"
-        },
-        "project": {
-          "type": "string"
-        }
-      },
-      "required": [
-        "project",
-        "permalink"
-      ],
-      "type": "object"
-    },
-    "output_schema": {
-      "$defs": {
-        "GitLogEntry": {
-          "description": "A single git commit entry for note history.",
-          "properties": {
-            "author": {
-              "type": "string"
-            },
-            "date": {
-              "type": "string"
-            },
-            "message": {
-              "type": "string"
-            },
-            "sha": {
-              "type": "string"
-            }
-          },
-          "required": [
-            "sha",
-            "message",
-            "author",
-            "date"
-          ],
-          "type": "object"
-        }
-      },
-      "$schema": "https://json-schema.org/draft/2020-12/schema",
-      "properties": {
-        "error": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "history": {
-          "items": {
-            "$ref": "#/$defs/GitLogEntry"
-          },
-          "type": "array"
-        }
-      },
-      "required": [
-        "history"
-      ],
-      "type": "object"
-    }
-  },
-  {
     "name": "memory_list",
     "read_only": false,
     "destructive": true,
@@ -9216,7 +9089,7 @@ expression: signatures
           ]
         },
         "type": {
-          "description": "New note type to move the note to. Use `proposed_adr` to recover a\nmis-routed ADR draft into `.djinn/decisions/proposed/`.",
+          "description": "New note type to move the note to. Use `proposed_adr` to recover a\nmis-routed ADR draft to proposed status in the project database.",
           "type": "string"
         }
       },
@@ -10288,6 +10161,223 @@ expression: signatures
     }
   },
   {
+    "name": "memory_retrieval_outcomes_report",
+    "read_only": false,
+    "destructive": true,
+    "idempotent": false,
+    "open_world": false,
+    "concurrent_safe": false,
+    "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "end": {
+          "type": "string"
+        },
+        "project": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "project_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "start": {
+          "type": "string"
+        },
+        "timezone": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "start",
+        "end",
+        "timezone"
+      ],
+      "type": "object"
+    },
+    "output_schema": {
+      "$defs": {
+        "RetrievalOutcomesAttemptSchema": {
+          "properties": {
+            "attempt_seq": {
+              "format": "int32",
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "count": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "rate": {
+              "format": "double",
+              "type": "number"
+            }
+          },
+          "required": [
+            "count",
+            "rate"
+          ],
+          "type": "object"
+        },
+        "RetrievalOutcomesRateSchema": {
+          "properties": {
+            "count": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "rate": {
+              "format": "double",
+              "type": "number"
+            },
+            "state": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "state",
+            "count",
+            "rate"
+          ],
+          "type": "object"
+        },
+        "RetrievalOutcomesReportCellSchema": {
+          "properties": {
+            "attempts": {
+              "items": {
+                "$ref": "#/$defs/RetrievalOutcomesAttemptSchema"
+              },
+              "type": "array"
+            },
+            "denominator": {
+              "description": "Distinct task runs in this cohort cell.",
+              "format": "int64",
+              "type": "integer"
+            },
+            "entry_point": {
+              "type": "string"
+            },
+            "merge_queue": {
+              "items": {
+                "$ref": "#/$defs/RetrievalOutcomesRateSchema"
+              },
+              "type": "array"
+            },
+            "outcome": {
+              "type": "string"
+            },
+            "parked_reasons": {
+              "items": {
+                "$ref": "#/$defs/RetrievalOutcomesRateSchema"
+              },
+              "type": "array"
+            },
+            "review": {
+              "items": {
+                "$ref": "#/$defs/RetrievalOutcomesRateSchema"
+              },
+              "type": "array"
+            },
+            "rollout_label": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "entry_point",
+            "rollout_label",
+            "outcome",
+            "denominator",
+            "parked_reasons",
+            "merge_queue",
+            "review",
+            "attempts"
+          ],
+          "type": "object"
+        },
+        "RetrievalOutcomesReportDiagnosticsSchema": {
+          "properties": {
+            "unattributed_trace_count": {
+              "description": "Traces without exact task_run_id; excluded from rates and never task_id-joined.",
+              "format": "int64",
+              "type": "integer"
+            },
+            "unrecorded_run_count": {
+              "description": "Eligible runs with no durable trace.",
+              "format": "int64",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "unattributed_trace_count",
+            "unrecorded_run_count"
+          ],
+          "type": "object"
+        },
+        "RetrievalOutcomesReportSchema": {
+          "properties": {
+            "cells": {
+              "items": {
+                "$ref": "#/$defs/RetrievalOutcomesReportCellSchema"
+              },
+              "type": "array"
+            },
+            "cells_are_non_additive": {
+              "description": "Different cohort-key cells can overlap and must not be summed.",
+              "type": "boolean"
+            },
+            "diagnostics": {
+              "$ref": "#/$defs/RetrievalOutcomesReportDiagnosticsSchema"
+            },
+            "end": {
+              "type": "string"
+            },
+            "start": {
+              "type": "string"
+            },
+            "timezone": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "start",
+            "end",
+            "timezone",
+            "cells_are_non_additive",
+            "cells",
+            "diagnostics"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "error": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "report": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RetrievalOutcomesReportSchema"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "type": "object"
+    }
+  },
+  {
     "name": "memory_run_enrichment",
     "read_only": false,
     "destructive": true,
@@ -10761,7 +10851,7 @@ expression: signatures
           ]
         },
         "status": {
-          "description": "Optional explicit status for routed note types. For ADRs, `proposed`\nwrites into `.djinn/decisions/proposed/`.",
+          "description": "Optional explicit status for routed note types. For ADRs, `proposed`\nrecords the ADR with proposed status in the project database.",
           "type": [
             "string",
             "null"
@@ -12042,7 +12132,7 @@ expression: signatures
                 "type": "array"
               },
               "default": {},
-              "description": "Per-agent-role MCP server defaults. Moved here from the pre-cut-over\n`.djinn/settings.json`'s `agent_mcp_defaults` field. The key is a role\nname (e.g. `\"worker\"`, `\"chat\"`) or `\"*\"` for the fallback applied to\nany role with no explicit entry. The value is the list of MCP server\nnames (from root `mcp.json`) that sessions for that role should\nconnect to by default. Specialist role assignments override these.",
+              "description": "Per-agent-role MCP server defaults. The key is a role\nname (e.g. `\"worker\"`, `\"chat\"`) or `\"*\"` for the fallback applied to\nany role with no explicit entry. The value is the list of MCP server\nnames (from root `mcp.json`) that sessions for that role should\nconnect to by default. Specialist role assignments override these.",
               "type": "object"
             },
             "cargo_cache_policy": {
@@ -12068,7 +12158,7 @@ expression: signatures
             },
             "global_skills": {
               "default": [],
-              "description": "Skills injected into every agent prompt regardless of role. Moved here\nfrom the pre-cut-over `.djinn/settings.json`'s `global_skills` field.\nEach entry is a skill file stem (resolved against `.djinn/skills/`).",
+              "description": "Skills injected into every agent prompt regardless of role. Each entry\nis a registered skill identifier.",
               "items": {
                 "type": "string"
               },
@@ -12848,7 +12938,7 @@ expression: signatures
                 "type": "array"
               },
               "default": {},
-              "description": "Per-agent-role MCP server defaults. Moved here from the pre-cut-over\n`.djinn/settings.json`'s `agent_mcp_defaults` field. The key is a role\nname (e.g. `\"worker\"`, `\"chat\"`) or `\"*\"` for the fallback applied to\nany role with no explicit entry. The value is the list of MCP server\nnames (from root `mcp.json`) that sessions for that role should\nconnect to by default. Specialist role assignments override these.",
+              "description": "Per-agent-role MCP server defaults. The key is a role\nname (e.g. `\"worker\"`, `\"chat\"`) or `\"*\"` for the fallback applied to\nany role with no explicit entry. The value is the list of MCP server\nnames (from root `mcp.json`) that sessions for that role should\nconnect to by default. Specialist role assignments override these.",
               "type": "object"
             },
             "cargo_cache_policy": {
@@ -12874,7 +12964,7 @@ expression: signatures
             },
             "global_skills": {
               "default": [],
-              "description": "Skills injected into every agent prompt regardless of role. Moved here\nfrom the pre-cut-over `.djinn/settings.json`'s `global_skills` field.\nEach entry is a skill file stem (resolved against `.djinn/skills/`).",
+              "description": "Skills injected into every agent prompt regardless of role. Each entry\nis a registered skill identifier.",
               "items": {
                 "type": "string"
               },
@@ -13628,7 +13718,7 @@ expression: signatures
                 "type": "array"
               },
               "default": {},
-              "description": "Per-agent-role MCP server defaults. Moved here from the pre-cut-over\n`.djinn/settings.json`'s `agent_mcp_defaults` field. The key is a role\nname (e.g. `\"worker\"`, `\"chat\"`) or `\"*\"` for the fallback applied to\nany role with no explicit entry. The value is the list of MCP server\nnames (from root `mcp.json`) that sessions for that role should\nconnect to by default. Specialist role assignments override these.",
+              "description": "Per-agent-role MCP server defaults. The key is a role\nname (e.g. `\"worker\"`, `\"chat\"`) or `\"*\"` for the fallback applied to\nany role with no explicit entry. The value is the list of MCP server\nnames (from root `mcp.json`) that sessions for that role should\nconnect to by default. Specialist role assignments override these.",
               "type": "object"
             },
             "cargo_cache_policy": {
@@ -13654,7 +13744,7 @@ expression: signatures
             },
             "global_skills": {
               "default": [],
-              "description": "Skills injected into every agent prompt regardless of role. Moved here\nfrom the pre-cut-over `.djinn/settings.json`'s `global_skills` field.\nEach entry is a skill file stem (resolved against `.djinn/skills/`).",
+              "description": "Skills injected into every agent prompt regardless of role. Each entry\nis a registered skill identifier.",
               "items": {
                 "type": "string"
               },
@@ -22399,20 +22489,6 @@ expression: signatures
                 "null"
               ]
             },
-            "memory_mount_enabled": {
-              "description": "Enable the ADR-057 Linux memory mount for filesystem-first note workflows. Disabled by default; requires a Linux build with the `memory-mount` cargo feature. The mounted path serves the current session-selected task/worktree view when available and otherwise falls back to the canonical `main` view.",
-              "type": [
-                "boolean",
-                "null"
-              ]
-            },
-            "memory_mount_path": {
-              "description": "Absolute filesystem path where the Linux FUSE mount should be attached. The directory must already exist and be empty at startup. This path hosts the current session-selected memory view; Djinn does not expose additional branch directories in this slice.",
-              "type": [
-                "string",
-                "null"
-              ]
-            },
             "models": {
               "description": "Ordered list of models available to agents, e.g. `[\"openai/gpt-4o\"]`.",
               "items": {
@@ -22508,20 +22584,6 @@ expression: signatures
           "format": "int64",
           "type": [
             "integer",
-            "null"
-          ]
-        },
-        "memory_mount_enabled": {
-          "description": "Enable the Linux-only ADR-057 memory FUSE mount for filesystem-first note workflows. Disabled by default; requires a Linux build with the `memory-mount` cargo feature. The mounted path serves the current session-selected task/worktree view when available and otherwise falls back to the canonical `main` view.",
-          "type": [
-            "boolean",
-            "null"
-          ]
-        },
-        "memory_mount_path": {
-          "description": "Absolute path for the Linux memory mount. The directory must already exist and be empty at startup. This path hosts the current session-selected memory view; no additional branch directories are exposed in this slice.",
-          "type": [
-            "string",
             "null"
           ]
         },

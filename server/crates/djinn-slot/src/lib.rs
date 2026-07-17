@@ -42,6 +42,7 @@ mod actor;
 pub mod attempt_lifecycle;
 pub mod commands;
 pub mod extraction_replay_eval;
+pub mod final_verification;
 pub mod finalize_handlers;
 pub mod finalize_types;
 pub mod helpers;

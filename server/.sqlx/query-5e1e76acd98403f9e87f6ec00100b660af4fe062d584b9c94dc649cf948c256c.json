@@ -1,0 +1,19 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO task_attempts\n                    (id, task_id, role, attempt_seq, dispatch_key, session_id, outcome)\n                 VALUES ($1, $2, $3, $4, $5, $6, 'pending')\n                 ON CONFLICT (dispatch_key) DO NOTHING",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Varchar",
+        "Varchar",
+        "Varchar",
+        "Int4",
+        "Varchar",
+        "Varchar"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "5e1e76acd98403f9e87f6ec00100b660af4fe062d584b9c94dc649cf948c256c"
+}
