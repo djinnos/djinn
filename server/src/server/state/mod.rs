@@ -479,14 +479,21 @@ impl AppState {
         let (events, _) = broadcast::channel(EVENT_CHANNEL_CAPACITY);
         let mirror = Arc::new(MirrorManager::new(mirrors_root()));
         let workspace_store = Arc::new(WorkspaceStore::new(workspaces_root(), Arc::clone(&mirror)));
-        let build_admission = (admission_config.mode != BuildAdmissionMode::Off).then(|| {
-            Arc::new(BuildAdmissionController::new(
+        let build_admission = match admission_config.mode {
+            BuildAdmissionMode::Off => None,
+            BuildAdmissionMode::Observe => Some(Arc::new(BuildAdmissionController::new(
                 Arc::new(djinn_db::AdmissionJournalRepository::new(db.clone())),
-                admission_config.mode,
+                BuildAdmissionMode::Observe,
                 admission_config.cap,
                 std::env::var("HOSTNAME").unwrap_or_else(|_| "coordinator".to_owned()),
-            ))
-        });
+            ))),
+            // Recovery owns the readiness handoff; Enforce starts fail-closed.
+            BuildAdmissionMode::Enforce => Some(Arc::new(BuildAdmissionController::new_closed(
+                Arc::new(djinn_db::AdmissionJournalRepository::new(db.clone())),
+                admission_config.cap,
+                std::env::var("HOSTNAME").unwrap_or_else(|_| "coordinator".to_owned()),
+            ))),
+        };
         Self {
             inner: Arc::new(Inner {
                 db,
@@ -3233,6 +3240,57 @@ mod retention_preflight_tests {
         assert!(
             outcome.report.contains("operator-owned"),
             "report must state production execution is operator-owned"
+        );
+    }
+}
+
+#[cfg(test)]
+mod build_admission_config_tests {
+    use super::*;
+
+    #[test]
+    fn build_admission_defaults_and_legacy_zero_are_deterministic() {
+        assert_eq!(
+            BuildAdmissionConfig::parse(None, None).unwrap(),
+            BuildAdmissionConfig {
+                mode: BuildAdmissionMode::Observe,
+                cap: 3
+            }
+        );
+        assert_eq!(
+            BuildAdmissionConfig::parse(None, Some("0")).unwrap(),
+            BuildAdmissionConfig {
+                mode: BuildAdmissionMode::Off,
+                cap: 0
+            }
+        );
+        assert!(BuildAdmissionConfig::parse(Some("observe"), Some("0")).is_err());
+        assert!(BuildAdmissionConfig::parse(Some("enforce"), Some("0")).is_err());
+    }
+
+    #[test]
+    fn build_admission_rejects_invalid_startup_values_and_is_restart_only() {
+        for cap in ["", "-1", "not-a-number", "65"] {
+            assert!(
+                BuildAdmissionConfig::parse(None, Some(cap)).is_err(),
+                "{cap}"
+            );
+        }
+        for mode in ["", "Observe", "unknown"] {
+            assert!(
+                BuildAdmissionConfig::parse(Some(mode), None).is_err(),
+                "{mode:?}"
+            );
+        }
+        let configured = BuildAdmissionConfig::parse(Some("enforce"), Some("4")).unwrap();
+        // Parsed configuration is a copied value retained by AppState; changing
+        // process environment cannot mutate this instance before restart.
+        assert_eq!(
+            configured,
+            BuildAdmissionConfig {
+                mode: BuildAdmissionMode::Enforce,
+                cap: 4
+            }
         );
     }
 }
