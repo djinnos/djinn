@@ -678,24 +678,24 @@ fn allow_redirect_to_dev_null() {
     assert_allow("echo hello > /dev/null");
 }
 
-// ── Path-scope exclusions: .djinn/read-sources ───────────────────────────
+// ── Path-scope exclusions: .djinn-read-sources ───────────────────────────
 
 #[test]
-fn hard_deny_rm_djinn_read_sources() {
-    assert_hard_deny("rm .djinn/read-sources/project/file.rs");
+fn hard_deny_rm_internal_read_sources() {
+    assert_hard_deny("rm .djinn-read-sources/project/file.rs");
 }
 
 #[test]
-fn hard_deny_mv_djinn_read_sources() {
-    assert_hard_deny("mv .djinn/read-sources/a.txt b.txt");
+fn hard_deny_mv_internal_read_sources() {
+    assert_hard_deny("mv .djinn-read-sources/a.txt b.txt");
 }
 
 #[test]
-fn hard_deny_redirect_to_djinn_read_sources() {
-    let decision = classify("echo data > .djinn/read-sources/patch");
+fn hard_deny_redirect_to_internal_read_sources() {
+    let decision = classify("echo data > .djinn-read-sources/patch");
     assert!(
         matches!(decision, ShellDestructiveDecision::HardDeny { .. }),
-        "expected HardDeny for redirect into .djinn/read-sources, got {decision:?}",
+        "expected HardDeny for redirect into .djinn-read-sources, got {decision:?}",
     );
 }
 

@@ -124,7 +124,7 @@ pub(crate) async fn call_shell(
     let timeout_ms = effective_shell_timeout_ms(p.timeout_ms, &p.command);
 
     // Cross-repo shell: when `project` names a different registered project,
-    // check it out read-only into `.djinn/read-sources/` and run there.
+    // check it out read-only into `.djinn-read-sources/` and run there.
     let run_dir: std::path::PathBuf =
         if let Some(proj) = p.project.as_deref().filter(|s| !s.is_empty()) {
             let repo = ProjectRepository::new(state.db.clone(), state.event_bus.clone());
@@ -136,8 +136,8 @@ pub(crate) async fn call_shell(
                         .ok()
                         .flatten()
                         .unwrap_or_else(|| "HEAD".to_string());
-                    let dest = worktree_path.join(".djinn/read-sources").join(&pid);
-                    append_git_exclude(worktree_path, ".djinn/read-sources/").await;
+                    let dest = worktree_path.join(".djinn-read-sources").join(&pid);
+                    append_git_exclude(worktree_path, ".djinn-read-sources/").await;
                     crate::repo_access::ensure_worktree(&pid, &git_ref, &dest).await?;
                     dest
                 }

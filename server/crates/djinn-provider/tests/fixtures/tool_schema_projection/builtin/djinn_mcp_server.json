@@ -4988,7 +4988,7 @@
               }
             },
             "agent_mcp_defaults": {
-              "description": "Per-agent-role MCP server defaults. Moved here from the pre-cut-over\n`.djinn/settings.json`'s `agent_mcp_defaults` field. The key is a role\nname (e.g. `\"worker\"`, `\"chat\"`) or `\"*\"` for the fallback applied to\nany role with no explicit entry. The value is the list of MCP server\nnames (from root `mcp.json`) that sessions for that role should\nconnect to by default. Specialist role assignments override these.",
+              "description": "Per-agent-role MCP server defaults. The key is a role\nname (e.g. `\"worker\"`, `\"chat\"`) or `\"*\"` for the fallback applied to\nany role with no explicit entry. The value is the list of MCP server\nnames (from root `mcp.json`) that sessions for that role should\nconnect to by default. Specialist role assignments override these.",
               "type": "object",
               "additionalProperties": {
                 "type": "array",
@@ -4999,7 +4999,7 @@
               "default": {}
             },
             "global_skills": {
-              "description": "Skills injected into every agent prompt regardless of role are configured by the server.",
+              "description": "Skills injected into every agent prompt regardless of role. Each entry\nis a registered skill identifier.",
               "type": "array",
               "items": {
                 "type": "string"
@@ -5877,7 +5877,7 @@
               }
             },
             "agent_mcp_defaults": {
-              "description": "Per-agent-role MCP server defaults. Moved here from the pre-cut-over\n`.djinn/settings.json`'s `agent_mcp_defaults` field. The key is a role\nname (e.g. `\"worker\"`, `\"chat\"`) or `\"*\"` for the fallback applied to\nany role with no explicit entry. The value is the list of MCP server\nnames (from root `mcp.json`) that sessions for that role should\nconnect to by default. Specialist role assignments override these.",
+              "description": "Per-agent-role MCP server defaults. The key is a role\nname (e.g. `\"worker\"`, `\"chat\"`) or `\"*\"` for the fallback applied to\nany role with no explicit entry. The value is the list of MCP server\nnames (from root `mcp.json`) that sessions for that role should\nconnect to by default. Specialist role assignments override these.",
               "type": "object",
               "additionalProperties": {
                 "type": "array",
@@ -5888,7 +5888,7 @@
               "default": {}
             },
             "global_skills": {
-              "description": "Skills injected into every agent prompt regardless of role are configured by the server.",
+              "description": "Skills injected into every agent prompt regardless of role. Each entry\nis a registered skill identifier.",
               "type": "array",
               "items": {
                 "type": "string"
@@ -6708,7 +6708,7 @@
               }
             },
             "agent_mcp_defaults": {
-              "description": "Per-agent-role MCP server defaults. Moved here from the pre-cut-over\n`.djinn/settings.json`'s `agent_mcp_defaults` field. The key is a role\nname (e.g. `\"worker\"`, `\"chat\"`) or `\"*\"` for the fallback applied to\nany role with no explicit entry. The value is the list of MCP server\nnames (from root `mcp.json`) that sessions for that role should\nconnect to by default. Specialist role assignments override these.",
+              "description": "Per-agent-role MCP server defaults. The key is a role\nname (e.g. `\"worker\"`, `\"chat\"`) or `\"*\"` for the fallback applied to\nany role with no explicit entry. The value is the list of MCP server\nnames (from root `mcp.json`) that sessions for that role should\nconnect to by default. Specialist role assignments override these.",
               "type": "object",
               "additionalProperties": {
                 "type": "array",
@@ -6719,7 +6719,7 @@
               "default": {}
             },
             "global_skills": {
-              "description": "Skills injected into every agent prompt regardless of role are configured by the server.",
+              "description": "Skills injected into every agent prompt regardless of role. Each entry\nis a registered skill identifier.",
               "type": "array",
               "items": {
                 "type": "string"
@@ -9131,7 +9131,7 @@
   },
   {
     "name": "memory_move",
-    "description": "Move a note to a new location. Updates permalink and resolves inbound links. Use type=\"proposed_adr\" to recover a mis-routed ADR draft into .djinn/decisions/proposed/ without raw shell mkdir/cp.",
+    "description": "Move a note to a new location. Updates permalink and resolves inbound links. Use type=\"proposed_adr\" to recover a mis-routed ADR draft into proposed status.",
     "inputSchema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "required": [
@@ -9148,7 +9148,7 @@
           "type": "string"
         },
         "type": {
-          "description": "New note type to move the note to. Use `proposed_adr` to recover a\nmis-routed ADR draft into `.djinn/decisions/proposed/`.",
+          "description": "New note type to move the note to. Use `proposed_adr` to recover a\nmis-routed ADR draft to proposed status in the project database.",
           "type": "string"
         },
         "title": {
@@ -10917,7 +10917,7 @@
           "type": "string"
         },
         "status": {
-          "description": "Optional explicit status for routed note types. For ADRs, `proposed`\nwrites into `.djinn/decisions/proposed/`.",
+          "description": "Optional explicit status for routed note types. For ADRs, `proposed`\nrecords the ADR with proposed status in the project database.",
           "type": [
             "string",
             "null"
@@ -12179,7 +12179,7 @@
               }
             },
             "agent_mcp_defaults": {
-              "description": "Per-agent-role MCP server defaults. Moved here from the pre-cut-over\n`.djinn/settings.json`'s `agent_mcp_defaults` field. The key is a role\nname (e.g. `\"worker\"`, `\"chat\"`) or `\"*\"` for the fallback applied to\nany role with no explicit entry. The value is the list of MCP server\nnames (from root `mcp.json`) that sessions for that role should\nconnect to by default. Specialist role assignments override these.",
+              "description": "Per-agent-role MCP server defaults. The key is a role\nname (e.g. `\"worker\"`, `\"chat\"`) or `\"*\"` for the fallback applied to\nany role with no explicit entry. The value is the list of MCP server\nnames (from root `mcp.json`) that sessions for that role should\nconnect to by default. Specialist role assignments override these.",
               "type": "object",
               "additionalProperties": {
                 "type": "array",
@@ -12190,7 +12190,7 @@
               "default": {}
             },
             "global_skills": {
-              "description": "Skills injected into every agent prompt regardless of role are configured by the server.",
+              "description": "Skills injected into every agent prompt regardless of role. Each entry\nis a registered skill identifier.",
               "type": "array",
               "items": {
                 "type": "string"
@@ -12986,7 +12986,7 @@
               }
             },
             "agent_mcp_defaults": {
-              "description": "Per-agent-role MCP server defaults. Moved here from the pre-cut-over\n`.djinn/settings.json`'s `agent_mcp_defaults` field. The key is a role\nname (e.g. `\"worker\"`, `\"chat\"`) or `\"*\"` for the fallback applied to\nany role with no explicit entry. The value is the list of MCP server\nnames (from root `mcp.json`) that sessions for that role should\nconnect to by default. Specialist role assignments override these.",
+              "description": "Per-agent-role MCP server defaults. The key is a role\nname (e.g. `\"worker\"`, `\"chat\"`) or `\"*\"` for the fallback applied to\nany role with no explicit entry. The value is the list of MCP server\nnames (from root `mcp.json`) that sessions for that role should\nconnect to by default. Specialist role assignments override these.",
               "type": "object",
               "additionalProperties": {
                 "type": "array",
@@ -12997,7 +12997,7 @@
               "default": {}
             },
             "global_skills": {
-              "description": "Skills injected into every agent prompt regardless of role are configured by the server.",
+              "description": "Skills injected into every agent prompt regardless of role. Each entry\nis a registered skill identifier.",
               "type": "array",
               "items": {
                 "type": "string"
@@ -13767,7 +13767,7 @@
               }
             },
             "agent_mcp_defaults": {
-              "description": "Per-agent-role MCP server defaults. Moved here from the pre-cut-over\n`.djinn/settings.json`'s `agent_mcp_defaults` field. The key is a role\nname (e.g. `\"worker\"`, `\"chat\"`) or `\"*\"` for the fallback applied to\nany role with no explicit entry. The value is the list of MCP server\nnames (from root `mcp.json`) that sessions for that role should\nconnect to by default. Specialist role assignments override these.",
+              "description": "Per-agent-role MCP server defaults. The key is a role\nname (e.g. `\"worker\"`, `\"chat\"`) or `\"*\"` for the fallback applied to\nany role with no explicit entry. The value is the list of MCP server\nnames (from root `mcp.json`) that sessions for that role should\nconnect to by default. Specialist role assignments override these.",
               "type": "object",
               "additionalProperties": {
                 "type": "array",
@@ -13778,7 +13778,7 @@
               "default": {}
             },
             "global_skills": {
-              "description": "Skills injected into every agent prompt regardless of role are configured by the server.",
+              "description": "Skills injected into every agent prompt regardless of role. Each entry\nis a registered skill identifier.",
               "type": "array",
               "items": {
                 "type": "string"

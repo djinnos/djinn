@@ -669,22 +669,22 @@ async fn shell_path_scope_parent_dir_is_hard_denied() {
     );
 }
 
-/// Commands targeting `.djinn/read-sources` paths are hard-denied through
+/// Commands targeting internal sibling-checkout paths are hard-denied through
 /// the full dispatch path.  `bash_soft_forced` is never recorded.
 #[tokio::test]
-async fn shell_path_scope_djinn_read_sources_is_hard_denied() {
+async fn shell_path_scope_internal_read_sources_is_hard_denied() {
     let (worktree, state) = setup("gg-shell-path-djinnrs-");
     let session_id = worktree.path().display().to_string();
 
     let err = call_shell(
         &state,
-        &shell_args("rm .djinn/read-sources/some-project/file.txt"),
+        &shell_args("rm .djinn-read-sources/some-project/file.txt"),
         worktree.path(),
         Some("worker"),
         &crate::extension::ToolCancellation::never(),
     )
     .await
-    .expect_err("rm targeting .djinn/read-sources must be hard-denied");
+    .expect_err("rm targeting internal sibling checkout must be hard-denied");
     assert!(
         err.contains("forbidden"),
         "hard-deny must contain 'forbidden', got: {err}"
@@ -695,7 +695,7 @@ async fn shell_path_scope_djinn_read_sources_is_hard_denied() {
             .file_time
             .has_bash_soft_forced(&session_id, &WORKTREE_LOCAL_FILE_MUTATION)
             .await,
-        ".djinn/read-sources path must NOT mark bash_soft_forced"
+        "internal sibling-checkout path must NOT mark bash_soft_forced"
     );
 }
 
