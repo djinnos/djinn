@@ -748,6 +748,56 @@ expression: tool_schemas_advocate()
     "concurrent_safe": true
   },
   {
+    "name": "proposal_debate_append",
+    "description": "Record a tribunal debate-trail entry. This is the ONLY channel the refinement loop reads. `kind` is `objection` (Adversary), `verdict` (Judge), or `rebuttal`. `blocking=true` blocks readiness. Read `proposal_id`, `round`, `against_revision_seq` from your task description; `agent_role` is `adversary` or `judge`.",
+    "inputSchema": {
+      "type": "object",
+      "required": [
+        "proposal_id",
+        "kind",
+        "body",
+        "agent_role",
+        "against_revision_seq",
+        "round"
+      ],
+      "properties": {
+        "proposal_id": {
+          "type": "string",
+          "description": "Proposal UUID or short_id (from your task description)"
+        },
+        "kind": {
+          "type": "string",
+          "description": "objection | rebuttal | verdict"
+        },
+        "body": {
+          "type": "string",
+          "description": "The objection/verdict text. For objections include summary, evidence, and a falsifiable resolution criterion."
+        },
+        "blocking": {
+          "type": "boolean",
+          "description": "True if this blocks readiness. Use for blocking objections and for a not-ready verdict. Default false."
+        },
+        "agent_role": {
+          "type": "string",
+          "description": "Your tribunal role: adversary | judge"
+        },
+        "against_revision_seq": {
+          "type": "integer",
+          "description": "The proposal revision this entry is written against (from your task description)"
+        },
+        "round": {
+          "type": "integer",
+          "description": "The 1-based debate round (from your task description)"
+        }
+      }
+    },
+    "readOnly": false,
+    "destructive": false,
+    "idempotent": false,
+    "openWorld": false,
+    "concurrent_safe": false
+  },
+  {
     "name": "proposal_update",
     "description": "Update a proposal (by UUID or short_id): title, body, acceptance_criteria, status (draft|shared|ready|archived|superseded), and superseded_by. Only provided fields change.",
     "inputSchema": {

@@ -836,6 +836,39 @@ fn adversary_and_judge_can_file_debate_trail_entries() {
     );
 }
 
+/// The Advocate's rebuttal channel (scope-ratchet counterweight): its prompt
+/// must teach filing `kind="rebuttal"` entries via `proposal_debate_append`,
+/// and the Judge's prompt must teach adjudicating them. Without the prompt
+/// wiring the tool grant in `tool_schemas_advocate` is dead weight and every
+/// objection can only be resolved by growing the spec.
+#[test]
+fn advocate_rebuttal_channel_is_prompt_wired() {
+    ensure_registry();
+    let task = make_task();
+    let ctx = make_ctx();
+
+    let advocate_prompt = render_prompt(AgentType::Advocate, &task, &ctx);
+    assert!(
+        advocate_prompt.contains("proposal_debate_append("),
+        "advocate prompt must teach the proposal_debate_append rebuttal call"
+    );
+    assert!(
+        advocate_prompt.contains("kind=\"rebuttal\"")
+            || advocate_prompt.contains("kind                  = \"rebuttal\""),
+        "advocate prompt must pin kind=\"rebuttal\" as its only debate-trail kind"
+    );
+
+    let judge_prompt = render_prompt(AgentType::Judge, &task, &ctx);
+    assert!(
+        judge_prompt.contains("Adjudicating rebuttals"),
+        "judge prompt must carry the rebuttal adjudication section"
+    );
+    assert!(
+        judge_prompt.contains("Minimality"),
+        "judge prompt must carry the minimality DoD dimension"
+    );
+}
+
 mod visual_spec;
 
 // ── Proposal-address prompt regressions (y4td) ───────────────────────────
