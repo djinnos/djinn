@@ -10,6 +10,80 @@
       "properties": {
         "mode": { "type": "string", "enum": ["delete", "dry_run"] }
       }
+    },
+    "buildAdmission": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mode", "maxBuildTaskRuns"],
+      "properties": {
+        "mode": { "type": "string", "enum": ["off", "observe", "enforce"] },
+        "maxBuildTaskRuns": { "type": "integer", "minimum": 1, "maximum": 64 }
+      }
+    },
+    "server": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["replicas", "strategy"],
+      "properties": {
+        "replicas": { "type": "integer", "minimum": 0 },
+        "strategy": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type"],
+          "properties": {
+            "type": { "type": "string", "enum": ["Recreate", "RollingUpdate"] },
+            "rollingUpdate": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["maxSurge", "maxUnavailable"],
+              "properties": {
+                "maxSurge": { "oneOf": [{ "type": "integer", "minimum": 0 }, { "type": "string" }] },
+                "maxUnavailable": { "oneOf": [{ "type": "integer", "minimum": 0 }, { "type": "string" }] }
+              }
+            }
+          }
+        }
+      }
     }
-  }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "buildAdmission": {
+            "properties": { "mode": { "const": "enforce" } },
+            "required": ["mode"]
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "server": {
+            "properties": {
+              "replicas": { "const": 1 },
+              "strategy": {
+                "anyOf": [
+                  { "properties": { "type": { "const": "Recreate" } } },
+                  {
+                    "properties": {
+                      "type": { "const": "RollingUpdate" },
+                      "rollingUpdate": {
+                        "properties": {
+                          "maxSurge": { "oneOf": [{ "const": 0 }, { "const": "0" }] },
+                          "maxUnavailable": { "oneOf": [{ "const": 1 }, { "const": "1" }] }
+                        },
+                        "required": ["maxSurge", "maxUnavailable"]
+                      }
+                    },
+                    "required": ["type", "rollingUpdate"]
+                  }
+                ]
+              }
+            },
+            "required": ["replicas", "strategy"]
+          }
+        }
+      }
+    }
+  ]
 }

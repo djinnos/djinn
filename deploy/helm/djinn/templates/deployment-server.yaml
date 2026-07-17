@@ -1,4 +1,18 @@
 {{- $githubAppConfigAttempted := include "djinn.githubAppConfigAttempted" . -}}
+{{- $buildAdmission := .Values.buildAdmission -}}
+{{- $server := .Values.server -}}
+{{- if eq $buildAdmission.mode "enforce" -}}
+  {{- if ne (int $server.replicas) 1 -}}
+    {{- fail "buildAdmission.mode=enforce requires server.replicas=1" -}}
+  {{- end -}}
+  {{- if eq $server.strategy.type "RollingUpdate" -}}
+    {{- if or (ne (toString $server.strategy.rollingUpdate.maxSurge) "0") (ne (toString $server.strategy.rollingUpdate.maxUnavailable) "1") -}}
+      {{- fail "buildAdmission.mode=enforce requires server.strategy RollingUpdate with maxSurge=0 and maxUnavailable=1" -}}
+    {{- end -}}
+  {{- else if ne $server.strategy.type "Recreate" -}}
+    {{- fail "buildAdmission.mode=enforce requires server.strategy.type=Recreate or non-overlapping RollingUpdate" -}}
+  {{- end -}}
+{{- end -}}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -7,7 +21,7 @@ metadata:
   labels:
     {{- include "djinn.server.labels" . | nindent 4 }}
 spec:
-  replicas: 1
+  replicas: {{ $server.replicas }}
   strategy:
     # Coordinator leadership is gated by a Postgres advisory lock (see
     # `djinn_server::leadership` + `AppState::become_leader`), so a brief
@@ -21,10 +35,12 @@ spec:
     # The new pod boots in HTTP-only standby (readiness is independent of
     # leadership) and promotes itself once the old pod exits and releases the
     # advisory lock.
-    type: RollingUpdate
+    type: {{ $server.strategy.type }}
+    {{- if eq $server.strategy.type "RollingUpdate" }}
     rollingUpdate:
-      maxSurge: 1
-      maxUnavailable: 0
+      maxSurge: {{ $server.strategy.rollingUpdate.maxSurge }}
+      maxUnavailable: {{ $server.strategy.rollingUpdate.maxUnavailable }}
+    {{- end }}
   selector:
     matchLabels:
       {{- include "djinn.server.selectorLabels" . | nindent 6 }}
@@ -188,6 +204,13 @@ spec:
             # activates the coordinator's selected cleanup mode.
             - name: DJINN_CACHE_CLEANUP_MODE
               value: {{ .Values.cacheCleanup.mode | quote }}
+            # Admission mode and cap are intentionally literal server env
+            # entries, rather than implicit binary defaults. Enforce topology
+            # validation above makes this exact configuration safe to render.
+            - name: DJINN_BUILD_ADMISSION_MODE
+              value: {{ $buildAdmission.mode | quote }}
+            - name: DJINN_MAX_BUILD_TASKRUNS
+              value: {{ $buildAdmission.maxBuildTaskRuns | quote }}
             - name: DJINN_IMAGE_BUILDER_IMAGE
               value: {{ .Values.imagePipeline.builderImage | quote }}
             # Fully-qualified ref used in `COPY --from=<ref>` in each
