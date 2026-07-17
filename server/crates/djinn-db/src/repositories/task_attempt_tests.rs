@@ -41,6 +41,53 @@ fn new_attempt_id() -> String {
     uuid::Uuid::now_v7().to_string()
 }
 
+/// Every dispatch allocates `attempt_seq` from two concurrent writers (the
+/// coordinator's dispatch-start and the slot supervisor's exact-attempt
+/// insert), so simultaneous auto-allocations on one task race on
+/// `(task_id, attempt_seq)`.  The loser must retry with a recomputed sequence
+/// instead of surfacing the unique violation (incident m0ed: the supervisor's
+/// lost race hard-failed the dispatch and wedged the respawn guard for the
+/// full orphan-sweep window).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_auto_seq_allocation_retries_past_unique_race() {
+    let db = test_db();
+    let (_pid, task_id) = create_task(&db).await;
+
+    let mut handles = Vec::new();
+    for i in 0..10 {
+        let db = db.clone();
+        let task_id = task_id.clone();
+        handles.push(tokio::spawn(async move {
+            let repo = TaskAttemptRepository::new(db);
+            let id = new_attempt_id();
+            let dispatch_key = format!("{task_id}:worker:race-{i}");
+            repo.create_or_get_pending(CreateTaskAttemptParams {
+                id: &id,
+                task_id: &task_id,
+                role: "worker",
+                dispatch_key: &dispatch_key,
+                session_id: None,
+                attempt_seq: None,
+            })
+            .await
+        }));
+    }
+
+    let mut seqs = std::collections::HashSet::new();
+    for handle in handles {
+        let attempt = handle
+            .await
+            .expect("allocation task must not panic")
+            .expect("concurrent auto allocation must retry past the (task_id, attempt_seq) race");
+        assert!(
+            seqs.insert(attempt.attempt_seq),
+            "attempt_seq {} allocated twice",
+            attempt.attempt_seq
+        );
+    }
+    assert_eq!(seqs.len(), 10, "every concurrent insert must land a row");
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn completed_blocker_parent_summaries_orders_and_bounds() {
     let db = test_db();
