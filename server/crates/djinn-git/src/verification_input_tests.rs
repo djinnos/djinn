@@ -958,3 +958,6 @@ async fn intermediate_symlink_escape_fails_closed_for_repo_and_external_walks() 
     });
     assert_unavailable(configured_fingerprint(fixture.path(), &config).await);
 }
+
+#[path = "verification_input_conformance_tests.rs"]
+mod conformance;
