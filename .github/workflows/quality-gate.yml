@@ -1118,7 +1118,7 @@ jobs:
       - name: Run deterministic qa smoke and coverage gate
         run: |
           set +e
-          target/debug/djinn-qa run --qa-profile smoke-ci --concurrency 8 --repo-root .. --evidence-dir ../qa/evidence/smoke-ci
+          target/debug/djinn-qa run --qa-profile smoke-ci --concurrency 8 --repo-root .. --evidence-dir qa/evidence/smoke-ci
           runner_status=$?
           target/debug/djinn-qa coverage --profile smoke-ci --format json --repo-root .. --evidence ../qa/evidence/smoke-ci --output ../qa/evidence/smoke-ci/coverage.json
           coverage_status=$?
