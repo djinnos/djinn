@@ -288,3 +288,21 @@ async fn setup_pass_is_excluded_and_only_post_authoring_fingerprint_is_stored() 
         Some("tree:post-authoring edit")
     );
 }
+
+#[tokio::test]
+async fn cancellation_precedes_injected_stored_outcome() {
+    let (ctx, request) = fixture().await;
+    request.cancellation.cancel();
+    assert!(matches!(
+        coordinate_final_verification(request.clone(), &ctx).await,
+        FinalVerificationRecordingOutcome::Ineligible { reason, .. }
+            if reason == "cancelled before resolution"
+    ));
+    assert!(
+        VerifyRunRepository::new(ctx.db.clone())
+            .list_for_task_run(&request.task_run_id)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}
