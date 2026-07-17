@@ -5,5 +5,6 @@ mod helpers_tests;
 mod lsp_schema_tests;
 mod memory_mutation_contract_tests;
 mod proposal_update_handler_tests;
+mod retrieval_outcomes_dispatch_tests;
 mod schema_tests;
 mod truncate_tests;

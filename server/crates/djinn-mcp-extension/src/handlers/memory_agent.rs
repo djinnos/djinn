@@ -15,8 +15,9 @@ use djinn_control_plane::tools::memory_tools::{
     ExtractedAuditParams as SharedMemoryExtractedAuditParams,
     HealthParams as SharedMemoryHealthParams, ListParams as SharedMemoryListParams,
     OrphansParams as SharedMemoryOrphansParams, ReadParams as SharedMemoryReadParams,
-    RecallTraceParams as SharedMemoryRecallTraceParams, SearchParams as SharedMemorySearchParams,
-    WriteParams as SharedMemoryWriteParams,
+    RecallTraceParams as SharedMemoryRecallTraceParams,
+    RetrievalOutcomesReportParams as SharedMemoryRetrievalOutcomesReportParams,
+    SearchParams as SharedMemorySearchParams, WriteParams as SharedMemoryWriteParams,
 };
 use djinn_db::AgentRepository;
 
@@ -121,6 +122,30 @@ pub(crate) async fn call_memory_recall_trace(
     .unwrap_or_else(
         |_| serde_json::json!({ "error": "failed to serialize memory_recall_trace response" }),
     ))
+}
+
+pub(crate) async fn call_memory_retrieval_outcomes_report(
+    ctx: &dyn ExtensionContext,
+    arguments: &Option<serde_json::Map<String, serde_json::Value>>,
+    project_path: &str,
+) -> Result<serde_json::Value, String> {
+    let p: MemoryRetrievalOutcomesReportParams =
+        parse_args_stripping(arguments, &["project", "project_id"])?;
+    let server = djinn_control_plane::server::DjinnMcpServer::new(ctx.mcp_state());
+    Ok(serde_json::to_value(
+        djinn_control_plane::tools::memory_tools::ops::memory_retrieval_outcomes_report(
+            &server,
+            SharedMemoryRetrievalOutcomesReportParams {
+                project: Some(project_path.to_owned()),
+                project_id: None,
+                start: p.start,
+                end: p.end,
+                timezone: p.timezone,
+            },
+        )
+        .await,
+    )
+    .unwrap())
 }
 
 pub(crate) async fn call_memory_build_context(

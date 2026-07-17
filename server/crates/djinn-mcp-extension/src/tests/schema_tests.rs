@@ -81,6 +81,7 @@ fn expected_safety_tuple(name: &str) -> Option<(bool, bool, bool, bool)> {
         | "memory_broken_links"
         | "memory_orphans"
         | "memory_recall_trace"
+        | "memory_retrieval_outcomes_report"
         | "agent_metrics"
         | "pr_review_context" => Some(read_only),
         "code_search" | "github_search" | "code_graph" => Some(open_world_read_only),
@@ -202,6 +203,11 @@ fn tool_schemas_include_role_specific_tools() {
     assert!(planner.iter().any(|n| n == "memory_orphans"));
     assert!(planner.iter().any(|n| n == "memory_build_context"));
     assert!(planner.iter().any(|n| n == "memory_recall_trace"));
+    assert!(
+        planner
+            .iter()
+            .any(|n| n == "memory_retrieval_outcomes_report")
+    );
     assert!(planner.iter().any(|n| n == "agent_metrics"));
     assert!(planner.iter().any(|n| n == "agent_create"));
 
@@ -216,6 +222,11 @@ fn tool_schemas_include_role_specific_tools() {
     assert!(architect.iter().any(|n| n == "memory_edit"));
     assert!(architect.iter().any(|n| n == "memory_move"));
     assert!(architect.iter().any(|n| n == "memory_recall_trace"));
+    assert!(
+        architect
+            .iter()
+            .any(|n| n == "memory_retrieval_outcomes_report")
+    );
     assert!(architect.iter().any(|n| n == "submit_work"));
     // Architect must NOT have code-writing tools.
     assert!(!architect.iter().any(|n| n == "write"));
@@ -431,6 +442,47 @@ fn memory_recall_trace_schema_discriminates_list_and_detail_modes() {
         "Exact recorded rollout label filter."
     );
     assert!(variants[1]["not"]["anyOf"].is_array());
+}
+
+#[test]
+fn memory_retrieval_outcomes_report_schema_is_explicit_observational_contract() {
+    let schema = serde_json::to_value(shared_schemas::tool_memory_retrieval_outcomes_report())
+        .expect("serialize memory_retrieval_outcomes_report schema");
+    assert_eq!(schema["name"], "memory_retrieval_outcomes_report");
+    assert_eq!(
+        schema["inputSchema"]["required"],
+        serde_json::json!(["start", "end", "timezone"])
+    );
+    for field in ["start", "end"] {
+        assert_eq!(
+            schema["inputSchema"]["properties"][field]["format"],
+            "date-time"
+        );
+    }
+    assert_eq!(
+        schema["inputSchema"]["properties"]["timezone"]["minLength"],
+        1
+    );
+
+    let description = schema["description"]
+        .as_str()
+        .expect("report schema has a description");
+    for required in [
+        "observational only",
+        "no causal or randomized-experiment claim",
+        "deduplicated within each entry_point/rollout_label/outcome cell",
+        "can overlap and are non-additive",
+        "denominator, count, rate, not-applicable state, attempt-number distribution",
+        "unattributed/unrecorded diagnostic",
+        "no fallback through task_id",
+        "protected 30-day trace window",
+        "rejected without clipping",
+    ] {
+        assert!(
+            description.contains(required),
+            "description missing {required:?}"
+        );
+    }
 }
 
 /// Phase 1 c4r6: the memory_search tool description must encode the query-style
