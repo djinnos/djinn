@@ -112,10 +112,25 @@
     ) -> String {
         let event_bus = djinn_core::events::EventBus::noop();
         let task_repo = djinn_db::TaskRepository::new(db.clone(), event_bus);
+        let creator_key = uuid::Uuid::now_v7();
+        let creator = djinn_db::UserRepository::new(db.clone())
+            .upsert_from_github(
+                creator_key.as_u128() as i64,
+                &format!("refinement-spike-fixture-{creator_key}"),
+                None,
+                None,
+            )
+            .await
+            .unwrap();
         task_repo
-            .create_in_project(
+            .create_in_project_with_provenance(
                 project_id,
                 None,
+                djinn_db::EffectiveCreatorProvenance {
+                    explicit_user_id: Some(&creator.id),
+                    source_task_id: None,
+                    proposal_id: None,
+                },
                 &format!("Evidence spike {short_label}"),
                 "Read-only evidence spike fixture",
                 "",

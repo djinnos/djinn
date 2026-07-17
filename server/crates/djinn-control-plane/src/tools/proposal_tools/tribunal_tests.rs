@@ -489,9 +489,14 @@ What happens if D fails?
 
         let targets = repo.targets(&proposal.id).await.unwrap();
         let spike = task_repo
-            .create_in_project(
+            .create_in_project_with_provenance(
                 &targets[0].project_id,
                 None,
+                EffectiveCreatorProvenance {
+                    explicit_user_id: Some(&user_id),
+                    source_task_id: None,
+                    proposal_id: None,
+                },
                 "Spike: Y feasibility",
                 "Can Y handle load?",
                 "Can Y handle load?",
