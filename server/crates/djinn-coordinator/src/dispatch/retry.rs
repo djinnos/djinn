@@ -1550,6 +1550,43 @@ impl CoordinatorActor {
                             .await;
                     }
 
+                    // Monitored-reopen starvation fix (incident v1ej,
+                    // 2026-07-17): an unconsumed row whose directive is a
+                    // `reopen` decision IS the monitored-reopen contract in
+                    // flight — the arbiter already decided, and the one
+                    // monitored worker attempt is what must run next.  Routing
+                    // "Lead arbiter" here (and then short-circuiting on
+                    // `AlreadyExistsUnconsumed`) starves that worker dispatch
+                    // on every tick once `intervention_count` reaches this
+                    // rung, so the monitored attempt never starts and the task
+                    // wedges until the 24h arbitration deadline.  Yield to the
+                    // normal dispatch pass instead: it applies the arbiter's
+                    // `exclude_models`, injects the directive one-shot
+                    // (`mark_directive_injected`), the respawn guard dedupes
+                    // while the monitored worker is live, and the supervisor's
+                    // terminal hook (`complete_monitored_reopen`) consumes the
+                    // row.  The deadline-expiry and decision-failure-cap parks
+                    // above still fire first, so an abandoned reopen cannot
+                    // yield forever.
+                    let is_monitored_reopen = existing
+                        .directive
+                        .as_ref()
+                        .and_then(|directive| directive.get("decision"))
+                        .and_then(serde_json::Value::as_str)
+                        == Some("reopen");
+                    if is_monitored_reopen {
+                        tracing::info!(
+                            task_id = %task.short_id,
+                            hold_cycle = cycle,
+                            directive_injected = existing.directive_injected,
+                            monitored_reopen_count = existing.monitored_reopen_count,
+                            "CoordinatorActor: second-strike — unconsumed arbitration row is a \
+                             monitored reopen; yielding to normal dispatch so the monitored \
+                             worker attempt can run"
+                        );
+                        return false;
+                    }
+
                     tracing::info!(
                         task_id = %task.short_id,
                         hold_cycle = cycle,
