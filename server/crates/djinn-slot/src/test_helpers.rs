@@ -487,6 +487,16 @@ pub fn agent_context_from_db_with_dispatcher(
     // No-op host callbacks for tests
     struct NoopCallbacks;
     impl crate::host::SlotHostCallbacks for NoopCallbacks {
+        fn final_verification_outcome_for_test(
+            &self,
+            _request: &crate::final_verification::FinalVerificationCoordinatorRequest,
+        ) -> Option<crate::final_verification::FinalVerificationRecordingOutcome> {
+            Some(crate::final_verification::FinalVerificationRecordingOutcome::Stored {
+                verification_attempt_id: uuid::Uuid::now_v7().to_string(),
+                verify_run_id: uuid::Uuid::now_v7().to_string(),
+            })
+        }
+
         fn interrupt_paused_worker_session<'a>(
             &'a self,
             _task_id: &'a str,
