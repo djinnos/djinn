@@ -142,13 +142,10 @@ pub async fn materialize_read_source(
     git_ref: &str,
     dest: &std::path::Path,
 ) -> Result<(), String> {
-    if dest.exists() {
-        return Err(format!(
-            "read-source destination already exists and will not be replaced: {}",
-            dest.display()
-        ));
-    }
     let mirror = mirror_path(project_id);
+    if dest.exists() {
+        return validate_read_source(&mirror, git_ref, dest).await;
+    }
     if !mirror.exists() {
         return Err(format!(
             "no mirror for project {project_id} on this host — cannot check it out"
@@ -175,9 +172,10 @@ pub async fn materialize_read_source(
         mirror.display().to_string(),
         staging.display().to_string(),
     ];
-    run_git_command(mirror_root(), args)
-        .await
-        .map_err(|e| format!("git clone --local failed: {e}"))?;
+    if let Err(e) = run_git_command(mirror_root(), args).await {
+        let _ = tokio::fs::remove_dir_all(&staging).await;
+        return Err(format!("git clone --local failed: {e}"));
+    }
     if let Err(e) = run_git_command(
         staging.clone(),
         vec!["checkout".into(), "--detach".into(), git_ref.to_string()],
@@ -190,6 +188,59 @@ pub async fn materialize_read_source(
     tokio::fs::rename(&staging, dest)
         .await
         .map_err(|e| format!("atomic read-source publish failed: {e}"))
+}
+
+async fn validate_read_source(
+    mirror: &std::path::Path,
+    git_ref: &str,
+    dest: &std::path::Path,
+) -> Result<(), String> {
+    if !dest.is_dir() || !dest.join(".git").is_dir() {
+        return Err(format!(
+            "partial read-source destination: {}",
+            dest.display()
+        ));
+    }
+    let expected = run_git_command(
+        mirror.to_path_buf(),
+        vec!["rev-parse".into(), format!("{git_ref}^{{commit}}")],
+    )
+    .await
+    .map_err(|e| format!("resolve read-source revision failed: {e}"))?
+    .stdout;
+    let origin = run_git_command(
+        dest.to_path_buf(),
+        vec!["config".into(), "--get".into(), "remote.origin.url".into()],
+    )
+    .await
+    .map_err(|e| format!("inspect read-source identity failed: {e}"))?
+    .stdout;
+    let head = run_git_command(dest.to_path_buf(), vec!["rev-parse".into(), "HEAD".into()])
+        .await
+        .map_err(|e| format!("inspect read-source HEAD failed: {e}"))?
+        .stdout;
+    let status = run_git_command(
+        dest.to_path_buf(),
+        vec![
+            "status".into(),
+            "--porcelain=v1".into(),
+            "--ignored".into(),
+            "--untracked-files=all".into(),
+        ],
+    )
+    .await
+    .map_err(|e| format!("inspect read-source cleanliness failed: {e}"))?
+    .stdout;
+    if std::path::Path::new(origin.trim()) != mirror
+        || head.trim() != expected.trim()
+        || !status.trim().is_empty()
+    {
+        return Err(format!(
+            "read-source destination is dirty or identity/revision-mismatched: {}",
+            dest.display()
+        ));
+    }
+    Ok(())
 }
 
 /// Parse one `git grep -n` line of the form `<ref>:<file>:<line>:<text>`.

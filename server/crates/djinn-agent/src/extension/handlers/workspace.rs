@@ -183,8 +183,16 @@ pub(crate) async fn call_shell(
         c
     };
 
+    let sandbox_scope = if run_dir == worktree_path {
+        sandbox::SandboxScope::Worktree(worktree_path)
+    } else {
+        sandbox::SandboxScope::ReadSource {
+            root: &run_dir,
+            cwd: &run_dir,
+        }
+    };
     sandbox::SANDBOX
-        .apply(worktree_path, &mut cmd)
+        .apply(sandbox_scope, &mut cmd)
         .map_err(|e| e.to_string())?;
 
     cmd.current_dir(&run_dir)

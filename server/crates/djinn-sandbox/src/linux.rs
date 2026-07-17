@@ -13,7 +13,7 @@ use landlock::{
     ABI, Access, AccessFs, PathBeneath, PathFd, Ruleset, RulesetAttr, RulesetCreatedAttr,
 };
 
-use crate::{Sandbox, djinn_cache_dir, git_dir, git_metadata_dir};
+use crate::{Sandbox, SandboxScope, djinn_cache_dir, git_dir, git_metadata_dir};
 
 /// Landlock-based filesystem sandbox for Linux ≥ 5.13.
 ///
@@ -30,8 +30,10 @@ use crate::{Sandbox, djinn_cache_dir, git_dir, git_metadata_dir};
 pub struct LandlockSandbox;
 
 impl Sandbox for LandlockSandbox {
-    fn apply(&self, worktree_path: &Path, cmd: &mut std::process::Command) -> Result<()> {
+    fn apply(&self, scope: SandboxScope<'_>, cmd: &mut std::process::Command) -> Result<()> {
         use std::os::unix::process::CommandExt;
+
+        scope.validate()?;
 
         // Redirect temp to a Landlock-writable, disk-backed dir. The K8s task-run
         // Pod sets TMPDIR=/workspace (job.rs) so the host supervisor's TempDir
@@ -49,8 +51,10 @@ impl Sandbox for LandlockSandbox {
         // emptyDir for large mirror clones.
         cmd.env("TMPDIR", "/var/tmp");
 
-        let worktree = worktree_path.to_path_buf();
-        let git_meta = git_metadata_dir(worktree_path);
+        let (writable_worktree, git_meta) = match scope {
+            SandboxScope::Worktree(path) => (Some(path.to_path_buf()), git_metadata_dir(path)),
+            SandboxScope::ReadSource { .. } => (None, None),
+        };
 
         // Resolve + create the djinn cache dir in the PARENT process, before
         // fork. `create_dir_all` and `tracing::warn!` are not async-signal-safe,
@@ -66,7 +70,7 @@ impl Sandbox for LandlockSandbox {
         unsafe {
             cmd.pre_exec(move || {
                 apply_policy(
-                    &worktree,
+                    writable_worktree.as_deref(),
                     git_meta.as_deref(),
                     cache_dir_for_rule.as_deref(),
                 )
@@ -106,7 +110,7 @@ fn prepare_cache_dir() -> Option<PathBuf> {
 /// logging, and any allocator-heavy work must happen in the parent before
 /// fork — see `LandlockSandbox::apply` and `prepare_cache_dir`.
 fn apply_policy(
-    worktree: &Path,
+    worktree: Option<&Path>,
     git_meta: Option<&Path>,
     cache_dir: Option<&Path>,
 ) -> anyhow::Result<()> {
@@ -131,8 +135,6 @@ fn apply_policy(
         .create()?
         // Read + execute access everywhere on the filesystem.
         .add_rule(PathBeneath::new(PathFd::new("/")?, read_exec))?
-        // Full (read + write) access to the task worktree.
-        .add_rule(PathBeneath::new(PathFd::new(worktree)?, full_access))?
         // Full access to /var/tmp (disk-backed) and /dev/null et al.
         // /tmp is intentionally excluded: on Linux it's typically tmpfs and
         // writes there can silently consume RAM.
@@ -140,6 +142,10 @@ fn apply_policy(
         .add_rule(PathBeneath::new(PathFd::new("/dev/null")?, full_access))?
         .add_rule(PathBeneath::new(PathFd::new("/dev/zero")?, full_access))?
         .add_rule(PathBeneath::new(PathFd::new("/dev/urandom")?, full_access))?;
+
+    if let Some(worktree) = worktree {
+        ruleset = ruleset.add_rule(PathBeneath::new(PathFd::new(worktree)?, full_access))?;
+    }
 
     // Cargo shared build cache directory.
     if let Some(ref dir) = cargo_build_dir.filter(|d| d.is_dir()) {
@@ -179,7 +185,7 @@ fn apply_policy(
     // Full .git/ dir needs write access for merge operations: object writes
     // (.git/objects/), ref updates (.git/refs/, .git/packed-refs), and
     // per-worktree state (.git/worktrees/{id}/ORIG_HEAD.lock etc.).
-    if let Some(dot_git) = git_dir(worktree) {
+    if let Some(dot_git) = worktree.and_then(git_dir) {
         if dot_git.is_dir() {
             ruleset = ruleset.add_rule(PathBeneath::new(PathFd::new(&dot_git)?, full_access))?;
         }
@@ -208,7 +214,7 @@ mod tests {
         cmd.env("TMPDIR", "/workspace");
 
         LandlockSandbox
-            .apply(Path::new("/tmp"), &mut cmd)
+            .apply(SandboxScope::Worktree(Path::new("/tmp")), &mut cmd)
             .expect("apply should succeed");
 
         let tmpdir = cmd

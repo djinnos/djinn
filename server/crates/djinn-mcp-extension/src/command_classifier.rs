@@ -743,7 +743,7 @@ fn is_file_mutation_command(cmd: &str) -> bool {
 /// - Absolute paths (outside the worktree — we cannot verify containment)
 /// - Parent-directory traversal (`..`)
 /// - `.git/` directory and its contents
-/// - `.djinn-read-sources/` (read-only sibling checkouts)
+/// - `.task-runtime/read-sources/` (owner-project read-only caches)
 /// - Durable data paths (project metadata and lock files)
 fn path_is_protected(path: &str) -> bool {
     // Absolute paths.
@@ -763,8 +763,10 @@ fn path_is_protected(path: &str) -> bool {
     {
         return true;
     }
-    // .djinn-read-sources (read-only sibling checkouts).
-    if path.starts_with(".djinn-read-sources") || path.contains("/.djinn-read-sources") {
+    // Canonical owner-project read-source caches.
+    if path.starts_with(".task-runtime/read-sources")
+        || path.contains("/.task-runtime/read-sources")
+    {
         return true;
     }
     // Durable data paths — project metadata that should never be casually

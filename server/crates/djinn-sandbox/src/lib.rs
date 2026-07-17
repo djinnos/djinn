@@ -35,7 +35,41 @@ pub use chat_shell::{ChatShellError, ChatShellRequest, ChatShellResult, ChatShel
 /// (Landlock on Linux, Seatbelt on macOS). FallbackSandbox performs heuristic
 /// path validation when the OS backend is unavailable.
 pub trait Sandbox: Send + Sync {
-    fn apply(&self, worktree_path: &Path, cmd: &mut std::process::Command) -> Result<()>;
+    fn apply(&self, scope: SandboxScope<'_>, cmd: &mut std::process::Command) -> Result<()>;
+}
+
+/// Typed filesystem authority for one shell invocation. Keeping read sources
+/// distinct prevents backends from ever adding them to a writable allowlist.
+#[derive(Clone, Copy, Debug)]
+pub enum SandboxScope<'a> {
+    Worktree(&'a Path),
+    ReadSource { root: &'a Path, cwd: &'a Path },
+}
+
+impl SandboxScope<'_> {
+    pub fn validate(self) -> Result<()> {
+        match self {
+            Self::Worktree(path) => validate_directory(path, "worktree"),
+            Self::ReadSource { root, cwd } => {
+                validate_directory(root, "read-source root")?;
+                validate_directory(cwd, "read-source cwd")?;
+                anyhow::ensure!(
+                    cwd.canonicalize()?.starts_with(root.canonicalize()?),
+                    "read-source cwd escapes mounted root"
+                );
+                Ok(())
+            }
+        }
+    }
+}
+
+fn validate_directory(path: &Path, label: &str) -> Result<()> {
+    anyhow::ensure!(
+        path.is_dir(),
+        "{label} does not exist or is not a directory: {}",
+        path.display()
+    );
+    Ok(())
 }
 
 // ─── Global singleton ─────────────────────────────────────────────────────────
@@ -55,7 +89,15 @@ pub static SANDBOX: LazyLock<Box<dyn Sandbox>> = LazyLock::new(detect_backend);
 pub struct FallbackSandbox;
 
 impl Sandbox for FallbackSandbox {
-    fn apply(&self, worktree_path: &Path, _cmd: &mut std::process::Command) -> Result<()> {
+    fn apply(&self, scope: SandboxScope<'_>, _cmd: &mut std::process::Command) -> Result<()> {
+        if matches!(scope, SandboxScope::ReadSource { .. }) {
+            return Err(anyhow::anyhow!(
+                "read-source shell requires an OS read-only sandbox"
+            ));
+        }
+        let SandboxScope::Worktree(worktree_path) = scope else {
+            unreachable!()
+        };
         if !worktree_path.exists() || !worktree_path.is_dir() {
             return Err(anyhow::anyhow!(
                 "workdir does not exist or is not a directory: {}",

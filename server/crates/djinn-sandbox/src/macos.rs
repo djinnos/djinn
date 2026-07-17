@@ -6,7 +6,7 @@ use std::path::Path;
 
 use anyhow::Result;
 
-use crate::{Sandbox, djinn_cache_dir, git_metadata_dir};
+use crate::{Sandbox, SandboxScope, djinn_cache_dir, git_metadata_dir};
 
 /// Seatbelt (sandbox-exec) based filesystem sandbox for macOS.
 ///
@@ -21,14 +21,17 @@ use crate::{Sandbox, djinn_cache_dir, git_metadata_dir};
 pub struct SeatbeltSandbox;
 
 impl Sandbox for SeatbeltSandbox {
-    fn apply(&self, worktree_path: &Path, cmd: &mut std::process::Command) -> Result<()> {
-        let worktree = worktree_path
-            .to_str()
-            .ok_or_else(|| anyhow::anyhow!("worktree path contains non-UTF-8 characters"))?;
+    fn apply(&self, scope: SandboxScope<'_>, cmd: &mut std::process::Command) -> Result<()> {
+        scope.validate()?;
+        let worktree_path = match scope {
+            SandboxScope::Worktree(path) => Some(path),
+            SandboxScope::ReadSource { .. } => None,
+        };
 
         // Git worktree metadata dir (e.g. .git/worktrees/{id}/) needs write
         // access for merge/rebase lock files.
-        let git_meta_rule = git_metadata_dir(worktree_path)
+        let git_meta_rule = worktree_path
+            .and_then(git_metadata_dir)
             .and_then(|p| p.to_str().map(|s| s.to_owned()))
             .map(|m| format!("(allow file-write* (subpath \"{m}\"))"))
             .unwrap_or_default();
@@ -70,12 +73,16 @@ impl Sandbox for SeatbeltSandbox {
             None => String::new(),
         };
 
+        let worktree_rule = worktree_path
+            .and_then(Path::to_str)
+            .map(|p| format!("(allow file-write* (subpath \"{p}\"))"))
+            .unwrap_or_default();
         let policy = format!(
             "(version 1)\
              (allow default)\
              (allow file-read*)\
              (deny file-write*)\
-             (allow file-write* (subpath \"{worktree}\"))\
+             {worktree_rule}\
              {git_meta_rule}\
              {cargo_build_rule}\
              {cache_rule}\
