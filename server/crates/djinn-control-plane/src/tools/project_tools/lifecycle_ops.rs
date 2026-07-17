@@ -30,37 +30,6 @@ async fn git_fetch_in(path: &str) -> Result<(), String> {
     crate::tools::git_ops::git_fetch_in(path).await
 }
 
-/// Content seeded into `.djinn/.gitignore` when a project is added.
-///
-/// This covers the `.djinn/` directory tree (including worktree metadata
-/// and any scratch files that land under `.djinn/`).  The `worktrees/`
-/// entry prevents the server-managed worktree clones from being tracked;
-/// the scratch/editor/cache entries are **defense-in-depth** — the
-/// authoritative junk filter lives in `Workspace::commit` staging
-/// (`djinn-workspace/src/commit_safety.rs`).
-const DJINN_GITIGNORE: &str = "\
-worktrees/
-# ── Defense-in-depth: common worker scratch / editor / cache droppings ──
-# These patterns mirror the authoritative commit-safety filter in
-# djinn-workspace::commit_safety but only cover files that land under
-# .djinn/.  They are a convenience layer so untracked scratch never
-# even shows up in `git status` for this subtree.
-patch.txt
-patch*
-test.txt
-test2.txt
-test3.txt
-*.swp
-*.swo
-*~
-*.bak
-*.tmp
-*.log
-.DS_Store
-Thumbs.db
-.cache/
-";
-
 /// Content seeded into the project root `.gitignore` when a project is
 /// added and no root `.gitignore` exists yet.
 ///
@@ -423,20 +392,7 @@ impl DjinnMcpServer {
             }
         }
 
-        // 6. Seed .djinn/ conveniences and defense-in-depth ignores.
-        //
-        // `.djinn/.gitignore` covers the .djinn/ subtree (worktree metadata,
-        // internal scratch).  A root-level `.gitignore` is seeded only when
-        // none exists yet — for repos that already have one the authoritative
-        // commit-safety filter in Workspace::commit remains the sole guard.
-        let djinn_dir = std::path::Path::new(&clone_path).join(".djinn");
-        let _ = fs::create_dir_all(&djinn_dir).await;
-        let gitignore_path = djinn_dir.join(".gitignore");
-        if !gitignore_path.exists() {
-            let _ = fs::write(&gitignore_path, DJINN_GITIGNORE).await;
-        }
-
-        // Defense-in-depth: seed root-level scratch ignores only if the
+        // 6. Seed root-level scratch ignores only if the
         // project has no `.gitignore` at all (common for fresh/empty repos;
         // cloned repos almost always have one already).
         let root_gitignore = std::path::Path::new(&clone_path).join(".gitignore");
@@ -582,62 +538,78 @@ mod tests {
         assert_eq!(ordered, vec!["a", "b"]);
     }
 
-    // ── Defense-in-depth gitignore template tests ──────────────────────
-
-    /// Verify `.djinn/.gitignore` content includes all expected scratch
-    /// patterns.  These are defense-in-depth only; the authoritative
-    /// filter is `Workspace::commit` staging
-    /// (`djinn-workspace/src/commit_safety`).
-    #[test]
-    fn djinn_gitignore_includes_worktrees_ignore() {
+    fn run_git(directory: &Path, args: &[&str]) {
+        let output = std::process::Command::new("git")
+            .args(args)
+            .current_dir(directory)
+            .output()
+            .expect("git command should spawn");
         assert!(
-            DJINN_GITIGNORE.contains("worktrees/"),
-            "DJINN_GITIGNORE must contain worktrees/ to prevent tracking worktree clones"
+            output.status.success(),
+            "git {} failed:\n{}",
+            args.join(" "),
+            String::from_utf8_lossy(&output.stderr)
         );
     }
 
-    #[test]
-    fn djinn_gitignore_includes_scratch_patterns() {
-        for pattern in &["patch.txt", "test.txt", "test2.txt", "test3.txt"] {
+    fn assert_no_project_local_compatibility_files(project_root: &Path) {
+        for path in [".djinn", ".djinn/.gitignore", "AGENTS.md", "CONVENTIONS.md"] {
             assert!(
-                DJINN_GITIGNORE.contains(pattern),
-                "DJINN_GITIGNORE missing scratch pattern: {pattern}"
-            );
-        }
-        // patch* glob covers patch.txt, patch.json, patch_output, etc.
-        assert!(
-            DJINN_GITIGNORE.contains("patch*"),
-            "DJINN_GITIGNORE must contain patch* glob pattern"
-        );
-    }
-
-    #[test]
-    fn djinn_gitignore_includes_editor_droppings() {
-        for pattern in &["*.swp", "*.swo", "*~", "*.bak", ".DS_Store", "Thumbs.db"] {
-            assert!(
-                DJINN_GITIGNORE.contains(pattern),
-                "DJINN_GITIGNORE missing editor/cache pattern: {pattern}"
+                !project_root.join(path).exists(),
+                "fresh project root must not contain {path}"
             );
         }
     }
 
     #[test]
-    fn djinn_gitignore_includes_temp_log_patterns() {
-        for pattern in &["*.tmp", "*.log"] {
-            assert!(
-                DJINN_GITIGNORE.contains(pattern),
-                "DJINN_GITIGNORE missing temp/log pattern: {pattern}"
-            );
-        }
+    fn ordinary_project_clone_does_not_create_local_djinn_or_conventions() {
+        let temp = tempfile::tempdir().expect("create temp dir");
+        let source = temp.path().join("ordinary-source");
+        let clone = temp.path().join("ordinary-clone");
+        std::fs::create_dir(&source).expect("create source repository");
+        run_git(&source, &["init", "-q"]);
+        run_git(&source, &["config", "user.email", "test@example.com"]);
+        run_git(&source, &["config", "user.name", "test"]);
+        std::fs::write(source.join("README.md"), "ordinary repository\n")
+            .expect("write source file");
+        run_git(&source, &["add", "README.md"]);
+        run_git(&source, &["commit", "-qm", "initial commit"]);
+        run_git(
+            temp.path(),
+            &[
+                "clone",
+                "-q",
+                source.to_str().unwrap(),
+                clone.to_str().unwrap(),
+            ],
+        );
+
+        assert_no_project_local_compatibility_files(&clone);
     }
 
     #[test]
-    fn djinn_gitignore_includes_cache_dir() {
-        assert!(
-            DJINN_GITIGNORE.contains(".cache/"),
-            "DJINN_GITIGNORE must exclude .cache/ directory"
+    fn empty_bare_project_clone_does_not_create_local_djinn_or_conventions() {
+        let temp = tempfile::tempdir().expect("create temp dir");
+        let bare_remote = temp.path().join("empty.git");
+        let clone = temp.path().join("empty-clone");
+        run_git(
+            temp.path(),
+            &["init", "--bare", "-q", bare_remote.to_str().unwrap()],
         );
+        run_git(
+            temp.path(),
+            &[
+                "clone",
+                "-q",
+                bare_remote.to_str().unwrap(),
+                clone.to_str().unwrap(),
+            ],
+        );
+
+        assert_no_project_local_compatibility_files(&clone);
     }
+
+    // ── Defense-in-depth root gitignore template tests ─────────────────
 
     /// Verify the root-level scratch gitignore includes expected patterns
     /// (all root-anchored so they don't leak into fixture/testdata dirs).
@@ -771,14 +743,9 @@ mod tests {
         );
     }
 
-    /// Both templates document their defense-in-depth nature.
+    /// The root template documents its defense-in-depth nature.
     #[test]
-    fn gitignore_templates_document_defense_in_depth() {
-        assert!(
-            DJINN_GITIGNORE.contains("defense-in-depth")
-                || DJINN_GITIGNORE.contains("Defense-in-depth"),
-            "DJINN_GITIGNORE should document its defense-in-depth nature"
-        );
+    fn root_scratch_gitignore_documents_defense_in_depth() {
         assert!(
             DJINN_ROOT_SCRATCH_GITIGNORE.contains("defense-in-depth")
                 || DJINN_ROOT_SCRATCH_GITIGNORE.contains("Defense-in-depth"),
@@ -786,14 +753,9 @@ mod tests {
         );
     }
 
-    /// Both templates reference the authoritative commit-safety filter.
+    /// The root template references the authoritative commit-safety filter.
     #[test]
-    fn gitignore_templates_reference_authoritative_filter() {
-        assert!(
-            DJINN_GITIGNORE.contains("commit_safety")
-                || DJINN_GITIGNORE.contains("Workspace::commit"),
-            "DJINN_GITIGNORE should reference the authoritative commit filter"
-        );
+    fn root_scratch_gitignore_references_authoritative_filter() {
         assert!(
             DJINN_ROOT_SCRATCH_GITIGNORE.contains("commit_safety")
                 || DJINN_ROOT_SCRATCH_GITIGNORE.contains("Workspace::commit"),
@@ -801,26 +763,24 @@ mod tests {
         );
     }
 
-    /// Verify the templates do NOT contain fixture/testdata exclusions —
+    /// Verify the root template does NOT contain fixture/testdata exclusions —
     /// fixture directories must remain allowed (intentional test data).
     /// The check skips comment lines (starting with `#`) and blank lines
     /// so explanatory comments referring to `fixtures/`/`testdata/` are
     /// permitted.
     #[test]
-    fn gitignore_templates_preserve_fixture_directories() {
-        for template in &[DJINN_GITIGNORE, DJINN_ROOT_SCRATCH_GITIGNORE] {
-            let offending: Vec<&str> = template
-                .lines()
-                .map(|l| l.trim())
-                .filter(|l| !l.is_empty() && !l.starts_with('#'))
-                .filter(|l| l.contains("fixtures/") || l.contains("testdata/"))
-                .collect();
-            assert!(
-                offending.is_empty(),
-                "Template must not ignore fixture/testdata directories, \
-                 offending pattern lines: {offending:?}"
-            );
-        }
+    fn root_scratch_gitignore_preserves_fixture_directories() {
+        let offending: Vec<&str> = DJINN_ROOT_SCRATCH_GITIGNORE
+            .lines()
+            .map(|l| l.trim())
+            .filter(|l| !l.is_empty() && !l.starts_with('#'))
+            .filter(|l| l.contains("fixtures/") || l.contains("testdata/"))
+            .collect();
+        assert!(
+            offending.is_empty(),
+            "Template must not ignore fixture/testdata directories, \
+             offending pattern lines: {offending:?}"
+        );
     }
 
     /// End-to-end regression test for the reviewer feedback:
