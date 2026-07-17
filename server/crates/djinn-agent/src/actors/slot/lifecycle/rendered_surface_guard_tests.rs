@@ -122,6 +122,7 @@ fn assert_clean_tree(path: &Path) {
 fn all_role_schemas() -> Vec<(&'static str, Vec<serde_json::Value>)> {
     vec![
         ("worker", tool_schemas_worker()),
+        ("evidence_spike", tool_schemas_evidence_spike()),
         ("reviewer", tool_schemas_reviewer()),
         ("lead", tool_schemas_lead()),
         ("planner", tool_schemas_planner()),
