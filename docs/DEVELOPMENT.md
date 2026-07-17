@@ -6,6 +6,16 @@ TypeScript, pnpm). The UI is compiled into the server binary via `rust-embed`,
 and the TypeScript MCP types are generated from the server's live tool schemas
 (`pnpm --dir ui mcp:types`).
 
+## Project worktree runtime
+
+Release N task and canonical-index worktrees are created only below the
+project-local `.task-runtime/worktrees/` parent. The former
+`.djinn/worktrees/` location is a migration and rollback input only: active
+legacy worktrees may remain usable at their recorded paths during the release
+window, but development tooling must not create or write new worktrees there.
+The canonical graph checkout is `.task-runtime/worktrees/_index`; entries
+starting with `_` are server infrastructure and are not task worktrees.
+
 ## Local stack (Tilt + kind)
 
 The full stack runs in a local [kind](https://kind.sigs.k8s.io) cluster,

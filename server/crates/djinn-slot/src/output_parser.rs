@@ -15,6 +15,17 @@ pub struct CompletionIntent {
     pub tool_use_id: String,
 }
 
+impl CompletionIntent {
+    /// Create the completion boundary for a lifecycle-generated submission.
+    /// Its payload stays empty until final verification has stored a pass.
+    pub fn auto_submit(task_run_id: &str) -> Self {
+        Self {
+            finalize_payload: serde_json::Value::Null,
+            tool_use_id: format!("auto-submit:{task_run_id}"),
+        }
+    }
+}
+
 /// Side-effect-free auto-submit settlement data prepared for lifecycle teardown.
 #[derive(Debug, Clone, PartialEq)]
 pub struct AutoSubmitSettlement {

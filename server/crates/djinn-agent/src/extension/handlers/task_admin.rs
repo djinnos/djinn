@@ -268,7 +268,7 @@ pub(super) async fn call_task_delete_branch(
         };
 
     // Task #8: the supervisor-driven dispatch path does not create user-
-    // visible `.djinn/worktrees/<short_id>` directories, so there's nothing
+    // visible `.task-runtime/worktrees/<short_id>` directories, so there's nothing
     // to tear down.  Just delete the local task branch; the remote branch
     // (if any) is cleaned up by the PR pipeline / GitHub settings.
     let base_branch = format!("task/{}", task.short_id);

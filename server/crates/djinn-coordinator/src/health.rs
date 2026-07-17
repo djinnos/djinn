@@ -103,7 +103,7 @@ pub(super) async fn sweep_stale_resources(
     };
 
     // Task #8: worktree GC removed — the supervisor-driven dispatch path no
-    // longer creates `.djinn/worktrees/<short_id>` directories, and the
+    // longer creates `.task-runtime/worktrees/<short_id>` directories, and the
     // session record's `worktree_path` column will be dropped in task #13.
     // We still walk per-project local branches to prune `task/<short_id>`
     // refs for closed, Djinn-authored tasks.

@@ -1,10 +1,11 @@
 //! Lifecycle teardown: delegates to host callbacks.
+use crate::final_verification::verify_completion_intent;
 use crate::finalize_handlers::{
     process_auto_submit_payload, process_finalize_payload_with_outcome,
     record_rejected_integrity_entry,
 };
 use crate::host::SlotContext;
-use crate::output_parser::{AutoSubmitSettlement, ParsedAgentOutput};
+use crate::output_parser::{AutoSubmitSettlement, CompletionIntent, ParsedAgentOutput};
 use crate::roles_support::AgentRole;
 use djinn_core::events::DjinnEventEnvelope;
 use djinn_db::repositories::verify_run::TaskRejectedSubmissionIntegrityRepository;
@@ -216,6 +217,23 @@ pub(crate) async fn settle_auto_submit_if_eligible(
         }
         emit_auto_submit_fallback_hook(task_id, ctx, "decision_skipped");
         return AutoSubmitSettlementOutcome::Skipped;
+    }
+    // This is the same intent/coordinator boundary as model-called submit_work.
+    // Constructing or persisting an auto-submit payload is forbidden until it
+    // returns `Stored`.
+    let intent = CompletionIntent::auto_submit(&settlement.task_run_id);
+    if let Err(error) = verify_completion_intent(
+        &intent,
+        task_id,
+        Some(&settlement.task_run_id),
+        tokio_util::sync::CancellationToken::new(),
+        ctx,
+    )
+    .await
+    {
+        tracing::warn!(task_id = %task_id, error = %error, "teardown: auto-submit final verification did not store a pass");
+        emit_auto_submit_fallback_hook(task_id, ctx, "final_verification_failed");
+        return AutoSubmitSettlementOutcome::Failed;
     }
     let payload = auto_submit_payload(task_id, settlement);
     if process_auto_submit_payload(&payload, task_id, ctx).await {
