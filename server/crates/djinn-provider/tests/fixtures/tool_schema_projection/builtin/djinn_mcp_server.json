@@ -10360,6 +10360,224 @@
     "concurrent_safe": false
   },
   {
+    "name": "memory_retrieval_outcomes_report",
+    "description": "Read an observational retrieval-injection outcomes report for an explicit project-scoped, timezone-aware RFC-3339 [start,end) interval. This operation is read-only and observational only: it makes no causal or randomized-experiment claim. A task run is deduplicated within each entry_point/rollout_label/outcome cell; cells with different cohort keys can overlap and are non-additive. The report includes all denominators, counts, rates, not-applicable states, attempt distributions, and unattributed/unrecorded diagnostics. Requests outside the protected 30-day retention window are rejected without clipping.",
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "required": [
+        "start",
+        "end",
+        "timezone"
+      ],
+      "additionalProperties": false,
+      "type": "object",
+      "properties": {
+        "project": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "project_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "start": {
+          "type": "string"
+        },
+        "end": {
+          "type": "string"
+        },
+        "timezone": {
+          "type": "string"
+        }
+      }
+    },
+    "outputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "$defs": {
+        "RetrievalOutcomesReportSchema": {
+          "type": "object",
+          "properties": {
+            "start": {
+              "type": "string"
+            },
+            "end": {
+              "type": "string"
+            },
+            "timezone": {
+              "type": "string"
+            },
+            "cells_are_non_additive": {
+              "description": "Different cohort-key cells can overlap and must not be summed.",
+              "type": "boolean"
+            },
+            "cells": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/RetrievalOutcomesReportCellSchema"
+              }
+            },
+            "diagnostics": {
+              "$ref": "#/$defs/RetrievalOutcomesReportDiagnosticsSchema"
+            }
+          },
+          "required": [
+            "start",
+            "end",
+            "timezone",
+            "cells_are_non_additive",
+            "cells",
+            "diagnostics"
+          ]
+        },
+        "RetrievalOutcomesReportCellSchema": {
+          "type": "object",
+          "properties": {
+            "entry_point": {
+              "type": "string"
+            },
+            "rollout_label": {
+              "type": "string"
+            },
+            "outcome": {
+              "type": "string"
+            },
+            "denominator": {
+              "description": "Distinct task runs in this cohort cell.",
+              "type": "integer",
+              "format": "int64"
+            },
+            "parked_reasons": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/RetrievalOutcomesRateSchema"
+              }
+            },
+            "merge_queue": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/RetrievalOutcomesRateSchema"
+              }
+            },
+            "review": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/RetrievalOutcomesRateSchema"
+              }
+            },
+            "attempts": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/RetrievalOutcomesAttemptSchema"
+              }
+            }
+          },
+          "required": [
+            "entry_point",
+            "rollout_label",
+            "outcome",
+            "denominator",
+            "parked_reasons",
+            "merge_queue",
+            "review",
+            "attempts"
+          ]
+        },
+        "RetrievalOutcomesRateSchema": {
+          "type": "object",
+          "properties": {
+            "state": {
+              "type": "string"
+            },
+            "count": {
+              "type": "integer",
+              "format": "int64"
+            },
+            "rate": {
+              "type": "number",
+              "format": "double"
+            }
+          },
+          "required": [
+            "state",
+            "count",
+            "rate"
+          ]
+        },
+        "RetrievalOutcomesAttemptSchema": {
+          "type": "object",
+          "properties": {
+            "attempt_seq": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "int32"
+            },
+            "count": {
+              "type": "integer",
+              "format": "int64"
+            },
+            "rate": {
+              "type": "number",
+              "format": "double"
+            }
+          },
+          "required": [
+            "count",
+            "rate"
+          ]
+        },
+        "RetrievalOutcomesReportDiagnosticsSchema": {
+          "type": "object",
+          "properties": {
+            "unattributed_trace_count": {
+              "description": "Traces without exact task_run_id; excluded from rates and never task_id-joined.",
+              "type": "integer",
+              "format": "int64"
+            },
+            "unrecorded_run_count": {
+              "description": "Eligible runs with no durable trace.",
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          "required": [
+            "unattributed_trace_count",
+            "unrecorded_run_count"
+          ]
+        }
+      },
+      "properties": {
+        "report": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RetrievalOutcomesReportSchema"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "error": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "readOnly": false,
+    "destructive": true,
+    "idempotent": false,
+    "openWorld": false,
+    "concurrent_safe": false
+  },
+  {
     "name": "memory_run_enrichment",
     "description": "Run the best-effort LLM memory enrichment pass for a project. Persists claim/entity nodes and typed implicit edges (builds_on / contradicts / supersedes / exemplifies) through the widened note_associations substrate. Proposal-aware: also includes proposals targeting the project as first-class graph entities and persists note↔proposal / proposal↔proposal edges through the heterogeneous memory_entity_associations substrate. All persistence is best-effort: provider or parse failures are surfaced as warnings, never as blocking errors. Set background=true to fire-and-forget on a tokio task; the response then returns immediately with status=queued. Concurrency: the pass yields cooperatively so memory_graph stays responsive while enrichment runs.",
     "inputSchema": {
