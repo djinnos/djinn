@@ -1,4 +1,5 @@
 use super::ops;
+use super::revision_readers;
 use super::*;
 
 #[tool_router(router = memory_reads_router, vis = "pub(super)")]
@@ -10,6 +11,50 @@ impl DjinnMcpServer {
         Parameters(p): Parameters<ReadParams>,
     ) -> Json<MemoryNoteResponse> {
         Json(ops::memory_read(self, p).await)
+    }
+
+    /// Return a note's immutable revision history from the ledger,
+    /// newest-first, with stable cursor pagination. Retained deleted-note
+    /// history requires audit authorization; live pre-ledger notes return an
+    /// empty `migration_cutover` history. Never consults git.
+    #[tool(
+        description = "Return a note's immutable ledger revision history, newest-first by note sequence, with bounded cursor pagination (default 50, max 200). Retained deleted-note history is available to audit-authorized callers; a live pre-ledger note returns an empty history with history_start=migration_cutover. Ledger-backed: no git fallback."
+    )]
+    pub async fn memory_history(
+        &self,
+        Parameters(p): Parameters<HistoryParams>,
+    ) -> Json<MemoryHistoryResponse> {
+        Json(revision_readers::note_history(self, p).await)
+    }
+
+    /// Render a deterministic unified text diff between two explicit
+    /// content-bearing ledger revisions of one note. Both endpoints must be
+    /// created/updated/deleted events for the same project and note, and the
+    /// from-revision must be older than the to-revision. Intervening
+    /// non-content events are returned alongside the diff.
+    #[tool(
+        description = "Render a deterministic unified text diff between two explicit ledger revisions of one note, from the from-revision's content_before snapshot to the to-revision's content_after snapshot. Endpoints must be content-bearing (created/updated/deleted) events in the same project and note, ordered oldest to newest; confidence_changed or extraction_skipped endpoints are rejected. Intervening non-content events are included in the response. Ledger-backed: no git fallback."
+    )]
+    pub async fn memory_diff(
+        &self,
+        Parameters(p): Parameters<DiffParams>,
+    ) -> Json<MemoryDiffResponse> {
+        Json(revision_readers::note_diff(self, p).await)
+    }
+
+    /// Return every ledger revision event attributed to one session or one
+    /// task run, newest-first by (created_at, id), with bounded cursor
+    /// pagination. Exactly one of session_id or task_run_id must be provided.
+    /// Content bodies are redacted when the caller lacks note-read
+    /// permission.
+    #[tool(
+        description = "Return all immutable ledger revision events attributed to exactly one session_id or task_run_id, newest-first by (created_at, id), with bounded cursor pagination (default 100, max 500). All event kinds are included. Event metadata is always visible; content bodies are redacted when the caller lacks note-read permission."
+    )]
+    pub async fn memory_session_diff(
+        &self,
+        Parameters(p): Parameters<SessionDiffParams>,
+    ) -> Json<MemorySessionDiffResponse> {
+        Json(revision_readers::session_diff(self, p).await)
     }
 
     /// List notes in a folder with depth control. Returns compact summaries

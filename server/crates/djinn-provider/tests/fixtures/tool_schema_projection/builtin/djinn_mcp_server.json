@@ -8124,6 +8124,224 @@
     "concurrent_safe": false
   },
   {
+    "name": "memory_diff",
+    "description": "Render a deterministic unified text diff between two explicit ledger revisions of one note, from the from-revision's content_before snapshot to the to-revision's content_after snapshot. Endpoints must be content-bearing (created/updated/deleted) events in the same project and note, ordered oldest to newest; confidence_changed or extraction_skipped endpoints are rejected. Intervening non-content events are included in the response. Ledger-backed: no git fallback.",
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "required": [
+        "project",
+        "note_id",
+        "from_revision_id",
+        "to_revision_id"
+      ],
+      "type": "object",
+      "properties": {
+        "project": {
+          "description": "Absolute path to the project directory.",
+          "type": "string"
+        },
+        "note_id": {
+          "description": "Note UUID both revisions belong to.",
+          "type": "string"
+        },
+        "from_revision_id": {
+          "description": "Older endpoint revision UUID. Must be a content-bearing\n(created/updated/deleted) event for `note_id`.",
+          "type": "string"
+        },
+        "to_revision_id": {
+          "description": "Newer endpoint revision UUID. Must be a content-bearing\n(created/updated/deleted) event for `note_id`.",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "outputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "$defs": {
+        "MemoryDiffEndpoint": {
+          "description": "Endpoint metadata for one side of a pairwise revision diff.",
+          "type": "object",
+          "properties": {
+            "revision_id": {
+              "type": "string"
+            },
+            "note_seq": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "int64"
+            },
+            "event_kind": {
+              "type": "string"
+            },
+            "created_at": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "revision_id",
+            "event_kind",
+            "created_at"
+          ]
+        },
+        "MemoryRevisionEvent": {
+          "description": "One immutable ledger event projected for the MCP reader surfaces.",
+          "type": "object",
+          "properties": {
+            "revision_id": {
+              "type": "string"
+            },
+            "note_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "note_seq": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "int64"
+            },
+            "event_kind": {
+              "description": "Ledger event kind: created, updated, deleted, confidence_changed, or\nextraction_skipped.",
+              "type": "string"
+            },
+            "content_before": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "content_after": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "confidence_before": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "format": "double"
+            },
+            "confidence_after": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "format": "double"
+            },
+            "actor_kind": {
+              "description": "Trusted actor kind: human, agent, or system.",
+              "type": "string"
+            },
+            "actor_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "subsystem": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "session_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "task_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "task_run_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "reason": {
+              "type": "string"
+            },
+            "created_at": {
+              "type": "string"
+            },
+            "content_redacted": {
+              "description": "True when `content_before`/`content_after` were withheld because the\ncaller lacks note-read permission.",
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "revision_id",
+            "event_kind",
+            "actor_kind",
+            "reason",
+            "created_at",
+            "content_redacted"
+          ]
+        }
+      },
+      "type": "object",
+      "properties": {
+        "from": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/MemoryDiffEndpoint"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "to": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/MemoryDiffEndpoint"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "diff": {
+          "description": "Deterministic unified text diff rendered from the explicit endpoint\nsnapshots (from.content_before → to.content_after).",
+          "type": "string"
+        },
+        "intervening_events": {
+          "description": "Non-content events (confidence_changed, extraction_skipped) between\nthe endpoints, newest-first.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/MemoryRevisionEvent"
+          }
+        },
+        "error": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "diff",
+        "intervening_events"
+      ]
+    },
+    "readOnly": false,
+    "destructive": true,
+    "idempotent": false,
+    "openWorld": false,
+    "concurrent_safe": false
+  },
+  {
     "name": "memory_edit",
     "description": "Edit an existing note. Operations: \"append\" (add to end), \"prepend\" (add after frontmatter), \"find_replace\" (exact text replacement, requires find_text), \"replace_section\" (replace content under a markdown heading, requires section). Use append to build large notes incrementally after memory_write creates the initial note. When type is provided and differs from current type, the note is automatically moved to the correct folder for the new type.",
     "inputSchema": {
@@ -9008,6 +9226,191 @@
       },
       "required": [
         "retrieval"
+      ]
+    },
+    "readOnly": false,
+    "destructive": true,
+    "idempotent": false,
+    "openWorld": false,
+    "concurrent_safe": false
+  },
+  {
+    "name": "memory_history",
+    "description": "Return a note's immutable ledger revision history, newest-first by note sequence, with bounded cursor pagination (default 50, max 200). Retained deleted-note history is available to audit-authorized callers; a live pre-ledger note returns an empty history with history_start=migration_cutover. Ledger-backed: no git fallback.",
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "required": [
+        "project",
+        "note_id"
+      ],
+      "type": "object",
+      "properties": {
+        "project": {
+          "description": "Absolute path to the project directory.",
+          "type": "string"
+        },
+        "note_id": {
+          "description": "Note UUID whose revision history is requested.",
+          "type": "string"
+        },
+        "limit": {
+          "description": "Page size (default 50, max 200).",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int64"
+        },
+        "before_cursor": {
+          "description": "Opaque cursor from a previous response's `next_cursor`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "outputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "$defs": {
+        "MemoryRevisionEvent": {
+          "description": "One immutable ledger event projected for the MCP reader surfaces.",
+          "type": "object",
+          "properties": {
+            "revision_id": {
+              "type": "string"
+            },
+            "note_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "note_seq": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "int64"
+            },
+            "event_kind": {
+              "description": "Ledger event kind: created, updated, deleted, confidence_changed, or\nextraction_skipped.",
+              "type": "string"
+            },
+            "content_before": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "content_after": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "confidence_before": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "format": "double"
+            },
+            "confidence_after": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "format": "double"
+            },
+            "actor_kind": {
+              "description": "Trusted actor kind: human, agent, or system.",
+              "type": "string"
+            },
+            "actor_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "subsystem": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "session_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "task_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "task_run_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "reason": {
+              "type": "string"
+            },
+            "created_at": {
+              "type": "string"
+            },
+            "content_redacted": {
+              "description": "True when `content_before`/`content_after` were withheld because the\ncaller lacks note-read permission.",
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "revision_id",
+            "event_kind",
+            "actor_kind",
+            "reason",
+            "created_at",
+            "content_redacted"
+          ]
+        }
+      },
+      "type": "object",
+      "properties": {
+        "events": {
+          "description": "Newest-first revision events for the note.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/MemoryRevisionEvent"
+          }
+        },
+        "next_cursor": {
+          "description": "Cursor for the next (older) page; null when the page is exhausted.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "history_start": {
+          "description": "`ledger` when retained events back the history, `migration_cutover`\nfor a live pre-ledger note with no retained events.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "error": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "events"
       ]
     },
     "readOnly": false,
@@ -10776,6 +11179,193 @@
       },
       "required": [
         "results"
+      ]
+    },
+    "readOnly": false,
+    "destructive": true,
+    "idempotent": false,
+    "openWorld": false,
+    "concurrent_safe": false
+  },
+  {
+    "name": "memory_session_diff",
+    "description": "Return all immutable ledger revision events attributed to exactly one session_id or task_run_id, newest-first by (created_at, id), with bounded cursor pagination (default 100, max 500). All event kinds are included. Event metadata is always visible; content bodies are redacted when the caller lacks note-read permission.",
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "required": [
+        "project"
+      ],
+      "type": "object",
+      "properties": {
+        "project": {
+          "description": "Absolute path to the project directory.",
+          "type": "string"
+        },
+        "session_id": {
+          "description": "Session UUID selector. Exactly one of `session_id` or `task_run_id`\nmust be provided.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "task_run_id": {
+          "description": "Task-run UUID selector. Exactly one of `session_id` or `task_run_id`\nmust be provided.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "limit": {
+          "description": "Page size (default 100, max 500).",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int64"
+        },
+        "before_cursor": {
+          "description": "Opaque cursor from a previous response's `next_cursor`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "outputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "$defs": {
+        "MemoryRevisionEvent": {
+          "description": "One immutable ledger event projected for the MCP reader surfaces.",
+          "type": "object",
+          "properties": {
+            "revision_id": {
+              "type": "string"
+            },
+            "note_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "note_seq": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "int64"
+            },
+            "event_kind": {
+              "description": "Ledger event kind: created, updated, deleted, confidence_changed, or\nextraction_skipped.",
+              "type": "string"
+            },
+            "content_before": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "content_after": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "confidence_before": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "format": "double"
+            },
+            "confidence_after": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "format": "double"
+            },
+            "actor_kind": {
+              "description": "Trusted actor kind: human, agent, or system.",
+              "type": "string"
+            },
+            "actor_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "subsystem": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "session_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "task_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "task_run_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "reason": {
+              "type": "string"
+            },
+            "created_at": {
+              "type": "string"
+            },
+            "content_redacted": {
+              "description": "True when `content_before`/`content_after` were withheld because the\ncaller lacks note-read permission.",
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "revision_id",
+            "event_kind",
+            "actor_kind",
+            "reason",
+            "created_at",
+            "content_redacted"
+          ]
+        }
+      },
+      "type": "object",
+      "properties": {
+        "events": {
+          "description": "Newest-first revision events by (created_at, id) for the selected\nsession or task run, spanning every event kind.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/MemoryRevisionEvent"
+          }
+        },
+        "next_cursor": {
+          "description": "Cursor for the next (older) page; null when the page is exhausted.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "error": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "events"
       ]
     },
     "readOnly": false,

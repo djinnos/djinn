@@ -91,10 +91,11 @@ async fn all_tool_schemas_includes_cross_domain_tools() {
     }
 }
 
-/// The file-era diff/history tools and ADR-057 mount settings were removed as
-/// one public-schema cutover. Keep this assertion alongside the positive
-/// registration check so clients cannot rediscover either compatibility
-/// surface through serialized MCP schemas.
+/// The file-era diff/history tools were removed and later restored as
+/// ledger-backed readers over the immutable revision ledger. Keep this
+/// assertion alongside the positive registration check so clients rediscover
+/// only the approved ledger shapes — never the retired permalink/SHA/git
+/// surfaces or the ADR-057 mount compatibility settings.
 #[tokio::test]
 async fn all_tool_schemas_excludes_retired_file_era_memory_surfaces() {
     let state = AppState::new(test_helpers::create_test_db(), CancellationToken::new());
@@ -105,10 +106,10 @@ async fn all_tool_schemas_excludes_retired_file_era_memory_surfaces() {
         .iter()
         .filter_map(|tool| tool.get("name").and_then(Value::as_str))
         .collect::<std::collections::HashSet<_>>();
-    for retired in ["memory_diff", "memory_history"] {
+    for restored in ["memory_diff", "memory_history", "memory_session_diff"] {
         assert!(
-            !names.contains(retired),
-            "retired file-era tool remains registered: {retired}"
+            names.contains(restored),
+            "ledger-backed reader tool is not registered: {restored}"
         );
     }
 
@@ -117,6 +118,23 @@ async fn all_tool_schemas_excludes_retired_file_era_memory_surfaces() {
             names.contains(retained),
             "DB-backed memory tool should remain registered: {retained}"
         );
+    }
+
+    // The restored readers take note/revision/session selectors only. The
+    // file-era permalink/SHA inputs must not reappear.
+    for name in ["memory_diff", "memory_history", "memory_session_diff"] {
+        let tool = tools
+            .iter()
+            .find(|tool| tool.get("name").and_then(Value::as_str) == Some(name))
+            .unwrap_or_else(|| panic!("missing {name} schema"));
+        let input_schema =
+            serde_json::to_string(tool.get("inputSchema").unwrap_or(&Value::Null)).unwrap();
+        for retired in ["permalink", "sha", "git"] {
+            assert!(
+                !input_schema.contains(retired),
+                "{name} input schema still exposes the retired file-era vocabulary: {retired}"
+            );
+        }
     }
 
     let serialized = serde_json::to_string(&tools).expect("tool schemas serialize");
