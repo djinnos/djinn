@@ -588,9 +588,6 @@ async fn mcp_memory_catalog_returns_structured_catalog() {
 }
 
 #[tokio::test]
-// memory_reindex tool was deleted alongside the on-disk reindex pipeline
-// (notes are db-only now). Removing the contract shape test.
-#[tokio::test]
 async fn mcp_memory_build_context_follows_wikilinks() {
     let caller = TrustedRevisionCallerContext::authenticated_human("memory-tools-test-user")
         .expect("test revision caller must be non-blank");

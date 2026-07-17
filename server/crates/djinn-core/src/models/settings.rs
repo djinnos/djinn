@@ -249,6 +249,7 @@ mod tests {
 
     #[test]
     fn from_db_value_parses_typed_format() {
+        let raw = r#"{"dispatch_limit":100,"models":["openai/gpt-4o"]}"#;
         let s = DjinnSettings::from_db_value(raw);
         assert_eq!(s.dispatch_limit, Some(100));
         assert_eq!(s.models.as_ref().unwrap(), &vec!["openai/gpt-4o"]);
@@ -283,6 +284,8 @@ mod tests {
         // DB rows written under the prior schema carried langfuse_* keys.
         // Ensure the strip path preserves the other typed fields instead of
         // falling through to the lossy legacy migrator (which would drop
+        // them).
+        let raw = r#"{"dispatch_limit":42,"langfuse_public_key":"pk","langfuse_secret_key":"sk","langfuse_endpoint":"http://x"}"#;
         let s = DjinnSettings::from_db_value(raw);
         assert_eq!(s.dispatch_limit, Some(42));
     }
