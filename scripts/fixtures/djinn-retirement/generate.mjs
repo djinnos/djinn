@@ -7,7 +7,8 @@
  *   - db-selection.json   — one synthetic DB-selection record per tracked
  *                            `.djinn` knowledge permalink, with a
  *                            normalized_sha256 that matches the committed
- *                            file's normalized content hash at HEAD so the
+ *                            file's normalized content hash at the immutable
+ *                            pre-cutover revision so the
  *                            guard's happy path resolves to `equivalent`.
  *   - db-guidance.json    — one synthetic DB-guidance record per affected
  *                            permalink, carrying classification/disposition,
@@ -16,12 +17,10 @@
  *
  * The fixtures are SYNTHETIC and HERMETIC: the uuids are deterministic sha256
  * derivatives of the permalink, not real production DB uuids. They exist so
- * the strict guard can run against the live repository HEAD without production
- * credentials. The real DB reconciliation task (kvuf) will replace these with
- * actual DB-record selections.
+ * the strict guard can run without production credentials.
  *
  * Usage:
- *   node scripts/fixtures/djinn-retirement/generate.mjs [--output-dir <dir>] [--revision HEAD]
+ *   node scripts/fixtures/djinn-retirement/generate.mjs --revision <source-sha> [--output-dir <dir>]
  *
  * Default output dir is the fixture directory next to this script.
  */
@@ -48,7 +47,7 @@ function deterministicUuid(prefix, permalink) {
 }
 
 function listKnowledgePaths(revision, { cwd } = {}) {
-  const bytes = execFileSync('git', ['ls-files', '-z', '.djinn/*'], {
+  const bytes = execFileSync('git', ['ls-tree', '-rz', '--name-only', revision, '--', '.djinn'], {
     cwd,
     maxBuffer: 64 * 1024 * 1024,
   });
@@ -115,7 +114,7 @@ function main(argv) {
   const { values } = parseArgs({
     args: argv,
     options: {
-      revision: { type: 'string', short: 'r', default: 'HEAD' },
+      revision: { type: 'string', short: 'r' },
       'output-dir': { type: 'string', short: 'o', default: DEFAULT_OUTPUT_DIR },
       help: { type: 'boolean', short: 'h' },
     },
@@ -125,7 +124,7 @@ function main(argv) {
   if (values.help) {
     process.stdout.write(
       [
-        'usage: generate.mjs [-r|--revision HEAD] [-o|--output-dir <dir>]',
+        'usage: generate.mjs -r|--revision <source-sha> [-o|--output-dir <dir>]',
         '',
         'Regenerates the hermetic db-selection.json and db-guidance.json fixtures',
         'from the tracked .djinn knowledge set at the given revision.',
@@ -134,7 +133,10 @@ function main(argv) {
     );
     return;
   }
-  const revision = values.revision || 'HEAD';
+  if (!values.revision) {
+    throw new Error('--revision is required after cutover; use the source SHA recorded in deletion-ledger.json');
+  }
+  const revision = values.revision;
   const outDir = resolve(values['output-dir'] || DEFAULT_OUTPUT_DIR);
   mkdirSync(outDir, { recursive: true });
 
