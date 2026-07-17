@@ -3136,9 +3136,8 @@ mod tests {
         let id = "018f0000-0000-7000-8000-000000000001";
         for (operation, expected) in [
             (
-                format!(
-                    r#"{{"kind":"patch","target_note_id":"bad","before_text":"old","after_text":"new","confidence_delta":0.0,"reason":"why"}}"#
-                ),
+                r#"{"kind":"patch","target_note_id":"bad","before_text":"old","after_text":"new","confidence_delta":0.0,"reason":"why"}"#
+                    .to_string(),
                 "invalid_note_id",
             ),
             (

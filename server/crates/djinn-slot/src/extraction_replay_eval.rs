@@ -151,8 +151,8 @@ pub fn validate_extraction_replay_fixtures(
             .and_then(serde_json::Value::as_str)
             .ok_or_else(|| format!("{} response lacks accepted note", fixture.id))?;
         if !content.contains(&fixture.required_discriminative_text)
-            || (!assess_note_quality(&fixture.expected_note_type, content).is_underspecified)
-                != fixture.expect_adr_054_quality
+            || assess_note_quality(&fixture.expected_note_type, content).is_underspecified
+                == fixture.expect_adr_054_quality
         {
             return Err(format!("{} response cannot satisfy rubric", fixture.id));
         }
@@ -768,9 +768,9 @@ pub fn score_extraction_replay(
             .any(|observation| observation.note_type == fixture.expected_note_type);
         let adr_054_quality = captured.iter().any(|observation| {
             observation.note_type == fixture.expected_note_type
-                && (!assess_note_quality(&observation.note_type, &observation.content)
-                    .is_underspecified)
-                    == fixture.expect_adr_054_quality
+                && assess_note_quality(&observation.note_type, &observation.content)
+                    .is_underspecified
+                    != fixture.expect_adr_054_quality
         });
         let must_not_duplicate = fixture
             .must_not_duplicate_target

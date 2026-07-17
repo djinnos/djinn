@@ -289,6 +289,16 @@ pub(crate) async fn supervisor_pr_open(
                     {
                         Ok(pr) => pr,
                         Err(e) => {
+                            if let Some(outcome) = adopt_recorded_pr_after_create_conflict(
+                                &e,
+                                &task_repo,
+                                task,
+                                &merge_result_commit_sha,
+                            )
+                            .await
+                            {
+                                return outcome;
+                            }
                             let create_error =
                                 render_github_write_error("GitHub PR creation failed", &e);
                             let reopen_error =
@@ -323,6 +333,16 @@ pub(crate) async fn supervisor_pr_open(
         {
             Ok(pr) => pr,
             Err(e) => {
+                if let Some(outcome) = adopt_recorded_pr_after_create_conflict(
+                    &e,
+                    &task_repo,
+                    task,
+                    &merge_result_commit_sha,
+                )
+                .await
+                {
+                    return outcome;
+                }
                 return pr_open_failure_outcome(
                     "POST",
                     format!("/repos/{owner}/{repo_name}/pulls"),
@@ -381,6 +401,70 @@ pub(crate) async fn supervisor_pr_open(
 const PR_ALREADY_EXISTS_HINT: &str =
     "a PR for this branch already exists — adopt it via the existing PR URL";
 const TASK_OUTCOME_BODY_EXCERPT_BYTES: usize = 512;
+
+/// Last-resort self-heal when `create_pull_request` still reports
+/// "already exists" after its internal adoption retries: a concurrent
+/// PR-open (the in-pod supervisor and the coordinator's approved re-cycle
+/// can race) may have created the PR and recorded it on the task row.
+/// Adopt that URL and finish the flow instead of failing the run — the
+/// board is already correct, and a `Failed { pr_open }` here surfaces a
+/// conflict envelope to the operator for a PR that opened fine (task mbfw,
+/// 2026-07-16, during GitHub's degraded-REST-API incident).
+async fn adopt_recorded_pr_after_create_conflict(
+    err: &GitHubApiError,
+    task_repo: &TaskRepository,
+    task: &djinn_core::models::Task,
+    head_sha: &str,
+) -> Option<TaskRunOutcome> {
+    if !err.is_pr_already_exists() {
+        return None;
+    }
+    let pr_url = match task_repo.get(&task.id).await {
+        Ok(Some(fresh)) => fresh.pr_url.filter(|url| !url.is_empty()),
+        Ok(None) => None,
+        Err(e) => {
+            tracing::warn!(
+                task_id = %task.short_id,
+                error = %e,
+                "supervisor PR-open: failed to re-read task while healing create conflict"
+            );
+            None
+        }
+    }?;
+
+    // Mirror the success path: the racing winner set pr_url before
+    // transitioning, so re-issue the transition here in case it crashed in
+    // between — otherwise the task sits in `approved` and re-runs PR-open
+    // every tick. Already-transitioned tasks warn-skip exactly like the
+    // success path.
+    if let Err(e) = task_repo
+        .transition(
+            &task.id,
+            TransitionAction::PrCreated,
+            "supervisor",
+            "system",
+            None,
+            None,
+        )
+        .await
+    {
+        tracing::warn!(
+            task_id = %task.id,
+            error = %e,
+            "supervisor PR-open: pr_created transition skipped while healing create conflict"
+        );
+    }
+
+    tracing::info!(
+        task_id = %task.short_id,
+        pr_url = %pr_url,
+        "Supervisor: PR create conflicted but a concurrent open already recorded the PR — adopted"
+    );
+    Some(TaskRunOutcome::PrOpened {
+        url: pr_url,
+        sha: head_sha.to_string(),
+    })
+}
 
 fn pr_open_failure_outcome(
     method: &'static str,
