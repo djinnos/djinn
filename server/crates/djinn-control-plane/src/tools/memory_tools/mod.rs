@@ -8,6 +8,7 @@ use rmcp::{Json, handler::server::wrapper::Parameters, schemars, tool, tool_rout
 use crate::server::DjinnMcpServer;
 use djinn_db::NoteRepository;
 use djinn_db::ProjectRepository;
+use djinn_memory::Note;
 
 pub(crate) mod types;
 pub use types::*;
@@ -55,7 +56,6 @@ mod recall_trace_tests;
 mod retrieval_outcomes_report_tests;
 #[cfg(test)]
 mod run_enrichment_tests;
-#[cfg(test)]
 #[cfg(test)]
 mod write_dedup_prompt_tests;
 #[cfg(test)]

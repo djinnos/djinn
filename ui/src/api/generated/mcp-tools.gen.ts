@@ -10607,12 +10607,6 @@ export namespace SettingsGetOutputSchema {
   [k: string]: number
   }
   /**
-   * Enable the ADR-057 Linux memory mount for filesystem-first note workflows. Disabled by default; requires a Linux build with the `memory-mount` cargo feature. The mounted path serves the current session-selected task/worktree view when available and otherwise falls back to the canonical `main` view.
-   */
-  /**
-   * Absolute filesystem path where the Linux FUSE mount should be attached. The directory must already exist and be empty at startup. This path hosts the current session-selected memory view; Djinn does not expose additional branch directories in this slice.
-   */
-  /**
    * Ordered list of models available to agents, e.g. `["openai/gpt-4o"]`.
    */
   models?: string[]
@@ -10652,12 +10646,6 @@ export namespace SettingsSetInputSchema {
    * Maximum number of tasks to dispatch per cycle. Omit to keep current value.
    */
   dispatch_limit?: number
-  /**
-   * Enable the Linux-only ADR-057 memory FUSE mount for filesystem-first note workflows. Disabled by default; requires a Linux build with the `memory-mount` cargo feature. The mounted path serves the current session-selected task/worktree view when available and otherwise falls back to the canonical `main` view.
-   */
-  /**
-   * Absolute path for the Linux memory mount. The directory must already exist and be empty at startup. This path hosts the current session-selected memory view; no additional branch directories are exposed in this slice.
-   */
   /**
    * Ordered list of models available to all agents (e.g. ["openai/gpt-4o"]). Omit to keep current value.
    * This is the deployment FALLBACK list (used for tasks with no creator and

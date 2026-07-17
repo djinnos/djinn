@@ -162,8 +162,6 @@ pub(crate) struct ProviderCatalogHealth {
     last_refresh_error: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
 /// Format a `SystemTime` as RFC3339, degrading to `None` on out-of-range or
 /// formatting errors so the health endpoint cannot panic.
 fn format_system_time_rfc3339(ts: SystemTime) -> Option<String> {

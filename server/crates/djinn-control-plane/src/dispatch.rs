@@ -32,10 +32,9 @@ use crate::tools::image_tools::{
 };
 use crate::tools::memory_tools::{
     AssociationsParams, BrokenLinksParams, BuildContextParams, CatalogParams, DeleteParams,
-    DiffParams, EditParams, ExtractedAuditParams, GraphParams, HealthParams, HistoryParams,
-    ListParams, MemoryConfirmParams, MoveParams, OrphansParams, ReadParams, RecallTraceParams,
-    RecentParams, RepairEmbeddingsParams, RetrievalOutcomesReportParams, RunEnrichmentParams,
-    SearchParams, TaskRefsParams, WriteParams,
+    EditParams, ExtractedAuditParams, GraphParams, HealthParams, ListParams, MemoryConfirmParams,
+    MoveParams, OrphansParams, ReadParams, RecallTraceParams, RecentParams, RepairEmbeddingsParams,
+    RetrievalOutcomesReportParams, RunEnrichmentParams, SearchParams, TaskRefsParams, WriteParams,
 };
 use crate::tools::org_policy_tools::{OrgPolicyGetParams, OrgPolicySetParams};
 use crate::tools::pr_review_tools::PrReviewContextParams;

@@ -1,7 +1,7 @@
 use axum::body::Body;
 use std::time::{Duration, SystemTime};
 
-use axum::http::header::{ACCEPT, CONTENT_TYPE};
+use axum::http::header::CONTENT_TYPE;
 use djinn_core::clock::{Clock, SystemClock};
 use http_body_util::BodyExt;
 use tower::ServiceExt;

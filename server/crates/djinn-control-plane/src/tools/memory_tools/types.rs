@@ -391,8 +391,6 @@ pub struct RecentParams {
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
-#[derive(Deserialize, schemars::JsonSchema)]
-#[derive(Deserialize, schemars::JsonSchema)]
 pub struct BuildContextParams {
     pub project: String,
     /// Memory URI: "memory://folder/note", "folder/note", or "folder/*" for all
@@ -779,8 +777,6 @@ pub struct MemoryRecentResponse {
     pub error: Option<String>,
 }
 
-#[derive(Serialize, schemars::JsonSchema)]
-#[derive(Serialize, schemars::JsonSchema)]
 #[derive(Serialize, schemars::JsonSchema)]
 pub struct MemoryBuildContextResponse {
     pub primary: Vec<MemoryNoteView>,

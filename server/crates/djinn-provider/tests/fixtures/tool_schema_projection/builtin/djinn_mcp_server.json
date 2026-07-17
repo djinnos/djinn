@@ -8123,7 +8123,6 @@
     "openWorld": false,
     "concurrent_safe": false
   },
-
   {
     "name": "memory_edit",
     "description": "Edit an existing note. Operations: \"append\" (add to end), \"prepend\" (add after frontmatter), \"find_replace\" (exact text replacement, requires find_text), \"replace_section\" (replace content under a markdown heading, requires section). Use append to build large notes incrementally after memory_write creates the initial note. When type is provided and differs from current type, the note is automatically moved to the correct folder for the new type.",
@@ -9017,7 +9016,6 @@
     "openWorld": false,
     "concurrent_safe": false
   },
-
   {
     "name": "memory_list",
     "description": "List notes in a folder with depth control. Returns compact summaries without full content.",
@@ -22742,7 +22740,8 @@
           "items": {
             "type": "string"
           }
-        },
+        }
+      },
       "type": "object"
     },
     "outputSchema": {
