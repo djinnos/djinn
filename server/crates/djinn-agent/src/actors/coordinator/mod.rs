@@ -10,7 +10,10 @@
 // bridges that gap.
 
 // Re-export everything except the items we shadow.
-pub use djinn_coordinator::build_admission::{BuildAdmissionController, BuildAdmissionMode};
+pub use djinn_coordinator::build_admission::{
+    AdmissionSeedReport, BuildAdmissionController, BuildAdmissionMode, BuildAdmissionReadiness,
+    allocate_server_epoch,
+};
 pub use djinn_coordinator::{
     AutoMergeTracker, BackgroundWorkTracker, BreakerDebugEntry, CoordinatorDebugSnapshot,
     CoordinatorError, CoordinatorHandle, CoordinatorStatus, DebugCooldown, DebugDispatchState,

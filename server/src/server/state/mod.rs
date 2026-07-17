@@ -479,19 +479,30 @@ impl AppState {
         let (events, _) = broadcast::channel(EVENT_CHANNEL_CAPACITY);
         let mirror = Arc::new(MirrorManager::new(mirrors_root()));
         let workspace_store = Arc::new(WorkspaceStore::new(workspaces_root(), Arc::clone(&mirror)));
+        // Each server process allocates a unique epoch so recovery can
+        // distinguish rows created by a predecessor from rows created here.
+        // The hostname is retained as a human-readable prefix; the UUIDv7
+        // suffix guarantees uniqueness across restarts and replicas.
+        let server_epoch = format!(
+            "{}:{}",
+            std::env::var("HOSTNAME").unwrap_or_else(|_| "coordinator".to_owned()),
+            djinn_agent::actors::coordinator::allocate_server_epoch()
+        );
         let build_admission = match admission_config.mode {
             BuildAdmissionMode::Off => None,
             BuildAdmissionMode::Observe => Some(Arc::new(BuildAdmissionController::new(
                 Arc::new(djinn_db::AdmissionJournalRepository::new(db.clone())),
                 BuildAdmissionMode::Observe,
                 admission_config.cap,
-                std::env::var("HOSTNAME").unwrap_or_else(|_| "coordinator".to_owned()),
+                server_epoch,
             ))),
-            // Recovery owns the readiness handoff; Enforce starts fail-closed.
+            // Enforce starts fail-closed (JournalRecoveryIncomplete) until the
+            // durable journal is recovered and seeded before any inventory or
+            // task/warm create can run.
             BuildAdmissionMode::Enforce => Some(Arc::new(BuildAdmissionController::new_closed(
                 Arc::new(djinn_db::AdmissionJournalRepository::new(db.clone())),
                 admission_config.cap,
-                std::env::var("HOSTNAME").unwrap_or_else(|_| "coordinator".to_owned()),
+                server_epoch,
             ))),
         };
         Self {
@@ -726,6 +737,124 @@ impl AppState {
         // the production shape so `TestRuntime` and dev boxes that never
         // ran `initialize()` still get correct semantics.
         Arc::new(build_in_process_graph_warmer(self.clone())) as Arc<dyn GraphWarmerService>
+    }
+
+    /// Recover the durable build-admission journal and seed the controller
+    /// before any Kubernetes inventory or task/warm create can run.
+    ///
+    /// Enforce admission remains fail-closed until recovery completes. Observe
+    /// runs lifecycle/telemetry but never denies; Off has no admission coupling.
+    /// This is idempotent: a second call re-seeds from the journal without harm.
+    async fn initialize_build_admission_recovery(&self) {
+        let Some(admission) = self.inner.build_admission.clone() else {
+            // Off: no journal, no controller, no readiness coupling.
+            return;
+        };
+        match admission.recover_all_predecessors_and_seed().await {
+            Ok(report) => {
+                tracing::info!(
+                    mode = ?admission.mode(),
+                    retired_reserved = report.retired_reserved,
+                    marked_create_unknown = report.marked_create_unknown,
+                    seeded_rows = report.seeded_rows,
+                    readiness = ?report.readiness,
+                    "build_admission: recovered durable journal and seeded controller"
+                );
+            }
+            Err(error) => {
+                // Enforce fails closed: the journal gate records the unhealthy
+                // journal and every later gate stays pending, so admission
+                // keeps denying. Observe continues without denial (it never
+                // gated on readiness). A durable journal outage during
+                // recovery is a fail-closed condition for Enforce.
+                admission.mark_journal_unhealthy();
+                tracing::error!(
+                    %error,
+                    mode = ?admission.mode(),
+                    "build_admission: journal recovery failed; Enforce remains fail-closed"
+                );
+            }
+        }
+    }
+
+    /// Run the broad Kubernetes build-capable inventory and advance the
+    /// Enforce readiness gate.
+    ///
+    /// This MUST run after [`Self::initialize_build_admission_recovery`] (the
+    /// durable journal loads before any Kubernetes inventory) and after
+    /// [`Self::initialize_graph_warmer`] (the inventory rides the same client
+    /// selection). The gate fails closed: any inventory LIST error leaves
+    /// `InventoryPending` set so Enforce admission keeps denying until a real
+    /// inventory succeeds. The in-process runtime has no Kubernetes objects
+    /// to inventory, so its (empty) listing trivially completes the gate.
+    /// Observe records the same degradation but never denies.
+    async fn initialize_build_admission_inventory(&self) {
+        let Some(admission) = self.inner.build_admission.clone() else {
+            // Off: no controller, no readiness coupling.
+            return;
+        };
+        let warmer = self.inner.graph_warmer.read().await.clone();
+        let Some(warmer) = warmer else {
+            admission.mark_inventory_pending();
+            tracing::error!(
+                mode = ?admission.mode(),
+                "build_admission: no graph warmer available for inventory; Enforce remains fail-closed"
+            );
+            return;
+        };
+        match warmer.list_taskrun_jobs().await {
+            Ok(jobs) => {
+                admission.mark_inventory_ready();
+                tracing::info!(
+                    mode = ?admission.mode(),
+                    task_run_jobs = jobs.len(),
+                    readiness = ?admission.readiness(),
+                    "build_admission: Kubernetes inventory complete"
+                );
+            }
+            Err(error) => {
+                admission.mark_inventory_pending();
+                tracing::error!(
+                    %error,
+                    mode = ?admission.mode(),
+                    "build_admission: Kubernetes inventory failed; Enforce remains fail-closed"
+                );
+            }
+        }
+    }
+
+    /// Confirm the single-active topology gate and advance Enforce readiness.
+    ///
+    /// Called from [`Self::become_leader`], which runs only after this process
+    /// wins the coordinator advisory lock — the lock IS the single-active
+    /// topology gate for build admission. A standby pod never runs this, so
+    /// its Enforce admission stays fail-closed with `TopologyPending`.
+    fn confirm_build_admission_topology(&self) {
+        if let Some(admission) = self.inner.build_admission.clone() {
+            admission.mark_topology_ready();
+            tracing::info!(
+                mode = ?admission.mode(),
+                readiness = ?admission.readiness(),
+                "build_admission: single-active topology confirmed by coordinator leadership"
+            );
+        }
+    }
+
+    /// Begin graceful build-admission draining.
+    ///
+    /// New Enforce reservations are blocked while draining; in-flight permits
+    /// may still transition to terminal. Observe and Off are unaffected because
+    /// they never gated admission on readiness. Safety under forced process
+    /// loss does not depend on this cooperative shutdown: the durable journal
+    /// records pre-POST state, so a replacement recovers the same occupancy.
+    pub async fn begin_build_admission_draining(&self) {
+        if let Some(admission) = self.inner.build_admission.clone() {
+            admission.begin_draining();
+            tracing::info!(
+                mode = ?admission.mode(),
+                "build_admission: draining begun; new Enforce reservations blocked"
+            );
+        }
     }
 
     /// Pick the best available [`GraphWarmerService`] implementation and
@@ -1707,11 +1836,27 @@ impl AppState {
         // image controller) now start in `become_leader()` so only the
         // single lock-holding pod runs them. See `crate::leadership`.
 
+        // Build-admission journal recovery. The durable journal is loaded and
+        // recovered BEFORE any Kubernetes inventory or task/warm create can run.
+        // Enforce admission remains fail-closed until recovery seeds the
+        // controller from all active recovered rows and confirms occupancy is
+        // within the cap. Observe records degradation but never denies; Off has
+        // no admission coupling. This must precede `initialize_graph_warmer`
+        // because the warmer can create warm jobs under the shared cap.
+        self.initialize_build_admission_recovery().await;
+
         // Phase 3 PR 8: pick the canonical-graph warmer impl (K8s or
         // in-process) and cache it. This is just a cached handle (the actual
         // warm is single-flight-gated elsewhere), so it is safe on every pod
         // and the serving/chat path needs it regardless of leadership.
         self.initialize_graph_warmer().await;
+
+        // Build-admission Kubernetes inventory. This must follow BOTH the
+        // journal recovery above (the durable journal loads before any
+        // Kubernetes inventory) and the graph-warmer selection (the inventory
+        // rides the same client). Enforce stays fail-closed with
+        // `InventoryPending` until this LIST succeeds.
+        self.initialize_build_admission_inventory().await;
     }
 
     /// Start the subsystems that must run on **exactly one** pod: the
@@ -1727,6 +1872,12 @@ impl AppState {
     /// plane (which `initialize()` sets up) serves on every pod regardless.
     pub async fn become_leader(&self) {
         tracing::info!("become_leader: starting active coordinator subsystems");
+
+        // Build-admission single-active topology gate. Winning the coordinator
+        // advisory lock is the topology check: only this lock-holding pod may
+        // open Enforce admission, so standby pods stay fail-closed with
+        // `TopologyPending` (and their dispatch subsystems never start).
+        self.confirm_build_admission_topology();
 
         let retention_config = ImageControllerConfig::from_env();
         if let Err(error) = self.run_zot_retention_preflight(&retention_config).await {
@@ -3373,5 +3524,123 @@ mod build_admission_config_tests {
                 None => std::env::remove_var(MAX_BUILD_TASKRUNS_ENV),
             }
         }
+    }
+
+    #[tokio::test]
+    async fn enforce_state_allocates_fresh_epoch_and_starts_journal_recovery_incomplete() {
+        let first = state_for_admission_config(BuildAdmissionConfig {
+            mode: BuildAdmissionMode::Enforce,
+            cap: 3,
+        });
+        let first_admission = first
+            .inner
+            .build_admission
+            .as_ref()
+            .expect("enforce composes a controller");
+        assert!(
+            !first_admission.is_ready(),
+            "Enforce starts fail-closed before recovery"
+        );
+        assert_eq!(
+            first_admission.readiness(),
+            djinn_agent::actors::coordinator::BuildAdmissionReadiness::JournalRecoveryIncomplete,
+        );
+
+        // A second AppState allocation produces a distinct, unique epoch.
+        let second = state_for_admission_config(BuildAdmissionConfig {
+            mode: BuildAdmissionMode::Enforce,
+            cap: 3,
+        });
+        let second_admission = second
+            .inner
+            .build_admission
+            .as_ref()
+            .expect("enforce composes a controller");
+        assert_ne!(
+            first_admission.server_epoch(),
+            second_admission.server_epoch(),
+            "each Enforce startup allocates a fresh, unique server epoch"
+        );
+    }
+
+    #[tokio::test]
+    async fn begin_draining_blocks_enforce_admission_via_app_state() {
+        let state = state_for_admission_config(BuildAdmissionConfig {
+            mode: BuildAdmissionMode::Enforce,
+            cap: 1,
+        });
+        let admission = state
+            .inner
+            .build_admission
+            .as_ref()
+            .expect("enforce composes a controller");
+        assert!(!admission.is_draining());
+        state.begin_build_admission_draining().await;
+        assert!(
+            admission.is_draining(),
+            "graceful shutdown begins draining before permit release"
+        );
+        assert_eq!(
+            admission.readiness(),
+            djinn_agent::actors::coordinator::BuildAdmissionReadiness::ShutdownDraining,
+        );
+    }
+
+    #[tokio::test]
+    async fn enforce_startup_walks_journal_inventory_topology_gates_in_order() {
+        use djinn_agent::actors::coordinator::BuildAdmissionReadiness;
+
+        let state = state_for_admission_config(BuildAdmissionConfig {
+            mode: BuildAdmissionMode::Enforce,
+            cap: 3,
+        });
+        let admission = state
+            .inner
+            .build_admission
+            .as_ref()
+            .expect("enforce composes a controller")
+            .clone();
+        assert_eq!(
+            admission.readiness(),
+            BuildAdmissionReadiness::JournalRecoveryIncomplete,
+            "Enforce starts fail-closed before journal recovery"
+        );
+
+        // Journal recovery runs first and, on an empty journal, must NOT mark
+        // the controller healthy: the inventory gate keeps admission closed.
+        state.initialize_build_admission_recovery().await;
+        assert_eq!(
+            admission.readiness(),
+            BuildAdmissionReadiness::InventoryPending,
+            "journal recovery alone advances only to inventory-pending"
+        );
+        assert!(!admission.is_ready());
+
+        // Without a graph warmer there is no inventory to trust, so the gate
+        // stays pending (fail-closed) rather than opening optimistically.
+        state.initialize_build_admission_inventory().await;
+        assert_eq!(
+            admission.readiness(),
+            BuildAdmissionReadiness::InventoryPending,
+            "a missing inventory keeps Enforce fail-closed"
+        );
+
+        // The in-process runtime's warmer returns an empty Kubernetes
+        // inventory successfully, completing the inventory gate.
+        let warmer = build_in_process_graph_warmer(state.clone());
+        *state.inner.graph_warmer.write().await = Some(Arc::new(warmer));
+        state.initialize_build_admission_inventory().await;
+        assert_eq!(
+            admission.readiness(),
+            BuildAdmissionReadiness::TopologyPending,
+            "a successful inventory LIST advances the gate to topology-pending"
+        );
+        assert!(!admission.is_ready());
+
+        // Winning the coordinator advisory lock (single-active topology) is
+        // the final gate; only then does Enforce admission open.
+        state.confirm_build_admission_topology();
+        assert_eq!(admission.readiness(), BuildAdmissionReadiness::Healthy);
+        assert!(admission.is_ready());
     }
 }
