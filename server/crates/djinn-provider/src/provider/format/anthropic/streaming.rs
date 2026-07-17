@@ -102,6 +102,22 @@ pub(crate) fn parse_anthropic_event(
                     .and_then(Value::as_str)
                     .unwrap_or("")
                 {
+                    "text" => {
+                        // Text content streams via `text_delta` events; the start
+                        // frame carries at most an initial fragment. Never track a
+                        // text block as pending Unknown state: the captured
+                        // `{"type":"text","text":""}` would be replayed verbatim on
+                        // the next request, which strict Anthropic-compatible
+                        // endpoints reject with 400 "text content is empty".
+                        if let Some(initial) = content_block.get("text").and_then(Value::as_str)
+                            && !initial.is_empty()
+                        {
+                            events.push(StreamEvent::Delta(ContentBlock::Text {
+                                text: initial.to_string(),
+                            }));
+                        }
+                        return events;
+                    }
                     "tool_use" => PendingContentBlock::ToolUse {
                         id: content_block
                             .get("id")
