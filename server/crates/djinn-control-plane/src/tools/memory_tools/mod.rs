@@ -8,7 +8,7 @@ use rmcp::{Json, handler::server::wrapper::Parameters, schemars, tool, tool_rout
 use crate::server::DjinnMcpServer;
 use djinn_db::NoteRepository;
 use djinn_db::ProjectRepository;
-use djinn_memory::{GitLogEntry, Note};
+use djinn_memory::Note;
 
 pub(crate) mod types;
 pub use types::*;
@@ -56,8 +56,6 @@ mod recall_trace_tests;
 mod retrieval_outcomes_report_tests;
 #[cfg(test)]
 mod run_enrichment_tests;
-#[cfg(test)]
-mod search_tests;
 #[cfg(test)]
 mod write_dedup_prompt_tests;
 #[cfg(test)]
@@ -146,16 +144,6 @@ fn parse_timeframe(s: &str) -> i64 {
     }
     s.parse::<i64>().unwrap_or(168)
 }
-
-/// Run `git log --format="%H|||%s|||%an|||%ai" -n N -- file` and parse entries.
-async fn git_log_for_file(file_path: &str, limit: i64) -> Vec<GitLogEntry> {
-    crate::tools::git_ops::git_log_for_file(file_path, limit).await
-}
-
-// `git_diff_for_file` was deleted alongside the live memory_diff tool body;
-// notes are now db-only, so there's no on-disk file to diff. The
-// memory_diff tool surface still exists (for back-compat) but always
-// returns an empty diff with an error message.
 
 #[cfg(test)]
 mod param_tests {
