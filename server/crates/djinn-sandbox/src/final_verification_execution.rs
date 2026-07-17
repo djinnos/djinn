@@ -481,6 +481,134 @@ fn now_millis() -> u128 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
+    use std::process::Command as ProcessCommand;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Mutex;
+
+    use djinn_core::canonical_verify::{
+        CanonicalFinalVerificationPlanV1, CanonicalHermeticityV1, ImmutableImageV1,
+        LockfileDigestV1, ToolProbeStatus, ToolProbeV1, VerificationInputManifestV1,
+    };
+    use tempfile::TempDir;
+
+    use crate::final_verification::{FinalVerificationResult, FinalVerificationViolation};
+
+    const DIGEST: &str = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+    fn descriptor(check_id: &str) -> CanonicalCommandDescriptorV1 {
+        CanonicalCommandDescriptorV1 {
+            check_id: check_id.into(),
+            executable: "verify-tool".into(),
+            argv: vec![check_id.into()],
+            working_directory: ".".into(),
+            environment_names: Vec::new(),
+            timeout_seconds: 60,
+            descriptor_revision: 1,
+        }
+    }
+
+    fn identity_input(
+        commands: Vec<CanonicalCommandDescriptorV1>,
+        output_only_globs: Vec<String>,
+    ) -> ResolvedEnvironmentIdentityInputV1 {
+        let required_checks = commands.iter().map(|command| command.check_id.clone()).collect();
+        ResolvedEnvironmentIdentityInputV1 {
+            schema_version: 1,
+            canonicalization_version: 1,
+            plan: CanonicalFinalVerificationPlanV1 {
+                version: 1,
+                profile_id: "test".into(),
+                profile_revision: 1,
+                commands,
+                required_checks,
+                hermeticity: CanonicalHermeticityV1 {
+                    hermetic: true,
+                    reusable: true,
+                    network_access: false,
+                },
+            },
+            input_manifest: VerificationInputManifestV1 {
+                version: 1,
+                repo_paths: Vec::new(),
+                environment_names: Vec::new(),
+                read_only_external_inputs: Vec::new(),
+                output_only_globs,
+            },
+            image: ImmutableImageV1 {
+                reference: "test-image".into(),
+                digest: DIGEST.into(),
+            },
+            tool_probes: vec![ToolProbeV1 {
+                tool: "verify-tool".into(),
+                version: "1".into(),
+                executable_digest: DIGEST.into(),
+                status: ToolProbeStatus::Passed,
+            }],
+            runner_version: "runner-1".into(),
+            lockfile_digests: vec![LockfileDigestV1 {
+                path: "lock".into(),
+                digest: DIGEST.into(),
+            }],
+            target: "test-target".into(),
+            features: Vec::new(),
+            allowlisted_environment: BTreeMap::new(),
+        }
+    }
+
+    fn git_worktree() -> TempDir {
+        let directory = tempfile::tempdir().expect("create worktree");
+        fs::write(directory.path().join("input.txt"), "before").expect("write input");
+        for args in [
+            ["init", "-b", "main"].as_slice(),
+            ["config", "user.email", "test@example.com"].as_slice(),
+            ["config", "user.name", "Test User"].as_slice(),
+            ["add", "input.txt"].as_slice(),
+            ["commit", "-m", "initial"].as_slice(),
+        ] {
+            let status = ProcessCommand::new("git")
+                .args(args)
+                .current_dir(directory.path())
+                .status()
+                .expect("run git");
+            assert!(status.success(), "git command failed: {args:?}");
+        }
+        directory
+    }
+
+    fn request(
+        worktree: &Path,
+        input: ResolvedEnvironmentIdentityInputV1,
+        resolver: EnvironmentIdentityResolver,
+    ) -> FinalVerificationExecutionRequest {
+        let output_directories = output_directories(&input.input_manifest.output_only_globs)
+            .expect("valid output-only directories");
+        FinalVerificationExecutionRequest {
+            worktree: worktree.to_path_buf(),
+            resolve_environment_identity: resolver,
+            fingerprint_config: VerificationInputFingerprintConfig {
+                base_ref: "main".into(),
+                manifest: input.input_manifest,
+                external_inputs: Vec::new(),
+            },
+            tool_runtime: Vec::new(),
+            read_only_external_mounts: Vec::new(),
+            output_directories,
+        }
+    }
+
+    fn static_resolver(input: ResolvedEnvironmentIdentityInputV1) -> EnvironmentIdentityResolver {
+        Arc::new(move || Ok(input.clone()))
+    }
+
+    fn succeeded() -> FinalVerificationResult {
+        FinalVerificationResult {
+            exit_code: Some(0),
+            timed_out: false,
+            stdout: Vec::new(),
+            stderr: Vec::new(),
+        }
+    }
 
     #[test]
     fn output_only_glob_requires_a_literal_launcher_directory() {
@@ -492,5 +620,122 @@ mod tests {
             output_directories(&["**/*.log".into()]),
             Err(FinalVerificationIneligibilityReason::ManifestBindingMismatch { .. })
         ));
+    }
+
+    #[tokio::test]
+    async fn repository_mutation_during_command_makes_fingerprint_ineligible() {
+        let worktree = git_worktree();
+        let input = identity_input(vec![descriptor("check")], Vec::new());
+        let request = request(worktree.path(), input.clone(), static_resolver(input));
+        let changed_path = worktree.path().join("input.txt");
+
+        let evidence = execute_final_verification_with_launcher(request, move |_, _| {
+            fs::write(&changed_path, "after").expect("mutate repository input");
+            Ok(succeeded())
+        })
+        .await;
+
+        assert_eq!(
+            evidence.eligibility_reason,
+            Some(FinalVerificationIneligibilityReason::FingerprintChanged)
+        );
+        assert_ne!(evidence.fingerprint_f0, evidence.fingerprint_f1);
+    }
+
+    #[tokio::test]
+    async fn refreshed_probe_material_change_makes_environment_ineligible() {
+        let worktree = git_worktree();
+        let input = identity_input(vec![descriptor("check")], Vec::new());
+        let changed = {
+            let mut changed = input.clone();
+            changed.tool_probes[0].executable_digest =
+                "sha256:abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789".into();
+            changed
+        };
+        let calls = Arc::new(AtomicUsize::new(0));
+        let resolver_calls = Arc::clone(&calls);
+        let initial = input.clone();
+        let resolver: EnvironmentIdentityResolver = Arc::new(move || {
+            if resolver_calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                Ok(input.clone())
+            } else {
+                Ok(changed.clone())
+            }
+        });
+        let request = request(worktree.path(), initial, resolver);
+
+        let evidence = execute_final_verification_with_launcher(request, |_, _| Ok(succeeded())).await;
+
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            evidence.eligibility_reason,
+            Some(FinalVerificationIneligibilityReason::EnvironmentChanged)
+        );
+        assert_eq!(evidence.fingerprint_f0, evidence.fingerprint_f1);
+    }
+
+    #[tokio::test]
+    async fn preexisting_manifest_output_is_rejected_before_command_evidence() {
+        let worktree = git_worktree();
+        fs::create_dir(worktree.path().join("out")).expect("create stale output directory");
+        fs::write(worktree.path().join("out/stale"), "stale").expect("write stale output");
+        let input = identity_input(vec![descriptor("check")], vec!["out/**".into()]);
+        let request = request(worktree.path(), input.clone(), static_resolver(input));
+        let launches = Arc::new(AtomicUsize::new(0));
+        let launcher_calls = Arc::clone(&launches);
+
+        let evidence = execute_final_verification_with_launcher(request, move |launch, _| {
+            launcher_calls.fetch_add(1, Ordering::SeqCst);
+            let path = launch.worktree.join(&launch.output_directories[0]);
+            assert!(path.exists(), "strict launcher observes the pre-existing output");
+            Err(FinalVerificationError::Violation(
+                FinalVerificationViolation::OutputOnlyPreexisting { path },
+            ))
+        })
+        .await;
+
+        assert_eq!(launches.load(Ordering::SeqCst), 1);
+        assert!(evidence.commands.is_empty(), "child never produced command evidence");
+        assert!(matches!(
+            evidence.eligibility_reason,
+            Some(FinalVerificationIneligibilityReason::SandboxViolation { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn commands_launch_in_order_and_each_must_pass() {
+        let worktree = git_worktree();
+        let input = identity_input(
+            vec![descriptor("first"), descriptor("second")],
+            Vec::new(),
+        );
+        let request = request(worktree.path(), input.clone(), static_resolver(input));
+        let launched = Arc::new(Mutex::new(Vec::new()));
+        let observed = Arc::clone(&launched);
+
+        let evidence = execute_final_verification_with_launcher(request, move |launch, _| {
+            let check = launch.argv[1].clone();
+            observed.lock().expect("lock observed commands").push(check.clone());
+            Ok(FinalVerificationResult {
+                exit_code: if check == "second" { Some(1) } else { Some(0) },
+                timed_out: false,
+                stdout: Vec::new(),
+                stderr: Vec::new(),
+            })
+        })
+        .await;
+
+        assert_eq!(
+            *launched.lock().expect("lock observed commands"),
+            vec!["first", "second"]
+        );
+        assert_eq!(evidence.commands.len(), 2);
+        assert_eq!(
+            evidence.eligibility_reason,
+            Some(FinalVerificationIneligibilityReason::CommandFailed {
+                check_id: "second".into(),
+                exit_code: Some(1),
+            })
+        );
     }
 }
