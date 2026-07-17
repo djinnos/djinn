@@ -116,3 +116,87 @@ pub(crate) async fn resolve_setup_context(
         prompt_setup_commands,
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_helpers::{
+        agent_context_from_db, create_test_db, create_test_epic, create_test_project,
+        create_test_task, test_tempdir,
+    };
+    use djinn_db::repositories::task_run::{CreateTaskRunParams, TaskRunRepository};
+    use djinn_db::repositories::verify_run::VerifyRunRepository;
+    use tokio_util::sync::CancellationToken;
+
+    /// Setup-time `pre_verification` hooks run in the worktree, but the setup
+    /// lifecycle must stay setup-only: it opens no final-verification attempt
+    /// and records no reusable verify-run pass. The post-authoring writer in
+    /// `djinn-slot` is the only completion boundary that may record one (the
+    /// companion regression in
+    /// `djinn-slot/src/final_verification/recording_tests.rs` proves the
+    /// persisted fingerprint is computed after authoring and reflects the
+    /// post-setup edit).
+    #[tokio::test]
+    async fn pre_verification_setup_never_opens_a_final_verification_attempt() {
+        let db = create_test_db();
+        let project = create_test_project(&db).await;
+        let epic = create_test_epic(&db, &project.id).await;
+        let task = create_test_task(&db, &project.id, &epic.id).await;
+        let run_id = uuid::Uuid::now_v7().to_string();
+        TaskRunRepository::new(db.clone())
+            .create(CreateTaskRunParams {
+                id: &run_id,
+                project_id: &project.id,
+                task_id: &task.id,
+                trigger_type: "dispatch",
+                status: Some("running"),
+                workspace_path: None,
+                mirror_ref: None,
+            })
+            .await
+            .expect("create task run");
+        let worktree = test_tempdir("djinn-setup-pre-verification-");
+        let app_state = agent_context_from_db(db.clone(), CancellationToken::new());
+        let hooks = vec![djinn_stack::environment::HookCommand::Shell(
+            "printf 'setup ran' > setup_marker.txt".to_owned(),
+        )];
+
+        let context = match resolve_setup_context(
+            hooks,
+            worktree.path(),
+            &task.id,
+            &task.short_id,
+            &app_state,
+        )
+        .await
+        {
+            Ok(context) => context,
+            Err(error) => panic!("setup hooks must succeed: {}", error.reason),
+        };
+
+        // The setup-time `pre_verification` hook really executed inside the
+        // worktree and was surfaced for the prompt.
+        assert_eq!(
+            std::fs::read_to_string(worktree.path().join("setup_marker.txt"))
+                .expect("setup hook ran in the worktree"),
+            "setup ran"
+        );
+        let prompt_commands = context
+            .prompt_setup_commands
+            .as_deref()
+            .expect("setup commands are formatted for the prompt");
+        assert!(prompt_commands.contains("setup-1"), "{prompt_commands}");
+
+        // … and yet no final-verification attempt was opened and no reusable
+        // pass was recorded for the task run.
+        let rows = VerifyRunRepository::new(db)
+            .list_for_task_run(&run_id)
+            .await
+            .expect("list verify runs");
+        assert!(
+            rows.is_empty(),
+            "setup must never record a verify-run pass ({} rows)",
+            rows.len()
+        );
+    }
+}
