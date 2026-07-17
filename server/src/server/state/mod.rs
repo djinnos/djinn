@@ -12,7 +12,9 @@ use tokio_util::sync::CancellationToken;
 
 use crate::db::runtime::{DatabaseRuntimeHealth, DatabaseRuntimeManager};
 use crate::events::DjinnEventEnvelope;
-use djinn_agent::actors::coordinator::CoordinatorHandle;
+use djinn_agent::actors::coordinator::{
+    BuildAdmissionController, BuildAdmissionMode, CoordinatorHandle,
+};
 use djinn_agent::actors::slot::{SlotPoolConfig, SlotPoolHandle};
 use djinn_agent::file_time::FileTime;
 use djinn_agent::lsp::LspManager;
@@ -382,6 +384,11 @@ struct Inner {
     /// dispatch through this handle rather than constructing a warmer
     /// per-call.
     pub graph_warmer: tokio::sync::RwLock<Option<Arc<dyn GraphWarmerService>>>,
+    /// The one admission controller for this server process. It is shared by
+    /// task-run dispatch and the concrete K8s graph warmer before either is
+    /// erased behind `GraphWarmerService`, so both workloads reserve from one
+    /// atomic durable cap.
+    pub build_admission: Arc<BuildAdmissionController>,
 }
 
 /// Result of a boot token exchange attempt.
@@ -428,6 +435,15 @@ impl AppState {
         let (events, _) = broadcast::channel(EVENT_CHANNEL_CAPACITY);
         let mirror = Arc::new(MirrorManager::new(mirrors_root()));
         let workspace_store = Arc::new(WorkspaceStore::new(workspaces_root(), Arc::clone(&mirror)));
+        let build_admission = Arc::new(BuildAdmissionController::new(
+            Arc::new(djinn_db::AdmissionJournalRepository::new(db.clone())),
+            BuildAdmissionMode::Enforce,
+            std::env::var("DJINN_BUILD_ADMISSION_CAP")
+                .ok()
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(50),
+            std::env::var("HOSTNAME").unwrap_or_else(|_| "coordinator".to_owned()),
+        ));
         Self {
             inner: Arc::new(Inner {
                 db,
@@ -469,6 +485,7 @@ impl AppState {
                 image_controller: tokio::sync::RwLock::new(None),
                 image_build_watcher: tokio::sync::Mutex::new(None),
                 graph_warmer: tokio::sync::RwLock::new(None),
+                build_admission,
             }),
         }
     }
@@ -688,7 +705,8 @@ impl AppState {
                         "graph_warmer: wiring K8sGraphWarmer"
                     );
                     let warmer = K8sGraphWarmer::new(client, config, self.db().clone())
-                        .with_completion_sink(Arc::new(CanonicalGraphInvalidationSink));
+                        .with_completion_sink(Arc::new(CanonicalGraphInvalidationSink))
+                        .with_warm_admission(self.inner.build_admission.clone());
                     Arc::new(warmer) as Arc<dyn GraphWarmerService>
                 }
                 Err(e) => {
@@ -1717,17 +1735,7 @@ impl AppState {
                 self.inner.background_work_tasks.clone(),
                 self.inner.lsp.clone(),
             )
-            .with_build_admission(Arc::new(
-                djinn_agent::actors::coordinator::BuildAdmissionController::new(
-                    Arc::new(djinn_db::AdmissionJournalRepository::new(self.db().clone())),
-                    djinn_agent::actors::coordinator::BuildAdmissionMode::Enforce,
-                    std::env::var("DJINN_BUILD_ADMISSION_CAP")
-                        .ok()
-                        .and_then(|value| value.parse().ok())
-                        .unwrap_or(50),
-                    std::env::var("HOSTNAME").unwrap_or_else(|_| "coordinator".to_owned()),
-                ),
-            ))
+            .with_build_admission(self.inner.build_admission.clone())
             .with_graph_warmer(self.graph_warmer().await)
             .with_mirror(self.inner.mirror.clone())
             .with_runtime_ops(Arc::new(self.clone()))

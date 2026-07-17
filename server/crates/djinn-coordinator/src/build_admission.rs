@@ -458,8 +458,20 @@ impl WarmAdmission for BuildAdmissionController {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use djinn_db::{AdmissionState, Database};
+    use async_trait::async_trait;
+    use djinn_core::events::EventBus;
+    use djinn_db::{
+        AdmissionState, Database, ImageRepository, ProjectRepository,
+        test_support::reject_admission_create_started_for_test,
+    };
+    use djinn_k8s::{
+        K8sGraphWarmer, KubernetesConfig, WarmJobDispatcher, WarmJobManifest, WarmJobWatcher,
+        WarmTerminalOutcome,
+    };
+    use djinn_runtime::GraphWarmerService;
     use futures::FutureExt;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tokio::sync::Notify;
 
     fn controller(mode: BuildAdmissionMode, cap: i64) -> BuildAdmissionController {
         BuildAdmissionController::new(
@@ -478,6 +490,226 @@ mod tests {
             generation: 0,
             object_name: format!("job-{id}"),
         }
+    }
+
+    async fn seed_project_with_ready_image(db: &Database, name: &str) -> String {
+        let projects = ProjectRepository::new(db.clone(), EventBus::noop());
+        let project = projects.create(name, "test", name).await.unwrap();
+        let images = ImageRepository::new(db.clone());
+        let image_id = format!("img-{name}");
+        images.create(&image_id, name, None, "{}").await.unwrap();
+        images
+            .mark_ready(
+                &image_id,
+                &format!("reg.example:5000/djinn-project-{}:abc123", project.id),
+                None,
+            )
+            .await
+            .unwrap();
+        images
+            .set_project_image(&project.id, Some(&image_id))
+            .await
+            .unwrap();
+        project.id
+    }
+
+    struct AdmissionStateRecordingDispatcher {
+        journal: Arc<AdmissionJournalRepository>,
+        work_id: String,
+        posts: Arc<AtomicUsize>,
+        posted: Arc<Notify>,
+    }
+
+    #[async_trait]
+    impl WarmJobDispatcher for AdmissionStateRecordingDispatcher {
+        async fn dispatch(
+            &self,
+            _namespace: &str,
+            _job: WarmJobManifest,
+        ) -> Result<String, String> {
+            let history = self
+                .journal
+                .list_history(AdmissionDomain::WarmBuild, &self.work_id)
+                .await
+                .unwrap();
+            assert_eq!(
+                history[0].state,
+                AdmissionState::CreateInFlight,
+                "the concrete controller must durably record CreateStarted before POST"
+            );
+            self.posts.fetch_add(1, Ordering::SeqCst);
+            self.posted.notify_one();
+            Ok("warm-job".into())
+        }
+    }
+
+    struct FencedTerminalWatcher;
+
+    #[async_trait]
+    impl WarmJobWatcher for FencedTerminalWatcher {
+        async fn wait_terminal(&self, _namespace: &str, _job_name: &str) -> WarmTerminalOutcome {
+            WarmTerminalOutcome::Succeeded
+        }
+
+        async fn job_uid(&self, _namespace: &str, _job_name: &str) -> Option<String> {
+            Some("warm-uid".into())
+        }
+    }
+
+    #[tokio::test]
+    async fn concrete_k8s_warmer_shares_task_cap_and_retries_after_fenced_release() {
+        let db = Database::open_in_memory().unwrap();
+        let journal = Arc::new(AdmissionJournalRepository::new(db.clone()));
+        let controller = Arc::new(BuildAdmissionController::new(
+            Arc::clone(&journal),
+            BuildAdmissionMode::Enforce,
+            1,
+            "epoch",
+        ));
+        let project_id = seed_project_with_ready_image(&db, "shared-cap").await;
+        let work_id = format!("graph-warm:{project_id}:unknown");
+        let posts = Arc::new(AtomicUsize::new(0));
+        let posted = Arc::new(Notify::new());
+        let warmer = K8sGraphWarmer::with_dispatcher(
+            KubernetesConfig::for_testing(),
+            db,
+            Arc::new(AdmissionStateRecordingDispatcher {
+                journal: Arc::clone(&journal),
+                work_id: work_id.clone(),
+                posts: Arc::clone(&posts),
+                posted: Arc::clone(&posted),
+            }),
+            Arc::new(FencedTerminalWatcher),
+        )
+        .with_warm_admission(controller.clone());
+
+        let task = controller
+            .admit_task_run(
+                Some("worker"),
+                AdmissionDomain::TaskObservation,
+                "task".into(),
+                1,
+                "task-job".into(),
+            )
+            .await
+            .unwrap();
+        let BuildAdmissionDecision::Permitted { permit: task, .. } = task else {
+            panic!("the task must win the cap-one reservation");
+        };
+
+        warmer.trigger(&project_id).await;
+        assert_eq!(posts.load(Ordering::SeqCst), 0, "denied warm must not POST");
+        assert_eq!(journal.count_task_or_warm_occupancy().await.unwrap(), 1);
+        assert!(
+            journal
+                .list_history(AdmissionDomain::WarmBuild, &work_id)
+                .await
+                .unwrap()
+                .is_empty(),
+            "the denied warm does not become completed or failed"
+        );
+
+        controller
+            .transition(&task, WarmAdmissionTransition::CreateStarted)
+            .await
+            .unwrap();
+        controller
+            .transition(
+                &task,
+                WarmAdmissionTransition::Live {
+                    uid: "task-uid".into(),
+                },
+            )
+            .await
+            .unwrap();
+        let released = controller.release_notifier().notified();
+        controller
+            .transition(
+                &task,
+                WarmAdmissionTransition::Terminal {
+                    uid: "task-uid".into(),
+                },
+            )
+            .await
+            .unwrap();
+        released.await;
+
+        let post = posted.notified();
+        tokio::pin!(post);
+        tokio::time::timeout(std::time::Duration::from_secs(3), post)
+            .await
+            .expect("pending warm should retry after the admission backoff");
+        assert_eq!(
+            posts.load(Ordering::SeqCst),
+            1,
+            "released capacity retries the pending warm"
+        );
+    }
+
+    #[tokio::test]
+    async fn concrete_k8s_warmer_keeps_failed_create_started_pending_without_posting() {
+        let db = Database::open_in_memory().unwrap();
+        let journal = Arc::new(AdmissionJournalRepository::new(db.clone()));
+        let controller = Arc::new(BuildAdmissionController::new(
+            Arc::clone(&journal),
+            BuildAdmissionMode::Enforce,
+            1,
+            "epoch",
+        ));
+        let project_id = seed_project_with_ready_image(&db, "create-started-failure").await;
+        let work_id = format!("graph-warm:{project_id}:unknown");
+        let posts = Arc::new(AtomicUsize::new(0));
+        let posted = Arc::new(Notify::new());
+        let warmer = K8sGraphWarmer::with_dispatcher(
+            KubernetesConfig::for_testing(),
+            db.clone(),
+            Arc::new(AdmissionStateRecordingDispatcher {
+                journal: Arc::clone(&journal),
+                work_id: work_id.clone(),
+                posts: Arc::clone(&posts),
+                posted: Arc::clone(&posted),
+            }),
+            Arc::new(FencedTerminalWatcher),
+        )
+        .with_warm_admission(controller);
+
+        // Fail the real controller durable state transition after it reserves
+        // the warm row, rather than substituting a fake WarmAdmission.
+        reject_admission_create_started_for_test(&db, true).await;
+
+        warmer.trigger(&project_id).await;
+        assert_eq!(
+            posts.load(Ordering::SeqCst),
+            0,
+            "a real-controller CreateStarted failure must perform zero POSTs"
+        );
+        assert_eq!(
+            journal
+                .list_history(AdmissionDomain::WarmBuild, &work_id)
+                .await
+                .unwrap()[0]
+                .state,
+            AdmissionState::Reserved,
+            "the failed transition retains the coalesced warm reservation"
+        );
+        warmer.trigger(&project_id).await;
+        assert_eq!(
+            posts.load(Ordering::SeqCst),
+            0,
+            "an immediate retrigger coalesces onto the pending warm"
+        );
+
+        reject_admission_create_started_for_test(&db, false).await;
+        let post = posted.notified();
+        tokio::pin!(post);
+        tokio::time::timeout(std::time::Duration::from_secs(3), post)
+            .await
+            .expect("pending warm should retry after the admission backoff");
+        assert_eq!(
+            posts.load(Ordering::SeqCst),
+            1,
+            "the retained warm retries after the journal transition becomes durable"
+        );
     }
 
     #[test]
