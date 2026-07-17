@@ -102,7 +102,7 @@ Lightweight guard for Rust source files under `server/crates/**` and `server/src
 
 ### CI gate
 
-`.github/workflows/quality-gate.yml` runs the `server-size-guard` job for PR and merge-queue server changes. The job computes added, modified, and renamed files with `git diff --name-only --diff-filter=AMR` and pipes that list to changed-file mode:
+`.github/workflows/quality-gate.yml` runs the "Check changed Rust file sizes" step of the `server-guards` job for PR and merge-queue server changes. The step computes added, modified, and renamed files with `git diff --name-only --diff-filter=AMR` and pipes that list to changed-file mode:
 
 ```sh
 ./scripts/check-file-size.sh --files-from-stdin

@@ -204,7 +204,14 @@ jobs:
           shared-key: release-bins
           cache-on-failure: true
           cache-all-crates: true
-          save-if: ${{ github.ref == 'refs/heads/main' }}
+          # This workflow only ever runs on v* tag pushes and manual
+          # dispatch — never on a branch ref — so the previous
+          # `github.ref == 'refs/heads/main'` condition was never true and
+          # the release-bins cache was never saved: every release
+          # cold-compiled the whole workspace (~19 min in the binaries
+          # job). Saving on every run keeps releases incremental against
+          # the previous tag.
+          save-if: true
       # Worker FIRST so its deps resolve WITHOUT qdrant (default features);
       # the server build then layers only the qdrant-extra deps on top,
       # reusing every shared non-qdrant artifact already on disk.

@@ -11,12 +11,13 @@ on:
 concurrency:
   group: ${{ github.event_name == 'pull_request' && format('ci-pr-{0}', github.event.pull_request.number) || github.event_name == 'push' && 'ci-main' || github.event_name == 'merge_group' && format('ci-merge-group-{0}', github.event.merge_group.head_sha || github.ref) || format('ci-dispatch-{0}', github.run_id) }}
   cancel-in-progress: ${{ github.event_name != 'merge_group' }}
-# actions: write lets the fail-fast watchdog job (`gh run cancel`)
-# actually cancel the run — without it the cancel dies with HTTP 403 and
-# the expensive test/clippy jobs run to completion behind a failed gate.
+# actions: read lets the nextest planner restore timing artifacts and the
+# test shards poll for the in-run plan artifact. Fail-fast cancellation
+# lives in ci-fail-fast.yml (workflow_job trigger), which carries its own
+# actions: write grant.
 permissions:
   contents: read
-  actions: write
+  actions: read
 env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: "0"
@@ -268,22 +269,45 @@ jobs:
           echo "::notice::cache-family=server-aarch64-check shared-key=server-aarch64-check cache-hit=${{ steps.rust-cache.outputs.cache-hit }}"
       - name: cargo check (aarch64)
         run: cargo check -p djinn-sandbox --all-targets --target aarch64-unknown-linux-gnu
-  server-cargo-deny:
-    name: Server cargo-deny
+  # One runner for every cheap guard lane. Each lane was previously its own
+  # job doing ~15s of scripting behind ~30s of runner spin-up and a full
+  # fetch-depth: 0 clone; merging them frees four to five concurrent job
+  # slots per run for the merge queue. Preflight routing granularity is
+  # preserved through per-step `if` guards on the same router outputs, and
+  # the quality gate pairs the union of those selections with this job's
+  # result.
+  server-guards:
+    name: Server Guards
     needs: preflight
-    if: needs.preflight.outputs.cargoDeny == 'true' && github.event_name != 'push'
+    if: >-
+      github.event_name != 'push' && (
+        needs.preflight.outputs.cargoDeny == 'true'
+        || needs.preflight.outputs.size == 'true'
+        || needs.preflight.outputs.migrations == 'true'
+        || needs.preflight.outputs.rawSql == 'true'
+        || needs.preflight.outputs.capability == 'true'
+        || needs.preflight.outputs.boundaries == 'true'
+      )
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: server
+    env:
+      BASE_SHA: |-
+        ${{ github.event.pull_request.base.sha
+           || github.event.merge_group.base_sha
+           || '' }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - run: rustup toolchain install
+        if: needs.preflight.outputs.cargoDeny == 'true'
         working-directory: server
       - uses: taiki-e/install-action@v2
+        if: needs.preflight.outputs.cargoDeny == 'true'
         with:
           tool: cargo-deny
       - name: cargo-deny check
+        if: needs.preflight.outputs.cargoDeny == 'true'
+        working-directory: server
         run: |
           # Retry up to 3 times with backoff — crates.io downloads can
           # fail transiently (Connection reset by peer, DNS hiccups).
@@ -302,6 +326,50 @@ jobs:
           done
           echo "::error::cargo-deny check failed after 3 attempts"
           exit 1
+      - name: Check changed Rust file sizes
+        if: needs.preflight.outputs.size == 'true'
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          set -eu
+
+          if [ -z "$BASE_SHA" ]; then
+            # workflow_dispatch has no PR/merge context; fall back to origin/main
+            # so the guard still runs against changes since the main branch.
+            git fetch --no-tags --depth=1 origin main >/dev/null 2>&1 || true
+            BASE_SHA="$(git rev-parse --verify origin/main 2>/dev/null || true)"
+          fi
+
+          if [ -z "$BASE_SHA" ]; then
+            echo "::error::Could not determine a base SHA for changed-file detection (event=$EVENT_NAME)."
+            exit 1
+          fi
+
+          echo "Computing changed-file diff against base $BASE_SHA (event=$EVENT_NAME)..."
+          # --diff-filter=AMR = Added, Modified, Renamed. D (Deleted) is
+          # intentionally excluded so deleted files are not re-checked.
+          # The three-dot form uses the merge base of $BASE_SHA and HEAD,
+          # which tolerates a slightly stale PR base SHA after main advances.
+          git diff --name-only --diff-filter=AMR "$BASE_SHA...HEAD" \
+            | ./scripts/check-file-size.sh --files-from-stdin
+      - name: Check applied migrations are immutable
+        if: needs.preflight.outputs.migrations == 'true'
+        run: ./scripts/check-migrations-immutable.sh
+      - name: Check raw-SQL boundary
+        if: needs.preflight.outputs.rawSql == 'true'
+        run: ./scripts/check-raw-sql-boundary.sh
+      - name: Self-test capability boundary detectors
+        if: needs.preflight.outputs.capability == 'true'
+        run: ./scripts/test-capability-boundaries.sh
+      - name: Check capability boundaries
+        if: needs.preflight.outputs.capability == 'true'
+        run: |
+          ./scripts/check-git-boundary.sh
+          ./scripts/check-http-boundary.sh
+          ./scripts/check-k8s-boundary.sh
+      - name: Check architectural boundaries
+        if: needs.preflight.outputs.boundaries == 'true'
+        run: python3 scripts/check_boundaries.py
   server-clippy:
     name: Server Clippy
     needs: preflight
@@ -386,106 +454,6 @@ jobs:
           echo "::notice::cache-family=server-aarch64-check shared-key=server-aarch64-check cache-hit=${{ steps.rust-cache.outputs.cache-hit }}"
       - name: cargo check (aarch64)
         run: cargo check -p djinn-sandbox --all-targets --target aarch64-unknown-linux-gnu
-  server-size-guard:
-    name: Server Size Guard
-    needs: preflight
-    if: needs.preflight.outputs.size == 'true' && github.event_name != 'push'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-      - name: Check changed Rust file sizes
-        env:
-          BASE_SHA: |-
-            ${{ github.event.pull_request.base.sha
-               || github.event.merge_group.base_sha
-               || '' }}
-          EVENT_NAME: ${{ github.event_name }}
-        run: |
-          set -eu
-
-          if [ -z "$BASE_SHA" ]; then
-            # workflow_dispatch has no PR/merge context; fall back to origin/main
-            # so the guard still runs against changes since the main branch.
-            git fetch --no-tags --depth=1 origin main >/dev/null 2>&1 || true
-            BASE_SHA="$(git rev-parse --verify origin/main 2>/dev/null || true)"
-          fi
-
-          if [ -z "$BASE_SHA" ]; then
-            echo "::error::Could not determine a base SHA for changed-file detection (event=$EVENT_NAME)."
-            exit 1
-          fi
-
-          echo "Computing changed-file diff against base $BASE_SHA (event=$EVENT_NAME)..."
-          # --diff-filter=AMR = Added, Modified, Renamed. D (Deleted) is
-          # intentionally excluded so deleted files are not re-checked.
-          # The three-dot form uses the merge base of $BASE_SHA and HEAD,
-          # which tolerates a slightly stale PR base SHA after main advances.
-          git diff --name-only --diff-filter=AMR "$BASE_SHA...HEAD" \
-            | ./scripts/check-file-size.sh --files-from-stdin
-  server-migrations-guard:
-    name: Server Migrations Guard
-    needs: preflight
-    if: needs.preflight.outputs.migrations == 'true' && github.event_name != 'push'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-      - name: Check applied migrations are immutable
-        env:
-          BASE_SHA: |-
-            ${{ github.event.pull_request.base.sha
-               || github.event.merge_group.base_sha
-               || '' }}
-        run: ./scripts/check-migrations-immutable.sh
-  server-raw-sql-boundary:
-    name: Server Raw-SQL Boundary
-    needs: preflight
-    if: needs.preflight.outputs.rawSql == 'true' && github.event_name != 'push'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-      - name: Check raw-SQL boundary
-        env:
-          BASE_SHA: |-
-            ${{ github.event.pull_request.base.sha
-               || github.event.merge_group.base_sha
-               || '' }}
-        run: ./scripts/check-raw-sql-boundary.sh
-  server-capability-boundaries:
-    name: Server Capability Boundaries
-    needs: preflight
-    if: needs.preflight.outputs.capability == 'true' && github.event_name != 'push'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-      - name: Self-test capability boundary detectors
-        run: ./scripts/test-capability-boundaries.sh
-      - name: Check capability boundaries
-        env:
-          BASE_SHA: |-
-            ${{ github.event.pull_request.base.sha
-               || github.event.merge_group.base_sha
-               || '' }}
-        run: |
-          ./scripts/check-git-boundary.sh
-          ./scripts/check-http-boundary.sh
-          ./scripts/check-k8s-boundary.sh
-  server-boundaries:
-    name: Server Architectural Boundaries
-    needs: preflight
-    if: needs.preflight.outputs.boundaries == 'true' && github.event_name != 'push'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: Check architectural boundaries
-        run: python3 scripts/check_boundaries.py
   nextest-plan:
     name: Plan Server Test Shards
     needs: preflight
@@ -649,14 +617,33 @@ jobs:
           retention-days: 30
   server-test:
     name: Server Test
+    # Shards deliberately do NOT `needs: nextest-plan`. The planner's
+    # ~5-minute discovery compile used to serialize ahead of every shard's
+    # own ~5-minute compile of the same crates; instead the shards start at
+    # preflight-time, run their build concurrently with the planner, and
+    # poll for the plan artifact (normally already uploaded by the time the
+    # build finishes). The matrix is statically provisioned at the planner's
+    # maximum width (COLD_START_SHARDS / WIDE_DEFAULT_SHARDS / PR_MAX_SHARDS
+    # in scripts/ci-nextest-plan.mjs are all 4); when a plan selects fewer
+    # shards, the surplus indices resolve no shard row and no-op, and the
+    # timing-publish job still verifies exact-once coverage across the
+    # shards that ran.
     needs:
       - preflight
-      - nextest-plan
     if: needs.preflight.outputs.serverTest == 'true' && github.event_name != 'push'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
-      matrix: ${{ fromJSON(needs.nextest-plan.outputs.matrix) }}
+      matrix:
+        include:
+          - shard: shard-1
+            shardIndex: 0
+          - shard: shard-2
+            shardIndex: 1
+          - shard: shard-3
+            shardIndex: 2
+          - shard: shard-4
+            shardIndex: 3
     defaults:
       run:
         working-directory: server
@@ -721,16 +708,64 @@ jobs:
         run: |
           git config --global user.email "ci@test.local"
           git config --global user.name "CI Test"
-      - name: Download full shard plan
-        uses: actions/download-artifact@v4
-        with:
-          name: nextest-plan-${{ github.run_id }}
-          path: server/nextest-plan
+      # DB setup must precede this build: the sqlx macros compile against
+      # the live migrated database (server/.env DATABASE_URL), not the
+      # offline cache. The build overlaps the planner's discovery compile
+      # of the same crates — that concurrency is the whole point of the
+      # shards not depending on nextest-plan.
+      - name: Build test binaries (concurrent with planner discovery)
+        run: cargo nextest run --workspace --all-targets --features qdrant --no-run
+      - name: Wait for and download full shard plan
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # The planner runs concurrently with this shard's build; by the
+          # time the build finishes the plan artifact is normally already
+          # uploaded, so this loop usually exits on the first probe. If the
+          # planner concludes without publishing a plan, fail immediately
+          # instead of burning the full timeout.
+          for attempt in $(seq 1 60); do
+            artifact_id=$(gh api "repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/artifacts?name=nextest-plan-${{ github.run_id }}" \
+              --jq '.artifacts[0].id // empty')
+            if [ -n "$artifact_id" ]; then
+              mkdir -p nextest-plan
+              gh api "repos/${{ github.repository }}/actions/artifacts/$artifact_id/zip" > nextest-plan/plan.zip
+              unzip -o nextest-plan/plan.zip -d nextest-plan
+              rm nextest-plan/plan.zip
+              exit 0
+            fi
+            planner=$(gh api "repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/jobs?per_page=100" \
+              --jq '[.jobs[] | select(.name == "Plan Server Test Shards")][0].conclusion // empty')
+            case "$planner" in
+              failure|cancelled|timed_out)
+                echo "::error::Plan Server Test Shards concluded '$planner' without publishing a plan."
+                exit 1
+                ;;
+            esac
+            sleep 10
+          done
+          echo "::error::Timed out waiting for the nextest plan artifact."
+          exit 1
       - name: Resolve and validate shard filter and test IDs
+        id: shard
         env:
           SHARD_INDEX: ${{ matrix.shardIndex }}
         run: |
           set -euo pipefail
+          matched=$(jq -r --argjson idx "$SHARD_INDEX" '[.shards[] | select(.shardIndex == $idx)] | length' nextest-plan/matrix.json)
+          shard_count=$(jq -r '.shardCount' nextest-plan/matrix.json)
+          if [ "$matched" -eq 0 ]; then
+            if [ "$SHARD_INDEX" -ge "$shard_count" ]; then
+              # The matrix provisions the planner's maximum width; this plan
+              # selected fewer shards, so this surplus index has no work.
+              echo "::notice::Plan selected $shard_count shard(s); shardIndex $SHARD_INDEX is surplus and no-ops."
+              echo "active=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            echo "::error::Plan claims $shard_count shard(s) but has no row for shardIndex $SHARD_INDEX."
+            exit 1
+          fi
           jq -e --argjson idx "$SHARD_INDEX" '
             ([.shards[] | select(.shardIndex == $idx)]) as $matches
             | ($matches | length == 1)
@@ -748,7 +783,9 @@ jobs:
             ([.shards[] | select(.shardIndex == $idx)]) as $matches
             | if ($matches | length) != 1 then error("expected exactly one shard row for shardIndex \($idx)") else $matches[0].testIds end
           ' nextest-plan/matrix.json > nextest-plan/shard-test-ids.json
+          echo "active=true" >> "$GITHUB_OUTPUT"
       - name: Generate nextest config with file-backed shard filter
+        if: steps.shard.outputs.active == 'true'
         env:
           NEXTEST_PROFILE: ${{ github.event_name == 'pull_request' && 'pull-request' || github.event_name == 'merge_group' && 'merge-group' || 'full-validation' }}
         run: |
@@ -769,6 +806,7 @@ jobs:
           NODE
           echo "::notice::Generated nextest config for profile $NEXTEST_PROFILE with file-backed default-filter."
       - name: Run planner-selected shard tests
+        if: steps.shard.outputs.active == 'true'
         env:
           NEXTEST_PROFILE: ${{ github.event_name == 'pull_request' && 'pull-request' || github.event_name == 'merge_group' && 'merge-group' || 'full-validation' }}
         run: |
@@ -792,7 +830,7 @@ jobs:
           ' nextest-plan/shard-test-ids.json > "nextest-timing/timing-${{ matrix.shardIndex }}.json"
           exit "$status"
       - name: Upload retained shard timing data
-        if: always()
+        if: always() && steps.shard.outputs.active == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: nextest-timing-${{ github.run_id }}-${{ matrix.shard }}
@@ -1155,6 +1193,8 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
+          cache: pnpm
+          cache-dependency-path: ui/pnpm-lock.yaml
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
       - name: Generated MCP types are up to date
@@ -1167,56 +1207,15 @@ jobs:
         run: pnpm test
       - name: Production build
         run: pnpm build
-  fail-fast-watchdog:
-    name: Fail-fast watchdog
-    needs: preflight
-    if: needs.preflight.result == 'success' && github.event_name != 'push'
-    runs-on: ubuntu-latest
-    timeout-minutes: 120
-    env:
-      GH_TOKEN: ${{ github.token }}
-    steps:
-      - name: Cancel the run when any lane concludes failure
-        run: |
-          # Fail-fast used to be a self-cancel step inside each guard job.
-          # Cancelling a run from INSIDE the failing job races that job's
-          # own finalization: GitHub usually stamps the culprit "cancelled"
-          # instead of "failure", hiding which lane broke and making merge
-          # queue ejections look like queue rebuilds. A bystander watchdog
-          # only cancels after a lane has CONCLUDED failure, so the red
-          # label survives.
-          for _ in $(seq 1 300); do
-            jobs_json=$(gh api "repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/jobs?per_page=100")
-            failed=$(jq -r '[.jobs[] | select(.conclusion == "failure") | .name] | first // empty' <<<"$jobs_json")
-            if [ -n "$failed" ]; then
-              echo "::error::Lane '$failed' failed — cancelling the remaining jobs."
-              gh run cancel ${{ github.run_id }} --repo ${{ github.repository }} \
-                || echo "::warning::Fail-fast cancel failed; letting the run finish."
-              exit 0
-            fi
-            running=$(jq -r --arg self "Fail-fast watchdog" --arg gate "Quality Gate" \
-              '[.jobs[] | select(.name != $self and .name != $gate) | select(.status != "completed")] | length' <<<"$jobs_json")
-            if [ "$running" -eq 0 ]; then
-              echo "All lanes completed without failure."
-              exit 0
-            fi
-            sleep 20
-          done
-          echo "::warning::Watchdog window elapsed; letting the run finish."
   quality-gate:
     name: Quality Gate
     runs-on: ubuntu-latest
     if: always() && github.event_name != 'push'
     needs:
       - preflight
-      - server-cargo-deny
+      - server-guards
       - server-clippy
       - server-aarch64-check
-      - server-size-guard
-      - server-migrations-guard
-      - server-raw-sql-boundary
-      - server-capability-boundaries
-      - server-boundaries
       - nextest-plan
       - server-test
       - nextest-timing-publish
@@ -1229,14 +1228,15 @@ jobs:
       - name: Fail closed on selected work
         env:
           PREFLIGHT: ${{ needs.preflight.result }}
-          CARGO_DENY: ${{ needs.preflight.outputs.cargoDeny }}:${{ needs.server-cargo-deny.result }}
+          GUARDS: |-
+            ${{ (needs.preflight.outputs.cargoDeny == 'true'
+               || needs.preflight.outputs.size == 'true'
+               || needs.preflight.outputs.migrations == 'true'
+               || needs.preflight.outputs.rawSql == 'true'
+               || needs.preflight.outputs.capability == 'true'
+               || needs.preflight.outputs.boundaries == 'true') }}:${{ needs.server-guards.result }}
           CLIPPY: ${{ needs.preflight.outputs.clippy }}:${{ needs.server-clippy.result }}
           AARCH64: ${{ needs.preflight.outputs.aarch64 }}:${{ needs.server-aarch64-check.result }}
-          SIZE: ${{ needs.preflight.outputs.size }}:${{ needs.server-size-guard.result }}
-          MIGRATIONS: ${{ needs.preflight.outputs.migrations }}:${{ needs.server-migrations-guard.result }}
-          RAW_SQL: ${{ needs.preflight.outputs.rawSql }}:${{ needs.server-raw-sql-boundary.result }}
-          CAPABILITY: ${{ needs.preflight.outputs.capability }}:${{ needs.server-capability-boundaries.result }}
-          BOUNDARIES: ${{ needs.preflight.outputs.boundaries }}:${{ needs.server-boundaries.result }}
           SERVER_TEST_PLAN: ${{ needs.preflight.outputs.serverTest }}:${{ needs.nextest-plan.result }}
           SERVER_TEST_SHARDS: ${{ needs.preflight.outputs.serverTest }}:${{ needs.server-test.result }}
           SERVER_TEST_TIMING: ${{ needs.preflight.outputs.serverTest }}:${{ needs.nextest-timing-publish.result }}
@@ -1254,9 +1254,7 @@ jobs:
             if [ "$selected" = false ] && [ "$result" = skipped ]; then return; fi
             echo "lane $lane selected=$selected result=$result"; return 1
           }
-          check cargo-deny "$CARGO_DENY"; check clippy "$CLIPPY"; check aarch64 "$AARCH64"
-          check size "$SIZE"; check migrations "$MIGRATIONS"; check raw-sql "$RAW_SQL"
-          check capability "$CAPABILITY"; check boundaries "$BOUNDARIES"
+          check server-guards "$GUARDS"; check clippy "$CLIPPY"; check aarch64 "$AARCH64"
           check server-test-plan "$SERVER_TEST_PLAN"; check server-test-shards "$SERVER_TEST_SHARDS"; check server-test-timing "$SERVER_TEST_TIMING"
           check sqlx-freshness "$SQLX"; check memory-eval "$MEMORY"
           check local-dev-contracts "$TILT_CONTRACTS"; check qa-smoke "$QA_SMOKE"; check ui "$UI"
