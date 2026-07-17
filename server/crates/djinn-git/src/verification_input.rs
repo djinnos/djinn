@@ -4,7 +4,10 @@ use djinn_core::canonical_verify::{
 };
 use globset::{Glob, GlobSet, GlobSetBuilder};
 use sha2::{Digest, Sha256};
-use std::path::{Path, PathBuf};
+use std::{
+    io::Read,
+    path::{Path, PathBuf},
+};
 pub const VERIFICATION_INPUT_FINGERPRINT_VERSION_V1: u32 = 1;
 pub const DEFAULT_VERIFICATION_BASE_REF: &str = "main";
 const STREAM_MAGIC: &[u8] = b"djinn-verification-input-fingerprint";
@@ -234,6 +237,10 @@ pub async fn compute_verification_input_fingerprint_with_config(
     if let Err(reason) = cleanup_output_only(worktree, &output_only) {
         return Ok(VerificationInputFingerprint::Unavailable(reason));
     }
+    let worktree_anchor = match PermittedRootAnchor::capture(worktree, b".") {
+        Ok(anchor) => anchor,
+        Err(reason) => return Ok(VerificationInputFingerprint::Unavailable(reason)),
+    };
     let base_ref = config.base_ref.trim();
     let base_ref = if base_ref.is_empty() {
         DEFAULT_VERIFICATION_BASE_REF
@@ -286,14 +293,14 @@ pub async fn compute_verification_input_fingerprint_with_config(
     let mut gitlink_states: Vec<GitlinkState> = Vec::new();
     for entry in &index_entries {
         if entry.mode == MODE_GITLINK_TAG {
-            match collect_gitlink_state(worktree, &entry.path, &entry.blob_sha).await {
+            match collect_gitlink_state(&worktree_anchor, &entry.path, &entry.blob_sha).await {
                 Ok(state) => gitlink_states.push(state),
                 Err(unavailable) => {
                     return Ok(VerificationInputFingerprint::Unavailable(unavailable));
                 }
             }
         } else {
-            match classify_worktree_entry(worktree, &entry.path, false) {
+            match classify_worktree_entry(&worktree_anchor, &entry.path, false) {
                 Ok(state) => tracked_states.push(state),
                 Err(unavailable) => {
                     return Ok(VerificationInputFingerprint::Unavailable(unavailable));
@@ -305,7 +312,7 @@ pub async fn compute_verification_input_fingerprint_with_config(
     extra_paths.retain(|path| !output_only.is_match(path_from_bytes(path)));
     let mut extra_states = Vec::with_capacity(extra_paths.len());
     for path in &extra_paths {
-        match classify_worktree_entry(worktree, path, true) {
+        match classify_worktree_entry(&worktree_anchor, path, true) {
             Ok(state) => extra_states.push(state),
             Err(unavailable) => {
                 return Ok(VerificationInputFingerprint::Unavailable(unavailable));
@@ -542,25 +549,29 @@ fn collect_external_states(
             .ok_or_else(|| VerificationInputUnavailable::MissingExternalInput {
                 id: declaration.id.clone(),
             })?;
-        if !std::fs::symlink_metadata(&mount.path)
-            .map(|m| m.file_type().is_dir())
-            .unwrap_or(false)
-        {
-            return Err(VerificationInputUnavailable::MissingExternalInput {
-                id: declaration.id.clone(),
-            });
-        }
-        collect_external_dir(&mount.path, &mount.path, declaration, &mut states)?;
+        let anchor =
+            PermittedRootAnchor::capture(&mount.path, declaration.id.as_bytes()).map_err(|_| {
+                VerificationInputUnavailable::MissingExternalInput {
+                    id: declaration.id.clone(),
+                }
+            })?;
+        collect_external_dir(&anchor, &mount.path, declaration, &mut states)?;
+        anchor.validate(declaration.id.as_bytes())?;
     }
     states.sort_by(|a, b| (&a.id, &a.locator, &a.path).cmp(&(&b.id, &b.locator, &b.path)));
     Ok(states)
 }
 fn collect_external_dir(
-    root: &Path,
+    anchor: &PermittedRootAnchor,
     dir: &Path,
     declaration: &djinn_core::canonical_verify::DeclaredExternalInputV1,
     states: &mut Vec<ExternalState>,
 ) -> Result<(), VerificationInputUnavailable> {
+    let dir_rel = dir
+        .strip_prefix(&anchor.lexical_root)
+        .map_err(|_| unavailable_manifest("external path escaped mount"))?;
+    let dir_bytes = path_bytes(dir_rel);
+    anchor.canonical_path_within_root(dir, &dir_bytes)?;
     let mut entries: Vec<_> = std::fs::read_dir(dir)
         .map_err(|e| VerificationInputUnavailable::UnreadableFile {
             path: dir.display().to_string(),
@@ -578,22 +589,23 @@ fn collect_external_dir(
     for entry in entries {
         let path = entry.path();
         let rel = path
-            .strip_prefix(root)
+            .strip_prefix(&anchor.lexical_root)
             .map_err(|_| unavailable_manifest("external path escaped mount"))?;
         let meta = std::fs::symlink_metadata(&path)
             .map_err(|_| unavailable_manifest("external traversal changed"))?;
         if meta.file_type().is_dir() {
-            collect_external_dir(root, &path, declaration, states)?;
+            collect_external_dir(anchor, &path, declaration, states)?;
         } else {
             let bytes = path_bytes(rel);
             states.push(ExternalState {
                 id: declaration.id.as_bytes().to_vec(),
                 locator: declaration.locator.as_bytes().to_vec(),
                 path: bytes.clone(),
-                state: classify_worktree_entry(root, &bytes, false)?,
+                state: classify_worktree_entry(anchor, &bytes, false)?,
             });
         }
     }
+    anchor.canonical_path_within_root(dir, &dir_bytes)?;
     Ok(())
 }
 async fn git_binary_stdout(worktree: &Path, args: Vec<String>) -> Result<Vec<u8>, GitError> {
@@ -708,6 +720,169 @@ struct WorktreeState {
     mode_tag: &'static [u8],
     content: Vec<u8>,
 }
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct EntryIdentity {
+    is_file: bool,
+    is_symlink: bool,
+    len: u64,
+    modified: Option<std::time::SystemTime>,
+    #[cfg(unix)]
+    dev: u64,
+    #[cfg(unix)]
+    ino: u64,
+    #[cfg(unix)]
+    mode: u32,
+    #[cfg(unix)]
+    ctime: i64,
+    #[cfg(unix)]
+    ctime_nsec: i64,
+}
+fn entry_identity(metadata: &std::fs::Metadata) -> EntryIdentity {
+    let kind = metadata.file_type();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        EntryIdentity {
+            is_file: kind.is_file(),
+            is_symlink: kind.is_symlink(),
+            len: metadata.len(),
+            modified: metadata.modified().ok(),
+            dev: metadata.dev(),
+            ino: metadata.ino(),
+            mode: metadata.mode(),
+            ctime: metadata.ctime(),
+            ctime_nsec: metadata.ctime_nsec(),
+        }
+    }
+    #[cfg(not(unix))]
+    EntryIdentity {
+        is_file: kind.is_file(),
+        is_symlink: kind.is_symlink(),
+        len: metadata.len(),
+        modified: metadata.modified().ok(),
+    }
+}
+fn traversal_changed(path: &[u8]) -> VerificationInputUnavailable {
+    VerificationInputUnavailable::UnreadableFile {
+        path: lossy_path(path),
+        error: "entry changed during verification input traversal".into(),
+    }
+}
+#[derive(Debug, Clone)]
+struct PermittedRootAnchor {
+    lexical_root: PathBuf,
+    canonical_root: PathBuf,
+    identity: EntryIdentity,
+}
+impl PermittedRootAnchor {
+    fn capture(root: &Path, display_path: &[u8]) -> Result<Self, VerificationInputUnavailable> {
+        let metadata = std::fs::symlink_metadata(root).map_err(|e| {
+            VerificationInputUnavailable::UnreadableFile {
+                path: lossy_path(display_path),
+                error: e.to_string(),
+            }
+        })?;
+        if !metadata.file_type().is_dir() {
+            return Err(traversal_changed(display_path));
+        }
+        let canonical_root = std::fs::canonicalize(root).map_err(|e| {
+            VerificationInputUnavailable::UnreadableFile {
+                path: lossy_path(display_path),
+                error: e.to_string(),
+            }
+        })?;
+        Ok(Self {
+            lexical_root: root.to_path_buf(),
+            canonical_root,
+            identity: entry_identity(&metadata),
+        })
+    }
+
+    fn validate(&self, display_path: &[u8]) -> Result<(), VerificationInputUnavailable> {
+        let metadata = std::fs::symlink_metadata(&self.lexical_root)
+            .map_err(|_| traversal_changed(display_path))?;
+        let canonical = std::fs::canonicalize(&self.lexical_root)
+            .map_err(|_| traversal_changed(display_path))?;
+        if entry_identity(&metadata) != self.identity || canonical != self.canonical_root {
+            return Err(traversal_changed(display_path));
+        }
+        Ok(())
+    }
+
+    fn canonical_path_within_root(
+        &self,
+        path: &Path,
+        rel_path: &[u8],
+    ) -> Result<PathBuf, VerificationInputUnavailable> {
+        self.validate(rel_path)?;
+        let canonical_path = std::fs::canonicalize(path).map_err(|e| {
+            VerificationInputUnavailable::UnreadableFile {
+                path: lossy_path(rel_path),
+                error: e.to_string(),
+            }
+        })?;
+        if !canonical_path.starts_with(&self.canonical_root) {
+            return Err(VerificationInputUnavailable::UnreadableFile {
+                path: lossy_path(rel_path),
+                error: "path escaped permitted root".into(),
+            });
+        }
+        Ok(canonical_path)
+    }
+}
+/// Resolve an entry before consuming it. `symlink_metadata` reports only the
+/// final entry, while opening a nested path follows intermediate symlinks.
+/// Every object inspected by this traversal must remain below its walk root.
+#[cfg(unix)]
+fn opened_file_within_root(
+    anchor: &PermittedRootAnchor,
+    file: &std::fs::File,
+    rel_path: &[u8],
+) -> Result<(), VerificationInputUnavailable> {
+    use std::os::unix::io::AsRawFd;
+
+    let opened_path = PathBuf::from(format!("/proc/self/fd/{}", file.as_raw_fd()));
+    anchor
+        .canonical_path_within_root(&opened_path, rel_path)
+        .map(|_| ())
+}
+
+#[cfg(not(unix))]
+fn opened_file_within_root(
+    anchor: &PermittedRootAnchor,
+    file: &std::fs::File,
+    rel_path: &[u8],
+) -> Result<(), VerificationInputUnavailable> {
+    // Non-Unix platforms have no portable descriptor-to-path API. The caller
+    // re-canonicalizes the pathname after reading as a conservative check.
+    let _ = (anchor, file, rel_path);
+    Ok(())
+}
+#[cfg(test)]
+type ReadMutationHook = std::sync::Arc<dyn Fn(&Path) + Send + Sync>;
+#[cfg(test)]
+static READ_MUTATION_HOOK: std::sync::OnceLock<std::sync::Mutex<Option<ReadMutationHook>>> =
+    std::sync::OnceLock::new();
+#[cfg(test)]
+fn set_test_read_mutation_hook(hook: Option<ReadMutationHook>) {
+    *READ_MUTATION_HOOK
+        .get_or_init(|| std::sync::Mutex::new(None))
+        .lock()
+        .expect("test mutation hook lock") = hook;
+}
+#[cfg(test)]
+fn run_test_read_mutation_hook(path: &Path) {
+    let hook = READ_MUTATION_HOOK
+        .get_or_init(|| std::sync::Mutex::new(None))
+        .lock()
+        .expect("test mutation hook lock")
+        .clone();
+    if let Some(hook) = hook {
+        hook(path);
+    }
+}
+#[cfg(not(test))]
+fn run_test_read_mutation_hook(_path: &Path) {}
 #[derive(Debug, Clone)]
 struct GitlinkState {
     path: Vec<u8>,
@@ -729,11 +904,12 @@ fn lossy_path(bytes: &[u8]) -> String {
     String::from_utf8_lossy(bytes).into_owned()
 }
 fn classify_worktree_entry(
-    worktree: &Path,
+    anchor: &PermittedRootAnchor,
     rel_path: &[u8],
     is_extra: bool,
 ) -> Result<WorktreeState, VerificationInputUnavailable> {
-    let full_path = worktree.join(path_from_bytes(rel_path));
+    anchor.validate(rel_path)?;
+    let full_path = anchor.lexical_root.join(path_from_bytes(rel_path));
     let metadata = match std::fs::symlink_metadata(&full_path) {
         Ok(m) => m,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -758,12 +934,28 @@ fn classify_worktree_entry(
     };
     let file_type = metadata.file_type();
     if file_type.is_symlink() {
+        let before = entry_identity(&metadata);
+        // Link text is an input only while the inspected link remains stable
+        // and resolves beneath the traversal's permitted root.
+        run_test_read_mutation_hook(&full_path);
         let target = std::fs::read_link(&full_path).map_err(|e| {
             VerificationInputUnavailable::UnreadableFile {
                 path: lossy_path(rel_path),
                 error: e.to_string(),
             }
         })?;
+        anchor.canonical_path_within_root(&full_path, rel_path)?;
+        let after =
+            std::fs::symlink_metadata(&full_path).map_err(|_| traversal_changed(rel_path))?;
+        if entry_identity(&after) != before {
+            return Err(traversal_changed(rel_path));
+        }
+        let target_after =
+            std::fs::read_link(&full_path).map_err(|_| traversal_changed(rel_path))?;
+        if target_after != target {
+            return Err(traversal_changed(rel_path));
+        }
+        anchor.canonical_path_within_root(&full_path, rel_path)?;
         return Ok(WorktreeState {
             path: rel_path.to_vec(),
             type_tag: TYPE_SYMLINK,
@@ -772,16 +964,48 @@ fn classify_worktree_entry(
         });
     }
     if file_type.is_file() {
-        let content = std::fs::read(&full_path).map_err(|e| {
+        let before = entry_identity(&metadata);
+        anchor.canonical_path_within_root(&full_path, rel_path)?;
+        run_test_read_mutation_hook(&full_path);
+        let mut file = std::fs::File::open(&full_path).map_err(|e| {
             VerificationInputUnavailable::UnreadableFile {
                 path: lossy_path(rel_path),
                 error: e.to_string(),
             }
         })?;
+        let opened_before =
+            file.metadata()
+                .map_err(|e| VerificationInputUnavailable::UnreadableFile {
+                    path: lossy_path(rel_path),
+                    error: e.to_string(),
+                })?;
+        if !opened_before.file_type().is_file() || entry_identity(&opened_before) != before {
+            return Err(traversal_changed(rel_path));
+        }
+        opened_file_within_root(anchor, &file, rel_path)?;
+        let mut content = Vec::new();
+        file.read_to_end(&mut content).map_err(|e| {
+            VerificationInputUnavailable::UnreadableFile {
+                path: lossy_path(rel_path),
+                error: e.to_string(),
+            }
+        })?;
+        let opened_after =
+            file.metadata()
+                .map_err(|e| VerificationInputUnavailable::UnreadableFile {
+                    path: lossy_path(rel_path),
+                    error: e.to_string(),
+                })?;
+        let path_after =
+            std::fs::symlink_metadata(&full_path).map_err(|_| traversal_changed(rel_path))?;
+        if entry_identity(&opened_after) != before || entry_identity(&path_after) != before {
+            return Err(traversal_changed(rel_path));
+        }
+        anchor.canonical_path_within_root(&full_path, rel_path)?;
         return Ok(WorktreeState {
             path: rel_path.to_vec(),
             type_tag: TYPE_REGULAR,
-            mode_tag: if is_executable(&metadata) {
+            mode_tag: if is_executable(&opened_before) {
                 MODE_EXEC
             } else {
                 MODE_NORMAL
@@ -830,43 +1054,29 @@ async fn collect_extra_paths(worktree: &Path) -> Result<Vec<Vec<u8>>, Verificati
 /// return identity-unavailable rather than degrading to an ordinary directory
 /// walk.
 async fn collect_gitlink_state(
-    parent_worktree: &Path,
+    parent_anchor: &PermittedRootAnchor,
     rel_path: &[u8],
     committed_sha: &str,
 ) -> Result<GitlinkState, VerificationInputUnavailable> {
     let sub_path = path_from_bytes(rel_path);
-    let full_sub_path = parent_worktree.join(&sub_path);
-    let canonical_sub_path = std::fs::canonicalize(&full_sub_path).map_err(|_| {
-        VerificationInputUnavailable::UninitializedSubmodule {
-            path: lossy_path(rel_path),
-        }
-    })?;
-    let canonical_parent = std::fs::canonicalize(parent_worktree).map_err(|_| {
-        VerificationInputUnavailable::UninitializedSubmodule {
-            path: lossy_path(rel_path),
-        }
-    })?;
-    if !canonical_sub_path.starts_with(&canonical_parent) {
+    let full_sub_path = parent_anchor.lexical_root.join(&sub_path);
+    let canonical_sub_path = parent_anchor.canonical_path_within_root(&full_sub_path, rel_path)?;
+    if !canonical_sub_path.starts_with(&parent_anchor.canonical_root) {
         return Err(VerificationInputUnavailable::SubmodulePathEscape {
             path: lossy_path(rel_path),
         });
     }
-    let metadata = std::fs::symlink_metadata(&canonical_sub_path).map_err(|_| {
+    let sub_anchor = PermittedRootAnchor::capture(&full_sub_path, rel_path).map_err(|_| {
         VerificationInputUnavailable::UninitializedSubmodule {
             path: lossy_path(rel_path),
         }
     })?;
-    if !metadata.file_type().is_dir() {
+    if !sub_anchor.lexical_root.join(".git").exists() {
         return Err(VerificationInputUnavailable::UninitializedSubmodule {
             path: lossy_path(rel_path),
         });
     }
-    if !canonical_sub_path.join(".git").exists() {
-        return Err(VerificationInputUnavailable::UninitializedSubmodule {
-            path: lossy_path(rel_path),
-        });
-    }
-    let sub_head = match try_rev_parse(&canonical_sub_path, "HEAD").await {
+    let sub_head = match try_rev_parse(&sub_anchor.lexical_root, "HEAD").await {
         Ok(Some(sha)) => sha,
         Ok(None) => {
             return Err(VerificationInputUnavailable::UninitializedSubmodule {
@@ -887,7 +1097,8 @@ async fn collect_gitlink_state(
             actual: sub_head,
         });
     }
-    let submodule_stream = collect_submodule_stream(&canonical_sub_path, b"").await?;
+    let submodule_stream = collect_submodule_stream(sub_anchor.clone(), b"").await?;
+    sub_anchor.validate(rel_path)?;
     Ok(GitlinkState {
         path: rel_path.to_vec(),
         committed_sha: committed_sha.to_string(),
@@ -901,22 +1112,20 @@ async fn collect_gitlink_state(
 /// `Err(unavailable)` when a nested repository is missing, unreadable, or
 /// invalid so that the top-level identity becomes unavailable.
 fn collect_submodule_stream(
-    sub_worktree: &Path,
+    anchor: PermittedRootAnchor,
     namespace: &[u8],
 ) -> std::pin::Pin<
     Box<dyn std::future::Future<Output = Result<Vec<u8>, VerificationInputUnavailable>> + Send>,
 > {
-    Box::pin(collect_submodule_stream_inner(
-        sub_worktree.to_path_buf(),
-        namespace.to_vec(),
-    ))
+    Box::pin(collect_submodule_stream_inner(anchor, namespace.to_vec()))
 }
 async fn collect_submodule_stream_inner(
-    sub_worktree: PathBuf,
+    anchor: PermittedRootAnchor,
     namespace: Vec<u8>,
 ) -> Result<Vec<u8>, VerificationInputUnavailable> {
+    anchor.validate(&namespace)?;
     let index_output = git_binary_stdout(
-        &sub_worktree,
+        &anchor.lexical_root,
         vec!["ls-files".into(), "-s".into(), "-z".into()],
     )
     .await
@@ -936,7 +1145,7 @@ async fn collect_submodule_stream_inner(
         }
         if entry.mode == MODE_GITLINK_TAG {
             let namespaced = namespace_join(&namespace, &entry.path);
-            match collect_gitlink_state(&sub_worktree, &entry.path, &entry.blob_sha).await {
+            match collect_gitlink_state(&anchor, &entry.path, &entry.blob_sha).await {
                 Ok(mut state) => {
                     state.path = namespaced;
                     gitlink_states.push(state);
@@ -947,7 +1156,7 @@ async fn collect_submodule_stream_inner(
             }
         } else {
             let namespaced = namespace_join(&namespace, &entry.path);
-            match classify_worktree_entry(&sub_worktree, &entry.path, false) {
+            match classify_worktree_entry(&anchor, &entry.path, false) {
                 Ok(mut state) => {
                     state.path = namespaced;
                     tracked_states.push(state);
@@ -958,16 +1167,16 @@ async fn collect_submodule_stream_inner(
             }
         }
     }
-    let extra_paths = collect_extra_paths(&sub_worktree).await.map_err(|e| {
-        VerificationInputUnavailable::UnreadableFile {
+    let extra_paths = collect_extra_paths(&anchor.lexical_root)
+        .await
+        .map_err(|e| VerificationInputUnavailable::UnreadableFile {
             path: String::from_utf8_lossy(&namespace).into_owned(),
             error: e.to_string(),
-        }
-    })?;
+        })?;
     let mut extra_states = Vec::with_capacity(extra_paths.len());
     for path in &extra_paths {
         let namespaced = namespace_join(&namespace, path);
-        match classify_worktree_entry(&sub_worktree, path, true) {
+        match classify_worktree_entry(&anchor, path, true) {
             Ok(mut state) => {
                 state.path = namespaced;
                 extra_states.push(state);
@@ -981,6 +1190,7 @@ async fn collect_submodule_stream_inner(
     tracked_states.sort_by(|a, b| a.path.cmp(&b.path));
     extra_states.sort_by(|a, b| a.path.cmp(&b.path));
     gitlink_states.sort_by(|a, b| a.path.cmp(&b.path));
+    anchor.validate(&namespace)?;
     let mut stream = CanonicalStream::new();
     stream.write_header();
     stream.field(&namespace);
