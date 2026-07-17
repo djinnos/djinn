@@ -131,6 +131,15 @@ pub struct CrateGraph {
     pub edges: Vec<CrateEdge>,
 }
 
+/// What [`RepoDependencyGraph::salvage_workspace_from_artifact`] spliced in.
+/// Zero `nodes_added` means the previous artifact had nothing for the
+/// workspace (or every key already existed) and the graph is unchanged.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct WorkspaceSalvageStats {
+    pub nodes_added: usize,
+    pub edges_added: usize,
+}
+
 #[cfg(test)]
 use self::graph::is_owned_by_changed_file;
 use self::graph::{build_name_index, build_process_lookup, derive_edge_confidence};
@@ -400,6 +409,127 @@ impl RepoDependencyGraph {
             out.layout_positions = crate::layout::derive_layout_positions(&out);
         }
         out
+    }
+
+    /// Splice one workspace's nodes and edges from a previously persisted
+    /// artifact into this freshly built graph.
+    ///
+    /// Last-good salvage for a workspace whose indexer failed or timed out
+    /// this warm: rather than publishing the merged graph with that workspace
+    /// wiped to zero nodes, the warm re-uses the workspace's subgraph from the
+    /// previous cached blob. The salvaged content is stale (it describes an
+    /// older commit) — the caller is responsible for surfacing that
+    /// provenance (see the per-workspace freshness rows in
+    /// `canonical_graph.rs`).
+    ///
+    /// Selection is by the node's `workspace` tag, which every builder
+    /// node-creation site stamps (files, symbols, and external placeholders
+    /// alike). Nodes whose key already exists in this graph are skipped, so a
+    /// workspace that produced partial fresh output never gets stale
+    /// duplicates. Edges are restored when both endpoints resolve in the
+    /// post-splice graph and at least one endpoint is a salvaged node —
+    /// cross-workspace edges therefore survive as long as the other
+    /// workspace's fresh build kept the same node key. `CoChangedWith` rows in
+    /// the shared edges vec are ignored (the co-change sidecar is re-derived
+    /// from the coupling index each warm), and synthetic process nodes carry
+    /// no workspace tag so process machinery is never salvaged.
+    ///
+    /// Also restores the workspace's `symbol_ranges` sidecar entries so
+    /// `symbols_at` keeps answering (with stale line numbers, matching the
+    /// stale nodes). Communities and processes are left to the fresh build.
+    pub fn salvage_workspace_from_artifact(
+        &mut self,
+        previous: &RepoGraphArtifact,
+        workspace_slug: &str,
+    ) -> WorkspaceSalvageStats {
+        let mut stats = WorkspaceSalvageStats::default();
+
+        // Pass 1: add the workspace's nodes, remembering artifact position →
+        // live NodeIndex for every position that resolves post-splice.
+        let mut position_map: BTreeMap<usize, NodeIndex> = BTreeMap::new();
+        let mut salvaged_positions: BTreeSet<usize> = BTreeSet::new();
+        for (pos, node) in previous.nodes.iter().enumerate() {
+            if node.workspace.as_deref() != Some(workspace_slug) {
+                continue;
+            }
+            if let Some(&existing) = self.node_lookup.get(&node.id) {
+                position_map.insert(pos, existing);
+                continue;
+            }
+            let index = self.graph.add_node(node.clone());
+            self.node_lookup.insert(node.id.clone(), index);
+            position_map.insert(pos, index);
+            salvaged_positions.insert(pos);
+            stats.nodes_added += 1;
+        }
+        if stats.nodes_added == 0 {
+            return stats;
+        }
+
+        // Pass 2: restore edges touching at least one salvaged node. The
+        // non-salvaged endpoint resolves through the live key lookup so
+        // cross-workspace edges reattach to the fresh build's nodes.
+        let resolve = |pos: usize,
+                       position_map: &BTreeMap<usize, NodeIndex>,
+                       node_lookup: &BTreeMap<RepoNodeKey, NodeIndex>|
+         -> Option<NodeIndex> {
+            if let Some(&index) = position_map.get(&pos) {
+                return Some(index);
+            }
+            let node = previous.nodes.get(pos)?;
+            node_lookup.get(&node.id).copied()
+        };
+        for edge in &previous.edges {
+            if edge.kind == RepoGraphEdgeKind::CoChangedWith {
+                continue;
+            }
+            if !salvaged_positions.contains(&edge.source)
+                && !salvaged_positions.contains(&edge.target)
+            {
+                continue;
+            }
+            let (Some(source), Some(target)) = (
+                resolve(edge.source, &position_map, &self.node_lookup),
+                resolve(edge.target, &position_map, &self.node_lookup),
+            ) else {
+                continue;
+            };
+            self.graph.add_edge(
+                source,
+                target,
+                RepoGraphEdge {
+                    kind: edge.kind,
+                    weight: edge.weight,
+                    evidence_count: edge.evidence_count,
+                    confidence: edge.confidence,
+                    reason: edge.reason.clone(),
+                    step: edge.step,
+                },
+            );
+            stats.edges_added += 1;
+        }
+
+        // Pass 3: restore the salvaged nodes' enclosing-range sidecar entries.
+        for (file, ranges) in &previous.symbol_ranges {
+            let mut translated: Vec<SymbolRange> = ranges
+                .iter()
+                .filter(|range| salvaged_positions.contains(&range.node))
+                .map(|range| SymbolRange {
+                    start_line: range.start_line,
+                    end_line: range.end_line,
+                    node: position_map[&range.node],
+                })
+                .collect();
+            if translated.is_empty() {
+                continue;
+            }
+            let entry = self.symbol_ranges.entry(file.clone()).or_default();
+            entry.append(&mut translated);
+            entry.sort_by_key(|r| (r.start_line, r.end_line));
+        }
+
+        self.name_index = build_name_index(&self.graph);
+        stats
     }
 
     /// Serialize the graph artifact to a JSON string for DB storage.

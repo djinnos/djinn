@@ -1376,3 +1376,4 @@ async fn planner_escalation_close_releases_source() {
         "source must be unblocked after the escalation closes, got: {blockers_after:?}"
     );
 }
+

@@ -6982,3 +6982,147 @@ async fn dispatch_pass_parks_when_decision_failure_cap_reached_at_dispatch_time(
         "decision-failure cap must NOT emit arbiter_dispatched"
     );
 }
+
+/// A stale unconsumed arbitration row whose directive already records a
+/// terminal decision (the approve/approve_conflict path historically never
+/// called `mark_consumed`) must NOT be treated as "arbiter already in flight".
+/// Re-entry must self-consume the stale row and dispatch a fresh arbiter on
+/// the next hold cycle (incident lre2, 2026-07-16: approve → pr_draft →
+/// merge-conflict reopen → wedged until the 24h arbitration deadline).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn reentry_with_stale_decided_arbitration_self_consumes_and_dispatches_fresh_arbiter() {
+    let db = test_helpers::create_test_db();
+    let (tx, _rx) = broadcast::channel(256);
+    let mut actor = coordinator_actor_for_tests(&db, &tx);
+    let repo = TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx));
+
+    let task = make_task_with_reopen_count(&db, &tx, REOPEN_INTERVENTION_THRESHOLD).await;
+    repo.reset_intervention_counters(&task.id).await.unwrap();
+    for _ in 0..REOPEN_INTERVENTION_THRESHOLD {
+        repo.set_status(&task.id, "closed").await.unwrap();
+        repo.set_status(&task.id, "open").await.unwrap();
+    }
+    let task = repo.get(&task.id).await.unwrap().unwrap();
+    assert_eq!(task.intervention_count, MAX_PLANNER_INTERVENTIONS);
+
+    // Seed an UNCONSUMED arbitration at hold_cycle 0 whose directive already
+    // carries a terminal decision — the shape left behind by an approve that
+    // never marked the row consumed.
+    let arb_repo = TaskArbitrationRepository::new(db.clone());
+    let decided_directive = serde_json::json!({
+        "decision": "approve",
+        "evidence_summary": "full diff review confirmed the remediation",
+    });
+    arb_repo
+        .try_create(CreateArbitrationParams {
+            task_id: &task.id,
+            hold_cycle: 0,
+            deadline_at: None,
+            mirror_head_sha: None,
+            github_head_sha: None,
+            pr_url: Some("https://github.com/acme/repo/pull/42"),
+            failing_ci_job_ids: &serde_json::json!([]),
+            dossier: None,
+            directive: Some(&decided_directive),
+            verification_command: None,
+            excluded_models: &serde_json::json!([]),
+        })
+        .await
+        .unwrap();
+
+    seed_terminated_post_intervention_sessions(&db, &tx, &task.id, &["m-a", "m-b"]).await;
+
+    let handled = actor
+        .route_planner_intervention(&task, "worker", "merge-conflict reopen reentry", None, 5)
+        .await;
+    assert!(handled, "stale-decided re-entry must be handled");
+
+    // The stale cycle-0 row is now consumed, and a fresh unconsumed cycle-1
+    // row exists (a new arbiter was dispatched).
+    let all_arbs = arb_repo.list_for_task(&task.id).await.unwrap();
+    assert_eq!(
+        all_arbs.len(),
+        2,
+        "must have consumed cycle 0 + fresh cycle 1; got: {all_arbs:?}"
+    );
+    let stale = all_arbs
+        .iter()
+        .find(|a| a.hold_cycle == 0)
+        .expect("cycle 0 must exist");
+    assert_eq!(
+        stale.state, "consumed",
+        "stale decided row must be self-consumed"
+    );
+    let fresh = all_arbs
+        .iter()
+        .find(|a| a.hold_cycle == 1)
+        .expect("cycle 1 must exist");
+    assert_eq!(fresh.state, "unconsumed", "fresh arbiter must be in flight");
+
+    // Task transitions to needs_lead_intervention (fresh arbiter dispatched).
+    let after = repo.get(&task.id).await.unwrap().unwrap();
+    assert_eq!(
+        after.status, "needs_lead_intervention",
+        "self-recovery must dispatch a fresh arbiter, not wedge"
+    );
+}
+
+/// A monitored-reopen row (directive decision "reopen") keeps its unconsumed
+/// state by design until `complete_monitored_reopen` — the self-recovery path
+/// must NOT consume it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn reentry_with_monitored_reopen_directive_does_not_self_consume() {
+    let db = test_helpers::create_test_db();
+    let (tx, _rx) = broadcast::channel(256);
+    let mut actor = coordinator_actor_for_tests(&db, &tx);
+    let repo = TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx));
+
+    let task = make_task_with_reopen_count(&db, &tx, REOPEN_INTERVENTION_THRESHOLD).await;
+    repo.reset_intervention_counters(&task.id).await.unwrap();
+    for _ in 0..REOPEN_INTERVENTION_THRESHOLD {
+        repo.set_status(&task.id, "closed").await.unwrap();
+        repo.set_status(&task.id, "open").await.unwrap();
+    }
+    let task = repo.get(&task.id).await.unwrap().unwrap();
+
+    let arb_repo = TaskArbitrationRepository::new(db.clone());
+    let reopen_directive = serde_json::json!({
+        "decision": "reopen",
+        "directive": "fix the flaky assertion and re-run the suite",
+    });
+    arb_repo
+        .try_create(CreateArbitrationParams {
+            task_id: &task.id,
+            hold_cycle: 0,
+            deadline_at: None,
+            mirror_head_sha: None,
+            github_head_sha: None,
+            pr_url: None,
+            failing_ci_job_ids: &serde_json::json!([]),
+            dossier: None,
+            directive: Some(&reopen_directive),
+            verification_command: None,
+            excluded_models: &serde_json::json!([]),
+        })
+        .await
+        .unwrap();
+
+    seed_terminated_post_intervention_sessions(&db, &tx, &task.id, &["m-a", "m-b"]).await;
+
+    let handled = actor
+        .route_planner_intervention(&task, "worker", "monitored reopen reentry", None, 5)
+        .await;
+    assert!(handled, "monitored-reopen re-entry must be handled");
+
+    // The single row survives unconsumed — no self-consume, no second row.
+    let all_arbs = arb_repo.list_for_task(&task.id).await.unwrap();
+    assert_eq!(
+        all_arbs.len(),
+        1,
+        "monitored reopen must keep exactly one arbitration row"
+    );
+    assert_eq!(
+        all_arbs[0].state, "unconsumed",
+        "monitored reopen row must stay unconsumed"
+    );
+}

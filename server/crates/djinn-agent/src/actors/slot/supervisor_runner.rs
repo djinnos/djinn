@@ -248,6 +248,80 @@ async fn persist_infra_death_on_attempt(
     }
 }
 
+/// Best-effort: advance this dispatch's still-`pending` attempt row to
+/// `crashed` when the run's terminal report is `Failed`. Without this the row
+/// keeps its `pending` outcome and the respawn guard defers every subsequent
+/// (task, role) dispatch until the periodic orphaned-attempt reaper catches it
+/// (5-minute threshold on a 15-minute sweep — up to ~20 minutes of dead board
+/// time per provider failure; incident 8lb0, 2026-07-16). A `submitted` row is
+/// deliberately left alone: submitted work is owned by the review/PR lifecycle
+/// and must keep its submitted signal.
+async fn terminalize_failed_run_attempt(
+    app_state: &AgentContext,
+    task_attempt_id: Option<&str>,
+    task: &Task,
+    report: &TaskRunReport,
+) {
+    let TaskRunOutcome::Failed { stage, reason, .. } = &report.outcome else {
+        return;
+    };
+    let Some(attempt_id) = task_attempt_id else {
+        return;
+    };
+    let attempt_repo = TaskAttemptRepository::new(app_state.db.clone());
+    let attempt = match attempt_repo.get(attempt_id).await {
+        Ok(Some(attempt)) => attempt,
+        Ok(None) => return,
+        Err(e) => {
+            tracing::warn!(
+                task_id = %task.short_id,
+                attempt_id,
+                error = %e,
+                "supervisor dispatch: failed to load attempt for failed-run terminalization"
+            );
+            return;
+        }
+    };
+    if attempt.outcome != djinn_core::models::task_attempt::TaskAttemptOutcome::Pending.as_str() {
+        return;
+    }
+    let truncated_reason: String = reason.chars().take(500).collect();
+    let summary = format!("run failed at stage {stage}: {truncated_reason}");
+    let summary_json = serde_json::json!({
+        "recovery_classifier": "failed_run_report",
+        "stage": stage,
+    })
+    .to_string();
+    match attempt_repo
+        .advance_to_terminal(djinn_db::TerminalTaskAttemptParams {
+            id: &attempt.id,
+            outcome: djinn_core::models::task_attempt::TaskAttemptOutcome::Crashed,
+            pr_url: None,
+            submit_ref: None,
+            checkpoint_ref: None,
+            mirror_head_sha: None,
+            github_head_sha: None,
+            summary: Some(&summary),
+            summary_json: Some(&summary_json),
+            log_tail: None,
+        })
+        .await
+    {
+        Ok(updated) => tracing::info!(
+            task_id = %task.short_id,
+            attempt_id = %updated.id,
+            outcome = %updated.outcome,
+            "supervisor dispatch: terminalized failed run's pending attempt"
+        ),
+        Err(e) => tracing::warn!(
+            task_id = %task.short_id,
+            attempt_id,
+            error = %e,
+            "supervisor dispatch: failed to terminalize failed run's pending attempt"
+        ),
+    }
+}
+
 /// Feed provider-breaker feedback on the terminal report, including OAuth
 /// refresh-on-401 and credential-revocation surfacing.
 async fn apply_provider_breaker_feedback(
@@ -530,6 +604,13 @@ pub(super) async fn dispatch_task_runtime(
                 "supervisor dispatch: task-run complete"
             );
             persist_loop_guard_activity(&task_repo, &task.id, &report).await;
+            terminalize_failed_run_attempt(
+                &app_state,
+                spec.task_attempt_id.as_deref(),
+                &task,
+                &report,
+            )
+            .await;
             apply_provider_breaker_feedback(
                 &app_state,
                 &report,
@@ -2207,6 +2288,121 @@ mod tests {
         assert!(
             !terminal_report_feeds_model_success(&env_report),
             "service readiness failure must not feed model-health success"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn failed_run_report_terminalizes_pending_attempt() {
+        use crate::test_helpers;
+        use djinn_core::models::task_attempt::TaskAttemptOutcome;
+        use tokio_util::sync::CancellationToken;
+
+        let db = test_helpers::create_test_db();
+        let project = test_helpers::create_test_project(&db).await;
+        let epic = test_helpers::create_test_epic(&db, &project.id).await;
+        let task = test_helpers::create_test_task(&db, &project.id, &epic.id).await;
+        let app_state = test_helpers::agent_context_from_db(db.clone(), CancellationToken::new());
+
+        let attempt_repo = TaskAttemptRepository::new(db.clone());
+        let attempt = attempt_repo
+            .create_or_get_pending(djinn_db::CreateTaskAttemptParams {
+                id: &uuid::Uuid::now_v7().to_string(),
+                task_id: &task.id,
+                role: "worker",
+                dispatch_key: "task-run:test-terminalize",
+                session_id: None,
+                attempt_seq: None,
+            })
+            .await
+            .expect("create pending attempt");
+
+        let failed = report(
+            "failed-run",
+            vec![],
+            TaskRunOutcome::Failed {
+                stage: "worker".into(),
+                reason: "provider API error 400: text content is empty".into(),
+                provider_failure: None,
+                error_class: None,
+                hint: None,
+                body_excerpt: None,
+            },
+        );
+        terminalize_failed_run_attempt(&app_state, Some(&attempt.id), &task, &failed).await;
+
+        let after = attempt_repo
+            .get(&attempt.id)
+            .await
+            .expect("read attempt")
+            .expect("attempt exists");
+        assert_eq!(
+            after.outcome,
+            TaskAttemptOutcome::Crashed.as_str(),
+            "a Failed run report must terminalize its pending attempt so the \
+             respawn guard does not defer dispatch until the orphan reaper"
+        );
+
+        // A submitted attempt is owned by the review/PR lifecycle — untouched.
+        let submitted = attempt_repo
+            .create_or_get_pending(djinn_db::CreateTaskAttemptParams {
+                id: &uuid::Uuid::now_v7().to_string(),
+                task_id: &task.id,
+                role: "worker",
+                dispatch_key: "task-run:test-terminalize-submitted",
+                session_id: None,
+                attempt_seq: None,
+            })
+            .await
+            .expect("create second attempt");
+        attempt_repo
+            .advance_to_submitted(djinn_db::SubmitTaskAttemptParams {
+                id: &submitted.id,
+                submit_ref: None,
+                checkpoint_ref: None,
+                mirror_head_sha: None,
+                github_head_sha: None,
+                summary: None,
+                summary_json: None,
+                log_tail: None,
+            })
+            .await
+            .expect("advance to submitted");
+        terminalize_failed_run_attempt(&app_state, Some(&submitted.id), &task, &failed).await;
+        let after_submitted = attempt_repo
+            .get(&submitted.id)
+            .await
+            .expect("read attempt")
+            .expect("attempt exists");
+        assert_eq!(
+            after_submitted.outcome,
+            TaskAttemptOutcome::Submitted.as_str(),
+            "a submitted attempt must keep its submitted signal"
+        );
+
+        // A non-Failed outcome must not touch the attempt.
+        let pending = attempt_repo
+            .create_or_get_pending(djinn_db::CreateTaskAttemptParams {
+                id: &uuid::Uuid::now_v7().to_string(),
+                task_id: &task.id,
+                role: "reviewer",
+                dispatch_key: "task-run:test-terminalize-nonfailed",
+                session_id: None,
+                attempt_seq: None,
+            })
+            .await
+            .expect("create third attempt");
+        let submitted_outcome = report("ok-run", vec![], TaskRunOutcome::WorkerSubmitted);
+        terminalize_failed_run_attempt(&app_state, Some(&pending.id), &task, &submitted_outcome)
+            .await;
+        let after_pending = attempt_repo
+            .get(&pending.id)
+            .await
+            .expect("read attempt")
+            .expect("attempt exists");
+        assert_eq!(
+            after_pending.outcome,
+            TaskAttemptOutcome::Pending.as_str(),
+            "non-Failed outcomes must not touch the attempt"
         );
     }
 }

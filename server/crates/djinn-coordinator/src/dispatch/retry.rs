@@ -1357,7 +1357,56 @@ impl CoordinatorActor {
             // path with a structured re-entry dossier.
             let arbiter_repo = TaskArbitrationRepository::new(self.db.clone());
             let hold_cycle = match arbiter_repo.resolve_current_hold_cycle(&task.id).await {
-                Ok((cycle, Some(existing))) => {
+                Ok((cycle, Some(existing))) => 'unconsumed: {
+                    // Self-recovery for a stale unconsumed row: when the row's
+                    // directive already records a terminal decision, the
+                    // arbiter DID run and decide — the row survived unconsumed
+                    // only because the decision path failed to mark it (the
+                    // approve/approve_conflict path historically never called
+                    // `mark_consumed`). Treating it as "arbiter in flight"
+                    // wedges the task until the 24h arbitration deadline
+                    // (incident lre2, 2026-07-16: approve → pr_draft →
+                    // merge-conflict reopen → every tick logged "arbiter
+                    // already in flight" with no live arbiter session).
+                    // Consume the stale row and open a fresh hold cycle.
+                    // "reopen" (monitored reopen) is excluded: that decision
+                    // keeps the row unconsumed by design until
+                    // `complete_monitored_reopen`.
+                    let stale_decision = existing
+                        .directive
+                        .as_ref()
+                        .and_then(|directive| directive.get("decision"))
+                        .and_then(serde_json::Value::as_str)
+                        .filter(|decision| {
+                            matches!(
+                                *decision,
+                                "approve" | "approve_conflict" | "park" | "supersede"
+                            )
+                        });
+                    if let Some(decision) = stale_decision {
+                        match arbiter_repo.mark_consumed(&task.id, cycle).await {
+                            Ok(_) => {
+                                tracing::warn!(
+                                    task_id = %task.short_id,
+                                    hold_cycle = cycle,
+                                    decision,
+                                    "CoordinatorActor: second-strike — unconsumed arbitration row \
+                                     already carries a terminal decision; self-consumed the stale \
+                                     row and opening a fresh hold cycle"
+                                );
+                                break 'unconsumed cycle.saturating_add(1);
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    task_id = %task.short_id,
+                                    hold_cycle = cycle,
+                                    error = %e,
+                                    "CoordinatorActor: second-strike — failed to self-consume stale \
+                                     arbitration row; falling back to in-flight handling this tick"
+                                );
+                            }
+                        }
+                    }
                     // Deadline auto-park: if the arbitration deadline has
                     // expired and no valid decision has consumed the row,
                     // auto-park with a generated failure dossier instead of

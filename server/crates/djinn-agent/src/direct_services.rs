@@ -1540,6 +1540,24 @@ impl SupervisorServices for DirectServices {
                 .map_err(|e| {
                     format!("record_arbiter_decision: failed to update arbitration row: {e}")
                 })?;
+
+            // Mark consumed exactly once, mirroring the park/supersede paths.
+            // An approve that leaves the row unconsumed wedges the task if it
+            // later re-enters the second-strike path (e.g. a merge-conflict
+            // reopen): the coordinator sees "arbiter already in flight" every
+            // tick and dispatches nothing until the arbitration deadline
+            // (incident lre2, 2026-07-16).
+            let consumed = arb_repo
+                .mark_consumed(&task_id, record.hold_cycle)
+                .await
+                .map_err(|e| format!("record_arbiter_decision: failed to mark consumed: {e}"))?;
+            if !consumed {
+                tracing::warn!(
+                    task_id = %task.short_id,
+                    hold_cycle = record.hold_cycle,
+                    "record_arbiter_decision: arbitration row was already consumed"
+                );
+            }
         } else {
             // No unconsumed row — log and continue. The park transaction
             // creates its own row, but approve/approve_conflict are expected
