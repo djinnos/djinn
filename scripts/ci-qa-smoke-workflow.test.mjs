@@ -5,6 +5,19 @@ import test from 'node:test';
 
 const WORKFLOW = resolve('.github/workflows/quality-gate.yml');
 
+// Keep trigger parsing scoped to GitHub event names so later top-level mappings
+// cannot be mistaken for events. This mirrors the cache-policy preflight parser.
+const GITHUB_EVENTS = new Set([
+  'branch_protection_rule', 'check_run', 'check_suite', 'create', 'delete',
+  'deployment', 'deployment_status', 'discussion', 'discussion_comment',
+  'fork', 'gollum', 'issue_comment', 'issues', 'label', 'merge_group',
+  'milestone', 'page_build', 'project', 'project_card', 'project_column',
+  'public', 'pull_request', 'pull_request_review',
+  'pull_request_review_comment', 'pull_request_target', 'push', 'registry_package',
+  'release', 'repository_dispatch', 'schedule', 'status', 'watch',
+  'workflow_call', 'workflow_dispatch', 'workflow_run',
+]);
+
 // qa-smoke may use only its local Postgres service and deterministic mocks. Do
 // not enumerate providers here: the catalog can gain providers independently of
 // this contract. Credential-shaped names catch both catalog API keys and OAuth
@@ -36,6 +49,42 @@ function parseJobs(source) {
     }
   }
   return { lines, jobs };
+}
+
+function workflowEvents(parsed) {
+  const onAt = parsed.lines.findIndex((line) => /^on:\s*(?:#.*)?$/.test(line));
+  if (onAt < 0) fail('workflow has no on: trigger mapping');
+
+  const events = [];
+  for (const line of parsed.lines.slice(onAt + 1)) {
+    if (/^\S/.test(line)) break;
+    const event = line.match(/^ {2}([A-Za-z_][A-Za-z0-9_]*):\s*(?:null)?\s*(?:#.*)?$/)?.[1];
+    if (event && GITHUB_EVENTS.has(event) && event !== 'workflow_call') events.push(event);
+  }
+  return events;
+}
+
+function jobService(job, name) {
+  const servicesAt = job.lines.findIndex(({ text }) => /^ {4}services:\s*(?:#.*)?$/.test(text));
+  if (servicesAt < 0) return undefined;
+
+  let serviceAt = -1;
+  for (let index = servicesAt + 1; index < job.lines.length; index += 1) {
+    const { text } = job.lines[index];
+    if (/^ {4}\S/.test(text)) break;
+    if (new RegExp(`^ {6}${name}:\\s*(?:#.*)?$`).test(text)) {
+      serviceAt = index;
+      break;
+    }
+  }
+  if (serviceAt < 0) return undefined;
+
+  const lines = [];
+  for (const line of job.lines.slice(serviceAt + 1)) {
+    if (/^ {4}\S|^ {6}\S/.test(line.text)) break;
+    lines.push(line);
+  }
+  return lines.map(({ text }) => text).join('\n');
 }
 
 function jobField(job, name) {
@@ -142,6 +191,11 @@ test('qa-smoke consumes the routed output and is event-safe', () => {
   assert.match(preflightSource, /^ {6}qaSmoke:\s*\$\{\{ steps\.router\.outputs\.qaSmoke \}\}\s*$/m,
     'preflight must expose the router qaSmoke output');
 
+  const triggers = workflowEvents(parsed);
+  for (const event of ['pull_request', 'merge_group', 'workflow_dispatch']) {
+    assert.ok(triggers.includes(event), `workflow on: mapping must contain ${event}`);
+  }
+
   const condition = jobField(qa, 'if') ?? '';
   assert.match(condition, /needs\.preflight\.outputs\.qaSmoke\s*==\s*['"]true['"]/, 'qa-smoke must consume qaSmoke');
   for (const event of ['pull_request', 'merge_group', 'workflow_dispatch']) {
@@ -159,6 +213,12 @@ test('qa-smoke owns only a restore-only test cache and a disposable database', (
   assert.match(source, /Swatinem\/rust-cache@v2/, 'qa-smoke must restore Rust build inputs');
   assert.match(source, /^ {10}shared-key:\s*server-test\s*$/m, 'qa-smoke must use the server-test cache family');
   assert.match(source, /^ {10}save-if:\s*false\s*$/m, 'qa-smoke must remain a restore-only cache consumer');
+  const postgres = jobService(qa, 'postgres');
+  assert.ok(postgres, 'qa-smoke must own a local postgres service');
+  assert.match(postgres, /^ {8}image:\s*postgres:16\s*$/m,
+    'qa-smoke postgres service must use the intended Postgres image');
+  assert.match(postgres, /^ {10}-\s*5433:5432\s*$/m,
+    'qa-smoke postgres service must expose the isolated 5433 host port');
   assert.match(source, /^ {6}DJINN_TEST_DATABASE_URL:\s*postgres:\/\/postgres:postgres@127\.0\.0\.1:5433\/postgres\s*$/m,
     'clone ownership must use the disposable maintenance database');
   assert.match(source, /^ {6}DATABASE_URL:\s*postgres:\/\/postgres:postgres@127\.0\.0\.1:5433\/djinn_test_template\s*$/m,
