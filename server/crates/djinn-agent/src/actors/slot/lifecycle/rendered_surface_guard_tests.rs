@@ -241,6 +241,7 @@ async fn runtime_and_serialized_surfaces_reject_project_local_djinn_paths() {
         "server/src/server/chat/prompt/codebase_header.rs",
         "server/crates/djinn-mcp-extension/tests/fixtures/tool_surface_baseline.json",
         "server/src/server/tests/snapshots/djinn_server__server__tests__tool_schemas__mcp_tools_schema.snap",
+        "ui/src/api/generated/mcp-tools.gen.ts",
     ] {
         assert_clean_file(&root.join(file));
     }
