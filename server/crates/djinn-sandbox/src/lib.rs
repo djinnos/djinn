@@ -12,6 +12,8 @@ use anyhow::Result;
 /// module never selects the heuristic fallback backend.
 #[cfg(target_os = "linux")]
 pub mod final_verification;
+#[cfg(target_os = "linux")]
+pub mod final_verification_execution;
 pub mod linux;
 #[cfg(target_os = "macos")]
 pub mod macos;

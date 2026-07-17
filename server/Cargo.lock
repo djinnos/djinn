@@ -1655,6 +1655,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "djinn-core",
+ "djinn-git",
  "landlock",
  "libc",
  "seccompiler",
