@@ -8064,55 +8064,7 @@ expression: signatures
       "type": "object"
     }
   },
-  {
-    "name": "memory_diff",
-    "read_only": false,
-    "destructive": true,
-    "idempotent": false,
-    "open_world": false,
-    "concurrent_safe": false,
-    "input_schema": {
-      "$schema": "https://json-schema.org/draft/2020-12/schema",
-      "properties": {
-        "permalink": {
-          "type": "string"
-        },
-        "project": {
-          "type": "string"
-        },
-        "sha": {
-          "description": "Specific commit SHA. Omit to get the diff for the most recent change.",
-          "type": [
-            "string",
-            "null"
-          ]
-        }
-      },
-      "required": [
-        "project",
-        "permalink"
-      ],
-      "type": "object"
-    },
-    "output_schema": {
-      "$schema": "https://json-schema.org/draft/2020-12/schema",
-      "properties": {
-        "diff": {
-          "type": "string"
-        },
-        "error": {
-          "type": [
-            "string",
-            "null"
-          ]
-        }
-      },
-      "required": [
-        "diff"
-      ],
-      "type": "object"
-    }
-  },
+
   {
     "name": "memory_edit",
     "read_only": false,
@@ -9002,84 +8954,7 @@ expression: signatures
       "type": "object"
     }
   },
-  {
-    "name": "memory_history",
-    "read_only": false,
-    "destructive": true,
-    "idempotent": false,
-    "open_world": false,
-    "concurrent_safe": false,
-    "input_schema": {
-      "$schema": "https://json-schema.org/draft/2020-12/schema",
-      "properties": {
-        "limit": {
-          "format": "int64",
-          "type": [
-            "integer",
-            "null"
-          ]
-        },
-        "permalink": {
-          "type": "string"
-        },
-        "project": {
-          "type": "string"
-        }
-      },
-      "required": [
-        "project",
-        "permalink"
-      ],
-      "type": "object"
-    },
-    "output_schema": {
-      "$defs": {
-        "GitLogEntry": {
-          "description": "A single git commit entry for note history.",
-          "properties": {
-            "author": {
-              "type": "string"
-            },
-            "date": {
-              "type": "string"
-            },
-            "message": {
-              "type": "string"
-            },
-            "sha": {
-              "type": "string"
-            }
-          },
-          "required": [
-            "sha",
-            "message",
-            "author",
-            "date"
-          ],
-          "type": "object"
-        }
-      },
-      "$schema": "https://json-schema.org/draft/2020-12/schema",
-      "properties": {
-        "error": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "history": {
-          "items": {
-            "$ref": "#/$defs/GitLogEntry"
-          },
-          "type": "array"
-        }
-      },
-      "required": [
-        "history"
-      ],
-      "type": "object"
-    }
-  },
+
   {
     "name": "memory_list",
     "read_only": false,
@@ -22616,20 +22491,6 @@ expression: signatures
                 "null"
               ]
             },
-            "memory_mount_enabled": {
-              "description": "Enable the ADR-057 Linux memory mount for filesystem-first note workflows. Disabled by default; requires a Linux build with the `memory-mount` cargo feature. The mounted path serves the current session-selected task/worktree view when available and otherwise falls back to the canonical `main` view.",
-              "type": [
-                "boolean",
-                "null"
-              ]
-            },
-            "memory_mount_path": {
-              "description": "Absolute filesystem path where the Linux FUSE mount should be attached. The directory must already exist and be empty at startup. This path hosts the current session-selected memory view; Djinn does not expose additional branch directories in this slice.",
-              "type": [
-                "string",
-                "null"
-              ]
-            },
             "models": {
               "description": "Ordered list of models available to agents, e.g. `[\"openai/gpt-4o\"]`.",
               "items": {
@@ -22725,20 +22586,6 @@ expression: signatures
           "format": "int64",
           "type": [
             "integer",
-            "null"
-          ]
-        },
-        "memory_mount_enabled": {
-          "description": "Enable the Linux-only ADR-057 memory FUSE mount for filesystem-first note workflows. Disabled by default; requires a Linux build with the `memory-mount` cargo feature. The mounted path serves the current session-selected task/worktree view when available and otherwise falls back to the canonical `main` view.",
-          "type": [
-            "boolean",
-            "null"
-          ]
-        },
-        "memory_mount_path": {
-          "description": "Absolute path for the Linux memory mount. The directory must already exist and be empty at startup. This path hosts the current session-selected memory view; no additional branch directories are exposed in this slice.",
-          "type": [
-            "string",
             "null"
           ]
         },

@@ -3839,28 +3839,6 @@ export namespace MemoryDeleteOutputSchema {
 
 }
 export type MemoryDeleteOutput = MemoryDeleteOutputSchema.MemoryDeleteOutput;
-export namespace MemoryDiffInputSchema {
-  export interface MemoryDiffInput {
-  permalink: string
-  project: string
-  /**
-   * Specific commit SHA. Omit to get the diff for the most recent change.
-   */
-  sha?: string
-  [k: string]: any
-  }
-
-}
-export type MemoryDiffInput = MemoryDiffInputSchema.MemoryDiffInput;
-export namespace MemoryDiffOutputSchema {
-  export interface MemoryDiffOutput {
-  diff: string
-  error?: string
-  [k: string]: any
-  }
-
-}
-export type MemoryDiffOutput = MemoryDiffOutputSchema.MemoryDiffOutput;
 export namespace MemoryEditInputSchema {
   export interface MemoryEditInput {
   content: string
@@ -4202,35 +4180,6 @@ export namespace MemoryHealthOutputSchema {
 
 }
 export type MemoryHealthOutput = MemoryHealthOutputSchema.MemoryHealthOutput;
-export namespace MemoryHistoryInputSchema {
-  export interface MemoryHistoryInput {
-  limit?: number
-  permalink: string
-  project: string
-  [k: string]: any
-  }
-
-}
-export type MemoryHistoryInput = MemoryHistoryInputSchema.MemoryHistoryInput;
-export namespace MemoryHistoryOutputSchema {
-  export interface MemoryHistoryOutput {
-  error?: string
-  history: GitLogEntry[]
-  [k: string]: any
-  }
-  /**
-   * A single git commit entry for note history.
-   */
-  export interface GitLogEntry {
-  author: string
-  date: string
-  message: string
-  sha: string
-  [k: string]: any
-  }
-
-}
-export type MemoryHistoryOutput = MemoryHistoryOutputSchema.MemoryHistoryOutput;
 export namespace MemoryListInputSchema {
   export interface MemoryListInput {
   /**
@@ -10660,11 +10609,9 @@ export namespace SettingsGetOutputSchema {
   /**
    * Enable the ADR-057 Linux memory mount for filesystem-first note workflows. Disabled by default; requires a Linux build with the `memory-mount` cargo feature. The mounted path serves the current session-selected task/worktree view when available and otherwise falls back to the canonical `main` view.
    */
-  memory_mount_enabled?: boolean
   /**
    * Absolute filesystem path where the Linux FUSE mount should be attached. The directory must already exist and be empty at startup. This path hosts the current session-selected memory view; Djinn does not expose additional branch directories in this slice.
    */
-  memory_mount_path?: string
   /**
    * Ordered list of models available to agents, e.g. `["openai/gpt-4o"]`.
    */
@@ -10708,11 +10655,9 @@ export namespace SettingsSetInputSchema {
   /**
    * Enable the Linux-only ADR-057 memory FUSE mount for filesystem-first note workflows. Disabled by default; requires a Linux build with the `memory-mount` cargo feature. The mounted path serves the current session-selected task/worktree view when available and otherwise falls back to the canonical `main` view.
    */
-  memory_mount_enabled?: boolean
   /**
    * Absolute path for the Linux memory mount. The directory must already exist and be empty at startup. This path hosts the current session-selected memory view; no additional branch directories are exposed in this slice.
    */
-  memory_mount_path?: string
   /**
    * Ordered list of models available to all agents (e.g. ["openai/gpt-4o"]). Omit to keep current value.
    * This is the deployment FALLBACK list (used for tasks with no creator and
@@ -11892,7 +11837,7 @@ export namespace UserSettingsSetOutputSchema {
 }
 export type UserSettingsSetOutput = UserSettingsSetOutputSchema.UserSettingsSetOutput;
 
-export type McpToolName = "agent_create" | "agent_list" | "agent_metrics" | "agent_show" | "agent_update" | "board_health" | "board_reconcile" | "code_graph" | "credential_delete" | "credential_list" | "credential_set" | "dispatch_pause" | "dispatch_pause_status" | "dispatch_resume" | "doctor_fix" | "doctor_list_findings" | "doctor_run" | "epic_add_read_source" | "epic_blocked_list" | "epic_blockers_list" | "epic_close" | "epic_count" | "epic_create" | "epic_delete" | "epic_list" | "epic_list_read_sources" | "epic_remove_read_source" | "epic_reopen" | "epic_show" | "epic_tasks" | "epic_update" | "execution_kill_task" | "get_block_catalog" | "get_project_devcontainer_status" | "get_project_stack" | "github_app_install_url" | "github_app_installations" | "github_fetch_file" | "github_list_repos" | "github_search" | "image_create" | "image_delete" | "image_list" | "image_set_services" | "image_update" | "memory_associations" | "memory_broken_links" | "memory_build_context" | "memory_catalog" | "memory_confirm" | "memory_delete" | "memory_diff" | "memory_edit" | "memory_extracted_audit" | "memory_graph" | "memory_health" | "memory_history" | "memory_list" | "memory_move" | "memory_orphans" | "memory_read" | "memory_recall_trace" | "memory_recent" | "memory_repair_embeddings" | "memory_retrieval_outcomes_report" | "memory_run_enrichment" | "memory_search" | "memory_task_refs" | "memory_write" | "model_health" | "org_policy_get" | "org_policy_set" | "pr_review_context" | "project_add_from_github" | "project_branches" | "project_config_get" | "project_config_set" | "project_environment_config_get" | "project_environment_config_reset" | "project_environment_config_set" | "project_graph_exclusions_get" | "project_graph_exclusions_set" | "project_list" | "project_remove" | "project_set_image" | "proposal_add_target" | "proposal_block_patch" | "proposal_blocks" | "proposal_create" | "proposal_debate_append" | "proposal_debate_list" | "proposal_debate_reopen" | "proposal_debate_resolve" | "proposal_delete" | "proposal_export" | "proposal_feedback_add" | "proposal_feedback_resolve" | "proposal_graduate" | "proposal_import" | "proposal_list" | "proposal_reconcile_obsolete_epic" | "proposal_refinement_demand_evidence" | "proposal_refinement_demand_round" | "proposal_refinement_resolve" | "proposal_refinement_start" | "proposal_refinement_status" | "proposal_remove_target" | "proposal_show" | "proposal_signoff" | "proposal_signoff_clear" | "proposal_stop_build" | "proposal_update" | "proposal_verdict_override" | "provider_catalog" | "provider_connected" | "provider_model_lookup" | "provider_models" | "provider_models_connected" | "provider_oauth_start" | "provider_remove" | "provider_validate" | "retrigger_image_build" | "service_preset_list" | "session_active" | "session_for_task" | "session_list" | "session_messages" | "session_show" | "settings_get" | "settings_reset" | "settings_set" | "system_ping" | "task_activity_list" | "task_blocked_list" | "task_blockers_list" | "task_claim" | "task_comment_add" | "task_count" | "task_create" | "task_list" | "task_memory_refs" | "task_ready" | "task_show" | "task_timeline" | "task_transition" | "task_update" | "toolchain_versions" | "user_settings_get" | "user_settings_set";
+export type McpToolName = "agent_create" | "agent_list" | "agent_metrics" | "agent_show" | "agent_update" | "board_health" | "board_reconcile" | "code_graph" | "credential_delete" | "credential_list" | "credential_set" | "dispatch_pause" | "dispatch_pause_status" | "dispatch_resume" | "doctor_fix" | "doctor_list_findings" | "doctor_run" | "epic_add_read_source" | "epic_blocked_list" | "epic_blockers_list" | "epic_close" | "epic_count" | "epic_create" | "epic_delete" | "epic_list" | "epic_list_read_sources" | "epic_remove_read_source" | "epic_reopen" | "epic_show" | "epic_tasks" | "epic_update" | "execution_kill_task" | "get_block_catalog" | "get_project_devcontainer_status" | "get_project_stack" | "github_app_install_url" | "github_app_installations" | "github_fetch_file" | "github_list_repos" | "github_search" | "image_create" | "image_delete" | "image_list" | "image_set_services" | "image_update" | "memory_associations" | "memory_broken_links" | "memory_build_context" | "memory_catalog" | "memory_confirm" | "memory_delete" | "memory_edit" | "memory_extracted_audit" | "memory_graph" | "memory_health" | "memory_list" | "memory_move" | "memory_orphans" | "memory_read" | "memory_recall_trace" | "memory_recent" | "memory_repair_embeddings" | "memory_retrieval_outcomes_report" | "memory_run_enrichment" | "memory_search" | "memory_task_refs" | "memory_write" | "model_health" | "org_policy_get" | "org_policy_set" | "pr_review_context" | "project_add_from_github" | "project_branches" | "project_config_get" | "project_config_set" | "project_environment_config_get" | "project_environment_config_reset" | "project_environment_config_set" | "project_graph_exclusions_get" | "project_graph_exclusions_set" | "project_list" | "project_remove" | "project_set_image" | "proposal_add_target" | "proposal_block_patch" | "proposal_blocks" | "proposal_create" | "proposal_debate_append" | "proposal_debate_list" | "proposal_debate_reopen" | "proposal_debate_resolve" | "proposal_delete" | "proposal_export" | "proposal_feedback_add" | "proposal_feedback_resolve" | "proposal_graduate" | "proposal_import" | "proposal_list" | "proposal_reconcile_obsolete_epic" | "proposal_refinement_demand_evidence" | "proposal_refinement_demand_round" | "proposal_refinement_resolve" | "proposal_refinement_start" | "proposal_refinement_status" | "proposal_remove_target" | "proposal_show" | "proposal_signoff" | "proposal_signoff_clear" | "proposal_stop_build" | "proposal_update" | "proposal_verdict_override" | "provider_catalog" | "provider_connected" | "provider_model_lookup" | "provider_models" | "provider_models_connected" | "provider_oauth_start" | "provider_remove" | "provider_validate" | "retrigger_image_build" | "service_preset_list" | "session_active" | "session_for_task" | "session_list" | "session_messages" | "session_show" | "settings_get" | "settings_reset" | "settings_set" | "system_ping" | "task_activity_list" | "task_blocked_list" | "task_blockers_list" | "task_claim" | "task_comment_add" | "task_count" | "task_create" | "task_list" | "task_memory_refs" | "task_ready" | "task_show" | "task_timeline" | "task_transition" | "task_update" | "toolchain_versions" | "user_settings_get" | "user_settings_set";
 
 export interface McpToolMap {
   "agent_create": { input: AgentCreateInput; output: AgentCreateOutput };
@@ -11946,12 +11891,10 @@ export interface McpToolMap {
   "memory_catalog": { input: MemoryCatalogInput; output: MemoryCatalogOutput };
   "memory_confirm": { input: MemoryConfirmInput; output: MemoryConfirmOutput };
   "memory_delete": { input: MemoryDeleteInput; output: MemoryDeleteOutput };
-  "memory_diff": { input: MemoryDiffInput; output: MemoryDiffOutput };
   "memory_edit": { input: MemoryEditInput; output: MemoryEditOutput };
   "memory_extracted_audit": { input: MemoryExtractedAuditInput; output: MemoryExtractedAuditOutput };
   "memory_graph": { input: MemoryGraphInput; output: MemoryGraphOutput };
   "memory_health": { input: MemoryHealthInput; output: MemoryHealthOutput };
-  "memory_history": { input: MemoryHistoryInput; output: MemoryHistoryOutput };
   "memory_list": { input: MemoryListInput; output: MemoryListOutput };
   "memory_move": { input: MemoryMoveInput; output: MemoryMoveOutput };
   "memory_orphans": { input: MemoryOrphansInput; output: MemoryOrphansOutput };
