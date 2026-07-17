@@ -4,11 +4,17 @@
 //! tested without wall-clock sleeps or a live database.
 
 use std::{
+    collections::BTreeMap,
     fs,
     path::{Path, PathBuf},
-    process::{Command, Output},
+    process::{Command, ExitStatus, Output},
     sync::mpsc,
     thread,
+};
+use std::{
+    io::Read,
+    process::Stdio,
+    time::{Duration, Instant},
 };
 
 use serde::{Deserialize, Serialize};
@@ -18,6 +24,10 @@ use crate::{Execution, Profile, Scenario, ScenarioInventory, Taxonomy, scenario:
 
 pub const RUNNER_NAME: &str = "djinn-qa";
 pub const RUNNER_VERSION: &str = env!("CARGO_PKG_VERSION");
+#[cfg(not(test))]
+const CHILD_DEADLINE: Duration = Duration::from_secs(10 * 60);
+const TERMINATION_GRACE: Duration = Duration::from_secs(2);
+const STREAM_TAIL_BYTES: usize = 64 * 1024;
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -36,6 +46,139 @@ pub struct ScenarioEvidenceArtifact {
     pub started_at: String,
     pub finished_at: String,
     pub diagnostics: Vec<String>,
+}
+
+fn format_stream_tail(name: &str, bytes: &[u8], truncated: bool) -> String {
+    let truncation = if truncated {
+        "; truncated to final 65536 bytes"
+    } else {
+        ""
+    };
+    format!(
+        "{name} tail ({} bytes{truncation}):\n{}",
+        bytes.len(),
+        String::from_utf8_lossy(bytes).trim()
+    )
+}
+
+/// Drain output continuously but retain only a deterministic suffix, preventing
+/// a noisy cargo descendant from consuming unbounded runner memory.
+fn read_tail(mut reader: impl Read + Send + 'static) -> thread::JoinHandle<(Vec<u8>, bool)> {
+    thread::spawn(move || {
+        let mut tail = Vec::new();
+        let mut truncated = false;
+        let mut buffer = [0_u8; 8192];
+        loop {
+            let count = match reader.read(&mut buffer) {
+                Ok(0) | Err(_) => break,
+                Ok(count) => count,
+            };
+            tail.extend_from_slice(&buffer[..count]);
+            if tail.len() > STREAM_TAIL_BYTES {
+                tail.drain(..tail.len() - STREAM_TAIL_BYTES);
+                truncated = true;
+            }
+        }
+        (tail, truncated)
+    })
+}
+
+#[allow(clippy::disallowed_methods)]
+fn run_bounded(command: &mut Command, deadline: Duration) -> Result<BoundedOutput, String> {
+    run_bounded_with_grace(command, deadline, TERMINATION_GRACE)
+}
+
+#[allow(clippy::disallowed_methods)]
+fn run_bounded_with_grace(
+    command: &mut Command,
+    deadline: Duration,
+    termination_grace: Duration,
+) -> Result<BoundedOutput, String> {
+    command.stdout(Stdio::piped()).stderr(Stdio::piped());
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        unsafe {
+            command.pre_exec(|| {
+                if libc::setpgid(0, 0) == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+    }
+    let mut child = command.spawn().map_err(|error| error.to_string())?;
+    let stdout = read_tail(child.stdout.take().ok_or("child stdout pipe unavailable")?);
+    let stderr = read_tail(child.stderr.take().ok_or("child stderr pipe unavailable")?);
+    let started = Instant::now();
+    let mut timed_out = false;
+    let status = 'wait: loop {
+        if let Some(status) = child.try_wait().map_err(|error| error.to_string())? {
+            break 'wait status;
+        }
+        if started.elapsed() >= deadline {
+            timed_out = true;
+            terminate_process_group(child.id());
+            let grace = Instant::now();
+            loop {
+                if let Some(status) = child.try_wait().map_err(|error| error.to_string())? {
+                    break 'wait status;
+                }
+                if grace.elapsed() >= termination_grace {
+                    kill_process_group(child.id());
+                    let _ = child.kill();
+                    break 'wait child.wait().map_err(|error| error.to_string())?;
+                }
+                thread::sleep(Duration::from_millis(10));
+            }
+        } else {
+            thread::sleep(Duration::from_millis(10));
+        }
+    };
+    let (stdout, stdout_truncated) = stdout.join().map_err(|_| "stdout reader panicked")?;
+    let (stderr, stderr_truncated) = stderr.join().map_err(|_| "stderr reader panicked")?;
+    if timed_out {
+        return Err(format!(
+            "timed out after {} seconds; process group terminated\n{}\n{}",
+            deadline.as_secs(),
+            format_tail_with_truncation("stdout", &stdout, stdout_truncated),
+            format_tail_with_truncation("stderr", &stderr, stderr_truncated),
+        ));
+    }
+    Ok(BoundedOutput {
+        status,
+        stdout,
+        stderr,
+        stdout_truncated,
+        stderr_truncated,
+    })
+}
+
+fn format_tail_with_truncation(name: &str, bytes: &[u8], truncated: bool) -> String {
+    format_stream_tail(name, bytes, truncated)
+}
+
+#[cfg(unix)]
+fn terminate_process_group(pid: u32) {
+    unsafe { libc::kill(-(pid as libc::pid_t), libc::SIGTERM) };
+}
+#[cfg(not(unix))]
+fn terminate_process_group(_pid: u32) {}
+#[cfg(unix)]
+fn kill_process_group(pid: u32) {
+    unsafe { libc::kill(-(pid as libc::pid_t), libc::SIGKILL) };
+}
+#[cfg(not(unix))]
+fn kill_process_group(_pid: u32) {}
+
+/// Captured child output with bounded-tail metadata retained for diagnostics.
+#[derive(Debug)]
+struct BoundedOutput {
+    status: ExitStatus,
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+    stdout_truncated: bool,
+    stderr_truncated: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -84,16 +227,25 @@ pub trait DatabaseAcquirer: Sync {
 
 /// The process runner is injected by focused tests so command construction and
 /// evidence validation are tested on the same production execution path.
-type CommandRunner = dyn Fn(&mut Command) -> std::io::Result<Output> + Send + Sync;
+#[cfg(test)]
+type CommandRunner = dyn Fn(&mut Command) -> Result<BoundedOutput, String> + Send + Sync;
 
 pub struct CargoExecutor {
+    #[cfg(test)]
     run_command: Box<CommandRunner>,
 }
 
+#[allow(clippy::derivable_impls)]
 impl Default for CargoExecutor {
     fn default() -> Self {
         Self {
-            run_command: Box::new(Command::output),
+            #[cfg(test)]
+            run_command: Box::new(|command| {
+                command
+                    .output()
+                    .map(BoundedOutput::from)
+                    .map_err(|error| error.to_string())
+            }),
         }
     }
 }
@@ -104,7 +256,31 @@ impl CargoExecutor {
         run_command: impl Fn(&mut Command) -> std::io::Result<Output> + Send + Sync + 'static,
     ) -> Self {
         Self {
+            run_command: Box::new(move |command| {
+                run_command(command)
+                    .map(BoundedOutput::from)
+                    .map_err(|error| error.to_string())
+            }),
+        }
+    }
+
+    fn with_bounded_process(
+        run_command: impl Fn(&mut Command) -> Result<BoundedOutput, String> + Send + Sync + 'static,
+    ) -> Self {
+        Self {
             run_command: Box::new(run_command),
+        }
+    }
+}
+
+impl From<Output> for BoundedOutput {
+    fn from(output: Output) -> Self {
+        Self {
+            status: output.status,
+            stdout: output.stdout,
+            stderr: output.stderr,
+            stdout_truncated: false,
+            stderr_truncated: false,
         }
     }
 }
@@ -136,13 +312,18 @@ impl ScenarioExecutor for CargoExecutor {
             command.arg("--test").arg(test);
         }
         command.arg("--").arg("--exact").arg(selector);
+        #[cfg(test)]
         let output = (self.run_command)(&mut command)
             .map_err(|e| format!("cargo adapter could not start `{package}`: {e}"))?;
+        #[cfg(not(test))]
+        let output = run_bounded(&mut command, CHILD_DEADLINE)
+            .map_err(|error| format!("cargo adapter could not complete `{package}`: {error}"))?;
         if !output.status.success() {
             return Err(format!(
-                "cargo adapter failed for package `{package}` (exit {}): {}",
+                "cargo adapter failed for package `{package}` (exit {}):\n{}\n{}",
                 output.status,
-                String::from_utf8_lossy(&output.stderr).trim()
+                format_stream_tail("stdout", &output.stdout, output.stdout_truncated),
+                format_stream_tail("stderr", &output.stderr, output.stderr_truncated),
             ));
         }
         // Fail closed: a successful child process that executed zero tests is
@@ -223,7 +404,8 @@ pub fn select_scenarios(inventory: &ScenarioInventory, profile: Profile) -> Vec<
         .collect()
 }
 
-/// Runs batches no larger than `concurrency`, collecting outcomes in stable ID order.
+/// Runs distinct exact executable identities in bounded batches, then fans each
+/// execution result back out to every scenario that declared that identity.
 pub fn execute_selected(
     root: &Path,
     selected: &[Scenario],
@@ -239,14 +421,23 @@ pub fn execute_selected(
             "no enabled, executable scenarios are eligible for the requested profile".into(),
         );
     }
+    let mut identities: BTreeMap<String, Vec<&Scenario>> = BTreeMap::new();
+    for scenario in selected {
+        identities
+            .entry(scenario.execution.identity())
+            .or_default()
+            .push(scenario);
+    }
+    let groups: Vec<_> = identities.into_values().collect();
     let mut outcomes = Vec::with_capacity(selected.len());
-    for batch in selected.chunks(concurrency) {
+    for batch in groups.chunks(concurrency) {
         let (sender, receiver) = mpsc::channel();
         thread::scope(|scope| {
-            for scenario in batch {
+            for scenarios in batch {
                 let sender = sender.clone();
                 scope.spawn(move || {
                     let started_at = now();
+                    let scenario = scenarios[0];
                     let (status, diagnostics) = if !resolves(&scenario.execution, root) {
                         (
                             RunStatus::Failed,
@@ -267,13 +458,16 @@ pub fn execute_selected(
                             Err(error) => (RunStatus::Failed, vec![error]),
                         }
                     };
-                    let _ = sender.send(ScenarioOutcome {
-                        scenario_id: scenario.id.clone(),
-                        status,
-                        diagnostics,
-                        started_at,
-                        finished_at: now(),
-                    });
+                    let finished_at = now();
+                    for scenario in scenarios {
+                        let _ = sender.send(ScenarioOutcome {
+                            scenario_id: scenario.id.clone(),
+                            status,
+                            diagnostics: diagnostics.clone(),
+                            started_at: started_at.clone(),
+                            finished_at: finished_at.clone(),
+                        });
+                    }
                 });
             }
         });
@@ -554,7 +748,11 @@ mod tests {
             peak: AtomicUsize::new(0),
             barrier: Barrier::new(2),
         });
-        let scenarios = vec![scenario("a"), scenario("b"), scenario("c"), scenario("d")];
+        let mut scenarios = vec![scenario("a"), scenario("b"), scenario("c"), scenario("d")];
+        for (index, scenario) in scenarios.iter_mut().enumerate() {
+            let Execution::CargoPackage { selector, .. } = &mut scenario.execution;
+            *selector = format!("scenario::tests::distinct_{index}");
+        }
         let outcomes =
             execute_selected(&repository_root(), &scenarios, 2, executor.as_ref(), &Db).unwrap();
         assert_eq!(outcomes.len(), 4);
@@ -738,6 +936,98 @@ scenarios:
         assert!(
             err.contains("empty libtest selector"),
             "whitespace-only selector must be rejected: {err}"
+        );
+    }
+    #[test]
+    fn identical_execution_fans_out_once_in_scenario_id_order() {
+        let executor = Executor {
+            calls: Mutex::new(0),
+            peak: AtomicUsize::new(0),
+        };
+        let outcomes = execute_selected(
+            &repository_root(),
+            &[scenario("z"), scenario("a")],
+            2,
+            &executor,
+            &Db,
+        )
+        .unwrap();
+        assert_eq!(*executor.calls.lock().unwrap(), 1);
+        assert_eq!(
+            outcomes
+                .iter()
+                .map(|outcome| outcome.scenario_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["a", "z"]
+        );
+    }
+
+    #[test]
+    fn bounded_tail_marks_truncation_and_retains_suffix() {
+        let payload = [vec![b'x'; STREAM_TAIL_BYTES], b"final".to_vec()].concat();
+        let (tail, truncated) = read_tail(std::io::Cursor::new(payload)).join().unwrap();
+        assert!(truncated);
+        assert_eq!(tail.len(), STREAM_TAIL_BYTES);
+        assert!(
+            format_stream_tail("stdout", &tail, truncated)
+                .contains("truncated to final 65536 bytes")
+        );
+        assert!(tail.ends_with(b"final"));
+    }
+
+    #[test]
+    fn stdout_only_child_failure_keeps_both_labeled_diagnostics() {
+        use std::os::unix::process::ExitStatusExt;
+        let executor = CargoExecutor::with_process(|_| {
+            Ok(Output {
+                status: std::process::ExitStatus::from_raw(1 << 8),
+                stdout: b"failure detail".to_vec(),
+                stderr: Vec::new(),
+            })
+        });
+        let error = executor
+            .execute(Path::new("."), &scenario("failure").execution)
+            .unwrap_err();
+        assert!(error.contains("stdout tail"));
+        assert!(error.contains("failure detail"));
+        assert!(error.contains("stderr tail (0 bytes)"));
+    }
+
+    #[test]
+    fn nonzero_child_failure_labels_truncated_stream_tails() {
+        use std::os::unix::process::ExitStatusExt;
+
+        let executor = CargoExecutor::with_bounded_process(|_| {
+            Ok(BoundedOutput {
+                status: std::process::ExitStatus::from_raw(1 << 8),
+                stdout: vec![b'x'; STREAM_TAIL_BYTES],
+                stderr: Vec::new(),
+                stdout_truncated: true,
+                stderr_truncated: false,
+            })
+        });
+        let error = executor
+            .execute(Path::new("."), &scenario("failure").execution)
+            .unwrap_err();
+        assert!(error.contains("stdout tail (65536 bytes; truncated to final 65536 bytes)"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn deadline_terminates_the_child_process_group() {
+        let temp = tempfile::tempdir().unwrap();
+        let marker = temp.path().join("descendant-survived");
+        let mut command = Command::new("sh");
+        command
+            .arg("-c")
+            .arg(format!("sleep 0.25; touch {} & wait", marker.display()));
+        let error = run_bounded(&mut command, Duration::from_millis(20)).unwrap_err();
+        assert!(error.contains("timed out"));
+        assert!(error.contains("process group terminated"));
+        thread::sleep(Duration::from_millis(300));
+        assert!(
+            !marker.exists(),
+            "the descendant survived deadline process-group termination"
         );
     }
 }
