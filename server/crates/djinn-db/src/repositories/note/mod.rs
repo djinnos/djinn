@@ -22,6 +22,7 @@ pub use embedding_associations::EmbeddingAssociationRefreshStats;
 mod entity_association;
 mod file_helpers;
 mod graph;
+mod guidance;
 mod housekeeping;
 mod indexing;
 mod lexical_search;
@@ -94,6 +95,10 @@ pub use file_helpers::{
 };
 use indexing::{index_links_for_note, resolve_links_for_note};
 
+pub use guidance::{
+    FileEraGuidanceClassification, FileEraGuidanceDiscovery, FileEraGuidanceManifest,
+    FileEraGuidanceManifestRecord,
+};
 pub use housekeeping::{
     AnchorProposerKind, BackfillRetrievalAnchorOptions, BackfillRetrievalAnchorReport,
     LlmAnchorProposer, ProposedBackfillAnchor, propose_anchor_deterministic,
