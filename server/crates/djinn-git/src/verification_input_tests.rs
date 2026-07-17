@@ -958,3 +958,170 @@ async fn intermediate_symlink_escape_fails_closed_for_repo_and_external_walks() 
     });
     assert_unavailable(configured_fingerprint(fixture.path(), &config).await);
 }
+
+fn complete_config(
+    first_id: &str,
+    first_path: &Path,
+    second_id: &str,
+    second_path: &Path,
+) -> VerificationInputFingerprintConfig {
+    let mut config = VerificationInputFingerprintConfig::default();
+    for (id, locator, path) in [
+        (first_id, format!("host://{first_id}"), first_path),
+        (second_id, format!("host://{second_id}"), second_path),
+    ] {
+        config.manifest.read_only_external_inputs.push(
+            djinn_core::canonical_verify::DeclaredExternalInputV1 {
+                id: id.to_owned(),
+                locator,
+            },
+        );
+        config.external_inputs.push(ResolvedExternalInputV1 {
+            id: id.to_owned(),
+            path: path.to_path_buf(),
+        });
+    }
+    config
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn configured_complete_v1_matrix_is_canonical_and_mutation_sensitive() {
+    let fixture = make_nested_submodule_fixture("vendor", "nested");
+    write_str(fixture.outer.path(), ".gitignore", "*.generated\n");
+    git(fixture.outer.path(), ["add", ".gitignore"]);
+    git(
+        fixture.outer.path(),
+        ["commit", "-m", "ignore generated input"],
+    );
+    write_str(fixture.outer.path(), "input.generated", "generated-v1\n");
+    write(fixture.outer.path(), "input.bin", &[0, 1, 255, 254]);
+
+    let mounts = tempfile::tempdir().expect("create external mount parent");
+    let alpha = mounts.path().join("alpha");
+    let zeta = mounts.path().join("zeta");
+    std::fs::create_dir_all(&alpha).expect("create alpha mount");
+    std::fs::create_dir_all(&zeta).expect("create zeta mount");
+    // Deliberately create each tree in reverse bytewise order.
+    write_str(&alpha, "z/last.txt", "alpha-last\n");
+    write_str(&alpha, "a/first.txt", "alpha-first\n");
+    write_str(&zeta, "z/last.txt", "zeta-last\n");
+    write_str(&zeta, "a/first.txt", "zeta-first\n");
+
+    let ordered = complete_config("alpha", &alpha, "zeta", &zeta);
+    let reversed = complete_config("zeta", &zeta, "alpha", &alpha);
+    let baseline = digest(configured_fingerprint(fixture.outer.path(), &ordered).await);
+    let reordered = digest(configured_fingerprint(fixture.outer.path(), &reversed).await);
+    assert_eq!(
+        baseline.fingerprint, reordered.fingerprint,
+        "manifest declaration and external enumeration order must not affect the complete V1 stream"
+    );
+
+    write_str(fixture.outer.path(), "input.generated", "generated-v2\n");
+    assert_ne!(
+        baseline.fingerprint,
+        digest(configured_fingerprint(fixture.outer.path(), &ordered).await).fingerprint,
+        "ignored generated input must affect the configured public API digest"
+    );
+    write_str(fixture.outer.path(), "input.generated", "generated-v1\n");
+
+    write(fixture.outer.path(), "input.bin", &[0, 2, 255, 254]);
+    assert_ne!(
+        baseline.fingerprint,
+        digest(configured_fingerprint(fixture.outer.path(), &ordered).await).fingerprint,
+        "untracked binary bytes must affect the configured public API digest"
+    );
+    write(fixture.outer.path(), "input.bin", &[0, 1, 255, 254]);
+
+    write_str(
+        &fixture.outer.path().join("vendor"),
+        "local.txt",
+        "submodule dirty\n",
+    );
+    assert_ne!(
+        baseline.fingerprint,
+        digest(configured_fingerprint(fixture.outer.path(), &ordered).await).fingerprint,
+        "submodule dirtiness must affect the configured public API digest"
+    );
+    std::fs::remove_file(fixture.outer.path().join("vendor/local.txt")).expect("restore submodule");
+
+    write_str(
+        &fixture.outer.path().join("vendor/nested"),
+        "local.txt",
+        "nested submodule dirty\n",
+    );
+    assert_ne!(
+        baseline.fingerprint,
+        digest(configured_fingerprint(fixture.outer.path(), &ordered).await).fingerprint,
+        "nested-submodule dirtiness must affect the configured public API digest"
+    );
+    std::fs::remove_file(fixture.outer.path().join("vendor/nested/local.txt"))
+        .expect("restore nested submodule");
+
+    for (mount, path, changed) in [
+        (&alpha, "a/first.txt", "alpha changed\n"),
+        (&zeta, "a/first.txt", "zeta changed\n"),
+    ] {
+        write_str(mount, path, changed);
+        assert_ne!(
+            baseline.fingerprint,
+            digest(configured_fingerprint(fixture.outer.path(), &ordered).await).fingerprint,
+            "each declared external mount must affect the configured public API digest"
+        );
+        write_str(
+            mount,
+            path,
+            if mount == &alpha {
+                "alpha-first\n"
+            } else {
+                "zeta-first\n"
+            },
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn configured_output_only_absence_and_invalid_declarations_are_stable() {
+    let fixture = init_repo_with_main_commit();
+    let mut output_config = VerificationInputFingerprintConfig::default();
+    output_config
+        .manifest
+        .output_only_globs
+        .push("generated/**".into());
+    assert!(
+        !fixture.path().join("generated/result.txt").exists(),
+        "validated generated outputs must begin absent before F0"
+    );
+    let absent = digest(configured_fingerprint(fixture.path(), &output_config).await);
+    write_str(
+        fixture.path(),
+        "generated/result.txt",
+        "output from prior pass\n",
+    );
+    let cleaned = digest(configured_fingerprint(fixture.path(), &output_config).await);
+    assert_eq!(absent.fingerprint, cleaned.fingerprint);
+    assert!(!fixture.path().join("generated/result.txt").exists());
+
+    let mut overlap = VerificationInputFingerprintConfig::default();
+    overlap.manifest.repo_paths.push("src".into());
+    overlap.manifest.output_only_globs.push("src".into());
+    let first_overlap = configured_fingerprint(fixture.path(), &overlap).await;
+    let second_overlap = configured_fingerprint(fixture.path(), &overlap).await;
+    assert!(first_overlap.is_unavailable());
+    assert_eq!(
+        first_overlap, second_overlap,
+        "overlap failure must be stable"
+    );
+
+    let mut escape = VerificationInputFingerprintConfig::default();
+    escape
+        .manifest
+        .output_only_globs
+        .push("../generated/**".into());
+    let first_escape = configured_fingerprint(fixture.path(), &escape).await;
+    let second_escape = configured_fingerprint(fixture.path(), &escape).await;
+    assert!(first_escape.is_unavailable());
+    assert_eq!(
+        first_escape, second_escape,
+        "escaping failure must be stable"
+    );
+}
