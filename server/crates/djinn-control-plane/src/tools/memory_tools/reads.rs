@@ -100,54 +100,6 @@ impl DjinnMcpServer {
         Json(MemoryRecentResponse { notes, error: None })
     }
 
-    /// Get git log entries for a .djinn/ file. Returns chronological history with
-    /// commit messages, timestamps, authors, and stats.
-    #[tool(
-        description = "Get git log entries for a .djinn/ file. Returns chronological history with commit messages, timestamps, authors, and stats."
-    )]
-    pub async fn memory_history(
-        &self,
-        Parameters(p): Parameters<HistoryParams>,
-    ) -> Json<MemoryHistoryResponse> {
-        let Some(project_id) = self.project_id_for_path(&p.project).await else {
-            return Json(MemoryHistoryResponse {
-                history: vec![],
-                error: Some(format!("project not found: {}", p.project)),
-            });
-        };
-
-        let repo = NoteRepository::new(self.state.db().clone(), self.state.event_bus());
-
-        let Some(note) = repo
-            .get_by_permalink(&project_id, &p.permalink)
-            .await
-            .ok()
-            .flatten()
-        else {
-            return Json(MemoryHistoryResponse {
-                history: vec![],
-                error: Some(format!("note not found: {}", p.permalink)),
-            });
-        };
-
-        if note.storage != "file" {
-            return Json(MemoryHistoryResponse {
-                history: vec![],
-                error: Some(format!(
-                    "note '{}' is stored in database only (storage='{}'); git history is only available for file-backed notes",
-                    p.permalink, note.storage
-                )),
-            });
-        }
-
-        let limit = p.limit.unwrap_or(20).clamp(1, 100);
-        let history = git_log_for_file(&note.file_path, limit).await;
-        Json(MemoryHistoryResponse {
-            history,
-            error: None,
-        })
-    }
-
     /// List task IDs that reference a memory note permalink (reverse lookup).
     #[tool(description = "List task IDs that reference a memory note permalink (reverse lookup).")]
     pub async fn memory_task_refs(

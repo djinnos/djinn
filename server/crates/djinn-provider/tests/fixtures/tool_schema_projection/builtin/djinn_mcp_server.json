@@ -8124,56 +8124,6 @@
     "concurrent_safe": false
   },
   {
-    "name": "memory_diff",
-    "description": "Get unified diff for a specific commit of a .djinn/ file. No SHA = returns diff for most recent change. Note: with db-only KB storage, this tool no longer returns a meaningful diff.",
-    "inputSchema": {
-      "$schema": "https://json-schema.org/draft/2020-12/schema",
-      "required": [
-        "project",
-        "permalink"
-      ],
-      "type": "object",
-      "properties": {
-        "project": {
-          "type": "string"
-        },
-        "permalink": {
-          "type": "string"
-        },
-        "sha": {
-          "description": "Specific commit SHA. Omit to get the diff for the most recent change.",
-          "type": [
-            "string",
-            "null"
-          ]
-        }
-      }
-    },
-    "outputSchema": {
-      "$schema": "https://json-schema.org/draft/2020-12/schema",
-      "required": [
-        "diff"
-      ],
-      "type": "object",
-      "properties": {
-        "diff": {
-          "type": "string"
-        },
-        "error": {
-          "type": [
-            "string",
-            "null"
-          ]
-        }
-      }
-    },
-    "readOnly": false,
-    "destructive": true,
-    "idempotent": false,
-    "openWorld": false,
-    "concurrent_safe": false
-  },
-  {
     "name": "memory_edit",
     "description": "Edit an existing note. Operations: \"append\" (add to end), \"prepend\" (add after frontmatter), \"find_replace\" (exact text replacement, requires find_text), \"replace_section\" (replace content under a markdown heading, requires section). Use append to build large notes incrementally after memory_write creates the initial note. When type is provided and differs from current type, the note is automatically moved to the correct folder for the new type.",
     "inputSchema": {
@@ -9058,85 +9008,6 @@
       },
       "required": [
         "retrieval"
-      ]
-    },
-    "readOnly": false,
-    "destructive": true,
-    "idempotent": false,
-    "openWorld": false,
-    "concurrent_safe": false
-  },
-  {
-    "name": "memory_history",
-    "description": "Get git log entries for a .djinn/ file. Returns chronological history with commit messages, timestamps, authors, and stats.",
-    "inputSchema": {
-      "$schema": "https://json-schema.org/draft/2020-12/schema",
-      "required": [
-        "project",
-        "permalink"
-      ],
-      "type": "object",
-      "properties": {
-        "project": {
-          "type": "string"
-        },
-        "permalink": {
-          "type": "string"
-        },
-        "limit": {
-          "type": [
-            "integer",
-            "null"
-          ],
-          "format": "int64"
-        }
-      }
-    },
-    "outputSchema": {
-      "$schema": "https://json-schema.org/draft/2020-12/schema",
-      "$defs": {
-        "GitLogEntry": {
-          "description": "A single git commit entry for note history.",
-          "type": "object",
-          "properties": {
-            "sha": {
-              "type": "string"
-            },
-            "message": {
-              "type": "string"
-            },
-            "author": {
-              "type": "string"
-            },
-            "date": {
-              "type": "string"
-            }
-          },
-          "required": [
-            "sha",
-            "message",
-            "author",
-            "date"
-          ]
-        }
-      },
-      "type": "object",
-      "properties": {
-        "history": {
-          "type": "array",
-          "items": {
-            "$ref": "#/$defs/GitLogEntry"
-          }
-        },
-        "error": {
-          "type": [
-            "string",
-            "null"
-          ]
-        }
-      },
-      "required": [
-        "history"
       ]
     },
     "readOnly": false,
@@ -22733,20 +22604,6 @@
                 "format": "int64"
               }
             },
-            "memory_mount_enabled": {
-              "description": "Enable the ADR-057 Linux memory mount for filesystem-first note workflows. Disabled by default; requires a Linux build with the `memory-mount` cargo feature. The mounted path serves the current session-selected task/worktree view when available and otherwise falls back to the canonical `main` view.",
-              "type": [
-                "boolean",
-                "null"
-              ]
-            },
-            "memory_mount_path": {
-              "description": "Absolute filesystem path where the Linux FUSE mount should be attached. The directory must already exist and be empty at startup. This path hosts the current session-selected memory view; Djinn does not expose additional branch directories in this slice.",
-              "type": [
-                "string",
-                "null"
-              ]
-            },
             "dispatch_pause": {
               "description": "Global emergency stop for task dispatch. Missing in older settings rows means unpaused.",
               "anyOf": [
@@ -22883,20 +22740,6 @@
           "items": {
             "type": "string"
           }
-        },
-        "memory_mount_enabled": {
-          "description": "Enable the Linux-only ADR-057 memory FUSE mount for filesystem-first note workflows. Disabled by default; requires a Linux build with the `memory-mount` cargo feature. The mounted path serves the current session-selected task/worktree view when available and otherwise falls back to the canonical `main` view.",
-          "type": [
-            "boolean",
-            "null"
-          ]
-        },
-        "memory_mount_path": {
-          "description": "Absolute path for the Linux memory mount. The directory must already exist and be empty at startup. This path hosts the current session-selected memory view; no additional branch directories are exposed in this slice.",
-          "type": [
-            "string",
-            "null"
-          ]
         }
       },
       "type": "object"

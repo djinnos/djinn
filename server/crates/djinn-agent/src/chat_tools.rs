@@ -192,8 +192,6 @@ fn chat_allowed_mcp_tool_annotations(
         | "memory_catalog"
         | "memory_recent"
         | "memory_graph"
-        | "memory_diff"
-        | "memory_history"
         | "memory_task_refs"
         | "memory_extracted_audit"
         // Read-only tasks + epics.
@@ -274,8 +272,6 @@ const CHAT_ALLOWED_MCP_TOOLS: &[&str] = &[
     "memory_catalog",
     "memory_recent",
     "memory_graph",
-    "memory_diff",
-    "memory_history",
     "memory_task_refs",
     "memory_extracted_audit",
     // Read-only tasks + epics
