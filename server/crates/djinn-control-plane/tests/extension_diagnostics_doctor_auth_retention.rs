@@ -16,8 +16,9 @@ use djinn_core::events::EventBus;
 use djinn_core::extension_diagnostics::ExtensionLoadDiagnosticV1;
 use djinn_core::paths::project_dir;
 use djinn_db::{
-    ExtensionLoadDiagnosticRepository, InsertExtensionLoadDiagnostic, ProjectRepository,
-    SessionRepository, TaskRepository, repositories::session::CreateSessionParams,
+    EffectiveCreatorProvenance, ExtensionLoadDiagnosticRepository, InsertExtensionLoadDiagnostic,
+    ProjectRepository, SessionRepository, TaskRepository,
+    repositories::session::CreateSessionParams, repositories::user::UserRepository,
     test_support::delete_session_row,
 };
 use serde_json::json;
@@ -203,10 +204,19 @@ async fn extension_diagnostics_doctor_auth_retention() {
         .first()
         .and_then(|attempt| attempt.first())
         .expect("first persisted doctor diagnostic");
+    let historical_creator = UserRepository::new(harness.db().clone())
+        .upsert_from_github(8_811_992, "doctor-probe-historical-session", None, None)
+        .await
+        .expect("create historical-session task user");
     let task = TaskRepository::new(harness.db().clone(), EventBus::noop())
-        .create_in_project(
+        .create_in_project_with_provenance(
             &project_a.id,
             None,
+            EffectiveCreatorProvenance {
+                explicit_user_id: Some(&historical_creator.id),
+                source_task_id: None,
+                proposal_id: None,
+            },
             "diagnostic task",
             "",
             "",
