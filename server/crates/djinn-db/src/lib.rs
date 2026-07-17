@@ -180,7 +180,7 @@ pub use repositories::{
     task::{
         ActivityQuery, BlockerRef, ChildDisposition, CountQuery, CreateTaskInProjectParams,
         CreateTaskParams, DispositionCounts, DispositionFinding, DispositionPlan, DispositionScope,
-        ListQuery, ListResult, ReadyQuery, UpdateTaskParams,
+        EffectiveCreatorProvenance, ListQuery, ListResult, ReadyQuery, UpdateTaskParams,
     },
     task_arbitration::{
         ArbitrationState, CreateArbitrationParams, TaskArbitrationRecord,

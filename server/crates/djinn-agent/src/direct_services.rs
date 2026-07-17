@@ -20,7 +20,6 @@ use async_trait::async_trait;
 use djinn_core::events::DjinnEventEnvelope;
 use djinn_core::models::SessionRecord;
 use djinn_core::models::{Task, TaskRunStatus};
-use djinn_db::SessionRepository;
 use djinn_db::TaskRunRepository;
 use djinn_db::repositories::llm_call_attempt::{
     CreateLlmCallAttemptParams, FinalizeLlmCallAttemptParams, LlmCallAttemptRepository,
@@ -29,6 +28,7 @@ use djinn_db::repositories::llm_call_attempt::{
 use djinn_db::repositories::session::CreateSessionParams;
 use djinn_db::repositories::task_run::CreateTaskRunParams;
 use djinn_db::repositories::task_run_outcome::TaskRunOutcomeRepository;
+use djinn_db::{EffectiveCreatorProvenance, SessionRepository};
 use djinn_stack::environment::EnvironmentConfig;
 use djinn_supervisor::services::wire::{PlannerAttemptResult, PlannerOutcome};
 use djinn_supervisor::services::{
@@ -551,10 +551,15 @@ impl DirectServices {
         // Create the escalation review task.
         let review_task = match djinn_core::auth_context::SESSION_USER_ID
             .scope(
-                source_creator,
-                task_repo.create_in_project(
+                source_creator.clone(),
+                task_repo.create_in_project_with_provenance(
                     project_id,
                     None,
+                    EffectiveCreatorProvenance {
+                        explicit_user_id: source_creator.as_deref(),
+                        source_task_id: source_task.as_ref().map(|task| task.id.as_str()),
+                        proposal_id: None,
+                    },
                     &title,
                     &description,
                     instructions,

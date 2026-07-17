@@ -10,7 +10,7 @@ mod common;
 use djinn_control_plane::test_support::McpTestHarness;
 use djinn_core::events::EventBus;
 use djinn_core::models::{CiStatus, TaskPrCiSnapshotInput};
-use djinn_db::TaskRepository;
+use djinn_db::{EffectiveCreatorProvenance, TaskRepository};
 use insta::assert_json_snapshot;
 use serde_json::json;
 
@@ -266,11 +266,17 @@ async fn task_list_filters_and_pagination() {
     let epic1 = common::create_test_epic(db, &project.id).await;
     let epic2 = common::create_test_epic(db, &project.id).await;
     let repo = TaskRepository::new(db.clone(), EventBus::noop());
+    let creator_id = common::create_test_creator(db).await;
 
     let t1 = repo
-        .create_in_project(
+        .create_in_project_with_provenance(
             &project.id,
             Some(&epic1.id),
+            EffectiveCreatorProvenance {
+                explicit_user_id: Some(&creator_id),
+                source_task_id: None,
+                proposal_id: None,
+            },
             "alpha ready",
             "desc",
             "design",
@@ -283,9 +289,14 @@ async fn task_list_filters_and_pagination() {
         .await
         .unwrap();
     let _t2 = repo
-        .create_in_project(
+        .create_in_project_with_provenance(
             &project.id,
             Some(&epic1.id),
+            EffectiveCreatorProvenance {
+                explicit_user_id: Some(&creator_id),
+                source_task_id: None,
+                proposal_id: None,
+            },
             "beta progress",
             "desc",
             "design",
@@ -298,9 +309,14 @@ async fn task_list_filters_and_pagination() {
         .await
         .unwrap();
     let _t3 = repo
-        .create_in_project(
+        .create_in_project_with_provenance(
             &project.id,
             Some(&epic2.id),
+            EffectiveCreatorProvenance {
+                explicit_user_id: Some(&creator_id),
+                source_task_id: None,
+                proposal_id: None,
+            },
             "gamma text",
             "desc",
             "design",
@@ -413,11 +429,17 @@ async fn task_list_status_merged() {
     let project = common::create_test_project(db).await;
     let epic = common::create_test_epic(db, &project.id).await;
     let repo = TaskRepository::new(db.clone(), EventBus::noop());
+    let creator_id = common::create_test_creator(db).await;
 
     let mk = async |title: &str| {
-        repo.create_in_project(
+        repo.create_in_project_with_provenance(
             &project.id,
             Some(&epic.id),
+            EffectiveCreatorProvenance {
+                explicit_user_id: Some(&creator_id),
+                source_task_id: None,
+                proposal_id: None,
+            },
             title,
             "desc",
             "design",

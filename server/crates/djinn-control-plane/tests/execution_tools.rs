@@ -32,8 +32,9 @@ use djinn_control_plane::test_support::{
 use djinn_core::events::EventBus;
 use djinn_core::models::{DjinnSettings, SessionStatus};
 use djinn_db::{
-    CreateSessionParams, CreateTaskRunParams, Database, EpicCreateInput, EpicRepository,
-    ProjectRepository, SessionRepository, TaskRepository, TaskRunRepository,
+    CreateSessionParams, CreateTaskRunParams, Database, EffectiveCreatorProvenance,
+    EpicCreateInput, EpicRepository, ProjectRepository, SessionRepository, TaskRepository,
+    TaskRunRepository, UserRepository,
 };
 use djinn_provider::catalog::{CatalogService, HealthTracker};
 use serde_json::json;
@@ -560,10 +561,25 @@ impl RealPoolKillHarness {
             )
             .await
             .expect("epic create should succeed");
+        let creator_key = uuid::Uuid::now_v7();
+        let creator = UserRepository::new(self.app_state.db.clone())
+            .upsert_from_github(
+                creator_key.as_u128() as i64,
+                &format!("execution-kill-fixture-{creator_key}"),
+                None,
+                None,
+            )
+            .await
+            .expect("fixture user create should succeed");
         let task = TaskRepository::new(self.app_state.db.clone(), self.app_state.event_bus.clone())
-            .create_in_project(
+            .create_in_project_with_provenance(
                 &project.id,
                 Some(&epic.id),
+                EffectiveCreatorProvenance {
+                    explicit_user_id: Some(&creator.id),
+                    source_task_id: None,
+                    proposal_id: None,
+                },
                 "real-pool-kill-task",
                 "test task",
                 "test design",
