@@ -1025,13 +1025,18 @@ async fn finalize_tool_call_ends_session_and_captures_payload() {
         tool_calls: vec![ContentBlock::ToolUse {
             id: "fin1".to_string(),
             name: "submit_work".to_string(),
-            input: serde_json::json!({"task_id": "t1", "summary": "done"}),
+            input: serde_json::json!({
+                "task_id": "t1",
+                "commit_title": "complete test work",
+                "summary": "done"
+            }),
         }],
         input_tokens: 100,
         output_tokens: 10,
         _error: None,
     }]);
     let mut h = ReplyLoopHarness::new().await;
+    provider.bind_valid_submit_work_fixtures(&h.task_id);
     let (result, output, _tokens_in, _tokens_out, _cr, _cw) = h.run(&provider, &tools).await;
     assert!(result.is_ok(), "expected ok, got: {:?}", result);
     assert_eq!(provider.remaining(), 0, "finalize response consumed");
@@ -1091,7 +1096,11 @@ async fn nudge_count_resets_after_tool_call() {
             tool_calls: vec![ContentBlock::ToolUse {
                 id: "fin1".to_string(),
                 name: "submit_work".to_string(),
-                input: serde_json::json!({"task_id": "t1", "summary": "all done"}),
+                input: serde_json::json!({
+                    "task_id": "t1",
+                    "commit_title": "complete test work",
+                    "summary": "all done"
+                }),
             }],
             input_tokens: 130,
             output_tokens: 10,
@@ -1099,6 +1108,7 @@ async fn nudge_count_resets_after_tool_call() {
         },
     ]);
     let mut h = ReplyLoopHarness::new().await;
+    provider.bind_valid_submit_work_fixtures(&h.task_id);
     let (result, output, _tokens_in, _tokens_out, _cr, _cw) = h.run(&provider, &tools).await;
     assert!(result.is_ok(), "expected ok, got: {:?}", result);
     assert_eq!(provider.remaining(), 0, "all responses consumed");
@@ -1145,7 +1155,7 @@ async fn tool_choice_required_for_supported_providers() {
             tool_calls: vec![ContentBlock::ToolUse {
                 id: "fin1".to_string(),
                 name: "submit_work".to_string(),
-                input: serde_json::json!({"task_id": "t1", "summary": "done"}),
+                input: serde_json::json!({"task_id": "t1", "commit_title": "complete test work", "summary": "done"}),
             }],
             input_tokens: 110,
             output_tokens: 10,
@@ -1158,6 +1168,7 @@ async fn tool_choice_required_for_supported_providers() {
         inner,
     };
     let (slot_ctx, project_path, task_id, session_id, cancel) = make_context().await;
+    provider.inner.bind_valid_submit_work_fixtures(&task_id);
     let worktree_path = std::path::PathBuf::from("/tmp");
     let mut conv = Conversation::new();
     conv.push(Message::system("You are a worker."));
@@ -1754,7 +1765,7 @@ async fn successful_novel_tool_call_resets_failure_pressure() {
         MockResponse::tool_call_with_input(
             "done",
             "submit_work",
-            serde_json::json!({"task_id": "t1", "summary": "done"}),
+            serde_json::json!({"task_id": "t1", "commit_title": "complete test work", "summary": "done"}),
             150,
         ),
     ]);
@@ -1825,7 +1836,7 @@ async fn mixed_successful_tool_batch_resets_consecutive_failure_pressure() {
     responses.push(MockResponse::tool_call_with_input(
         "done",
         "submit_work",
-        serde_json::json!({"task_id": "t1", "summary": "done"}),
+        serde_json::json!({"task_id": "t1", "commit_title": "complete test work", "summary": "done"}),
         140,
     ));
     let provider = MockProvider::new(responses);
@@ -1945,7 +1956,7 @@ async fn soft_budget_threshold_triggers_one_shot_converge_reminder() {
             tool_calls: vec![ContentBlock::ToolUse {
                 id: "fin".to_string(),
                 name: "submit_work".to_string(),
-                input: serde_json::json!({"task_id": "t1", "summary": "done"}),
+                input: serde_json::json!({"task_id": "t1", "commit_title": "complete test work", "summary": "done"}),
             }],
             input_tokens: 10,
             output_tokens: 5,
@@ -1953,6 +1964,7 @@ async fn soft_budget_threshold_triggers_one_shot_converge_reminder() {
         },
     ]);
     let (slot_ctx, project_path, task_id, session_id, cancel) = make_context().await;
+    provider.bind_valid_submit_work_fixtures(&task_id);
     let worktree_path = std::path::PathBuf::from("/tmp");
     let mut conv = Conversation::new();
     conv.push(Message::system("You are a worker."));
@@ -2081,7 +2093,7 @@ async fn soft_budget_below_threshold_no_injection() {
             tool_calls: vec![ContentBlock::ToolUse {
                 id: "fin".to_string(),
                 name: "submit_work".to_string(),
-                input: serde_json::json!({"task_id": "t1", "summary": "done"}),
+                input: serde_json::json!({"task_id": "t1", "commit_title": "complete test work", "summary": "done"}),
             }],
             input_tokens: 5,
             output_tokens: 5,
@@ -2089,6 +2101,7 @@ async fn soft_budget_below_threshold_no_injection() {
         },
     ]);
     let mut h = ReplyLoopHarness::new().await;
+    provider.bind_valid_submit_work_fixtures(&h.task_id);
     let (result, _output, _tokens_in, _tokens_out, _cr, _cw) = h.run(&provider, &tools).await;
     // SAFETY: SESSION_BUDGET_ENV_LOCK held; restore baseline before asserting.
     clear_session_budget_env();
@@ -2355,7 +2368,7 @@ async fn dangling_tool_call_is_sanitized_before_reaching_provider() {
         tool_calls: vec![ContentBlock::ToolUse {
             id: "fin1".to_string(),
             name: "submit_work".to_string(),
-            input: serde_json::json!({"task_id": "t1", "summary": "done"}),
+            input: serde_json::json!({"task_id": "t1", "commit_title": "complete test work", "summary": "done"}),
         }],
         input_tokens: 50,
         output_tokens: 10,
@@ -2367,6 +2380,7 @@ async fn dangling_tool_call_is_sanitized_before_reaching_provider() {
         inner,
     };
     let (slot_ctx, project_path, task_id, session_id, cancel) = make_context().await;
+    provider.inner.bind_valid_submit_work_fixtures(&task_id);
     let worktree_path = std::path::PathBuf::from("/tmp");
     // Seed a transcript ending in an UNANSWERED assistant tool call, exactly as
     // a prior session's persisted history would on a rework continuation.
@@ -4435,7 +4449,7 @@ async fn productive_turns_persisted_normally() {
             tool_calls: vec![ContentBlock::ToolUse {
                 id: "fin".to_string(),
                 name: "submit_work".to_string(),
-                input: serde_json::json!({"task_id": "t1", "summary": "done"}),
+                input: serde_json::json!({"task_id": "t1", "commit_title": "complete test work", "summary": "done"}),
             }],
             input_tokens: 110,
             output_tokens: 10,
@@ -4443,6 +4457,7 @@ async fn productive_turns_persisted_normally() {
         },
     ]);
     let mut h = ReplyLoopHarness::new().await;
+    provider.bind_valid_submit_work_fixtures(&h.task_id);
     let (result, _output, _, _, _, _) = h.run(&provider, &tools).await;
     assert!(
         result.is_ok(),
