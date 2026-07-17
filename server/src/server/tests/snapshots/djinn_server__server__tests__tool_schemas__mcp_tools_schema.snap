@@ -10288,6 +10288,223 @@ expression: signatures
     }
   },
   {
+    "name": "memory_retrieval_outcomes_report",
+    "read_only": false,
+    "destructive": true,
+    "idempotent": false,
+    "open_world": false,
+    "concurrent_safe": false,
+    "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "end": {
+          "type": "string"
+        },
+        "project": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "project_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "start": {
+          "type": "string"
+        },
+        "timezone": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "start",
+        "end",
+        "timezone"
+      ],
+      "type": "object"
+    },
+    "output_schema": {
+      "$defs": {
+        "RetrievalOutcomesAttemptSchema": {
+          "properties": {
+            "attempt_seq": {
+              "format": "int32",
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "count": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "rate": {
+              "format": "double",
+              "type": "number"
+            }
+          },
+          "required": [
+            "count",
+            "rate"
+          ],
+          "type": "object"
+        },
+        "RetrievalOutcomesRateSchema": {
+          "properties": {
+            "count": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "rate": {
+              "format": "double",
+              "type": "number"
+            },
+            "state": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "state",
+            "count",
+            "rate"
+          ],
+          "type": "object"
+        },
+        "RetrievalOutcomesReportCellSchema": {
+          "properties": {
+            "attempts": {
+              "items": {
+                "$ref": "#/$defs/RetrievalOutcomesAttemptSchema"
+              },
+              "type": "array"
+            },
+            "denominator": {
+              "description": "Distinct task runs in this cohort cell.",
+              "format": "int64",
+              "type": "integer"
+            },
+            "entry_point": {
+              "type": "string"
+            },
+            "merge_queue": {
+              "items": {
+                "$ref": "#/$defs/RetrievalOutcomesRateSchema"
+              },
+              "type": "array"
+            },
+            "outcome": {
+              "type": "string"
+            },
+            "parked_reasons": {
+              "items": {
+                "$ref": "#/$defs/RetrievalOutcomesRateSchema"
+              },
+              "type": "array"
+            },
+            "review": {
+              "items": {
+                "$ref": "#/$defs/RetrievalOutcomesRateSchema"
+              },
+              "type": "array"
+            },
+            "rollout_label": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "entry_point",
+            "rollout_label",
+            "outcome",
+            "denominator",
+            "parked_reasons",
+            "merge_queue",
+            "review",
+            "attempts"
+          ],
+          "type": "object"
+        },
+        "RetrievalOutcomesReportDiagnosticsSchema": {
+          "properties": {
+            "unattributed_trace_count": {
+              "description": "Traces without exact task_run_id; excluded from rates and never task_id-joined.",
+              "format": "int64",
+              "type": "integer"
+            },
+            "unrecorded_run_count": {
+              "description": "Eligible runs with no durable trace.",
+              "format": "int64",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "unattributed_trace_count",
+            "unrecorded_run_count"
+          ],
+          "type": "object"
+        },
+        "RetrievalOutcomesReportSchema": {
+          "properties": {
+            "cells": {
+              "items": {
+                "$ref": "#/$defs/RetrievalOutcomesReportCellSchema"
+              },
+              "type": "array"
+            },
+            "cells_are_non_additive": {
+              "description": "Different cohort-key cells can overlap and must not be summed.",
+              "type": "boolean"
+            },
+            "diagnostics": {
+              "$ref": "#/$defs/RetrievalOutcomesReportDiagnosticsSchema"
+            },
+            "end": {
+              "type": "string"
+            },
+            "start": {
+              "type": "string"
+            },
+            "timezone": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "start",
+            "end",
+            "timezone",
+            "cells_are_non_additive",
+            "cells",
+            "diagnostics"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "error": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "report": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RetrievalOutcomesReportSchema"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "type": "object"
+    }
+  },
+  {
     "name": "memory_run_enrichment",
     "read_only": false,
     "destructive": true,
