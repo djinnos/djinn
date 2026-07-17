@@ -41,6 +41,7 @@ jobs:
       memoryEval: ${{ steps.router.outputs.memoryEval }}
       tiltContracts: ${{ steps.router.outputs.tiltContracts }}
       ui: ${{ steps.router.outputs.ui }}
+      qaSmoke: ${{ steps.router.outputs.qaSmoke }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -1055,6 +1056,87 @@ jobs:
           if [[ -f "$SUMMARY" ]]; then
             cat "$SUMMARY" >> "$GITHUB_STEP_SUMMARY"
           fi
+  qa-smoke:
+    name: qa-smoke
+    needs: preflight
+    if: needs.preflight.outputs.qaSmoke == 'true' && (github.event_name == 'pull_request' || github.event_name == 'merge_group' || github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: server
+    # Clone ownership remains on the maintenance database while SQLx macros
+    # compile against the separately migrated template.
+    env:
+      DJINN_TEST_DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5433/postgres
+      DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5433/djinn_test_template
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5433:5432
+        options: --health-cmd="pg_isready -U postgres" --health-interval=5s --health-timeout=3s --health-retries=20
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: server
+          shared-key: server-test
+          cache-on-failure: true
+          cache-all-crates: true
+          save-if: false
+        id: rust-cache
+      - name: Log cache family and restore status
+        run: |-
+          echo "cache-family=server-test"
+          echo "shared-key=server-test"
+          echo "runner-os=${{ runner.os }}"
+          echo "rustc=$(rustc --version || echo 'unknown')"
+          echo "cache-hit=${{ steps.rust-cache.outputs.cache-hit }}"
+          echo "::notice::cache-family=server-test shared-key=server-test cache-hit=${{ steps.rust-cache.outputs.cache-hit }}"
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: sqlx-cli
+      - name: Build migrated Postgres template
+        env:
+          PGPASSWORD: postgres
+        run: |
+          set -euo pipefail
+          until pg_isready -h 127.0.0.1 -p 5433 -U postgres >/dev/null 2>&1; do sleep 1; done
+          psql -h 127.0.0.1 -p 5433 -U postgres -d postgres -v ON_ERROR_STOP=1 -c "CREATE DATABASE djinn_test_template"
+          (cd crates/djinn-db && DATABASE_URL="$DATABASE_URL" sqlx migrate run --source migrations_postgres)
+          psql -h 127.0.0.1 -p 5433 -U postgres -d postgres -v ON_ERROR_STOP=1 -c "UPDATE pg_database SET datistemplate = TRUE WHERE datname = 'djinn_test_template'"
+      - name: Build qa runner once
+        run: cargo build -p djinn-qa
+      - name: Precompile selected smoke test binaries
+        run: |
+          cargo test -p djinn-coordinator --no-run
+          cargo test -p djinn-slot --no-run
+          cargo test -p djinn-db --no-run
+      - name: Run deterministic qa smoke and coverage gate
+        run: |
+          set +e
+          target/debug/djinn-qa run --qa-profile smoke-ci --concurrency 8 --repo-root .. --evidence-dir qa/evidence/smoke-ci
+          runner_status=$?
+          target/debug/djinn-qa coverage --profile smoke-ci --format json --repo-root .. --evidence ../qa/evidence/smoke-ci --output ../qa/evidence/smoke-ci/coverage.json
+          coverage_status=$?
+          if [ "$coverage_status" -ne 0 ]; then
+            echo "::error::Required smoke coverage gaps remain:"
+            jq -r '.[] | select((.required_profiles | index("smoke-ci")) and .state != "proven") | "\(.coverage_id): state=\(.state), scenarios=\(.scenario_ids | join(",")), stale_reasons=\(.stale_reasons | join(","))"' ../qa/evidence/smoke-ci/coverage.json
+          fi
+          if [ "$runner_status" -ne 0 ] || [ "$coverage_status" -ne 0 ]; then
+            exit 1
+          fi
+      - name: Upload qa smoke evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: qa-smoke-evidence
+          path: qa/evidence/smoke-ci
+          if-no-files-found: error
+          retention-days: 30
   ui-frontend:
     name: UI Frontend
     needs: preflight
@@ -1139,6 +1221,7 @@ jobs:
       - server-sqlx-freshness
       - memory-eval
       - local-dev-contracts
+      - qa-smoke
       - ui-frontend
     steps:
       - name: Fail closed on selected work
@@ -1158,6 +1241,7 @@ jobs:
           SQLX: ${{ needs.preflight.outputs.sqlxFreshness }}:${{ needs.server-sqlx-freshness.result }}
           MEMORY: ${{ needs.preflight.outputs.memoryEval }}:${{ needs.memory-eval.result }}
           TILT_CONTRACTS: ${{ needs.preflight.outputs.tiltContracts }}:${{ needs.local-dev-contracts.result }}
+          QA_SMOKE: ${{ needs.preflight.outputs.qaSmoke }}:${{ needs.qa-smoke.result }}
           UI: ${{ needs.preflight.outputs.ui }}:${{ needs.ui-frontend.result }}
         run: |
           set -euo pipefail
@@ -1173,4 +1257,4 @@ jobs:
           check capability "$CAPABILITY"; check boundaries "$BOUNDARIES"
           check server-test-plan "$SERVER_TEST_PLAN"; check server-test-shards "$SERVER_TEST_SHARDS"; check server-test-timing "$SERVER_TEST_TIMING"
           check sqlx-freshness "$SQLX"; check memory-eval "$MEMORY"
-          check local-dev-contracts "$TILT_CONTRACTS"; check ui "$UI"
+          check local-dev-contracts "$TILT_CONTRACTS"; check qa-smoke "$QA_SMOKE"; check ui "$UI"

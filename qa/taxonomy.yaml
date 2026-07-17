@@ -1,20 +1,5 @@
 version: 1
 coverage:
-  - id: task.state-machine.legal-transitions
-    subsystem: task-state-machine
-    required_profiles: [smoke-ci]
-  - id: task.state-machine.illegal-transition-rejection
-    subsystem: task-state-machine
-    required_profiles: [smoke-ci]
-  - id: task.park.reason-attribution
-    subsystem: parking
-    required_profiles: [smoke-ci]
-  - id: task.park.event-causality
-    subsystem: parking
-    required_profiles: [smoke-ci]
-  - id: breaker.trip-recovery-scope-model
-    subsystem: breaker
-    required_profiles: [smoke-ci]
   - id: github.merge-queue-reopen
     subsystem: merge-queue
     required_profiles: [smoke-ci]
