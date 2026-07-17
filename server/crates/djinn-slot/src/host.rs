@@ -35,6 +35,8 @@ use crate::final_verification::{
 };
 use crate::helpers::ProviderCredential;
 use crate::reply_loop::compaction_guard::CompactionCriticalSection;
+#[cfg(test)]
+use djinn_sandbox::final_verification_execution::FinalVerificationExecutionEvidence;
 
 type FinalVerificationLeaseFuture<'a> = Pin<
     Box<dyn Future<Output = Result<Box<dyn FinalVerificationInvocationLease>, String>> + Send + 'a>,
@@ -78,6 +80,16 @@ pub trait SlotHostCallbacks: Send + Sync + 'static {
         &self,
         _request: &FinalVerificationCoordinatorRequest,
     ) -> Option<FinalVerificationRecordingOutcome> {
+        None
+    }
+    /// Deterministic executor seam for coordinator/persistence integration tests.
+    /// Unlike `final_verification_outcome_for_test`, this still exercises
+    /// resolution, leasing, evidence validation, and the durable writer.
+    #[cfg(test)]
+    fn final_verification_evidence_for_test(
+        &self,
+        _request: &FinalVerificationCoordinatorRequest,
+    ) -> Option<FinalVerificationExecutionEvidence> {
         None
     }
     /// Resolve canonical material for an authoritative final-verification call.

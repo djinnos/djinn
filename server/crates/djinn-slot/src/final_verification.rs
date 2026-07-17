@@ -118,20 +118,21 @@ pub async fn coordinate_final_verification(
     let verification_attempt_id = uuid::Uuid::now_v7().to_string();
     let verify_run_id = uuid::Uuid::now_v7().to_string();
 
-    // Keep production on the complete resolve/lease/execute/persist path while
-    // allowing reply-loop tests to deterministically exercise the typed
-    // coordinator boundary without a sandbox or durable verify-run fixture.
-    #[cfg(test)]
-    if let Some(outcome) = ctx.callbacks.final_verification_outcome_for_test(&request) {
-        return emit_outcome(&request, outcome);
-    }
-
+    // Cancellation is authoritative even when tests inject a typed outcome.
     if request.cancellation.is_cancelled() {
         return emit_ineligible(
             &request,
             &verification_attempt_id,
             "cancelled before resolution",
         );
+    }
+
+    // Keep production on the complete resolve/lease/execute/persist path while
+    // allowing reply-loop tests to deterministically exercise the typed
+    // coordinator boundary without a sandbox or durable verify-run fixture.
+    #[cfg(test)]
+    if let Some(outcome) = ctx.callbacks.final_verification_outcome_for_test(&request) {
+        return emit_outcome(&request, outcome);
     }
     let material = match ctx
         .callbacks
@@ -171,8 +172,16 @@ pub async fn coordinate_final_verification(
         ))
     } else {
         // The delivered executor performs every descriptor in order and returns
-        // evidence rather than persistence side effects.
-        let evidence = execute_final_verification(material.execution_request.clone()).await;
+        // evidence rather than persistence side effects. Tests inject evidence
+        // here while retaining the real resolve/lease/validate/write boundary.
+        #[cfg(test)]
+        let injected_evidence = ctx.callbacks.final_verification_evidence_for_test(&request);
+        #[cfg(not(test))]
+        let injected_evidence: Option<FinalVerificationExecutionEvidence> = None;
+        let evidence = match injected_evidence {
+            Some(evidence) => evidence,
+            None => execute_final_verification(material.execution_request.clone()).await,
+        };
         if request.cancellation.is_cancelled() {
             Err(ineligible_outcome(
                 &verification_attempt_id,
@@ -501,3 +510,6 @@ mod tests {
         assert!(!writer_started.load(Ordering::SeqCst));
     }
 }
+
+#[cfg(test)]
+mod recording_tests;
