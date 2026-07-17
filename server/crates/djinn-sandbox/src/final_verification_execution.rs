@@ -5,7 +5,8 @@
 //! by their respective coordinators.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::PathBuf;
+use std::path::{Component, Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Duration, UNIX_EPOCH};
 
 use djinn_core::canonical_verify::{
@@ -14,27 +15,45 @@ use djinn_core::canonical_verify::{
 };
 use djinn_core::clock::{Clock, SystemClock};
 use djinn_git::{
-    VerificationInputDigestV1, VerificationInputFingerprint, VerificationInputFingerprintConfig,
-    compute_verification_input_fingerprint_with_config,
+    ResolvedExternalInputV1, VerificationInputDigestV1, VerificationInputFingerprint,
+    VerificationInputFingerprintConfig, compute_verification_input_fingerprint_with_config,
 };
 
 use crate::final_verification::{
     FinalVerificationError, FinalVerificationRequest, launch_final_verification_with_timeout,
 };
 
-/// All resolved host material required to execute a canonical plan.  Tool
-/// probes, image identity, lockfiles, target, features, and allowlisted
-/// environment are carried by `environment_identity_input` and are validated
-/// by `EnvironmentIdentityV1::derive` before any command may run.
-#[derive(Clone, Debug)]
+/// Reacquires resolved identity material at each consistency boundary.
+pub type EnvironmentIdentityResolver = Arc<
+    dyn Fn() -> Result<ResolvedEnvironmentIdentityInputV1, EnvironmentIdentityError> + Send + Sync,
+>;
+
+/// All resolved host material required to execute a canonical plan.
+///
+/// `resolve_environment_identity` must re-probe host material on every call.
+/// The remaining fields are checked against its canonical manifest before F0.
+#[derive(Clone)]
 pub struct FinalVerificationExecutionRequest {
     pub worktree: PathBuf,
-    pub environment_identity_input: ResolvedEnvironmentIdentityInputV1,
+    pub resolve_environment_identity: EnvironmentIdentityResolver,
     pub fingerprint_config: VerificationInputFingerprintConfig,
     pub tool_runtime: Vec<PathBuf>,
     pub read_only_external_mounts: Vec<PathBuf>,
     /// Concrete output-only directories resolved from the manifest globs.
     pub output_directories: Vec<PathBuf>,
+}
+
+impl std::fmt::Debug for FinalVerificationExecutionRequest {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("FinalVerificationExecutionRequest")
+            .field("worktree", &self.worktree)
+            .field("fingerprint_config", &self.fingerprint_config)
+            .field("tool_runtime", &self.tool_runtime)
+            .field("read_only_external_mounts", &self.read_only_external_mounts)
+            .field("output_directories", &self.output_directories)
+            .finish_non_exhaustive()
+    }
 }
 
 /// Ordered evidence for one configured command descriptor.
@@ -51,6 +70,9 @@ pub struct FinalVerificationCommandEvidence {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum FinalVerificationIneligibilityReason {
     NonHermeticPlan,
+    ManifestBindingMismatch {
+        detail: String,
+    },
     EnvironmentIdentityUnavailable {
         detail: String,
     },
@@ -112,7 +134,37 @@ impl FinalVerificationExecutionEvidence {
 pub async fn execute_final_verification(
     request: FinalVerificationExecutionRequest,
 ) -> FinalVerificationExecutionEvidence {
-    let manifest_version = request.environment_identity_input.input_manifest.version;
+    execute_final_verification_with_launcher(request, |request, timeout| {
+        launch_final_verification_with_timeout(request, timeout)
+    })
+    .await
+}
+
+async fn execute_final_verification_with_launcher(
+    request: FinalVerificationExecutionRequest,
+    launch: impl Fn(
+        FinalVerificationRequest,
+        Duration,
+    ) -> Result<
+        crate::final_verification::FinalVerificationResult,
+        FinalVerificationError,
+    >,
+) -> FinalVerificationExecutionEvidence {
+    let initial_input = match (request.resolve_environment_identity)() {
+        Ok(input) => input,
+        Err(error) => {
+            return FinalVerificationExecutionEvidence {
+                manifest_version: 0,
+                pre_environment_identity: None,
+                post_environment_identity: None,
+                fingerprint_f0: None,
+                fingerprint_f1: None,
+                commands: Vec::new(),
+                eligibility_reason: Some(identity_reason(error)),
+            };
+        }
+    };
+    let manifest_version = initial_input.input_manifest.version;
     let mut evidence = FinalVerificationExecutionEvidence {
         manifest_version,
         pre_environment_identity: None,
@@ -123,19 +175,23 @@ pub async fn execute_final_verification(
         eligibility_reason: None,
     };
 
-    let plan = request.environment_identity_input.plan.clone();
+    let plan = initial_input.plan.clone();
     if !plan.hermeticity.hermetic || !plan.hermeticity.reusable || plan.hermeticity.network_access {
         return ineligible(
             evidence,
             FinalVerificationIneligibilityReason::NonHermeticPlan,
         );
     }
-    let pre_identity =
-        match EnvironmentIdentityV1::derive(request.environment_identity_input.clone()) {
-            Ok(identity) => identity,
-            Err(error) => return ineligible(evidence, identity_reason(error)),
-        };
+    let pre_identity = match EnvironmentIdentityV1::derive(initial_input.clone()) {
+        Ok(identity) => identity,
+        Err(error) => return ineligible(evidence, identity_reason(error)),
+    };
     evidence.pre_environment_identity = Some(pre_identity.clone());
+
+    let (external_mounts, output_directories) = match bind_manifest(&request, &initial_input) {
+        Ok(binding) => binding,
+        Err(reason) => return ineligible(evidence, reason),
+    };
 
     let f0 = match fingerprint(&request.worktree, &request.fingerprint_config).await {
         Ok(digest) => digest,
@@ -143,8 +199,7 @@ pub async fn execute_final_verification(
     };
     evidence.fingerprint_f0 = Some(f0);
 
-    let declared_environment: BTreeSet<_> = request
-        .environment_identity_input
+    let declared_environment: BTreeSet<_> = initial_input
         .input_manifest
         .environment_names
         .iter()
@@ -154,7 +209,7 @@ pub async fn execute_final_verification(
         let environment = match command_environment(
             &descriptor,
             &declared_environment,
-            &request.environment_identity_input.allowlisted_environment,
+            &initial_input.allowlisted_environment,
         ) {
             Ok(environment) => environment,
             Err(reason) => return ineligible(evidence, reason),
@@ -162,12 +217,12 @@ pub async fn execute_final_verification(
         let started_at_unix_millis = now_millis();
         // Outputs are created exactly once. Subsequent descriptors retain the
         // strict read-only worktree and cannot obtain a broader host grant.
-        let output_directories = if position == 0 {
-            request.output_directories.clone()
+        let command_outputs = if position == 0 {
+            output_directories.clone()
         } else {
             Vec::new()
         };
-        let launched = launch_final_verification_with_timeout(
+        let launched = launch(
             FinalVerificationRequest {
                 argv: std::iter::once(descriptor.executable.clone())
                     .chain(descriptor.argv.iter().cloned())
@@ -175,8 +230,8 @@ pub async fn execute_final_verification(
                 worktree: request.worktree.clone(),
                 working_directory: request.worktree.join(&descriptor.working_directory),
                 tool_runtime: request.tool_runtime.clone(),
-                read_only_external_mounts: request.read_only_external_mounts.clone(),
-                output_directories,
+                read_only_external_mounts: external_mounts.clone(),
+                output_directories: command_outputs,
                 environment,
             },
             Duration::from_secs(descriptor.timeout_seconds),
@@ -234,7 +289,11 @@ pub async fn execute_final_verification(
         Err(reason) => return ineligible(evidence, reason),
     };
     evidence.fingerprint_f1 = Some(f1.clone());
-    let post_identity = match EnvironmentIdentityV1::derive(request.environment_identity_input) {
+    let post_input = match (request.resolve_environment_identity)() {
+        Ok(input) => input,
+        Err(error) => return ineligible(evidence, identity_reason(error)),
+    };
+    let post_identity = match EnvironmentIdentityV1::derive(post_input) {
         Ok(identity) => identity,
         Err(error) => return ineligible(evidence, identity_reason(error)),
     };
@@ -268,6 +327,92 @@ async fn fingerprint(
         Err(error) => Err(FinalVerificationIneligibilityReason::FingerprintFailure {
             detail: error.to_string(),
         }),
+    }
+}
+
+/// Bind every filesystem-facing execution value to the identity manifest before
+/// it can affect either F0 or the launcher policy.
+fn bind_manifest(
+    request: &FinalVerificationExecutionRequest,
+    input: &ResolvedEnvironmentIdentityInputV1,
+) -> Result<(Vec<PathBuf>, Vec<PathBuf>), FinalVerificationIneligibilityReason> {
+    if request.fingerprint_config.manifest != input.input_manifest {
+        return Err(manifest_binding(
+            "fingerprint manifest differs from identity manifest",
+        ));
+    }
+    let declared: BTreeSet<_> = input
+        .input_manifest
+        .read_only_external_inputs
+        .iter()
+        .map(|entry| entry.id.as_str())
+        .collect();
+    let configured: BTreeSet<_> = request
+        .fingerprint_config
+        .external_inputs
+        .iter()
+        .map(|entry| entry.id.as_str())
+        .collect();
+    if configured.len() != request.fingerprint_config.external_inputs.len()
+        || configured != declared
+    {
+        return Err(manifest_binding(
+            "resolved external mounts differ from manifest declarations",
+        ));
+    }
+    let external_mounts = resolved_mount_paths(&request.fingerprint_config.external_inputs);
+    if request.read_only_external_mounts != external_mounts {
+        return Err(manifest_binding(
+            "launcher external mounts differ from fingerprint resolved mounts",
+        ));
+    }
+    let output_directories = output_directories(&input.input_manifest.output_only_globs)?;
+    if request.output_directories != output_directories {
+        return Err(manifest_binding(
+            "launcher output directories differ from manifest output-only globs",
+        ));
+    }
+    Ok((external_mounts, output_directories))
+}
+
+fn resolved_mount_paths(inputs: &[ResolvedExternalInputV1]) -> Vec<PathBuf> {
+    inputs.iter().map(|input| input.path.clone()).collect()
+}
+
+/// Convert an output glob into the literal directory prefix the strict launcher
+/// can make writable. Globs without a literal prefix would require a broader
+/// write grant and therefore fail closed.
+fn output_directories(
+    globs: &[String],
+) -> Result<Vec<PathBuf>, FinalVerificationIneligibilityReason> {
+    let mut directories = BTreeSet::new();
+    for glob in globs {
+        let mut prefix = PathBuf::new();
+        for component in Path::new(glob).components() {
+            let Component::Normal(component) = component else {
+                return Err(manifest_binding(
+                    "output-only glob is not a safe relative path",
+                ));
+            };
+            let component = component.to_string_lossy();
+            if component.contains(['*', '?', '[', '{']) {
+                break;
+            }
+            prefix.push(component.as_ref());
+        }
+        if prefix.as_os_str().is_empty() {
+            return Err(manifest_binding(
+                "output-only glob has no directory prefix for strict launcher",
+            ));
+        }
+        directories.insert(prefix);
+    }
+    Ok(directories.into_iter().collect())
+}
+
+fn manifest_binding(detail: impl Into<String>) -> FinalVerificationIneligibilityReason {
+    FinalVerificationIneligibilityReason::ManifestBindingMismatch {
+        detail: detail.into(),
     }
 }
 
@@ -331,4 +476,21 @@ fn now_millis() -> u128 {
         .now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |duration| duration.as_millis())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn output_only_glob_requires_a_literal_launcher_directory() {
+        assert_eq!(
+            output_directories(&["out/**".into()]).expect("directory"),
+            vec![PathBuf::from("out")]
+        );
+        assert!(matches!(
+            output_directories(&["**/*.log".into()]),
+            Err(FinalVerificationIneligibilityReason::ManifestBindingMismatch { .. })
+        ));
+    }
 }
