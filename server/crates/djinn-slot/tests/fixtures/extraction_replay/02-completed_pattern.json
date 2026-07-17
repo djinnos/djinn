@@ -1,27 +1,33 @@
 {
-   "injected_provider_response" : "{\"patterns\":[{\"content\":\"## Context\\ndiscriminative replay fact 02. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\\n\\n## Problem shape\\ndiscriminative replay fact 02. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\\n\\n## Recommended approach\\ndiscriminative replay fact 02. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\\n\\n## Why it works\\ndiscriminative replay fact 02. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\\n\\n## Tradeoffs / limits\\ndiscriminative replay fact 02. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\\n\\n## When to use\\ndiscriminative replay fact 02. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\\n\\n## When not to use\\ndiscriminative replay fact 02. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\\n\\n## Related\\ndiscriminative replay fact 02. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\",\"title\":\"Sanitized completed_pattern 02\",\"applies_when\":\"offline replay fixture\"}]}",
-   "provenance" : "sanitized_archived_transcript_derived",
-   "must_not_duplicate_target" : null,
-   "expected_duplicate_target" : null,
-   "messages" : [
-      {
-         "role" : "user",
-         "content" : "Summarize sanitized task evidence for discriminative replay fact 02."
-      },
-      {
-         "role" : "assistant",
-         "content" : "Implemented a concise deterministic change and recorded the outcome."
-      }
-   ],
-   "id" : "archive-derived-02",
    "category" : "completed_pattern",
    "expect_adr_054_quality" : true,
+   "expected_duplicate_target" : null,
+   "expected_note_type" : "pattern",
+   "id" : "archive-derived-02",
+   "injected_provider_response" : "{\"revision_operations\":[{\"kind\":\"deprecate_with_supersedes\",\"deprecated_note_id\":\"018f0000-0000-7000-8000-000000000002\",\"superseding_note_id\":\"018f0000-0000-7000-8000-000000000003\",\"reason\":\"fixture replacement is authoritative\"}],\"patterns\":[{\"applies_when\":\"offline replay fixture\",\"content\":\"## Context\\ndiscriminative replay fact 02. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\\n\\n## Problem shape\\ndiscriminative replay fact 02. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\\n\\n## Recommended approach\\ndiscriminative replay fact 02. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\\n\\n## Why it works\\ndiscriminative replay fact 02. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\\n\\n## Tradeoffs / limits\\ndiscriminative replay fact 02. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\\n\\n## When to use\\ndiscriminative replay fact 02. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\\n\\n## When not to use\\ndiscriminative replay fact 02. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\\n\\n## Related\\ndiscriminative replay fact 02. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\",\"title\":\"Sanitized completed_pattern 02\"}]}",
+   "messages" : [
+      {
+         "content" : "Summarize sanitized task evidence for discriminative replay fact 02.",
+         "role" : "user"
+      },
+      {
+         "content" : "Implemented a concise deterministic change and recorded the outcome.",
+         "role" : "assistant"
+      }
+   ],
+   "must_not_duplicate_target" : null,
+   "provenance" : "sanitized_archived_transcript_derived",
+   "required_discriminative_text" : "discriminative replay fact 02",
+   "revision_operation_simulations" : [
+      {
+         "outcome" : "applied",
+         "shape" : "deprecate_with_supersedes"
+      }
+   ],
    "terminal_context" : {
-      "review_decision" : null,
       "outcome" : {
          "kind" : "completed"
-      }
-   },
-   "required_discriminative_text" : "discriminative replay fact 02",
-   "expected_note_type" : "pattern"
+      },
+      "review_decision" : null
+   }
 }

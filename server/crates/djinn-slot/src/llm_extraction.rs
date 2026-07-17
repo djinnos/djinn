@@ -1482,8 +1482,38 @@ pub async fn capture_llm_extraction_replay(
     extraction_response: &str,
     provider: &dyn LlmProvider,
     candidates: &[djinn_db::NoteDedupCandidate],
+    simulations: &[crate::extraction_replay_eval::ReplayRevisionOperationSimulation],
 ) -> Result<Vec<crate::extraction_replay_eval::ExtractionObservation>, String> {
     let extracted = parse_extraction_response(extraction_response)?;
+    if extracted.revision_operations.len() != simulations.len() {
+        return Err("revision operation simulations must pair with emitted operations".to_owned());
+    }
+    let mut revision_operations = Vec::with_capacity(simulations.len() * 2);
+    for (operation, simulation) in extracted.revision_operations.iter().zip(simulations) {
+        let (shape, emitted_reason) = match operation {
+            RevisionOperation::Patch { reason, .. } => ("patch", reason),
+            RevisionOperation::DeprecateWithSupersedes { reason, .. } => {
+                ("deprecate_with_supersedes", reason)
+            }
+        };
+        if simulation.shape != shape
+            || !matches!(simulation.outcome.as_str(), "applied" | "refused")
+            || (simulation.outcome == "refused"
+                && simulation.reason.as_deref().is_none_or(str::is_empty))
+        {
+            return Err("invalid revision operation simulation".to_owned());
+        }
+        revision_operations.push(crate::extraction_replay_eval::ReplayRevisionOperation {
+            shape: shape.to_owned(),
+            outcome: "emitted".to_owned(),
+            reason: Some(emitted_reason.clone()),
+        });
+        revision_operations.push(crate::extraction_replay_eval::ReplayRevisionOperation {
+            shape: shape.to_owned(),
+            outcome: simulation.outcome.clone(),
+            reason: simulation.reason.clone(),
+        });
+    }
     let (notes, _) = dedup_extracted_notes(&extracted);
     let mut observations = Vec::with_capacity(notes.len());
     for (note_type, note) in notes {
@@ -1505,7 +1535,11 @@ pub async fn capture_llm_extraction_replay(
             content: note.content.clone(),
             adr_054_quality_passed: quality_passed,
             duplicate_of,
+            revision_operations: Vec::new(),
         });
+    }
+    if let Some(observation) = observations.first_mut() {
+        observation.revision_operations = revision_operations;
     }
     Ok(observations)
 }
@@ -5231,6 +5265,7 @@ mod evidence_merge_regression_tests {
             &extracted,
             &duplicate_provider,
             &[test_candidate()],
+            &[],
         )
         .await
         .expect("capture duplicate replay");
@@ -5249,6 +5284,7 @@ mod evidence_merge_regression_tests {
             &extracted,
             &malformed_provider,
             &[test_candidate()],
+            &[],
         )
         .await
         .expect("capture malformed novelty replay");
@@ -5260,6 +5296,7 @@ mod evidence_merge_regression_tests {
             "quality".to_string(),
             underspecified,
             &ScriptedProvider::new(vec![]),
+            &[],
             &[],
         )
         .await
