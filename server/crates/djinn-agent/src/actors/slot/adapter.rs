@@ -16,6 +16,7 @@ use djinn_core::canonical_verify::{
 use djinn_core::clock::SystemClock;
 use djinn_core::models::VerifySource;
 use djinn_db::TaskRunRepository;
+use djinn_db::advisory_lock;
 use djinn_git::verification_input::{ResolvedExternalInputV1, VerificationInputFingerprintConfig};
 use djinn_sandbox::final_verification_execution::{
     EnvironmentIdentityResolver, FinalVerificationExecutionRequest,
@@ -27,14 +28,74 @@ use crate::context::AgentContext;
 const UNKNOWN_IMAGE_DIGEST: &str =
     "sha256:0000000000000000000000000000000000000000000000000000000000000000";
 
-/// Production lease callback. The coordinator owns release-before-persist; the
-/// host must not inherit the trait's deliberately fail-closed test default.
-struct HostFinalVerificationLease;
+/// Advisory-lock class id for final-verification invocation leases. Chosen from
+/// the application-specific range to avoid collisions with the migrator and
+/// template-bootstrap locks.
+const FINAL_VERIFICATION_LOCK_CLASS: i32 = 0x4656_5246; // "FVRF"
+/// Per-attempt object id derived by hashing the verification attempt id, so
+/// distinct concurrent attempts do not contend for the same lock row.
+fn final_verification_lock_object(verification_attempt_id: &str) -> i32 {
+    let hash = verification_attempt_id
+        .as_bytes()
+        .iter()
+        .fold(0u32, |acc, byte| {
+            acc.wrapping_mul(31).wrapping_add(*byte as u32)
+        });
+    hash as i32
+}
+
+/// Production invocation lease backed by a dedicated Postgres connection holding
+/// a session-scoped advisory lock. The coordinator explicitly releases it before
+/// persistence; releasing drops the connection, which also releases the lock.
+struct HostFinalVerificationLease {
+    conn: Option<sqlx::postgres::PgConnection>,
+    class_id: i32,
+    object_id: i32,
+}
+impl HostFinalVerificationLease {
+    async fn acquire(
+        db: &djinn_db::Database,
+        verification_attempt_id: &str,
+    ) -> Result<Box<dyn djinn_slot::final_verification::FinalVerificationInvocationLease>, String>
+    {
+        let class_id = FINAL_VERIFICATION_LOCK_CLASS;
+        let object_id = final_verification_lock_object(verification_attempt_id);
+        // Open a dedicated connection (not a pooled one) so the session-scoped
+        // advisory lock persists until the connection is dropped on release.
+        let opts = db.pool().connect_options();
+        let mut conn = sqlx::Connection::connect_with(&*opts)
+            .await
+            .map_err(|e| format!("final-verification lease connection failed: {e}"))?;
+        let acquired = advisory_lock::try_acquire(&mut conn, class_id, object_id)
+            .await
+            .map_err(|e| format!("final-verification lock query failed: {e}"))?;
+        if !acquired {
+            return Err("final-verification invocation lock is held by another attempt".to_owned());
+        }
+        Ok(Box::new(Self {
+            conn: Some(conn),
+            class_id,
+            object_id,
+        })
+            as Box<
+                dyn djinn_slot::final_verification::FinalVerificationInvocationLease,
+            >)
+    }
+}
 impl djinn_slot::final_verification::FinalVerificationInvocationLease
     for HostFinalVerificationLease
 {
     fn release<'a>(&'a mut self) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>> {
-        Box::pin(async { Ok(()) })
+        let class_id = self.class_id;
+        let object_id = self.object_id;
+        Box::pin(async move {
+            if let Some(mut conn) = self.conn.take() {
+                advisory_lock::release(&mut conn, class_id, object_id)
+                    .await
+                    .map_err(|e| format!("final-verification lock release failed: {e}"))?;
+            }
+            Ok(())
+        })
     }
 }
 
@@ -58,6 +119,19 @@ fn output_directories(globs: &[String]) -> Result<Vec<PathBuf>, String> {
         directories.insert(prefix);
     }
     Ok(directories.into_iter().collect())
+}
+
+/// Canonical host runtime directories that the strict Landlock launcher must
+/// grant read/execute access to for final-verification commands. The launcher
+/// requires `tool_runtime` to include the executable and every runtime
+/// directory it needs (`/usr`, `/bin`, `/lib`, `/lib64`). Only existing
+/// directories are included so symlink-free hosts are handled correctly.
+fn canonical_tool_runtime() -> Vec<PathBuf> {
+    ["/usr", "/bin", "/lib", "/lib64"]
+        .into_iter()
+        .filter(|path| Path::new(path).is_dir())
+        .map(PathBuf::from)
+        .collect()
 }
 
 pub(crate) fn build_slot_context(
@@ -269,7 +343,7 @@ impl djinn_slot::host::SlotHostCallbacks for AgentHostCallbacks {
                             manifest,
                             external_inputs: external_inputs.clone(),
                         },
-                        tool_runtime: Vec::new(),
+                        tool_runtime: canonical_tool_runtime(),
                         read_only_external_mounts: external_inputs
                             .into_iter()
                             .map(|i| i.path)
@@ -287,8 +361,8 @@ impl djinn_slot::host::SlotHostCallbacks for AgentHostCallbacks {
         &'a self,
         _task_id: &'a str,
         _task_run_id: &'a str,
-        _attempt: &'a str,
-        _ctx: &'a djinn_slot::host::SlotContext,
+        attempt: &'a str,
+        ctx: &'a djinn_slot::host::SlotContext,
     ) -> Pin<
         Box<
             dyn Future<
@@ -300,12 +374,9 @@ impl djinn_slot::host::SlotHostCallbacks for AgentHostCallbacks {
                 + 'a,
         >,
     > {
-        Box::pin(async {
-            Ok(Box::new(HostFinalVerificationLease)
-                as Box<
-                    dyn djinn_slot::final_verification::FinalVerificationInvocationLease,
-                >)
-        })
+        let db = ctx.db.clone();
+        let attempt = attempt.to_owned();
+        Box::pin(async move { HostFinalVerificationLease::acquire(&db, &attempt).await })
     }
     fn interrupt_paused_worker_session<'a>(
         &'a self,

@@ -439,6 +439,38 @@ pub fn agent_context_from_db(db: Database, _cancel: CancellationToken) -> SlotCo
     agent_context_from_db_with_dispatcher(db, _cancel, Some(Arc::new(MockToolDispatcher)))
 }
 
+/// Build a `SlotContext` from an in-memory DB with custom host callbacks.
+/// This lets tests override final-verification resolution and lease behavior
+/// without going through the production `AgentHostCallbacks`.
+pub fn agent_context_from_db_with_callbacks(
+    db: Database,
+    callbacks: Arc<dyn crate::host::SlotHostCallbacks>,
+) -> SlotContext {
+    let event_bus = test_events();
+    let catalog = djinn_provider::catalog::CatalogService::new();
+    let health_tracker = djinn_provider::catalog::HealthTracker::default();
+    let background_work =
+        std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashSet::new()));
+    let active_tasks = std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
+    SlotContext {
+        db,
+        event_bus,
+        catalog,
+        health_tracker,
+        background_work_tasks: background_work,
+        active_tasks,
+        default_project_id: None,
+        working_root: None,
+        coordinator_trigger: None,
+        runtime_ops: None,
+        repo_graph_ops: None,
+        clock: std::sync::Arc::new(djinn_core::clock::SystemClock::new()),
+        callbacks,
+        tool_dispatcher: Some(Arc::new(MockToolDispatcher)),
+        compaction_cs: CompactionCriticalSection::new(),
+    }
+}
+
 /// Build a `SlotContext` from an in-memory DB with an explicit tool dispatcher.
 /// Pass `None` for `tool_dispatcher` to test the "no dispatcher" error path.
 pub fn agent_context_from_db_with_dispatcher(
