@@ -1,27 +1,33 @@
 {
-   "terminal_context" : {
-      "outcome" : {
-         "kind" : "completed"
-      },
-      "review_decision" : null
-   },
-   "required_discriminative_text" : "discriminative replay fact 01",
-   "expected_note_type" : "case",
    "category" : "completed_case",
    "expect_adr_054_quality" : true,
    "expected_duplicate_target" : null,
+   "expected_note_type" : "case",
    "id" : "archive-derived-01",
+   "injected_provider_response" : "{\"cases\":[{\"content\":\"## Situation\\ndiscriminative replay fact 01. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\\n\\n## Constraint\\ndiscriminative replay fact 01. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\\n\\n## Approach taken\\ndiscriminative replay fact 01. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\\n\\n## Result\\ndiscriminative replay fact 01. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\\n\\n## Why it worked / failed\\ndiscriminative replay fact 01. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\\n\\n## Reusable lesson\\ndiscriminative replay fact 01. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\\n\\n## Related\\ndiscriminative replay fact 01. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\",\"title\":\"Sanitized completed_case 01\",\"applies_when\":\"offline replay fixture\"}],\"revision_operations\":[{\"after_text\":\"corrected replay evidence\",\"kind\":\"patch\",\"confidence_delta\":0.1,\"before_text\":\"existing replay evidence\",\"target_note_id\":\"018f0000-0000-7000-8000-000000000001\",\"reason\":\"fixture correction is supported\"}]}",
    "messages" : [
       {
          "content" : "Summarize sanitized task evidence for discriminative replay fact 01.",
          "role" : "user"
       },
       {
-         "role" : "assistant",
-         "content" : "Implemented a concise deterministic change and recorded the outcome."
+         "content" : "Implemented a concise deterministic change and recorded the outcome.",
+         "role" : "assistant"
       }
    ],
    "must_not_duplicate_target" : null,
    "provenance" : "sanitized_archived_transcript_derived",
-   "injected_provider_response" : "{\"cases\":[{\"content\":\"## Situation\\ndiscriminative replay fact 01. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\\n\\n## Constraint\\ndiscriminative replay fact 01. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\\n\\n## Approach taken\\ndiscriminative replay fact 01. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\\n\\n## Result\\ndiscriminative replay fact 01. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\\n\\n## Why it worked / failed\\ndiscriminative replay fact 01. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\\n\\n## Reusable lesson\\ndiscriminative replay fact 01. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\\n\\n## Related\\ndiscriminative replay fact 01. This sanitized durable explanation records a reusable deterministic extraction detail for offline evaluation and future maintenance.\",\"title\":\"Sanitized completed_case 01\",\"applies_when\":\"offline replay fixture\"}]}"
+   "required_discriminative_text" : "discriminative replay fact 01",
+   "revision_operation_simulations" : [
+      {
+         "outcome" : "applied",
+         "shape" : "patch"
+      }
+   ],
+   "terminal_context" : {
+      "outcome" : {
+         "kind" : "completed"
+      },
+      "review_decision" : null
+   }
 }

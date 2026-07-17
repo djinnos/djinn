@@ -22,6 +22,7 @@ fn fixture(id: &str) -> ExtractionReplayFixture {
         messages: Vec::new(),
         terminal_context: crate::llm_extraction::TerminalExtractionContext::default(),
         injected_provider_response: String::new(),
+        revision_operation_simulations: Vec::new(),
     }
 }
 
@@ -90,7 +91,7 @@ fn offline_report_serialization_normalizes_disposable_duplicate_ids() {
             content: "stable candidate seam".to_string(),
             adr_054_quality_passed: false,
             duplicate_of: Some(database_id.to_string()),
-        revision_operations: Vec::new(),
+            revision_operations: Vec::new(),
         };
         let mut report = score_extraction_replay(&[fixture], &[observation]);
         normalize_offline_duplicate_targets(
@@ -123,8 +124,8 @@ fn dedup_counts_false_duplicate_prediction() {
         content: "stable candidate seam".to_string(),
         adr_054_quality_passed: false,
         duplicate_of: Some("live-note".to_string()),
-    revision_operations: Vec::new(),
-        };
+        revision_operations: Vec::new(),
+    };
     let report = score_extraction_replay(&[fixture], &[observation]);
     assert_eq!(report.dedup.false_positive, 1);
     assert_eq!(report.dedup_precision, 0.0);
@@ -142,8 +143,8 @@ fn dedup_counts_true_duplicate_prediction() {
         content: "stable candidate seam".to_string(),
         adr_054_quality_passed: false,
         duplicate_of: Some("existing-note".to_string()),
-    revision_operations: Vec::new(),
-        };
+        revision_operations: Vec::new(),
+    };
     let report = score_extraction_replay(&[fixture], &[observation]);
     assert_eq!(report.dedup.true_positive, 1);
     assert_eq!(report.dedup_precision, 1.0);
@@ -210,7 +211,7 @@ struct RecordingCaptureSeam {
 impl ReplayExtractionSeam for RecordingCaptureSeam {
     async fn capture(
         &self,
-        fixture_id: &str,
+        fixture: &ExtractionReplayFixture,
         transcript: &Conversation,
         candidates: &[NoteDedupCandidate],
     ) -> Result<Vec<ExtractionObservation>, String> {
@@ -226,13 +227,13 @@ impl ReplayExtractionSeam for RecordingCaptureSeam {
             .unwrap()
             .extend(candidates.iter().map(|candidate| candidate.id.clone()));
         Ok(vec![ExtractionObservation {
-            fixture_id: fixture_id.to_string(),
+            fixture_id: fixture.id.clone(),
             note_type: "case".to_string(),
             title: "replayed extraction".to_string(),
             content: "stable candidate seam".to_string(),
             adr_054_quality_passed: false,
-             duplicate_of: None,
-        revision_operations: Vec::new(),
+            duplicate_of: None,
+            revision_operations: Vec::new(),
         }])
     }
 }
@@ -460,6 +461,7 @@ async fn database_replay_drives_production_seam_with_dedup_and_non_dedup_outcome
         }],
         terminal_context: crate::llm_extraction::TerminalExtractionContext::default(),
         injected_provider_response: extraction_json.clone(),
+        revision_operation_simulations: Vec::new(),
     };
 
     // Fixture B: expects the extracted note to be novel relative to all
@@ -478,6 +480,7 @@ async fn database_replay_drives_production_seam_with_dedup_and_non_dedup_outcome
         }],
         terminal_context: crate::llm_extraction::TerminalExtractionContext::default(),
         injected_provider_response: extraction_json.clone(),
+        revision_operation_simulations: Vec::new(),
     };
 
     // The novelty provider for the dedup case returns "already_known"
@@ -661,6 +664,24 @@ async fn committed_corpus_replays_every_fixture_through_the_database_runner() {
     assert_eq!(report.dedup.false_positive, 0);
     assert_eq!(report.dedup.false_negative, 0);
     assert_eq!(report.dedup_precision, 1.0);
+    assert_eq!(report.revision_operations.emitted_by_shape["patch"], 2);
+    assert_eq!(
+        report.revision_operations.emitted_by_shape["deprecate_with_supersedes"],
+        2
+    );
+    assert_eq!(report.revision_operations.applied_by_shape["patch"], 1);
+    assert_eq!(
+        report.revision_operations.applied_by_shape["deprecate_with_supersedes"],
+        1
+    );
+    assert_eq!(
+        report.revision_operations.refused_by_shape_and_reason["patch:ineligible"],
+        1
+    );
+    assert_eq!(
+        report.revision_operations.refused_by_shape_and_reason["deprecate_with_supersedes:lifecycle_invalid"],
+        1
+    );
     assert!(report.failures.is_empty(), "{:#?}", report.failures);
 }
 
@@ -697,5 +718,51 @@ async fn provider_failure_stays_in_fixture_report() {
             .failures
             .iter()
             .any(|failure| failure.dimension == "provider.capture")
+    );
+}
+
+#[test]
+fn revision_operation_summary_counts_emitted_applied_and_refused_shapes() {
+    let fixture = fixture("revision-operations");
+    let observation = ExtractionObservation {
+        fixture_id: fixture.id.clone(),
+        note_type: "case".to_string(),
+        title: "candidate".to_string(),
+        content: "stable candidate seam".to_string(),
+        adr_054_quality_passed: false,
+        duplicate_of: None,
+        revision_operations: vec![
+            ReplayRevisionOperation {
+                shape: "patch".to_string(),
+                outcome: "emitted".to_string(),
+                reason: Some("evidence corrected".to_string()),
+            },
+            ReplayRevisionOperation {
+                shape: "patch".to_string(),
+                outcome: "applied".to_string(),
+                reason: None,
+            },
+            ReplayRevisionOperation {
+                shape: "deprecate_with_supersedes".to_string(),
+                outcome: "emitted".to_string(),
+                reason: Some("replacement is authoritative".to_string()),
+            },
+            ReplayRevisionOperation {
+                shape: "deprecate_with_supersedes".to_string(),
+                outcome: "refused".to_string(),
+                reason: Some("ineligible".to_string()),
+            },
+        ],
+    };
+    let report = score_extraction_replay(&[fixture], &[observation]);
+    assert_eq!(report.revision_operations.emitted_by_shape["patch"], 1);
+    assert_eq!(
+        report.revision_operations.emitted_by_shape["deprecate_with_supersedes"],
+        1
+    );
+    assert_eq!(report.revision_operations.applied_by_shape["patch"], 1);
+    assert_eq!(
+        report.revision_operations.refused_by_shape_and_reason["deprecate_with_supersedes:ineligible"],
+        1
     );
 }
