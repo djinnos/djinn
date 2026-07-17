@@ -45,8 +45,6 @@ mod canonical_graph_refresh_planner;
 mod provider_catalog_refresh;
 mod settings;
 
-use crate::memory_fs::MemoryViewSelection;
-use crate::memory_mount::MountedMemoryFilesystem;
 use canonical_graph_refresh_planner::{
     CanonicalGraphRefreshPlanner, CanonicalGraphRefreshProbe, RefreshPlan, WarmPlan, WarmPlanInputs,
 };
@@ -186,37 +184,6 @@ fn sync_provider_runtime_config(state: &CredentialSourceState) {
     }
 }
 
-fn canonical_view_resolution(
-    active_task_count: usize,
-    fallback: Option<crate::server::MemoryMountViewFallback>,
-) -> crate::server::MemoryMountViewResolution {
-    let fallback = fallback.or_else(|| {
-        (active_task_count > 1).then(|| crate::server::MemoryMountViewFallback {
-            reason: crate::server::MemoryMountViewFallbackReason::AmbiguousActiveTasks,
-            detail: Some(
-                "mounted memory requires exactly one active task before task-scoped selection can be used"
-                    .to_string(),
-            ),
-            active_task_count: Some(active_task_count),
-            task_id: None,
-            task_short_id: None,
-            task_project_id: None,
-            mount_project_id: None,
-            session_workspace_path: None,
-        })
-    });
-
-    crate::server::MemoryMountViewResolution {
-        selection: MemoryViewSelection::Canonical,
-        health: crate::server::MemoryMountViewHealth {
-            kind: crate::server::MemoryMountViewKind::Canonical,
-            task_short_id: None,
-            worktree_root: None,
-            fallback,
-        },
-    }
-}
-
 /// Shared application state, cheaply cloneable via `Arc`.
 #[derive(Clone)]
 pub struct AppState {
@@ -301,7 +268,6 @@ struct Inner {
     /// be coalesced (return immediately without spawning a duplicate task).
     /// The entry is removed by the spawned task in its completion branch.
     pub canonical_warm_inflight: Arc<std::sync::Mutex<HashSet<String>>>,
-    pub memory_mount: Mutex<Option<MountedMemoryFilesystem>>,
     /// Retained GitHub App credential-source state. This is the single source
     /// of truth for both the active configuration and operator-facing recovery
     /// state: `app_config()` derives its value from this enum instead of
@@ -469,7 +435,6 @@ impl AppState {
                 indexer_lock: Arc::new(tokio::sync::Mutex::new(())),
                 workspace_store,
                 canonical_warm_inflight: Arc::new(std::sync::Mutex::new(HashSet::new())),
-                memory_mount: Mutex::new(None),
                 app_credential_state: tokio::sync::RwLock::new(CredentialSourceState::Unconfigured),
                 boot_token: tokio::sync::RwLock::new(None),
                 setup_session: tokio::sync::RwLock::new(None),
@@ -1240,231 +1205,6 @@ impl AppState {
 
     pub fn database_health(&self) -> DatabaseRuntimeHealth {
         self.inner.db_runtime.health_snapshot(self.db())
-    }
-
-    pub(crate) async fn memory_mount_health(&self) -> crate::server::MemoryMountHealth {
-        let mount = self.inner.memory_mount.lock().await;
-        let Some(mount) = mount.as_ref() else {
-            return crate::server::MemoryMountHealth {
-                enabled: false,
-                active: false,
-                lifecycle: crate::server::MemoryMountLifecycleState::Disabled,
-                configured: false,
-                mount_path: None,
-                project_id: None,
-                detail: None,
-                view: crate::server::MemoryMountViewHealth {
-                    kind: crate::server::MemoryMountViewKind::Canonical,
-                    task_short_id: None,
-                    worktree_root: None,
-                    fallback: None,
-                },
-                pending_writes: 0,
-                last_error: None,
-            };
-        };
-        let active = mount.is_active();
-        let status = mount.status_snapshot().await;
-        crate::server::MemoryMountHealth {
-            enabled: status.configured,
-            active,
-            lifecycle: status.lifecycle,
-            configured: status.configured,
-            mount_path: status.mount_path.map(|path| path.display().to_string()),
-            project_id: status.project_id,
-            detail: status.detail,
-            view: status.view,
-            pending_writes: status.pending_writes,
-            last_error: status.last_error,
-        }
-    }
-
-    #[cfg(test)]
-    pub(crate) async fn set_memory_mount_for_tests(
-        &self,
-        mount: Option<crate::memory_mount::MountedMemoryFilesystem>,
-    ) {
-        *self.inner.memory_mount.lock().await = mount;
-    }
-
-    #[cfg_attr(
-        not(any(test, all(target_os = "linux", feature = "memory-mount"))),
-        allow(dead_code)
-    )]
-    pub(crate) async fn resolve_memory_mount_view_selection(
-        &self,
-        project_id: &str,
-        project_path: &Path,
-    ) -> MemoryViewSelection {
-        self.resolve_memory_mount_view_resolution(project_id, project_path)
-            .await
-            .selection
-    }
-
-    #[cfg_attr(
-        not(any(test, all(target_os = "linux", feature = "memory-mount"))),
-        allow(dead_code)
-    )]
-    pub(crate) async fn resolve_memory_mount_view_resolution(
-        &self,
-        project_id: &str,
-        project_path: &Path,
-    ) -> crate::server::MemoryMountViewResolution {
-        let active_task_ids: Vec<String> = self
-            .inner
-            .active_tasks
-            .lock()
-            .expect("poisoned")
-            .keys()
-            .cloned()
-            .collect();
-
-        let [task_id] = active_task_ids.as_slice() else {
-            return canonical_view_resolution(active_task_ids.len(), None);
-        };
-
-        let task_repo = djinn_db::TaskRepository::new(self.db().clone(), self.event_bus());
-        let Some(task) = task_repo.get(task_id).await.ok().flatten() else {
-            tracing::debug!(
-                task_id,
-                "memory mount falling back to main: active task not found"
-            );
-            return canonical_view_resolution(
-                1,
-                Some(crate::server::MemoryMountViewFallback {
-                    reason: crate::server::MemoryMountViewFallbackReason::ActiveTaskNotFound,
-                    detail: Some("active task no longer exists in the database".to_string()),
-                    active_task_count: Some(1),
-                    task_id: Some(task_id.to_string()),
-                    task_short_id: None,
-                    task_project_id: None,
-                    mount_project_id: Some(project_id.to_string()),
-                    session_workspace_path: None,
-                }),
-            );
-        };
-
-        if task.project_id != project_id {
-            tracing::debug!(
-                task_id = %task.id,
-                task_project_id = %task.project_id,
-                mount_project_id = %project_id,
-                "memory mount falling back to main: active task belongs to another project"
-            );
-            return canonical_view_resolution(
-                1,
-                Some(crate::server::MemoryMountViewFallback {
-                    reason: crate::server::MemoryMountViewFallbackReason::TaskProjectMismatch,
-                    detail: Some("active task belongs to another registered project".to_string()),
-                    active_task_count: Some(1),
-                    task_id: Some(task.id),
-                    task_short_id: Some(task.short_id),
-                    task_project_id: Some(task.project_id),
-                    mount_project_id: Some(project_id.to_string()),
-                    session_workspace_path: None,
-                }),
-            );
-        }
-
-        let session_repo = djinn_db::SessionRepository::new(self.db().clone(), self.event_bus());
-        let Some(session) = session_repo.active_for_task(&task.id).await.ok().flatten() else {
-            tracing::debug!(
-                task_id = %task.id,
-                short_id = %task.short_id,
-                "memory mount falling back to main: no running session for active task"
-            );
-            return canonical_view_resolution(
-                1,
-                Some(crate::server::MemoryMountViewFallback {
-                    reason: crate::server::MemoryMountViewFallbackReason::NoActiveSession,
-                    detail: Some("no running session is attached to the active task".to_string()),
-                    active_task_count: Some(1),
-                    task_id: Some(task.id),
-                    task_short_id: Some(task.short_id),
-                    task_project_id: Some(project_id.to_string()),
-                    mount_project_id: Some(project_id.to_string()),
-                    session_workspace_path: None,
-                }),
-            );
-        };
-
-        // Prefer the workspace_path owned by the session's task_run (migration
-        // 5 model).  Task #8 removed the `sessions.worktree_path` migration-
-        // window fallback; task #13 will drop the column.
-        let task_run_repo =
-            djinn_db::repositories::task_run::TaskRunRepository::new(self.db().clone());
-        let workspace_source: Option<String> = match session.task_run_id.as_deref() {
-            Some(run_id) => task_run_repo
-                .get(run_id)
-                .await
-                .ok()
-                .flatten()
-                .and_then(|run| run.workspace_path),
-            None => None,
-        };
-
-        let Some(workspace_path) = workspace_source
-            .as_deref()
-            .map(str::trim)
-            .filter(|p| !p.is_empty())
-        else {
-            tracing::debug!(
-                task_id = %task.id,
-                short_id = %task.short_id,
-                "memory mount falling back to main: active session has no workspace path"
-            );
-            return canonical_view_resolution(
-                1,
-                Some(crate::server::MemoryMountViewFallback {
-                    reason: crate::server::MemoryMountViewFallbackReason::MissingSessionWorktree,
-                    detail: Some("active session did not publish a workspace path".to_string()),
-                    active_task_count: Some(1),
-                    task_id: Some(task.id),
-                    task_short_id: Some(task.short_id),
-                    task_project_id: Some(project_id.to_string()),
-                    mount_project_id: Some(project_id.to_string()),
-                    session_workspace_path: None,
-                }),
-            );
-        };
-
-        let workspace_root = PathBuf::from(workspace_path);
-        if workspace_root == project_path {
-            tracing::debug!(
-                task_id = %task.id,
-                short_id = %task.short_id,
-                "memory mount falling back to main: active session is on canonical project root"
-            );
-            return canonical_view_resolution(
-                1,
-                Some(crate::server::MemoryMountViewFallback {
-                    reason: crate::server::MemoryMountViewFallbackReason::CanonicalProjectRoot,
-                    detail: Some(
-                        "active session workspace resolves to the canonical project root"
-                            .to_string(),
-                    ),
-                    active_task_count: Some(1),
-                    task_id: Some(task.id),
-                    task_short_id: Some(task.short_id),
-                    task_project_id: Some(project_id.to_string()),
-                    mount_project_id: Some(project_id.to_string()),
-                    session_workspace_path: Some(workspace_root.display().to_string()),
-                }),
-            );
-        }
-
-        crate::server::MemoryMountViewResolution {
-            selection: MemoryViewSelection::Task {
-                task_short_id: Some(task.short_id.clone()),
-                worktree_root: Some(workspace_root.clone()),
-            },
-            health: crate::server::MemoryMountViewHealth {
-                kind: crate::server::MemoryMountViewKind::TaskScoped,
-                task_short_id: Some(task.short_id),
-                worktree_root: Some(workspace_root.display().to_string()),
-                fallback: None,
-            },
-        }
     }
 
     pub fn cancel(&self) -> &CancellationToken {
