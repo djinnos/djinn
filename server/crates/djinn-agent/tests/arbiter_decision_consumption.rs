@@ -72,7 +72,10 @@ async fn arbiter_approve_marks_arbitration_row_consumed() {
         "consumed_at must be stamped on approve"
     );
     assert_eq!(
-        record.directive.as_ref().and_then(|d| d["decision"].as_str()),
+        record
+            .directive
+            .as_ref()
+            .and_then(|d| d["decision"].as_str()),
         Some("approve"),
         "decision must be persisted on the row before consumption"
     );
