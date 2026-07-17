@@ -485,6 +485,49 @@ impl AdmissionJournalRepository {
         })
     }
 
+    /// Atomically recover every predecessor epoch in a single transaction.
+    ///
+    /// On startup a replacement process does not know the exact predecessor
+    /// epoch string(s). This primitive retires every Reserved row and converts
+    /// every CreateInFlight row to occupying CreateUnknown for all rows whose
+    /// `creator_server_epoch` differs from the current server epoch. It then
+    /// returns all active rows so the controller can seed occupancy without
+    /// duplicating permits.
+    ///
+    /// This extends [`Self::recover_predecessor_epoch`] with the all-predecessor
+    /// recovery primitive required for cold restart; the single-epoch variant is
+    /// retained for tests and targeted reconciliation.
+    pub async fn recover_all_predecessors(
+        &self,
+        current_server_epoch: &str,
+    ) -> DbResult<AdmissionRecoveryResult> {
+        self.db.ensure_initialized().await?;
+        let mut tx = self.db.pool().begin().await?;
+        let retired_reserved = sqlx::query(
+            "UPDATE admission_journal SET state = 'terminal', terminal_at = now(), updated_at = now() \
+             WHERE creator_server_epoch <> $1 AND state = 'reserved'",
+        )
+        .bind(current_server_epoch)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+        let marked_create_unknown = sqlx::query(
+            "UPDATE admission_journal SET state = 'create_unknown', updated_at = now() \
+             WHERE creator_server_epoch <> $1 AND state = 'create_in_flight'",
+        )
+        .bind(current_server_epoch)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+        let rows = active_rows(&mut *tx).await?;
+        tx.commit().await?;
+        Ok(AdmissionRecoveryResult {
+            retired_reserved,
+            marked_create_unknown,
+            active_rows: rows,
+        })
+    }
+
     /// Count rows that currently occupy task-or-warm capacity.
     pub async fn count_task_or_warm_occupancy(&self) -> DbResult<i64> {
         self.db.ensure_initialized().await?;
@@ -1069,6 +1112,54 @@ mod tests {
                 ("recover-live", AdmissionState::Live),
                 ("recover-successor", AdmissionState::Reserved),
                 ("recover-unknown", AdmissionState::CreateUnknown),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn recover_all_predecessors_retires_every_predecessor_epoch_atomically() {
+        let db = Database::open_in_memory().unwrap();
+        let repo = AdmissionJournalRepository::new(db);
+        // Two distinct predecessor epochs plus the current replacement epoch.
+        let mut pred_a = input(AdmissionDomain::WarmBuild, "pred-a-reserved", 0);
+        pred_a.creator_server_epoch = "epoch-a".into();
+        let mut pred_a_flight = input(AdmissionDomain::WarmBuild, "pred-a-flight", 0);
+        pred_a_flight.creator_server_epoch = "epoch-a".into();
+        let mut pred_b = input(AdmissionDomain::WarmBuild, "pred-b-reserved", 0);
+        pred_b.creator_server_epoch = "epoch-b".into();
+        let mut current = input(AdmissionDomain::WarmBuild, "current-reserved", 0);
+        current.creator_server_epoch = "replacement-epoch".into();
+        for reservation in [&pred_a, &pred_a_flight, &pred_b, &current] {
+            repo.reserve(reservation, 10).await.unwrap();
+        }
+        repo.mark_create_started(&create_started(&pred_a_flight))
+            .await
+            .unwrap();
+
+        // recover_all_predecessors processes every epoch except the current one.
+        let report = repo
+            .recover_all_predecessors("replacement-epoch")
+            .await
+            .unwrap();
+        assert_eq!(
+            report.retired_reserved, 2,
+            "both predecessor Reserved retired"
+        );
+        assert_eq!(
+            report.marked_create_unknown, 1,
+            "the single predecessor CreateInFlight converted to CreateUnknown"
+        );
+        // The current-epoch Reserved row is untouched.
+        let states = report
+            .active_rows
+            .iter()
+            .map(|row| (row.key.work_id.as_str(), row.state))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            states,
+            vec![
+                ("current-reserved", AdmissionState::Reserved),
+                ("pred-a-flight", AdmissionState::CreateUnknown),
             ]
         );
     }

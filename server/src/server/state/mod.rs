@@ -479,19 +479,30 @@ impl AppState {
         let (events, _) = broadcast::channel(EVENT_CHANNEL_CAPACITY);
         let mirror = Arc::new(MirrorManager::new(mirrors_root()));
         let workspace_store = Arc::new(WorkspaceStore::new(workspaces_root(), Arc::clone(&mirror)));
+        // Each server process allocates a unique epoch so recovery can
+        // distinguish rows created by a predecessor from rows created here.
+        // The hostname is retained as a human-readable prefix; the UUIDv7
+        // suffix guarantees uniqueness across restarts and replicas.
+        let server_epoch = format!(
+            "{}:{}",
+            std::env::var("HOSTNAME").unwrap_or_else(|_| "coordinator".to_owned()),
+            djinn_agent::actors::coordinator::allocate_server_epoch()
+        );
         let build_admission = match admission_config.mode {
             BuildAdmissionMode::Off => None,
             BuildAdmissionMode::Observe => Some(Arc::new(BuildAdmissionController::new(
                 Arc::new(djinn_db::AdmissionJournalRepository::new(db.clone())),
                 BuildAdmissionMode::Observe,
                 admission_config.cap,
-                std::env::var("HOSTNAME").unwrap_or_else(|_| "coordinator".to_owned()),
+                server_epoch,
             ))),
-            // Recovery owns the readiness handoff; Enforce starts fail-closed.
+            // Enforce starts fail-closed (JournalRecoveryIncomplete) until the
+            // durable journal is recovered and seeded before any inventory or
+            // task/warm create can run.
             BuildAdmissionMode::Enforce => Some(Arc::new(BuildAdmissionController::new_closed(
                 Arc::new(djinn_db::AdmissionJournalRepository::new(db.clone())),
                 admission_config.cap,
-                std::env::var("HOSTNAME").unwrap_or_else(|_| "coordinator".to_owned()),
+                server_epoch,
             ))),
         };
         Self {
@@ -726,6 +737,62 @@ impl AppState {
         // the production shape so `TestRuntime` and dev boxes that never
         // ran `initialize()` still get correct semantics.
         Arc::new(build_in_process_graph_warmer(self.clone())) as Arc<dyn GraphWarmerService>
+    }
+
+    /// Recover the durable build-admission journal and seed the controller
+    /// before any Kubernetes inventory or task/warm create can run.
+    ///
+    /// Enforce admission remains fail-closed until recovery completes. Observe
+    /// runs lifecycle/telemetry but never denies; Off has no admission coupling.
+    /// This is idempotent: a second call re-seeds from the journal without harm.
+    async fn initialize_build_admission_recovery(&self) {
+        let Some(admission) = self.inner.build_admission.clone() else {
+            // Off: no journal, no controller, no readiness coupling.
+            return;
+        };
+        match admission.recover_all_predecessors_and_seed().await {
+            Ok(report) => {
+                tracing::info!(
+                    mode = ?admission.mode(),
+                    retired_reserved = report.retired_reserved,
+                    marked_create_unknown = report.marked_create_unknown,
+                    seeded_rows = report.seeded_rows,
+                    readiness = ?report.readiness,
+                    "build_admission: recovered durable journal and seeded controller"
+                );
+            }
+            Err(error) => {
+                // Enforce fails closed: leave the readiness gate in its initial
+                // JournalRecoveryIncomplete state. Observe continues without
+                // denial (it never gated on readiness). A durable journal outage
+                // during recovery is a fail-closed condition for Enforce.
+                admission.set_readiness(
+                    djinn_agent::actors::coordinator::BuildAdmissionReadiness::JournalUnhealthy,
+                );
+                tracing::error!(
+                    %error,
+                    mode = ?admission.mode(),
+                    "build_admission: journal recovery failed; Enforce remains fail-closed"
+                );
+            }
+        }
+    }
+
+    /// Begin graceful build-admission draining.
+    ///
+    /// New Enforce reservations are blocked while draining; in-flight permits
+    /// may still transition to terminal. Observe and Off are unaffected because
+    /// they never gated admission on readiness. Safety under forced process
+    /// loss does not depend on this cooperative shutdown: the durable journal
+    /// records pre-POST state, so a replacement recovers the same occupancy.
+    pub async fn begin_build_admission_draining(&self) {
+        if let Some(admission) = self.inner.build_admission.clone() {
+            admission.begin_draining();
+            tracing::info!(
+                mode = ?admission.mode(),
+                "build_admission: draining begun; new Enforce reservations blocked"
+            );
+        }
     }
 
     /// Pick the best available [`GraphWarmerService`] implementation and
@@ -1706,6 +1773,15 @@ impl AppState {
         // listener, org-membership sync, the worker RPC listener, and the
         // image controller) now start in `become_leader()` so only the
         // single lock-holding pod runs them. See `crate::leadership`.
+
+        // Build-admission journal recovery. The durable journal is loaded and
+        // recovered BEFORE any Kubernetes inventory or task/warm create can run.
+        // Enforce admission remains fail-closed until recovery seeds the
+        // controller from all active recovered rows and confirms occupancy is
+        // within the cap. Observe records degradation but never denies; Off has
+        // no admission coupling. This must precede `initialize_graph_warmer`
+        // because the warmer can create warm jobs under the shared cap.
+        self.initialize_build_admission_recovery().await;
 
         // Phase 3 PR 8: pick the canonical-graph warmer impl (K8s or
         // in-process) and cache it. This is just a cached handle (the actual
@@ -3373,5 +3449,65 @@ mod build_admission_config_tests {
                 None => std::env::remove_var(MAX_BUILD_TASKRUNS_ENV),
             }
         }
+    }
+
+    #[tokio::test]
+    async fn enforce_state_allocates_fresh_epoch_and_starts_journal_recovery_incomplete() {
+        let first = state_for_admission_config(BuildAdmissionConfig {
+            mode: BuildAdmissionMode::Enforce,
+            cap: 3,
+        });
+        let first_admission = first
+            .inner
+            .build_admission
+            .as_ref()
+            .expect("enforce composes a controller");
+        assert!(
+            !first_admission.is_ready(),
+            "Enforce starts fail-closed before recovery"
+        );
+        assert_eq!(
+            first_admission.readiness(),
+            djinn_agent::actors::coordinator::BuildAdmissionReadiness::JournalRecoveryIncomplete,
+        );
+
+        // A second AppState allocation produces a distinct, unique epoch.
+        let second = state_for_admission_config(BuildAdmissionConfig {
+            mode: BuildAdmissionMode::Enforce,
+            cap: 3,
+        });
+        let second_admission = second
+            .inner
+            .build_admission
+            .as_ref()
+            .expect("enforce composes a controller");
+        assert_ne!(
+            first_admission.server_epoch(),
+            second_admission.server_epoch(),
+            "each Enforce startup allocates a fresh, unique server epoch"
+        );
+    }
+
+    #[tokio::test]
+    async fn begin_draining_blocks_enforce_admission_via_app_state() {
+        let state = state_for_admission_config(BuildAdmissionConfig {
+            mode: BuildAdmissionMode::Enforce,
+            cap: 1,
+        });
+        let admission = state
+            .inner
+            .build_admission
+            .as_ref()
+            .expect("enforce composes a controller");
+        assert!(!admission.is_draining());
+        state.begin_build_admission_draining().await;
+        assert!(
+            admission.is_draining(),
+            "graceful shutdown begins draining before permit release"
+        );
+        assert_eq!(
+            admission.readiness(),
+            djinn_agent::actors::coordinator::BuildAdmissionReadiness::ShutdownDraining,
+        );
     }
 }
