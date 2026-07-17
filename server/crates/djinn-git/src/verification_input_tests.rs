@@ -924,7 +924,7 @@ async fn intermediate_symlink_escape_fails_closed_for_repo_and_external_walks() 
     let fixture = init_repo_with_main_commit();
     write_str(fixture.path(), "nested/input.txt", "tracked input\n");
     git(fixture.path(), ["add", "nested/input.txt"]);
-    git(fixture.path(), ["commit", "add nested input"]);
+    git(fixture.path(), ["commit", "-m", "add nested input"]);
     let outside = tempfile::tempdir().expect("create outside directory");
     write_str(outside.path(), "input.txt", "outside input\n");
     std::fs::remove_dir_all(fixture.path().join("nested")).expect("remove nested directory");
