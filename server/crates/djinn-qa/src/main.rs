@@ -3,12 +3,18 @@
 // binaries (e.g. `djinn-agent/src/bin/skills_manifest.rs`).
 #![allow(clippy::print_stdout, clippy::print_stderr)]
 
-use std::{collections::BTreeSet, env, fs, path::PathBuf, process::ExitCode};
+use std::{
+    collections::BTreeSet,
+    env, fs,
+    io::{self, Write},
+    path::PathBuf,
+    process::ExitCode,
+};
 
 use djinn_qa::{
-    CargoExecutor, CoverageContext, EvidenceSet, Profile, ScenarioInventory, Taxonomy,
-    TemplateCloneDatabase, coverage_report, discovered_root, empty_evidence, empty_inventory,
-    load_runner_artifacts, required_gap, run_inventory,
+    CargoExecutor, CoverageContext, EvidenceSet, Profile, RunStatus, RunSummary, ScenarioInventory,
+    Taxonomy, TemplateCloneDatabase, coverage_report, discovered_root, empty_evidence,
+    empty_inventory, load_runner_artifacts, required_gap, run_inventory,
 };
 
 fn main() -> ExitCode {
@@ -82,12 +88,32 @@ fn run_smoke(args: Vec<String>) -> Result<ExitCode, String> {
         &CargoExecutor::default(),
         &TemplateCloneDatabase,
     )?;
+    write_run_summary(io::stdout().lock(), &summary).map_err(|error| error.to_string())?;
     Ok(if summary.succeeded() {
         ExitCode::SUCCESS
     } else {
         ExitCode::from(1)
     })
 }
+
+/// Render every artifact before selecting an exit code so CI logs retain failed
+/// evidence even though the command ultimately exits unsuccessfully.
+fn write_run_summary(mut writer: impl Write, summary: &RunSummary) -> io::Result<()> {
+    let mut outcomes = summary.outcomes.iter().collect::<Vec<_>>();
+    outcomes.sort_by(|left, right| left.scenario_id.cmp(&right.scenario_id));
+    for outcome in outcomes {
+        let status = match outcome.status {
+            RunStatus::Passed => "passed",
+            RunStatus::Failed => "failed",
+        };
+        writeln!(writer, "scenario {}: {status}", outcome.scenario_id)?;
+        for diagnostic in &outcome.diagnostics {
+            writeln!(writer, "  diagnostic: {diagnostic}")?;
+        }
+    }
+    Ok(())
+}
+
 fn run(args: Vec<String>) -> Result<ExitCode, String> {
     match args.first().map(String::as_str) {
         Some("coverage") => coverage(args),
@@ -249,5 +275,39 @@ fn state_name(state: djinn_qa::CoverageState) -> &'static str {
         djinn_qa::CoverageState::Proven => "proven",
         djinn_qa::CoverageState::Stale => "stale",
         djinn_qa::CoverageState::Failing => "failing",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use djinn_qa::ScenarioOutcome;
+
+    #[test]
+    fn summary_formats_sorted_outcomes_and_diagnostics() {
+        let summary = RunSummary {
+            outcomes: vec![
+                ScenarioOutcome {
+                    scenario_id: "z".into(),
+                    status: RunStatus::Failed,
+                    diagnostics: vec!["why".into()],
+                    started_at: String::new(),
+                    finished_at: String::new(),
+                },
+                ScenarioOutcome {
+                    scenario_id: "a".into(),
+                    status: RunStatus::Passed,
+                    diagnostics: vec![],
+                    started_at: String::new(),
+                    finished_at: String::new(),
+                },
+            ],
+        };
+        let mut rendered = Vec::new();
+        write_run_summary(&mut rendered, &summary).unwrap();
+        assert_eq!(
+            String::from_utf8(rendered).unwrap(),
+            "scenario a: passed\nscenario z: failed\n  diagnostic: why\n"
+        );
     }
 }
