@@ -1419,6 +1419,10 @@ pub(crate) mod test_support;
 mod tests;
 
 #[cfg(test)]
+#[path = "rendered_surface_guard_tests.rs"]
+mod rendered_surface_guard_tests;
+
+#[cfg(test)]
 #[path = "attempt_history_prompt_tests.rs"]
 mod attempt_history_tests;
 
