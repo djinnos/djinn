@@ -36,7 +36,36 @@ type CanonicalGraphBuildOutput = (
     u64,
     usize,
     usize,
+    Vec<WorkspaceSalvageReport>,
+    Option<usize>,
 );
+
+/// One workspace spliced back from the previous cached graph because its
+/// indexer failed or timed out this warm. `origin_commit_sha` is the commit
+/// the salvaged content actually describes — carried forward from the
+/// workspace's previous freshness row so provenance survives repeated
+/// salvages instead of drifting to whatever commit last re-serialized the
+/// blob.
+#[derive(Debug, Clone)]
+struct WorkspaceSalvageReport {
+    workspace_slug: String,
+    origin_commit_sha: String,
+    nodes_added: usize,
+    edges_added: usize,
+}
+
+/// Kill switch for last-good workspace salvage. Default ON; set
+/// `DJINN_GRAPH_WORKSPACE_SALVAGE=0`/`false`/`off` to publish failed
+/// workspaces as empty (the pre-salvage behavior).
+fn workspace_salvage_enabled() -> bool {
+    !matches!(
+        std::env::var("DJINN_GRAPH_WORKSPACE_SALVAGE")
+            .ok()
+            .as_deref()
+            .map(|s| s.to_ascii_lowercase()),
+        Some(ref v) if matches!(v.as_str(), "0" | "false" | "off" | "no")
+    )
+}
 
 /// Ignore very small graph-size fluctuations: route/process extraction and
 /// indexer metadata can legitimately move a few nodes between commits.
@@ -865,6 +894,46 @@ pub async fn ensure_canonical_graph<C: WarmContext>(
     // Capture recovery flag for the blocking thread — when a stale sentinel
     // was detected, disable parse cache reuse to force a clean rebuild.
     let effective_cache_reuse = resolve_canonical_warm_cache_reuse(force_full_rebuild);
+
+    // Last-good workspace salvage: fetch the previous cached blob (and each
+    // failed workspace's provenance commit) BEFORE the blocking build so a
+    // workspace whose indexer failed or timed out can be spliced back from
+    // the previous graph instead of publishing with zero nodes. The same
+    // fetched row also feeds the shrink warning below, which previously
+    // re-read it after the build.
+    let pre_write_latest = match cache_repo.latest_for_project(project_id).await {
+        Ok(row) => row,
+        Err(e) => {
+            tracing::warn!(
+                project_id = %project_id,
+                commit_sha = %commit_sha,
+                error = %e,
+                "ensure_canonical_graph: failed to read previous graph cache row before build"
+            );
+            None
+        }
+    };
+    let salvage_candidates = if workspace_salvage_enabled() && pre_write_latest.is_some() {
+        resolve_salvage_candidates(
+            ctx,
+            project_id,
+            &workspace_statuses,
+            pre_write_latest.as_ref().map(|row| row.commit_sha.as_str()),
+        )
+        .await
+    } else {
+        Vec::new()
+    };
+    // The shrink warning needs the previous blob's node count exactly when no
+    // failed/timed_out/quarantine status explains a smaller graph (mirrors the
+    // suppression inside `detect_graph_cache_shrink_warning`).
+    let previous_needed_for_shrink = !workspace_statuses.iter().any(|status| {
+        matches!(
+            status.status.as_str(),
+            "failed" | "timed_out" | "ready_with_quarantine"
+        )
+    });
+    let previous_blob = pre_write_latest.map(|row| row.graph_blob);
     let blocking =
         tokio::task::spawn_blocking(move || -> Result<CanonicalGraphBuildOutput, String> {
             let t_parse = clock.now_instant();
@@ -983,6 +1052,54 @@ pub async fn ensure_canonical_graph<C: WarmContext>(
                     Some(&crate_map_for_build),
                 )?
             };
+            // Last-good workspace salvage: splice failed/timed-out
+            // workspaces back in from the previous cached graph, before the
+            // post-processors so salvaged nodes participate in route
+            // extraction, co-change resolution, ranking, layout, and the
+            // serialized blob. Guarded on the fresh build producing
+            // SOMETHING (node_count > 0): a warmer running without project
+            // source indexes nothing anywhere, and re-caching a fully
+            // salvaged copy at the new commit would defeat the empty-graph
+            // cache-poisoning guard below. The previous blob is also the
+            // shrink warning's old-node-count source, so it is deserialized
+            // at most once here and only when one of the two consumers
+            // needs it.
+            let mut salvage_reports: Vec<WorkspaceSalvageReport> = Vec::new();
+            let mut previous_node_count: Option<usize> = None;
+            let wants_salvage = !salvage_candidates.is_empty() && graph.node_count() > 0;
+            if (wants_salvage || previous_needed_for_shrink)
+                && let Some(blob) = previous_blob.as_deref()
+            {
+                match crate::repo_graph::deserialize_repo_graph_artifact_bincode(blob) {
+                    Ok(previous) => {
+                        previous_node_count = Some(previous.nodes.len());
+                        if wants_salvage {
+                            for candidate in &salvage_candidates {
+                                let stats = graph.salvage_workspace_from_artifact(
+                                    &previous,
+                                    &candidate.workspace_slug,
+                                );
+                                if stats.nodes_added == 0 {
+                                    continue;
+                                }
+                                salvage_reports.push(WorkspaceSalvageReport {
+                                    workspace_slug: candidate.workspace_slug.clone(),
+                                    origin_commit_sha: candidate.origin_commit_sha.clone(),
+                                    nodes_added: stats.nodes_added,
+                                    edges_added: stats.edges_added,
+                                });
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            error = %e,
+                            "ensure_canonical_graph: previous graph blob unreadable; skipping workspace salvage"
+                        );
+                    }
+                }
+            }
+            drop(previous_blob);
             // DB-access post-processor: opt-in via
             // `DJINN_DB_ACCESS_DETECTION`. Reads files from the index
             // tree and stamps `Reads`/`Writes` edges from caller
@@ -1055,6 +1172,8 @@ pub async fn ensure_canonical_graph<C: WarmContext>(
                 serial_ms,
                 node_count,
                 edge_count,
+                salvage_reports,
+                previous_node_count,
             ))
         })
         .await
@@ -1072,6 +1191,8 @@ pub async fn ensure_canonical_graph<C: WarmContext>(
         serial_ms,
         node_count,
         edge_count,
+        salvage_reports,
+        previous_node_count,
     ) = blocking?;
     // Wrap the freshly built graph in an `Arc` once, here, so the canonical
     // slot install, the best-effort chunk/cluster spawns, and the returned
@@ -1136,26 +1257,20 @@ pub async fn ensure_canonical_graph<C: WarmContext>(
         return Ok((handle, graph));
     }
 
-    let pre_write_latest = match cache_repo.latest_for_project(project_id).await {
-        Ok(row) => row,
-        Err(e) => {
-            tracing::warn!(
-                project_id = %project_id,
-                commit_sha = %commit_sha,
-                error = %e,
-                "ensure_canonical_graph: failed to read previous graph cache row before upsert"
-            );
-            None
-        }
-    };
+    for report in &salvage_reports {
+        tracing::warn!(
+            project_id = %project_id,
+            commit_sha = %commit_sha,
+            workspace_slug = %report.workspace_slug,
+            origin_commit_sha = %report.origin_commit_sha,
+            nodes_added = report.nodes_added,
+            edges_added = report.edges_added,
+            "ensure_canonical_graph: workspace indexing failed — salvaged last-good subgraph from previous cache"
+        );
+    }
 
-    let shrink_warning = detect_graph_cache_shrink_warning(
-        pre_write_latest
-            .as_ref()
-            .map(|row| row.graph_blob.as_slice()),
-        node_count,
-        &workspace_statuses,
-    );
+    let shrink_warning =
+        detect_graph_cache_shrink_warning(previous_node_count, node_count, &workspace_statuses);
     if let Some(warning) = &shrink_warning {
         tracing::warn!(
             project_id = %project_id,
@@ -1209,6 +1324,7 @@ pub async fn ensure_canonical_graph<C: WarmContext>(
                 &commit_sha,
                 &graph,
                 &workspace_statuses,
+                &salvage_reports,
             )
             .await;
             // Proposal glqk: alongside the bare freshness rows, persist the
@@ -1258,18 +1374,19 @@ pub async fn ensure_canonical_graph<C: WarmContext>(
 }
 
 fn detect_graph_cache_shrink_warning(
-    previous_blob: Option<&[u8]>,
+    previous_node_count: Option<usize>,
     new_node_count: usize,
     workspace_statuses: &[crate::scip_indexer::WorkspaceWarmStatus],
 ) -> Option<GraphCacheShrinkWarning> {
-    let previous_blob = previous_blob?;
     // Suppress shrink warnings whenever the warm explains a node-count drop:
     // `failed`/`timed_out` rows mean an indexer could not produce an artifact,
     // and `ready_with_quarantine` means a below-workspace partition was
     // quarantined while the rest of the workspace succeeded — both are
     // expected causes of a smaller graph and should not append a misleading
     // synthetic `graph-cache` warning row. Only an *unexplained* shrink with
-    // no such status still emits the warning.
+    // no such status still emits the warning. (The build closure mirrors this
+    // check when deciding whether to deserialize the previous blob at all —
+    // `previous_node_count` is `None` for a missing OR unreadable blob.)
     if workspace_statuses.iter().any(|status| {
         matches!(
             status.status.as_str(),
@@ -1279,9 +1396,7 @@ fn detect_graph_cache_shrink_warning(
         return None;
     }
 
-    let previous =
-        crate::repo_graph::deserialize_repo_graph_artifact_bincode(previous_blob).ok()?;
-    let old_node_count = previous.nodes.len();
+    let old_node_count = previous_node_count?;
     if new_node_count >= old_node_count {
         return None;
     }
@@ -1533,12 +1648,83 @@ fn distinct_workspace_slugs(graph: &crate::repo_graph::RepoDependencyGraph) -> V
     slugs.into_iter().collect()
 }
 
+/// A workspace eligible for last-good salvage this warm: its indexer reported
+/// `failed`/`timed_out`, and `origin_commit_sha` is the commit its previous
+/// freshness row was stamped with (falling back to the previous cached blob's
+/// commit) — i.e. the commit the salvaged content will actually describe.
+#[derive(Debug, Clone)]
+struct WorkspaceSalvageCandidate {
+    workspace_slug: String,
+    origin_commit_sha: String,
+}
+
+/// Resolve which workspaces this warm should try to salvage, and the origin
+/// commit each salvage would carry. Reads the per-workspace freshness rows so
+/// a workspace that was ALREADY salvaged on a prior warm keeps its original
+/// provenance commit instead of inheriting whichever commit last
+/// re-serialized the blob. Best-effort: a row-read failure just falls back to
+/// the previous blob's commit.
+async fn resolve_salvage_candidates<C: WarmContext>(
+    ctx: &C,
+    project_id: &str,
+    workspace_statuses: &[crate::scip_indexer::WorkspaceWarmStatus],
+    previous_blob_commit: Option<&str>,
+) -> Vec<WorkspaceSalvageCandidate> {
+    use djinn_db::ProjectWorkspaceGraphRepository;
+
+    let mut failed_slugs: Vec<&str> = Vec::new();
+    for status in workspace_statuses {
+        if matches!(status.status.as_str(), "failed" | "timed_out")
+            && !failed_slugs.contains(&status.workspace_slug.as_str())
+        {
+            failed_slugs.push(status.workspace_slug.as_str());
+        }
+    }
+    if failed_slugs.is_empty() {
+        return Vec::new();
+    }
+
+    let repo = ProjectWorkspaceGraphRepository::new(ctx.db().clone());
+    let rows = match repo.list_for_project(project_id).await {
+        Ok(rows) => rows,
+        Err(e) => {
+            tracing::warn!(
+                project_id = %project_id,
+                error = %e,
+                "resolve_salvage_candidates: failed to read workspace freshness rows; using blob commit for provenance"
+            );
+            Vec::new()
+        }
+    };
+    let row_commit: std::collections::BTreeMap<&str, &str> = rows
+        .iter()
+        .filter(|row| !row.commit_sha.is_empty())
+        .map(|row| (row.workspace_slug.as_str(), row.commit_sha.as_str()))
+        .collect();
+
+    failed_slugs
+        .into_iter()
+        .filter_map(|slug| {
+            let origin = row_commit
+                .get(slug)
+                .copied()
+                .or(previous_blob_commit)?
+                .to_string();
+            Some(WorkspaceSalvageCandidate {
+                workspace_slug: slug.to_string(),
+                origin_commit_sha: origin,
+            })
+        })
+        .collect()
+}
+
 async fn persist_workspace_graph_freshness_best_effort<C: WarmContext>(
     ctx: &C,
     project_id: &str,
     commit_sha: &str,
     graph: &crate::repo_graph::RepoDependencyGraph,
     workspace_statuses: &[crate::scip_indexer::WorkspaceWarmStatus],
+    salvage_reports: &[WorkspaceSalvageReport],
 ) {
     use djinn_db::{ProjectWorkspaceGraphRepository, ProjectWorkspaceGraphUpsert};
 
@@ -1547,13 +1733,45 @@ async fn persist_workspace_graph_freshness_best_effort<C: WarmContext>(
         return;
     }
 
+    // A salvaged workspace has nodes in the graph (so it makes
+    // `distinct_workspace_slugs`) but they are STALE — spliced from the
+    // previous cached blob because this warm's indexer failed or timed out.
+    // Its row must carry the salvaged content's origin commit and the failure
+    // status, never a fresh "ready" stamp at this commit; that provenance is
+    // also what the next warm's salvage reads to keep the origin from
+    // drifting forward.
+    let salvaged: std::collections::BTreeMap<&str, &WorkspaceSalvageReport> = salvage_reports
+        .iter()
+        .map(|report| (report.workspace_slug.as_str(), report))
+        .collect();
+    let salvaged_status = |slug: &str| -> &str {
+        workspace_statuses
+            .iter()
+            .find(|status| {
+                status.workspace_slug == slug
+                    && matches!(status.status.as_str(), "failed" | "timed_out")
+            })
+            .map(|status| status.status.as_str())
+            .unwrap_or("timed_out")
+    };
+
     let mut rows: Vec<_> = workspaces
         .iter()
-        .map(|workspace_slug| ProjectWorkspaceGraphUpsert {
-            project_id,
-            workspace_slug,
-            commit_sha,
-            status: "ready",
+        .map(|workspace_slug| {
+            match salvaged.get(workspace_slug.as_str()) {
+                Some(report) => ProjectWorkspaceGraphUpsert {
+                    project_id,
+                    workspace_slug,
+                    commit_sha: &report.origin_commit_sha,
+                    status: salvaged_status(workspace_slug),
+                },
+                None => ProjectWorkspaceGraphUpsert {
+                    project_id,
+                    workspace_slug,
+                    commit_sha,
+                    status: "ready",
+                },
+            }
         })
         .collect();
 
@@ -1564,7 +1782,9 @@ async fn persist_workspace_graph_freshness_best_effort<C: WarmContext>(
     // Stamp those at THIS commit with their failure status so the workspaces
     // op / UI can tell "indexed empty" from "indexer wiped out". Partial
     // success still caches the merged graph (see `tally_indexer_results` for
-    // the policy); this is purely visibility.
+    // the policy); this is purely visibility. (Salvaged workspaces DO have
+    // nodes, so they took the salvage row above and are skipped here via the
+    // `ready` set.)
     let ready: std::collections::BTreeSet<&str> = workspaces.iter().map(String::as_str).collect();
     let mut failed_seen = std::collections::BTreeSet::new();
     for status in workspace_statuses {
@@ -2755,14 +2975,6 @@ edition = "2024"
         assert!(distinct_workspace_slugs(&graph).is_empty());
     }
 
-    fn graph_artifact_blob_with_nodes(node_count: usize) -> Vec<u8> {
-        let graph = build_test_graph_fixture();
-        let mut artifact = graph.to_artifact();
-        let template = artifact.nodes.first().expect("fixture node").clone();
-        artifact.nodes.resize(node_count, template);
-        bincode::serialize(&artifact).expect("serialize graph artifact")
-    }
-
     fn warm_status(status: &str) -> crate::scip_indexer::WorkspaceWarmStatus {
         crate::scip_indexer::WorkspaceWarmStatus {
             workspace_slug: "root".to_string(),
@@ -2775,37 +2987,31 @@ edition = "2024"
 
     #[test]
     fn shrink_decision_ignores_missing_previous_artifact() {
+        // `None` covers both a missing and an unreadable previous blob — the
+        // build closure resolves either to no old node count.
         assert_eq!(detect_graph_cache_shrink_warning(None, 10, &[]), None);
-    }
-
-    #[test]
-    fn shrink_decision_ignores_unreadable_previous_artifact() {
         assert_eq!(
-            detect_graph_cache_shrink_warning(Some(b"not-bincode"), 10, &[warm_status("ready")]),
+            detect_graph_cache_shrink_warning(None, 10, &[warm_status("ready")]),
             None
         );
     }
 
     #[test]
     fn shrink_decision_ignores_shrinks_within_tolerance() {
-        let blob = graph_artifact_blob_with_nodes(1_000);
-
         assert_eq!(
-            detect_graph_cache_shrink_warning(Some(&blob), 950, &[warm_status("ready")]),
+            detect_graph_cache_shrink_warning(Some(1_000), 950, &[warm_status("ready")]),
             None
         );
     }
 
     #[test]
     fn shrink_decision_ignores_explained_failed_or_timed_out_workspace() {
-        let blob = graph_artifact_blob_with_nodes(1_000);
-
         assert_eq!(
-            detect_graph_cache_shrink_warning(Some(&blob), 700, &[warm_status("failed")]),
+            detect_graph_cache_shrink_warning(Some(1_000), 700, &[warm_status("failed")]),
             None
         );
         assert_eq!(
-            detect_graph_cache_shrink_warning(Some(&blob), 700, &[warm_status("timed_out")]),
+            detect_graph_cache_shrink_warning(Some(1_000), 700, &[warm_status("timed_out")]),
             None
         );
     }
@@ -2815,11 +3021,9 @@ edition = "2024"
         // `ready_with_quarantine` means a below-workspace partition was
         // quarantined while the rest succeeded — the smaller graph is
         // explained and must not append a misleading shrink warning.
-        let blob = graph_artifact_blob_with_nodes(1_000);
-
         assert_eq!(
             detect_graph_cache_shrink_warning(
-                Some(&blob),
+                Some(1_000),
                 700,
                 &[warm_status("ready_with_quarantine")]
             ),
@@ -2831,18 +3035,14 @@ edition = "2024"
     fn shrink_decision_warns_on_unexplained_shrink_with_only_ready() {
         // Only `ready` statuses (no quarantine/explanation) → shrink is
         // unexplained and the warning MUST fire.
-        let blob = graph_artifact_blob_with_nodes(1_000);
-
-        let warning = detect_graph_cache_shrink_warning(Some(&blob), 700, &[warm_status("ready")])
+        let warning = detect_graph_cache_shrink_warning(Some(1_000), 700, &[warm_status("ready")])
             .expect("warning decision");
         assert_eq!(warning.delta, 300);
     }
 
     #[test]
     fn shrink_decision_warns_on_unexplained_shrink_beyond_tolerance() {
-        let blob = graph_artifact_blob_with_nodes(1_000);
-
-        let warning = detect_graph_cache_shrink_warning(Some(&blob), 700, &[warm_status("ready")])
+        let warning = detect_graph_cache_shrink_warning(Some(1_000), 700, &[warm_status("ready")])
             .expect("warning decision");
         assert_eq!(warning.old_node_count, 1_000);
         assert_eq!(warning.new_node_count, 700);
@@ -2918,8 +3118,15 @@ edition = "2024"
         ];
 
         let ctx = TestWarmContext::new(db);
-        persist_workspace_graph_freshness_best_effort(&ctx, "p1", "new-commit", &graph, &statuses)
-            .await;
+        persist_workspace_graph_freshness_best_effort(
+            &ctx,
+            "p1",
+            "new-commit",
+            &graph,
+            &statuses,
+            &[],
+        )
+        .await;
 
         let ui = repo.get("p1", "ui").await.unwrap().expect("ui row");
         assert_eq!(ui.status, "ready");
@@ -2938,6 +3145,79 @@ edition = "2024"
                 .unwrap()
                 .is_none()
         );
+    }
+
+    #[tokio::test]
+    async fn persist_freshness_stamps_salvaged_workspace_with_origin_commit_and_failure_status() {
+        use djinn_db::{ProjectWorkspaceGraphRepository, ProjectWorkspaceGraphUpsert};
+
+        let db = create_test_db();
+        db.ensure_initialized().await.unwrap();
+        ProjectRepository::new(db.clone(), EventBus::noop())
+            .create_with_id("p1", "p1", "test", "p1")
+            .await
+            .unwrap();
+        let repo = ProjectWorkspaceGraphRepository::new(db.clone());
+        repo.upsert_many(&[ProjectWorkspaceGraphUpsert {
+            project_id: "p1",
+            workspace_slug: "server",
+            commit_sha: "origin-commit",
+            status: "ready",
+        }])
+        .await
+        .unwrap();
+
+        // New warm at `new-commit`: the graph carries `ui` (fresh) AND
+        // `server` nodes — but the server ones were salvaged from the
+        // previous blob after its indexer timed out.
+        let mut graph = build_test_graph_fixture();
+        for (i, node) in graph.graph_mut_unchecked().node_weights_mut().enumerate() {
+            node.workspace = Some(if i % 2 == 0 { "ui" } else { "server" }.to_string());
+        }
+        let statuses = vec![
+            crate::scip_indexer::WorkspaceWarmStatus {
+                workspace_slug: "ui".to_string(),
+                indexer: crate::scip_indexer::SupportedIndexer::TypeScript,
+                status: "ready".to_string(),
+                detail: None,
+                workspace_rel_root: "ui".to_string(),
+            },
+            crate::scip_indexer::WorkspaceWarmStatus {
+                workspace_slug: "server".to_string(),
+                indexer: crate::scip_indexer::SupportedIndexer::RustAnalyzer,
+                status: "timed_out".to_string(),
+                detail: Some("indexer timed out".to_string()),
+                workspace_rel_root: "server".to_string(),
+            },
+        ];
+        let salvages = vec![WorkspaceSalvageReport {
+            workspace_slug: "server".to_string(),
+            origin_commit_sha: "origin-commit".to_string(),
+            nodes_added: 3,
+            edges_added: 2,
+        }];
+
+        let ctx = TestWarmContext::new(db);
+        persist_workspace_graph_freshness_best_effort(
+            &ctx,
+            "p1",
+            "new-commit",
+            &graph,
+            &statuses,
+            &salvages,
+        )
+        .await;
+
+        let ui = repo.get("p1", "ui").await.unwrap().expect("ui row");
+        assert_eq!(ui.status, "ready");
+        assert_eq!(ui.commit_sha, "new-commit");
+
+        // The salvaged workspace has nodes in the graph, but they are stale:
+        // its row must keep the salvage origin commit and the failure status —
+        // never a fresh "ready" stamp at the new commit.
+        let server = repo.get("p1", "server").await.unwrap().expect("server row");
+        assert_eq!(server.status, "timed_out");
+        assert_eq!(server.commit_sha, "origin-commit");
     }
 
     #[tokio::test]
