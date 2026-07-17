@@ -185,15 +185,48 @@ async fn task_warm_races_and_cap_matrix_bound_combined_durable_occupancy() {
     }
 }
 
-#[tokio::test]
-async fn paused_and_ambiguous_create_retain_capacity_and_deterministic_retry_resolves_live() {
-    let controller = controller(BuildAdmissionMode::Enforce, 1);
-    let permit = WarmAdmission::admit(&controller, warm("deterministic-name"))
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn paused_post_reconciliation_and_callbacks_keep_fenced_capacity_correct() {
+    let controller = Arc::new(controller(BuildAdmissionMode::Enforce, 1));
+    let reserved = Arc::new(Barrier::new(2));
+    let (allow_post_result, post_result_gate) = tokio::sync::oneshot::channel();
+    let posts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let create = {
+        let controller = Arc::clone(&controller);
+        let reserved = Arc::clone(&reserved);
+        let posts = Arc::clone(&posts);
+        tokio::spawn(async move {
+            let permit = WarmAdmission::admit(controller.as_ref(), warm("deterministic-name"))
+                .await
+                .unwrap();
+            controller
+                .transition(&permit, WarmAdmissionTransition::CreateStarted)
+                .await
+                .unwrap();
+            reserved.wait().await;
+            post_result_gate.await.unwrap();
+            posts.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            controller
+                .transition(
+                    &permit,
+                    WarmAdmissionTransition::CreateUnknown {
+                        diagnostic: "POST response lost".into(),
+                    },
+                )
+                .await
+                .unwrap();
+            permit
+        })
+    };
+    reserved.wait().await;
+    // A reconciliation pass for another epoch cannot retire current in-flight POST.
+    controller
+        .journal()
+        .recover_predecessor_epoch("other-epoch")
         .await
         .unwrap();
-    // Reservation is durable before the controlled fake POST is allowed to run.
     assert!(matches!(
-        WarmAdmission::admit(&controller, warm("cannot-reconcile-away")).await,
+        WarmAdmission::admit(controller.as_ref(), warm("cannot-reconcile-away")).await,
         Err(WarmAdmissionError::Denied { .. })
     ));
     assert_eq!(
@@ -204,21 +237,10 @@ async fn paused_and_ambiguous_create_retain_capacity_and_deterministic_retry_res
             .unwrap(),
         1
     );
-
-    controller
-        .transition(&permit, WarmAdmissionTransition::CreateStarted)
-        .await
-        .unwrap();
-    controller
-        .transition(
-            &permit,
-            WarmAdmissionTransition::CreateUnknown {
-                diagnostic: "POST response lost".into(),
-            },
-        )
-        .await
-        .unwrap();
-    let retry = WarmAdmission::admit(&controller, warm("deterministic-name"))
+    allow_post_result.send(()).unwrap();
+    let permit = create.await.unwrap();
+    assert_eq!(posts.load(std::sync::atomic::Ordering::SeqCst), 1);
+    let retry = WarmAdmission::admit(controller.as_ref(), warm("deterministic-name"))
         .await
         .unwrap();
     assert_eq!(permit, retry);
@@ -246,6 +268,51 @@ async fn paused_and_ambiguous_create_retain_capacity_and_deterministic_retry_res
             .unwrap(),
         1
     );
+    assert!(
+        controller
+            .transition(
+                &retry,
+                WarmAdmissionTransition::Terminal {
+                    uid: "stale-uid".into()
+                }
+            )
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        controller
+            .journal()
+            .count_task_or_warm_occupancy()
+            .await
+            .unwrap(),
+        1
+    );
+    controller
+        .transition(
+            &retry,
+            WarmAdmissionTransition::Terminal {
+                uid: "looked-up-by-name".into(),
+            },
+        )
+        .await
+        .unwrap();
+    controller
+        .transition(
+            &retry,
+            WarmAdmissionTransition::Terminal {
+                uid: "looked-up-by-name".into(),
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        controller
+            .journal()
+            .count_task_or_warm_occupancy()
+            .await
+            .unwrap(),
+        0
+    );
 }
 
 #[tokio::test]
@@ -265,19 +332,19 @@ async fn invocation_children_are_durable_but_do_not_self_block_the_parent_cap() 
         BuildAdmissionDecision::Permitted { .. }
     ));
     for child in ["child-a", "child-b", "child-c"] {
-        assert!(matches!(
-            controller
-                .admit_task_run(
-                    Some("worker"),
-                    AdmissionDomain::InvocationBuild,
-                    child.into(),
-                    0,
-                    format!("{child}-job"),
-                )
-                .await
-                .unwrap(),
-            BuildAdmissionDecision::Permitted { .. }
-        ));
+        let BuildAdmissionDecision::Permitted { permit, .. } = controller
+            .admit_task_run(
+                Some("worker"),
+                AdmissionDomain::InvocationBuild,
+                child.into(),
+                0,
+                format!("{child}-job"),
+            )
+            .await
+            .unwrap()
+        else {
+            panic!("child must not self-block its parent");
+        };
         assert_eq!(
             controller
                 .journal()
@@ -286,13 +353,45 @@ async fn invocation_children_are_durable_but_do_not_self_block_the_parent_cap() 
                 .unwrap(),
             1
         );
+        controller
+            .transition(&permit, WarmAdmissionTransition::CreateStarted)
+            .await
+            .unwrap();
+        controller
+            .transition(
+                &permit,
+                WarmAdmissionTransition::Live {
+                    uid: format!("{child}-uid"),
+                },
+            )
+            .await
+            .unwrap();
+        controller
+            .transition(
+                &permit,
+                WarmAdmissionTransition::Terminal {
+                    uid: format!("{child}-uid"),
+                },
+            )
+            .await
+            .unwrap();
+        let rows = controller
+            .journal()
+            .list_history(AdmissionDomain::InvocationBuild, child)
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 1, "children retain separate durable views");
+        assert_eq!(
+            rows[0].state,
+            AdmissionState::Terminal,
+            "child release is durable"
+        );
         assert_eq!(
             controller
                 .journal()
-                .list_history(AdmissionDomain::InvocationBuild, child)
+                .count_task_or_warm_occupancy()
                 .await
-                .unwrap()
-                .len(),
+                .unwrap(),
             1
         );
     }
