@@ -185,7 +185,7 @@ async fn list_board_health_mismatch_candidates(
     // This is a conservative prefilter, not role inference. It rejects only
     // impossible positives and deliberately preserves all Rust-positive rows.
     let text_expression =
-        "LOWER(CONCAT_WS(E'\\n', t.title, t.description, t.design, t.acceptance_criteria))";
+        "LOWER(CONCAT_WS(E'\n', t.title, t.description, t.design, t.acceptance_criteria))";
     let mut predicates = Vec::new();
     let mut parameter = 1;
     for _ in PLANNER_ISSUE_TYPE_SIGNALS {
@@ -197,12 +197,12 @@ async fn list_board_health_mismatch_candidates(
         parameter += 1;
     }
     let sql = format!(
-        "SELECT t.id, t.short_id, t.epic_id, t.title, t.description, t.design, \\
-                t.acceptance_criteria::text AS acceptance_criteria, t.issue_type, t.status, t.total_reopen_count \\
-         FROM tasks t \\
-         WHERE t.total_reopen_count >= ${parameter} \\
-           AND t.status != 'closed' \\
-           AND ({}) \\
+        "SELECT t.id, t.short_id, t.epic_id, t.title, t.description, t.design, 
+                t.acceptance_criteria::text AS acceptance_criteria, t.issue_type, t.status, t.total_reopen_count 
+         FROM tasks t 
+         WHERE t.total_reopen_count >= ${parameter} 
+           AND t.status != 'closed' 
+           AND ({}) 
          ORDER BY t.id ASC",
         predicates.join(" OR "),
     );
