@@ -8568,6 +8568,71 @@ expression: signatures
     },
     "output_schema": {
       "$defs": {
+        "ExtractedNoteAuditAttribution": {
+          "description": "Immutable ledger event that explains the state of an extracted note when\nit was flagged by the audit. Absence means the note predates the revision\nledger; callers must not infer or fabricate provenance.",
+          "properties": {
+            "actor_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "actor_kind": {
+              "type": "string"
+            },
+            "reason": {
+              "type": "string"
+            },
+            "revision_created_at": {
+              "type": "string"
+            },
+            "revision_id": {
+              "type": "string"
+            },
+            "revision_kind": {
+              "type": "string"
+            },
+            "revision_seq": {
+              "format": "int64",
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "session_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "subsystem": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "task_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "task_run_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "revision_id",
+            "revision_kind",
+            "revision_created_at",
+            "actor_kind",
+            "reason"
+          ],
+          "type": "object"
+        },
         "ExtractedNoteAuditCategory": {
           "description": "Classification assigned during ADR-054 extracted-note corpus audits.",
           "enum": [
@@ -8581,6 +8646,17 @@ expression: signatures
         "ExtractedNoteAuditFinding": {
           "description": "A single extracted note flagged by the ADR-054 audit.",
           "properties": {
+            "attribution": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ExtractedNoteAuditAttribution"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Latest immutable revision for this note under the audited project.\nAbsent for pre-migration notes with no ledger history."
+            },
             "category": {
               "$ref": "#/$defs/ExtractedNoteAuditCategory"
             },
@@ -24450,6 +24526,110 @@ expression: signatures
     "output_schema": {
       "$defs": {
         "AnyJson": {},
+        "MemoryRevisionEvent": {
+          "description": "One immutable ledger event projected for the MCP reader surfaces.",
+          "properties": {
+            "actor_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "actor_kind": {
+              "description": "Trusted actor kind: human, agent, or system.",
+              "type": "string"
+            },
+            "confidence_after": {
+              "format": "double",
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "confidence_before": {
+              "format": "double",
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "content_after": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "content_before": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "content_redacted": {
+              "description": "True when `content_before`/`content_after` were withheld because the\ncaller lacks note-read permission.",
+              "type": "boolean"
+            },
+            "created_at": {
+              "type": "string"
+            },
+            "event_kind": {
+              "description": "Ledger event kind: created, updated, deleted, confidence_changed, or\nextraction_skipped.",
+              "type": "string"
+            },
+            "note_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "note_seq": {
+              "format": "int64",
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "reason": {
+              "type": "string"
+            },
+            "revision_id": {
+              "type": "string"
+            },
+            "session_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "subsystem": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "task_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "task_run_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "revision_id",
+            "event_kind",
+            "actor_kind",
+            "reason",
+            "created_at",
+            "content_redacted"
+          ],
+          "type": "object"
+        },
         "SessionToolSession": {
           "properties": {
             "agent_type": {
@@ -24656,6 +24836,16 @@ expression: signatures
           "description": "Canonical session-associated extension-load diagnostics, including as\nan empty array on successful timeline lookups.",
           "items": {
             "$ref": "#/$defs/TimelineExtensionLoadDiagnosticEvent"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "memory_revision_events": {
+          "description": "Immutable memory revisions caused by this task's sessions, newest-first\nby `(created_at, revision_id)`. Bodies follow the same authorization\nand redaction decision as `memory_session_diff`.",
+          "items": {
+            "$ref": "#/$defs/MemoryRevisionEvent"
           },
           "type": [
             "array",
