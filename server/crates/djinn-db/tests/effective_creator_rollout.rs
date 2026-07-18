@@ -121,6 +121,44 @@ fn production_source(source: &str) -> &str {
         .map_or(source, |attribute| &source[..attribute])
 }
 
+/// A source file is test-only only when its crate root attaches a test or
+/// `test-support` cfg directly to that module declaration. This deliberately
+/// inspects module structure instead of trusting a helper-like filename.
+fn structurally_test_only_module(file: &Path) -> bool {
+    let Some(stem) = file.file_stem().and_then(|stem| stem.to_str()) else {
+        return false;
+    };
+    let Some(crate_root) = file.parent().map(|directory| directory.join("lib.rs")) else {
+        return false;
+    };
+    let Ok(root) = std::fs::read_to_string(crate_root) else {
+        return false;
+    };
+    let declaration = format!("mod {stem};");
+    let Some(declaration_offset) = root.find(&declaration) else {
+        return false;
+    };
+    let preceding = &root[..declaration_offset];
+    let Some(attribute_offset) = preceding.rfind("#[cfg(") else {
+        return false;
+    };
+    let attributes = &preceding[attribute_offset..];
+    !attributes.contains(';')
+        && (attributes.contains("cfg(test)") || attributes.contains("feature = \"test-support\""))
+}
+
+/// Determine whether a cfg is attached immediately to a function declaration,
+/// rather than accepting an arbitrary marker elsewhere in the file.
+fn function_is_test_only(source: &str, function_offset: usize) -> bool {
+    let preceding = &source[..function_offset];
+    let Some(attribute_offset) = preceding.rfind("#[cfg(") else {
+        return false;
+    };
+    let attributes = &preceding[attribute_offset..];
+    !attributes.contains('}')
+        && (attributes.contains("cfg(test)") || attributes.contains("feature = \"test-support\""))
+}
+
 fn production_sources(dir: &Path, root: &Path, result: &mut Vec<PathBuf>) {
     for entry in std::fs::read_dir(dir).expect("source tree readable") {
         let path = entry.expect("directory entry readable").path();
@@ -136,6 +174,7 @@ fn production_sources(dir: &Path, root: &Path, result: &mut Vec<PathBuf>) {
             && !text.ends_with("/tests.rs")
             && !text.ends_with("_tests.rs")
             && !text.contains("test_support")
+            && !structurally_test_only_module(&path)
         {
             result.push(path);
         }
@@ -163,7 +202,10 @@ fn discover_production_writers(root: &Path) -> BTreeSet<String> {
         // inline `#[cfg(test)]` hooks in production methods remain visible.
         let source = production_source(&source);
         let direct_constants = direct_task_insert_constants(source);
-        for (symbol, _) in function_symbols(source) {
+        for (symbol, offset) in function_symbols(source) {
+            if function_is_test_only(source, offset) {
+                continue;
+            }
             let Some(body) = extract_function_body(source, &symbol) else {
                 continue;
             };
@@ -412,4 +454,32 @@ fn callsite_classifier_accepts_exact_scoped_and_unavailable_cases() {
     assert!(
         unscoped_test_task_callsites("server/crates/example/src/ordinary.rs", source).is_empty()
     );
+}
+
+#[test]
+fn producer_classifier_excludes_only_structurally_test_support_code() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../");
+    assert!(structurally_test_only_module(
+        &root.join("server/crates/djinn-agent/src/test_helpers.rs")
+    ));
+    assert!(structurally_test_only_module(
+        &root.join("server/crates/djinn-slot/src/test_helpers.rs")
+    ));
+
+    let replay = std::fs::read_to_string(
+        root.join("server/crates/djinn-slot/src/extraction_replay_eval.rs"),
+    )
+    .expect("replay fixture source readable");
+    let (_, offset) = function_symbols(&replay)
+        .into_iter()
+        .find(|(symbol, _)| symbol == "run_offline_fixture_replay")
+        .expect("offline replay fixture function");
+    assert!(function_is_test_only(&replay, offset));
+
+    let production = "pub async fn create_task() { repo.create_in_project_with_provenance(); }";
+    let (_, offset) = function_symbols(production)
+        .into_iter()
+        .next()
+        .expect("production function");
+    assert!(!function_is_test_only(production, offset));
 }
