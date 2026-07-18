@@ -26,12 +26,13 @@ use djinn_orchestration_types::coordinator::BackgroundWorkTracker;
 use djinn_orchestration_types::trigger::CoordinatorTrigger;
 use djinn_provider::catalog::{CatalogService, HealthTracker};
 
+use crate::final_verification::{
+    FinalVerificationConsultationFailure, FinalVerificationInvocationLease,
+    FinalVerificationResolvedMaterial,
+};
 #[cfg(test)]
 use crate::final_verification::{
     FinalVerificationCoordinatorRequest, FinalVerificationRecordingOutcome,
-};
-use crate::final_verification::{
-    FinalVerificationInvocationLease, FinalVerificationResolvedMaterial,
 };
 use crate::helpers::ProviderCredential;
 use crate::reply_loop::compaction_guard::CompactionCriticalSection;
@@ -73,6 +74,20 @@ pub type ActivityTracker = Arc<Mutex<HashMap<String, Arc<AtomicU64>>>>;
 /// `djinn-slot` depending on `djinn-agent` modules like `prompts`,
 /// `mcp_client`, `task_merge`, `runtime_bridge`, `supervisor`, etc.
 pub trait SlotHostCallbacks: Send + Sync + 'static {
+    /// Inject one named failure inside the production consult-or-run path.
+    fn inject_final_verification_consultation_failure_for_test(
+        &self,
+        _failure: FinalVerificationConsultationFailure,
+    ) -> bool {
+        false
+    }
+    /// Observe the bounded outcome and audit reason emitted for an injection.
+    fn record_final_verification_consultation_outcome_for_test(
+        &self,
+        _outcome: &'static str,
+        _reason: &'static str,
+    ) {
+    }
     /// Deterministic coordinator boundary used only by reply-loop unit tests.
     /// Production builds always execute `coordinate_final_verification` in full.
     #[cfg(test)]
