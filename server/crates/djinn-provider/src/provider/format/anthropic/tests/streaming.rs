@@ -588,7 +588,7 @@ fn test_indexed_thinking_redacted_unknown_and_tool_blocks() {
         r#"{"index":1,"delta":{"type":"input_json_delta","partial_json":"{\"cmd\":\"pwd\"}"}}"#
     );
     assert!(
-        matches!(&parse!("content_block_delta", r#"{"index":0,"delta":{"type":"thinking_delta","thinking":"reason "}}"#)[..], [StreamEvent::Thinking(text)] if text == "reason ")
+        matches!(&parse!("content_block_delta", r#"{"index":0,"delta":{"type":"thinking_delta","thinking":"reason "}}"#)[..], [StreamEvent::ThinkingDelta { id, text }] if *id == 0 && text == "reason ")
     );
     parse!(
         "content_block_delta",
@@ -600,9 +600,11 @@ fn test_indexed_thinking_redacted_unknown_and_tool_blocks() {
     );
     let thinking = parse!("content_block_stop", r#"{"index":0}"#);
     let tool = parse!("content_block_stop", r#"{"index":1}"#);
-    assert!(
-        matches!(&thinking[..], [StreamEvent::Delta(ContentBlock::Thinking { thinking, signature: Some(signature) })] if thinking == "reason complete" && signature == "sig_123")
-    );
+    assert!(matches!(&thinking[..], [
+            StreamEvent::ThinkingBlockComplete { id, thinking, signature: Some(signature) },
+            StreamEvent::Delta(ContentBlock::Thinking { thinking: t2, signature: Some(s2) })
+        ] if *id == 0 && thinking == "reason complete" && signature == "sig_123"
+            && t2 == "reason complete" && s2 == "sig_123"));
     assert!(
         matches!(&tool[..], [StreamEvent::Delta(ContentBlock::ToolUse { id, input, .. })] if id == "tool_1" && input["cmd"] == "pwd")
     );

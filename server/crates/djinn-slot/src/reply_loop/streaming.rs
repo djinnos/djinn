@@ -33,6 +33,16 @@ pub(super) struct StreamTurnState {
     pub turn_thinking: String,
     pub turn_provider_state: Vec<ContentBlock>,
     pub turn_tool_calls: Vec<ContentBlock>,
+    /// Arrival-ordered unresolved thinking-delta fragments keyed by their
+    /// provider content-block ID. Each fragment is the text from one
+    /// [`StreamEvent::ThinkingDelta`] event. Persistence reconciles these
+    /// against completed blocks by exact ID and retains only unmatched
+    /// residuals — never by text value, prefix, suffix, or presence.
+    pub turn_unresolved_thinking: Vec<(u64, String)>,
+    /// Block IDs for which a `ThinkingBlockComplete` was received. The
+    /// canonical assembler reconciles `turn_unresolved_thinking` against
+    /// this set, suppressing only exact-ID matches.
+    pub turn_completed_thinking_ids: HashSet<u64>,
     pub turn_tokens_in: u32,
     pub turn_tokens_out: u32,
     pub turn_cache_read: u32,
@@ -62,6 +72,8 @@ impl StreamTurnState {
             turn_thinking: String::new(),
             turn_provider_state: Vec::new(),
             turn_tool_calls: Vec::new(),
+            turn_unresolved_thinking: Vec::new(),
+            turn_completed_thinking_ids: HashSet::new(),
             turn_tokens_in: 0,
             turn_tokens_out: 0,
             turn_cache_read: 0,
@@ -233,6 +245,39 @@ pub(super) async fn consume_provider_stream(
                             }),
                         ));
                         state.turn_thinking.push_str(&thinking);
+                    }
+                    StreamEvent::ThinkingDelta { id, text } => {
+                        // Display/telemetry aggregate gets the attributed
+                        // delta text appended once.
+                        ctx.ctx.event_bus.send(DjinnEventEnvelope::session_message(
+                            ctx.session_id,
+                            ctx.task_id,
+                            ctx.role_name,
+                            &serde_json::json!({
+                                "type": "thinking_delta",
+                                "role": "assistant",
+                                "text": text,
+                            }),
+                        ));
+                        state.turn_thinking.push_str(&text);
+                        // Persistence fragment in arrival order, keyed by
+                        // exact block ID for later reconciliation.
+                        state.turn_unresolved_thinking.push((id, text));
+                    }
+                    StreamEvent::ThinkingBlockComplete {
+                        id,
+                        thinking: _,
+                        signature: _,
+                    } => {
+                        // The signed block already arrived as a
+                        // Delta(Thinking) pushed to turn_provider_state.
+                        // Record the completed block ID so the canonical
+                        // assembler can reconcile and suppress matching
+                        // ThinkingDelta fragments by exact ID. The completion
+                        // text is a strict superset of the matching deltas so
+                        // it is NOT appended to turn_thinking (deltas already
+                        // were).
+                        state.turn_completed_thinking_ids.insert(id);
                     }
                     StreamEvent::Usage(usage) => {
                         state.turn_tokens_in = usage.input;

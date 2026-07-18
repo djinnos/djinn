@@ -215,6 +215,73 @@ pub(super) fn serialize_llm_input(
     })
 }
 
+/// Assemble the canonical persisted assistant content for a turn.
+///
+/// Side-effect-free: builds and returns a `Vec<ContentBlock>` without mutating
+/// any input.  Both normal finalization in `turn.rs` and the interrupted
+/// `flush_in_flight_turn` path use this so the persisted shape is identical
+/// regardless of which exit the turn took.
+///
+/// Canonical order:
+/// 1. Provider-state blocks (signed thinking, OpenAIReasoning, etc.)
+/// 2. One unsigned thinking block — the concatenation of all non-empty
+///    unresolved `ThinkingDelta` fragments whose block ID was NOT matched by a
+///    `ThinkingBlockComplete`. Unattributed `Thinking(String)` text (OpenAI
+///    reasoning) is always included because it has no block ID to reconcile
+///    against.
+/// 3. Assistant text.
+/// 4. Tool calls.
+///
+/// Reconciliation is by exact block ID only. No value-, prefix-, suffix-, or
+/// presence-based deduplication is ever applied.
+pub(super) fn assemble_persisted_content(
+    provider_state: &[djinn_provider::message::ContentBlock],
+    unresolved_thinking: &[(u64, String)],
+    completed_thinking_ids: &std::collections::HashSet<u64>,
+    unattributed_thinking: &str,
+    text: &str,
+    tool_calls: &[djinn_provider::message::ContentBlock],
+) -> Vec<djinn_provider::message::ContentBlock> {
+    use djinn_provider::message::ContentBlock;
+
+    let mut content: Vec<ContentBlock> = Vec::new();
+
+    // 1. Provider-state blocks.
+    content.extend(provider_state.iter().cloned());
+
+    // 2. One unsigned thinking block from non-empty unresolved fragments.
+    //    Reconcile by exact block ID: a fragment is suppressed only if its ID
+    //    appears in the completed set. Unattributed text (Thinking(String),
+    //    OpenAI reasoning) has no block ID and is always included.
+    let mut unsigned = String::new();
+    for (id, fragment) in unresolved_thinking {
+        if !completed_thinking_ids.contains(id) {
+            unsigned.push_str(fragment);
+        }
+    }
+    if !unattributed_thinking.is_empty() {
+        unsigned.push_str(unattributed_thinking);
+    }
+    if !unsigned.is_empty() {
+        content.push(ContentBlock::Thinking {
+            thinking: unsigned,
+            signature: None,
+        });
+    }
+
+    // 3. Assistant text.
+    if !text.is_empty() {
+        content.push(ContentBlock::Text {
+            text: text.to_string(),
+        });
+    }
+
+    // 4. Tool calls.
+    content.extend(tool_calls.iter().cloned());
+
+    content
+}
+
 /// Idempotently persist any observed assistant/tool rows from the current
 /// in-flight turn that were not finalized through the normal reply-loop
 /// completion path.
@@ -243,23 +310,17 @@ pub(super) async fn flush_in_flight_turn(
     }
 
     // Build and persist the assistant message from accumulated turn content
-    // (thinking, text, tool_use blocks) if any content was observed.
-    let mut assistant_content: Vec<ContentBlock> = Vec::new();
-    assistant_content.extend(stream_state.turn_provider_state.clone());
-    if !stream_state.turn_thinking.is_empty() {
-        assistant_content.push(ContentBlock::Thinking {
-            thinking: stream_state.turn_thinking.clone(),
-            signature: None,
-        });
-    }
-    if !stream_state.turn_text.is_empty() {
-        assistant_content.push(ContentBlock::Text {
-            text: stream_state.turn_text.clone(),
-        });
-    }
-    for tc in &stream_state.turn_tool_calls {
-        assistant_content.push(tc.clone());
-    }
+    // using the canonical assembler — provider-state blocks, one unsigned
+    // thinking block from unresolved fragments, assistant text, then tool
+    // calls. Reconciles thinking fragments by exact block ID only.
+    let assistant_content = assemble_persisted_content(
+        &stream_state.turn_provider_state,
+        &stream_state.turn_unresolved_thinking,
+        &stream_state.turn_completed_thinking_ids,
+        &stream_state.turn_thinking,
+        &stream_state.turn_text,
+        &stream_state.turn_tool_calls,
+    );
     if !assistant_content.is_empty() {
         let assistant_msg = Message {
             role: Role::Assistant,

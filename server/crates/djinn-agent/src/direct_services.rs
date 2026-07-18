@@ -1087,6 +1087,11 @@ impl SupervisorServices for DirectServices {
             match ev.map_err(|e| format!("provider stream error: {e}"))? {
                 StreamEvent::Delta(block) => response.content.push(block),
                 StreamEvent::Thinking(s) => response.thinking.push_str(&s),
+                StreamEvent::ThinkingDelta { text, .. } => response.thinking.push_str(&text),
+                StreamEvent::ThinkingBlockComplete { .. } => {
+                    // Completion text is a superset of the deltas already
+                    // appended; do not re-append.
+                }
                 StreamEvent::Usage(u) => response.usage = u,
                 StreamEvent::Done => break,
             }
@@ -2337,6 +2342,11 @@ async fn collect_planner_stream(
             match event {
                 Ok(StreamEvent::Delta(block)) => response.content.push(block),
                 Ok(StreamEvent::Thinking(thinking)) => response.thinking.push_str(&thinking),
+                Ok(StreamEvent::ThinkingDelta { text, .. }) => response.thinking.push_str(&text),
+                Ok(StreamEvent::ThinkingBlockComplete { .. }) => {
+                    // Completion text is a superset of the deltas already
+                    // appended; do not re-append.
+                }
                 Ok(StreamEvent::Usage(usage)) => response.usage = usage,
                 Ok(StreamEvent::Done) => break,
                 Err(error) => return Err(format!("provider stream error: {error}")),

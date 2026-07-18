@@ -188,7 +188,10 @@ pub(crate) fn parse_anthropic_event(
                             .unwrap_or("")
                             .to_string();
                         if !thinking.is_empty() {
-                            events.push(StreamEvent::Thinking(thinking.clone()));
+                            events.push(StreamEvent::ThinkingDelta {
+                                id: index,
+                                text: thinking.clone(),
+                            });
                         }
                         if let Some(PendingContentBlock::Thinking {
                             thinking: accumulated,
@@ -253,10 +256,23 @@ pub(crate) fn parse_anthropic_event(
                     PendingContentBlock::Thinking {
                         thinking,
                         signature,
-                    } => ContentBlock::Thinking {
-                        thinking,
-                        signature,
-                    },
+                    } => {
+                        // Emit the provenance-aware completion event so
+                        // persistence paths can reconcile unresolved
+                        // ThinkingDelta fragments by exact ID. Also emit
+                        // the Delta(Thinking) block so consumers that route
+                        // thinking through Delta continue to receive the
+                        // signed block.
+                        events.push(StreamEvent::ThinkingBlockComplete {
+                            id: index,
+                            thinking: thinking.clone(),
+                            signature: signature.clone(),
+                        });
+                        ContentBlock::Thinking {
+                            thinking,
+                            signature,
+                        }
+                    }
                     PendingContentBlock::RedactedThinking { data } => {
                         ContentBlock::RedactedThinking { data }
                     }

@@ -249,10 +249,11 @@ const MAX_CHAT_COMPACTION_RETRIES: u32 = 2;
 
 /// Outcome of draining a single provider stream turn.
 enum TurnResult {
-    /// Normal turn with text, provider state, and optional tool calls.
+    /// Normal turn with the fully assembled assistant content (provider state,
+    /// reconciled thinking, text, tool calls) and the separate tool-call list
+    /// for dispatch.
     Ok {
-        text: String,
-        provider_state: Vec<ContentBlock>,
+        assistant_content: Vec<ContentBlock>,
         tool_calls: Vec<ContentBlock>,
     },
     /// Provider stream emitted an error event; partial assistant content
@@ -386,6 +387,54 @@ async fn init_provider_stream(
     }
 }
 
+/// Assemble the canonical persisted assistant content for a chat turn.
+///
+/// Canonical order: provider-state blocks, one unsigned thinking block from
+/// unresolved fragments (reconciled by exact block ID), assistant text, then
+/// tool calls. Side-effect-free.
+fn assemble_chat_assistant_content(
+    provider_state: &[ContentBlock],
+    unresolved_thinking: &[(u64, String)],
+    completed_thinking_ids: &std::collections::HashSet<u64>,
+    unattributed_thinking: &str,
+    text: &str,
+    tool_calls: &[ContentBlock],
+) -> Vec<ContentBlock> {
+    let mut content: Vec<ContentBlock> = Vec::new();
+
+    // 1. Provider-state blocks.
+    content.extend(provider_state.iter().cloned());
+
+    // 2. One unsigned thinking block from non-empty unresolved fragments.
+    let mut unsigned = String::new();
+    for (id, fragment) in unresolved_thinking {
+        if !completed_thinking_ids.contains(id) {
+            unsigned.push_str(fragment);
+        }
+    }
+    if !unattributed_thinking.is_empty() {
+        unsigned.push_str(unattributed_thinking);
+    }
+    if !unsigned.is_empty() {
+        content.push(ContentBlock::Thinking {
+            thinking: unsigned,
+            signature: None,
+        });
+    }
+
+    // 3. Assistant text.
+    if !text.is_empty() {
+        content.push(ContentBlock::Text {
+            text: text.to_string(),
+        });
+    }
+
+    // 4. Tool calls.
+    content.extend(tool_calls.iter().cloned());
+
+    content
+}
+
 /// Drain a single provider stream turn, forwarding deltas via SSE and assembling
 /// the turn result. On stream errors, persists partial assistant content and returns
 /// `TurnResult::StreamError` so the caller can abort.
@@ -398,6 +447,11 @@ async fn drain_provider_turn(
     let mut turn_text = String::new();
     let mut turn_provider_state: Vec<ContentBlock> = Vec::new();
     let mut tool_calls: Vec<ContentBlock> = Vec::new();
+    // Arrival-ordered unresolved thinking-delta fragments keyed by exact
+    // content-block ID, plus the set of IDs that completed.
+    let mut unresolved_thinking: Vec<(u64, String)> = Vec::new();
+    let mut completed_thinking_ids: std::collections::HashSet<u64> =
+        std::collections::HashSet::new();
 
     while let Some(item) = stream.next().await {
         match item {
@@ -414,8 +468,24 @@ async fn drain_provider_turn(
             | Ok(StreamEvent::Delta(state @ ContentBlock::Unknown { .. })) => {
                 turn_provider_state.push(state);
             }
+            Ok(StreamEvent::Delta(ContentBlock::ToolResult { .. }))
+            | Ok(StreamEvent::Delta(ContentBlock::Image { .. }))
+            | Ok(StreamEvent::Delta(ContentBlock::Document { .. })) => {}
+            Ok(StreamEvent::Thinking(_)) => {
+                // Unattributed thinking (OpenAI reasoning) — no block ID to
+                // reconcile against, always included via the turn_thinking
+                // aggregate. Chat does not display thinking deltas live.
+            }
+            Ok(StreamEvent::ThinkingDelta { id, text }) => {
+                unresolved_thinking.push((id, text));
+            }
+            Ok(StreamEvent::ThinkingBlockComplete { id, .. }) => {
+                // The signed block already arrived as Delta(Thinking) in
+                // turn_provider_state. Record the ID for reconciliation.
+                completed_thinking_ids.insert(id);
+            }
             Ok(StreamEvent::Done) => break,
-            Ok(_) => {}
+            Ok(StreamEvent::Usage(_)) => {}
             Err(e) => {
                 tracing::warn!(error=%e, "provider stream event failed");
                 let _ = tx
@@ -427,17 +497,21 @@ async fn drain_provider_turn(
                     ))
                     .await;
                 // Prior turns were already persisted incrementally and
-                // are well-formed. Persist this turn's partial text /
-                // reasoning so a refresh can show it — but DROP any
-                // buffered tool calls: their results will never be
-                // produced, and persisting a `function_call` with no
-                // `function_call_output` is exactly the orphan that
+                // are well-formed. Persist this turn's partial content
+                // using canonical assembly: completed provider state,
+                // unresolved thinking (reconciled by exact ID), then
+                // partial text. DROP any buffered tool calls: their results
+                // will never be produced, and persisting a `function_call`
+                // with no `function_call_output` is exactly the orphan that
                 // wedges the next turn.
-                let mut partial: Vec<ContentBlock> = Vec::new();
-                partial.append(&mut turn_provider_state);
-                if !turn_text.is_empty() {
-                    partial.push(ContentBlock::Text { text: turn_text });
-                }
+                let partial = assemble_chat_assistant_content(
+                    &turn_provider_state,
+                    &unresolved_thinking,
+                    &completed_thinking_ids,
+                    "",
+                    &turn_text,
+                    &[],
+                );
                 persist_interrupted_assistant_turn(
                     state,
                     session_id,
@@ -449,6 +523,17 @@ async fn drain_provider_turn(
             }
         }
     }
+
+    // Normal completion: assemble the canonical assistant content for the
+    // caller to persist.
+    let assistant_content = assemble_chat_assistant_content(
+        &turn_provider_state,
+        &unresolved_thinking,
+        &completed_thinking_ids,
+        "",
+        &turn_text,
+        &tool_calls,
+    );
 
     if turn_text.is_empty() && tool_calls.is_empty() {
         tracing::warn!(
@@ -469,8 +554,7 @@ async fn drain_provider_turn(
     }
 
     TurnResult::Ok {
-        text: turn_text,
-        provider_state: turn_provider_state,
+        assistant_content,
         tool_calls,
     }
 }
@@ -1412,22 +1496,15 @@ async fn run_chat_loop(ctx: ChatLoopContext) {
 
         tokio::pin!(stream);
         let turn = drain_provider_turn(&mut stream, &tx, &state, &session_id).await;
-        let (turn_text, turn_provider_state, tool_calls) = match turn {
+        let (assistant_content, tool_calls) = match turn {
             TurnResult::Ok {
-                text,
-                provider_state,
+                assistant_content,
                 tool_calls,
-            } => (text, provider_state, tool_calls),
+            } => (assistant_content, tool_calls),
             TurnResult::StreamError => return,
             TurnResult::Empty => return,
         };
 
-        let mut assistant_content = Vec::new();
-        assistant_content.extend(turn_provider_state);
-        if !turn_text.is_empty() {
-            assistant_content.push(ContentBlock::Text { text: turn_text });
-        }
-        assistant_content.extend(tool_calls.clone());
         // Persist this assistant turn immediately, in the exact shape it
         // will be replayed. Its tool-call results are written as a paired
         // user row right after they're computed (below), so the persisted
@@ -1703,7 +1780,11 @@ async fn generate_chat_title(
         match item {
             Ok(StreamEvent::Delta(ContentBlock::Text { text: chunk })) => text.push_str(&chunk),
             Ok(StreamEvent::Done) => break,
-            Ok(_) => {}
+            Ok(StreamEvent::Delta(_))
+            | Ok(StreamEvent::Usage(_))
+            | Ok(StreamEvent::Thinking(_))
+            | Ok(StreamEvent::ThinkingDelta { .. })
+            | Ok(StreamEvent::ThinkingBlockComplete { .. }) => {}
             Err(e) => {
                 tracing::warn!(session_id=%session_id, error=%e, "title-gen: stream event failed");
                 return None;

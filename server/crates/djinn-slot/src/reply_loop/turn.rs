@@ -896,6 +896,8 @@ pub async fn run_reply_loop(
                 turn_thinking,
                 turn_provider_state,
                 turn_tool_calls,
+                turn_unresolved_thinking,
+                turn_completed_thinking_ids,
                 turn_tokens_in,
                 turn_tokens_out,
                 turn_cache_read,
@@ -1010,22 +1012,28 @@ pub async fn run_reply_loop(
                     diag,
                 ));
             }
-            let mut assistant_content: Vec<ContentBlock> = Vec::new();
-            assistant_content.extend(turn_provider_state);
-            if !turn_thinking.is_empty() {
-                assistant_content.push(ContentBlock::Thinking { thinking: turn_thinking.clone(), signature: None });
-            }
+            // Canonical assembly: provider-state blocks, one unsigned
+            // thinking block from unresolved fragments (reconciled by exact
+            // block ID), assistant text, then tool calls.
+            let assistant_content = super::persistence::assemble_persisted_content(
+                &turn_provider_state,
+                &turn_unresolved_thinking,
+                &turn_completed_thinking_ids,
+                &turn_thinking,
+                &turn_text,
+                &turn_tool_calls,
+            );
+            // Side-effects that depend on turn content (not part of the
+            // canonical assembly itself).
             if !turn_text.is_empty() {
                 push_fragment(&mut assistant_fragments, format!("text:{turn_text}"));
                 last_assistant_text = turn_text.clone();
                 final_assistant_text = turn_text.clone();
-                assistant_content.push(ContentBlock::Text { text: turn_text.clone() });
             }
             for tool_call in &turn_tool_calls {
                 if let ContentBlock::ToolUse { id, .. } = tool_call {
                     push_fragment(&mut assistant_fragments, format!("tool_use:{id}"));
                 }
-                assistant_content.push(tool_call.clone());
             }
             if assistant_content.is_empty() {
                 if empty_turn_is_reasoning_only(turn_reasoning_out) {
