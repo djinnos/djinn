@@ -208,3 +208,64 @@ impl MismatchScanCoordinator {
 fn is_role_tool_mismatch(candidate: &BoardHealthMismatchCandidate) -> bool {
     djinn_db::evaluate_board_health_mismatch_candidate(candidate)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use djinn_core::events::EventBus;
+    use std::sync::Arc;
+    use tokio::sync::Barrier;
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn api_trigger_storm_coalesces_behind_one_active_runner() {
+        let db = Database::open_in_memory().unwrap();
+        db.ensure_initialized().await.unwrap();
+        let project_id = uuid::Uuid::now_v7().to_string();
+        sqlx::query(
+            "INSERT INTO projects (id, name, github_owner, github_repo) VALUES ($1, 'p', 'test', $2)",
+        )
+        .bind(&project_id)
+        .bind(format!("mismatch-storm-{project_id}"))
+        .execute(db.pool())
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO tasks (id, project_id, short_id, title, description, design, issue_type, status, labels, acceptance_criteria, memory_refs, total_reopen_count) \
+             SELECT '00000000-0000-0000-0000-' || lpad(n::text, 12, '0'), $1, 'storm-' || n, 'storm', 'requires task_create', '', 'task', 'open', '[]'::jsonb, '[]'::jsonb, '[]'::jsonb, 3 \
+             FROM generate_series(1, 10000) AS n",
+        )
+        .bind(&project_id)
+        .execute(db.pool())
+        .await
+        .unwrap();
+        let coordinator = MismatchScanCoordinator::new(db, EventBus::noop());
+        coordinator.trigger(Trigger::Api).await;
+        while !coordinator.state.lock().await.running {
+            tokio::task::yield_now().await;
+        }
+
+        let barrier = Arc::new(Barrier::new(33));
+        let mut joins = Vec::new();
+        for _ in 0..32 {
+            let coordinator = coordinator.clone();
+            let barrier = barrier.clone();
+            joins.push(tokio::spawn(async move {
+                barrier.wait().await;
+                coordinator.trigger(Trigger::Api).await;
+            }));
+        }
+        barrier.wait().await;
+        for join in joins {
+            join.await.unwrap();
+        }
+        // The FlightState pending bit is the bounded coalescing latch: no
+        // trigger storm can queue more than this one follow-up run.
+        assert!(coordinator.state.lock().await.pending);
+        while coordinator.state.lock().await.running {
+            tokio::task::yield_now().await;
+        }
+        let state = coordinator.state.lock().await;
+        assert!(!state.running);
+        assert!(!state.pending);
+    }
+}
