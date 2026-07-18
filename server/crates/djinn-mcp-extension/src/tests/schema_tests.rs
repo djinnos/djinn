@@ -259,8 +259,10 @@ fn tool_schemas_include_role_specific_tools() {
         advocate.iter().any(|n| n == "proposal_ac_set"),
         "advocate should have proposal_ac_set (silent AC update)"
     );
-    // The advocate ONLY revises the spec. Resolution + rebuttal are the
-    // Judge's job, and `proposal_ac_amend` spams AI feedback comments.
+    // The advocate revises the spec and may REBUT objections on the debate
+    // trail (kind="rebuttal") — the tribunal's counterweight against scope
+    // ratchet. Resolution stays the Judge's job, and `proposal_ac_amend`
+    // spams AI feedback comments.
     assert!(
         !advocate.iter().any(|n| n == "proposal_ac_amend"),
         "advocate must NOT have proposal_ac_amend (it persists AI feedback noise)"
@@ -270,8 +272,10 @@ fn tool_schemas_include_role_specific_tools() {
         "advocate must NOT resolve objections — the Judge adjudicates resolution"
     );
     assert!(
-        !advocate.iter().any(|n| n == "proposal_debate_append"),
-        "advocate must NOT write the debate trail — it only revises the spec"
+        advocate.iter().any(|n| n == "proposal_debate_append"),
+        "advocate must have proposal_debate_append — its rebuttal channel \
+         (kind=\"rebuttal\"); without it every objection can only be resolved \
+         by growing the spec"
     );
     assert!(
         advocate.iter().any(|n| n == "proposal_block_patch"),
@@ -1427,9 +1431,9 @@ fn lead_schema_does_not_expose_request_planner_or_escalate() {
 // Ensures no tool description in the canonical schema surfaces contains the
 // stale DB-system reference. If this test fails, a tool description was
 // reintroduced with the old wording instead of accurate memory_* MCP
-// guidance. The comprehensive agent-facing-file guard lives in the
-// integration test at tests/stale_token_guard.rs (outside src/, so the
-// AC-required grep over src/ stays clean).
+// guidance. The comprehensive runtime and serialized-surface guard lives in
+// djinn-agent beside production prompt-context assembly, where it can execute
+// both prompt renderers and recursively inspect these schemas.
 
 #[test]
 fn no_stale_db_token_in_tool_descriptions() {

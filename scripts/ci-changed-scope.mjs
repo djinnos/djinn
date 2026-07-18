@@ -212,6 +212,9 @@ function parseArgs(argv) {
     } else if (arg === '--files-file') {
       const contents = readFileSync(value(), 'utf8');
       input.files.push(...contents.split(/\r?\n/).filter(Boolean));
+    } else if (arg === '--files0-file') {
+      const contents = readFileSync(value(), 'utf8');
+      input.files.push(...contents.split('\0').filter(Boolean));
     } else if (arg === '--full-validation') input.fullValidation = true;
     else if (arg === '--github-output') githubOutput = value();
     else if (arg === '--help') return null;
@@ -223,7 +226,7 @@ function parseArgs(argv) {
 function main() {
   const parsed = parseArgs(process.argv.slice(2));
   if (parsed === null) {
-    process.stdout.write('usage: ci-changed-scope.mjs --event EVENT --base BASE --head HEAD [--file PATH | --files-json JSON | --files-file PATH] [--full-validation] [--github-output PATH]\n');
+    process.stdout.write('usage: ci-changed-scope.mjs --event EVENT --base BASE --head HEAD [--file PATH | --files-json JSON | --files-file PATH | --files0-file PATH] [--full-validation] [--github-output PATH]\n');
     return;
   }
   const result = planChangedScope(parsed.input);

@@ -117,10 +117,18 @@ fn role_tool_mismatch_reason(
 }
 
 async fn list_board_health_mismatch_candidates(repo: &TaskRepository) -> Result<Vec<Task>> {
+    // Non-closed only: the mismatch report is advisory about LIVE reopen
+    // churn, and closed tasks can never be re-routed to a different role.
+    // The unfiltered form scanned every task on the board (4,949 rows with
+    // ~20 correlated subqueries each, 6–9 s per call) on every board_health
+    // request — the UI polls that every 15 s, which starved the coordinator
+    // tick and the liveness probe as the closed backlog grew (2026-07-17
+    // restart loop). `!closed` bounds the candidate set by WIP, which does
+    // not grow with board history.
     let list = repo
         .list_filtered(ListQuery {
             project_id: None,
-            status: None,
+            status: Some("!closed".to_string()),
             issue_type: None,
             priority: None,
             label: None,
@@ -519,14 +527,20 @@ impl TaskRepository {
             })
             .collect();
 
-        // Review queue: tasks waiting in any review status.
+        // Review queue: tasks waiting in any review status. Closed tasks are
+        // NOT part of a queue of pending review work, and including them made
+        // this an unbounded full-history fetch (every closed task ever,
+        // serialized into JSON on each board_health call — the UI polls this
+        // every poll interval). Bounded defensively: the live review set is
+        // WIP-sized, so the LIMIT only guards against pathological states.
         let review_rows = sqlx::query!(
             r#"SELECT t.id, t.short_id, t.title, t.status, t.updated_at,
                     e.short_id AS epic_short_id
              FROM tasks t
              JOIN epics e ON t.epic_id = e.id
-             WHERE t.status IN ('needs_task_review','in_task_review','approved','pr_draft','pr_review','closed')
-             ORDER BY t.updated_at ASC"#,
+             WHERE t.status IN ('needs_task_review','in_task_review','approved','pr_draft','pr_review')
+             ORDER BY t.updated_at ASC
+             LIMIT 500"#,
         )
         .fetch_all(self.db.pool())
         .await?;
@@ -894,6 +908,8 @@ pub(super) fn sort_to_sql(sort: &str) -> &'static str {
     }
 }
 
+#[cfg(test)]
+mod board_health_bounds_tests;
 #[cfg(test)]
 mod merged_classification_tests;
 #[cfg(test)]

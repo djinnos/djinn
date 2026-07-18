@@ -45,8 +45,6 @@ mod canonical_graph_refresh_planner;
 mod provider_catalog_refresh;
 mod settings;
 
-use crate::memory_fs::MemoryViewSelection;
-use crate::memory_mount::MountedMemoryFilesystem;
 use canonical_graph_refresh_planner::{
     CanonicalGraphRefreshPlanner, CanonicalGraphRefreshProbe, RefreshPlan, WarmPlan, WarmPlanInputs,
 };
@@ -54,6 +52,74 @@ use canonical_graph_refresh_planner::{
 const EVENT_CHANNEL_CAPACITY: usize = 1024;
 const SETTINGS_RAW_KEY: &str = "settings.raw";
 const MODEL_HEALTH_STATE_KEY: &str = "model_health.state";
+
+const BUILD_ADMISSION_MODE_ENV: &str = "DJINN_BUILD_ADMISSION_MODE";
+const MAX_BUILD_TASKRUNS_ENV: &str = "DJINN_MAX_BUILD_TASKRUNS";
+
+/// Immutable build-admission startup policy. It is parsed before composition,
+/// so an environment change only takes effect after a process restart.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct BuildAdmissionConfig {
+    mode: BuildAdmissionMode,
+    cap: i64,
+}
+
+impl BuildAdmissionConfig {
+    const DEFAULT_CAP: i64 = 3;
+    const MAX_CAP: i64 = 64;
+
+    fn from_env() -> Result<Self, String> {
+        Self::parse(
+            std::env::var(BUILD_ADMISSION_MODE_ENV).ok().as_deref(),
+            std::env::var(MAX_BUILD_TASKRUNS_ENV).ok().as_deref(),
+        )
+    }
+
+    fn parse(mode: Option<&str>, cap: Option<&str>) -> Result<Self, String> {
+        let explicit_mode = match mode {
+            None => None,
+            Some("off") => Some(BuildAdmissionMode::Off),
+            Some("observe") => Some(BuildAdmissionMode::Observe),
+            Some("enforce") => Some(BuildAdmissionMode::Enforce),
+            Some("") => return Err(format!("{BUILD_ADMISSION_MODE_ENV} must not be empty")),
+            Some(value) => {
+                return Err(format!(
+                    "{BUILD_ADMISSION_MODE_ENV} must be exactly off, observe, or enforce (got {value:?})"
+                ));
+            }
+        };
+        let parsed_cap = match cap {
+            None => None,
+            Some("") => return Err(format!("{MAX_BUILD_TASKRUNS_ENV} must not be empty")),
+            Some(value) => Some(value.parse::<i64>().map_err(|_| {
+                format!(
+                    "{MAX_BUILD_TASKRUNS_ENV} must be an integer from 1 through 64 (got {value:?})"
+                )
+            })?),
+        };
+        if parsed_cap == Some(0) {
+            return match explicit_mode {
+                Some(BuildAdmissionMode::Observe | BuildAdmissionMode::Enforce) => Err(format!(
+                    "{MAX_BUILD_TASKRUNS_ENV}=0 conflicts with explicit {BUILD_ADMISSION_MODE_ENV}"
+                )),
+                _ => Ok(Self {
+                    mode: BuildAdmissionMode::Off,
+                    cap: 0,
+                }),
+            };
+        }
+        let cap = parsed_cap.unwrap_or(Self::DEFAULT_CAP);
+        if !(1..=Self::MAX_CAP).contains(&cap) {
+            return Err(format!(
+                "{MAX_BUILD_TASKRUNS_ENV} must be an integer from 1 through 64 (got {cap})"
+            ));
+        }
+        Ok(Self {
+            mode: explicit_mode.unwrap_or(BuildAdmissionMode::Observe),
+            cap,
+        })
+    }
+}
 
 /// Production [`WarmCompletionSink`]: converge the server's in-memory
 /// canonical-graph slot after an *out-of-pod* warm Job succeeds.
@@ -186,37 +252,6 @@ fn sync_provider_runtime_config(state: &CredentialSourceState) {
     }
 }
 
-fn canonical_view_resolution(
-    active_task_count: usize,
-    fallback: Option<crate::server::MemoryMountViewFallback>,
-) -> crate::server::MemoryMountViewResolution {
-    let fallback = fallback.or_else(|| {
-        (active_task_count > 1).then(|| crate::server::MemoryMountViewFallback {
-            reason: crate::server::MemoryMountViewFallbackReason::AmbiguousActiveTasks,
-            detail: Some(
-                "mounted memory requires exactly one active task before task-scoped selection can be used"
-                    .to_string(),
-            ),
-            active_task_count: Some(active_task_count),
-            task_id: None,
-            task_short_id: None,
-            task_project_id: None,
-            mount_project_id: None,
-            session_workspace_path: None,
-        })
-    });
-
-    crate::server::MemoryMountViewResolution {
-        selection: MemoryViewSelection::Canonical,
-        health: crate::server::MemoryMountViewHealth {
-            kind: crate::server::MemoryMountViewKind::Canonical,
-            task_short_id: None,
-            worktree_root: None,
-            fallback,
-        },
-    }
-}
-
 /// Shared application state, cheaply cloneable via `Arc`.
 #[derive(Clone)]
 pub struct AppState {
@@ -301,7 +336,6 @@ struct Inner {
     /// be coalesced (return immediately without spawning a duplicate task).
     /// The entry is removed by the spawned task in its completion branch.
     pub canonical_warm_inflight: Arc<std::sync::Mutex<HashSet<String>>>,
-    pub memory_mount: Mutex<Option<MountedMemoryFilesystem>>,
     /// Retained GitHub App credential-source state. This is the single source
     /// of truth for both the active configuration and operator-facing recovery
     /// state: `app_config()` derives its value from this enum instead of
@@ -384,11 +418,8 @@ struct Inner {
     /// dispatch through this handle rather than constructing a warmer
     /// per-call.
     pub graph_warmer: tokio::sync::RwLock<Option<Arc<dyn GraphWarmerService>>>,
-    /// The one admission controller for this server process. It is shared by
-    /// task-run dispatch and the concrete K8s graph warmer before either is
-    /// erased behind `GraphWarmerService`, so both workloads reserve from one
-    /// atomic durable cap.
-    pub build_admission: Arc<BuildAdmissionController>,
+    /// The admission controller for this server process when admission is enabled.
+    pub build_admission: Option<Arc<BuildAdmissionController>>,
 }
 
 /// Result of a boot token exchange attempt.
@@ -412,6 +443,10 @@ impl AppState {
             cancel,
             djinn_core::doctor::RetrievalHealthConfig::default(),
             Arc::new(djinn_telemetry::memory_retrieval::MemoryRetrievalMetrics::new()),
+            BuildAdmissionConfig {
+                mode: BuildAdmissionMode::Observe,
+                cap: BuildAdmissionConfig::DEFAULT_CAP,
+            },
         )
     }
 
@@ -421,8 +456,16 @@ impl AppState {
         cancel: CancellationToken,
         retrieval_config: djinn_core::doctor::RetrievalHealthConfig,
         retrieval_metrics: Arc<djinn_telemetry::memory_retrieval::MemoryRetrievalMetrics>,
-    ) -> Self {
-        Self::new_inner(db, db_runtime, cancel, retrieval_config, retrieval_metrics)
+    ) -> Result<Self, String> {
+        let admission_config = BuildAdmissionConfig::from_env()?;
+        Ok(Self::new_inner(
+            db,
+            db_runtime,
+            cancel,
+            retrieval_config,
+            retrieval_metrics,
+            admission_config,
+        ))
     }
 
     fn new_inner(
@@ -431,19 +474,37 @@ impl AppState {
         cancel: CancellationToken,
         retrieval_config: djinn_core::doctor::RetrievalHealthConfig,
         retrieval_metrics: Arc<djinn_telemetry::memory_retrieval::MemoryRetrievalMetrics>,
+        admission_config: BuildAdmissionConfig,
     ) -> Self {
         let (events, _) = broadcast::channel(EVENT_CHANNEL_CAPACITY);
         let mirror = Arc::new(MirrorManager::new(mirrors_root()));
         let workspace_store = Arc::new(WorkspaceStore::new(workspaces_root(), Arc::clone(&mirror)));
-        let build_admission = Arc::new(BuildAdmissionController::new(
-            Arc::new(djinn_db::AdmissionJournalRepository::new(db.clone())),
-            BuildAdmissionMode::Enforce,
-            std::env::var("DJINN_BUILD_ADMISSION_CAP")
-                .ok()
-                .and_then(|value| value.parse().ok())
-                .unwrap_or(50),
+        // Each server process allocates a unique epoch so recovery can
+        // distinguish rows created by a predecessor from rows created here.
+        // The hostname is retained as a human-readable prefix; the UUIDv7
+        // suffix guarantees uniqueness across restarts and replicas.
+        let server_epoch = format!(
+            "{}:{}",
             std::env::var("HOSTNAME").unwrap_or_else(|_| "coordinator".to_owned()),
-        ));
+            djinn_agent::actors::coordinator::allocate_server_epoch()
+        );
+        let build_admission = match admission_config.mode {
+            BuildAdmissionMode::Off => None,
+            BuildAdmissionMode::Observe => Some(Arc::new(BuildAdmissionController::new(
+                Arc::new(djinn_db::AdmissionJournalRepository::new(db.clone())),
+                BuildAdmissionMode::Observe,
+                admission_config.cap,
+                server_epoch,
+            ))),
+            // Enforce starts fail-closed (JournalRecoveryIncomplete) until the
+            // durable journal is recovered and seeded before any inventory or
+            // task/warm create can run.
+            BuildAdmissionMode::Enforce => Some(Arc::new(BuildAdmissionController::new_closed(
+                Arc::new(djinn_db::AdmissionJournalRepository::new(db.clone())),
+                admission_config.cap,
+                server_epoch,
+            ))),
+        };
         Self {
             inner: Arc::new(Inner {
                 db,
@@ -469,7 +530,6 @@ impl AppState {
                 indexer_lock: Arc::new(tokio::sync::Mutex::new(())),
                 workspace_store,
                 canonical_warm_inflight: Arc::new(std::sync::Mutex::new(HashSet::new())),
-                memory_mount: Mutex::new(None),
                 app_credential_state: tokio::sync::RwLock::new(CredentialSourceState::Unconfigured),
                 boot_token: tokio::sync::RwLock::new(None),
                 setup_session: tokio::sync::RwLock::new(None),
@@ -679,6 +739,124 @@ impl AppState {
         Arc::new(build_in_process_graph_warmer(self.clone())) as Arc<dyn GraphWarmerService>
     }
 
+    /// Recover the durable build-admission journal and seed the controller
+    /// before any Kubernetes inventory or task/warm create can run.
+    ///
+    /// Enforce admission remains fail-closed until recovery completes. Observe
+    /// runs lifecycle/telemetry but never denies; Off has no admission coupling.
+    /// This is idempotent: a second call re-seeds from the journal without harm.
+    async fn initialize_build_admission_recovery(&self) {
+        let Some(admission) = self.inner.build_admission.clone() else {
+            // Off: no journal, no controller, no readiness coupling.
+            return;
+        };
+        match admission.recover_all_predecessors_and_seed().await {
+            Ok(report) => {
+                tracing::info!(
+                    mode = ?admission.mode(),
+                    retired_reserved = report.retired_reserved,
+                    marked_create_unknown = report.marked_create_unknown,
+                    seeded_rows = report.seeded_rows,
+                    readiness = ?report.readiness,
+                    "build_admission: recovered durable journal and seeded controller"
+                );
+            }
+            Err(error) => {
+                // Enforce fails closed: the journal gate records the unhealthy
+                // journal and every later gate stays pending, so admission
+                // keeps denying. Observe continues without denial (it never
+                // gated on readiness). A durable journal outage during
+                // recovery is a fail-closed condition for Enforce.
+                admission.mark_journal_unhealthy();
+                tracing::error!(
+                    %error,
+                    mode = ?admission.mode(),
+                    "build_admission: journal recovery failed; Enforce remains fail-closed"
+                );
+            }
+        }
+    }
+
+    /// Run the broad Kubernetes build-capable inventory and advance the
+    /// Enforce readiness gate.
+    ///
+    /// This MUST run after [`Self::initialize_build_admission_recovery`] (the
+    /// durable journal loads before any Kubernetes inventory) and after
+    /// [`Self::initialize_graph_warmer`] (the inventory rides the same client
+    /// selection). The gate fails closed: any inventory LIST error leaves
+    /// `InventoryPending` set so Enforce admission keeps denying until a real
+    /// inventory succeeds. The in-process runtime has no Kubernetes objects
+    /// to inventory, so its (empty) listing trivially completes the gate.
+    /// Observe records the same degradation but never denies.
+    async fn initialize_build_admission_inventory(&self) {
+        let Some(admission) = self.inner.build_admission.clone() else {
+            // Off: no controller, no readiness coupling.
+            return;
+        };
+        let warmer = self.inner.graph_warmer.read().await.clone();
+        let Some(warmer) = warmer else {
+            admission.mark_inventory_pending();
+            tracing::error!(
+                mode = ?admission.mode(),
+                "build_admission: no graph warmer available for inventory; Enforce remains fail-closed"
+            );
+            return;
+        };
+        match warmer.list_taskrun_jobs().await {
+            Ok(jobs) => {
+                admission.mark_inventory_ready();
+                tracing::info!(
+                    mode = ?admission.mode(),
+                    task_run_jobs = jobs.len(),
+                    readiness = ?admission.readiness(),
+                    "build_admission: Kubernetes inventory complete"
+                );
+            }
+            Err(error) => {
+                admission.mark_inventory_pending();
+                tracing::error!(
+                    %error,
+                    mode = ?admission.mode(),
+                    "build_admission: Kubernetes inventory failed; Enforce remains fail-closed"
+                );
+            }
+        }
+    }
+
+    /// Confirm the single-active topology gate and advance Enforce readiness.
+    ///
+    /// Called from [`Self::become_leader`], which runs only after this process
+    /// wins the coordinator advisory lock — the lock IS the single-active
+    /// topology gate for build admission. A standby pod never runs this, so
+    /// its Enforce admission stays fail-closed with `TopologyPending`.
+    fn confirm_build_admission_topology(&self) {
+        if let Some(admission) = self.inner.build_admission.clone() {
+            admission.mark_topology_ready();
+            tracing::info!(
+                mode = ?admission.mode(),
+                readiness = ?admission.readiness(),
+                "build_admission: single-active topology confirmed by coordinator leadership"
+            );
+        }
+    }
+
+    /// Begin graceful build-admission draining.
+    ///
+    /// New Enforce reservations are blocked while draining; in-flight permits
+    /// may still transition to terminal. Observe and Off are unaffected because
+    /// they never gated admission on readiness. Safety under forced process
+    /// loss does not depend on this cooperative shutdown: the durable journal
+    /// records pre-POST state, so a replacement recovers the same occupancy.
+    pub async fn begin_build_admission_draining(&self) {
+        if let Some(admission) = self.inner.build_admission.clone() {
+            admission.begin_draining();
+            tracing::info!(
+                mode = ?admission.mode(),
+                "build_admission: draining begun; new Enforce reservations blocked"
+            );
+        }
+    }
+
     /// Pick the best available [`GraphWarmerService`] implementation and
     /// cache it on [`AppState`]. Idempotent.
     ///
@@ -705,8 +883,11 @@ impl AppState {
                         "graph_warmer: wiring K8sGraphWarmer"
                     );
                     let warmer = K8sGraphWarmer::new(client, config, self.db().clone())
-                        .with_completion_sink(Arc::new(CanonicalGraphInvalidationSink))
-                        .with_warm_admission(self.inner.build_admission.clone());
+                        .with_completion_sink(Arc::new(CanonicalGraphInvalidationSink));
+                    let warmer = match self.inner.build_admission.clone() {
+                        Some(admission) => warmer.with_warm_admission(admission),
+                        None => warmer,
+                    };
                     Arc::new(warmer) as Arc<dyn GraphWarmerService>
                 }
                 Err(e) => {
@@ -759,13 +940,14 @@ impl AppState {
         let db = db_runtime
             .bootstrap()
             .map_err(|e| anyhow::anyhow!("open database runtime: {e}"))?;
-        Ok(Self::new_with_runtime(
+        Self::new_with_runtime(
             db,
             db_runtime,
             cancel,
             djinn_core::doctor::RetrievalHealthConfig::default(),
             Arc::new(djinn_telemetry::memory_retrieval::MemoryRetrievalMetrics::new()),
-        ))
+        )
+        .map_err(anyhow::Error::msg)
     }
 
     /// Read-only snapshot of the active GitHub App configuration, if any.
@@ -1242,231 +1424,6 @@ impl AppState {
         self.inner.db_runtime.health_snapshot(self.db())
     }
 
-    pub(crate) async fn memory_mount_health(&self) -> crate::server::MemoryMountHealth {
-        let mount = self.inner.memory_mount.lock().await;
-        let Some(mount) = mount.as_ref() else {
-            return crate::server::MemoryMountHealth {
-                enabled: false,
-                active: false,
-                lifecycle: crate::server::MemoryMountLifecycleState::Disabled,
-                configured: false,
-                mount_path: None,
-                project_id: None,
-                detail: None,
-                view: crate::server::MemoryMountViewHealth {
-                    kind: crate::server::MemoryMountViewKind::Canonical,
-                    task_short_id: None,
-                    worktree_root: None,
-                    fallback: None,
-                },
-                pending_writes: 0,
-                last_error: None,
-            };
-        };
-        let active = mount.is_active();
-        let status = mount.status_snapshot().await;
-        crate::server::MemoryMountHealth {
-            enabled: status.configured,
-            active,
-            lifecycle: status.lifecycle,
-            configured: status.configured,
-            mount_path: status.mount_path.map(|path| path.display().to_string()),
-            project_id: status.project_id,
-            detail: status.detail,
-            view: status.view,
-            pending_writes: status.pending_writes,
-            last_error: status.last_error,
-        }
-    }
-
-    #[cfg(test)]
-    pub(crate) async fn set_memory_mount_for_tests(
-        &self,
-        mount: Option<crate::memory_mount::MountedMemoryFilesystem>,
-    ) {
-        *self.inner.memory_mount.lock().await = mount;
-    }
-
-    #[cfg_attr(
-        not(any(test, all(target_os = "linux", feature = "memory-mount"))),
-        allow(dead_code)
-    )]
-    pub(crate) async fn resolve_memory_mount_view_selection(
-        &self,
-        project_id: &str,
-        project_path: &Path,
-    ) -> MemoryViewSelection {
-        self.resolve_memory_mount_view_resolution(project_id, project_path)
-            .await
-            .selection
-    }
-
-    #[cfg_attr(
-        not(any(test, all(target_os = "linux", feature = "memory-mount"))),
-        allow(dead_code)
-    )]
-    pub(crate) async fn resolve_memory_mount_view_resolution(
-        &self,
-        project_id: &str,
-        project_path: &Path,
-    ) -> crate::server::MemoryMountViewResolution {
-        let active_task_ids: Vec<String> = self
-            .inner
-            .active_tasks
-            .lock()
-            .expect("poisoned")
-            .keys()
-            .cloned()
-            .collect();
-
-        let [task_id] = active_task_ids.as_slice() else {
-            return canonical_view_resolution(active_task_ids.len(), None);
-        };
-
-        let task_repo = djinn_db::TaskRepository::new(self.db().clone(), self.event_bus());
-        let Some(task) = task_repo.get(task_id).await.ok().flatten() else {
-            tracing::debug!(
-                task_id,
-                "memory mount falling back to main: active task not found"
-            );
-            return canonical_view_resolution(
-                1,
-                Some(crate::server::MemoryMountViewFallback {
-                    reason: crate::server::MemoryMountViewFallbackReason::ActiveTaskNotFound,
-                    detail: Some("active task no longer exists in the database".to_string()),
-                    active_task_count: Some(1),
-                    task_id: Some(task_id.to_string()),
-                    task_short_id: None,
-                    task_project_id: None,
-                    mount_project_id: Some(project_id.to_string()),
-                    session_workspace_path: None,
-                }),
-            );
-        };
-
-        if task.project_id != project_id {
-            tracing::debug!(
-                task_id = %task.id,
-                task_project_id = %task.project_id,
-                mount_project_id = %project_id,
-                "memory mount falling back to main: active task belongs to another project"
-            );
-            return canonical_view_resolution(
-                1,
-                Some(crate::server::MemoryMountViewFallback {
-                    reason: crate::server::MemoryMountViewFallbackReason::TaskProjectMismatch,
-                    detail: Some("active task belongs to another registered project".to_string()),
-                    active_task_count: Some(1),
-                    task_id: Some(task.id),
-                    task_short_id: Some(task.short_id),
-                    task_project_id: Some(task.project_id),
-                    mount_project_id: Some(project_id.to_string()),
-                    session_workspace_path: None,
-                }),
-            );
-        }
-
-        let session_repo = djinn_db::SessionRepository::new(self.db().clone(), self.event_bus());
-        let Some(session) = session_repo.active_for_task(&task.id).await.ok().flatten() else {
-            tracing::debug!(
-                task_id = %task.id,
-                short_id = %task.short_id,
-                "memory mount falling back to main: no running session for active task"
-            );
-            return canonical_view_resolution(
-                1,
-                Some(crate::server::MemoryMountViewFallback {
-                    reason: crate::server::MemoryMountViewFallbackReason::NoActiveSession,
-                    detail: Some("no running session is attached to the active task".to_string()),
-                    active_task_count: Some(1),
-                    task_id: Some(task.id),
-                    task_short_id: Some(task.short_id),
-                    task_project_id: Some(project_id.to_string()),
-                    mount_project_id: Some(project_id.to_string()),
-                    session_workspace_path: None,
-                }),
-            );
-        };
-
-        // Prefer the workspace_path owned by the session's task_run (migration
-        // 5 model).  Task #8 removed the `sessions.worktree_path` migration-
-        // window fallback; task #13 will drop the column.
-        let task_run_repo =
-            djinn_db::repositories::task_run::TaskRunRepository::new(self.db().clone());
-        let workspace_source: Option<String> = match session.task_run_id.as_deref() {
-            Some(run_id) => task_run_repo
-                .get(run_id)
-                .await
-                .ok()
-                .flatten()
-                .and_then(|run| run.workspace_path),
-            None => None,
-        };
-
-        let Some(workspace_path) = workspace_source
-            .as_deref()
-            .map(str::trim)
-            .filter(|p| !p.is_empty())
-        else {
-            tracing::debug!(
-                task_id = %task.id,
-                short_id = %task.short_id,
-                "memory mount falling back to main: active session has no workspace path"
-            );
-            return canonical_view_resolution(
-                1,
-                Some(crate::server::MemoryMountViewFallback {
-                    reason: crate::server::MemoryMountViewFallbackReason::MissingSessionWorktree,
-                    detail: Some("active session did not publish a workspace path".to_string()),
-                    active_task_count: Some(1),
-                    task_id: Some(task.id),
-                    task_short_id: Some(task.short_id),
-                    task_project_id: Some(project_id.to_string()),
-                    mount_project_id: Some(project_id.to_string()),
-                    session_workspace_path: None,
-                }),
-            );
-        };
-
-        let workspace_root = PathBuf::from(workspace_path);
-        if workspace_root == project_path {
-            tracing::debug!(
-                task_id = %task.id,
-                short_id = %task.short_id,
-                "memory mount falling back to main: active session is on canonical project root"
-            );
-            return canonical_view_resolution(
-                1,
-                Some(crate::server::MemoryMountViewFallback {
-                    reason: crate::server::MemoryMountViewFallbackReason::CanonicalProjectRoot,
-                    detail: Some(
-                        "active session workspace resolves to the canonical project root"
-                            .to_string(),
-                    ),
-                    active_task_count: Some(1),
-                    task_id: Some(task.id),
-                    task_short_id: Some(task.short_id),
-                    task_project_id: Some(project_id.to_string()),
-                    mount_project_id: Some(project_id.to_string()),
-                    session_workspace_path: Some(workspace_root.display().to_string()),
-                }),
-            );
-        }
-
-        crate::server::MemoryMountViewResolution {
-            selection: MemoryViewSelection::Task {
-                task_short_id: Some(task.short_id.clone()),
-                worktree_root: Some(workspace_root.clone()),
-            },
-            health: crate::server::MemoryMountViewHealth {
-                kind: crate::server::MemoryMountViewKind::TaskScoped,
-                task_short_id: Some(task.short_id),
-                worktree_root: Some(workspace_root.display().to_string()),
-                fallback: None,
-            },
-        }
-    }
-
     pub fn cancel(&self) -> &CancellationToken {
         &self.inner.cancel
     }
@@ -1723,24 +1680,26 @@ impl AppState {
                 role_priorities: std::collections::HashMap::new(),
             },
         );
-        let coordinator = djinn_agent::actors::coordinator::spawn_coordinator(
-            djinn_agent::actors::coordinator::CoordinatorDeps::new(
-                self.events().clone(),
-                self.cancel().clone(),
-                self.db().clone(),
-                pool.clone(),
-                self.catalog().clone(),
-                self.health_tracker().clone(),
-                self.inner.role_registry.clone(),
-                self.inner.background_work_tasks.clone(),
-                self.inner.lsp.clone(),
-            )
-            .with_build_admission(self.inner.build_admission.clone())
-            .with_graph_warmer(self.graph_warmer().await)
-            .with_mirror(self.inner.mirror.clone())
-            .with_runtime_ops(Arc::new(self.clone()))
-            .with_rpc_registry(self.inner.rpc_registry.clone()),
-        );
+        let deps = djinn_agent::actors::coordinator::CoordinatorDeps::new(
+            self.events().clone(),
+            self.cancel().clone(),
+            self.db().clone(),
+            pool.clone(),
+            self.catalog().clone(),
+            self.health_tracker().clone(),
+            self.inner.role_registry.clone(),
+            self.inner.background_work_tasks.clone(),
+            self.inner.lsp.clone(),
+        )
+        .with_graph_warmer(self.graph_warmer().await)
+        .with_mirror(self.inner.mirror.clone())
+        .with_runtime_ops(Arc::new(self.clone()))
+        .with_rpc_registry(self.inner.rpc_registry.clone());
+        let deps = match self.inner.build_admission.clone() {
+            Some(admission) => deps.with_build_admission(admission),
+            None => deps,
+        };
+        let coordinator = djinn_agent::actors::coordinator::spawn_coordinator(deps);
 
         *self.inner.pool.lock().await = Some(pool.clone());
         *self.inner.coordinator.lock().await = Some(coordinator.clone());
@@ -1877,11 +1836,27 @@ impl AppState {
         // image controller) now start in `become_leader()` so only the
         // single lock-holding pod runs them. See `crate::leadership`.
 
+        // Build-admission journal recovery. The durable journal is loaded and
+        // recovered BEFORE any Kubernetes inventory or task/warm create can run.
+        // Enforce admission remains fail-closed until recovery seeds the
+        // controller from all active recovered rows and confirms occupancy is
+        // within the cap. Observe records degradation but never denies; Off has
+        // no admission coupling. This must precede `initialize_graph_warmer`
+        // because the warmer can create warm jobs under the shared cap.
+        self.initialize_build_admission_recovery().await;
+
         // Phase 3 PR 8: pick the canonical-graph warmer impl (K8s or
         // in-process) and cache it. This is just a cached handle (the actual
         // warm is single-flight-gated elsewhere), so it is safe on every pod
         // and the serving/chat path needs it regardless of leadership.
         self.initialize_graph_warmer().await;
+
+        // Build-admission Kubernetes inventory. This must follow BOTH the
+        // journal recovery above (the durable journal loads before any
+        // Kubernetes inventory) and the graph-warmer selection (the inventory
+        // rides the same client). Enforce stays fail-closed with
+        // `InventoryPending` until this LIST succeeds.
+        self.initialize_build_admission_inventory().await;
     }
 
     /// Start the subsystems that must run on **exactly one** pod: the
@@ -1897,6 +1872,12 @@ impl AppState {
     /// plane (which `initialize()` sets up) serves on every pod regardless.
     pub async fn become_leader(&self) {
         tracing::info!("become_leader: starting active coordinator subsystems");
+
+        // Build-admission single-active topology gate. Winning the coordinator
+        // advisory lock is the topology check: only this lock-holding pod may
+        // open Enforce admission, so standby pods stay fail-closed with
+        // `TopologyPending` (and their dispatch subsystems never start).
+        self.confirm_build_admission_topology();
 
         let retention_config = ImageControllerConfig::from_env();
         if let Err(error) = self.run_zot_retention_preflight(&retention_config).await {
@@ -2629,7 +2610,7 @@ fn build_in_process_graph_warmer(state: AppState) -> djinn_agent::warmer::InProc
     let warm: djinn_agent::warmer::WarmCallback = Arc::new(move |project_id, project_root| {
         let state = warm_state.clone();
         Box::pin(async move {
-            let index_tree_path = project_root.join(".djinn").join("worktrees").join("_index");
+            let index_tree_path = djinn_core::index_tree::index_tree_path(&project_root);
             let planner = CanonicalGraphRefreshPlanner;
             let warm_plan = planner.plan_warm(WarmPlanInputs {
                 cache_has_entry: djinn_graph::canonical_graph::canonical_graph_cache_has_entry_for(
@@ -3411,5 +3392,255 @@ mod retention_preflight_tests {
             outcome.report.contains("operator-owned"),
             "report must state production execution is operator-owned"
         );
+    }
+}
+
+#[cfg(test)]
+mod build_admission_config_tests {
+    use super::*;
+
+    static BUILD_ADMISSION_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn state_for_admission_config(config: BuildAdmissionConfig) -> AppState {
+        let db = Database::open_in_memory().expect("test database");
+        let runtime = DatabaseRuntimeManager::new(
+            crate::db::runtime::DatabaseRuntimeConfig::postgres(db.bootstrap_info().target.clone()),
+        );
+        AppState::new_inner(
+            db,
+            runtime,
+            CancellationToken::new(),
+            djinn_core::doctor::RetrievalHealthConfig::default(),
+            Arc::new(djinn_telemetry::memory_retrieval::MemoryRetrievalMetrics::new()),
+            config,
+        )
+    }
+
+    #[test]
+    fn build_admission_defaults_and_legacy_zero_are_deterministic() {
+        assert_eq!(
+            BuildAdmissionConfig::parse(None, None).unwrap(),
+            BuildAdmissionConfig {
+                mode: BuildAdmissionMode::Observe,
+                cap: 3
+            }
+        );
+        assert_eq!(
+            BuildAdmissionConfig::parse(None, Some("0")).unwrap(),
+            BuildAdmissionConfig {
+                mode: BuildAdmissionMode::Off,
+                cap: 0
+            }
+        );
+        assert!(BuildAdmissionConfig::parse(Some("observe"), Some("0")).is_err());
+        assert!(BuildAdmissionConfig::parse(Some("enforce"), Some("0")).is_err());
+    }
+
+    #[test]
+    fn build_admission_rejects_invalid_startup_values() {
+        for cap in ["", "-1", "not-a-number", "65"] {
+            assert!(
+                BuildAdmissionConfig::parse(None, Some(cap)).is_err(),
+                "{cap}"
+            );
+        }
+        for mode in ["", "Observe", "unknown"] {
+            assert!(
+                BuildAdmissionConfig::parse(Some(mode), None).is_err(),
+                "{mode:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn off_state_composition_has_no_admission_dependency_to_inject() {
+        let state = state_for_admission_config(BuildAdmissionConfig {
+            mode: BuildAdmissionMode::Off,
+            cap: 3,
+        });
+
+        // This is the actual AppState composition root used by both the
+        // coordinator and K8s graph-warmer injection branches. No controller
+        // means no journal repository or warm-admission object exists to pass
+        // to either `.with_build_admission` or `.with_warm_admission`.
+        assert!(state.inner.build_admission.is_none());
+        assert!(
+            state
+                .inner
+                .coordinator
+                .try_lock()
+                .expect("unstarted")
+                .is_none()
+        );
+        assert!(
+            state
+                .inner
+                .graph_warmer
+                .try_read()
+                .expect("unstarted")
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn environment_rollback_requires_a_new_app_state() {
+        let _guard = BUILD_ADMISSION_ENV_LOCK.lock().expect("environment lock");
+        let old_mode = std::env::var_os(BUILD_ADMISSION_MODE_ENV);
+        let old_cap = std::env::var_os(MAX_BUILD_TASKRUNS_ENV);
+
+        // SAFETY: this test serializes its admission-environment mutations and
+        // restores both variables before returning.
+        unsafe {
+            std::env::set_var(BUILD_ADMISSION_MODE_ENV, "enforce");
+            std::env::set_var(MAX_BUILD_TASKRUNS_ENV, "4");
+        }
+        let running = state_for_admission_config(BuildAdmissionConfig::from_env().unwrap());
+        let running_admission = running
+            .inner
+            .build_admission
+            .as_ref()
+            .expect("enforce composes a controller");
+        assert!(!running_admission.is_ready(), "enforce begins closed");
+
+        // A rollback changes the process environment but cannot replace the
+        // controller retained by the already constructed process state.
+        unsafe {
+            std::env::set_var(BUILD_ADMISSION_MODE_ENV, "off");
+            std::env::set_var(MAX_BUILD_TASKRUNS_ENV, "3");
+        }
+        assert!(running.inner.build_admission.is_some());
+        let restarted = state_for_admission_config(BuildAdmissionConfig::from_env().unwrap());
+        assert!(restarted.inner.build_admission.is_none());
+
+        // SAFETY: restore the inherited process environment before releasing
+        // the serialization lock.
+        unsafe {
+            match old_mode {
+                Some(value) => std::env::set_var(BUILD_ADMISSION_MODE_ENV, value),
+                None => std::env::remove_var(BUILD_ADMISSION_MODE_ENV),
+            }
+            match old_cap {
+                Some(value) => std::env::set_var(MAX_BUILD_TASKRUNS_ENV, value),
+                None => std::env::remove_var(MAX_BUILD_TASKRUNS_ENV),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn enforce_state_allocates_fresh_epoch_and_starts_journal_recovery_incomplete() {
+        let first = state_for_admission_config(BuildAdmissionConfig {
+            mode: BuildAdmissionMode::Enforce,
+            cap: 3,
+        });
+        let first_admission = first
+            .inner
+            .build_admission
+            .as_ref()
+            .expect("enforce composes a controller");
+        assert!(
+            !first_admission.is_ready(),
+            "Enforce starts fail-closed before recovery"
+        );
+        assert_eq!(
+            first_admission.readiness(),
+            djinn_agent::actors::coordinator::BuildAdmissionReadiness::JournalRecoveryIncomplete,
+        );
+
+        // A second AppState allocation produces a distinct, unique epoch.
+        let second = state_for_admission_config(BuildAdmissionConfig {
+            mode: BuildAdmissionMode::Enforce,
+            cap: 3,
+        });
+        let second_admission = second
+            .inner
+            .build_admission
+            .as_ref()
+            .expect("enforce composes a controller");
+        assert_ne!(
+            first_admission.server_epoch(),
+            second_admission.server_epoch(),
+            "each Enforce startup allocates a fresh, unique server epoch"
+        );
+    }
+
+    #[tokio::test]
+    async fn begin_draining_blocks_enforce_admission_via_app_state() {
+        let state = state_for_admission_config(BuildAdmissionConfig {
+            mode: BuildAdmissionMode::Enforce,
+            cap: 1,
+        });
+        let admission = state
+            .inner
+            .build_admission
+            .as_ref()
+            .expect("enforce composes a controller");
+        assert!(!admission.is_draining());
+        state.begin_build_admission_draining().await;
+        assert!(
+            admission.is_draining(),
+            "graceful shutdown begins draining before permit release"
+        );
+        assert_eq!(
+            admission.readiness(),
+            djinn_agent::actors::coordinator::BuildAdmissionReadiness::ShutdownDraining,
+        );
+    }
+
+    #[tokio::test]
+    async fn enforce_startup_walks_journal_inventory_topology_gates_in_order() {
+        use djinn_agent::actors::coordinator::BuildAdmissionReadiness;
+
+        let state = state_for_admission_config(BuildAdmissionConfig {
+            mode: BuildAdmissionMode::Enforce,
+            cap: 3,
+        });
+        let admission = state
+            .inner
+            .build_admission
+            .as_ref()
+            .expect("enforce composes a controller")
+            .clone();
+        assert_eq!(
+            admission.readiness(),
+            BuildAdmissionReadiness::JournalRecoveryIncomplete,
+            "Enforce starts fail-closed before journal recovery"
+        );
+
+        // Journal recovery runs first and, on an empty journal, must NOT mark
+        // the controller healthy: the inventory gate keeps admission closed.
+        state.initialize_build_admission_recovery().await;
+        assert_eq!(
+            admission.readiness(),
+            BuildAdmissionReadiness::InventoryPending,
+            "journal recovery alone advances only to inventory-pending"
+        );
+        assert!(!admission.is_ready());
+
+        // Without a graph warmer there is no inventory to trust, so the gate
+        // stays pending (fail-closed) rather than opening optimistically.
+        state.initialize_build_admission_inventory().await;
+        assert_eq!(
+            admission.readiness(),
+            BuildAdmissionReadiness::InventoryPending,
+            "a missing inventory keeps Enforce fail-closed"
+        );
+
+        // The in-process runtime's warmer returns an empty Kubernetes
+        // inventory successfully, completing the inventory gate.
+        let warmer = build_in_process_graph_warmer(state.clone());
+        *state.inner.graph_warmer.write().await = Some(Arc::new(warmer));
+        state.initialize_build_admission_inventory().await;
+        assert_eq!(
+            admission.readiness(),
+            BuildAdmissionReadiness::TopologyPending,
+            "a successful inventory LIST advances the gate to topology-pending"
+        );
+        assert!(!admission.is_ready());
+
+        // Winning the coordinator advisory lock (single-active topology) is
+        // the final gate; only then does Enforce admission open.
+        state.confirm_build_admission_topology();
+        assert_eq!(admission.readiness(), BuildAdmissionReadiness::Healthy);
+        assert!(admission.is_ready());
     }
 }

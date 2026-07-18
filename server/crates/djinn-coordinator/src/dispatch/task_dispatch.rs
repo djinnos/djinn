@@ -8077,6 +8077,71 @@ mod build_admission_route_tests {
         );
     }
 
+    /// Six ready tasks use the actual dispatcher at cap three. Denied tasks
+    /// must stay queued and neutral rather than receiving a failure/cooldown.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn enforce_cap_three_keeps_three_of_six_ready_tasks_queued_and_neutral() {
+        let db = crate::test_helpers::create_test_db();
+        let (events_tx, _events_rx) = tokio::sync::broadcast::channel(256);
+        let fixture = seed_wnd1_ready_worker_tasks(&db, WND1_READY_TASK_COUNT).await;
+        configure_wnd1_user_max_sessions(&db, &fixture.created_by_user_id, &fixture.model_id, 5)
+            .await;
+
+        let journal = route_journal(&db);
+        let controller = route_controller(&journal, BuildAdmissionMode::Enforce, 3);
+        let (runtime, mut started_rx, _completed_rx) = AdmissionRouteRuntime::new(journal.clone());
+        let mut actor = build_route_actor(&db, &events_tx, &runtime, 5);
+        actor.build_admission = Some(controller);
+
+        let ready = fixture.task_ids[..6].to_vec();
+        let task_repo = TaskRepository::new(db.clone(), djinn_core::events::EventBus::noop());
+        for id in fixture.task_ids.iter().skip(6) {
+            task_repo
+                .set_status(id, "closed")
+                .await
+                .expect("close non-target task");
+        }
+
+        actor.dispatch_ready_tasks(Some(&fixture.project_id)).await;
+        assert_eq!(
+            actor.dispatched, 3,
+            "cap three permits exactly three pool creates"
+        );
+        assert_eq!(
+            journal.count_task_or_warm_occupancy().await.expect("count"),
+            3,
+            "only the dispatched three retain durable occupancy"
+        );
+
+        let mut dispatched = std::collections::HashSet::new();
+        for _ in 0..3 {
+            dispatched.insert(started_rx.recv().await.expect("admitted pool create"));
+        }
+        for task_id in ready.iter().filter(|id| !dispatched.contains(*id)) {
+            let task = task_repo
+                .get(task_id)
+                .await
+                .expect("fetch denied task")
+                .expect("denied task exists");
+            assert_eq!(task.status, "open", "cap denial leaves task queued");
+            assert!(
+                !actor.dispatch_failure_streak.contains_key(task_id)
+                    && !actor.provider_failure_streak.contains_key(task_id)
+                    && !actor.dispatch_cooldowns.contains_key(task_id),
+                "cap denial for {task_id} must not attribute failure or cooldown"
+            );
+        }
+        assert_eq!(
+            ready.iter().filter(|id| !dispatched.contains(*id)).count(),
+            3,
+            "exactly three ready tasks remain queued"
+        );
+
+        for task_id in dispatched {
+            runtime.release(&task_id).await;
+        }
+    }
+
     // ─── AC2: Observe mode creates and records would-defer ────────────────
 
     /// Prove Observe mode never cap-denies: dispatch proceeds at/over cap and

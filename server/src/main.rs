@@ -167,7 +167,11 @@ async fn async_main() {
         cancel.clone(),
         retrieval_config,
         retrieval_metrics,
-    );
+    )
+    .unwrap_or_else(|e| {
+        tracing::error!(error = %e, "invalid build admission configuration");
+        std::process::exit(1);
+    });
 
     // NOTE: the periodic housekeeping + mirror-fetch loops, the coordinator,
     // and the worker RPC listener no longer start here unconditionally — they
@@ -185,13 +189,6 @@ async fn async_main() {
 
     state.init_app_config().await;
     state.initialize().await;
-    state
-        .initialize_memory_mount_from_db()
-        .await
-        .unwrap_or_else(|e| {
-            tracing::error!(error = %e, "failed to initialize memory mount");
-            std::process::exit(1);
-        });
 
     // ── Leadership ────────────────────────────────────────────────────
     // Spawn the leadership manager: it races for the coordinator advisory
@@ -233,6 +230,12 @@ async fn async_main() {
     let router = server::router(state, cli.ui_enabled);
 
     server::run(router, cli.port, cancel).await;
+
+    // Graceful shutdown: block new Enforce build-admission reservations
+    // before draining in-flight work. Enforce admission begins draining so
+    // no new task/warm create can start during the teardown window; in-flight
+    // permits may still transition to terminal. Observe/Off are unaffected.
+    state_for_shutdown.begin_build_admission_draining().await;
 
     // Graceful RPC teardown: cancel the TCP accept loop + join it so any
     // in-flight worker RPCs drain cleanly.  Matches the HTTP server's

@@ -32,7 +32,6 @@ path = "src/bin/export_usage_schema.rs"
 default = []
 qdrant = ["djinn-db/qdrant"]
 vendored = ["git2/vendored-libgit2", "git2/vendored-openssl"]
-memory-mount = ["dep:fuser"]
 
 [dependencies]
 djinn-agent = { path = "crates/djinn-agent" }
@@ -102,7 +101,6 @@ workspace-hack.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
 landlock = "0.4"
-fuser = { version = "0.15", optional = true, default-features = false }
 
 [dev-dependencies]
 djinn-control-plane = { path = "crates/djinn-control-plane", features = ["test-support"] }

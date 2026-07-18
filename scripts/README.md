@@ -102,7 +102,7 @@ Lightweight guard for Rust source files under `server/crates/**` and `server/src
 
 ### CI gate
 
-`.github/workflows/quality-gate.yml` runs the `server-size-guard` job for PR and merge-queue server changes. The job computes added, modified, and renamed files with `git diff --name-only --diff-filter=AMR` and pipes that list to changed-file mode:
+`.github/workflows/quality-gate.yml` runs the "Check changed Rust file sizes" step of the `server-guards` job for PR and merge-queue server changes. The step computes added, modified, and renamed files with `git diff --name-only --diff-filter=AMR` and pipes that list to changed-file mode:
 
 ```sh
 ./scripts/check-file-size.sh --files-from-stdin
@@ -148,44 +148,38 @@ Generated Rust files are skipped defensively: paths matching `**/generated/**` a
 sh scripts/test-check-file-size.sh
 ```
 
-## Phase 1 retirement manifest generator
+## Phase 1 retirement deletion guard
 
-`djinn-retirement-manifest.mjs` is the hermetic retirement manifest generator
-for Phase 1 knowledge retirement (epic h1w2 / proposal qiy6). It consumes
-NUL-delimited `git ls-files -z` output plus explicit hermetic DB-selection and
-DB-guidance fixture input and writes two deterministic JSON manifests under
-`target/djinn-retirement/`:
-
-- `knowledge-manifest.json` — one entry per tracked `.djinn` knowledge file,
-  carrying repository path, committed blob SHA-256, normalized-content SHA-256,
-  detected permalink, selected DB identity (UUID/permalink/status/normalized
-  hash), and exactly one disposition (`equivalent`, `db_supersedes_file`, or
-  `approved_discard`).
-- `db-guidance-manifest.json` — one entry per affected DB guidance record,
-  carrying selected identity, classification, disposition, rationale, status,
-  hashes, and supersession linkage fields for the follow-up DB reconciliation
-  task.
+`djinn-retirement-manifest.mjs` generated and validated the pre-cutover
+knowledge manifest. The validated result is retained permanently as
+`scripts/fixtures/djinn-retirement/deletion-ledger.json`. Each ledger entry
+records its repository path, exact blob and normalized-content SHA-256 hashes,
+permalink, selected DB UUID/permalink/status/hash, rationale, approval, and one
+resolved disposition (`equivalent`, `db_supersedes_file`, or
+`approved_discard`). The ledger also records the immutable source commit so its
+blobs remain independently auditable after deletion.
 
 Normalization only removes YAML front matter and canonicalizes CRLF/CR to LF;
-committed blob SHA-256 is computed over the exact stored bytes (`git show
-HEAD:<path>`).
+committed blob SHA-256 is computed over the exact stored bytes.
 
 ### Hermetic fixtures
 
 Committed under `scripts/fixtures/djinn-retirement/`:
 
-- `db-selection.json` — synthetic DB-selection records keyed by detected
-  permalink (uuids are deterministic sha256 derivatives, not real DB uuids).
-- `db-guidance.json` — synthetic DB-guidance records with classification and
-  supersession linkage fields.
+- `deletion-ledger.json` — durable, deterministic evidence for the exact deleted
+  knowledge-path set.
+- `db-selection.json` — the selected DB identity for each detected permalink.
+- `db-guidance.json` — reconciled DB guidance classifications, dispositions,
+  rationales, hashes, statuses, and supersession links.
 
-Regenerate from the current HEAD:
+Fixture regeneration is deliberately anchored to the source revision recorded
+in the ledger; live HEAD has no tracked knowledge paths after cutover:
 
 ```sh
-node scripts/fixtures/djinn-retirement/generate.mjs
+node scripts/fixtures/djinn-retirement/generate.mjs --revision <ledger-source-sha>
 ```
 
-### Strict reconciliation guard
+### Strict post-cutover guard
 
 ```sh
 make check-retirement-manifest
@@ -193,11 +187,14 @@ make check-retirement-manifest
 ./scripts/check-djinn-retirement-manifest.sh
 ```
 
-The guard runs the generator against live HEAD with the committed fixtures and
-enforces strict invariants: ambiguous DB matches, duplicate paths,
-tracked/deletion count or set mismatch, missing preserved identity, empty
-discard reason or approving task id, missing guidance disposition, and
-unresolved entries are all hard failures.
+The guard validates the durable ledger against source-revision blobs and the DB
+guidance fixture, including uniqueness, hashes, identities, statuses,
+classifications, dispositions, rationales, approvals, count, and exact source
+set. It separately classifies current NUL-delimited `git ls-files -z` output and
+fails for every tracked project-local knowledge path, including paths never
+present in the old ledger. The three explicit operational files
+`.djinn/.gitignore`, `.djinn/settings.json`, and `.djinn/skills.json` must remain
+present and byte-identical to the source revision.
 
 ### Tests
 

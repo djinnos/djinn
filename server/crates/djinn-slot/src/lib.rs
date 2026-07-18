@@ -42,6 +42,7 @@ mod actor;
 pub mod attempt_lifecycle;
 pub mod commands;
 pub mod extraction_replay_eval;
+pub mod final_verification;
 pub mod finalize_handlers;
 pub mod finalize_types;
 pub mod helpers;
@@ -61,6 +62,8 @@ mod finalize_handlers_tests;
 mod helpers_tests;
 #[cfg(test)]
 mod llm_extraction_tests;
+#[cfg(test)]
+mod reply_loop_completion_intent_tests;
 #[cfg(test)]
 mod reply_loop_tests;
 #[cfg(test)]

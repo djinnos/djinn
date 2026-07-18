@@ -1,10 +1,11 @@
 //! Lifecycle teardown: delegates to host callbacks.
+use crate::final_verification::verify_completion_intent;
 use crate::finalize_handlers::{
     process_auto_submit_payload, process_finalize_payload_with_outcome,
     record_rejected_integrity_entry,
 };
 use crate::host::SlotContext;
-use crate::output_parser::{AutoSubmitSettlement, ParsedAgentOutput};
+use crate::output_parser::{AutoSubmitSettlement, CompletionIntent, ParsedAgentOutput};
 use crate::roles_support::AgentRole;
 use djinn_core::events::DjinnEventEnvelope;
 use djinn_db::repositories::verify_run::TaskRejectedSubmissionIntegrityRepository;
@@ -217,6 +218,23 @@ pub(crate) async fn settle_auto_submit_if_eligible(
         emit_auto_submit_fallback_hook(task_id, ctx, "decision_skipped");
         return AutoSubmitSettlementOutcome::Skipped;
     }
+    // This is the same intent/coordinator boundary as model-called submit_work.
+    // Constructing or persisting an auto-submit payload is forbidden until it
+    // returns `Stored`.
+    let intent = CompletionIntent::auto_submit(&settlement.task_run_id);
+    if let Err(error) = verify_completion_intent(
+        &intent,
+        task_id,
+        Some(&settlement.task_run_id),
+        tokio_util::sync::CancellationToken::new(),
+        ctx,
+    )
+    .await
+    {
+        tracing::warn!(task_id = %task_id, error = %error, "teardown: auto-submit final verification did not store a pass");
+        emit_auto_submit_fallback_hook(task_id, ctx, "final_verification_failed");
+        return AutoSubmitSettlementOutcome::Failed;
+    }
     let payload = auto_submit_payload(task_id, settlement);
     if process_auto_submit_payload(&payload, task_id, ctx).await {
         AutoSubmitSettlementOutcome::Submitted
@@ -321,6 +339,10 @@ pub(crate) async fn apply_transition_and_dispatch(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::final_verification::{
+        FinalVerificationCoordinatorRequest, FinalVerificationRecordingOutcome,
+    };
+    use crate::host::{ResolvedMcpTools, SlotHostCallbacks};
     use crate::test_helpers;
     use djinn_core::auto_submit_decision::{
         AutoSubmitDecision, ReviewAutoSubmitDecisionEvent, VerifyFreshnessEvaluatedEvent,
@@ -330,7 +352,118 @@ mod tests {
     use djinn_core::models::{AutoSubmitTriggerReason, TaskRunTrigger, VerifyRunRecord};
     use djinn_db::repositories::task_run::{CreateTaskRunParams, TaskRunRepository};
     use djinn_db::repositories::verify_run::AutoSubmitReviewRepository;
+    use std::future::Future;
+    use std::pin::Pin;
     use std::sync::{Arc, Mutex};
+
+    /// Host callbacks that force one deterministic non-stored coordinator
+    /// outcome at the completion-intent boundary so lifecycle-generated
+    /// submissions (eligible auto-submit, controlled termination) can be
+    /// regression tested without the production hermetic executor.
+    struct NonStoredOutcomeCallbacks(FinalVerificationRecordingOutcome);
+
+    impl SlotHostCallbacks for NonStoredOutcomeCallbacks {
+        fn final_verification_outcome_for_test(
+            &self,
+            _request: &FinalVerificationCoordinatorRequest,
+        ) -> Option<FinalVerificationRecordingOutcome> {
+            Some(self.0.clone())
+        }
+        fn interrupt_paused_worker_session<'a>(
+            &'a self,
+            _task_id: &'a str,
+            _ctx: &'a SlotContext,
+        ) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
+            Box::pin(async {})
+        }
+        fn resolve_mcp_tools<'a>(
+            &'a self,
+            _worktree_path: &'a str,
+            _role_name: &'a str,
+            _ctx: &'a SlotContext,
+        ) -> Pin<Box<dyn Future<Output = Result<ResolvedMcpTools, String>> + Send + 'a>> {
+            Box::pin(async { Err("not implemented in test".into()) })
+        }
+        fn render_prompt(
+            &self,
+            _role_name: &str,
+            _task: &djinn_core::models::Task,
+            _context_json: &serde_json::Value,
+        ) -> String {
+            String::new()
+        }
+        fn initial_user_message<'a>(
+            &'a self,
+            _task_id: &'a str,
+            _ctx: &'a SlotContext,
+        ) -> Pin<Box<dyn Future<Output = String> + Send + 'a>> {
+            Box::pin(async { String::new() })
+        }
+        fn build_mcp_state(&self, _ctx: &SlotContext) -> djinn_control_plane::McpState {
+            panic!("build_mcp_state not needed in non-stored outcome tests")
+        }
+        fn require_project_id_for_task_ops<'a>(
+            &'a self,
+            _project: &'a str,
+            _ctx: &'a SlotContext,
+        ) -> Pin<
+            Box<
+                dyn Future<
+                        Output = Result<
+                            String,
+                            djinn_control_plane::tools::task_tools::ErrorResponse,
+                        >,
+                    > + Send
+                    + 'a,
+            >,
+        > {
+            Box::pin(async {
+                Err(djinn_control_plane::tools::task_tools::ErrorResponse {
+                    error: "not implemented".into(),
+                })
+            })
+        }
+        fn resolve_provider_credential<'a>(
+            &'a self,
+            _provider_id: &'a str,
+            _ctx: &'a SlotContext,
+        ) -> Pin<
+            Box<
+                dyn Future<Output = Result<crate::helpers::ProviderCredential, String>> + Send + 'a,
+            >,
+        > {
+            Box::pin(async { Err("not implemented in test".into()) })
+        }
+        fn run_task_dispatch<'a>(
+            &'a self,
+            _task_id: String,
+            _project_path: String,
+            _model_id: String,
+            _ctx: SlotContext,
+            _kill: tokio_util::sync::CancellationToken,
+            _pause: tokio_util::sync::CancellationToken,
+            _resume_lifecycle_metadata: Option<serde_json::Value>,
+        ) -> Pin<Box<dyn Future<Output = anyhow::Result<()>> + Send + 'a>> {
+            Box::pin(async { Ok(()) })
+        }
+        fn touch_activity_rpc<'a>(
+            &'a self,
+            _task_id: String,
+        ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>> {
+            Box::pin(async { Ok(()) })
+        }
+        fn flush_session_tokens_rpc<'a>(
+            &'a self,
+            _session_id: String,
+            _tokens_in: i64,
+            _tokens_out: i64,
+            _cache_read: i64,
+            _cache_write: i64,
+        ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>> {
+            Box::pin(async { Ok(()) })
+        }
+    }
+
     fn test_ctx_with_events(
         db: djinn_db::Database,
         events: Arc<Mutex<Vec<DjinnEventEnvelope>>>,
@@ -370,6 +503,44 @@ mod tests {
             .expect("create task run");
         (db, ctx, task, run_id, events)
     }
+    /// Fixture variant whose host callbacks control the completion-intent
+    /// coordinator outcome (e.g. force `Ineligible`/`Error`).
+    async fn fixture_with_callbacks(
+        callbacks: Arc<dyn SlotHostCallbacks>,
+    ) -> (
+        djinn_db::Database,
+        SlotContext,
+        djinn_core::models::Task,
+        String,
+        Arc<Mutex<Vec<DjinnEventEnvelope>>>,
+    ) {
+        let db = test_helpers::create_test_db();
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let mut ctx = test_helpers::agent_context_from_db_with_callbacks(db.clone(), callbacks);
+        ctx.event_bus = EventBus::new({
+            let events = Arc::clone(&events);
+            move |event| {
+                events.lock().expect("events mutex").push(event);
+            }
+        });
+        let project = test_helpers::create_test_project(&db).await;
+        let epic = test_helpers::create_test_epic(&db, &project.id).await;
+        let task = test_helpers::create_test_task(&db, &project.id, &epic.id).await;
+        let run_id = uuid::Uuid::now_v7().to_string();
+        TaskRunRepository::new(db.clone())
+            .create(CreateTaskRunParams {
+                id: &run_id,
+                project_id: &project.id,
+                task_id: &task.id,
+                trigger_type: TaskRunTrigger::NewTask.as_str(),
+                status: None,
+                workspace_path: None,
+                mirror_ref: None,
+            })
+            .await
+            .expect("create task run");
+        (db, ctx, task, run_id, events)
+    }
     fn verify_run(task_run_id: &str) -> VerifyRunRecord {
         VerifyRunRecord {
             id: "verify-record-1".to_string(),
@@ -387,9 +558,20 @@ mod tests {
         }
     }
     fn settlement(task_run_id: &str, eligible: bool) -> AutoSubmitSettlement {
+        settlement_with_trigger(
+            task_run_id,
+            eligible,
+            AutoSubmitTriggerReason::ControlledTermination,
+        )
+    }
+    fn settlement_with_trigger(
+        task_run_id: &str,
+        eligible: bool,
+        trigger: AutoSubmitTriggerReason,
+    ) -> AutoSubmitSettlement {
         let decision = AutoSubmitDecision {
             eligible,
-            trigger_reason: AutoSubmitTriggerReason::ControlledTermination,
+            trigger_reason: trigger,
             block_reason: None,
             freshness_verdict: FreshnessVerdict::accept(),
         };
@@ -400,12 +582,12 @@ mod tests {
                 diff_fingerprint: "diff-123".to_string(),
                 has_verify_run: true,
                 freshness_verdict: FreshnessVerdict::accept(),
-                trigger_reason: AutoSubmitTriggerReason::ControlledTermination,
+                trigger_reason: trigger,
                 submit_id: None,
             },
             review_event: ReviewAutoSubmitDecisionEvent {
                 eligible,
-                trigger_reason: AutoSubmitTriggerReason::ControlledTermination,
+                trigger_reason: trigger,
                 block_reason: None,
                 diff_fingerprint: "diff-123".to_string(),
                 freshness_verdict: FreshnessVerdict::accept(),
@@ -449,6 +631,85 @@ mod tests {
         assert_eq!(records[0].model_id.as_deref(), Some("model-1"));
         assert_eq!(records[0].no_progress_streak, 3);
         assert!(!records[0].model_called_submit_work);
+    }
+    /// Assert the lifecycle-generated completion left no trace: no
+    /// `work_submitted` activity and no auto-submit review metadata.
+    async fn assert_completion_did_not_advance(
+        db: &djinn_db::Database,
+        ctx: &SlotContext,
+        task_id: &str,
+        task_run_id: &str,
+    ) {
+        let task_repo = djinn_db::TaskRepository::new(db.clone(), ctx.event_bus.clone());
+        let activity = task_repo.list_activity(task_id).await.unwrap();
+        assert!(
+            activity
+                .iter()
+                .all(|entry| entry.event_type != "work_submitted"),
+            "no work_submitted activity may be logged without a stored coordinator result"
+        );
+        let records = AutoSubmitReviewRepository::new(db.clone())
+            .list_for_task_run(task_run_id)
+            .await
+            .unwrap();
+        assert!(
+            records.is_empty(),
+            "completion must not advance without a stored coordinator result"
+        );
+    }
+    /// Eligible auto-submit (idle trigger): an ineligible coordinator outcome
+    /// must block submission even though the settlement was eligible.
+    #[tokio::test]
+    async fn eligible_auto_submit_without_stored_verification_never_submits() {
+        let callbacks = Arc::new(NonStoredOutcomeCallbacks(
+            FinalVerificationRecordingOutcome::Ineligible {
+                verification_attempt_id: "attempt-ineligible".into(),
+                reason: "CommandFailed { check_id: \"test\", exit_code: Some(1) }".into(),
+            },
+        ));
+        let (db, ctx, task, task_run_id, events) = fixture_with_callbacks(callbacks).await;
+        let mut output = ParsedAgentOutput::empty();
+        output.auto_submit = Some(settlement_with_trigger(
+            &task_run_id,
+            true,
+            AutoSubmitTriggerReason::Idle,
+        ));
+        let outcome = settle_auto_submit_if_eligible(&task.id, &ctx, &output).await;
+        assert_eq!(outcome, AutoSubmitSettlementOutcome::Failed);
+        assert_completion_did_not_advance(&db, &ctx, &task.id, &task_run_id).await;
+        let events = events.lock().expect("events mutex");
+        let fallback = events
+            .iter()
+            .find(|event| event.action == "auto_submit_fallback_checkpoint_requested")
+            .expect("final_verification_failed fallback hook must fire");
+        assert_eq!(fallback.payload["reason"], "final_verification_failed");
+    }
+    /// Controlled termination: an error coordinator outcome must block the
+    /// final-attempt submission even though the settlement was eligible.
+    #[tokio::test]
+    async fn controlled_termination_without_stored_verification_never_submits() {
+        let callbacks = Arc::new(NonStoredOutcomeCallbacks(
+            FinalVerificationRecordingOutcome::Error {
+                verification_attempt_id: "attempt-error".into(),
+                detail: "final verification insert failed: db unavailable".into(),
+            },
+        ));
+        let (db, ctx, task, task_run_id, events) = fixture_with_callbacks(callbacks).await;
+        let mut output = ParsedAgentOutput::empty();
+        output.auto_submit = Some(settlement_with_trigger(
+            &task_run_id,
+            true,
+            AutoSubmitTriggerReason::ControlledTermination,
+        ));
+        let outcome = settle_auto_submit_if_eligible(&task.id, &ctx, &output).await;
+        assert_eq!(outcome, AutoSubmitSettlementOutcome::Failed);
+        assert_completion_did_not_advance(&db, &ctx, &task.id, &task_run_id).await;
+        let events = events.lock().expect("events mutex");
+        let fallback = events
+            .iter()
+            .find(|event| event.action == "auto_submit_fallback_checkpoint_requested")
+            .expect("final_verification_failed fallback hook must fire");
+        assert_eq!(fallback.payload["reason"], "final_verification_failed");
     }
     #[tokio::test]
     async fn skipped_auto_submit_emits_fallback_hook_without_submission() {

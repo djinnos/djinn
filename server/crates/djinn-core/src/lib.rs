@@ -9,6 +9,7 @@ pub mod error;
 pub mod events;
 pub mod extension_diagnostics;
 pub mod index_tree;
+pub mod live_state_migration;
 pub mod liveness;
 pub mod message;
 pub mod models;

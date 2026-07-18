@@ -1,6 +1,6 @@
 // HTTP handlers for project-level MCP server and skill management.
 // MCP servers are stored in `mcp.json` at the project root.
-// Skills are stored as `.md` files in `.djinn/skills/`.
+// Skills are resolved through the project skill registry.
 
 use std::collections::HashMap;
 use std::path::Path;

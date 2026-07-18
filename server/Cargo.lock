@@ -1287,6 +1287,7 @@ name = "djinn-core"
 version = "0.1.0"
 dependencies = [
  "dirs 5.0.1",
+ "libc",
  "schemars 1.2.1",
  "serde",
  "serde_json",
@@ -1306,6 +1307,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "base64 0.22.1",
  "chrono",
  "dirs 6.0.0",
  "djinn-core",
@@ -1655,6 +1657,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "djinn-core",
+ "djinn-git",
  "landlock",
  "libc",
  "seccompiler",
@@ -1695,7 +1698,6 @@ dependencies = [
  "djinn-supervisor",
  "djinn-telemetry",
  "djinn-workspace",
- "fuser",
  "futures",
  "git2",
  "globset",
@@ -1761,6 +1763,7 @@ dependencies = [
  "djinn-provider",
  "djinn-roles",
  "djinn-runtime",
+ "djinn-sandbox",
  "djinn-stack",
  "djinn-supervisor",
  "djinn-telemetry",
@@ -2149,21 +2152,6 @@ name = "fs_extra"
 version = "1.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "42703706b716c37f96a77aea830392ad231f44c9e9a67872fa5548707e11b11c"
-
-[[package]]
-name = "fuser"
-version = "0.15.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "53274f494609e77794b627b1a3cddfe45d675a6b2e9ba9c0fdc8d8eee2184369"
-dependencies = [
- "libc",
- "log",
- "memchr",
- "nix",
- "page_size",
- "smallvec",
- "zerocopy",
-]
 
 [[package]]
 name = "futures"
@@ -3659,18 +3647,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "nix"
-version = "0.29.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "71e2746dc3a24dd78b3cfcb7be93368c6de9963d30f43a6a73998a9cf4b17b46"
-dependencies = [
- "bitflags 2.13.0",
- "cfg-if",
- "cfg_aliases",
- "libc",
-]
-
-[[package]]
 name = "nom"
 version = "7.1.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3956,16 +3932,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "68f19d67e5a2795c94e73e0bb1cc1a7edeb2e28efd39e2e1c9b7a40c1108b11c"
 dependencies = [
  "num-traits",
-]
-
-[[package]]
-name = "page_size"
-version = "0.6.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "30d5b2194ed13191c1999ae0704b7839fb18384fa22e49b57eeaa97d79ce40da"
-dependencies = [
- "libc",
- "winapi",
 ]
 
 [[package]]

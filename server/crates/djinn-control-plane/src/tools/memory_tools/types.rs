@@ -35,7 +35,7 @@ pub struct WriteParams {
     #[schemars(rename = "type")]
     pub note_type: String,
     /// Optional explicit status for routed note types. For ADRs, `proposed`
-    /// writes into `.djinn/decisions/proposed/`.
+    /// records the ADR with proposed status in the project database.
     pub status: Option<String>,
     pub tags: Option<Vec<String>>,
     /// Crate/module path prefixes this note applies to. Empty array means global.
@@ -358,7 +358,7 @@ pub struct MoveParams {
     pub project: String,
     pub identifier: String,
     /// New note type to move the note to. Use `proposed_adr` to recover a
-    /// mis-routed ADR draft into `.djinn/decisions/proposed/`.
+    /// mis-routed ADR draft to proposed status in the project database.
     #[serde(rename = "type")]
     #[schemars(rename = "type")]
     pub note_type: String,
@@ -388,21 +388,6 @@ pub struct RecentParams {
     /// Timeframe string, e.g. "7d", "24h", "today", "last week". Default: "7d".
     pub timeframe: Option<String>,
     pub limit: Option<i64>,
-}
-
-#[derive(Deserialize, schemars::JsonSchema)]
-pub struct HistoryParams {
-    pub project: String,
-    pub permalink: String,
-    pub limit: Option<i64>,
-}
-
-#[derive(Deserialize, schemars::JsonSchema)]
-pub struct DiffParams {
-    pub project: String,
-    pub permalink: String,
-    /// Specific commit SHA. Omit to get the diff for the most recent change.
-    pub sha: Option<String>,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -793,18 +778,6 @@ pub struct MemoryRecentResponse {
 }
 
 #[derive(Serialize, schemars::JsonSchema)]
-pub struct MemoryHistoryResponse {
-    pub history: Vec<GitLogEntry>,
-    pub error: Option<String>,
-}
-
-#[derive(Serialize, schemars::JsonSchema)]
-pub struct MemoryDiffResponse {
-    pub diff: String,
-    pub error: Option<String>,
-}
-
-#[derive(Serialize, schemars::JsonSchema)]
 pub struct MemoryBuildContextResponse {
     pub primary: Vec<MemoryNoteView>,
     pub related_l1: Vec<djinn_memory::NoteOverview>,
@@ -945,6 +918,143 @@ impl From<&djinn_memory::Note> for MemoryNoteView {
             last_accessed: note.last_accessed.clone(),
         }
     }
+}
+
+// ── Ledger-backed revision reader surfaces ───────────────────────────────────
+//
+// `memory_history`, `memory_diff`, and `memory_session_diff` read the
+// immutable `note_revision_events` ledger through the project-scoped
+// `NoteRepository` readers. They never touch git.
+
+/// Default page size for `memory_history`.
+pub const HISTORY_LIMIT_DEFAULT: i64 = 50;
+/// Maximum page size accepted by `memory_history`.
+pub const HISTORY_LIMIT_MAX: i64 = 200;
+/// Default page size for `memory_session_diff`.
+pub const SESSION_DIFF_LIMIT_DEFAULT: i64 = 100;
+/// Maximum page size accepted by `memory_session_diff`.
+pub const SESSION_DIFF_LIMIT_MAX: i64 = 500;
+
+/// `history_start` value when the retained history is backed by ledger events.
+pub const HISTORY_START_LEDGER: &str = "ledger";
+/// `history_start` value for a live note which predates the ledger and
+/// therefore has no retained events.
+pub const HISTORY_START_MIGRATION_CUTOVER: &str = "migration_cutover";
+
+#[derive(Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct HistoryParams {
+    /// Absolute path to the project directory.
+    pub project: String,
+    /// Note UUID whose revision history is requested.
+    pub note_id: String,
+    /// Page size (default 50, max 200).
+    pub limit: Option<i64>,
+    /// Opaque cursor from a previous response's `next_cursor`.
+    pub before_cursor: Option<String>,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct DiffParams {
+    /// Absolute path to the project directory.
+    pub project: String,
+    /// Note UUID both revisions belong to.
+    pub note_id: String,
+    /// Older endpoint revision UUID. Must be a content-bearing
+    /// (created/updated/deleted) event for `note_id`.
+    pub from_revision_id: String,
+    /// Newer endpoint revision UUID. Must be a content-bearing
+    /// (created/updated/deleted) event for `note_id`.
+    pub to_revision_id: String,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SessionDiffParams {
+    /// Absolute path to the project directory.
+    pub project: String,
+    /// Session UUID selector. Exactly one of `session_id` or `task_run_id`
+    /// must be provided.
+    pub session_id: Option<String>,
+    /// Task-run UUID selector. Exactly one of `session_id` or `task_run_id`
+    /// must be provided.
+    pub task_run_id: Option<String>,
+    /// Page size (default 100, max 500).
+    pub limit: Option<i64>,
+    /// Opaque cursor from a previous response's `next_cursor`.
+    pub before_cursor: Option<String>,
+}
+
+/// One immutable ledger event projected for the MCP reader surfaces.
+#[derive(Serialize, schemars::JsonSchema)]
+pub struct MemoryRevisionEvent {
+    pub revision_id: String,
+    pub note_id: Option<String>,
+    pub note_seq: Option<i64>,
+    /// Ledger event kind: created, updated, deleted, confidence_changed, or
+    /// extraction_skipped.
+    pub event_kind: String,
+    pub content_before: Option<String>,
+    pub content_after: Option<String>,
+    pub confidence_before: Option<f64>,
+    pub confidence_after: Option<f64>,
+    /// Trusted actor kind: human, agent, or system.
+    pub actor_kind: String,
+    pub actor_id: Option<String>,
+    pub subsystem: Option<String>,
+    pub session_id: Option<String>,
+    pub task_id: Option<String>,
+    pub task_run_id: Option<String>,
+    pub reason: String,
+    pub created_at: String,
+    /// True when `content_before`/`content_after` were withheld because the
+    /// caller lacks note-read permission.
+    pub content_redacted: bool,
+}
+
+#[derive(Serialize, schemars::JsonSchema)]
+pub struct MemoryHistoryResponse {
+    /// Newest-first revision events for the note.
+    pub events: Vec<MemoryRevisionEvent>,
+    /// Cursor for the next (older) page; null when the page is exhausted.
+    pub next_cursor: Option<String>,
+    /// `ledger` when retained events back the history, `migration_cutover`
+    /// for a live pre-ledger note with no retained events.
+    pub history_start: Option<String>,
+    pub error: Option<String>,
+}
+
+/// Endpoint metadata for one side of a pairwise revision diff.
+#[derive(Serialize, schemars::JsonSchema)]
+pub struct MemoryDiffEndpoint {
+    pub revision_id: String,
+    pub note_seq: Option<i64>,
+    pub event_kind: String,
+    pub created_at: String,
+}
+
+#[derive(Serialize, schemars::JsonSchema)]
+pub struct MemoryDiffResponse {
+    pub from: Option<MemoryDiffEndpoint>,
+    pub to: Option<MemoryDiffEndpoint>,
+    /// Deterministic unified text diff rendered from the explicit endpoint
+    /// snapshots (from.content_before → to.content_after).
+    pub diff: String,
+    /// Non-content events (confidence_changed, extraction_skipped) between
+    /// the endpoints, newest-first.
+    pub intervening_events: Vec<MemoryRevisionEvent>,
+    pub error: Option<String>,
+}
+
+#[derive(Serialize, schemars::JsonSchema)]
+pub struct MemorySessionDiffResponse {
+    /// Newest-first revision events by (created_at, id) for the selected
+    /// session or task run, spanning every event kind.
+    pub events: Vec<MemoryRevisionEvent>,
+    /// Cursor for the next (older) page; null when the page is exhausted.
+    pub next_cursor: Option<String>,
+    pub error: Option<String>,
 }
 
 impl MemoryNoteResponse {

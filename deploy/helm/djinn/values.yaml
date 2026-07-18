@@ -27,6 +27,32 @@ cacheCleanup:
   mode: delete
 
 # -----------------------------------------------------------------------------
+# Build admission
+# -----------------------------------------------------------------------------
+# Admission controls the combined task-run and warm-build concurrency cap. The
+# server receives both values as literal environment variables so its startup
+# validation has an auditable chart configuration surface. `enforce` requires a
+# single active server and a non-overlapping Deployment rollout; `off` and
+# `observe` deliberately retain the normal availability-first rollout.
+buildAdmission:
+  mode: observe
+  maxBuildTaskRuns: 3
+
+# -----------------------------------------------------------------------------
+# Server deployment
+# -----------------------------------------------------------------------------
+# Keep this availability-first rolling update for off/observe. When enabling
+# buildAdmission.mode=enforce, change this to Recreate or to RollingUpdate with
+# maxSurge: 0 and maxUnavailable: 1; the chart rejects every other topology.
+server:
+  replicas: 1
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+
+# -----------------------------------------------------------------------------
 # Namespace
 # -----------------------------------------------------------------------------
 namespace:

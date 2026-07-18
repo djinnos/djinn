@@ -35,7 +35,7 @@ use crate::tools::memory_tools::{
     DiffParams, EditParams, ExtractedAuditParams, GraphParams, HealthParams, HistoryParams,
     ListParams, MemoryConfirmParams, MoveParams, OrphansParams, ReadParams, RecallTraceParams,
     RecentParams, RepairEmbeddingsParams, RetrievalOutcomesReportParams, RunEnrichmentParams,
-    SearchParams, TaskRefsParams, WriteParams,
+    SearchParams, SessionDiffParams, TaskRefsParams, WriteParams,
 };
 use crate::tools::org_policy_tools::{OrgPolicyGetParams, OrgPolicySetParams};
 use crate::tools::pr_review_tools::PrReviewContextParams;
@@ -693,6 +693,21 @@ impl DjinnMcpServer {
                 self.memory_read(Parameters(decode_args::<ReadParams>(name, args)?))
                     .await,
             ),
+            "memory_history" => map_json(
+                name,
+                self.memory_history(Parameters(decode_args::<HistoryParams>(name, args)?))
+                    .await,
+            ),
+            "memory_diff" => map_json(
+                name,
+                self.memory_diff(Parameters(decode_args::<DiffParams>(name, args)?))
+                    .await,
+            ),
+            "memory_session_diff" => map_json(
+                name,
+                self.memory_session_diff(Parameters(decode_args::<SessionDiffParams>(name, args)?))
+                    .await,
+            ),
             "memory_confirm" => map_json(
                 name,
                 self.memory_confirm(Parameters(decode_args::<MemoryConfirmParams>(name, args)?))
@@ -725,11 +740,6 @@ impl DjinnMcpServer {
                 self.memory_recent(Parameters(decode_args::<RecentParams>(name, args)?))
                     .await,
             ),
-            "memory_history" => map_json(
-                name,
-                self.memory_history(Parameters(decode_args::<HistoryParams>(name, args)?))
-                    .await,
-            ),
             "memory_task_refs" => map_json(
                 name,
                 self.memory_task_refs(Parameters(decode_args::<TaskRefsParams>(name, args)?))
@@ -753,11 +763,6 @@ impl DjinnMcpServer {
             "memory_graph" => map_json(
                 name,
                 self.memory_graph(Parameters(decode_args::<GraphParams>(name, args)?))
-                    .await,
-            ),
-            "memory_diff" => map_json(
-                name,
-                self.memory_diff(Parameters(decode_args::<DiffParams>(name, args)?))
                     .await,
             ),
             "memory_build_context" => map_json(

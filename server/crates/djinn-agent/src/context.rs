@@ -177,7 +177,7 @@ pub struct AgentContext {
     /// `code_graph`).  When `Some`, the dispatch layer routes those tools
     /// against this path instead of the per-task worktree.  Used by the
     /// Architect and Chat surfaces to read against the canonical
-    /// `.djinn/worktrees/_index/` checkout pinned to `origin/main`.  Workers,
+    /// `.task-runtime/worktrees/_index/` checkout pinned to `origin/main`.  Workers,
     /// reviewers, planners, and lead leave this `None` so their tools continue
     /// to resolve against their task worktree.
     pub working_root: Option<PathBuf>,
@@ -211,7 +211,7 @@ pub struct AgentContext {
     pub cargo_target_runs_root: Option<PathBuf>,
     /// Shared bare-mirror manager. Used by the mirror-native merge path in
     /// `task_merge` to run squash-merges against an ephemeral hardlinked
-    /// clone instead of a worktree under `.djinn/worktrees/.merge-*`.
+    /// clone instead of a worktree under `.task-runtime/worktrees/.merge-*`.
     ///
     /// `None` in test contexts that do not exercise the merge path — those
     /// contexts never hit `squash_merge_via_mirror`, which bails out with a

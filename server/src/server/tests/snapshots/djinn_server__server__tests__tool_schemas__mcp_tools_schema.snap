@@ -4982,7 +4982,7 @@ expression: signatures
                 "type": "array"
               },
               "default": {},
-              "description": "Per-agent-role MCP server defaults. Moved here from the pre-cut-over\n`.djinn/settings.json`'s `agent_mcp_defaults` field. The key is a role\nname (e.g. `\"worker\"`, `\"chat\"`) or `\"*\"` for the fallback applied to\nany role with no explicit entry. The value is the list of MCP server\nnames (from root `mcp.json`) that sessions for that role should\nconnect to by default. Specialist role assignments override these.",
+              "description": "Per-agent-role MCP server defaults. The key is a role\nname (e.g. `\"worker\"`, `\"chat\"`) or `\"*\"` for the fallback applied to\nany role with no explicit entry. The value is the list of MCP server\nnames (from root `mcp.json`) that sessions for that role should\nconnect to by default. Specialist role assignments override these.",
               "type": "object"
             },
             "cargo_cache_policy": {
@@ -5008,7 +5008,7 @@ expression: signatures
             },
             "global_skills": {
               "default": [],
-              "description": "Skills injected into every agent prompt regardless of role. Moved here\nfrom the pre-cut-over `.djinn/settings.json`'s `global_skills` field.\nEach entry is a skill file stem (resolved against `.djinn/skills/`).",
+              "description": "Skills injected into every agent prompt regardless of role. Each entry\nis a registered skill identifier.",
               "items": {
                 "type": "string"
               },
@@ -5830,7 +5830,7 @@ expression: signatures
                 "type": "array"
               },
               "default": {},
-              "description": "Per-agent-role MCP server defaults. Moved here from the pre-cut-over\n`.djinn/settings.json`'s `agent_mcp_defaults` field. The key is a role\nname (e.g. `\"worker\"`, `\"chat\"`) or `\"*\"` for the fallback applied to\nany role with no explicit entry. The value is the list of MCP server\nnames (from root `mcp.json`) that sessions for that role should\nconnect to by default. Specialist role assignments override these.",
+              "description": "Per-agent-role MCP server defaults. The key is a role\nname (e.g. `\"worker\"`, `\"chat\"`) or `\"*\"` for the fallback applied to\nany role with no explicit entry. The value is the list of MCP server\nnames (from root `mcp.json`) that sessions for that role should\nconnect to by default. Specialist role assignments override these.",
               "type": "object"
             },
             "cargo_cache_policy": {
@@ -5856,7 +5856,7 @@ expression: signatures
             },
             "global_skills": {
               "default": [],
-              "description": "Skills injected into every agent prompt regardless of role. Moved here\nfrom the pre-cut-over `.djinn/settings.json`'s `global_skills` field.\nEach entry is a skill file stem (resolved against `.djinn/skills/`).",
+              "description": "Skills injected into every agent prompt regardless of role. Each entry\nis a registered skill identifier.",
               "items": {
                 "type": "string"
               },
@@ -6698,7 +6698,7 @@ expression: signatures
                 "type": "array"
               },
               "default": {},
-              "description": "Per-agent-role MCP server defaults. Moved here from the pre-cut-over\n`.djinn/settings.json`'s `agent_mcp_defaults` field. The key is a role\nname (e.g. `\"worker\"`, `\"chat\"`) or `\"*\"` for the fallback applied to\nany role with no explicit entry. The value is the list of MCP server\nnames (from root `mcp.json`) that sessions for that role should\nconnect to by default. Specialist role assignments override these.",
+              "description": "Per-agent-role MCP server defaults. The key is a role\nname (e.g. `\"worker\"`, `\"chat\"`) or `\"*\"` for the fallback applied to\nany role with no explicit entry. The value is the list of MCP server\nnames (from root `mcp.json`) that sessions for that role should\nconnect to by default. Specialist role assignments override these.",
               "type": "object"
             },
             "cargo_cache_policy": {
@@ -6724,7 +6724,7 @@ expression: signatures
             },
             "global_skills": {
               "default": [],
-              "description": "Skills injected into every agent prompt regardless of role. Moved here\nfrom the pre-cut-over `.djinn/settings.json`'s `global_skills` field.\nEach entry is a skill file stem (resolved against `.djinn/skills/`).",
+              "description": "Skills injected into every agent prompt regardless of role. Each entry\nis a registered skill identifier.",
               "items": {
                 "type": "string"
               },
@@ -8073,31 +8073,171 @@ expression: signatures
     "concurrent_safe": false,
     "input_schema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
       "properties": {
-        "permalink": {
+        "from_revision_id": {
+          "description": "Older endpoint revision UUID. Must be a content-bearing\n(created/updated/deleted) event for `note_id`.",
+          "type": "string"
+        },
+        "note_id": {
+          "description": "Note UUID both revisions belong to.",
           "type": "string"
         },
         "project": {
+          "description": "Absolute path to the project directory.",
           "type": "string"
         },
-        "sha": {
-          "description": "Specific commit SHA. Omit to get the diff for the most recent change.",
-          "type": [
-            "string",
-            "null"
-          ]
+        "to_revision_id": {
+          "description": "Newer endpoint revision UUID. Must be a content-bearing\n(created/updated/deleted) event for `note_id`.",
+          "type": "string"
         }
       },
       "required": [
         "project",
-        "permalink"
+        "note_id",
+        "from_revision_id",
+        "to_revision_id"
       ],
       "type": "object"
     },
     "output_schema": {
+      "$defs": {
+        "MemoryDiffEndpoint": {
+          "description": "Endpoint metadata for one side of a pairwise revision diff.",
+          "properties": {
+            "created_at": {
+              "type": "string"
+            },
+            "event_kind": {
+              "type": "string"
+            },
+            "note_seq": {
+              "format": "int64",
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "revision_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "revision_id",
+            "event_kind",
+            "created_at"
+          ],
+          "type": "object"
+        },
+        "MemoryRevisionEvent": {
+          "description": "One immutable ledger event projected for the MCP reader surfaces.",
+          "properties": {
+            "actor_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "actor_kind": {
+              "description": "Trusted actor kind: human, agent, or system.",
+              "type": "string"
+            },
+            "confidence_after": {
+              "format": "double",
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "confidence_before": {
+              "format": "double",
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "content_after": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "content_before": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "content_redacted": {
+              "description": "True when `content_before`/`content_after` were withheld because the\ncaller lacks note-read permission.",
+              "type": "boolean"
+            },
+            "created_at": {
+              "type": "string"
+            },
+            "event_kind": {
+              "description": "Ledger event kind: created, updated, deleted, confidence_changed, or\nextraction_skipped.",
+              "type": "string"
+            },
+            "note_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "note_seq": {
+              "format": "int64",
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "reason": {
+              "type": "string"
+            },
+            "revision_id": {
+              "type": "string"
+            },
+            "session_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "subsystem": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "task_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "task_run_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "revision_id",
+            "event_kind",
+            "actor_kind",
+            "reason",
+            "created_at",
+            "content_redacted"
+          ],
+          "type": "object"
+        }
+      },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
         "diff": {
+          "description": "Deterministic unified text diff rendered from the explicit endpoint\nsnapshots (from.content_before → to.content_after).",
           "type": "string"
         },
         "error": {
@@ -8105,10 +8245,38 @@ expression: signatures
             "string",
             "null"
           ]
+        },
+        "from": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/MemoryDiffEndpoint"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "intervening_events": {
+          "description": "Non-content events (confidence_changed, extraction_skipped) between\nthe endpoints, newest-first.",
+          "items": {
+            "$ref": "#/$defs/MemoryRevisionEvent"
+          },
+          "type": "array"
+        },
+        "to": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/MemoryDiffEndpoint"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "required": [
-        "diff"
+        "diff",
+        "intervening_events"
       ],
       "type": "object"
     }
@@ -9011,50 +9179,141 @@ expression: signatures
     "concurrent_safe": false,
     "input_schema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
       "properties": {
+        "before_cursor": {
+          "description": "Opaque cursor from a previous response's `next_cursor`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "limit": {
+          "description": "Page size (default 50, max 200).",
           "format": "int64",
           "type": [
             "integer",
             "null"
           ]
         },
-        "permalink": {
+        "note_id": {
+          "description": "Note UUID whose revision history is requested.",
           "type": "string"
         },
         "project": {
+          "description": "Absolute path to the project directory.",
           "type": "string"
         }
       },
       "required": [
         "project",
-        "permalink"
+        "note_id"
       ],
       "type": "object"
     },
     "output_schema": {
       "$defs": {
-        "GitLogEntry": {
-          "description": "A single git commit entry for note history.",
+        "MemoryRevisionEvent": {
+          "description": "One immutable ledger event projected for the MCP reader surfaces.",
           "properties": {
-            "author": {
+            "actor_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "actor_kind": {
+              "description": "Trusted actor kind: human, agent, or system.",
               "type": "string"
             },
-            "date": {
+            "confidence_after": {
+              "format": "double",
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "confidence_before": {
+              "format": "double",
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "content_after": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "content_before": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "content_redacted": {
+              "description": "True when `content_before`/`content_after` were withheld because the\ncaller lacks note-read permission.",
+              "type": "boolean"
+            },
+            "created_at": {
               "type": "string"
             },
-            "message": {
+            "event_kind": {
+              "description": "Ledger event kind: created, updated, deleted, confidence_changed, or\nextraction_skipped.",
               "type": "string"
             },
-            "sha": {
+            "note_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "note_seq": {
+              "format": "int64",
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "reason": {
               "type": "string"
+            },
+            "revision_id": {
+              "type": "string"
+            },
+            "session_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "subsystem": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "task_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "task_run_id": {
+              "type": [
+                "string",
+                "null"
+              ]
             }
           },
           "required": [
-            "sha",
-            "message",
-            "author",
-            "date"
+            "revision_id",
+            "event_kind",
+            "actor_kind",
+            "reason",
+            "created_at",
+            "content_redacted"
           ],
           "type": "object"
         }
@@ -9067,15 +9326,30 @@ expression: signatures
             "null"
           ]
         },
-        "history": {
+        "events": {
+          "description": "Newest-first revision events for the note.",
           "items": {
-            "$ref": "#/$defs/GitLogEntry"
+            "$ref": "#/$defs/MemoryRevisionEvent"
           },
           "type": "array"
+        },
+        "history_start": {
+          "description": "`ledger` when retained events back the history, `migration_cutover`\nfor a live pre-ledger note with no retained events.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "next_cursor": {
+          "description": "Cursor for the next (older) page; null when the page is exhausted.",
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
       "required": [
-        "history"
+        "events"
       ],
       "type": "object"
     }
@@ -9216,7 +9490,7 @@ expression: signatures
           ]
         },
         "type": {
-          "description": "New note type to move the note to. Use `proposed_adr` to recover a\nmis-routed ADR draft into `.djinn/decisions/proposed/`.",
+          "description": "New note type to move the note to. Use `proposed_adr` to recover a\nmis-routed ADR draft to proposed status in the project database.",
           "type": "string"
         }
       },
@@ -10839,6 +11113,192 @@ expression: signatures
     }
   },
   {
+    "name": "memory_session_diff",
+    "read_only": false,
+    "destructive": true,
+    "idempotent": false,
+    "open_world": false,
+    "concurrent_safe": false,
+    "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "before_cursor": {
+          "description": "Opaque cursor from a previous response's `next_cursor`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "limit": {
+          "description": "Page size (default 100, max 500).",
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "project": {
+          "description": "Absolute path to the project directory.",
+          "type": "string"
+        },
+        "session_id": {
+          "description": "Session UUID selector. Exactly one of `session_id` or `task_run_id`\nmust be provided.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "task_run_id": {
+          "description": "Task-run UUID selector. Exactly one of `session_id` or `task_run_id`\nmust be provided.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "project"
+      ],
+      "type": "object"
+    },
+    "output_schema": {
+      "$defs": {
+        "MemoryRevisionEvent": {
+          "description": "One immutable ledger event projected for the MCP reader surfaces.",
+          "properties": {
+            "actor_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "actor_kind": {
+              "description": "Trusted actor kind: human, agent, or system.",
+              "type": "string"
+            },
+            "confidence_after": {
+              "format": "double",
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "confidence_before": {
+              "format": "double",
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "content_after": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "content_before": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "content_redacted": {
+              "description": "True when `content_before`/`content_after` were withheld because the\ncaller lacks note-read permission.",
+              "type": "boolean"
+            },
+            "created_at": {
+              "type": "string"
+            },
+            "event_kind": {
+              "description": "Ledger event kind: created, updated, deleted, confidence_changed, or\nextraction_skipped.",
+              "type": "string"
+            },
+            "note_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "note_seq": {
+              "format": "int64",
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "reason": {
+              "type": "string"
+            },
+            "revision_id": {
+              "type": "string"
+            },
+            "session_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "subsystem": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "task_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "task_run_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "revision_id",
+            "event_kind",
+            "actor_kind",
+            "reason",
+            "created_at",
+            "content_redacted"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "error": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "events": {
+          "description": "Newest-first revision events by (created_at, id) for the selected\nsession or task run, spanning every event kind.",
+          "items": {
+            "$ref": "#/$defs/MemoryRevisionEvent"
+          },
+          "type": "array"
+        },
+        "next_cursor": {
+          "description": "Cursor for the next (older) page; null when the page is exhausted.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "events"
+      ],
+      "type": "object"
+    }
+  },
+  {
     "name": "memory_task_refs",
     "read_only": false,
     "destructive": true,
@@ -10978,7 +11438,7 @@ expression: signatures
           ]
         },
         "status": {
-          "description": "Optional explicit status for routed note types. For ADRs, `proposed`\nwrites into `.djinn/decisions/proposed/`.",
+          "description": "Optional explicit status for routed note types. For ADRs, `proposed`\nrecords the ADR with proposed status in the project database.",
           "type": [
             "string",
             "null"
@@ -12259,7 +12719,7 @@ expression: signatures
                 "type": "array"
               },
               "default": {},
-              "description": "Per-agent-role MCP server defaults. Moved here from the pre-cut-over\n`.djinn/settings.json`'s `agent_mcp_defaults` field. The key is a role\nname (e.g. `\"worker\"`, `\"chat\"`) or `\"*\"` for the fallback applied to\nany role with no explicit entry. The value is the list of MCP server\nnames (from root `mcp.json`) that sessions for that role should\nconnect to by default. Specialist role assignments override these.",
+              "description": "Per-agent-role MCP server defaults. The key is a role\nname (e.g. `\"worker\"`, `\"chat\"`) or `\"*\"` for the fallback applied to\nany role with no explicit entry. The value is the list of MCP server\nnames (from root `mcp.json`) that sessions for that role should\nconnect to by default. Specialist role assignments override these.",
               "type": "object"
             },
             "cargo_cache_policy": {
@@ -12285,7 +12745,7 @@ expression: signatures
             },
             "global_skills": {
               "default": [],
-              "description": "Skills injected into every agent prompt regardless of role. Moved here\nfrom the pre-cut-over `.djinn/settings.json`'s `global_skills` field.\nEach entry is a skill file stem (resolved against `.djinn/skills/`).",
+              "description": "Skills injected into every agent prompt regardless of role. Each entry\nis a registered skill identifier.",
               "items": {
                 "type": "string"
               },
@@ -13065,7 +13525,7 @@ expression: signatures
                 "type": "array"
               },
               "default": {},
-              "description": "Per-agent-role MCP server defaults. Moved here from the pre-cut-over\n`.djinn/settings.json`'s `agent_mcp_defaults` field. The key is a role\nname (e.g. `\"worker\"`, `\"chat\"`) or `\"*\"` for the fallback applied to\nany role with no explicit entry. The value is the list of MCP server\nnames (from root `mcp.json`) that sessions for that role should\nconnect to by default. Specialist role assignments override these.",
+              "description": "Per-agent-role MCP server defaults. The key is a role\nname (e.g. `\"worker\"`, `\"chat\"`) or `\"*\"` for the fallback applied to\nany role with no explicit entry. The value is the list of MCP server\nnames (from root `mcp.json`) that sessions for that role should\nconnect to by default. Specialist role assignments override these.",
               "type": "object"
             },
             "cargo_cache_policy": {
@@ -13091,7 +13551,7 @@ expression: signatures
             },
             "global_skills": {
               "default": [],
-              "description": "Skills injected into every agent prompt regardless of role. Moved here\nfrom the pre-cut-over `.djinn/settings.json`'s `global_skills` field.\nEach entry is a skill file stem (resolved against `.djinn/skills/`).",
+              "description": "Skills injected into every agent prompt regardless of role. Each entry\nis a registered skill identifier.",
               "items": {
                 "type": "string"
               },
@@ -13845,7 +14305,7 @@ expression: signatures
                 "type": "array"
               },
               "default": {},
-              "description": "Per-agent-role MCP server defaults. Moved here from the pre-cut-over\n`.djinn/settings.json`'s `agent_mcp_defaults` field. The key is a role\nname (e.g. `\"worker\"`, `\"chat\"`) or `\"*\"` for the fallback applied to\nany role with no explicit entry. The value is the list of MCP server\nnames (from root `mcp.json`) that sessions for that role should\nconnect to by default. Specialist role assignments override these.",
+              "description": "Per-agent-role MCP server defaults. The key is a role\nname (e.g. `\"worker\"`, `\"chat\"`) or `\"*\"` for the fallback applied to\nany role with no explicit entry. The value is the list of MCP server\nnames (from root `mcp.json`) that sessions for that role should\nconnect to by default. Specialist role assignments override these.",
               "type": "object"
             },
             "cargo_cache_policy": {
@@ -13871,7 +14331,7 @@ expression: signatures
             },
             "global_skills": {
               "default": [],
-              "description": "Skills injected into every agent prompt regardless of role. Moved here\nfrom the pre-cut-over `.djinn/settings.json`'s `global_skills` field.\nEach entry is a skill file stem (resolved against `.djinn/skills/`).",
+              "description": "Skills injected into every agent prompt regardless of role. Each entry\nis a registered skill identifier.",
               "items": {
                 "type": "string"
               },
@@ -22616,20 +23076,6 @@ expression: signatures
                 "null"
               ]
             },
-            "memory_mount_enabled": {
-              "description": "Enable the ADR-057 Linux memory mount for filesystem-first note workflows. Disabled by default; requires a Linux build with the `memory-mount` cargo feature. The mounted path serves the current session-selected task/worktree view when available and otherwise falls back to the canonical `main` view.",
-              "type": [
-                "boolean",
-                "null"
-              ]
-            },
-            "memory_mount_path": {
-              "description": "Absolute filesystem path where the Linux FUSE mount should be attached. The directory must already exist and be empty at startup. This path hosts the current session-selected memory view; Djinn does not expose additional branch directories in this slice.",
-              "type": [
-                "string",
-                "null"
-              ]
-            },
             "models": {
               "description": "Ordered list of models available to agents, e.g. `[\"openai/gpt-4o\"]`.",
               "items": {
@@ -22725,20 +23171,6 @@ expression: signatures
           "format": "int64",
           "type": [
             "integer",
-            "null"
-          ]
-        },
-        "memory_mount_enabled": {
-          "description": "Enable the Linux-only ADR-057 memory FUSE mount for filesystem-first note workflows. Disabled by default; requires a Linux build with the `memory-mount` cargo feature. The mounted path serves the current session-selected task/worktree view when available and otherwise falls back to the canonical `main` view.",
-          "type": [
-            "boolean",
-            "null"
-          ]
-        },
-        "memory_mount_path": {
-          "description": "Absolute path for the Linux memory mount. The directory must already exist and be empty at startup. This path hosts the current session-selected memory view; no additional branch directories are exposed in this slice.",
-          "type": [
-            "string",
             "null"
           ]
         },

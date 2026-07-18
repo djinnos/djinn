@@ -110,7 +110,7 @@ fn make_task() -> Task {
 fn make_ctx() -> TaskContext {
     TaskContext {
         project_path: "/home/user/project".into(),
-        workspace_path: "/home/user/project/.djinn/worktrees/t123".into(),
+        workspace_path: "/home/user/project/.task-runtime/worktrees/t123".into(),
         diff: None,
         commits: None,
         start_commit: None,
@@ -183,7 +183,7 @@ fn worker_prompt_contains_task_fields() {
     assert!(prompt.contains("- [ ] Widget exists"));
     assert!(prompt.contains("- [x] Tests pass"));
     assert!(prompt.contains("/home/user/project"));
-    assert!(prompt.contains("/home/user/project/.djinn/worktrees/t123"));
+    assert!(prompt.contains("/home/user/project/.task-runtime/worktrees/t123"));
     assert!(prompt.contains("memory_write"));
     assert!(prompt.contains("memory_edit"));
     // A plain `task` runs the implement flow — no research/spike section.
@@ -833,6 +833,39 @@ fn adversary_and_judge_can_file_debate_trail_entries() {
         judge_prompt.contains("`proposal_debate_append("),
         "judge MUST have proposal_debate_append — it is the only channel the \
          refinement loop reads for the verdict"
+    );
+}
+
+/// The Advocate's rebuttal channel (scope-ratchet counterweight): its prompt
+/// must teach filing `kind="rebuttal"` entries via `proposal_debate_append`,
+/// and the Judge's prompt must teach adjudicating them. Without the prompt
+/// wiring the tool grant in `tool_schemas_advocate` is dead weight and every
+/// objection can only be resolved by growing the spec.
+#[test]
+fn advocate_rebuttal_channel_is_prompt_wired() {
+    ensure_registry();
+    let task = make_task();
+    let ctx = make_ctx();
+
+    let advocate_prompt = render_prompt(AgentType::Advocate, &task, &ctx);
+    assert!(
+        advocate_prompt.contains("proposal_debate_append("),
+        "advocate prompt must teach the proposal_debate_append rebuttal call"
+    );
+    assert!(
+        advocate_prompt.contains("kind=\"rebuttal\"")
+            || advocate_prompt.contains("kind                  = \"rebuttal\""),
+        "advocate prompt must pin kind=\"rebuttal\" as its only debate-trail kind"
+    );
+
+    let judge_prompt = render_prompt(AgentType::Judge, &task, &ctx);
+    assert!(
+        judge_prompt.contains("Adjudicating rebuttals"),
+        "judge prompt must carry the rebuttal adjudication section"
+    );
+    assert!(
+        judge_prompt.contains("Minimality"),
+        "judge prompt must carry the minimality DoD dimension"
     );
 }
 

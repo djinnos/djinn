@@ -439,6 +439,38 @@ pub fn agent_context_from_db(db: Database, _cancel: CancellationToken) -> SlotCo
     agent_context_from_db_with_dispatcher(db, _cancel, Some(Arc::new(MockToolDispatcher)))
 }
 
+/// Build a `SlotContext` from an in-memory DB with custom host callbacks.
+/// This lets tests override final-verification resolution and lease behavior
+/// without going through the production `AgentHostCallbacks`.
+pub fn agent_context_from_db_with_callbacks(
+    db: Database,
+    callbacks: Arc<dyn crate::host::SlotHostCallbacks>,
+) -> SlotContext {
+    let event_bus = test_events();
+    let catalog = djinn_provider::catalog::CatalogService::new();
+    let health_tracker = djinn_provider::catalog::HealthTracker::default();
+    let background_work =
+        std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashSet::new()));
+    let active_tasks = std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
+    SlotContext {
+        db,
+        event_bus,
+        catalog,
+        health_tracker,
+        background_work_tasks: background_work,
+        active_tasks,
+        default_project_id: None,
+        working_root: None,
+        coordinator_trigger: None,
+        runtime_ops: None,
+        repo_graph_ops: None,
+        clock: std::sync::Arc::new(djinn_core::clock::SystemClock::new()),
+        callbacks,
+        tool_dispatcher: Some(Arc::new(MockToolDispatcher)),
+        compaction_cs: CompactionCriticalSection::new(),
+    }
+}
+
 /// Build a `SlotContext` from an in-memory DB with an explicit tool dispatcher.
 /// Pass `None` for `tool_dispatcher` to test the "no dispatcher" error path.
 pub fn agent_context_from_db_with_dispatcher(
@@ -455,6 +487,16 @@ pub fn agent_context_from_db_with_dispatcher(
     // No-op host callbacks for tests
     struct NoopCallbacks;
     impl crate::host::SlotHostCallbacks for NoopCallbacks {
+        fn final_verification_outcome_for_test(
+            &self,
+            _request: &crate::final_verification::FinalVerificationCoordinatorRequest,
+        ) -> Option<crate::final_verification::FinalVerificationRecordingOutcome> {
+            Some(crate::final_verification::FinalVerificationRecordingOutcome::Stored {
+                verification_attempt_id: uuid::Uuid::now_v7().to_string(),
+                verify_run_id: uuid::Uuid::now_v7().to_string(),
+            })
+        }
+
         fn interrupt_paused_worker_session<'a>(
             &'a self,
             _task_id: &'a str,
@@ -757,6 +799,22 @@ impl FakeProvider {
             .into_iter()
             .map(|turn| turn.into_iter().map(Ok).collect())
             .collect();
+        Self {
+            scripted_turns: Arc::new(StdMutex::new(scripted_turns)),
+        }
+    }
+    /// Create a provider whose scripted turns are followed by an explicit
+    /// terminal stream error. This lets reply-loop tests exercise recoverable
+    /// turns before terminating without relying on script-exhaustion panic.
+    pub fn script_with_terminal_error(
+        turns: Vec<Vec<StreamEvent>>,
+        message: impl Into<String>,
+    ) -> Self {
+        let mut scripted_turns: VecDeque<Vec<anyhow::Result<StreamEvent>>> = turns
+            .into_iter()
+            .map(|turn| turn.into_iter().map(Ok).collect())
+            .collect();
+        scripted_turns.push_back(vec![Err(anyhow::anyhow!(message.into()))]);
         Self {
             scripted_turns: Arc::new(StdMutex::new(scripted_turns)),
         }

@@ -11,7 +11,9 @@ use std::collections::BTreeMap;
 use std::io;
 use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::time::Duration;
 
+use djinn_core::clock::{Clock, SystemClock};
 use landlock::{
     ABI, Access, AccessFs, PathBeneath, PathFd, Ruleset, RulesetAttr, RulesetCreatedAttr,
     RulesetStatus,
@@ -45,6 +47,7 @@ pub struct FinalVerificationRequest {
 #[derive(Debug)]
 pub struct FinalVerificationResult {
     pub exit_code: Option<i32>,
+    pub timed_out: bool,
     pub stdout: Vec<u8>,
     pub stderr: Vec<u8>,
 }
@@ -101,13 +104,29 @@ pub fn launch_final_verification(
     launch_with_backend_check(request, ensure_backend_available)
 }
 
+pub fn launch_final_verification_with_timeout(
+    request: FinalVerificationRequest,
+    timeout: Duration,
+) -> Result<FinalVerificationResult, FinalVerificationError> {
+    launch_with_backend_check_and_timeout(request, ensure_backend_available, Some(timeout))
+}
+
 fn launch_with_backend_check(
     request: FinalVerificationRequest,
     backend_check: impl FnOnce() -> Result<(), FinalVerificationError>,
 ) -> Result<FinalVerificationResult, FinalVerificationError> {
+    launch_with_backend_check_and_timeout(request, backend_check, None)
+}
+
+fn launch_with_backend_check_and_timeout(
+    request: FinalVerificationRequest,
+    backend_check: impl FnOnce() -> Result<(), FinalVerificationError>,
+    timeout: Option<Duration>,
+) -> Result<FinalVerificationResult, FinalVerificationError> {
     launch_with_backend_and_setup(
         request,
         backend_check,
+        timeout,
         |worktree, runtimes, externals, outputs| {
             enter_isolated_network_namespace().map_err(|_| ())?;
             apply_filesystem_policy(worktree, runtimes, externals, outputs).map_err(|_| ())
@@ -118,6 +137,7 @@ fn launch_with_backend_check(
 fn launch_with_backend_and_setup(
     request: FinalVerificationRequest,
     backend_check: impl FnOnce() -> Result<(), FinalVerificationError>,
+    timeout: Option<Duration>,
     isolation_setup: impl Fn(&Path, &[PathBuf], &[PathBuf], &[PathBuf]) -> Result<(), ()>
     + Send
     + Sync
@@ -153,7 +173,7 @@ fn launch_with_backend_and_setup(
         });
     }
 
-    let output = command.output().map_err(|source| {
+    let mut child = command.spawn().map_err(|source| {
         if source.raw_os_error() == Some(ISOLATION_SETUP_ERROR) {
             FinalVerificationError::BackendUnavailable {
                 reason: "final-verification isolation setup failed",
@@ -162,8 +182,28 @@ fn launch_with_backend_and_setup(
             FinalVerificationError::Launch(source)
         }
     })?;
+    let clock = SystemClock::new();
+    let deadline = timeout.map(|duration| clock.now_instant() + duration);
+    let timed_out = loop {
+        if child
+            .try_wait()
+            .map_err(FinalVerificationError::Launch)?
+            .is_some()
+        {
+            break false;
+        }
+        if deadline.is_some_and(|deadline| clock.now_instant() >= deadline) {
+            child.kill().map_err(FinalVerificationError::Launch)?;
+            break true;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    let output = child
+        .wait_with_output()
+        .map_err(FinalVerificationError::Launch)?;
     Ok(FinalVerificationResult {
         exit_code: output.status.code(),
+        timed_out,
         stdout: output.stdout,
         stderr: output.stderr,
     })
@@ -520,6 +560,7 @@ mod tests {
         let error = launch_with_backend_and_setup(
             request(worktree.path()),
             || Ok(()),
+            None,
             |_, _, _, _| Err(()),
         )
         .unwrap_err();

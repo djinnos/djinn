@@ -1,3 +1,4 @@
+// djinn:allow-oversize — durable controller, restart recovery, readiness gates, and focused tests share lifecycle invariants.
 //! Coordinator-owned durable admission policy for build-producing workloads.
 //!
 //! The journal supplies serialization and lifecycle fencing; this module fixes
@@ -5,13 +6,16 @@
 //! the data-only graph-warmer protocol.
 
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, AtomicU64, Ordering},
+};
 
 use async_trait::async_trait;
 use djinn_db::{
-    AdmissionDomain, AdmissionJournalKey, AdmissionJournalRepository, AdmissionWorkloadKind,
-    CreateStartedInput, ReserveAdmissionInput, ReserveAdmissionResult, TerminalAdmissionInput,
-    UidFencedAdmissionInput,
+    AdmissionDomain, AdmissionJournalKey, AdmissionJournalRepository, AdmissionJournalRow,
+    AdmissionRecoveryResult, AdmissionState, AdmissionWorkloadKind, CreateStartedInput,
+    ReserveAdmissionInput, ReserveAdmissionResult, TerminalAdmissionInput, UidFencedAdmissionInput,
 };
 use djinn_k8s::{
     WarmAdmission, WarmAdmissionError, WarmAdmissionPermit, WarmAdmissionRequest,
@@ -100,6 +104,41 @@ pub enum BuildAdmissionDecision {
     Unclassified,
 }
 
+/// Bounded, deterministic readiness reason for Enforce admission gating.
+///
+/// Enforce admission fails closed until every required gate is healthy. Observe
+/// records degradation but remains non-denying. Off has no readiness coupling.
+/// Variants are exhaustive and intentionally bounded so telemetry and tests can
+/// rely on a stable, enumerated set. The default is fail-closed
+/// ([`BuildAdmissionReadiness::JournalRecoveryIncomplete`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum BuildAdmissionReadiness {
+    /// The journal has not been recovered yet; Enforce starts in this state.
+    #[default]
+    JournalRecoveryIncomplete,
+    /// The journal itself is unhealthy (a recovery/seed query failed).
+    JournalUnhealthy,
+    /// At least one recovered row is in CreateUnknown state.
+    CreateUnknownHealth,
+    /// Seeded occupancy exceeded the configured cap after recovery.
+    SeededOccupancyAboveCap,
+    /// Kubernetes inventory has not completed yet.
+    InventoryPending,
+    /// Single-active topology check has not succeeded yet.
+    TopologyPending,
+    /// Graceful shutdown is draining; new reservations are blocked.
+    ShutdownDraining,
+    /// Every required gate is healthy; admission may proceed.
+    Healthy,
+}
+
+impl BuildAdmissionReadiness {
+    #[must_use]
+    pub fn is_healthy(self) -> bool {
+        matches!(self, Self::Healthy)
+    }
+}
+
 #[derive(Clone, Debug)]
 struct PermitState {
     key: AdmissionJournalKey,
@@ -107,6 +146,28 @@ struct PermitState {
     object_name: String,
     durable: bool,
     released: bool,
+    /// This permit was seeded from a recovered CreateUnknown row and has not
+    /// yet been adopted into Live. Tracked so the startup CreateUnknown gate
+    /// is decremented exactly once when the row resolves.
+    create_unknown_outstanding: bool,
+}
+
+/// Outcome of durable predecessor-epoch recovery and controller seeding.
+///
+/// The controller seeds in-memory permit bookkeeping from the durable active
+/// rows returned by [`AdmissionJournalRepository::recover_predecessor_epoch`]
+/// without duplicating occupancy or relying on a separate in-memory permit
+/// count: occupancy is always derived from the journal itself.
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
+pub struct AdmissionSeedReport {
+    /// Number of predecessor Reserved rows atomically retired to Terminal.
+    pub retired_reserved: u64,
+    /// Number of predecessor CreateInFlight rows converted to CreateUnknown.
+    pub marked_create_unknown: u64,
+    /// Number of recovered rows the controller seeded as occupying permits.
+    pub seeded_rows: u64,
+    /// Final readiness reason applied after seeding completed.
+    pub readiness: BuildAdmissionReadiness,
 }
 
 /// A single controller shared by task-run dispatch and graph warming.
@@ -122,6 +183,31 @@ pub struct BuildAdmissionController {
     permits_by_task_run: Mutex<HashMap<String, WarmAdmissionPermit>>,
     unclassified_observations: Mutex<u64>,
     would_defer_observations: Mutex<u64>,
+    /// Readiness gate flags. The bounded [`BuildAdmissionReadiness`] reason is
+    /// DERIVED from these flags in fail-closed priority order, so no caller can
+    /// mark Enforce healthy without every real startup check completing:
+    /// journal recovery, journal health, CreateUnknown resolution, cap
+    /// seeding, Kubernetes inventory, and single-active topology.
+    ///
+    /// The durable journal has been loaded and recovered for this process.
+    journal_recovered: AtomicBool,
+    /// The recovery/seed queries themselves succeeded.
+    journal_healthy: AtomicBool,
+    /// Recovered rows still occupying as CreateUnknown. Seeding sets this from
+    /// the durable journal; adopting a seeded CreateUnknown row into Live
+    /// decrements it exactly once. Enforce stays closed while it is non-zero.
+    create_unknown_pending: AtomicU64,
+    /// Seeded durable occupancy exceeded the configured cap at recovery.
+    /// Cleared when a terminal release brings occupancy back within the cap.
+    over_cap: AtomicBool,
+    /// The broad Kubernetes inventory LIST completed successfully.
+    inventory_ready: AtomicBool,
+    /// The single-active topology gate (coordinator leadership) is held by
+    /// this process.
+    topology_ready: AtomicBool,
+    /// Graceful shutdown begins draining before permit release. New Enforce
+    /// reservations are blocked while this is set; Observe/Off are unaffected.
+    draining: AtomicBool,
     released: Notify,
 }
 
@@ -143,14 +229,148 @@ impl BuildAdmissionController {
             permits_by_task_run: Mutex::new(HashMap::new()),
             unclassified_observations: Mutex::new(0),
             would_defer_observations: Mutex::new(0),
+            journal_recovered: AtomicBool::new(true),
+            journal_healthy: AtomicBool::new(true),
+            create_unknown_pending: AtomicU64::new(0),
+            over_cap: AtomicBool::new(false),
+            inventory_ready: AtomicBool::new(true),
+            topology_ready: AtomicBool::new(true),
+            draining: AtomicBool::new(false),
             released: Notify::new(),
         }
+    }
+
+    /// Construct an Enforce controller which cannot admit work until every
+    /// startup gate completes.
+    ///
+    /// The controller starts fail-closed with all startup gates unsatisfied:
+    /// journal recovery, Kubernetes inventory, and the single-active topology
+    /// check must each complete before admission opens. Observe and Off never
+    /// gate admission and are constructed via [`Self::new`].
+    #[must_use]
+    pub fn new_closed(
+        journal: Arc<AdmissionJournalRepository>,
+        cap: i64,
+        creator_server_epoch: impl Into<String>,
+    ) -> Self {
+        let controller = Self::new(
+            journal,
+            BuildAdmissionMode::Enforce,
+            cap,
+            creator_server_epoch,
+        );
+        controller.journal_recovered.store(false, Ordering::Release);
+        controller.inventory_ready.store(false, Ordering::Release);
+        controller.topology_ready.store(false, Ordering::Release);
+        controller
+    }
+
+    /// Open the controller after every startup gate has completed.
+    ///
+    /// This satisfies all readiness gates at once. Production startup uses the
+    /// granular `mark_*` methods as each real check completes (journal
+    /// recovery first, then inventory, then topology); this helper is for
+    /// tests that need an open Enforce controller without walking startup.
+    pub fn mark_ready(&self) {
+        self.journal_recovered.store(true, Ordering::Release);
+        self.journal_healthy.store(true, Ordering::Release);
+        self.create_unknown_pending.store(0, Ordering::Release);
+        self.over_cap.store(false, Ordering::Release);
+        self.inventory_ready.store(true, Ordering::Release);
+        self.topology_ready.store(true, Ordering::Release);
+    }
+
+    /// Record that journal recovery failed. Enforce stays fail-closed with
+    /// [`BuildAdmissionReadiness::JournalUnhealthy`]; Observe records the same
+    /// degradation but never denies.
+    pub fn mark_journal_unhealthy(&self) {
+        self.journal_recovered.store(true, Ordering::Release);
+        self.journal_healthy.store(false, Ordering::Release);
+    }
+
+    /// The broad Kubernetes inventory LIST completed successfully.
+    pub fn mark_inventory_ready(&self) {
+        self.inventory_ready.store(true, Ordering::Release);
+    }
+
+    /// The Kubernetes inventory has not completed (or failed); Enforce stays
+    /// fail-closed with [`BuildAdmissionReadiness::InventoryPending`].
+    pub fn mark_inventory_pending(&self) {
+        self.inventory_ready.store(false, Ordering::Release);
+    }
+
+    /// The single-active topology gate is held: this process won the
+    /// coordinator leadership race, so it is the only active admission writer.
+    pub fn mark_topology_ready(&self) {
+        self.topology_ready.store(true, Ordering::Release);
+    }
+
+    /// Inspect the current bounded readiness reason, derived from the startup
+    /// gates in fail-closed priority order.
+    #[must_use]
+    pub fn readiness(&self) -> BuildAdmissionReadiness {
+        if self.draining.load(Ordering::Acquire) {
+            return BuildAdmissionReadiness::ShutdownDraining;
+        }
+        if !self.journal_recovered.load(Ordering::Acquire) {
+            return BuildAdmissionReadiness::JournalRecoveryIncomplete;
+        }
+        if !self.journal_healthy.load(Ordering::Acquire) {
+            return BuildAdmissionReadiness::JournalUnhealthy;
+        }
+        if self.create_unknown_pending.load(Ordering::Acquire) > 0 {
+            return BuildAdmissionReadiness::CreateUnknownHealth;
+        }
+        if self.over_cap.load(Ordering::Acquire) {
+            return BuildAdmissionReadiness::SeededOccupancyAboveCap;
+        }
+        if !self.inventory_ready.load(Ordering::Acquire) {
+            return BuildAdmissionReadiness::InventoryPending;
+        }
+        if !self.topology_ready.load(Ordering::Acquire) {
+            return BuildAdmissionReadiness::TopologyPending;
+        }
+        BuildAdmissionReadiness::Healthy
+    }
+
+    /// The configured admission mode.
+    #[must_use]
+    pub fn mode(&self) -> BuildAdmissionMode {
+        self.mode
+    }
+
+    /// The unique server epoch allocated for this controller's process.
+    #[must_use]
+    pub fn server_epoch(&self) -> &str {
+        &self.creator_server_epoch
+    }
+
+    #[must_use]
+    pub fn is_ready(&self) -> bool {
+        self.readiness().is_healthy()
+    }
+
+    /// Begin graceful shutdown draining. New Enforce reservations are blocked
+    /// while draining; in-flight permits may still transition to terminal.
+    pub fn begin_draining(&self) {
+        self.draining.store(true, Ordering::Release);
+    }
+
+    #[must_use]
+    pub fn is_draining(&self) -> bool {
+        self.draining.load(Ordering::Acquire)
     }
 
     /// Queue consumers may wait here after a terminal release instead of polling.
     #[must_use]
     pub fn release_notifier(&self) -> &Notify {
         &self.released
+    }
+
+    /// Durable inspection seam used by coordinator integration tests.
+    #[cfg(test)]
+    pub(crate) fn journal(&self) -> &Arc<AdmissionJournalRepository> {
+        &self.journal
     }
 
     /// Bounded count suitable for a telemetry exporter; values saturate at 1024.
@@ -167,6 +387,12 @@ impl BuildAdmissionController {
         &self,
         request: BuildAdmissionRequest,
     ) -> Result<BuildAdmissionDecision, WarmAdmissionError> {
+        if self.mode == BuildAdmissionMode::Enforce && (!self.is_ready() || self.is_draining()) {
+            return Ok(BuildAdmissionDecision::Denied {
+                occupancy: 0,
+                cap: self.cap,
+            });
+        }
         let workload_kind = match request.kind {
             BuildWorkloadKind::TaskRun { .. } => match request.domain {
                 AdmissionDomain::TaskObservation => AdmissionWorkloadKind::Task,
@@ -213,8 +439,17 @@ impl BuildAdmissionController {
                         },
                         self.cap,
                     )
-                    .await
-                    .map_err(unavailable)?;
+                    .await;
+                let observed = match observed {
+                    Ok(observed) => observed,
+                    Err(error) => {
+                        // Observe is telemetry-only: a journal outage must not become a dispatch denial.
+                        tracing::warn!(%error, "build admission observation unavailable; permitting without journal telemetry");
+                        return self
+                            .permit_without_reservation(key, permit_key, request.object_name)
+                            .await;
+                    }
+                };
                 if observed.would_defer {
                     let mut count = self.would_defer_observations.lock().await;
                     *count = count.saturating_add(1).min(1024);
@@ -250,6 +485,7 @@ impl BuildAdmissionController {
             object_name: request.object_name,
             durable,
             released: false,
+            create_unknown_outstanding: false,
         };
         self.permits.lock().await.insert(permit.clone(), state);
         self.permits_by_key
@@ -257,6 +493,34 @@ impl BuildAdmissionController {
             .await
             .insert(permit_key, permit.clone());
         Ok(BuildAdmissionDecision::Permitted { permit, idempotent })
+    }
+
+    async fn permit_without_reservation(
+        &self,
+        key: AdmissionJournalKey,
+        permit_key: String,
+        object_name: String,
+    ) -> Result<BuildAdmissionDecision, WarmAdmissionError> {
+        let permit = WarmAdmissionPermit::new();
+        self.permits.lock().await.insert(
+            permit.clone(),
+            PermitState {
+                key,
+                creator_server_epoch: self.creator_server_epoch.clone(),
+                object_name,
+                durable: false,
+                released: false,
+                create_unknown_outstanding: false,
+            },
+        );
+        self.permits_by_key
+            .lock()
+            .await
+            .insert(permit_key, permit.clone());
+        Ok(BuildAdmissionDecision::Permitted {
+            permit,
+            idempotent: false,
+        })
     }
 
     /// A missing or unknown task role is a fail-closed classification result.
@@ -282,22 +546,39 @@ impl BuildAdmissionController {
         .await
     }
 
+    /// Return the retained permit for this exact admission key, in any domain.
+    ///
+    /// This is the domain-appropriate recovered-permit lookup: seeded and
+    /// admitted permits are keyed by the full journal key, so a warm-build row
+    /// is addressable with [`AdmissionDomain::WarmBuild`] while a task-run row
+    /// uses [`AdmissionDomain::TaskObservation`]. Recovery and adoption use
+    /// this to reach the permit seeded from a recovered row.
+    pub async fn permit_for_key(
+        &self,
+        domain: AdmissionDomain,
+        work_id: &str,
+        generation: i64,
+    ) -> Option<WarmAdmissionPermit> {
+        let key = AdmissionJournalKey {
+            domain,
+            work_id: work_id.to_owned(),
+            generation,
+        };
+        self.permits_by_key
+            .lock()
+            .await
+            .get(&permit_key(&key))
+            .cloned()
+    }
+
     /// Return the retained permit for this exact task generation.
     pub async fn task_run_permit(
         &self,
         task_id: &str,
         generation: i64,
     ) -> Option<WarmAdmissionPermit> {
-        self.permits
-            .lock()
+        self.permit_for_key(AdmissionDomain::TaskObservation, task_id, generation)
             .await
-            .iter()
-            .find(|(_, state)| {
-                state.key.domain == AdmissionDomain::TaskObservation
-                    && state.key.work_id == task_id
-                    && state.key.generation == generation
-            })
-            .map(|(permit, _)| permit.clone())
     }
 
     /// Bind a UID-bearing runtime task-run to a permit already made Live.
@@ -346,7 +627,8 @@ impl BuildAdmissionController {
             WarmAdmissionTransition::DefinitiveFailure { .. }
                 | WarmAdmissionTransition::Terminal { .. }
         );
-        match transition {
+        let adopts_into_live = matches!(transition, WarmAdmissionTransition::Live { .. });
+        let result = match transition {
             WarmAdmissionTransition::CreateStarted => self
                 .journal
                 .mark_create_started(&CreateStartedInput {
@@ -356,7 +638,7 @@ impl BuildAdmissionController {
                 })
                 .await
                 .map(|_| ())
-                .map_err(unavailable)?,
+                .map_err(unavailable),
             WarmAdmissionTransition::Live { uid } => self
                 .journal
                 .mark_live(&UidFencedAdmissionInput {
@@ -365,19 +647,19 @@ impl BuildAdmissionController {
                 })
                 .await
                 .map(|_| ())
-                .map_err(unavailable)?,
+                .map_err(unavailable),
             WarmAdmissionTransition::CreateUnknown { .. } => self
                 .journal
                 .mark_create_unknown(&state.key)
                 .await
                 .map(|_| ())
-                .map_err(unavailable)?,
+                .map_err(unavailable),
             WarmAdmissionTransition::DefinitiveFailure { .. } => self
                 .journal
                 .mark_definitive_create_failure(&state.key)
                 .await
                 .map(|_| ())
-                .map_err(unavailable)?,
+                .map_err(unavailable),
             WarmAdmissionTransition::Terminal { uid } => self
                 .journal
                 .mark_terminal(&TerminalAdmissionInput {
@@ -386,7 +668,37 @@ impl BuildAdmissionController {
                 })
                 .await
                 .map(|_| ())
-                .map_err(unavailable)?,
+                .map_err(unavailable),
+        };
+        let transition_durable = result.is_ok();
+        if let Err(error) = result {
+            if self.mode != BuildAdmissionMode::Observe {
+                return Err(error);
+            }
+            tracing::warn!(%error, "build admission observation transition unavailable; continuing without journal telemetry");
+        }
+        // A recovered CreateUnknown row stops occupying as unknown once it is
+        // adopted into Live with the authoritative UID: clear its startup-gate
+        // contribution exactly once so readiness can advance past
+        // `CreateUnknownHealth`.
+        if transition_durable && adopts_into_live {
+            let cleared = {
+                let mut permits = self.permits.lock().await;
+                match permits.get_mut(permit) {
+                    Some(state) if state.create_unknown_outstanding => {
+                        state.create_unknown_outstanding = false;
+                        true
+                    }
+                    Some(_) | None => false,
+                }
+            };
+            if cleared {
+                self.create_unknown_pending
+                    .fetch_update(Ordering::AcqRel, Ordering::Acquire, |value| {
+                        Some(value.saturating_sub(1))
+                    })
+                    .ok();
+            }
         }
         if terminal {
             let newly_released = {
@@ -405,9 +717,184 @@ impl BuildAdmissionController {
                 // future registered in its select loop.
                 self.released.notify_one();
             }
+            // A terminal release can bring seeded occupancy back within the
+            // cap; refresh the over-cap gate from the durable journal rather
+            // than trusting in-memory bookkeeping.
+            if transition_durable && self.over_cap.load(Ordering::Acquire) {
+                match self.journal.count_task_or_warm_occupancy().await {
+                    Ok(occupancy) if occupancy <= self.cap => {
+                        self.over_cap.store(false, Ordering::Release);
+                    }
+                    Ok(_) => {}
+                    Err(error) => {
+                        tracing::warn!(%error, "build admission: failed to refresh over-cap gate after release; retaining it conservatively");
+                    }
+                }
+            }
         }
         Ok(())
     }
+
+    /// Recover the durable predecessor epoch and seed this controller from the
+    /// active recovered rows.
+    ///
+    /// This is the single startup recovery primitive. It must run before any
+    /// Kubernetes inventory or task/warm create can proceed under Enforce. It
+    /// uses [`AdmissionJournalRepository::recover_predecessor_epoch`] to
+    /// atomically retire predecessor Reserved rows, convert predecessor
+    /// CreateInFlight rows to occupying CreateUnknown, and retain predecessor
+    /// CreateUnknown/Live rows — then seeds in-memory permit bookkeeping from
+    /// all active recovered rows without duplicating occupancy.
+    ///
+    /// Occupancy is never tracked by an in-memory permit count: the journal is
+    /// the single source of truth. Seeds record one permit per recovered active
+    /// row so that idempotent re-admission and lifecycle transitions remain
+    /// consistent across the restart boundary.
+    ///
+    /// After seeding, the readiness gates are updated deterministically from
+    /// the durable journal: `CreateUnknownHealth` while any recovered
+    /// CreateUnknown row still occupies, `SeededOccupancyAboveCap` while
+    /// task/warm occupancy exceeds the cap. Journal recovery alone NEVER marks
+    /// Enforce healthy: the inventory and topology gates stay pending until
+    /// their own production checks complete, so a recovered controller with no
+    /// other degradation reports `InventoryPending`. Observe/Off ignore the
+    /// gates for admission but still receive the report for telemetry.
+    pub async fn recover_and_seed(
+        &self,
+        predecessor_epoch: &str,
+    ) -> Result<AdmissionSeedReport, WarmAdmissionError> {
+        self.recover_and_seed_with_filter(predecessor_epoch, |_| true)
+            .await
+    }
+
+    /// Variant of [`Self::recover_and_seed`] that lets a caller restrict which
+    /// recovered active rows become in-memory seeded permits. The durable
+    /// journal recovery still processes every predecessor row; only the
+    /// in-memory seeding bookkeeping is filtered. This is used by tests that
+    /// need to simulate a replacement process whose initial Kubernetes
+    /// inventory is empty (all rows recovered from the journal, none from
+    /// inventory) while still validating the durable occupancy accounting.
+    pub async fn recover_and_seed_with_filter(
+        &self,
+        predecessor_epoch: &str,
+        mut seed_filter: impl FnMut(&AdmissionJournalRow) -> bool,
+    ) -> Result<AdmissionSeedReport, WarmAdmissionError> {
+        let recovery = self
+            .journal
+            .recover_predecessor_epoch(predecessor_epoch)
+            .await
+            .map_err(unavailable)?;
+        self.seed_from_recovery(&recovery, &mut seed_filter).await
+    }
+
+    /// Recover every predecessor epoch and seed this controller from all active
+    /// recovered rows.
+    ///
+    /// This is the cold-restart recovery entry point: a replacement process does
+    /// not know the exact predecessor epoch string(s), so it recovers every row
+    /// whose `creator_server_epoch` differs from this process's epoch. See
+    /// [`AdmissionJournalRepository::recover_all_predecessors`].
+    pub async fn recover_all_predecessors_and_seed(
+        &self,
+    ) -> Result<AdmissionSeedReport, WarmAdmissionError> {
+        let recovery = self
+            .journal
+            .recover_all_predecessors(&self.creator_server_epoch)
+            .await
+            .map_err(unavailable)?;
+        self.seed_from_recovery(&recovery, &mut |_| true).await
+    }
+
+    /// Seed in-memory permit bookkeeping from a pre-fetched recovery result.
+    ///
+    /// Exposed so callers that have already recovered (for example via a
+    /// shared journal repository in tests) can seed without a second recovery
+    /// call. The journal remains the authoritative occupancy source; this only
+    /// populates the permit/key maps used for idempotent re-admission and
+    /// lifecycle transitions.
+    pub async fn seed_from_recovery(
+        &self,
+        recovery: &AdmissionRecoveryResult,
+        seed_filter: &mut impl FnMut(&AdmissionJournalRow) -> bool,
+    ) -> Result<AdmissionSeedReport, WarmAdmissionError> {
+        let mut seeded = 0u64;
+        // The CreateUnknown startup gate reflects every active recovered row,
+        // not only the ones seeded into memory: an unseeded CreateUnknown row
+        // still occupies durable capacity and still gates Enforce readiness.
+        let create_unknown_rows = recovery
+            .active_rows
+            .iter()
+            .filter(|row| row.state == AdmissionState::CreateUnknown)
+            .count() as u64;
+        {
+            let mut permits = self.permits.lock().await;
+            let mut by_key = self.permits_by_key.lock().await;
+            for row in &recovery.active_rows {
+                if !seed_filter(row) {
+                    continue;
+                }
+                // Re-seeding the same key reuses the existing permit so a
+                // repeated recovery never duplicates in-memory bookkeeping.
+                let key = permit_key(&row.key);
+                let permit = match by_key.get(&key) {
+                    Some(existing) => existing.clone(),
+                    None => {
+                        let permit = WarmAdmissionPermit::new();
+                        by_key.insert(key, permit.clone());
+                        permit
+                    }
+                };
+                permits.insert(
+                    permit,
+                    PermitState {
+                        key: row.key.clone(),
+                        creator_server_epoch: row.creator_server_epoch.clone(),
+                        object_name: row.object_name.clone(),
+                        durable: true,
+                        released: false,
+                        create_unknown_outstanding: row.state == AdmissionState::CreateUnknown,
+                    },
+                );
+                seeded = seeded.saturating_add(1);
+            }
+        }
+        // Occupancy is always read from the journal; it is not derived from the
+        // in-memory permit count. This keeps the cap invariant durable across a
+        // process loss that leaves permits uncommitted in memory.
+        let occupancy = self
+            .journal
+            .count_task_or_warm_occupancy()
+            .await
+            .map_err(unavailable)?;
+        if self.mode != BuildAdmissionMode::Off {
+            // Journal recovery succeeded. Only the journal-derived gates are
+            // updated here: the inventory and topology gates are deliberately
+            // NOT touched, so Enforce remains fail-closed
+            // (`InventoryPending`/`TopologyPending`) until the real Kubernetes
+            // inventory LIST and the single-active topology check complete.
+            self.journal_recovered.store(true, Ordering::Release);
+            self.journal_healthy.store(true, Ordering::Release);
+            self.create_unknown_pending
+                .store(create_unknown_rows, Ordering::Release);
+            self.over_cap.store(occupancy > self.cap, Ordering::Release);
+        }
+        let readiness = self.readiness();
+        Ok(AdmissionSeedReport {
+            retired_reserved: recovery.retired_reserved,
+            marked_create_unknown: recovery.marked_create_unknown,
+            seeded_rows: seeded,
+            readiness,
+        })
+    }
+}
+
+/// Allocate a fresh, unique server epoch for this process.
+///
+/// The epoch is a time-ordered UUIDv7 string so a replacement process always
+/// sorts after its predecessor and recovery can distinguish rows by creator.
+#[must_use]
+pub fn allocate_server_epoch() -> String {
+    uuid::Uuid::now_v7().to_string()
 }
 
 fn unavailable(error: impl std::fmt::Display) -> WarmAdmissionError {
@@ -762,6 +1249,26 @@ mod tests {
         assert_eq!(controller.unclassified_observation_count().await, 1024);
     }
 
+    #[tokio::test]
+    async fn observe_permits_when_journal_reservation_is_unavailable() {
+        let db = Database::open_in_memory().unwrap();
+        db.ensure_initialized().await.unwrap();
+        db.pool().close().await;
+        let controller = BuildAdmissionController::new(
+            Arc::new(AdmissionJournalRepository::new(db)),
+            BuildAdmissionMode::Observe,
+            1,
+            "epoch",
+        );
+
+        assert!(
+            WarmAdmission::admit(&controller, warm("journal-down"))
+                .await
+                .is_ok(),
+            "Observe journal failures are telemetry-only and must not defer dispatch"
+        );
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn observe_records_serialized_would_defer_without_denial_and_enforce_combines_domains() {
         let observed = Arc::new(controller(BuildAdmissionMode::Observe, 1));
@@ -1089,5 +1596,433 @@ mod tests {
                 .is_none(),
             "duplicate generation-two terminal must not wake dispatch again"
         );
+    }
+    #[tokio::test]
+    async fn closed_enforce_controller_denies_until_recovery_marks_ready() {
+        let controller = BuildAdmissionController::new_closed(
+            Arc::new(AdmissionJournalRepository::new(
+                Database::open_in_memory().unwrap(),
+            )),
+            1,
+            "epoch",
+        );
+        assert!(!controller.is_ready());
+        assert!(matches!(
+            WarmAdmission::admit(&controller, warm("closed")).await,
+            Err(WarmAdmissionError::Denied { .. })
+        ));
+        controller.mark_ready();
+        assert!(
+            WarmAdmission::admit(&controller, warm("open"))
+                .await
+                .is_ok()
+        );
+    }
+
+    fn predecessor_input(
+        work_id: &str,
+        generation: i64,
+        epoch: &str,
+    ) -> djinn_db::ReserveAdmissionInput {
+        djinn_db::ReserveAdmissionInput {
+            key: djinn_db::AdmissionJournalKey {
+                domain: AdmissionDomain::WarmBuild,
+                work_id: work_id.into(),
+                generation,
+            },
+            workload_kind: djinn_db::AdmissionWorkloadKind::Warm,
+            creator_server_epoch: epoch.into(),
+            object_name: format!("warm-{work_id}-{generation}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn enforce_recovery_alone_stays_closed_until_inventory_and_topology_complete() {
+        let journal = Arc::new(AdmissionJournalRepository::new(
+            Database::open_in_memory().unwrap(),
+        ));
+        let controller =
+            BuildAdmissionController::new_closed(Arc::clone(&journal), 1, "replacement-epoch");
+        assert_eq!(
+            controller.readiness(),
+            BuildAdmissionReadiness::JournalRecoveryIncomplete,
+            "Enforce starts fail-closed with the journal-recovery-incomplete gate"
+        );
+        assert!(matches!(
+            WarmAdmission::admit(&controller, warm("denied-before-recovery")).await,
+            Err(WarmAdmissionError::Denied { .. })
+        ));
+        let report = controller
+            .recover_all_predecessors_and_seed()
+            .await
+            .unwrap();
+        assert_eq!(report.retired_reserved, 0);
+        assert_eq!(report.marked_create_unknown, 0);
+        assert_eq!(report.seeded_rows, 0);
+        // Journal recovery alone must NOT mark Enforce healthy: even with an
+        // empty journal the inventory gate keeps admission fail-closed until
+        // the real Kubernetes inventory completes.
+        assert_eq!(
+            report.readiness,
+            BuildAdmissionReadiness::InventoryPending,
+            "journal recovery advances to inventory-pending, never straight to healthy"
+        );
+        assert!(!controller.is_ready());
+        assert!(
+            matches!(
+                WarmAdmission::admit(&controller, warm("denied-before-inventory")).await,
+                Err(WarmAdmissionError::Denied { .. })
+            ),
+            "admission stays fail-closed while the inventory gate is pending"
+        );
+
+        controller.mark_inventory_ready();
+        assert_eq!(
+            controller.readiness(),
+            BuildAdmissionReadiness::TopologyPending,
+            "completed inventory advances the gate to topology-pending"
+        );
+        assert!(
+            matches!(
+                WarmAdmission::admit(&controller, warm("denied-before-topology")).await,
+                Err(WarmAdmissionError::Denied { .. })
+            ),
+            "admission stays fail-closed while the topology gate is pending"
+        );
+
+        controller.mark_topology_ready();
+        assert_eq!(controller.readiness(), BuildAdmissionReadiness::Healthy);
+        assert!(controller.is_ready());
+        assert!(
+            WarmAdmission::admit(&controller, warm("after-all-gates"))
+                .await
+                .is_ok(),
+            "admission opens only after journal + inventory + topology all complete"
+        );
+    }
+
+    #[tokio::test]
+    async fn recovery_retires_predecessor_reserved_and_seeds_occupancy_without_duplicates() {
+        let journal = Arc::new(AdmissionJournalRepository::new(
+            Database::open_in_memory().unwrap(),
+        ));
+        // Predecessor rows from the old epoch.
+        journal
+            .reserve(&predecessor_input("reserved", 0, "old-epoch"), 5)
+            .await
+            .unwrap();
+        journal
+            .reserve(&predecessor_input("in-flight", 0, "old-epoch"), 5)
+            .await
+            .unwrap();
+        journal
+            .reserve(&predecessor_input("unknown", 0, "old-epoch"), 5)
+            .await
+            .unwrap();
+        journal
+            .reserve(&predecessor_input("live", 0, "old-epoch"), 5)
+            .await
+            .unwrap();
+        // Mark in-flight and advance the others.
+        journal
+            .mark_create_started(&djinn_db::CreateStartedInput {
+                key: djinn_db::AdmissionJournalKey {
+                    domain: AdmissionDomain::WarmBuild,
+                    work_id: "in-flight".into(),
+                    generation: 0,
+                },
+                creator_server_epoch: "old-epoch".into(),
+                object_name: "warm-in-flight-0".into(),
+            })
+            .await
+            .unwrap();
+        journal
+            .mark_create_started(&djinn_db::CreateStartedInput {
+                key: djinn_db::AdmissionJournalKey {
+                    domain: AdmissionDomain::WarmBuild,
+                    work_id: "unknown".into(),
+                    generation: 0,
+                },
+                creator_server_epoch: "old-epoch".into(),
+                object_name: "warm-unknown-0".into(),
+            })
+            .await
+            .unwrap();
+        journal
+            .mark_create_unknown(&djinn_db::AdmissionJournalKey {
+                domain: AdmissionDomain::WarmBuild,
+                work_id: "unknown".into(),
+                generation: 0,
+            })
+            .await
+            .unwrap();
+        journal
+            .mark_create_started(&djinn_db::CreateStartedInput {
+                key: djinn_db::AdmissionJournalKey {
+                    domain: AdmissionDomain::WarmBuild,
+                    work_id: "live".into(),
+                    generation: 0,
+                },
+                creator_server_epoch: "old-epoch".into(),
+                object_name: "warm-live-0".into(),
+            })
+            .await
+            .unwrap();
+        journal
+            .mark_live(&djinn_db::UidFencedAdmissionInput {
+                key: djinn_db::AdmissionJournalKey {
+                    domain: AdmissionDomain::WarmBuild,
+                    work_id: "live".into(),
+                    generation: 0,
+                },
+                object_uid: "uid-live".into(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            journal.count_task_or_warm_occupancy().await.unwrap(),
+            4,
+            "four predecessor rows occupy before recovery"
+        );
+
+        let controller =
+            BuildAdmissionController::new_closed(Arc::clone(&journal), 64, "replacement-epoch");
+        let report = controller
+            .recover_all_predecessors_and_seed()
+            .await
+            .unwrap();
+        assert_eq!(report.retired_reserved, 1, "predecessor Reserved retired");
+        assert_eq!(
+            report.marked_create_unknown, 1,
+            "predecessor CreateInFlight converted to CreateUnknown"
+        );
+        assert_eq!(
+            report.seeded_rows, 3,
+            "in-flight(now unknown), unknown, and live seeded"
+        );
+        // The predecessor Reserved row no longer occupies; the converted
+        // in-flight row now occupies as CreateUnknown.
+        assert_eq!(
+            journal.count_task_or_warm_occupancy().await.unwrap(),
+            3,
+            "retired Reserved releases one slot; CreateUnknown still occupies"
+        );
+        assert_eq!(
+            report.readiness,
+            BuildAdmissionReadiness::CreateUnknownHealth,
+            "CreateUnknown rows gate readiness"
+        );
+        assert!(!controller.is_ready());
+
+        // The seeded permits are addressable through the domain-appropriate
+        // recovered-permit lookup: these are WarmBuild rows, so the lookup
+        // must key on `AdmissionDomain::WarmBuild` (the task-run accessor
+        // deliberately filters to `AdmissionDomain::TaskObservation`).
+        let live_permit = controller
+            .permit_for_key(AdmissionDomain::WarmBuild, "live", 0)
+            .await
+            .expect("seeded live warm permit is addressable");
+        let mut unknown_permits = Vec::new();
+        for work in ["in-flight", "unknown"] {
+            unknown_permits.push(
+                controller
+                    .permit_for_key(AdmissionDomain::WarmBuild, work, 0)
+                    .await
+                    .expect("seeded CreateUnknown warm permit is addressable"),
+            );
+        }
+        assert!(
+            controller.task_run_permit("live", 0).await.is_none(),
+            "the task-run accessor must not return warm-build rows"
+        );
+
+        // Adopting each recovered CreateUnknown row into Live (authoritative
+        // GET/UID proof) clears the CreateUnknown startup gate; readiness then
+        // falls through to the still-pending inventory gate.
+        for (index, permit) in unknown_permits.iter().enumerate() {
+            controller
+                .transition(
+                    permit,
+                    WarmAdmissionTransition::Live {
+                        uid: format!("adopted-uid-{index}"),
+                    },
+                )
+                .await
+                .unwrap();
+        }
+        assert_eq!(
+            controller.readiness(),
+            BuildAdmissionReadiness::InventoryPending,
+            "adopting every CreateUnknown row advances the gate to inventory-pending"
+        );
+        assert!(!controller.is_ready());
+        controller.mark_inventory_ready();
+        assert_eq!(
+            controller.readiness(),
+            BuildAdmissionReadiness::TopologyPending
+        );
+        controller.mark_topology_ready();
+        assert_eq!(controller.readiness(), BuildAdmissionReadiness::Healthy);
+
+        // The seeded permits are idempotent: re-admitting the same key returns
+        // the seeded permit without consuming a new slot.
+        let retry = WarmAdmission::admit(&controller, warm("live"))
+            .await
+            .unwrap();
+        assert_eq!(
+            retry, live_permit,
+            "re-admission returns the seeded permit without duplicating occupancy"
+        );
+        assert_eq!(
+            journal.count_task_or_warm_occupancy().await.unwrap(),
+            3,
+            "idempotent re-admission does not add occupancy"
+        );
+    }
+
+    #[tokio::test]
+    async fn seeded_occupancy_above_cap_gates_readiness_fail_closed() {
+        let journal = Arc::new(AdmissionJournalRepository::new(
+            Database::open_in_memory().unwrap(),
+        ));
+        // Two predecessor Live rows under a cap of one.
+        for work in ["over-a", "over-b"] {
+            journal
+                .reserve(&predecessor_input(work, 0, "old-epoch"), 5)
+                .await
+                .unwrap();
+            journal
+                .mark_create_started(&djinn_db::CreateStartedInput {
+                    key: djinn_db::AdmissionJournalKey {
+                        domain: AdmissionDomain::WarmBuild,
+                        work_id: work.into(),
+                        generation: 0,
+                    },
+                    creator_server_epoch: "old-epoch".into(),
+                    object_name: format!("warm-{work}-0"),
+                })
+                .await
+                .unwrap();
+            journal
+                .mark_live(&djinn_db::UidFencedAdmissionInput {
+                    key: djinn_db::AdmissionJournalKey {
+                        domain: AdmissionDomain::WarmBuild,
+                        work_id: work.into(),
+                        generation: 0,
+                    },
+                    object_uid: format!("uid-{work}"),
+                })
+                .await
+                .unwrap();
+        }
+        let controller =
+            BuildAdmissionController::new_closed(Arc::clone(&journal), 1, "replacement-epoch");
+        let report = controller
+            .recover_all_predecessors_and_seed()
+            .await
+            .unwrap();
+        assert_eq!(report.seeded_rows, 2);
+        assert_eq!(
+            report.readiness,
+            BuildAdmissionReadiness::SeededOccupancyAboveCap,
+            "seeded occupancy above cap must gate readiness"
+        );
+        assert!(!controller.is_ready());
+        assert!(matches!(
+            WarmAdmission::admit(&controller, warm("denied-over-cap")).await,
+            Err(WarmAdmissionError::Denied { .. })
+        ));
+
+        // Terminal releases bring durable occupancy back within the cap; the
+        // over-cap gate clears from the journal count and readiness falls
+        // through to the still-pending inventory gate.
+        for (work, uid) in [("over-a", "uid-over-a"), ("over-b", "uid-over-b")] {
+            let permit = controller
+                .permit_for_key(AdmissionDomain::WarmBuild, work, 0)
+                .await
+                .expect("seeded over-cap permit is addressable");
+            controller
+                .transition(
+                    &permit,
+                    WarmAdmissionTransition::Terminal { uid: uid.into() },
+                )
+                .await
+                .unwrap();
+        }
+        assert_eq!(journal.count_task_or_warm_occupancy().await.unwrap(), 0);
+        assert_eq!(
+            controller.readiness(),
+            BuildAdmissionReadiness::InventoryPending,
+            "clearing the over-cap gate does not skip the inventory gate"
+        );
+        controller.mark_inventory_ready();
+        controller.mark_topology_ready();
+        assert_eq!(controller.readiness(), BuildAdmissionReadiness::Healthy);
+        assert!(
+            WarmAdmission::admit(&controller, warm("after-drain"))
+                .await
+                .is_ok(),
+            "admission opens once occupancy is within the cap and all gates complete"
+        );
+    }
+
+    #[tokio::test]
+    async fn observe_and_off_do_not_gate_admission_on_readiness() {
+        // Observe records degradation but never denies; the readiness value is
+        // inspectable for telemetry.
+        let observe = controller(BuildAdmissionMode::Observe, 1);
+        observe.mark_journal_unhealthy();
+        assert_eq!(
+            observe.readiness(),
+            BuildAdmissionReadiness::JournalUnhealthy
+        );
+        assert!(
+            WarmAdmission::admit(&observe, warm("observe-degraded"))
+                .await
+                .is_ok(),
+            "Observe must not deny even when readiness is degraded"
+        );
+
+        // Off has no readiness coupling and never touches the journal.
+        let off = controller(BuildAdmissionMode::Off, 0);
+        off.mark_inventory_pending();
+        assert!(
+            WarmAdmission::admit(&off, warm("off-uncoupled"))
+                .await
+                .is_ok(),
+            "Off has no readiness coupling"
+        );
+    }
+
+    #[tokio::test]
+    async fn shutdown_draining_blocks_new_enforce_reservations() {
+        let controller = controller(BuildAdmissionMode::Enforce, 1);
+        // A ready controller that begins draining must block every new
+        // reservation, regardless of prior occupancy. The drain gate is checked
+        // before any journal reservation, so this is independent of DB state.
+        controller.mark_ready();
+        assert!(controller.is_ready());
+        controller.begin_draining();
+        assert!(controller.is_draining());
+        assert_eq!(
+            controller.readiness(),
+            BuildAdmissionReadiness::ShutdownDraining
+        );
+        assert!(
+            matches!(
+                WarmAdmission::admit(&controller, warm("during-drain")).await,
+                Err(WarmAdmissionError::Denied { .. })
+            ),
+            "draining blocks new Enforce reservations"
+        );
+    }
+
+    #[test]
+    fn allocate_server_epoch_is_unique() {
+        let a = allocate_server_epoch();
+        let b = allocate_server_epoch();
+        assert!(!a.is_empty());
+        assert!(!b.is_empty());
+        assert_ne!(a, b, "each allocated epoch is unique");
     }
 }
