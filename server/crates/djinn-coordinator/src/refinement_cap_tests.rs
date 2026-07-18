@@ -325,7 +325,7 @@ async fn seed_task(
     djinn_core::auth_context::SESSION_USER_ID
         .scope(Some(user_id.to_owned()), async {
             TaskRepository::new(db.clone(), EventBus::noop())
-                .create_in_project(
+                .create_fixture_in_project(
                     project_id,
                     None,
                     label,
@@ -1227,7 +1227,7 @@ async fn evidence_lifecycle_awaiting_evidence_skips_dispatch() {
     let spike_task_id = djinn_core::auth_context::SESSION_USER_ID
         .scope(Some(fixture.user_id.clone()), async {
             TaskRepository::new(db.clone(), EventBus::noop())
-                .create_in_project(
+                .create_fixture_in_project(
                     &fixture.project_id,
                     None,
                     "Evidence spike",
@@ -1304,7 +1304,7 @@ async fn evidence_lifecycle_evidence_failed_skips_dispatch() {
     let spike_task_id = djinn_core::auth_context::SESSION_USER_ID
         .scope(Some(fixture.user_id.clone()), async {
             TaskRepository::new(db.clone(), EventBus::noop())
-                .create_in_project(
+                .create_fixture_in_project(
                     &fixture.project_id,
                     None,
                     "Evidence spike (failed)",

@@ -234,28 +234,6 @@ fn attributes_are_test_only(attributes: &[&str]) -> bool {
 /// inspects module structure instead of trusting a helper-like filename.
 fn structurally_test_only_module(file: &Path) -> bool {
     structurally_test_only_module_inner(file, &mut BTreeSet::new())
-        || structurally_exported_test_support(file)
-}
-
-fn structurally_exported_test_support(file: &Path) -> bool {
-    let Some(parent) = file.parent() else {
-        return false;
-    };
-    let Ok(module_root) = std::fs::read_to_string(parent.join("mod.rs")) else {
-        return false;
-    };
-    let Some(src) = parent.parent() else {
-        return false;
-    };
-    let Ok(crate_root) = std::fs::read_to_string(src.join("lib.rs")) else {
-        return false;
-    };
-    module_root.contains("pub mod test_support;")
-        && crate_root.contains("pub mod test_support {")
-        && crate_root.contains("pub use crate::repositories::test_support::")
-        && file
-            .file_name()
-            .is_some_and(|name| name == "test_support.rs")
 }
 
 fn structurally_test_only_module_inner(file: &Path, visited: &mut BTreeSet<PathBuf>) -> bool {
@@ -774,6 +752,19 @@ pub async fn runtime_writer() { repo.create_in_project_with_provenance(); }"#,
             "helper-like path must not suppress runtime writers: {helper_like_path}"
         );
     }
+
+    let ungated_public_test_support =
+        "pub async fn runtime_writer() { repo.create_in_project_with_provenance(); }";
+    assert_eq!(
+        production_writers_in_source(
+            "server/crates/example/src/test_support.rs",
+            ungated_public_test_support,
+        ),
+        BTreeSet::from([String::from(
+            "server/crates/example/src/test_support.rs::runtime_writer"
+        )]),
+        "an ungated publicly exported test_support module remains production-capable"
+    );
 
     let trailing_runtime_writer = r#"
         #[cfg(test)]

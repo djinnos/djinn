@@ -106,6 +106,7 @@ tikv-jemalloc-ctl = { version = "0.6", features = ["stats"] }
 
 [dev-dependencies]
 djinn-control-plane = { path = "crates/djinn-control-plane", features = ["test-support"] }
+djinn-db = { path = "crates/djinn-db", features = ["test-support"] }
 insta = { version = "1", features = ["json", "redactions"] }
 proptest = "1"
 rstest = "0.24"
