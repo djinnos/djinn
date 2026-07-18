@@ -496,10 +496,10 @@ pub fn build_task_run_job_with_read_sources(
     config: &KubernetesConfig, task_run_id: &Uuid, project_id: &str, secret_name: &str,
     project_image_tag: &str, services: &[BackingServiceSpec],
     policy: Option<&djinn_stack::environment::CargoCachePolicy>, is_evidence_spike: bool,
-    read_source_project_ids: &[String],
+    owner_cache_sub_path: Option<&str>,
 ) -> Job {
     let mut job = build_task_run_job(config, task_run_id, project_id, secret_name, project_image_tag, services, policy, is_evidence_spike);
-    if read_source_project_ids.is_empty() { return job; }
+    let Some(owner_cache_sub_path) = owner_cache_sub_path else { return job; };
     let pod = job.spec.as_mut().expect("builder sets JobSpec").template.spec.as_mut().expect("builder sets PodSpec");
     pod.volumes.get_or_insert_with(Vec::new).push(Volume {
         name: "read-sources".to_string(),
@@ -508,7 +508,7 @@ pub fn build_task_run_job_with_read_sources(
     });
     pod.containers[0].volume_mounts.get_or_insert_with(Vec::new).push(VolumeMount {
         name: "read-sources".to_string(), mount_path: "/read-sources".to_string(),
-        sub_path: Some(format!("{project_id}/.task-runtime/read-sources")), read_only: Some(true), ..VolumeMount::default()
+        sub_path: Some(owner_cache_sub_path.to_string()), read_only: Some(true), ..VolumeMount::default()
     });
     job
 }
@@ -2660,7 +2660,6 @@ mod tests {
     #[test]
     fn read_source_mount_is_exact_owner_cache_and_read_only() {
         let cfg = KubernetesConfig::for_testing();
-        let grants = vec!["target-a".to_string(), "target-b".to_string()];
         let job = build_task_run_job_with_read_sources(
             &cfg,
             &Uuid::now_v7(),
@@ -2670,7 +2669,7 @@ mod tests {
             &[],
             None,
             false,
-            &grants,
+            Some("octo/owner-repo/.task-runtime/read-sources"),
         );
         let pod = job.spec.unwrap().template.spec.unwrap();
         let volume = pod
@@ -2703,13 +2702,15 @@ mod tests {
         assert_eq!(mount.mount_path, "/read-sources");
         assert_eq!(
             mount.sub_path.as_deref(),
-            Some("owner-project/.task-runtime/read-sources")
+            Some("octo/owner-repo/.task-runtime/read-sources")
         );
         assert_eq!(mount.read_only, Some(true));
         assert!(!mounts.iter().any(|mount| {
             mount.mount_path.contains(".djinn/read-sources")
-                || mount.mount_path == "/projects"
-                || mount.mount_path == "/mirror/read-sources"
+                || mount.sub_path.as_deref() == Some("projects")
+                || mount.sub_path.as_deref() == Some("other-owner/other-repo/.task-runtime/read-sources")
+                || mount.sub_path.as_deref() == Some("octo/owner-repo/.djinn/read-sources")
+                || mount.sub_path.as_deref() == Some("mirror/read-sources")
         }));
     }
 
@@ -2725,7 +2726,7 @@ mod tests {
             &[],
             None,
             false,
-            &[],
+            None,
         );
         let pod = job.spec.unwrap().template.spec.unwrap();
         assert!(!pod.volumes.as_ref().unwrap().iter().any(|volume| {

@@ -69,9 +69,9 @@ use crate::sidecar::ImageServiceResolution;
 async fn pre_materialize_read_sources(
     db: &Database,
     spec: &TaskRunSpec,
-) -> Result<(), RuntimeError> {
+) -> Result<Option<String>, RuntimeError> {
     if spec.read_source_project_ids.is_empty() {
-        return Ok(());
+        return Ok(None);
     }
 
     let projects = ProjectRepository::new(db.clone(), djinn_core::events::EventBus::noop());
@@ -117,7 +117,10 @@ async fn pre_materialize_read_sources(
             ))
         })?;
     }
-    Ok(())
+    // The projects PVC is rooted at `projects_root`; the migrator writes under
+    // `project_dir(owner, repo)`. Use that exact relative cache directory,
+    // never the database project UUID, for the restricted Pod subPath.
+    Ok(Some(format!("{owner}/{repo}/.task-runtime/read-sources")))
 }
 
 /// Bound on the [`ConnectionRegistry::register_pending`] buffer used by
@@ -438,7 +441,7 @@ impl SessionRuntime for KubernetesRuntime {
 
         // A Pod must never be created while the owner cache is missing,
         // active, ambiguous, failed, or DB-uncertain.
-        pre_materialize_read_sources(db, spec).await?;
+        let read_source_cache_sub_path = pre_materialize_read_sources(db, spec).await?;
 
         // 0. Reserve the registry slot BEFORE creating the Job.  This closes
         //    the race where the Pod starts up and completes the AuthHello
@@ -580,7 +583,7 @@ impl SessionRuntime for KubernetesRuntime {
             services,
             cargo_cache_policy.as_ref(),
             spec.is_evidence_spike,
-            &spec.read_source_project_ids,
+            read_source_cache_sub_path.as_deref(),
         );
         let jobs: Api<Job> = Api::namespaced(self.client.clone(), ns);
         let created_job = match jobs.create(&PostParams::default(), &job).await {
