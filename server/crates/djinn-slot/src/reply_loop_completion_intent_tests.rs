@@ -59,14 +59,14 @@ use tokio_util::sync::CancellationToken;
 /// A mock `SlotHostCallbacks` that supplies final typed outcomes at the
 /// coordinator's execution/persistence boundary. It deliberately implements no
 /// resolution, lease, sandbox, persistence, or verify-run reuse behavior.
-struct CompletionIntentCallbacks {
+pub(crate) struct CompletionIntentCallbacks {
     outcomes: Mutex<VecDeque<FinalVerificationRecordingOutcome>>,
     coordinator_calls: Mutex<usize>,
     expected_task_id: String,
     reuse_probe: Option<ReuseProbe>,
 }
 
-fn fallback_evidence(
+pub(crate) fn fallback_evidence(
     material: &FinalVerificationResolvedMaterial,
     fingerprint: String,
     identity: EnvironmentIdentityV1,
@@ -436,7 +436,7 @@ async fn reply_loop_reuse_rejection_matrix_writes_fresh_authoritative_evidence()
     }
 }
 
-fn reuse_material(worktree: std::path::PathBuf) -> FinalVerificationResolvedMaterial {
+pub(crate) fn reuse_material(worktree: std::path::PathBuf) -> FinalVerificationResolvedMaterial {
     let required_checks = vec!["format".to_owned(), "slot-clippy".to_owned()];
     let manifest = VerificationInputManifestV1 {
         version: 1,
@@ -549,7 +549,7 @@ impl CompletionIntentCallbacks {
         Self::for_reuse_with_evidence(expected_task_id, material, None, false, None)
     }
 
-    fn for_reuse_with_evidence(
+    pub(crate) fn for_reuse_with_evidence(
         expected_task_id: String,
         material: FinalVerificationResolvedMaterial,
         evidence: Option<FinalVerificationExecutionEvidence>,
@@ -578,7 +578,7 @@ impl CompletionIntentCallbacks {
         *self.coordinator_calls.lock().unwrap()
     }
 
-    fn reuse_events(&self) -> Vec<&'static str> {
+    pub(crate) fn reuse_events(&self) -> Vec<&'static str> {
         self.reuse_probe
             .as_ref()
             .unwrap()

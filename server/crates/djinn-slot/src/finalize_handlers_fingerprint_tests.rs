@@ -1,8 +1,13 @@
 use std::sync::{Arc, Mutex};
 
+use crate::final_verification::FinalVerificationSuccessEvidence;
 use crate::finalize_handlers::{
-    process_finalize_payload, process_finalize_payload_with_outcome,
-    record_rejected_integrity_entry,
+    process_completion_intent_with_outcome, process_finalize_payload,
+    process_finalize_payload_with_outcome, record_rejected_integrity_entry,
+};
+use crate::output_parser::CompletionIntent;
+use crate::reply_loop_completion_intent_tests::{
+    CompletionIntentCallbacks, fallback_evidence, reuse_material,
 };
 use crate::test_helpers;
 use djinn_db::repositories::task_run::TaskRunRepository;
@@ -958,7 +963,7 @@ async fn c2_fingerprint(
     }
 }
 
-async fn assert_after_c1_mutation_changes_complete_c2(
+async fn assert_after_c1_mutation_reverifies_before_completion(
     name: &str,
     config: VerificationInputFingerprintConfig,
     mutate: impl FnOnce(&std::path::Path),
@@ -968,11 +973,100 @@ async fn assert_after_c1_mutation_changes_complete_c2(
     mutate(worktree.path());
     let c2 = c2_fingerprint(worktree.path(), &config).await;
     assert_ne!(c1, c2, "{name}: stale C1 evidence must not match C2");
+    let material = reuse_material(worktree.path().to_path_buf());
+    let identity = djinn_core::canonical_verify::EnvironmentIdentityV1::derive(
+        (material.execution_request.resolve_environment_identity)().unwrap(),
+    )
+    .unwrap();
+    let stale = FinalVerificationSuccessEvidence {
+        persisted_run_id: "stale-c1".into(),
+        completed_at: "2026-01-01T00:00:00Z".into(),
+        ordered_commands: serde_json::json!([]),
+        covered_checks: serde_json::json!(["format", "slot-clippy"]),
+        required_checks: material.required_checks.clone(),
+        verification_input_fingerprint: c1,
+        manifest_version: "manifest-v1".into(),
+        environment_identity_digest: identity.digest.clone(),
+    };
+    let db = test_helpers::create_test_db();
+    let project = test_helpers::create_test_project(&db).await;
+    let epic = test_helpers::create_test_epic(&db, &project.id).await;
+    let task = test_helpers::create_test_task(&db, &project.id, &epic.id).await;
+    create_run_with_workspace(
+        &db,
+        &project.id,
+        &task.id,
+        Some(worktree.path().to_str().unwrap()),
+    )
+    .await;
+    let intent = CompletionIntent {
+        finalize_payload: serde_json::json!({"task_id":task.id,"commit_title":"C2","summary":"C2","files_changed":[],"remaining_concerns":[]}),
+        tool_use_id: "C1".into(),
+        final_verification_evidence: Some(stale),
+    };
+    let failing = Arc::new(CompletionIntentCallbacks::for_reuse_with_evidence(
+        task.id.clone(),
+        material.clone(),
+        None,
+        false,
+        None,
+    ));
+    let fail_ctx = test_helpers::agent_context_from_db_with_callbacks(db.clone(), failing.clone());
+    assert!(
+        !process_completion_intent_with_outcome(&intent, "submit_work", &task.id, &fail_ctx).await,
+        "{name}: failed canonical C2 blocks finalization"
+    );
+    assert!(
+        failing.reuse_events().contains(&"writer-resolution"),
+        "{name}: C2 resolves changed inputs"
+    );
+    assert!(
+        failing.reuse_events().contains(&"canonical-execution"),
+        "{name}: stale evidence invokes canonical executor"
+    );
+    assert!(
+        !djinn_db::TaskRepository::new(db.clone(), fail_ctx.event_bus.clone())
+            .list_activity(&task.id)
+            .await
+            .unwrap()
+            .iter()
+            .any(|e| e.event_type == "work_submitted"),
+        "{name}: failed C2 has no completion side effect"
+    );
+    let passing = Arc::new(CompletionIntentCallbacks::for_reuse_with_evidence(
+        task.id.clone(),
+        material.clone(),
+        Some(fallback_evidence(&material, c2.clone(), identity)),
+        false,
+        None,
+    ));
+    let pass_ctx = test_helpers::agent_context_from_db_with_callbacks(db.clone(), passing.clone());
+    assert!(
+        process_completion_intent_with_outcome(&intent, "submit_work", &task.id, &pass_ctx).await,
+        "{name}: current canonical C2 pass finalizes"
+    );
+    assert!(passing.reuse_events().contains(&"canonical-execution"));
+    let entries = djinn_db::TaskRepository::new(db, pass_ctx.event_bus.clone())
+        .list_activity(&task.id)
+        .await
+        .unwrap();
+    let completion_payload: serde_json::Value = serde_json::from_str(
+        &entries
+            .iter()
+            .find(|e| e.event_type == "work_submitted")
+            .unwrap()
+            .payload,
+    )
+    .unwrap();
+    assert_eq!(
+        completion_payload["final_verification_evidence"]["verification_input_fingerprint"], c2,
+        "{name}: completion uses replacement C2 evidence"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn after_c1_tracked_text_mutation_changes_c2() {
-    assert_after_c1_mutation_changes_complete_c2(
+    assert_after_c1_mutation_reverifies_before_completion(
         "tracked text",
         VerificationInputFingerprintConfig::default(),
         |root| std::fs::write(root.join("README.md"), "hello\nchanged after C1\n").unwrap(),
@@ -982,7 +1076,7 @@ async fn after_c1_tracked_text_mutation_changes_c2() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn after_c1_ignored_generated_configuration_mutation_changes_c2() {
-    assert_after_c1_mutation_changes_complete_c2(
+    assert_after_c1_mutation_reverifies_before_completion(
         "ignored/generated configuration",
         VerificationInputFingerprintConfig::default(),
         |root| {
@@ -995,7 +1089,7 @@ async fn after_c1_ignored_generated_configuration_mutation_changes_c2() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn after_c1_untracked_binary_mutation_changes_c2() {
-    assert_after_c1_mutation_changes_complete_c2(
+    assert_after_c1_mutation_reverifies_before_completion(
         "untracked binary",
         VerificationInputFingerprintConfig::default(),
         |root| std::fs::write(root.join("generated.bin"), [0_u8, 255, 17, 42]).unwrap(),
@@ -1005,7 +1099,7 @@ async fn after_c1_untracked_binary_mutation_changes_c2() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn after_c1_submodule_state_mutation_changes_c2() {
-    assert_after_c1_mutation_changes_complete_c2(
+    assert_after_c1_mutation_reverifies_before_completion(
         "submodule state",
         VerificationInputFingerprintConfig::default(),
         |root| {
@@ -1032,12 +1126,12 @@ async fn after_c1_declared_external_input_mutation_changes_c2() {
         id: "toolchain".into(),
         path: external.path().to_path_buf(),
     });
-    let worktree = init_git_repo_with_dirty_file();
-    let c1 = c2_fingerprint(worktree.path(), &config).await;
-    std::fs::write(external.path().join("toolchain.txt"), "v2 after C1\n").unwrap();
-    assert_ne!(
-        c1,
-        c2_fingerprint(worktree.path(), &config).await,
-        "declared external input must be resolved at C2"
-    );
+    assert_after_c1_mutation_reverifies_before_completion(
+        "declared external input",
+        config,
+        |_: &std::path::Path| {
+            std::fs::write(external.path().join("toolchain.txt"), "v2 after C1\n").unwrap();
+        },
+    )
+    .await;
 }
