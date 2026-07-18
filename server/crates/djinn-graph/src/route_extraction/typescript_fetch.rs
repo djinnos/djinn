@@ -464,10 +464,6 @@ mod tests {
             ts_symbol(project_tools, "deleteMcpServer"),
             ts_symbol(project_tools, "fetchMcpDefaults"),
             ts_symbol(project_tools, "saveMcpDefaults"),
-            ts_symbol(project_tools, "fetchSkills"),
-            ts_symbol(project_tools, "createSkill"),
-            ts_symbol(project_tools, "updateSkill"),
-            ts_symbol(project_tools, "deleteSkill"),
             fixture_node(
                 RepoNodeKey::File(PathBuf::from(chat_sessions)),
                 RepoGraphNodeKind::File,
@@ -494,9 +490,6 @@ mod tests {
             route_node("/project/mcp-servers/update"),
             route_node("/project/mcp-servers/delete"),
             route_node("/project/mcp-defaults"),
-            route_node("/project/skills"),
-            route_node("/project/skills/update"),
-            route_node("/project/skills/delete"),
             route_node("/api/chat/sessions"),
             route_node("/api/chat/sessions/{id}"),
             route_node("/api/chat/sessions/{id}/messages"),
@@ -654,7 +647,7 @@ mod tests {
         let chat_sessions = include_str!("tests/fixtures/chatSessions.ts");
 
         let project_fetches = scan_fetches(project_tools);
-        assert_eq!(project_fetches.len(), 10);
+        assert_eq!(project_fetches.len(), 6);
         assert!(
             project_fetches
                 .iter()
@@ -672,10 +665,6 @@ mod tests {
                 "/project/mcp-servers/delete",
                 "/project/mcp-defaults",
                 "/project/mcp-defaults",
-                "/project/skills",
-                "/project/skills",
-                "/project/skills/update",
-                "/project/skills/delete",
             ]
         );
 
@@ -733,7 +722,7 @@ mod tests {
             &mut report,
         );
 
-        assert_eq!(report.fetches_edges_added, 14);
+        assert_eq!(report.fetches_edges_added, 10);
         assert_eq!(report.unmatched_fetch_count, 1);
         assert_eq!(report.unresolved_consumer_count, 0);
         assert_eq!(
@@ -751,7 +740,7 @@ mod tests {
             .edge_references()
             .filter(|edge| edge.weight().kind == RepoGraphEdgeKind::Fetches)
             .collect();
-        assert_eq!(fetch_edges.len(), 14);
+        assert_eq!(fetch_edges.len(), 10);
         assert!(
             fetch_edges
                 .iter()
@@ -775,9 +764,6 @@ mod tests {
             "GET /project/mcp-servers/update (axum)",
             "GET /project/mcp-servers/delete (axum)",
             "GET /project/mcp-defaults (axum)",
-            "GET /project/skills (axum)",
-            "GET /project/skills/update (axum)",
-            "GET /project/skills/delete (axum)",
             "GET /api/chat/sessions (axum)",
         ] {
             assert!(
