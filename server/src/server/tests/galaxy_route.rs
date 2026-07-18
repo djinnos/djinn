@@ -10,6 +10,7 @@ use axum::{
     body::Body,
     http::{Request, StatusCode},
 };
+use djinn_db::repositories::repo_graph_generation::ReservedPublicationFailureStage;
 use djinn_db::{
     CreateUserAuthSession, Database, DatabaseConnectConfig, PostgresDatabaseConfig,
     RepoGraphGenerationRepository, ReservedGalaxyArtifactChunk, ReservedGalaxyArtifactManifest,
@@ -108,6 +109,17 @@ async fn publish(
     commit: &str,
     chunks: Vec<Vec<u8>>,
 ) -> (String, String) {
+    let (publication, generation_id, artifact_id) = reserved_publication(commit, chunks);
+    repo.publish_reserved_generation(publication)
+        .await
+        .expect("publish fixture artifact");
+    (generation_id, artifact_id)
+}
+
+fn reserved_publication(
+    commit: &str,
+    chunks: Vec<Vec<u8>>,
+) -> (ReservedGraphPublication, String, String) {
     let generation_id = uuid::Uuid::now_v7().to_string();
     let artifact_id = uuid::Uuid::now_v7().to_string();
     let hashes: Vec<_> = chunks.iter().map(|chunk| digest(chunk)).collect();
@@ -116,7 +128,7 @@ async fn publish(
         transport.update(chunk);
     }
     let byte_count = chunks.iter().map(|chunk| chunk.len() as i64).sum();
-    repo.publish_reserved_generation(ReservedGraphPublication {
+    let publication = ReservedGraphPublication {
         project_id: PROJECT.to_owned(),
         commit_sha: commit.to_owned(),
         generation_id: generation_id.clone(),
@@ -141,10 +153,8 @@ async fn publish(
                 bytes,
             })
             .collect(),
-    })
-    .await
-    .expect("publish fixture artifact");
-    (generation_id, artifact_id)
+    };
+    (publication, generation_id, artifact_id)
 }
 
 async fn get(app: &axum::Router, token: &str, etag: Option<&str>) -> axum::response::Response {
@@ -306,20 +316,37 @@ async fn galaxy_route_artifactless_pointer_and_failed_publication_keep_prior_art
     let unavailable = get(&app, &token, None).await;
     assert_eq!(unavailable.status(), StatusCode::NOT_FOUND);
 
-    // Restore a valid current artifact, then force a transaction failure while attempting a new publication.
+    // Restore a valid current artifact, then fail the landed publication transaction
+    // after it has written compatibility, artifact, and first-chunk records.
     sqlx::query("UPDATE repo_graph_current SET generation_id = (SELECT generation_id FROM repo_graph_galaxy_artifact WHERE artifact_id = $1::uuid) WHERE project_id = $2")
         .bind(&artifact).bind(PROJECT).execute(db.pool()).await.expect("restore prior pointer");
     let before = get(&app, &token, None).await;
     let prior_etag = before.headers()["etag"].to_str().unwrap().to_owned();
-    drop(before);
-    let failed = sqlx::query("INSERT INTO repo_graph_generation(generation_id, project_id, commit_sha, graph_blob, built_at, publish_seq, artifact_required) VALUES (gen_random_uuid(), $1, 'failed', $2, CURRENT_TIMESTAMP, 999999, true)")
-        .bind(PROJECT).bind(b"failed".as_slice()).execute(db.pool()).await;
+    assert_eq!(
+        consume_incrementally(before.into_body()).await.unwrap(),
+        b"prior",
+        "prior artifact is readable before failed publication"
+    );
+    let (failed_publication, _, _) = reserved_publication("failed", vec![b"partial".to_vec()]);
+    let failed = repo
+        .publish_reserved_generation_with_failure(
+            failed_publication,
+            ReservedPublicationFailureStage::FirstChunkInsert,
+        )
+        .await;
     assert!(
         failed.is_err(),
-        "generation validation must reject incomplete publication"
+        "landed publication contract must roll back after partial writes"
     );
-    let after = get(&app, &token, Some(&prior_etag)).await;
-    assert_eq!(after.status(), StatusCode::NOT_MODIFIED);
+    let after = get(&app, &token, None).await;
+    assert_eq!(after.headers()["etag"].to_str().unwrap(), prior_etag);
+    assert_eq!(
+        consume_incrementally(after.into_body()).await.unwrap(),
+        b"prior",
+        "rolled-back publication must retain prior artifact body"
+    );
+    let not_modified = get(&app, &token, Some(&prior_etag)).await;
+    assert_eq!(not_modified.status(), StatusCode::NOT_MODIFIED);
     assert_ne!(
         etag, "",
         "prior ETag was observable before pointer advancement"
@@ -403,6 +430,7 @@ async fn galaxy_route_600_chunk_request_stays_below_32_mib_rss_growth() {
     assert_eq!(response.status(), StatusCode::OK);
     let mut body = response.into_body();
     let mut frames = 0_usize;
+    let mut peak_rss = baseline;
     while let Some(frame) = body.frame().await {
         let data = frame.unwrap().into_data().expect("data frame");
         assert!(
@@ -410,12 +438,13 @@ async fn galaxy_route_600_chunk_request_stays_below_32_mib_rss_growth() {
             "route must emit one bounded stored chunk"
         );
         frames += 1;
+        peak_rss = peak_rss.max(rss_bytes());
     }
     assert_eq!(frames, 600);
-    let growth = rss_bytes().saturating_sub(baseline);
+    let growth = peak_rss.saturating_sub(baseline);
     assert!(
         growth <= 32 * 1024 * 1024,
-        "request RSS grew {} MiB (limit 32 MiB)",
+        "request peak RSS grew {} MiB while incrementally streaming (limit 32 MiB)",
         growth / 1024 / 1024
     );
 }
@@ -436,24 +465,44 @@ fn rss_bytes() -> u64 {
 fn galaxy_route_allocation_shape_guard_rejects_payload_aggregation_regressions() {
     let route = include_str!("../galaxy.rs");
     let reader = include_str!("../../../crates/djinn-db/src/repositories/repo_graph_generation.rs");
+    let stream = route
+        .split("fn stream_gzip(")
+        .nth(1)
+        .expect("production stream implementation");
+    let read_chunk = reader
+        .split("pub async fn read_chunk")
+        .nth(1)
+        .and_then(|source| source.split("/// Explicitly release").next())
+        .expect("production pinned one-chunk reader implementation");
     for forbidden in [
-        "collect().await",
-        "fetch_all",
-        "Vec<RepoGraphGalaxyChunk>",
+        "fetch_all(",
+        ".collect",
+        "try_collect",
         "read_to_end",
+        "read_to_string",
+        "decode_all",
         "GzDecoder",
+        "Decoder",
+        "decompress",
+        "uncompress",
+        "Vec<u8>",
+        "BytesMut",
     ] {
         assert!(
-            !route.contains(forbidden) && !reader.contains(forbidden),
-            "route/reader allocation guard rejected {forbidden}"
+            !stream.contains(forbidden) && !read_chunk.contains(forbidden),
+            "pinned route/read path allocation guard rejected {forbidden}"
         );
     }
     assert!(
-        reader.contains("chunk_index = $3"),
-        "reader must retain indexed one-chunk query"
+        read_chunk.contains(
+            "WHERE generation_id = $1::uuid AND artifact_id = $2::uuid AND chunk_index = $3"
+        ) && read_chunk.contains(".bind(chunk_index)")
+            && read_chunk.contains(".fetch_optional"),
+        "pinned reader must retain its indexed one-row chunk query"
     );
     assert!(
-        route.contains("for index in 0..chunk_count"),
+        stream.contains("for index in 0..chunk_count")
+            && stream.contains("reader.read_chunk(index).await"),
         "route must stream in ordered bounded chunks"
     );
 }
