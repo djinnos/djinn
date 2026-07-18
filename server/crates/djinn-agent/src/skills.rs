@@ -495,10 +495,6 @@ mod tests {
         dir
     }
 
-    fn write_flat_skill(dir: &Path, name: &str, body: &str) {
-        fs::write(dir.join(format!("{name}.md")), body).unwrap();
-    }
-
     fn write_directory_skill(dir: &Path, name: &str, body: &str) {
         let skill_dir = dir.join(name);
         fs::create_dir_all(&skill_dir).unwrap();
@@ -571,17 +567,17 @@ mod tests {
     }
 
     #[test]
-    fn load_skills_resolves_existing_files() {
+    fn load_skills_resolves_claude_directory_skills() {
         let tmp = crate::test_helpers::test_tempdir("djinn-skills-");
-        let skills_dir = make_skill_dir(&tmp, ".djinn");
+        let claude_skills = make_skill_dir(&tmp, ".claude");
 
-        write_flat_skill(
-            &skills_dir,
+        write_directory_skill(
+            &claude_skills,
             "rust-safety",
             "---\nname: rust-safety\ndescription: Safe Rust\n---\n\nAvoid unsafe.\n",
         );
-        write_flat_skill(
-            &skills_dir,
+        write_directory_skill(
+            &claude_skills,
             "git-workflow",
             "---\ndescription: Git workflow\n---\n\nCommit often.\n",
         );
@@ -597,12 +593,72 @@ mod tests {
     }
 
     #[test]
+    fn load_skills_resolves_opencode_directory_skills() {
+        let tmp = crate::test_helpers::test_tempdir("djinn-skills-");
+        let opencode_skills = make_skill_dir(&tmp, ".opencode");
+
+        write_directory_skill(
+            &opencode_skills,
+            "code-review",
+            "---\ndescription: Review code\n---\n\nCheck for bugs.\n",
+        );
+
+        let resolved = load_skills(tmp.path(), &["code-review".to_string()]);
+
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(resolved[0].name, "code-review");
+        assert_eq!(resolved[0].description, "Review code");
+    }
+
+    #[test]
+    fn load_skills_claude_takes_precedence_over_opencode() {
+        let tmp = crate::test_helpers::test_tempdir("djinn-skills-");
+        let claude_skills = make_skill_dir(&tmp, ".claude");
+        let opencode_skills = make_skill_dir(&tmp, ".opencode");
+
+        write_directory_skill(
+            &claude_skills,
+            "shared",
+            "---\ndescription: From Claude\n---\n\nClaude body.\n",
+        );
+        write_directory_skill(
+            &opencode_skills,
+            "shared",
+            "---\ndescription: From OpenCode\n---\n\nOpenCode body.\n",
+        );
+
+        let resolved = load_skills(tmp.path(), &["shared".to_string()]);
+
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(resolved[0].description, "From Claude");
+    }
+
+    #[test]
+    fn load_skills_does_not_resolve_djinn_skills_root() {
+        let tmp = crate::test_helpers::test_tempdir("djinn-skills-");
+        let djinn_skills = make_skill_dir(&tmp, ".djinn");
+
+        write_directory_skill(
+            &djinn_skills,
+            "legacy",
+            "---\ndescription: Legacy djinn skill\n---\n\nLegacy body.\n",
+        );
+
+        let resolved = load_skills(tmp.path(), &["legacy".to_string()]);
+
+        assert!(
+            resolved.is_empty(),
+            ".djinn/skills must not be a discovery surface"
+        );
+    }
+
+    #[test]
     fn load_skills_missing_skill_is_skipped_not_blocked() {
         let tmp = crate::test_helpers::test_tempdir("djinn-skills-");
-        let skills_dir = make_skill_dir(&tmp, ".djinn");
+        let claude_skills = make_skill_dir(&tmp, ".claude");
 
-        write_flat_skill(
-            &skills_dir,
+        write_directory_skill(
+            &claude_skills,
             "exists",
             "---\ndescription: This one exists\n---\n\nContent.\n",
         );
@@ -617,10 +673,13 @@ mod tests {
     #[test]
     fn detailed_load_reports_frontmatter_and_missing_files_in_request_order() {
         let tmp = crate::test_helpers::test_tempdir("djinn-skills-detailed-");
-        let skills_dir = make_skill_dir(&tmp, ".djinn");
-        write_flat_skill(&skills_dir, "broken", "not frontmatter\n");
-        write_flat_skill(
-            &skills_dir,
+        let claude_skills = make_skill_dir(&tmp, ".claude");
+        // Write a broken-frontmatter directory skill (file exists but is malformed).
+        let broken_dir = claude_skills.join("broken");
+        fs::create_dir_all(&broken_dir).unwrap();
+        fs::write(broken_dir.join("SKILL.md"), "not frontmatter\n").unwrap();
+        write_directory_skill(
+            &claude_skills,
             "valid",
             "---\ndescription: Valid project skill\n---\n\nBody.\n",
         );
@@ -706,12 +765,6 @@ mod tests {
     }
 
     #[test]
-
-    #[test]
-
-    #[test]
-
-    #[test]
     fn load_skills_uses_requested_name_when_frontmatter_name_missing_in_directory_skill() {
         let tmp = crate::test_helpers::test_tempdir("djinn-skills-");
         let claude_skills = make_skill_dir(&tmp, ".claude");
@@ -771,23 +824,27 @@ mod tests {
     }
 
     #[test]
-    fn load_skills_flat_files_do_not_include_directory_references() {
+    fn load_skills_claude_directory_skill_includes_references() {
         let tmp = crate::test_helpers::test_tempdir("djinn-skills-");
-        let djinn_skills = make_skill_dir(&tmp, ".djinn");
-        let ignored_references = djinn_skills.join("flat-skill").join("references");
+        let claude_skills = make_skill_dir(&tmp, ".claude");
+        let skill_dir = claude_skills.join("dir-skill");
+        let references_dir = skill_dir.join("references");
 
-        write_flat_skill(
-            &djinn_skills,
-            "flat-skill",
-            "---\ndescription: Flat skill\n---\n\nFlat body.\n",
+        write_directory_skill(
+            &claude_skills,
+            "dir-skill",
+            "---\ndescription: Directory skill\n---\n\nFlat body.\n",
         );
-        fs::create_dir_all(&ignored_references).unwrap();
-        fs::write(ignored_references.join("ignored.md"), "Ignored reference\n").unwrap();
+        fs::create_dir_all(&references_dir).unwrap();
+        fs::write(references_dir.join("included.md"), "Included reference\n").unwrap();
 
-        let resolved = load_skills(tmp.path(), &["flat-skill".to_string()]);
+        let resolved = load_skills(tmp.path(), &["dir-skill".to_string()]);
 
         assert_eq!(resolved.len(), 1);
-        assert_eq!(resolved[0].content, "Flat body.");
+        assert_eq!(
+            resolved[0].content,
+            "Flat body.\n\n## References\n\n### included.md\n\nIncluded reference"
+        );
     }
 
     #[test]
@@ -961,22 +1018,23 @@ mod tests {
     }
 
     #[test]
-    fn load_skills_with_sources_returns_source_path_per_skill() {
+    fn load_skills_with_sources_detailed_returns_source_path_per_skill() {
         let tmp = crate::test_helpers::test_tempdir("djinn-skills-sources-");
-        let skills_dir = make_skill_dir(&tmp, ".djinn");
-        write_flat_skill(
-            &skills_dir,
+        let claude_skills = make_skill_dir(&tmp, ".claude");
+        write_directory_skill(
+            &claude_skills,
             "with-path",
             "---\ndescription: Has path\n---\n\nBody.\n",
         );
 
-        let resolved = load_skills_with_sources(tmp.path(), &["with-path".to_string()]);
-        assert_eq!(resolved.len(), 1);
-        let (skill, path) = &resolved[0];
+        let detailed = load_skills_with_sources_detailed(tmp.path(), &["with-path".to_string()]);
+        assert_eq!(detailed.skills.len(), 1);
+        let (name, skill, path) = &detailed.skills[0];
+        assert_eq!(name, "with-path");
         assert_eq!(skill.name, "with-path");
         assert!(
-            path.ends_with("with-path.md"),
-            "expected source path to end with with-path.md, got {:?}",
+            path.ends_with("SKILL.md"),
+            "expected source path to end with SKILL.md, got {:?}",
             path
         );
     }

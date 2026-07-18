@@ -1,3 +1,5 @@
+use super::*;
+use std::fs;
 
 /// `skill_read` is present in every role's tool schema (it rides the base set,
 /// like `read`).

@@ -15,6 +15,7 @@ import {
   ManifestError,
   KNOWLEDGE_DISPOSITIONS,
   NON_KNOWLEDGE_TRACKED,
+  RETIRED_OPERATIONAL_PATHS,
   DEFAULT_OUTPUT_DIR,
   normalizeContent,
   sha256Hex,
@@ -69,7 +70,9 @@ function syntheticRepo() {
     join(dir, '.djinn', 'reference', 'b.md'),
     '---\ntitle: B\ntype: reference\ntags: []\n---\n\ny\n',
   );
-  // Non-knowledge tracked files that must be excluded.
+  // Non-knowledge tracked files that must be excluded from the knowledge set.
+  // `.djinn/skills.json` is included to prove it is excluded from knowledge
+  // classification even after retirement (it is now in RETIRED_OPERATIONAL_PATHS).
   writeFileSync(join(dir, '.djinn', '.gitignore'), 'worktrees/\n');
   writeFileSync(join(dir, '.djinn', 'settings.json'), '{}\n');
   writeFileSync(join(dir, '.djinn', 'skills.json'), '[]\n');
@@ -202,6 +205,28 @@ test('post-cutover guard rejects a newly invented tracked knowledge path', () =>
     () => validateRetirementCutover(paths, ledger, guidance, { cwd: REPO_ROOT }),
     (err) => err instanceof ManifestError && err.code === 'knowledge_reintroduced',
   );
+});
+
+test('post-cutover guard rejects reintroduction of retired operational paths', () => {
+  const fixtureDir = join(REPO_ROOT, 'scripts', 'fixtures', 'djinn-retirement');
+  const ledger = JSON.parse(readFileSync(join(fixtureDir, 'deletion-ledger.json'), 'utf8'));
+  const guidance = loadDbGuidanceFixture(join(fixtureDir, 'db-guidance.json'));
+  for (const retired of RETIRED_OPERATIONAL_PATHS) {
+    const paths = nulBytes([...NON_KNOWLEDGE_TRACKED, retired]);
+    assert.throws(
+      () => validateRetirementCutover(paths, ledger, guidance, { cwd: REPO_ROOT }),
+      (err) => err instanceof ManifestError && err.code === 'retired_path_reintroduced',
+    );
+  }
+});
+
+test('post-cutover guard accepts absent retired operational paths', () => {
+  const fixtureDir = join(REPO_ROOT, 'scripts', 'fixtures', 'djinn-retirement');
+  const ledger = JSON.parse(readFileSync(join(fixtureDir, 'deletion-ledger.json'), 'utf8'));
+  const guidance = loadDbGuidanceFixture(join(fixtureDir, 'db-guidance.json'));
+  const paths = nulBytes([...NON_KNOWLEDGE_TRACKED]);
+  // Must not throw: all retired operational paths are absent.
+  validateRetirementCutover(paths, ledger, guidance, { cwd: REPO_ROOT });
 });
 
 test('post-cutover guard rejects durable deletion count and set drift', () => {
