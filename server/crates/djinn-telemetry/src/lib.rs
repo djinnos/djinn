@@ -393,7 +393,11 @@ pub mod board_health_mismatch {
     pub fn record_pass_age(started_at: Option<&str>) {
         let age_seconds = started_at
             .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
-            .and_then(|started| (chrono::Utc::now() - started.with_timezone(&chrono::Utc)).to_std().ok())
+            .and_then(|started| {
+                (chrono::Utc::now() - started.with_timezone(&chrono::Utc))
+                    .to_std()
+                    .ok()
+            })
             .map_or(0.0, |age| age.as_secs_f64());
         metrics::gauge!(super::BOARD_HEALTH_MISMATCH_PASS_AGE_SECONDS).set(age_seconds);
     }

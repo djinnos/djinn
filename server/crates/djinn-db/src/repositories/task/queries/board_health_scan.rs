@@ -30,11 +30,11 @@ impl TaskRepository {
     /// The sequence survives process restarts, unlike an in-process counter.
     pub async fn next_board_health_mismatch_leader_epoch(&self) -> Result<i64> {
         self.db.ensure_initialized().await?;
-        Ok(sqlx::query_scalar(
-            "SELECT nextval('board_health_mismatch_scan_leader_epoch_seq')",
+        Ok(
+            sqlx::query_scalar("SELECT nextval('board_health_mismatch_scan_leader_epoch_seq')")
+                .fetch_one(self.db.pool())
+                .await?,
         )
-        .fetch_one(self.db.pool())
-        .await?)
     }
 
     /// Creates an idle singleton then captures high-water, or resumes its cursor.
