@@ -1,29 +1,15 @@
-# Classification-only inventory of production `StreamEvent::` references.
+# Classification-only inventory of production `StreamEvent` match sites.
 # This is static coverage evidence, not a behavioral claim. Runtime behavior is
 # owned by the listed crates' tests. Test-only mocks, emitters, and assertions
 # (`tests/`, `*_tests.rs`, `test_helpers.rs`, and `tests.rs`) are deliberately
 # excluded by stream_event_consumer_audit.rs.
-# path<TAB>classification
-server/crates/djinn-agent/src/actors/slot/supervisor_runner.rs	unrelated runtime StreamEvent
-server/crates/djinn-agent/src/direct_services.rs	provider consumer
-server/crates/djinn-compaction/src/summarizer.rs	provider consumer with grouped ignore arm
-server/crates/djinn-control-plane/src/tools/memory_tools/contradiction.rs	test-only emitter retained in production path
-server/crates/djinn-k8s/src/runtime.rs	unrelated runtime StreamEvent
-server/crates/djinn-provider/src/completion.rs	provider text-only consumer with grouped ignore arm
-server/crates/djinn-provider/src/provider/format/anthropic/streaming.rs	provider producer
-server/crates/djinn-provider/src/provider/format/google.rs	provider producer and unit assertions
-server/crates/djinn-provider/src/provider/format/openai.rs	provider producer
-server/crates/djinn-provider/src/provider/format/openai_responses.rs	provider producer and unit assertions
-server/crates/djinn-provider/src/provider/mod.rs	documentation-only
-server/crates/djinn-runtime/src/stream.rs	documentation-only unrelated runtime StreamEvent
-server/crates/djinn-runtime/src/test_runtime.rs	test runtime implementation uses unrelated runtime StreamEvent
-server/crates/djinn-runtime/src/wire.rs	documentation-only unrelated runtime StreamEvent
-server/crates/djinn-slot/src/extraction_replay_eval.rs	test-only emitter in production module
-server/crates/djinn-slot/src/llm_extraction.rs	test-only emitter in production module
-server/crates/djinn-slot/src/reply_loop/streaming.rs	provider consumer
-server/crates/djinn-slot/src/reply_loop/turn.rs	provider turn implementation and test scaffolding
-server/crates/djinn-slot/src/session_extraction.rs	test-only emitter in production module
-server/crates/djinn-supervisor/src/services.rs	documentation-only unrelated runtime StreamEvent
-server/crates/djinn-supervisor/src/services/rpc.rs	documentation-only unrelated runtime StreamEvent
-server/crates/djinn-supervisor/src/services/server.rs	unrelated runtime StreamEvent
-server/src/server/chat/handler.rs	provider consumer drain_provider_turn and grouped ignore arm
+# site identifier<TAB>all StreamEvent arms at this site
+# Source files may contain test-only mocks/emitters, but they are not match
+# sites and are excluded by stream_event_consumer_audit.rs' path classification.
+server/crates/djinn-agent/src/actors/slot/supervisor_runner.rs::await_report_from_stream#1	runtime stream arms: Report, StageStep, grouped AssistantDelta/ToolCall/FinalizePayload/StageOutcome, and None terminal handling
+server/crates/djinn-agent/src/direct_services.rs::collect_planner_stream#1	consumer arms: Delta, Thinking, ThinkingDelta, ThinkingBlockComplete, Usage, Done; wildcard/error arm is the Result error
+server/crates/djinn-compaction/src/summarizer.rs::call_llm_for_summary#1	consumer arms: text Delta append, Usage, Done; grouped ignore arm for non-text Delta/Thinking/ThinkingDelta/ThinkingBlockComplete
+server/crates/djinn-provider/src/completion.rs::collect_completion#1	text-only consumer arms: text Delta append, Usage, Done; grouped ignore arm for non-text Delta/Thinking/ThinkingDelta/ThinkingBlockComplete
+server/crates/djinn-slot/src/reply_loop/streaming.rs::consume_provider_stream#1	consumer arms: text/tool/provider-state deltas, Thinking, ThinkingDelta, ThinkingBlockComplete, Usage, Done; grouped ignore arms for unsupported Delta variants
+server/src/server/chat/handler.rs::drain_provider_turn#1	consumer arms: text/tool/provider-state deltas, Thinking, ThinkingDelta, ThinkingBlockComplete, Usage, Done; grouped ignore arm for unsupported Delta variants and wildcard/error Result arm
+server/src/server/chat/handler.rs::generate_chat_title#1	consumer arms: text Delta append, Thinking/ThinkingDelta/ThinkingBlockComplete/non-text Delta ignore, Usage, Done; wildcard/error Result arm

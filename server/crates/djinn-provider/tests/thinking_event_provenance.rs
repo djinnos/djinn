@@ -41,9 +41,12 @@ fn frame(value: serde_json::Value) -> String {
 async fn anthropic_thinking_events_keep_content_index_provenance() {
     let body = [
         frame(json!({"type":"message_start","message":{"usage":{"input_tokens":11}}})),
-        // Front-loaded text must remain an ordinary text delta.
+        // Front-loaded ordinary text remains an ordinary text delta.
         frame(json!({"type":"content_block_start","index":4,"content_block":{"type":"text","text":"front "}})),
-        frame(json!({"type":"content_block_start","index":7,"content_block":{"type":"thinking"}})),
+        // Anthropic can put the first thinking bytes on the start frame. They
+        // belong to index 7's eventual completion, while subsequent deltas
+        // retain that same index as their provenance.
+        frame(json!({"type":"content_block_start","index":7,"content_block":{"type":"thinking","thinking":"head "}})),
         frame(json!({"type":"content_block_start","index":2,"content_block":{"type":"thinking"}})),
         frame(json!({"type":"content_block_start","index":9,"content_block":{"type":"tool_use","id":"tool-9","name":"shell"}})),
         frame(json!({"type":"content_block_delta","index":7,"delta":{"type":"thinking_delta","thinking":"seven-a "}})),
@@ -97,7 +100,7 @@ async fn anthropic_thinking_events_keep_content_index_provenance() {
         matches!(&events[5], StreamEvent::ThinkingBlockComplete { id: 2, thinking, signature: None } if thinking == "two-a ")
     );
     assert!(
-        matches!(&events[6], StreamEvent::ThinkingBlockComplete { id: 7, thinking, signature: Some(signature) } if thinking == "seven-a seven-b" && signature == "sig-7")
+        matches!(&events[6], StreamEvent::ThinkingBlockComplete { id: 7, thinking, signature: Some(signature) } if thinking == "head seven-a seven-b" && signature == "sig-7")
     );
     assert!(
         matches!(&events[7], StreamEvent::Delta(ContentBlock::ToolUse { id, name, input }) if id == "tool-9" && name == "shell" && input["cmd"] == "pwd")
