@@ -23,8 +23,10 @@ fn contract() -> Value {
     serde_json::from_str(CONTRACT).expect("memory revision contract fixture is valid JSON")
 }
 
-/// Seed fixed rows by immutable INSERT only: no writer or schema relaxation is
-/// involved, and the fixture owns every value projected by the public readers.
+/// Seed fixed rows by immutable INSERT only. The fixture includes one historical
+/// malformed update to prove the reader never infers a missing snapshot from a
+/// neighboring revision, so its per-harness shape check is restored as NOT VALID
+/// after seeding; subsequent inserts remain checked.
 async fn seed_reader_contract(harness: &McpTestHarness, fixture: &Value) {
     let seed = &fixture["reader_fixture"];
     let project_id = fixture["ids"]["project_id"]
@@ -39,6 +41,17 @@ async fn seed_reader_contract(harness: &McpTestHarness, fixture: &Value) {
         )
         .await
         .expect("seed fixed project");
+    ProjectRepository::new(harness.db().clone(), EventBus::noop())
+        .create_with_id(
+            fixture["ids"]["foreign_project_id"]
+                .as_str()
+                .expect("fixture foreign project id"),
+            "revision-contract-foreign",
+            "fixture",
+            "revision-contract-foreign",
+        )
+        .await
+        .expect("seed fixed foreign project");
     for note in seed["live_notes"].as_array().expect("fixture live notes") {
         let mut insert = QueryBuilder::<Postgres>::new(
             "INSERT INTO notes (id, project_id, permalink, title, file_path, storage, note_type, folder, status, tags, content, scope_paths, confidence) VALUES (",
@@ -72,6 +85,17 @@ async fn seed_reader_contract(harness: &McpTestHarness, fixture: &Value) {
             .await
             .expect("seed fixed live note");
     }
+    // Production writers cannot produce malformed updates. The legacy fixture
+    // row is intentional: the reader must reject its missing after snapshot
+    // instead of deriving it from the preceding revision.
+    QueryBuilder::<Postgres>::new(
+        "ALTER TABLE note_revision_events DROP CONSTRAINT chk_note_revision_events_shape",
+    )
+    .build()
+    .execute(harness.db().pool())
+    .await
+    .expect("temporarily permit fixture's legacy missing snapshot");
+
     for event in seed["events"].as_array().expect("fixture events") {
         let mut insert = QueryBuilder::<Postgres>::new(
             "INSERT INTO note_revision_events (id, project_id, note_id, note_seq, event_kind, content_before, content_after, confidence_before, confidence_after, actor_kind, actor_id, subsystem, session_id, task_id, task_run_id, reason, created_at) VALUES (",
@@ -80,8 +104,8 @@ async fn seed_reader_contract(harness: &McpTestHarness, fixture: &Value) {
             let mut values = insert.separated(", ");
             values.push_bind(event["id"].as_str().expect("revision id"));
             values.push_bind(project_id);
-            values.push_bind(event["note_id"].as_str().expect("event note id"));
-            values.push_bind(event["note_seq"].as_i64().expect("note sequence"));
+            values.push_bind(event.get("note_id").and_then(Value::as_str));
+            values.push_bind(event.get("note_seq").and_then(Value::as_i64));
             values.push_bind(event["event_kind"].as_str().expect("event kind"));
             values.push_bind(event.get("content_before").and_then(Value::as_str));
             values.push_bind(event.get("content_after").and_then(Value::as_str));
@@ -103,6 +127,14 @@ async fn seed_reader_contract(harness: &McpTestHarness, fixture: &Value) {
             .await
             .expect("append immutable fixed revision event");
     }
+
+    QueryBuilder::<Postgres>::new(
+        "ALTER TABLE note_revision_events ADD CONSTRAINT chk_note_revision_events_shape CHECK ((event_kind = 'created' AND note_id IS NOT NULL AND content_before IS NULL AND confidence_before IS NULL AND content_after IS NOT NULL AND confidence_after IS NOT NULL) OR (event_kind = 'updated' AND note_id IS NOT NULL AND content_before IS NOT NULL AND confidence_before IS NOT NULL AND content_after IS NOT NULL AND confidence_after IS NOT NULL) OR (event_kind = 'deleted' AND note_id IS NOT NULL AND content_before IS NOT NULL AND confidence_before IS NOT NULL AND content_after IS NULL AND confidence_after IS NULL) OR (event_kind = 'confidence_changed' AND note_id IS NOT NULL AND content_before IS NULL AND content_after IS NULL AND confidence_before IS NOT NULL AND confidence_after IS NOT NULL) OR (event_kind = 'extraction_skipped' AND note_id IS NULL AND content_before IS NULL AND content_after IS NULL AND confidence_before IS NULL AND confidence_after IS NULL AND (session_id IS NOT NULL OR task_run_id IS NOT NULL))) NOT VALID",
+    )
+    .build()
+    .execute(harness.db().pool())
+    .await
+    .expect("restore revision shape check after legacy fixture seed");
 
     let context = &seed["session_context"];
     let task_id = context["task_id"].as_str().expect("fixed task id");
@@ -378,6 +410,48 @@ async fn fixed_fixture_pins_history_pages_pairwise_diff_and_deleted_history() {
     )
     .await;
     assert_eq!(deleted, expected["deleted_history"]);
+}
+
+#[tokio::test]
+async fn fixed_fixture_executes_negative_reader_envelopes() {
+    let fixture = contract();
+    let harness = McpTestHarness::new().await;
+    seed_reader_contract(&harness, &fixture).await;
+
+    for (name, expectation) in fixture["mcp_response_expectations"]
+        .as_object()
+        .expect("fixture response expectations")
+    {
+        let tool = expectation["tool"].as_str().expect("fixture tool");
+        let args = expectation["args"].clone();
+        if expectation.get("expected_error").is_some() {
+            let error = harness
+                .call_tool(tool, args)
+                .await
+                .expect_err("retired selector must fail deserialization");
+            assert_eq!(
+                format!("{error:#}"),
+                expectation["expected_error"]
+                    .as_str()
+                    .expect("fixture error"),
+                "{name}"
+            );
+            continue;
+        }
+
+        let actual = if expectation["caller"] == "readerless" {
+            let readerless = UserRepository::new(harness.db().clone())
+                .upsert_from_github(8_420_100, "revision-readerless", None, None)
+                .await
+                .expect("seed readerless user");
+            SESSION_USER_ID
+                .scope(Some(readerless.id), dispatch(&harness, tool, args))
+                .await
+        } else {
+            dispatch(&harness, tool, args).await
+        };
+        assert_eq!(actual, expectation["expected"], "{name}");
+    }
 }
 
 #[tokio::test]
