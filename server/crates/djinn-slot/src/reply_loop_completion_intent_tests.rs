@@ -16,19 +16,36 @@ use std::sync::{Arc, Mutex};
 
 use crate::final_verification::{
     FinalVerificationCoordinatorRequest, FinalVerificationRecordingOutcome,
-    FinalVerificationSuccessEvidence,
+    FinalVerificationResolvedMaterial, FinalVerificationSuccessEvidence,
 };
 use crate::host::{ResolvedMcpTools, SlotContext, SlotHostCallbacks};
 use crate::reply_loop::{ReplyLoopContext, run_reply_loop};
 use crate::test_helpers::{
     FakeProvider, agent_context_from_db_with_callbacks, create_test_db, create_test_epic,
-    create_test_project, create_test_task, test_path,
+    create_test_project, create_test_task, test_path, test_tempdir,
 };
-use djinn_core::models::Task;
+use djinn_core::{
+    canonical_verify::{
+        CanonicalCommandDescriptorV1, CanonicalFinalVerificationPlanV1, CanonicalHermeticityV1,
+        EnvironmentIdentityV1, ImmutableImageV1, ResolvedEnvironmentIdentityInputV1,
+        ToolProbeStatus, ToolProbeV1, VerificationInputManifestV1,
+    },
+    models::{Task, VerifySource},
+};
 use djinn_db::repositories::session::{CreateSessionParams, SessionRepository};
+use djinn_db::repositories::settings::SettingsRepository;
 use djinn_db::repositories::task_run::{CreateTaskRunParams, TaskRunRepository};
+use djinn_db::repositories::verify_run::{
+    RecordEligibleFinalVerificationPassParams, RequiredFinalVerificationCommand,
+    VerifyRunRepository,
+};
+use djinn_git::{
+    VerificationInputFingerprint, VerificationInputFingerprintConfig,
+    compute_verification_input_fingerprint_with_config, run_git_command_in,
+};
 use djinn_provider::message::{ContentBlock, Conversation, Message};
 use djinn_provider::provider::StreamEvent;
+use djinn_sandbox::final_verification_execution::FinalVerificationExecutionRequest;
 use tokio_util::sync::CancellationToken;
 
 // ---------------------------------------------------------------------------
@@ -42,6 +59,94 @@ struct CompletionIntentCallbacks {
     outcomes: Mutex<VecDeque<FinalVerificationRecordingOutcome>>,
     coordinator_calls: Mutex<usize>,
     expected_task_id: String,
+    reuse_probe: Option<ReuseProbe>,
+}
+
+fn reuse_material(worktree: std::path::PathBuf) -> FinalVerificationResolvedMaterial {
+    let required_checks = vec!["format".to_owned(), "slot-clippy".to_owned()];
+    let manifest = VerificationInputManifestV1 {
+        version: 1,
+        repo_paths: vec![],
+        environment_names: vec![],
+        read_only_external_inputs: vec![],
+        output_only_globs: vec![],
+    };
+    let commands = required_checks
+        .iter()
+        .map(|check_id| CanonicalCommandDescriptorV1 {
+            check_id: check_id.clone(),
+            executable: format!("{check_id}-tool"),
+            argv: vec![check_id.clone()],
+            working_directory: ".".into(),
+            environment_names: vec![],
+            timeout_seconds: 60,
+            descriptor_revision: 1,
+        })
+        .collect::<Vec<_>>();
+    let input = ResolvedEnvironmentIdentityInputV1 {
+        schema_version: 1,
+        canonicalization_version: 1,
+        plan: CanonicalFinalVerificationPlanV1 {
+            version: 1,
+            profile_id: "reply-loop-reuse".into(),
+            profile_revision: 1,
+            commands: commands.clone(),
+            required_checks: required_checks.clone(),
+            hermeticity: CanonicalHermeticityV1 {
+                hermetic: true,
+                reusable: true,
+                network_access: false,
+            },
+        },
+        input_manifest: manifest.clone(),
+        image: ImmutableImageV1 {
+            reference: "test-image".into(),
+            digest: "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+                .into(),
+        },
+        tool_probes:
+            commands
+                .iter()
+                .map(|command| ToolProbeV1 {
+                    tool: command.executable.clone(),
+                    version: "test".into(),
+                    executable_digest:
+                        "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+                            .into(),
+                    status: ToolProbeStatus::Passed,
+                })
+                .collect(),
+        runner_version: "test-runner".into(),
+        lockfile_digests: vec![],
+        target: "test-target".into(),
+        features: vec![],
+        allowlisted_environment: Default::default(),
+    };
+    FinalVerificationResolvedMaterial {
+        execution_request: FinalVerificationExecutionRequest {
+            worktree,
+            resolve_environment_identity: Arc::new(move || Ok(input.clone())),
+            fingerprint_config: VerificationInputFingerprintConfig {
+                base_ref: "main".into(),
+                manifest,
+                external_inputs: vec![],
+            },
+            tool_runtime: vec![],
+            read_only_external_mounts: vec![],
+            output_directories: vec![],
+        },
+        verify_source: VerifySource::Worker,
+        required_checks,
+        diff_fingerprint: "reply-loop-reuse-audit-diff".into(),
+    }
+}
+
+struct ReuseProbe {
+    material: FinalVerificationResolvedMaterial,
+    events: Mutex<Vec<&'static str>>,
+    lease_requests: Mutex<usize>,
+    lease_acquisitions: Mutex<usize>,
+    canonical_executions: Mutex<usize>,
 }
 
 impl CompletionIntentCallbacks {
@@ -50,11 +155,37 @@ impl CompletionIntentCallbacks {
             outcomes: Mutex::new(outcomes.into()),
             coordinator_calls: Mutex::new(0),
             expected_task_id,
+            reuse_probe: None,
+        }
+    }
+
+    fn for_reuse(expected_task_id: String, material: FinalVerificationResolvedMaterial) -> Self {
+        Self {
+            outcomes: Mutex::new(VecDeque::new()),
+            coordinator_calls: Mutex::new(0),
+            expected_task_id,
+            reuse_probe: Some(ReuseProbe {
+                material,
+                events: Mutex::new(Vec::new()),
+                lease_requests: Mutex::new(0),
+                lease_acquisitions: Mutex::new(0),
+                canonical_executions: Mutex::new(0),
+            }),
         }
     }
 
     fn coordinator_count(&self) -> usize {
         *self.coordinator_calls.lock().unwrap()
+    }
+
+    fn reuse_events(&self) -> Vec<&'static str> {
+        self.reuse_probe
+            .as_ref()
+            .unwrap()
+            .events
+            .lock()
+            .unwrap()
+            .clone()
     }
 }
 
@@ -68,7 +199,77 @@ impl SlotHostCallbacks for CompletionIntentCallbacks {
             "fixture task ID reached completion-intent verification"
         );
         *self.coordinator_calls.lock().unwrap() += 1;
+        if let Some(probe) = &self.reuse_probe {
+            // Coordinator entry follows parsing and acceptance of submit_work.
+            // Returning None intentionally leaves production consultation live.
+            probe
+                .events
+                .lock()
+                .unwrap()
+                .push("completion-intent-accepted");
+            return None;
+        }
         self.outcomes.lock().unwrap().pop_front()
+    }
+
+    fn final_verification_evidence_for_test(
+        &self,
+        _request: &FinalVerificationCoordinatorRequest,
+    ) -> Option<djinn_sandbox::final_verification_execution::FinalVerificationExecutionEvidence>
+    {
+        if let Some(probe) = &self.reuse_probe {
+            *probe.canonical_executions.lock().unwrap() += 1;
+        }
+        None
+    }
+
+    fn resolve_final_verification<'a>(
+        &'a self,
+        _task_id: &'a str,
+        _task_run_id: &'a str,
+        _verification_attempt_id: &'a str,
+        verify_run_id: &'a str,
+        _ctx: &'a SlotContext,
+    ) -> Pin<Box<dyn Future<Output = Result<FinalVerificationResolvedMaterial, String>> + Send + 'a>>
+    {
+        let probe = self.reuse_probe.as_ref();
+        Box::pin(async move {
+            let probe = probe.ok_or_else(|| "not implemented in test".to_owned())?;
+            probe.events.lock().unwrap().push(match verify_run_id {
+                "reuse-c0" => "consult-reuse-c0",
+                "reuse-c1" => "consult-reuse-c1",
+                _ => "writer-resolution",
+            });
+            Ok(probe.material.clone())
+        })
+    }
+
+    fn acquire_final_verification_lease<'a>(
+        &'a self,
+        _task_id: &'a str,
+        _task_run_id: &'a str,
+        _verification_attempt_id: &'a str,
+        _ctx: &'a SlotContext,
+    ) -> Pin<
+        Box<
+            dyn Future<
+                    Output = Result<
+                        Box<dyn crate::final_verification::FinalVerificationInvocationLease>,
+                        String,
+                    >,
+                > + Send
+                + 'a,
+        >,
+    > {
+        let probe = self.reuse_probe.as_ref();
+        if let Some(probe) = probe {
+            *probe.lease_requests.lock().unwrap() += 1;
+        }
+        Box::pin(async move {
+            let probe = probe.ok_or_else(|| "not implemented in test".to_owned())?;
+            *probe.lease_acquisitions.lock().unwrap() += 1;
+            Err("lease must not be acquired for a reuse hit".into())
+        })
     }
 
     fn interrupt_paused_worker_session<'a>(
@@ -307,34 +508,11 @@ fn stored_evidence() -> FinalVerificationSuccessEvidence {
     }
 }
 
-fn reused_evidence() -> FinalVerificationSuccessEvidence {
-    FinalVerificationSuccessEvidence {
-        persisted_run_id: "persisted-reused".into(),
-        completed_at: "2025-02-02T03:04:05Z".into(),
-        ordered_commands: serde_json::json!([
-            {"command": "cargo clippy -p djinn-slot --lib --no-deps", "ordinal": 0},
-            {"command": "cargo clippy -p djinn-agent --lib --no-deps", "ordinal": 1}
-        ]),
-        covered_checks: serde_json::json!(["slot-clippy", "agent-clippy"]),
-        required_checks: vec!["slot-clippy".into(), "agent-clippy".into()],
-        verification_input_fingerprint: "reused-complete-fingerprint".into(),
-        manifest_version: "manifest-v2".into(),
-        environment_identity_digest: "reused-environment-digest".into(),
-    }
-}
-
 fn stored() -> FinalVerificationRecordingOutcome {
     FinalVerificationRecordingOutcome::Stored {
         verification_attempt_id: "attempt-stored".into(),
         verify_run_id: "run-stored".into(),
         evidence: Box::new(stored_evidence()),
-    }
-}
-
-fn reused() -> FinalVerificationRecordingOutcome {
-    FinalVerificationRecordingOutcome::Reused {
-        verification_attempt_id: "attempt-reused".into(),
-        evidence: Box::new(reused_evidence()),
     }
 }
 
@@ -423,41 +601,182 @@ async fn stored_verification_forwards_original_payload_exactly_once() {
 }
 
 #[tokio::test]
-async fn reused_verification_forwards_complete_evidence_on_completion_intent() {
-    let fixture = make_fixture(vec![reused()]).await;
+async fn repeat_worker_reuses_compatible_persisted_pass_after_completion_intent() {
+    let db = create_test_db();
+    let project = create_test_project(&db).await;
+    let epic = create_test_epic(&db, &project.id).await;
+    let task = create_test_task(&db, &project.id, &epic.id).await;
+    let tree = test_tempdir("reply-loop-reuse-hit-");
+    for args in [
+        vec!["init"],
+        vec!["config", "user.email", "test@example.com"],
+        vec!["config", "user.name", "Reply Loop Test"],
+    ] {
+        run_git_command_in(tree.path(), args.into_iter().map(String::from).collect())
+            .await
+            .unwrap();
+    }
+    std::fs::write(
+        tree.path().join("authored.txt"),
+        "repeat-worker authored state",
+    )
+    .unwrap();
+    for args in [
+        vec!["add", "authored.txt"],
+        vec!["commit", "-m", "authored state"],
+        vec!["branch", "-M", "main"],
+    ] {
+        run_git_command_in(tree.path(), args.into_iter().map(String::from).collect())
+            .await
+            .unwrap();
+    }
+    let material = reuse_material(tree.path().to_path_buf());
+    let fingerprint = match compute_verification_input_fingerprint_with_config(
+        tree.path(),
+        &material.execution_request.fingerprint_config,
+    )
+    .await
+    .unwrap()
+    {
+        VerificationInputFingerprint::Available(digest) => digest.fingerprint,
+        VerificationInputFingerprint::Unavailable(reason) => {
+            panic!("fingerprint unavailable: {reason}")
+        }
+    };
+    let identity = EnvironmentIdentityV1::derive(
+        (material.execution_request.resolve_environment_identity)().unwrap(),
+    )
+    .unwrap();
+    let run_id = uuid::Uuid::now_v7().to_string();
+    TaskRunRepository::new(db.clone())
+        .create(CreateTaskRunParams {
+            id: &run_id,
+            project_id: &project.id,
+            task_id: &task.id,
+            trigger_type: "dispatch",
+            status: Some("running"),
+            workspace_path: Some(tree.path().to_str().unwrap()),
+            mirror_ref: None,
+        })
+        .await
+        .unwrap();
+    SettingsRepository::new(db.clone(), crate::test_helpers::test_events())
+        .set(
+            &format!("project.{}.verify_run_reuse_enabled", project.id),
+            "true",
+        )
+        .await
+        .unwrap();
+    let persisted_id = "persisted-reply-loop-reuse-hit";
+    let completed_at = "2099-02-02T03:04:05Z";
+    let ordered_commands = serde_json::json!([
+        {"descriptor_id": "format", "result": "pass", "passed": true},
+        {"descriptor_id": "slot-clippy", "result": "pass", "passed": true}
+    ]);
+    let covered_checks = serde_json::json!(["format", "slot-clippy"]);
+    let commands = [
+        RequiredFinalVerificationCommand {
+            descriptor_id: "format",
+        },
+        RequiredFinalVerificationCommand {
+            descriptor_id: "slot-clippy",
+        },
+    ];
+    let identity_json = serde_json::from_str(&identity.canonical_json).unwrap();
+    VerifyRunRepository::new(db.clone())
+        .record_eligible_final_verification_pass(RecordEligibleFinalVerificationPassParams {
+            id: persisted_id,
+            task_run_id: &run_id,
+            verify_source: "worker",
+            verify_run_id: "seeded-reuse-run",
+            verification_attempt_id: "seeded-reuse-attempt",
+            required_commands: &commands,
+            ordered_commands: &ordered_commands,
+            covered_checks: &covered_checks,
+            required_checks: &material.required_checks,
+            verification_input_fingerprint: &fingerprint,
+            manifest_version: "manifest-v1",
+            environment_identity_json: &identity_json,
+            environment_identity_digest: &identity.digest,
+            environment_identity_version: "identity-v1",
+            completed_at,
+            diff_fingerprint: &material.diff_fingerprint,
+        })
+        .await
+        .unwrap();
+    let callbacks = Arc::new(CompletionIntentCallbacks::for_reuse(
+        task.id.clone(),
+        material,
+    ));
+    let slot_ctx = agent_context_from_db_with_callbacks(db, callbacks.clone());
+    let session = SessionRepository::new(slot_ctx.db.clone(), slot_ctx.event_bus.clone())
+        .create(CreateSessionParams {
+            project_id: &project.id,
+            task_id: Some(&task.id),
+            model: "synthetic/test-model",
+            agent_type: "worker",
+            metadata_json: None,
+            task_run_id: Some(&run_id),
+            pricing: None,
+            cost_basis: None,
+        })
+        .await
+        .unwrap();
     let expected_payload = serde_json::json!({
-        "task_id": fixture.task_id,
+        "task_id": task.id,
         "commit_title": "complete reused verification",
         "summary": "reused verification",
     });
     let provider = FakeProvider::script(vec![submit_turn(
         "submit-reused",
-        &fixture.task_id,
+        &task.id,
         "reused verification",
     )]);
     let mut conversation = base_conversation();
+    let cancel = CancellationToken::new();
     let (result, output, _, _, _, _) = run_with_provider(
         &provider,
         &[dummy_tool_schema("submit_work")],
         &mut conversation,
-        &fixture.slot_ctx,
-        &fixture.project_path,
-        &fixture.task_id,
-        &fixture.session_id,
-        &fixture.cancel,
+        &slot_ctx,
+        tree.path().to_str().unwrap(),
+        &task.id,
+        &session.id,
+        &cancel,
     )
     .await;
 
     assert!(result.is_ok());
-    assert_eq!(fixture.callbacks.coordinator_count(), 1);
+    assert_eq!(callbacks.coordinator_count(), 1);
     assert_eq!(output.finalize_payload.as_ref(), Some(&expected_payload));
-    assert_eq!(output.finalize_tool_name.as_deref(), Some("submit_work"));
     let intent = output
         .completion_intent
-        .expect("reused verification reached the completion-intent output");
+        .expect("reused verification reached finalization");
     assert_eq!(intent.finalize_payload, expected_payload);
     assert_eq!(intent.tool_use_id, "submit-reused");
-    assert_eq!(intent.final_verification_evidence, Some(reused_evidence()));
+    assert_eq!(
+        callbacks.reuse_events(),
+        vec![
+            "completion-intent-accepted",
+            "consult-reuse-c0",
+            "consult-reuse-c1"
+        ]
+    );
+    let evidence = intent
+        .final_verification_evidence
+        .expect("persisted evidence reaches finalization");
+    assert_eq!(evidence.persisted_run_id, persisted_id);
+    assert_eq!(evidence.completed_at, completed_at);
+    assert_eq!(evidence.ordered_commands, ordered_commands);
+    assert_eq!(evidence.covered_checks, covered_checks);
+    assert_eq!(evidence.required_checks, vec!["format", "slot-clippy"]);
+    assert_eq!(evidence.verification_input_fingerprint, fingerprint);
+    assert_eq!(evidence.manifest_version, "manifest-v1");
+    assert_eq!(evidence.environment_identity_digest, identity.digest);
+    let probe = callbacks.reuse_probe.as_ref().unwrap();
+    assert_eq!(*probe.lease_requests.lock().unwrap(), 0);
+    assert_eq!(*probe.lease_acquisitions.lock().unwrap(), 0);
+    assert_eq!(*probe.canonical_executions.lock().unwrap(), 0);
     assert!(error_ids(&conversation).is_empty());
 }
 
