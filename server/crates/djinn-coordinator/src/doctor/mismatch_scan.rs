@@ -4,12 +4,9 @@
 //! outside it, so an arbitrary burst of triggers becomes one pending rerun.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicI64, Ordering};
 use std::time::Duration;
 
 use djinn_core::clock::{Clock, SystemClock};
-
-static NEXT_LEADER_EPOCH: AtomicI64 = AtomicI64::new(1);
 
 use tokio::sync::Mutex;
 
@@ -45,18 +42,18 @@ pub struct MismatchScanCoordinator {
     db: Database,
     events: djinn_core::events::EventBus,
     state: Arc<Mutex<FlightState>>,
-    leader_epoch: i64,
+    /// Allocated from a database sequence on first use, so it is monotonic
+    /// across process restarts and distinct leader pods.
+    leader_epoch: Arc<Mutex<Option<i64>>>,
 }
 
 impl MismatchScanCoordinator {
     pub fn new(db: Database, events: djinn_core::events::EventBus) -> Self {
-        // Monotonic process epoch fences stale page commits without labels.
-        let leader_epoch = NEXT_LEADER_EPOCH.fetch_add(1, Ordering::Relaxed);
         Self {
             db,
             events,
             state: Arc::new(Mutex::new(FlightState::default())),
-            leader_epoch,
+            leader_epoch: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -102,8 +99,25 @@ impl MismatchScanCoordinator {
     async fn run_once(&self, trigger: Trigger) {
         let started = SystemClock::new().now_instant();
         let repo = TaskRepository::new(self.db.clone(), self.events.clone());
+        let leader_epoch = {
+            let mut epoch = self.leader_epoch.lock().await;
+            match *epoch {
+                Some(epoch) => epoch,
+                None => match repo.next_board_health_mismatch_leader_epoch().await {
+                    Ok(next) => {
+                        *epoch = Some(next);
+                        next
+                    }
+                    Err(error) => {
+                        tracing::warn!(error = %error, trigger = trigger.label(), "board-health mismatch scan could not allocate a leader epoch");
+                        djinn_telemetry::board_health_mismatch::record_outcome("error", trigger.label());
+                        return;
+                    }
+                },
+            }
+        };
         let state = match repo
-            .start_or_resume_board_health_mismatch_pass(self.leader_epoch)
+            .start_or_resume_board_health_mismatch_pass(leader_epoch)
             .await
         {
             Ok(state) => state,
@@ -117,7 +131,7 @@ impl MismatchScanCoordinator {
 
         loop {
             let page = match repo
-                .load_board_health_mismatch_page(self.leader_epoch)
+                .load_board_health_mismatch_page(leader_epoch)
                 .await
             {
                 Ok(page) => page,
@@ -132,7 +146,7 @@ impl MismatchScanCoordinator {
             };
             if page.candidates.is_empty() {
                 match repo
-                    .complete_board_health_mismatch_pass(self.leader_epoch)
+                    .complete_board_health_mismatch_pass(leader_epoch)
                     .await
                 {
                     Ok(completed) => {
@@ -173,7 +187,7 @@ impl MismatchScanCoordinator {
             };
             if let Err(error) = repo
                 .commit_board_health_mismatch_page(
-                    self.leader_epoch,
+                    leader_epoch,
                     expected_cursor.as_deref(),
                     &page_last_id,
                 )

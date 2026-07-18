@@ -388,8 +388,14 @@ pub mod board_health_mismatch {
     pub fn record_outcome(outcome: &'static str, trigger: &'static str) {
         metrics::counter!(super::BOARD_HEALTH_MISMATCH_OUTCOMES_TOTAL, "outcome" => outcome, "trigger" => trigger).increment(1);
     }
-    pub fn record_pass_age(_started_at: Option<&str>) {
-        metrics::gauge!(super::BOARD_HEALTH_MISMATCH_PASS_AGE_SECONDS).set(0.0);
+    /// Record the persisted pass's wall-clock age. Parsing failures and future
+    /// timestamps are safely represented as zero without adding labels.
+    pub fn record_pass_age(started_at: Option<&str>) {
+        let age_seconds = started_at
+            .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
+            .and_then(|started| (chrono::Utc::now() - started.with_timezone(&chrono::Utc)).to_std().ok())
+            .map_or(0.0, |age| age.as_secs_f64());
+        metrics::gauge!(super::BOARD_HEALTH_MISMATCH_PASS_AGE_SECONDS).set(age_seconds);
     }
 }
 

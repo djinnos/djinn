@@ -1,6 +1,5 @@
 use super::task_select_where_id;
 use super::*;
-use crate::SessionRepository;
 use djinn_core::models::IssueType;
 
 const REPEATED_REOPEN_MISMATCH_THRESHOLD: i64 = 3;
@@ -178,18 +177,6 @@ pub fn evaluate_board_health_mismatch_candidate(task: &BoardHealthMismatchCandid
         .is_some_and(|(expected_role, _)| expected_role != dispatched_role_for_task(task))
 }
 
-fn role_tool_mismatch_reason(
-    total_reopen_count: i64,
-    expected_role: &str,
-    dispatched_role: &str,
-) -> String {
-    let expected_tools = toolset_for_role(expected_role).join(", ");
-    let dispatched_tools = toolset_for_role(dispatched_role).join(", ");
-    format!(
-        "Repeated reopen churn ({total_reopen_count} reopens) suggests this task needs the {expected_role} toolset ({expected_tools}) rather than the currently routed {dispatched_role} toolset ({dispatched_tools})."
-    )
-}
-
 pub(super) fn board_health_mismatch_predicate(alias: &str) -> String {
     // This is a conservative prefilter, not role inference. It rejects only
     // impossible positives and deliberately preserves all Rust-positive rows.
@@ -210,12 +197,13 @@ pub(super) fn board_health_mismatch_predicate(alias: &str) -> String {
     )
 }
 
+#[cfg(test)]
 async fn list_board_health_mismatch_candidates(
     repo: &TaskRepository,
 ) -> Result<Vec<BoardHealthMismatchCandidate>> {
     let sql = format!(
-        "SELECT t.id, t.short_id, t.epic_id, t.title, t.description, t.design,
-                t.acceptance_criteria::text AS acceptance_criteria, t.issue_type, t.status, t.total_reopen_count
+        "SELECT t.id, t.short_id, t.epic_id, t.title, t.description, t.design, \
+                t.acceptance_criteria::text AS acceptance_criteria, t.issue_type, t.status, t.total_reopen_count \
          FROM tasks t WHERE {} ORDER BY t.id ASC",
         board_health_mismatch_predicate("t"),
     );
@@ -640,53 +628,10 @@ impl TaskRepository {
             })
             .collect();
 
-        let session_repo = SessionRepository::new(self.db.clone(), self.events.clone());
-        let mismatch_candidates = list_board_health_mismatch_candidates(self).await?;
-        let mut repeated_reopen_role_tool_mismatches = Vec::new();
-
-        for task in mismatch_candidates {
-            if task.total_reopen_count < REPEATED_REOPEN_MISMATCH_THRESHOLD {
-                continue;
-            }
-
-            let Some((expected_role, mismatch_signals)) = infer_expected_role_for_task(&task)
-            else {
-                continue;
-            };
-            let dispatched_role = dispatched_role_for_task(&task);
-            if expected_role == dispatched_role {
-                continue;
-            }
-
-            let session_count = session_repo.count_for_task(&task.id).await.unwrap_or(0);
-            let epic_short_id = if let Some(epic_id) = &task.epic_id {
-                sqlx::query_scalar!("SELECT short_id FROM epics WHERE id = $1", epic_id)
-                    .fetch_optional(self.db.pool())
-                    .await?
-                    .unwrap_or_default()
-            } else {
-                String::new()
-            };
-
-            repeated_reopen_role_tool_mismatches.push(serde_json::json!({
-                "id": task.id,
-                "short_id": task.short_id,
-                "title": task.title,
-                "status": task.status,
-                "issue_type": task.issue_type,
-                "dispatched_role": dispatched_role,
-                "expected_role": expected_role,
-                "total_reopen_count": task.total_reopen_count,
-                "session_count": session_count,
-                "mismatch_signals": mismatch_signals,
-                "reason": role_tool_mismatch_reason(
-                    task.total_reopen_count,
-                    expected_role,
-                    dispatched_role,
-                ),
-                "epic_short_id": epic_short_id,
-            }));
-        }
+        // Refreshing this advisory finding is coordinator-owned and bounded to
+        // persisted 250-row pages. Keep the legacy response field as an array,
+        // but never materialize mismatch candidates on this request path.
+        let repeated_reopen_role_tool_mismatches: Vec<serde_json::Value> = Vec::new();
 
         // ── Additive liveness / protocol / attribution / stranded sections ─
         // These bounded JSON sections live in the sibling `board_health`

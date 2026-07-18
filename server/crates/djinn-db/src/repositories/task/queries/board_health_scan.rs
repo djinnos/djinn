@@ -26,6 +26,17 @@ pub struct BoardHealthMismatchPage {
 const SCAN_STATE_COLUMNS: &str = "active, cursor_id, eligible_high_water_id, pass_id, pass_started_at, leader_epoch, completed_at, last_pass_duration_ms";
 
 impl TaskRepository {
+    /// Allocate one globally monotonic fencing epoch for a coordinator lifetime.
+    /// The sequence survives process restarts, unlike an in-process counter.
+    pub async fn next_board_health_mismatch_leader_epoch(&self) -> Result<i64> {
+        self.db.ensure_initialized().await?;
+        Ok(sqlx::query_scalar(
+            "SELECT nextval('board_health_mismatch_scan_leader_epoch_seq')",
+        )
+        .fetch_one(self.db.pool())
+        .await?)
+    }
+
     /// Creates an idle singleton then captures high-water, or resumes its cursor.
     /// `active`, rather than high-water, distinguishes a completed pass from an
     /// unfinished empty pass.
