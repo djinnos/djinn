@@ -5,8 +5,8 @@
 //! branch (stored, ineligible, error) is testable deterministically without
 //! requiring the production hermetic launcher.
 //!
-//! No verify-run cache lookup or C1/C2 reuse check is exercised — those are
-//! owned by sibling epic `0i1s`.
+//! The repeat-worker hit below deliberately drives the production consultation
+//! path rather than manufacturing a terminal reuse outcome.
 
 use std::collections::VecDeque;
 use std::future::Future;
