@@ -10,15 +10,21 @@ pub(super) enum CoordinatorMessage {
     /// Run an immediate dispatch pass for all ready tasks.
     TriggerDispatch,
     /// Run an immediate dispatch pass for a specific project.
-    TriggerProjectDispatch { project_id: String },
+    TriggerProjectDispatch {
+        project_id: String,
+    },
     /// Update runtime dispatch limit from settings reload.
-    UpdateDispatchLimit { limit: usize },
+    UpdateDispatchLimit {
+        limit: usize,
+    },
     /// Update per-role model priority list from settings reload.
     UpdateModelPriorities {
         priorities: HashMap<String, Vec<String>>,
     },
     /// Run an immediate stuck-task detection pass.
     TriggerStuckScan,
+    // Queue the persisted board-health mismatch scan on the shared coalescer.
+    TriggerBoardHealthMismatchScan,
     /// Lead requests Planner escalation for a task.
     /// Creates a review task and dispatches Planner to it.
     /// Per ADR-051 §8 the Planner is the escalation ceiling above Lead.
@@ -37,7 +43,10 @@ pub(super) enum CoordinatorMessage {
     /// Clear same-role dispatch-failure state after a planned terminal lifecycle
     /// ending (for example a budget park). The next continuation dispatch must
     /// start from the disposition ladder, not from stale failure accounting.
-    ClearPlannedDispatchCompletion { task_id: String, reason: String },
+    ClearPlannedDispatchCompletion {
+        task_id: String,
+        reason: String,
+    },
     /// Collect coordinator/repository evidence for the task and return the
     /// reusable live-mover summary exposed outside the PR-open path.
     #[allow(dead_code)]
@@ -47,7 +56,9 @@ pub(super) enum CoordinatorMessage {
     },
     /// Route a settled task that has no live mover through the shared no-op
     /// disposition ladder (if the live-mover predicate says it is orphaned).
-    RouteSettledNoopWithoutLiveMover { task_id: String },
+    RouteSettledNoopWithoutLiveMover {
+        task_id: String,
+    },
     /// Publish scrape-time coordinator live-state gauges without exposing
     /// per-task labels or storing per-task metric state.
     RecordLiveMetrics {
