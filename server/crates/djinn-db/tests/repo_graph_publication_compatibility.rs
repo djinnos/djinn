@@ -32,6 +32,20 @@ fn base_url() -> String {
         .expect("live PostgreSQL URL")
 }
 
+async fn assert_strict_history_order(conn: &mut PgConnection) {
+    let times: Vec<String> = sqlx::query_scalar(
+        "SELECT built_at FROM repo_graph_generation WHERE project_id=$1 ORDER BY publish_seq",
+    )
+    .bind(PROJECT)
+    .fetch_all(&mut *conn)
+    .await
+    .unwrap();
+    assert!(
+        times.windows(2).all(|w| w[0] < w[1]),
+        "committed legacy timestamps must be unique and increasing: {times:?}"
+    );
+}
+
 fn prefix(url: &str) -> String {
     url.rsplit_once('/').expect("database in URL").0.to_owned()
 }
@@ -104,11 +118,18 @@ async fn old_and_current_agree(conn: &mut PgConnection) {
 
 async fn state(conn: &mut PgConnection) -> String {
     sqlx::query_scalar(
-        "SELECT concat_ws('|',
-           (SELECT count(*)::text FROM repo_graph_cache WHERE project_id = $1),
-           (SELECT count(*)::text FROM repo_graph_generation WHERE project_id = $1),
-           coalesce((SELECT generation_id::text FROM repo_graph_current WHERE project_id = $1), ''),
-           coalesce((SELECT last_built_at::text FROM repo_graph_publish_clock WHERE project_id = $1), ''))",
+        "SELECT jsonb_build_object(
+           'cache', coalesce((SELECT jsonb_agg(jsonb_build_object(
+             'commit', commit_sha, 'blob', encode(graph_blob, 'hex'),
+             'built_at', built_at, 'generation', generation_id::text) ORDER BY commit_sha)
+             FROM repo_graph_cache WHERE project_id = $1), '[]'::jsonb),
+           'history', coalesce((SELECT jsonb_agg(jsonb_build_object(
+             'seq', publish_seq, 'commit', commit_sha, 'blob', encode(graph_blob, 'hex'),
+             'built_at', built_at, 'generation', generation_id::text,
+             'artifact_required', artifact_required) ORDER BY publish_seq)
+             FROM repo_graph_generation WHERE project_id = $1), '[]'::jsonb),
+           'current', coalesce((SELECT generation_id::text FROM repo_graph_current WHERE project_id = $1), ''),
+           'clock', coalesce((SELECT last_built_at::text FROM repo_graph_publish_clock WHERE project_id = $1), ''))::text",
     ).bind(PROJECT).fetch_one(&mut *conn).await.expect("publication state")
 }
 
@@ -192,9 +213,17 @@ async fn exact_legacy_sql_rotates_generations_orders_commits_and_preserves_rollb
     let two: String = sqlx::query_scalar("SELECT generation_id::text FROM repo_graph_cache WHERE project_id=$1 AND commit_sha='same'").bind(PROJECT).fetch_one(&mut first).await.unwrap();
     assert_ne!(one, two, "conflict updates must rotate generation identity");
 
-    // Explicit equal/stale/future source values are all overwritten by the trigger clock.
+    // Bind the actual preceding stored value: equal/stale/future source values
+    // are all overwritten by the trigger clock.
+    let preceding_built_at: String = sqlx::query_scalar(
+        "SELECT built_at FROM repo_graph_cache WHERE project_id=$1 AND commit_sha='same'",
+    )
+    .bind(PROJECT)
+    .fetch_one(&mut first)
+    .await
+    .unwrap();
     for (commit, source) in [
-        ("equal", "1970-01-01T00:00:00Z"),
+        ("equal", preceding_built_at.as_str()),
         ("stale", ""),
         ("future", "9999-12-31T00:00:00Z"),
     ] {
@@ -202,17 +231,7 @@ async fn exact_legacy_sql_rotates_generations_orders_commits_and_preserves_rollb
             .bind(PROJECT).bind(commit).bind(source).execute(&mut first).await.unwrap();
         old_and_current_agree(&mut first).await;
     }
-    let times: Vec<String> = sqlx::query_scalar(
-        "SELECT built_at FROM repo_graph_generation WHERE project_id=$1 ORDER BY publish_seq",
-    )
-    .bind(PROJECT)
-    .fetch_all(&mut first)
-    .await
-    .unwrap();
-    assert!(
-        times.windows(2).all(|w| w[0] < w[1]),
-        "committed legacy timestamps must be unique and increasing: {times:?}"
-    );
+    assert_strict_history_order(&mut first).await;
     assert_eq!(
         sqlx::query_scalar::<_, i64>(
             "SELECT count(*) FROM repo_graph_generation WHERE project_id=$1"
@@ -268,6 +287,7 @@ async fn exact_legacy_sql_rotates_generations_orders_commits_and_preserves_rollb
     let later_observation: (String, String) = sqlx::query_as("SELECT generation_id::text, built_at FROM repo_graph_cache WHERE project_id=$1 AND commit_sha='later-commit'").bind(PROJECT).fetch_one(&mut first).await.unwrap();
     assert_ne!(first_observation.0, later_observation.0);
     assert!(first_observation.1 < later_observation.1);
+    assert_strict_history_order(&mut first).await;
 
     drop(second);
     drop(first);
@@ -293,6 +313,7 @@ async fn marked_publications_require_a_reserved_v7_complete_manifest_and_legacy_
     migrate(&mut conn).await;
     conn.execute("INSERT INTO projects(id, name, github_owner, github_repo) VALUES ('publication-compat-project', 'marked compatibility', 'marked-owner', 'marked-repo')").await.unwrap();
     legacy_publish(&mut conn, "baseline", b"base").await;
+    old_and_current_agree(&mut conn).await;
 
     let generation = uuid::Uuid::now_v7();
     let artifact = uuid::Uuid::now_v7();
@@ -313,7 +334,22 @@ async fn marked_publications_require_a_reserved_v7_complete_manifest_and_legacy_
         .unwrap()
     );
 
-    // Reservation validation happens before any compatibility, immutable, clock, or pointer mutation.
+    // An explicit identity is never accepted without a transaction-owned marker.
+    let before = state(&mut conn).await;
+    conn.execute("BEGIN").await.unwrap();
+    assert!(sqlx::query("INSERT INTO repo_graph_cache (project_id,commit_sha,graph_blob,built_at,generation_id) VALUES ($1,'no-marker',decode('a1','hex'),'caller',$2::text::uuid)")
+        .bind(PROJECT).bind(uuid::Uuid::now_v7().to_string()).execute(&mut conn).await.is_err());
+    conn.execute("ROLLBACK").await.unwrap();
+    assert_eq!(state(&mut conn).await, before, "unmarked identity escaped");
+
+    // The reservation's UUID must equal the cache row's explicit UUID.
+    let before = state(&mut conn).await;
+    begin_marked(&mut conn, uuid::Uuid::now_v7()).await;
+    assert!(sqlx::query("INSERT INTO repo_graph_cache (project_id,commit_sha,graph_blob,built_at,generation_id) VALUES ($1,'marker-mismatch',decode('a1','hex'),'caller',$2::text::uuid)")
+        .bind(PROJECT).bind(uuid::Uuid::now_v7().to_string()).execute(&mut conn).await.is_err());
+    conn.execute("ROLLBACK").await.unwrap();
+    assert_eq!(state(&mut conn).await, before, "marker mismatch escaped");
+
     let before = state(&mut conn).await;
     conn.execute("BEGIN").await.unwrap();
     let non_v7 = uuid::Uuid::new_v4();
@@ -326,12 +362,18 @@ async fn marked_publications_require_a_reserved_v7_complete_manifest_and_legacy_
             .is_err()
     );
     conn.execute("ROLLBACK").await.unwrap();
-    assert_eq!(state(&mut conn).await, before);
+    assert_eq!(state(&mut conn).await, before, "non-v7 marker escaped");
+
+    // This is an immutable-only collision, independently of compatibility.
+    let immutable_collision = uuid::Uuid::now_v7();
+    sqlx::query("INSERT INTO repo_graph_generation (generation_id,project_id,commit_sha,graph_blob,built_at) VALUES ($1::text::uuid,$2,'immutable-collision',decode('a1','hex'),'0000')")
+        .bind(immutable_collision.to_string()).bind(PROJECT).execute(&mut conn).await.unwrap();
+    let before = state(&mut conn).await;
     conn.execute("BEGIN").await.unwrap();
     assert!(
         sqlx::query("SELECT repo_graph_reserve_generation($1, $2::text::uuid)")
             .bind(PROJECT)
-            .bind(generation.to_string())
+            .bind(immutable_collision.to_string())
             .execute(&mut conn)
             .await
             .is_err()
@@ -340,10 +382,44 @@ async fn marked_publications_require_a_reserved_v7_complete_manifest_and_legacy_
     assert_eq!(
         state(&mut conn).await,
         before,
-        "identity collision must not advance state"
+        "immutable-only collision advanced state"
     );
 
-    rejected_marked_commit(&mut conn, uuid::Uuid::now_v7(), "").await; // missing artifact
+    // Construct a compatibility-only collision outside publication triggers.
+    let cache_collision = uuid::Uuid::now_v7();
+    conn.execute("ALTER TABLE repo_graph_cache DISABLE TRIGGER ALL")
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO repo_graph_cache (project_id,commit_sha,graph_blob,built_at,generation_id) VALUES ($1,'cache-collision',decode('a1','hex'),'0000',$2::text::uuid)")
+        .bind(PROJECT).bind(cache_collision.to_string()).execute(&mut conn).await.unwrap();
+    conn.execute("ALTER TABLE repo_graph_cache ENABLE TRIGGER ALL")
+        .await
+        .unwrap();
+    let before = state(&mut conn).await;
+    conn.execute("BEGIN").await.unwrap();
+    assert!(
+        sqlx::query("SELECT repo_graph_reserve_generation($1,$2::text::uuid)")
+            .bind(PROJECT)
+            .bind(cache_collision.to_string())
+            .execute(&mut conn)
+            .await
+            .is_err()
+    );
+    conn.execute("ROLLBACK").await.unwrap();
+    assert_eq!(
+        state(&mut conn).await,
+        before,
+        "compatibility-only collision overwrote state"
+    );
+
+    // Artifact absent and artifact with a missing chunk are distinct incomplete manifests.
+    rejected_marked_commit(&mut conn, uuid::Uuid::now_v7(), "").await;
+    let missing_chunk_generation = uuid::Uuid::now_v7();
+    let missing_chunk_artifact = uuid::Uuid::now_v7();
+    let missing_chunk = format!(
+        "INSERT INTO repo_graph_galaxy_artifact (artifact_id,generation_id,graph_content_hash,transport_sha256,chunk_count,byte_count,chunk_hashes) VALUES ('{missing_chunk_artifact}','{missing_chunk_generation}','a','b',1,1,'[\"x\"]')"
+    );
+    rejected_marked_commit(&mut conn, missing_chunk_generation, &missing_chunk).await;
     let gap_generation = uuid::Uuid::now_v7();
     let gap_artifact = uuid::Uuid::now_v7();
     let gap = format!(
@@ -356,6 +432,33 @@ async fn marked_publications_require_a_reserved_v7_complete_manifest_and_legacy_
         "INSERT INTO repo_graph_galaxy_artifact (artifact_id,generation_id,graph_content_hash,transport_sha256,chunk_count,byte_count,chunk_hashes) VALUES ('{hash_artifact}','{hash_generation}','a','b',1,1,'[\"expected\"]'); INSERT INTO repo_graph_galaxy_chunk (generation_id,artifact_id,chunk_index,byte_count,sha256,bytes) VALUES ('{hash_generation}','{hash_artifact}',0,1,'wrong',decode('01','hex'))"
     );
     rejected_marked_commit(&mut conn, hash_generation, &wrong_hash).await;
+
+    let bytes_generation = uuid::Uuid::now_v7();
+    let bytes_artifact = uuid::Uuid::now_v7();
+    let wrong_bytes = format!(
+        "INSERT INTO repo_graph_galaxy_artifact (artifact_id,generation_id,graph_content_hash,transport_sha256,chunk_count,byte_count,chunk_hashes) VALUES ('{bytes_artifact}','{bytes_generation}','a','8a8950f7623663222542c9469c73be3c4c81bbdf019e2c577590a61f2ce9a157',1,2,'[\"x\"]'); INSERT INTO repo_graph_galaxy_chunk (generation_id,artifact_id,chunk_index,byte_count,sha256,bytes) VALUES ('{bytes_generation}','{bytes_artifact}',0,1,'x',decode('a1','hex'))"
+    );
+    rejected_marked_commit(&mut conn, bytes_generation, &wrong_bytes).await;
+
+    let transport_generation = uuid::Uuid::now_v7();
+    let transport_artifact = uuid::Uuid::now_v7();
+    let wrong_transport = format!(
+        "INSERT INTO repo_graph_galaxy_artifact (artifact_id,generation_id,graph_content_hash,transport_sha256,chunk_count,byte_count,chunk_hashes) VALUES ('{transport_artifact}','{transport_generation}','a','wrong-aggregate',1,1,'[\"x\"]'); INSERT INTO repo_graph_galaxy_chunk (generation_id,artifact_id,chunk_index,byte_count,sha256,bytes) VALUES ('{transport_generation}','{transport_artifact}',0,1,'x',decode('a1','hex'))"
+    );
+    rejected_marked_commit(&mut conn, transport_generation, &wrong_transport).await;
+
+    // A complete valid manifest stays tentative until its caller commits.
+    let before = state(&mut conn).await;
+    let rollback_generation = uuid::Uuid::now_v7();
+    begin_marked(&mut conn, rollback_generation).await;
+    marked_cache(&mut conn, rollback_generation, "forced-rollback").await;
+    insert_valid_artifact(&mut conn, rollback_generation, uuid::Uuid::now_v7()).await;
+    conn.execute("ROLLBACK").await.unwrap();
+    assert_eq!(
+        state(&mut conn).await,
+        before,
+        "forced rollback escaped valid publication"
+    );
 
     // A later old writer is unmarked and therefore advances to an artifactless generation.
     legacy_publish(&mut conn, "legacy-after-artifact", b"legacy").await;

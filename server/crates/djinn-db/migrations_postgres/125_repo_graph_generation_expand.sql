@@ -3,6 +3,9 @@
 -- for compatibility; triggers below turn each successful publication into an
 -- immutable generation.
 
+-- The deferred artifact validator hashes the ordered transport bytes.
+CREATE EXTENSION IF NOT EXISTS pgcrypto;
+
 ALTER TABLE repo_graph_cache
     ADD COLUMN IF NOT EXISTS generation_id UUID;
 
@@ -267,6 +270,11 @@ BEGIN
            OR EXISTS (SELECT 1 FROM repo_graph_generation g WHERE g.generation_id = NEW.generation_id) THEN
             RAISE EXCEPTION 'repo graph generation marker already exists';
         END IF;
+    ELSIF TG_OP = 'UPDATE' THEN
+        -- The DO UPDATE branch of exact legacy INSERT .. ON CONFLICT presents
+        -- the existing compatibility identity here. It is not an explicit
+        -- new-writer reservation, so every old-writer update rotates it.
+        NEW.generation_id := gen_random_uuid();
     ELSIF NEW.generation_id IS NOT NULL THEN
         -- An explicit identity is a new-writer publication and must be bound
         -- to the transaction-owned reservation. Exact legacy SQL omits this
