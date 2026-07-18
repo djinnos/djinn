@@ -119,6 +119,14 @@ mod tests {
 
     async fn fresh() -> RepoGraphCacheRepository {
         let db = Database::open_in_memory().expect("in-memory db");
+        db.ensure_initialized().await.expect("initialize database");
+        sqlx::query(
+            "INSERT INTO projects(id, name, github_owner, github_repo) \
+             VALUES ('p1', 'repo graph cache test', 'test-owner', 'test-repo')",
+        )
+        .execute(db.pool())
+        .await
+        .expect("insert repo graph cache test project");
         RepoGraphCacheRepository::new(db)
     }
 
