@@ -784,6 +784,37 @@ async fn artifact_boundary_invariants_accept_and_reject_correctly() {
         "negative count must be rejected by a CHECK constraint: {neg_count_err}"
     );
 
+    // Use a separate generation so its otherwise-valid artifact identity cannot
+    // mask a missing byte_count check with the one-artifact-per-generation key.
+    conn.execute(
+        "INSERT INTO repo_graph_cache(project_id, commit_sha, graph_blob, built_at) \
+         VALUES ('boundary-proj', 'negative-byte-count', decode('ab', 'hex'), '')",
+    )
+    .await
+    .expect("seed cache row for negative byte_count test");
+    let negative_byte_generation_id: String = sqlx::query_scalar(
+        "SELECT generation_id::text FROM repo_graph_cache \
+         WHERE project_id = 'boundary-proj' AND commit_sha = 'negative-byte-count'",
+    )
+    .fetch_one(&mut conn)
+    .await
+    .expect("fetch generation id for negative byte_count test");
+    let neg_byte_err = conn
+        .execute(
+            format!(
+                "INSERT INTO repo_graph_galaxy_artifact \
+                 (generation_id, graph_content_hash, transport_sha256, chunk_count, byte_count, chunk_hashes) \
+                 VALUES ('{negative_byte_generation_id}'::uuid, 'c-neg-byte', 't-neg-byte', 0, -1, '[]'::jsonb)"
+            )
+            .as_str(),
+        )
+        .await
+        .expect_err("negative artifact byte_count must be rejected");
+    assert!(
+        neg_byte_err.to_string().contains("nonnegative"),
+        "negative byte_count must be rejected by the nonnegative CHECK: {neg_byte_err}"
+    );
+
     // ── chunk_hashes must be an array whose length equals chunk_count ──────
     let bad_array_err = conn
         .execute(format!(
