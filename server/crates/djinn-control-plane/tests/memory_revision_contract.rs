@@ -4,6 +4,9 @@
 //! This target deliberately pins the cross-writer fixture vocabulary and checks
 //! both published schema projections instead of regenerating either artifact.
 
+use djinn_control_plane::test_support::McpTestHarness;
+use djinn_core::events::EventBus;
+use djinn_db::ProjectRepository;
 use serde_json::Value;
 
 const CONTRACT: &str = include_str!("fixtures/memory_revision_contract.json");
@@ -16,6 +19,73 @@ const SERVER_SCHEMA_SNAPSHOT: &str = include_str!(
 
 fn contract() -> Value {
     serde_json::from_str(CONTRACT).expect("memory revision contract fixture is valid JSON")
+}
+
+/// Seed fixed rows by immutable INSERT only: no writer or schema relaxation is
+/// involved, and the fixture owns every value projected by the public readers.
+async fn seed_reader_contract(harness: &McpTestHarness, fixture: &Value) {
+    let seed = &fixture["reader_fixture"];
+    let project_id = fixture["ids"]["project_id"]
+        .as_str()
+        .expect("fixture project id");
+    ProjectRepository::new(harness.db().clone(), EventBus::noop())
+        .create_with_id(
+            project_id,
+            "revision-contract",
+            "fixture",
+            "revision-contract",
+        )
+        .await
+        .expect("seed fixed project");
+    for note in seed["live_notes"].as_array().expect("fixture live notes") {
+        sqlx::query(
+            "INSERT INTO notes (id, project_id, permalink, title, file_path, storage, note_type, folder, status, tags, content, scope_paths, confidence) \
+             VALUES ($1, $2, $3, $4, '', 'db', 'reference', 'reference', 'active', '[]', $5, '[]', $6)",
+        )
+        .bind(note["id"].as_str().expect("note id"))
+        .bind(project_id)
+        .bind(note["permalink"].as_str().expect("permalink"))
+        .bind(note["title"].as_str().expect("title"))
+        .bind(note["content"].as_str().expect("content"))
+        .bind(note["confidence"].as_f64().expect("confidence"))
+        .execute(harness.db().pool())
+        .await
+        .expect("seed fixed live note");
+    }
+    for event in seed["events"].as_array().expect("fixture events") {
+        sqlx::query(
+            "INSERT INTO note_revision_events \
+             (id, project_id, note_id, note_seq, event_kind, content_before, content_after, confidence_before, confidence_after, actor_kind, actor_id, subsystem, session_id, task_id, task_run_id, reason, created_at) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)",
+        )
+        .bind(event["id"].as_str().expect("revision id"))
+        .bind(project_id)
+        .bind(event["note_id"].as_str().expect("event note id"))
+        .bind(event["note_seq"].as_i64().expect("note sequence"))
+        .bind(event["event_kind"].as_str().expect("event kind"))
+        .bind(event.get("content_before").and_then(Value::as_str))
+        .bind(event.get("content_after").and_then(Value::as_str))
+        .bind(event.get("confidence_before").and_then(Value::as_f64))
+        .bind(event.get("confidence_after").and_then(Value::as_f64))
+        .bind(event["actor_kind"].as_str().expect("actor kind"))
+        .bind(event.get("actor_id").and_then(Value::as_str))
+        .bind(event.get("subsystem").and_then(Value::as_str))
+        .bind(event.get("session_id").and_then(Value::as_str))
+        .bind(event.get("task_id").and_then(Value::as_str))
+        .bind(event.get("task_run_id").and_then(Value::as_str))
+        .bind(event["reason"].as_str().expect("reason"))
+        .bind(event["created_at"].as_str().expect("timestamp"))
+        .execute(harness.db().pool())
+        .await
+        .expect("append immutable fixed revision event");
+    }
+}
+
+async fn dispatch(harness: &McpTestHarness, tool: &str, args: Value) -> Value {
+    harness
+        .call_tool(tool, args)
+        .await
+        .unwrap_or_else(|error| panic!("{tool} dispatch failed: {error}"))
 }
 
 fn named_tool<'a>(tools: &'a [Value], name: &str) -> &'a Value {
@@ -145,6 +215,46 @@ fn fixture_pins_all_writers_events_and_semantic_noops() {
             case["name"]
         );
     }
+}
+
+#[tokio::test]
+async fn fixed_fixture_pins_history_pages_pairwise_diff_and_deleted_history() {
+    let fixture = contract();
+    let harness = McpTestHarness::new().await;
+    seed_reader_contract(&harness, &fixture).await;
+    let reader = &fixture["reader_fixture"];
+    let requests = &reader["requests"];
+    let expected = &reader["expected"];
+
+    let full = dispatch(&harness, "memory_history", requests["history_full"].clone()).await;
+    assert_eq!(full, expected["history_full"]);
+
+    let first_page = dispatch(
+        &harness,
+        "memory_history",
+        requests["history_page_1"].clone(),
+    )
+    .await;
+    assert_eq!(first_page, expected["history_page_1"]);
+
+    let second_page = dispatch(
+        &harness,
+        "memory_history",
+        requests["history_page_2"].clone(),
+    )
+    .await;
+    assert_eq!(second_page, expected["history_page_2"]);
+
+    let diff = dispatch(&harness, "memory_diff", requests["diff"].clone()).await;
+    assert_eq!(diff, expected["diff"]);
+
+    let deleted = dispatch(
+        &harness,
+        "memory_history",
+        requests["deleted_history"].clone(),
+    )
+    .await;
+    assert_eq!(deleted, expected["deleted_history"]);
 }
 
 #[test]
