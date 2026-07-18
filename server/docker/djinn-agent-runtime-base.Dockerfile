@@ -84,6 +84,11 @@ FROM debian:trixie-slim AS base
 
 ENV DEBIAN_FRONTEND=noninteractive
 
+# Shared with scripts/install-rust.sh. The audited snapshot/version and amd64+
+# arm64 availability are recorded in docs/MOLD_DEBIAN_SNAPSHOT.md.
+ARG DEBIAN_SNAPSHOT_URL=https://snapshot.debian.org/archive/debian/20250401T000000Z
+ARG MOLD_VERSION=2.37.1+dfsg-1
+
 # Runtime + build toolchain deps. Kept in one RUN so apt layer size stays
 # bounded, and so the lists/ cache is dropped before the layer seals.
 #   - git, ca-certificates, openssl/libssl3: network fetches + TLS
@@ -91,11 +96,14 @@ ENV DEBIAN_FRONTEND=noninteractive
 #   - python3 + venv + pip: for pyright + python language workflows
 #   - tini: PID-1 signal handler
 #   - curl, xz-utils: bootstrapping rustup + extracting tarballs
-#   - clang, mold: fast linker path used by CARGO_BUILD_RUSTFLAGS below
+#   - clang, exact snapshot-pinned mold: fast linker path used by
+#     CARGO_BUILD_RUSTFLAGS below
 #   - sccache: compilation-result cache, keyed by (rustc version + source
 #     hash + flags). Shared across task runs via /cache/sccache, so
 #     identical rustc invocations in different tasks hit the cache.
-RUN apt-get update && apt-get install -y --no-install-recommends \
+RUN printf 'deb [check-valid-until=no] %s trixie main\n' "$DEBIAN_SNAPSHOT_URL" > /etc/apt/sources.list \
+    && rm -f /etc/apt/sources.list.d/debian.sources \
+    && apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates \
         git \
         openssl \
@@ -109,7 +117,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         curl \
         xz-utils \
         clang \
-        mold \
+        mold=2.37.1+dfsg-1 \
         sccache \
     && rm -rf /var/lib/apt/lists/*
 
