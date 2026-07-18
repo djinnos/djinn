@@ -26,8 +26,8 @@ use djinn_core::models::{Epic, Project, Task};
 use djinn_db::Database;
 use djinn_db::repositories::session::CreateSessionParams;
 use djinn_db::{
-    EpicCreateInput, EpicRepository, ProjectRepository, SessionMessageRepository,
-    SessionRepository, TaskRepository,
+    EffectiveCreatorProvenance, EpicCreateInput, EpicRepository, ProjectRepository,
+    SessionMessageRepository, SessionRepository, TaskRepository, UserRepository,
 };
 use djinn_provider::message::ContentBlock;
 use djinn_slot::reply_loop::persistence::assemble_persisted_content;
@@ -81,9 +81,21 @@ async fn create_test_epic(db: &Database, project_id: &str) -> Epic {
 async fn create_test_task(db: &Database, project_id: &str, epic_id: &str) -> Task {
     let event_bus = EventBus::noop();
     let repo = TaskRepository::new(db.clone(), event_bus);
-    repo.create_in_project(
+    let fixture_identity = uuid::Uuid::now_v7();
+    let github_id = (fixture_identity.as_u128() % 9_000_000_000_000_000_000) as i64;
+    let user = UserRepository::new(db.clone())
+        .upsert_from_github(
+            github_id,
+            &format!("thinking-persistence-fixture-{fixture_identity}"),
+            Some("Thinking persistence fixture"),
+            None,
+        )
+        .await
+        .expect("persist thinking persistence fixture user");
+    repo.create_in_project_with_provenance(
         project_id,
         Some(epic_id),
+        EffectiveCreatorProvenance::explicit_user_id(&user.id),
         "test-task",
         "test task description",
         "test task design",

@@ -223,7 +223,7 @@ async fn seed_refinement_task_row(
     djinn_core::auth_context::SESSION_USER_ID
         .scope(Some(user_id.to_owned()), async {
             TaskRepository::new(db.clone(), EventBus::noop())
-                .create_in_project(
+                .create_fixture_in_project(
                     project_id,
                     None,
                     "Refinement watchdog task",

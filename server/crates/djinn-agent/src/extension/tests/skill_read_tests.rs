@@ -275,10 +275,16 @@ async fn skill_read_serves_native_visual_spec_for_authoring_planner_session() {
 
     // Create an epic_breakdown task (proposal authoring session).
     let task_repo = djinn_db::TaskRepository::new(db.clone(), djinn_core::events::EventBus::noop());
+    let creator = crate::test_helpers::create_test_creator(&db).await;
     let task = task_repo
-        .create_in_project(
+        .create_in_project_with_provenance(
             &project.id,
             Some(&epic.id),
+            djinn_db::EffectiveCreatorProvenance {
+                explicit_user_id: Some(&creator.id),
+                source_task_id: None,
+                proposal_id: None,
+            },
             "Decompose proposal into epics",
             "proposal decomposition task",
             "",
@@ -346,10 +352,16 @@ async fn skill_read_rejects_visual_spec_in_non_authoring_planner_session() {
 
     // Create a planning task (non-authoring session).
     let task_repo = djinn_db::TaskRepository::new(db.clone(), djinn_core::events::EventBus::noop());
+    let creator = crate::test_helpers::create_test_creator(&db).await;
     let task = task_repo
-        .create_in_project(
+        .create_in_project_with_provenance(
             &project.id,
             Some(&epic.id),
+            djinn_db::EffectiveCreatorProvenance {
+                explicit_user_id: Some(&creator.id),
+                source_task_id: None,
+                proposal_id: None,
+            },
             "Plan next wave",
             "wave planning task",
             "",
@@ -403,10 +415,16 @@ async fn skill_read_serves_native_visual_spec_for_advocate_refinement_session() 
     let epic = create_test_epic(&db, &project.id).await;
 
     let task_repo = djinn_db::TaskRepository::new(db.clone(), djinn_core::events::EventBus::noop());
+    let creator = crate::test_helpers::create_test_creator(&db).await;
     let task = task_repo
-        .create_in_project(
+        .create_in_project_with_provenance(
             &project.id,
             Some(&epic.id),
+            djinn_db::EffectiveCreatorProvenance {
+                explicit_user_id: Some(&creator.id),
+                source_task_id: None,
+                proposal_id: None,
+            },
             "Refinement advocate — revise proposal spec",
             "advocate refinement task",
             "",
@@ -459,10 +477,16 @@ async fn skill_read_rejects_visual_spec_for_non_planner_role() {
     let epic = create_test_epic(&db, &project.id).await;
 
     let task_repo = djinn_db::TaskRepository::new(db.clone(), djinn_core::events::EventBus::noop());
+    let creator = crate::test_helpers::create_test_creator(&db).await;
     let task = task_repo
-        .create_in_project(
+        .create_in_project_with_provenance(
             &project.id,
             Some(&epic.id),
+            djinn_db::EffectiveCreatorProvenance {
+                explicit_user_id: Some(&creator.id),
+                source_task_id: None,
+                proposal_id: None,
+            },
             "Some worker task",
             "worker task description",
             "",
@@ -514,10 +538,16 @@ async fn skill_read_native_body_not_from_worktree() {
     let epic = create_test_epic(&db, &project.id).await;
 
     let task_repo = djinn_db::TaskRepository::new(db.clone(), djinn_core::events::EventBus::noop());
+    let creator = crate::test_helpers::create_test_creator(&db).await;
     let task = task_repo
-        .create_in_project(
+        .create_in_project_with_provenance(
             &project.id,
             Some(&epic.id),
+            djinn_db::EffectiveCreatorProvenance {
+                explicit_user_id: Some(&creator.id),
+                source_task_id: None,
+                proposal_id: None,
+            },
             "Decompose proposal",
             "proposal decomposition",
             "",

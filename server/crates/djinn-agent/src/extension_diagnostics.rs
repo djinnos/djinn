@@ -261,7 +261,8 @@ mod tests {
     use super::*;
     use djinn_core::events::EventBus;
     use djinn_db::{
-        CreateSessionParams, Database, ProjectRepository, SessionRepository, TaskRepository,
+        CreateSessionParams, Database, EffectiveCreatorProvenance, ProjectRepository,
+        SessionRepository, TaskRepository,
     };
 
     fn fact(summary_material: impl Into<String>) -> ExtensionDiagnosticFact {
@@ -394,10 +395,16 @@ mod tests {
             )
             .await
             .unwrap();
+        let creator = crate::test_helpers::create_test_creator(&db).await;
         let task = TaskRepository::new(db.clone(), events.clone())
-            .create_in_project(
+            .create_in_project_with_provenance(
                 &project.id,
                 None,
+                EffectiveCreatorProvenance {
+                    explicit_user_id: Some(&creator.id),
+                    source_task_id: None,
+                    proposal_id: None,
+                },
                 "diagnostic correlation",
                 "",
                 "",
