@@ -1357,6 +1357,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "bincode",
+ "chrono",
  "djinn-core",
  "djinn-db",
  "djinn-git",
