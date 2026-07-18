@@ -71,6 +71,24 @@ pub async fn seed_task_row(db: &Database, seed: UsageTestTaskSeed<'_>) -> String
     id
 }
 
+/// Seed one deterministic board-health mismatch candidate for coordinator
+/// integration tests. Raw fixture SQL stays behind the `djinn-db` boundary.
+pub async fn seed_board_health_mismatch_candidate(db: &Database, project_id: &str, task_id: &str) {
+    db.ensure_initialized().await.unwrap();
+    sqlx::query(
+        "INSERT INTO tasks \
+         (id, project_id, short_id, title, description, design, issue_type, status, \
+          labels, acceptance_criteria, memory_refs, total_reopen_count) \
+         VALUES ($1, $2, 'mismatch-storm', 'mismatch storm', 'requires task_create', \
+                 '', 'task', 'open', '[]'::jsonb, '[]'::jsonb, '[]'::jsonb, 3)",
+    )
+    .bind(task_id)
+    .bind(project_id)
+    .execute(db.pool())
+    .await
+    .expect("failed to seed board-health mismatch candidate");
+}
+
 /// Seed raw session rows directly into the database for integration-level
 /// contract tests that need actual query results.
 pub async fn seed_session_row(db: &Database, seed: UsageTestSessionSeed<'_>) {
