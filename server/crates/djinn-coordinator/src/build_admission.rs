@@ -8,7 +8,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::{
     Arc,
-    atomic::{AtomicBool, AtomicU64, Ordering},
+    atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering},
 };
 
 use async_trait::async_trait;
@@ -33,6 +33,25 @@ pub enum BuildAdmissionMode {
     /// Atomically enforce the configured cap.
     #[default]
     Enforce,
+}
+
+impl BuildAdmissionMode {
+    const fn as_u8(self) -> u8 {
+        match self {
+            Self::Off => 0,
+            Self::Observe => 1,
+            Self::Enforce => 2,
+        }
+    }
+
+    fn from_u8(value: u8) -> Self {
+        match value {
+            0 => Self::Off,
+            1 => Self::Observe,
+            2 => Self::Enforce,
+            _ => Self::Enforce,
+        }
+    }
 }
 
 /// Typed classification captured before dispatch; only the audited bypass weighs zero.
@@ -173,7 +192,7 @@ pub struct AdmissionSeedReport {
 /// A single controller shared by task-run dispatch and graph warming.
 pub struct BuildAdmissionController {
     journal: Arc<AdmissionJournalRepository>,
-    mode: BuildAdmissionMode,
+    mode: AtomicU8,
     cap: i64,
     creator_server_epoch: String,
     permits: Mutex<HashMap<WarmAdmissionPermit, PermitState>>,
@@ -222,7 +241,7 @@ impl BuildAdmissionController {
     ) -> Self {
         Self {
             journal,
-            mode,
+            mode: AtomicU8::new(mode.as_u8()),
             cap,
             creator_server_epoch: creator_server_epoch.into(),
             permits: Mutex::new(HashMap::new()),
@@ -282,6 +301,27 @@ impl BuildAdmissionController {
         self.topology_ready.store(true, Ordering::Release);
     }
 
+    /// Promote this controller to emergency Enforce and reset every startup
+    /// gate. The handoff reader invokes this before recovery so a configured
+    /// Off/Observe process cannot weaken a durable emergency-primary epoch.
+    pub fn require_enforcement(&self) {
+        self.mode
+            .store(BuildAdmissionMode::Enforce.as_u8(), Ordering::Release);
+        self.journal_recovered.store(false, Ordering::Release);
+        self.journal_healthy.store(true, Ordering::Release);
+        self.create_unknown_pending.store(0, Ordering::Release);
+        self.over_cap.store(false, Ordering::Release);
+        self.inventory_ready.store(false, Ordering::Release);
+        self.topology_ready.store(false, Ordering::Release);
+    }
+
+    /// Release emergency authority only after a committed invocation-primary
+    /// epoch is observed by the handoff policy.
+    pub fn disable(&self) {
+        self.mode
+            .store(BuildAdmissionMode::Off.as_u8(), Ordering::Release);
+    }
+
     /// Record that journal recovery failed. Enforce stays fail-closed with
     /// [`BuildAdmissionReadiness::JournalUnhealthy`]; Observe records the same
     /// degradation but never denies.
@@ -338,7 +378,7 @@ impl BuildAdmissionController {
     /// The configured admission mode.
     #[must_use]
     pub fn mode(&self) -> BuildAdmissionMode {
-        self.mode
+        BuildAdmissionMode::from_u8(self.mode.load(Ordering::Acquire))
     }
 
     /// The unique server epoch allocated for this controller's process.
@@ -387,12 +427,12 @@ impl BuildAdmissionController {
     /// Export bounded admission metrics from the durable journal snapshot.
     /// InvocationBuild rows are intentionally excluded from all v0 views.
     pub async fn publish_metrics(&self) {
-        let mode = match self.mode {
+        let mode = match self.mode() {
             BuildAdmissionMode::Off => "off",
             BuildAdmissionMode::Observe => "observe",
             BuildAdmissionMode::Enforce => "enforce",
         };
-        if self.mode == BuildAdmissionMode::Off {
+        if self.mode() == BuildAdmissionMode::Off {
             djinn_telemetry::build_admission::set_slots(mode, self.cap, 0, 0);
             djinn_telemetry::build_admission::set_health(mode, self.cap, false, false, false);
             return;
@@ -424,7 +464,7 @@ impl BuildAdmissionController {
                 (0, true)
             }
         };
-        let queued = if self.mode == BuildAdmissionMode::Enforce {
+        let queued = if self.mode() == BuildAdmissionMode::Enforce {
             self.deferred_enforce.lock().await.len()
         } else {
             0
@@ -445,7 +485,7 @@ impl BuildAdmissionController {
         &self,
         request: BuildAdmissionRequest,
     ) -> Result<BuildAdmissionDecision, WarmAdmissionError> {
-        if self.mode == BuildAdmissionMode::Enforce && (!self.is_ready() || self.is_draining()) {
+        if self.mode() == BuildAdmissionMode::Enforce && (!self.is_ready() || self.is_draining()) {
             return Ok(BuildAdmissionDecision::Denied {
                 occupancy: 0,
                 cap: self.cap,
@@ -475,7 +515,7 @@ impl BuildAdmissionController {
             generation: request.generation,
         };
         let permit_key = permit_key(&key);
-        let durable = self.mode != BuildAdmissionMode::Off;
+        let durable = self.mode() != BuildAdmissionMode::Off;
         let idempotent_permit = self.permits_by_key.lock().await.get(&permit_key).cloned();
         if let Some(permit) = idempotent_permit {
             return Ok(BuildAdmissionDecision::Permitted {
@@ -485,7 +525,7 @@ impl BuildAdmissionController {
         }
         let mut idempotent = false;
         if durable {
-            let reservation = if self.mode == BuildAdmissionMode::Observe {
+            let reservation = if self.mode() == BuildAdmissionMode::Observe {
                 let observed = self
                     .journal
                     .reserve_observed(
@@ -681,7 +721,7 @@ impl BuildAdmissionController {
     async fn observe_unclassified(&self) {
         let mut count = self.unclassified_observations.lock().await;
         *count = count.saturating_add(1).min(1024);
-        let mode = match self.mode {
+        let mode = match self.mode() {
             BuildAdmissionMode::Off => "off",
             BuildAdmissionMode::Observe => "observe",
             BuildAdmissionMode::Enforce => "enforce",
@@ -755,7 +795,7 @@ impl BuildAdmissionController {
         };
         let transition_durable = result.is_ok();
         if let Err(error) = result {
-            if self.mode != BuildAdmissionMode::Observe {
+            if self.mode() != BuildAdmissionMode::Observe {
                 return Err(error);
             }
             tracing::warn!(%error, "build admission observation transition unavailable; continuing without journal telemetry");
@@ -961,7 +1001,7 @@ impl BuildAdmissionController {
             .count_task_or_warm_occupancy()
             .await
             .map_err(unavailable)?;
-        if self.mode != BuildAdmissionMode::Off {
+        if self.mode() != BuildAdmissionMode::Off {
             // Journal recovery succeeded. Only the journal-derived gates are
             // updated here: the inventory and topology gates are deliberately
             // NOT touched, so Enforce remains fail-closed

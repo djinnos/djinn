@@ -48,6 +48,7 @@ use types::*;
 
 pub mod audit_sampler;
 pub mod build_admission;
+pub mod build_admission_handoff;
 pub mod build_admission_inventory;
 pub mod cargo_warm_base_gc;
 pub(crate) mod ci_preflight_gate;
