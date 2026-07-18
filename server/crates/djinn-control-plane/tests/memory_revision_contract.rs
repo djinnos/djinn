@@ -8,6 +8,7 @@ use djinn_control_plane::test_support::McpTestHarness;
 use djinn_core::events::EventBus;
 use djinn_db::ProjectRepository;
 use serde_json::Value;
+use sqlx::{Postgres, QueryBuilder};
 
 const CONTRACT: &str = include_str!("fixtures/memory_revision_contract.json");
 const PROVIDER_PROJECTION: &str = include_str!(
@@ -38,46 +39,57 @@ async fn seed_reader_contract(harness: &McpTestHarness, fixture: &Value) {
         .await
         .expect("seed fixed project");
     for note in seed["live_notes"].as_array().expect("fixture live notes") {
-        sqlx::query(
-            "INSERT INTO notes (id, project_id, permalink, title, file_path, storage, note_type, folder, status, tags, content, scope_paths, confidence) \
-             VALUES ($1, $2, $3, $4, '', 'db', 'reference', 'reference', 'active', '[]', $5, '[]', $6)",
-        )
-        .bind(note["id"].as_str().expect("note id"))
-        .bind(project_id)
-        .bind(note["permalink"].as_str().expect("permalink"))
-        .bind(note["title"].as_str().expect("title"))
-        .bind(note["content"].as_str().expect("content"))
-        .bind(note["confidence"].as_f64().expect("confidence"))
-        .execute(harness.db().pool())
-        .await
-        .expect("seed fixed live note");
+        let mut insert = QueryBuilder::<Postgres>::new(
+            "INSERT INTO notes (id, project_id, permalink, title, file_path, storage, note_type, folder, status, tags, content, scope_paths, confidence) VALUES (",
+        );
+        {
+            let mut values = insert.separated(", ");
+            values.push_bind(note["id"].as_str().expect("note id"));
+            values.push_bind(project_id);
+            values.push_bind(note["permalink"].as_str().expect("permalink"));
+            values.push_bind(note["title"].as_str().expect("title"));
+            values.push("'', 'db', 'reference', 'reference', 'active', '[]'");
+            values.push_bind(note["content"].as_str().expect("content"));
+            values.push("'[]'");
+            values.push_bind(note["confidence"].as_f64().expect("confidence"));
+        }
+        insert
+            .push(")")
+            .build()
+            .execute(harness.db().pool())
+            .await
+            .expect("seed fixed live note");
     }
     for event in seed["events"].as_array().expect("fixture events") {
-        sqlx::query(
-            "INSERT INTO note_revision_events \
-             (id, project_id, note_id, note_seq, event_kind, content_before, content_after, confidence_before, confidence_after, actor_kind, actor_id, subsystem, session_id, task_id, task_run_id, reason, created_at) \
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)",
-        )
-        .bind(event["id"].as_str().expect("revision id"))
-        .bind(project_id)
-        .bind(event["note_id"].as_str().expect("event note id"))
-        .bind(event["note_seq"].as_i64().expect("note sequence"))
-        .bind(event["event_kind"].as_str().expect("event kind"))
-        .bind(event.get("content_before").and_then(Value::as_str))
-        .bind(event.get("content_after").and_then(Value::as_str))
-        .bind(event.get("confidence_before").and_then(Value::as_f64))
-        .bind(event.get("confidence_after").and_then(Value::as_f64))
-        .bind(event["actor_kind"].as_str().expect("actor kind"))
-        .bind(event.get("actor_id").and_then(Value::as_str))
-        .bind(event.get("subsystem").and_then(Value::as_str))
-        .bind(event.get("session_id").and_then(Value::as_str))
-        .bind(event.get("task_id").and_then(Value::as_str))
-        .bind(event.get("task_run_id").and_then(Value::as_str))
-        .bind(event["reason"].as_str().expect("reason"))
-        .bind(event["created_at"].as_str().expect("timestamp"))
-        .execute(harness.db().pool())
-        .await
-        .expect("append immutable fixed revision event");
+        let mut insert = QueryBuilder::<Postgres>::new(
+            "INSERT INTO note_revision_events (id, project_id, note_id, note_seq, event_kind, content_before, content_after, confidence_before, confidence_after, actor_kind, actor_id, subsystem, session_id, task_id, task_run_id, reason, created_at) VALUES (",
+        );
+        {
+            let mut values = insert.separated(", ");
+            values.push_bind(event["id"].as_str().expect("revision id"));
+            values.push_bind(project_id);
+            values.push_bind(event["note_id"].as_str().expect("event note id"));
+            values.push_bind(event["note_seq"].as_i64().expect("note sequence"));
+            values.push_bind(event["event_kind"].as_str().expect("event kind"));
+            values.push_bind(event.get("content_before").and_then(Value::as_str));
+            values.push_bind(event.get("content_after").and_then(Value::as_str));
+            values.push_bind(event.get("confidence_before").and_then(Value::as_f64));
+            values.push_bind(event.get("confidence_after").and_then(Value::as_f64));
+            values.push_bind(event["actor_kind"].as_str().expect("actor kind"));
+            values.push_bind(event.get("actor_id").and_then(Value::as_str));
+            values.push_bind(event.get("subsystem").and_then(Value::as_str));
+            values.push_bind(event.get("session_id").and_then(Value::as_str));
+            values.push_bind(event.get("task_id").and_then(Value::as_str));
+            values.push_bind(event.get("task_run_id").and_then(Value::as_str));
+            values.push_bind(event["reason"].as_str().expect("reason"));
+            values.push_bind(event["created_at"].as_str().expect("timestamp"));
+        }
+        insert
+            .push(")")
+            .build()
+            .execute(harness.db().pool())
+            .await
+            .expect("append immutable fixed revision event");
     }
 }
 
