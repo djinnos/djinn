@@ -25,6 +25,9 @@ use crate::tools::graph_exclusions::GraphExclusions;
 use crate::tools::task_tools::{ErrorOr, ErrorResponse};
 use djinn_db::ProjectRepository;
 
+/// Maximum node-selection budget accepted by MCP `code_graph snapshot`.
+pub const MAX_SNAPSHOT_NODE_CAP: usize = 10_000;
+
 mod handler;
 mod handler_basic_ops;
 mod handler_change_ops;

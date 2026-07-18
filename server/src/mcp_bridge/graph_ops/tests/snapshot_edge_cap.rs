@@ -111,7 +111,13 @@ fn snapshot_caps_drawable_edges_but_keeps_containment() {
         &GraphExclusions::empty(),
         None,
         SnapshotLevel::Symbol,
-        10_000,
+        1_000_000,
+    );
+
+    assert_eq!(
+        payload.node_cap,
+        crate::mcp_bridge::snapshot::MAX_SNAPSHOT_NODE_CAP,
+        "million-node requests report the effective bounded node cap"
     );
 
     let drawable_emitted = payload
