@@ -352,7 +352,7 @@
                }
             ],
             "history_start" : "ledger",
-            "next_cursor" : "eyJrIjoibm90ZV9oaXN0b3J5IiwidiI6eyJzIjoyfX0="
+            "next_cursor" : "eyJrIjoibm90ZV9oaXN0b3J5IiwidiI6eyJzIjoyfX0"
          },
          "history_page_2" : {
             "error" : null,
@@ -412,7 +412,7 @@
             "project" : "fixture/revision-contract"
          },
          "history_page_2" : {
-            "before_cursor" : "eyJrIjoibm90ZV9oaXN0b3J5IiwidiI6eyJzIjoyfX0=",
+            "before_cursor" : "eyJrIjoibm90ZV9oaXN0b3J5IiwidiI6eyJzIjoyfX0",
             "limit" : 2,
             "note_id" : "00000000-0000-4000-8000-000000000104",
             "project" : "fixture/revision-contract"
