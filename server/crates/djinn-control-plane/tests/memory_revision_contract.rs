@@ -5,8 +5,9 @@
 //! both published schema projections instead of regenerating either artifact.
 
 use djinn_control_plane::test_support::McpTestHarness;
+use djinn_core::auth_context::SESSION_USER_ID;
 use djinn_core::events::EventBus;
-use djinn_db::ProjectRepository;
+use djinn_db::{ProjectRepository, UserRepository};
 use serde_json::Value;
 use sqlx::{Postgres, QueryBuilder};
 
@@ -22,8 +23,10 @@ fn contract() -> Value {
     serde_json::from_str(CONTRACT).expect("memory revision contract fixture is valid JSON")
 }
 
-/// Seed fixed rows by immutable INSERT only: no writer or schema relaxation is
-/// involved, and the fixture owns every value projected by the public readers.
+/// Seed fixed rows by immutable INSERT only. The fixture includes one historical
+/// malformed update to prove the reader never infers a missing snapshot from a
+/// neighboring revision, so its per-harness shape check is restored as NOT VALID
+/// after seeding; subsequent inserts remain checked.
 async fn seed_reader_contract(harness: &McpTestHarness, fixture: &Value) {
     let seed = &fixture["reader_fixture"];
     let project_id = fixture["ids"]["project_id"]
@@ -38,6 +41,17 @@ async fn seed_reader_contract(harness: &McpTestHarness, fixture: &Value) {
         )
         .await
         .expect("seed fixed project");
+    ProjectRepository::new(harness.db().clone(), EventBus::noop())
+        .create_with_id(
+            fixture["ids"]["foreign_project_id"]
+                .as_str()
+                .expect("fixture foreign project id"),
+            "revision-contract-foreign",
+            "fixture",
+            "revision-contract-foreign",
+        )
+        .await
+        .expect("seed fixed foreign project");
     for note in seed["live_notes"].as_array().expect("fixture live notes") {
         let mut insert = QueryBuilder::<Postgres>::new(
             "INSERT INTO notes (id, project_id, permalink, title, file_path, storage, note_type, folder, status, tags, content, scope_paths, confidence) VALUES (",
@@ -48,7 +62,18 @@ async fn seed_reader_contract(harness: &McpTestHarness, fixture: &Value) {
             values.push_bind(project_id);
             values.push_bind(note["permalink"].as_str().expect("permalink"));
             values.push_bind(note["title"].as_str().expect("title"));
-            values.push("'', 'db', 'reference', 'reference', 'active', '[]'");
+            values.push("'', 'db'");
+            values.push_bind(
+                note.get("note_type")
+                    .and_then(Value::as_str)
+                    .unwrap_or("reference"),
+            );
+            values.push_bind(
+                note.get("folder")
+                    .and_then(Value::as_str)
+                    .unwrap_or("reference"),
+            );
+            values.push("'active', '[]'");
             values.push_bind(note["content"].as_str().expect("content"));
             values.push("'[]'");
             values.push_bind(note["confidence"].as_f64().expect("confidence"));
@@ -60,6 +85,17 @@ async fn seed_reader_contract(harness: &McpTestHarness, fixture: &Value) {
             .await
             .expect("seed fixed live note");
     }
+    // Production writers cannot produce malformed updates. The legacy fixture
+    // row is intentional: the reader must reject its missing after snapshot
+    // instead of deriving it from the preceding revision.
+    QueryBuilder::<Postgres>::new(
+        "ALTER TABLE note_revision_events DROP CONSTRAINT chk_note_revision_events_shape",
+    )
+    .build()
+    .execute(harness.db().pool())
+    .await
+    .expect("temporarily permit fixture's legacy missing snapshot");
+
     for event in seed["events"].as_array().expect("fixture events") {
         let mut insert = QueryBuilder::<Postgres>::new(
             "INSERT INTO note_revision_events (id, project_id, note_id, note_seq, event_kind, content_before, content_after, confidence_before, confidence_after, actor_kind, actor_id, subsystem, session_id, task_id, task_run_id, reason, created_at) VALUES (",
@@ -68,8 +104,8 @@ async fn seed_reader_contract(harness: &McpTestHarness, fixture: &Value) {
             let mut values = insert.separated(", ");
             values.push_bind(event["id"].as_str().expect("revision id"));
             values.push_bind(project_id);
-            values.push_bind(event["note_id"].as_str().expect("event note id"));
-            values.push_bind(event["note_seq"].as_i64().expect("note sequence"));
+            values.push_bind(event.get("note_id").and_then(Value::as_str));
+            values.push_bind(event.get("note_seq").and_then(Value::as_i64));
             values.push_bind(event["event_kind"].as_str().expect("event kind"));
             values.push_bind(event.get("content_before").and_then(Value::as_str));
             values.push_bind(event.get("content_after").and_then(Value::as_str));
@@ -91,6 +127,113 @@ async fn seed_reader_contract(harness: &McpTestHarness, fixture: &Value) {
             .await
             .expect("append immutable fixed revision event");
     }
+
+    QueryBuilder::<Postgres>::new(
+        "ALTER TABLE note_revision_events ADD CONSTRAINT chk_note_revision_events_shape CHECK ((event_kind = 'created' AND note_id IS NOT NULL AND content_before IS NULL AND confidence_before IS NULL AND content_after IS NOT NULL AND confidence_after IS NOT NULL) OR (event_kind = 'updated' AND note_id IS NOT NULL AND content_before IS NOT NULL AND confidence_before IS NOT NULL AND content_after IS NOT NULL AND confidence_after IS NOT NULL) OR (event_kind = 'deleted' AND note_id IS NOT NULL AND content_before IS NOT NULL AND confidence_before IS NOT NULL AND content_after IS NULL AND confidence_after IS NULL) OR (event_kind = 'confidence_changed' AND note_id IS NOT NULL AND content_before IS NULL AND content_after IS NULL AND confidence_before IS NOT NULL AND confidence_after IS NOT NULL) OR (event_kind = 'extraction_skipped' AND note_id IS NULL AND content_before IS NULL AND content_after IS NULL AND confidence_before IS NULL AND confidence_after IS NULL AND (session_id IS NOT NULL OR task_run_id IS NOT NULL))) NOT VALID",
+    )
+    .build()
+    .execute(harness.db().pool())
+    .await
+    .expect("restore revision shape check after legacy fixture seed");
+
+    let context = &seed["session_context"];
+    let task_id = context["task_id"].as_str().expect("fixed task id");
+    let session_id = context["session_id"].as_str().expect("fixed session id");
+    let task_run_id = context["task_run_id"].as_str().expect("fixed task run id");
+    let mut task_insert = QueryBuilder::<Postgres>::new(
+        "INSERT INTO tasks (id, project_id, short_id, title, description, design, labels, acceptance_criteria, memory_refs) VALUES (",
+    );
+    {
+        let mut values = task_insert.separated(", ");
+        values.push_bind(task_id);
+        values.push_bind(project_id);
+        values.push("'fixed-task', 'Fixed contract task', '', '', '[]', '[]', '[]'");
+    }
+    task_insert
+        .push(")")
+        .build()
+        .execute(harness.db().pool())
+        .await
+        .expect("seed fixed task");
+
+    let mut task_run_insert = QueryBuilder::<Postgres>::new(
+        "INSERT INTO task_runs (id, project_id, task_id, trigger_type, status, started_at) VALUES (",
+    );
+    {
+        let mut values = task_run_insert.separated(", ");
+        values.push_bind(task_run_id);
+        values.push_bind(project_id);
+        values.push_bind(task_id);
+        values.push("'manual', 'running', '2026-02-04T05:06:07.000Z'");
+    }
+    task_run_insert
+        .push(")")
+        .build()
+        .execute(harness.db().pool())
+        .await
+        .expect("seed fixed task run");
+
+    let mut session_insert = QueryBuilder::<Postgres>::new(
+        "INSERT INTO sessions (id, project_id, task_id, task_run_id, model_id, agent_type, started_at, status) VALUES (",
+    );
+    {
+        let mut values = session_insert.separated(", ");
+        values.push_bind(session_id);
+        values.push_bind(project_id);
+        values.push_bind(task_id);
+        values.push_bind(task_run_id);
+        values.push("'fixture-model', 'worker', '2026-02-04T05:06:07.000Z', 'active'");
+    }
+    session_insert
+        .push(")")
+        .build()
+        .execute(harness.db().pool())
+        .await
+        .expect("seed fixed session");
+
+    // Second session/task-run used by the equal-time session-diff and extracted-audit
+    // scenarios. These are separate from the history/diff session so the session-diff
+    // events are isolated from the tk95 envelope.
+    let sd_session = context["session_diff_session_id"]
+        .as_str()
+        .expect("fixed session-diff session id");
+    let sd_task_run = context["session_diff_task_run_id"]
+        .as_str()
+        .expect("fixed session-diff task run id");
+    let mut session_diff_task_run_insert = QueryBuilder::<Postgres>::new(
+        "INSERT INTO task_runs (id, project_id, task_id, trigger_type, status, started_at) VALUES (",
+    );
+    {
+        let mut values = session_diff_task_run_insert.separated(", ");
+        values.push_bind(sd_task_run);
+        values.push_bind(project_id);
+        values.push_bind(task_id);
+        values.push("'manual', 'running', '2026-02-04T05:06:05.000Z'");
+    }
+    session_diff_task_run_insert
+        .push(")")
+        .build()
+        .execute(harness.db().pool())
+        .await
+        .expect("seed session-diff task run");
+
+    let mut session_diff_insert = QueryBuilder::<Postgres>::new(
+        "INSERT INTO sessions (id, project_id, task_id, task_run_id, model_id, agent_type, started_at, status) VALUES (",
+    );
+    {
+        let mut values = session_diff_insert.separated(", ");
+        values.push_bind(sd_session);
+        values.push_bind(project_id);
+        values.push_bind(task_id);
+        values.push_bind(sd_task_run);
+        values.push("'fixture-model', 'worker', '2026-02-04T05:06:05.000Z', 'active'");
+    }
+    session_diff_insert
+        .push(")")
+        .build()
+        .execute(harness.db().pool())
+        .await
+        .expect("seed session-diff session");
 }
 
 async fn dispatch(harness: &McpTestHarness, tool: &str, args: Value) -> Value {
@@ -267,6 +410,122 @@ async fn fixed_fixture_pins_history_pages_pairwise_diff_and_deleted_history() {
     )
     .await;
     assert_eq!(deleted, expected["deleted_history"]);
+}
+
+#[tokio::test]
+async fn fixed_fixture_executes_negative_reader_envelopes() {
+    let fixture = contract();
+    let harness = McpTestHarness::new().await;
+    seed_reader_contract(&harness, &fixture).await;
+
+    for (name, expectation) in fixture["mcp_response_expectations"]
+        .as_object()
+        .expect("fixture response expectations")
+    {
+        let tool = expectation["tool"].as_str().expect("fixture tool");
+        let args = expectation["args"].clone();
+        if expectation.get("expected_error").is_some() {
+            let error = harness
+                .call_tool(tool, args)
+                .await
+                .expect_err("retired selector must fail deserialization");
+            assert_eq!(
+                format!("{error:#}"),
+                expectation["expected_error"]
+                    .as_str()
+                    .expect("fixture error"),
+                "{name}"
+            );
+            continue;
+        }
+
+        let actual = if expectation["caller"] == "readerless" {
+            let readerless = UserRepository::new(harness.db().clone())
+                .upsert_from_github(8_420_100, "revision-readerless", None, None)
+                .await
+                .expect("seed readerless user");
+            SESSION_USER_ID
+                .scope(Some(readerless.id), dispatch(&harness, tool, args))
+                .await
+        } else {
+            dispatch(&harness, tool, args).await
+        };
+        assert_eq!(actual, expectation["expected"], "{name}");
+    }
+}
+
+#[tokio::test]
+async fn fixed_fixture_pins_equal_time_session_diff_pages_and_extracted_audit() {
+    let fixture = contract();
+    let harness = McpTestHarness::new().await;
+    seed_reader_contract(&harness, &fixture).await;
+    let reader = &fixture["reader_fixture"];
+    let requests = &reader["requests"];
+    let expected = &reader["expected"];
+
+    // Full session-diff: all five events ordered newest-first by
+    // (created_at DESC, id DESC), exercising the equal-time tie-break.
+    let session_full = dispatch(
+        &harness,
+        "memory_session_diff",
+        requests["session_diff_full"].clone(),
+    )
+    .await;
+    assert_eq!(session_full, expected["session_diff_full"]);
+
+    // Cursor page 1: first two equal-time events + cursor into the boundary.
+    let sd_page_1 = dispatch(
+        &harness,
+        "memory_session_diff",
+        requests["session_diff_page_1"].clone(),
+    )
+    .await;
+    assert_eq!(sd_page_1, expected["session_diff_page_1"]);
+
+    // Cursor page 2: next two equal-time events.
+    let sd_page_2 = dispatch(
+        &harness,
+        "memory_session_diff",
+        requests["session_diff_page_2"].clone(),
+    )
+    .await;
+    assert_eq!(sd_page_2, expected["session_diff_page_2"]);
+
+    // Cursor page 3: final single event.
+    let sd_page_3 = dispatch(
+        &harness,
+        "memory_session_diff",
+        requests["session_diff_page_3"].clone(),
+    )
+    .await;
+    assert_eq!(sd_page_3, expected["session_diff_page_3"]);
+
+    // Readerless/redacted: a non-admin caller gets the same page shape but
+    // with content bodies withheld and content_redacted = true.
+    let readerless = UserRepository::new(harness.db().clone())
+        .upsert_from_github(8_420_001, "session-diff-readerless", None, None)
+        .await
+        .expect("seed readerless user");
+    let redacted = SESSION_USER_ID
+        .scope(
+            Some(readerless.id.clone()),
+            dispatch(
+                &harness,
+                "memory_session_diff",
+                requests["session_diff_page_1"].clone(),
+            ),
+        )
+        .await;
+    assert_eq!(redacted, expected["session_diff_redacted"]);
+
+    // Extracted audit: a nonempty attributed underspecified finding.
+    let audit = dispatch(
+        &harness,
+        "memory_extracted_audit",
+        requests["extracted_audit"].clone(),
+    )
+    .await;
+    assert_eq!(audit, expected["extracted_audit"]);
 }
 
 #[test]
