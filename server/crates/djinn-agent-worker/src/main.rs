@@ -2677,15 +2677,25 @@ mod tests {
 
     static CARGO_INSTRUMENT_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-    #[test]
-    fn worker_context_authorization_preserves_zero_one_and_multiple_immutable_grants() {
+    #[tokio::test]
+    async fn worker_context_authorization_preserves_zero_one_and_multiple_immutable_grants() {
         for targets in [
             Vec::<String>::new(),
             vec!["target-a".into()],
             vec!["target-a".into(), "target-b".into()],
         ] {
-            let authorization =
-                worker_read_source_authorization("immutable-owner".into(), targets.clone());
+            let (stream, _peer) = tokio::io::duplex(64);
+            let (read, write) = tokio::io::split(stream);
+            let cancel = CancellationToken::new();
+            let (rpc, _tasks) = RpcServices::from_split(read, write, cancel.clone());
+            let context = build_worker_agent_context(
+                Database::open_in_memory().expect("in-memory worker database"),
+                rpc,
+                "immutable-owner".into(),
+                targets.clone(),
+            );
+            let authorization = context.read_source_authorization;
+            cancel.cancel();
             assert_eq!(
                 authorization.owner_project_id.as_deref(),
                 Some("immutable-owner")

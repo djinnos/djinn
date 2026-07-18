@@ -264,6 +264,14 @@ pub struct KubernetesRuntime {
     /// legacy `new`/`from_client` surface — those callers never reach the
     /// `prepare` code path (they exercise pure-builder unit tests).
     db: Option<Database>,
+    /// Injectable host-side read-source gate. Production constructs the DB-backed
+    /// implementation lazily; tests inject a recorder while still driving the
+    /// real `SessionRuntime::prepare` orchestration.
+    read_source_preparation: Option<Arc<dyn ReadSourcePreparation>>,
+    /// Test-only dispatch-image bypass used to reach the actual resource POSTs
+    /// without coupling orchestration regressions to a live database.
+    #[cfg(test)]
+    dispatch_image_override: Option<String>,
     /// Per-task-run [`PendingConnection`] handles reserved during `prepare`
     /// and drained by `attach_stdio` / `teardown`.  Keyed by
     /// `task_run_id`.  Entries stay present until whichever method lands
@@ -294,6 +302,9 @@ impl KubernetesRuntime {
             config,
             registry,
             db: None,
+            read_source_preparation: None,
+            #[cfg(test)]
+            dispatch_image_override: None,
             pending: Arc::new(Mutex::new(HashMap::new())),
         })
     }
@@ -311,6 +322,9 @@ impl KubernetesRuntime {
             config,
             registry,
             db: Some(db),
+            read_source_preparation: None,
+            #[cfg(test)]
+            dispatch_image_override: None,
             pending: Arc::new(Mutex::new(HashMap::new())),
         })
     }
@@ -327,6 +341,9 @@ impl KubernetesRuntime {
             config,
             registry,
             db: None,
+            read_source_preparation: None,
+            #[cfg(test)]
+            dispatch_image_override: None,
             pending: Arc::new(Mutex::new(HashMap::new())),
         }
     }
@@ -344,6 +361,9 @@ impl KubernetesRuntime {
             config,
             registry,
             db: Some(db),
+            read_source_preparation: None,
+            #[cfg(test)]
+            dispatch_image_override: None,
             pending: Arc::new(Mutex::new(HashMap::new())),
         }
     }
@@ -363,6 +383,19 @@ impl KubernetesRuntime {
     /// a concurrent `serve_on_tcp` spawn.
     pub fn registry(&self) -> &Arc<ConnectionRegistry> {
         &self.registry
+    }
+
+    async fn prepare_read_sources(
+        &self,
+        db: &Database,
+        spec: &TaskRunSpec,
+    ) -> Result<Option<String>, RuntimeError> {
+        match &self.read_source_preparation {
+            Some(preparation) => {
+                pre_materialize_read_sources_with(preparation.as_ref(), spec).await
+            }
+            None => pre_materialize_read_sources(db, spec).await,
+        }
     }
 
     /// Foreground-delete the canonical task-run Job for `task_run_id`.
@@ -434,21 +467,38 @@ impl SessionRuntime for KubernetesRuntime {
                     .into(),
             )
         })?;
+
+        // Safety gate: every authorized cache is materialized before any
+        // Kubernetes API request can be issued.
+        let read_source_cache_sub_path = self.prepare_read_sources(db, spec).await?;
+
         let repo = ProjectRepository::new(db.clone(), djinn_core::events::EventBus::noop());
         // Catalog-image precedence (migration 46): a project on a shared
         // catalog image dispatches against that image's pull ref; otherwise
         // it uses its own per-project build. The resolver is the single
         // source of truth — no silent fallback if the resolved image isn't
         // ready yet (hard-fail, exactly as the per-project path always did).
-        let dispatch_image = repo
-            .resolve_dispatch_image(&spec.project_id)
-            .await
-            .map_err(|e| {
-                RuntimeError::Prepare(format!("resolve_dispatch_image({}): {e}", spec.project_id))
-            })?;
-        let project_image_tag = match dispatch_image.as_ref().and_then(|d| d.pull_ref()) {
-            Some(pull_ref) => pull_ref,
-            None => return Err(RuntimeError::DevcontainerMissing(spec.project_id.clone())),
+        #[cfg(test)]
+        let project_image_tag = self.dispatch_image_override.clone();
+        #[cfg(not(test))]
+        let project_image_tag: Option<String> = None;
+        let project_image_tag = match project_image_tag {
+            Some(tag) => tag,
+            None => {
+                let dispatch_image = repo
+                    .resolve_dispatch_image(&spec.project_id)
+                    .await
+                    .map_err(|e| {
+                        RuntimeError::Prepare(format!(
+                            "resolve_dispatch_image({}): {e}",
+                            spec.project_id
+                        ))
+                    })?;
+                match dispatch_image.as_ref().and_then(|d| d.pull_ref()) {
+                    Some(pull_ref) => pull_ref,
+                    None => return Err(RuntimeError::DevcontainerMissing(spec.project_id.clone())),
+                }
+            }
         };
 
         // Load the project's effective EnvironmentConfig once for the
@@ -495,10 +545,6 @@ impl SessionRuntime for KubernetesRuntime {
                 }
             }
         };
-
-        // A Pod must never be created while the owner cache is missing,
-        // active, ambiguous, failed, or DB-uncertain.
-        let read_source_cache_sub_path = pre_materialize_read_sources(db, spec).await?;
 
         // 0. Reserve the registry slot BEFORE creating the Job.  This closes
         //    the race where the Pod starts up and completes the AuthHello
@@ -1431,7 +1477,7 @@ mod tests {
     struct FakeReadSourcePreparation {
         coords: HashMap<String, Result<Option<(String, String)>, String>>,
         migration_error: Option<String>,
-        events: StdMutex<Vec<String>>,
+        events: Arc<StdMutex<Vec<String>>>,
         requests: StdMutex<Vec<djinn_workspace::ReadSourceMigrationRequest>>,
     }
 
@@ -1469,7 +1515,7 @@ mod tests {
 
     fn read_source_spec(targets: &[&str]) -> TaskRunSpec {
         TaskRunSpec {
-            task_run_id: "run-read-source".into(),
+            task_run_id: "019f72b5-a92a-7501-8b41-b0ffe68cdda5".into(),
             task_attempt_id: None,
             task_id: "task-read-source".into(),
             project_id: "owner-project-id".into(),
@@ -1508,15 +1554,63 @@ mod tests {
         }
     }
 
-    async fn prepare_and_record_resource_posts(
-        preparation: &FakeReadSourcePreparation,
+    async fn prepare_through_runtime(
+        preparation: Arc<FakeReadSourcePreparation>,
         spec: &TaskRunSpec,
-    ) -> Result<Option<String>, RuntimeError> {
-        let sub_path = pre_materialize_read_sources_with(preparation, spec).await?;
-        let mut events = preparation.events.lock().unwrap();
-        events.push("POST:Secret".into());
-        events.push("POST:Job".into());
-        Ok(sub_path)
+        seed_dispatch_image: bool,
+    ) -> Result<RunHandle, RuntimeError> {
+        use http::Response;
+        use kube::client::Body;
+        use tower::service_fn;
+
+        let events = preparation.events.clone();
+        let client = kube::Client::new(
+            service_fn(move |request: http::Request<Body>| {
+                let events = events.clone();
+                async move {
+                    let path = request.uri().path();
+                    let (event, body) = if path.contains("/secrets") {
+                        (
+                            "POST:Secret",
+                            serde_json::json!({
+                                "apiVersion": "v1", "kind": "Secret",
+                                "metadata": {"name": "task-secret"}
+                            }),
+                        )
+                    } else {
+                        (
+                            "POST:Job",
+                            serde_json::json!({
+                                "apiVersion": "batch/v1", "kind": "Job",
+                                "metadata": {"name": "task-job", "uid": "job-uid"}
+                            }),
+                        )
+                    };
+                    if request.method() == http::Method::POST {
+                        events.lock().unwrap().push(event.into());
+                    }
+                    Ok::<_, std::io::Error>(
+                        Response::builder()
+                            .status(200)
+                            .header("content-type", "application/json")
+                            .body(Body::from(body.to_string().into_bytes()))
+                            .unwrap(),
+                    )
+                }
+            }),
+            "djinn",
+        );
+        let db = Database::open_in_memory().expect("in-memory runtime database");
+        let runtime = KubernetesRuntime {
+            client,
+            config: KubernetesConfig::for_testing(),
+            registry: Arc::new(ConnectionRegistry::new()),
+            db: Some(db),
+            read_source_preparation: Some(preparation),
+            dispatch_image_override: seed_dispatch_image.then(|| "registry/test:test".into()),
+            pending: Arc::new(Mutex::new(HashMap::new())),
+        };
+        runtime.prepare(spec, &ResolvedCredentials::default()).await
     }
 
     #[tokio::test]
@@ -1574,9 +1668,13 @@ mod tests {
             } else {
                 preparation.migration_error = Some(error.into());
             }
-            let result =
-                prepare_and_record_resource_posts(&preparation, &read_source_spec(&["target-a"]))
-                    .await;
+            let preparation = Arc::new(preparation);
+            let result = prepare_through_runtime(
+                preparation.clone(),
+                &read_source_spec(&["target-a"]),
+                false,
+            )
+            .await;
             assert!(result.is_err(), "{error} must defer preparation");
             let events = preparation.events.lock().unwrap();
             assert!(
@@ -1588,10 +1686,11 @@ mod tests {
 
     #[tokio::test]
     async fn prepare_materializes_every_target_before_secret_and_job_posts() {
-        let preparation = successful_preparation(&["target-a", "target-b"]);
-        prepare_and_record_resource_posts(
-            &preparation,
+        let preparation = Arc::new(successful_preparation(&["target-a", "target-b"]));
+        prepare_through_runtime(
+            preparation.clone(),
             &read_source_spec(&["target-a", "target-b"]),
+            true,
         )
         .await
         .expect("prepare succeeds");
