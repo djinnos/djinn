@@ -14,7 +14,7 @@ pub mod server;
 pub mod server_memory;
 pub mod sse;
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub mod test_helpers;
 
 #[cfg(test)]
