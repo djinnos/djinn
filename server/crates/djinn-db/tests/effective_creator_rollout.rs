@@ -378,6 +378,34 @@ fn discover_production_writers(root: &Path) -> BTreeSet<String> {
     discovered
 }
 
+fn manifest_section<'a>(manifest: &'a str, heading: &str) -> &'a str {
+    let heading = format!("[{heading}]");
+    let section = manifest
+        .split_once(&heading)
+        .unwrap_or_else(|| panic!("manifest section {heading} must exist"))
+        .1;
+    section.find("\n[").map_or(section, |next| &section[..next])
+}
+
+#[test]
+fn coordinator_enables_db_test_support_only_on_its_dev_edge() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../");
+    let manifest = std::fs::read_to_string(root.join("server/crates/djinn-coordinator/Cargo.toml"))
+        .expect("coordinator manifest readable");
+    let normal = manifest_section(&manifest, "dependencies");
+    let dev = manifest_section(&manifest, "dev-dependencies");
+    assert!(
+        normal
+            .lines()
+            .any(|line| line.trim() == r#"djinn-db = { path = "../djinn-db" }"#)
+    );
+    assert!(!normal.contains("test-support"));
+    assert!(
+        dev.lines().any(|line| line.trim()
+            == r#"djinn-db = { path = "../djinn-db", features = ["test-support"] }"#)
+    );
+}
+
 #[test]
 fn inventoried_producers_reach_the_transactional_provenance_boundary() {
     let inventory: Value =
