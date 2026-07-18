@@ -468,67 +468,173 @@ fn galaxy_route_allocation_shape_guard_rejects_payload_aggregation_regressions()
         include_str!("../../../crates/djinn-db/src/repositories/repo_graph_generation.rs");
     let stream = rust_function_body(route, "fn stream_gzip(");
     let read_chunk = rust_function_body(reader_source, "pub async fn read_chunk");
-
-    // This is deliberately stronger than a denylist for `collect`: the one
-    // success arm is the ownership boundary for every stored chunk. Requiring
-    // its exact, direct handoff makes an inferred `Vec::new()` plus `push`,
-    // `extend`, `concat`, or any other retention of `chunk.bytes` change this
-    // assertion before a 150 MiB regression can reach the RSS test.
-    let stream_success = rust_block_after(stream, "Ok(chunk) => {");
-    assert_eq!(
-        without_whitespace(stream_success),
-        concat!(
-            "transport_hasher.update(&chunk.bytes);",
-            "djinn_telemetry::galaxy_artifact_route::record_chunk(chunk.bytes.len());",
-            "yieldOk(Bytes::from(chunk.bytes));"
-        ),
-        "each chunk must be hashed, metered, and transferred directly to the response without retention"
-    );
-
-    let pinned_reader = rust_block_after(reader_source, "pub struct PinnedGalaxyArtifact {");
-    assert_eq!(
-        without_whitespace(pinned_reader),
-        concat!(
-            "metadata:PinnedGalaxyArtifactMetadata,",
-            "chunk_hashes:Vec<String>,",
-            "pin_key:GenerationStreamPinKey,",
-            "connection:Option<PoolConnection<Postgres>>,"
-        ),
-        "pinned reader may retain only bounded metadata, manifest hashes, pin identity, and its session"
-    );
-    for forbidden in [
-        "fetch_all(",
-        ".collect",
-        "try_collect",
-        "read_to_end",
-        "read_to_string",
-        "decode_all",
-        "GzDecoder",
-        "Decoder",
-        "decompress",
-        "uncompress",
-        "Vec<u8>",
-        "BytesMut",
-    ] {
-        assert!(
-            !stream.contains(forbidden) && !read_chunk.contains(forbidden),
-            "pinned route/read path allocation guard rejected {forbidden}"
-        );
-    }
-    assert!(
-        read_chunk.contains(
-            "WHERE generation_id = $1::uuid AND artifact_id = $2::uuid AND chunk_index = $3"
-        ) && read_chunk.contains(".bind(chunk_index)")
-            && read_chunk.contains(".fetch_optional"),
-        "pinned reader must retain its indexed one-row chunk query"
-    );
-    assert!(
-        stream.contains("for index in 0..chunk_count")
-            && stream.contains("reader.read_chunk(index).await"),
-        "route must stream in ordered bounded chunks"
-    );
+    bounded_galaxy_body_contract(stream, read_chunk)
+        .expect("landed galaxy stream and pinned read must retain the bounded shape");
 }
 
+#[test]
+fn galaxy_allocation_shape_guard_rejects_finite_mutation_table() {
+    const GOOD_STREAM: &str = r#"
+        let chunk_count = reader.metadata().chunk_count;
+        for index in 0..chunk_count {
+            match reader.read_chunk(index).await {
+                Ok(chunk) => yield Ok(Bytes::from(chunk.bytes)),
+                Err(_) => return,
+            }
+        }
+    "#;
+    const GOOD_READER: &str = r#"
+        let row = sqlx::query_as(
+            "SELECT bytes FROM repo_graph_galaxy_chunk WHERE artifact_id = $1::uuid AND chunk_index = $2"
+        ).bind(&self.metadata.artifact_id).bind(chunk_index)
+          .fetch_optional(&mut **conn).await;
+    "#;
+
+    let bad_streams = [
+        (
+            "reviewer inferred Vec plus second read and push",
+            r#"let mut all = Vec::new(); for index in 0..chunk_count {
+                all.push(reader.read_chunk(index).await.unwrap().bytes);
+                yield Ok(Bytes::from(reader.read_chunk(index).await.unwrap().bytes));
+            }"#,
+        ),
+        (
+            "Vec::with_capacity plus extend",
+            r#"let mut all = Vec::with_capacity(4); all.extend(chunks); for index in 0..chunk_count { yield reader.read_chunk(index).await; }"#,
+        ),
+        (
+            "iterator collect",
+            r#"let all = chunks.into_iter().collect::<Vec<_>>(); for index in 0..chunk_count { yield reader.read_chunk(index).await; }"#,
+        ),
+        (
+            "stream try_collect",
+            r#"let all = chunks.try_collect::<Vec<_>>().await; for index in 0..chunk_count { yield reader.read_chunk(index).await; }"#,
+        ),
+        (
+            "to_vec materialization",
+            r#"let all = chunk.bytes.to_vec(); for index in 0..chunk_count { yield reader.read_chunk(index).await; }"#,
+        ),
+        (
+            "concat materialization",
+            r#"let all = chunks.concat(); for index in 0..chunk_count { yield reader.read_chunk(index).await; }"#,
+        ),
+        (
+            "BytesMut accumulation",
+            r#"let mut all = BytesMut::new(); for index in 0..chunk_count { yield reader.read_chunk(index).await; }"#,
+        ),
+        (
+            "whole-payload compression",
+            r#"let all = encode_all(payload); for index in 0..chunk_count { yield reader.read_chunk(index).await; }"#,
+        ),
+        (
+            "whole-payload decompression",
+            r#"let all = GzDecoder::new(payload); for index in 0..chunk_count { yield reader.read_chunk(index).await; }"#,
+        ),
+        (
+            "missing indexed read",
+            r#"for index in 0..chunk_count { yield cached[index]; }"#,
+        ),
+        (
+            "second indexed read",
+            r#"for index in 0..chunk_count { let a = reader.read_chunk(index).await; let b = reader.read_chunk(index).await; yield a; }"#,
+        ),
+    ];
+    for (mutation, stream) in bad_streams {
+        assert!(
+            bounded_galaxy_body_contract(stream, GOOD_READER).is_err(),
+            "guard accepted stream mutation: {mutation}"
+        );
+    }
+
+    let bad_readers = [
+        (
+            "missing artifact identity",
+            r#"sqlx::query("SELECT bytes FROM repo_graph_galaxy_chunk WHERE chunk_index = $2").bind(chunk_index).fetch_optional(conn).await"#,
+        ),
+        (
+            "missing indexed predicate",
+            r#"sqlx::query("SELECT bytes FROM repo_graph_galaxy_chunk WHERE artifact_id = $1::uuid").bind(&self.metadata.artifact_id).fetch_optional(conn).await"#,
+        ),
+        (
+            "wrong chunk parameter",
+            r#"sqlx::query("SELECT bytes FROM repo_graph_galaxy_chunk WHERE artifact_id = $1::uuid AND chunk_index = $3").bind(&self.metadata.artifact_id).bind(chunk_index).fetch_optional(conn).await"#,
+        ),
+        (
+            "multi-row fetch_all",
+            r#"sqlx::query("SELECT bytes FROM repo_graph_galaxy_chunk WHERE artifact_id = $1::uuid AND chunk_index = $2").bind(&self.metadata.artifact_id).bind(chunk_index).fetch_all(conn).await"#,
+        ),
+        (
+            "multi-row fetch stream",
+            r#"sqlx::query("SELECT bytes FROM repo_graph_galaxy_chunk WHERE artifact_id = $1::uuid AND chunk_index = $2").bind(&self.metadata.artifact_id).bind(chunk_index).fetch(conn)"#,
+        ),
+        (
+            "reader payload collect",
+            r#"let all = rows.try_collect::<Vec<_>>().await; sqlx::query("SELECT bytes FROM repo_graph_galaxy_chunk WHERE artifact_id = $1::uuid AND chunk_index = $2").bind(&self.metadata.artifact_id).bind(chunk_index).fetch_optional(conn).await"#,
+        ),
+    ];
+    for (mutation, reader) in bad_readers {
+        assert!(
+            bounded_galaxy_body_contract(GOOD_STREAM, reader).is_err(),
+            "guard accepted reader mutation: {mutation}"
+        );
+    }
+}
+
+/// Finite source-shape contract. The live RSS test remains the behavioral
+/// allocation bound; this catches the concrete reviewable accumulation/query
+/// mutations without claiming to recognize arbitrary future Rust allocation.
+fn bounded_galaxy_body_contract(stream: &str, read_chunk: &str) -> Result<(), String> {
+    let stream = without_whitespace(stream);
+    let read_chunk = without_whitespace(read_chunk);
+    let loop_marker = "forindexin0..chunk_count{";
+    let loop_start = stream
+        .find(loop_marker)
+        .ok_or_else(|| "missing ordered indexed stream loop".to_owned())?;
+    let loop_body = rust_block_after(&stream[loop_start..], "{");
+    let indexed_read = "reader.read_chunk(index).await";
+    if loop_body.matches(indexed_read).count() != 1 || stream.matches(indexed_read).count() != 1 {
+        return Err("stream loop must perform exactly one indexed chunk read".to_owned());
+    }
+
+    for forbidden in [
+        "Vec::new(",
+        "Vec::with_capacity(",
+        ".push(",
+        ".extend(",
+        ".collect",
+        "try_collect",
+        ".to_vec(",
+        "concat(",
+        "BytesMut",
+        "read_to_end",
+        "read_to_string",
+        "encode_all",
+        "decode_all",
+        "GzEncoder",
+        "GzDecoder",
+        "ZlibEncoder",
+        "ZlibDecoder",
+        "DeflateEncoder",
+        "DeflateDecoder",
+        "compress(",
+        "decompress(",
+    ] {
+        if stream.contains(forbidden) || read_chunk.contains(forbidden) {
+            return Err(format!("payload materialization token: {forbidden}"));
+        }
+    }
+
+    if !read_chunk.contains("WHEREartifact_id=$1::uuidANDchunk_index=$2")
+        || !read_chunk.contains(".bind(&self.metadata.artifact_id).bind(chunk_index)")
+        || read_chunk.matches(".fetch_optional(").count() != 1
+        || [".fetch_all(", ".fetch_many(", ".fetch("]
+            .iter()
+            .any(|fetch| read_chunk.contains(fetch))
+    {
+        return Err("reader must use the artifact/index one-row query".to_owned());
+    }
+    Ok(())
+}
 /// Extract one Rust brace-delimited body so source assertions cannot be fooled
 /// by a similarly named helper later in the module.
 fn rust_function_body<'a>(source: &'a str, signature: &str) -> &'a str {
