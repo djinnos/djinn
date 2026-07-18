@@ -1361,6 +1361,7 @@ dependencies = [
  "djinn-git",
  "djinn-memory",
  "djinn-stack",
+ "djinn-telemetry",
  "futures",
  "hex",
  "libc",
