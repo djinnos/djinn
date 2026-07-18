@@ -642,6 +642,7 @@ mod tests {
     use djinn_core::events::EventBus;
     use djinn_db::{
         Database, EpicCreateInput, EpicRepository, ProjectRepository, ReadyQuery, TaskRepository,
+        UserRepository,
     };
 
     fn epic_input<'a>(title: &'a str) -> EpicCreateInput<'a> {
@@ -770,12 +771,26 @@ mod tests {
             .await
             .unwrap();
 
-        let Json(created) = create_task(
-            &server,
-            &project.id,
-            planning_task_request("dependent task", &blocked_epic.short_id),
-        )
-        .await;
+        let github_id = (uuid::Uuid::now_v7().as_u128() % i64::MAX as u128) as i64;
+        let creator = UserRepository::new(db)
+            .upsert_from_github(
+                github_id,
+                &format!("blocked-epic-task-fixture-{github_id}"),
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        let Json(created) = djinn_core::auth_context::SESSION_USER_ID
+            .scope(Some(creator.id), async {
+                create_task(
+                    &server,
+                    &project.id,
+                    planning_task_request("dependent task", &blocked_epic.short_id),
+                )
+                .await
+            })
+            .await;
         let dependent_task = match created {
             ErrorOr::Ok(task) => task,
             ErrorOr::Error(err) => panic!("task_create failed: {}", err.error),

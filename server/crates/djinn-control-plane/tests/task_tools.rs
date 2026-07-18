@@ -242,7 +242,8 @@ async fn task_show_found_and_not_found_shapes() {
         ".project_id" => "[UUID]",
         ".short_id" => "[SHORT_ID]",
         ".created_at" => "[TIMESTAMP]",
-        ".updated_at" => "[TIMESTAMP]"
+        ".updated_at" => "[TIMESTAMP]",
+        ".created_by_user_id" => "[UUID]"
     });
 
     let err = harness
@@ -413,7 +414,8 @@ async fn task_list_filters_and_pagination() {
         ".tasks.**.project_id" => "[UUID]",
         ".tasks.**.short_id" => "[SHORT_ID]",
         ".tasks.**.created_at" => "[TIMESTAMP]",
-        ".tasks.**.updated_at" => "[TIMESTAMP]"
+        ".tasks.**.updated_at" => "[TIMESTAMP]",
+        ".tasks.**.created_by_user_id" => "[UUID]"
     });
 }
 
