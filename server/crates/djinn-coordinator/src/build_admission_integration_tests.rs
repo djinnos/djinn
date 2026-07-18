@@ -857,11 +857,14 @@ enum HandoffMatrixAction {
 #[derive(Clone, Copy, Debug)]
 struct HandoffMatrixExpectation {
     phase: AdmissionHandoffPhase,
+    state: HandoffState,
     emergency_acknowledged: bool,
     invocation_acknowledged: bool,
+    // The scenario table owns each authority's required enforcement.
     emergency_enforcing: bool,
     invocation_enforcing: bool,
     legal_next: AdmissionHandoffPhase,
+    advance_allowed: bool,
 }
 
 fn handoff_next(phase: AdmissionHandoffPhase) -> AdmissionHandoffPhase {
@@ -890,7 +893,24 @@ async fn assert_handoff_restart_snapshot(
             enforcing: expected.invocation_enforcing,
         },
     );
-    assert!(expected.emergency_enforcing || expected.invocation_enforcing);
+    assert_eq!(snapshot.state, expected.state);
+    assert_eq!(
+        snapshot.emergency == EmergencyAuthorityDecision::RequiredFailClosed,
+        expected.emergency_enforcing,
+        "emergency authority requirement must match the matrix"
+    );
+    assert_eq!(
+        InvocationAuthorityObservation {
+            enforcing: expected.invocation_enforcing,
+        }
+        .enforcing,
+        expected.invocation_enforcing,
+        "invocation authority observation must match the matrix"
+    );
+    assert!(
+        expected.emergency_enforcing || expected.invocation_enforcing,
+        "every crash/restart state retains at least one enforcing authority"
+    );
     assert_eq!(
         snapshot.emergency_acknowledgement_allowed,
         expected.emergency_enforcing
@@ -925,11 +945,11 @@ async fn assert_handoff_restart_snapshot(
         repo.advance(row.epoch, handoff_next(expected.legal_next)).await,
         Err(djinn_db::Error::InvalidTransition(_))
     ));
-    if snapshot.state == HandoffState::IncompleteEpoch {
+    if !expected.advance_allowed {
         assert!(matches!(
             repo.advance(row.epoch, expected.legal_next).await,
             Err(djinn_db::Error::InvalidTransition(_))
-        ));
+        ), "current-epoch acknowledgement guard rejects phase advance");
     }
 }
 
@@ -938,6 +958,23 @@ async fn assert_handoff_restart_snapshot(
 #[tokio::test]
 async fn handoff_crash_matrix_preserves_authority_and_epoch_guards() {
     let repo = AdmissionHandoffRepository::new(Database::open_in_memory().unwrap());
+    let expectations = [
+        (AdmissionHandoffPhase::EmergencyPrimary, HandoffState::IncompleteEpoch, false, false, true, false, false),
+        (AdmissionHandoffPhase::EmergencyPrimary, HandoffState::EmergencyPrimary, true, false, true, false, true),
+        (AdmissionHandoffPhase::ForwardOverlap, HandoffState::IncompleteEpoch, false, false, true, true, false),
+        (AdmissionHandoffPhase::ForwardOverlap, HandoffState::IncompleteEpoch, true, false, true, true, false),
+        (AdmissionHandoffPhase::ForwardOverlap, HandoffState::ForwardOverlap, true, true, true, true, true),
+        (AdmissionHandoffPhase::InvocationPrimary, HandoffState::IncompleteEpoch, false, false, true, true, false),
+        (AdmissionHandoffPhase::InvocationPrimary, HandoffState::InvocationPrimary, false, true, false, true, true),
+        (AdmissionHandoffPhase::RollbackOverlap, HandoffState::IncompleteEpoch, false, false, true, true, false),
+        (AdmissionHandoffPhase::RollbackOverlap, HandoffState::IncompleteEpoch, true, false, true, true, false),
+        (AdmissionHandoffPhase::RollbackOverlap, HandoffState::RollbackOverlap, true, true, true, true, true),
+        (AdmissionHandoffPhase::EmergencyPrimary, HandoffState::IncompleteEpoch, false, false, true, false, false),
+    ]
+    .map(|(phase, state, emergency_acknowledged, invocation_acknowledged, emergency_enforcing, invocation_enforcing, advance_allowed)| HandoffMatrixExpectation {
+        phase, state, emergency_acknowledged, invocation_acknowledged, emergency_enforcing, invocation_enforcing,
+        legal_next: handoff_next(phase), advance_allowed,
+    });
     let actions = [
         HandoffMatrixAction::Acknowledge(AdmissionHandoffAuthority::Emergency),
         HandoffMatrixAction::Commit(AdmissionHandoffPhase::ForwardOverlap),
@@ -950,9 +987,12 @@ async fn handoff_crash_matrix_preserves_authority_and_epoch_guards() {
         HandoffMatrixAction::Acknowledge(AdmissionHandoffAuthority::Invocation),
         HandoffMatrixAction::Commit(AdmissionHandoffPhase::EmergencyPrimary),
     ];
-    for action in actions {
-        // Crash immediately before and after each durable acknowledgement/commit.
-        assert_handoff_restart_snapshot(&repo).await;
+    for (index, expected) in expectations.into_iter().enumerate() {
+        // Crash/restart before every action and, on the next iteration, after it.
+        assert_handoff_restart_snapshot(&repo, expected).await;
+        let Some(action) = actions.get(index).copied() else {
+            continue;
+        };
         let before = repo.read().await.unwrap().unwrap();
         match action {
             HandoffMatrixAction::Acknowledge(authority) => {
@@ -963,7 +1003,6 @@ async fn handoff_crash_matrix_preserves_authority_and_epoch_guards() {
                 repo.advance(before.epoch, next).await.unwrap();
             }
         }
-        assert_handoff_restart_snapshot(&repo).await;
     }
 
     let current = repo.read().await.unwrap().unwrap();
@@ -1011,6 +1050,21 @@ async fn handoff_crash_matrix_preserves_authority_and_epoch_guards() {
                 unexpected_overlap: 1,
                 ..HandoffWarningGauges::default()
             },
+        ),
+        (
+            "emergency primary overlap",
+            Ok(Some(djinn_db::AdmissionHandoffRow { phase: AdmissionHandoffPhase::EmergencyPrimary, epoch: 9, emergency_ack_epoch: Some(9), invocation_ack_epoch: None, updated_at: "test".into() })),
+            true, true, HandoffWarningGauges { unexpected_overlap: 1, ..HandoffWarningGauges::default() },
+        ),
+        (
+            "invocation primary overlap",
+            Ok(Some(djinn_db::AdmissionHandoffRow { phase: AdmissionHandoffPhase::InvocationPrimary, epoch: 9, emergency_ack_epoch: None, invocation_ack_epoch: Some(9), updated_at: "test".into() })),
+            true, true, HandoffWarningGauges { unexpected_overlap: 1, ..HandoffWarningGauges::default() },
+        ),
+        (
+            "recovered emergency primary",
+            Ok(Some(djinn_db::AdmissionHandoffRow { phase: AdmissionHandoffPhase::EmergencyPrimary, epoch: 9, emergency_ack_epoch: Some(9), invocation_ack_epoch: None, updated_at: "test".into() })),
+            true, false, HandoffWarningGauges::default(),
         ),
         (
             "valid overlap",
@@ -1116,6 +1170,16 @@ async fn concurrent_invocation_children_share_parent_observation_without_v0_occu
         1,
         "three simultaneously acquired invocation leases never double-count parent occupancy"
     );
+    assert_eq!(
+        controller.journal().list_history(AdmissionDomain::TaskObservation, "shared-identity").await.unwrap().len(),
+        1,
+        "same work identity retains its parent observation view while children coexist"
+    );
+    assert_eq!(
+        controller.journal().list_history(AdmissionDomain::InvocationBuild, "shared-identity").await.unwrap().len(),
+        1,
+        "same work identity retains its invocation view while the parent is held"
+    );
     for (child, permit) in children {
         controller
             .transition(&permit, WarmAdmissionTransition::CreateStarted)
@@ -1158,6 +1222,11 @@ async fn concurrent_invocation_children_share_parent_observation_without_v0_occu
             .unwrap(),
         1,
         "child release cannot release or collide with the parent observation"
+    );
+    assert_eq!(
+        controller.journal().list_history(AdmissionDomain::TaskObservation, "shared-identity").await.unwrap().len(),
+        1,
+        "releasing the same-identity child cannot replace the parent view"
     );
     controller
         .transition(
