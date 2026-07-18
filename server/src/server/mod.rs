@@ -14,6 +14,9 @@ use crate::sse;
 
 mod agents;
 mod auth;
+#[cfg(any(test, feature = "test-support"))]
+pub mod chat;
+#[cfg(not(any(test, feature = "test-support")))]
 mod chat;
 mod debug;
 mod github_install;
