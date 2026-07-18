@@ -3,6 +3,7 @@ use crate::finalize_types::{
     SubmitWork,
 };
 use crate::host::SlotContext;
+use crate::output_parser::CompletionIntent;
 use djinn_core::events::DjinnEventEnvelope;
 use djinn_db::TaskRepository;
 use djinn_db::repositories::task_run::TaskRunRepository;
@@ -41,7 +42,7 @@ pub async fn process_finalize_payload_with_outcome(
 ) -> bool {
     let Some(payload) = payload else { return true };
     match finalize_tool_name {
-        "submit_work" => handle_submit_work(payload, task_id, app_state, true).await,
+        "submit_work" => handle_submit_work(payload, task_id, app_state, true, None).await,
         "submit_review" => {
             handle_submit_review(payload, task_id, app_state).await;
             true
@@ -64,12 +65,44 @@ pub async fn process_finalize_payload_with_outcome(
     }
 }
 
+pub async fn process_completion_intent_with_outcome(
+    intent: &CompletionIntent,
+    finalize_tool_name: &str,
+    task_id: &str,
+    app_state: &SlotContext,
+) -> bool {
+    match finalize_tool_name {
+        "submit_work" => match intent.final_verification_evidence.as_ref() {
+            Some(evidence) => {
+                handle_submit_work(
+                    &intent.finalize_payload,
+                    task_id,
+                    app_state,
+                    true,
+                    Some(evidence),
+                )
+                .await
+            }
+            None => false,
+        },
+        _ => {
+            process_finalize_payload_with_outcome(
+                &Some(intent.finalize_payload.clone()),
+                finalize_tool_name,
+                task_id,
+                app_state,
+            )
+            .await
+        }
+    }
+}
+
 pub async fn process_auto_submit_payload(
     payload: &serde_json::Value,
     task_id: &str,
     app_state: &SlotContext,
 ) -> bool {
-    handle_submit_work(payload, task_id, app_state, false).await
+    handle_submit_work(payload, task_id, app_state, false, None).await
 }
 
 /// Persist a budget-park handoff summary using the same payload shape as
@@ -130,6 +163,9 @@ pub(crate) async fn handle_submit_work(
     task_id: &str,
     app_state: &SlotContext,
     model_called_submit_work: bool,
+    final_verification_evidence: Option<
+        &crate::final_verification::FinalVerificationSuccessEvidence,
+    >,
 ) -> bool {
     let work = match serde_json::from_value::<SubmitWork>(payload.clone()) {
         Ok(w) => w,
@@ -148,6 +184,7 @@ pub(crate) async fn handle_submit_work(
         "summary": work.summary,
         "files_changed": work.files_changed,
         "remaining_concerns": work.remaining_concerns,
+        "final_verification_evidence": final_verification_evidence,
     })
     .to_string();
     let repo = TaskRepository::new(app_state.db.clone(), app_state.event_bus.clone());

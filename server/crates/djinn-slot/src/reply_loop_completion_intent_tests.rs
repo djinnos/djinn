@@ -5,8 +5,9 @@
 //! branch (stored, ineligible, error) is testable deterministically without
 //! requiring the production hermetic launcher.
 //!
-//! No verify-run cache lookup or C1/C2 reuse check is exercised — those are
-//! owned by sibling epic `0i1s`.
+//! Repository-backed reuse consultation is covered separately; this module
+//! verifies that both stored and reused success evidence survive the reply-loop
+//! completion-intent boundary unchanged.
 
 use std::collections::VecDeque;
 use std::future::Future;
@@ -290,20 +291,50 @@ async fn run_with_provider(
 // Tests
 // ---------------------------------------------------------------------------
 
+fn stored_evidence() -> FinalVerificationSuccessEvidence {
+    FinalVerificationSuccessEvidence {
+        persisted_run_id: "persisted-stored".into(),
+        completed_at: "2025-01-01T00:00:00Z".into(),
+        ordered_commands: serde_json::json!([
+            {"command": "cargo fmt --check", "ordinal": 0},
+            {"command": "cargo test -p djinn-slot", "ordinal": 1}
+        ]),
+        covered_checks: serde_json::json!(["format", "slot-tests"]),
+        required_checks: vec!["format".into(), "slot-tests".into()],
+        verification_input_fingerprint: "stored-complete-fingerprint".into(),
+        manifest_version: "manifest-v1".into(),
+        environment_identity_digest: "stored-environment-digest".into(),
+    }
+}
+
+fn reused_evidence() -> FinalVerificationSuccessEvidence {
+    FinalVerificationSuccessEvidence {
+        persisted_run_id: "persisted-reused".into(),
+        completed_at: "2025-02-02T03:04:05Z".into(),
+        ordered_commands: serde_json::json!([
+            {"command": "cargo clippy -p djinn-slot --lib --no-deps", "ordinal": 0},
+            {"command": "cargo clippy -p djinn-agent --lib --no-deps", "ordinal": 1}
+        ]),
+        covered_checks: serde_json::json!(["slot-clippy", "agent-clippy"]),
+        required_checks: vec!["slot-clippy".into(), "agent-clippy".into()],
+        verification_input_fingerprint: "reused-complete-fingerprint".into(),
+        manifest_version: "manifest-v2".into(),
+        environment_identity_digest: "reused-environment-digest".into(),
+    }
+}
+
 fn stored() -> FinalVerificationRecordingOutcome {
     FinalVerificationRecordingOutcome::Stored {
         verification_attempt_id: "attempt-stored".into(),
         verify_run_id: "run-stored".into(),
-        evidence: Box::new(FinalVerificationSuccessEvidence {
-            persisted_run_id: "persisted-stored".into(),
-            completed_at: "2025-01-01T00:00:00Z".into(),
-            ordered_commands: serde_json::json!([]),
-            covered_checks: serde_json::json!([]),
-            required_checks: vec![],
-            verification_input_fingerprint: "fingerprint".into(),
-            manifest_version: "manifest-v1".into(),
-            environment_identity_digest: "identity".into(),
-        }),
+        evidence: Box::new(stored_evidence()),
+    }
+}
+
+fn reused() -> FinalVerificationRecordingOutcome {
+    FinalVerificationRecordingOutcome::Reused {
+        verification_attempt_id: "attempt-reused".into(),
+        evidence: Box::new(reused_evidence()),
     }
 }
 
@@ -387,6 +418,46 @@ async fn stored_verification_forwards_original_payload_exactly_once() {
         .expect("valid payload reached completion-intent verification");
     assert_eq!(intent.finalize_payload, expected);
     assert_eq!(intent.tool_use_id, "submit-1");
+    assert_eq!(intent.final_verification_evidence, Some(stored_evidence()));
+    assert!(error_ids(&conversation).is_empty());
+}
+
+#[tokio::test]
+async fn reused_verification_forwards_complete_evidence_on_completion_intent() {
+    let fixture = make_fixture(vec![reused()]).await;
+    let expected_payload = serde_json::json!({
+        "task_id": fixture.task_id,
+        "commit_title": "complete reused verification",
+        "summary": "reused verification",
+    });
+    let provider = FakeProvider::script(vec![submit_turn(
+        "submit-reused",
+        &fixture.task_id,
+        "reused verification",
+    )]);
+    let mut conversation = base_conversation();
+    let (result, output, _, _, _, _) = run_with_provider(
+        &provider,
+        &[dummy_tool_schema("submit_work")],
+        &mut conversation,
+        &fixture.slot_ctx,
+        &fixture.project_path,
+        &fixture.task_id,
+        &fixture.session_id,
+        &fixture.cancel,
+    )
+    .await;
+
+    assert!(result.is_ok());
+    assert_eq!(fixture.callbacks.coordinator_count(), 1);
+    assert_eq!(output.finalize_payload.as_ref(), Some(&expected_payload));
+    assert_eq!(output.finalize_tool_name.as_deref(), Some("submit_work"));
+    let intent = output
+        .completion_intent
+        .expect("reused verification reached the completion-intent output");
+    assert_eq!(intent.finalize_payload, expected_payload);
+    assert_eq!(intent.tool_use_id, "submit-reused");
+    assert_eq!(intent.final_verification_evidence, Some(reused_evidence()));
     assert!(error_ids(&conversation).is_empty());
 }
 
