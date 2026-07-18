@@ -154,6 +154,9 @@ spec:
             # migrate-only never serves HTTP/UI — skip the embedded-asset probe.
             - name: DJINN_UI_ENABLED
               value: "false"
+            # Keep allocator behavior identical to the application server.
+            - name: MALLOC_CONF
+              value: {{ $server.mallocConf | quote }}
           resources:
             {{- toYaml .Values.resources.server | nindent 12 }}
       containers:
@@ -185,6 +188,10 @@ spec:
                   name: {{ .Values.database.existingSecret | quote }}
                   key: url
             {{- end }}
+            # Shared with migrate-only so all djinn-server invocations use the
+            # operator-selected jemalloc configuration.
+            - name: MALLOC_CONF
+              value: {{ $server.mallocConf | quote }}
             # HTTP bind port — must match `service.apiPort`. The binary's
             # CLI default is 8372 (legacy local-dev), so we have to pin it
             # here or the readiness probe would never pass.
