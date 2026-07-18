@@ -17,6 +17,7 @@ pub(crate) struct ParsedAgentOutput {
     /// Name of the finalize tool that was actually called (e.g. `"submit_work"`,
     /// `"request_planner"`). Set alongside `finalize_payload`.
     pub finalize_tool_name: Option<String>,
+    pub completion_intent: Option<djinn_slot::output_parser::CompletionIntent>,
     /// Text-only handoff captured after a budget-triggered wind-down directive.
     /// This is intentionally separate from normal assistant text so settlement
     /// can park the run and persist an extractor-compatible `work_submitted`
@@ -43,6 +44,7 @@ impl ParsedAgentOutput {
             reviewer_feedback: None,
             finalize_payload: None,
             finalize_tool_name: None,
+            completion_intent: None,
             budget_wind_down_summary: None,
             budget_wind_down_details: None,
         }

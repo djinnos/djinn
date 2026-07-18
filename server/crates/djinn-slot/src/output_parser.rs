@@ -8,11 +8,15 @@ use djinn_core::auto_submit_decision::{
 };
 use djinn_core::models::VerifyRunRecord;
 
+use crate::final_verification::FinalVerificationSuccessEvidence;
+
 /// Validated worker completion awaiting authoritative verification.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CompletionIntent {
     pub finalize_payload: serde_json::Value,
     pub tool_use_id: String,
+    /// Complete proof accepted at the authoritative completion boundary.
+    pub final_verification_evidence: Option<FinalVerificationSuccessEvidence>,
 }
 
 impl CompletionIntent {
@@ -22,6 +26,7 @@ impl CompletionIntent {
         Self {
             finalize_payload: serde_json::Value::Null,
             tool_use_id: format!("auto-submit:{task_run_id}"),
+            final_verification_evidence: None,
         }
     }
 }
