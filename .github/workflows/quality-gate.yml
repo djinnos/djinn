@@ -194,19 +194,29 @@ jobs:
           echo "::notice::cache-family=server-quality shared-key=server-quality cache-hit=${{ steps.rust-cache.outputs.cache-hit }}"
       - name: Build workspace (populate cache)
         run: cargo clippy --all-targets --features qdrant -- -D warnings
-  cache-warm-x86_64-test:
-    name: Cache Warm x86_64 (Test)
+  # The server-test cache family is arm64: the test lane (planner, shards,
+  # qa-smoke) runs on GitHub's free-for-public-repos ubuntu-24.04-arm
+  # runners (4 vCPU Cobalt 100, measurably faster than the x64 hosted
+  # tier). workflow_dispatch is a supported warm route so the arm cache
+  # can be (re)seeded on demand — e.g. from a branch before a runner
+  # migration lands — not just on main pushes. The push-only admission
+  # delay lives inline as a step because a `needs: main-admission` edge
+  # would auto-skip this job on dispatch (skipped dependency).
+  cache-warm-arm64-test:
+    name: Cache Warm arm64 (Test)
     needs:
       - preflight
-      - main-admission
-    if: github.event_name == 'push' && needs.preflight.outputs.serverTest == 'true'
-    runs-on: ubuntu-latest
+    if: (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && needs.preflight.outputs.serverTest == 'true'
+    runs-on: ubuntu-24.04-arm
     defaults:
       run:
         working-directory: server
     env:
       SQLX_OFFLINE: "true"
     steps:
+      - name: Main admission delay
+        if: github.event_name == 'push'
+        run: sleep 90
       - uses: actions/checkout@v4
       - run: rustup toolchain install
         working-directory: server
@@ -458,7 +468,7 @@ jobs:
     name: Plan Server Test Shards
     needs: preflight
     if: needs.preflight.outputs.serverTest == 'true' && github.event_name != 'push'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04-arm
     outputs:
       matrix: ${{ steps.plan.outputs.matrix }}
       coldStart: ${{ steps.plan.outputs.coldStart }}
@@ -631,7 +641,7 @@ jobs:
     needs:
       - preflight
     if: needs.preflight.outputs.serverTest == 'true' && github.event_name != 'push'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04-arm
     strategy:
       fail-fast: false
       matrix:
@@ -1100,7 +1110,7 @@ jobs:
     name: qa-smoke
     needs: preflight
     if: needs.preflight.outputs.qaSmoke == 'true' && (github.event_name == 'pull_request' || github.event_name == 'merge_group' || github.event_name == 'workflow_dispatch')
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04-arm
     defaults:
       run:
         working-directory: server
