@@ -11,6 +11,7 @@ pub mod logging;
 mod mcp_bridge;
 pub mod mirror_fetcher;
 pub mod server;
+pub mod server_memory;
 pub mod sse;
 
 #[cfg(test)]
