@@ -3766,7 +3766,7 @@ mod build_admission_config_tests {
 
     #[test]
     fn handoff_warning_logging_carries_startup_state_into_the_persistent_loop() {
-        let start = Instant::now();
+        let start = SystemClockTrait::new().now_instant();
         let mut startup_state = HandoffWarningLogState::default();
         assert_eq!(
             startup_state.observe_startup(start, Some(HandoffWarningReason::UnexpectedOverlap)),
