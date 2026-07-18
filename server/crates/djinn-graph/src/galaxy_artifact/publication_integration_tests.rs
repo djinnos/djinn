@@ -4,6 +4,7 @@
 //! Postgres. It never uses producer-calculated hashes as the assertion oracle.
 
 use std::io::Read;
+use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 use djinn_db::repositories::repo_graph_generation::ReservedPublicationFailureStage;
@@ -12,12 +13,14 @@ use djinn_db::{
     RepoGraphCacheRepository, RepoGraphGenerationRepository, ReservedGalaxyArtifactChunk,
     ReservedGalaxyArtifactManifest, ReservedGraphPublication,
 };
+use protobuf::{EnumOrUnknown, Message};
+use scip::types::{Document, Index, Occurrence, SymbolInformation, symbol_information};
 use sha2::{Digest, Sha256};
 use sqlx::{Row, postgres::PgRow};
 
 use super::{
-    ArtifactSizeCap, GalaxyArtifact, GalaxyArtifactError, GalaxyArtifactInput,
-    GalaxySnapshotPayload, GenerationId, build_galaxy_artifact,
+    ArtifactSizeCap, GalaxyArtifact, GalaxyArtifactError, GalaxyArtifactInput, GenerationId,
+    build_galaxy_artifact,
 };
 
 const PROJECT: &str = "full-warm-publication-regression";
@@ -64,24 +67,158 @@ async fn fresh() -> (Database, RepoGraphGenerationRepository) {
     (db, repo)
 }
 
-fn build_artifact(id: GenerationId, cap: ArtifactSizeCap) -> GalaxyArtifact {
-    let graph = crate::test_helpers::td55_equivalence_fixture_graph();
-    build_galaxy_artifact(GalaxyArtifactInput {
-        graph: &graph,
-        project_id: PROJECT.to_owned(),
-        git_head: "full-warm-commit".to_owned(),
-        generated_at: "2026-07-18T00:00:00Z".to_owned(),
-        generation_id: id,
-        size_cap: cap,
-    })
-    .expect("deterministic small full-warm artifact")
+struct EnvVarGuard {
+    key: &'static str,
+    previous: Option<std::ffi::OsString>,
 }
 
-fn publication(artifact: &GalaxyArtifact) -> ReservedGraphPublication {
+impl EnvVarGuard {
+    fn set(key: &'static str, value: impl AsRef<std::ffi::OsStr>) -> Self {
+        let previous = std::env::var_os(key);
+        // `run_real_full_warm` holds the shared pipeline lock for this whole
+        // process-environment mutation and its spawned indexer subprocess.
+        unsafe { std::env::set_var(key, value) };
+        Self { key, previous }
+    }
+}
+
+impl Drop for EnvVarGuard {
+    fn drop(&mut self) {
+        unsafe {
+            match self.previous.take() {
+                Some(previous) => std::env::set_var(self.key, previous),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
+}
+
+fn write_fake_rust_analyzer(tmp: &Path) -> (PathBuf, PathBuf) {
+    let fixture_path = tmp.join("fixture.scip");
+    let mut document = Document::new();
+    document.relative_path = "src/lib.rs".to_string();
+    document.language = "rust".to_string();
+    document.occurrences = vec![Occurrence {
+        range: vec![0, 7, 13],
+        symbol: "scip-rust full-warm src/lib.rs `answer`().".to_string(),
+        symbol_roles: scip::types::SymbolRole::Definition as i32,
+        ..Occurrence::new()
+    }];
+    document.symbols = vec![SymbolInformation {
+        symbol: "scip-rust full-warm src/lib.rs `answer`().".to_string(),
+        display_name: "answer".to_string(),
+        kind: EnumOrUnknown::new(symbol_information::Kind::Function),
+        ..SymbolInformation::new()
+    }];
+    let mut index = Index::new();
+    index.documents = vec![document];
+    std::fs::write(
+        &fixture_path,
+        index.write_to_bytes().expect("encode SCIP fixture"),
+    )
+    .expect("write SCIP fixture");
+
+    let fake_bin = tmp.join("fake-bin");
+    std::fs::create_dir_all(&fake_bin).expect("create fake indexer bin dir");
+    let script_path = fake_bin.join("rust-analyzer");
+    std::fs::write(
+        &script_path,
+        r#"#!/bin/sh
+set -eu
+out=""
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "--output" ]; then shift; out="$1"; fi
+  shift || true
+done
+mkdir -p "$(dirname "$out")"
+cp "$DJINN_TEST_SCIP_FIXTURE" "$out"
+"#,
+    )
+    .expect("write fake rust-analyzer");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut permissions = std::fs::metadata(&script_path)
+            .expect("fake rust-analyzer metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&script_path, permissions).expect("chmod fake rust-analyzer");
+    }
+    (fake_bin, fixture_path)
+}
+
+/// Exercise the source-bearing warm path end-to-end. This includes the real
+/// reservation, producer inputs, graph-blob selection, manifest conversion,
+/// and warmer publication call; assertions below only inspect stored rows.
+#[allow(clippy::await_holding_lock)]
+async fn run_real_full_warm(db: &Database) -> (String, Vec<u8>) {
+    let _env_lock = crate::test_helpers::lock_pipeline_env();
+    crate::canonical_graph::clear_test_caches().await;
+    let temp = crate::test_helpers::workspace_tempdir("full-warm-publication-");
+    let project_root = temp.path().join("repo");
+    std::fs::create_dir_all(project_root.join("src")).expect("create source fixture");
+    std::fs::write(
+        project_root.join("Cargo.toml"),
+        "[package]\nname = \"full_warm_fixture\"\nversion = \"0.1.0\"\nedition = \"2024\"\n[workspace]\n",
+    )
+    .expect("write fixture manifest");
+    std::fs::write(
+        project_root.join("src/lib.rs"),
+        "pub fn answer() -> u32 { 42 }\n",
+    )
+    .expect("write fixture source");
+    for args in [
+        vec!["init", "-q", "-b", "main"],
+        vec!["config", "user.email", "full-warm@test"],
+        vec!["config", "user.name", "full warm"],
+        vec!["add", "Cargo.toml", "src/lib.rs"],
+        vec!["commit", "-q", "-m", "full warm fixture"],
+    ] {
+        let output = djinn_git::run_git_command_in(
+            &project_root,
+            args.into_iter().map(str::to_owned).collect(),
+        )
+        .await
+        .expect("run fixture git command");
+        assert_eq!(output.code, 0, "fixture git command failed: {output:?}");
+    }
+    let (fake_bin, fixture_path) = write_fake_rust_analyzer(temp.path());
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    let joined_path =
+        std::env::join_paths(std::iter::once(fake_bin).chain(std::env::split_paths(&path)))
+            .expect("join PATH with fake rust-analyzer");
+    let _path = EnvVarGuard::set("PATH", joined_path);
+    let _fixture = EnvVarGuard::set("DJINN_TEST_SCIP_FIXTURE", fixture_path);
+
+    let context = crate::test_helpers::TestWarmContext::new(db.clone());
+    let result = crate::canonical_graph::ensure_canonical_graph(
+        &context,
+        PROJECT,
+        &project_root,
+        crate::architect::ArchitectWarmToken::for_tests(),
+    )
+    .await;
+    assert!(result.is_ok(), "real full warm failed: {result:?}");
+    let commit_sha = djinn_git::head_commit_sha(&project_root)
+        .await
+        .expect("resolve full-warm fixture HEAD");
+    let graph_blob = RepoGraphCacheRepository::new(db.clone())
+        .get(PROJECT, &commit_sha)
+        .await
+        .expect("read warmer graph blob")
+        .expect("real full-warm cache row")
+        .graph_blob;
+    crate::canonical_graph::clear_test_caches().await;
+    (commit_sha, graph_blob)
+}
+
+// Failure-stage injection is a repository seam by design; the successful
+// publication assertions exercise the real warmer through `run_real_full_warm`.
+fn failure_publication(artifact: &GalaxyArtifact) -> ReservedGraphPublication {
     let generation_id = artifact.generation_id.as_str();
     ReservedGraphPublication {
         project_id: PROJECT.to_owned(),
-        commit_sha: "full-warm-commit".to_owned(),
+        commit_sha: "injected-failure".to_owned(),
         generation_id: generation_id.clone(),
         graph_blob: crate::test_helpers::td55_equivalence_fixture_artifact_blob(),
         artifact: ReservedGalaxyArtifactManifest {
@@ -106,6 +243,19 @@ fn publication(artifact: &GalaxyArtifact) -> ReservedGraphPublication {
             })
             .collect(),
     }
+}
+
+fn build_failure_artifact() -> GalaxyArtifact {
+    let graph = crate::test_helpers::td55_equivalence_fixture_graph();
+    build_galaxy_artifact(GalaxyArtifactInput {
+        graph: &graph,
+        project_id: PROJECT.to_owned(),
+        git_head: "injected-failure".to_owned(),
+        generated_at: "2026-07-18T00:00:00Z".to_owned(),
+        generation_id: GenerationId::new(uuid::Uuid::now_v7()).expect("UUIDv7 generation"),
+        size_cap: ArtifactSizeCap::default(),
+    })
+    .expect("failure-stage artifact")
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -137,14 +287,10 @@ fn row_string(row: &PgRow, name: &str) -> String {
 async fn full_warm_publishes_one_identity_and_stored_artifact_recomputes_independently() {
     let _serial = database_lock().lock().await;
     let (db, repo) = fresh().await;
-    let id = GenerationId::new(uuid::Uuid::now_v7()).unwrap();
-    let artifact = build_artifact(id, ArtifactSizeCap::default());
-    let expected_id = artifact.generation_id.as_str();
-    repo.publish_reserved_generation(publication(&artifact))
-        .await
-        .expect("publish full warm");
+    let (commit_sha, _) = run_real_full_warm(&db).await;
 
-    let compatibility = sqlx::query("SELECT generation_id::text AS generation_id FROM repo_graph_cache WHERE project_id=$1 AND commit_sha='full-warm-commit'").bind(PROJECT).fetch_one(db.pool()).await.unwrap();
+    let compatibility = sqlx::query("SELECT generation_id::text AS generation_id FROM repo_graph_cache WHERE project_id=$1 AND commit_sha=$2").bind(PROJECT).bind(&commit_sha).fetch_one(db.pool()).await.unwrap();
+    let expected_id = row_string(&compatibility, "generation_id");
     let generation = repo
         .generation_by_id(&expected_id)
         .await
@@ -166,7 +312,7 @@ async fn full_warm_publishes_one_identity_and_stored_artifact_recomputes_indepen
     assert_eq!(current, expected_id);
     assert_eq!(row_string(&metadata, "artifact_id"), expected_id);
     assert_eq!(row_string(&metadata, "generation_id"), expected_id);
-    assert_eq!(chunks.len(), artifact.spool.chunks.len());
+    assert_eq!(chunks.len(), metadata.get::<i32, _>("chunk_count") as usize);
 
     let mut compressed = Vec::new();
     let mut manifest_hashes = Vec::new();
@@ -205,14 +351,17 @@ async fn full_warm_publishes_one_identity_and_stored_artifact_recomputes_indepen
         row_string(&metadata, "graph_content_hash")
     );
     assert!(!object.contains_key("transport_sha256"));
-    // Rebuild the semantic wire model from the decompressed stored JSON rather
-    // than consuming the producer's retained hash-input bytes.
-    let mut semantic: GalaxySnapshotPayload = serde_json::from_slice(&payload).unwrap();
-    semantic.graph_content_hash = None;
-    assert_eq!(
-        sha256(&serde_json::to_vec(&semantic).unwrap()),
-        row_string(&metadata, "graph_content_hash")
-    );
+    // Rebuild canonical semantic JSON from the decompressed stored payload,
+    // never from producer-retained hash-input bytes. The canonical wire order
+    // is part of the hash domain, so remove exactly the one hash member from
+    // validated stored JSON rather than reordering its objects via a map.
+    let stored_hash = row_string(&metadata, "graph_content_hash");
+    let hash_member = format!("\"graph_content_hash\":\"{stored_hash}\",");
+    let canonical_semantic = std::str::from_utf8(&payload)
+        .expect("stored payload UTF-8")
+        .replacen(&hash_member, "", 1);
+    assert_ne!(canonical_semantic, std::str::from_utf8(&payload).unwrap());
+    assert_eq!(sha256(canonical_semantic.as_bytes()), stored_hash);
 }
 
 #[tokio::test]
@@ -248,12 +397,9 @@ async fn full_warm_failures_preserve_previous_pointer_and_every_table() {
         ReservedPublicationFailureStage::FirstChunkInsert,
         ReservedPublicationFailureStage::Commit,
     ] {
-        let artifact = build_artifact(
-            GenerationId::new(uuid::Uuid::now_v7()).unwrap(),
-            ArtifactSizeCap::default(),
-        );
+        let artifact = build_failure_artifact();
         assert!(
-            repo.publish_reserved_generation_with_failure(publication(&artifact), stage)
+            repo.publish_reserved_generation_with_failure(failure_publication(&artifact), stage)
                 .await
                 .is_err()
         );
@@ -269,23 +415,23 @@ async fn full_warm_failures_preserve_previous_pointer_and_every_table() {
 async fn unchanged_old_reader_sees_new_warm_and_unmarked_legacy_advances_artifactless_current() {
     let _serial = database_lock().lock().await;
     let (db, repo) = fresh().await;
-    let artifact = build_artifact(
-        GenerationId::new(uuid::Uuid::now_v7()).unwrap(),
-        ArtifactSizeCap::default(),
-    );
-    let published = publication(&artifact);
-    let blob = published.graph_blob.clone();
-    let generation_id = published.generation_id.clone();
-    repo.publish_reserved_generation(published).await.unwrap();
+    let (commit_sha, blob) = run_real_full_warm(&db).await;
     let old = sqlx::query(OLD_LATEST)
         .bind(PROJECT)
         .fetch_one(db.pool())
         .await
         .unwrap();
     assert_eq!(row_string(&old, "project_id"), PROJECT);
-    assert_eq!(row_string(&old, "commit_sha"), "full-warm-commit");
+    assert_eq!(row_string(&old, "commit_sha"), commit_sha);
     assert_eq!(old.get::<Vec<u8>, _>("graph_blob"), blob);
-    assert_eq!(row_string(&old, "generation_id"), generation_id);
+    let current: String = sqlx::query_scalar(
+        "SELECT generation_id::text FROM repo_graph_current WHERE project_id=$1",
+    )
+    .bind(PROJECT)
+    .fetch_one(db.pool())
+    .await
+    .unwrap();
+    assert_eq!(row_string(&old, "generation_id"), current);
 
     sqlx::query(LEGACY_UPSERT)
         .bind(PROJECT)
