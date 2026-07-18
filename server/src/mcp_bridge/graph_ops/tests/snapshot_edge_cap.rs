@@ -8,6 +8,7 @@ use super::*;
 fn snapshot_caps_drawable_edges_but_keeps_containment() {
     use crate::mcp_bridge::snapshot::SNAPSHOT_DRAWABLE_EDGE_CAP;
     use djinn_control_plane::tools::graph_exclusions::GraphExclusions;
+    use djinn_control_plane::tools::graph_tools::MAX_SNAPSHOT_NODE_CAP;
     use djinn_graph::repo_graph::{
         REPO_GRAPH_ARTIFACT_VERSION, RankedRepoGraphNode, RepoDependencyGraph, RepoGraphArtifact,
         RepoGraphArtifactEdge, RepoGraphEdgeKind, RepoGraphNode, RepoGraphNodeKind,
@@ -115,8 +116,7 @@ fn snapshot_caps_drawable_edges_but_keeps_containment() {
     );
 
     assert_eq!(
-        payload.node_cap,
-        crate::mcp_bridge::snapshot::MAX_SNAPSHOT_NODE_CAP,
+        payload.node_cap, MAX_SNAPSHOT_NODE_CAP,
         "million-node requests report the effective bounded node cap"
     );
 
@@ -151,8 +151,8 @@ fn snapshot_caps_drawable_edges_but_keeps_containment() {
 /// selection budget.
 #[test]
 fn snapshot_caps_million_limit_for_isolated_communities() {
-    use crate::mcp_bridge::snapshot::MAX_SNAPSHOT_NODE_CAP;
     use djinn_control_plane::tools::graph_exclusions::GraphExclusions;
+    use djinn_control_plane::tools::graph_tools::MAX_SNAPSHOT_NODE_CAP;
     use djinn_graph::{
         communities::Community,
         repo_graph::{
