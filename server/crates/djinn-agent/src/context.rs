@@ -234,6 +234,10 @@ pub struct AgentContext {
     /// surface + multi-project planners) where the caller IS expected to
     /// disambiguate.
     pub default_project_id: Option<String>,
+    /// Immutable cross-project shell authority copied from the task-run spec.
+    /// An untrusted child process cannot grant itself another source through
+    /// environment configuration.
+    pub read_source_authorization: ReadSourceAuthorization,
     /// Runtime-owned configuration for the optional session-start memory
     /// planner. Composition roots may inject an enabled value; ordinary
     /// construction keeps the feature disabled.
@@ -261,6 +265,9 @@ pub struct AgentContext {
 pub struct ReadSourceAuthorization {
     pub owner_project_id: Option<String>,
     pub read_source_project_ids: Vec<String>,
+    /// Host-provided root containing this owner's Release N cache. An absent
+    /// root is a fail-closed missing-mount signal; workers never clone it.
+    pub owner_cache_root: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

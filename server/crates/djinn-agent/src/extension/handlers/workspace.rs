@@ -123,48 +123,42 @@ pub(crate) async fn call_shell(
 
     let timeout_ms = effective_shell_timeout_ms(p.timeout_ms, &p.command);
 
-    // Cross-repo shell is authorized by the immutable task-run spec injected by
-    // the host, never by an apparent filesystem path. Release N uses only the
-    // owner project's shared cache; task-local `.djinn-read-sources` is not a
-    // migration input and is never created here.
+    // Cross-repo shell is authorized by immutable task-run data injected into
+    // AgentContext, never by process environment. Workers consume only an
+    // already-mounted owner cache; migration and clone lifecycle are host-only.
     let run_dir: std::path::PathBuf = if let Some(proj) =
         p.project.as_deref().filter(|s| !s.is_empty())
     {
         let repo = ProjectRepository::new(state.db.clone(), state.event_bus.clone());
         match repo.resolve(proj).await.map_err(|e| e.to_string())? {
             Some(pid) if state.default_project_id.as_deref() != Some(pid.as_str()) => {
-                let authorized = std::env::var("DJINN_READ_SOURCE_PROJECT_IDS")
-                    .ok()
-                    .into_iter()
-                    .flat_map(|ids| {
-                        ids.split(',')
-                            .map(str::trim)
-                            .map(str::to_owned)
-                            .collect::<Vec<_>>()
-                    })
-                    .any(|authorized_id| authorized_id == pid);
-                if !authorized {
+                let authorization = &state.read_source_authorization;
+                if !authorization
+                    .read_source_project_ids
+                    .iter()
+                    .any(|authorized_id| authorized_id == &pid)
+                {
                     return Err(format!(
                         "cross-project shell denied: project {pid} is not an authorized read source"
                     ));
                 }
-                let owner_root = std::env::var_os("DJINN_OWNER_PROJECT_ROOT")
-                    .map(std::path::PathBuf::from)
-                    .ok_or_else(|| {
-                        "cross-project shell denied: immutable owner project root is unavailable"
-                            .to_string()
-                    })?;
-                let git_ref = repo
-                    .get_default_branch(&pid)
-                    .await
-                    .ok()
-                    .flatten()
-                    .unwrap_or_else(|| "HEAD".to_string());
+                if authorization.owner_project_id.as_deref() != state.default_project_id.as_deref()
+                {
+                    return Err("cross-project shell denied: immutable owner ID is unavailable or mismatched".into());
+                }
+                let owner_root = authorization.owner_cache_root.as_deref().ok_or_else(|| {
+                    "cross-project shell denied: authorized owner cache is not mounted".to_string()
+                })?;
                 let dest = owner_root
                     .join(".task-runtime")
                     .join("read-sources")
                     .join(&pid);
-                crate::repo_access::materialize_read_source(&pid, &git_ref, &dest).await?;
+                if !dest.is_dir() {
+                    return Err(format!(
+                        "cross-project shell denied: authorized read-source cache is not mounted: {}",
+                        dest.display()
+                    ));
+                }
                 dest
             }
             _ => worktree_path.to_path_buf(),
