@@ -503,6 +503,10 @@ impl BuildAdmissionController {
                     Err(error) => {
                         // Observe is telemetry-only: a journal outage must not become a dispatch denial.
                         tracing::warn!(%error, "build admission observation unavailable; permitting without journal telemetry");
+                        // Surface the live journal failure as a degraded health
+                        // signal even though Observe continues to permit dispatch.
+                        self.mark_journal_unhealthy();
+                        self.publish_metrics().await;
                         return self
                             .permit_without_reservation(key, permit_key, request.object_name)
                             .await;
@@ -771,6 +775,10 @@ impl BuildAdmissionController {
                         Some(value.saturating_sub(1))
                     })
                     .ok();
+                // CreateUnknown resolution changes a bounded health signal;
+                // publish immediately so the gauge reflects the new state
+                // rather than waiting for an unrelated terminal event.
+                self.publish_metrics().await;
             }
         }
         if terminal {
@@ -2102,5 +2110,576 @@ mod tests {
         assert!(!a.is_empty());
         assert!(!b.is_empty());
         assert_ne!(a, b, "each allocated epoch is unique");
+    }
+
+    // ── Build-admission telemetry regression tests ──────────────────────
+    //
+    // The Prometheus recorder is a process-global singleton shared by every
+    // test in the binary. These tests serialize through a static mutex to
+    // avoid cross-test metric interference, and each initializes the recorder
+    // (idempotent) before rendering.
+    static TELEMETRY_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn telemetry_guard() -> std::sync::MutexGuard<'static, ()> {
+        TELEMETRY_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    fn sample_value(rendered: &str, metric: &str, labels: &[(&str, &str)]) -> f64 {
+        let line = rendered
+            .lines()
+            .find(|l| {
+                l.starts_with(metric)
+                    && labels
+                        .iter()
+                        .all(|(k, v)| l.contains(&format!("{k}=\"{v}\"")))
+            })
+            .unwrap_or_else(|| panic!("missing sample {metric}{labels:?} in:\n{rendered}"));
+        line.rsplit_once(' ')
+            .and_then(|(_, v)| v.parse::<f64>().ok())
+            .unwrap_or_else(|| panic!("sample should end with a number: {line}"))
+    }
+
+    fn assert_no_identity_labels(rendered: &str, metric: &str) {
+        for forbidden in ["work_id=", "uid=", "epoch=", "task_id=", "session_id="] {
+            for line in rendered.lines() {
+                if line.starts_with(metric) {
+                    assert!(
+                        !line.contains(forbidden),
+                        "{metric} must not carry identity label {forbidden}: {line}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn telemetry_occupied_gauge_refreshes_on_normal_lifecycle() {
+        let _guard = telemetry_guard();
+        djinn_telemetry::init().unwrap();
+
+        // Starting from zero: the first successfully reserved task must
+        // immediately refresh the occupied gauge — it must not wait for a
+        // later cap denial or terminal release.
+        let c = controller(BuildAdmissionMode::Enforce, 3);
+        c.mark_ready();
+        c.admit_task_run(
+            Some("worker"),
+            AdmissionDomain::TaskObservation,
+            "task-occ".into(),
+            1,
+            "task-job".into(),
+        )
+        .await
+        .unwrap();
+
+        let rendered = djinn_telemetry::render().unwrap();
+        let occupied = sample_value(
+            &rendered,
+            "djinn_build_slots_occupied",
+            &[("effective_mode", "enforce"), ("effective_cap", "3")],
+        );
+        assert_eq!(
+            occupied, 1.0,
+            "occupied gauge must reflect the newly reserved row immediately"
+        );
+        assert_no_identity_labels(&rendered, "djinn_build_slots_occupied");
+    }
+
+    #[tokio::test]
+    async fn telemetry_occupied_gauge_deduplicates_recovered_and_adopted_rows() {
+        let _guard = telemetry_guard();
+        djinn_telemetry::init().unwrap();
+
+        let journal = Arc::new(AdmissionJournalRepository::new(
+            Database::open_in_memory().unwrap(),
+        ));
+        // Seed two predecessor Live rows.
+        for work in ["rec-a", "rec-b"] {
+            journal
+                .reserve(&predecessor_input(work, 0, "old-epoch"), 5)
+                .await
+                .unwrap();
+            journal
+                .mark_create_started(&djinn_db::CreateStartedInput {
+                    key: djinn_db::AdmissionJournalKey {
+                        domain: AdmissionDomain::WarmBuild,
+                        work_id: work.into(),
+                        generation: 0,
+                    },
+                    creator_server_epoch: "old-epoch".into(),
+                    object_name: format!("warm-{work}-0"),
+                })
+                .await
+                .unwrap();
+            journal
+                .mark_live(&djinn_db::UidFencedAdmissionInput {
+                    key: djinn_db::AdmissionJournalKey {
+                        domain: AdmissionDomain::WarmBuild,
+                        work_id: work.into(),
+                        generation: 0,
+                    },
+                    object_uid: format!("uid-{work}"),
+                })
+                .await
+                .unwrap();
+        }
+        let controller =
+            BuildAdmissionController::new_closed(Arc::clone(&journal), 64, "replacement-epoch");
+        controller
+            .recover_all_predecessors_and_seed()
+            .await
+            .unwrap();
+
+        let rendered = djinn_telemetry::render().unwrap();
+        let occupied = sample_value(
+            &rendered,
+            "djinn_build_slots_occupied",
+            &[("effective_mode", "enforce"), ("effective_cap", "64")],
+        );
+        assert_eq!(
+            occupied, 2.0,
+            "recovered occupancy must be exported at startup"
+        );
+    }
+
+    #[tokio::test]
+    async fn telemetry_off_mode_reports_no_occupancy() {
+        let _guard = telemetry_guard();
+        djinn_telemetry::init().unwrap();
+
+        let c = controller(BuildAdmissionMode::Off, 0);
+        c.publish_metrics().await;
+
+        let rendered = djinn_telemetry::render().unwrap();
+        let occupied = sample_value(
+            &rendered,
+            "djinn_build_slots_occupied",
+            &[("effective_mode", "off"), ("effective_cap", "0")],
+        );
+        assert_eq!(occupied, 0.0, "Off must report zero occupancy");
+        let queued = sample_value(
+            &rendered,
+            "djinn_build_slots_queued",
+            &[("effective_mode", "off"), ("effective_cap", "0")],
+        );
+        assert_eq!(queued, 0.0, "Off must report zero queued");
+    }
+
+    #[tokio::test]
+    async fn telemetry_unknown_classification_counter_increments() {
+        let _guard = telemetry_guard();
+        djinn_telemetry::init().unwrap();
+
+        let c = controller(BuildAdmissionMode::Enforce, 3);
+        c.mark_ready();
+        // A NonBuild request with an empty audit reason triggers unknown
+        // classification.
+        let decision = c
+            .admit(BuildAdmissionRequest {
+                domain: AdmissionDomain::TaskObservation,
+                work_id: "unknown".into(),
+                generation: 0,
+                object_name: "obj".into(),
+                kind: BuildWorkloadKind::NonBuild { audit_reason: "" },
+            })
+            .await
+            .unwrap();
+        assert_eq!(decision, BuildAdmissionDecision::Unclassified);
+
+        let rendered = djinn_telemetry::render().unwrap();
+        let value = sample_value(
+            &rendered,
+            "djinn_build_admission_unknown_classification_total",
+            &[("effective_mode", "enforce"), ("effective_cap", "3")],
+        );
+        assert!(
+            value >= 1.0,
+            "unknown-classification counter must increment on unclassified admission"
+        );
+        assert_no_identity_labels(
+            &rendered,
+            "djinn_build_admission_unknown_classification_total",
+        );
+    }
+
+    #[tokio::test]
+    async fn telemetry_would_defer_counter_increments_in_observe() {
+        let _guard = telemetry_guard();
+        djinn_telemetry::init().unwrap();
+
+        let c = controller(BuildAdmissionMode::Observe, 1);
+        // First admission succeeds.
+        let _ = WarmAdmission::admit(&c, warm("first")).await.unwrap();
+        // Second admission would exceed the cap (but Observe permits anyway).
+        let _ = WarmAdmission::admit(&c, warm("second")).await.unwrap();
+
+        let rendered = djinn_telemetry::render().unwrap();
+        let value = sample_value(
+            &rendered,
+            "djinn_build_admission_would_defer_total",
+            &[("effective_mode", "observe"), ("effective_cap", "1")],
+        );
+        assert!(
+            value >= 1.0,
+            "would-defer counter must increment when Observe sees a would-defer"
+        );
+    }
+
+    #[tokio::test]
+    async fn telemetry_queued_gauge_increments_on_enforce_deny() {
+        let _guard = telemetry_guard();
+        djinn_telemetry::init().unwrap();
+
+        let c = controller(BuildAdmissionMode::Enforce, 1);
+        c.mark_ready();
+        // Fill the cap.
+        let _ = WarmAdmission::admit(&c, warm("queued-a")).await.unwrap();
+        // The second warm is denied — it becomes a deferred Enforce identity.
+        let denied = WarmAdmission::admit(&c, warm("queued-b")).await;
+        assert!(denied.is_err(), "second warm must be denied at cap 1");
+
+        let rendered = djinn_telemetry::render().unwrap();
+        let queued = sample_value(
+            &rendered,
+            "djinn_build_slots_queued",
+            &[("effective_mode", "enforce"), ("effective_cap", "1")],
+        );
+        assert_eq!(
+            queued, 1.0,
+            "queued gauge must reflect the Enforce-deferred identity"
+        );
+    }
+
+    #[tokio::test]
+    async fn telemetry_queued_decrements_on_release_wakeup() {
+        let _guard = telemetry_guard();
+        djinn_telemetry::init().unwrap();
+
+        let c = controller(BuildAdmissionMode::Enforce, 1);
+        c.mark_ready();
+        let first = WarmAdmission::admit(&c, warm("release-a")).await.unwrap();
+        // Deny a second — queued becomes 1.
+        assert!(WarmAdmission::admit(&c, warm("release-b")).await.is_err());
+
+        // Release the first permit (terminal transition clears the deferred
+        // queue and refreshes the gauge).
+        c.transition(&first, WarmAdmissionTransition::CreateStarted)
+            .await
+            .unwrap();
+        c.transition(&first, WarmAdmissionTransition::Live { uid: "uid".into() })
+            .await
+            .unwrap();
+        c.transition(
+            &first,
+            WarmAdmissionTransition::Terminal { uid: "uid".into() },
+        )
+        .await
+        .unwrap();
+
+        let rendered = djinn_telemetry::render().unwrap();
+        let queued = sample_value(
+            &rendered,
+            "djinn_build_slots_queued",
+            &[("effective_mode", "enforce"), ("effective_cap", "1")],
+        );
+        assert_eq!(
+            queued, 0.0,
+            "queued gauge must clear after terminal release"
+        );
+    }
+
+    #[tokio::test]
+    async fn telemetry_create_unknown_health_resolves_on_adoption() {
+        let _guard = telemetry_guard();
+        djinn_telemetry::init().unwrap();
+
+        let journal = Arc::new(AdmissionJournalRepository::new(
+            Database::open_in_memory().unwrap(),
+        ));
+        // Seed a predecessor CreateInFlight row (will become CreateUnknown).
+        journal
+            .reserve(&predecessor_input("cu", 0, "old-epoch"), 5)
+            .await
+            .unwrap();
+        journal
+            .mark_create_started(&djinn_db::CreateStartedInput {
+                key: djinn_db::AdmissionJournalKey {
+                    domain: AdmissionDomain::WarmBuild,
+                    work_id: "cu".into(),
+                    generation: 0,
+                },
+                creator_server_epoch: "old-epoch".into(),
+                object_name: "warm-cu-0".into(),
+            })
+            .await
+            .unwrap();
+
+        let controller =
+            BuildAdmissionController::new_closed(Arc::clone(&journal), 64, "replacement-epoch");
+        controller
+            .recover_all_predecessors_and_seed()
+            .await
+            .unwrap();
+
+        // After recovery the CreateUnknown health signal must be elevated.
+        let rendered = djinn_telemetry::render().unwrap();
+        let cu_health = sample_value(
+            &rendered,
+            "djinn_build_admission_create_unknown_health",
+            &[("effective_mode", "enforce"), ("effective_cap", "64")],
+        );
+        assert_eq!(
+            cu_health, 1.0,
+            "CreateUnknown health must be elevated after recovery"
+        );
+
+        // Adopting the CreateUnknown row into Live must immediately refresh
+        // the health signal — without waiting for a terminal event.
+        let permit = controller
+            .permit_for_key(AdmissionDomain::WarmBuild, "cu", 0)
+            .await
+            .expect("seeded CreateUnknown permit is addressable");
+        controller
+            .transition(
+                &permit,
+                WarmAdmissionTransition::Live {
+                    uid: "adopted".into(),
+                },
+            )
+            .await
+            .unwrap();
+
+        let rendered = djinn_telemetry::render().unwrap();
+        let cu_health = sample_value(
+            &rendered,
+            "djinn_build_admission_create_unknown_health",
+            &[("effective_mode", "enforce"), ("effective_cap", "64")],
+        );
+        assert_eq!(
+            cu_health, 0.0,
+            "CreateUnknown health must clear immediately after adoption into Live"
+        );
+    }
+
+    #[tokio::test]
+    async fn telemetry_inventory_degraded_surfaces_on_pending_inventory() {
+        let _guard = telemetry_guard();
+        djinn_telemetry::init().unwrap();
+
+        // Use a non-closed controller (journal is healthy by default) and
+        // simulate the post-recovery state where inventory is still pending.
+        let c = controller(BuildAdmissionMode::Enforce, 3);
+        c.mark_ready();
+        c.mark_inventory_pending();
+        c.publish_metrics().await;
+
+        let rendered = djinn_telemetry::render().unwrap();
+        let inv_degraded = sample_value(
+            &rendered,
+            "djinn_build_admission_inventory_degraded",
+            &[("effective_mode", "enforce"), ("effective_cap", "3")],
+        );
+        assert_eq!(
+            inv_degraded, 1.0,
+            "inventory_degraded must be elevated while inventory gate is pending"
+        );
+
+        // Completing inventory must clear the degraded signal.
+        c.mark_inventory_ready();
+        c.publish_metrics().await;
+        let rendered = djinn_telemetry::render().unwrap();
+        let inv_degraded = sample_value(
+            &rendered,
+            "djinn_build_admission_inventory_degraded",
+            &[("effective_mode", "enforce"), ("effective_cap", "3")],
+        );
+        assert_eq!(
+            inv_degraded, 0.0,
+            "inventory_degraded must clear after inventory completes"
+        );
+    }
+
+    #[tokio::test]
+    async fn telemetry_journal_degraded_surfaces_on_unhealthy_journal() {
+        let _guard = telemetry_guard();
+        djinn_telemetry::init().unwrap();
+
+        let c = controller(BuildAdmissionMode::Enforce, 3);
+        c.mark_journal_unhealthy();
+        c.publish_metrics().await;
+
+        let rendered = djinn_telemetry::render().unwrap();
+        let journal_degraded = sample_value(
+            &rendered,
+            "djinn_build_admission_journal_degraded",
+            &[("effective_mode", "enforce"), ("effective_cap", "3")],
+        );
+        assert_eq!(
+            journal_degraded, 1.0,
+            "journal_degraded must be elevated when journal health is marked unhealthy"
+        );
+        assert_no_identity_labels(&rendered, "djinn_build_admission_journal_degraded");
+    }
+
+    #[tokio::test]
+    async fn telemetry_invocation_build_excluded_from_occupied() {
+        let _guard = telemetry_guard();
+        djinn_telemetry::init().unwrap();
+
+        let c = controller(BuildAdmissionMode::Enforce, 3);
+        c.mark_ready();
+        // Reserve an InvocationBuild row — it must not appear in occupied.
+        let _ = c
+            .admit(BuildAdmissionRequest {
+                domain: AdmissionDomain::InvocationBuild,
+                work_id: "inv".into(),
+                generation: 0,
+                object_name: "inv-job".into(),
+                kind: BuildWorkloadKind::TaskRun {
+                    role: TaskRunRole::Worker,
+                },
+            })
+            .await
+            .unwrap();
+        c.publish_metrics().await;
+
+        let rendered = djinn_telemetry::render().unwrap();
+        let occupied = sample_value(
+            &rendered,
+            "djinn_build_slots_occupied",
+            &[("effective_mode", "enforce"), ("effective_cap", "3")],
+        );
+        assert_eq!(
+            occupied, 0.0,
+            "InvocationBuild rows must be excluded from v0 occupied"
+        );
+    }
+
+    #[tokio::test]
+    async fn telemetry_task_and_warm_share_combined_cap() {
+        let _guard = telemetry_guard();
+        djinn_telemetry::init().unwrap();
+
+        let c = controller(BuildAdmissionMode::Enforce, 1);
+        c.mark_ready();
+        // Reserve a task — occupies 1.
+        let task = c
+            .admit_task_run(
+                Some("worker"),
+                AdmissionDomain::TaskObservation,
+                "task-cap".into(),
+                1,
+                "task-job".into(),
+            )
+            .await
+            .unwrap();
+        let BuildAdmissionDecision::Permitted { permit: task, .. } = task else {
+            panic!("task must win the cap-one reservation");
+        };
+        // Warm must be denied — the combined cap is exhausted by the task.
+        let warm_result = WarmAdmission::admit(&c, warm("warm-cap")).await;
+        assert!(
+            warm_result.is_err(),
+            "warm must be denied when the task consumes the combined cap"
+        );
+
+        let rendered = djinn_telemetry::render().unwrap();
+        let occupied = sample_value(
+            &rendered,
+            "djinn_build_slots_occupied",
+            &[("effective_mode", "enforce"), ("effective_cap", "1")],
+        );
+        assert_eq!(
+            occupied, 1.0,
+            "combined cap occupied reflects the task reservation"
+        );
+
+        // Releasing the task frees the combined cap.
+        c.transition(&task, WarmAdmissionTransition::CreateStarted)
+            .await
+            .unwrap();
+        c.transition(
+            &task,
+            WarmAdmissionTransition::Live {
+                uid: "t-uid".into(),
+            },
+        )
+        .await
+        .unwrap();
+        c.transition(
+            &task,
+            WarmAdmissionTransition::Terminal {
+                uid: "t-uid".into(),
+            },
+        )
+        .await
+        .unwrap();
+        let rendered = djinn_telemetry::render().unwrap();
+        let occupied = sample_value(
+            &rendered,
+            "djinn_build_slots_occupied",
+            &[("effective_mode", "enforce"), ("effective_cap", "1")],
+        );
+        assert_eq!(
+            occupied, 0.0,
+            "combined cap must be zero after task terminal release"
+        );
+    }
+
+    #[tokio::test]
+    async fn telemetry_observe_journal_outage_surfaces_journal_degraded() {
+        let _guard = telemetry_guard();
+        djinn_telemetry::init().unwrap();
+
+        let db = Database::open_in_memory().unwrap();
+        db.ensure_initialized().await.unwrap();
+        db.pool().close().await;
+        let c = BuildAdmissionController::new(
+            Arc::new(AdmissionJournalRepository::new(db)),
+            BuildAdmissionMode::Observe,
+            1,
+            "epoch",
+        );
+
+        // An Observe journal failure must permit dispatch (telemetry-only)
+        // but must surface the degradation.
+        assert!(
+            WarmAdmission::admit(&c, warm("journal-down")).await.is_ok(),
+            "Observe journal failures are telemetry-only and must not defer dispatch"
+        );
+
+        let rendered = djinn_telemetry::render().unwrap();
+        let journal_degraded = sample_value(
+            &rendered,
+            "djinn_build_admission_journal_degraded",
+            &[("effective_mode", "observe"), ("effective_cap", "1")],
+        );
+        assert_eq!(
+            journal_degraded, 1.0,
+            "Observe must surface journal degradation on a live journal outage"
+        );
+    }
+
+    #[tokio::test]
+    async fn telemetry_all_health_labels_are_bounded() {
+        let _guard = telemetry_guard();
+        djinn_telemetry::init().unwrap();
+
+        let c = controller(BuildAdmissionMode::Enforce, 5);
+        c.mark_ready();
+        c.publish_metrics().await;
+
+        let rendered = djinn_telemetry::render().unwrap();
+        for metric in [
+            "djinn_build_admission_inventory_degraded",
+            "djinn_build_admission_journal_degraded",
+            "djinn_build_admission_create_unknown_health",
+            "djinn_build_slots_occupied",
+            "djinn_build_slots_queued",
+        ] {
+            assert_no_identity_labels(&rendered, metric);
+        }
     }
 }

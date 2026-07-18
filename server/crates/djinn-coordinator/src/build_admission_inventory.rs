@@ -137,6 +137,7 @@ impl BuildAdmissionReconciler {
             Ok(v) => v,
             Err(e) => {
                 self.controller.mark_inventory_pending();
+                self.controller.publish_metrics().await;
                 return InventoryReport {
                     blockers: vec![e],
                     ..Default::default()
@@ -246,10 +247,17 @@ impl BuildAdmissionReconciler {
                 .controller
                 .seed_from_recovery(&recovery, &mut |_| true)
                 .await;
-            self.controller.mark_inventory_ready()
+            self.controller.mark_inventory_ready();
         } else {
-            self.controller.mark_inventory_pending()
+            self.controller.mark_inventory_pending();
         }
+        // Adoption may have changed durable occupancy (valid live workloads
+        // were adopted into the journal before blockers were decided); refresh
+        // the occupied gauge and health signals regardless of whether blockers
+        // remain. `seed_from_recovery` publishes internally when there are no
+        // blockers, but the blockers branch and any adoption under partial
+        // inventory still need this explicit publication.
+        self.controller.publish_metrics().await;
         out
     }
 }

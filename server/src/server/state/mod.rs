@@ -773,6 +773,7 @@ impl AppState {
                     mode = ?admission.mode(),
                     "build_admission: journal recovery failed; Enforce remains fail-closed"
                 );
+                admission.publish_metrics().await;
             }
         }
     }
@@ -796,6 +797,7 @@ impl AppState {
         let warmer = self.inner.graph_warmer.read().await.clone();
         let Some(warmer) = warmer else {
             admission.mark_inventory_pending();
+            admission.publish_metrics().await;
             tracing::error!(
                 mode = ?admission.mode(),
                 "build_admission: no graph warmer available for inventory; Enforce remains fail-closed"
@@ -805,6 +807,7 @@ impl AppState {
         match warmer.list_taskrun_jobs().await {
             Ok(jobs) => {
                 admission.mark_inventory_ready();
+                admission.publish_metrics().await;
                 tracing::info!(
                     mode = ?admission.mode(),
                     task_run_jobs = jobs.len(),
@@ -814,6 +817,7 @@ impl AppState {
             }
             Err(error) => {
                 admission.mark_inventory_pending();
+                admission.publish_metrics().await;
                 tracing::error!(
                     %error,
                     mode = ?admission.mode(),
@@ -829,9 +833,10 @@ impl AppState {
     /// wins the coordinator advisory lock — the lock IS the single-active
     /// topology gate for build admission. A standby pod never runs this, so
     /// its Enforce admission stays fail-closed with `TopologyPending`.
-    fn confirm_build_admission_topology(&self) {
+    async fn confirm_build_admission_topology(&self) {
         if let Some(admission) = self.inner.build_admission.clone() {
             admission.mark_topology_ready();
+            admission.publish_metrics().await;
             tracing::info!(
                 mode = ?admission.mode(),
                 readiness = ?admission.readiness(),
@@ -850,6 +855,7 @@ impl AppState {
     pub async fn begin_build_admission_draining(&self) {
         if let Some(admission) = self.inner.build_admission.clone() {
             admission.begin_draining();
+            admission.publish_metrics().await;
             tracing::info!(
                 mode = ?admission.mode(),
                 "build_admission: draining begun; new Enforce reservations blocked"
@@ -1877,7 +1883,7 @@ impl AppState {
         // advisory lock is the topology check: only this lock-holding pod may
         // open Enforce admission, so standby pods stay fail-closed with
         // `TopologyPending` (and their dispatch subsystems never start).
-        self.confirm_build_admission_topology();
+        self.confirm_build_admission_topology().await;
 
         let retention_config = ImageControllerConfig::from_env();
         if let Err(error) = self.run_zot_retention_preflight(&retention_config).await {
@@ -3639,7 +3645,7 @@ mod build_admission_config_tests {
 
         // Winning the coordinator advisory lock (single-active topology) is
         // the final gate; only then does Enforce admission open.
-        state.confirm_build_admission_topology();
+        state.confirm_build_admission_topology().await;
         assert_eq!(admission.readiness(), BuildAdmissionReadiness::Healthy);
         assert!(admission.is_ready());
     }
