@@ -81,9 +81,38 @@ impl TokenUsage {
 pub enum StreamEvent {
     /// A content delta (text token or complete tool use block).
     Delta(ContentBlock),
-    /// Reasoning/thinking token from models that stream their chain-of-thought
-    /// (e.g. Kimi K2.5 `reasoning_content`, GLM `reasoning_details`).
+    /// Unattributed reasoning/thinking token from providers that stream their
+    /// chain-of-thought as a bare string without a content-block identity
+    /// (e.g. OpenAI Chat `reasoning_content`, OpenAI Responses
+    /// `reasoning_summary_text_delta`). This is the load-bearing aggregate for
+    /// those formats and must NOT be suppressed by the presence of provider
+    /// state.
     Thinking(String),
+    /// A thinking **delta** carrying the content-block identity (index) it
+    /// belongs to, so consumers can reconcile it against the signed block that
+    /// completes at `content_block_stop`.  Anthropic emits these for every
+    /// `thinking_delta` SSE frame, keyed by the wire content index.
+    ///
+    /// Consumers that accumulate thinking for display/telemetry must append the
+    /// text once. Persistence paths reconcile these fragments by exact `id`
+    /// against [`Self::ThinkingBlockComplete`] and retain only unmatched
+    /// residuals.
+    ThinkingDelta { id: u64, text: String },
+    /// A thinking **block completion** carrying the content-block identity
+    /// (index) it belongs to, emitted exactly once when a signed/attributed
+    /// thinking block finishes (Anthropic `content_block_stop` on a `thinking`
+    /// block). The complete text and optional signature are embedded; consumers
+    /// must NOT re-append this text to any string aggregate that already
+    /// consumed the matching [`Self::ThinkingDelta`] events.
+    ///
+    /// Persistence paths retain the block once; canonical assembly reconciles
+    /// the `id` against unresolved `ThinkingDelta` fragments and suppresses
+    /// only exact matches.
+    ThinkingBlockComplete {
+        id: u64,
+        thinking: String,
+        signature: Option<String>,
+    },
     /// Token usage report from the provider.
     Usage(TokenUsage),
     /// End-of-stream sentinel.
