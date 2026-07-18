@@ -5,7 +5,7 @@
 //! workload classification before dispatch and translates controller facts into
 //! the data-only graph-warmer protocol.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{
     Arc,
     atomic::{AtomicBool, AtomicU64, Ordering},
@@ -209,6 +209,7 @@ pub struct BuildAdmissionController {
     /// reservations are blocked while this is set; Observe/Off are unaffected.
     draining: AtomicBool,
     released: Notify,
+    deferred_enforce: Mutex<HashSet<String>>,
 }
 
 impl BuildAdmissionController {
@@ -237,6 +238,7 @@ impl BuildAdmissionController {
             topology_ready: AtomicBool::new(true),
             draining: AtomicBool::new(false),
             released: Notify::new(),
+            deferred_enforce: Mutex::new(HashSet::new()),
         }
     }
 
@@ -383,6 +385,47 @@ impl BuildAdmissionController {
         *self.would_defer_observations.lock().await
     }
 
+    /// Export bounded admission metrics from the durable journal snapshot.
+    /// InvocationBuild rows are intentionally excluded from all v0 views.
+    pub async fn publish_metrics(&self) {
+        let mode = match self.mode {
+            BuildAdmissionMode::Off => "off",
+            BuildAdmissionMode::Observe => "observe",
+            BuildAdmissionMode::Enforce => "enforce",
+        };
+        if self.mode == BuildAdmissionMode::Off {
+            djinn_telemetry::build_admission::set_slots(mode, self.cap, 0, 0);
+            djinn_telemetry::build_admission::set_health(mode, self.cap, false, false, false);
+            return;
+        }
+        let readiness = self.readiness();
+        let occupied = match self.journal.list_active_rows().await {
+            Ok(rows) => rows
+                .into_iter()
+                .filter(|row| matches!(row.key.domain, AdmissionDomain::TaskObservation | AdmissionDomain::WarmBuild))
+                .map(|row| format!("{:?}:{}:{}", row.key.domain, row.key.work_id, row.key.generation))
+                .collect::<HashSet<_>>()
+                .len(),
+            Err(error) => {
+                tracing::warn!(%error, "build admission metrics journal snapshot unavailable");
+                0
+            }
+        };
+        let queued = if self.mode == BuildAdmissionMode::Enforce {
+            self.deferred_enforce.lock().await.len()
+        } else {
+            0
+        };
+        djinn_telemetry::build_admission::set_slots(mode, self.cap, occupied, queued);
+        djinn_telemetry::build_admission::set_health(
+            mode,
+            self.cap,
+            matches!(readiness, BuildAdmissionReadiness::InventoryPending),
+            matches!(readiness, BuildAdmissionReadiness::JournalRecoveryIncomplete | BuildAdmissionReadiness::JournalUnhealthy),
+            matches!(readiness, BuildAdmissionReadiness::CreateUnknownHealth),
+        );
+    }
+
     pub async fn admit(
         &self,
         request: BuildAdmissionRequest,
@@ -453,6 +496,7 @@ impl BuildAdmissionController {
                 if observed.would_defer {
                     let mut count = self.would_defer_observations.lock().await;
                     *count = count.saturating_add(1).min(1024);
+                    djinn_telemetry::build_admission::increment_would_defer("observe", self.cap);
                 }
                 observed.reservation
             } else {
@@ -471,6 +515,8 @@ impl BuildAdmissionController {
             };
             match reservation {
                 ReserveAdmissionResult::Denied { occupancy, cap } => {
+                    self.deferred_enforce.lock().await.insert(permit_key.clone());
+                    self.publish_metrics().await;
                     return Ok(BuildAdmissionDecision::Denied { occupancy, cap });
                 }
                 ReserveAdmissionResult::Reserved {
@@ -717,6 +763,8 @@ impl BuildAdmissionController {
                 // future registered in its select loop.
                 self.released.notify_one();
             }
+            self.deferred_enforce.lock().await.clear();
+            self.publish_metrics().await;
             // A terminal release can bring seeded occupancy back within the
             // cap; refresh the over-cap gate from the durable journal rather
             // than trusting in-memory bookkeeping.
