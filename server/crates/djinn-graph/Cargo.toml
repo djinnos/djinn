@@ -9,7 +9,7 @@ doctest = false
 
 [dependencies]
 djinn-core = { path = "../djinn-core" }
-djinn-db = { path = "../djinn-db" }
+djinn-db = { path = "../djinn-db", features = ["test-support"] }
 djinn-git = { path = "../djinn-git" }
 djinn-memory = { path = "../djinn-memory" }
 djinn-stack = { path = "../djinn-stack" }
@@ -52,6 +52,7 @@ tree-sitter-ruby = "0.23"
 workspace-hack.workspace = true
 
 [dev-dependencies]
+sqlx = { version = "0.8", features = ["postgres", "runtime-tokio-rustls"] }
 tokio = { version = "1", features = ["full", "test-util"] }
 tokio-util = "0.7"
 

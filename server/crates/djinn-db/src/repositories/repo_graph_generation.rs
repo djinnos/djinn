@@ -108,15 +108,17 @@ pub struct ReservedGraphPublication {
 
 const MAX_GALAXY_CHUNK_BYTES: usize = 256 * 1024;
 
-/// Private stage selector used only by the test-only publication entry point.
+/// Stage selector used by integration tests to prove partial publications roll
+/// back through the same transaction body as production publication.
 /// Keeping the transaction body shared ensures rollback assertions exercise the
 /// same production write ordering.
-#[allow(dead_code)]
+#[cfg(any(test, feature = "test-support"))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum ReservedPublicationFailureStage {
+pub enum ReservedPublicationFailureStage {
     CompatibilityUpsert,
     ArtifactInsert,
     FirstChunkInsert,
+    Commit,
 }
 
 fn invalid_publication(message: impl Into<String>) -> Error {
@@ -250,8 +252,8 @@ impl RepoGraphGenerationRepository {
 
     /// Test-only failure seam for verifying every partial write rolls back as
     /// one transaction. Production callers use `publish_reserved_generation`.
-    #[cfg(test)]
-    async fn publish_reserved_generation_with_failure(
+    #[cfg(any(test, feature = "test-support"))]
+    pub async fn publish_reserved_generation_with_failure(
         &self,
         publication: ReservedGraphPublication,
         failure_stage: ReservedPublicationFailureStage,
@@ -323,6 +325,9 @@ impl RepoGraphGenerationRepository {
                     "injected failure after partial chunk insertion",
                 ));
             }
+        }
+        if failure_stage == Some(ReservedPublicationFailureStage::Commit) {
+            return Err(invalid_publication("injected failure before commit"));
         }
         // Deferred migration triggers validate and advance current here.
         tx.commit().await?;
