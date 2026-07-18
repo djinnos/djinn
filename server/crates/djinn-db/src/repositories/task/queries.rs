@@ -5,6 +5,81 @@ use djinn_core::models::IssueType;
 
 const REPEATED_REOPEN_MISMATCH_THRESHOLD: i64 = 3;
 
+/// A deliberately narrow page row for the repeated-reopen mismatch scan.
+///
+/// Do not replace this with `Task`: mismatch inference needs only these task
+/// columns, while `Task` hydration includes several correlated CI lookups.
+#[derive(Debug, sqlx::FromRow)]
+struct BoardHealthMismatchCandidate {
+    id: String,
+    short_id: String,
+    epic_id: Option<String>,
+    title: String,
+    description: String,
+    design: String,
+    acceptance_criteria: String,
+    issue_type: String,
+    status: String,
+    total_reopen_count: i64,
+}
+
+const PLANNER_ISSUE_TYPE_SIGNALS: &[&str] = &["planning", "decomposition"];
+
+/// Text signals are authoritative for expected-role inference and are also
+/// used to build the SQL prefilter. The prefilter may return false positives,
+/// but every Rust-positive task must match it.
+const PLANNER_ROLE_SIGNALS: &[(&str, &str)] = &[
+    ("task_create", "requires:task_create"),
+    ("epic_update", "requires:epic_update"),
+    ("memory_ref", "requires:memory_ref_update"),
+    ("memory refs", "requires:memory_ref_update"),
+    ("re-priorit", "requires:reprioritization"),
+    ("repriorit", "requires:reprioritization"),
+    ("decompos", "requires:decomposition"),
+    ("plan next wave", "requires:planning"),
+    ("planning task", "requires:planning"),
+];
+
+const LEAD_ROLE_SIGNALS: &[(&str, &str)] = &[
+    ("lead intervention", "requires:lead_intervention"),
+    ("force_close", "requires:force_close"),
+    ("replacement task", "requires:replacement_tasks"),
+    ("decompose into subtasks", "requires:decomposition"),
+];
+
+trait RoleSignalTask {
+    fn issue_type(&self) -> &str;
+    fn title(&self) -> &str;
+    fn description(&self) -> &str;
+    fn design(&self) -> &str;
+    fn acceptance_criteria(&self) -> &str;
+}
+
+macro_rules! impl_role_signal_task {
+    ($type:ty) => {
+        impl RoleSignalTask for $type {
+            fn issue_type(&self) -> &str {
+                &self.issue_type
+            }
+            fn title(&self) -> &str {
+                &self.title
+            }
+            fn description(&self) -> &str {
+                &self.description
+            }
+            fn design(&self) -> &str {
+                &self.design
+            }
+            fn acceptance_criteria(&self) -> &str {
+                &self.acceptance_criteria
+            }
+        }
+    };
+}
+
+impl_role_signal_task!(Task);
+impl_role_signal_task!(BoardHealthMismatchCandidate);
+
 pub(super) fn toolset_for_role(role: &str) -> &'static [&'static str] {
     match role {
         "planner" => &[
@@ -25,20 +100,23 @@ pub(super) fn toolset_for_role(role: &str) -> &'static [&'static str] {
     }
 }
 
-fn infer_expected_role_for_task(task: &Task) -> Option<(&'static str, Vec<String>)> {
+fn infer_expected_role_for_task(task: &impl RoleSignalTask) -> Option<(&'static str, Vec<String>)> {
     let mut planner_signals = Vec::new();
 
-    if matches!(task.issue_type.as_str(), "planning" | "decomposition") {
+    if PLANNER_ISSUE_TYPE_SIGNALS
+        .iter()
+        .any(|issue_type| task.issue_type().eq_ignore_ascii_case(issue_type))
+    {
         planner_signals.push("issue_type:planning".to_string());
         return Some(("planner", planner_signals));
     }
 
     let haystack = format!(
         "{}\n{}\n{}\n{}",
-        task.title.to_lowercase(),
-        task.description.to_lowercase(),
-        task.design.to_lowercase(),
-        task.acceptance_criteria.to_lowercase()
+        task.title().to_lowercase(),
+        task.description().to_lowercase(),
+        task.design().to_lowercase(),
+        task.acceptance_criteria().to_lowercase()
     );
 
     let add_signal_once = |signals: &mut Vec<String>, signal: &str| {
@@ -47,29 +125,14 @@ fn infer_expected_role_for_task(task: &Task) -> Option<(&'static str, Vec<String
         }
     };
 
-    for (needle, signal) in [
-        ("task_create", "requires:task_create"),
-        ("epic_update", "requires:epic_update"),
-        ("memory_ref", "requires:memory_ref_update"),
-        ("memory refs", "requires:memory_ref_update"),
-        ("re-priorit", "requires:reprioritization"),
-        ("repriorit", "requires:reprioritization"),
-        ("decompos", "requires:decomposition"),
-        ("plan next wave", "requires:planning"),
-        ("planning task", "requires:planning"),
-    ] {
+    for (needle, signal) in PLANNER_ROLE_SIGNALS {
         if haystack.contains(needle) {
             add_signal_once(&mut planner_signals, signal);
         }
     }
 
     let mut lead_signals = Vec::new();
-    for (needle, signal) in [
-        ("lead intervention", "requires:lead_intervention"),
-        ("force_close", "requires:force_close"),
-        ("replacement task", "requires:replacement_tasks"),
-        ("decompose into subtasks", "requires:decomposition"),
-    ] {
+    for (needle, signal) in LEAD_ROLE_SIGNALS {
         if haystack.contains(needle) {
             add_signal_once(&mut lead_signals, signal);
         }
@@ -82,7 +145,7 @@ fn infer_expected_role_for_task(task: &Task) -> Option<(&'static str, Vec<String
         return Some(("lead", lead_signals));
     }
 
-    if IssueType::parse(&task.issue_type)
+    if IssueType::parse(task.issue_type())
         .map(|issue_type| issue_type.uses_simple_lifecycle())
         .unwrap_or(false)
     {
@@ -92,7 +155,7 @@ fn infer_expected_role_for_task(task: &Task) -> Option<(&'static str, Vec<String
     None
 }
 
-fn dispatched_role_for_task(task: &Task) -> &'static str {
+fn dispatched_role_for_task(task: &BoardHealthMismatchCandidate) -> &'static str {
     match task.status.as_str() {
         "needs_task_review" | "in_task_review" => "reviewer",
         "needs_lead_intervention" | "in_lead_intervention" => "lead",
@@ -116,30 +179,42 @@ fn role_tool_mismatch_reason(
     )
 }
 
-async fn list_board_health_mismatch_candidates(repo: &TaskRepository) -> Result<Vec<Task>> {
-    // Non-closed only: the mismatch report is advisory about LIVE reopen
-    // churn, and closed tasks can never be re-routed to a different role.
-    // The unfiltered form scanned every task on the board (4,949 rows with
-    // ~20 correlated subqueries each, 6–9 s per call) on every board_health
-    // request — the UI polls that every 15 s, which starved the coordinator
-    // tick and the liveness probe as the closed backlog grew (2026-07-17
-    // restart loop). `!closed` bounds the candidate set by WIP, which does
-    // not grow with board history.
-    let list = repo
-        .list_filtered(ListQuery {
-            project_id: None,
-            status: Some("!closed".to_string()),
-            issue_type: None,
-            priority: None,
-            label: None,
-            text: None,
-            parent: None,
-            sort: "updated_desc".to_string(),
-            limit: 10_000,
-            offset: 0,
-        })
-        .await?;
-    Ok(list.tasks)
+async fn list_board_health_mismatch_candidates(
+    repo: &TaskRepository,
+) -> Result<Vec<BoardHealthMismatchCandidate>> {
+    // This is a conservative prefilter, not role inference. It rejects only
+    // impossible positives and deliberately preserves all Rust-positive rows.
+    let text_expression =
+        "LOWER(CONCAT_WS(E'\\n', t.title, t.description, t.design, t.acceptance_criteria))";
+    let mut predicates = Vec::new();
+    let mut parameter = 1;
+    for _ in PLANNER_ISSUE_TYPE_SIGNALS {
+        predicates.push(format!("LOWER(t.issue_type) = ${parameter}"));
+        parameter += 1;
+    }
+    for _ in PLANNER_ROLE_SIGNALS.iter().chain(LEAD_ROLE_SIGNALS) {
+        predicates.push(format!("{text_expression} LIKE ${parameter}"));
+        parameter += 1;
+    }
+    let sql = format!(
+        "SELECT t.id, t.short_id, t.epic_id, t.title, t.description, t.design, \\
+                t.acceptance_criteria::text AS acceptance_criteria, t.issue_type, t.status, t.total_reopen_count \\
+         FROM tasks t \\
+         WHERE t.total_reopen_count >= ${parameter} \\
+           AND t.status != 'closed' \\
+           AND ({}) \\
+         ORDER BY t.id ASC",
+        predicates.join(" OR "),
+    );
+    let mut query = sqlx::query_as::<_, BoardHealthMismatchCandidate>(&sql);
+    for issue_type in PLANNER_ISSUE_TYPE_SIGNALS {
+        query = query.bind(*issue_type);
+    }
+    for (needle, _) in PLANNER_ROLE_SIGNALS.iter().chain(LEAD_ROLE_SIGNALS) {
+        query = query.bind(format!("%{needle}%"));
+    }
+    query = query.bind(REPEATED_REOPEN_MISMATCH_THRESHOLD);
+    Ok(query.fetch_all(repo.db.pool()).await?)
 }
 
 impl TaskRepository {

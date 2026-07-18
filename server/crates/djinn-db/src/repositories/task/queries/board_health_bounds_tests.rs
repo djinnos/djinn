@@ -93,10 +93,7 @@ async fn board_health_mismatch_candidates_exclude_closed_tasks() {
     let mismatches = health["repeated_reopen_role_tool_mismatches"]
         .as_array()
         .expect("mismatch section is an array");
-    let listed: Vec<&str> = mismatches
-        .iter()
-        .filter_map(|m| m["id"].as_str())
-        .collect();
+    let listed: Vec<&str> = mismatches.iter().filter_map(|m| m["id"].as_str()).collect();
     assert!(
         listed.contains(&ids[0].as_str()),
         "the live churn-heavy task must be reported; got {listed:?}"
