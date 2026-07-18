@@ -195,7 +195,6 @@ fn parse_phase(value: &str) -> Result<ExtensionLoadPhase> {
         "tools_list" => Ok(ExtensionLoadPhase::ToolsList),
         "frontmatter" => Ok(ExtensionLoadPhase::Frontmatter),
         "missing_file" => Ok(ExtensionLoadPhase::MissingFile),
-        "manifest_drift" => Ok(ExtensionLoadPhase::ManifestDrift),
         _ => Err(Error::InvalidData(format!(
             "unknown extension load phase: {value}"
         ))),
@@ -220,7 +219,6 @@ fn parse_remedy_code(value: &str) -> Result<ExtensionLoadRemedyCode> {
         "check_server" => Ok(ExtensionLoadRemedyCode::CheckServer),
         "check_skill_frontmatter" => Ok(ExtensionLoadRemedyCode::CheckSkillFrontmatter),
         "restore_skill_file" => Ok(ExtensionLoadRemedyCode::RestoreSkillFile),
-        "update_skill_manifest" => Ok(ExtensionLoadRemedyCode::UpdateSkillManifest),
         _ => Err(Error::InvalidData(format!(
             "unknown extension remedy code: {value}"
         ))),

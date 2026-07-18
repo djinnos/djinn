@@ -179,9 +179,6 @@ pub(crate) fn remedy_template(code: ExtensionLoadRemedyCode) -> &'static str {
             "Check the skill frontmatter syntax and fields."
         }
         ExtensionLoadRemedyCode::RestoreSkillFile => "Restore the declared skill file.",
-        ExtensionLoadRemedyCode::UpdateSkillManifest => {
-            "Update the skill manifest to match the workspace."
-        }
     }
 }
 
