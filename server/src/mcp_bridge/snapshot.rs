@@ -3,6 +3,7 @@ use std::sync::Arc;
 use djinn_control_plane::bridge::{
     CoordinatorOps, SlotPoolOps, SnapshotEdge, SnapshotLevel, SnapshotNode, SnapshotPayload,
 };
+use djinn_control_plane::tools::graph_tools::MAX_SNAPSHOT_NODE_CAP;
 use petgraph::visit::EdgeRef;
 
 use djinn_graph::repo_graph::RepoGraphEdgeKind;
@@ -147,6 +148,10 @@ pub(crate) fn build_snapshot_payload(
     level: SnapshotLevel,
     node_cap: usize,
 ) -> SnapshotPayload {
+    // Defend the selection boundary too, so any bridge caller reports and
+    // uses the MCP effective cap even if it bypasses request normalization.
+    let node_cap = node_cap.clamp(1, MAX_SNAPSHOT_NODE_CAP);
+
     if level == SnapshotLevel::Community {
         return build_community_snapshot_payload(
             graph,
@@ -410,14 +415,9 @@ pub(crate) fn build_snapshot_payload(
         }
     }
 
-    // Cap the cappable remainder to the budget left after the always-kept
-    // cross-workspace edges, keeping the highest-salience edges. The edge
-    // budget scales with the requested node budget: a caller that asked
-    // for a whole-graph snapshot (galaxy renderer, lmkv) gets the whole
-    // edge set too, while default-budget UI snapshots keep the small
-    // cold-load payload.
-    let drawable_edge_cap = SNAPSHOT_DRAWABLE_EDGE_CAP.max(node_cap);
-    let intra_budget = drawable_edge_cap.saturating_sub(cross_workspace_edges.len());
+    // Containment and cross-workspace edges remain mandatory context. Only
+    // the cappable intra-workspace drawable remainder uses this fixed ceiling.
+    let intra_budget = SNAPSHOT_DRAWABLE_EDGE_CAP;
     if drawable_edges.len() > intra_budget {
         drawable_edges.select_nth_unstable_by(intra_budget, |a, b| {
             b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal)
@@ -560,6 +560,11 @@ fn build_community_snapshot_payload(
     type CommunityEdgeKey = (String, String, String);
     type CommunityEdgeAgg = (f64, Option<String>, usize);
     let mut edge_aggs: BTreeMap<CommunityEdgeKey, CommunityEdgeAgg> = BTreeMap::new();
+    // Preserve the same mandatory cross-workspace context as symbol-level
+    // snapshots. The initial community selection below is hard-capped, but a
+    // selected community must not leave a cross-workspace relationship with a
+    // missing endpoint.
+    let mut cross_workspace_community_pairs: BTreeSet<(String, String)> = BTreeSet::new();
     let mut total_inter_community_edges = 0usize;
     for edge_ref in graph.graph().edge_references() {
         let source = edge_ref.source();
@@ -579,6 +584,15 @@ fn build_community_snapshot_payload(
             }
             continue;
         }
+        let source_workspace = graph.node(source).workspace.as_deref();
+        let target_workspace = graph.node(target).workspace.as_deref();
+        if source_workspace.is_some()
+            && target_workspace.is_some()
+            && source_workspace != target_workspace
+        {
+            cross_workspace_community_pairs
+                .insert((source_community.to_string(), target_community.to_string()));
+        }
         total_inter_community_edges += 1;
         let weight = edge_ref.weight();
         let key = (
@@ -594,9 +608,34 @@ fn build_community_snapshot_payload(
         entry.2 += 1;
     }
 
+    let total_communities = communities.len();
+    let mut ranked_community_ids: Vec<&CommunityAgg> = communities.values().collect();
+    ranked_community_ids.sort_by(|a, b| {
+        b.pagerank_sum
+            .total_cmp(&a.pagerank_sum)
+            .then_with(|| a.id.cmp(&b.id))
+    });
+
+    // `node_cap` is an initial selection budget, not merely a value echoed on
+    // the wire. As at symbol level, explicitly preserve only mandatory
+    // cross-workspace context after that bounded selection.
+    let mut selected_community_ids: HashSet<String> = ranked_community_ids
+        .into_iter()
+        .take(node_cap)
+        .map(|agg| agg.id.clone())
+        .collect();
+    for (source_community, target_community) in cross_workspace_community_pairs {
+        if selected_community_ids.contains(&source_community)
+            || selected_community_ids.contains(&target_community)
+        {
+            selected_community_ids.insert(source_community);
+            selected_community_ids.insert(target_community);
+        }
+    }
+
     let mut snapshot_nodes: Vec<SnapshotNode> = communities
         .into_values()
-        .filter(|agg| !agg.members.is_empty())
+        .filter(|agg| selected_community_ids.contains(&agg.id))
         .map(|agg| {
             let (workspace, workspace_kind) = match (agg.workspaces.len(), agg.missing_workspace) {
                 (1, false) => (agg.workspaces.iter().next().cloned(), "single".to_string()),
@@ -670,8 +709,8 @@ fn build_community_snapshot_payload(
         project_id,
         git_head,
         generated_at,
-        truncated: false,
-        total_nodes: snapshot_nodes.len(),
+        truncated: total_communities > node_cap,
+        total_nodes: total_communities,
         total_edges: total_inter_community_edges,
         node_cap,
         nodes: snapshot_nodes,
