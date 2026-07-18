@@ -128,12 +128,104 @@ fn directly_attached_attributes(source: &str, item_offset: usize) -> Vec<&str> {
     attributes
 }
 
+struct CfgExpression<'a> {
+    remaining: &'a str,
+}
+
+impl<'a> CfgExpression<'a> {
+    fn new(expression: &'a str) -> Self {
+        Self {
+            remaining: expression,
+        }
+    }
+
+    fn skip_whitespace(&mut self) {
+        self.remaining = self.remaining.trim_start();
+    }
+
+    fn consume(&mut self, expected: char) -> bool {
+        self.skip_whitespace();
+        if self.remaining.starts_with(expected) {
+            self.remaining = &self.remaining[expected.len_utf8()..];
+            true
+        } else {
+            false
+        }
+    }
+
+    fn identifier(&mut self) -> Option<&'a str> {
+        self.skip_whitespace();
+        let end = self
+            .remaining
+            .find(|character: char| !(character.is_ascii_alphanumeric() || character == '_'))
+            .unwrap_or(self.remaining.len());
+        if end == 0 {
+            return None;
+        }
+        let identifier = &self.remaining[..end];
+        self.remaining = &self.remaining[end..];
+        Some(identifier)
+    }
+
+    fn quoted_value(&mut self) -> Option<&'a str> {
+        self.skip_whitespace();
+        let value = self.remaining.strip_prefix('"')?;
+        let end = value.find('"')?;
+        self.remaining = &value[end + 1..];
+        Some(&value[..end])
+    }
+
+    /// Return whether every configuration satisfying this expression must
+    /// enable either `test` or the `test-support` feature.
+    fn necessarily_test_only(&mut self) -> Option<bool> {
+        let predicate = self.identifier()?;
+        self.skip_whitespace();
+
+        if self.consume('=') {
+            let value = self.quoted_value()?;
+            return Some(predicate == "feature" && value == "test-support");
+        }
+        if !self.consume('(') {
+            return Some(predicate == "test");
+        }
+
+        let mut operands = Vec::new();
+        loop {
+            self.skip_whitespace();
+            if self.consume(')') {
+                break;
+            }
+            operands.push(self.necessarily_test_only()?);
+            self.skip_whitespace();
+            if self.consume(')') {
+                break;
+            }
+            if !self.consume(',') {
+                return None;
+            }
+        }
+
+        match predicate {
+            // A conjunction is test-only if at least one mandatory operand is.
+            "all" => Some(!operands.is_empty() && operands.into_iter().any(|value| value)),
+            // Every disjunct must independently require a test-only setting.
+            "any" => Some(!operands.is_empty() && operands.into_iter().all(|value| value)),
+            // Negation and unknown cfg operators are conservatively production-capable.
+            _ => Some(false),
+        }
+    }
+}
+
 fn attributes_are_test_only(attributes: &[&str]) -> bool {
     attributes.iter().any(|attribute| {
-        attribute.starts_with("#[cfg(")
-            && (attribute.contains("cfg(test)")
-                || attribute.contains("any(test,")
-                || attribute.contains("feature = \"test-support\""))
+        let Some(expression) = attribute
+            .strip_prefix("#[cfg(")
+            .and_then(|attribute| attribute.strip_suffix(")]"))
+        else {
+            return false;
+        };
+        let mut expression = CfgExpression::new(expression);
+        expression.necessarily_test_only() == Some(true) && expression.remaining.trim().is_empty()
     })
 }
 
@@ -244,11 +336,6 @@ fn function_is_test_only(source: &str, function_offset: usize) -> bool {
     attributes_are_test_only(&directly_attached_attributes(source, function_offset))
 }
 
-fn appended_test_module_start(source: &str) -> Option<usize> {
-    let module = source.rfind("\nmod tests {")? + 1;
-    attributes_are_test_only(&directly_attached_attributes(source, module)).then_some(module)
-}
-
 fn production_source_path(path: &Path) -> bool {
     path.extension().is_some_and(|extension| extension == "rs")
         && path.to_string_lossy().contains("/src/")
@@ -268,6 +355,37 @@ fn production_sources(dir: &Path, root: &Path, result: &mut Vec<PathBuf>) {
     }
 }
 
+fn production_writers_in_source(path: &str, source: &str) -> BTreeSet<String> {
+    let mut discovered = BTreeSet::new();
+    let is_db_repository = path.contains("djinn-db/src/repositories/");
+    let is_shared_task_boundary = path.ends_with("repositories/task/writes.rs")
+        || path.ends_with("repositories/task/reads.rs");
+    let inline_test_modules = inline_test_ranges(source);
+    let direct_constants = direct_task_insert_constants(source);
+    for (symbol, offset) in function_symbols(source) {
+        if function_is_test_only(source, offset)
+            || inline_test_modules
+                .iter()
+                .any(|module| module.contains(&offset))
+        {
+            continue;
+        }
+        let Some(body) = extract_function_body(source, &symbol) else {
+            continue;
+        };
+        let direct_insert = contains_task_insert(&body)
+            || direct_constants
+                .iter()
+                .any(|(constant, _)| body.contains(constant));
+        if (!is_db_repository && BOUNDARIES.iter().any(|boundary| body.contains(boundary)))
+            || (direct_insert && !is_shared_task_boundary)
+        {
+            discovered.insert(format!("{path}::{symbol}"));
+        }
+    }
+    discovered
+}
+
 /// Discover production writers from the source tree rather than trusting the fixture.
 /// Only modules and functions proven test-only by an attached cfg are excluded.
 fn discover_production_writers(root: &Path) -> BTreeSet<String> {
@@ -276,39 +394,8 @@ fn discover_production_writers(root: &Path) -> BTreeSet<String> {
     let mut discovered = BTreeSet::new();
     for file in files {
         let source = std::fs::read_to_string(&file).expect("production source readable");
-        let path = file
-            .strip_prefix(root)
-            .unwrap()
-            .to_string_lossy()
-            .into_owned();
-        let is_db_repository = path.contains("djinn-db/src/repositories/");
-        let is_shared_task_boundary = path.ends_with("repositories/task/writes.rs")
-            || path.ends_with("repositories/task/reads.rs");
-        let inline_test_modules = inline_test_ranges(&source);
-        let appended_test_module = appended_test_module_start(&source);
-        let direct_constants = direct_task_insert_constants(&source);
-        for (symbol, offset) in function_symbols(&source) {
-            if function_is_test_only(&source, offset)
-                || appended_test_module.is_some_and(|module| offset >= module)
-                || inline_test_modules
-                    .iter()
-                    .any(|module| module.contains(&offset))
-            {
-                continue;
-            }
-            let Some(body) = extract_function_body(&source, &symbol) else {
-                continue;
-            };
-            let direct_insert = contains_task_insert(&body)
-                || direct_constants
-                    .iter()
-                    .any(|(constant, _)| body.contains(constant));
-            if (!is_db_repository && BOUNDARIES.iter().any(|boundary| body.contains(boundary)))
-                || (direct_insert && !is_shared_task_boundary)
-            {
-                discovered.insert(format!("{path}::{symbol}"));
-            }
-        }
+        let path = file.strip_prefix(root).unwrap().to_string_lossy();
+        discovered.extend(production_writers_in_source(&path, &source));
     }
     discovered
 }
@@ -412,18 +499,84 @@ fn rust_sources(dir: &Path, result: &mut Vec<PathBuf>) {
 }
 
 fn brace_end(source: &str, open: usize) -> Option<usize> {
+    let bytes = source.as_bytes();
     let mut depth = 0_i32;
-    for (relative, byte) in source[open..].bytes().enumerate() {
-        match byte {
+    let mut offset = open;
+    while offset < bytes.len() {
+        match bytes[offset] {
+            b'/' if bytes.get(offset + 1) == Some(&b'/') => {
+                offset = source[offset..]
+                    .find('\n')
+                    .map_or(bytes.len(), |end| offset + end + 1);
+                continue;
+            }
+            b'/' if bytes.get(offset + 1) == Some(&b'*') => {
+                let mut comment_depth = 1_u32;
+                offset += 2;
+                while offset < bytes.len() && comment_depth > 0 {
+                    if bytes[offset..].starts_with(b"/*") {
+                        comment_depth += 1;
+                        offset += 2;
+                    } else if bytes[offset..].starts_with(b"*/") {
+                        comment_depth -= 1;
+                        offset += 2;
+                    } else {
+                        offset += 1;
+                    }
+                }
+                continue;
+            }
+            b'"' => {
+                offset += 1;
+                while offset < bytes.len() {
+                    match bytes[offset] {
+                        b'\\' => offset += 2,
+                        b'"' => {
+                            offset += 1;
+                            break;
+                        }
+                        _ => offset += 1,
+                    }
+                }
+                continue;
+            }
+            b'r' | b'b' => {
+                let prefix = offset;
+                let mut marker = offset + usize::from(bytes[offset] == b'b');
+                if bytes.get(marker) == Some(&b'r') {
+                    marker += 1;
+                } else if bytes[offset] == b'b' && bytes.get(marker) == Some(&b'"') {
+                    offset = marker;
+                    continue;
+                } else {
+                    offset += 1;
+                    continue;
+                }
+                let hashes = bytes[marker..]
+                    .iter()
+                    .take_while(|byte| **byte == b'#')
+                    .count();
+                marker += hashes;
+                if bytes.get(marker) != Some(&b'"') {
+                    offset = prefix + 1;
+                    continue;
+                }
+                let terminator = format!("\"{}", "#".repeat(hashes));
+                offset = source[marker + 1..]
+                    .find(&terminator)
+                    .map_or(bytes.len(), |end| marker + 1 + end + terminator.len());
+                continue;
+            }
             b'{' => depth += 1,
             b'}' => {
                 depth -= 1;
                 if depth == 0 {
-                    return Some(open + relative + 1);
+                    return Some(offset + 1);
                 }
             }
             _ => {}
         }
+        offset += 1;
     }
     None
 }
@@ -575,6 +728,19 @@ fn producer_classifier_excludes_only_structurally_test_support_code() {
         .expect("production function");
     assert!(!function_is_test_only(production, offset));
 
+    for production_capable_cfg in [
+        r#"#[cfg(not(feature = "test-support"))]
+pub async fn runtime_writer() { repo.create_in_project_with_provenance(); }"#,
+        r#"#[cfg(any(unix, feature = "test-support"))]
+pub async fn runtime_writer() { repo.create_in_project_with_provenance(); }"#,
+    ] {
+        let (_, offset) = function_symbols(production_capable_cfg)
+            .into_iter()
+            .next()
+            .expect("cfg-gated runtime writer");
+        assert!(!function_is_test_only(production_capable_cfg, offset));
+    }
+
     let intervening_declaration = r#"
         #[cfg(test)]
         const FIXTURE: &str = "marker";
@@ -608,4 +774,22 @@ fn producer_classifier_excludes_only_structurally_test_support_code() {
             "helper-like path must not suppress runtime writers: {helper_like_path}"
         );
     }
+
+    let trailing_runtime_writer = r#"
+        #[cfg(test)]
+        mod tests {
+            fn fixture_writer() { repo.create_in_project_with_provenance(); }
+        }
+        pub async fn runtime_writer() { repo.create_in_project_with_provenance(); }
+    "#;
+    assert_eq!(
+        production_writers_in_source(
+            "server/crates/example/src/runtime.rs",
+            trailing_runtime_writer
+        ),
+        BTreeSet::from([String::from(
+            "server/crates/example/src/runtime.rs::runtime_writer"
+        )]),
+        "a writer after a bounded cfg(test) module remains a production candidate"
+    );
 }
