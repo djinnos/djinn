@@ -55,13 +55,29 @@ pub(crate) fn spawn_post_session_work(params: PostSessionParams) {
             }
         }
         if final_result_ok {
-            super::super::finalize_handlers::process_finalize_payload(
-                &final_output.finalize_payload,
-                final_output.finalize_tool_name.as_deref().unwrap_or(""),
-                &task_id,
-                &app_state,
-            )
-            .await;
+            if final_output.finalize_tool_name.as_deref() == Some("submit_work") {
+                // Worker submit_work is accepted by the slot reply loop as a
+                // typed completion intent. Preserve that authoritative object
+                // through the host boundary so reused verification evidence is
+                // available to submit finalization.
+                if let Some(intent) = final_output.completion_intent.as_ref() {
+                    super::super::finalize_handlers::process_completion_intent(
+                        intent,
+                        "submit_work",
+                        &task_id,
+                        &app_state,
+                    )
+                    .await;
+                }
+            } else {
+                super::super::finalize_handlers::process_finalize_payload(
+                    &final_output.finalize_payload,
+                    final_output.finalize_tool_name.as_deref().unwrap_or(""),
+                    &task_id,
+                    &app_state,
+                )
+                .await;
+            }
         }
         if let Some(reason) = &final_error {
             let payload = serde_json::json!({
