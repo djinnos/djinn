@@ -285,7 +285,10 @@ async fn eligible_final_pass_roundtrips_complete_generic_audit_projection() {
     );
     assert_eq!(fetched.ordered_commands.as_ref(), Some(&expected_commands));
     assert_eq!(fetched.covered_checks.as_ref(), Some(&expected_coverage));
-    assert_eq!(fetched.check_coverage.as_ref(), Some(&expected_coverage));
+    assert_eq!(
+        fetched.check_coverage.as_ref(),
+        Some(&serde_json::json!({"format": true, "tests": true}))
+    );
     assert_eq!(
         fetched.verification_input_fingerprint.as_deref(),
         Some("fingerprint-v1")

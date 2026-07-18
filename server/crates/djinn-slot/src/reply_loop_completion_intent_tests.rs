@@ -15,6 +15,7 @@ use std::sync::{Arc, Mutex};
 
 use crate::final_verification::{
     FinalVerificationCoordinatorRequest, FinalVerificationRecordingOutcome,
+    FinalVerificationSuccessEvidence,
 };
 use crate::host::{ResolvedMcpTools, SlotContext, SlotHostCallbacks};
 use crate::reply_loop::{ReplyLoopContext, run_reply_loop};
@@ -293,6 +294,16 @@ fn stored() -> FinalVerificationRecordingOutcome {
     FinalVerificationRecordingOutcome::Stored {
         verification_attempt_id: "attempt-stored".into(),
         verify_run_id: "run-stored".into(),
+        evidence: Box::new(FinalVerificationSuccessEvidence {
+            persisted_run_id: "persisted-stored".into(),
+            completed_at: "2025-01-01T00:00:00Z".into(),
+            ordered_commands: serde_json::json!([]),
+            covered_checks: serde_json::json!([]),
+            required_checks: vec![],
+            verification_input_fingerprint: "fingerprint".into(),
+            manifest_version: "manifest-v1".into(),
+            environment_identity_digest: "identity".into(),
+        }),
     }
 }
 
