@@ -60,6 +60,11 @@ impl TaskRepository {
         let mut tx = self.db.pool().begin().await?;
         sqlx::query("INSERT INTO board_health_mismatch_scan_state (singleton) VALUES (TRUE) ON CONFLICT (singleton) DO NOTHING").execute(&mut *tx).await?;
         let state: BoardHealthMismatchScanState = sqlx::query_as(&format!("SELECT {SCAN_STATE_COLUMNS} FROM board_health_mismatch_scan_state WHERE singleton FOR UPDATE")).fetch_one(&mut *tx).await?;
+        if leader_epoch < state.leader_epoch {
+            return Err(Error::InvalidData(
+                "board-health mismatch pass is owned by a newer leader epoch".into(),
+            ));
+        }
         let result = if !state.active {
             let high_water: Option<String> = sqlx::query_scalar(&format!(
                 "SELECT MAX(t.id) FROM tasks t WHERE {}",
@@ -69,7 +74,7 @@ impl TaskRepository {
             .await?;
             sqlx::query_as(&format!("UPDATE board_health_mismatch_scan_state SET active=TRUE, cursor_id=NULL, eligible_high_water_id=$1, pass_id=$2, pass_started_at=to_char(now() AT TIME ZONE 'utc', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"'), leader_epoch=$3, completed_at=NULL, last_pass_duration_ms=NULL WHERE singleton RETURNING {SCAN_STATE_COLUMNS}"))
                 .bind(high_water).bind(uuid::Uuid::now_v7().to_string()).bind(leader_epoch).fetch_one(&mut *tx).await?
-        } else if state.leader_epoch != leader_epoch {
+        } else if state.leader_epoch < leader_epoch {
             sqlx::query_as(&format!("UPDATE board_health_mismatch_scan_state SET leader_epoch=$1 WHERE singleton RETURNING {SCAN_STATE_COLUMNS}")).bind(leader_epoch).fetch_one(&mut *tx).await?
         } else {
             state

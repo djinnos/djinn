@@ -130,6 +130,12 @@ async fn pages_are_bounded_retryable_guarded_fenced_and_reset_for_behind_cursor_
         .await
         .unwrap();
     assert_eq!(takeover.pass_id, started.pass_id);
+    // A stale coordinator cannot reclaim ownership after a newer epoch takes over.
+    assert!(
+        repo.start_or_resume_board_health_mismatch_pass(10)
+            .await
+            .is_err()
+    );
     assert!(
         repo.commit_board_health_mismatch_page(10, Some(&last), &last)
             .await
