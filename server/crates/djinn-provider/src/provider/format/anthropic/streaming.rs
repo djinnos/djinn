@@ -188,7 +188,10 @@ pub(crate) fn parse_anthropic_event(
                             .unwrap_or("")
                             .to_string();
                         if !thinking.is_empty() {
-                            events.push(StreamEvent::Thinking(thinking.clone()));
+                            events.push(StreamEvent::ThinkingDelta {
+                                id: index,
+                                text: thinking.clone(),
+                            });
                         }
                         if let Some(PendingContentBlock::Thinking {
                             thinking: accumulated,
@@ -253,10 +256,18 @@ pub(crate) fn parse_anthropic_event(
                     PendingContentBlock::Thinking {
                         thinking,
                         signature,
-                    } => ContentBlock::Thinking {
-                        thinking,
-                        signature,
-                    },
+                    } => {
+                        // Completion is the single load-bearing representation
+                        // of this block. Consumers atomically materialize its
+                        // payload and record its ID; emitting a second
+                        // Delta(Thinking) would create an exact-once gap.
+                        events.push(StreamEvent::ThinkingBlockComplete {
+                            id: index,
+                            thinking,
+                            signature,
+                        });
+                        return events;
+                    }
                     PendingContentBlock::RedactedThinking { data } => {
                         ContentBlock::RedactedThinking { data }
                     }

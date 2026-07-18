@@ -3904,6 +3904,11 @@ async fn flushed_tool_round_visible_exactly_once_in_load_conversation() {
     let mut state = super::streaming::StreamTurnState::new();
     state.turn_text = "Let me run the tests.".to_string();
     state.turn_thinking = "Need to verify the build.".to_string();
+    state.turn_unresolved_thinking.push(
+        super::streaming::UnresolvedThinkingFragment::Unattributed(
+            "Need to verify the build.".to_string(),
+        ),
+    );
     state.turn_tool_calls = vec![ContentBlock::ToolUse {
         id: "call_flush_1".to_string(),
         name: "shell".to_string(),
