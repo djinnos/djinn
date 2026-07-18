@@ -63,6 +63,7 @@ struct Cli {
     allocator_settings: bool,
 }
 
+#[allow(clippy::print_stderr)] // Startup validation errors must be visible before logging initializes.
 fn main() {
     if let Err(error) = djinn_server::allocator::validate_malloc_conf_from_env() {
         tracing::error!(%error, "invalid MALLOC_CONF");
@@ -93,6 +94,8 @@ fn main() {
         .block_on(async_main(cli));
 }
 
+#[allow(clippy::print_stdout)] // This explicit diagnostic mode reports its requested settings to stdout.
+#[allow(clippy::print_stderr)] // Diagnostic failures must be visible before logging initializes.
 fn report_allocator_settings() {
     #[cfg(target_os = "linux")]
     match djinn_server::allocator::settings() {
