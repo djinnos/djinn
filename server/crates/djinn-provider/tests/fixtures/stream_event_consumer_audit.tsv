@@ -7,6 +7,7 @@
 # Source files may contain test-only mocks/emitters, but they are not match
 # sites and are excluded by stream_event_consumer_audit.rs' path classification.
 server/crates/djinn-agent/src/actors/slot/supervisor_runner.rs::await_report_from_stream#1	runtime stream arms: Report, StageStep, grouped AssistantDelta/ToolCall/FinalizePayload/StageOutcome, and None terminal handling
+server/crates/djinn-agent/src/direct_services.rs::invoke_llm#1	consumer arms: Delta, Thinking, ThinkingDelta, ThinkingBlockComplete, Usage, Done; Result error is propagated before arm dispatch
 server/crates/djinn-agent/src/direct_services.rs::collect_planner_stream#1	consumer arms: Delta, Thinking, ThinkingDelta, ThinkingBlockComplete, Usage, Done; wildcard/error arm is the Result error
 server/crates/djinn-compaction/src/summarizer.rs::call_llm_for_summary#1	consumer arms: text Delta append, Usage, Done; grouped ignore arm for non-text Delta/Thinking/ThinkingDelta/ThinkingBlockComplete
 server/crates/djinn-provider/src/completion.rs::collect_completion#1	text-only consumer arms: text Delta append, Usage, Done; grouped ignore arm for non-text Delta/Thinking/ThinkingDelta/ThinkingBlockComplete

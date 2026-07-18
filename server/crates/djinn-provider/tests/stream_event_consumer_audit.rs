@@ -42,6 +42,74 @@ fn closing_brace(source: &str, opening: usize) -> Option<usize> {
     None
 }
 
+/// Locate the body delimiter after a `match` keyword without mistaking braces
+/// in its scrutinee's strings, comments, calls, or indexing expressions for
+/// the arm body. In particular, format strings commonly contain `{name}`.
+fn match_body_opening(source: &str, mut offset: usize) -> Option<usize> {
+    let bytes = source.as_bytes();
+    let mut paren_depth = 0usize;
+    let mut bracket_depth = 0usize;
+
+    while offset < bytes.len() {
+        match bytes[offset] {
+            b'\"' => {
+                offset += 1;
+                while offset < bytes.len() {
+                    if bytes[offset] == b'\\' {
+                        offset += 2;
+                    } else if bytes[offset] == b'\"' {
+                        offset += 1;
+                        break;
+                    } else {
+                        offset += 1;
+                    }
+                }
+            }
+            b'/' if bytes.get(offset + 1) == Some(&b'/') => {
+                offset = source[offset..]
+                    .find('\n')
+                    .map_or(bytes.len(), |relative| offset + relative + 1);
+            }
+            b'/' if bytes.get(offset + 1) == Some(&b'*') => {
+                offset += 2;
+                let mut depth = 1usize;
+                while offset < bytes.len() && depth != 0 {
+                    match (bytes[offset], bytes.get(offset + 1)) {
+                        (b'/', Some(b'*')) => {
+                            depth += 1;
+                            offset += 2;
+                        }
+                        (b'*', Some(b'/')) => {
+                            depth -= 1;
+                            offset += 2;
+                        }
+                        _ => offset += 1,
+                    }
+                }
+            }
+            b'(' => {
+                paren_depth += 1;
+                offset += 1;
+            }
+            b')' => {
+                paren_depth = paren_depth.checked_sub(1)?;
+                offset += 1;
+            }
+            b'[' => {
+                bracket_depth += 1;
+                offset += 1;
+            }
+            b']' => {
+                bracket_depth = bracket_depth.checked_sub(1)?;
+                offset += 1;
+            }
+            b'{' if paren_depth == 0 && bracket_depth == 0 => return Some(offset),
+            _ => offset += 1,
+        }
+    }
+    None
+}
+
 /// Match patterns begin an arm line with `StreamEvent` (or its `Result` /
 /// `Option` wrapper). This excludes producers that construct a `StreamEvent`
 /// in a different wire-event match body.
@@ -112,7 +180,7 @@ fn collect_match_sites(root: &Path, repo_root: &Path, found: &mut BTreeSet<Strin
                 {
                     continue;
                 }
-                let Some(opening) = source[search_from..].find('{').map(|i| search_from + i) else {
+                let Some(opening) = match_body_opening(&source, search_from) else {
                     continue;
                 };
                 let Some(closing) = closing_brace(&source, opening) else {
@@ -130,6 +198,14 @@ fn collect_match_sites(root: &Path, repo_root: &Path, found: &mut BTreeSet<Strin
             }
         }
     }
+}
+
+#[test]
+fn match_body_opening_skips_braces_in_format_string_scrutinees() {
+    let source = "match ev.map_err(|e| format!(\"provider stream error: {e}\"))? {\n    StreamEvent::Done => {}\n}";
+    let opening = match_body_opening(source, "match".len()).expect("match arm body");
+    assert_eq!(&source[opening..=opening], "{");
+    assert!(has_stream_event_arm(&source[opening..]));
 }
 
 #[test]
