@@ -324,6 +324,7 @@ mod tests {
 
     use super::*;
     use crate::repositories::epic::EpicRepository;
+    use crate::test_support::{UsageTestTaskSeed, seed_project, seed_task_row};
 
     fn test_db() -> Database {
         Database::open_in_memory().unwrap()
@@ -626,8 +627,32 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn live_workspace_paths_are_owner_scoped_and_only_include_live_runs() {
         let db = test_db();
-        let (project_id, task_id) = create_task(&db, EventBus::noop()).await;
-        let (other_project_id, other_task_id) = create_task(&db, EventBus::noop()).await;
+        let project_id = "workspace-owner-project".to_string();
+        let other_project_id = "workspace-other-project".to_string();
+        seed_project(&db, &project_id, "workspace-owner").await;
+        seed_project(&db, &other_project_id, "workspace-other").await;
+        let task_id = seed_task_row(
+            &db,
+            UsageTestTaskSeed {
+                project_id: &project_id,
+                status: "open",
+                close_reason: None,
+                total_reopen_count: 0,
+            },
+        )
+        .await;
+        let other_task_id = seed_task_row(
+            &db,
+            UsageTestTaskSeed {
+                project_id: &other_project_id,
+                status: "open",
+                close_reason: None,
+                total_reopen_count: 0,
+            },
+        )
+        .await;
+        assert_ne!(project_id, other_project_id);
+        assert_ne!(task_id, other_task_id);
         let repo = TaskRunRepository::new(db);
         let live_id = new_run_id();
         repo.create(CreateTaskRunParams {
