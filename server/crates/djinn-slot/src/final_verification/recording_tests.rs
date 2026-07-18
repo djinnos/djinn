@@ -417,6 +417,7 @@ async fn canonical_multi_command_completion_records_one_complete_row() {
     let FinalVerificationRecordingOutcome::Stored {
         verification_attempt_id,
         verify_run_id,
+        evidence,
     } = outcome
     else {
         panic!("canonical completion must store one pass, got {outcome:?}");
@@ -443,6 +444,20 @@ async fn canonical_multi_command_completion_records_one_complete_row() {
         Some(verification_attempt_id.as_str())
     );
     assert_eq!(row.verify_run_id, verify_run_id);
+    assert_eq!(evidence.persisted_run_id, row.id);
+    assert_eq!(evidence.completed_at, row.completed_at);
+    assert_eq!(
+        evidence.ordered_commands,
+        row.ordered_commands.clone().unwrap()
+    );
+    assert_eq!(evidence.covered_checks, row.covered_checks.clone().unwrap());
+    assert_eq!(evidence.required_checks, vec!["lint", "test"]);
+    assert_eq!(
+        evidence.verification_input_fingerprint,
+        "post-authoring-fingerprint"
+    );
+    assert_eq!(evidence.manifest_version, "manifest-v1");
+    assert_eq!(evidence.environment_identity_digest, "identity-stable");
     assert_eq!(row.source_phase.as_deref(), Some("final_verification"));
     // Ordered passing commands in plan order.
     let ordered: Vec<(&str, &str, bool)> = row
