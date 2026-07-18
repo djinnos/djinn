@@ -25,6 +25,22 @@ pub(crate) async fn process_finalize_payload(
     });
 }
 
+pub(crate) async fn process_completion_intent(
+    intent: &djinn_slot::output_parser::CompletionIntent,
+    finalize_tool_name: &str,
+    task_id: &str,
+    app_state: &AgentContext,
+) {
+    crate::with_slot_context!(app_state, |slot_ctx| {
+        djinn_slot::finalize_handlers::process_completion_intent_with_outcome(
+            intent,
+            finalize_tool_name,
+            task_id,
+            slot_ctx,
+        )
+    });
+}
+
 /// Agent-compatible wrapper around `djinn_slot::finalize_handlers::handle_budget_park`.
 pub(crate) async fn handle_budget_park(
     summary: &str,

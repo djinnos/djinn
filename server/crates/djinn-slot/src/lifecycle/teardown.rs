@@ -1,8 +1,8 @@
 //! Lifecycle teardown: delegates to host callbacks.
 use crate::final_verification::verify_completion_intent;
 use crate::finalize_handlers::{
-    process_auto_submit_payload, process_finalize_payload_with_outcome,
-    record_rejected_integrity_entry,
+    process_auto_submit_payload, process_completion_intent_with_outcome,
+    process_finalize_payload_with_outcome, record_rejected_integrity_entry,
 };
 use crate::host::SlotContext;
 use crate::output_parser::{AutoSubmitSettlement, CompletionIntent, ParsedAgentOutput};
@@ -50,13 +50,25 @@ pub(crate) fn spawn_post_session_work(params: PostSessionParams) {
                 final_output.finalize_tool_name.as_deref() == Some(role.finalize_tool_name());
             if model_called_submit_work {
                 if final_result_ok {
-                    let _ = process_finalize_payload_with_outcome(
-                        &final_output.finalize_payload,
-                        final_output.finalize_tool_name.as_deref().unwrap_or(""),
-                        &task_id,
-                        &ctx,
-                    )
-                    .await;
+                    if final_output.finalize_tool_name.as_deref() == Some("submit_work") {
+                        if let Some(intent) = final_output.completion_intent.as_ref() {
+                            let _ = process_completion_intent_with_outcome(
+                                intent,
+                                "submit_work",
+                                &task_id,
+                                &ctx,
+                            )
+                            .await;
+                        }
+                    } else {
+                        let _ = process_finalize_payload_with_outcome(
+                            &final_output.finalize_payload,
+                            final_output.finalize_tool_name.as_deref().unwrap_or(""),
+                            &task_id,
+                            &ctx,
+                        )
+                        .await;
+                    }
                 }
             } else {
                 let _ = settle_auto_submit_if_eligible(&task_id, &ctx, &final_output).await;
@@ -221,9 +233,9 @@ pub(crate) async fn settle_auto_submit_if_eligible(
     // This is the same intent/coordinator boundary as model-called submit_work.
     // Constructing or persisting an auto-submit payload is forbidden until it
     // returns `Stored`.
-    let intent = CompletionIntent::auto_submit(&settlement.task_run_id);
+    let mut intent = CompletionIntent::auto_submit(&settlement.task_run_id);
     if let Err(error) = verify_completion_intent(
-        &intent,
+        &mut intent,
         task_id,
         Some(&settlement.task_run_id),
         tokio_util::sync::CancellationToken::new(),
