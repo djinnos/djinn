@@ -35,7 +35,73 @@ pub use chat_shell::{ChatShellError, ChatShellRequest, ChatShellResult, ChatShel
 /// (Landlock on Linux, Seatbelt on macOS). FallbackSandbox performs heuristic
 /// path validation when the OS backend is unavailable.
 pub trait Sandbox: Send + Sync {
-    fn apply(&self, worktree_path: &Path, cmd: &mut std::process::Command) -> Result<()>;
+    fn apply(&self, scope: SandboxScope<'_>, cmd: &mut std::process::Command) -> Result<()>;
+}
+
+/// Typed filesystem authority for one shell invocation. Keeping read sources
+/// distinct prevents backends from ever adding them to a writable allowlist.
+#[derive(Clone, Copy, Debug)]
+pub enum SandboxScope<'a> {
+    Worktree(&'a Path),
+    ReadSource { root: &'a Path, cwd: &'a Path },
+}
+
+impl SandboxScope<'_> {
+    pub fn validate(self) -> Result<()> {
+        match self {
+            Self::Worktree(path) => validate_directory(path, "worktree"),
+            Self::ReadSource { root, cwd } => {
+                validate_directory(root, "read-source root")?;
+                validate_directory(cwd, "read-source cwd")?;
+                reject_read_source_writable_overlap(root)?;
+                anyhow::ensure!(
+                    cwd.canonicalize()?.starts_with(root.canonicalize()?),
+                    "read-source cwd escapes mounted root"
+                );
+                Ok(())
+            }
+        }
+    }
+}
+
+fn validate_directory(path: &Path, label: &str) -> Result<()> {
+    anyhow::ensure!(
+        path.is_dir(),
+        "{label} does not exist or is not a directory: {}",
+        path.display()
+    );
+    Ok(())
+}
+
+/// Read-source roots must not be nested under a backend-wide writable rule.
+///
+/// Both OS backends intentionally allow these locations for compiler caches and
+/// disk-backed scratch. Landlock and Seatbelt use additive path rules, so a
+/// read-only child cannot override a writable ancestor. Reject the scope before
+/// spawning: an authorized cache mounted there must be remounted elsewhere.
+fn reject_read_source_writable_overlap(root: &Path) -> Result<()> {
+    let root = root.canonicalize()?;
+    let mut writable_roots = vec![PathBuf::from("/cache"), PathBuf::from("/var/tmp")];
+    if let Some(cache) = djinn_cache_dir() {
+        writable_roots.push(cache);
+    }
+    if let Some(cargo_home) = std::env::var_os("CARGO_HOME") {
+        writable_roots.push(PathBuf::from(cargo_home).join("build"));
+    } else if let Some(home) = std::env::var_os("HOME") {
+        writable_roots.push(PathBuf::from(home).join(".cargo/build"));
+    }
+
+    for writable_root in writable_roots {
+        // A missing optional cache directory cannot contain the validated,
+        // existing read-source root, so retain its lexical path in that case.
+        let writable_root = writable_root.canonicalize().unwrap_or(writable_root);
+        anyhow::ensure!(
+            !root.starts_with(&writable_root),
+            "read-source root overlaps a writable sandbox path: {}",
+            writable_root.display()
+        );
+    }
+    Ok(())
 }
 
 // ─── Global singleton ─────────────────────────────────────────────────────────
@@ -55,7 +121,15 @@ pub static SANDBOX: LazyLock<Box<dyn Sandbox>> = LazyLock::new(detect_backend);
 pub struct FallbackSandbox;
 
 impl Sandbox for FallbackSandbox {
-    fn apply(&self, worktree_path: &Path, _cmd: &mut std::process::Command) -> Result<()> {
+    fn apply(&self, scope: SandboxScope<'_>, _cmd: &mut std::process::Command) -> Result<()> {
+        if matches!(scope, SandboxScope::ReadSource { .. }) {
+            return Err(anyhow::anyhow!(
+                "read-source shell requires an OS read-only sandbox"
+            ));
+        }
+        let SandboxScope::Worktree(worktree_path) = scope else {
+            unreachable!()
+        };
         if !worktree_path.exists() || !worktree_path.is_dir() {
             return Err(anyhow::anyhow!(
                 "workdir does not exist or is not a directory: {}",
@@ -301,6 +375,60 @@ mod tests {
         assert!(!is_worktree_path(Path::new(
             "/projects/acme/repo/.task-runtime/read-sources/other"
         )));
+    }
+
+    #[test]
+    fn read_source_scope_rejects_cwd_outside_owner_cache() {
+        // The process temp directory is intentionally writable in both OS
+        // policies. Put this fixture under the test working directory so the
+        // overlap guard cannot mask the CWD-containment error this regression
+        // is meant to exercise.
+        let fixture_parent = std::env::current_dir().expect("test working directory");
+        let root = tempfile::tempdir_in(&fixture_parent).expect("root");
+        let outside = tempfile::tempdir_in(&fixture_parent).expect("outside");
+        let error = SandboxScope::ReadSource {
+            root: root.path(),
+            cwd: outside.path(),
+        }
+        .validate()
+        .expect_err("read-source cwd must remain in its root");
+        assert!(error.to_string().contains("escapes mounted root"));
+    }
+
+    #[test]
+    fn read_source_scope_rejects_writable_scratch_overlap() {
+        let root = tempfile::tempdir_in("/var/tmp").expect("root");
+        let error = SandboxScope::ReadSource {
+            root: root.path(),
+            cwd: root.path(),
+        }
+        .validate()
+        .expect_err("read-source roots cannot inherit /var/tmp write access");
+        assert!(
+            error
+                .to_string()
+                .contains("overlaps a writable sandbox path: /var/tmp")
+        );
+    }
+
+    #[test]
+    fn fallback_rejects_read_source_scope() {
+        let root = tempfile::tempdir().expect("root");
+        let mut command = std::process::Command::new("true");
+        let error = FallbackSandbox
+            .apply(
+                SandboxScope::ReadSource {
+                    root: root.path(),
+                    cwd: root.path(),
+                },
+                &mut command,
+            )
+            .expect_err("fallback must reject a read-source scope");
+        assert!(
+            error
+                .to_string()
+                .contains("requires an OS read-only sandbox")
+        );
     }
 
     #[test]
