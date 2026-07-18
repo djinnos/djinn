@@ -72,7 +72,7 @@ fn assert_no_empty_text_placeholder(content: &[serde_json::Value]) {
 }
 
 #[test]
-fn signed_thinking_then_tool_use_replays_before_tool_result() {
+fn replay_roundtrip_signed_thinking_golden() {
     // Realistic Anthropic SSE sequence: a signed thinking block at index 0
     // followed immediately by a tool_use block at index 1. The deltas must be
     // accumulated by index and completed at the matching content_block_stop.
@@ -108,8 +108,17 @@ fn signed_thinking_then_tool_use_replays_before_tool_result() {
     ]);
     assert_eq!(blocks.len(), 2);
 
-    // Simulate the persist round-trip before replay.
-    let round_tripped = round_trip_blocks(&blocks);
+    // Simulate the persist round-trip before replay. An unsigned block is a
+    // durable fallback candidate but is intentionally absent from Anthropic's
+    // signed-thinking replay bytes.
+    let mut round_tripped = round_trip_blocks(&blocks);
+    round_tripped.insert(
+        1,
+        ContentBlock::Thinking {
+            thinking: "unsigned fallback".into(),
+            signature: None,
+        },
+    );
 
     let mut conv = Conversation::default();
     conv.push(Message {
