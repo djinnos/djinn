@@ -97,6 +97,8 @@ export async function validateGalaxyArtifact(
   requestedProjectId: string,
   headers: Headers,
   payload: unknown,
+  /** Exact compressed HTTP representation, before gzip decoding. */
+  transportBytes: BufferSource,
 ): Promise<ValidatedGalaxyArtifact> {
   const raw = record(payload, "payload");
   const identity: GalaxyArtifactIdentity = {
@@ -108,6 +110,10 @@ export async function validateGalaxyArtifact(
     etag: string(headers.get("etag"), "etag"),
   };
   if (!/^"[0-9a-f]{64}"$/.test(identity.etag)) fail("etag is not a strong SHA-256 entity tag");
+  // The ETag authenticates the compressed transport representation, not just
+  // an arbitrary label attached to valid decoded JSON.
+  const transportHash = await sha256Hex(transportBytes);
+  if (identity.etag !== `"${transportHash}"`) fail("transport etag recomputation mismatch");
   if (!Number.isInteger(identity.artifactVersion) || identity.artifactVersion !== GALAXY_ARTIFACT_VERSION) fail("artifact version is unsupported");
   const payloadProject = string(raw.project_id, "payload.project_id");
   const payloadGeneration = string(raw.generation_id, "payload.generation_id");

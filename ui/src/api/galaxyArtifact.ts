@@ -36,7 +36,7 @@ async function errorCode(response: Response): Promise<string> {
   return (body as { code: string }).code;
 }
 
-async function parseResponseJson(response: Response): Promise<unknown> {
+async function parseResponseJson(response: Response): Promise<{ payload: unknown; transportBytes: ArrayBuffer }> {
   const bytes = await response.arrayBuffer();
   let text: string;
   if (response.headers.get("content-encoding")?.toLowerCase() === "gzip") {
@@ -55,7 +55,7 @@ async function parseResponseJson(response: Response): Promise<unknown> {
   } else {
     text = new TextDecoder().decode(bytes);
   }
-  try { return JSON.parse(text); } catch { failure("artifact JSON could not be parsed"); }
+  try { return { payload: JSON.parse(text), transportBytes: bytes }; } catch { failure("artifact JSON could not be parsed"); }
 }
 
 /**
@@ -91,8 +91,8 @@ export async function fetchGalaxyArtifact(
   }
   if (response.status === 401 || response.status === 403) failure(`authorization failed (${response.status})`);
   if (response.status !== 200) failure(`unexpected HTTP status ${response.status}`);
-  const payload = await parseResponseJson(response);
-  const artifact = await validateGalaxyArtifact(projectId, response.headers, payload);
+  const { payload, transportBytes } = await parseResponseJson(response);
+  const artifact = await validateGalaxyArtifact(projectId, response.headers, payload, transportBytes);
   cache.set(projectId, artifact);
   return { kind: "artifact", artifact };
 }
