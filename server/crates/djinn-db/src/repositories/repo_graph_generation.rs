@@ -121,6 +121,49 @@ pub enum ReservedPublicationFailureStage {
     Commit,
 }
 
+// Kept private and always compiled so the production transaction body does not
+// expose a cfg-gated test type in its signature.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PublicationFailureStage {
+    CompatibilityUpsert,
+    ArtifactInsert,
+    FirstChunkInsert,
+    Commit,
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl From<ReservedPublicationFailureStage> for PublicationFailureStage {
+    fn from(value: ReservedPublicationFailureStage) -> Self {
+        match value {
+            ReservedPublicationFailureStage::CompatibilityUpsert => Self::CompatibilityUpsert,
+            ReservedPublicationFailureStage::ArtifactInsert => Self::ArtifactInsert,
+            ReservedPublicationFailureStage::FirstChunkInsert => Self::FirstChunkInsert,
+            ReservedPublicationFailureStage::Commit => Self::Commit,
+        }
+    }
+}
+
+#[cfg(any(test, feature = "test-support"))]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PublicationTestSnapshot {
+    pub cache: i64,
+    pub generations: i64,
+    pub current: Option<String>,
+    pub artifacts: i64,
+    pub chunks: i64,
+    pub clock: Option<String>,
+}
+
+#[cfg(any(test, feature = "test-support"))]
+#[derive(Clone, Debug, PartialEq, Eq, sqlx::FromRow)]
+pub struct LegacyLatestGraph {
+    pub project_id: String,
+    pub commit_sha: String,
+    pub graph_blob: Vec<u8>,
+    pub built_at: String,
+    pub generation_id: String,
+}
+
 fn invalid_publication(message: impl Into<String>) -> Error {
     Error::InvalidData(format!(
         "invalid reserved graph publication: {}",
@@ -258,14 +301,14 @@ impl RepoGraphGenerationRepository {
         publication: ReservedGraphPublication,
         failure_stage: ReservedPublicationFailureStage,
     ) -> Result<()> {
-        self.publish_reserved_generation_inner(publication, Some(failure_stage))
+        self.publish_reserved_generation_inner(publication, Some(failure_stage.into()))
             .await
     }
 
     async fn publish_reserved_generation_inner(
         &self,
         publication: ReservedGraphPublication,
-        failure_stage: Option<ReservedPublicationFailureStage>,
+        failure_stage: Option<PublicationFailureStage>,
     ) -> Result<()> {
         validate_reserved_publication(&publication)?;
 
@@ -281,7 +324,7 @@ impl RepoGraphGenerationRepository {
         )
         .await?;
 
-        if failure_stage == Some(ReservedPublicationFailureStage::CompatibilityUpsert) {
+        if failure_stage == Some(PublicationFailureStage::CompatibilityUpsert) {
             return Err(invalid_publication(
                 "injected failure after compatibility upsert",
             ));
@@ -301,7 +344,7 @@ impl RepoGraphGenerationRepository {
             },
         )
         .await?;
-        if failure_stage == Some(ReservedPublicationFailureStage::ArtifactInsert) {
+        if failure_stage == Some(PublicationFailureStage::ArtifactInsert) {
             return Err(invalid_publication(
                 "injected failure after artifact insertion",
             ));
@@ -319,14 +362,14 @@ impl RepoGraphGenerationRepository {
             )
             .await?;
             if chunk_position == 0
-                && failure_stage == Some(ReservedPublicationFailureStage::FirstChunkInsert)
+                && failure_stage == Some(PublicationFailureStage::FirstChunkInsert)
             {
                 return Err(invalid_publication(
                     "injected failure after partial chunk insertion",
                 ));
             }
         }
-        if failure_stage == Some(ReservedPublicationFailureStage::Commit) {
+        if failure_stage == Some(PublicationFailureStage::Commit) {
             return Err(invalid_publication("injected failure before commit"));
         }
         // Deferred migration triggers validate and advance current here.
@@ -564,6 +607,88 @@ impl RepoGraphGenerationRepository {
         .bind(chunk_index)
         .fetch_optional(self.db.pool())
         .await?)
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub async fn prepare_publication_test_project(&self, project_id: &str) -> Result<()> {
+        self.db.ensure_initialized().await?;
+        sqlx::query("DELETE FROM projects WHERE id = $1")
+            .bind(project_id)
+            .execute(self.db.pool())
+            .await?;
+        sqlx::query("INSERT INTO projects(id, name, github_owner, github_repo) VALUES ($1, 'full warm publication regression', 'test-owner', 'test-repo')")
+            .bind(project_id)
+            .execute(self.db.pool())
+            .await?;
+        Ok(())
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub async fn compatibility_generation_id(
+        &self,
+        project_id: &str,
+        commit_sha: &str,
+    ) -> Result<String> {
+        Ok(sqlx::query_scalar("SELECT generation_id::text FROM repo_graph_cache WHERE project_id = $1 AND commit_sha = $2")
+            .bind(project_id).bind(commit_sha).fetch_one(self.db.pool()).await?)
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub async fn galaxy_chunks_for_test(
+        &self,
+        generation_id: &str,
+    ) -> Result<Vec<RepoGraphGalaxyChunk>> {
+        Ok(sqlx::query_as("SELECT generation_id::text AS generation_id, artifact_id::text AS artifact_id, chunk_index, byte_count, sha256, bytes FROM repo_graph_galaxy_chunk WHERE generation_id = $1::uuid ORDER BY chunk_index")
+            .bind(generation_id).fetch_all(self.db.pool()).await?)
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub async fn publication_snapshot_for_test(
+        &self,
+        project_id: &str,
+    ) -> Result<PublicationTestSnapshot> {
+        Ok(PublicationTestSnapshot {
+            cache: sqlx::query_scalar("SELECT count(*) FROM repo_graph_cache WHERE project_id=$1").bind(project_id).fetch_one(self.db.pool()).await?,
+            generations: sqlx::query_scalar("SELECT count(*) FROM repo_graph_generation WHERE project_id=$1").bind(project_id).fetch_one(self.db.pool()).await?,
+            current: sqlx::query_scalar("SELECT generation_id::text FROM repo_graph_current WHERE project_id=$1").bind(project_id).fetch_optional(self.db.pool()).await?,
+            artifacts: sqlx::query_scalar("SELECT count(*) FROM repo_graph_galaxy_artifact a JOIN repo_graph_generation g ON g.generation_id=a.generation_id WHERE g.project_id=$1").bind(project_id).fetch_one(self.db.pool()).await?,
+            chunks: sqlx::query_scalar("SELECT count(*) FROM repo_graph_galaxy_chunk c JOIN repo_graph_generation g ON g.generation_id=c.generation_id WHERE g.project_id=$1").bind(project_id).fetch_one(self.db.pool()).await?,
+            clock: sqlx::query_scalar("SELECT last_built_at::text FROM repo_graph_publish_clock WHERE project_id=$1").bind(project_id).fetch_optional(self.db.pool()).await?,
+        })
+    }
+
+    /// Execute the exact unmarked SQL shipped by the legacy warmer.
+    #[cfg(any(test, feature = "test-support"))]
+    pub async fn legacy_upsert_for_publication_test(
+        &self,
+        project_id: &str,
+        commit_sha: &str,
+        graph_blob: &[u8],
+    ) -> Result<()> {
+        sqlx::query(
+            r#"INSERT INTO repo_graph_cache
+             (project_id, commit_sha, graph_blob, built_at)
+             VALUES ($1, $2, $3, to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'))
+             ON CONFLICT (project_id, commit_sha) DO UPDATE SET
+                graph_blob = EXCLUDED.graph_blob,
+                built_at = EXCLUDED.built_at"#,
+        )
+        .bind(project_id)
+        .bind(commit_sha)
+        .bind(graph_blob)
+        .execute(self.db.pool())
+        .await?;
+        Ok(())
+    }
+
+    /// Execute the exact old-server latest-row reader unchanged.
+    #[cfg(any(test, feature = "test-support"))]
+    pub async fn legacy_latest_for_publication_test(
+        &self,
+        project_id: &str,
+    ) -> Result<LegacyLatestGraph> {
+        Ok(sqlx::query_as("SELECT project_id, commit_sha, graph_blob, built_at, generation_id::text AS generation_id FROM repo_graph_cache WHERE project_id = $1 ORDER BY built_at DESC LIMIT 1")
+            .bind(project_id).fetch_one(self.db.pool()).await?)
     }
 }
 
