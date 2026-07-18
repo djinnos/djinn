@@ -238,8 +238,7 @@ impl ReadSourceMigrator {
             path: runtime.clone(),
             source,
         })?;
-        let lock =
-            ProjectLiveStateMigrationLock::try_acquire(&runtime, &request.owner_project_id)?;
+        let lock = ProjectLiveStateMigrationLock::try_acquire(&runtime, &request.owner_project_id)?;
         self.reconcile_locked(request, &lock).await
     }
 
@@ -256,30 +255,47 @@ impl ReadSourceMigrator {
         // owner/target-scoped provisional record before touching staging.
         let provisional = provisional_inventory(&request, &destination);
         let destination_text = destination.display().to_string();
-        ProjectLiveStateMigrationRepository::new(self.db.clone())
-            .begin(BeginProjectLiveStateMigration {
-                project_id: &request.owner_project_id,
-                family: &format!("read_source:{}", request.target_project_id),
-                release: RELEASE,
-                source_inventory: &provisional,
-                destination: &destination_text,
-                pre_hash: None,
-                rollback_instruction: ROLLBACK_INSTRUCTION,
-            })
-            .await?;
+        let family = format!("read_source:{}", request.target_project_id);
+        let repo = ProjectLiveStateMigrationRepository::new(self.db.clone());
+        repo.begin(BeginProjectLiveStateMigration {
+            project_id: &request.owner_project_id,
+            family: &family,
+            release: RELEASE,
+            source_inventory: &provisional,
+            destination: &destination_text,
+            pre_hash: None,
+            rollback_instruction: ROLLBACK_INSTRUCTION,
+        })
+        .await?;
 
         let temp = Self::staging_path(parent, &request.target_project_id);
         if temp.is_symlink() {
-            return Err(ReadSourceMigrationError::Ambiguous(format!(
-                "staging temp is a symlink: {}",
-                temp.display()
-            )));
+            let detail = format!("staging temp is a symlink: {}", temp.display());
+            repo.fail(
+                MigrationKey {
+                    project_id: &request.owner_project_id,
+                    family: &family,
+                    release: RELEASE,
+                },
+                &detail,
+            )
+            .await?;
+            return Err(ReadSourceMigrationError::Ambiguous(detail));
         }
         if temp.exists() {
-            fs::remove_dir_all(&temp).map_err(|source| ReadSourceMigrationError::Io {
-                path: temp.clone(),
-                source,
-            })?;
+            if let Err(source) = fs::remove_dir_all(&temp) {
+                let detail = format!("failed to remove staging temp {}: {source}", temp.display());
+                repo.fail(
+                    MigrationKey {
+                        project_id: &request.owner_project_id,
+                        family: &family,
+                        release: RELEASE,
+                    },
+                    &detail,
+                )
+                .await?;
+                return Err(ReadSourceMigrationError::Io { path: temp, source });
+            }
         }
         self.migrate_locked(request, _lock).await
     }
@@ -335,9 +351,33 @@ impl ReadSourceMigrator {
         })
         .await?;
         let temp = Self::staging_path(parent, target_project_id);
-        if temp.exists() && !temp.is_symlink() {
-            fs::remove_dir_all(&temp)
-                .map_err(|source| ReadSourceMigrationError::Io { path: temp, source })?;
+        if temp.is_symlink() {
+            let detail = format!("staging temp is a symlink: {}", temp.display());
+            repo.fail(
+                MigrationKey {
+                    project_id: owner_project_id,
+                    family: &family,
+                    release: RELEASE,
+                },
+                &detail,
+            )
+            .await?;
+            return Err(ReadSourceMigrationError::Ambiguous(detail));
+        }
+        if temp.exists() {
+            if let Err(source) = fs::remove_dir_all(&temp) {
+                let detail = format!("failed to remove staging temp {}: {source}", temp.display());
+                repo.fail(
+                    MigrationKey {
+                        project_id: owner_project_id,
+                        family: &family,
+                        release: RELEASE,
+                    },
+                    &detail,
+                )
+                .await?;
+                return Err(ReadSourceMigrationError::Io { path: temp, source });
+            }
         }
         repo.rollback(
             MigrationKey {
@@ -368,8 +408,7 @@ impl ReadSourceMigrator {
             path: runtime.clone(),
             source,
         })?;
-        let lock =
-            ProjectLiveStateMigrationLock::try_acquire(&runtime, &request.owner_project_id)?;
+        let lock = ProjectLiveStateMigrationLock::try_acquire(&runtime, &request.owner_project_id)?;
         self.migrate_locked(request, &lock).await
     }
 
@@ -410,13 +449,17 @@ impl ReadSourceMigrator {
         let target_commit = match &mirror_state {
             MirrorState::Valid(commit) => commit.clone(),
             MirrorState::Invalid(detail) => {
-                let inventory = json!({
-                    "owner_project_id": request.owner_project_id,
-                    "target_project_id": request.target_project_id,
-                    "mirror": {"path": request.mirror_path, "state": "invalid", "detail": detail},
-                    "result": "fail_closed",
-                    "reason": "invalid_mirror",
+                // Retain the provisional `sources` list. `begin` refreshes
+                // pending records, so mirror-only failure data would discard
+                // caller-discovered legacy inputs.
+                let mut inventory = provisional.clone();
+                inventory["mirror"] = json!({
+                    "path": request.mirror_path,
+                    "state": "invalid",
+                    "detail": detail,
                 });
+                inventory["result"] = json!("fail_closed");
+                inventory["reason"] = json!("invalid_mirror");
                 self.begin_and_fail(
                     &request.owner_project_id,
                     &family,
@@ -1531,7 +1574,9 @@ mod tests {
         // AC3: even a pre-decision failure (invalid mirror) must produce a
         // durable record while the lock is held.
         let fx = Fixture::new().await;
-        let mut request = fx.request(vec![]);
+        let legacy_input = fx.legacy_input(LegacyKind::TaskLocal);
+        let legacy_path = legacy_input.path.display().to_string();
+        let mut request = fx.request(vec![legacy_input]);
         request.mirror_path = fx.tmp_path.join("nonexistent.git");
 
         let migrator = fx.migrator();
@@ -1548,6 +1593,13 @@ mod tests {
         };
         let record = repo.get(key).await.unwrap().expect("durable record exists");
         assert_eq!(record.result, "failed");
+        assert!(
+            record.source_inventory["sources"]
+                .as_array()
+                .expect("failure inventory has sources")
+                .iter()
+                .any(|source| source["path"].as_str() == Some(&legacy_path))
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1759,15 +1811,20 @@ mod tests {
         // Model an in-flight migration that owns the deterministic staging tree.
         let runtime = fx.owner_root.join(".task-runtime");
         fs::create_dir_all(&runtime).unwrap();
-        let lock =
-            ProjectLiveStateMigrationLock::try_acquire(&runtime, "owner-proj-001").unwrap();
+        let lock = ProjectLiveStateMigrationLock::try_acquire(&runtime, "owner-proj-001").unwrap();
         let migrator = fx.migrator();
         let (reconcile, rollback) = tokio::join!(
             migrator.reconcile(fx.request(vec![])),
             migrator.rollback("owner-proj-001", &fx.target_project_id, &fx.owner_root),
         );
-        assert!(matches!(reconcile, Err(ReadSourceMigrationError::LiveState(_))));
-        assert!(matches!(rollback, Err(ReadSourceMigrationError::LiveState(_))));
+        assert!(matches!(
+            reconcile,
+            Err(ReadSourceMigrationError::LiveState(_))
+        ));
+        assert!(matches!(
+            rollback,
+            Err(ReadSourceMigrationError::LiveState(_))
+        ));
         assert_eq!(
             fs::read_to_string(staging.join("active-marker")).unwrap(),
             "active migration\n",
