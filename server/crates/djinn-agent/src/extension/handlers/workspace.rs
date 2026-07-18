@@ -149,10 +149,9 @@ pub(crate) async fn call_shell(
                 let owner_root = authorization.owner_cache_root.as_deref().ok_or_else(|| {
                     "cross-project shell denied: authorized owner cache is not mounted".to_string()
                 })?;
-                let dest = owner_root
-                    .join(".task-runtime")
-                    .join("read-sources")
-                    .join(&pid);
+                // The injected root is exactly the owner cache
+                // (`.task-runtime/read-sources`), never the project root.
+                let dest = owner_root.join(&pid);
                 if !dest.is_dir() {
                     return Err(format!(
                         "cross-project shell denied: authorized read-source cache is not mounted: {}",

@@ -2346,7 +2346,10 @@ fn build_worker_agent_context(
         read_source_authorization: djinn_agent::context::ReadSourceAuthorization {
             owner_project_id: Some(project_id),
             read_source_project_ids,
-            owner_cache_root: None,
+            // K8s mounts exactly the owner cache root when immutable grants
+            // are present; workers never infer or create this path.
+            owner_cache_root: (!read_source_project_ids.is_empty())
+                .then(|| PathBuf::from("/read-sources")),
         },
         reconciliation_sweep: ReconciliationSweepConfig::default(),
         memory_intent_planner: djinn_agent::context::MemoryIntentPlannerConfig::from_env(),

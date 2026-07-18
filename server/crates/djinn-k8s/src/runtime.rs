@@ -59,7 +59,7 @@ use tracing::{debug, info, warn};
 use uuid::Uuid;
 
 use crate::config::KubernetesConfig;
-use crate::job::{build_task_run_job, taskrun_job_ref_from_job};
+use crate::job::{build_task_run_job_with_read_sources, taskrun_job_ref_from_job};
 use crate::secret::{TaskRunSecretBuilder, job_owner_reference, task_run_resource_name};
 use crate::sidecar::ImageServiceResolution;
 
@@ -510,7 +510,7 @@ impl SessionRuntime for KubernetesRuntime {
         // 2. Build + create the Job manifest.  The `cargo_cache_policy`
         //    was extracted from the effective EnvironmentConfig earlier
         //    (step 1) and is passed through as before.
-        let job = build_task_run_job(
+        let job = build_task_run_job_with_read_sources(
             &self.config,
             &task_run_id,
             &spec.project_id,
@@ -519,6 +519,7 @@ impl SessionRuntime for KubernetesRuntime {
             services,
             cargo_cache_policy.as_ref(),
             spec.is_evidence_spike,
+            &spec.read_source_project_ids,
         );
         let jobs: Api<Job> = Api::namespaced(self.client.clone(), ns);
         let created_job = match jobs.create(&PostParams::default(), &job).await {

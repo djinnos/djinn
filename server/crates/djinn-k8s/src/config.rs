@@ -34,6 +34,9 @@ pub struct KubernetesConfig {
     pub ttl_seconds_after_finished: i32,
     /// RWX PVC backing the task-run mirror (mounted read-only at `/mirror`).
     pub mirror_pvc: String,
+    /// RWX PVC holding canonical project roots. Task-run Pods mount only an
+    /// owning project read-source subPath from this claim, never the namespace.
+    pub projects_pvc: String,
     /// RWX PVC backing shared caches (cargo / pnpm / pip). Mounted writeable
     /// at `/cache` — the Job manifest mounts this PVC once; the worker carves
     /// per-tool subdirectories (`/cache/cargo`, `/cache/pnpm`, `/cache/pip`)
@@ -152,6 +155,7 @@ impl KubernetesConfig {
             memory_limit: "4Gi".into(),
             ttl_seconds_after_finished: 300,
             mirror_pvc: "djinn-mirror".into(),
+            projects_pvc: "djinn-projects".into(),
             cache_pvc: "djinn-cache".into(),
             server_addr: "djinn.djinn.svc.cluster.local:8443".into(),
             warm_job_ttl_seconds: 300,
@@ -261,6 +265,9 @@ impl KubernetesConfig {
         }
         if let Ok(v) = std::env::var("DJINN_K8S_MIRROR_PVC") {
             cfg.mirror_pvc = v;
+        }
+        if let Ok(v) = std::env::var("DJINN_K8S_PROJECTS_PVC") {
+            cfg.projects_pvc = v;
         }
         if let Ok(v) = std::env::var("DJINN_K8S_CACHE_PVC") {
             cfg.cache_pvc = v;

@@ -490,6 +490,29 @@ pub fn build_task_run_job(
 /// Labels are intentionally minimal: the task-run id is the primary
 /// correlator and the component marker lets controllers find task-run
 /// resources with a single selector.
+/// Add the sole owner-cache mount for immutable read-source grants.
+#[allow(clippy::too_many_arguments)]
+pub fn build_task_run_job_with_read_sources(
+    config: &KubernetesConfig, task_run_id: &Uuid, project_id: &str, secret_name: &str,
+    project_image_tag: &str, services: &[BackingServiceSpec],
+    policy: Option<&djinn_stack::environment::CargoCachePolicy>, is_evidence_spike: bool,
+    read_source_project_ids: &[String],
+) -> Job {
+    let mut job = build_task_run_job(config, task_run_id, project_id, secret_name, project_image_tag, services, policy, is_evidence_spike);
+    if read_source_project_ids.is_empty() { return job; }
+    let pod = job.spec.as_mut().expect("builder sets JobSpec").template.spec.as_mut().expect("builder sets PodSpec");
+    pod.volumes.get_or_insert_with(Vec::new).push(Volume {
+        name: "read-sources".to_string(),
+        persistent_volume_claim: Some(PersistentVolumeClaimVolumeSource { claim_name: config.projects_pvc.clone(), read_only: Some(true) }),
+        ..Volume::default()
+    });
+    pod.containers[0].volume_mounts.get_or_insert_with(Vec::new).push(VolumeMount {
+        name: "read-sources".to_string(), mount_path: "/read-sources".to_string(),
+        sub_path: Some(format!("{project_id}/.task-runtime/read-sources")), read_only: Some(true), ..VolumeMount::default()
+    });
+    job
+}
+
 fn job_labels(task_run_id: &str) -> BTreeMap<String, String> {
     let mut labels = BTreeMap::new();
     labels.insert(LABEL_TASK_RUN_ID.to_string(), task_run_id.to_string());
