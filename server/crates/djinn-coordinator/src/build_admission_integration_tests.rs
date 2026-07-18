@@ -854,6 +854,16 @@ enum HandoffMatrixAction {
     Commit(AdmissionHandoffPhase),
 }
 
+#[derive(Clone, Copy, Debug)]
+struct HandoffMatrixExpectation {
+    phase: AdmissionHandoffPhase,
+    emergency_acknowledged: bool,
+    invocation_acknowledged: bool,
+    emergency_enforcing: bool,
+    invocation_enforcing: bool,
+    legal_next: AdmissionHandoffPhase,
+}
+
 fn handoff_next(phase: AdmissionHandoffPhase) -> AdmissionHandoffPhase {
     match phase {
         AdmissionHandoffPhase::EmergencyPrimary => AdmissionHandoffPhase::ForwardOverlap,
@@ -863,51 +873,64 @@ fn handoff_next(phase: AdmissionHandoffPhase) -> AdmissionHandoffPhase {
     }
 }
 
-async fn assert_handoff_restart_snapshot(repo: &AdmissionHandoffRepository) {
+async fn assert_handoff_restart_snapshot(
+    repo: &AdmissionHandoffRepository,
+    expected: HandoffMatrixExpectation,
+) {
     let row = repo.read().await.unwrap().unwrap();
-    let emergency_current = row.emergency_ack_epoch == Some(row.epoch);
-    let invocation_current = row.invocation_ack_epoch == Some(row.epoch);
-    let invocation_enforcing = !matches!(row.phase, AdmissionHandoffPhase::EmergencyPrimary);
-    let emergency_enforcing =
-        !matches!(row.phase, AdmissionHandoffPhase::InvocationPrimary) || !invocation_current;
+    assert_eq!(row.phase, expected.phase);
+    assert_eq!(row.emergency_ack_epoch, expected.emergency_acknowledged.then_some(row.epoch));
+    assert_eq!(row.invocation_ack_epoch, expected.invocation_acknowledged.then_some(row.epoch));
     let snapshot = evaluate_handoff(
         Ok(Some(row.clone())),
         BuildAdmissionMode::Enforce,
-        emergency_enforcing,
+        expected.emergency_enforcing,
         BuildAdmissionReadiness::Healthy,
         InvocationAuthorityObservation {
-            enforcing: invocation_enforcing,
+            enforcing: expected.invocation_enforcing,
         },
     );
-    assert!(emergency_enforcing || invocation_enforcing);
+    assert!(expected.emergency_enforcing || expected.invocation_enforcing);
     assert_eq!(
         snapshot.emergency_acknowledgement_allowed,
-        emergency_enforcing
-            && !emergency_current
+        expected.emergency_enforcing
+            && !expected.emergency_acknowledged
             && snapshot.emergency == EmergencyAuthorityDecision::RequiredFailClosed,
     );
-    let complete = match row.phase {
-        AdmissionHandoffPhase::EmergencyPrimary => emergency_current,
-        AdmissionHandoffPhase::ForwardOverlap | AdmissionHandoffPhase::RollbackOverlap => {
-            emergency_current && invocation_current
-        }
-        AdmissionHandoffPhase::InvocationPrimary => invocation_current,
-    };
     assert_eq!(
         snapshot.emergency == EmergencyAuthorityDecision::MayDisable,
-        row.phase == AdmissionHandoffPhase::InvocationPrimary && complete,
+        !expected.emergency_enforcing,
     );
     assert_eq!(
-        snapshot.warning_gauges(),
-        if complete {
-            HandoffWarningGauges::default()
-        } else {
+        snapshot.warning_gauges(
+            expected.emergency_enforcing,
+            InvocationAuthorityObservation { enforcing: expected.invocation_enforcing },
+        ),
+        if snapshot.state == HandoffState::IncompleteEpoch {
             HandoffWarningGauges {
                 stale_epoch: 1,
                 ..HandoffWarningGauges::default()
             }
+        } else {
+            HandoffWarningGauges::default()
         },
     );
+    for authority in [AdmissionHandoffAuthority::Emergency, AdmissionHandoffAuthority::Invocation] {
+        assert!(matches!(
+            repo.acknowledge(authority, row.epoch - 1).await,
+            Err(djinn_db::Error::InvalidTransition(_))
+        ));
+    }
+    assert!(matches!(
+        repo.advance(row.epoch, handoff_next(expected.legal_next)).await,
+        Err(djinn_db::Error::InvalidTransition(_))
+    ));
+    if snapshot.state == HandoffState::IncompleteEpoch {
+        assert!(matches!(
+            repo.advance(row.epoch, expected.legal_next).await,
+            Err(djinn_db::Error::InvalidTransition(_))
+        ));
+    }
 }
 
 /// Table-driven crash/restart proof for the complete forward and rollback cycle.
@@ -1029,7 +1052,14 @@ async fn handoff_crash_matrix_preserves_authority_and_epoch_guards() {
                 enforcing: invocation,
             },
         );
-        assert_eq!(snapshot.warning_gauges(), expected, "{name}");
+        assert_eq!(
+            snapshot.warning_gauges(
+                emergency,
+                InvocationAuthorityObservation { enforcing: invocation },
+            ),
+            expected,
+            "{name}"
+        );
     }
     assert_eq!(
         evaluate_handoff(
@@ -1061,7 +1091,7 @@ async fn concurrent_invocation_children_share_parent_observation_without_v0_occu
         panic!("parent observation reserves the one v0 slot");
     };
     let mut children = Vec::new();
-    for child in ["invocation-a", "invocation-b", "invocation-c"] {
+    for child in ["shared-identity", "invocation-a", "invocation-b"] {
         let BuildAdmissionDecision::Permitted { permit, .. } = controller
             .admit_task_run(
                 Some("worker"),
