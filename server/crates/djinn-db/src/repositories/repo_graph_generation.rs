@@ -1125,7 +1125,10 @@ mod tests {
             artifact: ReservedGalaxyArtifactManifest {
                 artifact_id: art_str.clone(),
                 generation_id: gen_str.clone(),
-                graph_content_hash: "graph_content_hash_domain_value".to_owned(),
+                // The pinned-reader selector validates both hash domains
+                // before it can acquire its session pin. Keep this fixture
+                // representative so its lock assertions reach that protocol.
+                graph_content_hash: sha256_hex(b"semantic graph domain"),
                 transport_sha256: chunk_hash.clone(),
                 chunk_count: 1,
                 byte_count: blob.len() as i64,
@@ -1418,6 +1421,91 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn pinned_reader_read_error_discards_its_pinned_connection() {
+        let (db, repo) = fresh().await;
+        insert_project(&db, "p-pin-read-error").await;
+        let (generation_id, artifact_id) = reserved_publish_with_artifact(
+            &repo,
+            "p-pin-read-error",
+            "pin-read-error-commit",
+            b"pin-read-error-blob",
+        )
+        .await;
+        let key = generation_stream_pin_key(&generation_id).expect("pin key");
+
+        // Deliberately make the row disagree with its immutable manifest. The
+        // reader must reject it and discard, rather than return, its session.
+        sqlx::query(
+            "UPDATE repo_graph_galaxy_chunk SET sha256 = $1 \
+             WHERE generation_id = $2::uuid AND artifact_id = $3::uuid AND chunk_index = 0",
+        )
+        .bind(sha256_hex(b"different chunk hash"))
+        .bind(&generation_id)
+        .bind(&artifact_id)
+        .execute(db.pool())
+        .await
+        .expect("corrupt chunk hash for reader test");
+
+        let mut reader = match repo
+            .pin_current_galaxy_artifact("p-pin-read-error")
+            .await
+            .expect("select pinned artifact")
+        {
+            PinnedGalaxyArtifactSelection::Pinned(reader) => reader,
+            other => panic!("expected pinned artifact, got {other:?}"),
+        };
+        assert!(reader.read_chunk(0).await.is_err(), "corrupt chunk must fail");
+        drop(reader);
+
+        let mut contender = db.pool().acquire().await.expect("contender connection");
+        assert!(
+            try_acquire_generation_stream_pin_exclusive(&mut contender, key)
+                .await
+                .expect("try exclusive after read error"),
+            "a read error must not return a session holding the shared pin"
+        );
+        assert!(
+            release_generation_stream_pin_exclusive(&mut contender, key)
+                .await
+                .expect("release exclusive")
+        );
+    }
+
+    #[tokio::test]
+    async fn pinned_reader_reports_persisted_unsupported_wire_format() {
+        let (db, repo) = fresh().await;
+        insert_project(&db, "p-unsupported-wire").await;
+        let (generation_id, _) = reserved_publish_with_artifact(
+            &repo,
+            "p-unsupported-wire",
+            "unsupported-wire-commit",
+            b"unsupported-wire-blob",
+        )
+        .await;
+        sqlx::query(
+            "UPDATE repo_graph_galaxy_artifact SET artifact_version = $1 \
+             WHERE generation_id = $2::uuid",
+        )
+        .bind((SUPPORTED_GALAXY_ARTIFACT_VERSION + 1) as i32)
+        .bind(&generation_id)
+        .execute(db.pool())
+        .await
+        .expect("set unsupported artifact version");
+
+        match repo
+            .pin_current_galaxy_artifact("p-unsupported-wire")
+            .await
+            .expect("select unsupported artifact")
+        {
+            PinnedGalaxyArtifactSelection::UnsupportedVersion { version, encoding } => {
+                assert_eq!(version, SUPPORTED_GALAXY_ARTIFACT_VERSION + 1);
+                assert_eq!(&*encoding, SUPPORTED_GALAXY_ARTIFACT_ENCODING);
+            }
+            other => panic!("expected UnsupportedVersion, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
     async fn galaxy_chunk_returns_exactly_one_by_index() {
         let (db, repo) = fresh().await;
         insert_project(&db, "p-chunk").await;
@@ -1482,7 +1570,7 @@ mod tests {
             artifact: ReservedGalaxyArtifactManifest {
                 artifact_id: artifact_id.clone(),
                 generation_id: generation_id.clone(),
-                graph_content_hash: "semantic-graph-hash".to_owned(),
+                graph_content_hash: sha256_hex(b"semantic graph domain"),
                 transport_sha256: sha256_hex(&[first.clone(), second.clone()].concat()),
                 chunk_count: 2,
                 byte_count: (first.len() + second.len()) as i64,
