@@ -878,9 +878,11 @@ fn classify(path: &Path, target: &str) -> ReadSourcePathState {
             ReadSourcePathState::Special
         };
     }
-    // Check for symlinks or special files inside the directory tree.
-    if has_unsafe_entry(path) {
-        return ReadSourcePathState::UnknownEntry;
+    // Check for symlinks or special files inside the directory tree using
+    // no-follow metadata. Each unsafe entry maps to its exact typed state
+    // class so fleet reporting can observe the exact disposition.
+    if let Some(state) = find_unsafe_entry(path) {
+        return state;
     }
     let commit = match git(path, &["rev-parse", "HEAD"]) {
         Ok(value) => value,
@@ -922,30 +924,34 @@ fn classify(path: &Path, target: &str) -> ReadSourcePathState {
 }
 
 /// Recursively check that a directory tree contains no symlinks or special
-/// files. This is a no-follow safety check.
-fn has_unsafe_entry(path: &Path) -> bool {
-    fn inner(path: &Path) -> bool {
+/// files. Returns the exact typed `ReadSourcePathState` of the first unsafe
+/// entry found, or `None` if the tree is clean. Uses no-follow metadata
+/// (`symlink_metadata`) throughout.
+fn find_unsafe_entry(path: &Path) -> Option<ReadSourcePathState> {
+    fn inner(path: &Path) -> Option<ReadSourcePathState> {
         let entries = match fs::read_dir(path) {
             Ok(entries) => entries,
-            Err(_) => return true, // unreadable → unsafe
+            Err(_) => return Some(ReadSourcePathState::UnknownEntry), // unreadable
         };
         for entry in entries.flatten() {
             let entry_path = entry.path();
             let metadata = match fs::symlink_metadata(&entry_path) {
                 Ok(metadata) => metadata,
-                Err(_) => return true,
+                Err(_) => return Some(ReadSourcePathState::UnknownEntry),
             };
             if metadata.file_type().is_symlink() {
-                return true;
+                return Some(ReadSourcePathState::Symlink);
             }
             if !metadata.is_file() && !metadata.is_dir() {
-                return true;
+                return Some(ReadSourcePathState::Special);
             }
-            if metadata.is_dir() && inner(&entry_path) {
-                return true;
+            if metadata.is_dir()
+                && let Some(state) = inner(&entry_path)
+            {
+                return Some(state);
             }
         }
-        false
+        None
     }
     inner(path)
 }
