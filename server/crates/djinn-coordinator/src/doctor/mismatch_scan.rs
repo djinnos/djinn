@@ -16,7 +16,7 @@ use djinn_core::clock::{Clock, SystemClock};
 use tokio::sync::Mutex;
 
 #[cfg(test)]
-use tokio::sync::Notify;
+use tokio::sync::Semaphore;
 
 use djinn_db::{BoardHealthMismatchCandidate, Database, TaskRepository};
 
@@ -51,8 +51,11 @@ struct PageQueryProbe {
     max_active: AtomicUsize,
     queries: AtomicUsize,
     block_first: AtomicBool,
-    entered: Notify,
-    release: Notify,
+    // Semaphores retain permits, unlike Notify::notify_waiters. This makes the
+    // test handshakes safe regardless of whether a waiter starts before or
+    // after the page query reaches its hold point.
+    entered: Semaphore,
+    release: Semaphore,
 }
 
 #[cfg(test)]
@@ -63,8 +66,8 @@ impl PageQueryProbe {
             max_active: AtomicUsize::new(0),
             queries: AtomicUsize::new(0),
             block_first: AtomicBool::new(true),
-            entered: Notify::new(),
-            release: Notify::new(),
+            entered: Semaphore::new(0),
+            release: Semaphore::new(0),
         }
     }
 
@@ -72,9 +75,13 @@ impl PageQueryProbe {
         let active = self.active.fetch_add(1, Ordering::SeqCst) + 1;
         self.max_active.fetch_max(active, Ordering::SeqCst);
         self.queries.fetch_add(1, Ordering::SeqCst);
-        self.entered.notify_waiters();
+        self.entered.add_permits(1);
         if self.block_first.swap(false, Ordering::SeqCst) {
-            self.release.notified().await;
+            self.release
+                .acquire()
+                .await
+                .expect("page-query release semaphore is never closed")
+                .forget();
         }
         let result = page_query.await;
         self.active.fetch_sub(1, Ordering::SeqCst);
@@ -82,12 +89,12 @@ impl PageQueryProbe {
     }
 
     async fn wait_until_first_query_is_held(&self) {
-        loop {
-            if self.active.load(Ordering::SeqCst) == 1 {
-                return;
-            }
-            self.entered.notified().await;
-        }
+        self.entered
+            .acquire()
+            .await
+            .expect("page-query entered semaphore is never closed")
+            .forget();
+        assert_eq!(self.active.load(Ordering::SeqCst), 1);
     }
 }
 
@@ -346,7 +353,7 @@ mod tests {
         // follow-up run regardless of how many timer/API triggers arrived.
         assert_eq!(probe.active.load(Ordering::SeqCst), 1);
         assert!(coordinator.state.lock().await.pending);
-        probe.release.notify_waiters();
+        probe.release.add_permits(1);
         while coordinator.state.lock().await.running {
             tokio::task::yield_now().await;
         }
