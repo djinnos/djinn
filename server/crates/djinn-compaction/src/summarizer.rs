@@ -182,6 +182,16 @@ pub async fn call_llm_for_summary_for_test(
     call_llm_for_summary(provider, conv).await
 }
 
+/// Production partial-compaction retry path exposed for behavioral integration
+/// tests that need to exercise retries through `call_llm_for_summary`.
+#[doc(hidden)]
+pub async fn do_partial_compact_for_test(
+    provider: &dyn LlmProvider,
+    tail_messages: &[Message],
+) -> anyhow::Result<String> {
+    do_partial_compact(provider, tail_messages).await
+}
+
 pub(super) fn filter_tool_responses_middle_out(
     messages: &[Message],
     remove_percent: u32,

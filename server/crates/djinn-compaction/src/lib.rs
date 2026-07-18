@@ -22,7 +22,7 @@ pub use prompts::CompactionContext;
 pub use prompts::{COMPACTION_SUMMARY_END_MARKER, strip_compaction_markers};
 pub use prompts::{extract_prior_summary, previous_summary_block};
 
-pub use summarizer::call_llm_for_summary_for_test;
+pub use summarizer::{call_llm_for_summary_for_test, do_partial_compact_for_test};
 /// Maximum length for a message identity that fits the boundary table's
 /// `VARCHAR(36)` id columns (`first_message_id`, `last_compacted_message_id`,
 /// `first_retained_message_id` — see migration 92).
