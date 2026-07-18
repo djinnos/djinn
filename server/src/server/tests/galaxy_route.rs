@@ -464,16 +464,38 @@ fn rss_bytes() -> u64 {
 #[test]
 fn galaxy_route_allocation_shape_guard_rejects_payload_aggregation_regressions() {
     let route = include_str!("../galaxy.rs");
-    let reader = include_str!("../../../crates/djinn-db/src/repositories/repo_graph_generation.rs");
-    let stream = route
-        .split("fn stream_gzip(")
-        .nth(1)
-        .expect("production stream implementation");
-    let read_chunk = reader
-        .split("pub async fn read_chunk")
-        .nth(1)
-        .and_then(|source| source.split("/// Explicitly release").next())
-        .expect("production pinned one-chunk reader implementation");
+    let reader_source =
+        include_str!("../../../crates/djinn-db/src/repositories/repo_graph_generation.rs");
+    let stream = rust_function_body(route, "fn stream_gzip(");
+    let read_chunk = rust_function_body(reader_source, "pub async fn read_chunk");
+
+    // This is deliberately stronger than a denylist for `collect`: the one
+    // success arm is the ownership boundary for every stored chunk. Requiring
+    // its exact, direct handoff makes an inferred `Vec::new()` plus `push`,
+    // `extend`, `concat`, or any other retention of `chunk.bytes` change this
+    // assertion before a 150 MiB regression can reach the RSS test.
+    let stream_success = rust_block_after(stream, "Ok(chunk) => {");
+    assert_eq!(
+        without_whitespace(stream_success),
+        concat!(
+            "transport_hasher.update(&chunk.bytes);",
+            "djinn_telemetry::galaxy_artifact_route::record_chunk(chunk.bytes.len());",
+            "yieldOk(Bytes::from(chunk.bytes));"
+        ),
+        "each chunk must be hashed, metered, and transferred directly to the response without retention"
+    );
+
+    let pinned_reader = rust_block_after(reader_source, "pub struct PinnedGalaxyArtifact {");
+    assert_eq!(
+        without_whitespace(pinned_reader),
+        concat!(
+            "metadata:PinnedGalaxyArtifactMetadata,",
+            "chunk_hashes:Vec<String>,",
+            "pin_key:GenerationStreamPinKey,",
+            "connection:Option<PoolConnection<Postgres>>,"
+        ),
+        "pinned reader may retain only bounded metadata, manifest hashes, pin identity, and its session"
+    );
     for forbidden in [
         "fetch_all(",
         ".collect",
@@ -505,4 +527,36 @@ fn galaxy_route_allocation_shape_guard_rejects_payload_aggregation_regressions()
             && stream.contains("reader.read_chunk(index).await"),
         "route must stream in ordered bounded chunks"
     );
+}
+
+/// Extract one Rust brace-delimited body so source assertions cannot be fooled
+/// by a similarly named helper later in the module.
+fn rust_function_body<'a>(source: &'a str, signature: &str) -> &'a str {
+    let start = source.find(signature).expect("production function");
+    rust_block_after(&source[start..], "{")
+}
+
+fn rust_block_after<'a>(source: &'a str, prefix: &str) -> &'a str {
+    let start = source.find(prefix).expect("production block") + prefix.len() - 1;
+    let mut depth = 0_usize;
+    for (offset, character) in source[start..].char_indices() {
+        match character {
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return &source[start + 1..start + offset];
+                }
+            }
+            _ => {}
+        }
+    }
+    panic!("unterminated production block")
+}
+
+fn without_whitespace(source: &str) -> String {
+    source
+        .chars()
+        .filter(|character| !character.is_whitespace())
+        .collect()
 }
