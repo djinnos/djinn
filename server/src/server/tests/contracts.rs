@@ -228,7 +228,8 @@ async fn mcp_contract_task_and_epic_snapshot_shapes() {
         ".project_id" => "[UUID]",
         ".short_id" => "[SHORT_ID]",
         ".created_at" => "[TIMESTAMP]",
-        ".updated_at" => "[TIMESTAMP]"
+        ".updated_at" => "[TIMESTAMP]",
+        ".created_by_user_id" => "[UUID]"
     });
 
     let epic_list = test_helpers::mcp_call_tool(
