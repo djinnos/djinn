@@ -1156,11 +1156,14 @@ mod created_by_tests {
 
         let repo = TaskRepository::new(db.clone(), EventBus::noop());
 
-        // No session in scope → inherit the epic's creator.
+        // No session in scope → inherit the epic creator. Fixtures always
+        // provide their own explicit creator, so exercise the production
+        // provenance boundary directly here.
         let inherited = repo
-            .create_fixture_in_project(
+            .create_in_project_with_provenance(
                 &project_id,
                 Some(&owned_epic_id),
+                EffectiveCreatorProvenance::default(),
                 "Inherited",
                 "",
                 "",
@@ -1178,12 +1181,13 @@ mod created_by_tests {
             "background task under an owned epic must inherit the epic's creator"
         );
 
-        // Session user present → it wins over the epic's creator.
+        // Session user present → it wins over the epic creator.
         let session_owned = SESSION_USER_ID
             .scope(Some(session_user.id.clone()), async {
-                repo.create_fixture_in_project(
+                repo.create_in_project_with_provenance(
                     &project_id,
                     Some(&owned_epic_id),
+                    EffectiveCreatorProvenance::default(),
                     "SessionOwned",
                     "",
                     "",
@@ -1236,7 +1240,11 @@ mod created_by_tests {
             .create_in_project_with_blockers(
                 &project_id,
                 Some(&epic_id),
-                EffectiveCreatorProvenance::default(),
+                EffectiveCreatorProvenance {
+                    explicit_user_id: None,
+                    source_task_id: Some(&blocker.id),
+                    proposal_id: None,
+                },
                 "Blocked",
                 "",
                 "",
@@ -1249,7 +1257,6 @@ mod created_by_tests {
             )
             .await
             .unwrap();
-
         // The edge exists the moment creation returns — no window where the task
         // is dispatchable-but-unblocked.
         let edge: i64 = sqlx::query_scalar!(

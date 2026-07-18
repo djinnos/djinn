@@ -1,5 +1,6 @@
 //! Integration tests for the arbiter park transaction via
 //! `DirectServices::transition_task("arbiter_park")`.
+// djinn:allow-oversize
 //!
 //! These tests exercise the actual code path that the supervisor calls when
 //! `StageOutcome::LeadParked { park_dossier_json }` is handled, rather than
