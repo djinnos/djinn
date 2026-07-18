@@ -63,6 +63,63 @@ use crate::job::{build_task_run_job_with_read_sources, taskrun_job_ref_from_job}
 use crate::secret::{TaskRunSecretBuilder, job_owner_reference, task_run_resource_name};
 use crate::sidecar::ImageServiceResolution;
 
+/// Populate the owner-scoped cache before any task-run resource exists. The
+/// migrator owns durable active-run and ambiguity checks, so every error is a
+/// fail-closed dispatch deferral rather than an in-Pod recovery.
+async fn pre_materialize_read_sources(
+    db: &Database,
+    spec: &TaskRunSpec,
+) -> Result<(), RuntimeError> {
+    if spec.read_source_project_ids.is_empty() {
+        return Ok(());
+    }
+
+    let projects = ProjectRepository::new(db.clone(), djinn_core::events::EventBus::noop());
+    let (owner, repo) = projects
+        .get_github_coords(&spec.project_id)
+        .await
+        .map_err(|error| RuntimeError::Prepare(format!(
+            "read-source authorization lookup for owner {} is uncertain: {error}",
+            spec.project_id
+        )))?
+        .ok_or_else(|| RuntimeError::Prepare(format!(
+            "read-source authorization owner {} does not exist", spec.project_id
+        )))?;
+    let owner_root = djinn_core::paths::project_dir(&owner, &repo);
+    let migrator = djinn_workspace::ReadSourceMigrator::new(db.clone());
+
+    for target_project_id in &spec.read_source_project_ids {
+        // The immutable spec grant is the authorization. This lookup only
+        // fails closed for a deleted granted project or uncertain DB state.
+        projects
+            .get_github_coords(target_project_id)
+            .await
+            .map_err(|error| RuntimeError::Prepare(format!(
+                "read-source authorization lookup for target {target_project_id} is uncertain: {error}"
+            )))?
+            .ok_or_else(|| RuntimeError::Prepare(format!(
+                "authorized read-source project {target_project_id} does not exist"
+            )))?;
+        let request = djinn_workspace::ReadSourceMigrationRequest::new(
+            spec.project_id.clone(),
+            target_project_id.clone(),
+            owner_root.clone(),
+            djinn_workspace::mirror_path_for(target_project_id),
+            vec![djinn_workspace::LegacyReadSource {
+                kind: djinn_workspace::LegacyKind::ProjectLocal,
+                path: owner_root.join(".djinn/read-sources").join(target_project_id),
+            }],
+        );
+        migrator.migrate(request).await.map_err(|error| {
+            RuntimeError::Prepare(format!(
+                "read-source pre-materialization for owner {} target {target_project_id} deferred: {error}",
+                spec.project_id
+            ))
+        })?;
+    }
+    Ok(())
+}
+
 /// Bound on the [`ConnectionRegistry::register_pending`] buffer used by
 /// `prepare`.  Large enough that a busy worker doesn't back-pressure on
 /// frame-rate, small enough that we don't hoard memory if the launcher
@@ -378,6 +435,10 @@ impl SessionRuntime for KubernetesRuntime {
                 }
             }
         };
+
+        // A Pod must never be created while the owner cache is missing,
+        // active, ambiguous, failed, or DB-uncertain.
+        pre_materialize_read_sources(db, spec).await?;
 
         // 0. Reserve the registry slot BEFORE creating the Job.  This closes
         //    the race where the Pod starts up and completes the AuthHello

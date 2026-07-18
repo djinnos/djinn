@@ -2656,4 +2656,89 @@ mod tests {
             "sidecar container must not override the image entrypoint with commands"
         );
     }
+
+    #[test]
+    fn read_source_mount_is_exact_owner_cache_and_read_only() {
+        let cfg = KubernetesConfig::for_testing();
+        let grants = vec!["target-a".to_string(), "target-b".to_string()];
+        let job = build_task_run_job_with_read_sources(
+            &cfg,
+            &Uuid::now_v7(),
+            "owner-project",
+            "djinn-taskrun-test",
+            "registry.example/project:tag",
+            &[],
+            None,
+            false,
+            &grants,
+        );
+        let pod = job.spec.unwrap().template.spec.unwrap();
+        let volume = pod
+            .volumes
+            .as_ref()
+            .unwrap()
+            .iter()
+            .find(|volume| volume.name == "read-sources")
+            .expect("owner-cache volume present");
+        assert_eq!(
+            volume
+                .persistent_volume_claim
+                .as_ref()
+                .map(|pvc| pvc.claim_name.as_str()),
+            Some(cfg.projects_pvc.as_str())
+        );
+        assert_eq!(
+            volume
+                .persistent_volume_claim
+                .as_ref()
+                .and_then(|pvc| pvc.read_only),
+            Some(true)
+        );
+
+        let mounts = pod.containers[0].volume_mounts.as_ref().unwrap();
+        let mount = mounts
+            .iter()
+            .find(|mount| mount.name == "read-sources")
+            .expect("owner-cache mount present");
+        assert_eq!(mount.mount_path, "/read-sources");
+        assert_eq!(
+            mount.sub_path.as_deref(),
+            Some("owner-project/.task-runtime/read-sources")
+        );
+        assert_eq!(mount.read_only, Some(true));
+        assert!(!mounts.iter().any(|mount| {
+            mount.mount_path.contains(".djinn/read-sources")
+                || mount.mount_path == "/projects"
+                || mount.mount_path == "/mirror/read-sources"
+        }));
+    }
+
+    #[test]
+    fn zero_read_source_grants_do_not_mount_projects_claim() {
+        let cfg = KubernetesConfig::for_testing();
+        let job = build_task_run_job_with_read_sources(
+            &cfg,
+            &Uuid::now_v7(),
+            "owner-project",
+            "djinn-taskrun-test",
+            "registry.example/project:tag",
+            &[],
+            None,
+            false,
+            &[],
+        );
+        let pod = job.spec.unwrap().template.spec.unwrap();
+        assert!(!pod.volumes.as_ref().unwrap().iter().any(|volume| {
+            volume
+                .persistent_volume_claim
+                .as_ref()
+                .is_some_and(|pvc| pvc.claim_name == cfg.projects_pvc)
+        }));
+        assert!(!pod.containers[0]
+            .volume_mounts
+            .as_ref()
+            .unwrap()
+            .iter()
+            .any(|mount| mount.name == "read-sources"));
+    }
 }
