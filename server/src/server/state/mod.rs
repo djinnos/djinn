@@ -887,22 +887,21 @@ impl AppState {
             EmergencyAuthorityDecision::RequiredFailClosed
             | EmergencyAuthorityDecision::ConfiguredStandalone => {}
         }
-        if snapshot.emergency_acknowledgement_allowed {
-            if let Some(row) = snapshot
+        if snapshot.emergency_acknowledgement_allowed
+            && let Some(row) = snapshot
                 .row
                 .filter(|row| row.emergency_ack_epoch != Some(row.epoch))
+        {
+            match AdmissionHandoffRepository::new(self.db().clone())
+                .acknowledge(AdmissionHandoffAuthority::Emergency, row.epoch)
+                .await
             {
-                match AdmissionHandoffRepository::new(self.db().clone())
-                    .acknowledge(AdmissionHandoffAuthority::Emergency, row.epoch)
-                    .await
-                {
-                    Ok(_) => tracing::info!(
-                        epoch = row.epoch,
-                        "build admission emergency handoff acknowledged"
-                    ),
-                    Err(error) => {
-                        tracing::error!(%error, epoch = row.epoch, "build admission handoff acknowledgement failed; emergency remains enforced")
-                    }
+                Ok(_) => tracing::info!(
+                    epoch = row.epoch,
+                    "build admission emergency handoff acknowledged"
+                ),
+                Err(error) => {
+                    tracing::error!(%error, epoch = row.epoch, "build admission handoff acknowledgement failed; emergency remains enforced")
                 }
             }
         }
@@ -3803,8 +3802,8 @@ mod build_admission_config_tests {
             .read()
             .await
             .expect("initialize handoff fixture");
-        sqlx::query("DELETE FROM admission_handoff WHERE name = 'build'")
-            .execute(missing.db().pool())
+        handoff_repository(&missing)
+            .delete_for_test()
             .await
             .expect("remove row");
         missing.initialize_build_admission_handoff().await;
