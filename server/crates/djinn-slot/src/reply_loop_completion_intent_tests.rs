@@ -334,8 +334,13 @@ async fn reply_loop_reuse_rejection_matrix_writes_fresh_authoritative_evidence()
                 "{name}"
             );
         }
-        assert!(
-            callbacks.reuse_events().contains(&"writer-resolution"),
+        assert_eq!(
+            callbacks
+                .reuse_events()
+                .iter()
+                .filter(|event| **event == "writer-resolution")
+                .count(),
+            1,
             "{name}"
         );
         assert_eq!(*probe.lease_requests.lock().unwrap(), 1, "{name}");
@@ -400,6 +405,14 @@ async fn reply_loop_reuse_rejection_matrix_writes_fresh_authoritative_evidence()
         assert_eq!(evidence.manifest_version, "manifest-v1", "{name}");
         assert_eq!(
             evidence.environment_identity_digest, identity.digest,
+            "{name}"
+        );
+        assert_eq!(
+            &evidence.covered_checks,
+            stored
+                .covered_checks
+                .as_ref()
+                .expect("fresh durable evidence records covered checks"),
             "{name}"
         );
         assert_eq!(
