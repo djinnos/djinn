@@ -67,6 +67,14 @@ const INLINE_CLEANUP_SKIP_REASONS: [&str; 7] = [
     "dry_run",
 ];
 
+// ─── Server process memory scrape telemetry ───────────────────────────────
+const PROCESS_RSS_BYTES: &str = "djinn_process_rss_bytes";
+const PROCESS_ANON_RSS_BYTES: &str = "djinn_process_anon_rss_bytes";
+const JEMALLOC_ALLOCATED_BYTES: &str = "djinn_jemalloc_allocated_bytes";
+const JEMALLOC_RESIDENT_BYTES: &str = "djinn_jemalloc_resident_bytes";
+const JEMALLOC_RETAINED_BYTES: &str = "djinn_jemalloc_retained_bytes";
+const SERVER_MEMORY_SCRAPE_OUTCOME: &str = "djinn_server_memory_scrape_outcome";
+
 // ─── Stale-PR/branch reconciliation sweep ────────────────────────────────
 const STALE_PR_REAPED_TOTAL: &str = "djinn_stale_pr_reaped_total";
 const STALE_BRANCH_REAPED_TOTAL: &str = "djinn_stale_branch_reaped_total";
@@ -109,6 +117,13 @@ const BUILD_SLOT_QUEUE_WAIT_BUCKETS: [f64; 15] = [
 ];
 const BUILD_SLOTS_IN_USE: &str = "djinn_build_slots_in_use";
 const BUILD_SLOTS_QUEUED: &str = "djinn_build_slots_queued";
+const BUILD_SLOTS_OCCUPIED: &str = "djinn_build_slots_occupied";
+const BUILD_ADMISSION_WOULD_DEFER_TOTAL: &str = "djinn_build_admission_would_defer_total";
+const BUILD_ADMISSION_UNKNOWN_CLASSIFICATION_TOTAL: &str =
+    "djinn_build_admission_unknown_classification_total";
+const BUILD_ADMISSION_INVENTORY_DEGRADED: &str = "djinn_build_admission_inventory_degraded";
+const BUILD_ADMISSION_JOURNAL_DEGRADED: &str = "djinn_build_admission_journal_degraded";
+const BUILD_ADMISSION_CREATE_UNKNOWN_HEALTH: &str = "djinn_build_admission_create_unknown_health";
 const AGENT_SESSION_PHASE_SECONDS_TOTAL: &str = "djinn_agent_session_phase_seconds_total";
 
 // ─── Linux PSI telemetry (proposal zp5t) ──────────────────────────────
@@ -221,6 +236,50 @@ pub mod jit_pitfalls {
     /// fields emitted next to this counter.
     pub fn increment_outcome(outcome: &'static str) {
         metrics::counter!(super::JIT_PITFALL_HINTS_TOTAL, "outcome" => outcome).increment(1);
+    }
+}
+
+/// Bounded gauges populated by the server's scrape-time memory sampler.
+///
+/// Byte gauges intentionally have no labels. The separate outcome gauge is
+/// limited to fixed source and outcome enums so a read failure never creates a
+/// series from an error, path, PID, or other process identity.
+pub mod server_memory {
+    pub const SOURCE_PROCESS_STATUS: &str = "process_status";
+    pub const SOURCE_JEMALLOC: &str = "jemalloc";
+    pub const OUTCOME_OK: &str = "ok";
+    pub const OUTCOME_UNAVAILABLE: &str = "unavailable";
+
+    pub fn record_process_rss(rss_bytes: u64, anon_rss_bytes: u64) {
+        metrics::gauge!(super::PROCESS_RSS_BYTES).set(rss_bytes as f64);
+        metrics::gauge!(super::PROCESS_ANON_RSS_BYTES).set(anon_rss_bytes as f64);
+        set_outcome(SOURCE_PROCESS_STATUS, OUTCOME_OK);
+    }
+
+    pub fn record_process_unavailable() {
+        set_outcome(SOURCE_PROCESS_STATUS, OUTCOME_UNAVAILABLE);
+    }
+
+    pub fn record_jemalloc_stats(allocated: usize, resident: usize, retained: usize) {
+        metrics::gauge!(super::JEMALLOC_ALLOCATED_BYTES).set(allocated as f64);
+        metrics::gauge!(super::JEMALLOC_RESIDENT_BYTES).set(resident as f64);
+        metrics::gauge!(super::JEMALLOC_RETAINED_BYTES).set(retained as f64);
+        set_outcome(SOURCE_JEMALLOC, OUTCOME_OK);
+    }
+
+    pub fn record_jemalloc_unavailable() {
+        set_outcome(SOURCE_JEMALLOC, OUTCOME_UNAVAILABLE);
+    }
+
+    fn set_outcome(source: &'static str, outcome: &'static str) {
+        for known_outcome in [OUTCOME_OK, OUTCOME_UNAVAILABLE] {
+            metrics::gauge!(
+                super::SERVER_MEMORY_SCRAPE_OUTCOME,
+                "source" => source,
+                "outcome" => known_outcome
+            )
+            .set(if known_outcome == outcome { 1.0 } else { 0.0 });
+        }
     }
 }
 
@@ -670,6 +729,42 @@ fn format_build_error(error: BuildError) -> String {
 
 fn register_metrics() {
     memory_retrieval::register_metrics();
+    metrics::describe_gauge!(
+        PROCESS_RSS_BYTES,
+        "Current process resident set size in bytes from Linux /proc status."
+    );
+    metrics::describe_gauge!(
+        PROCESS_ANON_RSS_BYTES,
+        "Current process anonymous resident set size in bytes from Linux /proc status."
+    );
+    metrics::describe_gauge!(
+        JEMALLOC_ALLOCATED_BYTES,
+        "Current jemalloc allocated bytes after refreshing its statistics epoch."
+    );
+    metrics::describe_gauge!(
+        JEMALLOC_RESIDENT_BYTES,
+        "Current jemalloc resident bytes after refreshing its statistics epoch."
+    );
+    metrics::describe_gauge!(
+        JEMALLOC_RETAINED_BYTES,
+        "Current jemalloc retained bytes after refreshing its statistics epoch."
+    );
+    metrics::describe_gauge!(
+        SERVER_MEMORY_SCRAPE_OUTCOME,
+        "Latest bounded server-memory scrape outcome by fixed source and outcome."
+    );
+    for source in [
+        server_memory::SOURCE_PROCESS_STATUS,
+        server_memory::SOURCE_JEMALLOC,
+    ] {
+        for outcome in [
+            server_memory::OUTCOME_OK,
+            server_memory::OUTCOME_UNAVAILABLE,
+        ] {
+            metrics::gauge!(SERVER_MEMORY_SCRAPE_OUTCOME, "source" => source, "outcome" => outcome)
+                .set(0.0);
+        }
+    }
     metrics::describe_counter!(
         DISPATCH_ATTEMPTS_TOTAL,
         "Dispatch attempts partitioned by terminal dispatch outcome."
@@ -1071,6 +1166,28 @@ fn register_metrics() {
         "Current number of build slots queued for admission across the process. Absolute setter for reconstructed unique state-set cardinality."
     );
     metrics::gauge!(BUILD_SLOTS_QUEUED).set(0.0);
+    metrics::describe_gauge!(
+        BUILD_SLOTS_OCCUPIED,
+        "Deduplicated task-observation and warm-build identities occupying admission capacity."
+    );
+    metrics::describe_counter!(
+        BUILD_ADMISSION_WOULD_DEFER_TOTAL,
+        "Observe-mode admissions that would have been deferred at the effective cap."
+    );
+    metrics::describe_counter!(
+        BUILD_ADMISSION_UNKNOWN_CLASSIFICATION_TOTAL,
+        "Build-admission requests with an unknown workload classification."
+    );
+    for metric in [
+        BUILD_ADMISSION_INVENTORY_DEGRADED,
+        BUILD_ADMISSION_JOURNAL_DEGRADED,
+        BUILD_ADMISSION_CREATE_UNKNOWN_HEALTH,
+    ] {
+        metrics::describe_gauge!(
+            metric,
+            "Bounded build-admission health signal; one means degraded."
+        );
+    }
     metrics::describe_counter!(
         AGENT_SESSION_PHASE_SECONDS_TOTAL,
         "Cumulative seconds spent in agent session phases, partitioned by bounded phase and role labels."
@@ -2121,6 +2238,43 @@ pub mod build_slot_occupancy {
 /// High-cardinality dimensions (`task_id`, `session_id`, `project_id`,
 /// `user_id`, `work_id`) belong in structured tracing fields emitted at the
 /// phase transition site, not in Prometheus labels.
+/// Build-admission metrics whose labels are restricted to effective mode/cap.
+/// Work IDs, UIDs, epochs, and diagnostics must remain in tracing only.
+pub mod build_admission {
+    /// Publish the deduplicated occupied and Enforce-deferred queue sizes.
+    pub fn set_slots(
+        effective_mode: &'static str,
+        effective_cap: i64,
+        occupied: usize,
+        queued: usize,
+    ) {
+        let cap = effective_cap.to_string();
+        metrics::gauge!(super::BUILD_SLOTS_OCCUPIED, "effective_mode" => effective_mode, "effective_cap" => cap.clone()).set(occupied as f64);
+        metrics::gauge!(super::BUILD_SLOTS_QUEUED, "effective_mode" => effective_mode, "effective_cap" => cap).set(queued as f64);
+    }
+    /// Set readiness-derived health gauges. `true` means degraded.
+    pub fn set_health(
+        effective_mode: &'static str,
+        effective_cap: i64,
+        inventory_degraded: bool,
+        journal_degraded: bool,
+        create_unknown: bool,
+    ) {
+        let cap = effective_cap.to_string();
+        metrics::gauge!(super::BUILD_ADMISSION_INVENTORY_DEGRADED, "effective_mode" => effective_mode, "effective_cap" => cap.clone()).set(f64::from(inventory_degraded));
+        metrics::gauge!(super::BUILD_ADMISSION_JOURNAL_DEGRADED, "effective_mode" => effective_mode, "effective_cap" => cap.clone()).set(f64::from(journal_degraded));
+        metrics::gauge!(super::BUILD_ADMISSION_CREATE_UNKNOWN_HEALTH, "effective_mode" => effective_mode, "effective_cap" => cap).set(f64::from(create_unknown));
+    }
+    /// Record one bounded Observe-mode would-defer event.
+    pub fn increment_would_defer(effective_mode: &'static str, effective_cap: i64) {
+        metrics::counter!(super::BUILD_ADMISSION_WOULD_DEFER_TOTAL, "effective_mode" => effective_mode, "effective_cap" => effective_cap.to_string()).increment(1);
+    }
+    /// Record one bounded unknown-classification event.
+    pub fn increment_unknown_classification(effective_mode: &'static str, effective_cap: i64) {
+        metrics::counter!(super::BUILD_ADMISSION_UNKNOWN_CLASSIFICATION_TOTAL, "effective_mode" => effective_mode, "effective_cap" => effective_cap.to_string()).increment(1);
+    }
+}
+
 pub mod agent_session_phase {
     pub const PHASE_PROVIDER_WAIT: &str = "provider_wait";
     pub const PHASE_TOOL_EXECUTION: &str = "tool_execution";

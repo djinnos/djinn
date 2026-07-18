@@ -333,3 +333,32 @@ async fn authoritative_uid_not_found_releases_and_emits_wakeup() {
             .is_empty()
     );
 }
+
+#[tokio::test]
+async fn journal_snapshot_failure_degrades_and_keeps_enforce_closed() {
+    djinn_telemetry::init().unwrap();
+    let db = Database::open_in_memory().unwrap();
+    db.ensure_initialized().await.unwrap();
+    let controller = Arc::new(BuildAdmissionController::new(
+        Arc::new(AdmissionJournalRepository::new(db.clone())),
+        BuildAdmissionMode::Enforce,
+        1,
+        "failed-reconcile",
+    ));
+    controller.mark_ready();
+    db.pool().close().await;
+    let report =
+        BuildAdmissionReconciler::new(controller.clone(), Arc::new(FakeInventory::new(vec![])))
+            .reconcile()
+            .await;
+    assert!(!report.blockers.is_empty());
+    assert_eq!(
+        controller.readiness(),
+        BuildAdmissionReadiness::JournalUnhealthy
+    );
+    assert!(djinn_telemetry::render().unwrap().lines().any(|line| {
+        line.starts_with("djinn_build_admission_journal_degraded")
+            && line.contains("effective_mode=\"enforce\"")
+            && line.ends_with(" 1")
+    }));
+}
