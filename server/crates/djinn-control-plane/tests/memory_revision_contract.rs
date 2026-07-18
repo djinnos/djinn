@@ -23,8 +23,10 @@ fn contract() -> Value {
     serde_json::from_str(CONTRACT).expect("memory revision contract fixture is valid JSON")
 }
 
-/// Seed fixed rows by immutable INSERT only: no writer or schema relaxation is
-/// involved, and the fixture owns every value projected by the public readers.
+/// Seed fixed rows by immutable INSERT only. The fixture includes one historical
+/// malformed update to prove the reader never infers a missing snapshot from a
+/// neighboring revision, so its per-harness shape check is restored as NOT VALID
+/// after seeding; subsequent inserts remain checked.
 async fn seed_reader_contract(harness: &McpTestHarness, fixture: &Value) {
     let seed = &fixture["reader_fixture"];
     let project_id = fixture["ids"]["project_id"]
@@ -83,6 +85,17 @@ async fn seed_reader_contract(harness: &McpTestHarness, fixture: &Value) {
             .await
             .expect("seed fixed live note");
     }
+    // Production writers cannot produce malformed updates. The legacy fixture
+    // row is intentional: the reader must reject its missing after snapshot
+    // instead of deriving it from the preceding revision.
+    QueryBuilder::<Postgres>::new(
+        "ALTER TABLE note_revision_events DROP CONSTRAINT chk_note_revision_events_shape",
+    )
+    .build()
+    .execute(harness.db().pool())
+    .await
+    .expect("temporarily permit fixture's legacy missing snapshot");
+
     for event in seed["events"].as_array().expect("fixture events") {
         let mut insert = QueryBuilder::<Postgres>::new(
             "INSERT INTO note_revision_events (id, project_id, note_id, note_seq, event_kind, content_before, content_after, confidence_before, confidence_after, actor_kind, actor_id, subsystem, session_id, task_id, task_run_id, reason, created_at) VALUES (",
@@ -114,6 +127,14 @@ async fn seed_reader_contract(harness: &McpTestHarness, fixture: &Value) {
             .await
             .expect("append immutable fixed revision event");
     }
+
+    QueryBuilder::<Postgres>::new(
+        "ALTER TABLE note_revision_events ADD CONSTRAINT chk_note_revision_events_shape CHECK ((event_kind = 'created' AND note_id IS NOT NULL AND content_before IS NULL AND confidence_before IS NULL AND content_after IS NOT NULL AND confidence_after IS NOT NULL) OR (event_kind = 'updated' AND note_id IS NOT NULL AND content_before IS NOT NULL AND confidence_before IS NOT NULL AND content_after IS NOT NULL AND confidence_after IS NOT NULL) OR (event_kind = 'deleted' AND note_id IS NOT NULL AND content_before IS NOT NULL AND confidence_before IS NOT NULL AND content_after IS NULL AND confidence_after IS NULL) OR (event_kind = 'confidence_changed' AND note_id IS NOT NULL AND content_before IS NULL AND content_after IS NULL AND confidence_before IS NOT NULL AND confidence_after IS NOT NULL) OR (event_kind = 'extraction_skipped' AND note_id IS NULL AND content_before IS NULL AND content_after IS NULL AND confidence_before IS NULL AND confidence_after IS NULL AND (session_id IS NOT NULL OR task_run_id IS NOT NULL))) NOT VALID",
+    )
+    .build()
+    .execute(harness.db().pool())
+    .await
+    .expect("restore revision shape check after legacy fixture seed");
 
     let context = &seed["session_context"];
     let task_id = context["task_id"].as_str().expect("fixed task id");
