@@ -15,6 +15,48 @@ pub struct InvocationAuthorityObservation {
     pub enforcing: bool,
 }
 
+impl HandoffSnapshot {
+    /// Convert the typed policy result plus authority observations into the
+    /// intentionally small warning contract.
+    #[must_use]
+    pub fn warning_reason(
+        &self,
+        emergency_enforcing: bool,
+        invocation: InvocationAuthorityObservation,
+    ) -> Option<HandoffWarningReason> {
+        match self.state {
+            HandoffState::UnexpectedOverlap => Some(HandoffWarningReason::UnexpectedOverlap),
+            HandoffState::IncompleteEpoch => Some(HandoffWarningReason::StaleEpoch),
+            HandoffState::EpochUnreadable => Some(HandoffWarningReason::EpochUnreadable),
+            HandoffState::ForwardOverlap | HandoffState::RollbackOverlap => {
+                if emergency_enforcing && invocation.enforcing {
+                    None
+                } else {
+                    Some(HandoffWarningReason::StaleEpoch)
+                }
+            }
+            HandoffState::EmergencyPrimary => {
+                if emergency_enforcing {
+                    invocation
+                        .enforcing
+                        .then_some(HandoffWarningReason::UnexpectedOverlap)
+                } else {
+                    Some(HandoffWarningReason::StaleEpoch)
+                }
+            }
+            HandoffState::InvocationPrimary => {
+                if invocation.enforcing {
+                    emergency_enforcing.then_some(HandoffWarningReason::UnexpectedOverlap)
+                } else {
+                    Some(HandoffWarningReason::StaleEpoch)
+                }
+            }
+            HandoffState::MissingRow => (emergency_enforcing && invocation.enforcing)
+                .then_some(HandoffWarningReason::UnexpectedOverlap),
+        }
+    }
+}
+
 /// Why an emergency controller remains required.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EmergencyAuthorityDecision {
@@ -37,6 +79,25 @@ pub enum HandoffState {
     IncompleteEpoch,
     EpochUnreadable,
     UnexpectedOverlap,
+}
+
+/// The bounded reasons used by handoff telemetry and persistent lifecycle logs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HandoffWarningReason {
+    UnexpectedOverlap,
+    StaleEpoch,
+    EpochUnreadable,
+}
+
+impl HandoffWarningReason {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::UnexpectedOverlap => "unexpected_overlap",
+            Self::StaleEpoch => "stale_epoch",
+            Self::EpochUnreadable => "epoch_unreadable",
+        }
+    }
 }
 
 /// Data-only handoff result.  `row` preserves the exact durable epoch and
@@ -271,5 +332,52 @@ mod tests {
                 readiness.is_healthy()
             );
         }
+    }
+    #[test]
+    fn warning_classification_has_only_the_contract_reasons() {
+        let invocation = InvocationAuthorityObservation { enforcing: true };
+        for phase in [
+            AdmissionHandoffPhase::ForwardOverlap,
+            AdmissionHandoffPhase::RollbackOverlap,
+        ] {
+            let snapshot = evaluate_handoff(
+                Ok(Some(row(phase, true, true))),
+                BuildAdmissionMode::Enforce,
+                true,
+                BuildAdmissionReadiness::Healthy,
+                invocation,
+            );
+            assert_eq!(snapshot.warning_reason(true, invocation), None, "{phase:?}");
+            assert_eq!(
+                snapshot.warning_reason(true, InvocationAuthorityObservation::default()),
+                Some(HandoffWarningReason::StaleEpoch)
+            );
+        }
+        let unreadable = evaluate_handoff(
+            Err(()),
+            BuildAdmissionMode::Enforce,
+            true,
+            BuildAdmissionReadiness::Healthy,
+            InvocationAuthorityObservation::default(),
+        );
+        assert_eq!(
+            unreadable.warning_reason(true, InvocationAuthorityObservation::default()),
+            Some(HandoffWarningReason::EpochUnreadable)
+        );
+        let overlap = evaluate_handoff(
+            Ok(Some(row(
+                AdmissionHandoffPhase::EmergencyPrimary,
+                true,
+                false,
+            ))),
+            BuildAdmissionMode::Enforce,
+            true,
+            BuildAdmissionReadiness::Healthy,
+            invocation,
+        );
+        assert_eq!(
+            overlap.warning_reason(true, invocation),
+            Some(HandoffWarningReason::UnexpectedOverlap)
+        );
     }
 }
