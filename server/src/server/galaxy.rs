@@ -23,15 +23,15 @@ use djinn_db::{
     PinnedGalaxyArtifact, PinnedGalaxyArtifactSelection, RepoGraphGenerationRepository,
 };
 
-pub const GALAXY_ROUTE: &str = "/api/projects/{project_id}/code-graph/galaxy";
-pub const ERROR_UNAVAILABLE: &str = "galaxy_artifact_unavailable";
-pub const ERROR_UNSUPPORTED: &str = "galaxy_artifact_unsupported";
-pub const ERROR_CORRUPT: &str = "galaxy_artifact_corrupt";
-pub const HEADER_PROJECT_ID: &str = "x-djinn-project-id";
-pub const HEADER_GENERATION_ID: &str = "x-djinn-generation-id";
-pub const HEADER_COMMIT_SHA: &str = "x-djinn-commit-sha";
-pub const HEADER_ARTIFACT_VERSION: &str = "x-djinn-galaxy-artifact-version";
-pub const HEADER_SEMANTIC_HASH: &str = "x-djinn-galaxy-semantic-sha256";
+pub(super) const GALAXY_ROUTE: &str = "/api/projects/{project_id}/code-graph/galaxy";
+pub(super) const ERROR_UNAVAILABLE: &str = "galaxy_artifact_unavailable";
+pub(super) const ERROR_UNSUPPORTED: &str = "galaxy_artifact_unsupported";
+pub(super) const ERROR_CORRUPT: &str = "galaxy_artifact_corrupt";
+pub(super) const HEADER_PROJECT_ID: &str = "x-djinn-project-id";
+pub(super) const HEADER_GENERATION_ID: &str = "x-djinn-generation-id";
+pub(super) const HEADER_COMMIT_SHA: &str = "x-djinn-commit-sha";
+pub(super) const HEADER_ARTIFACT_VERSION: &str = "x-djinn-galaxy-artifact-version";
+pub(super) const HEADER_SEMANTIC_HASH: &str = "x-djinn-galaxy-semantic-sha256";
 
 pub(super) fn router() -> Router<AppState> {
     Router::new().route(GALAXY_ROUTE, get(get_galaxy))
@@ -312,6 +312,17 @@ mod tests {
     fn if_none_match_wildcard_matches_any_current_representation() {
         let mut headers = HeaderMap::new();
         headers.insert(header::IF_NONE_MATCH, HeaderValue::from_static("*"));
+        assert!(etag_matches(&headers, "\"transport-sha256\""));
+    }
+
+    #[test]
+    fn if_none_match_combines_multiple_header_fields() {
+        let mut headers = HeaderMap::new();
+        headers.append(header::IF_NONE_MATCH, HeaderValue::from_static("\"other\""));
+        headers.append(
+            header::IF_NONE_MATCH,
+            HeaderValue::from_static("W/\"transport-sha256\""),
+        );
         assert!(etag_matches(&headers, "\"transport-sha256\""));
     }
 
