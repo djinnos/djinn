@@ -114,6 +114,11 @@ impl CoordinatorHandle {
         self.send(CoordinatorMessage::TriggerStuckScan).await
     }
 
+    pub async fn trigger_board_health_mismatch_scan(&self) -> Result<(), CoordinatorError> {
+        self.send(CoordinatorMessage::TriggerBoardHealthMismatchScan)
+            .await
+    }
+
     /// Update ready-task dispatch limit.
     pub async fn update_dispatch_limit(&self, limit: usize) -> Result<(), CoordinatorError> {
         self.send(CoordinatorMessage::UpdateDispatchLimit {

@@ -18,6 +18,7 @@
 pub mod closed_parent_open_children;
 pub mod leader_tick;
 pub mod live_mover;
+pub mod mismatch_scan;
 pub mod stranded_ready;
 
 use std::sync::Arc;

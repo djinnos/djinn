@@ -3357,6 +3357,10 @@ mod inflight_ledger_tests {
             consolidation_runner: std::sync::Arc::new(
                 crate::consolidation::DbConsolidationRunner::new(db.clone()),
             ),
+            mismatch_scan: crate::doctor::mismatch_scan::MismatchScanCoordinator::new(
+                db.clone(),
+                crate::events::event_bus_for(events_tx),
+            ),
             last_stale_sweep: StdInstant::now(),
             last_auto_dispatch_sweep: StdInstant::now(),
             last_proposal_review_sweep: StdInstant::now(),
@@ -4662,6 +4666,10 @@ mod failover_chain_tests {
             auto_merge_tracker: AutoMergeTracker::default(),
             consolidation_runner: std::sync::Arc::new(
                 crate::consolidation::DbConsolidationRunner::new(db.clone()),
+            ),
+            mismatch_scan: crate::doctor::mismatch_scan::MismatchScanCoordinator::new(
+                db.clone(),
+                crate::events::event_bus_for(events_tx),
             ),
             last_stale_sweep: StdInstant::now(),
             last_auto_dispatch_sweep: StdInstant::now(),
@@ -7162,6 +7170,10 @@ mod monitored_reopen_no_eligible_model_tests {
             consolidation_runner: std::sync::Arc::new(
                 crate::consolidation::DbConsolidationRunner::new(db.clone()),
             ),
+            mismatch_scan: crate::doctor::mismatch_scan::MismatchScanCoordinator::new(
+                db.clone(),
+                crate::events::event_bus_for(events_tx),
+            ),
             last_stale_sweep: StdInstant::now(),
             last_auto_dispatch_sweep: StdInstant::now(),
             last_proposal_review_sweep: StdInstant::now(),
@@ -7740,6 +7752,10 @@ mod build_admission_route_tests {
             auto_merge_tracker: AutoMergeTracker::default(),
             consolidation_runner: std::sync::Arc::new(
                 crate::consolidation::DbConsolidationRunner::new(db.clone()),
+            ),
+            mismatch_scan: crate::doctor::mismatch_scan::MismatchScanCoordinator::new(
+                db.clone(),
+                crate::events::event_bus_for(events_tx),
             ),
             last_stale_sweep: StdInstant::now(),
             last_auto_dispatch_sweep: StdInstant::now(),

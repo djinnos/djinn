@@ -29,7 +29,7 @@ pub use parent_disposition::{
 };
 pub use queries::{
     BOARD_HEALTH_MISMATCH_PAGE_SIZE, BoardHealthMismatchCandidate, BoardHealthMismatchPage,
-    BoardHealthMismatchScanState,
+    BoardHealthMismatchScanState, evaluate_board_health_mismatch_candidate,
 };
 
 // ── Query / result types ──────────────────────────────────────────────────────

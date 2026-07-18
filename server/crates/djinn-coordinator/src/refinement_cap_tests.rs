@@ -152,6 +152,10 @@ pub(crate) fn build_refinement_actor(
         background_work_tracker: BackgroundWorkTracker::default(),
         auto_merge_tracker: AutoMergeTracker::default(),
         consolidation_runner: Arc::new(DbConsolidationRunner::new(db.clone())),
+        mismatch_scan: crate::doctor::mismatch_scan::MismatchScanCoordinator::new(
+            db.clone(),
+            crate::events::event_bus_for(events_tx),
+        ),
         last_stale_sweep: StdInstant::now(),
         last_auto_dispatch_sweep: StdInstant::now(),
         last_proposal_review_sweep: StdInstant::now(),
@@ -214,6 +218,7 @@ pub(crate) fn spawn_test_pool(
 
 /// Create a controlled refinement pool whose runner snapshots the durable
 /// admission row before performing any lifecycle side effect.
+#[allow(clippy::type_complexity)]
 fn spawn_admission_observing_pool(
     db: &djinn_db::Database,
     journal: Arc<AdmissionJournalRepository>,
