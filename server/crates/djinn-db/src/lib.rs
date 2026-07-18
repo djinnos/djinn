@@ -170,7 +170,8 @@ pub use repositories::{
     repo_graph_generation::{
         CurrentGalaxyArtifact, ProjectCurrentGraph, RepoGraphGalaxyArtifact,
         RepoGraphGalaxyArtifactInsert, RepoGraphGalaxyChunk, RepoGraphGalaxyChunkInsert,
-        RepoGraphGeneration, RepoGraphGenerationRepository,
+        RepoGraphGeneration, RepoGraphGenerationRepository, ReservedGalaxyArtifactChunk,
+        ReservedGalaxyArtifactManifest, ReservedGraphPublication,
     },
     scip_indexer_timing::{
         ScipIndexerTiming, ScipIndexerTimingObservation, ScipIndexerTimingRepository,
@@ -190,9 +191,10 @@ pub use repositories::{
     settings::SettingsRepository,
     task::TaskRepository,
     task::{
-        ActivityQuery, BlockerRef, ChildDisposition, CountQuery, CreateTaskInProjectParams,
-        CreateTaskParams, DispositionCounts, DispositionFinding, DispositionPlan, DispositionScope,
-        ListQuery, ListResult, ReadyQuery, UpdateTaskParams,
+        ActivityQuery, BlockerRef, BoardHealthMismatchCandidate, ChildDisposition, CountQuery,
+        CreateTaskInProjectParams, CreateTaskParams, DispositionCounts, DispositionFinding,
+        DispositionPlan, DispositionScope, ListQuery, ListResult, ReadyQuery, UpdateTaskParams,
+        evaluate_board_health_mismatch_candidate,
     },
     task_arbitration::{
         ArbitrationState, CreateArbitrationParams, TaskArbitrationRecord,
