@@ -232,6 +232,11 @@ fn checked_in_classification_covers_every_production_stream_event_match() {
     assert!(FIXTURE.contains("drain_provider_turn"));
     assert!(FIXTURE.contains("grouped ignore arm"));
     assert!(FIXTURE.contains("wildcard"));
+    assert!(FIXTURE.contains(
+        "server/crates/djinn-agent/src/direct_services.rs::append_direct_response_event#1\tshared direct-invocation and planner response match ownership"
+    ));
+    assert!(!FIXTURE.contains("direct_services.rs::invoke_llm#1"));
+    assert!(!FIXTURE.contains("direct_services.rs::collect_planner_stream#1"));
     assert!(
         FIXTURE.contains("no behavioral claim")
             || include_str!("stream_event_consumer_audit.rs").contains("no behavioral claim")

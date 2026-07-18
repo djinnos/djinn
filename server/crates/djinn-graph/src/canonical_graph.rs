@@ -693,7 +693,10 @@ pub async fn ensure_canonical_graph<C: WarmContext>(
     ),
     String,
 > {
-    use djinn_db::{RepoGraphCacheRepository, RepoGraphGenerationRepository, ReservedGalaxyArtifactChunk, ReservedGalaxyArtifactManifest, ReservedGraphPublication};
+    use djinn_db::{
+        RepoGraphCacheRepository, RepoGraphGenerationRepository, ReservedGalaxyArtifactChunk,
+        ReservedGalaxyArtifactManifest, ReservedGraphPublication,
+    };
 
     let mut handle =
         crate::index_tree::IndexTree::ensure_with_migration(project_id, project_root, ctx.db())
@@ -1321,46 +1324,83 @@ pub async fn ensure_canonical_graph<C: WarmContext>(
     let generated_at = chrono::DateTime::<chrono::Utc>::from(SystemClock::new().now()).to_rfc3339();
     let artifact = match crate::galaxy_artifact::build_galaxy_artifact(
         crate::galaxy_artifact::GalaxyArtifactInput {
-            graph: &graph, project_id: project_id.to_string(), git_head: commit_sha.clone(),
-            generated_at, generation_id: reserved_generation,
+            graph: &graph,
+            project_id: project_id.to_string(),
+            git_head: commit_sha.clone(),
+            generated_at,
+            generation_id: reserved_generation,
             size_cap: crate::galaxy_artifact::ArtifactSizeCap::default(),
         },
     ) {
         Ok(artifact) => artifact,
         Err(crate::galaxy_artifact::GalaxyArtifactError::Oversize { actual, cap }) => {
             djinn_telemetry::galaxy_artifact_publication::record_oversize();
-            djinn_telemetry::galaxy_artifact_publication::record_build_duration(artifact_started.elapsed());
-            return Err(format!("build galaxy artifact for reserved generation {reserved_generation}: compressed size {actual} exceeds cap {cap}"));
+            djinn_telemetry::galaxy_artifact_publication::record_build_duration(
+                artifact_started.elapsed(),
+            );
+            return Err(format!(
+                "build galaxy artifact for reserved generation {reserved_generation}: compressed size {actual} exceeds cap {cap}"
+            ));
         }
         Err(e) => {
             djinn_telemetry::galaxy_artifact_publication::record_failure();
-            djinn_telemetry::galaxy_artifact_publication::record_build_duration(artifact_started.elapsed());
-            return Err(format!("build galaxy artifact for reserved generation {reserved_generation}: {e}"));
+            djinn_telemetry::galaxy_artifact_publication::record_build_duration(
+                artifact_started.elapsed(),
+            );
+            return Err(format!(
+                "build galaxy artifact for reserved generation {reserved_generation}: {e}"
+            ));
         }
     };
     djinn_telemetry::galaxy_artifact_publication::record_build_duration(artifact_started.elapsed());
-    djinn_telemetry::galaxy_artifact_publication::record_sizes(artifact.payload_json.len(), artifact.spool.total_compressed_bytes, artifact.spool.chunks.len());
+    djinn_telemetry::galaxy_artifact_publication::record_sizes(
+        artifact.payload_json.len(),
+        artifact.spool.total_compressed_bytes,
+        artifact.spool.chunks.len(),
+    );
 
     // The same reserved identity is the payload generation, artifact, manifest,
     // and every chunk identity. No legacy cache upsert is permitted on failure.
     let generation_id = artifact.generation_id.as_str();
     let publication = ReservedGraphPublication {
-        project_id: project_id.to_string(), commit_sha: commit_sha.clone(), generation_id: generation_id.clone(), graph_blob: serialized_blob.clone(),
+        project_id: project_id.to_string(),
+        commit_sha: commit_sha.clone(),
+        generation_id: generation_id.clone(),
+        graph_blob: serialized_blob.clone(),
         artifact: ReservedGalaxyArtifactManifest {
-            artifact_id: generation_id.clone(), generation_id: generation_id.clone(), graph_content_hash: artifact.graph_content_hash.clone(), transport_sha256: artifact.spool.transport_sha256.clone(),
-            chunk_count: i32::try_from(artifact.spool.chunks.len()).map_err(|_| "galaxy artifact has too many chunks".to_string())?,
-            byte_count: i64::try_from(artifact.spool.total_compressed_bytes).map_err(|_| "galaxy artifact byte count overflowed".to_string())?,
+            artifact_id: generation_id.clone(),
+            generation_id: generation_id.clone(),
+            graph_content_hash: artifact.graph_content_hash.clone(),
+            transport_sha256: artifact.spool.transport_sha256.clone(),
+            chunk_count: i32::try_from(artifact.spool.chunks.len())
+                .map_err(|_| "galaxy artifact has too many chunks".to_string())?,
+            byte_count: i64::try_from(artifact.spool.total_compressed_bytes)
+                .map_err(|_| "galaxy artifact byte count overflowed".to_string())?,
             chunk_hashes: artifact.spool.chunk_hashes.clone(),
         },
-        chunks: artifact.spool.chunks.into_iter().map(|chunk| ReservedGalaxyArtifactChunk {
-            generation_id: generation_id.clone(), artifact_id: generation_id.clone(),
-            chunk_index: i32::try_from(chunk.index).expect("bounded galaxy chunk index fits i32"), sha256: chunk.sha256, bytes: chunk.bytes,
-        }).collect(),
+        chunks: artifact
+            .spool
+            .chunks
+            .into_iter()
+            .map(|chunk| ReservedGalaxyArtifactChunk {
+                generation_id: generation_id.clone(),
+                artifact_id: generation_id.clone(),
+                chunk_index: i32::try_from(chunk.index)
+                    .expect("bounded galaxy chunk index fits i32"),
+                sha256: chunk.sha256,
+                bytes: chunk.bytes,
+            })
+            .collect(),
     };
     let publication_started = SystemClock::new().now_instant();
-    match RepoGraphGenerationRepository::new(ctx.db().clone()).publish_reserved_generation(publication).await {
+    match RepoGraphGenerationRepository::new(ctx.db().clone())
+        .publish_reserved_generation(publication)
+        .await
+    {
         Ok(()) => {
-            djinn_telemetry::galaxy_artifact_publication::record_publication_duration(publication_started.elapsed());
+            djinn_telemetry::galaxy_artifact_publication::record_publication_duration(
+                publication_started.elapsed(),
+            );
             djinn_telemetry::galaxy_artifact_publication::record_success();
             persist_workspace_graph_freshness_best_effort(
                 ctx,
@@ -1388,9 +1428,13 @@ pub async fn ensure_canonical_graph<C: WarmContext>(
             .await;
         }
         Err(e) => {
-            djinn_telemetry::galaxy_artifact_publication::record_publication_duration(publication_started.elapsed());
+            djinn_telemetry::galaxy_artifact_publication::record_publication_duration(
+                publication_started.elapsed(),
+            );
             djinn_telemetry::galaxy_artifact_publication::record_failure();
-            return Err(format!("publish galaxy artifact generation {generation_id}: {e}"));
+            return Err(format!(
+                "publish galaxy artifact generation {generation_id}: {e}"
+            ));
         }
     }
 
