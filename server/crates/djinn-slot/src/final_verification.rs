@@ -73,6 +73,18 @@ pub struct FinalVerificationCoordinatorRequest {
     pub cancellation: CancellationToken,
 }
 
+/// Named checkpoints in the production reuse consultation. Tests inject at
+/// these checkpoints to prove uncertainty falls through to the normal writer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FinalVerificationConsultationFailure {
+    Lookup,
+    Evaluator,
+    Context,
+    Fingerprint,
+    Identity,
+    Database,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum FinalVerificationRecordingOutcome {
     Stored {
@@ -276,11 +288,29 @@ async fn consult_reusable_final_verification(
     attempt_id: &str,
     ctx: &SlotContext,
 ) -> Option<FinalVerificationSuccessEvidence> {
+    if injected_consultation_failure(
+        ctx,
+        FinalVerificationConsultationFailure::Context,
+        request,
+        attempt_id,
+        "task_context",
+    ) {
+        return None;
+    }
     let task = match ctx.load_task(&request.task_id).await {
         Ok(task) => task,
         Err(error) => return lookup_none("error", request, attempt_id, "task_context", &error),
     };
     let key = format!("project.{}.verify_run_reuse_enabled", task.project_id);
+    if injected_consultation_failure(
+        ctx,
+        FinalVerificationConsultationFailure::Database,
+        request,
+        attempt_id,
+        "gate_database",
+    ) {
+        return None;
+    }
     let enabled = match djinn_db::repositories::settings::SettingsRepository::new(
         ctx.db.clone(),
         ctx.event_bus.clone(),
@@ -309,10 +339,34 @@ async fn consult_reusable_final_verification(
         Ok(material) => material,
         Err(error) => return lookup_none("error", request, attempt_id, "resolution", &error),
     };
+    if injected_consultation_failure(
+        ctx,
+        FinalVerificationConsultationFailure::Identity,
+        request,
+        attempt_id,
+        "c0_identity",
+    ) || injected_consultation_failure(
+        ctx,
+        FinalVerificationConsultationFailure::Fingerprint,
+        request,
+        attempt_id,
+        "c0_fingerprint",
+    ) {
+        return None;
+    }
     let c0 = match derive_current_inputs(&material).await {
         Ok(inputs) => inputs,
         Err(error) => return lookup_none("error", request, attempt_id, "c0", &error),
     };
+    if injected_consultation_failure(
+        ctx,
+        FinalVerificationConsultationFailure::Lookup,
+        request,
+        attempt_id,
+        "lookup",
+    ) {
+        return None;
+    }
     let candidate = match VerifyRunRepository::new(ctx.db.clone())
         .latest_compatible_passing_final_verification(
             &request.task_id,
@@ -334,6 +388,15 @@ async fn consult_reusable_final_verification(
         environment_identity: Some(c0.identity.clone()),
         manifest_version: Some(c0.manifest_version.clone()),
     };
+    if injected_consultation_failure(
+        ctx,
+        FinalVerificationConsultationFailure::Evaluator,
+        request,
+        attempt_id,
+        "evaluator",
+    ) {
+        return None;
+    }
     if !evaluate_freshness(
         &material.diff_fingerprint,
         Some(&candidate),
@@ -389,6 +452,26 @@ async fn consult_reusable_final_verification(
         manifest_version: c1.manifest_version,
         environment_identity_digest: c1.identity.digest,
     })
+}
+
+fn injected_consultation_failure(
+    ctx: &SlotContext,
+    failure: FinalVerificationConsultationFailure,
+    request: &FinalVerificationCoordinatorRequest,
+    attempt_id: &str,
+    reason: &'static str,
+) -> bool {
+    if ctx
+        .callbacks
+        .inject_final_verification_consultation_failure_for_test(failure)
+    {
+        emit_lookup_outcome("error", request, attempt_id, reason, "injected");
+        ctx.callbacks
+            .record_final_verification_consultation_outcome_for_test("error", reason);
+        true
+    } else {
+        false
+    }
 }
 
 async fn derive_current_inputs(
