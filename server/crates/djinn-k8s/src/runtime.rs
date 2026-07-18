@@ -59,9 +59,126 @@ use tracing::{debug, info, warn};
 use uuid::Uuid;
 
 use crate::config::KubernetesConfig;
-use crate::job::{build_task_run_job, taskrun_job_ref_from_job};
+use crate::job::{build_task_run_job_with_read_sources, taskrun_job_ref_from_job};
 use crate::secret::{TaskRunSecretBuilder, job_owner_reference, task_run_resource_name};
 use crate::sidecar::ImageServiceResolution;
+
+#[async_trait]
+trait ReadSourcePreparation: Send + Sync {
+    async fn github_coords(&self, project_id: &str) -> Result<Option<(String, String)>, String>;
+
+    async fn migrate(
+        &self,
+        request: djinn_workspace::ReadSourceMigrationRequest,
+    ) -> Result<(), String>;
+}
+
+struct HostReadSourcePreparation {
+    projects: ProjectRepository,
+    migrator: djinn_workspace::ReadSourceMigrator,
+}
+
+impl HostReadSourcePreparation {
+    fn new(db: &Database) -> Self {
+        Self {
+            projects: ProjectRepository::new(db.clone(), djinn_core::events::EventBus::noop()),
+            migrator: djinn_workspace::ReadSourceMigrator::new(db.clone()),
+        }
+    }
+}
+
+#[async_trait]
+impl ReadSourcePreparation for HostReadSourcePreparation {
+    async fn github_coords(&self, project_id: &str) -> Result<Option<(String, String)>, String> {
+        self.projects
+            .get_github_coords(project_id)
+            .await
+            .map_err(|error| error.to_string())
+    }
+
+    async fn migrate(
+        &self,
+        request: djinn_workspace::ReadSourceMigrationRequest,
+    ) -> Result<(), String> {
+        self.migrator
+            .migrate(request)
+            .await
+            .map(|_| ())
+            .map_err(|error| error.to_string())
+    }
+}
+
+/// Populate the owner-scoped cache before any task-run resource exists. The
+/// migrator owns durable active-run and ambiguity checks, so every error is a
+/// fail-closed dispatch deferral rather than an in-Pod recovery.
+async fn pre_materialize_read_sources_with(
+    preparation: &dyn ReadSourcePreparation,
+    spec: &TaskRunSpec,
+) -> Result<Option<String>, RuntimeError> {
+    if spec.read_source_project_ids.is_empty() {
+        return Ok(None);
+    }
+
+    let (owner, repo) = preparation
+        .github_coords(&spec.project_id)
+        .await
+        .map_err(|error| {
+            RuntimeError::Prepare(format!(
+                "read-source authorization lookup for owner {} is uncertain: {error}",
+                spec.project_id
+            ))
+        })?
+        .ok_or_else(|| {
+            RuntimeError::Prepare(format!(
+                "read-source authorization owner {} does not exist",
+                spec.project_id
+            ))
+        })?;
+    let owner_root = djinn_core::paths::project_dir(&owner, &repo);
+
+    for target_project_id in &spec.read_source_project_ids {
+        // The immutable spec grant is the authorization. This lookup only
+        // fails closed for a deleted granted project or uncertain DB state.
+        preparation
+            .github_coords(target_project_id)
+            .await
+            .map_err(|error| RuntimeError::Prepare(format!(
+                "read-source authorization lookup for target {target_project_id} is uncertain: {error}"
+            )))?
+            .ok_or_else(|| RuntimeError::Prepare(format!(
+                "authorized read-source project {target_project_id} does not exist"
+            )))?;
+        let request = djinn_workspace::ReadSourceMigrationRequest::new(
+            spec.project_id.clone(),
+            target_project_id.clone(),
+            owner_root.clone(),
+            djinn_workspace::mirror_path_for(target_project_id),
+            vec![djinn_workspace::LegacyReadSource {
+                kind: djinn_workspace::LegacyKind::ProjectLocal,
+                path: owner_root
+                    .join(".djinn/read-sources")
+                    .join(target_project_id),
+            }],
+        );
+        preparation.migrate(request).await.map_err(|error| {
+            RuntimeError::Prepare(format!(
+                "read-source pre-materialization for owner {} target {target_project_id} deferred: {error}",
+                spec.project_id
+            ))
+        })?;
+    }
+    // The projects PVC is rooted at `projects_root`; the migrator writes under
+    // `project_dir(owner, repo)`. Use that exact relative cache directory,
+    // never the database project UUID, for the restricted Pod subPath.
+    Ok(Some(format!("{owner}/{repo}/.task-runtime/read-sources")))
+}
+
+async fn pre_materialize_read_sources(
+    db: &Database,
+    spec: &TaskRunSpec,
+) -> Result<Option<String>, RuntimeError> {
+    pre_materialize_read_sources_with(&HostReadSourcePreparation::new(db), spec).await
+}
 
 /// Bound on the [`ConnectionRegistry::register_pending`] buffer used by
 /// `prepare`.  Large enough that a busy worker doesn't back-pressure on
@@ -147,6 +264,14 @@ pub struct KubernetesRuntime {
     /// legacy `new`/`from_client` surface — those callers never reach the
     /// `prepare` code path (they exercise pure-builder unit tests).
     db: Option<Database>,
+    /// Injectable host-side read-source gate. Production constructs the DB-backed
+    /// implementation lazily; tests inject a recorder while still driving the
+    /// real `SessionRuntime::prepare` orchestration.
+    read_source_preparation: Option<Arc<dyn ReadSourcePreparation>>,
+    /// Test-only dispatch-image bypass used to reach the actual resource POSTs
+    /// without coupling orchestration regressions to a live database.
+    #[cfg(test)]
+    dispatch_image_override: Option<String>,
     /// Per-task-run [`PendingConnection`] handles reserved during `prepare`
     /// and drained by `attach_stdio` / `teardown`.  Keyed by
     /// `task_run_id`.  Entries stay present until whichever method lands
@@ -177,6 +302,9 @@ impl KubernetesRuntime {
             config,
             registry,
             db: None,
+            read_source_preparation: None,
+            #[cfg(test)]
+            dispatch_image_override: None,
             pending: Arc::new(Mutex::new(HashMap::new())),
         })
     }
@@ -194,6 +322,9 @@ impl KubernetesRuntime {
             config,
             registry,
             db: Some(db),
+            read_source_preparation: None,
+            #[cfg(test)]
+            dispatch_image_override: None,
             pending: Arc::new(Mutex::new(HashMap::new())),
         })
     }
@@ -210,6 +341,9 @@ impl KubernetesRuntime {
             config,
             registry,
             db: None,
+            read_source_preparation: None,
+            #[cfg(test)]
+            dispatch_image_override: None,
             pending: Arc::new(Mutex::new(HashMap::new())),
         }
     }
@@ -227,6 +361,9 @@ impl KubernetesRuntime {
             config,
             registry,
             db: Some(db),
+            read_source_preparation: None,
+            #[cfg(test)]
+            dispatch_image_override: None,
             pending: Arc::new(Mutex::new(HashMap::new())),
         }
     }
@@ -246,6 +383,19 @@ impl KubernetesRuntime {
     /// a concurrent `serve_on_tcp` spawn.
     pub fn registry(&self) -> &Arc<ConnectionRegistry> {
         &self.registry
+    }
+
+    async fn prepare_read_sources(
+        &self,
+        db: &Database,
+        spec: &TaskRunSpec,
+    ) -> Result<Option<String>, RuntimeError> {
+        match &self.read_source_preparation {
+            Some(preparation) => {
+                pre_materialize_read_sources_with(preparation.as_ref(), spec).await
+            }
+            None => pre_materialize_read_sources(db, spec).await,
+        }
     }
 
     /// Foreground-delete the canonical task-run Job for `task_run_id`.
@@ -317,21 +467,38 @@ impl SessionRuntime for KubernetesRuntime {
                     .into(),
             )
         })?;
+
+        // Safety gate: every authorized cache is materialized before any
+        // Kubernetes API request can be issued.
+        let read_source_cache_sub_path = self.prepare_read_sources(db, spec).await?;
+
         let repo = ProjectRepository::new(db.clone(), djinn_core::events::EventBus::noop());
         // Catalog-image precedence (migration 46): a project on a shared
         // catalog image dispatches against that image's pull ref; otherwise
         // it uses its own per-project build. The resolver is the single
         // source of truth — no silent fallback if the resolved image isn't
         // ready yet (hard-fail, exactly as the per-project path always did).
-        let dispatch_image = repo
-            .resolve_dispatch_image(&spec.project_id)
-            .await
-            .map_err(|e| {
-                RuntimeError::Prepare(format!("resolve_dispatch_image({}): {e}", spec.project_id))
-            })?;
-        let project_image_tag = match dispatch_image.as_ref().and_then(|d| d.pull_ref()) {
-            Some(pull_ref) => pull_ref,
-            None => return Err(RuntimeError::DevcontainerMissing(spec.project_id.clone())),
+        #[cfg(test)]
+        let project_image_tag = self.dispatch_image_override.clone();
+        #[cfg(not(test))]
+        let project_image_tag: Option<String> = None;
+        let project_image_tag = match project_image_tag {
+            Some(tag) => tag,
+            None => {
+                let dispatch_image = repo
+                    .resolve_dispatch_image(&spec.project_id)
+                    .await
+                    .map_err(|e| {
+                        RuntimeError::Prepare(format!(
+                            "resolve_dispatch_image({}): {e}",
+                            spec.project_id
+                        ))
+                    })?;
+                match dispatch_image.as_ref().and_then(|d| d.pull_ref()) {
+                    Some(pull_ref) => pull_ref,
+                    None => return Err(RuntimeError::DevcontainerMissing(spec.project_id.clone())),
+                }
+            }
         };
 
         // Load the project's effective EnvironmentConfig once for the
@@ -510,7 +677,7 @@ impl SessionRuntime for KubernetesRuntime {
         // 2. Build + create the Job manifest.  The `cargo_cache_policy`
         //    was extracted from the effective EnvironmentConfig earlier
         //    (step 1) and is passed through as before.
-        let job = build_task_run_job(
+        let job = build_task_run_job_with_read_sources(
             &self.config,
             &task_run_id,
             &spec.project_id,
@@ -519,6 +686,7 @@ impl SessionRuntime for KubernetesRuntime {
             services,
             cargo_cache_policy.as_ref(),
             spec.is_evidence_spike,
+            read_source_cache_sub_path.as_deref(),
         );
         let jobs: Api<Job> = Api::namespaced(self.client.clone(), ns);
         let created_job = match jobs.create(&PostParams::default(), &job).await {
@@ -1300,6 +1468,245 @@ async fn delete_job_foreground(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use djinn_core::models::TaskRunTrigger;
+    use djinn_runtime::SupervisorFlow;
+    use std::collections::HashMap;
+    use std::sync::Mutex as StdMutex;
+
+    #[derive(Default)]
+    struct FakeReadSourcePreparation {
+        coords: HashMap<String, Result<Option<(String, String)>, String>>,
+        migration_error: Option<String>,
+        events: Arc<StdMutex<Vec<String>>>,
+        requests: StdMutex<Vec<djinn_workspace::ReadSourceMigrationRequest>>,
+    }
+
+    #[async_trait]
+    impl ReadSourcePreparation for FakeReadSourcePreparation {
+        async fn github_coords(
+            &self,
+            project_id: &str,
+        ) -> Result<Option<(String, String)>, String> {
+            self.events
+                .lock()
+                .unwrap()
+                .push(format!("lookup:{project_id}"));
+            self.coords
+                .get(project_id)
+                .cloned()
+                .unwrap_or_else(|| Ok(None))
+        }
+
+        async fn migrate(
+            &self,
+            request: djinn_workspace::ReadSourceMigrationRequest,
+        ) -> Result<(), String> {
+            self.events.lock().unwrap().push(format!(
+                "migrate:{}:{}",
+                request.owner_project_id, request.target_project_id
+            ));
+            self.requests.lock().unwrap().push(request);
+            match &self.migration_error {
+                Some(error) => Err(error.clone()),
+                None => Ok(()),
+            }
+        }
+    }
+
+    fn read_source_spec(targets: &[&str]) -> TaskRunSpec {
+        TaskRunSpec {
+            task_run_id: "019f72b5-a92a-7501-8b41-b0ffe68cdda5".into(),
+            task_attempt_id: None,
+            task_id: "task-read-source".into(),
+            project_id: "owner-project-id".into(),
+            trigger: TaskRunTrigger::NewTask,
+            base_branch: "main".into(),
+            task_branch: "task/read-source".into(),
+            flow: SupervisorFlow::NewTask,
+            model_id_per_role: HashMap::new(),
+            read_source_project_ids: targets.iter().map(|target| (*target).into()).collect(),
+            github_owner: None,
+            github_install_token: None,
+            commit_author_name: None,
+            commit_author_email: None,
+            resume_lifecycle_metadata: None,
+            is_evidence_spike: false,
+        }
+    }
+
+    fn successful_preparation(targets: &[&str]) -> FakeReadSourcePreparation {
+        let mut coords = HashMap::from([(
+            "owner-project-id".into(),
+            Ok(Some(("canonical-owner".into(), "canonical-repo".into()))),
+        )]);
+        for target in targets {
+            coords.insert(
+                (*target).into(),
+                Ok(Some((
+                    format!("target-owner-{target}"),
+                    format!("target-repo-{target}"),
+                ))),
+            );
+        }
+        FakeReadSourcePreparation {
+            coords,
+            ..Default::default()
+        }
+    }
+
+    async fn prepare_through_runtime(
+        preparation: Arc<FakeReadSourcePreparation>,
+        spec: &TaskRunSpec,
+        seed_dispatch_image: bool,
+    ) -> Result<RunHandle, RuntimeError> {
+        use http::Response;
+        use kube::client::Body;
+        use tower::service_fn;
+
+        let events = preparation.events.clone();
+        let client = kube::Client::new(
+            service_fn(move |request: http::Request<Body>| {
+                let events = events.clone();
+                async move {
+                    let path = request.uri().path();
+                    let (event, body) = if path.contains("/secrets") {
+                        (
+                            "POST:Secret",
+                            serde_json::json!({
+                                "apiVersion": "v1", "kind": "Secret",
+                                "metadata": {"name": "task-secret"}
+                            }),
+                        )
+                    } else {
+                        (
+                            "POST:Job",
+                            serde_json::json!({
+                                "apiVersion": "batch/v1", "kind": "Job",
+                                "metadata": {"name": "task-job", "uid": "job-uid"}
+                            }),
+                        )
+                    };
+                    if request.method() == http::Method::POST {
+                        events.lock().unwrap().push(event.into());
+                    }
+                    Ok::<_, std::io::Error>(
+                        Response::builder()
+                            .status(200)
+                            .header("content-type", "application/json")
+                            .body(Body::from(body.to_string().into_bytes()))
+                            .unwrap(),
+                    )
+                }
+            }),
+            "djinn",
+        );
+        let db = Database::open_in_memory().expect("in-memory runtime database");
+        let runtime = KubernetesRuntime {
+            client,
+            config: KubernetesConfig::for_testing(),
+            registry: Arc::new(ConnectionRegistry::new()),
+            db: Some(db),
+            read_source_preparation: Some(preparation),
+            dispatch_image_override: seed_dispatch_image.then(|| "registry/test:test".into()),
+            pending: Arc::new(Mutex::new(HashMap::new())),
+        };
+        runtime.prepare(spec, &ResolvedCredentials::default()).await
+    }
+
+    #[tokio::test]
+    async fn pre_materialization_covers_zero_one_and_multiple_immutable_grants() {
+        for targets in [&[][..], &["target-a"][..], &["target-a", "target-b"][..]] {
+            let preparation = successful_preparation(targets);
+            let spec = read_source_spec(targets);
+            let sub_path = pre_materialize_read_sources_with(&preparation, &spec)
+                .await
+                .expect("authorized sources materialize");
+
+            assert_eq!(
+                sub_path.as_deref(),
+                (!targets.is_empty())
+                    .then_some("canonical-owner/canonical-repo/.task-runtime/read-sources")
+            );
+            let requests = preparation.requests.lock().unwrap();
+            assert_eq!(requests.len(), targets.len());
+            for (request, target) in requests.iter().zip(targets) {
+                assert_eq!(request.owner_project_id, "owner-project-id");
+                assert_eq!(request.target_project_id, *target);
+                assert_eq!(
+                    request.owner_root,
+                    djinn_core::paths::project_dir("canonical-owner", "canonical-repo")
+                );
+                assert_eq!(
+                    djinn_workspace::ReadSourceMigrator::destination_for(
+                        &request.owner_root,
+                        &request.target_project_id
+                    ),
+                    request
+                        .owner_root
+                        .join(".task-runtime/read-sources")
+                        .join(*target)
+                );
+                assert_ne!(request.owner_project_id, request.target_project_id);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn prepare_defers_before_secret_or_job_post_for_uncertain_and_unsafe_sources() {
+        let cases = [
+            ("database unavailable", true),
+            ("active legacy workspace is using a read source", false),
+            ("ambiguous read-source state", false),
+            ("failed migration requires reconciliation", false),
+        ];
+        for (error, lookup_failure) in cases {
+            let mut preparation = successful_preparation(&["target-a"]);
+            if lookup_failure {
+                preparation
+                    .coords
+                    .insert("target-a".into(), Err(error.into()));
+            } else {
+                preparation.migration_error = Some(error.into());
+            }
+            let preparation = Arc::new(preparation);
+            let result = prepare_through_runtime(
+                preparation.clone(),
+                &read_source_spec(&["target-a"]),
+                false,
+            )
+            .await;
+            assert!(result.is_err(), "{error} must defer preparation");
+            let events = preparation.events.lock().unwrap();
+            assert!(
+                !events.iter().any(|event| event.starts_with("POST:")),
+                "resource POST after {error}: {events:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn prepare_materializes_every_target_before_secret_and_job_posts() {
+        let preparation = Arc::new(successful_preparation(&["target-a", "target-b"]));
+        prepare_through_runtime(
+            preparation.clone(),
+            &read_source_spec(&["target-a", "target-b"]),
+            true,
+        )
+        .await
+        .expect("prepare succeeds");
+        assert_eq!(
+            *preparation.events.lock().unwrap(),
+            vec![
+                "lookup:owner-project-id",
+                "lookup:target-a",
+                "migrate:owner-project-id:target-a",
+                "lookup:target-b",
+                "migrate:owner-project-id:target-b",
+                "POST:Secret",
+                "POST:Job",
+            ]
+        );
+    }
 
     /// Object-safety: `dyn SessionRuntime` must accept a reference to
     /// `KubernetesRuntime`. This is a compile-only check.

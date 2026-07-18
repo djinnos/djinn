@@ -1061,11 +1061,18 @@ impl TaskRunSpecInputs {
                     .unwrap_or_else(|| model_id.to_string());
             model_id_per_role.insert(*role, resolved);
         }
-        let read_source_project_ids =
-            djinn_db::EpicRepository::new(app_state.db.clone(), app_state.event_bus.clone())
-                .read_sources_for_task(task.epic_id.as_deref())
-                .await
-                .unwrap_or_default();
+        let read_source_project_ids = djinn_db::EpicRepository::new(
+            app_state.db.clone(),
+            app_state.event_bus.clone(),
+        )
+        .read_sources_for_task(task.epic_id.as_deref())
+        .await
+        .map_err(|error| {
+            anyhow::anyhow!(
+                "supervisor dispatch: read-source authorization lookup is uncertain for task {}: {error}",
+                task.id
+            )
+        })?;
         let pd_project_repo =
             djinn_db::ProjectRepository::new(app_state.db.clone(), app_state.event_bus.clone());
         let github_owner = pd_project_repo
