@@ -122,3 +122,75 @@ impl Sandbox for SeatbeltSandbox {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn write_file(scope: SandboxScope<'_>, path: &Path) -> std::process::Output {
+        let mut cmd = std::process::Command::new("sh");
+        cmd.args(["-c", "printf x > \"$1\"", "--"]).arg(path);
+        SeatbeltSandbox
+            .apply(scope, &mut cmd)
+            .expect("scope should configure Seatbelt");
+        cmd.output().expect("sandboxed shell should spawn")
+    }
+
+    /// Execute Seatbelt for both authorities. A read source gets no writable
+    /// subpath rule, including for `.git`, whereas the owning task worktree
+    /// continues to receive its explicit writable allowance.
+    #[test]
+    fn read_source_policy_denies_content_and_git_writes_but_allows_worktree() {
+        if std::process::Command::new("sandbox-exec")
+            .arg("-h")
+            .output()
+            .is_err()
+        {
+            return;
+        }
+        let source = tempfile::tempdir_in(std::env::current_dir().expect("test directory"))
+            .expect("read source");
+        let source_git = source.path().join(".git");
+        std::fs::create_dir(&source_git).expect("source git directory");
+        let worktree = tempfile::tempdir_in("/var/tmp").expect("worktree");
+
+        let source_content = source.path().join("source-write");
+        assert!(
+            !write_file(
+                SandboxScope::ReadSource {
+                    root: source.path(),
+                    cwd: source.path(),
+                },
+                &source_content,
+            )
+            .status
+            .success(),
+            "Seatbelt must deny writes to read-source content"
+        );
+        assert!(!source_content.exists());
+
+        let source_metadata = source_git.join("metadata-write");
+        assert!(
+            !write_file(
+                SandboxScope::ReadSource {
+                    root: source.path(),
+                    cwd: source.path(),
+                },
+                &source_metadata,
+            )
+            .status
+            .success(),
+            "Seatbelt must deny writes to read-source Git metadata"
+        );
+        assert!(!source_metadata.exists());
+
+        let worktree_content = worktree.path().join("worktree-write");
+        assert!(
+            write_file(SandboxScope::Worktree(worktree.path()), &worktree_content)
+                .status
+                .success(),
+            "Seatbelt must retain task-worktree write access"
+        );
+        assert!(worktree_content.exists());
+    }
+}

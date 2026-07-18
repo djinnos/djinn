@@ -53,6 +53,7 @@ impl SandboxScope<'_> {
             Self::ReadSource { root, cwd } => {
                 validate_directory(root, "read-source root")?;
                 validate_directory(cwd, "read-source cwd")?;
+                reject_read_source_writable_overlap(root)?;
                 anyhow::ensure!(
                     cwd.canonicalize()?.starts_with(root.canonicalize()?),
                     "read-source cwd escapes mounted root"
@@ -69,6 +70,37 @@ fn validate_directory(path: &Path, label: &str) -> Result<()> {
         "{label} does not exist or is not a directory: {}",
         path.display()
     );
+    Ok(())
+}
+
+/// Read-source roots must not be nested under a backend-wide writable rule.
+///
+/// Both OS backends intentionally allow these locations for compiler caches and
+/// disk-backed scratch. Landlock and Seatbelt use additive path rules, so a
+/// read-only child cannot override a writable ancestor. Reject the scope before
+/// spawning: an authorized cache mounted there must be remounted elsewhere.
+fn reject_read_source_writable_overlap(root: &Path) -> Result<()> {
+    let root = root.canonicalize()?;
+    let mut writable_roots = vec![PathBuf::from("/cache"), PathBuf::from("/var/tmp")];
+    if let Some(cache) = djinn_cache_dir() {
+        writable_roots.push(cache);
+    }
+    if let Some(cargo_home) = std::env::var_os("CARGO_HOME") {
+        writable_roots.push(PathBuf::from(cargo_home).join("build"));
+    } else if let Some(home) = std::env::var_os("HOME") {
+        writable_roots.push(PathBuf::from(home).join(".cargo/build"));
+    }
+
+    for writable_root in writable_roots {
+        // A missing optional cache directory cannot contain the validated,
+        // existing read-source root, so retain its lexical path in that case.
+        let writable_root = writable_root.canonicalize().unwrap_or(writable_root);
+        anyhow::ensure!(
+            !root.starts_with(&writable_root),
+            "read-source root overlaps a writable sandbox path: {}",
+            writable_root.display()
+        );
+    }
     Ok(())
 }
 
@@ -356,6 +388,22 @@ mod tests {
         .validate()
         .expect_err("read-source cwd must remain in its root");
         assert!(error.to_string().contains("escapes mounted root"));
+    }
+
+    #[test]
+    fn read_source_scope_rejects_writable_scratch_overlap() {
+        let root = tempfile::tempdir_in("/var/tmp").expect("root");
+        let error = SandboxScope::ReadSource {
+            root: root.path(),
+            cwd: root.path(),
+        }
+        .validate()
+        .expect_err("read-source roots cannot inherit /var/tmp write access");
+        assert!(
+            error
+                .to_string()
+                .contains("overlaps a writable sandbox path: /var/tmp")
+        );
     }
 
     #[test]

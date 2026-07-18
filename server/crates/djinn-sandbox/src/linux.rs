@@ -204,6 +204,15 @@ mod tests {
     use super::*;
     use std::ffi::{OsStr, OsString};
 
+    fn write_file(scope: SandboxScope<'_>, path: &Path) -> std::process::Output {
+        let mut cmd = std::process::Command::new("sh");
+        cmd.args(["-c", "printf x > \"$1\"", "--"]).arg(path);
+        LandlockSandbox
+            .apply(scope, &mut cmd)
+            .expect("scope should configure Landlock");
+        cmd.output().expect("sandboxed shell should spawn")
+    }
+
     /// The task-run Pod inherits `TMPDIR=/workspace` (the read-only PVC mount
     /// root). The sandbox must override it to a Landlock-writable dir, or every
     /// sandboxed tool that honors `$TMPDIR` (go codehost, cargo/cc linker) hits
@@ -227,5 +236,59 @@ mod tests {
             Some(OsString::from("/var/tmp")),
             "sandboxed commands must use a Landlock-writable TMPDIR, not the inherited /workspace"
         );
+    }
+
+    /// Exercise the actual Landlock policy: an owner-cache source is readable
+    /// but neither its files nor its Git metadata can be changed, while a task
+    /// worktree remains writable.
+    #[test]
+    fn read_source_policy_denies_content_and_git_writes_but_allows_worktree() {
+        if !crate::probe_landlock() {
+            return;
+        }
+        let source = tempfile::tempdir_in(std::env::current_dir().expect("test directory"))
+            .expect("read source");
+        let source_git = source.path().join(".git");
+        std::fs::create_dir(&source_git).expect("source git directory");
+        let worktree = tempfile::tempdir_in("/var/tmp").expect("worktree");
+
+        let source_content = source.path().join("source-write");
+        assert!(
+            !write_file(
+                SandboxScope::ReadSource {
+                    root: source.path(),
+                    cwd: source.path(),
+                },
+                &source_content,
+            )
+            .status
+            .success(),
+            "Landlock must deny writes to read-source content"
+        );
+        assert!(!source_content.exists());
+
+        let source_metadata = source_git.join("metadata-write");
+        assert!(
+            !write_file(
+                SandboxScope::ReadSource {
+                    root: source.path(),
+                    cwd: source.path(),
+                },
+                &source_metadata,
+            )
+            .status
+            .success(),
+            "Landlock must deny writes to read-source Git metadata"
+        );
+        assert!(!source_metadata.exists());
+
+        let worktree_content = worktree.path().join("worktree-write");
+        assert!(
+            write_file(SandboxScope::Worktree(worktree.path()), &worktree_content)
+                .status
+                .success(),
+            "Landlock must retain task-worktree write access"
+        );
+        assert!(worktree_content.exists());
     }
 }
