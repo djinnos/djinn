@@ -896,6 +896,8 @@ pub async fn run_reply_loop(
                 turn_thinking,
                 turn_provider_state,
                 turn_tool_calls,
+                turn_unresolved_thinking,
+                turn_completed_thinking_ids,
                 turn_tokens_in,
                 turn_tokens_out,
                 turn_cache_read,
@@ -1010,22 +1012,27 @@ pub async fn run_reply_loop(
                     diag,
                 ));
             }
-            let mut assistant_content: Vec<ContentBlock> = Vec::new();
-            assistant_content.extend(turn_provider_state);
-            if !turn_thinking.is_empty() {
-                assistant_content.push(ContentBlock::Thinking { thinking: turn_thinking.clone(), signature: None });
-            }
+            // Canonical assembly: provider-state blocks, one unsigned
+            // thinking block from unresolved fragments (reconciled by exact
+            // block ID), assistant text, then tool calls.
+            let assistant_content = super::persistence::assemble_persisted_content(
+                &turn_provider_state,
+                &turn_unresolved_thinking,
+                &turn_completed_thinking_ids,
+                &turn_text,
+                &turn_tool_calls,
+            );
+            // Side-effects that depend on turn content (not part of the
+            // canonical assembly itself).
             if !turn_text.is_empty() {
                 push_fragment(&mut assistant_fragments, format!("text:{turn_text}"));
                 last_assistant_text = turn_text.clone();
                 final_assistant_text = turn_text.clone();
-                assistant_content.push(ContentBlock::Text { text: turn_text.clone() });
             }
             for tool_call in &turn_tool_calls {
                 if let ContentBlock::ToolUse { id, .. } = tool_call {
                     push_fragment(&mut assistant_fragments, format!("tool_use:{id}"));
                 }
-                assistant_content.push(tool_call.clone());
             }
             if assistant_content.is_empty() {
                 if empty_turn_is_reasoning_only(turn_reasoning_out) {
@@ -1846,7 +1853,7 @@ mod tests {
     // ---- idempotent in-flight turn flush (djxg) --------------------------
 
     use super::super::persistence::flush_in_flight_turn;
-    use super::super::streaming::StreamTurnState;
+    use super::super::streaming::{StreamTurnState, UnresolvedThinkingFragment};
     use djinn_db::SessionMessageRepository;
     use djinn_db::repositories::session::{CreateSessionParams, SessionRepository};
 
@@ -1879,6 +1886,11 @@ mod tests {
         let mut state = StreamTurnState::new();
         state.turn_text = "Let me check the file.".to_string();
         state.turn_thinking = "Thinking about the task.".to_string();
+        state
+            .turn_unresolved_thinking
+            .push(UnresolvedThinkingFragment::Unattributed(
+                "Thinking about the task.".to_string(),
+            ));
         state.turn_tool_calls = vec![ContentBlock::ToolUse {
             id: "call_1".to_string(),
             name: "read".to_string(),
@@ -2107,6 +2119,128 @@ mod tests {
         );
     }
 
+    /// Cancellation immediately after a completion event must retain exactly
+    /// one signed thinking block. This exercises the stream consumer boundary:
+    /// the completion payload must enter provider state before its ID is marked
+    /// complete and the next biased cancellation poll interrupts the stream.
+    #[tokio::test]
+    async fn completion_then_immediate_cancellation_flushes_one_signed_block() {
+        use super::super::streaming::StreamLoopContext;
+        use futures::StreamExt;
+        use std::sync::Arc;
+        use std::sync::atomic::AtomicU64;
+        use tokio_util::sync::CancellationToken;
+
+        let db = create_test_db();
+        db.ensure_initialized().await.expect("db init");
+        let (session_id, task_id) = create_flush_test_session(&db).await;
+        let msg_repo =
+            SessionMessageRepository::new(db.clone(), djinn_core::events::EventBus::noop());
+        let slot_ctx = agent_context_from_db(db, CancellationToken::new());
+        let provider = FakeProvider::text("unused");
+        let cancel = CancellationToken::new();
+        let cancel_after_completion = cancel.clone();
+        let stream = Box::pin(
+            futures::stream::iter(vec![
+                Ok::<_, anyhow::Error>(StreamEvent::ThinkingDelta {
+                    id: 9,
+                    text: "completed reasoning".into(),
+                }),
+                Ok(StreamEvent::ThinkingBlockComplete {
+                    id: 9,
+                    thinking: "completed reasoning".into(),
+                    signature: Some("signed-completion".into()),
+                }),
+            ])
+            .inspect(move |event| {
+                if matches!(event, Ok(StreamEvent::ThinkingBlockComplete { .. })) {
+                    cancel_after_completion.cancel();
+                }
+            }),
+        );
+        let global_cancel = CancellationToken::new();
+        let tool_metadata = super::super::tool_dispatch::tool_runtime_metadata(&[]);
+        let dispatcher = slot_ctx
+            .tool_dispatcher
+            .as_deref()
+            .expect("test SlotContext has a tool dispatcher");
+        let phase_tracker = Arc::new(std::sync::Mutex::new(
+            super::super::phase::SessionPhaseTracker::new(&slot_ctx, "worker"),
+        ));
+        let dispatch_ctx = super::super::tool_dispatch::ToolDispatchContext {
+            ctx: &slot_ctx,
+            task_id: &task_id,
+            worktree_path: std::path::Path::new("/tmp"),
+            role_name: "worker",
+            tool_metadata: &tool_metadata,
+            tool_dispatcher: dispatcher,
+            otel_session: None,
+            phase_tracker: None,
+        };
+        let activity_ts = Arc::new(AtomicU64::new(0));
+        let last_rpc_touch = Arc::new(AtomicU64::new(0));
+        let last_token_flush = Arc::new(AtomicU64::new(0));
+        let mut current_context_tokens = 0;
+        let mut total_tokens_in = 0;
+        let mut total_tokens_out = 0;
+        let mut total_cache_read = 0;
+        let mut total_cache_write = 0;
+        let mut total_reasoning_out = 0;
+
+        let mut state = consume_provider_stream(StreamLoopContext {
+            provider: &provider,
+            stream,
+            tool_metadata: &tool_metadata,
+            dispatch: &dispatch_ctx,
+            phase_tracker: &phase_tracker,
+            task_id: &task_id,
+            session_id: &session_id,
+            role_name: "worker",
+            project_path: "/tmp",
+            worktree_path: std::path::Path::new("/tmp"),
+            context_window: 100_000,
+            ctx: &slot_ctx,
+            cancel: &cancel,
+            global_cancel: &global_cancel,
+            activity_ts: &activity_ts,
+            last_rpc_touch: &last_rpc_touch,
+            last_token_flush: &last_token_flush,
+            compaction_attempts: 0,
+            current_context_tokens: &mut current_context_tokens,
+            total_tokens_in: &mut total_tokens_in,
+            total_tokens_out: &mut total_tokens_out,
+            total_cache_read: &mut total_cache_read,
+            total_cache_write: &mut total_cache_write,
+            total_reasoning_out: &mut total_reasoning_out,
+        })
+        .await
+        .expect("consume provider stream");
+
+        assert_eq!(state.interrupted, Some("session cancelled"));
+        flush_in_flight_turn(&msg_repo, &session_id, &task_id, 0, &mut state).await;
+
+        let loaded = msg_repo
+            .load_raw_conversation(&session_id)
+            .await
+            .expect("load persisted assistant content");
+        assert_eq!(loaded.messages.len(), 1);
+        let thinking_blocks: Vec<_> = loaded.messages[0]
+            .content
+            .iter()
+            .filter(|block| matches!(block, ContentBlock::Thinking { .. }))
+            .collect();
+        assert_eq!(
+            thinking_blocks.len(),
+            1,
+            "completion must not leave an unsigned duplicate"
+        );
+        assert!(matches!(
+            thinking_blocks[0],
+            ContentBlock::Thinking { thinking, signature: Some(signature) }
+                if thinking == "completed reasoning" && signature == "signed-completion"
+        ));
+    }
+
     // ---- thinking persistence regressions (nbky) --------------------------
     //
     // These tests validate that the new ContentBlock variants introduced by
@@ -2120,7 +2254,7 @@ mod tests {
     // fields exactly through the round-trip.
     //
     // The `flush_in_flight_turn` path (which constructs a Thinking block from
-    // the plain `turn_thinking` string with `signature: None`) is also
+    // unattributed unresolved reasoning with `signature: None`) is also
     // exercised to confirm it does not accidentally attach or drop signatures.
 
     /// Old stored Thinking blocks that only contain `thinking` (no `signature`
@@ -2318,8 +2452,8 @@ mod tests {
         }
     }
 
-    /// `flush_in_flight_turn` constructs a Thinking block from the plain
-    /// `turn_thinking` string with `signature: None`. After persistence and
+    /// `flush_in_flight_turn` constructs a Thinking block from an unattributed
+    /// unresolved fragment with `signature: None`. After persistence and
     /// reload, the block must still carry `signature: None` — this confirms
     /// the flush path does not accidentally attach or drop signatures.
     #[tokio::test]
@@ -2332,6 +2466,11 @@ mod tests {
 
         let mut state = StreamTurnState::new();
         state.turn_thinking = "internal reasoning about the task".into();
+        state
+            .turn_unresolved_thinking
+            .push(UnresolvedThinkingFragment::Unattributed(
+                "internal reasoning about the task".into(),
+            ));
         state.turn_text = "Here is the answer.".into();
 
         flush_in_flight_turn(&msg_repo, &session_id, &task_id, 0, &mut state).await;
