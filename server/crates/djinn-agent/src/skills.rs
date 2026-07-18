@@ -63,7 +63,7 @@ struct SkillFrontmatter {
 }
 
 /// Default `trust_level` used when a skill's frontmatter omits the key. Keeps
-/// existing skills manifest-friendly without forcing an edit.
+/// existing skills compatible without forcing an edit.
 pub(crate) const DEFAULT_TRUST_LEVEL: &str = "project";
 
 /// Returns `true` when the value is a truthy frontmatter flag
@@ -217,16 +217,6 @@ pub(crate) fn load_skills_with_sources_detailed(
 /// frontmatter parsing, same `references/` inclusion. Exists so the manifest
 /// generator can record per-skill `source_files[].path` without re-resolving
 /// names and risking a different file matching between load and manifest.
-pub(crate) fn load_skills_with_sources(
-    project_root: &Path,
-    names: &[String],
-) -> Vec<(ResolvedSkill, PathBuf)> {
-    load_skills_with_sources_detailed(project_root, names)
-        .skills
-        .into_iter()
-        .map(|(_, skill, path)| (skill, path))
-        .collect()
-}
 
 #[derive(Debug, Clone, Copy)]
 enum LoadSkillFailure {
@@ -256,15 +246,6 @@ pub(crate) fn missing_file_fact(requested_name: &str) -> ExtensionDiagnosticFact
         ExtensionLoadPhase::MissingFile,
         ExtensionLoadRemedyCode::RestoreSkillFile,
         "Requested project skill file is missing.",
-    )
-}
-
-pub(crate) fn manifest_drift_fact(requested_name: &str) -> ExtensionDiagnosticFact {
-    skill_fact(
-        requested_name,
-        ExtensionLoadPhase::ManifestDrift,
-        ExtensionLoadRemedyCode::UpdateSkillManifest,
-        "Project skill does not match the checked skill manifest.",
     )
 }
 
@@ -298,15 +279,6 @@ pub(crate) fn skill_path(project_root: &Path, name: &str) -> Option<PathBuf> {
             .join("SKILL.md"),
         project_root
             .join(".opencode")
-            .join("skills")
-            .join(&name)
-            .join("SKILL.md"),
-        project_root
-            .join(".djinn")
-            .join("skills")
-            .join(format!("{name}.md")),
-        project_root
-            .join(".djinn")
             .join("skills")
             .join(&name)
             .join("SKILL.md"),
@@ -734,82 +706,10 @@ mod tests {
     }
 
     #[test]
-    fn load_skills_prefers_claude_then_opencode_then_djinn() {
-        let tmp = crate::test_helpers::test_tempdir("djinn-skills-");
-        let claude_skills = make_skill_dir(&tmp, ".claude");
-        let opencode_skills = make_skill_dir(&tmp, ".opencode");
-        let djinn_skills = make_skill_dir(&tmp, ".djinn");
-
-        write_directory_skill(
-            &claude_skills,
-            "shared-skill",
-            "---\ndescription: Claude version\n---\n\nFrom claude.\n",
-        );
-        write_directory_skill(
-            &opencode_skills,
-            "shared-skill",
-            "---\ndescription: OpenCode version\n---\n\nFrom opencode.\n",
-        );
-        write_flat_skill(
-            &djinn_skills,
-            "shared-skill",
-            "---\ndescription: Djinn flat version\n---\n\nFrom djinn flat.\n",
-        );
-
-        let resolved = load_skills(tmp.path(), &["shared-skill".to_string()]);
-
-        assert_eq!(resolved.len(), 1);
-        assert_eq!(resolved[0].name, "shared-skill");
-        assert_eq!(resolved[0].description, "Claude version");
-        assert_eq!(resolved[0].content, "From claude.");
-    }
 
     #[test]
-    fn load_skills_falls_back_from_claude_to_opencode_to_djinn() {
-        let tmp = crate::test_helpers::test_tempdir("djinn-skills-");
-        let opencode_skills = make_skill_dir(&tmp, ".opencode");
-        let djinn_skills = make_skill_dir(&tmp, ".djinn");
-
-        write_directory_skill(
-            &opencode_skills,
-            "shared-skill",
-            "---\ndescription: OpenCode version\n---\n\nFrom opencode.\n",
-        );
-        write_flat_skill(
-            &djinn_skills,
-            "shared-skill",
-            "---\ndescription: Djinn flat version\n---\n\nFrom djinn flat.\n",
-        );
-
-        let resolved = load_skills(tmp.path(), &["shared-skill".to_string()]);
-
-        assert_eq!(resolved.len(), 1);
-        assert_eq!(resolved[0].description, "OpenCode version");
-        assert_eq!(resolved[0].content, "From opencode.");
-    }
 
     #[test]
-    fn load_skills_prefers_djinn_flat_file_over_directory() {
-        let tmp = crate::test_helpers::test_tempdir("djinn-skills-");
-        let djinn_skills = make_skill_dir(&tmp, ".djinn");
-
-        write_flat_skill(
-            &djinn_skills,
-            "legacy-skill",
-            "---\ndescription: Flat file version\n---\n\nFrom flat file.\n",
-        );
-        write_directory_skill(
-            &djinn_skills,
-            "legacy-skill",
-            "---\ndescription: Directory version\n---\n\nFrom directory.\n",
-        );
-
-        let resolved = load_skills(tmp.path(), &["legacy-skill".to_string()]);
-
-        assert_eq!(resolved.len(), 1);
-        assert_eq!(resolved[0].description, "Flat file version");
-        assert_eq!(resolved[0].content, "From flat file.");
-    }
 
     #[test]
     fn load_skills_uses_requested_name_when_frontmatter_name_missing_in_directory_skill() {

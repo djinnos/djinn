@@ -307,7 +307,7 @@ export function AgentForm({
           {skills.length === 0 ? (
             <p className="text-xs text-muted-foreground/60 italic">
               {availableSkills.length === 0
-                ? "No skills discovered. Add .md files to .djinn/skills/ in your project."
+                ? "No skills discovered. Add SKILL.md directories under .claude/skills/ or .opencode/skills/."
                 : "No skills assigned. Use the dropdown to add one."}
             </p>
           ) : (
