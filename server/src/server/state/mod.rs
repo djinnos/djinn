@@ -12,6 +12,9 @@ use tokio_util::sync::CancellationToken;
 
 use crate::db::runtime::{DatabaseRuntimeHealth, DatabaseRuntimeManager};
 use crate::events::DjinnEventEnvelope;
+use djinn_agent::actors::coordinator::build_admission_handoff::{
+    InvocationAuthorityObservation, evaluate_handoff,
+};
 use djinn_agent::actors::coordinator::{
     BuildAdmissionController, BuildAdmissionMode, CoordinatorHandle,
 };
@@ -22,8 +25,9 @@ use djinn_agent::roles::RoleRegistry;
 use djinn_agent::runtime_bridge::{K8sTokenReviewValidator, RuntimeKind, runtime_kind};
 use djinn_core::clock::{Clock, SystemClock as SystemClockTrait};
 use djinn_db::{
-    Database, NoopNoteVectorStore, NoteVectorStore, ProjectRepository, QdrantCodeChunkConfig,
-    QdrantCodeChunkVectorStore, QdrantConfig, QdrantNoteVectorStore, SettingsRepository,
+    AdmissionHandoffRepository, Database, NoopNoteVectorStore, NoteVectorStore, ProjectRepository,
+    QdrantCodeChunkConfig, QdrantCodeChunkVectorStore, QdrantConfig, QdrantNoteVectorStore,
+    SettingsRepository,
 };
 use djinn_git::{GitActorHandle, GitError};
 use djinn_image_controller::{
@@ -737,6 +741,26 @@ impl AppState {
         // the production shape so `TestRuntime` and dev boxes that never
         // ran `initialize()` still get correct semantics.
         Arc::new(build_in_process_graph_warmer(self.clone())) as Arc<dyn GraphWarmerService>
+    }
+
+    /// Read the durable handoff row before journal recovery can weaken any emergency gate.
+    /// A storage failure remains fail-closed through the existing readiness gates.
+    async fn initialize_build_admission_handoff(&self) {
+        let Some(admission) = self.inner.build_admission.clone() else {
+            return;
+        };
+        let snapshot = evaluate_handoff(
+            AdmissionHandoffRepository::new(self.db().clone())
+                .read()
+                .await
+                .map_err(|_| ()),
+            admission.mode(),
+            admission.mode() == BuildAdmissionMode::Enforce,
+            admission.readiness(),
+            InvocationAuthorityObservation::default(),
+        );
+        tracing::info!(state = ?snapshot.state, emergency = ?snapshot.emergency,
+            "build admission handoff evaluated before emergency recovery");
     }
 
     /// Recover the durable build-admission journal and seed the controller
@@ -1849,6 +1873,7 @@ impl AppState {
         // within the cap. Observe records degradation but never denies; Off has
         // no admission coupling. This must precede `initialize_graph_warmer`
         // because the warmer can create warm jobs under the shared cap.
+        self.initialize_build_admission_handoff().await;
         self.initialize_build_admission_recovery().await;
 
         // Phase 3 PR 8: pick the canonical-graph warmer impl (K8s or
