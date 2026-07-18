@@ -311,16 +311,57 @@ async fn extracted_note_audit_groups_merge_strengthen_demote_and_archive_backlog
         .unwrap();
     }
 
-    let underspecified = repo
-        .create_db_note(
-            &project.id,
-            "Underspecified pattern note",
-            "A short note with no template sections.",
-            "pattern",
-            "[]",
-        )
+    let underspecified_id = uuid::Uuid::now_v7().to_string();
+    let underspecified_revision = repo
+        .mutate_with_revision(NoteRevisionMutation {
+            project_id: project.id.clone(),
+            note_id: Some(underspecified_id.clone()),
+            event_kind: NoteRevisionEventKind::Created,
+            desired: NoteRevisionDesiredState::Create(NoteRevisionCreateState {
+                title: "Underspecified pattern note".into(),
+                permalink: "patterns/underspecified-pattern-note".into(),
+                content: "A short note with no template sections.".into(),
+                note_type: "pattern".into(),
+                folder: "patterns".into(),
+                status: "active".into(),
+                tags: "[]".into(),
+                retrieval_anchor: None,
+                scope_paths: "[]".into(),
+                confidence: 0.5,
+            }),
+            attribution: TrustedNoteRevisionAttribution::agent("audit-fixture-agent").unwrap(),
+            provenance: TrustedNoteRevisionProvenance::new(
+                Some("audit-fixture-session".into()),
+                Some("audit-fixture-task".into()),
+                Some("audit-fixture-run".into()),
+            )
+            .unwrap(),
+            reason: NoteRevisionReason::new("create low-quality audit fixture").unwrap(),
+        })
         .await
         .unwrap();
+    let underspecified = repo
+        .get(&underspecified_id)
+        .await
+        .unwrap()
+        .expect("attributed note");
+    let underspecified_event = repo
+        .note_revision_history(NoteHistoryRequest {
+            project_id: &project.id,
+            note_id: &underspecified.id,
+            limit: 1,
+            before: None,
+        })
+        .await
+        .unwrap()
+        .events
+        .into_iter()
+        .next()
+        .expect("attributed revision event");
+    assert_eq!(
+        underspecified_revision.revision_id.as_deref(),
+        Some(underspecified_event.id.as_str())
+    );
 
     let demote = repo
         .create_db_note(
@@ -366,11 +407,44 @@ async fn extracted_note_audit_groups_merge_strengthen_demote_and_archive_backlog
             .iter()
             .any(|finding| finding.note_id == underspecified.id)
     );
+    let attributed = report
+        .underspecified
+        .iter()
+        .find(|finding| finding.note_id == underspecified.id)
+        .and_then(|finding| finding.attribution.as_ref())
+        .expect("ledger-backed finding attribution");
+    assert_eq!(attributed.revision_id, underspecified_event.id);
+    assert_eq!(attributed.revision_kind, "created");
+    assert_eq!(attributed.revision_seq, Some(1));
+    assert_eq!(
+        attributed.revision_created_at,
+        underspecified_event.created_at
+    );
+    assert_eq!(attributed.actor_kind, "agent");
+    assert_eq!(attributed.actor_id.as_deref(), Some("audit-fixture-agent"));
+    assert_eq!(attributed.subsystem, None);
+    assert_eq!(
+        attributed.session_id.as_deref(),
+        Some("audit-fixture-session")
+    );
+    assert_eq!(attributed.task_id.as_deref(), Some("audit-fixture-task"));
+    assert_eq!(attributed.task_run_id.as_deref(), Some("audit-fixture-run"));
+    assert_eq!(attributed.reason, "create low-quality audit fixture");
     assert!(
         report
             .demote_to_working_spec
             .iter()
             .any(|finding| finding.note_id == demote.id)
+    );
+    assert_eq!(
+        report
+            .demote_to_working_spec
+            .iter()
+            .find(|finding| finding.note_id == demote.id)
+            .expect("pre-migration finding")
+            .attribution,
+        None,
+        "notes without ledger events must not receive fabricated attribution"
     );
     assert!(
         report

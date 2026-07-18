@@ -1,7 +1,8 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use djinn_memory::{
-    ExtractedNoteAuditCategory, ExtractedNoteAuditFinding, LifecycleHealth, RecentSweepMetrics,
+    ExtractedNoteAuditAttribution, ExtractedNoteAuditCategory, ExtractedNoteAuditFinding,
+    LifecycleHealth, RecentSweepMetrics,
 };
 use sqlx::Row;
 
@@ -589,6 +590,33 @@ impl NoteRepository {
         }
 
         for note in &notes {
+            // Select the latest immutable event under the same project/note
+            // scope as the audit. An empty history is expected for
+            // pre-migration notes and deliberately remains unattributed.
+            let attribution = self
+                .note_revision_history(NoteHistoryRequest {
+                    project_id,
+                    note_id: &note.id,
+                    limit: 1,
+                    before: None,
+                })
+                .await?
+                .events
+                .into_iter()
+                .next()
+                .map(|event| ExtractedNoteAuditAttribution {
+                    revision_id: event.id,
+                    revision_kind: event.event_kind.as_str().to_owned(),
+                    revision_seq: event.note_seq,
+                    revision_created_at: event.created_at,
+                    actor_kind: event.attribution.actor_kind().as_str().to_owned(),
+                    actor_id: event.attribution.actor_id().map(ToOwned::to_owned),
+                    subsystem: event.attribution.subsystem().map(ToOwned::to_owned),
+                    session_id: event.provenance.session_id().map(ToOwned::to_owned),
+                    task_id: event.provenance.task_id().map(ToOwned::to_owned),
+                    task_run_id: event.provenance.task_run_id().map(ToOwned::to_owned),
+                    reason: event.reason.into_inner(),
+                });
             if let Some(related_ids) = cluster_by_note_id.get(&note.id)
                 && seen.insert((note.id.clone(), "merge"))
             {
@@ -609,6 +637,7 @@ impl NoteRepository {
                         .filter(|id| *id != &note.id)
                         .cloned()
                         .collect(),
+                    attribution: attribution.clone(),
                 });
             }
 
@@ -640,6 +669,7 @@ impl NoteRepository {
                         .filter(|id| *id != &note.id)
                         .cloned()
                         .collect(),
+                    attribution: attribution.clone(),
                 });
             }
 
@@ -664,6 +694,7 @@ impl NoteRepository {
                         .filter(|id| *id != &note.id)
                         .cloned()
                         .collect(),
+                    attribution: attribution.clone(),
                 });
             }
 
@@ -701,6 +732,7 @@ impl NoteRepository {
                         .filter(|id| *id != &note.id)
                         .cloned()
                         .collect(),
+                    attribution: attribution.clone(),
                 });
             }
         }

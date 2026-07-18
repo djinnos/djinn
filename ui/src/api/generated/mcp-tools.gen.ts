@@ -4043,6 +4043,11 @@ export namespace MemoryExtractedAuditOutputSchema {
    * A single extracted note flagged by the ADR-054 audit.
    */
   export interface ExtractedNoteAuditFinding {
+  /**
+   * Latest immutable revision for this note under the audited project.
+   * Absent for pre-migration notes with no ledger history.
+   */
+  attribution?: (ExtractedNoteAuditAttribution | null)
   category: ExtractedNoteAuditCategory
   folder: string
   note_id: string
@@ -4051,6 +4056,25 @@ export namespace MemoryExtractedAuditOutputSchema {
   reasons: string[]
   related_note_ids: string[]
   title: string
+  [k: string]: any
+  }
+  /**
+   * Immutable ledger event that explains the state of an extracted note when
+   * it was flagged by the audit. Absence means the note predates the revision
+   * ledger; callers must not infer or fabricate provenance.
+   */
+  export interface ExtractedNoteAuditAttribution {
+  actor_id?: string
+  actor_kind: string
+  reason: string
+  revision_created_at: string
+  revision_id: string
+  revision_kind: string
+  revision_seq?: number
+  session_id?: string
+  subsystem?: string
+  task_id?: string
+  task_run_id?: string
   [k: string]: any
   }
 
@@ -11564,6 +11588,12 @@ export namespace TaskTimelineOutputSchema {
    * an empty array on successful timeline lookups.
    */
   extension_load_diagnostic_events?: TimelineExtensionLoadDiagnosticEvent[]
+  /**
+   * Immutable memory revisions caused by this task's sessions, newest-first
+   * by `(created_at, revision_id)`. Bodies follow the same authorization
+   * and redaction decision as `memory_session_diff`.
+   */
+  memory_revision_events?: MemoryRevisionEvent[]
   messages?: TimelineMessage[]
   sessions?: SessionToolSession[]
   [k: string]: any
@@ -11597,6 +11627,40 @@ export namespace TaskTimelineOutputSchema {
   kind: string
   session_id: string
   timestamp: string
+  [k: string]: any
+  }
+  /**
+   * One immutable ledger event projected for the MCP reader surfaces.
+   */
+  export interface MemoryRevisionEvent {
+  actor_id?: string
+  /**
+   * Trusted actor kind: human, agent, or system.
+   */
+  actor_kind: string
+  confidence_after?: number
+  confidence_before?: number
+  content_after?: string
+  content_before?: string
+  /**
+   * True when `content_before`/`content_after` were withheld because the
+   * caller lacks note-read permission.
+   */
+  content_redacted: boolean
+  created_at: string
+  /**
+   * Ledger event kind: created, updated, deleted, confidence_changed, or
+   * extraction_skipped.
+   */
+  event_kind: string
+  note_id?: string
+  note_seq?: number
+  reason: string
+  revision_id: string
+  session_id?: string
+  subsystem?: string
+  task_id?: string
+  task_run_id?: string
   [k: string]: any
   }
   export interface TimelineMessage {
