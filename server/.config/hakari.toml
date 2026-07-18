@@ -18,6 +18,11 @@ resolver = "2"
 # https://doc.rust-lang.org/rustc/platform-support.html
 platforms = [
     "x86_64-unknown-linux-gnu",
+    # CI test execution runs on GitHub's arm64 hosted runners; without this
+    # entry the workspace-hack does not unify features on aarch64-linux and
+    # e.g. serde_json loses preserve_order there, breaking every
+    # JSON-shape-sensitive snapshot test.
+    "aarch64-unknown-linux-gnu",
     "aarch64-apple-darwin",
 ]
 

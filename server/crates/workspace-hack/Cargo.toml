@@ -45,8 +45,8 @@ log = { version = "0.4.33", default-features = false, features = ["std"] }
 memchr = { version = "2.8.3" }
 num-traits = { version = "0.2.19", features = ["i128", "libm"] }
 percent-encoding = { version = "2.3.2" }
-rand-274715c4dabd11b0 = { package = "rand", version = "0.9.4" }
-rand-c38e5c1d305a1b54 = { package = "rand", version = "0.8.6", features = ["small_rng"] }
+rand-274715c4dabd11b0 = { package = "rand", version = "0.9.5" }
+rand-c38e5c1d305a1b54 = { package = "rand", version = "0.8.7", features = ["small_rng"] }
 rand_chacha = { version = "0.9.0", default-features = false, features = ["std"] }
 regex-automata = { version = "0.4.15", default-features = false, features = ["dfa", "hybrid", "meta", "nfa", "perf", "std", "unicode"] }
 regex-syntax = { version = "0.8.11" }
@@ -54,7 +54,7 @@ reqwest-594e8ee84c453af0 = { package = "reqwest", version = "0.13.4", default-fe
 reqwest-5ef9efb8ec2df382 = { package = "reqwest", version = "0.12.28", features = ["blocking", "json", "macos-system-configuration", "rustls-tls", "rustls-tls-native-roots", "stream"] }
 rmcp = { version = "1.8.0", features = ["client", "transport-io", "transport-streamable-http-client-reqwest", "transport-streamable-http-server"] }
 rust-embed-utils = { version = "8.12.0", default-features = false, features = ["mime-guess"] }
-rustls = { version = "0.23.41", default-features = false, features = ["logging", "ring", "std", "tls12"] }
+rustls = { version = "0.23.42", default-features = false, features = ["logging", "ring", "std", "tls12"] }
 schemars = { version = "1.2.1", features = ["chrono04"] }
 serde = { version = "1.0.228", features = ["alloc", "derive", "rc"] }
 serde_core = { version = "1.0.228", features = ["alloc", "rc"] }
@@ -79,8 +79,8 @@ tracing = { version = "0.1.44", features = ["log"] }
 tracing-core = { version = "0.1.36" }
 tracing-subscriber = { version = "0.3.23", features = ["env-filter", "json"] }
 typenum = { version = "1.20.1", default-features = false, features = ["const-generics"] }
-uuid = { version = "1.23.4", features = ["v4", "v7"] }
-winnow = { version = "1.0.3" }
+uuid = { version = "1.23.5", features = ["v4", "v7"] }
+winnow = { version = "1.0.4" }
 yoke = { version = "0.8.3", features = ["derive"] }
 zerocopy = { version = "0.8.54", default-features = false, features = ["derive", "simd"] }
 zerofrom = { version = "0.1.8", default-features = false, features = ["alloc", "derive"] }
@@ -90,7 +90,7 @@ aho-corasick = { version = "1.1.4" }
 base64 = { version = "0.22.1" }
 bitflags = { version = "2.13.0", default-features = false, features = ["serde"] }
 byteorder = { version = "1.5.0" }
-cc = { version = "1.2.66", default-features = false, features = ["parallel"] }
+cc = { version = "1.2.67", default-features = false, features = ["parallel"] }
 crossbeam-utils = { version = "0.8.22" }
 digest = { version = "0.10.7", features = ["mac", "oid", "std"] }
 either = { version = "1.16.0", features = ["serde", "use_std"] }
@@ -106,11 +106,11 @@ log = { version = "0.4.33", default-features = false, features = ["std"] }
 memchr = { version = "2.8.3" }
 num-traits = { version = "0.2.19", features = ["i128", "libm"] }
 percent-encoding = { version = "2.3.2" }
-rand-c38e5c1d305a1b54 = { package = "rand", version = "0.8.6", features = ["small_rng"] }
+rand-c38e5c1d305a1b54 = { package = "rand", version = "0.8.7", features = ["small_rng"] }
 regex-automata = { version = "0.4.15", default-features = false, features = ["dfa", "hybrid", "meta", "nfa", "perf", "std", "unicode"] }
 regex-syntax = { version = "0.8.11" }
 rust-embed-utils = { version = "8.12.0", default-features = false, features = ["mime-guess"] }
-rustls = { version = "0.23.41", default-features = false, features = ["logging", "ring", "std", "tls12"] }
+rustls = { version = "0.23.42", default-features = false, features = ["logging", "ring", "std", "tls12"] }
 serde = { version = "1.0.228", features = ["alloc", "derive", "rc"] }
 serde_core = { version = "1.0.228", features = ["alloc", "rc"] }
 serde_json = { version = "1.0.150", features = ["alloc", "raw_value"] }
@@ -122,7 +122,7 @@ sqlx-macros-core = { version = "0.8.6", features = ["_rt-tokio", "_tls-rustls-ri
 sqlx-mysql = { version = "0.8.6", default-features = false, features = ["any", "json", "migrate", "offline"] }
 sqlx-postgres = { version = "0.8.6", default-features = false, features = ["any", "json", "migrate", "offline"] }
 stable_deref_trait = { version = "1.2.1" }
-syn = { version = "2.0.118", features = ["extra-traits", "fold", "full", "visit", "visit-mut"] }
+syn = { version = "2.0.119", features = ["extra-traits", "fold", "full", "visit", "visit-mut"] }
 thiserror = { version = "2.0.18" }
 tokio = { version = "1.52.3", features = ["full", "test-util"] }
 tokio-stream = { version = "0.1.18", features = ["fs", "net", "sync"] }
@@ -131,7 +131,7 @@ toml_parser = { version = "1.1.2" }
 tracing = { version = "0.1.44", features = ["log"] }
 tracing-core = { version = "0.1.36" }
 typenum = { version = "1.20.1", default-features = false, features = ["const-generics"] }
-winnow = { version = "1.0.3" }
+winnow = { version = "1.0.4" }
 yoke = { version = "0.8.3", features = ["derive"] }
 zerocopy = { version = "0.8.54", default-features = false, features = ["derive", "simd"] }
 zerofrom = { version = "0.1.8", default-features = false, features = ["alloc", "derive"] }
@@ -141,10 +141,9 @@ bitflags = { version = "2.13.0", default-features = false, features = ["std"] }
 getrandom = { version = "0.4.3", default-features = false, features = ["std", "sys_rng"] }
 hyper-rustls = { version = "0.27.9", default-features = false, features = ["aws-lc-rs", "http1", "http2", "logging", "native-tokio", "ring", "tls12", "webpki-tokio"] }
 hyper-util = { version = "0.1.20", default-features = false, features = ["client-proxy", "client-proxy-system"] }
-libc = { version = "0.2.186", features = ["extra_traits"] }
 openssl-sys = { version = "0.9.117", default-features = false, features = ["vendored"] }
 ring = { version = "0.17.14", features = ["std"] }
-rustls = { version = "0.23.41", default-features = false, features = ["aws-lc-rs", "aws_lc_rs"] }
+rustls = { version = "0.23.42", default-features = false, features = ["aws-lc-rs", "aws_lc_rs"] }
 rustls-webpki = { version = "0.103.13", default-features = false, features = ["aws-lc-rs", "ring", "std"] }
 serde_json = { version = "1.0.150", default-features = false, features = ["preserve_order"] }
 tokio-rustls = { version = "0.26.4", default-features = false, features = ["aws-lc-rs"] }
@@ -153,9 +152,29 @@ tower-http = { version = "0.6.11", features = ["cors", "follow-redirect"] }
 
 [target.x86_64-unknown-linux-gnu.build-dependencies]
 bitflags = { version = "2.13.0", default-features = false, features = ["std"] }
-libc = { version = "0.2.186", features = ["extra_traits"] }
 ring = { version = "0.17.14", features = ["std"] }
-rustls = { version = "0.23.41", default-features = false, features = ["aws-lc-rs", "aws_lc_rs"] }
+rustls = { version = "0.23.42", default-features = false, features = ["aws-lc-rs", "aws_lc_rs"] }
+rustls-webpki = { version = "0.103.13", default-features = false, features = ["aws-lc-rs", "ring", "std"] }
+serde_json = { version = "1.0.150", default-features = false, features = ["preserve_order"] }
+
+[target.aarch64-unknown-linux-gnu.dependencies]
+bitflags = { version = "2.13.0", default-features = false, features = ["std"] }
+getrandom = { version = "0.4.3", default-features = false, features = ["std", "sys_rng"] }
+hyper-rustls = { version = "0.27.9", default-features = false, features = ["aws-lc-rs", "http1", "http2", "logging", "native-tokio", "ring", "tls12", "webpki-tokio"] }
+hyper-util = { version = "0.1.20", default-features = false, features = ["client-proxy", "client-proxy-system"] }
+openssl-sys = { version = "0.9.117", default-features = false, features = ["vendored"] }
+ring = { version = "0.17.14", features = ["std"] }
+rustls = { version = "0.23.42", default-features = false, features = ["aws-lc-rs", "aws_lc_rs"] }
+rustls-webpki = { version = "0.103.13", default-features = false, features = ["aws-lc-rs", "ring", "std"] }
+serde_json = { version = "1.0.150", default-features = false, features = ["preserve_order"] }
+tokio-rustls = { version = "0.26.4", default-features = false, features = ["aws-lc-rs"] }
+tower-d8f496e17d97b5cb = { package = "tower", version = "0.5.3", default-features = false, features = ["retry", "timeout"] }
+tower-http = { version = "0.6.11", features = ["cors", "follow-redirect"] }
+
+[target.aarch64-unknown-linux-gnu.build-dependencies]
+bitflags = { version = "2.13.0", default-features = false, features = ["std"] }
+ring = { version = "0.17.14", features = ["std"] }
+rustls = { version = "0.23.42", default-features = false, features = ["aws-lc-rs", "aws_lc_rs"] }
 rustls-webpki = { version = "0.103.13", default-features = false, features = ["aws-lc-rs", "ring", "std"] }
 serde_json = { version = "1.0.150", default-features = false, features = ["preserve_order"] }
 
@@ -167,7 +186,7 @@ hyper-rustls = { version = "0.27.9", default-features = false, features = ["aws-
 hyper-util = { version = "0.1.20", default-features = false, features = ["client-proxy", "client-proxy-system"] }
 openssl-sys = { version = "0.9.117", default-features = false, features = ["vendored"] }
 ring = { version = "0.17.14", features = ["std"] }
-rustls = { version = "0.23.41", default-features = false, features = ["aws-lc-rs", "aws_lc_rs"] }
+rustls = { version = "0.23.42", default-features = false, features = ["aws-lc-rs", "aws_lc_rs"] }
 rustls-webpki = { version = "0.103.13", default-features = false, features = ["aws-lc-rs", "ring", "std"] }
 security-framework-sys = { version = "2.17.0" }
 serde_json = { version = "1.0.150", default-features = false, features = ["preserve_order"] }
@@ -179,7 +198,7 @@ tower-http = { version = "0.6.11", features = ["cors", "follow-redirect"] }
 bitflags = { version = "2.13.0", default-features = false, features = ["std"] }
 errno = { version = "0.3.14" }
 ring = { version = "0.17.14", features = ["std"] }
-rustls = { version = "0.23.41", default-features = false, features = ["aws-lc-rs", "aws_lc_rs"] }
+rustls = { version = "0.23.42", default-features = false, features = ["aws-lc-rs", "aws_lc_rs"] }
 rustls-webpki = { version = "0.103.13", default-features = false, features = ["aws-lc-rs", "ring", "std"] }
 serde_json = { version = "1.0.150", default-features = false, features = ["preserve_order"] }
 
