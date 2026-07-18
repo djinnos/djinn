@@ -18,6 +18,39 @@ extract_value() {
         | head -n1
 }
 
+# A shared declaration is insufficient unless the command configuring apt's
+# source actually consumes it. Each path is allowed to remove Debian's default
+# deb822 source, but may configure only the shared snapshot-backed trixie/main
+# source below.
+verify_snapshot_source() {
+    local file="$1"
+    local expected_snapshot="$2"
+    local snapshot_reference="$3"
+    local source_line
+    local line
+
+    source_line="printf 'deb [check-valid-until=no] %s trixie main\\n' ${snapshot_reference} > /etc/apt/sources.list"
+    grep -Fq "$source_line" "$file" \
+        || fail "apt source does not consume its declared Debian snapshot in ${file#$REPO_ROOT/}"
+
+    # A second source-file write could select another repository or snapshot
+    # after the canonical source. Restrict source configuration to the line
+    # above and removal of the default deb822 source.
+    while IFS= read -r line; do
+        case "$line" in
+            *"$source_line"* | *"rm -f /etc/apt/sources.list.d/debian.sources"*) ;;
+            *) fail "alternate apt source configuration in ${file#$REPO_ROOT/}: $line" ;;
+        esac
+    done < <(grep -F '/etc/apt/sources.list' "$file" || true)
+
+    # A literal alternate snapshot URL can otherwise bypass the declaration
+    # while leaving its value unchanged.
+    while IFS= read -r source_url; do
+        [[ "$source_url" == "$expected_snapshot" ]] \
+            || fail "alternate Debian snapshot in ${file#$REPO_ROOT/}: $source_url"
+    done < <(grep -Eo 'https://snapshot\.debian\.org/archive/debian/[0-9]{8}T[0-9]{6}Z' "$file" || true)
+}
+
 rust_snapshot="$(extract_value "$RUST_INSTALLER" DEBIAN_SNAPSHOT_URL)"
 runtime_snapshot="$(extract_value "$RUNTIME_DOCKERFILE" DEBIAN_SNAPSHOT_URL)"
 rust_version="$(extract_value "$RUST_INSTALLER" MOLD_VERSION)"
@@ -36,6 +69,9 @@ done
     || fail "snapshot URL is not a dated Debian snapshot: $rust_snapshot"
 [[ "$rust_version" != *'${'* && "$rust_version" != *'$'* ]] \
     || fail "mold version must be literal: $rust_version"
+
+verify_snapshot_source "$RUST_INSTALLER" "$rust_snapshot" '"${DEBIAN_SNAPSHOT_URL}"'
+verify_snapshot_source "$RUNTIME_DOCKERFILE" "$runtime_snapshot" '"$DEBIAN_SNAPSHOT_URL"'
 
 grep -Fq "mold=${rust_version}" "$RUST_INSTALLER" \
     || fail "Rust installer does not install mold with its literal exact version"
