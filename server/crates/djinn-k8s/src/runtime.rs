@@ -63,36 +63,84 @@ use crate::job::{build_task_run_job_with_read_sources, taskrun_job_ref_from_job}
 use crate::secret::{TaskRunSecretBuilder, job_owner_reference, task_run_resource_name};
 use crate::sidecar::ImageServiceResolution;
 
+#[async_trait]
+trait ReadSourcePreparation: Send + Sync {
+    async fn github_coords(&self, project_id: &str) -> Result<Option<(String, String)>, String>;
+
+    async fn migrate(
+        &self,
+        request: djinn_workspace::ReadSourceMigrationRequest,
+    ) -> Result<(), String>;
+}
+
+struct HostReadSourcePreparation {
+    projects: ProjectRepository,
+    migrator: djinn_workspace::ReadSourceMigrator,
+}
+
+impl HostReadSourcePreparation {
+    fn new(db: &Database) -> Self {
+        Self {
+            projects: ProjectRepository::new(db.clone(), djinn_core::events::EventBus::noop()),
+            migrator: djinn_workspace::ReadSourceMigrator::new(db.clone()),
+        }
+    }
+}
+
+#[async_trait]
+impl ReadSourcePreparation for HostReadSourcePreparation {
+    async fn github_coords(&self, project_id: &str) -> Result<Option<(String, String)>, String> {
+        self.projects
+            .get_github_coords(project_id)
+            .await
+            .map_err(|error| error.to_string())
+    }
+
+    async fn migrate(
+        &self,
+        request: djinn_workspace::ReadSourceMigrationRequest,
+    ) -> Result<(), String> {
+        self.migrator
+            .migrate(request)
+            .await
+            .map(|_| ())
+            .map_err(|error| error.to_string())
+    }
+}
+
 /// Populate the owner-scoped cache before any task-run resource exists. The
 /// migrator owns durable active-run and ambiguity checks, so every error is a
 /// fail-closed dispatch deferral rather than an in-Pod recovery.
-async fn pre_materialize_read_sources(
-    db: &Database,
+async fn pre_materialize_read_sources_with(
+    preparation: &dyn ReadSourcePreparation,
     spec: &TaskRunSpec,
 ) -> Result<Option<String>, RuntimeError> {
     if spec.read_source_project_ids.is_empty() {
         return Ok(None);
     }
 
-    let projects = ProjectRepository::new(db.clone(), djinn_core::events::EventBus::noop());
-    let (owner, repo) = projects
-        .get_github_coords(&spec.project_id)
+    let (owner, repo) = preparation
+        .github_coords(&spec.project_id)
         .await
-        .map_err(|error| RuntimeError::Prepare(format!(
-            "read-source authorization lookup for owner {} is uncertain: {error}",
-            spec.project_id
-        )))?
-        .ok_or_else(|| RuntimeError::Prepare(format!(
-            "read-source authorization owner {} does not exist", spec.project_id
-        )))?;
+        .map_err(|error| {
+            RuntimeError::Prepare(format!(
+                "read-source authorization lookup for owner {} is uncertain: {error}",
+                spec.project_id
+            ))
+        })?
+        .ok_or_else(|| {
+            RuntimeError::Prepare(format!(
+                "read-source authorization owner {} does not exist",
+                spec.project_id
+            ))
+        })?;
     let owner_root = djinn_core::paths::project_dir(&owner, &repo);
-    let migrator = djinn_workspace::ReadSourceMigrator::new(db.clone());
 
     for target_project_id in &spec.read_source_project_ids {
         // The immutable spec grant is the authorization. This lookup only
         // fails closed for a deleted granted project or uncertain DB state.
-        projects
-            .get_github_coords(target_project_id)
+        preparation
+            .github_coords(target_project_id)
             .await
             .map_err(|error| RuntimeError::Prepare(format!(
                 "read-source authorization lookup for target {target_project_id} is uncertain: {error}"
@@ -107,10 +155,12 @@ async fn pre_materialize_read_sources(
             djinn_workspace::mirror_path_for(target_project_id),
             vec![djinn_workspace::LegacyReadSource {
                 kind: djinn_workspace::LegacyKind::ProjectLocal,
-                path: owner_root.join(".djinn/read-sources").join(target_project_id),
+                path: owner_root
+                    .join(".djinn/read-sources")
+                    .join(target_project_id),
             }],
         );
-        migrator.migrate(request).await.map_err(|error| {
+        preparation.migrate(request).await.map_err(|error| {
             RuntimeError::Prepare(format!(
                 "read-source pre-materialization for owner {} target {target_project_id} deferred: {error}",
                 spec.project_id
@@ -121,6 +171,13 @@ async fn pre_materialize_read_sources(
     // `project_dir(owner, repo)`. Use that exact relative cache directory,
     // never the database project UUID, for the restricted Pod subPath.
     Ok(Some(format!("{owner}/{repo}/.task-runtime/read-sources")))
+}
+
+async fn pre_materialize_read_sources(
+    db: &Database,
+    spec: &TaskRunSpec,
+) -> Result<Option<String>, RuntimeError> {
+    pre_materialize_read_sources_with(&HostReadSourcePreparation::new(db), spec).await
 }
 
 /// Bound on the [`ConnectionRegistry::register_pending`] buffer used by
@@ -1365,6 +1422,192 @@ async fn delete_job_foreground(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use djinn_core::models::TaskRunTrigger;
+    use djinn_runtime::SupervisorFlow;
+    use std::collections::HashMap;
+    use std::sync::Mutex as StdMutex;
+
+    #[derive(Default)]
+    struct FakeReadSourcePreparation {
+        coords: HashMap<String, Result<Option<(String, String)>, String>>,
+        migration_error: Option<String>,
+        events: StdMutex<Vec<String>>,
+        requests: StdMutex<Vec<djinn_workspace::ReadSourceMigrationRequest>>,
+    }
+
+    #[async_trait]
+    impl ReadSourcePreparation for FakeReadSourcePreparation {
+        async fn github_coords(
+            &self,
+            project_id: &str,
+        ) -> Result<Option<(String, String)>, String> {
+            self.events
+                .lock()
+                .unwrap()
+                .push(format!("lookup:{project_id}"));
+            self.coords
+                .get(project_id)
+                .cloned()
+                .unwrap_or_else(|| Ok(None))
+        }
+
+        async fn migrate(
+            &self,
+            request: djinn_workspace::ReadSourceMigrationRequest,
+        ) -> Result<(), String> {
+            self.events.lock().unwrap().push(format!(
+                "migrate:{}:{}",
+                request.owner_project_id, request.target_project_id
+            ));
+            self.requests.lock().unwrap().push(request);
+            match &self.migration_error {
+                Some(error) => Err(error.clone()),
+                None => Ok(()),
+            }
+        }
+    }
+
+    fn read_source_spec(targets: &[&str]) -> TaskRunSpec {
+        TaskRunSpec {
+            task_run_id: "run-read-source".into(),
+            task_attempt_id: None,
+            task_id: "task-read-source".into(),
+            project_id: "owner-project-id".into(),
+            trigger: TaskRunTrigger::NewTask,
+            base_branch: "main".into(),
+            task_branch: "task/read-source".into(),
+            flow: SupervisorFlow::NewTask,
+            model_id_per_role: HashMap::new(),
+            read_source_project_ids: targets.iter().map(|target| (*target).into()).collect(),
+            github_owner: None,
+            github_install_token: None,
+            commit_author_name: None,
+            commit_author_email: None,
+            resume_lifecycle_metadata: None,
+            is_evidence_spike: false,
+        }
+    }
+
+    fn successful_preparation(targets: &[&str]) -> FakeReadSourcePreparation {
+        let mut coords = HashMap::from([(
+            "owner-project-id".into(),
+            Ok(Some(("canonical-owner".into(), "canonical-repo".into()))),
+        )]);
+        for target in targets {
+            coords.insert(
+                (*target).into(),
+                Ok(Some((
+                    format!("target-owner-{target}"),
+                    format!("target-repo-{target}"),
+                ))),
+            );
+        }
+        FakeReadSourcePreparation {
+            coords,
+            ..Default::default()
+        }
+    }
+
+    async fn prepare_and_record_resource_posts(
+        preparation: &FakeReadSourcePreparation,
+        spec: &TaskRunSpec,
+    ) -> Result<Option<String>, RuntimeError> {
+        let sub_path = pre_materialize_read_sources_with(preparation, spec).await?;
+        let mut events = preparation.events.lock().unwrap();
+        events.push("POST:Secret".into());
+        events.push("POST:Job".into());
+        Ok(sub_path)
+    }
+
+    #[tokio::test]
+    async fn pre_materialization_covers_zero_one_and_multiple_immutable_grants() {
+        for targets in [&[][..], &["target-a"][..], &["target-a", "target-b"][..]] {
+            let preparation = successful_preparation(targets);
+            let spec = read_source_spec(targets);
+            let sub_path = pre_materialize_read_sources_with(&preparation, &spec)
+                .await
+                .expect("authorized sources materialize");
+
+            assert_eq!(
+                sub_path.as_deref(),
+                (!targets.is_empty())
+                    .then_some("canonical-owner/canonical-repo/.task-runtime/read-sources")
+            );
+            let requests = preparation.requests.lock().unwrap();
+            assert_eq!(requests.len(), targets.len());
+            for (request, target) in requests.iter().zip(targets) {
+                assert_eq!(request.owner_project_id, "owner-project-id");
+                assert_eq!(request.target_project_id, *target);
+                assert_eq!(
+                    request.owner_root,
+                    djinn_core::paths::project_dir("canonical-owner", "canonical-repo")
+                );
+                assert_eq!(
+                    djinn_workspace::ReadSourceMigrator::destination_for(
+                        &request.owner_root,
+                        &request.target_project_id
+                    ),
+                    request
+                        .owner_root
+                        .join(".task-runtime/read-sources")
+                        .join(*target)
+                );
+                assert_ne!(request.owner_project_id, request.target_project_id);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn prepare_defers_before_secret_or_job_post_for_uncertain_and_unsafe_sources() {
+        let cases = [
+            ("database unavailable", true),
+            ("active legacy workspace is using a read source", false),
+            ("ambiguous read-source state", false),
+            ("failed migration requires reconciliation", false),
+        ];
+        for (error, lookup_failure) in cases {
+            let mut preparation = successful_preparation(&["target-a"]);
+            if lookup_failure {
+                preparation
+                    .coords
+                    .insert("target-a".into(), Err(error.into()));
+            } else {
+                preparation.migration_error = Some(error.into());
+            }
+            let result =
+                prepare_and_record_resource_posts(&preparation, &read_source_spec(&["target-a"]))
+                    .await;
+            assert!(result.is_err(), "{error} must defer preparation");
+            let events = preparation.events.lock().unwrap();
+            assert!(
+                !events.iter().any(|event| event.starts_with("POST:")),
+                "resource POST after {error}: {events:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn prepare_materializes_every_target_before_secret_and_job_posts() {
+        let preparation = successful_preparation(&["target-a", "target-b"]);
+        prepare_and_record_resource_posts(
+            &preparation,
+            &read_source_spec(&["target-a", "target-b"]),
+        )
+        .await
+        .expect("prepare succeeds");
+        assert_eq!(
+            *preparation.events.lock().unwrap(),
+            vec![
+                "lookup:owner-project-id",
+                "lookup:target-a",
+                "migrate:owner-project-id:target-a",
+                "lookup:target-b",
+                "migrate:owner-project-id:target-b",
+                "POST:Secret",
+                "POST:Job",
+            ]
+        );
+    }
 
     /// Object-safety: `dyn SessionRuntime` must accept a reference to
     /// `KubernetesRuntime`. This is a compile-only check.

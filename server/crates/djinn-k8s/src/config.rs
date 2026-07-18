@@ -380,6 +380,7 @@ mod tests {
             std::env::set_var("DJINN_K8S_NAMESPACE", "test-ns");
             std::env::set_var("DJINN_K8S_IMAGE", "repo/img:tag");
             std::env::set_var("DJINN_K8S_SERVER_ADDR", "djinn:9000");
+            std::env::set_var("DJINN_K8S_PROJECTS_PVC", "owner-cache-projects-pvc");
             std::env::set_var("DJINN_K8S_TTL_SECONDS", "600");
             std::env::set_var(
                 "DJINN_DATABASE_URL",
@@ -390,6 +391,7 @@ mod tests {
         assert_eq!(cfg.namespace, "test-ns");
         assert_eq!(cfg.image, "repo/img:tag");
         assert_eq!(cfg.server_addr, "djinn:9000");
+        assert_eq!(cfg.projects_pvc, "owner-cache-projects-pvc");
         assert_eq!(cfg.ttl_seconds_after_finished, 600);
         // Unset vars fall back to `for_testing` defaults.
         assert_eq!(cfg.service_account, "djinn-taskrun");
@@ -405,6 +407,7 @@ mod tests {
             std::env::remove_var("DJINN_K8S_NAMESPACE");
             std::env::remove_var("DJINN_K8S_IMAGE");
             std::env::remove_var("DJINN_K8S_SERVER_ADDR");
+            std::env::remove_var("DJINN_K8S_PROJECTS_PVC");
             std::env::remove_var("DJINN_K8S_TTL_SECONDS");
             std::env::remove_var("DJINN_DATABASE_URL");
         }

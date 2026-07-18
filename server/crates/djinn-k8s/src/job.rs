@@ -493,23 +493,55 @@ pub fn build_task_run_job(
 /// Add the sole owner-cache mount for immutable read-source grants.
 #[allow(clippy::too_many_arguments)]
 pub fn build_task_run_job_with_read_sources(
-    config: &KubernetesConfig, task_run_id: &Uuid, project_id: &str, secret_name: &str,
-    project_image_tag: &str, services: &[BackingServiceSpec],
-    policy: Option<&djinn_stack::environment::CargoCachePolicy>, is_evidence_spike: bool,
+    config: &KubernetesConfig,
+    task_run_id: &Uuid,
+    project_id: &str,
+    secret_name: &str,
+    project_image_tag: &str,
+    services: &[BackingServiceSpec],
+    policy: Option<&djinn_stack::environment::CargoCachePolicy>,
+    is_evidence_spike: bool,
     owner_cache_sub_path: Option<&str>,
 ) -> Job {
-    let mut job = build_task_run_job(config, task_run_id, project_id, secret_name, project_image_tag, services, policy, is_evidence_spike);
-    let Some(owner_cache_sub_path) = owner_cache_sub_path else { return job; };
-    let pod = job.spec.as_mut().expect("builder sets JobSpec").template.spec.as_mut().expect("builder sets PodSpec");
+    let mut job = build_task_run_job(
+        config,
+        task_run_id,
+        project_id,
+        secret_name,
+        project_image_tag,
+        services,
+        policy,
+        is_evidence_spike,
+    );
+    let Some(owner_cache_sub_path) = owner_cache_sub_path else {
+        return job;
+    };
+    let pod = job
+        .spec
+        .as_mut()
+        .expect("builder sets JobSpec")
+        .template
+        .spec
+        .as_mut()
+        .expect("builder sets PodSpec");
     pod.volumes.get_or_insert_with(Vec::new).push(Volume {
         name: "read-sources".to_string(),
-        persistent_volume_claim: Some(PersistentVolumeClaimVolumeSource { claim_name: config.projects_pvc.clone(), read_only: Some(true) }),
+        persistent_volume_claim: Some(PersistentVolumeClaimVolumeSource {
+            claim_name: config.projects_pvc.clone(),
+            read_only: Some(true),
+        }),
         ..Volume::default()
     });
-    pod.containers[0].volume_mounts.get_or_insert_with(Vec::new).push(VolumeMount {
-        name: "read-sources".to_string(), mount_path: "/read-sources".to_string(),
-        sub_path: Some(owner_cache_sub_path.to_string()), read_only: Some(true), ..VolumeMount::default()
-    });
+    pod.containers[0]
+        .volume_mounts
+        .get_or_insert_with(Vec::new)
+        .push(VolumeMount {
+            name: "read-sources".to_string(),
+            mount_path: "/read-sources".to_string(),
+            sub_path: Some(owner_cache_sub_path.to_string()),
+            read_only: Some(true),
+            ..VolumeMount::default()
+        });
     job
 }
 
@@ -2708,7 +2740,8 @@ mod tests {
         assert!(!mounts.iter().any(|mount| {
             mount.mount_path.contains(".djinn/read-sources")
                 || mount.sub_path.as_deref() == Some("projects")
-                || mount.sub_path.as_deref() == Some("other-owner/other-repo/.task-runtime/read-sources")
+                || mount.sub_path.as_deref()
+                    == Some("other-owner/other-repo/.task-runtime/read-sources")
                 || mount.sub_path.as_deref() == Some("octo/owner-repo/.djinn/read-sources")
                 || mount.sub_path.as_deref() == Some("mirror/read-sources")
         }));
@@ -2735,11 +2768,13 @@ mod tests {
                 .as_ref()
                 .is_some_and(|pvc| pvc.claim_name == cfg.projects_pvc)
         }));
-        assert!(!pod.containers[0]
-            .volume_mounts
-            .as_ref()
-            .unwrap()
-            .iter()
-            .any(|mount| mount.name == "read-sources"));
+        assert!(
+            !pod.containers[0]
+                .volume_mounts
+                .as_ref()
+                .unwrap()
+                .iter()
+                .any(|mount| mount.name == "read-sources")
+        );
     }
 }
