@@ -70,6 +70,7 @@
       "synthetic_revisions_permitted" : false
    },
    "reader_fixture" : {
+    "session_context": {"task_id":"00000000-0000-4000-8000-000000000030","session_id":"00000000-0000-4000-8000-000000000020","task_run_id":"00000000-0000-4000-8000-000000000040"},
       "events" : [
          {
             "actor_id" : "fixture-human",

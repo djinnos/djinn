@@ -5,8 +5,9 @@
 //! both published schema projections instead of regenerating either artifact.
 
 use djinn_control_plane::test_support::McpTestHarness;
+use djinn_core::auth_context::SESSION_USER_ID;
 use djinn_core::events::EventBus;
-use djinn_db::ProjectRepository;
+use djinn_db::{ProjectRepository, UserRepository};
 use serde_json::Value;
 use sqlx::{Postgres, QueryBuilder};
 
