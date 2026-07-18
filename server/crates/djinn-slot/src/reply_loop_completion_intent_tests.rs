@@ -190,6 +190,63 @@ async fn reply_loop_reuse_rejection_matrix_writes_fresh_authoritative_evidence()
                 .await
                 .unwrap();
         }
+        // Every rejection other than the true miss/disabled gate gets a durable,
+        // deliberately identifiable candidate.  The writer assertions below then
+        // prove that this candidate cannot leak into finalization.
+        if !matches!(name, "no-compatible-row" | "disabled-gate") {
+            let candidate_id = format!("candidate-or-synthetic-reuse-{name}");
+            let candidate_commands = serde_json::json!([
+                {"descriptor_id":"format","result":"pass","passed":true},
+                {"descriptor_id":"slot-clippy","result":"pass","passed":true}
+            ]);
+            let candidate_coverage = if name == "required-coverage-mismatch" {
+                serde_json::json!(["format", "slot-clippy", "unexpected"])
+            } else {
+                serde_json::json!(["format", "slot-clippy"])
+            };
+            let candidate_manifest = if name == "manifest-version-mismatch" {
+                "manifest-v999"
+            } else {
+                "manifest-v1"
+            };
+            let candidate_diff = if name == "stale-row" {
+                "deliberately-stale"
+            } else {
+                &material.diff_fingerprint
+            };
+            let candidate_required = [
+                RequiredFinalVerificationCommand {
+                    descriptor_id: "format",
+                },
+                RequiredFinalVerificationCommand {
+                    descriptor_id: "slot-clippy",
+                },
+            ];
+            let identity_json = serde_json::from_str(&identity.canonical_json).unwrap();
+            VerifyRunRepository::new(db.clone())
+                .record_eligible_final_verification_pass(
+                    RecordEligibleFinalVerificationPassParams {
+                        id: &candidate_id,
+                        task_run_id: &run_id,
+                        verify_source: "worker",
+                        verify_run_id: "candidate-run",
+                        verification_attempt_id: "candidate-attempt",
+                        required_commands: &candidate_required,
+                        ordered_commands: &candidate_commands,
+                        covered_checks: &candidate_coverage,
+                        required_checks: &material.required_checks,
+                        verification_input_fingerprint: &fingerprint,
+                        manifest_version: candidate_manifest,
+                        environment_identity_json: &identity_json,
+                        environment_identity_digest: &identity.digest,
+                        environment_identity_version: "identity-v1",
+                        completed_at: "2000-01-01T00:00:00Z",
+                        diff_fingerprint: candidate_diff,
+                    },
+                )
+                .await
+                .unwrap();
+        }
         let callbacks = Arc::new(CompletionIntentCallbacks::for_reuse_with_evidence(
             task.id.clone(),
             material.clone(),
@@ -244,8 +301,39 @@ async fn reply_loop_reuse_rejection_matrix_writes_fresh_authoritative_evidence()
             .unwrap()
             .final_verification_evidence
             .unwrap();
-        assert_ne!(
-            evidence.persisted_run_id, "candidate-or-synthetic-reuse",
+        assert!(
+            !evidence
+                .persisted_run_id
+                .starts_with("candidate-or-synthetic-reuse-"),
+            "{name}: candidate evidence reached finalization"
+        );
+        let stored = VerifyRunRepository::new(slot_ctx.db.clone())
+            .get(&evidence.persisted_run_id)
+            .await
+            .unwrap()
+            .expect("fresh finalization evidence names a durable row");
+        assert_eq!(stored.id, evidence.persisted_run_id, "{name}");
+        assert_eq!(
+            stored.verification_input_fingerprint.as_deref(),
+            Some(fingerprint.as_str()),
+            "{name}"
+        );
+        assert_eq!(
+            stored.manifest_version.as_deref(),
+            Some("manifest-v1"),
+            "{name}"
+        );
+        assert_eq!(
+            stored.environment_identity_digest.as_deref(),
+            Some(identity.digest.as_str()),
+            "{name}"
+        );
+        assert_eq!(
+            stored.ordered_commands,
+            Some(serde_json::json!([
+                {"descriptor_id":"format","result":"pass","passed":true,"started_at_unix_millis":10,"completed_at_unix_millis":20},
+                {"descriptor_id":"slot-clippy","result":"pass","passed":true,"started_at_unix_millis":10,"completed_at_unix_millis":20}
+            ])),
             "{name}"
         );
         assert_eq!(
