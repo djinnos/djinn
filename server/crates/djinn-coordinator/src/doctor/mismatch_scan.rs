@@ -97,7 +97,6 @@ impl MismatchScanCoordinator {
     }
 
     async fn run_once(&self, trigger: Trigger) {
-        let started = SystemClock::new().now_instant();
         let repo = TaskRepository::new(self.db.clone(), self.events.clone());
         let leader_epoch = {
             let mut epoch = self.leader_epoch.lock().await;
@@ -110,7 +109,10 @@ impl MismatchScanCoordinator {
                     }
                     Err(error) => {
                         tracing::warn!(error = %error, trigger = trigger.label(), "board-health mismatch scan could not allocate a leader epoch");
-                        djinn_telemetry::board_health_mismatch::record_outcome("error", trigger.label());
+                        djinn_telemetry::board_health_mismatch::record_outcome(
+                            "error",
+                            trigger.label(),
+                        );
                         return;
                     }
                 },
@@ -130,10 +132,7 @@ impl MismatchScanCoordinator {
         djinn_telemetry::board_health_mismatch::record_pass_age(state.pass_started_at.as_deref());
 
         loop {
-            let page = match repo
-                .load_board_health_mismatch_page(leader_epoch)
-                .await
-            {
+            let page = match repo.load_board_health_mismatch_page(leader_epoch).await {
                 Ok(page) => page,
                 Err(error) => {
                     tracing::warn!(error = %error, "board-health mismatch scan page load failed; pass remains resumable");
@@ -145,12 +144,15 @@ impl MismatchScanCoordinator {
                 }
             };
             if page.candidates.is_empty() {
-                match repo
-                    .complete_board_health_mismatch_pass(leader_epoch)
-                    .await
-                {
+                match repo.complete_board_health_mismatch_pass(leader_epoch).await {
                     Ok(completed) => {
-                        djinn_telemetry::board_health_mismatch::record_duration(started.elapsed());
+                        // Completion derives this from the persisted pass start.
+                        // A local timer would under-report a restarted pass.
+                        let duration_ms =
+                            completed.last_pass_duration_ms.unwrap_or(0).max(0) as u64;
+                        djinn_telemetry::board_health_mismatch::record_duration(
+                            Duration::from_millis(duration_ms),
+                        );
                         djinn_telemetry::board_health_mismatch::record_pass_age(
                             completed.pass_started_at.as_deref(),
                         );
