@@ -7,12 +7,16 @@
 use std::future::Future;
 use std::pin::Pin;
 
-use djinn_core::canonical_verify::EnvironmentIdentityV1;
+use djinn_core::canonical_verify::{
+    CurrentEnvironmentIdentity, EnvironmentIdentityV1, FreshnessCompatibilityInput,
+    evaluate_freshness,
+};
 use djinn_core::models::VerifySource;
 use djinn_db::repositories::verify_run::{
     RecordEligibleFinalVerificationPassParams, RequiredFinalVerificationCommand,
     VerifyRunRepository,
 };
+use djinn_git::{VerificationInputFingerprint, compute_verification_input_fingerprint_with_config};
 use djinn_sandbox::final_verification_execution::{
     FinalVerificationExecutionEvidence, FinalVerificationExecutionRequest,
     execute_final_verification,
@@ -36,6 +40,26 @@ pub struct FinalVerificationResolvedMaterial {
     pub diff_fingerprint: String,
 }
 
+/// Complete proof carried for a reusable pass, rather than an opaque cache hit.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FinalVerificationSuccessEvidence {
+    pub persisted_run_id: String,
+    pub completed_at: String,
+    pub ordered_commands: serde_json::Value,
+    pub covered_checks: serde_json::Value,
+    pub required_checks: Vec<String>,
+    pub verification_input_fingerprint: String,
+    pub manifest_version: String,
+    pub environment_identity_digest: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct CurrentVerificationInputs {
+    fingerprint: String,
+    identity: CurrentEnvironmentIdentity,
+    manifest_version: String,
+}
+
 /// The normal invocation lease. The coordinator explicitly releases it before
 /// every return, including ineligible, insert-error, and cancellation paths.
 pub trait FinalVerificationInvocationLease: Send {
@@ -54,6 +78,10 @@ pub enum FinalVerificationRecordingOutcome {
     Stored {
         verification_attempt_id: String,
         verify_run_id: String,
+    },
+    Reused {
+        verification_attempt_id: String,
+        evidence: Box<FinalVerificationSuccessEvidence>,
     },
     Ineligible {
         verification_attempt_id: String,
@@ -100,7 +128,8 @@ pub(crate) async fn verify_completion_intent(
     )
     .await
     {
-        FinalVerificationRecordingOutcome::Stored { .. } => Ok(()),
+        FinalVerificationRecordingOutcome::Stored { .. }
+        | FinalVerificationRecordingOutcome::Reused { .. } => Ok(()),
         FinalVerificationRecordingOutcome::Ineligible { reason, .. } => Err(format!(
             "Final verification rejected this submit_work request: {reason}. Fix the worktree and resubmit."
         )),
@@ -133,6 +162,17 @@ pub async fn coordinate_final_verification(
     #[cfg(test)]
     if let Some(outcome) = ctx.callbacks.final_verification_outcome_for_test(&request) {
         return emit_outcome(&request, outcome);
+    }
+    if let Some(evidence) =
+        consult_reusable_final_verification(&request, &verification_attempt_id, ctx).await
+    {
+        return emit_outcome(
+            &request,
+            FinalVerificationRecordingOutcome::Reused {
+                verification_attempt_id,
+                evidence: Box::new(evidence),
+            },
+        );
     }
     let material = match ctx
         .callbacks
@@ -222,6 +262,190 @@ pub async fn coordinate_final_verification(
         }
     };
     emit_outcome(&request, outcome)
+}
+
+/// Resolve the project gate before constructing a verify-run repository. Every
+/// miss, stale verdict, or error returns to the original writer path.
+async fn consult_reusable_final_verification(
+    request: &FinalVerificationCoordinatorRequest,
+    attempt_id: &str,
+    ctx: &SlotContext,
+) -> Option<FinalVerificationSuccessEvidence> {
+    let task = match ctx.load_task(&request.task_id).await {
+        Ok(task) => task,
+        Err(error) => return lookup_none("error", request, attempt_id, "task_context", &error),
+    };
+    let key = format!("project.{}.verify_run_reuse_enabled", task.project_id);
+    let enabled = match djinn_db::repositories::settings::SettingsRepository::new(
+        ctx.db.clone(),
+        ctx.event_bus.clone(),
+    )
+    .get(&key)
+    .await
+    {
+        Ok(Some(setting)) => matches!(setting.value.trim(), "true" | "1"),
+        Ok(None) => false,
+        Err(error) => return lookup_none("error", request, attempt_id, "gate", &error.to_string()),
+    };
+    if !enabled {
+        return lookup_none("disabled", request, attempt_id, "default_off", "");
+    }
+    let material = match ctx
+        .callbacks
+        .resolve_final_verification(
+            &request.task_id,
+            &request.task_run_id,
+            attempt_id,
+            "reuse-c0",
+            ctx,
+        )
+        .await
+    {
+        Ok(material) => material,
+        Err(error) => return lookup_none("error", request, attempt_id, "resolution", &error),
+    };
+    let c0 = match derive_current_inputs(&material).await {
+        Ok(inputs) => inputs,
+        Err(error) => return lookup_none("error", request, attempt_id, "c0", &error),
+    };
+    let candidate = match VerifyRunRepository::new(ctx.db.clone())
+        .latest_compatible_passing_final_verification(
+            &request.task_id,
+            &c0.fingerprint,
+            &c0.manifest_version,
+            &c0.identity.version,
+            &material.required_checks,
+        )
+        .await
+    {
+        Ok(Some(row)) => row,
+        Ok(None) => return lookup_none("miss", request, attempt_id, "no_candidate", ""),
+        Err(error) => {
+            return lookup_none("error", request, attempt_id, "lookup", &error.to_string());
+        }
+    };
+    let compatibility = FreshnessCompatibilityInput {
+        verification_input_fingerprint: Some(c0.fingerprint.clone()),
+        environment_identity: Some(c0.identity.clone()),
+        manifest_version: Some(c0.manifest_version.clone()),
+    };
+    if !evaluate_freshness(
+        &material.diff_fingerprint,
+        Some(&candidate),
+        &[],
+        &[],
+        &material.required_checks,
+        &compatibility,
+    )
+    .fresh
+        || !coverage_equals_required(candidate.covered_checks.as_ref(), &material.required_checks)
+    {
+        return lookup_none("stale", request, attempt_id, "freshness_or_coverage", "");
+    }
+    // C1 is recomputed immediately before execution is suppressed, while no
+    // invocation lease exists.
+    let c1_material = match ctx
+        .callbacks
+        .resolve_final_verification(
+            &request.task_id,
+            &request.task_run_id,
+            attempt_id,
+            "reuse-c1",
+            ctx,
+        )
+        .await
+    {
+        Ok(material) => material,
+        Err(error) => return lookup_none("error", request, attempt_id, "c1_resolution", &error),
+    };
+    let c1 = match derive_current_inputs(&c1_material).await {
+        Ok(inputs) => inputs,
+        Err(error) => return lookup_none("error", request, attempt_id, "c1", &error),
+    };
+    if c0 != c1
+        || candidate.verification_input_fingerprint.as_deref() != Some(c1.fingerprint.as_str())
+        || candidate.environment_identity_digest.as_deref() != Some(c1.identity.digest.as_str())
+        || candidate.manifest_version.as_deref() != Some(c1.manifest_version.as_str())
+        || !coverage_equals_required(
+            candidate.covered_checks.as_ref(),
+            &c1_material.required_checks,
+        )
+    {
+        return lookup_none("stale", request, attempt_id, "c1_mismatch", "");
+    }
+    emit_lookup_outcome("hit", request, attempt_id, "verified_c1", "");
+    Some(FinalVerificationSuccessEvidence {
+        persisted_run_id: candidate.id,
+        completed_at: candidate.completed_at,
+        ordered_commands: candidate.ordered_commands.unwrap_or_default(),
+        covered_checks: candidate.covered_checks.unwrap_or_default(),
+        required_checks: c1_material.required_checks,
+        verification_input_fingerprint: c1.fingerprint,
+        manifest_version: c1.manifest_version,
+        environment_identity_digest: c1.identity.digest,
+    })
+}
+
+async fn derive_current_inputs(
+    material: &FinalVerificationResolvedMaterial,
+) -> Result<CurrentVerificationInputs, String> {
+    let input = (material.execution_request.resolve_environment_identity)()
+        .map_err(|error| error.to_string())?;
+    let identity =
+        EnvironmentIdentityV1::derive(input.clone()).map_err(|error| error.to_string())?;
+    let fingerprint = match compute_verification_input_fingerprint_with_config(
+        &material.execution_request.worktree,
+        &material.execution_request.fingerprint_config,
+    )
+    .await
+    .map_err(|error| error.to_string())?
+    {
+        VerificationInputFingerprint::Available(digest) => digest.fingerprint,
+        VerificationInputFingerprint::Unavailable(reason) => return Err(reason.to_string()),
+    };
+    Ok(CurrentVerificationInputs {
+        fingerprint,
+        identity: CurrentEnvironmentIdentity {
+            version: "identity-v1".into(),
+            digest: identity.digest,
+        },
+        manifest_version: format!("manifest-v{}", input.input_manifest.version),
+    })
+}
+
+fn coverage_equals_required(coverage: Option<&serde_json::Value>, required: &[String]) -> bool {
+    let Some(values) = coverage.and_then(serde_json::Value::as_array) else {
+        return false;
+    };
+    let actual: std::collections::BTreeSet<_> = values
+        .iter()
+        .filter_map(serde_json::Value::as_str)
+        .collect();
+    let expected: std::collections::BTreeSet<_> = required.iter().map(String::as_str).collect();
+    actual == expected
+}
+
+fn lookup_none<T>(
+    outcome: &'static str,
+    request: &FinalVerificationCoordinatorRequest,
+    attempt_id: &str,
+    reason: &str,
+    detail: &str,
+) -> Option<T> {
+    emit_lookup_outcome(outcome, request, attempt_id, reason, detail);
+    None
+}
+
+fn emit_lookup_outcome(
+    outcome: &'static str,
+    request: &FinalVerificationCoordinatorRequest,
+    attempt_id: &str,
+    reason: &str,
+    detail: &str,
+) {
+    tracing::info!(verify_run_lookup_outcome = outcome, task_id = %request.task_id,
+        task_run_id = %request.task_run_id, verification_attempt_id = %attempt_id,
+        audit_reason = reason, audit_detail = detail, "final verification reuse consultation");
 }
 
 /// Release before any durable write. This is the commit protocol boundary: the
@@ -423,6 +647,14 @@ fn emit_outcome(
         } => tracing::info!(
             recording_outcome = "stored", task_id = %request.task_id, task_run_id = %request.task_run_id,
             verification_attempt_id = %verification_attempt_id, verify_run_id = %verify_run_id,
+            "final verification recording completed"
+        ),
+        FinalVerificationRecordingOutcome::Reused {
+            verification_attempt_id,
+            evidence,
+        } => tracing::info!(
+            recording_outcome = "reused", task_id = %request.task_id, task_run_id = %request.task_run_id,
+            verification_attempt_id = %verification_attempt_id, verify_run_id = %evidence.persisted_run_id,
             "final verification recording completed"
         ),
         FinalVerificationRecordingOutcome::Ineligible {
