@@ -108,12 +108,56 @@ async fn seed_reader_contract(harness: &McpTestHarness, fixture: &Value) {
     let task_id = context["task_id"].as_str().expect("fixed task id");
     let session_id = context["session_id"].as_str().expect("fixed session id");
     let task_run_id = context["task_run_id"].as_str().expect("fixed task run id");
-    sqlx::query("INSERT INTO tasks (id, project_id, short_id, title, description, design, labels, acceptance_criteria, memory_refs) VALUES ($1, $2, 'fixed-task', 'Fixed contract task', '', '', '[]', '[]', '[]')")
-        .bind(task_id).bind(project_id).execute(harness.db().pool()).await.expect("seed fixed task");
-    sqlx::query("INSERT INTO task_runs (id, project_id, task_id, trigger_type, status, started_at) VALUES ($1, $2, $3, 'manual', 'running', '2026-02-04T05:06:07.000Z')")
-        .bind(task_run_id).bind(project_id).bind(task_id).execute(harness.db().pool()).await.expect("seed fixed task run");
-    sqlx::query("INSERT INTO sessions (id, project_id, task_id, task_run_id, model_id, agent_type, started_at, status) VALUES ($1, $2, $3, $4, 'fixture-model', 'worker', '2026-02-04T05:06:07.000Z', 'active')")
-        .bind(session_id).bind(project_id).bind(task_id).bind(task_run_id).execute(harness.db().pool()).await.expect("seed fixed session");
+    let mut task_insert = QueryBuilder::<Postgres>::new(
+        "INSERT INTO tasks (id, project_id, short_id, title, description, design, labels, acceptance_criteria, memory_refs) VALUES (",
+    );
+    {
+        let mut values = task_insert.separated(", ");
+        values.push_bind(task_id);
+        values.push_bind(project_id);
+        values.push("'fixed-task', 'Fixed contract task', '', '', '[]', '[]', '[]'");
+    }
+    task_insert
+        .push(")")
+        .build()
+        .execute(harness.db().pool())
+        .await
+        .expect("seed fixed task");
+
+    let mut task_run_insert = QueryBuilder::<Postgres>::new(
+        "INSERT INTO task_runs (id, project_id, task_id, trigger_type, status, started_at) VALUES (",
+    );
+    {
+        let mut values = task_run_insert.separated(", ");
+        values.push_bind(task_run_id);
+        values.push_bind(project_id);
+        values.push_bind(task_id);
+        values.push("'manual', 'running', '2026-02-04T05:06:07.000Z'");
+    }
+    task_run_insert
+        .push(")")
+        .build()
+        .execute(harness.db().pool())
+        .await
+        .expect("seed fixed task run");
+
+    let mut session_insert = QueryBuilder::<Postgres>::new(
+        "INSERT INTO sessions (id, project_id, task_id, task_run_id, model_id, agent_type, started_at, status) VALUES (",
+    );
+    {
+        let mut values = session_insert.separated(", ");
+        values.push_bind(session_id);
+        values.push_bind(project_id);
+        values.push_bind(task_id);
+        values.push_bind(task_run_id);
+        values.push("'fixture-model', 'worker', '2026-02-04T05:06:07.000Z', 'active'");
+    }
+    session_insert
+        .push(")")
+        .build()
+        .execute(harness.db().pool())
+        .await
+        .expect("seed fixed session");
 
     // Second session/task-run used by the equal-time session-diff and extracted-audit
     // scenarios. These are separate from the history/diff session so the session-diff
@@ -124,10 +168,40 @@ async fn seed_reader_contract(harness: &McpTestHarness, fixture: &Value) {
     let sd_task_run = context["session_diff_task_run_id"]
         .as_str()
         .expect("fixed session-diff task run id");
-    sqlx::query("INSERT INTO task_runs (id, project_id, task_id, trigger_type, status, started_at) VALUES ($1, $2, $3, 'manual', 'running', '2026-02-04T05:06:05.000Z')")
-        .bind(sd_task_run).bind(project_id).bind(task_id).execute(harness.db().pool()).await.expect("seed session-diff task run");
-    sqlx::query("INSERT INTO sessions (id, project_id, task_id, task_run_id, model_id, agent_type, started_at, status) VALUES ($1, $2, $3, $4, 'fixture-model', 'worker', '2026-02-04T05:06:05.000Z', 'active')")
-        .bind(sd_session).bind(project_id).bind(task_id).bind(sd_task_run).execute(harness.db().pool()).await.expect("seed session-diff session");
+    let mut session_diff_task_run_insert = QueryBuilder::<Postgres>::new(
+        "INSERT INTO task_runs (id, project_id, task_id, trigger_type, status, started_at) VALUES (",
+    );
+    {
+        let mut values = session_diff_task_run_insert.separated(", ");
+        values.push_bind(sd_task_run);
+        values.push_bind(project_id);
+        values.push_bind(task_id);
+        values.push("'manual', 'running', '2026-02-04T05:06:05.000Z'");
+    }
+    session_diff_task_run_insert
+        .push(")")
+        .build()
+        .execute(harness.db().pool())
+        .await
+        .expect("seed session-diff task run");
+
+    let mut session_diff_insert = QueryBuilder::<Postgres>::new(
+        "INSERT INTO sessions (id, project_id, task_id, task_run_id, model_id, agent_type, started_at, status) VALUES (",
+    );
+    {
+        let mut values = session_diff_insert.separated(", ");
+        values.push_bind(sd_session);
+        values.push_bind(project_id);
+        values.push_bind(task_id);
+        values.push_bind(sd_task_run);
+        values.push("'fixture-model', 'worker', '2026-02-04T05:06:05.000Z', 'active'");
+    }
+    session_diff_insert
+        .push(")")
+        .build()
+        .execute(harness.db().pool())
+        .await
+        .expect("seed session-diff session");
 }
 
 async fn dispatch(harness: &McpTestHarness, tool: &str, args: Value) -> Value {
