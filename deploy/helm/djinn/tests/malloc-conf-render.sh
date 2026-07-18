@@ -7,6 +7,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CHART_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 DEFAULT_VALUE="background_thread:true,dirty_decay_ms:10000,muzzy_decay_ms:10000"
 OVERRIDE_VALUE="background_thread:false,dirty_decay_ms:5000,muzzy_decay_ms:0"
+# Helm's --set-string parser uses commas to separate assignments, so preserve
+# literal commas in the supplied value while asserting the unescaped render.
+OVERRIDE_SET_VALUE="${OVERRIDE_VALUE//,/\\,}"
 
 require_tool() {
     command -v "$1" >/dev/null 2>&1 || {
@@ -69,7 +72,7 @@ render "$TMPDIR_RENDER/default.yaml"
 assert_malloc_conf "$TMPDIR_RENDER/default.yaml" "$DEFAULT_VALUE"
 
 echo "=== overridden allocator configuration ==="
-render "$TMPDIR_RENDER/override.yaml" --set-string "server.mallocConf=$OVERRIDE_VALUE"
+render "$TMPDIR_RENDER/override.yaml" --set-string "server.mallocConf=$OVERRIDE_SET_VALUE"
 assert_malloc_conf "$TMPDIR_RENDER/override.yaml" "$OVERRIDE_VALUE"
 
 echo "=== All MALLOC_CONF Helm render tests passed ==="
