@@ -28,11 +28,27 @@ use crate::helpers::{runtime_env_diagnostics, runtime_fs_diagnostics};
 pub(super) type StreamingFut<'a> =
     Pin<Box<dyn std::future::Future<Output = (usize, ContentBlock)> + Send + 'a>>;
 
+/// One unresolved reasoning fragment in provider event arrival order.
+pub(super) enum UnresolvedThinkingFragment {
+    Attributed { id: u64, text: String },
+    Unattributed(String),
+}
+
 pub(super) struct StreamTurnState {
     pub turn_text: String,
+    /// Complete arrival-order thinking aggregate for display and telemetry.
+    /// This includes unattributed events and attributed delta text, so it is
+    /// deliberately kept separate from canonical persistence input.
     pub turn_thinking: String,
     pub turn_provider_state: Vec<ContentBlock>,
     pub turn_tool_calls: Vec<ContentBlock>,
+    /// Attributed and unattributed fragments in one event-arrival sequence.
+    /// Persistence suppresses only attributed entries whose exact ID completed.
+    pub turn_unresolved_thinking: Vec<UnresolvedThinkingFragment>,
+    /// Block IDs for which a `ThinkingBlockComplete` was received. The
+    /// canonical assembler reconciles `turn_unresolved_thinking` against
+    /// this set, suppressing only exact-ID matches.
+    pub turn_completed_thinking_ids: HashSet<u64>,
     pub turn_tokens_in: u32,
     pub turn_tokens_out: u32,
     pub turn_cache_read: u32,
@@ -62,6 +78,8 @@ impl StreamTurnState {
             turn_thinking: String::new(),
             turn_provider_state: Vec::new(),
             turn_tool_calls: Vec::new(),
+            turn_unresolved_thinking: Vec::new(),
+            turn_completed_thinking_ids: HashSet::new(),
             turn_tokens_in: 0,
             turn_tokens_out: 0,
             turn_cache_read: 0,
@@ -233,6 +251,42 @@ pub(super) async fn consume_provider_stream(
                             }),
                         ));
                         state.turn_thinking.push_str(&thinking);
+                        state
+                            .turn_unresolved_thinking
+                            .push(UnresolvedThinkingFragment::Unattributed(thinking));
+                    }
+                    StreamEvent::ThinkingDelta { id, text } => {
+                        // Display/telemetry aggregate gets the attributed
+                        // delta text appended once.
+                        ctx.ctx.event_bus.send(DjinnEventEnvelope::session_message(
+                            ctx.session_id,
+                            ctx.task_id,
+                            ctx.role_name,
+                            &serde_json::json!({
+                                "type": "thinking_delta",
+                                "role": "assistant",
+                                "text": text,
+                            }),
+                        ));
+                        state.turn_thinking.push_str(&text);
+                        // Persistence fragment in arrival order, keyed by
+                        // exact block ID for later reconciliation.
+                        state.turn_unresolved_thinking.push(
+                            UnresolvedThinkingFragment::Attributed { id, text },
+                        );
+                    }
+                    StreamEvent::ThinkingBlockComplete {
+                        id,
+                        thinking,
+                        signature,
+                    } => {
+                        // Materialize the load-bearing completion before
+                        // marking its ID complete, making interruption safe.
+                        state.turn_provider_state.push(ContentBlock::Thinking {
+                            thinking,
+                            signature,
+                        });
+                        state.turn_completed_thinking_ids.insert(id);
                     }
                     StreamEvent::Usage(usage) => {
                         state.turn_tokens_in = usage.input;

@@ -27,6 +27,10 @@ pub use parent_disposition::{
     ChildDisposition, DispositionCounts, DispositionFinding, DispositionPlan, DispositionScope,
     DoctorRepairOutcome, apply_doctor_repair_tx, apply_parent_disposition_tx, classify_child_tx,
 };
+pub use queries::{
+    BOARD_HEALTH_MISMATCH_PAGE_SIZE, BoardHealthMismatchCandidate, BoardHealthMismatchPage,
+    BoardHealthMismatchScanState,
+};
 
 // ── Query / result types ──────────────────────────────────────────────────────
 

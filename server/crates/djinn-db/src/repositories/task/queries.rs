@@ -10,18 +10,23 @@ const REPEATED_REOPEN_MISMATCH_THRESHOLD: i64 = 3;
 /// Do not replace this with `Task`: mismatch inference needs only these task
 /// columns, while `Task` hydration includes several correlated CI lookups.
 #[derive(Debug, sqlx::FromRow)]
-struct BoardHealthMismatchCandidate {
-    id: String,
-    short_id: String,
-    epic_id: Option<String>,
-    title: String,
-    description: String,
-    design: String,
-    acceptance_criteria: String,
-    issue_type: String,
-    status: String,
-    total_reopen_count: i64,
+pub struct BoardHealthMismatchCandidate {
+    pub id: String,
+    pub short_id: String,
+    pub epic_id: Option<String>,
+    pub title: String,
+    pub description: String,
+    pub design: String,
+    pub acceptance_criteria: String,
+    pub issue_type: String,
+    pub status: String,
+    pub total_reopen_count: i64,
 }
+
+mod board_health_scan;
+pub use board_health_scan::{
+    BOARD_HEALTH_MISMATCH_PAGE_SIZE, BoardHealthMismatchPage, BoardHealthMismatchScanState,
+};
 
 const PLANNER_ISSUE_TYPE_SIGNALS: &[&str] = &["planning", "decomposition"];
 
@@ -179,42 +184,38 @@ fn role_tool_mismatch_reason(
     )
 }
 
+pub(super) fn board_health_mismatch_predicate(alias: &str) -> String {
+    // This is a conservative prefilter, not role inference. It rejects only
+    // impossible positives and deliberately preserves all Rust-positive rows.
+    let text_expression = format!(
+        "LOWER(CONCAT_WS(E'\\n', {alias}.title, {alias}.description, {alias}.design, {alias}.acceptance_criteria))"
+    );
+    let mut predicates = Vec::new();
+    for issue_type in PLANNER_ISSUE_TYPE_SIGNALS {
+        predicates.push(format!("LOWER({alias}.issue_type) = '{issue_type}'"));
+    }
+    for (needle, _) in PLANNER_ROLE_SIGNALS.iter().chain(LEAD_ROLE_SIGNALS) {
+        predicates.push(format!("{text_expression} LIKE '%{needle}%'"));
+    }
+    format!(
+        "{alias}.total_reopen_count >= {REPEATED_REOPEN_MISMATCH_THRESHOLD} \
+         AND {alias}.status != 'closed' AND ({})",
+        predicates.join(" OR ")
+    )
+}
+
 async fn list_board_health_mismatch_candidates(
     repo: &TaskRepository,
 ) -> Result<Vec<BoardHealthMismatchCandidate>> {
-    // This is a conservative prefilter, not role inference. It rejects only
-    // impossible positives and deliberately preserves all Rust-positive rows.
-    let text_expression =
-        "LOWER(CONCAT_WS(E'\n', t.title, t.description, t.design, t.acceptance_criteria))";
-    let mut predicates = Vec::new();
-    let mut parameter = 1;
-    for _ in PLANNER_ISSUE_TYPE_SIGNALS {
-        predicates.push(format!("LOWER(t.issue_type) = ${parameter}"));
-        parameter += 1;
-    }
-    for _ in PLANNER_ROLE_SIGNALS.iter().chain(LEAD_ROLE_SIGNALS) {
-        predicates.push(format!("{text_expression} LIKE ${parameter}"));
-        parameter += 1;
-    }
     let sql = format!(
-        "SELECT t.id, t.short_id, t.epic_id, t.title, t.description, t.design, 
-                t.acceptance_criteria::text AS acceptance_criteria, t.issue_type, t.status, t.total_reopen_count 
-         FROM tasks t 
-         WHERE t.total_reopen_count >= ${parameter} 
-           AND t.status != 'closed' 
-           AND ({}) 
-         ORDER BY t.id ASC",
-        predicates.join(" OR "),
+        "SELECT t.id, t.short_id, t.epic_id, t.title, t.description, t.design,
+                t.acceptance_criteria::text AS acceptance_criteria, t.issue_type, t.status, t.total_reopen_count
+         FROM tasks t WHERE {} ORDER BY t.id ASC",
+        board_health_mismatch_predicate("t"),
     );
-    let mut query = sqlx::query_as::<_, BoardHealthMismatchCandidate>(&sql);
-    for issue_type in PLANNER_ISSUE_TYPE_SIGNALS {
-        query = query.bind(*issue_type);
-    }
-    for (needle, _) in PLANNER_ROLE_SIGNALS.iter().chain(LEAD_ROLE_SIGNALS) {
-        query = query.bind(format!("%{needle}%"));
-    }
-    query = query.bind(REPEATED_REOPEN_MISMATCH_THRESHOLD);
-    Ok(query.fetch_all(repo.db.pool()).await?)
+    Ok(sqlx::query_as::<_, BoardHealthMismatchCandidate>(&sql)
+        .fetch_all(repo.db.pool())
+        .await?)
 }
 
 impl TaskRepository {
@@ -985,6 +986,8 @@ pub(super) fn sort_to_sql(sort: &str) -> &'static str {
 
 #[cfg(test)]
 mod board_health_bounds_tests;
+#[cfg(test)]
+mod board_health_scan_protocol_tests;
 #[cfg(test)]
 mod merged_classification_tests;
 #[cfg(test)]
