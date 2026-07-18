@@ -50,6 +50,73 @@ use djinn_provider::message::{ContentBlock, Conversation};
 use djinn_provider::provider::{LlmProvider, LlmResponse, StreamEvent, TokenUsage, ToolChoice};
 use futures::StreamExt;
 
+/// Apply one provider event to the terminal response aggregate used by direct
+/// services. Returns `true` when the event terminates the stream.
+///
+/// This production seam is shared by direct invocation and attributed planner
+/// calls. A completed attributed thinking block is retained as content, but
+/// its text is not appended to `thinking`: the matching delta already supplied
+/// the display aggregate.
+#[doc(hidden)]
+pub fn append_direct_response_event(response: &mut LlmResponse, event: StreamEvent) -> bool {
+    match event {
+        StreamEvent::Delta(block) => response.content.push(block),
+        StreamEvent::Thinking(thinking) => response.thinking.push_str(&thinking),
+        StreamEvent::ThinkingDelta { text, .. } => response.thinking.push_str(&text),
+        StreamEvent::ThinkingBlockComplete {
+            thinking,
+            signature,
+            ..
+        } => response.content.push(ContentBlock::Thinking {
+            thinking,
+            signature,
+        }),
+        StreamEvent::Usage(usage) => response.usage = usage,
+        StreamEvent::Done => return true,
+    }
+    false
+}
+
+/// Drive the ordinary direct-invocation provider stream to its terminal
+/// aggregate. This is deliberately shared by `invoke_llm` and the integration
+/// test seam below so consumer tests execute the production collection loop,
+/// rather than duplicating its event matching.
+async fn collect_invoke_llm_stream(
+    provider: &dyn LlmProvider,
+    conversation: &Conversation,
+    tools: &[serde_json::Value],
+    tool_choice: Option<ToolChoice>,
+) -> Result<LlmResponse, String> {
+    let mut stream = provider
+        .stream(conversation, tools, tool_choice)
+        .await
+        .map_err(|e| format!("provider stream init failed: {e}"))?;
+    let mut response = LlmResponse {
+        content: Vec::new(),
+        thinking: String::new(),
+        usage: TokenUsage::default(),
+    };
+    while let Some(ev) = stream.next().await {
+        let event = ev.map_err(|e| format!("provider stream error: {e}"))?;
+        if append_direct_response_event(&mut response, event) {
+            break;
+        }
+    }
+    Ok(response)
+}
+
+/// Production `invoke_llm` stream collector exposed solely for behavioral
+/// integration tests that supply a scripted provider.
+#[doc(hidden)]
+pub async fn collect_invoke_llm_stream_for_test(
+    provider: &dyn LlmProvider,
+    conversation: &Conversation,
+    tools: &[serde_json::Value],
+    tool_choice: Option<ToolChoice>,
+) -> Result<LlmResponse, String> {
+    collect_invoke_llm_stream(provider, conversation, tools, tool_choice).await
+}
+
 /// In-process `SupervisorServices` impl that delegates straight to the
 /// lifecycle helpers inside `djinn-agent`.
 pub struct DirectServices {
@@ -1079,33 +1146,7 @@ impl SupervisorServices for DirectServices {
             .ok_or_else(|| "no provider credential resolved for model".to_string())?;
 
         // Drive the stream to completion and collect the terminal aggregate.
-        let mut stream = provider
-            .stream(&conversation, &tools, tool_choice)
-            .await
-            .map_err(|e| format!("provider stream init failed: {e}"))?;
-        let mut response = LlmResponse {
-            content: Vec::new(),
-            thinking: String::new(),
-            usage: TokenUsage::default(),
-        };
-        while let Some(ev) = stream.next().await {
-            match ev.map_err(|e| format!("provider stream error: {e}"))? {
-                StreamEvent::Delta(block) => response.content.push(block),
-                StreamEvent::Thinking(s) => response.thinking.push_str(&s),
-                StreamEvent::ThinkingDelta { text, .. } => response.thinking.push_str(&text),
-                StreamEvent::ThinkingBlockComplete {
-                    thinking,
-                    signature,
-                    ..
-                } => response.content.push(ContentBlock::Thinking {
-                    thinking,
-                    signature,
-                }),
-                StreamEvent::Usage(u) => response.usage = u,
-                StreamEvent::Done => break,
-            }
-        }
-        Ok(response)
+        collect_invoke_llm_stream(provider.as_ref(), &conversation, &tools, tool_choice).await
     }
 
     async fn plan_memory_intents(
@@ -2349,19 +2390,11 @@ async fn collect_planner_stream(
             .map_err(|e| format!("provider stream init failed: {e}"))?;
         while let Some(event) = stream.next().await {
             match event {
-                Ok(StreamEvent::Delta(block)) => response.content.push(block),
-                Ok(StreamEvent::Thinking(thinking)) => response.thinking.push_str(&thinking),
-                Ok(StreamEvent::ThinkingDelta { text, .. }) => response.thinking.push_str(&text),
-                Ok(StreamEvent::ThinkingBlockComplete {
-                    thinking,
-                    signature,
-                    ..
-                }) => response.content.push(ContentBlock::Thinking {
-                    thinking,
-                    signature,
-                }),
-                Ok(StreamEvent::Usage(usage)) => response.usage = usage,
-                Ok(StreamEvent::Done) => break,
+                Ok(event) => {
+                    if append_direct_response_event(&mut response, event) {
+                        break;
+                    }
+                }
                 Err(error) => return Err(format!("provider stream error: {error}")),
             }
         }
@@ -2393,6 +2426,28 @@ async fn collect_planner_stream(
             completed: false,
         },
     }
+}
+
+/// Production attributed-planner stream collector exposed solely for
+/// behavioral integration tests with a scripted provider. The tuple preserves
+/// the collector's observable response and terminal classification without
+/// exposing its private bookkeeping struct as public API.
+#[doc(hidden)]
+pub async fn collect_planner_stream_for_test(
+    provider: &dyn LlmProvider,
+    conversation: &Conversation,
+    tools: &[serde_json::Value],
+    tool_choice: Option<ToolChoice>,
+    timeout_ms: u64,
+) -> (LlmResponse, PlannerOutcome, Option<String>, bool) {
+    let collected =
+        collect_planner_stream(provider, conversation, tools, tool_choice, timeout_ms).await;
+    (
+        collected.response,
+        collected.outcome,
+        collected.diagnostic,
+        collected.completed,
+    )
 }
 
 /// Intern the wire form's `(entity_type, action)` back into the static-str
