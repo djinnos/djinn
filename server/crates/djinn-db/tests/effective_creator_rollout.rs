@@ -111,52 +111,147 @@ fn direct_task_insert_constants(source: &str) -> Vec<(String, String)> {
     constants
 }
 
-fn production_source(source: &str) -> &str {
-    let Some(test_module) = source.rfind("\nmod tests {") else {
-        return source;
-    };
-    let prefix = &source[..test_module];
-    prefix
-        .rfind("#[cfg(test)]")
-        .map_or(source, |attribute| &source[..attribute])
+fn directly_attached_attributes(source: &str, item_offset: usize) -> Vec<&str> {
+    let mut preceding = source[..item_offset].trim_end();
+    let mut attributes = Vec::new();
+    while preceding.ends_with(']') {
+        let Some(attribute_offset) = preceding.rfind("#[") else {
+            break;
+        };
+        let attribute = &preceding[attribute_offset..];
+        if attribute.contains(';') || attribute.contains('{') || attribute.contains('}') {
+            break;
+        }
+        attributes.push(attribute);
+        preceding = preceding[..attribute_offset].trim_end();
+    }
+    attributes
+}
+
+fn attributes_are_test_only(attributes: &[&str]) -> bool {
+    attributes.iter().any(|attribute| {
+        attribute.starts_with("#[cfg(")
+            && (attribute.contains("cfg(test)")
+                || attribute.contains("any(test,")
+                || attribute.contains("feature = \"test-support\""))
+    })
 }
 
 /// A source file is test-only only when its crate root attaches a test or
 /// `test-support` cfg directly to that module declaration. This deliberately
 /// inspects module structure instead of trusting a helper-like filename.
 fn structurally_test_only_module(file: &Path) -> bool {
+    structurally_test_only_module_inner(file, &mut BTreeSet::new())
+        || structurally_exported_test_support(file)
+}
+
+fn structurally_exported_test_support(file: &Path) -> bool {
+    let Some(parent) = file.parent() else {
+        return false;
+    };
+    let Ok(module_root) = std::fs::read_to_string(parent.join("mod.rs")) else {
+        return false;
+    };
+    let Some(src) = parent.parent() else {
+        return false;
+    };
+    let Ok(crate_root) = std::fs::read_to_string(src.join("lib.rs")) else {
+        return false;
+    };
+    module_root.contains("pub mod test_support;")
+        && crate_root.contains("pub mod test_support {")
+        && crate_root.contains("pub use crate::repositories::test_support::")
+        && file
+            .file_name()
+            .is_some_and(|name| name == "test_support.rs")
+}
+
+fn structurally_test_only_module_inner(file: &Path, visited: &mut BTreeSet<PathBuf>) -> bool {
+    if !visited.insert(file.to_path_buf()) {
+        return false;
+    }
     let Some(stem) = file.file_stem().and_then(|stem| stem.to_str()) else {
         return false;
     };
-    let Some(crate_root) = file.parent().map(|directory| directory.join("lib.rs")) else {
+    let Some(parent) = file.parent() else {
         return false;
     };
-    let Ok(root) = std::fs::read_to_string(crate_root) else {
-        return false;
-    };
-    let declaration = format!("mod {stem};");
-    let Some(declaration_offset) = root.find(&declaration) else {
-        return false;
-    };
-    let preceding = &root[..declaration_offset];
-    let Some(attribute_offset) = preceding.rfind("#[cfg(") else {
-        return false;
-    };
-    let attributes = &preceding[attribute_offset..];
-    !attributes.contains(';')
-        && (attributes.contains("cfg(test)") || attributes.contains("feature = \"test-support\""))
+    let mut owners = vec![parent.join("mod.rs"), parent.join("lib.rs")];
+    if let (Some(directory_name), Some(grandparent)) = (
+        parent.file_name().and_then(|name| name.to_str()),
+        parent.parent(),
+    ) {
+        owners.push(grandparent.join(format!("{directory_name}.rs")));
+    }
+    if let Ok(entries) = std::fs::read_dir(parent) {
+        owners.extend(entries.filter_map(|entry| {
+            let path = entry.ok()?.path();
+            (path.extension().is_some_and(|extension| extension == "rs")).then_some(path)
+        }));
+    }
+    owners.sort();
+    owners.dedup();
+
+    let file_name = file
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("");
+    for owner in owners.into_iter().filter(|owner| owner != file) {
+        let Ok(source) = std::fs::read_to_string(&owner) else {
+            continue;
+        };
+        let normal_declaration = format!("mod {stem};");
+        let path_attribute = format!("#[path = \"{file_name}\"]");
+        let include = format!("include!(\"{file_name}\")");
+        if let Some(include_offset) = source.find(&include) {
+            let item_offset = source[..include_offset]
+                .rfind('\n')
+                .map_or(0, |line_end| line_end + 1);
+            if attributes_are_test_only(&directly_attached_attributes(&source, item_offset))
+                || inline_test_ranges(&source)
+                    .iter()
+                    .any(|module| module.contains(&include_offset))
+            {
+                return true;
+            }
+        }
+        let declaration_offset = source
+            .find(&path_attribute)
+            .and_then(|path_offset| {
+                source[path_offset..]
+                    .find("mod ")
+                    .map(|relative| path_offset + relative)
+            })
+            .or_else(|| source.find(&normal_declaration));
+        let Some(declaration_offset) = declaration_offset else {
+            continue;
+        };
+        let item_offset = source[..declaration_offset]
+            .rfind('\n')
+            .map_or(0, |line_end| line_end + 1);
+        if attributes_are_test_only(&directly_attached_attributes(&source, item_offset))
+            || structurally_test_only_module_inner(&owner, visited)
+        {
+            return true;
+        }
+    }
+    false
 }
 
 /// Determine whether a cfg is attached immediately to a function declaration,
 /// rather than accepting an arbitrary marker elsewhere in the file.
 fn function_is_test_only(source: &str, function_offset: usize) -> bool {
-    let preceding = &source[..function_offset];
-    let Some(attribute_offset) = preceding.rfind("#[cfg(") else {
-        return false;
-    };
-    let attributes = &preceding[attribute_offset..];
-    !attributes.contains('}')
-        && (attributes.contains("cfg(test)") || attributes.contains("feature = \"test-support\""))
+    attributes_are_test_only(&directly_attached_attributes(source, function_offset))
+}
+
+fn appended_test_module_start(source: &str) -> Option<usize> {
+    let module = source.rfind("\nmod tests {")? + 1;
+    attributes_are_test_only(&directly_attached_attributes(source, module)).then_some(module)
+}
+
+fn production_source_path(path: &Path) -> bool {
+    path.extension().is_some_and(|extension| extension == "rs")
+        && path.to_string_lossy().contains("/src/")
 }
 
 fn production_sources(dir: &Path, root: &Path, result: &mut Vec<PathBuf>) {
@@ -167,22 +262,14 @@ fn production_sources(dir: &Path, root: &Path, result: &mut Vec<PathBuf>) {
             continue;
         }
         let relative = path.strip_prefix(root).expect("under repository root");
-        let text = relative.to_string_lossy();
-        if path.extension().is_some_and(|ext| ext == "rs")
-            && text.contains("/src/")
-            && !text.contains("/tests/")
-            && !text.ends_with("/tests.rs")
-            && !text.ends_with("_tests.rs")
-            && !text.contains("test_support")
-            && !structurally_test_only_module(&path)
-        {
+        if production_source_path(relative) && !structurally_test_only_module(&path) {
             result.push(path);
         }
     }
 }
 
 /// Discover production writers from the source tree rather than trusting the fixture.
-/// Test modules, integration-test trees, and fixture helpers are deliberately excluded.
+/// Only modules and functions proven test-only by an attached cfg are excluded.
 fn discover_production_writers(root: &Path) -> BTreeSet<String> {
     let mut files = Vec::new();
     production_sources(&root.join("server/crates"), root, &mut files);
@@ -197,16 +284,19 @@ fn discover_production_writers(root: &Path) -> BTreeSet<String> {
         let is_db_repository = path.contains("djinn-db/src/repositories/");
         let is_shared_task_boundary = path.ends_with("repositories/task/writes.rs")
             || path.ends_with("repositories/task/reads.rs");
-        // Test modules are conventionally appended to a repository file. Their
-        // fixture SQL is intentionally outside the production discovery set;
-        // inline `#[cfg(test)]` hooks in production methods remain visible.
-        let source = production_source(&source);
-        let direct_constants = direct_task_insert_constants(source);
-        for (symbol, offset) in function_symbols(source) {
-            if function_is_test_only(source, offset) {
+        let inline_test_modules = inline_test_ranges(&source);
+        let appended_test_module = appended_test_module_start(&source);
+        let direct_constants = direct_task_insert_constants(&source);
+        for (symbol, offset) in function_symbols(&source) {
+            if function_is_test_only(&source, offset)
+                || appended_test_module.is_some_and(|module| offset >= module)
+                || inline_test_modules
+                    .iter()
+                    .any(|module| module.contains(&offset))
+            {
                 continue;
             }
-            let Some(body) = extract_function_body(source, &symbol) else {
+            let Some(body) = extract_function_body(&source, &symbol) else {
                 continue;
             };
             let direct_insert = contains_task_insert(&body)
@@ -340,25 +430,27 @@ fn brace_end(source: &str, open: usize) -> Option<usize> {
 
 fn inline_test_ranges(source: &str) -> Vec<std::ops::Range<usize>> {
     let mut ranges = Vec::new();
-    let mut from = 0;
-    while let Some(relative) = source[from..].find("#[cfg(test)]") {
-        let attribute = from + relative;
-        let after_attribute = &source[attribute + "#[cfg(test)]".len()..];
-        let trimmed = after_attribute.trim_start();
-        let Some(after_mod) = trimmed.strip_prefix("mod ") else {
-            from = attribute + "#[cfg(test)]".len();
+    let mut offset = 0;
+    for line in source.lines() {
+        let item_offset = offset;
+        offset += line.len() + 1;
+        if !line.trim_start().starts_with("mod ")
+            || !attributes_are_test_only(&directly_attached_attributes(source, item_offset))
+        {
+            continue;
+        }
+        let module = item_offset + line.find("mod ").expect("module line");
+        let Some(open_relative) = source[module..].find('{') else {
             continue;
         };
-        let module = source.len() - after_mod.len();
-        let Some(open_relative) = source[module..].find('{') else {
-            break;
-        };
         let open = module + open_relative;
+        if source[module..open].contains(';') {
+            continue;
+        }
         let Some(end) = brace_end(source, open) else {
-            break;
+            continue;
         };
-        ranges.push(attribute..end);
-        from = end;
+        ranges.push(item_offset..end);
     }
     ranges
 }
@@ -482,4 +574,38 @@ fn producer_classifier_excludes_only_structurally_test_support_code() {
         .next()
         .expect("production function");
     assert!(!function_is_test_only(production, offset));
+
+    let intervening_declaration = r#"
+        #[cfg(test)]
+        const FIXTURE: &str = "marker";
+        pub async fn runtime_writer() { repo.create_in_project_with_provenance(); }
+    "#;
+    let (_, offset) = function_symbols(intervening_declaration)
+        .into_iter()
+        .find(|(symbol, _)| symbol == "runtime_writer")
+        .expect("runtime writer");
+    assert!(!function_is_test_only(intervening_declaration, offset));
+
+    let intervening_marker = r#"
+        #[cfg(test)]
+        // This marker is not an attribute on the runtime writer.
+        const MARKER: () = ();
+        pub async fn runtime_writer() { repo.create_in_project_with_provenance(); }
+    "#;
+    let (_, offset) = function_symbols(intervening_marker)
+        .into_iter()
+        .find(|(symbol, _)| symbol == "runtime_writer")
+        .expect("runtime writer after marker");
+    assert!(!function_is_test_only(intervening_marker, offset));
+
+    for helper_like_path in [
+        "server/crates/example/src/runtime_test_support.rs",
+        "server/crates/example/src/runtime_tests.rs",
+        "server/crates/example/src/tests/runtime_writer.rs",
+    ] {
+        assert!(
+            production_source_path(Path::new(helper_like_path)),
+            "helper-like path must not suppress runtime writers: {helper_like_path}"
+        );
+    }
 }

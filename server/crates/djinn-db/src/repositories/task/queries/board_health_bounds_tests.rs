@@ -49,9 +49,10 @@ async fn setup_project(db: &Database) -> (String, String) {
 
 /// Persist a real fixture user for insertion-time task attribution.
 async fn fixture_creator_id(db: &Database) -> String {
+    let github_id = (uuid::Uuid::now_v7().as_u128() & 0x7fff_ffff_ffff_ffff) as i64;
     UserRepository::new(db.clone())
         .upsert_from_github(
-            9_100_042,
+            github_id,
             "board-health-fixture",
             Some("Board Health Fixture"),
             None,
