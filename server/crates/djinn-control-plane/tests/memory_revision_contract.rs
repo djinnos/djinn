@@ -80,8 +80,8 @@ async fn seed_reader_contract(harness: &McpTestHarness, fixture: &Value) {
             let mut values = insert.separated(", ");
             values.push_bind(event["id"].as_str().expect("revision id"));
             values.push_bind(project_id);
-            values.push_bind(event["note_id"].as_str().expect("event note id"));
-            values.push_bind(event["note_seq"].as_i64().expect("note sequence"));
+            values.push_bind(event.get("note_id").and_then(Value::as_str));
+            values.push_bind(event.get("note_seq").and_then(Value::as_i64));
             values.push_bind(event["event_kind"].as_str().expect("event kind"));
             values.push_bind(event.get("content_before").and_then(Value::as_str));
             values.push_bind(event.get("content_after").and_then(Value::as_str));
@@ -378,6 +378,26 @@ async fn fixed_fixture_pins_history_pages_pairwise_diff_and_deleted_history() {
     )
     .await;
     assert_eq!(deleted, expected["deleted_history"]);
+}
+
+#[tokio::test]
+async fn fixed_fixture_executes_non_content_diff_endpoint_envelopes() {
+    let fixture = contract();
+    let harness = McpTestHarness::new().await;
+    seed_reader_contract(&harness, &fixture).await;
+
+    for (name, expectation) in fixture["mcp_response_expectations"]
+        .as_object()
+        .expect("fixture response expectations")
+    {
+        let actual = dispatch(
+            &harness,
+            expectation["tool"].as_str().expect("fixture tool"),
+            expectation["args"].clone(),
+        )
+        .await;
+        assert_eq!(actual, expectation["expected"], "{name}");
+    }
 }
 
 #[tokio::test]

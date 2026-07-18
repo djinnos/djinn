@@ -60,9 +60,10 @@
       "tenant_id" : "00000000-0000-4000-8000-000000000001"
    },
    "mcp_response_expectations" : {
-      "intentionally_separate_from_repository_rows" : false,
-      "reader_fixture_owned" : true,
-      "reserved_for_later_handler_reader_epics" : false
+      "confidence_from" : {"tool":"memory_diff","args":{"project":"fixture/revision-contract","note_id":"00000000-0000-4000-8000-000000000104","from_revision_id":"00000000-0000-4000-8000-000000000211","to_revision_id":"00000000-0000-4000-8000-000000000212"},"expected":{"from":null,"to":null,"diff":"","intervening_events":[],"error":"invalid parameters: field: from_revision_id, message: revision is not a content-bearing event"}},
+      "confidence_to" : {"tool":"memory_diff","args":{"project":"fixture/revision-contract","note_id":"00000000-0000-4000-8000-000000000104","from_revision_id":"00000000-0000-4000-8000-000000000210","to_revision_id":"00000000-0000-4000-8000-000000000211"},"expected":{"from":null,"to":null,"diff":"","intervening_events":[],"error":"invalid parameters: field: to_revision_id, message: revision is not a content-bearing event"}},
+      "extraction_skipped_from" : {"tool":"memory_diff","args":{"project":"fixture/revision-contract","note_id":"00000000-0000-4000-8000-000000000104","from_revision_id":"00000000-0000-4000-8000-000000000226","to_revision_id":"00000000-0000-4000-8000-000000000212"},"expected":{"from":null,"to":null,"diff":"","intervening_events":[],"error":"invalid parameters: field: from_revision_id, message: revision is not a content-bearing event"}},
+      "extraction_skipped_to" : {"tool":"memory_diff","args":{"project":"fixture/revision-contract","note_id":"00000000-0000-4000-8000-000000000104","from_revision_id":"00000000-0000-4000-8000-000000000210","to_revision_id":"00000000-0000-4000-8000-000000000226"},"expected":{"from":null,"to":null,"diff":"","intervening_events":[],"error":"invalid parameters: field: to_revision_id, message: revision is not a content-bearing event"}}
    },
    "migration_cutover" : {
       "expected_repository_history" : [],
@@ -269,6 +270,24 @@
             "subsystem" : null,
             "task_id" : "00000000-0000-4000-8000-000000000030",
             "task_run_id" : "00000000-0000-4000-8000-000000000041"
+         },
+         {
+            "actor_id" : null,
+            "actor_kind" : "system",
+            "confidence_after" : null,
+            "confidence_before" : null,
+            "content_after" : null,
+            "content_before" : null,
+            "created_at" : "2026-02-04T05:06:09.000Z",
+            "event_kind" : "extraction_skipped",
+            "id" : "00000000-0000-4000-8000-000000000226",
+            "note_id" : null,
+            "note_seq" : null,
+            "reason" : "fixed extraction produced no durable memory",
+            "session_id" : "00000000-0000-4000-8000-000000000020",
+            "subsystem" : "extraction",
+            "task_id" : "00000000-0000-4000-8000-000000000030",
+            "task_run_id" : "00000000-0000-4000-8000-000000000040"
          }
       ],
       "expected" : {
