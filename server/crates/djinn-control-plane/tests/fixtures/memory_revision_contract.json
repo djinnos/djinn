@@ -70,7 +70,7 @@
       "synthetic_revisions_permitted" : false
    },
    "reader_fixture" : {
-    "session_context": {"task_id":"00000000-0000-4000-8000-000000000030","session_id":"00000000-0000-4000-8000-000000000020","task_run_id":"00000000-0000-4000-8000-000000000040"},
+    "session_context": {"task_id":"00000000-0000-4000-8000-000000000030","session_id":"00000000-0000-4000-8000-000000000020","task_run_id":"00000000-0000-4000-8000-000000000040","session_diff_session_id":"00000000-0000-4000-8000-000000000021","session_diff_task_run_id":"00000000-0000-4000-8000-000000000041","audit_note_id":"00000000-0000-4000-8000-000000000107"},
       "events" : [
          {
             "actor_id" : "fixture-human",
@@ -161,9 +161,118 @@
             "subsystem" : null,
             "task_id" : "00000000-0000-4000-8000-000000000030",
             "task_run_id" : "00000000-0000-4000-8000-000000000040"
+         },
+         {
+            "actor_id" : "fixture-agent",
+            "actor_kind" : "agent",
+            "confidence_after" : 0.5,
+            "confidence_before" : null,
+            "content_after" : "delta\n",
+            "content_before" : null,
+            "created_at" : "2026-02-04T05:06:07.000Z",
+            "event_kind" : "created",
+            "id" : "00000000-0000-4000-8000-000000000220",
+            "note_id" : "00000000-0000-4000-8000-000000000106",
+            "note_seq" : 1,
+            "reason" : "create equal-time session note a",
+            "session_id" : "00000000-0000-4000-8000-000000000021",
+            "subsystem" : null,
+            "task_id" : "00000000-0000-4000-8000-000000000030",
+            "task_run_id" : "00000000-0000-4000-8000-000000000041"
+         },
+         {
+            "actor_id" : "fixture-agent",
+            "actor_kind" : "agent",
+            "confidence_after" : 0.8,
+            "confidence_before" : 0.5,
+            "content_after" : null,
+            "content_before" : null,
+            "created_at" : "2026-02-04T05:06:07.000Z",
+            "event_kind" : "confidence_changed",
+            "id" : "00000000-0000-4000-8000-000000000221",
+            "note_id" : "00000000-0000-4000-8000-000000000106",
+            "note_seq" : 2,
+            "reason" : "raise equal-time session confidence a",
+            "session_id" : "00000000-0000-4000-8000-000000000021",
+            "subsystem" : null,
+            "task_id" : "00000000-0000-4000-8000-000000000030",
+            "task_run_id" : "00000000-0000-4000-8000-000000000041"
+         },
+         {
+            "actor_id" : "fixture-agent",
+            "actor_kind" : "agent",
+            "confidence_after" : 0.8,
+            "confidence_before" : 0.8,
+            "content_after" : "delta\nepsilon\n",
+            "content_before" : "delta\n",
+            "created_at" : "2026-02-04T05:06:06.000Z",
+            "event_kind" : "updated",
+            "id" : "00000000-0000-4000-8000-000000000222",
+            "note_id" : "00000000-0000-4000-8000-000000000106",
+            "note_seq" : 3,
+            "reason" : "update equal-time session note b",
+            "session_id" : "00000000-0000-4000-8000-000000000021",
+            "subsystem" : null,
+            "task_id" : "00000000-0000-4000-8000-000000000030",
+            "task_run_id" : "00000000-0000-4000-8000-000000000041"
+         },
+         {
+            "actor_id" : "fixture-agent",
+            "actor_kind" : "agent",
+            "confidence_after" : 0.9,
+            "confidence_before" : 0.8,
+            "content_after" : null,
+            "content_before" : null,
+            "created_at" : "2026-02-04T05:06:06.000Z",
+            "event_kind" : "confidence_changed",
+            "id" : "00000000-0000-4000-8000-000000000223",
+            "note_id" : "00000000-0000-4000-8000-000000000106",
+            "note_seq" : 4,
+            "reason" : "raise equal-time session confidence b",
+            "session_id" : "00000000-0000-4000-8000-000000000021",
+            "subsystem" : null,
+            "task_id" : "00000000-0000-4000-8000-000000000030",
+            "task_run_id" : "00000000-0000-4000-8000-000000000041"
+         },
+         {
+            "actor_id" : "fixture-agent",
+            "actor_kind" : "agent",
+            "confidence_after" : 0.9,
+            "confidence_before" : 0.9,
+            "content_after" : "delta\nepsilon\nzeta\n",
+            "content_before" : "delta\nepsilon\n",
+            "created_at" : "2026-02-04T05:06:05.000Z",
+            "event_kind" : "updated",
+            "id" : "00000000-0000-4000-8000-000000000224",
+            "note_id" : "00000000-0000-4000-8000-000000000106",
+            "note_seq" : 5,
+            "reason" : "extend equal-time session note tail",
+            "session_id" : "00000000-0000-4000-8000-000000000021",
+            "subsystem" : null,
+            "task_id" : "00000000-0000-4000-8000-000000000030",
+            "task_run_id" : "00000000-0000-4000-8000-000000000041"
+         },
+         {
+            "actor_id" : "audit-agent",
+            "actor_kind" : "agent",
+            "confidence_after" : 0.75,
+            "confidence_before" : null,
+            "content_after" : "Thin case note body.",
+            "content_before" : null,
+            "created_at" : "2026-02-04T05:06:08.000Z",
+            "event_kind" : "created",
+            "id" : "00000000-0000-4000-8000-000000000225",
+            "note_id" : "00000000-0000-4000-8000-000000000107",
+            "note_seq" : 1,
+            "reason" : "create underspecified audit note",
+            "session_id" : "00000000-0000-4000-8000-000000000021",
+            "subsystem" : null,
+            "task_id" : "00000000-0000-4000-8000-000000000030",
+            "task_run_id" : "00000000-0000-4000-8000-000000000041"
          }
       ],
       "expected" : {
+
          "deleted_history" : {
             "error" : null,
             "events" : [
@@ -380,6 +489,339 @@
             ],
             "history_start" : "ledger",
             "next_cursor" : null
+         },
+         "session_diff_full" : {
+            "error" : null,
+            "events" : [
+{
+                  "actor_id" : "audit-agent",
+                  "actor_kind" : "agent",
+                  "confidence_after" : 0.75,
+                  "confidence_before" : null,
+                  "content_after" : "Thin case note body.",
+                  "content_before" : null,
+                  "content_redacted" : false,
+                  "created_at" : "2026-02-04T05:06:08.000Z",
+                  "event_kind" : "created",
+                  "note_id" : "00000000-0000-4000-8000-000000000107",
+                  "note_seq" : 1,
+                  "reason" : "create underspecified audit note",
+                  "revision_id" : "00000000-0000-4000-8000-000000000225",
+                  "session_id" : "00000000-0000-4000-8000-000000000021",
+                  "subsystem" : null,
+                  "task_id" : "00000000-0000-4000-8000-000000000030",
+                  "task_run_id" : "00000000-0000-4000-8000-000000000041"
+               },
+{
+                  "actor_id" : "fixture-agent",
+                  "actor_kind" : "agent",
+                  "confidence_after" : 0.8,
+                  "confidence_before" : 0.5,
+                  "content_after" : null,
+                  "content_before" : null,
+                  "content_redacted" : false,
+                  "created_at" : "2026-02-04T05:06:07.000Z",
+                  "event_kind" : "confidence_changed",
+                  "note_id" : "00000000-0000-4000-8000-000000000106",
+                  "note_seq" : 2,
+                  "reason" : "raise equal-time session confidence a",
+                  "revision_id" : "00000000-0000-4000-8000-000000000221",
+                  "session_id" : "00000000-0000-4000-8000-000000000021",
+                  "subsystem" : null,
+                  "task_id" : "00000000-0000-4000-8000-000000000030",
+                  "task_run_id" : "00000000-0000-4000-8000-000000000041"
+               },
+{
+                  "actor_id" : "fixture-agent",
+                  "actor_kind" : "agent",
+                  "confidence_after" : 0.5,
+                  "confidence_before" : null,
+                  "content_after" : "delta\n",
+                  "content_before" : null,
+                  "content_redacted" : false,
+                  "created_at" : "2026-02-04T05:06:07.000Z",
+                  "event_kind" : "created",
+                  "note_id" : "00000000-0000-4000-8000-000000000106",
+                  "note_seq" : 1,
+                  "reason" : "create equal-time session note a",
+                  "revision_id" : "00000000-0000-4000-8000-000000000220",
+                  "session_id" : "00000000-0000-4000-8000-000000000021",
+                  "subsystem" : null,
+                  "task_id" : "00000000-0000-4000-8000-000000000030",
+                  "task_run_id" : "00000000-0000-4000-8000-000000000041"
+               },
+{
+                  "actor_id" : "fixture-agent",
+                  "actor_kind" : "agent",
+                  "confidence_after" : 0.9,
+                  "confidence_before" : 0.8,
+                  "content_after" : null,
+                  "content_before" : null,
+                  "content_redacted" : false,
+                  "created_at" : "2026-02-04T05:06:06.000Z",
+                  "event_kind" : "confidence_changed",
+                  "note_id" : "00000000-0000-4000-8000-000000000106",
+                  "note_seq" : 4,
+                  "reason" : "raise equal-time session confidence b",
+                  "revision_id" : "00000000-0000-4000-8000-000000000223",
+                  "session_id" : "00000000-0000-4000-8000-000000000021",
+                  "subsystem" : null,
+                  "task_id" : "00000000-0000-4000-8000-000000000030",
+                  "task_run_id" : "00000000-0000-4000-8000-000000000041"
+               },
+{
+                  "actor_id" : "fixture-agent",
+                  "actor_kind" : "agent",
+                  "confidence_after" : 0.8,
+                  "confidence_before" : 0.8,
+                  "content_after" : "delta\nepsilon\n",
+                  "content_before" : "delta\n",
+                  "content_redacted" : false,
+                  "created_at" : "2026-02-04T05:06:06.000Z",
+                  "event_kind" : "updated",
+                  "note_id" : "00000000-0000-4000-8000-000000000106",
+                  "note_seq" : 3,
+                  "reason" : "update equal-time session note b",
+                  "revision_id" : "00000000-0000-4000-8000-000000000222",
+                  "session_id" : "00000000-0000-4000-8000-000000000021",
+                  "subsystem" : null,
+                  "task_id" : "00000000-0000-4000-8000-000000000030",
+                  "task_run_id" : "00000000-0000-4000-8000-000000000041"
+               },
+{
+                  "actor_id" : "fixture-agent",
+                  "actor_kind" : "agent",
+                  "confidence_after" : 0.9,
+                  "confidence_before" : 0.9,
+                  "content_after" : "delta\nepsilon\nzeta\n",
+                  "content_before" : "delta\nepsilon\n",
+                  "content_redacted" : false,
+                  "created_at" : "2026-02-04T05:06:05.000Z",
+                  "event_kind" : "updated",
+                  "note_id" : "00000000-0000-4000-8000-000000000106",
+                  "note_seq" : 5,
+                  "reason" : "extend equal-time session note tail",
+                  "revision_id" : "00000000-0000-4000-8000-000000000224",
+                  "session_id" : "00000000-0000-4000-8000-000000000021",
+                  "subsystem" : null,
+                  "task_id" : "00000000-0000-4000-8000-000000000030",
+                  "task_run_id" : "00000000-0000-4000-8000-000000000041"
+               }
+            ],
+            "next_cursor" : null
+         },
+         "session_diff_page_1" : {
+            "error" : null,
+            "events" : [
+{
+                  "actor_id" : "audit-agent",
+                  "actor_kind" : "agent",
+                  "confidence_after" : 0.75,
+                  "confidence_before" : null,
+                  "content_after" : "Thin case note body.",
+                  "content_before" : null,
+                  "content_redacted" : false,
+                  "created_at" : "2026-02-04T05:06:08.000Z",
+                  "event_kind" : "created",
+                  "note_id" : "00000000-0000-4000-8000-000000000107",
+                  "note_seq" : 1,
+                  "reason" : "create underspecified audit note",
+                  "revision_id" : "00000000-0000-4000-8000-000000000225",
+                  "session_id" : "00000000-0000-4000-8000-000000000021",
+                  "subsystem" : null,
+                  "task_id" : "00000000-0000-4000-8000-000000000030",
+                  "task_run_id" : "00000000-0000-4000-8000-000000000041"
+               },
+{
+                  "actor_id" : "fixture-agent",
+                  "actor_kind" : "agent",
+                  "confidence_after" : 0.8,
+                  "confidence_before" : 0.5,
+                  "content_after" : null,
+                  "content_before" : null,
+                  "content_redacted" : false,
+                  "created_at" : "2026-02-04T05:06:07.000Z",
+                  "event_kind" : "confidence_changed",
+                  "note_id" : "00000000-0000-4000-8000-000000000106",
+                  "note_seq" : 2,
+                  "reason" : "raise equal-time session confidence a",
+                  "revision_id" : "00000000-0000-4000-8000-000000000221",
+                  "session_id" : "00000000-0000-4000-8000-000000000021",
+                  "subsystem" : null,
+                  "task_id" : "00000000-0000-4000-8000-000000000030",
+                  "task_run_id" : "00000000-0000-4000-8000-000000000041"
+               }
+            ],
+            "next_cursor" : "eyJrIjoic2Vzc2lvbiIsInYiOnsiYyI6IjIwMjYtMDItMDRUMDU6MDY6MDcuMDAwWiIsImkiOiIwMDAwMDAwMC0wMDAwLTQwMDAtODAwMC0wMDAwMDAwMDAyMjEifX0"
+         },
+         "session_diff_page_2" : {
+            "error" : null,
+            "events" : [
+{
+                  "actor_id" : "fixture-agent",
+                  "actor_kind" : "agent",
+                  "confidence_after" : 0.5,
+                  "confidence_before" : null,
+                  "content_after" : "delta\n",
+                  "content_before" : null,
+                  "content_redacted" : false,
+                  "created_at" : "2026-02-04T05:06:07.000Z",
+                  "event_kind" : "created",
+                  "note_id" : "00000000-0000-4000-8000-000000000106",
+                  "note_seq" : 1,
+                  "reason" : "create equal-time session note a",
+                  "revision_id" : "00000000-0000-4000-8000-000000000220",
+                  "session_id" : "00000000-0000-4000-8000-000000000021",
+                  "subsystem" : null,
+                  "task_id" : "00000000-0000-4000-8000-000000000030",
+                  "task_run_id" : "00000000-0000-4000-8000-000000000041"
+               },
+{
+                  "actor_id" : "fixture-agent",
+                  "actor_kind" : "agent",
+                  "confidence_after" : 0.9,
+                  "confidence_before" : 0.8,
+                  "content_after" : null,
+                  "content_before" : null,
+                  "content_redacted" : false,
+                  "created_at" : "2026-02-04T05:06:06.000Z",
+                  "event_kind" : "confidence_changed",
+                  "note_id" : "00000000-0000-4000-8000-000000000106",
+                  "note_seq" : 4,
+                  "reason" : "raise equal-time session confidence b",
+                  "revision_id" : "00000000-0000-4000-8000-000000000223",
+                  "session_id" : "00000000-0000-4000-8000-000000000021",
+                  "subsystem" : null,
+                  "task_id" : "00000000-0000-4000-8000-000000000030",
+                  "task_run_id" : "00000000-0000-4000-8000-000000000041"
+               }
+            ],
+            "next_cursor" : "eyJrIjoic2Vzc2lvbiIsInYiOnsiYyI6IjIwMjYtMDItMDRUMDU6MDY6MDYuMDAwWiIsImkiOiIwMDAwMDAwMC0wMDAwLTQwMDAtODAwMC0wMDAwMDAwMDAyMjMifX0"
+         },
+         "session_diff_page_3" : {
+            "error" : null,
+            "events" : [
+{
+                  "actor_id" : "fixture-agent",
+                  "actor_kind" : "agent",
+                  "confidence_after" : 0.8,
+                  "confidence_before" : 0.8,
+                  "content_after" : "delta\nepsilon\n",
+                  "content_before" : "delta\n",
+                  "content_redacted" : false,
+                  "created_at" : "2026-02-04T05:06:06.000Z",
+                  "event_kind" : "updated",
+                  "note_id" : "00000000-0000-4000-8000-000000000106",
+                  "note_seq" : 3,
+                  "reason" : "update equal-time session note b",
+                  "revision_id" : "00000000-0000-4000-8000-000000000222",
+                  "session_id" : "00000000-0000-4000-8000-000000000021",
+                  "subsystem" : null,
+                  "task_id" : "00000000-0000-4000-8000-000000000030",
+                  "task_run_id" : "00000000-0000-4000-8000-000000000041"
+               },
+{
+                  "actor_id" : "fixture-agent",
+                  "actor_kind" : "agent",
+                  "confidence_after" : 0.9,
+                  "confidence_before" : 0.9,
+                  "content_after" : "delta\nepsilon\nzeta\n",
+                  "content_before" : "delta\nepsilon\n",
+                  "content_redacted" : false,
+                  "created_at" : "2026-02-04T05:06:05.000Z",
+                  "event_kind" : "updated",
+                  "note_id" : "00000000-0000-4000-8000-000000000106",
+                  "note_seq" : 5,
+                  "reason" : "extend equal-time session note tail",
+                  "revision_id" : "00000000-0000-4000-8000-000000000224",
+                  "session_id" : "00000000-0000-4000-8000-000000000021",
+                  "subsystem" : null,
+                  "task_id" : "00000000-0000-4000-8000-000000000030",
+                  "task_run_id" : "00000000-0000-4000-8000-000000000041"
+               }
+            ],
+            "next_cursor" : null
+         },
+         "session_diff_redacted" : {
+            "error" : null,
+            "events" : [
+{
+                  "actor_id" : "audit-agent",
+                  "actor_kind" : "agent",
+                  "confidence_after" : 0.75,
+                  "confidence_before" : null,
+                  "content_after" : null,
+                  "content_before" : null,
+                  "content_redacted" : true,
+                  "created_at" : "2026-02-04T05:06:08.000Z",
+                  "event_kind" : "created",
+                  "note_id" : "00000000-0000-4000-8000-000000000107",
+                  "note_seq" : 1,
+                  "reason" : "create underspecified audit note",
+                  "revision_id" : "00000000-0000-4000-8000-000000000225",
+                  "session_id" : "00000000-0000-4000-8000-000000000021",
+                  "subsystem" : null,
+                  "task_id" : "00000000-0000-4000-8000-000000000030",
+                  "task_run_id" : "00000000-0000-4000-8000-000000000041"
+               },
+{
+                  "actor_id" : "fixture-agent",
+                  "actor_kind" : "agent",
+                  "confidence_after" : 0.8,
+                  "confidence_before" : 0.5,
+                  "content_after" : null,
+                  "content_before" : null,
+                  "content_redacted" : true,
+                  "created_at" : "2026-02-04T05:06:07.000Z",
+                  "event_kind" : "confidence_changed",
+                  "note_id" : "00000000-0000-4000-8000-000000000106",
+                  "note_seq" : 2,
+                  "reason" : "raise equal-time session confidence a",
+                  "revision_id" : "00000000-0000-4000-8000-000000000221",
+                  "session_id" : "00000000-0000-4000-8000-000000000021",
+                  "subsystem" : null,
+                  "task_id" : "00000000-0000-4000-8000-000000000030",
+                  "task_run_id" : "00000000-0000-4000-8000-000000000041"
+               }
+            ],
+            "next_cursor" : "eyJrIjoic2Vzc2lvbiIsInYiOnsiYyI6IjIwMjYtMDItMDRUMDU6MDY6MDcuMDAwWiIsImkiOiIwMDAwMDAwMC0wMDAwLTQwMDAtODAwMC0wMDAwMDAwMDAyMjEifX0"
+         },
+         "extracted_audit" : {
+            "archive_candidates" : [],
+            "demote_to_working_spec" : [],
+            "error" : null,
+            "merge_candidates" : [],
+            "rerun_hint" : "Rerun `memory_extracted_audit()` after cleanup and compare category counts to measure the remaining ADR-054 migration backlog.",
+            "scanned_note_count" : 1,
+            "underspecified" : [
+               {
+                  "attribution" : {
+                     "actor_id" : "audit-agent",
+                     "actor_kind" : "agent",
+                     "reason" : "create underspecified audit note",
+                     "revision_created_at" : "2026-02-04T05:06:08.000Z",
+                     "revision_id" : "00000000-0000-4000-8000-000000000225",
+                     "revision_kind" : "created",
+                     "revision_seq" : 1,
+                     "session_id" : "00000000-0000-4000-8000-000000000021",
+                     "subsystem" : null,
+                     "task_id" : "00000000-0000-4000-8000-000000000030",
+                     "task_run_id" : "00000000-0000-4000-8000-000000000041"
+                  },
+                  "category" : "underspecified",
+                  "folder" : "cases",
+                  "note_id" : "00000000-0000-4000-8000-000000000107",
+                  "note_type" : "case",
+                  "permalink" : "cases/audit-underspecified",
+                  "reasons" : [
+                     "Missing ADR-054 required sections: Situation, Constraint, Approach taken, Result, Why it worked / failed, Reusable lesson, Related",
+                     "Body is too short for durable memory (20 chars)",
+                     "Body has only 1 paragraph(s); strengthen with explicit context, rationale, and transfer lesson"
+                  ],
+                  "related_note_ids" : [],
+                  "title" : "Underspecified audit note"
+               }
+            ]
          }
       },
       "live_notes" : [
@@ -389,6 +831,15 @@
             "id" : "00000000-0000-4000-8000-000000000104",
             "permalink" : "reference/fixed-live",
             "title" : "Fixed live note"
+         },
+         {
+            "confidence" : 0.75,
+            "content" : "Thin case note body.",
+            "folder" : "cases",
+            "id" : "00000000-0000-4000-8000-000000000107",
+            "note_type" : "case",
+            "permalink" : "cases/audit-underspecified",
+            "title" : "Underspecified audit note"
          }
       ],
       "project" : "fixture/revision-contract",
@@ -417,10 +868,36 @@
             "limit" : 2,
             "note_id" : "00000000-0000-4000-8000-000000000104",
             "project" : "fixture/revision-contract"
+         },
+         "session_diff_full" : {
+            "limit" : 6,
+            "project" : "fixture/revision-contract",
+            "session_id" : "00000000-0000-4000-8000-000000000021"
+         },
+         "session_diff_page_1" : {
+            "limit" : 2,
+            "project" : "fixture/revision-contract",
+            "session_id" : "00000000-0000-4000-8000-000000000021"
+         },
+         "session_diff_page_2" : {
+            "before_cursor" : "eyJrIjoic2Vzc2lvbiIsInYiOnsiYyI6IjIwMjYtMDItMDRUMDU6MDY6MDcuMDAwWiIsImkiOiIwMDAwMDAwMC0wMDAwLTQwMDAtODAwMC0wMDAwMDAwMDAyMjEifX0",
+            "limit" : 2,
+            "project" : "fixture/revision-contract",
+            "session_id" : "00000000-0000-4000-8000-000000000021"
+         },
+         "session_diff_page_3" : {
+            "before_cursor" : "eyJrIjoic2Vzc2lvbiIsInYiOnsiYyI6IjIwMjYtMDItMDRUMDU6MDY6MDYuMDAwWiIsImkiOiIwMDAwMDAwMC0wMDAwLTQwMDAtODAwMC0wMDAwMDAwMDAyMjMifX0",
+            "limit" : 2,
+            "project" : "fixture/revision-contract",
+            "session_id" : "00000000-0000-4000-8000-000000000021"
+         },
+         "extracted_audit" : {
+            "project" : "fixture/revision-contract"
          }
       }
    },
    "registered_subsystems" : [
+
       "mcp",
       "dedup",
       "consolidation",

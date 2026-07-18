@@ -114,6 +114,20 @@ async fn seed_reader_contract(harness: &McpTestHarness, fixture: &Value) {
         .bind(task_run_id).bind(project_id).bind(task_id).execute(harness.db().pool()).await.expect("seed fixed task run");
     sqlx::query("INSERT INTO sessions (id, project_id, task_id, task_run_id, model_id, agent_type, started_at, status) VALUES ($1, $2, $3, $4, 'fixture-model', 'worker', '2026-02-04T05:06:07.000Z', 'active')")
         .bind(session_id).bind(project_id).bind(task_id).bind(task_run_id).execute(harness.db().pool()).await.expect("seed fixed session");
+
+    // Second session/task-run used by the equal-time session-diff and extracted-audit
+    // scenarios. These are separate from the history/diff session so the session-diff
+    // events are isolated from the tk95 envelope.
+    let sd_session = context["session_diff_session_id"]
+        .as_str()
+        .expect("fixed session-diff session id");
+    let sd_task_run = context["session_diff_task_run_id"]
+        .as_str()
+        .expect("fixed session-diff task run id");
+    sqlx::query("INSERT INTO task_runs (id, project_id, task_id, trigger_type, status, started_at) VALUES ($1, $2, $3, 'manual', 'running', '2026-02-04T05:06:05.000Z')")
+        .bind(sd_task_run).bind(project_id).bind(task_id).execute(harness.db().pool()).await.expect("seed session-diff task run");
+    sqlx::query("INSERT INTO sessions (id, project_id, task_id, task_run_id, model_id, agent_type, started_at, status) VALUES ($1, $2, $3, $4, 'fixture-model', 'worker', '2026-02-04T05:06:05.000Z', 'active')")
+        .bind(sd_session).bind(project_id).bind(task_id).bind(sd_task_run).execute(harness.db().pool()).await.expect("seed session-diff session");
 }
 
 async fn dispatch(harness: &McpTestHarness, tool: &str, args: Value) -> Value {
@@ -290,6 +304,80 @@ async fn fixed_fixture_pins_history_pages_pairwise_diff_and_deleted_history() {
     )
     .await;
     assert_eq!(deleted, expected["deleted_history"]);
+}
+
+#[tokio::test]
+async fn fixed_fixture_pins_equal_time_session_diff_pages_and_extracted_audit() {
+    let fixture = contract();
+    let harness = McpTestHarness::new().await;
+    seed_reader_contract(&harness, &fixture).await;
+    let reader = &fixture["reader_fixture"];
+    let requests = &reader["requests"];
+    let expected = &reader["expected"];
+
+    // Full session-diff: all five events ordered newest-first by
+    // (created_at DESC, id DESC), exercising the equal-time tie-break.
+    let session_full = dispatch(
+        &harness,
+        "memory_session_diff",
+        requests["session_diff_full"].clone(),
+    )
+    .await;
+    assert_eq!(session_full, expected["session_diff_full"]);
+
+    // Cursor page 1: first two equal-time events + cursor into the boundary.
+    let sd_page_1 = dispatch(
+        &harness,
+        "memory_session_diff",
+        requests["session_diff_page_1"].clone(),
+    )
+    .await;
+    assert_eq!(sd_page_1, expected["session_diff_page_1"]);
+
+    // Cursor page 2: next two equal-time events.
+    let sd_page_2 = dispatch(
+        &harness,
+        "memory_session_diff",
+        requests["session_diff_page_2"].clone(),
+    )
+    .await;
+    assert_eq!(sd_page_2, expected["session_diff_page_2"]);
+
+    // Cursor page 3: final single event.
+    let sd_page_3 = dispatch(
+        &harness,
+        "memory_session_diff",
+        requests["session_diff_page_3"].clone(),
+    )
+    .await;
+    assert_eq!(sd_page_3, expected["session_diff_page_3"]);
+
+    // Readerless/redacted: a non-admin caller gets the same page shape but
+    // with content bodies withheld and content_redacted = true.
+    let readerless = UserRepository::new(harness.db().clone())
+        .upsert_from_github(8_420_001, "session-diff-readerless", None, None)
+        .await
+        .expect("seed readerless user");
+    let redacted = SESSION_USER_ID
+        .scope(
+            Some(readerless.id.clone()),
+            dispatch(
+                &harness,
+                "memory_session_diff",
+                requests["session_diff_page_1"].clone(),
+            ),
+        )
+        .await;
+    assert_eq!(redacted, expected["session_diff_redacted"]);
+
+    // Extracted audit: a nonempty attributed underspecified finding.
+    let audit = dispatch(
+        &harness,
+        "memory_extracted_audit",
+        requests["extracted_audit"].clone(),
+    )
+    .await;
+    assert_eq!(audit, expected["extracted_audit"]);
 }
 
 #[test]
