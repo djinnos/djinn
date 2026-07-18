@@ -172,6 +172,16 @@ async fn call_llm_for_summary(
     Ok(summary)
 }
 
+/// Production compaction stream consumer exposed for integration-level
+/// behavioral tests. Production callers should use the public policy APIs.
+#[doc(hidden)]
+pub async fn call_llm_for_summary_for_test(
+    provider: &dyn LlmProvider,
+    conv: &Conversation,
+) -> anyhow::Result<String> {
+    call_llm_for_summary(provider, conv).await
+}
+
 pub(super) fn filter_tool_responses_middle_out(
     messages: &[Message],
     remove_percent: u32,

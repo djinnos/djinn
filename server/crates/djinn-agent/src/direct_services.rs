@@ -50,6 +50,33 @@ use djinn_provider::message::{ContentBlock, Conversation};
 use djinn_provider::provider::{LlmProvider, LlmResponse, StreamEvent, TokenUsage, ToolChoice};
 use futures::StreamExt;
 
+/// Apply one provider event to the terminal response aggregate used by direct
+/// services. Returns `true` when the event terminates the stream.
+///
+/// This production seam is shared by direct invocation and attributed planner
+/// calls. A completed attributed thinking block is retained as content, but
+/// its text is not appended to `thinking`: the matching delta already supplied
+/// the display aggregate.
+#[doc(hidden)]
+pub fn append_direct_response_event(response: &mut LlmResponse, event: StreamEvent) -> bool {
+    match event {
+        StreamEvent::Delta(block) => response.content.push(block),
+        StreamEvent::Thinking(thinking) => response.thinking.push_str(&thinking),
+        StreamEvent::ThinkingDelta { text, .. } => response.thinking.push_str(&text),
+        StreamEvent::ThinkingBlockComplete {
+            thinking,
+            signature,
+            ..
+        } => response.content.push(ContentBlock::Thinking {
+            thinking,
+            signature,
+        }),
+        StreamEvent::Usage(usage) => response.usage = usage,
+        StreamEvent::Done => return true,
+    }
+    false
+}
+
 /// In-process `SupervisorServices` impl that delegates straight to the
 /// lifecycle helpers inside `djinn-agent`.
 pub struct DirectServices {
@@ -1084,20 +1111,9 @@ impl SupervisorServices for DirectServices {
             usage: TokenUsage::default(),
         };
         while let Some(ev) = stream.next().await {
-            match ev.map_err(|e| format!("provider stream error: {e}"))? {
-                StreamEvent::Delta(block) => response.content.push(block),
-                StreamEvent::Thinking(s) => response.thinking.push_str(&s),
-                StreamEvent::ThinkingDelta { text, .. } => response.thinking.push_str(&text),
-                StreamEvent::ThinkingBlockComplete {
-                    thinking,
-                    signature,
-                    ..
-                } => response.content.push(ContentBlock::Thinking {
-                    thinking,
-                    signature,
-                }),
-                StreamEvent::Usage(u) => response.usage = u,
-                StreamEvent::Done => break,
+            let event = ev.map_err(|e| format!("provider stream error: {e}"))?;
+            if append_direct_response_event(&mut response, event) {
+                break;
             }
         }
         Ok(response)
@@ -2344,19 +2360,8 @@ async fn collect_planner_stream(
             .map_err(|e| format!("provider stream init failed: {e}"))?;
         while let Some(event) = stream.next().await {
             match event {
-                Ok(StreamEvent::Delta(block)) => response.content.push(block),
-                Ok(StreamEvent::Thinking(thinking)) => response.thinking.push_str(&thinking),
-                Ok(StreamEvent::ThinkingDelta { text, .. }) => response.thinking.push_str(&text),
-                Ok(StreamEvent::ThinkingBlockComplete {
-                    thinking,
-                    signature,
-                    ..
-                }) => response.content.push(ContentBlock::Thinking {
-                    thinking,
-                    signature,
-                }),
-                Ok(StreamEvent::Usage(usage)) => response.usage = usage,
-                Ok(StreamEvent::Done) => break,
+                Ok(event) if append_direct_response_event(&mut response, event) => break,
+                Ok(_) => {}
                 Err(error) => return Err(format!("provider stream error: {error}")),
             }
         }
@@ -2370,7 +2375,6 @@ async fn collect_planner_stream(
     .await
     {
         Ok(Ok(())) => CollectedPlannerStream {
-            response,
             outcome: PlannerOutcome::Success,
             diagnostic: None,
             completed: true,
