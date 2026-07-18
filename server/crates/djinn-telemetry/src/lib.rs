@@ -146,6 +146,9 @@ const BUILD_ADMISSION_UNKNOWN_CLASSIFICATION_TOTAL: &str =
 const BUILD_ADMISSION_INVENTORY_DEGRADED: &str = "djinn_build_admission_inventory_degraded";
 const BUILD_ADMISSION_JOURNAL_DEGRADED: &str = "djinn_build_admission_journal_degraded";
 const BUILD_ADMISSION_CREATE_UNKNOWN_HEALTH: &str = "djinn_build_admission_create_unknown_health";
+const BUILD_ADMISSION_HANDOFF_WARNING: &str = "djinn_build_admission_handoff_warning";
+const BUILD_ADMISSION_HANDOFF_WARNING_REASONS: [&str; 3] =
+    ["unexpected_overlap", "stale_epoch", "epoch_unreadable"];
 const AGENT_SESSION_PHASE_SECONDS_TOTAL: &str = "djinn_agent_session_phase_seconds_total";
 
 // ─── Linux PSI telemetry (proposal zp5t) ──────────────────────────────
@@ -1303,6 +1306,13 @@ fn register_metrics() {
             "Bounded build-admission health signal; one means degraded."
         );
     }
+    metrics::describe_gauge!(
+        BUILD_ADMISSION_HANDOFF_WARNING,
+        "Current bounded emergency-to-invocation admission handoff warning; one means active."
+    );
+    for reason in BUILD_ADMISSION_HANDOFF_WARNING_REASONS {
+        metrics::gauge!(BUILD_ADMISSION_HANDOFF_WARNING, "reason" => reason).set(0.0);
+    }
     metrics::describe_counter!(
         AGENT_SESSION_PHASE_SECONDS_TOTAL,
         "Cumulative seconds spent in agent session phases, partitioned by bounded phase and role labels."
@@ -2356,6 +2366,15 @@ pub mod build_slot_occupancy {
 /// Build-admission metrics whose labels are restricted to effective mode/cap.
 /// Work IDs, UIDs, epochs, and diagnostics must remain in tracing only.
 pub mod build_admission {
+    /// Set exactly one handoff warning and explicitly clear every stale reason
+    /// series. `None` clears the entire bounded family.
+    pub fn set_handoff_warning(active: Option<&'static str>) {
+        for reason in super::BUILD_ADMISSION_HANDOFF_WARNING_REASONS {
+            metrics::gauge!(super::BUILD_ADMISSION_HANDOFF_WARNING, "reason" => reason)
+                .set(f64::from(Some(reason) == active));
+        }
+    }
+
     /// Publish the deduplicated occupied and Enforce-deferred queue sizes.
     pub fn set_slots(
         effective_mode: &'static str,
@@ -4775,6 +4794,32 @@ mod tests {
         assert_eq!(unlabelled_sample_value(&rendered, BUILD_SLOTS_QUEUED), 1.0);
     }
 
+    #[test]
+    fn handoff_warning_gauge_has_exact_bounded_values_and_resets_stale_series() {
+        let _guard = test_guard();
+        init().unwrap();
+        for active in [
+            Some("unexpected_overlap"),
+            Some("stale_epoch"),
+            Some("epoch_unreadable"),
+            None,
+        ] {
+            // Each update must make all three bounded series exact.
+            build_admission::set_handoff_warning(active);
+            let rendered = render().unwrap();
+            for reason in BUILD_ADMISSION_HANDOFF_WARNING_REASONS {
+                assert_eq!(
+                    labeled_sample_value(
+                        &rendered,
+                        BUILD_ADMISSION_HANDOFF_WARNING,
+                        &[("reason", reason)]
+                    ),
+                    f64::from(Some(reason) == active),
+                    "reason={reason} active={active:?}"
+                );
+            }
+        }
+    }
     #[test]
     fn agent_session_phase_counter_covers_all_combinations() {
         let _guard = test_guard();
