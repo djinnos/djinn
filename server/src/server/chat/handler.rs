@@ -3,9 +3,9 @@ use std::convert::Infallible;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 use std::collections::HashMap;
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 use std::sync::LazyLock;
 
 use djinn_core::clock::{Clock, SystemClock as SystemClockTrait};
@@ -112,18 +112,18 @@ use djinn_db::{
 use djinn_provider::message::{ContentBlock, Conversation, Message, Role};
 use djinn_provider::provider::{LlmProvider, StreamEvent, TelemetryMeta, create_provider};
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 type TestProviderFactory = Arc<dyn Fn() -> Box<dyn LlmProvider> + Send + Sync>;
 
 /// Test-only seam for HTTP handler regressions. The session-affinity key is
 /// already unique per request, so concurrent tests cannot replace each other's
 /// provider behavior.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 static TEST_PROVIDERS: LazyLock<Mutex<HashMap<String, TestProviderFactory>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
-#[cfg(test)]
-pub(super) fn register_test_provider(
+#[cfg(any(test, feature = "test-support"))]
+pub fn register_test_provider(
     session_id: &str,
     factory: impl Fn() -> Box<dyn LlmProvider> + Send + Sync + 'static,
 ) {
@@ -134,7 +134,7 @@ pub(super) fn register_test_provider(
 }
 
 fn create_chat_provider(config: djinn_provider::provider::ProviderConfig) -> Box<dyn LlmProvider> {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     if let Some(factory) = config.session_affinity_key.as_deref().and_then(|key| {
         TEST_PROVIDERS
             .lock()
