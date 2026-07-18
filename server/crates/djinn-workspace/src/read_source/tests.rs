@@ -30,19 +30,14 @@ fn init_bare_mirror(work: &Path) -> String {
 }
 
 fn run_git(dir: &Path, args: &[&str]) {
-    let output = Command::new("git")
-        .current_dir(dir)
-        .args(args)
-        .output()
-        .expect("git command");
-    if !output.status.success() {
-        panic!(
-            "git {} failed in {}: {}",
-            args.join(" "),
-            dir.display(),
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
+    djinn_git::run_git_command_binary_in(dir, args.iter().map(|arg| (*arg).to_owned()).collect())
+        .unwrap_or_else(|error| {
+            panic!(
+                "git {} failed in {}: {error}",
+                args.join(" "),
+                dir.display()
+            )
+        });
 }
 
 /// Create a clean detached checkout of the mirror at `dest`.
@@ -700,7 +695,8 @@ async fn different_owners_are_isolated() {
     // Owner one.
     migrator.migrate(fx.request(vec![])).await.unwrap();
 
-    // Owner two — different root.
+    // Owner two — different root and a distinct durable project identity.
+    seed_project(&fx.db, "owner-proj-002", "other-owner").await;
     let owner2_root = fx.tmp_path.join("owner2-root");
     fs::create_dir_all(&owner2_root).unwrap();
     let mut req2 = fx.request(vec![]);

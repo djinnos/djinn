@@ -17,7 +17,6 @@
 //! `m0ed` spike for the canonical ownership and legacy-inventory contract.
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use djinn_core::live_state_migration::{ProjectLiveStateMigrationLock, atomic_rename};
 use djinn_db::{
@@ -747,20 +746,18 @@ impl ReadSourceMigrator {
                 MigrationFailurePoint::FailClone,
             ));
         }
-        let output = Command::new("git")
-            .args(["clone", "--local", "--shared", "--no-checkout"])
-            .arg(&request.mirror_path)
-            .arg(temp)
-            .output()
-            .map_err(|source| ReadSourceMigrationError::Io {
-                path: temp.to_path_buf(),
-                source,
-            })?;
-        if !output.status.success() {
-            return Err(ReadSourceMigrationError::Git(
-                String::from_utf8_lossy(&output.stderr).into_owned(),
-            ));
-        }
+        djinn_git::run_git_command_binary_in(
+            temp.parent().unwrap_or(destination),
+            vec![
+                "clone".to_owned(),
+                "--local".to_owned(),
+                "--shared".to_owned(),
+                "--no-checkout".to_owned(),
+                request.mirror_path.to_string_lossy().into_owned(),
+                temp.to_string_lossy().into_owned(),
+            ],
+        )
+        .map_err(|error| ReadSourceMigrationError::Git(error.to_string()))?;
 
         // ── Checkout step ─────────────────────────────────────────────────
         if request.fail_at == Some(MigrationFailurePoint::FailCheckout) {
@@ -1034,16 +1031,12 @@ fn build_inventory(
 }
 
 fn git(path: &Path, args: &[&str]) -> Result<String, String> {
-    let output = Command::new("git")
-        .current_dir(path)
-        .args(args)
-        .output()
-        .map_err(|error| error.to_string())?;
-    if output.status.success() {
-        Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
-    } else {
-        Err(String::from_utf8_lossy(&output.stderr).trim().to_owned())
-    }
+    let output = djinn_git::run_git_command_binary_in(
+        path,
+        args.iter().map(|arg| (*arg).to_owned()).collect(),
+    )
+    .map_err(|error| error.to_string())?;
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
 }
 
 #[cfg(test)]
