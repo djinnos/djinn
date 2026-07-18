@@ -10,6 +10,7 @@ use std::sync::{
     Arc,
     atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering},
 };
+use std::time::Instant;
 
 use async_trait::async_trait;
 use djinn_db::{
@@ -171,6 +172,18 @@ struct PermitState {
     create_unknown_outstanding: bool,
 }
 
+trait QueueClock: Send + Sync {
+    fn now(&self) -> Instant;
+}
+
+struct SystemQueueClock;
+
+impl QueueClock for SystemQueueClock {
+    fn now(&self) -> Instant {
+        Instant::now()
+    }
+}
+
 /// Outcome of durable predecessor-epoch recovery and controller seeding.
 ///
 /// The controller seeds in-memory permit bookkeeping from the durable active
@@ -228,7 +241,10 @@ pub struct BuildAdmissionController {
     /// reservations are blocked while this is set; Observe/Off are unaffected.
     draining: AtomicBool,
     released: Notify,
-    deferred_enforce: Mutex<HashSet<String>>,
+    deferred_enforce: std::sync::Mutex<HashSet<String>>,
+    /// Monotonic first-denial timestamps keyed by full admission identity.
+    queue_waiters: std::sync::Mutex<HashMap<String, Instant>>,
+    queue_clock: Arc<dyn QueueClock>,
 }
 
 impl BuildAdmissionController {
@@ -257,7 +273,9 @@ impl BuildAdmissionController {
             topology_ready: AtomicBool::new(true),
             draining: AtomicBool::new(false),
             released: Notify::new(),
-            deferred_enforce: Mutex::new(HashSet::new()),
+            deferred_enforce: std::sync::Mutex::new(HashSet::new()),
+            queue_waiters: std::sync::Mutex::new(HashMap::new()),
+            queue_clock: Arc::new(SystemQueueClock),
         }
     }
 
@@ -396,6 +414,11 @@ impl BuildAdmissionController {
     /// while draining; in-flight permits may still transition to terminal.
     pub fn begin_draining(&self) {
         self.draining.store(true, Ordering::Release);
+        self.finish_all_queued_waits(djinn_telemetry::build_slot_queue::OUTCOME_SHUTDOWN);
+        if let Ok(mut deferred) = self.deferred_enforce.lock() {
+            deferred.clear();
+        }
+        djinn_telemetry::build_slot_occupancy::set_slots_queued(0);
     }
 
     #[must_use]
@@ -433,7 +456,8 @@ impl BuildAdmissionController {
             BuildAdmissionMode::Enforce => "enforce",
         };
         if self.mode() == BuildAdmissionMode::Off {
-            djinn_telemetry::build_admission::set_slots(mode, self.cap, 0, 0);
+            djinn_telemetry::build_slot_occupancy::set_slots_in_use(0);
+            djinn_telemetry::build_slot_occupancy::set_slots_queued(0);
             djinn_telemetry::build_admission::set_health(mode, self.cap, false, false, false);
             return;
         }
@@ -465,11 +489,15 @@ impl BuildAdmissionController {
             }
         };
         let queued = if self.mode() == BuildAdmissionMode::Enforce {
-            self.deferred_enforce.lock().await.len()
+            self.deferred_enforce
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .len()
         } else {
             0
         };
-        djinn_telemetry::build_admission::set_slots(mode, self.cap, occupied, queued);
+        djinn_telemetry::build_slot_occupancy::set_slots_in_use(occupied);
+        djinn_telemetry::build_slot_occupancy::set_slots_queued(queued);
         djinn_telemetry::build_admission::set_health(
             mode,
             self.cap,
@@ -574,10 +602,18 @@ impl BuildAdmissionController {
             };
             match reservation {
                 ReserveAdmissionResult::Denied { occupancy, cap } => {
-                    self.deferred_enforce
+                    let first_denial = self
+                        .deferred_enforce
                         .lock()
-                        .await
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
                         .insert(permit_key.clone());
+                    if first_denial {
+                        self.queue_waiters
+                            .lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner())
+                            .entry(permit_key.clone())
+                            .or_insert_with(|| self.queue_clock.now());
+                    }
                     self.publish_metrics().await;
                     return Ok(BuildAdmissionDecision::Denied { occupancy, cap });
                 }
@@ -587,7 +623,17 @@ impl BuildAdmissionController {
                     idempotent = value;
                     // This exact identity has successfully left deferred state.
                     // Other waiters remain queued until their own retry succeeds.
-                    self.deferred_enforce.lock().await.remove(&permit_key);
+                    if self
+                        .deferred_enforce
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .remove(&permit_key)
+                    {
+                        self.finish_queued_wait(
+                            &permit_key,
+                            djinn_telemetry::build_slot_queue::OUTCOME_ADMITTED,
+                        );
+                    }
                 }
             }
         }
@@ -733,6 +779,55 @@ impl BuildAdmissionController {
         );
     }
 
+    /// Cancel a deferred request. Duplicate signals are idempotent: removal
+    /// precedes observation, so one identity can produce only one outcome.
+    pub async fn cancel_deferred(&self, domain: AdmissionDomain, work_id: &str, generation: i64) {
+        let key = permit_key(&AdmissionJournalKey {
+            domain,
+            work_id: work_id.to_owned(),
+            generation,
+        });
+        if self
+            .deferred_enforce
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(&key)
+        {
+            self.finish_queued_wait(&key, djinn_telemetry::build_slot_queue::OUTCOME_CANCELLED);
+        }
+        self.publish_metrics().await;
+    }
+
+    fn finish_queued_wait(&self, key: &str, outcome: &'static str) {
+        let queued_at = self
+            .queue_waiters
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(key);
+        if let Some(queued_at) = queued_at {
+            djinn_telemetry::build_slot_queue::record_wait_seconds(
+                outcome,
+                self.queue_clock.now().saturating_duration_since(queued_at),
+            );
+        }
+    }
+
+    fn finish_all_queued_waits(&self, outcome: &'static str) {
+        let waiters = {
+            let mut waiters = self
+                .queue_waiters
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            std::mem::take(&mut *waiters)
+        };
+        for queued_at in waiters.into_values() {
+            djinn_telemetry::build_slot_queue::record_wait_seconds(
+                outcome,
+                self.queue_clock.now().saturating_duration_since(queued_at),
+            );
+        }
+    }
+
     async fn transition_permit(
         &self,
         permit: &WarmAdmissionPermit,
@@ -850,7 +945,10 @@ impl BuildAdmissionController {
             }
             // Waking one waiter cannot prove unrelated identities have left
             // deferred state. Only remove this terminal identity, if present.
-            self.deferred_enforce.lock().await.remove(&state_permit_key);
+            self.deferred_enforce
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .remove(&state_permit_key);
             self.publish_metrics().await;
             // A terminal release can bring seeded occupancy back within the
             // cap; refresh the over-cap gate from the durable journal rather
@@ -2181,6 +2279,19 @@ mod tests {
     }
 
     fn sample_value(rendered: &str, metric: &str, labels: &[(&str, &str)]) -> f64 {
+        if matches!(
+            metric,
+            "djinn_build_slots_in_use" | "djinn_build_slots_queued"
+        ) {
+            let line = rendered
+                .lines()
+                .find(|line| line.starts_with(metric) && !line.contains("{"))
+                .unwrap_or_else(|| panic!("missing unlabelled sample {metric} in:\n{rendered}"));
+            return line
+                .rsplit_once(' ')
+                .and_then(|(_, value)| value.parse::<f64>().ok())
+                .unwrap_or_else(|| panic!("sample should end with a number: {line}"));
+        }
         let line = rendered
             .lines()
             .find(|l| {
@@ -2231,14 +2342,14 @@ mod tests {
         let rendered = djinn_telemetry::render().unwrap();
         let occupied = sample_value(
             &rendered,
-            "djinn_build_slots_occupied",
+            "djinn_build_slots_in_use",
             &[("effective_mode", "enforce"), ("effective_cap", "3")],
         );
         assert_eq!(
             occupied, 1.0,
             "occupied gauge must reflect the newly reserved row immediately"
         );
-        assert_no_identity_labels(&rendered, "djinn_build_slots_occupied");
+        assert_no_identity_labels(&rendered, "djinn_build_slots_in_use");
     }
 
     #[tokio::test]
@@ -2304,7 +2415,7 @@ mod tests {
         let rendered = djinn_telemetry::render().unwrap();
         let occupied = sample_value(
             &rendered,
-            "djinn_build_slots_occupied",
+            "djinn_build_slots_in_use",
             &[("effective_mode", "enforce"), ("effective_cap", "64")],
         );
         assert_eq!(
@@ -2324,7 +2435,7 @@ mod tests {
         let rendered = djinn_telemetry::render().unwrap();
         let occupied = sample_value(
             &rendered,
-            "djinn_build_slots_occupied",
+            "djinn_build_slots_in_use",
             &[("effective_mode", "off"), ("effective_cap", "0")],
         );
         assert_eq!(occupied, 0.0, "Off must report zero occupancy");
@@ -2628,7 +2739,7 @@ mod tests {
         let rendered = djinn_telemetry::render().unwrap();
         let occupied = sample_value(
             &rendered,
-            "djinn_build_slots_occupied",
+            "djinn_build_slots_in_use",
             &[("effective_mode", "enforce"), ("effective_cap", "3")],
         );
         assert_eq!(
@@ -2668,7 +2779,7 @@ mod tests {
         let rendered = djinn_telemetry::render().unwrap();
         let occupied = sample_value(
             &rendered,
-            "djinn_build_slots_occupied",
+            "djinn_build_slots_in_use",
             &[("effective_mode", "enforce"), ("effective_cap", "1")],
         );
         assert_eq!(
@@ -2699,7 +2810,7 @@ mod tests {
         let rendered = djinn_telemetry::render().unwrap();
         let occupied = sample_value(
             &rendered,
-            "djinn_build_slots_occupied",
+            "djinn_build_slots_in_use",
             &[("effective_mode", "enforce"), ("effective_cap", "1")],
         );
         assert_eq!(
@@ -2787,7 +2898,7 @@ mod tests {
             "djinn_build_admission_inventory_degraded",
             "djinn_build_admission_journal_degraded",
             "djinn_build_admission_create_unknown_health",
-            "djinn_build_slots_occupied",
+            "djinn_build_slots_in_use",
             "djinn_build_slots_queued",
         ] {
             assert_no_identity_labels(&rendered, metric);
