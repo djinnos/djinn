@@ -412,7 +412,7 @@ mod tests {
                 artifact_id: &art_str,
                 generation_id: &gen_str,
                 graph_content_hash: "graph_content_hash_domain_value",
-                transport_sha256: "transport_sha256_domain_value",
+                transport_sha256: &chunk_hash,
                 chunk_count: 1,
                 byte_count: blob.len() as i64,
                 chunk_hashes: &format!(r#"["{chunk_hash}"]"#),
