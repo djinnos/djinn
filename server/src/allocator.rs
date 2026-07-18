@@ -1,8 +1,8 @@
 //! jemalloc startup configuration and process-wide memory statistics.
 //!
 //! The configuration parser is deliberately available on every target so the
-//! server's startup contract is consistent. Statistics are Linux-only because
-//! the server installs jemalloc there.
+//! server's startup contract is consistent. Statistics and live settings are
+//! Linux-only because the server installs jemalloc there.
 
 use std::env;
 use std::fmt;
@@ -19,6 +19,18 @@ pub struct AllocatorStats {
     pub allocated: usize,
     pub resident: usize,
     pub retained: usize,
+}
+
+/// A snapshot of the managed live jemalloc settings.
+///
+/// Unlike the startup parser, this is read from jemalloc's control interface
+/// after the allocator has been linked and initialized.
+#[cfg(target_os = "linux")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AllocatorSettings {
+    pub background_thread: bool,
+    pub dirty_decay_ms: isize,
+    pub muzzy_decay_ms: isize,
 }
 
 /// Failure to parse the supported `MALLOC_CONF` startup options.
@@ -111,6 +123,18 @@ pub fn stats() -> Result<AllocatorStats, tikv_jemalloc_ctl::Error> {
     })
 }
 
+/// Read the managed live jemalloc settings through `mallctl`.
+#[cfg(target_os = "linux")]
+pub fn settings() -> Result<AllocatorSettings, tikv_jemalloc_ctl::Error> {
+    use tikv_jemalloc_ctl::{Access, AsName};
+
+    Ok(AllocatorSettings {
+        background_thread: tikv_jemalloc_ctl::background_thread::read()?,
+        dirty_decay_ms: b"arenas.dirty_decay_ms\0".name().read()?,
+        muzzy_decay_ms: b"arenas.muzzy_decay_ms\0".name().read()?,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::{validate_malloc_conf, validate_malloc_conf_value};
@@ -151,5 +175,38 @@ mod tests {
     fn stats_refreshes_epoch_before_reading() {
         let stats = super::stats().expect("jemalloc statistics should be readable");
         assert!(stats.resident >= stats.allocated);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn helm_default_is_consumed_by_jemalloc() {
+        const HELM_DEFAULT: &str =
+            "background_thread:true,dirty_decay_ms:10000,muzzy_decay_ms:10000";
+        const CHILD_ENV: &str = "DJINN_ALLOCATOR_SETTINGS_TEST_CHILD";
+
+        if std::env::var_os(CHILD_ENV).is_some() {
+            let settings = super::settings().expect("jemalloc settings should be readable");
+            assert_eq!(
+                settings,
+                super::AllocatorSettings {
+                    background_thread: true,
+                    dirty_decay_ms: 10_000,
+                    muzzy_decay_ms: 10_000,
+                }
+            );
+            return;
+        }
+
+        let status = std::process::Command::new(
+            std::env::current_exe().expect("test executable path should be available"),
+        )
+        .arg("--exact")
+        .arg("allocator::tests::helm_default_is_consumed_by_jemalloc")
+        .env(CHILD_ENV, "1")
+        .env("MALLOC_CONF", HELM_DEFAULT)
+        .status()
+        .expect("controlled jemalloc test process should start");
+
+        assert!(status.success(), "controlled jemalloc test process failed");
     }
 }

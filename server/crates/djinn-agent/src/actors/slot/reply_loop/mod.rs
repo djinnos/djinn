@@ -372,6 +372,7 @@ pub(crate) async fn run_reply_loop(
     agent_output.reviewer_feedback = output.reviewer_feedback;
     agent_output.finalize_payload = output.finalize_payload;
     agent_output.finalize_tool_name = output.finalize_tool_name;
+    agent_output.completion_intent = output.completion_intent;
     agent_output.budget_wind_down_summary = output.budget_wind_down_summary;
     agent_output.budget_wind_down_details = output.budget_wind_down_details;
     (
