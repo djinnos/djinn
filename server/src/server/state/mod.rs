@@ -13,7 +13,8 @@ use tokio_util::sync::CancellationToken;
 use crate::db::runtime::{DatabaseRuntimeHealth, DatabaseRuntimeManager};
 use crate::events::DjinnEventEnvelope;
 use djinn_agent::actors::coordinator::build_admission_handoff::{
-    EmergencyAuthorityDecision, InvocationAuthorityObservation, evaluate_handoff,
+    EmergencyAuthorityDecision, HandoffWarningReason, InvocationAuthorityObservation,
+    evaluate_handoff,
 };
 use djinn_agent::actors::coordinator::{
     BuildAdmissionController, BuildAdmissionMode, CoordinatorHandle,
@@ -59,6 +60,70 @@ const MODEL_HEALTH_STATE_KEY: &str = "model_health.state";
 
 const BUILD_ADMISSION_MODE_ENV: &str = "DJINN_BUILD_ADMISSION_MODE";
 const MAX_BUILD_TASKRUNS_ENV: &str = "DJINN_MAX_BUILD_TASKRUNS";
+const HANDOFF_WARNING_INTERVAL: Duration = Duration::from_secs(5 * 60);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum HandoffWarningLogEvent {
+    Warning(HandoffWarningReason),
+    Recovery(HandoffWarningReason),
+}
+
+#[derive(Default)]
+struct HandoffWarningLogState {
+    active: Option<HandoffWarningReason>,
+    last_logged: Option<Instant>,
+}
+
+impl HandoffWarningLogState {
+    /// Record the startup observation before the persistent loop takes ownership
+    /// of this state.
+    fn observe_startup(
+        &mut self,
+        now: Instant,
+        warning: Option<HandoffWarningReason>,
+    ) -> Option<HandoffWarningLogEvent> {
+        self.observe(now, warning)
+    }
+
+    /// Record a periodic observation using the transition state established at
+    /// startup. Keeping this distinct from `observe_startup` makes the
+    /// lifecycle handoff explicit and prevents recovery state from being lost.
+    fn observe_persistent(
+        &mut self,
+        now: Instant,
+        warning: Option<HandoffWarningReason>,
+    ) -> Option<HandoffWarningLogEvent> {
+        self.observe(now, warning)
+    }
+
+    fn observe(
+        &mut self,
+        now: Instant,
+        warning: Option<HandoffWarningReason>,
+    ) -> Option<HandoffWarningLogEvent> {
+        match (self.active, warning) {
+            (Some(previous), None) => {
+                self.active = None;
+                self.last_logged = None;
+                Some(HandoffWarningLogEvent::Recovery(previous))
+            }
+            (_, Some(current)) if self.active != Some(current) => {
+                self.active = Some(current);
+                self.last_logged = Some(now);
+                Some(HandoffWarningLogEvent::Warning(current))
+            }
+            (Some(current), Some(_))
+                if self
+                    .last_logged
+                    .is_none_or(|last| now.duration_since(last) >= HANDOFF_WARNING_INTERVAL) =>
+            {
+                self.last_logged = Some(now);
+                Some(HandoffWarningLogEvent::Warning(current))
+            }
+            _ => None,
+        }
+    }
+}
 
 /// Immutable build-admission startup policy. It is parsed before composition,
 /// so an environment change only takes effect after a process restart.
@@ -299,6 +364,8 @@ struct Inner {
     pub provider_catalog_refresh_interval: std::time::Duration,
     /// Ensures repeated startup hooks cannot create concurrent refresh loops.
     pub provider_catalog_refresh_started: AtomicBool,
+    /// Ensures startup creates at most one persistent handoff-warning loop.
+    pub handoff_warning_loop_started: AtomicBool,
     /// Per-model circuit-breaker health tracker.
     pub health_tracker: HealthTracker,
     /// Immutable retrieval-health config parsed once at startup.
@@ -521,6 +588,7 @@ impl AppState {
                 provider_catalog_refresh_interval:
                     provider_catalog_refresh::refresh_interval_from_env(),
                 provider_catalog_refresh_started: AtomicBool::new(false),
+                handoff_warning_loop_started: AtomicBool::new(false),
                 health_tracker: HealthTracker::new(),
                 retrieval_config,
                 retrieval_metrics,
@@ -767,6 +835,80 @@ impl AppState {
         }
         tracing::info!(state = ?snapshot.state, emergency = ?snapshot.emergency, mode = ?admission.mode(),
             "build admission handoff applied before emergency recovery");
+        // The startup observation is part of the same transition stream as the
+        // periodic observations. Move its state into the loop so a warning that
+        // clears before the first tick still emits its one recovery transition.
+        let mut handoff_warning_log_state = HandoffWarningLogState::default();
+        if let Some(event) = handoff_warning_log_state.observe_startup(
+            SystemClockTrait::new().now_instant(),
+            self.publish_handoff_warning().await,
+        ) {
+            Self::log_handoff_warning(event);
+        }
+        self.start_handoff_warning_loop(handoff_warning_log_state);
+    }
+
+    async fn publish_handoff_warning(&self) -> Option<HandoffWarningReason> {
+        let admission = self.inner.build_admission.clone()?;
+        let emergency_enforcing = admission.mode() == BuildAdmissionMode::Enforce;
+        let invocation = InvocationAuthorityObservation::default();
+        let snapshot = evaluate_handoff(
+            AdmissionHandoffRepository::new(self.db().clone())
+                .read()
+                .await
+                .map_err(|_| ()),
+            admission.mode(),
+            emergency_enforcing,
+            admission.readiness(),
+            invocation,
+        );
+        let warning = snapshot.warning_reason(emergency_enforcing, invocation);
+        djinn_telemetry::build_admission::set_handoff_warning(
+            warning.map(HandoffWarningReason::as_str),
+        );
+        warning
+    }
+
+    fn log_handoff_warning(event: HandoffWarningLogEvent) {
+        match event {
+            HandoffWarningLogEvent::Warning(reason) => tracing::warn!(
+                reason = reason.as_str(),
+                "build admission handoff warning active"
+            ),
+            HandoffWarningLogEvent::Recovery(reason) => tracing::info!(
+                reason = reason.as_str(),
+                "build admission handoff warning recovered"
+            ),
+        }
+    }
+
+    fn start_handoff_warning_loop(&self, mut log_state: HandoffWarningLogState) {
+        if self
+            .inner
+            .handoff_warning_loop_started
+            .swap(true, Ordering::AcqRel)
+        {
+            return;
+        }
+        let state = self.clone();
+        let cancel = self.cancel().clone();
+        tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(HANDOFF_WARNING_INTERVAL);
+            ticker.tick().await;
+            loop {
+                tokio::select! {
+                    _ = ticker.tick() => {
+                        if let Some(event) = log_state.observe_persistent(
+                            SystemClockTrait::new().now_instant(),
+                            state.publish_handoff_warning().await,
+                        ) {
+                            Self::log_handoff_warning(event);
+                        }
+                    }
+                    _ = cancel.cancelled() => break,
+                }
+            }
+        });
     }
 
     /// Recover the durable build-admission journal and seed the controller
@@ -3620,6 +3762,80 @@ mod build_admission_config_tests {
                     .expect("invocation ack");
             }
         }
+    }
+
+    #[test]
+    fn handoff_warning_logging_carries_startup_state_into_the_persistent_loop() {
+        let start = SystemClockTrait::new().now_instant();
+        let mut startup_state = HandoffWarningLogState::default();
+        assert_eq!(
+            startup_state.observe_startup(start, Some(HandoffWarningReason::UnexpectedOverlap)),
+            Some(HandoffWarningLogEvent::Warning(
+                HandoffWarningReason::UnexpectedOverlap
+            ))
+        );
+        // `start_handoff_warning_loop` receives this exact state, so its first
+        // periodic observation retains the startup warning and emits recovery.
+        let mut loop_state = startup_state;
+        assert_eq!(
+            loop_state.observe_persistent(start + Duration::from_secs(1), None),
+            Some(HandoffWarningLogEvent::Recovery(
+                HandoffWarningReason::UnexpectedOverlap
+            ))
+        );
+        assert_eq!(
+            loop_state.observe_persistent(start + Duration::from_secs(2), None),
+            None
+        );
+
+        let mut state = HandoffWarningLogState::default();
+        assert_eq!(
+            state.observe_startup(start, Some(HandoffWarningReason::UnexpectedOverlap)),
+            Some(HandoffWarningLogEvent::Warning(
+                HandoffWarningReason::UnexpectedOverlap
+            ))
+        );
+        assert_eq!(
+            state.observe_persistent(
+                start + Duration::from_secs(299),
+                Some(HandoffWarningReason::UnexpectedOverlap)
+            ),
+            None
+        );
+        assert_eq!(
+            state.observe_persistent(
+                start + HANDOFF_WARNING_INTERVAL,
+                Some(HandoffWarningReason::UnexpectedOverlap)
+            ),
+            Some(HandoffWarningLogEvent::Warning(
+                HandoffWarningReason::UnexpectedOverlap
+            ))
+        );
+        assert_eq!(
+            state.observe_persistent(
+                start + HANDOFF_WARNING_INTERVAL + Duration::from_secs(1),
+                Some(HandoffWarningReason::StaleEpoch)
+            ),
+            Some(HandoffWarningLogEvent::Warning(
+                HandoffWarningReason::StaleEpoch
+            ))
+        );
+        assert_eq!(
+            state.observe_persistent(
+                start + HANDOFF_WARNING_INTERVAL + Duration::from_secs(2),
+                None
+            ),
+            Some(HandoffWarningLogEvent::Recovery(
+                HandoffWarningReason::StaleEpoch
+            ))
+        );
+        assert_eq!(
+            state.observe_persistent(
+                start + HANDOFF_WARNING_INTERVAL + Duration::from_secs(3),
+                None
+            ),
+            None
+        );
     }
 
     #[test]

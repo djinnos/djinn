@@ -2279,6 +2279,20 @@ fn install_periodic_push(
     });
 }
 
+fn worker_read_source_authorization(
+    project_id: String,
+    read_source_project_ids: Vec<String>,
+) -> djinn_agent::context::ReadSourceAuthorization {
+    let has_grants = !read_source_project_ids.is_empty();
+    djinn_agent::context::ReadSourceAuthorization {
+        owner_project_id: Some(project_id),
+        read_source_project_ids,
+        // K8s injects exactly this restricted mount. Never infer a host,
+        // project-local, mirror, or other-owner path inside the worker.
+        owner_cache_root: has_grants.then(|| PathBuf::from("/read-sources")),
+    }
+}
+
 /// Build the in-Pod `AgentContext` the per-stage executor threads through
 /// helpers that still touch the DB directly. Most fields are no-ops on the
 /// worker; `db` carries the in-Pod connection bootstrapped via
@@ -2343,11 +2357,10 @@ fn build_worker_agent_context(
         // retrying past the "project is required when multiple projects
         // are configured" error from helpers::resolve_project_id_for_agent_tools.
         default_project_id: Some(project_id.clone()),
-        read_source_authorization: djinn_agent::context::ReadSourceAuthorization {
-            owner_project_id: Some(project_id),
+        read_source_authorization: worker_read_source_authorization(
+            project_id,
             read_source_project_ids,
-            owner_cache_root: None,
-        },
+        ),
         reconciliation_sweep: ReconciliationSweepConfig::default(),
         memory_intent_planner: djinn_agent::context::MemoryIntentPlannerConfig::from_env(),
         compaction_cs: djinn_slot::reply_loop::CompactionCriticalSection::default(),
@@ -2663,6 +2676,55 @@ mod tests {
     use tracing::dispatcher::Dispatch;
 
     static CARGO_INSTRUMENT_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[tokio::test]
+    async fn worker_context_authorization_preserves_zero_one_and_multiple_immutable_grants() {
+        for targets in [
+            Vec::<String>::new(),
+            vec!["target-a".into()],
+            vec!["target-a".into(), "target-b".into()],
+        ] {
+            let (stream, _peer) = tokio::io::duplex(64);
+            let (read, write) = tokio::io::split(stream);
+            let cancel = CancellationToken::new();
+            let (rpc, _tasks) = RpcServices::from_split(read, write, cancel.clone());
+            let context = build_worker_agent_context(
+                Database::open_in_memory().expect("in-memory worker database"),
+                rpc,
+                "immutable-owner".into(),
+                targets.clone(),
+            );
+            let authorization = context.read_source_authorization;
+            cancel.cancel();
+            assert_eq!(
+                authorization.owner_project_id.as_deref(),
+                Some("immutable-owner")
+            );
+            assert_eq!(authorization.read_source_project_ids, targets);
+            assert_eq!(
+                authorization.owner_cache_root,
+                (!authorization.read_source_project_ids.is_empty())
+                    .then(|| PathBuf::from("/read-sources"))
+            );
+            if let Some(root) = &authorization.owner_cache_root {
+                let rendered = root.display().to_string();
+                assert_eq!(rendered, "/read-sources");
+                for forbidden in [
+                    ".djinn",
+                    ".task-runtime",
+                    "/mirror",
+                    "target-a",
+                    "other-owner",
+                ] {
+                    assert!(!rendered.contains(forbidden));
+                }
+            }
+            assert_ne!(
+                authorization.owner_project_id.as_deref(),
+                Some("other-owner")
+            );
+        }
+    }
 
     #[test]
     fn worker_bridge_exact_ignored_pairs_skip_serialization() {

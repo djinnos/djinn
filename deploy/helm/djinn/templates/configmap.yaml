@@ -30,6 +30,7 @@ data:
   DJINN_TASKRUN_IMAGE_PULL_POLICY: {{ .Values.image.pullPolicy | quote }}
   DJINN_TASKRUN_NAMESPACE: {{ include "djinn.namespace" . | quote }}
   DJINN_TASKRUN_SERVICE_ACCOUNT: {{ include "djinn.serviceAccountName.taskrun" . | quote }}
+  DJINN_K8S_PROJECTS_PVC: {{ include "djinn.pvcName.projects" . | quote }}
   DJINN_SERVER_RPC_ADDR: {{ printf "%s.%s.svc.cluster.local:%d" (include "djinn.serviceName.server" .) (include "djinn.namespace" .) (.Values.service.rpcPort | int) | quote }}
   # OAuth callbacks + browser redirects mint URLs against DJINN_PUBLIC_URL.
   # Precedence: explicit env.publicUrl override → Ingress host (when the
