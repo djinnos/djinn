@@ -282,20 +282,20 @@ impl ReadSourceMigrator {
             .await?;
             return Err(ReadSourceMigrationError::Ambiguous(detail));
         }
-        if temp.exists() {
-            if let Err(source) = fs::remove_dir_all(&temp) {
-                let detail = format!("failed to remove staging temp {}: {source}", temp.display());
-                repo.fail(
-                    MigrationKey {
-                        project_id: &request.owner_project_id,
-                        family: &family,
-                        release: RELEASE,
-                    },
-                    &detail,
-                )
-                .await?;
-                return Err(ReadSourceMigrationError::Io { path: temp, source });
-            }
+        if temp.exists()
+            && let Err(source) = fs::remove_dir_all(&temp)
+        {
+            let detail = format!("failed to remove staging temp {}: {source}", temp.display());
+            repo.fail(
+                MigrationKey {
+                    project_id: &request.owner_project_id,
+                    family: &family,
+                    release: RELEASE,
+                },
+                &detail,
+            )
+            .await?;
+            return Err(ReadSourceMigrationError::Io { path: temp, source });
         }
         self.migrate_locked(request, _lock).await
     }
@@ -364,20 +364,20 @@ impl ReadSourceMigrator {
             .await?;
             return Err(ReadSourceMigrationError::Ambiguous(detail));
         }
-        if temp.exists() {
-            if let Err(source) = fs::remove_dir_all(&temp) {
-                let detail = format!("failed to remove staging temp {}: {source}", temp.display());
-                repo.fail(
-                    MigrationKey {
-                        project_id: owner_project_id,
-                        family: &family,
-                        release: RELEASE,
-                    },
-                    &detail,
-                )
-                .await?;
-                return Err(ReadSourceMigrationError::Io { path: temp, source });
-            }
+        if temp.exists()
+            && let Err(source) = fs::remove_dir_all(&temp)
+        {
+            let detail = format!("failed to remove staging temp {}: {source}", temp.display());
+            repo.fail(
+                MigrationKey {
+                    project_id: owner_project_id,
+                    family: &family,
+                    release: RELEASE,
+                },
+                &detail,
+            )
+            .await?;
+            return Err(ReadSourceMigrationError::Io { path: temp, source });
         }
         repo.rollback(
             MigrationKey {
@@ -1049,7 +1049,12 @@ fn git(path: &Path, args: &[&str]) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use djinn_db::Database;
+    use djinn_db::{
+        CreateTaskRunParams, Database, TaskRunRepository,
+        test_support::{
+            UsageTestTaskSeed, drop_table_cascade_for_test, seed_project, seed_task_row,
+        },
+    };
 
     /// Create a bare git repository at `work/mirror.git` with one commit.
     /// Returns the commit SHA.
@@ -1134,14 +1139,7 @@ mod tests {
             let owner_root = tmp_path.join("owner-root");
             fs::create_dir_all(&owner_root).unwrap();
             let db = test_db();
-            db.ensure_initialized().await.unwrap();
-            sqlx::query(
-                "INSERT INTO projects (id, name, github_owner, github_repo) VALUES ($1, 'owner', 'test', 'owner')",
-            )
-            .bind("owner-proj-001")
-            .execute(db.pool())
-            .await
-            .unwrap();
+            seed_project(&db, "owner-proj-001", "owner").await;
             let target_project_id = "target-proj-001".to_string();
             Self {
                 _tmp: tmp,
@@ -1665,27 +1663,28 @@ mod tests {
         // that contains the legacy input path.
         fx.db.ensure_initialized().await.unwrap();
         let workspace = fx.owner_root.to_string_lossy().to_string();
-        let task_id = uuid::Uuid::now_v7().to_string();
-        let run_id = uuid::Uuid::now_v7().to_string();
-        sqlx::query(
-            "INSERT INTO tasks (id, project_id, short_id, epic_id, title, description, design, issue_type, priority, owner, status, continuation_count, labels, acceptance_criteria, memory_refs) VALUES ($1, $2, 'tsk', $3, 'T', '', '', 'task', 0, '', 'open', 0, '[]'::jsonb, '[]'::jsonb, '[]'::jsonb)",
+        let task_id = seed_task_row(
+            &fx.db,
+            UsageTestTaskSeed {
+                project_id: "owner-proj-001",
+                status: "open",
+                close_reason: None,
+                total_reopen_count: 0,
+            },
         )
-        .bind(&task_id)
-        .bind("owner-proj-001")
-        .bind(uuid::Uuid::now_v7().to_string())
-        .execute(fx.db.pool())
-        .await
-        .unwrap();
-        sqlx::query(
-            "INSERT INTO task_runs (id, project_id, task_id, trigger_type, status, workspace_path) VALUES ($1, $2, $3, 'new_task', 'running', $4)",
-        )
-        .bind(&run_id)
-        .bind("owner-proj-001")
-        .bind(&task_id)
-        .bind(&workspace)
-        .execute(fx.db.pool())
-        .await
-        .unwrap();
+        .await;
+        TaskRunRepository::new(fx.db.clone())
+            .create(CreateTaskRunParams {
+                id: "active-run",
+                project_id: "owner-proj-001",
+                task_id: &task_id,
+                trigger_type: "new_task",
+                status: Some("running"),
+                workspace_path: Some(&workspace),
+                mirror_ref: None,
+            })
+            .await
+            .unwrap();
 
         let migrator = fx.migrator();
         let result = migrator
@@ -1713,10 +1712,7 @@ mod tests {
         // Drop the task_runs table to simulate DB uncertainty.
         let fx = Fixture::new().await;
         fx.db.ensure_initialized().await.unwrap();
-        sqlx::query("DROP TABLE task_runs")
-            .execute(fx.db.pool())
-            .await
-            .unwrap();
+        drop_table_cascade_for_test(&fx.db, "task_runs").await;
 
         let migrator = fx.migrator();
         let result = migrator.migrate(fx.request(vec![])).await;
@@ -1837,6 +1833,44 @@ mod tests {
         migrator.reconcile(fx.request(vec![])).await.unwrap();
         assert!(destination.exists());
         assert!(!staging.exists());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn reconcile_symlink_staging_records_durable_failure() {
+        let fx = Fixture::new().await;
+        let destination = fx.destination();
+        let parent = destination.parent().unwrap();
+        fs::create_dir_all(parent).unwrap();
+        let staging = ReadSourceMigrator::staging_path(parent, &fx.target_project_id);
+        std::os::unix::fs::symlink("unexpected-target", &staging).unwrap();
+
+        let migrator = fx.migrator();
+        let result = migrator.reconcile(fx.request(vec![])).await;
+        assert!(matches!(
+            result,
+            Err(ReadSourceMigrationError::Ambiguous(_))
+        ));
+
+        let repo = ProjectLiveStateMigrationRepository::new(fx.db.clone());
+        let (owner, family) = fx.migration_key();
+        let record = repo
+            .get(fx.make_key(&owner, &family))
+            .await
+            .unwrap()
+            .expect("reconcile attempt is durable");
+        assert_eq!(record.result, "failed");
+        assert!(
+            record
+                .detail
+                .as_deref()
+                .unwrap_or_default()
+                .contains("symlink"),
+            "inspectable staging failure must be recorded before returning"
+        );
+        assert!(
+            staging.is_symlink(),
+            "ambiguous staging symlink is retained"
+        );
     }
 
     // ── AC4: Injected clone/rename/finalization failure ───────────────────

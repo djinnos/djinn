@@ -22,9 +22,7 @@ tracing = "0.1"
 workspace-hack.workspace = true
 
 [dev-dependencies]
-sqlx = { version = "0.8", default-features = false, features = ["postgres", "runtime-tokio-rustls"] }
 tokio = { version = "1", features = ["full", "test-util"] }
-uuid = { version = "1", features = ["v7"] }
 
 [lints]
 workspace = true
