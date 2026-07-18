@@ -180,15 +180,22 @@ impl BuildAdmissionReconciler {
             };
             match self.controller.journal().adopt_live(&x).await {
                 Ok(_) => out.adopted += 1,
-                Err(e) => out.blockers.push(e.to_string()),
+                Err(e) => {
+                    self.controller.mark_journal_unhealthy();
+                    out.blockers.push(e.to_string());
+                }
             }
         }
-        let active = self
-            .controller
-            .journal()
-            .list_active_rows()
-            .await
-            .unwrap_or_default();
+        let active = match self.controller.journal().list_active_rows().await {
+            Ok(rows) => rows,
+            Err(error) => {
+                self.controller.mark_journal_unhealthy();
+                self.controller.mark_inventory_pending();
+                out.blockers.push(error.to_string());
+                self.controller.publish_metrics().await;
+                return out;
+            }
+        };
         let by: HashMap<_, _> = cs
             .iter()
             .map(|c| {
@@ -216,8 +223,8 @@ impl BuildAdmissionReconciler {
             } else {
                 false
             };
-            if proof
-                && self
+            if proof {
+                match self
                     .controller
                     .journal()
                     .mark_terminal(&TerminalAdmissionInput {
@@ -225,29 +232,45 @@ impl BuildAdmissionReconciler {
                         object_uid: row.object_uid.clone(),
                     })
                     .await
-                    .is_ok()
-            {
-                out.released += 1;
-                self.controller.release_notifier().notify_one()
+                {
+                    Ok(_) => {
+                        out.released += 1;
+                        self.controller.release_notifier().notify_one();
+                    }
+                    Err(error) => {
+                        self.controller.mark_journal_unhealthy();
+                        out.blockers.push(error.to_string());
+                    }
+                }
             }
         }
         if out.blockers.is_empty() {
-            let rows = self
-                .controller
-                .journal()
-                .list_active_rows()
-                .await
-                .unwrap_or_default();
+            let rows = match self.controller.journal().list_active_rows().await {
+                Ok(rows) => rows,
+                Err(error) => {
+                    self.controller.mark_journal_unhealthy();
+                    self.controller.mark_inventory_pending();
+                    out.blockers.push(error.to_string());
+                    self.controller.publish_metrics().await;
+                    return out;
+                }
+            };
             let recovery = AdmissionRecoveryResult {
                 retired_reserved: 0,
                 marked_create_unknown: 0,
                 active_rows: rows,
             };
-            let _ = self
+            if let Err(error) = self
                 .controller
                 .seed_from_recovery(&recovery, &mut |_| true)
-                .await;
-            self.controller.mark_inventory_ready();
+                .await
+            {
+                self.controller.mark_journal_unhealthy();
+                self.controller.mark_inventory_pending();
+                out.blockers.push(error.to_string());
+            } else {
+                self.controller.mark_inventory_ready();
+            }
         } else {
             self.controller.mark_inventory_pending();
         }

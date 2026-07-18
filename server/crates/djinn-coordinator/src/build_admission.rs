@@ -543,7 +543,12 @@ impl BuildAdmissionController {
                 }
                 ReserveAdmissionResult::Reserved {
                     idempotent: value, ..
-                } => idempotent = value,
+                } => {
+                    idempotent = value;
+                    // This exact identity has successfully left deferred state.
+                    // Other waiters remain queued until their own retry succeeds.
+                    self.deferred_enforce.lock().await.remove(&permit_key);
+                }
             }
         }
         let permit = WarmAdmissionPermit::new();
@@ -705,6 +710,7 @@ impl BuildAdmissionController {
                 | WarmAdmissionTransition::Terminal { .. }
         );
         let adopts_into_live = matches!(transition, WarmAdmissionTransition::Live { .. });
+        let state_permit_key = permit_key(&state.key);
         let result = match transition {
             WarmAdmissionTransition::CreateStarted => self
                 .journal
@@ -753,6 +759,10 @@ impl BuildAdmissionController {
                 return Err(error);
             }
             tracing::warn!(%error, "build admission observation transition unavailable; continuing without journal telemetry");
+            // Observe remains non-denying, but every lifecycle journal outage
+            // immediately raises the bounded degradation signal.
+            self.mark_journal_unhealthy();
+            self.publish_metrics().await;
         }
         // A recovered CreateUnknown row stops occupying as unknown once it is
         // adopted into Live with the authoritative UID: clear its startup-gate
@@ -798,7 +808,9 @@ impl BuildAdmissionController {
                 // future registered in its select loop.
                 self.released.notify_one();
             }
-            self.deferred_enforce.lock().await.clear();
+            // Waking one waiter cannot prove unrelated identities have left
+            // deferred state. Only remove this terminal identity, if present.
+            self.deferred_enforce.lock().await.remove(&state_permit_key);
             self.publish_metrics().await;
             // A terminal release can bring seeded occupancy back within the
             // cap; refresh the over-cap gate from the durable journal rather
@@ -2195,8 +2207,8 @@ mod tests {
         let journal = Arc::new(AdmissionJournalRepository::new(
             Database::open_in_memory().unwrap(),
         ));
-        // Seed two predecessor Live rows.
-        for work in ["rec-a", "rec-b"] {
+        // Seed one predecessor Live row, then adopt that same durable identity.
+        for work in ["rec-a"] {
             journal
                 .reserve(&predecessor_input(work, 0, "old-epoch"), 5)
                 .await
@@ -2231,6 +2243,21 @@ mod tests {
             .recover_all_predecessors_and_seed()
             .await
             .unwrap();
+        journal
+            .adopt_live(&djinn_db::AdoptLiveAdmissionInput {
+                key: djinn_db::AdmissionJournalKey {
+                    domain: AdmissionDomain::WarmBuild,
+                    work_id: "rec-a".into(),
+                    generation: 0,
+                },
+                workload_kind: AdmissionWorkloadKind::Warm,
+                creator_server_epoch: "replacement-epoch".into(),
+                object_name: "warm-rec-a-0".into(),
+                object_uid: "uid-rec-a".into(),
+            })
+            .await
+            .unwrap();
+        controller.publish_metrics().await;
 
         let rendered = djinn_telemetry::render().unwrap();
         let occupied = sample_value(
@@ -2239,8 +2266,8 @@ mod tests {
             &[("effective_mode", "enforce"), ("effective_cap", "64")],
         );
         assert_eq!(
-            occupied, 2.0,
-            "recovered occupancy must be exported at startup"
+            occupied, 1.0,
+            "recovery and adoption of one identity must export one occupied slot"
         );
     }
 
@@ -2353,18 +2380,23 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn telemetry_queued_decrements_on_release_wakeup() {
+    async fn telemetry_queue_tracks_unique_waiters_until_each_reenters() {
         let _guard = telemetry_guard();
         djinn_telemetry::init().unwrap();
-
         let c = controller(BuildAdmissionMode::Enforce, 1);
         c.mark_ready();
         let first = WarmAdmission::admit(&c, warm("release-a")).await.unwrap();
-        // Deny a second — queued becomes 1.
         assert!(WarmAdmission::admit(&c, warm("release-b")).await.is_err());
-
-        // Release the first permit (terminal transition clears the deferred
-        // queue and refreshes the gauge).
+        assert!(WarmAdmission::admit(&c, warm("release-b")).await.is_err());
+        assert!(WarmAdmission::admit(&c, warm("release-c")).await.is_err());
+        assert_eq!(
+            sample_value(
+                &djinn_telemetry::render().unwrap(),
+                "djinn_build_slots_queued",
+                &[("effective_mode", "enforce"), ("effective_cap", "1")]
+            ),
+            2.0
+        );
         c.transition(&first, WarmAdmissionTransition::CreateStarted)
             .await
             .unwrap();
@@ -2377,16 +2409,22 @@ mod tests {
         )
         .await
         .unwrap();
-
-        let rendered = djinn_telemetry::render().unwrap();
-        let queued = sample_value(
-            &rendered,
-            "djinn_build_slots_queued",
-            &[("effective_mode", "enforce"), ("effective_cap", "1")],
-        );
         assert_eq!(
-            queued, 0.0,
-            "queued gauge must clear after terminal release"
+            sample_value(
+                &djinn_telemetry::render().unwrap(),
+                "djinn_build_slots_queued",
+                &[("effective_mode", "enforce"), ("effective_cap", "1")]
+            ),
+            2.0
+        );
+        WarmAdmission::admit(&c, warm("release-b")).await.unwrap();
+        assert_eq!(
+            sample_value(
+                &djinn_telemetry::render().unwrap(),
+                "djinn_build_slots_queued",
+                &[("effective_mode", "enforce"), ("effective_cap", "1")]
+            ),
+            1.0
         );
     }
 
@@ -2660,6 +2698,37 @@ mod tests {
             journal_degraded, 1.0,
             "Observe must surface journal degradation on a live journal outage"
         );
+    }
+
+    #[tokio::test]
+    async fn telemetry_observe_transition_failure_is_non_denying_and_degraded() {
+        let _guard = telemetry_guard();
+        djinn_telemetry::init().unwrap();
+        let db = Database::open_in_memory().unwrap();
+        let c = BuildAdmissionController::new(
+            Arc::new(AdmissionJournalRepository::new(db.clone())),
+            BuildAdmissionMode::Observe,
+            1,
+            "transition-failure",
+        );
+        let permit = WarmAdmission::admit(&c, warm("transition-down"))
+            .await
+            .unwrap();
+        reject_admission_create_started_for_test(&db, true).await;
+        assert!(
+            c.transition(&permit, WarmAdmissionTransition::CreateStarted)
+                .await
+                .is_ok()
+        );
+        assert_eq!(
+            sample_value(
+                &djinn_telemetry::render().unwrap(),
+                "djinn_build_admission_journal_degraded",
+                &[("effective_mode", "observe"), ("effective_cap", "1")],
+            ),
+            1.0
+        );
+        reject_admission_create_started_for_test(&db, false).await;
     }
 
     #[tokio::test]
