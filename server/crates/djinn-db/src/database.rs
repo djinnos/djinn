@@ -486,7 +486,6 @@ impl Database {
             return Ok(());
         }
 
-        let pool = self.pool.clone();
         let url = self.bootstrap.target.clone();
         let test_branch = self.test_branch.clone();
         self.initialized
@@ -513,12 +512,24 @@ impl Database {
                     }
                     None => {
                         migrations::ensure_postgres_database_exists(&url).await?;
-                        sqlx::migrate!("./migrations_postgres")
-                            .run(&pool)
+                        // Migrations may backfill over production-scale data
+                        // (migration 125 rewrites every repo_graph_cache blob),
+                        // so the runtime pool's 30s per-statement bound must
+                        // not apply. Run them on a dedicated single-connection
+                        // pool without that bound, closed as soon as the run
+                        // finishes so the unbounded setting cannot leak into
+                        // regular query traffic.
+                        let migrate_pool = PgPoolOptions::new()
+                            .max_connections(1)
+                            .connect_lazy_with(PgConnectOptions::from_str(&url)?);
+                        let migrate_result = sqlx::migrate!("./migrations_postgres")
+                            .run(&migrate_pool)
                             .await
                             .map_err(|e: sqlx::migrate::MigrateError| {
                                 DbError::InvalidData(e.to_string())
-                            })?;
+                            });
+                        migrate_pool.close().await;
+                        migrate_result?;
                     }
                 }
                 Ok::<(), DbError>(())
