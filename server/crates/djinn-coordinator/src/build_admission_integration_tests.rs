@@ -867,6 +867,13 @@ struct HandoffMatrixExpectation {
     advance_allowed: bool,
 }
 
+#[derive(Clone, Copy, Debug)]
+struct HandoffMatrixScenario {
+    expected: HandoffMatrixExpectation,
+    // A deterministic fake supplied independently of the expected policy result.
+    invocation_observation: InvocationAuthorityObservation,
+}
+
 fn handoff_next(phase: AdmissionHandoffPhase) -> AdmissionHandoffPhase {
     match phase {
         AdmissionHandoffPhase::EmergencyPrimary => AdmissionHandoffPhase::ForwardOverlap,
@@ -878,8 +885,10 @@ fn handoff_next(phase: AdmissionHandoffPhase) -> AdmissionHandoffPhase {
 
 async fn assert_handoff_restart_snapshot(
     repo: &AdmissionHandoffRepository,
-    expected: HandoffMatrixExpectation,
+    scenario: HandoffMatrixScenario,
 ) {
+    let expected = scenario.expected;
+    let invocation_observation = scenario.invocation_observation;
     let row = repo.read().await.unwrap().unwrap();
     assert_eq!(row.phase, expected.phase);
     assert_eq!(row.emergency_ack_epoch, expected.emergency_acknowledged.then_some(row.epoch));
@@ -889,9 +898,7 @@ async fn assert_handoff_restart_snapshot(
         BuildAdmissionMode::Enforce,
         expected.emergency_enforcing,
         BuildAdmissionReadiness::Healthy,
-        InvocationAuthorityObservation {
-            enforcing: expected.invocation_enforcing,
-        },
+        invocation_observation,
     );
     assert_eq!(snapshot.state, expected.state);
     assert_eq!(
@@ -900,15 +907,13 @@ async fn assert_handoff_restart_snapshot(
         "emergency authority requirement must match the matrix"
     );
     assert_eq!(
-        InvocationAuthorityObservation {
-            enforcing: expected.invocation_enforcing,
-        }
-        .enforcing,
+        invocation_observation.enforcing,
         expected.invocation_enforcing,
         "invocation authority observation must match the matrix"
     );
     assert!(
-        expected.emergency_enforcing || expected.invocation_enforcing,
+        snapshot.emergency == EmergencyAuthorityDecision::RequiredFailClosed
+            || invocation_observation.enforcing,
         "every crash/restart state retains at least one enforcing authority"
     );
     assert_eq!(
@@ -922,10 +927,7 @@ async fn assert_handoff_restart_snapshot(
         !expected.emergency_enforcing,
     );
     assert_eq!(
-        snapshot.warning_gauges(
-            expected.emergency_enforcing,
-            InvocationAuthorityObservation { enforcing: expected.invocation_enforcing },
-        ),
+        snapshot.warning_gauges(expected.emergency_enforcing, invocation_observation),
         if snapshot.state == HandoffState::IncompleteEpoch {
             HandoffWarningGauges {
                 stale_epoch: 1,
@@ -959,21 +961,24 @@ async fn assert_handoff_restart_snapshot(
 async fn handoff_crash_matrix_preserves_authority_and_epoch_guards() {
     let repo = AdmissionHandoffRepository::new(Database::open_in_memory().unwrap());
     let expectations = [
-        (AdmissionHandoffPhase::EmergencyPrimary, HandoffState::IncompleteEpoch, false, false, true, false, false),
-        (AdmissionHandoffPhase::EmergencyPrimary, HandoffState::EmergencyPrimary, true, false, true, false, true),
-        (AdmissionHandoffPhase::ForwardOverlap, HandoffState::IncompleteEpoch, false, false, true, true, false),
-        (AdmissionHandoffPhase::ForwardOverlap, HandoffState::IncompleteEpoch, true, false, true, true, false),
-        (AdmissionHandoffPhase::ForwardOverlap, HandoffState::ForwardOverlap, true, true, true, true, true),
-        (AdmissionHandoffPhase::InvocationPrimary, HandoffState::IncompleteEpoch, false, false, true, true, false),
-        (AdmissionHandoffPhase::InvocationPrimary, HandoffState::InvocationPrimary, false, true, false, true, true),
-        (AdmissionHandoffPhase::RollbackOverlap, HandoffState::IncompleteEpoch, false, false, true, true, false),
-        (AdmissionHandoffPhase::RollbackOverlap, HandoffState::IncompleteEpoch, true, false, true, true, false),
-        (AdmissionHandoffPhase::RollbackOverlap, HandoffState::RollbackOverlap, true, true, true, true, true),
-        (AdmissionHandoffPhase::EmergencyPrimary, HandoffState::IncompleteEpoch, false, false, true, false, false),
+        (AdmissionHandoffPhase::EmergencyPrimary, HandoffState::IncompleteEpoch, false, false, true, false, false, false),
+        (AdmissionHandoffPhase::EmergencyPrimary, HandoffState::EmergencyPrimary, true, false, true, false, false, true),
+        (AdmissionHandoffPhase::ForwardOverlap, HandoffState::IncompleteEpoch, false, false, true, true, true, false),
+        (AdmissionHandoffPhase::ForwardOverlap, HandoffState::IncompleteEpoch, true, false, true, true, true, false),
+        (AdmissionHandoffPhase::ForwardOverlap, HandoffState::ForwardOverlap, true, true, true, true, true, true),
+        (AdmissionHandoffPhase::InvocationPrimary, HandoffState::IncompleteEpoch, false, false, true, true, true, false),
+        (AdmissionHandoffPhase::InvocationPrimary, HandoffState::InvocationPrimary, false, true, false, true, true, true),
+        (AdmissionHandoffPhase::RollbackOverlap, HandoffState::IncompleteEpoch, false, false, true, true, true, false),
+        (AdmissionHandoffPhase::RollbackOverlap, HandoffState::IncompleteEpoch, true, false, true, true, true, false),
+        (AdmissionHandoffPhase::RollbackOverlap, HandoffState::RollbackOverlap, true, true, true, true, true, true),
+        (AdmissionHandoffPhase::EmergencyPrimary, HandoffState::IncompleteEpoch, false, false, true, false, false, false),
     ]
-    .map(|(phase, state, emergency_acknowledged, invocation_acknowledged, emergency_enforcing, invocation_enforcing, advance_allowed)| HandoffMatrixExpectation {
-        phase, state, emergency_acknowledged, invocation_acknowledged, emergency_enforcing, invocation_enforcing,
-        legal_next: handoff_next(phase), advance_allowed,
+    .map(|(phase, state, emergency_acknowledged, invocation_acknowledged, emergency_enforcing, invocation_observed, invocation_enforcing, advance_allowed)| HandoffMatrixScenario {
+        expected: HandoffMatrixExpectation {
+            phase, state, emergency_acknowledged, invocation_acknowledged, emergency_enforcing, invocation_enforcing,
+            legal_next: handoff_next(phase), advance_allowed,
+        },
+        invocation_observation: InvocationAuthorityObservation { enforcing: invocation_observed },
     });
     let actions = [
         HandoffMatrixAction::Acknowledge(AdmissionHandoffAuthority::Emergency),
@@ -987,9 +992,9 @@ async fn handoff_crash_matrix_preserves_authority_and_epoch_guards() {
         HandoffMatrixAction::Acknowledge(AdmissionHandoffAuthority::Invocation),
         HandoffMatrixAction::Commit(AdmissionHandoffPhase::EmergencyPrimary),
     ];
-    for (index, expected) in expectations.into_iter().enumerate() {
+    for (index, scenario) in expectations.into_iter().enumerate() {
         // Crash/restart before every action and, on the next iteration, after it.
-        assert_handoff_restart_snapshot(&repo, expected).await;
+        assert_handoff_restart_snapshot(&repo, scenario).await;
         let Some(action) = actions.get(index).copied() else {
             continue;
         };
