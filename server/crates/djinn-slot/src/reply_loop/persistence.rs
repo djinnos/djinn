@@ -234,7 +234,7 @@ pub(super) fn serialize_llm_input(
 ///
 /// Reconciliation is by exact block ID only. No value-, prefix-, suffix-, or
 /// presence-based deduplication is ever applied.
-pub(super) fn assemble_persisted_content(
+pub fn assemble_persisted_content(
     provider_state: &[djinn_provider::message::ContentBlock],
     unresolved_thinking: &[super::streaming::UnresolvedThinkingFragment],
     completed_thinking_ids: &std::collections::HashSet<u64>,
@@ -300,7 +300,7 @@ pub(super) fn assemble_persisted_content(
 /// This makes the helper safe to call from multiple teardown paths.
 ///
 /// Best-effort: persistence failures are logged and never propagated.
-pub(super) async fn flush_in_flight_turn(
+pub async fn flush_in_flight_turn(
     repo: &SessionMessageRepository,
     session_id: &str,
     task_id: &str,

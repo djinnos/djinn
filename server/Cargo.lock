@@ -1695,6 +1695,7 @@ dependencies = [
  "djinn-memory",
  "djinn-provider",
  "djinn-runtime",
+ "djinn-server",
  "djinn-slot",
  "djinn-stack",
  "djinn-supervisor",
@@ -1768,6 +1769,7 @@ dependencies = [
  "djinn-roles",
  "djinn-runtime",
  "djinn-sandbox",
+ "djinn-slot",
  "djinn-stack",
  "djinn-supervisor",
  "djinn-telemetry",
@@ -1841,6 +1843,7 @@ dependencies = [
 name = "djinn-telemetry"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "metrics",
  "metrics-exporter-prometheus",
  "workspace-hack",
