@@ -52,6 +52,7 @@ workspace-hack.workspace = true
 
 [dev-dependencies]
 djinn-agent-worker = { path = "../djinn-agent-worker" }
+sqlx = { version = "0.8", features = ["postgres", "runtime-tokio-rustls"] }
 tokio = { version = "1", features = ["test-util", "macros", "rt-multi-thread"] }
 tempfile = "3"
 filetime = "0.2"

@@ -1,6 +1,7 @@
 use super::*;
 use crate::database::Database;
 use djinn_core::events::EventBus;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 async fn setup_repo() -> (Database, TaskRepository, String) {
@@ -19,6 +20,52 @@ async fn setup_repo() -> (Database, TaskRepository, String) {
     .unwrap();
     let repo = TaskRepository::new(db.clone(), EventBus::noop());
     (db, repo, project_id)
+}
+
+#[derive(Default)]
+struct PageQueryTracker {
+    active: AtomicUsize,
+    max_active: AtomicUsize,
+    queries: AtomicUsize,
+}
+
+impl PageQueryTracker {
+    async fn load(&self, repo: &TaskRepository, epoch: i64) -> BoardHealthMismatchPage {
+        let active = self.active.fetch_add(1, Ordering::SeqCst) + 1;
+        self.max_active.fetch_max(active, Ordering::SeqCst);
+        self.queries.fetch_add(1, Ordering::SeqCst);
+        let page = repo.load_board_health_mismatch_page(epoch).await.unwrap();
+        self.active.fetch_sub(1, Ordering::SeqCst);
+        page
+    }
+}
+
+/// Evaluate the large fixture while counting every actual repository page query.
+async fn evaluate_pass_with_query_tracking(
+    repo: &TaskRepository,
+    epoch: i64,
+    query_tracker: &PageQueryTracker,
+) -> (Vec<String>, usize, usize) {
+    let mut evaluated = Vec::new();
+    let mut pages = 0;
+    let mut max_retained = 0;
+    loop {
+        let page = query_tracker.load(repo, epoch).await;
+        max_retained = max_retained.max(page.candidates.len());
+        if page.candidates.is_empty() {
+            repo.complete_board_health_mismatch_pass(epoch)
+                .await
+                .unwrap();
+            return (evaluated, pages, max_retained);
+        }
+        pages += 1;
+        let expected_cursor = page.state.cursor_id.clone();
+        let last_id = page.candidates.last().unwrap().id.clone();
+        evaluated.extend(page.candidates.into_iter().map(|candidate| candidate.id));
+        repo.commit_board_health_mismatch_page(epoch, expected_cursor.as_deref(), &last_id)
+            .await
+            .unwrap();
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -155,10 +202,16 @@ async fn ten_thousand_candidates_finish_in_forty_bounded_pages_under_two_minutes
     repo.start_or_resume_board_health_mismatch_pass(40)
         .await
         .unwrap();
-    let (evaluated, pages, max_retained) = evaluate_pass(&repo, 40).await;
+    let query_tracker = PageQueryTracker::default();
+    let (evaluated, pages, max_retained) =
+        evaluate_pass_with_query_tracking(&repo, 40, &query_tracker).await;
     assert_eq!(evaluated.len(), 10_000);
     assert_eq!(pages, 40);
     assert_eq!(max_retained, BOARD_HEALTH_MISMATCH_PAGE_SIZE as usize);
+    // The tracked calls include the final empty completion read; all are
+    // repository page queries and must remain single-flight.
+    assert_eq!(query_tracker.queries.load(Ordering::SeqCst), 41);
+    assert_eq!(query_tracker.max_active.load(Ordering::SeqCst), 1);
     assert!(started_at.elapsed() < Duration::from_secs(120));
 }
 

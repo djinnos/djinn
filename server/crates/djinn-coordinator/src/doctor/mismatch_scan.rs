@@ -6,9 +6,17 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+#[cfg(test)]
+use std::future::Future;
+#[cfg(test)]
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
 use djinn_core::clock::{Clock, SystemClock};
 
 use tokio::sync::Mutex;
+
+#[cfg(test)]
+use tokio::sync::Notify;
 
 use djinn_db::{BoardHealthMismatchCandidate, Database, TaskRepository};
 
@@ -36,6 +44,53 @@ struct FlightState {
     last_timer: Option<std::time::Instant>,
 }
 
+/// Test-only page-source hook for deterministic active-query instrumentation.
+#[cfg(test)]
+struct PageQueryProbe {
+    active: AtomicUsize,
+    max_active: AtomicUsize,
+    queries: AtomicUsize,
+    block_first: AtomicBool,
+    entered: Notify,
+    release: Notify,
+}
+
+#[cfg(test)]
+impl PageQueryProbe {
+    fn blocking_first_query() -> Self {
+        Self {
+            active: AtomicUsize::new(0),
+            max_active: AtomicUsize::new(0),
+            queries: AtomicUsize::new(0),
+            block_first: AtomicBool::new(true),
+            entered: Notify::new(),
+            release: Notify::new(),
+        }
+    }
+
+    async fn load<T>(&self, page_query: impl Future<Output = T>) -> T {
+        let active = self.active.fetch_add(1, Ordering::SeqCst) + 1;
+        self.max_active.fetch_max(active, Ordering::SeqCst);
+        self.queries.fetch_add(1, Ordering::SeqCst);
+        self.entered.notify_waiters();
+        if self.block_first.swap(false, Ordering::SeqCst) {
+            self.release.notified().await;
+        }
+        let result = page_query.await;
+        self.active.fetch_sub(1, Ordering::SeqCst);
+        result
+    }
+
+    async fn wait_until_first_query_is_held(&self) {
+        loop {
+            if self.active.load(Ordering::SeqCst) == 1 {
+                return;
+            }
+            self.entered.notified().await;
+        }
+    }
+}
+
 /// Shared by the coordinator's leader tick and the control-plane handle.
 #[derive(Clone)]
 pub struct MismatchScanCoordinator {
@@ -45,6 +100,8 @@ pub struct MismatchScanCoordinator {
     /// Allocated from a database sequence on first use, so it is monotonic
     /// across process restarts and distinct leader pods.
     leader_epoch: Arc<Mutex<Option<i64>>>,
+    #[cfg(test)]
+    page_query_probe: Option<Arc<PageQueryProbe>>,
 }
 
 impl MismatchScanCoordinator {
@@ -54,7 +111,20 @@ impl MismatchScanCoordinator {
             events,
             state: Arc::new(Mutex::new(FlightState::default())),
             leader_epoch: Arc::new(Mutex::new(None)),
+            #[cfg(test)]
+            page_query_probe: None,
         }
+    }
+
+    #[cfg(test)]
+    fn new_with_page_query_probe(
+        db: Database,
+        events: djinn_core::events::EventBus,
+        page_query_probe: Arc<PageQueryProbe>,
+    ) -> Self {
+        let mut coordinator = Self::new(db, events);
+        coordinator.page_query_probe = Some(page_query_probe);
+        coordinator
     }
 
     /// Start a pass if idle, otherwise retain exactly one follow-up request.
@@ -132,7 +202,17 @@ impl MismatchScanCoordinator {
         djinn_telemetry::board_health_mismatch::record_pass_age(state.pass_started_at.as_deref());
 
         loop {
-            let page = match repo.load_board_health_mismatch_page(leader_epoch).await {
+            #[cfg(test)]
+            let page_result = if let Some(probe) = &self.page_query_probe {
+                probe
+                    .load(repo.load_board_health_mismatch_page(leader_epoch))
+                    .await
+            } else {
+                repo.load_board_health_mismatch_page(leader_epoch).await
+            };
+            #[cfg(not(test))]
+            let page_result = repo.load_board_health_mismatch_page(leader_epoch).await;
+            let page = match page_result {
                 Ok(page) => page,
                 Err(error) => {
                     tracing::warn!(error = %error, "board-health mismatch scan page load failed; pass remains resumable");
@@ -213,11 +293,10 @@ fn is_role_tool_mismatch(candidate: &BoardHealthMismatchCandidate) -> bool {
 mod tests {
     use super::*;
     use djinn_core::events::EventBus;
-    use std::sync::Arc;
     use tokio::sync::Barrier;
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn api_trigger_storm_coalesces_behind_one_active_runner() {
+    async fn mixed_trigger_storm_coalesces_behind_one_active_page_query() {
         let db = Database::open_in_memory().unwrap();
         db.ensure_initialized().await.unwrap();
         let project_id = uuid::Uuid::now_v7().to_string();
@@ -231,41 +310,52 @@ mod tests {
         .unwrap();
         sqlx::query(
             "INSERT INTO tasks (id, project_id, short_id, title, description, design, issue_type, status, labels, acceptance_criteria, memory_refs, total_reopen_count) \
-             SELECT '00000000-0000-0000-0000-' || lpad(n::text, 12, '0'), $1, 'storm-' || n, 'storm', 'requires task_create', '', 'task', 'open', '[]'::jsonb, '[]'::jsonb, '[]'::jsonb, 3 \
-             FROM generate_series(1, 10000) AS n",
+             VALUES ('00000000-0000-0000-0000-000000000001', $1, 'storm', 'storm', 'requires task_create', '', 'task', 'open', '[]'::jsonb, '[]'::jsonb, '[]'::jsonb, 3)",
         )
         .bind(&project_id)
         .execute(db.pool())
         .await
         .unwrap();
-        let coordinator = MismatchScanCoordinator::new(db, EventBus::noop());
+        let probe = Arc::new(PageQueryProbe::blocking_first_query());
+        let coordinator =
+            MismatchScanCoordinator::new_with_page_query_probe(db, EventBus::noop(), probe.clone());
         coordinator.trigger(Trigger::Api).await;
-        while !coordinator.state.lock().await.running {
-            tokio::task::yield_now().await;
-        }
+        probe.wait_until_first_query_is_held().await;
 
         let barrier = Arc::new(Barrier::new(33));
         let mut joins = Vec::new();
-        for _ in 0..32 {
+        for i in 0..32 {
             let coordinator = coordinator.clone();
             let barrier = barrier.clone();
             joins.push(tokio::spawn(async move {
                 barrier.wait().await;
-                coordinator.trigger(Trigger::Api).await;
+                coordinator
+                    .trigger(if i % 2 == 0 {
+                        Trigger::Api
+                    } else {
+                        Trigger::Timer
+                    })
+                    .await;
             }));
         }
         barrier.wait().await;
         for join in joins {
             join.await.unwrap();
         }
-        // The FlightState pending bit is the bounded coalescing latch: no
-        // trigger storm can queue more than this one follow-up run.
+        // The first page is still held, and the latch can represent only one
+        // follow-up run regardless of how many timer/API triggers arrived.
+        assert_eq!(probe.active.load(Ordering::SeqCst), 1);
         assert!(coordinator.state.lock().await.pending);
+        probe.release.notify_waiters();
         while coordinator.state.lock().await.running {
             tokio::task::yield_now().await;
         }
         let state = coordinator.state.lock().await;
         assert!(!state.running);
         assert!(!state.pending);
+        // Each one-row pass has a data page and an empty completion page. The
+        // storm coalesces to exactly one additional pass rather than 32 runs.
+        assert_eq!(probe.queries.load(Ordering::SeqCst), 4);
+        assert_eq!(probe.max_active.load(Ordering::SeqCst), 1);
     }
 }
