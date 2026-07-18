@@ -19,6 +19,7 @@ pub mod chat;
 #[cfg(not(any(test, feature = "test-support")))]
 mod chat;
 mod debug;
+mod galaxy;
 mod github_install;
 mod mcp_handler;
 mod oauth;
@@ -55,6 +56,7 @@ pub fn router(state: AppState, serve_ui: bool) -> Router {
         .merge(debug::router())
         .merge(oauth::router())
         .merge(github_install::router())
+        .merge(galaxy::router())
         .merge(crate::mirror_fetcher::router())
         .merge(org_sync::router())
         .merge(project_tools::router())
