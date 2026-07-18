@@ -1306,7 +1306,7 @@ pub async fn run_reply_loop(
                                 tool_use_id,
                                 final_verification_evidence: None,
                             };
-                            match verify_completion_intent(&mut intent, task_id, None, cancel.clone(), slot_ctx).await {
+                            match verify_completion_intent(&mut intent, task_id, None, cancel.clone(), slot_ctx, "submit_work").await {
                                 Ok(_) => {
                                     output.finalize_payload = Some(intent.finalize_payload.clone());
                                     output.finalize_tool_name = Some(primary_finalize.to_string());
@@ -1322,6 +1322,62 @@ pub async fn run_reply_loop(
                         Ok(_) | Err(_) => {
                             let result_msg = Message::user("submit_work payload is invalid for this task; correct it and resubmit.");
                             persist_session_message(&msg_repo, session_id, task_id, &result_msg).await; conversation.push(result_msg); continue;
+                        }
+                    }
+                }
+                // Reviewer canonical verification consults the same
+                // task-scoped complete-fingerprint cache after the reviewer has
+                // the current authored tree but strictly before any canonical
+                // verification command dispatch or invocation-lease request.
+                // A fresh hit injects the persisted run context and never
+                // executes canonical commands or requests/acquires the lease;
+                // every miss, stale verdict, or error records the normal
+                // canonical reviewer verification. This does NOT intercept
+                // arbitrary reviewer shell commands, setup `pre_verification`,
+                // or merge-queue/project CI.
+                if matches!(role_name, "reviewer" | "task_reviewer")
+                    && primary_finalize == "submit_review"
+                {
+                    let mut intent = CompletionIntent {
+                        finalize_payload: payload.clone(),
+                        tool_use_id: tool_use_id.clone(),
+                        final_verification_evidence: None,
+                    };
+                    // The reviewer's authoritative final-verification boundary.
+                    // On a hit this suppresses canonical commands and lease
+                    // acquisition; on any miss/error it runs normal canonical
+                    // reviewer verification. The reviewer's verdict and AC
+                    // payload always survive to finalization unchanged.
+                    match verify_completion_intent(
+                        &mut intent,
+                        task_id,
+                        None,
+                        cancel.clone(),
+                        slot_ctx,
+                        "submit_review",
+                    )
+                    .await
+                    {
+                        Ok(_) => {
+                            output.finalize_payload = Some(intent.finalize_payload.clone());
+                            output.finalize_tool_name = Some(primary_finalize.to_string());
+                            output.completion_intent = Some(intent);
+                            break;
+                        }
+                        Err(error) => {
+                            let result_msg = Message {
+                                role: Role::User,
+                                content: vec![ContentBlock::ToolResult {
+                                    tool_use_id: intent.tool_use_id,
+                                    content: vec![ContentBlock::Text { text: error }],
+                                    is_error: true,
+                                }],
+                                metadata: None,
+                            };
+                            persist_session_message(&msg_repo, session_id, task_id, &result_msg)
+                                .await;
+                            conversation.push(result_msg);
+                            continue;
                         }
                     }
                 }
