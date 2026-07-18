@@ -48,8 +48,8 @@ pub use repositories::tool_call_metrics::{
 pub use repositories::{
     admission_journal::{
         AdmissionDomain, AdmissionJournalKey, AdmissionJournalRepository, AdmissionJournalRow,
-        AdmissionRecoveryResult, AdmissionState, AdmissionWorkloadKind, CreateStartedInput,
-        ObserveAdmissionResult, ReserveAdmissionInput, ReserveAdmissionResult,
+        AdmissionRecoveryResult, AdmissionState, AdmissionWorkloadKind, AdoptLiveAdmissionInput,
+        CreateStartedInput, ObserveAdmissionResult, ReserveAdmissionInput, ReserveAdmissionResult,
         TerminalAdmissionInput, UidFencedAdmissionInput,
     },
     agent::{

@@ -370,7 +370,6 @@ impl BuildAdmissionController {
     }
 
     /// Durable inspection seam used by coordinator integration tests.
-    #[cfg(test)]
     pub(crate) fn journal(&self) -> &Arc<AdmissionJournalRepository> {
         &self.journal
     }
