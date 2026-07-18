@@ -26,6 +26,7 @@ pub mod complexity;
 pub mod coupling_index;
 pub mod db_access;
 pub mod entry_points;
+pub mod galaxy_artifact;
 pub mod galaxy_layout;
 pub mod git_diff;
 pub mod graph_parity;
