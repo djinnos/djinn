@@ -11,8 +11,9 @@ use djinn_core::models::{Epic, Project, SessionRecord, Task};
 use djinn_core::paths::project_dir;
 use djinn_db::repositories::session::CreateSessionParams;
 use djinn_db::{
-    Database, EffectiveCreatorProvenance, EpicCreateInput, EpicRepository, NoteRepository,
-    ProjectRepository, SessionRepository, TaskRepository, UserRepository,
+    CreateUserAuthSession, Database, EffectiveCreatorProvenance, EpicCreateInput, EpicRepository,
+    NoteRepository, ProjectRepository, SessionAuthRepository, SessionRepository, TaskRepository,
+    UserRepository,
 };
 use djinn_memory::Note;
 
@@ -194,6 +195,49 @@ pub async fn create_test_session(db: &Database, project_id: &str, task_id: &str)
     })
     .await
     .expect("failed to create test session")
+}
+
+/// Seed a user + a live `djinn_session` row and return the `djinn_session`
+/// cookie value suitable for an HTTP `Cookie` header.  This lets contract
+/// tests exercise the authenticated MCP dispatch path so that task/epic
+/// creation resolves an effective creator via `SESSION_USER_ID`.
+pub async fn seed_session_cookie(db: &Database, login: &str) -> String {
+    let user = UserRepository::new(db.clone())
+        .upsert_from_github(424242, login, None, None)
+        .await
+        .expect("persist contract-test fixture user");
+    let token = format!("sess-{}", uuid::Uuid::now_v7().simple());
+    SessionAuthRepository::new(db.clone())
+        .create(CreateUserAuthSession {
+            token: &token,
+            user_fk: &user.id,
+            github_login: login,
+            github_name: None,
+            github_avatar_url: None,
+            github_access_token: "gho_test",
+            github_access_token_expires_at: None,
+            github_refresh_token: None,
+            github_refresh_token_expires_at: None,
+            expires_at: "2099-01-01T00:00:00.000Z",
+        })
+        .await
+        .expect("persist contract-test fixture session");
+    token
+}
+
+/// Build a test app with a pre-registered project AND return the underlying
+/// `Database` so callers can seed additional rows (users, sessions, etc.).
+pub async fn create_test_app_with_project_and_db()
+-> (axum::Router, String, Database, tempfile::TempDir) {
+    let db = create_test_db();
+    let dir = workspace_tempdir("server-test-project-");
+    let repo = ProjectRepository::new(db.clone(), test_events());
+    let project = repo
+        .create("test-project", "test", "test-project")
+        .await
+        .expect("failed to register test project");
+    let app = create_test_app_with_db(db.clone());
+    (app, project.slug(), db, dir)
 }
 
 pub async fn create_test_note(db: &Database, project_id: &str) -> Note {
