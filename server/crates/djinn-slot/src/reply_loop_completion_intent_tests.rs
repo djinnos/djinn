@@ -387,6 +387,19 @@ async fn stored_verification_forwards_original_payload_exactly_once() {
         .expect("valid payload reached completion-intent verification");
     assert_eq!(intent.finalize_payload, expected);
     assert_eq!(intent.tool_use_id, "submit-1");
+    assert_eq!(
+        intent.final_verification_evidence,
+        Some(FinalVerificationSuccessEvidence {
+            persisted_run_id: "persisted-stored".into(),
+            completed_at: "2025-01-01T00:00:00Z".into(),
+            ordered_commands: serde_json::json!([]),
+            covered_checks: serde_json::json!([]),
+            required_checks: vec![],
+            verification_input_fingerprint: "fingerprint".into(),
+            manifest_version: "manifest-v1".into(),
+            environment_identity_digest: "identity".into(),
+        })
+    );
     assert!(error_ids(&conversation).is_empty());
 }
 
