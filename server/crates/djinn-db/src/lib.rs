@@ -167,6 +167,11 @@ pub use repositories::{
         ProposalRepository, ProposalUpdateInput,
     },
     repo_graph_cache::{CachedRepoGraph, RepoGraphCacheInsert, RepoGraphCacheRepository},
+    repo_graph_generation::{
+        CurrentGalaxyArtifact, ProjectCurrentGraph, RepoGraphGalaxyArtifact,
+        RepoGraphGalaxyArtifactInsert, RepoGraphGalaxyChunk, RepoGraphGalaxyChunkInsert,
+        RepoGraphGeneration, RepoGraphGenerationRepository,
+    },
     scip_indexer_timing::{
         ScipIndexerTiming, ScipIndexerTimingObservation, ScipIndexerTimingRepository,
         TIMING_STATUS_FAILED, TIMING_STATUS_SUCCESS, TIMING_STATUS_TIMED_OUT,
