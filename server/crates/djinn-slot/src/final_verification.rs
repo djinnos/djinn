@@ -96,12 +96,17 @@ pub enum FinalVerificationRecordingOutcome {
 
 /// Run the one authoritative completion boundary for either a model tool call
 /// or a lifecycle-generated auto-submit settlement.
+///
+/// `submit_tool_label` names the finalize tool that initiated verification
+/// (e.g. `"submit_work"` for a worker or `"submit_review"` for a reviewer) so
+/// error messages reference the correct request without hard-coding a role.
 pub(crate) async fn verify_completion_intent(
     intent: &mut CompletionIntent,
     task_id: &str,
     task_run_id: Option<&str>,
     cancellation: CancellationToken,
     slot_ctx: &SlotContext,
+    submit_tool_label: &str,
 ) -> Result<FinalVerificationSuccessEvidence, String> {
     let task_run_id = match task_run_id {
         Some(task_run_id) => task_run_id.to_owned(),
@@ -136,7 +141,7 @@ pub(crate) async fn verify_completion_intent(
             Ok(evidence)
         }
         FinalVerificationRecordingOutcome::Ineligible { reason, .. } => Err(format!(
-            "Final verification rejected this submit_work request: {reason}. Fix the worktree and resubmit."
+            "Final verification rejected this {submit_tool_label} request: {reason}. Fix the worktree and resubmit."
         )),
         FinalVerificationRecordingOutcome::Error { detail, .. } => Err(format!(
             "Final verification could not complete: {detail}. Inspect the worktree and resubmit."
