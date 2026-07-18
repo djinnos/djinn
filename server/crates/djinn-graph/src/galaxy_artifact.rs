@@ -425,7 +425,7 @@ fn build_semantic_model(
     usize,
     usize,
 ) {
-    use std::collections::HashMap;
+    use std::collections::{HashMap, HashSet};
 
     // Compute the ranking once so node ordering + pagerank values match the
     // snapshot builder convention. The ranking excludes route/tool nodes, so
@@ -440,7 +440,6 @@ fn build_semantic_model(
     // Tally eligible nodes: exclude route/tool nodes and external nodes,
     // matching the existing snapshot eligibility filter.
     let mut eligible: Vec<NodeIndex> = Vec::new();
-    let mut total_nodes: usize = 0;
     for idx in graph.graph().node_indices() {
         let node = graph.node(idx);
         if node.is_route_or_tool() {
@@ -449,9 +448,13 @@ fn build_semantic_model(
         if node.is_external {
             continue;
         }
-        total_nodes += 1;
         eligible.push(idx);
     }
+    // Keep the exact eligibility lookup while emitting edges. The compatibility
+    // snapshot drops every edge whose endpoint did not survive node filtering;
+    // otherwise consumers receive dangling endpoints absent from `nodes`.
+    let eligible_set: HashSet<NodeIndex> = eligible.iter().copied().collect();
+    let total_nodes = eligible.len();
 
     let mut snapshot_nodes: Vec<GalaxySnapshotNode> = eligible
         .into_iter()
@@ -496,12 +499,16 @@ fn build_semantic_model(
             .then_with(|| a.id.cmp(&b.id))
     });
 
-    // Build edges over the full graph (no cap for the canonical artifact).
+    // Build edges over the eligible graph (no cap for the canonical artifact).
     let mut total_edges: usize = 0;
     let mut containment_edges: Vec<GalaxySnapshotEdge> = Vec::new();
     let mut cross_workspace_edges: Vec<GalaxySnapshotEdge> = Vec::new();
     let mut drawable_edges: Vec<GalaxySnapshotEdge> = Vec::new();
     for edge_ref in graph.graph().edge_references() {
+        if !eligible_set.contains(&edge_ref.source()) || !eligible_set.contains(&edge_ref.target())
+        {
+            continue;
+        }
         let from_node = graph.node(edge_ref.source());
         let to_node = graph.node(edge_ref.target());
         total_edges += 1;
@@ -534,6 +541,9 @@ fn build_semantic_model(
     snapshot_edges.append(&mut cross_workspace_edges);
     snapshot_edges.append(&mut drawable_edges);
     for cc in graph.cochange_edges() {
+        if !eligible_set.contains(&cc.source) || !eligible_set.contains(&cc.target) {
+            continue;
+        }
         let from_node = graph.node(cc.source);
         let to_node = graph.node(cc.target);
         snapshot_edges.push(GalaxySnapshotEdge {

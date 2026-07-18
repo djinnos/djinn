@@ -233,62 +233,78 @@ fn transport_hash_recomputes_from_concatenated_chunks() {
 #[test]
 fn golden_decompress_chunks_and_recompute_all_domains() {
     let artifact = build_basic_artifact();
+    let hash_input = include_bytes!("fixtures/hash_input.json");
+    let payload = include_bytes!("fixtures/payload.json");
+    let compressed = include_bytes!("fixtures/payload.json.gz");
+    let manifest: serde_json::Value =
+        serde_json::from_slice(include_bytes!("fixtures/manifest.json")).expect("parse manifest");
+    let graph_content_hash = manifest["graph_content_hash"]
+        .as_str()
+        .expect("fixture graph hash");
+    let chunk_hashes = manifest["chunk_hashes"]
+        .as_array()
+        .expect("fixture chunk hashes");
+    let transport_sha256 = manifest["transport_sha256"]
+        .as_str()
+        .expect("fixture transport hash");
+    let total_compressed_bytes = manifest["total_compressed_bytes"]
+        .as_u64()
+        .expect("fixture byte total");
 
-    // 1. Reassemble the compressed stream from ordered chunks.
-    let mut compressed: Vec<u8> = Vec::new();
-    for chunk in &artifact.spool.chunks {
-        compressed.extend_from_slice(&chunk.bytes);
-    }
+    // The producer must retain these pinned canonical bytes, not merely agree
+    // with values derived from its own current serialization.
+    assert_eq!(artifact.hash_input_json, hash_input);
+    assert_eq!(artifact.payload_json, payload);
+    assert_eq!(artifact.graph_content_hash, graph_content_hash);
+    assert_eq!(
+        artifact.spool.total_compressed_bytes,
+        total_compressed_bytes
+    );
+    assert_eq!(artifact.spool.transport_sha256, transport_sha256);
+    assert_eq!(artifact.spool.chunks.len(), chunk_hashes.len());
+    assert_eq!(
+        artifact
+            .spool
+            .chunks
+            .iter()
+            .flat_map(|chunk| chunk.bytes.iter().copied())
+            .collect::<Vec<_>>(),
+        compressed
+    );
 
-    // 2. Decompress independently with a fresh gzip decoder.
+    // Independently decompress the checked-in gzip bytes.
     let mut decoder = flate2::read::GzDecoder::new(compressed.as_slice());
     let mut decompressed = Vec::new();
     use std::io::Read;
     decoder.read_to_end(&mut decompressed).expect("decompress");
+    assert_eq!(decompressed, payload);
 
-    // 3. The decompressed bytes must equal the final payload JSON.
-    assert_eq!(
-        decompressed, artifact.payload_json,
-        "decompressed chunks must equal the final payload JSON"
-    );
+    // Validate compatible JSON without round-tripping the producer mirror.
+    let wire: serde_json::Value = serde_json::from_slice(&decompressed).expect("parse wire JSON");
+    let object = wire.as_object().expect("payload object");
+    assert_eq!(object["generation_id"], generation_id().as_str());
+    assert_eq!(object["graph_content_hash"], graph_content_hash);
+    assert!(!object.contains_key("transport_sha256"));
+    let node_ids: std::collections::HashSet<&str> = object["nodes"]
+        .as_array()
+        .expect("nodes array")
+        .iter()
+        .map(|node| node["id"].as_str().expect("node id"))
+        .collect();
+    for edge in object["edges"].as_array().expect("edges array") {
+        assert!(node_ids.contains(edge["from"].as_str().expect("edge from")));
+        assert!(node_ids.contains(edge["to"].as_str().expect("edge to")));
+    }
 
-    // 4. Parse the decompressed JSON as a compatible payload and validate it
-    //    carries generation_id + graph_content_hash, never transport_sha256.
-    let parsed: GalaxySnapshotPayload =
-        serde_json::from_slice(&decompressed).expect("parse compatible payload");
-    assert_eq!(parsed.generation_id, artifact.generation_id.as_str());
-    assert_eq!(
-        parsed.graph_content_hash,
-        Some(artifact.graph_content_hash.clone())
-    );
-
-    // 5. Recompute the semantic hash from the parsed payload with the hash
-    //    field blanked out, and confirm it matches.
-    let mut hash_input = parsed.clone();
-    hash_input.graph_content_hash = None;
-    let hash_input_bytes = serde_json::to_vec(&hash_input).unwrap();
-    let recomputed_semantic = hex_sha256(&hash_input_bytes);
-    assert_eq!(
-        recomputed_semantic, artifact.graph_content_hash,
-        "semantic hash must recompute from the parsed payload with graph_content_hash omitted"
-    );
-
-    // 6. Recompute all three domains independently.
-    //    Semantic: already done above.
-    //    Per-chunk: reassemble compressed, re-chunk, re-hash.
-    for (i, window) in compressed.chunks(CHUNK_MAX_BYTES).enumerate() {
-        let recomputed = hex_sha256(window);
+    // Independently recompute all hash domains from the checked-in bytes.
+    assert_eq!(hex_sha256(hash_input), graph_content_hash);
+    for (index, chunk) in compressed.chunks(CHUNK_MAX_BYTES).enumerate() {
         assert_eq!(
-            recomputed, artifact.spool.chunk_hashes[i],
-            "golden per-chunk hash {i} must recompute"
+            hex_sha256(chunk),
+            chunk_hashes[index].as_str().expect("string chunk hash")
         );
     }
-    //    Transport:
-    let recomputed_transport = hex_sha256(&compressed);
-    assert_eq!(
-        recomputed_transport, artifact.spool.transport_sha256,
-        "golden transport hash must recompute"
-    );
+    assert_eq!(hex_sha256(compressed), transport_sha256);
 }
 
 #[test]
