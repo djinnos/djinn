@@ -47,6 +47,10 @@ pub use repositories::tool_call_metrics::{
     retry_after_edit_failure, wilson_difference_interval, wilson_interval,
 };
 pub use repositories::{
+    admission_handoff::{
+        AdmissionHandoffAuthority, AdmissionHandoffPhase, AdmissionHandoffRepository,
+        AdmissionHandoffRow,
+    },
     admission_journal::{
         AdmissionDomain, AdmissionJournalKey, AdmissionJournalRepository, AdmissionJournalRow,
         AdmissionRecoveryResult, AdmissionState, AdmissionWorkloadKind, AdoptLiveAdmissionInput,
