@@ -686,6 +686,12 @@ jobs:
           # The all-targets test build can exhaust the hosted runner after the
           # Rust cache is restored. These preinstalled SDKs are unused here.
           sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc
+      - name: Install PostgreSQL client tools
+        run: |
+          # The arm64 hosted runner images do not preinstall postgresql-client
+          # (the x64 images do). Without it, pg_isready/psql are missing and
+          # the template-database wait loop below spins forever.
+          sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends postgresql-client
       - run: rustup toolchain install
         working-directory: server
       - uses: Swatinem/rust-cache@v2
@@ -1145,6 +1151,12 @@ jobs:
         options: --health-cmd="pg_isready -U postgres" --health-interval=5s --health-timeout=3s --health-retries=20
     steps:
       - uses: actions/checkout@v4
+      - name: Install PostgreSQL client tools
+        run: |
+          # The arm64 hosted runner images do not preinstall postgresql-client
+          # (the x64 images do). Without it, pg_isready/psql are missing and
+          # the template-database wait loop below spins forever.
+          sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends postgresql-client
       - run: rustup toolchain install
       - uses: Swatinem/rust-cache@v2
         with:
