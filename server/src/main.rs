@@ -16,6 +16,12 @@ use djinn_server::db::runtime::{DatabaseRuntimeConfig, DatabaseRuntimeManager};
 use djinn_server::logging;
 use djinn_server::server::{self, AppState};
 use djinn_telemetry::memory_retrieval::MemoryRetrievalMetrics;
+#[cfg(target_os = "linux")]
+use tikv_jemallocator::Jemalloc;
+
+#[cfg(target_os = "linux")]
+#[global_allocator]
+static GLOBAL: Jemalloc = Jemalloc;
 
 #[derive(Parser)]
 #[command(name = "djinn-server", about = "Djinn MCP server", version)]
@@ -52,6 +58,11 @@ struct Cli {
 }
 
 fn main() {
+    if let Err(error) = djinn_server::allocator::validate_malloc_conf_from_env() {
+        eprintln!("invalid MALLOC_CONF: {error}");
+        std::process::exit(1);
+    }
+
     // rustls 0.23 requires an explicit process-level CryptoProvider before
     // any TLS use. Without this every reqwest HTTPS call (LLM providers,
     // GitHub App, OTLP exporter) panics on first invocation.
