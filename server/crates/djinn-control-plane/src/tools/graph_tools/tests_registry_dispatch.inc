@@ -64,6 +64,8 @@
         detect_changes_result: Option<DetectedChangesResult>,
         /// Programmable success response for `snapshot`.
         snapshot_result: Option<SnapshotPayload>,
+        /// Effective node caps received by `snapshot` bridge calls.
+        snapshot_node_caps: Arc<Mutex<Vec<usize>>>,
         /// Programmable success response for `status`.
         status_result: Option<GraphStatus>,
         /// Programmable success response for `coupling`.
@@ -84,6 +86,7 @@
                 flow_result: None,
                 detect_changes_result: None,
                 snapshot_result: None,
+                snapshot_node_caps: Arc::new(Mutex::new(Vec::new())),
                 status_result: None,
                 coupling_result: None,
                 coupling_hotspots_result: None,
@@ -149,6 +152,13 @@
             self.calls
                 .lock()
                 .expect("registry dispatch calls lock")
+                .clone()
+        }
+
+        fn snapshot_node_caps(&self) -> Vec<usize> {
+            self.snapshot_node_caps
+                .lock()
+                .expect("registry dispatch snapshot node caps lock")
                 .clone()
         }
     }
@@ -463,6 +473,10 @@
                 .push(("snapshot", workspace.map(str::to_string)));
             assert!(matches!(level, SnapshotLevel::Symbol | SnapshotLevel::Community));
             assert!(node_cap > 0, "registry dispatch: snapshot node_cap must be > 0");
+            self.snapshot_node_caps
+                .lock()
+                .expect("registry dispatch snapshot node caps lock")
+                .push(node_cap);
             self.snapshot_result.clone().ok_or_else(|| {
                 "registry dispatch fixture: snapshot_result not programmed".to_string()
             })
@@ -1106,7 +1120,7 @@
         let mut params = test_params("snapshot");
         params.project_id = ctx.id.clone();
         params.project_path = ctx.clone_path.clone();
-        params.limit = Some(25);
+        params.limit = Some(1_000_000);
         let response = server
             .dispatch_code_graph(&ctx, &mut params)
             .await
@@ -1119,6 +1133,11 @@
             other => panic!("expected Snapshot envelope, got {other:?}"),
         }
         assert_eq!(ops.calls()[0].0, "snapshot");
+        assert_eq!(
+            ops.snapshot_node_caps(),
+            vec![MAX_SNAPSHOT_NODE_CAP],
+            "a million-node MCP request must be normalized before bridge selection"
+        );
 
         let (server, ops) = registry_dispatch_server(
             RegistryDispatchOps::new().with_coupling(vec![CouplingEntry {

@@ -144,3 +144,101 @@ fn snapshot_caps_drawable_edges_but_keeps_containment() {
         "total_edges reports the full post-exclusion count for the UI's \"N of M\""
     );
 }
+
+/// A caller must not turn the community projection into an unbounded graph by
+/// supplying a huge `limit`. Isolated communities have no mandatory
+/// cross-workspace context, so this fixture must emit exactly the effective
+/// selection budget.
+#[test]
+fn snapshot_caps_million_limit_for_isolated_communities() {
+    use crate::mcp_bridge::snapshot::MAX_SNAPSHOT_NODE_CAP;
+    use djinn_control_plane::tools::graph_exclusions::GraphExclusions;
+    use djinn_graph::{
+        communities::Community,
+        repo_graph::{
+            REPO_GRAPH_ARTIFACT_VERSION, RankedRepoGraphNode, RepoDependencyGraph,
+            RepoGraphArtifact, RepoGraphNode, RepoGraphNodeKind, RepoGraphRanking, RepoNodeKey,
+        },
+    };
+
+    let community_count = MAX_SNAPSHOT_NODE_CAP + 1;
+    let nodes: Vec<RepoGraphNode> = (0..community_count)
+        .map(|i| RepoGraphNode {
+            id: RepoNodeKey::Symbol(format!("isolated-{i}")),
+            kind: RepoGraphNodeKind::Symbol,
+            display_name: format!("isolated-{i}"),
+            language: Some("rust".to_string()),
+            file_path: Some(PathBuf::from(format!("ws/src/isolated-{i}.rs"))),
+            symbol: Some(format!("isolated-{i}")),
+            symbol_kind: None,
+            is_external: false,
+            visibility: None,
+            signature: None,
+            documentation: vec![],
+            signature_parts: None,
+            is_test: false,
+            complexity: None,
+            workspace: Some("ws".to_string()),
+            route_framework: None,
+            route_handler_symbol: None,
+        })
+        .collect();
+    let communities: Vec<Community> = (0..community_count)
+        .map(|i| Community {
+            id: format!("community-{i}"),
+            label: format!("community-{i}"),
+            member_ids: vec![i],
+            cohesion: 1.0,
+            symbol_count: 1,
+            keywords: vec![],
+        })
+        .collect();
+    let graph = RepoDependencyGraph::from_artifact(&RepoGraphArtifact {
+        version: REPO_GRAPH_ARTIFACT_VERSION,
+        nodes,
+        edges: vec![],
+        symbol_ranges: std::collections::BTreeMap::new(),
+        communities,
+        processes: vec![],
+        route_exclusion_config: Default::default(),
+        layout_positions: std::collections::BTreeMap::new(),
+        galaxy_positions: std::collections::BTreeMap::new(),
+        galaxy_degrees: std::collections::BTreeMap::new(),
+    });
+    let ranking = RepoGraphRanking {
+        nodes: graph
+            .graph()
+            .node_indices()
+            .map(|node_index| RankedRepoGraphNode {
+                node_index,
+                key: graph.node(node_index).id.clone(),
+                kind: graph.node(node_index).kind,
+                score: 1.0,
+                page_rank: 1.0,
+                structural_weight: 1.0,
+                inbound_edge_weight: 0.0,
+                outbound_edge_weight: 0.0,
+                is_entry_point: false,
+                entry_point_distance: None,
+                fused_rank: 1.0,
+            })
+            .collect(),
+    };
+
+    let payload = build_snapshot_payload(
+        &graph,
+        &ranking,
+        "proj-test".to_string(),
+        "deadbeef".to_string(),
+        "2026-04-28T00:00:00Z".to_string(),
+        &GraphExclusions::empty(),
+        None,
+        SnapshotLevel::Community,
+        1_000_000,
+    );
+
+    assert_eq!(payload.node_cap, MAX_SNAPSHOT_NODE_CAP);
+    assert_eq!(payload.total_nodes, community_count);
+    assert_eq!(payload.nodes.len(), MAX_SNAPSHOT_NODE_CAP);
+    assert!(payload.truncated);
+}
