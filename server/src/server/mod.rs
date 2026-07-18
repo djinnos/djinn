@@ -84,6 +84,8 @@ async fn metrics(State(state): State<AppState>) -> Response {
 }
 
 async fn refresh_metrics_live_state(state: &AppState) {
+    crate::server_memory::refresh();
+
     if let Some(coordinator) = state.coordinator().await
         && let Err(e) = coordinator.record_live_metrics().await
     {
