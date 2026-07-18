@@ -29,6 +29,12 @@ const PR_POLLER_TRACKED: &str = "djinn_pr_poller_tracked";
 const MERGE_FAILURES_TOTAL: &str = "djinn_merge_failures_total";
 const DOCTOR_FINDINGS: &str = "djinn_doctor_findings";
 const DOCTOR_RUN_DURATION_SECONDS: &str = "djinn_doctor_run_duration_seconds";
+const BOARD_HEALTH_MISMATCH_ROWS: &str = "djinn_board_health_mismatch_rows";
+const BOARD_HEALTH_MISMATCH_PAGES: &str = "djinn_board_health_mismatch_pages";
+const BOARD_HEALTH_MISMATCH_DURATION_SECONDS: &str = "djinn_board_health_mismatch_duration_seconds";
+const BOARD_HEALTH_MISMATCH_COALESCED_TOTAL: &str = "djinn_board_health_mismatch_coalesced_total";
+const BOARD_HEALTH_MISMATCH_PASS_AGE_SECONDS: &str = "djinn_board_health_mismatch_pass_age_seconds";
+const BOARD_HEALTH_MISMATCH_OUTCOMES_TOTAL: &str = "djinn_board_health_mismatch_outcomes_total";
 const CARGO_TARGET_SEED_TOTAL: &str = "djinn_cargo_target_seed_total";
 const CARGO_SEED_HIT_TOTAL: &str = "djinn_cargo_seed_hit_total";
 const CARGO_SEED_COLD_TOTAL: &str = "djinn_cargo_seed_cold_total";
@@ -363,6 +369,27 @@ pub mod inline_cleanup {
     /// Increment the inline cleanup skipped counter for one of the stable reason labels.
     pub fn increment_skipped(reason: &'static str) {
         metrics::counter!(super::INLINE_CLEANUP_SKIPPED_TOTAL, "reason" => reason).increment(1);
+    }
+}
+
+pub mod board_health_mismatch {
+    pub fn record_page(rows: usize) {
+        metrics::histogram!(super::BOARD_HEALTH_MISMATCH_ROWS).record(rows as f64);
+        metrics::counter!(super::BOARD_HEALTH_MISMATCH_PAGES).increment(1);
+    }
+    pub fn record_duration(duration: std::time::Duration) {
+        metrics::histogram!(super::BOARD_HEALTH_MISMATCH_DURATION_SECONDS)
+            .record(duration.as_secs_f64());
+    }
+    pub fn record_coalesced(trigger: &'static str) {
+        metrics::counter!(super::BOARD_HEALTH_MISMATCH_COALESCED_TOTAL, "trigger" => trigger)
+            .increment(1);
+    }
+    pub fn record_outcome(outcome: &'static str, trigger: &'static str) {
+        metrics::counter!(super::BOARD_HEALTH_MISMATCH_OUTCOMES_TOTAL, "outcome" => outcome, "trigger" => trigger).increment(1);
+    }
+    pub fn record_pass_age(_started_at: Option<&str>) {
+        metrics::gauge!(super::BOARD_HEALTH_MISMATCH_PASS_AGE_SECONDS).set(0.0);
     }
 }
 

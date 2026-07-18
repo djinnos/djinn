@@ -9,7 +9,7 @@ const REPEATED_REOPEN_MISMATCH_THRESHOLD: i64 = 3;
 ///
 /// Do not replace this with `Task`: mismatch inference needs only these task
 /// columns, while `Task` hydration includes several correlated CI lookups.
-#[derive(Debug, sqlx::FromRow)]
+#[derive(Debug, Clone, sqlx::FromRow)]
 pub struct BoardHealthMismatchCandidate {
     pub id: String,
     pub short_id: String,
@@ -170,6 +170,12 @@ fn dispatched_role_for_task(task: &BoardHealthMismatchCandidate) -> &'static str
             _ => "worker",
         },
     }
+}
+
+/// Pure authoritative evaluation for the persisted page runner.
+pub fn evaluate_board_health_mismatch_candidate(task: &BoardHealthMismatchCandidate) -> bool {
+    infer_expected_role_for_task(task)
+        .is_some_and(|(expected_role, _)| expected_role != dispatched_role_for_task(task))
 }
 
 fn role_tool_mismatch_reason(
