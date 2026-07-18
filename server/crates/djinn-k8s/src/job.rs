@@ -490,6 +490,61 @@ pub fn build_task_run_job(
 /// Labels are intentionally minimal: the task-run id is the primary
 /// correlator and the component marker lets controllers find task-run
 /// resources with a single selector.
+/// Add the sole owner-cache mount for immutable read-source grants.
+#[allow(clippy::too_many_arguments)]
+pub fn build_task_run_job_with_read_sources(
+    config: &KubernetesConfig,
+    task_run_id: &Uuid,
+    project_id: &str,
+    secret_name: &str,
+    project_image_tag: &str,
+    services: &[BackingServiceSpec],
+    policy: Option<&djinn_stack::environment::CargoCachePolicy>,
+    is_evidence_spike: bool,
+    owner_cache_sub_path: Option<&str>,
+) -> Job {
+    let mut job = build_task_run_job(
+        config,
+        task_run_id,
+        project_id,
+        secret_name,
+        project_image_tag,
+        services,
+        policy,
+        is_evidence_spike,
+    );
+    let Some(owner_cache_sub_path) = owner_cache_sub_path else {
+        return job;
+    };
+    let pod = job
+        .spec
+        .as_mut()
+        .expect("builder sets JobSpec")
+        .template
+        .spec
+        .as_mut()
+        .expect("builder sets PodSpec");
+    pod.volumes.get_or_insert_with(Vec::new).push(Volume {
+        name: "read-sources".to_string(),
+        persistent_volume_claim: Some(PersistentVolumeClaimVolumeSource {
+            claim_name: config.projects_pvc.clone(),
+            read_only: Some(true),
+        }),
+        ..Volume::default()
+    });
+    pod.containers[0]
+        .volume_mounts
+        .get_or_insert_with(Vec::new)
+        .push(VolumeMount {
+            name: "read-sources".to_string(),
+            mount_path: "/read-sources".to_string(),
+            sub_path: Some(owner_cache_sub_path.to_string()),
+            read_only: Some(true),
+            ..VolumeMount::default()
+        });
+    job
+}
+
 fn job_labels(task_run_id: &str) -> BTreeMap<String, String> {
     let mut labels = BTreeMap::new();
     labels.insert(LABEL_TASK_RUN_ID.to_string(), task_run_id.to_string());
@@ -2631,6 +2686,95 @@ mod tests {
         assert!(
             container.command.is_none(),
             "sidecar container must not override the image entrypoint with commands"
+        );
+    }
+
+    #[test]
+    fn read_source_mount_is_exact_owner_cache_and_read_only() {
+        let cfg = KubernetesConfig::for_testing();
+        let job = build_task_run_job_with_read_sources(
+            &cfg,
+            &Uuid::now_v7(),
+            "owner-project",
+            "djinn-taskrun-test",
+            "registry.example/project:tag",
+            &[],
+            None,
+            false,
+            Some("octo/owner-repo/.task-runtime/read-sources"),
+        );
+        let pod = job.spec.unwrap().template.spec.unwrap();
+        let volume = pod
+            .volumes
+            .as_ref()
+            .unwrap()
+            .iter()
+            .find(|volume| volume.name == "read-sources")
+            .expect("owner-cache volume present");
+        assert_eq!(
+            volume
+                .persistent_volume_claim
+                .as_ref()
+                .map(|pvc| pvc.claim_name.as_str()),
+            Some(cfg.projects_pvc.as_str())
+        );
+        assert_eq!(
+            volume
+                .persistent_volume_claim
+                .as_ref()
+                .and_then(|pvc| pvc.read_only),
+            Some(true)
+        );
+
+        let mounts = pod.containers[0].volume_mounts.as_ref().unwrap();
+        let mount = mounts
+            .iter()
+            .find(|mount| mount.name == "read-sources")
+            .expect("owner-cache mount present");
+        assert_eq!(mount.mount_path, "/read-sources");
+        assert_eq!(
+            mount.sub_path.as_deref(),
+            Some("octo/owner-repo/.task-runtime/read-sources")
+        );
+        assert_eq!(mount.read_only, Some(true));
+        assert!(!mounts.iter().any(|mount| {
+            mount.mount_path.contains(".djinn/read-sources")
+                || mount.sub_path.as_deref() == Some("projects")
+                || mount.sub_path.as_deref()
+                    == Some("other-owner/other-repo/.task-runtime/read-sources")
+                || mount.sub_path.as_deref() == Some("octo/owner-repo/.djinn/read-sources")
+                || mount.sub_path.as_deref() == Some("mirror/read-sources")
+        }));
+    }
+
+    #[test]
+    fn zero_read_source_grants_do_not_mount_projects_claim() {
+        let cfg = KubernetesConfig::for_testing();
+        let job = build_task_run_job_with_read_sources(
+            &cfg,
+            &Uuid::now_v7(),
+            "owner-project",
+            "djinn-taskrun-test",
+            "registry.example/project:tag",
+            &[],
+            None,
+            false,
+            None,
+        );
+        let pod = job.spec.unwrap().template.spec.unwrap();
+        assert!(!pod.volumes.as_ref().unwrap().iter().any(|volume| {
+            volume
+                .persistent_volume_claim
+                .as_ref()
+                .is_some_and(|pvc| pvc.claim_name == cfg.projects_pvc)
+        }));
+        assert!(
+            !pod.containers[0]
+                .volume_mounts
+                .as_ref()
+                .unwrap()
+                .iter()
+                .any(|mount| mount.name == "read-sources")
         );
     }
 }
