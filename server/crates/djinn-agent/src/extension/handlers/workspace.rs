@@ -123,29 +123,49 @@ pub(crate) async fn call_shell(
 
     let timeout_ms = effective_shell_timeout_ms(p.timeout_ms, &p.command);
 
-    // Cross-repo shell: when `project` names a different registered project,
-    // check it out read-only into `.djinn-read-sources/` and run there.
-    let run_dir: std::path::PathBuf =
-        if let Some(proj) = p.project.as_deref().filter(|s| !s.is_empty()) {
-            let repo = ProjectRepository::new(state.db.clone(), state.event_bus.clone());
-            match repo.resolve(proj).await.map_err(|e| e.to_string())? {
-                Some(pid) if state.default_project_id.as_deref() != Some(pid.as_str()) => {
-                    let git_ref = repo
-                        .get_default_branch(&pid)
-                        .await
-                        .ok()
-                        .flatten()
-                        .unwrap_or_else(|| "HEAD".to_string());
-                    let dest = worktree_path.join(".djinn-read-sources").join(&pid);
-                    append_git_exclude(worktree_path, ".djinn-read-sources/").await;
-                    crate::repo_access::ensure_worktree(&pid, &git_ref, &dest).await?;
-                    dest
+    // Cross-repo shell is authorized by immutable task-run data injected into
+    // AgentContext, never by process environment. Workers consume only an
+    // already-mounted owner cache; migration and clone lifecycle are host-only.
+    let run_dir: std::path::PathBuf = if let Some(proj) =
+        p.project.as_deref().filter(|s| !s.is_empty())
+    {
+        let repo = ProjectRepository::new(state.db.clone(), state.event_bus.clone());
+        match repo.resolve(proj).await.map_err(|e| e.to_string())? {
+            Some(pid) if state.default_project_id.as_deref() != Some(pid.as_str()) => {
+                let authorization = &state.read_source_authorization;
+                if !authorization
+                    .read_source_project_ids
+                    .iter()
+                    .any(|authorized_id| authorized_id == &pid)
+                {
+                    return Err(format!(
+                        "cross-project shell denied: project {pid} is not an authorized read source"
+                    ));
                 }
-                _ => worktree_path.to_path_buf(),
+                if authorization.owner_project_id.as_deref() != state.default_project_id.as_deref()
+                {
+                    return Err("cross-project shell denied: immutable owner ID is unavailable or mismatched".into());
+                }
+                let owner_root = authorization.owner_cache_root.as_deref().ok_or_else(|| {
+                    "cross-project shell denied: authorized owner cache is not mounted".to_string()
+                })?;
+                let dest = owner_root
+                    .join(".task-runtime")
+                    .join("read-sources")
+                    .join(&pid);
+                if !dest.is_dir() {
+                    return Err(format!(
+                        "cross-project shell denied: authorized read-source cache is not mounted: {}",
+                        dest.display()
+                    ));
+                }
+                dest
             }
-        } else {
-            worktree_path.to_path_buf()
-        };
+            _ => worktree_path.to_path_buf(),
+        }
+    } else {
+        worktree_path.to_path_buf()
+    };
 
     let mut cmd = if cfg!(windows) {
         let mut c = std::process::Command::new("cmd");
@@ -157,8 +177,16 @@ pub(crate) async fn call_shell(
         c
     };
 
+    let sandbox_scope = if run_dir == worktree_path {
+        sandbox::SandboxScope::Worktree(worktree_path)
+    } else {
+        sandbox::SandboxScope::ReadSource {
+            root: &run_dir,
+            cwd: &run_dir,
+        }
+    };
     sandbox::SANDBOX
-        .apply(worktree_path, &mut cmd)
+        .apply(sandbox_scope, &mut cmd)
         .map_err(|e| e.to_string())?;
 
     cmd.current_dir(&run_dir)
@@ -226,28 +254,6 @@ pub(crate) async fn call_shell(
         "stderr": stderr,
         "workdir": run_dir.display().to_string(),
     }))
-}
-
-/// Best-effort append of a pattern to the worktree's `.git/info/exclude` so a
-/// lazily checked-out sibling repo never enters the task's commits.
-async fn append_git_exclude(worktree_path: &Path, pattern: &str) {
-    let exclude = worktree_path.join(".git/info/exclude");
-    let existing = tokio::fs::read_to_string(&exclude)
-        .await
-        .unwrap_or_default();
-    if existing.lines().any(|l| l.trim() == pattern.trim()) {
-        return;
-    }
-    if let Some(parent) = exclude.parent() {
-        let _ = tokio::fs::create_dir_all(parent).await;
-    }
-    let mut body = existing;
-    if !body.is_empty() && !body.ends_with('\n') {
-        body.push('\n');
-    }
-    body.push_str(pattern);
-    body.push('\n');
-    let _ = tokio::fs::write(&exclude, body).await;
 }
 
 /// Format an in-memory file body as a numbered, paginated window matching the

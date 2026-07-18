@@ -673,6 +673,9 @@ impl NoteRepository {
 
     /// Returns an explicit single revision, scoped to project and note so
     /// inaccessible or cross-project IDs are indistinguishable to callers.
+    /// Note-less extraction-skipped events remain project-scoped so the diff
+    /// reader can classify that legitimate endpoint without relaxing ordinary
+    /// cross-note lookup isolation.
     ///
     /// Returns `Ok(None)` when the revision does not exist within the scoped
     /// project/note pair.
@@ -686,7 +689,8 @@ impl NoteRepository {
              confidence_before, confidence_after, actor_kind, actor_id, subsystem, session_id, \
              task_id, task_run_id, reason, created_at \
              FROM note_revision_events \
-             WHERE project_id = $1 AND note_id = $2 AND id = $3",
+             WHERE project_id = $1 AND id = $3 \
+             AND (note_id = $2 OR (note_id IS NULL AND event_kind = 'extraction_skipped'))",
         )
         .bind(request.project_id)
         .bind(request.note_id)

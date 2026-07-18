@@ -97,6 +97,18 @@ impl AdmissionHandoffRepository {
         row.map(TryInto::try_into).transpose()
     }
 
+    /// Remove the singleton to exercise startup behavior for installations
+    /// where no durable handoff has been created.
+    #[cfg(any(test, feature = "test-support"))]
+    pub async fn delete_for_test(&self) -> DbResult<()> {
+        self.db.ensure_initialized().await?;
+        sqlx::query("DELETE FROM admission_handoff WHERE name = $1")
+            .bind(HANDOFF_NAME)
+            .execute(self.db.pool())
+            .await?;
+        Ok(())
+    }
+
     /// Record one authority's acknowledgement only when `epoch` is still current.
     /// Repeating the same current acknowledgement is idempotent.
     pub async fn acknowledge(

@@ -45,6 +45,7 @@
          "human" : "00000000-0000-4000-8000-000000000010",
          "system" : "00000000-0000-4000-8000-000000000012"
       },
+      "foreign_project_id" : "00000000-0000-4000-8000-000000000003",
       "notes" : {
          "already_known" : "00000000-0000-4000-8000-000000000101",
          "merge_target" : "00000000-0000-4000-8000-000000000102",
@@ -60,9 +61,196 @@
       "tenant_id" : "00000000-0000-4000-8000-000000000001"
    },
    "mcp_response_expectations" : {
-      "intentionally_separate_from_repository_rows" : false,
-      "reader_fixture_owned" : true,
-      "reserved_for_later_handler_reader_epics" : false
+      "confidence_from" : {
+         "args" : {
+            "from_revision_id" : "00000000-0000-4000-8000-000000000211",
+            "note_id" : "00000000-0000-4000-8000-000000000104",
+            "project" : "fixture/revision-contract",
+            "to_revision_id" : "00000000-0000-4000-8000-000000000212"
+         },
+         "expected" : {
+            "diff" : "",
+            "error" : "invalid parameters: field: from_revision_id, message: revision is not a content-bearing event",
+            "from" : null,
+            "intervening_events" : [],
+            "to" : null
+         },
+         "tool" : "memory_diff"
+      },
+      "confidence_to" : {
+         "args" : {
+            "from_revision_id" : "00000000-0000-4000-8000-000000000210",
+            "note_id" : "00000000-0000-4000-8000-000000000104",
+            "project" : "fixture/revision-contract",
+            "to_revision_id" : "00000000-0000-4000-8000-000000000211"
+         },
+         "expected" : {
+            "diff" : "",
+            "error" : "invalid parameters: field: to_revision_id, message: revision is not a content-bearing event",
+            "from" : null,
+            "intervening_events" : [],
+            "to" : null
+         },
+         "tool" : "memory_diff"
+      },
+      "cross_project_not_found" : {
+         "args" : {
+            "note_id" : "00000000-0000-4000-8000-000000000104",
+            "project" : "fixture/revision-contract-foreign"
+         },
+         "expected" : {
+            "error" : "note not found: 00000000-0000-4000-8000-000000000104",
+            "events" : [],
+            "history_start" : null,
+            "next_cursor" : null
+         },
+         "tool" : "memory_history"
+      },
+      "deleted_note_unauthorized_not_found" : {
+         "args" : {
+            "note_id" : "00000000-0000-4000-8000-000000000105",
+            "project" : "fixture/revision-contract"
+         },
+         "caller" : "readerless",
+         "expected" : {
+            "error" : "note not found: 00000000-0000-4000-8000-000000000105",
+            "events" : [],
+            "history_start" : null,
+            "next_cursor" : null
+         },
+         "tool" : "memory_history"
+      },
+      "extraction_skipped_from" : {
+         "args" : {
+            "from_revision_id" : "00000000-0000-4000-8000-000000000226",
+            "note_id" : "00000000-0000-4000-8000-000000000104",
+            "project" : "fixture/revision-contract",
+            "to_revision_id" : "00000000-0000-4000-8000-000000000212"
+         },
+         "expected" : {
+            "diff" : "",
+            "error" : "invalid parameters: field: from_revision_id, message: revision is not a content-bearing event",
+            "from" : null,
+            "intervening_events" : [],
+            "to" : null
+         },
+         "tool" : "memory_diff"
+      },
+      "extraction_skipped_to" : {
+         "args" : {
+            "from_revision_id" : "00000000-0000-4000-8000-000000000210",
+            "note_id" : "00000000-0000-4000-8000-000000000104",
+            "project" : "fixture/revision-contract",
+            "to_revision_id" : "00000000-0000-4000-8000-000000000226"
+         },
+         "expected" : {
+            "diff" : "",
+            "error" : "invalid parameters: field: to_revision_id, message: revision is not a content-bearing event",
+            "from" : null,
+            "intervening_events" : [],
+            "to" : null
+         },
+         "tool" : "memory_diff"
+      },
+      "migration_cutover" : {
+         "args" : {
+            "note_id" : "00000000-0000-4000-8000-000000000199",
+            "project" : "fixture/revision-contract"
+         },
+         "expected" : {
+            "error" : null,
+            "events" : [],
+            "history_start" : "migration_cutover",
+            "next_cursor" : null
+         },
+         "tool" : "memory_history"
+      },
+      "no_neighboring_snapshot_inference" : {
+         "args" : {
+            "from_revision_id" : "00000000-0000-4000-8000-000000000227",
+            "note_id" : "00000000-0000-4000-8000-000000000108",
+            "project" : "fixture/revision-contract",
+            "to_revision_id" : "00000000-0000-4000-8000-000000000228"
+         },
+         "expected" : {
+            "diff" : "",
+            "error" : "revision snapshot is missing content: 00000000-0000-4000-8000-000000000228",
+            "from" : null,
+            "intervening_events" : [],
+            "to" : null
+         },
+         "tool" : "memory_diff"
+      },
+      "retired_diff_selector_rejected" : {
+         "args" : {
+            "permalink" : "reference/fixed-live",
+            "project" : "fixture/revision-contract",
+            "sha" : "deadbeef"
+         },
+         "expected_error" : "call_tool(memory_diff) failed: invalid arguments for tool 'memory_diff': unknown field `permalink`, expected one of `project`, `note_id`, `from_revision_id`, `to_revision_id`",
+         "tool" : "memory_diff"
+      },
+      "retired_history_selector_rejected" : {
+         "args" : {
+            "permalink" : "reference/fixed-live",
+            "project" : "fixture/revision-contract"
+         },
+         "expected_error" : "call_tool(memory_history) failed: invalid arguments for tool 'memory_history': unknown field `permalink`, expected one of `project`, `note_id`, `limit`, `before_cursor`",
+         "tool" : "memory_history"
+      },
+      "session_body_redaction" : {
+         "args" : {
+            "limit" : 2,
+            "project" : "fixture/revision-contract",
+            "session_id" : "00000000-0000-4000-8000-000000000021"
+         },
+         "caller" : "readerless",
+         "expected" : {
+            "error" : null,
+            "events" : [
+               {
+                  "actor_id" : "audit-agent",
+                  "actor_kind" : "agent",
+                  "confidence_after" : 0.75,
+                  "confidence_before" : null,
+                  "content_after" : null,
+                  "content_before" : null,
+                  "content_redacted" : true,
+                  "created_at" : "2026-02-04T05:06:08.000Z",
+                  "event_kind" : "created",
+                  "note_id" : "00000000-0000-4000-8000-000000000107",
+                  "note_seq" : 1,
+                  "reason" : "create underspecified audit note",
+                  "revision_id" : "00000000-0000-4000-8000-000000000225",
+                  "session_id" : "00000000-0000-4000-8000-000000000021",
+                  "subsystem" : null,
+                  "task_id" : "00000000-0000-4000-8000-000000000030",
+                  "task_run_id" : "00000000-0000-4000-8000-000000000041"
+               },
+               {
+                  "actor_id" : "fixture-agent",
+                  "actor_kind" : "agent",
+                  "confidence_after" : 0.8,
+                  "confidence_before" : 0.5,
+                  "content_after" : null,
+                  "content_before" : null,
+                  "content_redacted" : true,
+                  "created_at" : "2026-02-04T05:06:07.000Z",
+                  "event_kind" : "confidence_changed",
+                  "note_id" : "00000000-0000-4000-8000-000000000106",
+                  "note_seq" : 2,
+                  "reason" : "raise equal-time session confidence a",
+                  "revision_id" : "00000000-0000-4000-8000-000000000221",
+                  "session_id" : "00000000-0000-4000-8000-000000000021",
+                  "subsystem" : null,
+                  "task_id" : "00000000-0000-4000-8000-000000000030",
+                  "task_run_id" : "00000000-0000-4000-8000-000000000041"
+               }
+            ],
+            "next_cursor" : "eyJrIjoic2Vzc2lvbiIsInYiOnsiYyI6IjIwMjYtMDItMDRUMDU6MDY6MDcuMDAwWiIsImkiOiIwMDAwMDAwMC0wMDAwLTQwMDAtODAwMC0wMDAwMDAwMDAyMjEifX0"
+         },
+         "tool" : "memory_session_diff"
+      }
    },
    "migration_cutover" : {
       "expected_repository_history" : [],
@@ -70,7 +258,6 @@
       "synthetic_revisions_permitted" : false
    },
    "reader_fixture" : {
-    "session_context": {"task_id":"00000000-0000-4000-8000-000000000030","session_id":"00000000-0000-4000-8000-000000000020","task_run_id":"00000000-0000-4000-8000-000000000040","session_diff_session_id":"00000000-0000-4000-8000-000000000021","session_diff_task_run_id":"00000000-0000-4000-8000-000000000041","audit_note_id":"00000000-0000-4000-8000-000000000107"},
       "events" : [
          {
             "actor_id" : "fixture-human",
@@ -269,10 +456,63 @@
             "subsystem" : null,
             "task_id" : "00000000-0000-4000-8000-000000000030",
             "task_run_id" : "00000000-0000-4000-8000-000000000041"
+         },
+         {
+            "actor_id" : null,
+            "actor_kind" : "system",
+            "confidence_after" : null,
+            "confidence_before" : null,
+            "content_after" : null,
+            "content_before" : null,
+            "created_at" : "2026-02-04T05:06:09.000Z",
+            "event_kind" : "extraction_skipped",
+            "id" : "00000000-0000-4000-8000-000000000226",
+            "note_id" : null,
+            "note_seq" : null,
+            "reason" : "fixed extraction produced no durable memory",
+            "session_id" : "00000000-0000-4000-8000-000000000020",
+            "subsystem" : "extraction",
+            "task_id" : "00000000-0000-4000-8000-000000000030",
+            "task_run_id" : "00000000-0000-4000-8000-000000000040"
+         },
+         {
+            "actor_id" : "fixture-human",
+            "actor_kind" : "human",
+            "confidence_after" : 0.5,
+            "confidence_before" : null,
+            "content_after" : "initial\n",
+            "content_before" : null,
+            "created_at" : "2026-02-05T05:06:05.000Z",
+            "event_kind" : "created",
+            "id" : "00000000-0000-4000-8000-000000000227",
+            "note_id" : "00000000-0000-4000-8000-000000000108",
+            "note_seq" : 1,
+            "reason" : "create missing snapshot note",
+            "session_id" : null,
+            "subsystem" : null,
+            "task_id" : null,
+            "task_run_id" : null
+         },
+         {
+            "actor_id" : "fixture-human",
+            "actor_kind" : "human",
+            "confidence_after" : 0.5,
+            "confidence_before" : 0.5,
+            "content_after" : null,
+            "content_before" : "initial\n",
+            "created_at" : "2026-02-05T05:06:06.000Z",
+            "event_kind" : "updated",
+            "id" : "00000000-0000-4000-8000-000000000228",
+            "note_id" : "00000000-0000-4000-8000-000000000108",
+            "note_seq" : 2,
+            "reason" : "missing after snapshot must not infer neighbor",
+            "session_id" : null,
+            "subsystem" : null,
+            "task_id" : null,
+            "task_run_id" : null
          }
       ],
       "expected" : {
-
          "deleted_history" : {
             "error" : null,
             "events" : [
@@ -354,6 +594,43 @@
                "note_seq" : 3,
                "revision_id" : "00000000-0000-4000-8000-000000000212"
             }
+         },
+         "extracted_audit" : {
+            "archive_candidates" : [],
+            "demote_to_working_spec" : [],
+            "error" : null,
+            "merge_candidates" : [],
+            "rerun_hint" : "Rerun `memory_extracted_audit()` after cleanup and compare category counts to measure the remaining ADR-054 migration backlog.",
+            "scanned_note_count" : 1,
+            "underspecified" : [
+               {
+                  "attribution" : {
+                     "actor_id" : "audit-agent",
+                     "actor_kind" : "agent",
+                     "reason" : "create underspecified audit note",
+                     "revision_created_at" : "2026-02-04T05:06:08.000Z",
+                     "revision_id" : "00000000-0000-4000-8000-000000000225",
+                     "revision_kind" : "created",
+                     "revision_seq" : 1,
+                     "session_id" : "00000000-0000-4000-8000-000000000021",
+                     "subsystem" : null,
+                     "task_id" : "00000000-0000-4000-8000-000000000030",
+                     "task_run_id" : "00000000-0000-4000-8000-000000000041"
+                  },
+                  "category" : "underspecified",
+                  "folder" : "cases",
+                  "note_id" : "00000000-0000-4000-8000-000000000107",
+                  "note_type" : "case",
+                  "permalink" : "cases/audit-underspecified",
+                  "reasons" : [
+                     "Missing ADR-054 required sections: Situation, Constraint, Approach taken, Result, Why it worked / failed, Reusable lesson, Related",
+                     "Body is too short for durable memory (20 chars)",
+                     "Body has only 1 paragraph(s); strengthen with explicit context, rationale, and transfer lesson"
+                  ],
+                  "related_note_ids" : [],
+                  "title" : "Underspecified audit note"
+               }
+            ]
          },
          "history_full" : {
             "error" : null,
@@ -493,7 +770,7 @@
          "session_diff_full" : {
             "error" : null,
             "events" : [
-{
+               {
                   "actor_id" : "audit-agent",
                   "actor_kind" : "agent",
                   "confidence_after" : 0.75,
@@ -512,7 +789,7 @@
                   "task_id" : "00000000-0000-4000-8000-000000000030",
                   "task_run_id" : "00000000-0000-4000-8000-000000000041"
                },
-{
+               {
                   "actor_id" : "fixture-agent",
                   "actor_kind" : "agent",
                   "confidence_after" : 0.8,
@@ -531,7 +808,7 @@
                   "task_id" : "00000000-0000-4000-8000-000000000030",
                   "task_run_id" : "00000000-0000-4000-8000-000000000041"
                },
-{
+               {
                   "actor_id" : "fixture-agent",
                   "actor_kind" : "agent",
                   "confidence_after" : 0.5,
@@ -550,7 +827,7 @@
                   "task_id" : "00000000-0000-4000-8000-000000000030",
                   "task_run_id" : "00000000-0000-4000-8000-000000000041"
                },
-{
+               {
                   "actor_id" : "fixture-agent",
                   "actor_kind" : "agent",
                   "confidence_after" : 0.9,
@@ -569,7 +846,7 @@
                   "task_id" : "00000000-0000-4000-8000-000000000030",
                   "task_run_id" : "00000000-0000-4000-8000-000000000041"
                },
-{
+               {
                   "actor_id" : "fixture-agent",
                   "actor_kind" : "agent",
                   "confidence_after" : 0.8,
@@ -588,7 +865,7 @@
                   "task_id" : "00000000-0000-4000-8000-000000000030",
                   "task_run_id" : "00000000-0000-4000-8000-000000000041"
                },
-{
+               {
                   "actor_id" : "fixture-agent",
                   "actor_kind" : "agent",
                   "confidence_after" : 0.9,
@@ -613,7 +890,7 @@
          "session_diff_page_1" : {
             "error" : null,
             "events" : [
-{
+               {
                   "actor_id" : "audit-agent",
                   "actor_kind" : "agent",
                   "confidence_after" : 0.75,
@@ -632,7 +909,7 @@
                   "task_id" : "00000000-0000-4000-8000-000000000030",
                   "task_run_id" : "00000000-0000-4000-8000-000000000041"
                },
-{
+               {
                   "actor_id" : "fixture-agent",
                   "actor_kind" : "agent",
                   "confidence_after" : 0.8,
@@ -657,7 +934,7 @@
          "session_diff_page_2" : {
             "error" : null,
             "events" : [
-{
+               {
                   "actor_id" : "fixture-agent",
                   "actor_kind" : "agent",
                   "confidence_after" : 0.5,
@@ -676,7 +953,7 @@
                   "task_id" : "00000000-0000-4000-8000-000000000030",
                   "task_run_id" : "00000000-0000-4000-8000-000000000041"
                },
-{
+               {
                   "actor_id" : "fixture-agent",
                   "actor_kind" : "agent",
                   "confidence_after" : 0.9,
@@ -701,7 +978,7 @@
          "session_diff_page_3" : {
             "error" : null,
             "events" : [
-{
+               {
                   "actor_id" : "fixture-agent",
                   "actor_kind" : "agent",
                   "confidence_after" : 0.8,
@@ -720,7 +997,7 @@
                   "task_id" : "00000000-0000-4000-8000-000000000030",
                   "task_run_id" : "00000000-0000-4000-8000-000000000041"
                },
-{
+               {
                   "actor_id" : "fixture-agent",
                   "actor_kind" : "agent",
                   "confidence_after" : 0.9,
@@ -745,7 +1022,7 @@
          "session_diff_redacted" : {
             "error" : null,
             "events" : [
-{
+               {
                   "actor_id" : "audit-agent",
                   "actor_kind" : "agent",
                   "confidence_after" : 0.75,
@@ -764,7 +1041,7 @@
                   "task_id" : "00000000-0000-4000-8000-000000000030",
                   "task_run_id" : "00000000-0000-4000-8000-000000000041"
                },
-{
+               {
                   "actor_id" : "fixture-agent",
                   "actor_kind" : "agent",
                   "confidence_after" : 0.8,
@@ -785,43 +1062,6 @@
                }
             ],
             "next_cursor" : "eyJrIjoic2Vzc2lvbiIsInYiOnsiYyI6IjIwMjYtMDItMDRUMDU6MDY6MDcuMDAwWiIsImkiOiIwMDAwMDAwMC0wMDAwLTQwMDAtODAwMC0wMDAwMDAwMDAyMjEifX0"
-         },
-         "extracted_audit" : {
-            "archive_candidates" : [],
-            "demote_to_working_spec" : [],
-            "error" : null,
-            "merge_candidates" : [],
-            "rerun_hint" : "Rerun `memory_extracted_audit()` after cleanup and compare category counts to measure the remaining ADR-054 migration backlog.",
-            "scanned_note_count" : 1,
-            "underspecified" : [
-               {
-                  "attribution" : {
-                     "actor_id" : "audit-agent",
-                     "actor_kind" : "agent",
-                     "reason" : "create underspecified audit note",
-                     "revision_created_at" : "2026-02-04T05:06:08.000Z",
-                     "revision_id" : "00000000-0000-4000-8000-000000000225",
-                     "revision_kind" : "created",
-                     "revision_seq" : 1,
-                     "session_id" : "00000000-0000-4000-8000-000000000021",
-                     "subsystem" : null,
-                     "task_id" : "00000000-0000-4000-8000-000000000030",
-                     "task_run_id" : "00000000-0000-4000-8000-000000000041"
-                  },
-                  "category" : "underspecified",
-                  "folder" : "cases",
-                  "note_id" : "00000000-0000-4000-8000-000000000107",
-                  "note_type" : "case",
-                  "permalink" : "cases/audit-underspecified",
-                  "reasons" : [
-                     "Missing ADR-054 required sections: Situation, Constraint, Approach taken, Result, Why it worked / failed, Reusable lesson, Related",
-                     "Body is too short for durable memory (20 chars)",
-                     "Body has only 1 paragraph(s); strengthen with explicit context, rationale, and transfer lesson"
-                  ],
-                  "related_note_ids" : [],
-                  "title" : "Underspecified audit note"
-               }
-            ]
          }
       },
       "live_notes" : [
@@ -840,6 +1080,20 @@
             "note_type" : "case",
             "permalink" : "cases/audit-underspecified",
             "title" : "Underspecified audit note"
+         },
+         {
+            "confidence" : 0.5,
+            "content" : "pre-ledger\n",
+            "id" : "00000000-0000-4000-8000-000000000199",
+            "permalink" : "reference/pre-ledger",
+            "title" : "Pre-ledger note"
+         },
+         {
+            "confidence" : 0.5,
+            "content" : "initial\n",
+            "id" : "00000000-0000-4000-8000-000000000108",
+            "permalink" : "reference/missing-snapshot",
+            "title" : "Missing snapshot note"
          }
       ],
       "project" : "fixture/revision-contract",
@@ -853,6 +1107,9 @@
             "note_id" : "00000000-0000-4000-8000-000000000104",
             "project" : "fixture/revision-contract",
             "to_revision_id" : "00000000-0000-4000-8000-000000000212"
+         },
+         "extracted_audit" : {
+            "project" : "fixture/revision-contract"
          },
          "history_full" : {
             "note_id" : "00000000-0000-4000-8000-000000000104",
@@ -890,14 +1147,18 @@
             "limit" : 2,
             "project" : "fixture/revision-contract",
             "session_id" : "00000000-0000-4000-8000-000000000021"
-         },
-         "extracted_audit" : {
-            "project" : "fixture/revision-contract"
          }
+      },
+      "session_context" : {
+         "audit_note_id" : "00000000-0000-4000-8000-000000000107",
+         "session_diff_session_id" : "00000000-0000-4000-8000-000000000021",
+         "session_diff_task_run_id" : "00000000-0000-4000-8000-000000000041",
+         "session_id" : "00000000-0000-4000-8000-000000000020",
+         "task_id" : "00000000-0000-4000-8000-000000000030",
+         "task_run_id" : "00000000-0000-4000-8000-000000000040"
       }
    },
    "registered_subsystems" : [
-
       "mcp",
       "dedup",
       "consolidation",
