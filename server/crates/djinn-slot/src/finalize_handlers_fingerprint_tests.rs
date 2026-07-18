@@ -7,6 +7,10 @@ use crate::finalize_handlers::{
 use crate::test_helpers;
 use djinn_db::repositories::task_run::TaskRunRepository;
 use djinn_db::repositories::verify_run::TaskRejectedSubmissionIntegrityRepository;
+use djinn_git::{
+    ResolvedExternalInputV1, VerificationInputFingerprint, VerificationInputFingerprintConfig,
+    compute_verification_input_fingerprint_with_config,
+};
 
 fn init_git_repo_with_dirty_file() -> tempfile::TempDir {
     let dir = tempfile::Builder::new()
@@ -935,5 +939,105 @@ async fn settlement_accepted_and_rejected_paths_store_same_review_fingerprint() 
         review_records[0].diff_fingerprint, rejected_latest.diff_fingerprint,
         "accepted review and rejected integrity must store identical fingerprints \
          from the same shared submission fingerprint source"
+    );
+}
+
+/// Complete C2 input fingerprint mutation matrix. These cases model evidence
+/// captured at C1 and prove every declared input class changes the value the
+/// completion validator must compare before consuming that evidence.
+async fn c2_fingerprint(
+    worktree: &std::path::Path,
+    config: &VerificationInputFingerprintConfig,
+) -> String {
+    match compute_verification_input_fingerprint_with_config(worktree, config)
+        .await
+        .expect("compute C2 fingerprint")
+    {
+        VerificationInputFingerprint::Available(digest) => digest.fingerprint,
+        VerificationInputFingerprint::Unavailable(reason) => panic!("C2 unavailable: {reason}"),
+    }
+}
+
+async fn assert_after_c1_mutation_changes_complete_c2(
+    name: &str,
+    config: VerificationInputFingerprintConfig,
+    mutate: impl FnOnce(&std::path::Path),
+) {
+    let worktree = init_git_repo_with_dirty_file();
+    let c1 = c2_fingerprint(worktree.path(), &config).await;
+    mutate(worktree.path());
+    let c2 = c2_fingerprint(worktree.path(), &config).await;
+    assert_ne!(c1, c2, "{name}: stale C1 evidence must not match C2");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn after_c1_tracked_text_mutation_changes_c2() {
+    assert_after_c1_mutation_changes_complete_c2(
+        "tracked text",
+        VerificationInputFingerprintConfig::default(),
+        |root| std::fs::write(root.join("README.md"), "hello\nchanged after C1\n").unwrap(),
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn after_c1_ignored_generated_configuration_mutation_changes_c2() {
+    assert_after_c1_mutation_changes_complete_c2(
+        "ignored/generated configuration",
+        VerificationInputFingerprintConfig::default(),
+        |root| {
+            std::fs::write(root.join(".gitignore"), "generated.conf\n").unwrap();
+            std::fs::write(root.join("generated.conf"), "changed after C1\n").unwrap();
+        },
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn after_c1_untracked_binary_mutation_changes_c2() {
+    assert_after_c1_mutation_changes_complete_c2(
+        "untracked binary",
+        VerificationInputFingerprintConfig::default(),
+        |root| std::fs::write(root.join("generated.bin"), [0_u8, 255, 17, 42]).unwrap(),
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn after_c1_submodule_state_mutation_changes_c2() {
+    assert_after_c1_mutation_changes_complete_c2(
+        "submodule state",
+        VerificationInputFingerprintConfig::default(),
+        |root| {
+            std::fs::write(root.join(".gitmodules"), "[submodule \"vendor/input\"]\npath = vendor/input\nurl = https://example.invalid/input\n").unwrap();
+            std::fs::create_dir_all(root.join("vendor/input")).unwrap();
+            std::fs::write(root.join("vendor/input/.git"), "gitdir: ../.git/modules/input\n").unwrap();
+        },
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn after_c1_declared_external_input_mutation_changes_c2() {
+    let external = tempfile::tempdir().unwrap();
+    std::fs::write(external.path().join("toolchain.txt"), "v1\n").unwrap();
+    let mut config = VerificationInputFingerprintConfig::default();
+    config.manifest.read_only_external_inputs.push(
+        djinn_core::canonical_verify::DeclaredExternalInputV1 {
+            id: "toolchain".into(),
+            locator: "host://toolchain".into(),
+        },
+    );
+    config.external_inputs.push(ResolvedExternalInputV1 {
+        id: "toolchain".into(),
+        path: external.path().to_path_buf(),
+    });
+    let worktree = init_git_repo_with_dirty_file();
+    let c1 = c2_fingerprint(worktree.path(), &config).await;
+    std::fs::write(external.path().join("toolchain.txt"), "v2 after C1\n").unwrap();
+    assert_ne!(
+        c1,
+        c2_fingerprint(worktree.path(), &config).await,
+        "declared external input must be resolved at C2"
     );
 }
