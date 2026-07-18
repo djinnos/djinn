@@ -1144,7 +1144,7 @@ mod tests {
         tx: &broadcast::Sender<DjinnEventEnvelope>,
     ) -> djinn_core::models::Task {
         TaskRepository::new(db.clone(), crate::events::event_bus_for(tx))
-            .create_in_project(
+            .create_fixture_in_project(
                 project_id,
                 Some(epic_id),
                 title,
@@ -2376,7 +2376,7 @@ mod tests {
             .unwrap();
 
         let breakdown = task_repo
-            .create_in_project(
+            .create_fixture_in_project(
                 &project.id,
                 None,
                 &format!("Break down proposal: {}", proposal.title),

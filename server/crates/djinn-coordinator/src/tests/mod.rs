@@ -1093,7 +1093,7 @@ async fn create_simple_task(
         .await
         .unwrap();
     let task = TaskRepository::new(db.clone(), crate::events::event_bus_for(tx))
-        .create_in_project(
+        .create_fixture_in_project(
             &project.id,
             Some(&epic.id),
             title,
@@ -1227,7 +1227,7 @@ async fn make_task_with_reopen_count(
         .unwrap();
     let repo = TaskRepository::new(db.clone(), crate::events::event_bus_for(tx));
     let task = repo
-        .create_in_project(
+        .create_fixture_in_project(
             &project.id,
             Some(&epic.id),
             "Stuck task",

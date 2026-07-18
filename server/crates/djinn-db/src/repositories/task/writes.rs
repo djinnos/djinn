@@ -172,7 +172,7 @@ impl TaskRepository {
         owner: &str,
         status: Option<&str>,
     ) -> Result<Task> {
-        self.create_with_ac(
+        self.create_fixture_with_ac(
             epic_id,
             title,
             description,
@@ -190,7 +190,7 @@ impl TaskRepository {
     /// Production code must use [`Self::create_in_project_with_provenance`].
     #[cfg(any(test, feature = "test-support"))]
     #[allow(clippy::too_many_arguments)]
-    pub async fn create_with_ac(
+    pub async fn create_fixture_with_ac(
         &self,
         epic_id: &str,
         title: &str,
@@ -207,7 +207,7 @@ impl TaskRepository {
             .fetch_optional(self.db.pool())
             .await?
             .ok_or_else(|| Error::Internal(format!("epic not found: {epic_id}")))?;
-        self.create_in_project(
+        self.create_fixture_in_project(
             &project_id,
             Some(epic_id),
             title,
@@ -379,13 +379,13 @@ impl TaskRepository {
         Ok(task)
     }
 
-    /// Test-only convenience: create a task with no blocker edges. Uses the
-    /// current SESSION_USER_ID as provenance. Production code must use
+    /// Test-only fixture boundary: persist a collision-resistant user and
+    /// insert with explicit provenance. Production code must use
     /// [`Self::create_in_project_with_provenance`] (no blockers) or
     /// [`Self::create_in_project_with_blockers`] (with blockers).
     #[cfg(any(test, feature = "test-support"))]
     #[allow(clippy::too_many_arguments)]
-    pub async fn create_in_project(
+    pub async fn create_fixture_in_project(
         &self,
         project_id: &str,
         epic_id: Option<&str>,
@@ -398,11 +398,16 @@ impl TaskRepository {
         status: Option<&str>,
         acceptance_criteria: Option<&str>,
     ) -> Result<Task> {
-        self.create_in_project_with_blockers(
+        let github_id = (uuid::Uuid::now_v7().as_u128() & i64::MAX as u128) as i64;
+        let username = format!("fixture-creator-{github_id}");
+        let user = crate::repositories::user::UserRepository::new(self.db.clone())
+            .upsert_from_github(github_id, &username, Some("Fixture Creator"), None)
+            .await?;
+        self.create_in_project_with_provenance(
             project_id,
             epic_id,
             EffectiveCreatorProvenance {
-                explicit_user_id: djinn_core::auth_context::current_user_id().as_deref(),
+                explicit_user_id: Some(&user.id),
                 source_task_id: None,
                 proposal_id: None,
             },
@@ -414,7 +419,6 @@ impl TaskRepository {
             owner,
             status,
             acceptance_criteria,
-            &[],
         )
         .await
     }
@@ -1030,7 +1034,7 @@ mod created_by_tests {
         let created_id = SESSION_USER_ID
             .scope(Some(user_id.clone()), async {
                 let task = repo
-                    .create_in_project(
+                    .create_fixture_in_project(
                         &project_id,
                         Some(&epic_id),
                         "Attributed",
@@ -1127,7 +1131,7 @@ mod created_by_tests {
 
         // No session in scope → inherit the epic's creator.
         let inherited = repo
-            .create_in_project(
+            .create_fixture_in_project(
                 &project_id,
                 Some(&owned_epic_id),
                 "Inherited",
@@ -1150,7 +1154,7 @@ mod created_by_tests {
         // Session user present → it wins over the epic's creator.
         let session_owned = SESSION_USER_ID
             .scope(Some(session_user.id.clone()), async {
-                repo.create_in_project(
+                repo.create_fixture_in_project(
                     &project_id,
                     Some(&owned_epic_id),
                     "SessionOwned",
@@ -1185,7 +1189,7 @@ mod created_by_tests {
 
         // Blocking task — stays `open` (unresolved).
         let blocker = repo
-            .create_in_project(
+            .create_fixture_in_project(
                 &project_id,
                 Some(&epic_id),
                 "Blocker",

@@ -128,7 +128,7 @@ mod tests {
         issue_type: &str,
         acceptance_criteria: Option<&str>,
     ) -> Task {
-        repo.create_with_ac(
+        repo.create_fixture_with_ac(
             epic_id,
             "Task title",
             "desc",
@@ -645,7 +645,7 @@ mod tests {
         // Human-review hold task: issue_type=review, owner=system,
         // label=human-review-hold (matches the auto-park shape from pdn6).
         let hold = repo
-            .create_in_project(
+            .create_fixture_in_project(
                 &project.id,
                 Some(&epic_id),
                 "Human review hold",
@@ -774,7 +774,7 @@ mod tests {
 
         // Human-review hold task (review type, matching the auto-park shape from pdn6).
         let review_hold = repo
-            .create_in_project(
+            .create_fixture_in_project(
                 &project.id,
                 Some(&epic_id),
                 "Human review hold",
@@ -860,7 +860,7 @@ mod tests {
         let source = make_task(&repo, &epic_id, "task", None).await;
 
         let review_hold = repo
-            .create_in_project(
+            .create_fixture_in_project(
                 &project.id,
                 Some(&epic_id),
                 "Human review hold",
@@ -953,7 +953,7 @@ mod tests {
         // (open → in_progress → closed), so `transition(Close)` from `open`
         // is a valid state-machine move.
         let normal_blocker = repo
-            .create_in_project(
+            .create_fixture_in_project(
                 &project.id,
                 Some(&epic_id),
                 "Dependency spike",

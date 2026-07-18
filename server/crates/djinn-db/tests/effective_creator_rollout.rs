@@ -385,17 +385,17 @@ fn fixture_task_creation_callsites_have_creator_provenance() {
 
 #[test]
 fn callsite_classifier_rejects_ordinary_inline_and_external_tests() {
-    let inline = r#"
-        #[cfg(test)]
-        mod tests { #[test] fn ordinary_case() { repo.create_in_project(); } }
-    "#;
+    let call = concat!(".create_", "in_project(");
+    let inline = format!(
+        "\n        #[cfg(test)]\n        mod tests {{ #[test] fn ordinary_case() {{ repo{call}); }} }}\n    "
+    );
     assert_eq!(
-        unscoped_test_task_callsites("server/crates/example/src/ordinary.rs", inline),
+        unscoped_test_task_callsites("server/crates/example/src/ordinary.rs", &inline),
         vec!["server/crates/example/src/ordinary.rs::ordinary_case"]
     );
-    let external = r#"#[test] fn ordinary_case() { repo.create_in_project(); }"#;
+    let external = format!("#[test] fn ordinary_case() {{ repo{call}); }}");
     assert_eq!(
-        unscoped_test_task_callsites("server/crates/example/tests/ordinary.rs", external),
+        unscoped_test_task_callsites("server/crates/example/tests/ordinary.rs", &external),
         vec!["server/crates/example/tests/ordinary.rs::ordinary_case"]
     );
 }

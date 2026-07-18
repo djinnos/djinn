@@ -34,7 +34,7 @@ async fn semantic_candidate_branch_resolution_tracks_task_and_canonical_metadata
 
     let epic_id = make_epic(&db, &project.id).await;
     let task = TaskRepository::new(db.clone(), EventBus::noop())
-        .create_with_ac(
+        .create_fixture_with_ac(
             &epic_id,
             "Branch-aware semantic retrieval",
             "exercise branch-aware embeddings",

@@ -735,7 +735,7 @@ mod tests {
             .unwrap();
 
         let open_foundation_task = task_repo
-            .create_in_project(
+            .create_fixture_in_project(
                 &project.id,
                 Some(&foundation_epic.id),
                 "open foundation task",
@@ -750,7 +750,7 @@ mod tests {
             .await
             .unwrap();
         let closed_foundation_task = task_repo
-            .create_in_project(
+            .create_fixture_in_project(
                 &project.id,
                 Some(&foundation_epic.id),
                 "closed foundation task",

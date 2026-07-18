@@ -43,7 +43,7 @@ async fn board_health_flags_repeated_reopen_role_tool_mismatch_candidates() {
     let epic = create_test_epic(&db, &project.id).await;
     let repo = TaskRepository::new(db.clone(), event_bus_for(&tx));
     let task = repo
-        .create_in_project(
+        .create_fixture_in_project(
             &project.id,
             Some(&epic.id),
             "Plan next wave after repeated worker churn",
@@ -96,7 +96,7 @@ async fn board_health_ignores_repeated_reopen_tasks_without_role_tool_mismatch()
     let epic = make_epic(&db, event_bus_for(&tx)).await;
     let repo = TaskRepository::new(db.clone(), event_bus_for(&tx));
     let task = repo
-        .create_in_project(
+        .create_fixture_in_project(
             &epic.project_id,
             Some(&epic.id),
             "Implement worker-safe fix",
@@ -134,7 +134,7 @@ async fn board_health_returns_liveness_outcomes_section() {
 
     // Create a task + session + liveness evidence row.
     let task = repo
-        .create_in_project(
+        .create_fixture_in_project(
             &project.id,
             Some(&epic.id),
             "Liveness task",
@@ -187,7 +187,7 @@ async fn board_health_returns_protocol_violations_section() {
     let repo = TaskRepository::new(db.clone(), event_bus_for(&tx));
 
     let task = repo
-        .create_in_project(
+        .create_fixture_in_project(
             &project.id,
             Some(&epic.id),
             "Protocol violation task",
@@ -240,7 +240,7 @@ async fn board_health_stranded_ready_detects_stale_open_tasks() {
     // Create an open task (no sessions) and backdate it so it exceeds the
     // 30-minute stranded-ready threshold.
     let task = repo
-        .create_in_project(
+        .create_fixture_in_project(
             &project.id,
             Some(&epic.id),
             "Starved open task",
@@ -283,7 +283,7 @@ async fn board_health_stranded_ready_excludes_tasks_with_active_sessions() {
 
     // Create an open task with an active running session.
     let task = repo
-        .create_in_project(
+        .create_fixture_in_project(
             &project.id,
             Some(&epic.id),
             "Active task",
@@ -328,7 +328,7 @@ async fn board_health_stranded_ready_high_confidence_with_activity_log() {
     // Create an open task and insert an activity_log entry showing it was
     // transitioned to 'open' long ago.
     let task = repo
-        .create_in_project(
+        .create_fixture_in_project(
             &project.id,
             Some(&epic.id),
             "Task with activity log",
@@ -381,7 +381,7 @@ async fn board_health_stranded_ready_severity_escalates_with_elapsed_time() {
 
     // Task at 35 minutes: warning (≥1×30, <2×30).
     let t1 = repo
-        .create_in_project(
+        .create_fixture_in_project(
             &project.id,
             Some(&epic.id),
             "Warning task",
@@ -399,7 +399,7 @@ async fn board_health_stranded_ready_severity_escalates_with_elapsed_time() {
 
     // Task at 65 minutes: error (≥2×30, <6×30).
     let t2 = repo
-        .create_in_project(
+        .create_fixture_in_project(
             &project.id,
             Some(&epic.id),
             "Error task",
@@ -417,7 +417,7 @@ async fn board_health_stranded_ready_severity_escalates_with_elapsed_time() {
 
     // Task at 200 minutes: critical (≥6×30).
     let t3 = repo
-        .create_in_project(
+        .create_fixture_in_project(
             &project.id,
             Some(&epic.id),
             "Critical task",
@@ -458,7 +458,7 @@ async fn board_health_stranded_ready_excludes_rate_limited_tasks() {
     let repo = TaskRepository::new(db.clone(), event_bus_for(&tx));
 
     let task = repo
-        .create_in_project(
+        .create_fixture_in_project(
             &project.id,
             Some(&epic.id),
             "Rate-limited task",
@@ -499,7 +499,7 @@ async fn board_health_stranded_ready_excludes_cooldown_active_tasks() {
     let repo = TaskRepository::new(db.clone(), event_bus_for(&tx));
 
     let task = repo
-        .create_in_project(
+        .create_fixture_in_project(
             &project.id,
             Some(&epic.id),
             "Cooldown task",
@@ -543,7 +543,7 @@ async fn board_health_stranded_ready_excludes_paused_tasks() {
     let repo = TaskRepository::new(db.clone(), event_bus_for(&tx));
 
     let task = repo
-        .create_in_project(
+        .create_fixture_in_project(
             &project.id,
             Some(&epic.id),
             "Paused task",
@@ -597,7 +597,7 @@ async fn board_health_stranded_ready_gate_evidence_fields() {
         .unwrap();
 
     let task = repo
-        .create_in_project(
+        .create_fixture_in_project(
             &project.id,
             Some(&epic.id),
             "Gate evidence task",
@@ -671,7 +671,7 @@ async fn board_health_stranded_ready_excludes_credential_revoked_tasks() {
     let repo = TaskRepository::new(db.clone(), event_bus_for(&tx));
 
     let task = repo
-        .create_in_project(
+        .create_fixture_in_project(
             &project.id,
             Some(&epic.id),
             "Credential-blocked task",
@@ -748,7 +748,7 @@ async fn board_health_legacy_and_additive_fields_coexist() {
 
     // ── Seed legacy stale task ──────────────────────────────────────────
     let stale_task = repo
-        .create_in_project(
+        .create_fixture_in_project(
             &project.id,
             Some(&epic.id),
             "Stale in_progress task",
@@ -781,7 +781,7 @@ async fn board_health_legacy_and_additive_fields_coexist() {
 
     // ── Seed liveness evidence (dead verdict) ──────────────────────────
     let liveness_task = repo
-        .create_in_project(
+        .create_fixture_in_project(
             &project.id,
             Some(&epic.id),
             "Liveness evidence task",
@@ -831,7 +831,7 @@ async fn board_health_legacy_and_additive_fields_coexist() {
 
     // ── Seed stranded-ready task ───────────────────────────────────────
     let stranded_task = repo
-        .create_in_project(
+        .create_fixture_in_project(
             &project.id,
             Some(&epic.id),
             "Stranded open task",

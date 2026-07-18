@@ -81,7 +81,7 @@ async fn make_session(
             let epic_id = make_epic(db, project_id).await;
             Some(
                 TaskRepository::new(db.clone(), EventBus::noop())
-                    .create_with_ac(
+                    .create_fixture_with_ac(
                         &epic_id,
                         "Session Task",
                         "session task",
