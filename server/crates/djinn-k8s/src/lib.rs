@@ -15,6 +15,7 @@ pub mod secret;
 pub mod sidecar;
 pub mod token_review;
 pub mod warm_job;
+pub mod workload_inventory;
 
 pub use config::KubernetesConfig;
 pub use env_config::{
@@ -31,6 +32,11 @@ pub use graph_warmer::{
 pub use runtime::KubernetesRuntime;
 pub use token_review::TokenReviewer;
 pub use warm_job::build_warm_job;
+pub use workload_inventory::{
+    KubeWorkloadInventory, LABEL_ADMISSION_DOMAIN, LABEL_ADMISSION_GENERATION,
+    LABEL_ADMISSION_WORK_ID, UidGetResult, WorkloadInventory, WorkloadObjectKind, WorkloadRecord,
+    has_canonical_warm_signature,
+};
 
 /// Re-exported `kube::Client` type so non-owner callers can name the
 /// Kubernetes client type without adding a direct `kube` dependency.
