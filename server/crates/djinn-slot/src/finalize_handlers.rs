@@ -1,3 +1,4 @@
+use crate::final_verification::validate_or_reverify_completion_intent;
 use crate::finalize_types::{
     AcVerdict, AutoSubmitReviewMetadataPayload, SubmitDecision, SubmitGrooming, SubmitReview,
     SubmitWork,
@@ -42,7 +43,31 @@ pub async fn process_finalize_payload_with_outcome(
 ) -> bool {
     let Some(payload) = payload else { return true };
     match finalize_tool_name {
-        "submit_work" => handle_submit_work(payload, task_id, app_state, true, None).await,
+        "submit_work" => {
+            let mut intent = CompletionIntent {
+                finalize_payload: payload.clone(),
+                tool_use_id: "finalize-payload".to_owned(),
+                final_verification_evidence: None,
+            };
+            match validate_or_reverify_completion_intent(
+                &mut intent,
+                task_id,
+                None,
+                tokio_util::sync::CancellationToken::new(),
+                app_state,
+                "submit_work",
+            )
+            .await
+            {
+                Ok(evidence) => {
+                    handle_submit_work(payload, task_id, app_state, true, Some(&evidence)).await
+                }
+                Err(error) => {
+                    tracing::warn!(task_id = %task_id, error = %error, "finalize_handlers: submit_work verification failed");
+                    false
+                }
+            }
+        }
         "submit_review" => {
             handle_submit_review(payload, task_id, app_state).await;
             true
@@ -72,19 +97,34 @@ pub async fn process_completion_intent_with_outcome(
     app_state: &SlotContext,
 ) -> bool {
     match finalize_tool_name {
-        "submit_work" => match intent.final_verification_evidence.as_ref() {
-            Some(evidence) => {
-                handle_submit_work(
-                    &intent.finalize_payload,
-                    task_id,
-                    app_state,
-                    true,
-                    Some(evidence),
-                )
-                .await
+        "submit_work" => {
+            let mut intent = intent.clone();
+            match validate_or_reverify_completion_intent(
+                &mut intent,
+                task_id,
+                None,
+                tokio_util::sync::CancellationToken::new(),
+                app_state,
+                "submit_work",
+            )
+            .await
+            {
+                Ok(evidence) => {
+                    handle_submit_work(
+                        &intent.finalize_payload,
+                        task_id,
+                        app_state,
+                        true,
+                        Some(&evidence),
+                    )
+                    .await
+                }
+                Err(error) => {
+                    tracing::warn!(task_id = %task_id, error = %error, "finalize_handlers: completion C2 validation failed");
+                    false
+                }
             }
-            None => false,
-        },
+        }
         _ => {
             process_finalize_payload_with_outcome(
                 &Some(intent.finalize_payload.clone()),
@@ -98,11 +138,36 @@ pub async fn process_completion_intent_with_outcome(
 }
 
 pub async fn process_auto_submit_payload(
-    payload: &serde_json::Value,
+    intent: &CompletionIntent,
     task_id: &str,
     app_state: &SlotContext,
 ) -> bool {
-    handle_submit_work(payload, task_id, app_state, false, None).await
+    let mut intent = intent.clone();
+    match validate_or_reverify_completion_intent(
+        &mut intent,
+        task_id,
+        None,
+        tokio_util::sync::CancellationToken::new(),
+        app_state,
+        "submit_work",
+    )
+    .await
+    {
+        Ok(evidence) => {
+            handle_submit_work(
+                &intent.finalize_payload,
+                task_id,
+                app_state,
+                false,
+                Some(&evidence),
+            )
+            .await
+        }
+        Err(error) => {
+            tracing::warn!(task_id = %task_id, error = %error, "finalize_handlers: auto-submit C2 validation failed");
+            false
+        }
+    }
 }
 
 /// Persist a budget-park handoff summary using the same payload shape as

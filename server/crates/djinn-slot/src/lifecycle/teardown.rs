@@ -266,8 +266,8 @@ pub(crate) async fn settle_auto_submit_if_eligible(
         emit_auto_submit_fallback_hook(task_id, ctx, "final_verification_failed");
         return AutoSubmitSettlementOutcome::Failed;
     }
-    let payload = auto_submit_payload(task_id, settlement);
-    if process_auto_submit_payload(&payload, task_id, ctx).await {
+    intent.finalize_payload = auto_submit_payload(task_id, settlement);
+    if process_auto_submit_payload(&intent, task_id, ctx).await {
         AutoSubmitSettlementOutcome::Submitted
     } else {
         emit_auto_submit_fallback_hook(task_id, ctx, "submit_failed");
