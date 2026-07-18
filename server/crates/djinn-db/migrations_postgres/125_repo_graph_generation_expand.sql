@@ -86,10 +86,65 @@ CREATE TABLE repo_graph_galaxy_chunk (
 CREATE INDEX repo_graph_galaxy_chunk_artifact_order
     ON repo_graph_galaxy_chunk (artifact_id, chunk_index);
 
--- A session-local marker is deliberately set only by this function.  It is
--- transaction-local, obtains the same project advisory lock as compatibility
--- writes, and makes a v7 UUID reservation explicit rather than trusting a
--- caller-supplied generation_id column value.
+-- pg_locks cannot distinguish session advisory locks from transaction advisory
+-- locks. This token is inserted only after the xact lock is acquired, is bound
+-- to the xid/backend, and is removed by a deferred trigger at commit.
+CREATE TABLE repo_graph_publish_lock_token (
+    project_id          VARCHAR(36) NOT NULL,
+    transaction_id      BIGINT NOT NULL,
+    backend_pid         INTEGER NOT NULL,
+    reserved_generation UUID,
+    PRIMARY KEY (project_id, transaction_id, backend_pid),
+    CONSTRAINT fk_repo_graph_publish_lock_token_project
+        FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
+);
+
+CREATE OR REPLACE FUNCTION repo_graph_release_publish_lock_token()
+RETURNS TRIGGER LANGUAGE plpgsql AS $$
+BEGIN
+    DELETE FROM repo_graph_publish_lock_token
+     WHERE project_id = NEW.project_id
+       AND transaction_id = NEW.transaction_id
+       AND backend_pid = NEW.backend_pid;
+    RETURN NULL;
+END;
+$$;
+
+CREATE CONSTRAINT TRIGGER repo_graph_release_publish_lock_token
+AFTER INSERT ON repo_graph_publish_lock_token
+DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW EXECUTE FUNCTION repo_graph_release_publish_lock_token();
+
+CREATE OR REPLACE FUNCTION repo_graph_acquire_publish_lock(
+    p_project_id VARCHAR,
+    p_reserved_generation UUID DEFAULT NULL
+) RETURNS VOID LANGUAGE plpgsql AS $$
+DECLARE
+    v_transaction_id BIGINT := txid_current();
+    v_existing UUID;
+BEGIN
+    PERFORM pg_advisory_xact_lock(hashtextextended(p_project_id, 0));
+    SELECT reserved_generation INTO v_existing
+      FROM repo_graph_publish_lock_token
+     WHERE project_id = p_project_id
+       AND transaction_id = v_transaction_id
+       AND backend_pid = pg_backend_pid()
+     FOR UPDATE;
+    IF FOUND THEN
+        IF p_reserved_generation IS NOT NULL
+           AND v_existing IS DISTINCT FROM p_reserved_generation THEN
+            RAISE EXCEPTION 'repo graph generation marker does not match publication generation';
+        END IF;
+    ELSE
+        INSERT INTO repo_graph_publish_lock_token
+            (project_id, transaction_id, backend_pid, reserved_generation)
+        VALUES (p_project_id, v_transaction_id, pg_backend_pid(), p_reserved_generation);
+    END IF;
+END;
+$$;
+
+-- A reservation records its UUID in the transaction-owned token instead of a
+-- caller-settable custom GUC.
 CREATE OR REPLACE FUNCTION repo_graph_reserve_generation(
     p_project_id VARCHAR,
     p_generation_id UUID
@@ -98,14 +153,11 @@ BEGIN
     IF (get_byte(uuid_send(p_generation_id), 6) >> 4) <> 7 THEN
         RAISE EXCEPTION 'repo graph generation marker must be UUIDv7';
     END IF;
-    PERFORM pg_advisory_xact_lock(hashtextextended(p_project_id, 0));
-    PERFORM set_config('djinn.repo_graph_publish_lock_project', p_project_id, true);
+    PERFORM repo_graph_acquire_publish_lock(p_project_id, p_generation_id);
     IF EXISTS (SELECT 1 FROM repo_graph_cache WHERE generation_id = p_generation_id)
        OR EXISTS (SELECT 1 FROM repo_graph_generation WHERE generation_id = p_generation_id) THEN
         RAISE EXCEPTION 'repo graph generation marker already exists';
     END IF;
-    PERFORM set_config('djinn.repo_graph_reserved_project', p_project_id, true);
-    PERFORM set_config('djinn.repo_graph_reserved_generation', p_generation_id::text, true);
 END;
 $$;
 
@@ -116,25 +168,17 @@ BEGIN
 END;
 $$;
 
--- `pg_locks` is the authoritative backend lock table.  Do not use the
--- user-settable marker GUC as lock evidence: a direct UPDATE must already
--- hold this exact transaction-scoped advisory key.
+-- Do not use pg_locks or a custom GUC as lock evidence: the former conflates
+-- session and transaction locks while the latter is caller-settable.
 CREATE OR REPLACE FUNCTION repo_graph_assert_publish_lock(p_project_id VARCHAR)
 RETURNS VOID LANGUAGE plpgsql AS $$
-DECLARE
-    v_lock_key BIGINT := hashtextextended(p_project_id, 0);
 BEGIN
     IF NOT EXISTS (
         SELECT 1
-          FROM pg_locks
-         WHERE locktype = 'advisory'
-           AND pid = pg_backend_pid()
-           AND granted
-           -- pg_advisory_xact_lock(bigint) exposes its 64-bit key as these
-           -- two unsigned 32-bit fields with objsubid = 1.
-           AND classid = (((v_lock_key >> 32) & 4294967295)::oid)
-           AND objid = ((v_lock_key & 4294967295)::oid)
-           AND objsubid = 1
+          FROM repo_graph_publish_lock_token
+         WHERE project_id = p_project_id
+           AND transaction_id = txid_current()
+           AND backend_pid = pg_backend_pid()
     ) THEN
         RAISE EXCEPTION 'repo graph cache UPDATE requires its project publication lock';
     END IF;
@@ -163,29 +207,28 @@ $$;
 CREATE OR REPLACE FUNCTION repo_graph_cache_publish_before()
 RETURNS TRIGGER LANGUAGE plpgsql AS $$
 DECLARE
-    v_reserved_project TEXT;
-    v_reserved_generation TEXT;
+    v_reserved_generation UUID;
     v_marked BOOLEAN;
 BEGIN
     IF TG_OP = 'INSERT' THEN
-        -- This is intentionally before conflict resolution.  An INSERT which
+        -- This is intentionally before conflict resolution. An INSERT which
         -- lands in DO UPDATE has already acquired the transaction lock.
-        PERFORM pg_advisory_xact_lock(hashtextextended(NEW.project_id, 0));
-        PERFORM set_config('djinn.repo_graph_publish_lock_project', NEW.project_id, true);
+        PERFORM repo_graph_acquire_publish_lock(NEW.project_id);
     ELSE
         PERFORM repo_graph_assert_publish_lock(NEW.project_id);
     END IF;
 
-    v_reserved_project := current_setting('djinn.repo_graph_reserved_project', true);
-    v_reserved_generation := current_setting('djinn.repo_graph_reserved_generation', true);
-    IF v_reserved_project = NEW.project_id
-       AND v_reserved_generation IS NOT NULL
-       AND NEW.generation_id::text IS DISTINCT FROM v_reserved_generation THEN
+    SELECT reserved_generation INTO v_reserved_generation
+      FROM repo_graph_publish_lock_token
+     WHERE project_id = NEW.project_id
+       AND transaction_id = txid_current()
+       AND backend_pid = pg_backend_pid();
+    IF v_reserved_generation IS NOT NULL
+       AND NEW.generation_id IS DISTINCT FROM v_reserved_generation THEN
         RAISE EXCEPTION 'repo graph generation marker does not match publication generation';
     END IF;
-    v_marked := v_reserved_project = NEW.project_id
-                AND v_reserved_generation IS NOT NULL
-                AND NEW.generation_id::text = v_reserved_generation;
+    v_marked := v_reserved_generation IS NOT NULL
+                AND NEW.generation_id = v_reserved_generation;
 
     IF v_marked THEN
         IF (get_byte(uuid_send(NEW.generation_id), 6) >> 4) <> 7 THEN
@@ -211,11 +254,12 @@ RETURNS TRIGGER LANGUAGE plpgsql AS $$
 DECLARE
     v_marked BOOLEAN;
 BEGIN
-    v_marked := COALESCE(
-        current_setting('djinn.repo_graph_reserved_project', true) = NEW.project_id
-        AND current_setting('djinn.repo_graph_reserved_generation', true) = NEW.generation_id::text,
-        FALSE
-    );
+    SELECT reserved_generation = NEW.generation_id INTO v_marked
+      FROM repo_graph_publish_lock_token
+     WHERE project_id = NEW.project_id
+       AND transaction_id = txid_current()
+       AND backend_pid = pg_backend_pid();
+    v_marked := COALESCE(v_marked, FALSE);
     INSERT INTO repo_graph_generation
         (generation_id, project_id, commit_sha, graph_blob, built_at, artifact_required)
     VALUES (NEW.generation_id, NEW.project_id, NEW.commit_sha, NEW.graph_blob, NEW.built_at, v_marked);
