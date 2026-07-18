@@ -68,13 +68,21 @@ pub fn evaluate_handoff(
         && emergency_enforcing
         && emergency_readiness.is_healthy();
     let (state, emergency, row) = match row {
-        Err(()) => (HandoffState::EpochUnreadable, EmergencyAuthorityDecision::RequiredFailClosed, None),
+        Err(()) => (
+            HandoffState::EpochUnreadable,
+            EmergencyAuthorityDecision::RequiredFailClosed,
+            None,
+        ),
         Ok(None) if emergency_enforcing && invocation.enforcing => (
             HandoffState::UnexpectedOverlap,
             EmergencyAuthorityDecision::ConfiguredStandalone,
             None,
         ),
-        Ok(None) => (HandoffState::MissingRow, EmergencyAuthorityDecision::ConfiguredStandalone, None),
+        Ok(None) => (
+            HandoffState::MissingRow,
+            EmergencyAuthorityDecision::ConfiguredStandalone,
+            None,
+        ),
         Ok(Some(row)) => {
             let emergency_current = row.emergency_ack_epoch == Some(row.epoch);
             let invocation_current = row.invocation_ack_epoch == Some(row.epoch);
@@ -86,18 +94,47 @@ pub fn evaluate_handoff(
                 AdmissionHandoffPhase::InvocationPrimary => invocation_current,
             };
             if !complete {
-                (HandoffState::IncompleteEpoch, EmergencyAuthorityDecision::RequiredFailClosed, Some(row))
+                (
+                    HandoffState::IncompleteEpoch,
+                    EmergencyAuthorityDecision::RequiredFailClosed,
+                    Some(row),
+                )
             } else {
                 match row.phase {
-                    AdmissionHandoffPhase::EmergencyPrimary => (HandoffState::EmergencyPrimary, EmergencyAuthorityDecision::RequiredFailClosed, Some(row)),
-                    AdmissionHandoffPhase::ForwardOverlap => (HandoffState::ForwardOverlap, EmergencyAuthorityDecision::RequiredFailClosed, Some(row)),
-                    AdmissionHandoffPhase::InvocationPrimary => (HandoffState::InvocationPrimary, EmergencyAuthorityDecision::MayDisable, Some(row)),
-                    AdmissionHandoffPhase::RollbackOverlap => (HandoffState::RollbackOverlap, EmergencyAuthorityDecision::RequiredFailClosed, Some(row)),
+                    AdmissionHandoffPhase::EmergencyPrimary => (
+                        HandoffState::EmergencyPrimary,
+                        EmergencyAuthorityDecision::RequiredFailClosed,
+                        Some(row),
+                    ),
+                    AdmissionHandoffPhase::ForwardOverlap => (
+                        HandoffState::ForwardOverlap,
+                        EmergencyAuthorityDecision::RequiredFailClosed,
+                        Some(row),
+                    ),
+                    AdmissionHandoffPhase::InvocationPrimary => (
+                        HandoffState::InvocationPrimary,
+                        EmergencyAuthorityDecision::MayDisable,
+                        Some(row),
+                    ),
+                    AdmissionHandoffPhase::RollbackOverlap => (
+                        HandoffState::RollbackOverlap,
+                        EmergencyAuthorityDecision::RequiredFailClosed,
+                        Some(row),
+                    ),
                 }
             }
         }
     };
-    HandoffSnapshot { state, emergency, row, emergency_acknowledgement_allowed: ack_allowed }
+    HandoffSnapshot {
+        state,
+        emergency,
+        emergency_acknowledgement_allowed: ack_allowed
+            && emergency == EmergencyAuthorityDecision::RequiredFailClosed
+            && row
+                .as_ref()
+                .is_some_and(|row| row.emergency_ack_epoch != Some(row.epoch)),
+        row,
+    }
 }
 
 #[cfg(test)]
@@ -105,19 +142,55 @@ mod tests {
     use super::*;
 
     fn row(phase: AdmissionHandoffPhase, emergency: bool, invocation: bool) -> AdmissionHandoffRow {
-        AdmissionHandoffRow { phase, epoch: 7, emergency_ack_epoch: emergency.then_some(7), invocation_ack_epoch: invocation.then_some(7), updated_at: "now".into() }
+        AdmissionHandoffRow {
+            phase,
+            epoch: 7,
+            emergency_ack_epoch: emergency.then_some(7),
+            invocation_ack_epoch: invocation.then_some(7),
+            updated_at: "now".into(),
+        }
     }
 
     #[test]
     fn every_persisted_phase_has_a_deterministic_emergency_decision() {
         let cases = [
-            (AdmissionHandoffPhase::EmergencyPrimary, true, false, HandoffState::EmergencyPrimary, EmergencyAuthorityDecision::RequiredFailClosed),
-            (AdmissionHandoffPhase::ForwardOverlap, true, true, HandoffState::ForwardOverlap, EmergencyAuthorityDecision::RequiredFailClosed),
-            (AdmissionHandoffPhase::InvocationPrimary, false, true, HandoffState::InvocationPrimary, EmergencyAuthorityDecision::MayDisable),
-            (AdmissionHandoffPhase::RollbackOverlap, true, true, HandoffState::RollbackOverlap, EmergencyAuthorityDecision::RequiredFailClosed),
+            (
+                AdmissionHandoffPhase::EmergencyPrimary,
+                true,
+                false,
+                HandoffState::EmergencyPrimary,
+                EmergencyAuthorityDecision::RequiredFailClosed,
+            ),
+            (
+                AdmissionHandoffPhase::ForwardOverlap,
+                true,
+                true,
+                HandoffState::ForwardOverlap,
+                EmergencyAuthorityDecision::RequiredFailClosed,
+            ),
+            (
+                AdmissionHandoffPhase::InvocationPrimary,
+                false,
+                true,
+                HandoffState::InvocationPrimary,
+                EmergencyAuthorityDecision::MayDisable,
+            ),
+            (
+                AdmissionHandoffPhase::RollbackOverlap,
+                true,
+                true,
+                HandoffState::RollbackOverlap,
+                EmergencyAuthorityDecision::RequiredFailClosed,
+            ),
         ];
         for (phase, emergency_ack, invocation_ack, state, decision) in cases {
-            let snapshot = evaluate_handoff(Ok(Some(row(phase, emergency_ack, invocation_ack))), BuildAdmissionMode::Enforce, true, BuildAdmissionReadiness::Healthy, InvocationAuthorityObservation::default());
+            let snapshot = evaluate_handoff(
+                Ok(Some(row(phase, emergency_ack, invocation_ack))),
+                BuildAdmissionMode::Enforce,
+                true,
+                BuildAdmissionReadiness::Healthy,
+                InvocationAuthorityObservation::default(),
+            );
             assert_eq!(snapshot.state, state);
             assert_eq!(snapshot.emergency, decision);
         }
@@ -127,27 +200,76 @@ mod tests {
     fn failures_incomplete_epochs_and_restart_before_commit_stay_closed() {
         for input in [
             Err(()),
-            Ok(Some(row(AdmissionHandoffPhase::ForwardOverlap, true, false))),
-            Ok(Some(row(AdmissionHandoffPhase::InvocationPrimary, false, false))),
+            Ok(Some(row(
+                AdmissionHandoffPhase::ForwardOverlap,
+                true,
+                false,
+            ))),
+            Ok(Some(row(
+                AdmissionHandoffPhase::InvocationPrimary,
+                false,
+                false,
+            ))),
         ] {
-            assert_eq!(evaluate_handoff(input, BuildAdmissionMode::Enforce, true, BuildAdmissionReadiness::Healthy, InvocationAuthorityObservation::default()).emergency, EmergencyAuthorityDecision::RequiredFailClosed);
+            assert_eq!(
+                evaluate_handoff(
+                    input,
+                    BuildAdmissionMode::Enforce,
+                    true,
+                    BuildAdmissionReadiness::Healthy,
+                    InvocationAuthorityObservation::default()
+                )
+                .emergency,
+                EmergencyAuthorityDecision::RequiredFailClosed
+            );
         }
     }
 
     #[test]
     fn missing_row_preserves_mode_but_simultaneous_authorities_are_anomalous() {
-        let standalone = evaluate_handoff(Ok(None), BuildAdmissionMode::Observe, false, BuildAdmissionReadiness::Healthy, InvocationAuthorityObservation::default());
+        let standalone = evaluate_handoff(
+            Ok(None),
+            BuildAdmissionMode::Observe,
+            false,
+            BuildAdmissionReadiness::Healthy,
+            InvocationAuthorityObservation::default(),
+        );
         assert_eq!(standalone.state, HandoffState::MissingRow);
-        assert_eq!(standalone.emergency, EmergencyAuthorityDecision::ConfiguredStandalone);
-        let anomaly = evaluate_handoff(Ok(None), BuildAdmissionMode::Enforce, true, BuildAdmissionReadiness::Healthy, InvocationAuthorityObservation { enforcing: true });
+        assert_eq!(
+            standalone.emergency,
+            EmergencyAuthorityDecision::ConfiguredStandalone
+        );
+        let anomaly = evaluate_handoff(
+            Ok(None),
+            BuildAdmissionMode::Enforce,
+            true,
+            BuildAdmissionReadiness::Healthy,
+            InvocationAuthorityObservation { enforcing: true },
+        );
         assert_eq!(anomaly.state, HandoffState::UnexpectedOverlap);
     }
 
     #[test]
     fn acknowledgement_requires_actual_healthy_enforcement() {
-        for readiness in [BuildAdmissionReadiness::JournalRecoveryIncomplete, BuildAdmissionReadiness::Healthy] {
-            let snapshot = evaluate_handoff(Ok(Some(row(AdmissionHandoffPhase::EmergencyPrimary, false, false))), BuildAdmissionMode::Enforce, readiness.is_healthy(), readiness, InvocationAuthorityObservation::default());
-            assert_eq!(snapshot.emergency_acknowledgement_allowed, readiness.is_healthy());
+        for readiness in [
+            BuildAdmissionReadiness::JournalRecoveryIncomplete,
+            BuildAdmissionReadiness::Healthy,
+        ] {
+            let snapshot = evaluate_handoff(
+                Ok(Some(row(
+                    AdmissionHandoffPhase::EmergencyPrimary,
+                    false,
+                    false,
+                ))),
+                BuildAdmissionMode::Enforce,
+                readiness.is_healthy(),
+                readiness,
+                InvocationAuthorityObservation::default(),
+            );
+            assert_eq!(
+                snapshot.emergency_acknowledgement_allowed,
+                readiness.is_healthy()
+            );
         }
     }
 }

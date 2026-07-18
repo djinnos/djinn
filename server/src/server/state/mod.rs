@@ -13,7 +13,7 @@ use tokio_util::sync::CancellationToken;
 use crate::db::runtime::{DatabaseRuntimeHealth, DatabaseRuntimeManager};
 use crate::events::DjinnEventEnvelope;
 use djinn_agent::actors::coordinator::build_admission_handoff::{
-    InvocationAuthorityObservation, evaluate_handoff,
+    EmergencyAuthorityDecision, InvocationAuthorityObservation, evaluate_handoff,
 };
 use djinn_agent::actors::coordinator::{
     BuildAdmissionController, BuildAdmissionMode, CoordinatorHandle,
@@ -25,9 +25,9 @@ use djinn_agent::roles::RoleRegistry;
 use djinn_agent::runtime_bridge::{K8sTokenReviewValidator, RuntimeKind, runtime_kind};
 use djinn_core::clock::{Clock, SystemClock as SystemClockTrait};
 use djinn_db::{
-    AdmissionHandoffRepository, Database, NoopNoteVectorStore, NoteVectorStore, ProjectRepository,
-    QdrantCodeChunkConfig, QdrantCodeChunkVectorStore, QdrantConfig, QdrantNoteVectorStore,
-    SettingsRepository,
+    AdmissionHandoffAuthority, AdmissionHandoffRepository, Database, NoopNoteVectorStore,
+    NoteVectorStore, ProjectRepository, QdrantCodeChunkConfig, QdrantCodeChunkVectorStore,
+    QdrantConfig, QdrantNoteVectorStore, SettingsRepository,
 };
 use djinn_git::{GitActorHandle, GitError};
 use djinn_image_controller::{
@@ -492,23 +492,24 @@ impl AppState {
             std::env::var("HOSTNAME").unwrap_or_else(|_| "coordinator".to_owned()),
             djinn_agent::actors::coordinator::allocate_server_epoch()
         );
-        let build_admission = match admission_config.mode {
-            BuildAdmissionMode::Off => None,
-            BuildAdmissionMode::Observe => Some(Arc::new(BuildAdmissionController::new(
+        // Retain an Off controller until the durable handoff row has been read.
+        // A row requiring v0 promotes it before recovery; a missing row keeps
+        // the configured standalone mode.
+        let build_admission = Some(match admission_config.mode {
+            BuildAdmissionMode::Off | BuildAdmissionMode::Observe => {
+                Arc::new(BuildAdmissionController::new(
+                    Arc::new(djinn_db::AdmissionJournalRepository::new(db.clone())),
+                    admission_config.mode,
+                    admission_config.cap,
+                    server_epoch,
+                ))
+            }
+            BuildAdmissionMode::Enforce => Arc::new(BuildAdmissionController::new_closed(
                 Arc::new(djinn_db::AdmissionJournalRepository::new(db.clone())),
-                BuildAdmissionMode::Observe,
                 admission_config.cap,
                 server_epoch,
-            ))),
-            // Enforce starts fail-closed (JournalRecoveryIncomplete) until the
-            // durable journal is recovered and seeded before any inventory or
-            // task/warm create can run.
-            BuildAdmissionMode::Enforce => Some(Arc::new(BuildAdmissionController::new_closed(
-                Arc::new(djinn_db::AdmissionJournalRepository::new(db.clone())),
-                admission_config.cap,
-                server_epoch,
-            ))),
-        };
+            )),
+        });
         Self {
             inner: Arc::new(Inner {
                 db,
@@ -759,8 +760,13 @@ impl AppState {
             admission.readiness(),
             InvocationAuthorityObservation::default(),
         );
-        tracing::info!(state = ?snapshot.state, emergency = ?snapshot.emergency,
-            "build admission handoff evaluated before emergency recovery");
+        match snapshot.emergency {
+            EmergencyAuthorityDecision::RequiredFailClosed => admission.require_enforcement(),
+            EmergencyAuthorityDecision::MayDisable => admission.disable(),
+            EmergencyAuthorityDecision::ConfiguredStandalone => {}
+        }
+        tracing::info!(state = ?snapshot.state, emergency = ?snapshot.emergency, mode = ?admission.mode(),
+            "build admission handoff applied before emergency recovery");
     }
 
     /// Recover the durable build-admission journal and seed the controller
@@ -851,7 +857,57 @@ impl AppState {
         }
     }
 
-    /// Confirm the single-active topology gate and advance Enforce readiness.
+    /// Re-read the durable row after topology has made the emergency controller
+    /// healthy Enforce, then acknowledge its exact emergency epoch.
+    async fn finalize_build_admission_handoff(&self, admission: &BuildAdmissionController) {
+        let snapshot = evaluate_handoff(
+            AdmissionHandoffRepository::new(self.db().clone())
+                .read()
+                .await
+                .map_err(|_| ()),
+            admission.mode(),
+            admission.mode() == BuildAdmissionMode::Enforce,
+            admission.readiness(),
+            InvocationAuthorityObservation::default(),
+        );
+        match snapshot.emergency {
+            EmergencyAuthorityDecision::MayDisable => {
+                admission.disable();
+                tracing::info!(state = ?snapshot.state, "build admission handoff committed; emergency disabled");
+                return;
+            }
+            EmergencyAuthorityDecision::RequiredFailClosed
+                if admission.mode() != BuildAdmissionMode::Enforce =>
+            {
+                // The durable row changed while this process was completing its
+                // startup gates. Re-close and require a fresh healthy pass.
+                admission.require_enforcement();
+                return;
+            }
+            EmergencyAuthorityDecision::RequiredFailClosed
+            | EmergencyAuthorityDecision::ConfiguredStandalone => {}
+        }
+        if snapshot.emergency_acknowledgement_allowed {
+            if let Some(row) = snapshot
+                .row
+                .filter(|row| row.emergency_ack_epoch != Some(row.epoch))
+            {
+                match AdmissionHandoffRepository::new(self.db().clone())
+                    .acknowledge(AdmissionHandoffAuthority::Emergency, row.epoch)
+                    .await
+                {
+                    Ok(_) => tracing::info!(
+                        epoch = row.epoch,
+                        "build admission emergency handoff acknowledged"
+                    ),
+                    Err(error) => {
+                        tracing::error!(%error, epoch = row.epoch, "build admission handoff acknowledgement failed; emergency remains enforced")
+                    }
+                }
+            }
+        }
+    }
+
     ///
     /// Called from [`Self::become_leader`], which runs only after this process
     /// wins the coordinator advisory lock — the lock IS the single-active
@@ -860,6 +916,7 @@ impl AppState {
     async fn confirm_build_admission_topology(&self) {
         if let Some(admission) = self.inner.build_admission.clone() {
             admission.mark_topology_ready();
+            self.finalize_build_admission_handoff(&admission).await;
             admission.publish_metrics().await;
             tracing::info!(
                 mode = ?admission.mode(),
@@ -3484,17 +3541,37 @@ mod build_admission_config_tests {
     }
 
     #[tokio::test]
-    async fn off_state_composition_has_no_admission_dependency_to_inject() {
+    async fn off_state_composition_retains_a_standby_handoff_controller() {
         let state = state_for_admission_config(BuildAdmissionConfig {
             mode: BuildAdmissionMode::Off,
             cap: 3,
         });
 
-        // This is the actual AppState composition root used by both the
-        // coordinator and K8s graph-warmer injection branches. No controller
-        // means no journal repository or warm-admission object exists to pass
-        // to either `.with_build_admission` or `.with_warm_admission`.
-        assert!(state.inner.build_admission.is_none());
+        // Startup must read a durable handoff row even when standalone v0 is
+        // configured Off, so composition retains an Off controller that can be
+        // promoted before recovery.
+        assert_eq!(
+            state
+                .inner
+                .build_admission
+                .as_ref()
+                .expect("handoff controller")
+                .mode(),
+            BuildAdmissionMode::Off
+        );
+
+        // The in-memory fixture has no handoff table, so its read is
+        // deliberately unreadable. Startup must promote the configured-Off
+        // controller before recovery rather than silently remain disabled.
+        state.initialize_build_admission_handoff().await;
+        let admission = state
+            .inner
+            .build_admission
+            .as_ref()
+            .expect("handoff controller");
+        assert_eq!(admission.mode(), BuildAdmissionMode::Enforce);
+        assert!(!admission.is_ready());
+
         assert!(
             state
                 .inner
@@ -3541,7 +3618,15 @@ mod build_admission_config_tests {
         }
         assert!(running.inner.build_admission.is_some());
         let restarted = state_for_admission_config(BuildAdmissionConfig::from_env().unwrap());
-        assert!(restarted.inner.build_admission.is_none());
+        assert_eq!(
+            restarted
+                .inner
+                .build_admission
+                .as_ref()
+                .expect("Off retains handoff reader")
+                .mode(),
+            BuildAdmissionMode::Off
+        );
 
         // SAFETY: restore the inherited process environment before releasing
         // the serialization lock.
