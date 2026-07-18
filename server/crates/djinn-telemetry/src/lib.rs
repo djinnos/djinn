@@ -74,6 +74,12 @@ const JEMALLOC_ALLOCATED_BYTES: &str = "djinn_jemalloc_allocated_bytes";
 const JEMALLOC_RESIDENT_BYTES: &str = "djinn_jemalloc_resident_bytes";
 const JEMALLOC_RETAINED_BYTES: &str = "djinn_jemalloc_retained_bytes";
 const SERVER_MEMORY_SCRAPE_OUTCOME: &str = "djinn_server_memory_scrape_outcome";
+const CANONICAL_GRAPH_SLOT_PRESENT: &str = "djinn_canonical_graph_slot_present";
+const CANONICAL_GRAPH_SLOT_APPROX_SERIALIZED_BYTES: &str =
+    "djinn_canonical_graph_slot_approx_serialized_bytes";
+const CANONICAL_GRAPH_SLOT_NODE_COUNT: &str = "djinn_canonical_graph_slot_node_count";
+const CANONICAL_GRAPH_SLOT_EDGE_COUNT: &str = "djinn_canonical_graph_slot_edge_count";
+const CANONICAL_GRAPH_SLOT_INSTALLS_TOTAL: &str = "djinn_canonical_graph_slot_installs_total";
 
 // ─── Stale-PR/branch reconciliation sweep ────────────────────────────────
 const STALE_PR_REAPED_TOTAL: &str = "djinn_stale_pr_reaped_total";
@@ -729,6 +735,27 @@ fn format_build_error(error: BuildError) -> String {
 
 fn register_metrics() {
     memory_retrieval::register_metrics();
+    metrics::describe_gauge!(
+        CANONICAL_GRAPH_SLOT_PRESENT,
+        "Whether the process-global canonical graph slot is populated: 1 populated, 0 empty."
+    );
+    metrics::describe_gauge!(
+        CANONICAL_GRAPH_SLOT_APPROX_SERIALIZED_BYTES,
+        "Approximate serialized bytes for the resident canonical graph; zero when unavailable or empty."
+    );
+    metrics::describe_gauge!(
+        CANONICAL_GRAPH_SLOT_NODE_COUNT,
+        "Node count for the resident canonical graph; zero when the slot is empty."
+    );
+    metrics::describe_gauge!(
+        CANONICAL_GRAPH_SLOT_EDGE_COUNT,
+        "Edge count for the resident canonical graph; zero when the slot is empty."
+    );
+    metrics::describe_counter!(
+        CANONICAL_GRAPH_SLOT_INSTALLS_TOTAL,
+        "Canonical graph slot transitions by fixed source and outcome only."
+    );
+    canonical_graph_slot::initialize_empty();
     metrics::describe_gauge!(
         PROCESS_RSS_BYTES,
         "Current process resident set size in bytes from Linux /proc status."
@@ -4889,3 +4916,59 @@ mod tests {
 }
 
 // warm-base validation: v0.6.11 incremental=0 (no-op)
+
+/// Bounded resident canonical-graph-slot gauges and transition counter.
+/// Footprint gauges have no labels because the process owns exactly one slot.
+/// A missing byte estimate and an empty slot both use zero; `slot_present`
+/// distinguishes those cases so no prior graph footprint is retained.
+pub mod canonical_graph_slot {
+    #[derive(Clone, Copy)]
+    pub enum Source {
+        Warm,
+        Reload,
+        Unknown,
+    }
+
+    impl Source {
+        fn label(self) -> &'static str {
+            match self {
+                Self::Warm => "warm",
+                Self::Reload => "reload",
+                Self::Unknown => "unknown",
+            }
+        }
+    }
+    pub const OUTCOME_INSTALLED: &str = "installed";
+    pub const OUTCOME_CLEARED: &str = "cleared";
+    pub const OUTCOME_ERROR: &str = "error";
+
+    pub fn record_install(
+        source: Source,
+        approx_serialized_bytes: Option<usize>,
+        node_count: usize,
+        edge_count: usize,
+    ) {
+        metrics::gauge!(super::CANONICAL_GRAPH_SLOT_PRESENT).set(1.0);
+        metrics::gauge!(super::CANONICAL_GRAPH_SLOT_APPROX_SERIALIZED_BYTES)
+            .set(approx_serialized_bytes.unwrap_or(0) as f64);
+        metrics::gauge!(super::CANONICAL_GRAPH_SLOT_NODE_COUNT).set(node_count as f64);
+        metrics::gauge!(super::CANONICAL_GRAPH_SLOT_EDGE_COUNT).set(edge_count as f64);
+        metrics::counter!(super::CANONICAL_GRAPH_SLOT_INSTALLS_TOTAL, "source" => source.label(), "outcome" => OUTCOME_INSTALLED).increment(1);
+    }
+
+    fn set_empty() {
+        metrics::gauge!(super::CANONICAL_GRAPH_SLOT_PRESENT).set(0.0);
+        metrics::gauge!(super::CANONICAL_GRAPH_SLOT_APPROX_SERIALIZED_BYTES).set(0.0);
+        metrics::gauge!(super::CANONICAL_GRAPH_SLOT_NODE_COUNT).set(0.0);
+        metrics::gauge!(super::CANONICAL_GRAPH_SLOT_EDGE_COUNT).set(0.0);
+    }
+
+    pub fn initialize_empty() {
+        set_empty();
+    }
+
+    pub fn record_cleared() {
+        set_empty();
+        metrics::counter!(super::CANONICAL_GRAPH_SLOT_INSTALLS_TOTAL, "source" => Source::Unknown.label(), "outcome" => OUTCOME_CLEARED).increment(1);
+    }
+}
