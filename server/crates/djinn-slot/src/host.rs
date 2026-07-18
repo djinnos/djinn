@@ -30,13 +30,13 @@ use crate::final_verification::{
     FinalVerificationConsultationFailure, FinalVerificationInvocationLease,
     FinalVerificationResolvedMaterial,
 };
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 use crate::final_verification::{
     FinalVerificationCoordinatorRequest, FinalVerificationRecordingOutcome,
 };
 use crate::helpers::ProviderCredential;
 use crate::reply_loop::compaction_guard::CompactionCriticalSection;
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 use djinn_sandbox::final_verification_execution::FinalVerificationExecutionEvidence;
 
 type FinalVerificationLeaseFuture<'a> = Pin<
@@ -90,7 +90,7 @@ pub trait SlotHostCallbacks: Send + Sync + 'static {
     }
     /// Deterministic coordinator boundary used only by reply-loop unit tests.
     /// Production builds always execute `coordinate_final_verification` in full.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     fn final_verification_outcome_for_test(
         &self,
         _request: &FinalVerificationCoordinatorRequest,
@@ -100,7 +100,7 @@ pub trait SlotHostCallbacks: Send + Sync + 'static {
     /// Deterministic executor seam for coordinator/persistence integration tests.
     /// Unlike `final_verification_outcome_for_test`, this still exercises
     /// resolution, leasing, evidence validation, and the durable writer.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     fn final_verification_evidence_for_test(
         &self,
         _request: &FinalVerificationCoordinatorRequest,

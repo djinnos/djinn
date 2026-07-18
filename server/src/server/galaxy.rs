@@ -113,8 +113,10 @@ fn identity_headers(
 ) -> Result<HeaderMap, ()> {
     let artifact_version = metadata.artifact_version.to_string();
     let values = [
-        (header::CONTENT_TYPE, "application/json"),
-        (header::CONTENT_ENCODING, "gzip"),
+        // Do not use HTTP Content-Encoding here: Fetch transparently decodes
+        // it, leaving browser code unable to verify the compressed ETag. This
+        // is an explicit gzip artifact whose raw bytes are hashable by clients.
+        (header::CONTENT_TYPE, "application/gzip"),
         (header::ETAG, etag),
         (
             HeaderName::from_static(HEADER_PROJECT_ID),
@@ -293,7 +295,8 @@ mod tests {
         assert_eq!(headers[header::ETAG], etag);
         assert_eq!(headers[HEADER_PROJECT_ID], "project-id");
         assert_eq!(headers[HEADER_ARTIFACT_VERSION], "1");
-        assert_eq!(headers[header::CONTENT_ENCODING], "gzip");
+        assert_eq!(headers[header::CONTENT_TYPE], "application/gzip");
+        assert!(headers.get(header::CONTENT_ENCODING).is_none());
     }
 
     #[test]

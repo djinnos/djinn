@@ -66,8 +66,9 @@ pub struct ParsedAgentOutput {
     pub completion_intent: Option<CompletionIntent>,
     /// Text-only handoff captured after a budget-triggered wind-down directive.
     /// This is intentionally separate from normal assistant text so settlement
-    /// can park the run and persist an extractor-compatible `work_submitted`
-    /// activity without treating every text-only stop as a budget park.
+    /// can park the run and persist a `work_parked` handoff activity without
+    /// treating every text-only stop as a budget park. It is not a successful
+    /// submission and never advances a worker attempt.
     pub budget_wind_down_summary: Option<String>,
     /// Structured details describing why the budget wind-down was triggered.
     /// Paired with `budget_wind_down_summary` so the handoff activity can record

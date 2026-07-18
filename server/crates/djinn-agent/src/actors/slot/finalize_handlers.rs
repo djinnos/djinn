@@ -73,6 +73,21 @@ mod tests {
             let project = test_helpers::create_test_project(&db).await;
             let epic = test_helpers::create_test_epic(&db, &project.id).await;
             let task = test_helpers::create_test_task(&db, &project.id, &epic.id).await;
+            // Create a task run so the C2 validation boundary can resolve an
+            // active task_run_id. Without this, validate_or_reverify_completion_intent
+            // errors before reaching the test-injected final_verification_outcome.
+            djinn_db::repositories::task_run::TaskRunRepository::new(db.clone())
+                .create(djinn_db::repositories::task_run::CreateTaskRunParams {
+                    id: &uuid::Uuid::now_v7().to_string(),
+                    project_id: &project.id,
+                    task_id: &task.id,
+                    trigger_type: djinn_core::models::TaskRunTrigger::NewTask.as_str(),
+                    status: None,
+                    workspace_path: None,
+                    mirror_ref: None,
+                })
+                .await
+                .expect("create task run in FinalizeFixtures");
             Self { db, ctx, task }
         }
         fn repo(&self) -> TaskRepository {
@@ -123,7 +138,7 @@ mod tests {
         assert_eq!(parsed[0]["met"], false);
     }
     #[tokio::test]
-    async fn budget_park_logs_extractor_compatible_work_submitted() {
+    async fn budget_park_logs_handoff_without_successful_submission() {
         let f = FinalizeFixtures::new().await;
         handle_budget_park(
             "completed A; B remains",
@@ -133,9 +148,10 @@ mod tests {
         )
         .await;
         let entries = f.repo().list_activity(&f.task.id).await.unwrap();
+        assert!(entries.iter().all(|e| e.event_type != "work_submitted"));
         let work_entries: Vec<_> = entries
             .iter()
-            .filter(|e| e.event_type == "work_submitted")
+            .filter(|e| e.event_type == "work_parked")
             .collect();
         assert_eq!(work_entries.len(), 1);
         let body: serde_json::Value = serde_json::from_str(&work_entries[0].payload).unwrap();
@@ -150,7 +166,7 @@ mod tests {
         let f = FinalizeFixtures::new().await;
         handle_budget_park("   ", "ignored", &f.task.id, &f.ctx).await;
         let entries = f.repo().list_activity(&f.task.id).await.unwrap();
-        assert!(entries.iter().all(|e| e.event_type != "work_submitted"));
+        assert!(entries.iter().all(|e| e.event_type != "work_parked"));
     }
     #[tokio::test]
     async fn submit_work_logs_activity_with_summary_and_files() {

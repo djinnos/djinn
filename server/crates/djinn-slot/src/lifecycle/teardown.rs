@@ -140,24 +140,9 @@ pub(crate) async fn settle_no_progress_submission(task_id: &str, ctx: &SlotConte
             "teardown: failed to log no_progress_submission activity"
         );
     }
-    // Attempt lifecycle: advance the matching pending attempt to `submitted`
-    // for the no-progress settlement. Best-effort.
-    crate::attempt_lifecycle::advance_to_submitted(
-        ctx,
-        crate::attempt_lifecycle::SubmitAdvancementParams {
-            task_id,
-            role: "worker",
-            submit_ref: None,
-            checkpoint_ref: None,
-            mirror_head_sha: None,
-            github_head_sha: None,
-            summary: Some(
-                "no_progress_submission: second consecutive identical rejected-fingerprint submit_work",
-            ),
-            summary_json: None,
-        },
-    )
-    .await;
+    // This is a rejected/no-progress result, not a successful submission.
+    // Do not advance the worker attempt to `submitted`: that transition is
+    // reserved for the C2-validated `handle_submit_work` boundary.
     // Increment the task-level no_progress_streak by recording a new rejected
     // integrity entry with the same fingerprint. This uses the latest rejected
     // fingerprint already on file.
@@ -266,8 +251,8 @@ pub(crate) async fn settle_auto_submit_if_eligible(
         emit_auto_submit_fallback_hook(task_id, ctx, "final_verification_failed");
         return AutoSubmitSettlementOutcome::Failed;
     }
-    let payload = auto_submit_payload(task_id, settlement);
-    if process_auto_submit_payload(&payload, task_id, ctx).await {
+    intent.finalize_payload = auto_submit_payload(task_id, settlement);
+    if process_auto_submit_payload(&intent, task_id, ctx).await {
         AutoSubmitSettlementOutcome::Submitted
     } else {
         emit_auto_submit_fallback_hook(task_id, ctx, "submit_failed");
@@ -965,6 +950,57 @@ mod tests {
             "empty fingerprint must not produce a rejected integrity record"
         );
     }
+    #[tokio::test]
+    async fn stale_reviewer_evidence_with_failed_reverification_has_no_review_side_effect() {
+        let callbacks = Arc::new(NonStoredOutcomeCallbacks(
+            FinalVerificationRecordingOutcome::Error {
+                verification_attempt_id: "c2-failed".into(),
+                detail: "canonical verification failed after C2 mismatch".into(),
+            },
+        ));
+        let (db, ctx, task, _run_id, _events) = fixture_with_callbacks(callbacks).await;
+        let intent = CompletionIntent {
+            finalize_payload: serde_json::json!({
+                "task_id": task.id,
+                "verdict": "approved",
+                "acceptance_criteria": [],
+                "feedback": null
+            }),
+            tool_use_id: "review-c1".into(),
+            // Deliberately legacy/stale values force the C2 path to discard
+            // this candidate before the injected canonical failure is returned.
+            final_verification_evidence: Some(
+                crate::final_verification::FinalVerificationSuccessEvidence {
+                    persisted_run_id: "stale-run".into(),
+                    completed_at: "2025-01-01T00:00:00Z".into(),
+                    ordered_commands: serde_json::json!([]),
+                    covered_checks: serde_json::json!([]),
+                    required_checks: vec![],
+                    verification_input_fingerprint: "legacy-diff-fingerprint".into(),
+                    manifest_version: "legacy-manifest".into(),
+                    environment_identity_digest: String::new(),
+                },
+            ),
+        };
+        let ok = crate::finalize_handlers::process_completion_intent_with_outcome(
+            &intent,
+            "submit_review",
+            &task.id,
+            &ctx,
+        )
+        .await;
+        assert!(!ok);
+        let entries = djinn_db::TaskRepository::new(db, ctx.event_bus.clone())
+            .list_activity(&task.id)
+            .await
+            .unwrap();
+        assert!(
+            entries
+                .iter()
+                .all(|entry| entry.event_type != "review_submitted")
+        );
+    }
+
     /// The `settle_no_progress_submission` function records a
     /// `no_progress_submission` activity, increments the no_progress_streak
     /// on the rejected integrity entry, and emits a telemetry event.

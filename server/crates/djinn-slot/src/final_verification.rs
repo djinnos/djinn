@@ -161,6 +161,66 @@ pub(crate) async fn verify_completion_intent(
     }
 }
 
+/// Recompute C2 immediately before final consumption. C0/C1 protect command
+/// suppression; this closes the interval before a submission is persisted.
+pub(crate) async fn validate_or_reverify_completion_intent(
+    intent: &mut CompletionIntent,
+    task_id: &str,
+    task_run_id: Option<&str>,
+    cancellation: CancellationToken,
+    slot_ctx: &SlotContext,
+    submit_tool_label: &str,
+) -> Result<FinalVerificationSuccessEvidence, String> {
+    let task_run_id = match task_run_id {
+        Some(id) => id.to_owned(),
+        None => djinn_db::repositories::task_run::TaskRunRepository::new(slot_ctx.db.clone())
+            .list_for_task(task_id)
+            .await
+            .map_err(|e| format!("could not resolve task run: {e}"))?
+            .into_iter()
+            .find(|run| matches!(run.status.as_str(), "starting" | "running"))
+            .map(|run| run.id)
+            .ok_or_else(|| "no active task run is available for final verification".to_owned())?,
+    };
+    if let Some(candidate) = intent.final_verification_evidence.clone() {
+        let current = async {
+            let material = slot_ctx
+                .callbacks
+                .resolve_final_verification(
+                    task_id,
+                    &task_run_id,
+                    "completion-c2",
+                    "completion-c2",
+                    slot_ctx,
+                )
+                .await?;
+            Ok::<_, String>((derive_current_inputs(&material).await?, material))
+        }
+        .await;
+        if let Ok((inputs, material)) = current
+            && candidate.verification_input_fingerprint == inputs.fingerprint
+            && candidate.environment_identity_digest == inputs.identity.digest
+            && candidate.manifest_version == inputs.manifest_version
+            && candidate.required_checks == material.required_checks
+            && coverage_equals_required(Some(&candidate.covered_checks), &material.required_checks)
+        {
+            return Ok(candidate);
+        }
+        // Every mismatch/error discards evidence; only the canonical path below
+        // may produce replacement evidence for the current inputs.
+        intent.final_verification_evidence = None;
+    }
+    verify_completion_intent(
+        intent,
+        task_id,
+        Some(&task_run_id),
+        cancellation,
+        slot_ctx,
+        submit_tool_label,
+    )
+    .await
+}
+
 /// Resolve, lease, execute once, and conditionally record exactly one pass.
 pub async fn coordinate_final_verification(
     request: FinalVerificationCoordinatorRequest,
@@ -181,7 +241,7 @@ pub async fn coordinate_final_verification(
     // Keep production on the complete resolve/lease/execute/persist path while
     // allowing reply-loop tests to deterministically exercise the typed
     // coordinator boundary without a sandbox or durable verify-run fixture.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     if let Some(outcome) = ctx.callbacks.final_verification_outcome_for_test(&request) {
         return emit_outcome(&request, outcome);
     }
@@ -236,9 +296,9 @@ pub async fn coordinate_final_verification(
         // The delivered executor performs every descriptor in order and returns
         // evidence rather than persistence side effects. Tests inject evidence
         // here while retaining the real resolve/lease/validate/write boundary.
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         let injected_evidence = ctx.callbacks.final_verification_evidence_for_test(&request);
-        #[cfg(not(test))]
+        #[cfg(not(any(test, feature = "test-support")))]
         let injected_evidence: Option<FinalVerificationExecutionEvidence> = None;
         let evidence = match injected_evidence {
             Some(evidence) => evidence,

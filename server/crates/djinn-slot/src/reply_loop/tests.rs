@@ -2202,14 +2202,20 @@ async fn hard_budget_wind_down_captures_budget_summary() {
     .await;
     let repo = TaskRepository::new(h.slot_ctx.db.clone(), h.slot_ctx.event_bus.clone());
     let entries = repo.list_activity(&h.task_id).await.unwrap();
+    assert!(
+        entries
+            .iter()
+            .all(|entry| entry.event_type != "work_submitted"),
+        "budget parks must not be represented as successful work submission"
+    );
     let work_entries: Vec<_> = entries
         .iter()
-        .filter(|entry| entry.event_type == "work_submitted")
+        .filter(|entry| entry.event_type == "work_parked")
         .collect();
     assert_eq!(
         work_entries.len(),
         1,
-        "budget summary should be persisted exactly once as normal work_submitted activity"
+        "budget summary should be persisted exactly once as work_parked activity"
     );
     let payload: serde_json::Value = serde_json::from_str(&work_entries[0].payload).unwrap();
     assert_eq!(
@@ -2231,7 +2237,7 @@ async fn hard_budget_wind_down_captures_budget_summary() {
         worker_concerns
             .as_deref()
             .is_some_and(|concerns| concerns.contains("budget-parked:")),
-        "budget-park concern should surface through work_submitted extraction: {worker_concerns:?}"
+        "budget-park concern should surface through handoff extraction: {worker_concerns:?}"
     );
 }
 
