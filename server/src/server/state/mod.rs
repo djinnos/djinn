@@ -75,6 +75,27 @@ struct HandoffWarningLogState {
 }
 
 impl HandoffWarningLogState {
+    /// Record the startup observation before the persistent loop takes ownership
+    /// of this state.
+    fn observe_startup(
+        &mut self,
+        now: Instant,
+        warning: Option<HandoffWarningReason>,
+    ) -> Option<HandoffWarningLogEvent> {
+        self.observe(now, warning)
+    }
+
+    /// Record a periodic observation using the transition state established at
+    /// startup. Keeping this distinct from `observe_startup` makes the
+    /// lifecycle handoff explicit and prevents recovery state from being lost.
+    fn observe_persistent(
+        &mut self,
+        now: Instant,
+        warning: Option<HandoffWarningReason>,
+    ) -> Option<HandoffWarningLogEvent> {
+        self.observe(now, warning)
+    }
+
     fn observe(
         &mut self,
         now: Instant,
@@ -818,18 +839,17 @@ impl AppState {
         // periodic observations. Move its state into the loop so a warning that
         // clears before the first tick still emits its one recovery transition.
         let mut handoff_warning_log_state = HandoffWarningLogState::default();
-        if let Some(event) =
-            handoff_warning_log_state.observe(Instant::now(), self.publish_handoff_warning().await)
-        {
+        if let Some(event) = handoff_warning_log_state.observe_startup(
+            SystemClockTrait::new().now_instant(),
+            self.publish_handoff_warning().await,
+        ) {
             Self::log_handoff_warning(event);
         }
         self.start_handoff_warning_loop(handoff_warning_log_state);
     }
 
     async fn publish_handoff_warning(&self) -> Option<HandoffWarningReason> {
-        let Some(admission) = self.inner.build_admission.clone() else {
-            return None;
-        };
+        let admission = self.inner.build_admission.clone()?;
         let emergency_enforcing = admission.mode() == BuildAdmissionMode::Enforce;
         let invocation = InvocationAuthorityObservation::default();
         let snapshot = evaluate_handoff(
@@ -878,7 +898,10 @@ impl AppState {
             loop {
                 tokio::select! {
                     _ = ticker.tick() => {
-                        if let Some(event) = log_state.observe(Instant::now(), state.publish_handoff_warning().await) {
+                        if let Some(event) = log_state.observe_persistent(
+                            SystemClockTrait::new().now_instant(),
+                            state.publish_handoff_warning().await,
+                        ) {
                             Self::log_handoff_warning(event);
                         }
                     }
@@ -3746,40 +3769,41 @@ mod build_admission_config_tests {
         let start = Instant::now();
         let mut startup_state = HandoffWarningLogState::default();
         assert_eq!(
-            startup_state.observe(start, Some(HandoffWarningReason::UnexpectedOverlap)),
+            startup_state.observe_startup(start, Some(HandoffWarningReason::UnexpectedOverlap)),
             Some(HandoffWarningLogEvent::Warning(
                 HandoffWarningReason::UnexpectedOverlap
             ))
         );
-        // Startup hands this exact transition state to the persistent loop.
-        let mut state = startup_state;
-        let mut startup_clear_state = HandoffWarningLogState::default();
-        assert!(
-            startup_clear_state
-                .observe(start, Some(HandoffWarningReason::UnexpectedOverlap))
-                .is_some()
-        );
-        let mut loop_state = startup_clear_state;
+        // `start_handoff_warning_loop` receives this exact state, so its first
+        // periodic observation retains the startup warning and emits recovery.
+        let mut loop_state = startup_state;
         assert_eq!(
-            loop_state.observe(start + Duration::from_secs(1), None),
+            loop_state.observe_persistent(start + Duration::from_secs(1), None),
             Some(HandoffWarningLogEvent::Recovery(
                 HandoffWarningReason::UnexpectedOverlap
             ))
         );
         assert_eq!(
-            loop_state.observe(start + Duration::from_secs(2), None),
+            loop_state.observe_persistent(start + Duration::from_secs(2), None),
             None
         );
 
+        let mut state = HandoffWarningLogState::default();
         assert_eq!(
-            state.observe(
+            state.observe_startup(start, Some(HandoffWarningReason::UnexpectedOverlap)),
+            Some(HandoffWarningLogEvent::Warning(
+                HandoffWarningReason::UnexpectedOverlap
+            ))
+        );
+        assert_eq!(
+            state.observe_persistent(
                 start + Duration::from_secs(299),
                 Some(HandoffWarningReason::UnexpectedOverlap)
             ),
             None
         );
         assert_eq!(
-            state.observe(
+            state.observe_persistent(
                 start + HANDOFF_WARNING_INTERVAL,
                 Some(HandoffWarningReason::UnexpectedOverlap)
             ),
@@ -3788,7 +3812,7 @@ mod build_admission_config_tests {
             ))
         );
         assert_eq!(
-            state.observe(
+            state.observe_persistent(
                 start + HANDOFF_WARNING_INTERVAL + Duration::from_secs(1),
                 Some(HandoffWarningReason::StaleEpoch)
             ),
@@ -3797,7 +3821,7 @@ mod build_admission_config_tests {
             ))
         );
         assert_eq!(
-            state.observe(
+            state.observe_persistent(
                 start + HANDOFF_WARNING_INTERVAL + Duration::from_secs(2),
                 None
             ),
@@ -3806,7 +3830,7 @@ mod build_admission_config_tests {
             ))
         );
         assert_eq!(
-            state.observe(
+            state.observe_persistent(
                 start + HANDOFF_WARNING_INTERVAL + Duration::from_secs(3),
                 None
             ),
