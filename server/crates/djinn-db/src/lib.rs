@@ -181,8 +181,8 @@ pub use repositories::{
         RepoGraphGenerationRepository, ReservedGalaxyArtifactChunk, ReservedGalaxyArtifactManifest,
         ReservedGraphPublication, SUPPORTED_GALAXY_ARTIFACT_ENCODING,
         SUPPORTED_GALAXY_ARTIFACT_VERSION, acquire_generation_stream_pin_shared,
-        generation_stream_pin_key, release_generation_stream_pin,
-        try_acquire_generation_stream_pin_exclusive,
+        generation_stream_pin_key, release_generation_stream_pin_exclusive,
+        release_generation_stream_pin_shared, try_acquire_generation_stream_pin_exclusive,
     },
     scip_indexer_timing::{
         ScipIndexerTiming, ScipIndexerTimingObservation, ScipIndexerTimingRepository,

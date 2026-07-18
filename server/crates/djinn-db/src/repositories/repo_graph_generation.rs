@@ -29,6 +29,10 @@ pub struct RepoGraphGalaxyArtifact {
     pub graph_content_hash: String,
     /// SHA-256 over the served transport representation.
     pub transport_sha256: String,
+    /// Version of the persisted galaxy wire artifact.
+    pub artifact_version: i32,
+    /// Content encoding of the persisted galaxy wire artifact.
+    pub encoding: String,
     pub chunk_count: i32,
     pub byte_count: i64,
     /// JSON manifest of ordered chunk SHA-256 values.
@@ -172,17 +176,32 @@ pub async fn try_acquire_generation_stream_pin_exclusive(
         .await
 }
 
-/// Release either side of the canonical generation stream-pin protocol.
-pub async fn release_generation_stream_pin(
+/// Release the reader side of the canonical generation stream-pin protocol.
+///
+/// PostgreSQL tracks shared and exclusive advisory locks separately. Callers
+/// must treat `false` as a protocol error: it means this session did not hold
+/// the shared lock being released.
+pub async fn release_generation_stream_pin_shared(
     conn: &mut sqlx::postgres::PgConnection,
     key: GenerationStreamPinKey,
-) -> std::result::Result<(), sqlx::Error> {
-    sqlx::query("SELECT pg_advisory_unlock($1, $2)")
+) -> std::result::Result<bool, sqlx::Error> {
+    sqlx::query_scalar("SELECT pg_advisory_unlock_shared($1, $2)")
         .bind(key.class_id)
         .bind(key.object_id)
-        .execute(conn)
+        .fetch_one(conn)
         .await
-        .map(|_| ())
+}
+
+/// Release the retention side of the canonical generation stream-pin protocol.
+pub async fn release_generation_stream_pin_exclusive(
+    conn: &mut sqlx::postgres::PgConnection,
+    key: GenerationStreamPinKey,
+) -> std::result::Result<bool, sqlx::Error> {
+    sqlx::query_scalar("SELECT pg_advisory_unlock($1, $2)")
+        .bind(key.class_id)
+        .bind(key.object_id)
+        .fetch_one(conn)
+        .await
 }
 
 /// Stage selector used by integration tests to prove partial publications roll
@@ -361,19 +380,20 @@ pub struct PinnedGalaxyArtifactMetadata {
     pub graph_content_hash: String,
     pub transport_sha256: String,
     pub artifact_version: u32,
-    pub encoding: &'static str,
+    pub encoding: String,
     pub chunk_count: i32,
     pub byte_count: i64,
 }
 
 /// Selection outcome before a route has formed response headers.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug)]
 pub enum PinnedGalaxyArtifactSelection {
     NoCurrentGeneration,
     ArtifactUnavailable,
     UnsupportedVersion {
         version: u32,
-        encoding: &'static str,
+        encoding: Box<str>,
     },
     CorruptMetadata {
         reason: String,
@@ -460,11 +480,19 @@ impl PinnedGalaxyArtifact {
             .connection
             .take()
             .expect("finished reader has no connection");
-        if let Err(error) = release_generation_stream_pin(&mut conn, self.pin_key).await {
-            let _ = conn.close().await;
-            return Err(error.into());
+        match release_generation_stream_pin_shared(&mut conn, self.pin_key).await {
+            Ok(true) => Ok(()),
+            Ok(false) => {
+                let _ = conn.close().await;
+                Err(Error::InvalidData(
+                    "galaxy shared stream pin was not held by its session".to_owned(),
+                ))
+            }
+            Err(error) => {
+                let _ = conn.close().await;
+                Err(error.into())
+            }
         }
-        Ok(())
     }
 }
 
@@ -833,7 +861,7 @@ impl RepoGraphGenerationRepository {
         };
         let artifact = sqlx::query_as::<_, RepoGraphGalaxyArtifact>(
             "SELECT artifact_id::text AS artifact_id, generation_id::text AS generation_id, \
-                    graph_content_hash, transport_sha256, chunk_count, byte_count, chunk_hashes::text AS chunk_hashes \
+                    graph_content_hash, transport_sha256, artifact_version, encoding, chunk_count, byte_count, chunk_hashes::text AS chunk_hashes \
              FROM repo_graph_galaxy_artifact WHERE generation_id = $1::uuid",
         )
         .bind(&generation.generation_id)
@@ -868,13 +896,25 @@ impl RepoGraphGenerationRepository {
         };
         let artifact = sqlx::query_as::<_, RepoGraphGalaxyArtifact>(
             "SELECT artifact_id::text AS artifact_id, generation_id::text AS generation_id, \
-                    graph_content_hash, transport_sha256, chunk_count, byte_count, chunk_hashes::text AS chunk_hashes \
+                    graph_content_hash, transport_sha256, artifact_version, encoding, chunk_count, byte_count, chunk_hashes::text AS chunk_hashes \
              FROM repo_graph_galaxy_artifact WHERE generation_id = $1::uuid FOR SHARE",
         ).bind(&generation.generation_id).fetch_optional(&mut *tx).await?;
         let Some(artifact) = artifact else {
             tx.commit().await?;
             return Ok(PinnedGalaxyArtifactSelection::ArtifactUnavailable);
         };
+        let version = u32::try_from(artifact.artifact_version).map_err(|_| {
+            Error::InvalidData("galaxy artifact version does not fit u32".to_owned())
+        })?;
+        if version != SUPPORTED_GALAXY_ARTIFACT_VERSION
+            || artifact.encoding != SUPPORTED_GALAXY_ARTIFACT_ENCODING
+        {
+            tx.commit().await?;
+            return Ok(PinnedGalaxyArtifactSelection::UnsupportedVersion {
+                version,
+                encoding: artifact.encoding.into(),
+            });
+        }
         let synthetic = RepoGraphGeneration {
             generation_id: generation.generation_id.clone(),
             project_id: generation.project_id.clone(),
@@ -906,8 +946,8 @@ impl RepoGraphGenerationRepository {
                     artifact_id: artifact.artifact_id,
                     graph_content_hash: artifact.graph_content_hash,
                     transport_sha256: artifact.transport_sha256,
-                    artifact_version: SUPPORTED_GALAXY_ARTIFACT_VERSION,
-                    encoding: SUPPORTED_GALAXY_ARTIFACT_ENCODING,
+                    artifact_version: version,
+                    encoding: artifact.encoding,
                     chunk_count: artifact.chunk_count,
                     byte_count: artifact.byte_count,
                 },
@@ -1328,6 +1368,56 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn pinned_reader_shared_pin_survives_commit_and_releases() {
+        let (db, repo) = fresh().await;
+        insert_project(&db, "p-pin").await;
+        let (generation_id, _) =
+            reserved_publish_with_artifact(&repo, "p-pin", "pin-commit", b"pin-blob").await;
+        let key = generation_stream_pin_key(&generation_id).expect("pin key");
+
+        let reader = match repo
+            .pin_current_galaxy_artifact("p-pin")
+            .await
+            .expect("select pinned artifact")
+        {
+            PinnedGalaxyArtifactSelection::Pinned(reader) => reader,
+            other => panic!("expected pinned artifact, got {other:?}"),
+        };
+        let mut contender = db.pool().acquire().await.expect("contender connection");
+        assert!(
+            !try_acquire_generation_stream_pin_exclusive(&mut contender, key)
+                .await
+                .expect("try exclusive while pinned"),
+            "the shared pin must survive selector commit"
+        );
+        reader.finish().await.expect("finish reader");
+        assert!(
+            try_acquire_generation_stream_pin_exclusive(&mut contender, key)
+                .await
+                .expect("try exclusive after finish"),
+            "finish must release the shared pin"
+        );
+        assert!(
+            release_generation_stream_pin_exclusive(&mut contender, key)
+                .await
+                .expect("release exclusive")
+        );
+
+        let reader = match repo.pin_current_galaxy_artifact("p-pin").await.expect("select second pinned artifact") {
+            PinnedGalaxyArtifactSelection::Pinned(reader) => reader,
+            other => panic!("expected pinned artifact, got {other:?}"),
+        };
+        drop(reader);
+        assert!(
+            try_acquire_generation_stream_pin_exclusive(&mut contender, key)
+                .await
+                .expect("try exclusive after drop"),
+            "drop must discard the pinned connection rather than leak its lock"
+        );
+        assert!(release_generation_stream_pin_exclusive(&mut contender, key).await.expect("release after drop"));
+    }
+
+    #[tokio::test]
     async fn galaxy_chunk_returns_exactly_one_by_index() {
         let (db, repo) = fresh().await;
         insert_project(&db, "p-chunk").await;
@@ -1467,7 +1557,7 @@ mod tests {
             .await
             .expect("generation")
             .expect("immutable generation");
-        let artifact: RepoGraphGalaxyArtifact = sqlx::query_as("SELECT artifact_id::text AS artifact_id, generation_id::text AS generation_id, graph_content_hash, transport_sha256, chunk_count, byte_count, chunk_hashes::text AS chunk_hashes FROM repo_graph_galaxy_artifact WHERE artifact_id = $1::uuid").bind(&artifact_id).fetch_one(db.pool()).await.expect("artifact");
+        let artifact: RepoGraphGalaxyArtifact = sqlx::query_as("SELECT artifact_id::text AS artifact_id, generation_id::text AS generation_id, graph_content_hash, transport_sha256, artifact_version, encoding, chunk_count, byte_count, chunk_hashes::text AS chunk_hashes FROM repo_graph_galaxy_artifact WHERE artifact_id = $1::uuid").bind(&artifact_id).fetch_one(db.pool()).await.expect("artifact");
         let chunks: Vec<RepoGraphGalaxyChunk> = sqlx::query_as("SELECT generation_id::text AS generation_id, artifact_id::text AS artifact_id, chunk_index, byte_count, sha256, bytes FROM repo_graph_galaxy_chunk WHERE generation_id = $1::uuid ORDER BY chunk_index").bind(&generation_id).fetch_all(db.pool()).await.expect("chunks");
         assert_eq!(cache_id, generation_id);
         assert_eq!(generation.generation_id, generation_id);
