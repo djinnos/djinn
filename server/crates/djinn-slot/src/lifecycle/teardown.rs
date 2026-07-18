@@ -60,6 +60,24 @@ pub(crate) fn spawn_post_session_work(params: PostSessionParams) {
                             )
                             .await;
                         }
+                    } else if final_output.finalize_tool_name.as_deref() == Some("submit_review")
+                        && final_output.completion_intent.is_some()
+                    {
+                        // A reviewer that reached the final-verification
+                        // consult-or-run boundary carries a completion intent
+                        // with reused or freshly-stored evidence. Thread it
+                        // through the same handler so the reviewer's verdict
+                        // and AC state are processed while the evidence
+                        // survives finalization.
+                        if let Some(intent) = final_output.completion_intent.as_ref() {
+                            let _ = process_completion_intent_with_outcome(
+                                intent,
+                                "submit_review",
+                                &task_id,
+                                &ctx,
+                            )
+                            .await;
+                        }
                     } else {
                         let _ = process_finalize_payload_with_outcome(
                             &final_output.finalize_payload,
@@ -240,6 +258,7 @@ pub(crate) async fn settle_auto_submit_if_eligible(
         Some(&settlement.task_run_id),
         tokio_util::sync::CancellationToken::new(),
         ctx,
+        "submit_work",
     )
     .await
     {
