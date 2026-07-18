@@ -987,7 +987,7 @@ pub struct SessionDiffParams {
 }
 
 /// One immutable ledger event projected for the MCP reader surfaces.
-#[derive(Serialize, schemars::JsonSchema)]
+#[derive(Clone, Serialize, schemars::JsonSchema)]
 pub struct MemoryRevisionEvent {
     pub revision_id: String,
     pub note_id: Option<String>,

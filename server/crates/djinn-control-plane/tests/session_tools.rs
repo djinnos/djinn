@@ -10,14 +10,17 @@
 mod common;
 
 use djinn_control_plane::test_support::McpTestHarness;
+use djinn_core::auth_context::SESSION_USER_ID;
 use djinn_core::events::EventBus;
 use djinn_core::extension_diagnostics::{
     ExtensionLoadDiagnosticV1, ExtensionLoadPhase, ExtensionLoadRemedyCode, ExtensionLoadSeverity,
     ExtensionLoadSourceKind,
 };
 use djinn_db::{
-    ExtensionLoadDiagnosticRepository, InsertExtensionLoadDiagnostic, SessionMessageRepository,
-    TaskRepository,
+    ExtensionLoadDiagnosticRepository, InsertExtensionLoadDiagnostic, NoteRepository,
+    NoteRevisionCreateState, NoteRevisionDesiredState, NoteRevisionEventKind, NoteRevisionMutation,
+    NoteRevisionReason, SessionMessageRepository, TaskRepository, TrustedNoteRevisionAttribution,
+    TrustedNoteRevisionProvenance, UserRepository,
 };
 use serde_json::json;
 
@@ -909,4 +912,126 @@ async fn session_messages_returns_messages_for_valid_session_id() {
         messages[0].get("role").and_then(|v| v.as_str()),
         Some("user")
     );
+}
+
+#[tokio::test]
+async fn task_timeline_revision_events_match_session_diff_ordering_and_redaction() {
+    let harness = McpTestHarness::new().await;
+    let db = harness.db();
+    let project = common::create_test_project(db).await;
+    let epic = common::create_test_epic(db, &project.id).await;
+    let task = common::create_test_task(db, &project.id, &epic.id).await;
+    let session = common::create_test_session(db, &project.id, &task.id).await;
+    let note_repo = NoteRepository::new(db.clone(), EventBus::noop());
+    let note_id = uuid::Uuid::now_v7().to_string();
+    let provenance =
+        TrustedNoteRevisionProvenance::new(Some(session.id.clone()), Some(task.id.clone()), None)
+            .expect("session provenance");
+
+    note_repo
+        .mutate_with_revision(NoteRevisionMutation {
+            project_id: project.id.clone(),
+            note_id: Some(note_id.clone()),
+            event_kind: NoteRevisionEventKind::Created,
+            desired: NoteRevisionDesiredState::Create(NoteRevisionCreateState {
+                title: "Timeline revision fixture".into(),
+                permalink: "reference/timeline-revision-fixture".into(),
+                content: "first body".into(),
+                note_type: "reference".into(),
+                folder: "reference".into(),
+                status: "active".into(),
+                tags: "[]".into(),
+                retrieval_anchor: None,
+                scope_paths: "[]".into(),
+                confidence: 0.5,
+            }),
+            attribution: TrustedNoteRevisionAttribution::human("timeline-user").unwrap(),
+            provenance: provenance.clone(),
+            reason: NoteRevisionReason::new("create timeline fixture").unwrap(),
+        })
+        .await
+        .expect("create revision");
+    note_repo
+        .mutate_with_revision(NoteRevisionMutation {
+            project_id: project.id.clone(),
+            note_id: Some(note_id),
+            event_kind: NoteRevisionEventKind::Updated,
+            desired: NoteRevisionDesiredState::Existing {
+                content: "second body".into(),
+                confidence: 0.5,
+            },
+            attribution: TrustedNoteRevisionAttribution::human("timeline-user").unwrap(),
+            provenance,
+            reason: NoteRevisionReason::new("update timeline fixture").unwrap(),
+        })
+        .await
+        .expect("update revision");
+
+    let timeline = harness
+        .call_tool(
+            "task_timeline",
+            json!({"task_id": task.id, "project": project.slug()}),
+        )
+        .await
+        .expect("timeline dispatch");
+    let session_diff = harness
+        .call_tool(
+            "memory_session_diff",
+            json!({"session_id": session.id, "project": project.slug()}),
+        )
+        .await
+        .expect("session diff dispatch");
+    assert_eq!(
+        timeline["memory_revision_events"], session_diff["events"],
+        "a one-session timeline must preserve the shared service projection and ordering"
+    );
+    assert_eq!(
+        timeline["memory_revision_events"][0]["event_kind"],
+        "updated"
+    );
+    assert_eq!(
+        timeline["memory_revision_events"][1]["event_kind"],
+        "created"
+    );
+    assert_eq!(
+        timeline["memory_revision_events"][0]["content_redacted"],
+        false
+    );
+
+    let readerless = UserRepository::new(db.clone())
+        .upsert_from_github(8_410_001, "timeline-readerless", None, None)
+        .await
+        .expect("seed readerless user");
+    let redacted_timeline = SESSION_USER_ID
+        .scope(
+            Some(readerless.id.clone()),
+            harness.call_tool(
+                "task_timeline",
+                json!({"task_id": task.id, "project": project.slug()}),
+            ),
+        )
+        .await
+        .expect("redacted timeline dispatch");
+    let redacted_diff = SESSION_USER_ID
+        .scope(
+            Some(readerless.id),
+            harness.call_tool(
+                "memory_session_diff",
+                json!({"session_id": session.id, "project": project.slug()}),
+            ),
+        )
+        .await
+        .expect("redacted session diff dispatch");
+    assert_eq!(
+        redacted_timeline["memory_revision_events"],
+        redacted_diff["events"]
+    );
+    for event in redacted_timeline["memory_revision_events"]
+        .as_array()
+        .expect("revision events")
+    {
+        assert_eq!(event["content_redacted"], true);
+        assert!(event["content_before"].is_null());
+        assert!(event["content_after"].is_null());
+    }
 }

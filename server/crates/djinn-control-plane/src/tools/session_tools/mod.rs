@@ -10,6 +10,11 @@ use djinn_db::SessionMessageRepository;
 use djinn_db::SessionRepository;
 use djinn_db::TaskRepository;
 
+use super::memory_tools::MemoryRevisionEvent;
+use super::memory_tools::revision_readers::{
+    SessionDiffSelector, caller_has_note_read_permission, session_revision_events,
+};
+
 #[derive(Deserialize, schemars::JsonSchema)]
 pub struct SessionListParams {
     /// Task UUID or short_id.
@@ -258,6 +263,11 @@ pub struct TaskTimelineResponse {
     pub messages: Option<Vec<TimelineMessage>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub activity: Option<Vec<TimelineActivity>>,
+    /// Immutable memory revisions caused by this task's sessions, newest-first
+    /// by `(created_at, revision_id)`. Bodies follow the same authorization
+    /// and redaction decision as `memory_session_diff`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub memory_revision_events: Option<Vec<MemoryRevisionEvent>>,
     /// Canonical session-associated extension-load diagnostics, including as
     /// an empty array on successful timeline lookups.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -645,6 +655,7 @@ impl DjinnMcpServer {
                 sessions: None,
                 messages: None,
                 activity: None,
+                memory_revision_events: None,
                 extension_load_diagnostic_events: None,
                 error: Some(e),
             })
@@ -681,6 +692,42 @@ impl DjinnMcpServer {
         };
 
         let session_ids: Vec<String> = sessions.iter().map(|s| s.id.clone()).collect();
+
+        // Reuse the exact memory session-diff service (including cursor and
+        // body projection logic) rather than querying the ledger here. The
+        // timeline retains its single-call contract by exhausting bounded
+        // pages for each task-owned session and merging their ordered streams.
+        let redact_bodies = !caller_has_note_read_permission(self).await;
+        let mut memory_revision_events = Vec::new();
+        for session_id in &session_ids {
+            let mut before_cursor = None;
+            loop {
+                let (mut events, next_cursor) = match session_revision_events(
+                    self,
+                    &project_id,
+                    SessionDiffSelector::Session(session_id),
+                    super::memory_tools::SESSION_DIFF_LIMIT_MAX as usize,
+                    before_cursor.as_deref(),
+                    redact_bodies,
+                )
+                .await
+                {
+                    Ok(page) => page,
+                    Err(e) => return err(e),
+                };
+                memory_revision_events.append(&mut events);
+                before_cursor = next_cursor;
+                if before_cursor.is_none() {
+                    break;
+                }
+            }
+        }
+        memory_revision_events.sort_by(|left, right| {
+            right
+                .created_at
+                .cmp(&left.created_at)
+                .then_with(|| right.revision_id.cmp(&left.revision_id))
+        });
 
         // Diagnostics are task-owned and must be read under the task's owning
         // project. Keep only rows associated with one of the sessions already
@@ -766,6 +813,7 @@ impl DjinnMcpServer {
             sessions: Some(sessions_out),
             messages: Some(messages),
             activity: Some(activity),
+            memory_revision_events: Some(memory_revision_events),
             extension_load_diagnostic_events: Some(extension_load_diagnostic_events),
             error: None,
         })
