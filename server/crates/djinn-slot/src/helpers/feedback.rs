@@ -66,8 +66,8 @@ fn is_rejected_review(entry: &djinn_core::models::ActivityEntry) -> bool {
     payload.get("verdict").and_then(|v| v.as_str()) == Some("rejected")
 }
 
-/// Extract worker submission summary/concerns from the activity log so the
-/// reviewer sees why the worker made certain changes.
+/// Extract worker completion or park handoff summary/concerns from the activity
+/// log so the reviewer sees why the worker made certain changes or stopped.
 ///
 /// Returns `(worker_summary, worker_concerns)`.
 pub fn extract_worker_context(
@@ -76,11 +76,14 @@ pub fn extract_worker_context(
     let Some(entries) = activity else {
         return (None, None);
     };
-    // Last work_submitted entry — contains summary and remaining_concerns.
+    // The last successful submission or budget-park handoff contains summary
+    // and remaining_concerns. `work_parked` stays distinct from a successful
+    // `work_submitted` activity, but its handoff still informs the next worker
+    // or reviewer.
     let (worker_summary, worker_concerns) = entries
         .iter()
         .rev()
-        .find(|e| e.event_type == "work_submitted")
+        .find(|e| matches!(e.event_type.as_str(), "work_submitted" | "work_parked"))
         .and_then(|e| serde_json::from_str::<serde_json::Value>(&e.payload).ok())
         .map(|payload| {
             let summary = payload
