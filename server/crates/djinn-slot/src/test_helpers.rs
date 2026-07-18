@@ -491,10 +491,12 @@ pub fn agent_context_from_db_with_dispatcher(
             &self,
             _request: &crate::final_verification::FinalVerificationCoordinatorRequest,
         ) -> Option<crate::final_verification::FinalVerificationRecordingOutcome> {
-            Some(crate::final_verification::FinalVerificationRecordingOutcome::Stored {
-                verification_attempt_id: uuid::Uuid::now_v7().to_string(),
-                verify_run_id: uuid::Uuid::now_v7().to_string(),
-            })
+            Some(
+                crate::final_verification::FinalVerificationRecordingOutcome::Stored {
+                    verification_attempt_id: uuid::Uuid::now_v7().to_string(),
+                    verify_run_id: uuid::Uuid::now_v7().to_string(),
+                },
+            )
         }
 
         fn interrupt_paused_worker_session<'a>(

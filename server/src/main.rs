@@ -59,7 +59,7 @@ struct Cli {
 
 fn main() {
     if let Err(error) = djinn_server::allocator::validate_malloc_conf_from_env() {
-        eprintln!("invalid MALLOC_CONF: {error}");
+        tracing::error!(%error, "invalid MALLOC_CONF");
         std::process::exit(1);
     }
 
