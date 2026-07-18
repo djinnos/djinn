@@ -275,7 +275,10 @@ async fn seeded_v124_upgrade_deterministically_backfills_generations() {
     // The backfill normalizes built_at to strictly increasing trigger-assigned
     // values; the ORDER BY ... built_at DESC LIMIT 1 reader now agrees with
     // repo_graph_current.
-    for project_id in ["proj-equal", "proj-skew"] {
+    for (project_id, expected_commits) in [
+        ("proj-equal", &["commit-a", "commit-b", "commit-c"][..]),
+        ("proj-skew", &["old-1", "old-2", "future-1"][..]),
+    ] {
         // publish_seq is globally unique and strictly increasing per project.
         let seqs: Vec<i64> = sqlx::query_scalar(
             "SELECT publish_seq FROM repo_graph_generation \
@@ -292,6 +295,23 @@ async fn seeded_v124_upgrade_deterministically_backfills_generations() {
                 "publish_seq strictly increasing for {project_id}"
             );
         }
+
+        // Backfill's tie-breaker is part of the compatibility contract: empty
+        // and equal legacy timestamps sort by commit_sha, while stale and
+        // future rows retain lexical timestamp order. A nondeterministic
+        // backfill would otherwise satisfy the uniqueness checks above.
+        let commits: Vec<String> = sqlx::query_scalar(
+            "SELECT commit_sha FROM repo_graph_generation \
+             WHERE project_id = $1 ORDER BY publish_seq",
+        )
+        .bind(project_id)
+        .fetch_all(&mut conn)
+        .await
+        .expect("fetch deterministic backfill commit order");
+        assert_eq!(
+            commits, expected_commits,
+            "backfill commit order is deterministic for {project_id}"
+        );
 
         // built_at is now unique and normalized (no empty / stale / skewed text).
         let built_ats: Vec<String> = sqlx::query_scalar(
@@ -451,12 +471,36 @@ async fn fresh_database_preserves_old_surface_and_has_all_new_objects() {
         assert_eq!(exists, 1, "table {table} must exist");
     }
 
-    // ── repo_graph_generation PK + UNIQUE constraints ─────────────────────
+    // ── New table keys and UNIQUE constraints ──────────────────────────────
+    assert_pk(&mut conn, "repo_graph_publish_clock", "project_id").await;
     assert_pk(&mut conn, "repo_graph_generation", "generation_id").await;
+    assert_pk(&mut conn, "repo_graph_current", "project_id").await;
+    assert_pk(&mut conn, "repo_graph_galaxy_artifact", "artifact_id").await;
+    assert_pk(
+        &mut conn,
+        "repo_graph_galaxy_chunk",
+        "generation_id,artifact_id,chunk_index",
+    )
+    .await;
+    assert_pk(
+        &mut conn,
+        "repo_graph_publish_lock_token",
+        "project_id,transaction_id,backend_pid",
+    )
+    .await;
     assert_unique(
         &mut conn,
         "repo_graph_generation",
         "project_id,generation_id",
+    )
+    .await;
+    assert_unique(&mut conn, "repo_graph_generation", "publish_seq").await;
+    assert_unique(&mut conn, "repo_graph_cache", "generation_id").await;
+    assert_unique(&mut conn, "repo_graph_galaxy_artifact", "generation_id").await;
+    assert_unique(
+        &mut conn,
+        "repo_graph_galaxy_artifact",
+        "generation_id,artifact_id",
     )
     .await;
 
@@ -513,6 +557,7 @@ async fn fresh_database_preserves_old_surface_and_has_all_new_objects() {
     assert_fk_cascade(&mut conn, "fk_repo_graph_galaxy_artifact_generation").await;
     assert_fk_cascade(&mut conn, "fk_repo_graph_galaxy_chunk_artifact").await;
     assert_fk_cascade(&mut conn, "fk_repo_graph_cache_generation").await;
+    assert_fk_cascade(&mut conn, "fk_repo_graph_publish_lock_token_project").await;
 
     // ── On-delete cascade actually fires ──────────────────────────────────
     seed_project(&mut conn, "cascade-proj").await;
@@ -831,6 +876,53 @@ async fn marked_publication_rejects_invalid_manifests_without_partial_state() {
     apply_through(&mut conn, EXPAND_VERSION).await;
     seed_project(&mut conn, "marked-proj").await;
 
+    // A successful compatibility publication gives failed marked publications
+    // observable clock and current-pointer state that they must not change.
+    conn.execute(
+        "INSERT INTO repo_graph_cache(project_id, commit_sha, graph_blob, built_at) \
+         VALUES ('marked-proj', 'baseline', decode('00', 'hex'), '')",
+    )
+    .await
+    .expect("publish baseline compatibility row");
+
+    async fn publication_state(
+        conn: &mut PgConnection,
+    ) -> (Vec<String>, Vec<String>, Vec<String>, Vec<String>) {
+        let cache = sqlx::query_scalar(
+            "SELECT commit_sha || ':' || generation_id::text || ':' || built_at \
+             FROM repo_graph_cache WHERE project_id = 'marked-proj' \
+             ORDER BY commit_sha",
+        )
+        .fetch_all(&mut *conn)
+        .await
+        .expect("snapshot compatibility rows");
+        let generations = sqlx::query_scalar(
+            "SELECT commit_sha || ':' || generation_id::text || ':' || publish_seq::text \
+             FROM repo_graph_generation WHERE project_id = 'marked-proj' \
+             ORDER BY publish_seq",
+        )
+        .fetch_all(&mut *conn)
+        .await
+        .expect("snapshot immutable generations");
+        let clocks = sqlx::query_scalar(
+            "SELECT project_id || ':' || last_built_at::text \
+             FROM repo_graph_publish_clock WHERE project_id = 'marked-proj'",
+        )
+        .fetch_all(&mut *conn)
+        .await
+        .expect("snapshot publication clock");
+        let current = sqlx::query_scalar(
+            "SELECT project_id || ':' || generation_id::text \
+             FROM repo_graph_current WHERE project_id = 'marked-proj'",
+        )
+        .fetch_all(&mut *conn)
+        .await
+        .expect("snapshot current pointer");
+        (cache, generations, clocks, current)
+    }
+
+    let baseline_state = publication_state(&mut conn).await;
+
     // Helper: attempt a marked publication that should fail at COMMIT.
     // Returns true if COMMIT failed.
     async fn attempt_bad_marked(
@@ -916,6 +1008,11 @@ async fn marked_publication_rejects_invalid_manifests_without_partial_state() {
     )
     .await;
     assert!(failed, "missing chunk must fail marked publication");
+    assert_eq!(
+        publication_state(&mut conn).await,
+        baseline_state,
+        "missing chunks leave compatibility, generation, clock, and current unchanged"
+    );
 
     // ── Noncontiguous chunks: index 0 and 2 (skipping 1) ──────────────────
     let failed = attempt_bad_marked(
@@ -928,6 +1025,11 @@ async fn marked_publication_rejects_invalid_manifests_without_partial_state() {
     )
     .await;
     assert!(failed, "noncontiguous chunks must fail marked publication");
+    assert_eq!(
+        publication_state(&mut conn).await,
+        baseline_state,
+        "noncontiguous chunks leave compatibility, generation, clock, and current unchanged"
+    );
 
     // ── Mismatched per-chunk hash ──────────────────────────────────────────
     let failed = attempt_bad_marked(
@@ -940,6 +1042,11 @@ async fn marked_publication_rejects_invalid_manifests_without_partial_state() {
     )
     .await;
     assert!(failed, "mismatched chunk hash must fail marked publication");
+    assert_eq!(
+        publication_state(&mut conn).await,
+        baseline_state,
+        "mismatched chunk hash leaves compatibility, generation, clock, and current unchanged"
+    );
 
     // ── Mismatched aggregate byte count ────────────────────────────────────
     let failed = attempt_bad_marked(
@@ -954,6 +1061,11 @@ async fn marked_publication_rejects_invalid_manifests_without_partial_state() {
     assert!(
         failed,
         "mismatched aggregate byte count must fail marked publication"
+    );
+    assert_eq!(
+        publication_state(&mut conn).await,
+        baseline_state,
+        "mismatched aggregate bytes leave compatibility, generation, clock, and current unchanged"
     );
 
     // ── Failed publication leaves no partial state ────────────────────────
@@ -978,8 +1090,8 @@ async fn marked_publication_rejects_invalid_manifests_without_partial_state() {
     .expect("count marked gens");
     assert_eq!(marked_gens, 0, "no successful marked publications");
 
-    // No cache rows should exist from failed marked publications — the
-    // failed transactions rolled back entirely.
+    // Only the successful baseline cache row remains; every failed marked
+    // transaction rolled back its compatibility publication entirely.
     let cache_count: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM repo_graph_cache WHERE project_id = 'marked-proj'",
     )
@@ -987,8 +1099,8 @@ async fn marked_publication_rejects_invalid_manifests_without_partial_state() {
     .await
     .expect("count cache rows");
     assert_eq!(
-        cache_count, 0,
-        "no cache rows from failed marked publications (full rollback)"
+        cache_count, 1,
+        "only baseline cache row remains after rollback"
     );
 
     drop(conn);
