@@ -55,12 +55,28 @@ struct Cli {
     /// useful standalone for debugging: `djinn-server --migrate-only`.
     #[arg(long, env = "DJINN_MIGRATE_ONLY", default_value_t = false)]
     migrate_only: bool,
+
+    /// Validate MALLOC_CONF and report the effective managed jemalloc settings.
+    ///
+    /// This exits before logging, telemetry, Tokio, or database startup.
+    #[arg(long, default_value_t = false)]
+    allocator_settings: bool,
 }
 
 fn main() {
     if let Err(error) = djinn_server::allocator::validate_malloc_conf_from_env() {
         tracing::error!(%error, "invalid MALLOC_CONF");
+        eprintln!("invalid MALLOC_CONF: {error}");
         std::process::exit(1);
+    }
+
+    // Parse only the command-line configuration needed to decide whether this
+    // process is the allocator diagnostic. This mode deliberately precedes all
+    // runtime, logging, telemetry, and database initialization.
+    let cli = Cli::parse();
+    if cli.allocator_settings {
+        report_allocator_settings();
+        return;
     }
 
     // rustls 0.23 requires an explicit process-level CryptoProvider before
@@ -74,16 +90,35 @@ fn main() {
         .enable_all()
         .build()
         .expect("failed to build tokio runtime")
-        .block_on(async_main());
+        .block_on(async_main(cli));
 }
 
-async fn async_main() {
+fn report_allocator_settings() {
+    #[cfg(target_os = "linux")]
+    match djinn_server::allocator::settings() {
+        Ok(settings) => {
+            println!("background_thread={}", settings.background_thread);
+            println!("dirty_decay_ms={}", settings.dirty_decay_ms);
+            println!("muzzy_decay_ms={}", settings.muzzy_decay_ms);
+        }
+        Err(error) => {
+            eprintln!("failed to read effective jemalloc settings: {error}");
+            std::process::exit(1);
+        }
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    {
+        eprintln!("effective jemalloc settings are only available on Linux");
+        std::process::exit(1);
+    }
+}
+
+async fn async_main(cli: Cli) {
     let _log_guards = init_logging();
     if let Err(e) = djinn_telemetry::init() {
         tracing::warn!(error = %e, "failed to initialize Prometheus telemetry");
     }
-
-    let cli = Cli::parse();
 
     let cancel = CancellationToken::new();
 
