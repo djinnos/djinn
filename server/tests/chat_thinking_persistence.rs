@@ -61,7 +61,7 @@ impl LlmProvider for ScriptedProvider {
                 + 'a,
         >,
     > {
-        let events = self.events.lock().unwrap().clone();
+        let events = std::mem::take(&mut *self.events.lock().unwrap());
         Box::pin(async move {
             Ok(Box::pin(futures::stream::iter(events))
                 as Pin<
