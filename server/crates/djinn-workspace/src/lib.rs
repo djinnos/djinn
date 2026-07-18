@@ -14,6 +14,7 @@ pub mod commit_safety;
 pub mod git_helpers;
 pub mod merge_safety;
 pub mod mirror;
+pub mod read_source;
 pub mod workspace;
 pub mod workspace_store;
 
@@ -24,6 +25,10 @@ pub use merge_safety::{
 pub use mirror::{
     GcGuardError, MirrorError, MirrorManager, gc_mirror_under, gc_project_clone_under,
     mirror_path_for, mirrors_root,
+};
+pub use read_source::{
+    LegacyKind, LegacyReadSource, MigrationFailurePoint, ReadSourceMigrationError,
+    ReadSourceMigrationRequest, ReadSourceMigrationResult, ReadSourceMigrator, ReadSourcePathState,
 };
 pub use workspace::{
     CommitOutcome, EphemeralWorkspaceError, GitIdentity, MergeOutcome, MergeParentOutcome,
