@@ -4795,6 +4795,32 @@ mod tests {
     }
 
     #[test]
+    fn handoff_warning_gauge_has_exact_bounded_values_and_resets_stale_series() {
+        let _guard = test_guard();
+        init().unwrap();
+        for active in [
+            Some("unexpected_overlap"),
+            Some("stale_epoch"),
+            Some("epoch_unreadable"),
+            None,
+        ] {
+            // Each update must make all three bounded series exact.
+            build_admission::set_handoff_warning(active);
+            let rendered = render().unwrap();
+            for reason in BUILD_ADMISSION_HANDOFF_WARNING_REASONS {
+                assert_eq!(
+                    labeled_sample_value(
+                        &rendered,
+                        BUILD_ADMISSION_HANDOFF_WARNING,
+                        &[("reason", reason)]
+                    ),
+                    f64::from(Some(reason) == active),
+                    "reason={reason} active={active:?}"
+                );
+            }
+        }
+    }
+    #[test]
     fn agent_session_phase_counter_covers_all_combinations() {
         let _guard = test_guard();
         init().unwrap();

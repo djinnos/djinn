@@ -814,12 +814,16 @@ impl AppState {
         }
         tracing::info!(state = ?snapshot.state, emergency = ?snapshot.emergency, mode = ?admission.mode(),
             "build admission handoff applied before emergency recovery");
-        if let Some(event) = HandoffWarningLogState::default()
-            .observe(Instant::now(), self.publish_handoff_warning().await)
+        // The startup observation is part of the same transition stream as the
+        // periodic observations. Move its state into the loop so a warning that
+        // clears before the first tick still emits its one recovery transition.
+        let mut handoff_warning_log_state = HandoffWarningLogState::default();
+        if let Some(event) =
+            handoff_warning_log_state.observe(Instant::now(), self.publish_handoff_warning().await)
         {
             Self::log_handoff_warning(event);
         }
-        self.start_handoff_warning_loop();
+        self.start_handoff_warning_loop(handoff_warning_log_state);
     }
 
     async fn publish_handoff_warning(&self) -> Option<HandoffWarningReason> {
@@ -858,7 +862,7 @@ impl AppState {
         }
     }
 
-    fn start_handoff_warning_loop(&self) {
+    fn start_handoff_warning_loop(&self, mut log_state: HandoffWarningLogState) {
         if self
             .inner
             .handoff_warning_loop_started
@@ -871,7 +875,6 @@ impl AppState {
         tokio::spawn(async move {
             let mut ticker = tokio::time::interval(HANDOFF_WARNING_INTERVAL);
             ticker.tick().await;
-            let mut log_state = HandoffWarningLogState::default();
             loop {
                 tokio::select! {
                     _ = ticker.tick() => {
@@ -3739,15 +3742,35 @@ mod build_admission_config_tests {
     }
 
     #[test]
-    fn handoff_warning_logging_is_startup_cadenced_and_recovers_once() {
+    fn handoff_warning_logging_carries_startup_state_into_the_persistent_loop() {
         let start = Instant::now();
-        let mut state = HandoffWarningLogState::default();
+        let mut startup_state = HandoffWarningLogState::default();
         assert_eq!(
-            state.observe(start, Some(HandoffWarningReason::UnexpectedOverlap)),
+            startup_state.observe(start, Some(HandoffWarningReason::UnexpectedOverlap)),
             Some(HandoffWarningLogEvent::Warning(
                 HandoffWarningReason::UnexpectedOverlap
             ))
         );
+        // Startup hands this exact transition state to the persistent loop.
+        let mut state = startup_state;
+        let mut startup_clear_state = HandoffWarningLogState::default();
+        assert!(
+            startup_clear_state
+                .observe(start, Some(HandoffWarningReason::UnexpectedOverlap))
+                .is_some()
+        );
+        let mut loop_state = startup_clear_state;
+        assert_eq!(
+            loop_state.observe(start + Duration::from_secs(1), None),
+            Some(HandoffWarningLogEvent::Recovery(
+                HandoffWarningReason::UnexpectedOverlap
+            ))
+        );
+        assert_eq!(
+            loop_state.observe(start + Duration::from_secs(2), None),
+            None
+        );
+
         assert_eq!(
             state.observe(
                 start + Duration::from_secs(299),
