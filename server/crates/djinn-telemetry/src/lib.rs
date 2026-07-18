@@ -67,6 +67,14 @@ const INLINE_CLEANUP_SKIP_REASONS: [&str; 7] = [
     "dry_run",
 ];
 
+// ─── Server process memory scrape telemetry ───────────────────────────────
+const PROCESS_RSS_BYTES: &str = "djinn_process_rss_bytes";
+const PROCESS_ANON_RSS_BYTES: &str = "djinn_process_anon_rss_bytes";
+const JEMALLOC_ALLOCATED_BYTES: &str = "djinn_jemalloc_allocated_bytes";
+const JEMALLOC_RESIDENT_BYTES: &str = "djinn_jemalloc_resident_bytes";
+const JEMALLOC_RETAINED_BYTES: &str = "djinn_jemalloc_retained_bytes";
+const SERVER_MEMORY_SCRAPE_OUTCOME: &str = "djinn_server_memory_scrape_outcome";
+
 // ─── Stale-PR/branch reconciliation sweep ────────────────────────────────
 const STALE_PR_REAPED_TOTAL: &str = "djinn_stale_pr_reaped_total";
 const STALE_BRANCH_REAPED_TOTAL: &str = "djinn_stale_branch_reaped_total";
@@ -221,6 +229,50 @@ pub mod jit_pitfalls {
     /// fields emitted next to this counter.
     pub fn increment_outcome(outcome: &'static str) {
         metrics::counter!(super::JIT_PITFALL_HINTS_TOTAL, "outcome" => outcome).increment(1);
+    }
+}
+
+/// Bounded gauges populated by the server's scrape-time memory sampler.
+///
+/// Byte gauges intentionally have no labels. The separate outcome gauge is
+/// limited to fixed source and outcome enums so a read failure never creates a
+/// series from an error, path, PID, or other process identity.
+pub mod server_memory {
+    pub const SOURCE_PROCESS_STATUS: &str = "process_status";
+    pub const SOURCE_JEMALLOC: &str = "jemalloc";
+    pub const OUTCOME_OK: &str = "ok";
+    pub const OUTCOME_UNAVAILABLE: &str = "unavailable";
+
+    pub fn record_process_rss(rss_bytes: u64, anon_rss_bytes: u64) {
+        metrics::gauge!(super::PROCESS_RSS_BYTES).set(rss_bytes as f64);
+        metrics::gauge!(super::PROCESS_ANON_RSS_BYTES).set(anon_rss_bytes as f64);
+        set_outcome(SOURCE_PROCESS_STATUS, OUTCOME_OK);
+    }
+
+    pub fn record_process_unavailable() {
+        set_outcome(SOURCE_PROCESS_STATUS, OUTCOME_UNAVAILABLE);
+    }
+
+    pub fn record_jemalloc_stats(allocated: usize, resident: usize, retained: usize) {
+        metrics::gauge!(super::JEMALLOC_ALLOCATED_BYTES).set(allocated as f64);
+        metrics::gauge!(super::JEMALLOC_RESIDENT_BYTES).set(resident as f64);
+        metrics::gauge!(super::JEMALLOC_RETAINED_BYTES).set(retained as f64);
+        set_outcome(SOURCE_JEMALLOC, OUTCOME_OK);
+    }
+
+    pub fn record_jemalloc_unavailable() {
+        set_outcome(SOURCE_JEMALLOC, OUTCOME_UNAVAILABLE);
+    }
+
+    fn set_outcome(source: &'static str, outcome: &'static str) {
+        for known_outcome in [OUTCOME_OK, OUTCOME_UNAVAILABLE] {
+            metrics::gauge!(
+                super::SERVER_MEMORY_SCRAPE_OUTCOME,
+                "source" => source,
+                "outcome" => known_outcome
+            )
+            .set(if known_outcome == outcome { 1.0 } else { 0.0 });
+        }
     }
 }
 
@@ -670,6 +722,42 @@ fn format_build_error(error: BuildError) -> String {
 
 fn register_metrics() {
     memory_retrieval::register_metrics();
+    metrics::describe_gauge!(
+        PROCESS_RSS_BYTES,
+        "Current process resident set size in bytes from Linux /proc status."
+    );
+    metrics::describe_gauge!(
+        PROCESS_ANON_RSS_BYTES,
+        "Current process anonymous resident set size in bytes from Linux /proc status."
+    );
+    metrics::describe_gauge!(
+        JEMALLOC_ALLOCATED_BYTES,
+        "Current jemalloc allocated bytes after refreshing its statistics epoch."
+    );
+    metrics::describe_gauge!(
+        JEMALLOC_RESIDENT_BYTES,
+        "Current jemalloc resident bytes after refreshing its statistics epoch."
+    );
+    metrics::describe_gauge!(
+        JEMALLOC_RETAINED_BYTES,
+        "Current jemalloc retained bytes after refreshing its statistics epoch."
+    );
+    metrics::describe_gauge!(
+        SERVER_MEMORY_SCRAPE_OUTCOME,
+        "Latest bounded server-memory scrape outcome by fixed source and outcome."
+    );
+    for source in [
+        server_memory::SOURCE_PROCESS_STATUS,
+        server_memory::SOURCE_JEMALLOC,
+    ] {
+        for outcome in [
+            server_memory::OUTCOME_OK,
+            server_memory::OUTCOME_UNAVAILABLE,
+        ] {
+            metrics::gauge!(SERVER_MEMORY_SCRAPE_OUTCOME, "source" => source, "outcome" => outcome)
+                .set(0.0);
+        }
+    }
     metrics::describe_counter!(
         DISPATCH_ATTEMPTS_TOTAL,
         "Dispatch attempts partitioned by terminal dispatch outcome."

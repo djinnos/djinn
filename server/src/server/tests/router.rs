@@ -309,6 +309,11 @@ async fn metrics_returns_prometheus_text_without_auth() {
         "djinn_tasks_parked_total",
         "djinn_pr_poller_tracked",
         "djinn_merge_failures_total",
+        "djinn_process_rss_bytes",
+        "djinn_process_anon_rss_bytes",
+        "djinn_jemalloc_allocated_bytes",
+        "djinn_jemalloc_resident_bytes",
+        "djinn_jemalloc_retained_bytes",
     ] {
         assert!(text.contains(metric), "missing metric {metric} in:\n{text}");
     }
@@ -324,6 +329,28 @@ async fn metrics_returns_prometheus_text_without_auth() {
         "djinn_breaker_state",
         &["scope=\"metrics-user\"", "model=\"metrics-model\""],
     );
+    for metric in [
+        "djinn_process_rss_bytes",
+        "djinn_process_anon_rss_bytes",
+        "djinn_jemalloc_allocated_bytes",
+        "djinn_jemalloc_resident_bytes",
+        "djinn_jemalloc_retained_bytes",
+    ] {
+        let line = text
+            .lines()
+            .find(|line| line.starts_with(metric) && !line.starts_with("#"))
+            .unwrap_or_else(|| panic!("missing server-memory sample for {metric} in:\n{text}"));
+        assert!(
+            !line.contains('{'),
+            "server-memory byte gauges must not have identity labels: {line}"
+        );
+        for forbidden in ["project", "task", "commit", "generation", "path", "pid"] {
+            assert!(
+                !line.contains(forbidden),
+                "server-memory byte gauge must not contain {forbidden}: {line}"
+            );
+        }
+    }
     assert!(text.contains(" 1"));
 }
 
