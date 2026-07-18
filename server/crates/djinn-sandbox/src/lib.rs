@@ -379,8 +379,13 @@ mod tests {
 
     #[test]
     fn read_source_scope_rejects_cwd_outside_owner_cache() {
-        let root = tempfile::tempdir().expect("root");
-        let outside = tempfile::tempdir().expect("outside");
+        // The process temp directory is intentionally writable in both OS
+        // policies. Put this fixture under the test working directory so the
+        // overlap guard cannot mask the CWD-containment error this regression
+        // is meant to exercise.
+        let fixture_parent = std::env::current_dir().expect("test working directory");
+        let root = tempfile::tempdir_in(&fixture_parent).expect("root");
+        let outside = tempfile::tempdir_in(&fixture_parent).expect("outside");
         let error = SandboxScope::ReadSource {
             root: root.path(),
             cwd: outside.path(),

@@ -699,6 +699,20 @@ fn hard_deny_redirect_to_internal_read_sources() {
     );
 }
 
+#[test]
+fn hard_deny_rm_legacy_task_local_read_sources() {
+    assert_hard_deny("rm .djinn-read-sources/project/file.rs");
+}
+
+#[test]
+fn hard_deny_redirect_to_legacy_task_local_read_sources() {
+    let decision = classify("echo data > .djinn-read-sources/project/patch");
+    assert!(
+        matches!(decision, ShellDestructiveDecision::HardDeny { .. }),
+        "expected HardDeny for redirect into legacy read-source mount, got {decision:?}",
+    );
+}
+
 // ── Path-scope exclusions: durable data paths ────────────────────────────
 
 #[test]

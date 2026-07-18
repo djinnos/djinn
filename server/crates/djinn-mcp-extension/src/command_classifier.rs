@@ -744,6 +744,7 @@ fn is_file_mutation_command(cmd: &str) -> bool {
 /// - Parent-directory traversal (`..`)
 /// - `.git/` directory and its contents
 /// - `.task-runtime/read-sources/` (owner-project read-only caches)
+/// - `.djinn-read-sources/` (legacy task-local read-source mounts)
 /// - Durable data paths (project metadata and lock files)
 fn path_is_protected(path: &str) -> bool {
     // Absolute paths.
@@ -766,6 +767,17 @@ fn path_is_protected(path: &str) -> bool {
     // Canonical owner-project read-source caches.
     if path.starts_with(".task-runtime/read-sources")
         || path.contains("/.task-runtime/read-sources")
+    {
+        return true;
+    }
+    // Release N still recognizes legacy task-local read-source mounts as
+    // immutable input. They are migration-era read paths only and must never
+    // fall through to the worktree mutation soft gate.
+    if path == ".djinn-read-sources"
+        || path.starts_with(".djinn-read-sources/")
+        || path.starts_with(".djinn-read-sources\\")
+        || path.contains("/.djinn-read-sources/")
+        || path.contains("\\.djinn-read-sources\\")
     {
         return true;
     }
