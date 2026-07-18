@@ -177,8 +177,11 @@ mod tests {
                 "missing byte gauge {metric} in:\n{rendered}"
             );
         }
-        assert!(rendered.contains(
-            "djinn_server_memory_scrape_outcome{outcome=\"unavailable\",source=\"jemalloc\"} 1"
-        ));
+        assert!(rendered.lines().any(|line| {
+            line.starts_with("djinn_server_memory_scrape_outcome{")
+                && line.contains("source=\"jemalloc\"")
+                && line.contains("outcome=\"unavailable\"")
+                && line.ends_with(" 1")
+        }));
     }
 }
