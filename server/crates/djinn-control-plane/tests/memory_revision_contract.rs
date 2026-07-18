@@ -39,6 +39,17 @@ async fn seed_reader_contract(harness: &McpTestHarness, fixture: &Value) {
         )
         .await
         .expect("seed fixed project");
+    ProjectRepository::new(harness.db().clone(), EventBus::noop())
+        .create_with_id(
+            fixture["ids"]["foreign_project_id"]
+                .as_str()
+                .expect("fixture foreign project id"),
+            "revision-contract-foreign",
+            "fixture",
+            "revision-contract-foreign",
+        )
+        .await
+        .expect("seed fixed foreign project");
     for note in seed["live_notes"].as_array().expect("fixture live notes") {
         let mut insert = QueryBuilder::<Postgres>::new(
             "INSERT INTO notes (id, project_id, permalink, title, file_path, storage, note_type, folder, status, tags, content, scope_paths, confidence) VALUES (",
@@ -381,7 +392,7 @@ async fn fixed_fixture_pins_history_pages_pairwise_diff_and_deleted_history() {
 }
 
 #[tokio::test]
-async fn fixed_fixture_executes_non_content_diff_endpoint_envelopes() {
+async fn fixed_fixture_executes_negative_reader_envelopes() {
     let fixture = contract();
     let harness = McpTestHarness::new().await;
     seed_reader_contract(&harness, &fixture).await;
@@ -390,12 +401,34 @@ async fn fixed_fixture_executes_non_content_diff_endpoint_envelopes() {
         .as_object()
         .expect("fixture response expectations")
     {
-        let actual = dispatch(
-            &harness,
-            expectation["tool"].as_str().expect("fixture tool"),
-            expectation["args"].clone(),
-        )
-        .await;
+        let tool = expectation["tool"].as_str().expect("fixture tool");
+        let args = expectation["args"].clone();
+        if expectation.get("expected_error").is_some() {
+            let error = harness
+                .call_tool(tool, args)
+                .await
+                .expect_err("retired selector must fail deserialization");
+            assert_eq!(
+                format!("{error:#}"),
+                expectation["expected_error"]
+                    .as_str()
+                    .expect("fixture error"),
+                "{name}"
+            );
+            continue;
+        }
+
+        let actual = if expectation["caller"] == "readerless" {
+            let readerless = UserRepository::new(harness.db().clone())
+                .upsert_from_github(8_420_100, "revision-readerless", None, None)
+                .await
+                .expect("seed readerless user");
+            SESSION_USER_ID
+                .scope(Some(readerless.id), dispatch(&harness, tool, args))
+                .await
+        } else {
+            dispatch(&harness, tool, args).await
+        };
         assert_eq!(actual, expectation["expected"], "{name}");
     }
 }
