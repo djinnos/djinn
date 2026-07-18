@@ -60,9 +60,9 @@ impl GitHubApiClient {
                 }
             })
             .await
-            .map_err(|err| artifact_context(err, "get_job", &path))?;
+            .map_err(|err| artifact_context(err, "get_job", &path, None))?;
         if !resp.status().is_success() {
-            return Err(artifact_http("get_job", path, resp).await);
+            return Err(artifact_http("get_job", path, resp, None).await);
         }
         resp.json().await.map_err(|e| {
             GitHubApiError::transport(
@@ -99,9 +99,9 @@ impl GitHubApiClient {
                 }
             })
             .await
-            .map_err(|err| artifact_context(err, "list_run_artifacts", &path))?;
+            .map_err(|err| artifact_context(err, "list_run_artifacts", &path, Some(run_id)))?;
         if !resp.status().is_success() {
-            return Err(artifact_http("list_run_artifacts", path, resp).await);
+            return Err(artifact_http("list_run_artifacts", path, resp, Some(run_id)).await);
         }
         let parsed: ActionsArtifactsResponse = resp.json().await.map_err(|e| {
             GitHubApiError::transport(
@@ -147,9 +147,9 @@ impl GitHubApiClient {
                 }
             })
             .await
-            .map_err(|err| artifact_context(err, "download_artifact", &path))?;
+            .map_err(|err| artifact_context(err, "download_artifact", &path, Some(run_id)))?;
         if !resp.status().is_success() {
-            return Err(artifact_http("download_artifact", path, resp).await);
+            return Err(artifact_http("download_artifact", path, resp, Some(run_id)).await);
         }
         let content_type = resp
             .headers()
@@ -1228,10 +1228,22 @@ fn artifact_context(
     mut error: GitHubApiError,
     operation: &'static str,
     path: &str,
+    run_id: Option<u64>,
 ) -> GitHubApiError {
     error.method = operation;
     error.path = path.to_owned();
-    error.body = format!("GitHub Actions operation {operation}: {}", error.body);
+    let run_context = run_id
+        .map(|id| format!(" for run {id}"))
+        .unwrap_or_default();
+    let failure_context = if error.source == crate::github_api::GitHubErrorSource::Transport {
+        " transport failure (including timeout)"
+    } else {
+        ""
+    };
+    error.body = format!(
+        "GitHub Actions operation {operation}{run_context}{failure_context}: {}",
+        error.body
+    );
     error
 }
 
@@ -1239,6 +1251,7 @@ async fn artifact_http(
     operation: &'static str,
     path: String,
     response: reqwest::Response,
+    run_id: Option<u64>,
 ) -> GitHubApiError {
     let status = response.status();
     let body = response.text().await.unwrap_or_default();
@@ -1247,7 +1260,15 @@ async fn artifact_http(
         StatusCode::NOT_FOUND => "artifact or workflow run is missing or expired",
         _ => "GitHub Actions request failed",
     };
-    GitHubApiError::http(operation, path, status, format!("{guidance}: {body}"))
+    let run_context = run_id
+        .map(|id| format!(" for run {id}"))
+        .unwrap_or_default();
+    GitHubApiError::http(
+        operation,
+        path,
+        status,
+        format!("{guidance}{run_context}: {body}"),
+    )
 }
 
 fn artifact_budget_error(owner: &str, repo: &str, run_id: u64, artifact_id: u64) -> GitHubApiError {

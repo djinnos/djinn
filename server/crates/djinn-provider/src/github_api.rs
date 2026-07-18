@@ -199,6 +199,7 @@ impl GitHubApiClient {
 
     fn build(auth: AuthMode, base_url: String) -> Self {
         let http = Client::builder()
+            .timeout(std::time::Duration::from_secs(30))
             .user_agent("djinn-server/0.1 (+https://github.com/djinnos/server)")
             .build()
             .expect("failed to build reqwest client");
