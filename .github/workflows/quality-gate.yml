@@ -202,9 +202,14 @@ jobs:
   # delay lives inline as a step because a `needs: main-admission` edge
   # would auto-skip this job on dispatch (skipped dependency).
   # NOTE: a full arm64 trial (2026-07-18, PR #2275 branch) measured
-  # GitHub's free ubuntu-24.04-arm runners ~2.3x slower on warm builds
-  # and ~25% slower on test execution than x64 for this workspace —
-  # keep the lane on x64 unless those runners improve.
+  # GitHub's free ubuntu-24.04-arm runners slower than x64 for this
+  # workspace with a genuinely warm cache: shard builds 316-385s vs
+  # 272-289s (~15-35% slower) and test execution 285-310s vs 230-239s
+  # (~25% slower), roughly +1.5-2.5 min per run. Keep the lane on x64
+  # unless those runners improve. (Cache-scoping gotcha from the trial:
+  # PR merge-ref runs cannot restore head-branch-scoped caches — only
+  # base/default branch scopes — so branch-seeded warm caches look
+  # cold from the PR run.)
   cache-warm-x86_64-test:
     name: Cache Warm x86_64 (Test)
     needs:
