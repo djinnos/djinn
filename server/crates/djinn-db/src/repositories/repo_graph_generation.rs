@@ -108,6 +108,17 @@ pub struct ReservedGraphPublication {
 
 const MAX_GALAXY_CHUNK_BYTES: usize = 256 * 1024;
 
+/// Private stage selector used only by the test-only publication entry point.
+/// Keeping the transaction body shared ensures rollback assertions exercise the
+/// same production write ordering.
+#[allow(dead_code)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ReservedPublicationFailureStage {
+    AfterCompatibilityUpsert,
+    AfterArtifactInsert,
+    AfterFirstChunkInsert,
+}
+
 fn invalid_publication(message: impl Into<String>) -> Error {
     Error::InvalidData(format!(
         "invalid reserved graph publication: {}",
@@ -233,6 +244,26 @@ impl RepoGraphGenerationRepository {
         &self,
         publication: ReservedGraphPublication,
     ) -> Result<()> {
+        self.publish_reserved_generation_inner(publication, None).await
+    }
+
+    /// Test-only failure seam for verifying every partial write rolls back as
+    /// one transaction. Production callers use `publish_reserved_generation`.
+    #[cfg(test)]
+    async fn publish_reserved_generation_with_failure(
+        &self,
+        publication: ReservedGraphPublication,
+        failure_stage: ReservedPublicationFailureStage,
+    ) -> Result<()> {
+        self.publish_reserved_generation_inner(publication, Some(failure_stage))
+            .await
+    }
+
+    async fn publish_reserved_generation_inner(
+        &self,
+        publication: ReservedGraphPublication,
+        failure_stage: Option<ReservedPublicationFailureStage>,
+    ) -> Result<()> {
         validate_reserved_publication(&publication)?;
 
         let mut tx = self
@@ -246,6 +277,10 @@ impl RepoGraphGenerationRepository {
             &publication.generation_id,
         )
         .await?;
+
+        if failure_stage == Some(ReservedPublicationFailureStage::AfterCompatibilityUpsert) {
+            return Err(invalid_publication("injected failure after compatibility upsert"));
+        }
 
         let chunk_hashes = serde_json::to_string(&publication.artifact.chunk_hashes)?;
         Self::insert_galaxy_artifact_in_transaction(
@@ -261,7 +296,10 @@ impl RepoGraphGenerationRepository {
             },
         )
         .await?;
-        for chunk in &publication.chunks {
+        if failure_stage == Some(ReservedPublicationFailureStage::AfterArtifactInsert) {
+            return Err(invalid_publication("injected failure after artifact insertion"));
+        }
+        for (chunk_position, chunk) in publication.chunks.iter().enumerate() {
             Self::insert_galaxy_chunk_in_transaction(
                 &mut tx,
                 RepoGraphGalaxyChunkInsert {
@@ -273,6 +311,11 @@ impl RepoGraphGenerationRepository {
                 },
             )
             .await?;
+            if chunk_position == 0
+                && failure_stage == Some(ReservedPublicationFailureStage::AfterFirstChunkInsert)
+            {
+                return Err(invalid_publication("injected failure after partial chunk insertion"));
+            }
         }
         // Deferred migration triggers validate and advance current here.
         tx.commit().await?;
@@ -861,5 +904,62 @@ mod tests {
         assert_eq!(by_id.generation_id, current.generation_id);
         assert_eq!(by_id.commit_sha, "byid-commit");
         assert_eq!(by_id.graph_blob, b"byid-blob");
+    }
+
+    fn reserved_two_chunk_publication(project_id: &str, commit_sha: &str) -> ReservedGraphPublication {
+        let generation_id = uuid::Uuid::now_v7().to_string();
+        let artifact_id = uuid::Uuid::now_v7().to_string();
+        let first = b"first".to_vec();
+        let second = b"second".to_vec();
+        let first_hash = sha256_hex(&first);
+        let second_hash = sha256_hex(&second);
+        ReservedGraphPublication {
+            project_id: project_id.to_owned(), commit_sha: commit_sha.to_owned(), generation_id: generation_id.clone(), graph_blob: b"complete graph".to_vec(),
+            artifact: ReservedGalaxyArtifactManifest { artifact_id: artifact_id.clone(), generation_id: generation_id.clone(), graph_content_hash: "semantic-graph-hash".to_owned(), transport_sha256: sha256_hex(&[first.clone(), second.clone()].concat()), chunk_count: 2, byte_count: (first.len() + second.len()) as i64, chunk_hashes: vec![first_hash.clone(), second_hash.clone()] },
+            chunks: vec![
+                ReservedGalaxyArtifactChunk { generation_id: generation_id.clone(), artifact_id: artifact_id.clone(), chunk_index: 0, sha256: first_hash, bytes: first },
+                ReservedGalaxyArtifactChunk { generation_id, artifact_id, chunk_index: 1, sha256: second_hash, bytes: second },
+            ],
+        }
+    }
+
+    #[derive(Debug, PartialEq, Eq)]
+    struct PublicationSnapshot { cache: i64, generations: i64, current: Option<String>, artifacts: i64, chunks: i64, clock: Option<String> }
+
+    async fn publication_snapshot(db: &Database, project_id: &str) -> PublicationSnapshot {
+        PublicationSnapshot {
+            cache: sqlx::query_scalar("SELECT count(*) FROM repo_graph_cache WHERE project_id = $1").bind(project_id).fetch_one(db.pool()).await.expect("cache"),
+            generations: sqlx::query_scalar("SELECT count(*) FROM repo_graph_generation WHERE project_id = $1").bind(project_id).fetch_one(db.pool()).await.expect("generations"),
+            current: sqlx::query_scalar("SELECT generation_id::text FROM repo_graph_current WHERE project_id = $1").bind(project_id).fetch_optional(db.pool()).await.expect("current"),
+            artifacts: sqlx::query_scalar("SELECT count(*) FROM repo_graph_galaxy_artifact a JOIN repo_graph_generation g ON g.generation_id = a.generation_id WHERE g.project_id = $1").bind(project_id).fetch_one(db.pool()).await.expect("artifacts"),
+            chunks: sqlx::query_scalar("SELECT count(*) FROM repo_graph_galaxy_chunk c JOIN repo_graph_generation g ON g.generation_id = c.generation_id WHERE g.project_id = $1").bind(project_id).fetch_one(db.pool()).await.expect("chunks"),
+            clock: sqlx::query_scalar("SELECT last_built_at::text FROM repo_graph_publish_clock WHERE project_id = $1").bind(project_id).fetch_optional(db.pool()).await.expect("clock"),
+        }
+    }
+
+    #[tokio::test]
+    async fn reserved_publication_persists_complete_write_set_under_reserved_identity() {
+        let (db, repo) = fresh().await;
+        insert_project(&db, "p-complete").await;
+        let publication = reserved_two_chunk_publication("p-complete", "complete-commit");
+        let generation_id = publication.generation_id.clone(); let artifact_id = publication.artifact.artifact_id.clone();
+        repo.publish_reserved_generation(publication).await.expect("publish");
+        let cache_id: String = sqlx::query_scalar("SELECT generation_id::text FROM repo_graph_cache WHERE project_id = $1").bind("p-complete").fetch_one(db.pool()).await.expect("cache");
+        let current_id: String = sqlx::query_scalar("SELECT generation_id::text FROM repo_graph_current WHERE project_id = $1").bind("p-complete").fetch_one(db.pool()).await.expect("current");
+        let generation = repo.generation_by_id(&generation_id).await.expect("generation").expect("immutable generation");
+        let artifact: RepoGraphGalaxyArtifact = sqlx::query_as("SELECT artifact_id::text AS artifact_id, generation_id::text AS generation_id, graph_content_hash, transport_sha256, chunk_count, byte_count, chunk_hashes::text AS chunk_hashes FROM repo_graph_galaxy_artifact WHERE artifact_id = $1::uuid").bind(&artifact_id).fetch_one(db.pool()).await.expect("artifact");
+        let chunks: Vec<RepoGraphGalaxyChunk> = sqlx::query_as("SELECT generation_id::text AS generation_id, artifact_id::text AS artifact_id, chunk_index, byte_count, sha256, bytes FROM repo_graph_galaxy_chunk WHERE generation_id = $1::uuid ORDER BY chunk_index").bind(&generation_id).fetch_all(db.pool()).await.expect("chunks");
+        assert_eq!(cache_id, generation_id); assert_eq!(generation.generation_id, generation_id); assert_eq!(current_id, generation_id); assert_eq!(artifact.generation_id, generation_id); assert_eq!(artifact.artifact_id, artifact_id); assert_eq!(chunks.len(), 2);
+        for (index, chunk) in chunks.iter().enumerate() { assert_eq!(chunk.generation_id, generation_id); assert_eq!(chunk.artifact_id, artifact_id); assert_eq!(chunk.chunk_index, index as i32); }
+    }
+
+    #[tokio::test]
+    async fn injected_reserved_publication_failures_rollback_every_write_stage() {
+        for stage in [ReservedPublicationFailureStage::AfterCompatibilityUpsert, ReservedPublicationFailureStage::AfterArtifactInsert, ReservedPublicationFailureStage::AfterFirstChunkInsert] {
+            let (db, repo) = fresh().await; insert_project(&db, "p-rollback").await; legacy_publish(&db, "p-rollback", "old", b"old graph").await;
+            let before = publication_snapshot(&db, "p-rollback").await;
+            assert!(repo.publish_reserved_generation_with_failure(reserved_two_chunk_publication("p-rollback", "new"), stage).await.is_err());
+            assert_eq!(publication_snapshot(&db, "p-rollback").await, before, "stage {stage:?} leaked a transaction write");
+        }
     }
 }
