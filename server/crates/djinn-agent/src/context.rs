@@ -255,6 +255,14 @@ pub struct AgentContext {
     pub compaction_cs: CompactionCriticalSection,
 }
 
+/// Cross-project shell authority for the single task run represented by an
+/// in-pod [`AgentContext`]. Host contexts use the empty default.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ReadSourceAuthorization {
+    pub owner_project_id: Option<String>,
+    pub read_source_project_ids: Vec<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum KnowledgeBranchTarget {
     Main,

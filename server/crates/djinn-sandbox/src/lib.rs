@@ -346,6 +346,39 @@ mod tests {
     }
 
     #[test]
+    fn read_source_scope_rejects_cwd_outside_owner_cache() {
+        let root = tempfile::tempdir().expect("root");
+        let outside = tempfile::tempdir().expect("outside");
+        let error = SandboxScope::ReadSource {
+            root: root.path(),
+            cwd: outside.path(),
+        }
+        .validate()
+        .expect_err("read-source cwd must remain in its root");
+        assert!(error.to_string().contains("escapes mounted root"));
+    }
+
+    #[test]
+    fn fallback_rejects_read_source_scope() {
+        let root = tempfile::tempdir().expect("root");
+        let mut command = std::process::Command::new("true");
+        let error = FallbackSandbox
+            .apply(
+                SandboxScope::ReadSource {
+                    root: root.path(),
+                    cwd: root.path(),
+                },
+                &mut command,
+            )
+            .expect_err("fallback must reject a read-source scope");
+        assert!(
+            error
+                .to_string()
+                .contains("requires an OS read-only sandbox")
+        );
+    }
+
+    #[test]
     fn is_temp_path_rejects_slash_tmp() {
         with_env(
             &[("XDG_CACHE_HOME", None), ("HOME", Some("/home/carol"))],
