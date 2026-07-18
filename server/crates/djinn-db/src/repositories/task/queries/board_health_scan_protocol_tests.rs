@@ -22,7 +22,7 @@ async fn setup_repo() -> (Database, TaskRepository, String) {
 
 async fn candidate(repo: &TaskRepository, db: &Database, project: &str, title: &str) -> String {
     let task = repo
-        .create_in_project(
+        .create_fixture_in_project(
             project,
             None,
             title,
@@ -91,7 +91,7 @@ async fn empty_pass_restart_preserves_identity_then_completion_resets() {
 async fn pages_are_bounded_retryable_guarded_fenced_and_reset_for_behind_cursor_rows() {
     let (db, repo, project) = setup_repo().await;
     let behind = repo
-        .create_in_project(
+        .create_fixture_in_project(
             &project, None, "behind", "ordinary", "", "task", 0, "", None, None,
         )
         .await

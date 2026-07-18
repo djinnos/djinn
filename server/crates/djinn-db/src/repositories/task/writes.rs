@@ -10,6 +10,17 @@ pub struct EffectiveCreatorProvenance<'a> {
     pub proposal_id: Option<&'a str>,
 }
 
+impl<'a> EffectiveCreatorProvenance<'a> {
+    /// Provenance for a producer that already has a concrete persisted user.
+    pub fn explicit_user_id(user_id: &'a str) -> Self {
+        Self {
+            explicit_user_id: Some(user_id),
+            source_task_id: None,
+            proposal_id: None,
+        }
+    }
+}
+
 /// `Default` is only available under `cfg(test)` so production code cannot
 /// accidentally construct an empty-provenance object.
 #[cfg(test)]
