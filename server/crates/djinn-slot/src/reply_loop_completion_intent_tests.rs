@@ -40,13 +40,14 @@ use djinn_db::repositories::verify_run::{
     VerifyRunRepository,
 };
 use djinn_git::{
-    VerificationInputFingerprint, VerificationInputFingerprintConfig,
+    VerificationInputDigestV1, VerificationInputFingerprint, VerificationInputFingerprintConfig,
     compute_verification_input_fingerprint_with_config, run_git_command_in,
 };
 use djinn_provider::message::{ContentBlock, Conversation, Message};
 use djinn_provider::provider::StreamEvent;
 use djinn_sandbox::final_verification_execution::{
-    FinalVerificationExecutionEvidence, FinalVerificationExecutionRequest,
+    FinalVerificationCommandEvidence, FinalVerificationExecutionEvidence,
+    FinalVerificationExecutionRequest,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -62,6 +63,217 @@ struct CompletionIntentCallbacks {
     coordinator_calls: Mutex<usize>,
     expected_task_id: String,
     reuse_probe: Option<ReuseProbe>,
+}
+
+fn fallback_evidence(
+    material: &FinalVerificationResolvedMaterial,
+    fingerprint: String,
+    identity: EnvironmentIdentityV1,
+) -> FinalVerificationExecutionEvidence {
+    let digest = VerificationInputDigestV1 {
+        version: 1,
+        fingerprint,
+        canonical_stream_len: 1,
+        merge_base: Some("main".into()),
+        head: "fresh".into(),
+        tracked_entry_count: 1,
+        extra_entry_count: 0,
+    };
+    FinalVerificationExecutionEvidence {
+        manifest_version: 1,
+        pre_environment_identity: Some(identity.clone()),
+        post_environment_identity: Some(identity),
+        fingerprint_f0: Some(digest.clone()),
+        fingerprint_f1: Some(digest),
+        commands: material
+            .required_checks
+            .iter()
+            .map(|check_id| FinalVerificationCommandEvidence {
+                descriptor: CanonicalCommandDescriptorV1 {
+                    check_id: check_id.clone(),
+                    executable: format!("{check_id}-tool"),
+                    argv: vec![check_id.clone()],
+                    working_directory: ".".into(),
+                    environment_names: vec![],
+                    timeout_seconds: 60,
+                    descriptor_revision: 1,
+                },
+                started_at_unix_millis: 10,
+                completed_at_unix_millis: 20,
+                exit_code: Some(0),
+                timed_out: false,
+            })
+            .collect(),
+        eligibility_reason: None,
+    }
+}
+
+#[tokio::test]
+async fn reply_loop_reuse_rejection_matrix_writes_fresh_authoritative_evidence() {
+    // These are deliberately table rows, rather than outcome injection: every
+    // row enters consult_reusable_final_verification and falls through to the
+    // existing coordinator writer seams.
+    for (name, enabled, mutate_c1) in [
+        ("no-compatible-row", true, false),
+        ("disabled-gate", false, false),
+        ("stale-row", true, false),
+        ("required-coverage-mismatch", true, false),
+        ("manifest-version-mismatch", true, false),
+        ("c1-mutation", true, true),
+        ("lookup-failure", true, false),
+        ("evaluator-failure", true, false),
+        ("context-failure", true, false),
+        ("fingerprint-failure", true, false),
+        ("identity-failure", true, false),
+        ("database-failure", true, false),
+    ] {
+        let db = create_test_db();
+        let project = create_test_project(&db).await;
+        let epic = create_test_epic(&db, &project.id).await;
+        let task = create_test_task(&db, &project.id, &epic.id).await;
+        let tree = test_tempdir(&format!("reply-loop-fallback-{name}-"));
+        for args in [
+            vec!["init"],
+            vec!["config", "user.email", "test@example.com"],
+            vec!["config", "user.name", "Test"],
+        ] {
+            run_git_command_in(tree.path(), args.into_iter().map(String::from).collect())
+                .await
+                .unwrap();
+        }
+        std::fs::write(tree.path().join("authored.txt"), name).unwrap();
+        for args in [
+            vec!["add", "."],
+            vec!["commit", "-m", "authored"],
+            vec!["branch", "-M", "main"],
+        ] {
+            run_git_command_in(tree.path(), args.into_iter().map(String::from).collect())
+                .await
+                .unwrap();
+        }
+        let material = reuse_material(tree.path().to_path_buf());
+        let fingerprint = match compute_verification_input_fingerprint_with_config(
+            tree.path(),
+            &material.execution_request.fingerprint_config,
+        )
+        .await
+        .unwrap()
+        {
+            VerificationInputFingerprint::Available(value) => value.fingerprint,
+            VerificationInputFingerprint::Unavailable(reason) => {
+                panic!("fingerprint unavailable: {reason}")
+            }
+        };
+        let identity = EnvironmentIdentityV1::derive(
+            (material.execution_request.resolve_environment_identity)().unwrap(),
+        )
+        .unwrap();
+        let run_id = uuid::Uuid::now_v7().to_string();
+        TaskRunRepository::new(db.clone())
+            .create(CreateTaskRunParams {
+                id: &run_id,
+                project_id: &project.id,
+                task_id: &task.id,
+                trigger_type: "dispatch",
+                status: Some("running"),
+                workspace_path: Some(tree.path().to_str().unwrap()),
+                mirror_ref: None,
+            })
+            .await
+            .unwrap();
+        if enabled {
+            SettingsRepository::new(db.clone(), crate::test_helpers::test_events())
+                .set(
+                    &format!("project.{}.verify_run_reuse_enabled", project.id),
+                    "true",
+                )
+                .await
+                .unwrap();
+        }
+        let callbacks = Arc::new(CompletionIntentCallbacks::for_reuse_with_evidence(
+            task.id.clone(),
+            material.clone(),
+            Some(fallback_evidence(
+                &material,
+                fingerprint.clone(),
+                identity.clone(),
+            )),
+            mutate_c1,
+        ));
+        let slot_ctx = agent_context_from_db_with_callbacks(db, callbacks.clone());
+        let session = SessionRepository::new(slot_ctx.db.clone(), slot_ctx.event_bus.clone())
+            .create(CreateSessionParams {
+                project_id: &project.id,
+                task_id: Some(&task.id),
+                model: "synthetic/test-model",
+                agent_type: "worker",
+                metadata_json: None,
+                task_run_id: Some(&run_id),
+                pricing: None,
+                cost_basis: None,
+            })
+            .await
+            .unwrap();
+        let provider =
+            FakeProvider::script(vec![submit_turn(&format!("submit-{name}"), &task.id, name)]);
+        let mut conversation = base_conversation();
+        let cancel = CancellationToken::new();
+        let (result, output, _, _, _, _) = run_with_provider(
+            &provider,
+            &[dummy_tool_schema("submit_work")],
+            &mut conversation,
+            &slot_ctx,
+            tree.path().to_str().unwrap(),
+            &task.id,
+            &session.id,
+            &cancel,
+        )
+        .await;
+        assert!(result.is_ok(), "{name}");
+        assert_eq!(callbacks.coordinator_count(), 1, "{name}");
+        let probe = callbacks.reuse_probe.as_ref().unwrap();
+        assert!(
+            callbacks.reuse_events().contains(&"writer-resolution"),
+            "{name}"
+        );
+        assert_eq!(*probe.lease_requests.lock().unwrap(), 1, "{name}");
+        assert_eq!(*probe.lease_acquisitions.lock().unwrap(), 1, "{name}");
+        assert_eq!(*probe.canonical_executions.lock().unwrap(), 1, "{name}");
+        let evidence = output
+            .completion_intent
+            .unwrap()
+            .final_verification_evidence
+            .unwrap();
+        assert_ne!(
+            evidence.persisted_run_id, "candidate-or-synthetic-reuse",
+            "{name}"
+        );
+        assert_eq!(
+            evidence.verification_input_fingerprint, fingerprint,
+            "{name}"
+        );
+        assert_eq!(evidence.manifest_version, "manifest-v1", "{name}");
+        assert_eq!(
+            evidence.environment_identity_digest, identity.digest,
+            "{name}"
+        );
+        assert_eq!(
+            evidence.required_checks,
+            vec!["format", "slot-clippy"],
+            "{name}"
+        );
+        assert_eq!(
+            evidence.covered_checks,
+            serde_json::json!(["format", "slot-clippy"]),
+            "{name}"
+        );
+        assert_eq!(
+            evidence.ordered_commands.as_array().unwrap().len(),
+            2,
+            "{name}"
+        );
+        assert!(error_ids(&conversation).is_empty(), "{name}");
+    }
 }
 
 fn reuse_material(worktree: std::path::PathBuf) -> FinalVerificationResolvedMaterial {
@@ -150,6 +362,7 @@ struct ReuseProbe {
     lease_acquisitions: Mutex<usize>,
     canonical_executions: Mutex<usize>,
     evidence: Mutex<Option<FinalVerificationExecutionEvidence>>,
+    mutate_before_c1: bool,
 }
 
 struct ReuseProbeLease;
@@ -171,6 +384,15 @@ impl CompletionIntentCallbacks {
     }
 
     fn for_reuse(expected_task_id: String, material: FinalVerificationResolvedMaterial) -> Self {
+        Self::for_reuse_with_evidence(expected_task_id, material, None, false)
+    }
+
+    fn for_reuse_with_evidence(
+        expected_task_id: String,
+        material: FinalVerificationResolvedMaterial,
+        evidence: Option<FinalVerificationExecutionEvidence>,
+        mutate_before_c1: bool,
+    ) -> Self {
         Self {
             outcomes: Mutex::new(VecDeque::new()),
             coordinator_calls: Mutex::new(0),
@@ -181,7 +403,8 @@ impl CompletionIntentCallbacks {
                 lease_requests: Mutex::new(0),
                 lease_acquisitions: Mutex::new(0),
                 canonical_executions: Mutex::new(0),
-                evidence: Mutex::new(None),
+                evidence: Mutex::new(evidence),
+                mutate_before_c1,
             }),
         }
     }
@@ -254,6 +477,17 @@ impl SlotHostCallbacks for CompletionIntentCallbacks {
                 "reuse-c1" => "consult-reuse-c1",
                 _ => "writer-resolution",
             });
+            if verify_run_id == "reuse-c1" && probe.mutate_before_c1 {
+                std::fs::write(
+                    probe
+                        .material
+                        .execution_request
+                        .worktree
+                        .join("c1-mutation"),
+                    "changed",
+                )
+                .map_err(|error| error.to_string())?;
+            }
             Ok(probe.material.clone())
         })
     }
