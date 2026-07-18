@@ -41,7 +41,7 @@ pub struct FinalVerificationResolvedMaterial {
 }
 
 /// Complete proof carried for a reusable pass, rather than an opaque cache hit.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
 pub struct FinalVerificationSuccessEvidence {
     pub persisted_run_id: String,
     pub completed_at: String,
@@ -97,12 +97,12 @@ pub enum FinalVerificationRecordingOutcome {
 /// Run the one authoritative completion boundary for either a model tool call
 /// or a lifecycle-generated auto-submit settlement.
 pub(crate) async fn verify_completion_intent(
-    _intent: &CompletionIntent,
+    intent: &mut CompletionIntent,
     task_id: &str,
     task_run_id: Option<&str>,
     cancellation: CancellationToken,
     slot_ctx: &SlotContext,
-) -> Result<(), String> {
+) -> Result<FinalVerificationSuccessEvidence, String> {
     let task_run_id = match task_run_id {
         Some(task_run_id) => task_run_id.to_owned(),
         None => {
@@ -129,8 +129,12 @@ pub(crate) async fn verify_completion_intent(
     )
     .await
     {
-        FinalVerificationRecordingOutcome::Stored { .. }
-        | FinalVerificationRecordingOutcome::Reused { .. } => Ok(()),
+        FinalVerificationRecordingOutcome::Stored { evidence, .. }
+        | FinalVerificationRecordingOutcome::Reused { evidence, .. } => {
+            let evidence = *evidence;
+            intent.final_verification_evidence = Some(evidence.clone());
+            Ok(evidence)
+        }
         FinalVerificationRecordingOutcome::Ineligible { reason, .. } => Err(format!(
             "Final verification rejected this submit_work request: {reason}. Fix the worktree and resubmit."
         )),

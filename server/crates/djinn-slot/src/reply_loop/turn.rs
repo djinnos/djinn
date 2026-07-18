@@ -1277,12 +1277,19 @@ pub async fn run_reply_loop(
                 if role_name == "worker" && primary_finalize == "submit_work" {
                     match serde_json::from_value::<SubmitWork>(payload.clone()) {
                         Ok(work) if work.task_id == task_id => {
-                            let intent = CompletionIntent { finalize_payload: payload, tool_use_id };
-                            output.completion_intent = Some(intent.clone());
-                            match verify_completion_intent(&intent, task_id, None, cancel.clone(), slot_ctx).await {
-                                Ok(()) => { output.finalize_payload = Some(intent.finalize_payload); output.finalize_tool_name = Some(primary_finalize.to_string()); break; }
+                            let mut intent = CompletionIntent {
+                                finalize_payload: payload,
+                                tool_use_id,
+                                final_verification_evidence: None,
+                            };
+                            match verify_completion_intent(&mut intent, task_id, None, cancel.clone(), slot_ctx).await {
+                                Ok(_) => {
+                                    output.finalize_payload = Some(intent.finalize_payload.clone());
+                                    output.finalize_tool_name = Some(primary_finalize.to_string());
+                                    output.completion_intent = Some(intent);
+                                    break;
+                                }
                                 Err(error) => {
-                                    output.completion_intent = None;
                                     let result_msg = Message { role: Role::User, content: vec![ContentBlock::ToolResult { tool_use_id: intent.tool_use_id, content: vec![ContentBlock::Text { text: error }], is_error: true }], metadata: None };
                                     persist_session_message(&msg_repo, session_id, task_id, &result_msg).await; conversation.push(result_msg); continue;
                                 }
