@@ -46,7 +46,7 @@ use crate::actors::slot::lifecycle::memory_intent_planner::parse_planned_queries
 use crate::context::AgentContext;
 use crate::supervisor_impl::{SupervisorCallbackContext, execute_stage, supervisor_pr_open};
 use djinn_provider::catalog::builtin::classify_provider;
-use djinn_provider::message::Conversation;
+use djinn_provider::message::{ContentBlock, Conversation};
 use djinn_provider::provider::{LlmProvider, LlmResponse, StreamEvent, TokenUsage, ToolChoice};
 use futures::StreamExt;
 
@@ -1088,10 +1088,14 @@ impl SupervisorServices for DirectServices {
                 StreamEvent::Delta(block) => response.content.push(block),
                 StreamEvent::Thinking(s) => response.thinking.push_str(&s),
                 StreamEvent::ThinkingDelta { text, .. } => response.thinking.push_str(&text),
-                StreamEvent::ThinkingBlockComplete { .. } => {
-                    // Completion text is a superset of the deltas already
-                    // appended; do not re-append.
-                }
+                StreamEvent::ThinkingBlockComplete {
+                    thinking,
+                    signature,
+                    ..
+                } => response.content.push(ContentBlock::Thinking {
+                    thinking,
+                    signature,
+                }),
                 StreamEvent::Usage(u) => response.usage = u,
                 StreamEvent::Done => break,
             }
@@ -2343,10 +2347,14 @@ async fn collect_planner_stream(
                 Ok(StreamEvent::Delta(block)) => response.content.push(block),
                 Ok(StreamEvent::Thinking(thinking)) => response.thinking.push_str(&thinking),
                 Ok(StreamEvent::ThinkingDelta { text, .. }) => response.thinking.push_str(&text),
-                Ok(StreamEvent::ThinkingBlockComplete { .. }) => {
-                    // Completion text is a superset of the deltas already
-                    // appended; do not re-append.
-                }
+                Ok(StreamEvent::ThinkingBlockComplete {
+                    thinking,
+                    signature,
+                    ..
+                }) => response.content.push(ContentBlock::Thinking {
+                    thinking,
+                    signature,
+                }),
                 Ok(StreamEvent::Usage(usage)) => response.usage = usage,
                 Ok(StreamEvent::Done) => break,
                 Err(error) => return Err(format!("provider stream error: {error}")),

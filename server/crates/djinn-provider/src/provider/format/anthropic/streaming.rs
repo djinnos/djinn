@@ -257,16 +257,10 @@ pub(crate) fn parse_anthropic_event(
                         thinking,
                         signature,
                     } => {
-                        // Emit the retained signed provider block before its
-                        // completion marker. Slot cancellation is checked
-                        // between yielded events, so this guarantees that an
-                        // interrupted turn can persist the block before exact
-                        // ID reconciliation suppresses its delta fragments.
-                        let block = ContentBlock::Thinking {
-                            thinking: thinking.clone(),
-                            signature: signature.clone(),
-                        };
-                        events.push(StreamEvent::Delta(block));
+                        // Completion is the single load-bearing representation
+                        // of this block. Consumers atomically materialize its
+                        // payload and record its ID; emitting a second
+                        // Delta(Thinking) would create an exact-once gap.
                         events.push(StreamEvent::ThinkingBlockComplete {
                             id: index,
                             thinking,

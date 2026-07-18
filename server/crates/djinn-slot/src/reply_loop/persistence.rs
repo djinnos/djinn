@@ -236,9 +236,8 @@ pub(super) fn serialize_llm_input(
 /// presence-based deduplication is ever applied.
 pub(super) fn assemble_persisted_content(
     provider_state: &[djinn_provider::message::ContentBlock],
-    unresolved_thinking: &[(u64, String)],
+    unresolved_thinking: &[super::streaming::UnresolvedThinkingFragment],
     completed_thinking_ids: &std::collections::HashSet<u64>,
-    unattributed_thinking: &str,
     text: &str,
     tool_calls: &[djinn_provider::message::ContentBlock],
 ) -> Vec<djinn_provider::message::ContentBlock> {
@@ -254,13 +253,18 @@ pub(super) fn assemble_persisted_content(
     //    appears in the completed set. Unattributed text (Thinking(String),
     //    OpenAI reasoning) has no block ID and is always included.
     let mut unsigned = String::new();
-    for (id, fragment) in unresolved_thinking {
-        if !completed_thinking_ids.contains(id) {
-            unsigned.push_str(fragment);
+    for fragment in unresolved_thinking {
+        match fragment {
+            super::streaming::UnresolvedThinkingFragment::Attributed { id, text }
+                if !completed_thinking_ids.contains(id) =>
+            {
+                unsigned.push_str(text)
+            }
+            super::streaming::UnresolvedThinkingFragment::Unattributed(text) => {
+                unsigned.push_str(text);
+            }
+            super::streaming::UnresolvedThinkingFragment::Attributed { .. } => {}
         }
-    }
-    if !unattributed_thinking.is_empty() {
-        unsigned.push_str(unattributed_thinking);
     }
     if !unsigned.is_empty() {
         content.push(ContentBlock::Thinking {
@@ -317,7 +321,6 @@ pub(super) async fn flush_in_flight_turn(
         &stream_state.turn_provider_state,
         &stream_state.turn_unresolved_thinking,
         &stream_state.turn_completed_thinking_ids,
-        &stream_state.turn_unattributed_thinking,
         &stream_state.turn_text,
         &stream_state.turn_tool_calls,
     );
@@ -362,4 +365,71 @@ pub(super) async fn flush_in_flight_turn(
     }
 
     stream_state.turn_flushed = true;
+}
+
+#[cfg(test)]
+mod thinking_reconciliation_tests {
+    use super::assemble_persisted_content;
+    use crate::reply_loop::streaming::UnresolvedThinkingFragment::{Attributed, Unattributed};
+    use djinn_provider::message::ContentBlock;
+    use std::collections::HashSet;
+
+    fn fallback(
+        fragments: Vec<crate::reply_loop::streaming::UnresolvedThinkingFragment>,
+    ) -> String {
+        let content = assemble_persisted_content(&[], &fragments, &HashSet::new(), "", &[]);
+        match content.as_slice() {
+            [
+                ContentBlock::Thinking {
+                    thinking,
+                    signature: None,
+                },
+            ] => thinking.clone(),
+            other => panic!("unexpected canonical content: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn unresolved_fragments_preserve_both_arrival_orders() {
+        assert_eq!(
+            fallback(vec![
+                Unattributed("U1".into()),
+                Attributed {
+                    id: 9,
+                    text: "A".into()
+                },
+            ]),
+            "U1A"
+        );
+        assert_eq!(
+            fallback(vec![
+                Attributed {
+                    id: 9,
+                    text: "A".into()
+                },
+                Unattributed("U1".into()),
+            ]),
+            "AU1"
+        );
+    }
+
+    #[test]
+    fn exact_id_suppression_preserves_other_fragments() {
+        let fragments = vec![
+            Attributed {
+                id: 1,
+                text: "done".into(),
+            },
+            Unattributed("U".into()),
+            Attributed {
+                id: 2,
+                text: "partial".into(),
+            },
+        ];
+        let content = assemble_persisted_content(&[], &fragments, &HashSet::from([1]), "", &[]);
+        assert!(matches!(
+            content.as_slice(),
+            [ContentBlock::Thinking { thinking, signature: None }] if thinking == "Upartial"
+        ));
+    }
 }

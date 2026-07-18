@@ -28,23 +28,23 @@ use crate::helpers::{runtime_env_diagnostics, runtime_fs_diagnostics};
 pub(super) type StreamingFut<'a> =
     Pin<Box<dyn std::future::Future<Output = (usize, ContentBlock)> + Send + 'a>>;
 
+/// One unresolved reasoning fragment in provider event arrival order.
+pub(super) enum UnresolvedThinkingFragment {
+    Attributed { id: u64, text: String },
+    Unattributed(String),
+}
+
 pub(super) struct StreamTurnState {
     pub turn_text: String,
     /// Complete arrival-order thinking aggregate for display and telemetry.
     /// This includes unattributed events and attributed delta text, so it is
     /// deliberately kept separate from canonical persistence input.
     pub turn_thinking: String,
-    /// Only `Thinking(String)` text, which has no provider block ID and is
-    /// therefore always retained in the unsigned persistence fallback.
-    pub turn_unattributed_thinking: String,
     pub turn_provider_state: Vec<ContentBlock>,
     pub turn_tool_calls: Vec<ContentBlock>,
-    /// Arrival-ordered unresolved thinking-delta fragments keyed by their
-    /// provider content-block ID. Each fragment is the text from one
-    /// [`StreamEvent::ThinkingDelta`] event. Persistence reconciles these
-    /// against completed blocks by exact ID and retains only unmatched
-    /// residuals — never by text value, prefix, suffix, or presence.
-    pub turn_unresolved_thinking: Vec<(u64, String)>,
+    /// Attributed and unattributed fragments in one event-arrival sequence.
+    /// Persistence suppresses only attributed entries whose exact ID completed.
+    pub turn_unresolved_thinking: Vec<UnresolvedThinkingFragment>,
     /// Block IDs for which a `ThinkingBlockComplete` was received. The
     /// canonical assembler reconciles `turn_unresolved_thinking` against
     /// this set, suppressing only exact-ID matches.
@@ -76,7 +76,6 @@ impl StreamTurnState {
         Self {
             turn_text: String::new(),
             turn_thinking: String::new(),
-            turn_unattributed_thinking: String::new(),
             turn_provider_state: Vec::new(),
             turn_tool_calls: Vec::new(),
             turn_unresolved_thinking: Vec::new(),
@@ -252,7 +251,9 @@ pub(super) async fn consume_provider_stream(
                             }),
                         ));
                         state.turn_thinking.push_str(&thinking);
-                        state.turn_unattributed_thinking.push_str(&thinking);
+                        state
+                            .turn_unresolved_thinking
+                            .push(UnresolvedThinkingFragment::Unattributed(thinking));
                     }
                     StreamEvent::ThinkingDelta { id, text } => {
                         // Display/telemetry aggregate gets the attributed
@@ -270,21 +271,21 @@ pub(super) async fn consume_provider_stream(
                         state.turn_thinking.push_str(&text);
                         // Persistence fragment in arrival order, keyed by
                         // exact block ID for later reconciliation.
-                        state.turn_unresolved_thinking.push((id, text));
+                        state.turn_unresolved_thinking.push(
+                            UnresolvedThinkingFragment::Attributed { id, text },
+                        );
                     }
                     StreamEvent::ThinkingBlockComplete {
                         id,
-                        thinking: _,
-                        signature: _,
+                        thinking,
+                        signature,
                     } => {
-                        // The signed block already arrived as a
-                        // Delta(Thinking) pushed to turn_provider_state.
-                        // Record the completed block ID so the canonical
-                        // assembler can reconcile and suppress matching
-                        // ThinkingDelta fragments by exact ID. The completion
-                        // text is a strict superset of the matching deltas so
-                        // it is NOT appended to turn_thinking (deltas already
-                        // were).
+                        // Materialize the load-bearing completion before
+                        // marking its ID complete, making interruption safe.
+                        state.turn_provider_state.push(ContentBlock::Thinking {
+                            thinking,
+                            signature,
+                        });
                         state.turn_completed_thinking_ids.insert(id);
                     }
                     StreamEvent::Usage(usage) => {

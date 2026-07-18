@@ -392,11 +392,15 @@ async fn init_provider_stream(
 /// Canonical order: provider-state blocks, one unsigned thinking block from
 /// unresolved fragments (reconciled by exact block ID), assistant text, then
 /// tool calls. Side-effect-free.
+enum UnresolvedThinkingFragment {
+    Attributed { id: u64, text: String },
+    Unattributed(String),
+}
+
 fn assemble_chat_assistant_content(
     provider_state: &[ContentBlock],
-    unresolved_thinking: &[(u64, String)],
+    unresolved_thinking: &[UnresolvedThinkingFragment],
     completed_thinking_ids: &std::collections::HashSet<u64>,
-    unattributed_thinking: &str,
     text: &str,
     tool_calls: &[ContentBlock],
 ) -> Vec<ContentBlock> {
@@ -407,13 +411,16 @@ fn assemble_chat_assistant_content(
 
     // 2. One unsigned thinking block from non-empty unresolved fragments.
     let mut unsigned = String::new();
-    for (id, fragment) in unresolved_thinking {
-        if !completed_thinking_ids.contains(id) {
-            unsigned.push_str(fragment);
+    for fragment in unresolved_thinking {
+        match fragment {
+            UnresolvedThinkingFragment::Attributed { id, text }
+                if !completed_thinking_ids.contains(id) =>
+            {
+                unsigned.push_str(text)
+            }
+            UnresolvedThinkingFragment::Unattributed(text) => unsigned.push_str(text),
+            UnresolvedThinkingFragment::Attributed { .. } => {}
         }
-    }
-    if !unattributed_thinking.is_empty() {
-        unsigned.push_str(unattributed_thinking);
     }
     if !unsigned.is_empty() {
         content.push(ContentBlock::Thinking {
@@ -447,14 +454,10 @@ async fn drain_provider_turn(
     let mut turn_text = String::new();
     let mut turn_provider_state: Vec<ContentBlock> = Vec::new();
     let mut tool_calls: Vec<ContentBlock> = Vec::new();
-    // Arrival-ordered unresolved thinking-delta fragments keyed by exact
-    // content-block ID, plus the set of IDs that completed.
-    let mut unresolved_thinking: Vec<(u64, String)> = Vec::new();
+    // One arrival-ordered sequence for attributed and unattributed fragments.
+    let mut unresolved_thinking: Vec<UnresolvedThinkingFragment> = Vec::new();
     let mut completed_thinking_ids: std::collections::HashSet<u64> =
         std::collections::HashSet::new();
-    // `Thinking(String)` has no content-block ID, so it must remain separate
-    // from attributed delta fragments and always survive canonical assembly.
-    let mut unattributed_thinking = String::new();
 
     while let Some(item) = stream.next().await {
         match item {
@@ -478,14 +481,21 @@ async fn drain_provider_turn(
                 // Unattributed thinking (OpenAI reasoning) has no block ID to
                 // reconcile against, so canonical persistence retains it.
                 // Chat does not display thinking deltas live.
-                unattributed_thinking.push_str(&thinking);
+                unresolved_thinking.push(UnresolvedThinkingFragment::Unattributed(thinking));
             }
             Ok(StreamEvent::ThinkingDelta { id, text }) => {
-                unresolved_thinking.push((id, text));
+                unresolved_thinking.push(UnresolvedThinkingFragment::Attributed { id, text });
             }
-            Ok(StreamEvent::ThinkingBlockComplete { id, .. }) => {
-                // The signed block already arrived as Delta(Thinking) in
-                // turn_provider_state. Record the ID for reconciliation.
+            Ok(StreamEvent::ThinkingBlockComplete {
+                id,
+                thinking,
+                signature,
+            }) => {
+                // Materialize completion before marking the exact ID complete.
+                turn_provider_state.push(ContentBlock::Thinking {
+                    thinking,
+                    signature,
+                });
                 completed_thinking_ids.insert(id);
             }
             Ok(StreamEvent::Done) => break,
@@ -512,7 +522,6 @@ async fn drain_provider_turn(
                     &turn_provider_state,
                     &unresolved_thinking,
                     &completed_thinking_ids,
-                    &unattributed_thinking,
                     &turn_text,
                     &[],
                 );
@@ -534,7 +543,6 @@ async fn drain_provider_turn(
         &turn_provider_state,
         &unresolved_thinking,
         &completed_thinking_ids,
-        &unattributed_thinking,
         &turn_text,
         &tool_calls,
     );

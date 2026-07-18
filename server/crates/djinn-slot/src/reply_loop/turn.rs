@@ -894,7 +894,6 @@ pub async fn run_reply_loop(
             let StreamTurnState {
                 turn_text,
                 turn_thinking,
-                turn_unattributed_thinking,
                 turn_provider_state,
                 turn_tool_calls,
                 turn_unresolved_thinking,
@@ -1020,7 +1019,6 @@ pub async fn run_reply_loop(
                 &turn_provider_state,
                 &turn_unresolved_thinking,
                 &turn_completed_thinking_ids,
-                &turn_unattributed_thinking,
                 &turn_text,
                 &turn_tool_calls,
             );
