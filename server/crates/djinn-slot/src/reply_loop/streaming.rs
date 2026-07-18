@@ -29,12 +29,13 @@ pub(super) type StreamingFut<'a> =
     Pin<Box<dyn std::future::Future<Output = (usize, ContentBlock)> + Send + 'a>>;
 
 /// One unresolved reasoning fragment in provider event arrival order.
-pub(super) enum UnresolvedThinkingFragment {
+#[derive(Clone)]
+pub enum UnresolvedThinkingFragment {
     Attributed { id: u64, text: String },
     Unattributed(String),
 }
 
-pub(super) struct StreamTurnState {
+pub struct StreamTurnState {
     pub turn_text: String,
     /// Complete arrival-order thinking aggregate for display and telemetry.
     /// This includes unattributed events and attributed delta text, so it is
@@ -72,7 +73,7 @@ pub(super) struct StreamTurnState {
 }
 
 impl StreamTurnState {
-    pub(super) fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             turn_text: String::new(),
             turn_thinking: String::new(),

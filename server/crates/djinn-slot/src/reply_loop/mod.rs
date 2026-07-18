@@ -13,9 +13,11 @@ pub(crate) mod budget;
 pub mod compaction_guard;
 pub mod error_handling;
 pub mod loop_guard;
-mod persistence;
+#[cfg(any(test, feature = "test-support"))]
+pub mod persistence;
 pub mod phase;
-mod streaming;
+#[cfg(any(test, feature = "test-support"))]
+pub mod streaming;
 mod tool_dispatch;
 mod turn;
 mod turn_budget;

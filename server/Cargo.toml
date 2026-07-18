@@ -32,6 +32,7 @@ path = "src/bin/export_usage_schema.rs"
 default = []
 qdrant = ["djinn-db/qdrant"]
 vendored = ["git2/vendored-libgit2", "git2/vendored-openssl"]
+test-support = []
 
 [dependencies]
 djinn-agent = { path = "crates/djinn-agent" }
@@ -106,6 +107,7 @@ tikv-jemalloc-ctl = { version = "0.6", features = ["stats"] }
 
 [dev-dependencies]
 djinn-control-plane = { path = "crates/djinn-control-plane", features = ["test-support"] }
+djinn-server = { path = ".", features = ["test-support"] }
 insta = { version = "1", features = ["json", "redactions"] }
 proptest = "1"
 rstest = "0.24"

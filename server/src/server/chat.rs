@@ -6,6 +6,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::server::AppState;
 mod compaction_boundary;
+#[cfg(any(test, feature = "test-support"))]
+pub mod handler;
+#[cfg(not(any(test, feature = "test-support")))]
 mod handler;
 mod project_resolver;
 mod prompt;
