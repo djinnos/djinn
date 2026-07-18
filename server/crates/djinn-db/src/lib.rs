@@ -190,9 +190,10 @@ pub use repositories::{
     settings::SettingsRepository,
     task::TaskRepository,
     task::{
-        ActivityQuery, BlockerRef, ChildDisposition, CountQuery, CreateTaskInProjectParams,
-        CreateTaskParams, DispositionCounts, DispositionFinding, DispositionPlan, DispositionScope,
-        ListQuery, ListResult, ReadyQuery, UpdateTaskParams,
+        ActivityQuery, BlockerRef, BoardHealthMismatchCandidate, ChildDisposition, CountQuery,
+        CreateTaskInProjectParams, CreateTaskParams, DispositionCounts, DispositionFinding,
+        DispositionPlan, DispositionScope, ListQuery, ListResult, ReadyQuery, UpdateTaskParams,
+        evaluate_board_health_mismatch_candidate,
     },
     task_arbitration::{
         ArbitrationState, CreateArbitrationParams, TaskArbitrationRecord,
