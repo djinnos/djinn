@@ -1672,6 +1672,10 @@ impl AppState {
             // tool arg. Only the K8s worker (one-project-per-Pod) sets
             // this in build_worker_agent_context.
             default_project_id: None,
+            // Host contexts span projects and have no task-run-scoped
+            // cross-project shell authority; worker contexts receive it from
+            // their immutable TaskRunSpec instead.
+            read_source_authorization: djinn_agent::context::ReadSourceAuthorization::default(),
             reconciliation_sweep: djinn_agent::context::ReconciliationSweepConfig::from_env(),
             memory_intent_planner: djinn_agent::context::MemoryIntentPlannerConfig::from_env(),
             compaction_cs: djinn_slot::reply_loop::CompactionCriticalSection::default(),
