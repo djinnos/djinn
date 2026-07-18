@@ -48,6 +48,7 @@ use types::*;
 
 pub mod audit_sampler;
 pub mod build_admission;
+pub mod build_admission_inventory;
 pub mod cargo_warm_base_gc;
 pub(crate) mod ci_preflight_gate;
 pub mod ci_reproduction;
@@ -173,6 +174,8 @@ pub use djinn_orchestration_types::coordinator::PR_REVIEW_FEEDBACK_EVENT;
 
 #[cfg(test)]
 mod build_admission_integration_tests;
+#[cfg(test)]
+mod build_admission_inventory_tests;
 #[cfg(test)]
 pub(crate) mod test_helpers;
 #[cfg(test)]

@@ -169,6 +169,15 @@ pub struct UidFencedAdmissionInput {
     pub object_uid: String,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AdoptLiveAdmissionInput {
+    pub key: AdmissionJournalKey,
+    pub workload_kind: AdmissionWorkloadKind,
+    pub creator_server_epoch: String,
+    pub object_name: String,
+    pub object_uid: String,
+}
+
 /// Terminal mutation input; a UID is required for a Live row.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TerminalAdmissionInput {
@@ -394,6 +403,41 @@ impl AdmissionJournalRepository {
         };
         tx.commit().await?;
         Ok(result)
+    }
+
+    pub async fn adopt_live(
+        &self,
+        input: &AdoptLiveAdmissionInput,
+    ) -> DbResult<AdmissionJournalRow> {
+        if input.object_uid.trim().is_empty() {
+            return Err(DbError::InvalidData("inventory UID is empty".into()));
+        }
+        self.db.ensure_initialized().await?;
+        let mut tx = self.db.pool().begin().await?;
+        lock_capacity(&mut tx).await?;
+        if let Some(row) = fetch_row(&mut tx, &input.key).await? {
+            if row.state == AdmissionState::Live
+                && row.object_uid.as_deref() == Some(input.object_uid.as_str())
+            {
+                tx.commit().await?;
+                return Ok(row);
+            }
+            if row.state == AdmissionState::CreateUnknown
+                && row.object_name == input.object_name
+                && row.object_uid.is_none()
+            {
+                let adopted =
+                    update_state(&mut tx, &input.key, "live", Some(&input.object_uid)).await?;
+                tx.commit().await?;
+                return Ok(adopted);
+            }
+            return Err(DbError::InvalidTransition(
+                "inventory identity collision".into(),
+            ));
+        }
+        let row = sqlx::query_as::<_, JournalDbRow>("INSERT INTO admission_journal (domain, work_id, generation, workload_kind, state, creator_server_epoch, object_name, object_uid) VALUES ($1,$2,$3,$4,'live',$5,$6,$7) RETURNING domain, work_id, generation, workload_kind, state, creator_server_epoch, object_name, object_uid, created_at::text, updated_at::text, terminal_at::text").bind(input.key.domain.as_str()).bind(&input.key.work_id).bind(input.key.generation).bind(input.workload_kind.as_str()).bind(&input.creator_server_epoch).bind(&input.object_name).bind(&input.object_uid).fetch_one(&mut *tx).await?;
+        tx.commit().await?;
+        row.try_into()
     }
 
     pub async fn mark_definitive_create_failure(
