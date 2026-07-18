@@ -215,7 +215,7 @@ mod tests {
     use crate::test_helpers;
     use crate::{BackgroundWorkTracker, CoordinatorDeps, CoordinatorHandle, DEFAULT_MODEL_ID};
     use djinn_core::events::DjinnEventEnvelope;
-    use djinn_db::{Database, EpicRepository, TaskRepository};
+    use djinn_db::{Database, EpicCreateInput, EpicRepository, TaskRepository, UserRepository};
     use djinn_provider::catalog::CatalogService;
     use djinn_provider::catalog::health::HealthTracker;
     use djinn_slot::{ModelSlotConfig, SlotPoolConfig, SlotPoolHandle};
@@ -258,6 +258,36 @@ mod tests {
         ))
     }
 
+    /// Create an epic through the authenticated ownership path used by the
+    /// production MCP endpoint. Planning resolves attribution from the epic.
+    async fn create_owned_epic(
+        db: &Database,
+        epic_repo: &EpicRepository,
+        project_id: &str,
+        input: EpicCreateInput<'_>,
+    ) -> djinn_db::Result<djinn_core::models::Epic> {
+        let fixture_key = uuid::Uuid::now_v7();
+        let mut github_id_bytes = [0_u8; 8];
+        github_id_bytes.copy_from_slice(&fixture_key.as_bytes()[8..]);
+        let github_id = i64::from_be_bytes(github_id_bytes) & i64::MAX;
+        let user = UserRepository::new(db.clone())
+            .upsert_from_github(
+                github_id,
+                &format!("wave-fixture-{fixture_key}"),
+                Some("wave coordinator fixture owner"),
+                None,
+            )
+            .await
+            .expect("create persisted wave fixture owner");
+
+        djinn_core::auth_context::SESSION_USER_ID
+            .scope(
+                Some(user.id),
+                epic_repo.create_for_project(project_id, input),
+            )
+            .await
+    }
+
     async fn wait_for_decomp_tasks(
         db: &Database,
         tx: &broadcast::Sender<DjinnEventEnvelope>,
@@ -295,24 +325,25 @@ mod tests {
         let _handle = spawn_coordinator_with_planner(&db, &tx);
         tokio::task::yield_now().await;
 
-        let epic = epic_repo
-            .create_for_project(
-                &project.id,
-                djinn_db::EpicCreateInput {
-                    title: "Wave Test Epic",
-                    description: "test",
-                    emoji: "",
-                    color: "",
-                    owner: "",
-                    memory_refs: None,
-                    status: Some("open"),
-                    auto_breakdown: None,
-                    originating_adr_id: None,
-                    blocked_by: None,
-                },
-            )
-            .await
-            .unwrap();
+        let epic = create_owned_epic(
+            &db,
+            &epic_repo,
+            &project.id,
+            djinn_db::EpicCreateInput {
+                title: "Wave Test Epic",
+                description: "test",
+                emoji: "",
+                color: "",
+                owner: "",
+                memory_refs: None,
+                status: Some("open"),
+                auto_breakdown: None,
+                originating_adr_id: None,
+                blocked_by: None,
+            },
+        )
+        .await
+        .unwrap();
 
         let decomp_tasks = wait_for_decomp_tasks(&db, &tx, &epic.id, 1).await;
         assert_eq!(decomp_tasks.len(), 1);
@@ -328,24 +359,25 @@ mod tests {
         let _handle = spawn_coordinator_with_planner(&db, &tx);
         tokio::task::yield_now().await;
 
-        let epic = epic_repo
-            .create_for_project(
-                &project.id,
-                djinn_db::EpicCreateInput {
-                    title: "Dedup Epic",
-                    description: "",
-                    emoji: "",
-                    color: "",
-                    owner: "",
-                    memory_refs: None,
-                    status: Some("open"),
-                    auto_breakdown: None,
-                    originating_adr_id: None,
-                    blocked_by: None,
-                },
-            )
-            .await
-            .unwrap();
+        let epic = create_owned_epic(
+            &db,
+            &epic_repo,
+            &project.id,
+            djinn_db::EpicCreateInput {
+                title: "Dedup Epic",
+                description: "",
+                emoji: "",
+                color: "",
+                owner: "",
+                memory_refs: None,
+                status: Some("open"),
+                auto_breakdown: None,
+                originating_adr_id: None,
+                blocked_by: None,
+            },
+        )
+        .await
+        .unwrap();
 
         let decomp_tasks = wait_for_decomp_tasks(&db, &tx, &epic.id, 1).await;
         assert_eq!(decomp_tasks.len(), 1);
@@ -377,24 +409,25 @@ mod tests {
         let _handle = spawn_coordinator_with_planner(&db, &tx);
         tokio::task::yield_now().await;
 
-        let epic = epic_repo
-            .create_for_project(
-                &project.id,
-                djinn_db::EpicCreateInput {
-                    title: "No Auto Breakdown Epic",
-                    description: "",
-                    emoji: "",
-                    color: "",
-                    owner: "",
-                    memory_refs: None,
-                    status: Some("open"),
-                    auto_breakdown: Some(false),
-                    originating_adr_id: None,
-                    blocked_by: None,
-                },
-            )
-            .await
-            .unwrap();
+        let epic = create_owned_epic(
+            &db,
+            &epic_repo,
+            &project.id,
+            djinn_db::EpicCreateInput {
+                title: "No Auto Breakdown Epic",
+                description: "",
+                emoji: "",
+                color: "",
+                owner: "",
+                memory_refs: None,
+                status: Some("open"),
+                auto_breakdown: Some(false),
+                originating_adr_id: None,
+                blocked_by: None,
+            },
+        )
+        .await
+        .unwrap();
 
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
 
@@ -418,24 +451,25 @@ mod tests {
         let _handle = spawn_coordinator_with_planner(&db, &tx);
         tokio::task::yield_now().await;
 
-        let epic = epic_repo
-            .create_for_project(
-                &project.id,
-                djinn_db::EpicCreateInput {
-                    title: "Promote Me Epic",
-                    description: "",
-                    emoji: "",
-                    color: "",
-                    owner: "",
-                    memory_refs: None,
-                    status: Some("closed"),
-                    auto_breakdown: None,
-                    originating_adr_id: None,
-                    blocked_by: None,
-                },
-            )
-            .await
-            .unwrap();
+        let epic = create_owned_epic(
+            &db,
+            &epic_repo,
+            &project.id,
+            djinn_db::EpicCreateInput {
+                title: "Promote Me Epic",
+                description: "",
+                emoji: "",
+                color: "",
+                owner: "",
+                memory_refs: None,
+                status: Some("closed"),
+                auto_breakdown: None,
+                originating_adr_id: None,
+                blocked_by: None,
+            },
+        )
+        .await
+        .unwrap();
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
         let promoted = epic_repo.set_status_raw(&epic.id, "open").await.unwrap();
@@ -457,24 +491,25 @@ mod tests {
         let _handle = spawn_coordinator_with_planner(&db, &tx);
         tokio::task::yield_now().await;
 
-        let epic = epic_repo
-            .create_for_project(
-                &project.id,
-                djinn_db::EpicCreateInput {
-                    title: "No Dup Promote Epic",
-                    description: "",
-                    emoji: "",
-                    color: "",
-                    owner: "",
-                    memory_refs: None,
-                    status: Some("closed"),
-                    auto_breakdown: None,
-                    originating_adr_id: None,
-                    blocked_by: None,
-                },
-            )
-            .await
-            .unwrap();
+        let epic = create_owned_epic(
+            &db,
+            &epic_repo,
+            &project.id,
+            djinn_db::EpicCreateInput {
+                title: "No Dup Promote Epic",
+                description: "",
+                emoji: "",
+                color: "",
+                owner: "",
+                memory_refs: None,
+                status: Some("closed"),
+                auto_breakdown: None,
+                originating_adr_id: None,
+                blocked_by: None,
+            },
+        )
+        .await
+        .unwrap();
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
         let promoted = epic_repo.set_status_raw(&epic.id, "open").await.unwrap();
@@ -517,24 +552,25 @@ mod tests {
         let _handle = spawn_coordinator_with_planner(&db, &tx);
         tokio::task::yield_now().await;
 
-        let epic = epic_repo
-            .create_for_project(
-                &project.id,
-                djinn_db::EpicCreateInput {
-                    title: "Already Decomposed Epic",
-                    description: "",
-                    emoji: "",
-                    color: "",
-                    owner: "",
-                    memory_refs: None,
-                    status: Some("open"),
-                    auto_breakdown: None,
-                    originating_adr_id: None,
-                    blocked_by: None,
-                },
-            )
-            .await
-            .unwrap();
+        let epic = create_owned_epic(
+            &db,
+            &epic_repo,
+            &project.id,
+            djinn_db::EpicCreateInput {
+                title: "Already Decomposed Epic",
+                description: "",
+                emoji: "",
+                color: "",
+                owner: "",
+                memory_refs: None,
+                status: Some("open"),
+                auto_breakdown: None,
+                originating_adr_id: None,
+                blocked_by: None,
+            },
+        )
+        .await
+        .unwrap();
 
         // Wave 1: epic creation produces the first planning task.
         let decomp_tasks = wait_for_decomp_tasks(&db, &tx, &epic.id, 1).await;
@@ -598,24 +634,25 @@ mod tests {
         let _handle = spawn_coordinator_with_planner(&db, &tx);
         tokio::task::yield_now().await;
 
-        let epic = epic_repo
-            .create_for_project(
-                &project.id,
-                djinn_db::EpicCreateInput {
-                    title: "Batch Completion Epic",
-                    description: "",
-                    emoji: "",
-                    color: "",
-                    owner: "",
-                    memory_refs: None,
-                    status: Some("open"),
-                    auto_breakdown: None,
-                    originating_adr_id: None,
-                    blocked_by: None,
-                },
-            )
-            .await
-            .unwrap();
+        let epic = create_owned_epic(
+            &db,
+            &epic_repo,
+            &project.id,
+            djinn_db::EpicCreateInput {
+                title: "Batch Completion Epic",
+                description: "",
+                emoji: "",
+                color: "",
+                owner: "",
+                memory_refs: None,
+                status: Some("open"),
+                auto_breakdown: None,
+                originating_adr_id: None,
+                blocked_by: None,
+            },
+        )
+        .await
+        .unwrap();
 
         let task_repo = TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx));
         let initial_decomp = wait_for_decomp_tasks(&db, &tx, &epic.id, 1).await;
@@ -687,24 +724,25 @@ mod tests {
         tokio::task::yield_now().await;
 
         // Create epic A (foundation, no blockers).
-        let epic_a = epic_repo
-            .create_for_project(
-                &project.id,
-                djinn_db::EpicCreateInput {
-                    title: "Foundation Epic A",
-                    description: "owns migration",
-                    emoji: "",
-                    color: "",
-                    owner: "",
-                    memory_refs: None,
-                    status: Some("open"),
-                    auto_breakdown: None,
-                    originating_adr_id: None,
-                    blocked_by: None,
-                },
-            )
-            .await
-            .unwrap();
+        let epic_a = create_owned_epic(
+            &db,
+            &epic_repo,
+            &project.id,
+            djinn_db::EpicCreateInput {
+                title: "Foundation Epic A",
+                description: "owns migration",
+                emoji: "",
+                color: "",
+                owner: "",
+                memory_refs: None,
+                status: Some("open"),
+                auto_breakdown: None,
+                originating_adr_id: None,
+                blocked_by: None,
+            },
+        )
+        .await
+        .unwrap();
 
         // Epic A gets its planning task immediately (no blockers).
         let a_tasks = wait_for_decomp_tasks(&db, &tx, &epic_a.id, 1).await;
@@ -715,24 +753,25 @@ mod tests {
         );
 
         // Create epic B (dependent).
-        let epic_b = epic_repo
-            .create_for_project(
-                &project.id,
-                djinn_db::EpicCreateInput {
-                    title: "Dependent Epic B",
-                    description: "depends on A",
-                    emoji: "",
-                    color: "",
-                    owner: "",
-                    memory_refs: None,
-                    status: Some("open"),
-                    auto_breakdown: None,
-                    originating_adr_id: None,
-                    blocked_by: None,
-                },
-            )
-            .await
-            .unwrap();
+        let epic_b = create_owned_epic(
+            &db,
+            &epic_repo,
+            &project.id,
+            djinn_db::EpicCreateInput {
+                title: "Dependent Epic B",
+                description: "depends on A",
+                emoji: "",
+                color: "",
+                owner: "",
+                memory_refs: None,
+                status: Some("open"),
+                auto_breakdown: None,
+                originating_adr_id: None,
+                blocked_by: None,
+            },
+        )
+        .await
+        .unwrap();
 
         // B initially has no blockers — its planning task may or may not
         // have fired by now. Wire the blocker immediately (simulates the
@@ -777,48 +816,50 @@ mod tests {
         tokio::task::yield_now().await;
 
         // P1: foundation epic (owns a migration).
-        let p1 = epic_repo
-            .create_for_project(
-                &project.id,
-                djinn_db::EpicCreateInput {
-                    title: "P1 Migration Foundation",
-                    description: "adds migration that P2 depends on",
-                    emoji: "",
-                    color: "",
-                    owner: "",
-                    memory_refs: None,
-                    status: Some("open"),
-                    auto_breakdown: None,
-                    originating_adr_id: None,
-                    blocked_by: None,
-                },
-            )
-            .await
-            .unwrap();
+        let p1 = create_owned_epic(
+            &db,
+            &epic_repo,
+            &project.id,
+            djinn_db::EpicCreateInput {
+                title: "P1 Migration Foundation",
+                description: "adds migration that P2 depends on",
+                emoji: "",
+                color: "",
+                owner: "",
+                memory_refs: None,
+                status: Some("open"),
+                auto_breakdown: None,
+                originating_adr_id: None,
+                blocked_by: None,
+            },
+        )
+        .await
+        .unwrap();
 
         // P1 gets its planning task.
         let p1_tasks = wait_for_decomp_tasks(&db, &tx, &p1.id, 1).await;
         assert_eq!(p1_tasks.len(), 1, "P1 should get a planning task");
 
         // P2: dependent epic.
-        let p2 = epic_repo
-            .create_for_project(
-                &project.id,
-                djinn_db::EpicCreateInput {
-                    title: "P2 Dependent Feature",
-                    description: "builds on P1 migration",
-                    emoji: "",
-                    color: "",
-                    owner: "",
-                    memory_refs: None,
-                    status: Some("open"),
-                    auto_breakdown: None,
-                    originating_adr_id: None,
-                    blocked_by: None,
-                },
-            )
-            .await
-            .unwrap();
+        let p2 = create_owned_epic(
+            &db,
+            &epic_repo,
+            &project.id,
+            djinn_db::EpicCreateInput {
+                title: "P2 Dependent Feature",
+                description: "builds on P1 migration",
+                emoji: "",
+                color: "",
+                owner: "",
+                memory_refs: None,
+                status: Some("open"),
+                auto_breakdown: None,
+                originating_adr_id: None,
+                blocked_by: None,
+            },
+        )
+        .await
+        .unwrap();
 
         // Wire P2.blocked_by = P1 (simulates proposal planner wiring).
         epic_repo.add_blocker(&p2.id, &p1.id).await.unwrap();
@@ -871,24 +912,25 @@ mod tests {
         tokio::task::yield_now().await;
 
         // Create a single epic with no blockers and default auto_breakdown.
-        let epic = epic_repo
-            .create_for_project(
-                &project.id,
-                djinn_db::EpicCreateInput {
-                    title: "Simple Epic",
-                    description: "no blockers, should decompose immediately",
-                    emoji: "",
-                    color: "",
-                    owner: "",
-                    memory_refs: None,
-                    status: Some("open"),
-                    auto_breakdown: None,
-                    originating_adr_id: None,
-                    blocked_by: None,
-                },
-            )
-            .await
-            .unwrap();
+        let epic = create_owned_epic(
+            &db,
+            &epic_repo,
+            &project.id,
+            djinn_db::EpicCreateInput {
+                title: "Simple Epic",
+                description: "no blockers, should decompose immediately",
+                emoji: "",
+                color: "",
+                owner: "",
+                memory_refs: None,
+                status: Some("open"),
+                auto_breakdown: None,
+                originating_adr_id: None,
+                blocked_by: None,
+            },
+        )
+        .await
+        .unwrap();
 
         // It should get a planning task immediately.
         let decomp_tasks = wait_for_decomp_tasks(&db, &tx, &epic.id, 1).await;

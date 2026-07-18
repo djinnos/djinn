@@ -1110,26 +1110,56 @@ mod tests {
         )
     }
 
+    async fn make_fixture_user(db: &Database, purpose: &str) -> djinn_db::User {
+        let fixture_key = uuid::Uuid::now_v7();
+        let mut github_id_bytes = [0_u8; 8];
+        github_id_bytes.copy_from_slice(&fixture_key.as_bytes()[8..]);
+        let github_id = i64::from_be_bytes(github_id_bytes) & i64::MAX;
+        djinn_db::UserRepository::new(db.clone())
+            .upsert_from_github(
+                github_id,
+                &format!("rules-{purpose}-{fixture_key}"),
+                Some("rules coordinator fixture owner"),
+                None,
+            )
+            .await
+            .expect("create persisted rules fixture owner")
+    }
+
+    async fn set_building_with_fixture_owner(
+        db: &Database,
+        proposal_repo: &djinn_db::ProposalRepository,
+        proposal_id: &str,
+    ) -> djinn_db::Result<djinn_core::models::Proposal> {
+        let owner = make_fixture_user(db, "proposal-build-owner").await;
+        proposal_repo.set_building(proposal_id, &owner.id).await
+    }
+
     async fn make_epic(
         db: &Database,
         project_id: &str,
         tx: &broadcast::Sender<DjinnEventEnvelope>,
     ) -> djinn_core::models::Epic {
-        EpicRepository::new(db.clone(), crate::events::event_bus_for(tx))
-            .create_for_project(
-                project_id,
-                djinn_db::EpicCreateInput {
-                    title: "Test Epic",
-                    description: "",
-                    emoji: "",
-                    color: "",
-                    owner: "",
-                    memory_refs: None,
-                    status: Some("open"),
-                    auto_breakdown: None,
-                    originating_adr_id: None,
-                    blocked_by: None,
-                },
+        let owner = make_fixture_user(db, "epic-owner").await;
+        djinn_core::auth_context::SESSION_USER_ID
+            .scope(
+                Some(owner.id),
+                EpicRepository::new(db.clone(), crate::events::event_bus_for(tx))
+                    .create_for_project(
+                        project_id,
+                        djinn_db::EpicCreateInput {
+                            title: "Test Epic",
+                            description: "",
+                            emoji: "",
+                            color: "",
+                            owner: "",
+                            memory_refs: None,
+                            status: Some("open"),
+                            auto_breakdown: None,
+                            originating_adr_id: None,
+                            blocked_by: None,
+                        },
+                    ),
             )
             .await
             .unwrap()
@@ -1783,8 +1813,7 @@ mod tests {
             .link_epic(&proposal.id, &e2.id, &project.id)
             .await
             .unwrap();
-        proposal_repo
-            .set_building(&proposal.id, "user-x")
+        set_building_with_fixture_owner(&db, &proposal_repo, &proposal.id)
             .await
             .unwrap();
 
@@ -1850,8 +1879,7 @@ mod tests {
             .link_epic(&proposal.id, &e1.id, &project.id)
             .await
             .unwrap();
-        proposal_repo
-            .set_building(&proposal.id, "user-x")
+        set_building_with_fixture_owner(&db, &proposal_repo, &proposal.id)
             .await
             .unwrap();
         epic_repo.close(&e1.id).await.unwrap();
@@ -1915,8 +1943,7 @@ mod tests {
             .link_epic(&proposal.id, &epic.id, &project.id)
             .await
             .unwrap();
-        let building = proposal_repo
-            .set_building(&proposal.id, "user-x")
+        let building = set_building_with_fixture_owner(&db, &proposal_repo, &proposal.id)
             .await
             .unwrap();
 
@@ -1976,8 +2003,7 @@ mod tests {
             .link_epic(&proposal.id, &epic.id, &project.id)
             .await
             .unwrap();
-        let building = proposal_repo
-            .set_building(&proposal.id, "user-x")
+        let building = set_building_with_fixture_owner(&db, &proposal_repo, &proposal.id)
             .await
             .unwrap();
 
@@ -2058,8 +2084,7 @@ mod tests {
             .link_epic(&proposal.id, &epic.id, &project.id)
             .await
             .unwrap();
-        let building = proposal_repo
-            .set_building(&proposal.id, "user-x")
+        let building = set_building_with_fixture_owner(&db, &proposal_repo, &proposal.id)
             .await
             .unwrap();
 
@@ -2165,8 +2190,7 @@ mod tests {
             .link_epic(&clean.id, &epic.id, &project.id)
             .await
             .unwrap();
-        let clean_building = proposal_repo
-            .set_building(&clean.id, "user-x")
+        let clean_building = set_building_with_fixture_owner(&db, &proposal_repo, &clean.id)
             .await
             .unwrap();
 
@@ -2500,8 +2524,7 @@ mod tests {
             .add_target(&proposal.id, &project.id, "primary")
             .await
             .unwrap();
-        let building = proposal_repo
-            .set_building(&proposal.id, "user-x")
+        let building = set_building_with_fixture_owner(&db, &proposal_repo, &proposal.id)
             .await
             .unwrap();
 
