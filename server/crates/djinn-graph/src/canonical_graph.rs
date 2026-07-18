@@ -2060,24 +2060,26 @@ async fn install_as_canonical(
 ) {
     let node_count = graph.node_count();
     let edge_count = graph.edge_count();
-    {
-        let mut cache = GRAPH_CACHE.write().await;
-        *cache = Some(CachedGraph {
-            graph,
-            project_path,
-            git_head,
-            pagerank,
-            sccs,
-            layout_positions,
-            crate_map,
-        });
-    }
+    // Keep the footprint gauges ordered with the slot write. Without the shared
+    // write guard, a later install or clear can update the slot and then be
+    // overwritten by this install's stale gauge values.
+    let mut cache = GRAPH_CACHE.write().await;
+    *cache = Some(CachedGraph {
+        graph,
+        project_path,
+        git_head,
+        pagerank,
+        sccs,
+        layout_positions,
+        crate_map,
+    });
     djinn_telemetry::canonical_graph_slot::record_install(
         source,
         approx_serialized_bytes,
         node_count,
         edge_count,
     );
+    drop(cache);
     cache_telemetry::incr(&cache_telemetry::INSTALLS);
     tracing::info!(
         node_count,
@@ -4843,16 +4845,36 @@ mod canonical_graph_slot_telemetry_tests {
         let installed = djinn_telemetry::render().expect("render installed metrics");
         assert!(installed.contains("djinn_canonical_graph_slot_present 1"));
         assert!(installed.contains("djinn_canonical_graph_slot_approx_serialized_bytes 1234"));
-        assert!(installed.contains(&format!("djinn_canonical_graph_slot_node_count {node_count}")));
-        assert!(installed.contains(&format!("djinn_canonical_graph_slot_edge_count {edge_count}")));
-        assert!(installed.contains("djinn_canonical_graph_slot_installs_total{outcome=\"installed\",source=\"warm\"}"));
+        assert!(installed.contains(&format!(
+            "djinn_canonical_graph_slot_node_count {node_count}"
+        )));
+        assert!(installed.contains(&format!(
+            "djinn_canonical_graph_slot_edge_count {edge_count}"
+        )));
+        assert!(installed.lines().any(|line| {
+            line.starts_with("djinn_canonical_graph_slot_installs_total{")
+                && line.contains("source=\"warm\"")
+                && line.contains("outcome=\"installed\"")
+        }));
 
         clear_test_caches().await;
         let cleared = djinn_telemetry::render().expect("render cleared metrics");
-        for metric in ["djinn_canonical_graph_slot_present", "djinn_canonical_graph_slot_approx_serialized_bytes", "djinn_canonical_graph_slot_node_count", "djinn_canonical_graph_slot_edge_count"] {
-            assert!(cleared.contains(&format!("{metric} 0")), "missing zeroed {metric}:\n{cleared}");
+        for metric in [
+            "djinn_canonical_graph_slot_present",
+            "djinn_canonical_graph_slot_approx_serialized_bytes",
+            "djinn_canonical_graph_slot_node_count",
+            "djinn_canonical_graph_slot_edge_count",
+        ] {
+            assert!(
+                cleared.contains(&format!("{metric} 0")),
+                "missing zeroed {metric}:\n{cleared}"
+            );
         }
-        assert!(cleared.contains("djinn_canonical_graph_slot_installs_total{outcome=\"cleared\",source=\"unknown\"}"));
+        assert!(cleared.lines().any(|line| {
+            line.starts_with("djinn_canonical_graph_slot_installs_total{")
+                && line.contains("source=\"unknown\"")
+                && line.contains("outcome=\"cleared\"")
+        }));
         assert!(!cleared.contains("project_path="));
         assert!(!cleared.contains("commit_sha="));
     }

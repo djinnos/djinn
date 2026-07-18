@@ -735,11 +735,26 @@ fn format_build_error(error: BuildError) -> String {
 
 fn register_metrics() {
     memory_retrieval::register_metrics();
-    metrics::describe_gauge!(CANONICAL_GRAPH_SLOT_PRESENT, "Whether the process-global canonical graph slot is populated: 1 populated, 0 empty.");
-    metrics::describe_gauge!(CANONICAL_GRAPH_SLOT_APPROX_SERIALIZED_BYTES, "Approximate serialized bytes for the resident canonical graph; zero when unavailable or empty.");
-    metrics::describe_gauge!(CANONICAL_GRAPH_SLOT_NODE_COUNT, "Node count for the resident canonical graph; zero when the slot is empty.");
-    metrics::describe_gauge!(CANONICAL_GRAPH_SLOT_EDGE_COUNT, "Edge count for the resident canonical graph; zero when the slot is empty.");
-    metrics::describe_counter!(CANONICAL_GRAPH_SLOT_INSTALLS_TOTAL, "Canonical graph slot transitions by fixed source and outcome only.");
+    metrics::describe_gauge!(
+        CANONICAL_GRAPH_SLOT_PRESENT,
+        "Whether the process-global canonical graph slot is populated: 1 populated, 0 empty."
+    );
+    metrics::describe_gauge!(
+        CANONICAL_GRAPH_SLOT_APPROX_SERIALIZED_BYTES,
+        "Approximate serialized bytes for the resident canonical graph; zero when unavailable or empty."
+    );
+    metrics::describe_gauge!(
+        CANONICAL_GRAPH_SLOT_NODE_COUNT,
+        "Node count for the resident canonical graph; zero when the slot is empty."
+    );
+    metrics::describe_gauge!(
+        CANONICAL_GRAPH_SLOT_EDGE_COUNT,
+        "Edge count for the resident canonical graph; zero when the slot is empty."
+    );
+    metrics::describe_counter!(
+        CANONICAL_GRAPH_SLOT_INSTALLS_TOTAL,
+        "Canonical graph slot transitions by fixed source and outcome only."
+    );
     canonical_graph_slot::initialize_empty();
     metrics::describe_gauge!(
         PROCESS_RSS_BYTES,
@@ -4927,9 +4942,15 @@ pub mod canonical_graph_slot {
     pub const OUTCOME_CLEARED: &str = "cleared";
     pub const OUTCOME_ERROR: &str = "error";
 
-    pub fn record_install(source: Source, approx_serialized_bytes: Option<usize>, node_count: usize, edge_count: usize) {
+    pub fn record_install(
+        source: Source,
+        approx_serialized_bytes: Option<usize>,
+        node_count: usize,
+        edge_count: usize,
+    ) {
         metrics::gauge!(super::CANONICAL_GRAPH_SLOT_PRESENT).set(1.0);
-        metrics::gauge!(super::CANONICAL_GRAPH_SLOT_APPROX_SERIALIZED_BYTES).set(approx_serialized_bytes.unwrap_or(0) as f64);
+        metrics::gauge!(super::CANONICAL_GRAPH_SLOT_APPROX_SERIALIZED_BYTES)
+            .set(approx_serialized_bytes.unwrap_or(0) as f64);
         metrics::gauge!(super::CANONICAL_GRAPH_SLOT_NODE_COUNT).set(node_count as f64);
         metrics::gauge!(super::CANONICAL_GRAPH_SLOT_EDGE_COUNT).set(edge_count as f64);
         metrics::counter!(super::CANONICAL_GRAPH_SLOT_INSTALLS_TOTAL, "source" => source.label(), "outcome" => OUTCOME_INSTALLED).increment(1);
