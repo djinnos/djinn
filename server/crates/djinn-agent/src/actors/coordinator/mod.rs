@@ -14,6 +14,7 @@ pub use djinn_coordinator::build_admission::{
     AdmissionSeedReport, BuildAdmissionController, BuildAdmissionMode, BuildAdmissionReadiness,
     allocate_server_epoch,
 };
+pub use djinn_coordinator::build_admission_handoff;
 pub use djinn_coordinator::{
     AutoMergeTracker, BackgroundWorkTracker, BreakerDebugEntry, CoordinatorDebugSnapshot,
     CoordinatorError, CoordinatorHandle, CoordinatorStatus, DebugCooldown, DebugDispatchState,
