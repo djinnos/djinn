@@ -7286,7 +7286,6 @@ dependencies = [
  "hyper-util",
  "indexmap 2.14.0",
  "insta",
- "libc",
  "libgit2-sys",
  "log",
  "memchr",

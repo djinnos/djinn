@@ -11,13 +11,15 @@ on:
 concurrency:
   group: ${{ github.event_name == 'pull_request' && format('ci-pr-{0}', github.event.pull_request.number) || github.event_name == 'push' && 'ci-main' || github.event_name == 'merge_group' && format('ci-merge-group-{0}', github.event.merge_group.head_sha || github.ref) || format('ci-dispatch-{0}', github.run_id) }}
   cancel-in-progress: ${{ github.event_name != 'merge_group' }}
-# actions: read lets the nextest planner restore timing artifacts and the
-# test shards poll for the in-run plan artifact. Fail-fast cancellation
-# lives in ci-fail-fast.yml (workflow_job trigger), which carries its own
-# actions: write grant.
+# actions: write lets the in-shard fail-fast watcher cancel the run when
+# another lane concludes failure (and covers the planner's artifact reads
+# and the shards' plan polling). NOTE: an external workflow_job-triggered
+# cancel workflow is NOT possible — workflow_job is a webhook event, not
+# a workflow trigger; a file declaring it is invalid and produces a red
+# zero-job run on every push.
 permissions:
   contents: read
-  actions: read
+  actions: write
 env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: "0"
@@ -194,12 +196,25 @@ jobs:
           echo "::notice::cache-family=server-quality shared-key=server-quality cache-hit=${{ steps.rust-cache.outputs.cache-hit }}"
       - name: Build workspace (populate cache)
         run: cargo clippy --all-targets --features qdrant -- -D warnings
+  # workflow_dispatch is a supported warm route so the test cache can be
+  # (re)seeded on demand — e.g. from a branch before a cache-family
+  # migration lands — not just on main pushes. The push-only admission
+  # delay lives inline as a step because a `needs: main-admission` edge
+  # would auto-skip this job on dispatch (skipped dependency).
+  # NOTE: a full arm64 trial (2026-07-18, PR #2275 branch) measured
+  # GitHub's free ubuntu-24.04-arm runners slower than x64 for this
+  # workspace with a genuinely warm cache: shard builds 316-385s vs
+  # 272-289s (~15-35% slower) and test execution 285-310s vs 230-239s
+  # (~25% slower), roughly +1.5-2.5 min per run. Keep the lane on x64
+  # unless those runners improve. (Cache-scoping gotcha from the trial:
+  # PR merge-ref runs cannot restore head-branch-scoped caches — only
+  # base/default branch scopes — so branch-seeded warm caches look
+  # cold from the PR run.)
   cache-warm-x86_64-test:
     name: Cache Warm x86_64 (Test)
     needs:
       - preflight
-      - main-admission
-    if: github.event_name == 'push' && needs.preflight.outputs.serverTest == 'true'
+    if: (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && needs.preflight.outputs.serverTest == 'true'
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -207,6 +222,9 @@ jobs:
     env:
       SQLX_OFFLINE: "true"
     steps:
+      - name: Main admission delay
+        if: github.event_name == 'push'
+        run: sleep 90
       - uses: actions/checkout@v4
       - run: rustup toolchain install
         working-directory: server
@@ -663,6 +681,42 @@ jobs:
           # The all-targets test build can exhaust the hosted runner after the
           # Rust cache is restored. These preinstalled SDKs are unused here.
           sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc
+      - name: Install PostgreSQL client tools
+        run: |
+          # The x64 hosted runner images preinstall postgresql-client; the
+          # arm64 images do not, and without it pg_isready/psql are missing
+          # and the template-database wait loop below spins forever. Guarded
+          # so it is a no-op wherever the client already exists.
+          if ! command -v pg_isready >/dev/null 2>&1; then
+            sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends postgresql-client
+          fi
+      - name: Start fail-fast watcher (background)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # Shards are the longest-lived and most expensive jobs, so each
+          # hosts a background watcher: if any lane in this run concludes
+          # failure, the run is cancelled instead of burning the remaining
+          # shard minutes behind an already-failed gate. Cancelling from a
+          # bystander AFTER the culprit concluded preserves its red
+          # "failure" label (a self-cancel races finalization and stamps
+          # it "cancelled"). The process dies with the job; redundant
+          # watchers across shards are idempotent. This replaces both the
+          # old dedicated watchdog job (a full runner slot polling for the
+          # entire run) and the invalid workflow_job-based workflow.
+          nohup bash -c '
+            for _ in $(seq 1 240); do
+              sleep 15
+              failed=$(gh api "repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/jobs?per_page=100" \
+                --jq "[.jobs[] | select(.conclusion == \"failure\") | .name] | first // empty" 2>/dev/null || true)
+              if [ -n "$failed" ]; then
+                echo "Lane $failed failed — cancelling run ${{ github.run_id }}."
+                gh run cancel ${{ github.run_id }} --repo ${{ github.repository }} || true
+                exit 0
+              fi
+            done
+          ' > "$RUNNER_TEMP/fail-fast-watch.log" 2>&1 &
+          echo "fail-fast watcher started"
       - run: rustup toolchain install
         working-directory: server
       - uses: Swatinem/rust-cache@v2
@@ -1119,6 +1173,15 @@ jobs:
         options: --health-cmd="pg_isready -U postgres" --health-interval=5s --health-timeout=3s --health-retries=20
     steps:
       - uses: actions/checkout@v4
+      - name: Install PostgreSQL client tools
+        run: |
+          # The x64 hosted runner images preinstall postgresql-client; the
+          # arm64 images do not, and without it pg_isready/psql are missing
+          # and the template-database wait loop below spins forever. Guarded
+          # so it is a no-op wherever the client already exists.
+          if ! command -v pg_isready >/dev/null 2>&1; then
+            sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends postgresql-client
+          fi
       - run: rustup toolchain install
       - uses: Swatinem/rust-cache@v2
         with:
