@@ -307,22 +307,18 @@ mod tests {
         let db = Database::open_in_memory().unwrap();
         db.ensure_initialized().await.unwrap();
         let project_id = uuid::Uuid::now_v7().to_string();
-        sqlx::query(
-            "INSERT INTO projects (id, name, github_owner, github_repo) VALUES ($1, 'p', 'test', $2)",
+        djinn_db::test_support::seed_project(
+            &db,
+            &project_id,
+            &format!("mismatch-storm-{project_id}"),
         )
-        .bind(&project_id)
-        .bind(format!("mismatch-storm-{project_id}"))
-        .execute(db.pool())
-        .await
-        .unwrap();
-        sqlx::query(
-            "INSERT INTO tasks (id, project_id, short_id, title, description, design, issue_type, status, labels, acceptance_criteria, memory_refs, total_reopen_count) \
-             VALUES ('00000000-0000-0000-0000-000000000001', $1, 'storm', 'storm', 'requires task_create', '', 'task', 'open', '[]'::jsonb, '[]'::jsonb, '[]'::jsonb, 3)",
+        .await;
+        djinn_db::test_support::seed_board_health_mismatch_candidate(
+            &db,
+            &project_id,
+            "00000000-0000-0000-0000-000000000001",
         )
-        .bind(&project_id)
-        .execute(db.pool())
-        .await
-        .unwrap();
+        .await;
         let probe = Arc::new(PageQueryProbe::blocking_first_query());
         let coordinator =
             MismatchScanCoordinator::new_with_page_query_probe(db, EventBus::noop(), probe.clone());
