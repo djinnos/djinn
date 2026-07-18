@@ -86,6 +86,14 @@ const CANONICAL_GRAPH_SLOT_APPROX_SERIALIZED_BYTES: &str =
 const CANONICAL_GRAPH_SLOT_NODE_COUNT: &str = "djinn_canonical_graph_slot_node_count";
 const CANONICAL_GRAPH_SLOT_EDGE_COUNT: &str = "djinn_canonical_graph_slot_edge_count";
 const CANONICAL_GRAPH_SLOT_INSTALLS_TOTAL: &str = "djinn_canonical_graph_slot_installs_total";
+const GALAXY_ARTIFACT_BUILD_SECONDS: &str = "djinn_galaxy_artifact_build_seconds";
+const GALAXY_ARTIFACT_PUBLICATION_SECONDS: &str = "djinn_galaxy_artifact_publication_seconds";
+const GALAXY_ARTIFACT_UNCOMPRESSED_BYTES: &str = "djinn_galaxy_artifact_uncompressed_bytes";
+const GALAXY_ARTIFACT_COMPRESSED_BYTES: &str = "djinn_galaxy_artifact_compressed_bytes";
+const GALAXY_ARTIFACT_CHUNK_COUNT: &str = "djinn_galaxy_artifact_chunk_count";
+const GALAXY_ARTIFACT_PUBLICATION_SUCCESS_TOTAL: &str = "djinn_galaxy_artifact_publication_success_total";
+const GALAXY_ARTIFACT_OVERSIZE_TOTAL: &str = "djinn_galaxy_artifact_oversize_total";
+const GALAXY_ARTIFACT_PUBLICATION_FAILURE_TOTAL: &str = "djinn_galaxy_artifact_publication_failure_total";
 
 // ─── Stale-PR/branch reconciliation sweep ────────────────────────────────
 const STALE_PR_REAPED_TOTAL: &str = "djinn_stale_pr_reaped_total";
@@ -793,6 +801,8 @@ fn register_metrics() {
         "Canonical graph slot transitions by fixed source and outcome only."
     );
     canonical_graph_slot::initialize_empty();
+    for (metric, description) in [(GALAXY_ARTIFACT_BUILD_SECONDS, "Out-of-transaction canonical galaxy artifact build duration in seconds."), (GALAXY_ARTIFACT_PUBLICATION_SECONDS, "Atomic reserved galaxy artifact publication duration in seconds."), (GALAXY_ARTIFACT_UNCOMPRESSED_BYTES, "Canonical galaxy artifact JSON bytes before gzip."), (GALAXY_ARTIFACT_COMPRESSED_BYTES, "Canonical galaxy artifact gzip spool bytes."), (GALAXY_ARTIFACT_CHUNK_COUNT, "Canonical galaxy artifact bounded gzip chunk count.")] { metrics::describe_histogram!(metric, description); }
+    for (metric, description) in [(GALAXY_ARTIFACT_PUBLICATION_SUCCESS_TOTAL, "Successful atomic galaxy artifact publications."), (GALAXY_ARTIFACT_OVERSIZE_TOTAL, "Galaxy artifact builds rejected by their compressed-size cap."), (GALAXY_ARTIFACT_PUBLICATION_FAILURE_TOTAL, "Galaxy artifact build or atomic publication failures.")] { metrics::describe_counter!(metric, description); metrics::counter!(metric).absolute(0); }
     metrics::describe_gauge!(
         PROCESS_RSS_BYTES,
         "Current process resident set size in bytes from Linux /proc status."
@@ -2425,7 +2435,7 @@ mod tests {
 
     static TEST_MUTEX: Mutex<()> = Mutex::new(());
 
-    fn test_guard() -> MutexGuard<'static, ()> {
+    pub(crate) fn test_guard() -> MutexGuard<'static, ()> {
         TEST_MUTEX.lock().expect("telemetry test mutex poisoned")
     }
 
@@ -5007,5 +5017,59 @@ pub mod canonical_graph_slot {
     pub fn record_cleared() {
         set_empty();
         metrics::counter!(super::CANONICAL_GRAPH_SLOT_INSTALLS_TOTAL, "source" => Source::Unknown.label(), "outcome" => OUTCOME_CLEARED).increment(1);
+    }
+}
+
+/// Full-warm galaxy artifact metrics. They deliberately have no labels: project,
+/// commit, generation, artifact, and hash identities are unbounded.
+pub mod galaxy_artifact_publication {
+    use std::time::Duration;
+    pub fn record_build_duration(duration: Duration) { metrics::histogram!(super::GALAXY_ARTIFACT_BUILD_SECONDS).record(duration); }
+    pub fn record_publication_duration(duration: Duration) { metrics::histogram!(super::GALAXY_ARTIFACT_PUBLICATION_SECONDS).record(duration); }
+    pub fn record_sizes(uncompressed_bytes: usize, compressed_bytes: u64, chunk_count: usize) {
+        metrics::histogram!(super::GALAXY_ARTIFACT_UNCOMPRESSED_BYTES).record(uncompressed_bytes as f64);
+        metrics::histogram!(super::GALAXY_ARTIFACT_COMPRESSED_BYTES).record(compressed_bytes as f64);
+        metrics::histogram!(super::GALAXY_ARTIFACT_CHUNK_COUNT).record(chunk_count as f64);
+    }
+    pub fn record_success() { metrics::counter!(super::GALAXY_ARTIFACT_PUBLICATION_SUCCESS_TOTAL).increment(1); }
+    pub fn record_oversize() { metrics::counter!(super::GALAXY_ARTIFACT_OVERSIZE_TOTAL).increment(1); }
+    pub fn record_failure() { metrics::counter!(super::GALAXY_ARTIFACT_PUBLICATION_FAILURE_TOTAL).increment(1); }
+}
+
+#[cfg(test)]
+mod galaxy_artifact_publication_tests {
+    use super::*;
+
+    #[test]
+    fn galaxy_artifact_metrics_render_without_identity_labels() {
+        let _guard = crate::tests::test_guard();
+        init().unwrap();
+        galaxy_artifact_publication::record_build_duration(std::time::Duration::from_millis(1));
+        galaxy_artifact_publication::record_publication_duration(std::time::Duration::from_millis(1));
+        galaxy_artifact_publication::record_sizes(11, 7, 1);
+        galaxy_artifact_publication::record_success();
+        galaxy_artifact_publication::record_oversize();
+        galaxy_artifact_publication::record_failure();
+        let rendered = render().unwrap();
+        for metric in [
+            GALAXY_ARTIFACT_BUILD_SECONDS,
+            GALAXY_ARTIFACT_PUBLICATION_SECONDS,
+            GALAXY_ARTIFACT_UNCOMPRESSED_BYTES,
+            GALAXY_ARTIFACT_COMPRESSED_BYTES,
+            GALAXY_ARTIFACT_CHUNK_COUNT,
+            GALAXY_ARTIFACT_PUBLICATION_SUCCESS_TOTAL,
+            GALAXY_ARTIFACT_OVERSIZE_TOTAL,
+            GALAXY_ARTIFACT_PUBLICATION_FAILURE_TOTAL,
+        ] {
+            assert!(rendered.contains(metric), "missing {metric}:\n{rendered}");
+            for line in rendered.lines().filter(|line| line.starts_with(metric)) {
+                for forbidden in ["project", "commit", "generation", "artifact", "hash"] {
+                    assert!(
+                        !line.contains(&format!("{forbidden}=")),
+                        "high-cardinality identity label on {metric}: {line}"
+                    );
+                }
+            }
+        }
     }
 }
