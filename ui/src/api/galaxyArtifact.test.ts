@@ -1,5 +1,6 @@
 import { createHash, webcrypto } from "node:crypto";
 import { readFile } from "node:fs/promises";
+import { gzipSync } from "node:zlib";
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("@/api/serverUrl", () => ({ getServerBaseUrl: () => "http://server.test" }));
@@ -50,7 +51,23 @@ function headers(etag: string, overrides: Record<string, string> = {}): Headers 
 }
 
 function artifactResponse(etag = `"${manifest.transport_sha256}"`): Response {
-  return new Response(gzip, { status: 200, headers: headers(etag, { "content-encoding": "gzip" }) });
+  return new Response(gzip, { status: 200, headers: headers(etag, { "content-type": "application/gzip" }) });
+}
+
+/** Derive valid later generations from the producer golden, never a hand schema. */
+function generationResponse(generationId: string, generatedAt: string) {
+  const next = structuredClone(payload);
+  next.generation_id = generationId;
+  next.generated_at = generatedAt;
+  next.graph_content_hash = hash(canonicalSemanticJson(next));
+  const bytes = gzipSync(JSON.stringify(next));
+  const etag = `"${hash(bytes)}"`;
+  const responseHeaders = headers(etag, {
+    [IDENTITY_HEADERS.generationId]: generationId,
+    [IDENTITY_HEADERS.semanticHash]: next.graph_content_hash as string,
+    "content-type": "application/gzip",
+  });
+  return { etag, response: new Response(bytes, { status: 200, headers: responseHeaders }) };
 }
 
 describe("producer galaxy artifact golden", () => {
@@ -101,6 +118,32 @@ describe("fetchGalaxyArtifact cache and rollout outcomes", () => {
     await expect(fetchGalaxyArtifact("test-project")).rejects.toThrow("304 did not match");
   });
 
+  it("keeps a valid artifact across artifactless advancement and reuses it on 304", async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(artifactResponse())
+      .mockResolvedValueOnce(new Response(JSON.stringify({ code: "galaxy_artifact_unavailable" }), { status: 404 }))
+      .mockResolvedValueOnce(new Response(null, { status: 304, headers: headers(`"${manifest.transport_sha256}"`) }));
+    vi.stubGlobal("fetch", fetchMock);
+    await fetchGalaxyArtifact("test-project");
+    await expect(fetchGalaxyArtifact("test-project")).resolves.toEqual({ kind: "fallback", reason: "unavailable" });
+    await expect(fetchGalaxyArtifact("test-project")).resolves.toMatchObject({ kind: "artifact" });
+  });
+
+  it("retains old ETags so a G1 to G2 to G1 rollback is a validated 304 reuse", async () => {
+    const g2 = generationResponse("019f741c-0000-7000-8000-000000000002", "later");
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(artifactResponse())
+      .mockResolvedValueOnce(g2.response)
+      .mockResolvedValueOnce(new Response(null, { status: 304, headers: headers(`"${manifest.transport_sha256}"`) }));
+    vi.stubGlobal("fetch", fetchMock);
+    const g1 = await fetchGalaxyArtifact("test-project");
+    await fetchGalaxyArtifact("test-project");
+    const rollback = await fetchGalaxyArtifact("test-project");
+    expect(rollback).toEqual(g1);
+    expect(((fetchMock.mock.calls[2][1] as RequestInit).headers as Headers).get("if-none-match"))
+      .toBe(`"${manifest.transport_sha256}", ${g2.etag}`);
+  });
+
   it("allows MCP fallback only for the two explicit rollout codes", async () => {
     const fetchMock = vi.fn()
       .mockResolvedValueOnce(new Response(JSON.stringify({ code: "galaxy_artifact_unavailable" }), { status: 404 }))
@@ -115,7 +158,7 @@ describe("fetchGalaxyArtifact cache and rollout outcomes", () => {
   it("rejects transport corruption, mixed versions, and authorization instead of falling back", async () => {
     const fetchMock = vi.fn()
       .mockResolvedValueOnce(artifactResponse(`"${"a".repeat(64)}"`))
-      .mockResolvedValueOnce(new Response(gzip, { status: 200, headers: headers(`"${manifest.transport_sha256}"`, { "content-encoding": "gzip", [IDENTITY_HEADERS.artifactVersion]: "2" }) }))
+      .mockResolvedValueOnce(new Response(gzip, { status: 200, headers: headers(`"${manifest.transport_sha256}"`, { [IDENTITY_HEADERS.artifactVersion]: "2" }) }))
       .mockResolvedValueOnce(new Response(null, { status: 401 }));
     vi.stubGlobal("fetch", fetchMock);
     await expect(fetchGalaxyArtifact("test-project")).rejects.toThrow("transport etag recomputation mismatch");

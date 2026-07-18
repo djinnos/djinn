@@ -71,6 +71,7 @@ describe("GalaxyView REST artifact cutover", () => {
     const rendered = render(<GalaxyView projectId="old-project" />);
     rendered.rerender(<GalaxyView projectId="new-project" />);
     await waitFor(() => expect(screen.getByTestId("galaxy")).toHaveTextContent("new-project"));
+    expect((fetchArtifact.mock.calls[0][1] as { signal: AbortSignal }).signal.aborted).toBe(true);
     resolveFirst({ kind: "artifact", artifact: { snapshot: snapshot("old-project") } });
     await Promise.resolve();
     expect(screen.getByTestId("galaxy")).toHaveTextContent("new-project");

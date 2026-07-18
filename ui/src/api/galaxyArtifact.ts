@@ -9,7 +9,9 @@ export type GalaxyArtifactOutcome =
   | { kind: "artifact"; artifact: ValidatedGalaxyArtifact }
   | { kind: "fallback"; reason: "unavailable" | "unsupported" };
 
-const cache = new Map<string, ValidatedGalaxyArtifact>();
+// Retain validated rollback representations as well as the newest one. A
+// multi-value If-None-Match lets the server select an older cached ETag.
+const cache = new Map<string, Map<string, ValidatedGalaxyArtifact>>();
 const UNAVAILABLE = "galaxy_artifact_unavailable";
 const UNSUPPORTED = "galaxy_artifact_unsupported";
 
@@ -38,23 +40,16 @@ async function errorCode(response: Response): Promise<string> {
 
 async function parseResponseJson(response: Response): Promise<{ payload: unknown; transportBytes: ArrayBuffer }> {
   const bytes = await response.arrayBuffer();
+  // The route deliberately sends an explicit gzip artifact rather than HTTP
+  // Content-Encoding gzip: Fetch would otherwise decode the bytes before this
+  // code can verify the compressed-representation ETag.
+  if (response.headers.has("content-encoding")) failure("artifact transport must expose raw gzip bytes");
+  if (typeof DecompressionStream === "undefined") failure("browser cannot decode gzip artifact");
   let text: string;
-  if (response.headers.get("content-encoding")?.toLowerCase() === "gzip") {
-    if (typeof DecompressionStream !== "undefined") {
-      try {
-        const stream = new Blob([bytes]).stream().pipeThrough(new DecompressionStream("gzip"));
-        text = await new Response(stream).text();
-      } catch {
-        // Fetch normally transparently decompresses response content. Accept that
-        // browser-standard representation only after the same strict validation.
-        text = new TextDecoder().decode(bytes);
-      }
-    } else {
-      text = new TextDecoder().decode(bytes);
-    }
-  } else {
-    text = new TextDecoder().decode(bytes);
-  }
+  try {
+    const stream = new Blob([bytes]).stream().pipeThrough(new DecompressionStream("gzip"));
+    text = await new Response(stream).text();
+  } catch { failure("artifact gzip could not be parsed"); }
   try { return { payload: JSON.parse(text), transportBytes: bytes }; } catch { failure("artifact JSON could not be parsed"); }
 }
 
@@ -69,7 +64,7 @@ export async function fetchGalaxyArtifact(
 ): Promise<GalaxyArtifactOutcome> {
   const cached = cache.get(projectId);
   const headers = new Headers({ Accept: "application/json" });
-  if (cached) headers.set("If-None-Match", cached.etag);
+  if (cached?.size) headers.set("If-None-Match", [...cached.keys()].join(", "));
   let response: Response;
   try {
     response = await fetch(`${getServerBaseUrl()}/api/projects/${encodeURIComponent(projectId)}/code-graph/galaxy`, {
@@ -80,8 +75,10 @@ export async function fetchGalaxyArtifact(
     failure(error instanceof Error ? error.message : "network failure");
   }
   if (response.status === 304) {
-    if (!cached || !cacheMatchesRequest(projectId, cached, response.headers)) failure("304 did not match a fully validated cache entry");
-    return { kind: "artifact", artifact: cached };
+    const etag = response.headers.get("etag");
+    const artifact = etag ? cached?.get(etag) : undefined;
+    if (!artifact || !cacheMatchesRequest(projectId, artifact, response.headers)) failure("304 did not match a fully validated cache entry");
+    return { kind: "artifact", artifact };
   }
   if (response.status === 404 || response.status === 409) {
     const code = await errorCode(response);
@@ -93,7 +90,9 @@ export async function fetchGalaxyArtifact(
   if (response.status !== 200) failure(`unexpected HTTP status ${response.status}`);
   const { payload, transportBytes } = await parseResponseJson(response);
   const artifact = await validateGalaxyArtifact(projectId, response.headers, payload, transportBytes);
-  cache.set(projectId, artifact);
+  const projectCache = cache.get(projectId) ?? new Map<string, ValidatedGalaxyArtifact>();
+  projectCache.set(artifact.etag, artifact);
+  cache.set(projectId, projectCache);
   return { kind: "artifact", artifact };
 }
 
