@@ -171,7 +171,8 @@ pub use repositories::{
     repo_graph_generation::{
         CurrentGalaxyArtifact, ProjectCurrentGraph, RepoGraphGalaxyArtifact,
         RepoGraphGalaxyArtifactInsert, RepoGraphGalaxyChunk, RepoGraphGalaxyChunkInsert,
-        RepoGraphGeneration, RepoGraphGenerationRepository,
+        RepoGraphGeneration, RepoGraphGenerationRepository, ReservedGalaxyArtifactChunk,
+        ReservedGalaxyArtifactManifest, ReservedGraphPublication,
     },
     scip_indexer_timing::{
         ScipIndexerTiming, ScipIndexerTimingObservation, ScipIndexerTimingRepository,
