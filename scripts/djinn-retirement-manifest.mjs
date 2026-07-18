@@ -67,7 +67,7 @@ export const KNOWLEDGE_DISPOSITIONS = new Set([
 /**
  * Knowledge families (folders / singletons) that constitute the project-local
  * tracked knowledge set. Non-knowledge tracked files under `.djinn/`
- * (`.gitignore`, `settings.json`, `skills.json`) are intentionally excluded
+ * (`.gitignore`, `skills.json`) are intentionally excluded
  * because they are operational/generated, not knowledge artifacts.
  */
 export const KNOWLEDGE_FAMILIES = [
@@ -150,8 +150,7 @@ export function sha256Hex(bytes) {
  * `.djinn/` knowledge set.
  *
  * The knowledge set is every tracked `.djinn/` file EXCEPT the explicit
- * non-knowledge operational/generated files (`.gitignore`, `settings.json`,
- * `skills.json`). All other tracked `.djinn/**` markdown / metadata files are
+ * non-knowledge operational/generated files (`.gitignore`, `skills.json`). All other tracked `.djinn/**` markdown / metadata files are
  * knowledge artifacts in scope for retirement reconciliation.
  */
 export function isKnowledgePath(repoPath) {

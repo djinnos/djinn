@@ -786,6 +786,33 @@ impl CoordinatorActor {
     pub(super) async fn run(mut self) {
         tracing::info!("CoordinatorActor started");
 
+        match ProjectRepository::new(
+            self.db.clone(),
+            crate::events::event_bus_for(&self.events_tx),
+        )
+        .list()
+        .await
+        {
+            Ok(projects) => {
+                for project in projects {
+                    let checkout =
+                        djinn_core::paths::project_dir(&project.github_owner, &project.github_repo);
+                    if let Err(error) = djinn_workspace::import_legacy_settings_file(
+                        self.db.clone(),
+                        &project.id,
+                        &checkout,
+                    )
+                    .await
+                    {
+                        tracing::error!(project_id = %project.id, checkout = %checkout.display(), %error, "legacy settings import failed; retained source for this project");
+                    }
+                }
+            }
+            Err(error) => {
+                tracing::error!(%error, "cannot enumerate projects for legacy settings import")
+            }
+        }
+
         // Log detected system memory at startup.
         if let Some(mem) = crate::resource_monitor::MemoryStatus::read() {
             tracing::info!(

@@ -71,7 +71,6 @@ function syntheticRepo() {
   );
   // Non-knowledge tracked files that must be excluded.
   writeFileSync(join(dir, '.djinn', '.gitignore'), 'worktrees/\n');
-  writeFileSync(join(dir, '.djinn', 'settings.json'), '{}\n');
   writeFileSync(join(dir, '.djinn', 'skills.json'), '[]\n');
   // A path with a space (proves NUL-delimiting handles it).
   mkdirSync(join(dir, '.djinn', 'research'), { recursive: true });
@@ -562,7 +561,7 @@ test('isKnowledgePath excludes non-knowledge tracked files', () => {
   assert.equal(isKnowledgePath('.djinn/decisions/a.md'), true);
   assert.equal(isKnowledgePath('.djinn/brief.md'), true);
   assert.equal(isKnowledgePath('.djinn/.gitignore'), false);
-  assert.equal(isKnowledgePath('.djinn/settings.json'), false);
+  assert.equal(isKnowledgePath('.djinn/settings.json'), true);
   assert.equal(isKnowledgePath('.djinn/skills.json'), false);
   assert.equal(isKnowledgePath('server/src/lib.rs'), false);
   assert.equal(isKnowledgePath(''), false);

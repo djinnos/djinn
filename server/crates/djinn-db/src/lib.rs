@@ -97,6 +97,9 @@ pub use repositories::{
     extension_load_diagnostic::{ExtensionLoadDiagnosticRepository, InsertExtensionLoadDiagnostic},
     git_settings::GitSettingsRepository,
     image::{Image, ImageRepository, ImageStatus, SelectedCatalogImage},
+    legacy_settings_import::{
+        LegacySettingsImport, LegacySettingsImportError, LegacySettingsImportResult,
+    },
     liveness::{
         ClaimExtensionRecord, CurrentLivenessState, LivenessEvidenceSnapshot, LivenessRepository,
     },

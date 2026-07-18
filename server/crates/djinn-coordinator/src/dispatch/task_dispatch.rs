@@ -1583,6 +1583,19 @@ impl CoordinatorActor {
             }
         };
 
+        let blocked_projects: HashSet<String> = match djinn_db::LegacySettingsImport::new(
+            self.db.clone(),
+        )
+        .failed_project_ids()
+        .await
+        {
+            Ok(project_ids) => project_ids.into_iter().collect(),
+            Err(error) => {
+                tracing::error!(%error, "CoordinatorActor: cannot read legacy settings outcomes; deferring dispatch pass");
+                return;
+            }
+        };
+
         for status in ["needs_task_review", "needs_lead_intervention"] {
             match repo.list_by_status_filtered(status, true).await {
                 Ok(mut tasks) => ready.append(&mut tasks),
@@ -1785,6 +1798,10 @@ impl CoordinatorActor {
             if let Some(project_id) = project_filter
                 && task.project_id != project_id
             {
+                continue;
+            }
+            if blocked_projects.contains(&task.project_id) {
+                tracing::error!(task_id = %task.short_id, project_id = %task.project_id, "CoordinatorActor: dispatch blocked by failed legacy settings import");
                 continue;
             }
             if let Some((pause_scope, pause_target_id, pause)) =

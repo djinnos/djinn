@@ -192,9 +192,10 @@ guidance fixture, including uniqueness, hashes, identities, statuses,
 classifications, dispositions, rationales, approvals, count, and exact source
 set. It separately classifies current NUL-delimited `git ls-files -z` output and
 fails for every tracked project-local knowledge path, including paths never
-present in the old ledger. The three explicit operational files
-`.djinn/.gitignore`, `.djinn/settings.json`, and `.djinn/skills.json` must remain
-present and byte-identical to the source revision.
+present in the old ledger. The two explicit operational files
+`.djinn/.gitignore` and `.djinn/skills.json` must remain present and byte-identical
+to the source revision. Project-local `.djinn/settings.json` is retired: it is
+imported once into project-scoped Postgres and must not be reintroduced.
 
 ### Tests
 

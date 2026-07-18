@@ -1312,6 +1312,7 @@ dependencies = [
  "dirs 6.0.0",
  "djinn-core",
  "djinn-memory",
+ "djinn-stack",
  "futures",
  "globset",
  "libc",
