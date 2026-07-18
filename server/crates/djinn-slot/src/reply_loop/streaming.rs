@@ -30,7 +30,13 @@ pub(super) type StreamingFut<'a> =
 
 pub(super) struct StreamTurnState {
     pub turn_text: String,
+    /// Complete arrival-order thinking aggregate for display and telemetry.
+    /// This includes unattributed events and attributed delta text, so it is
+    /// deliberately kept separate from canonical persistence input.
     pub turn_thinking: String,
+    /// Only `Thinking(String)` text, which has no provider block ID and is
+    /// therefore always retained in the unsigned persistence fallback.
+    pub turn_unattributed_thinking: String,
     pub turn_provider_state: Vec<ContentBlock>,
     pub turn_tool_calls: Vec<ContentBlock>,
     /// Arrival-ordered unresolved thinking-delta fragments keyed by their
@@ -70,6 +76,7 @@ impl StreamTurnState {
         Self {
             turn_text: String::new(),
             turn_thinking: String::new(),
+            turn_unattributed_thinking: String::new(),
             turn_provider_state: Vec::new(),
             turn_tool_calls: Vec::new(),
             turn_unresolved_thinking: Vec::new(),
@@ -245,6 +252,7 @@ pub(super) async fn consume_provider_stream(
                             }),
                         ));
                         state.turn_thinking.push_str(&thinking);
+                        state.turn_unattributed_thinking.push_str(&thinking);
                     }
                     StreamEvent::ThinkingDelta { id, text } => {
                         // Display/telemetry aggregate gets the attributed

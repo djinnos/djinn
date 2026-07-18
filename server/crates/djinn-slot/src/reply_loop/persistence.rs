@@ -317,7 +317,7 @@ pub(super) async fn flush_in_flight_turn(
         &stream_state.turn_provider_state,
         &stream_state.turn_unresolved_thinking,
         &stream_state.turn_completed_thinking_ids,
-        &stream_state.turn_thinking,
+        &stream_state.turn_unattributed_thinking,
         &stream_state.turn_text,
         &stream_state.turn_tool_calls,
     );

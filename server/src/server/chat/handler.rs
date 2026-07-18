@@ -452,6 +452,9 @@ async fn drain_provider_turn(
     let mut unresolved_thinking: Vec<(u64, String)> = Vec::new();
     let mut completed_thinking_ids: std::collections::HashSet<u64> =
         std::collections::HashSet::new();
+    // `Thinking(String)` has no content-block ID, so it must remain separate
+    // from attributed delta fragments and always survive canonical assembly.
+    let mut unattributed_thinking = String::new();
 
     while let Some(item) = stream.next().await {
         match item {
@@ -471,10 +474,11 @@ async fn drain_provider_turn(
             Ok(StreamEvent::Delta(ContentBlock::ToolResult { .. }))
             | Ok(StreamEvent::Delta(ContentBlock::Image { .. }))
             | Ok(StreamEvent::Delta(ContentBlock::Document { .. })) => {}
-            Ok(StreamEvent::Thinking(_)) => {
-                // Unattributed thinking (OpenAI reasoning) — no block ID to
-                // reconcile against, always included via the turn_thinking
-                // aggregate. Chat does not display thinking deltas live.
+            Ok(StreamEvent::Thinking(thinking)) => {
+                // Unattributed thinking (OpenAI reasoning) has no block ID to
+                // reconcile against, so canonical persistence retains it.
+                // Chat does not display thinking deltas live.
+                unattributed_thinking.push_str(&thinking);
             }
             Ok(StreamEvent::ThinkingDelta { id, text }) => {
                 unresolved_thinking.push((id, text));
@@ -508,7 +512,7 @@ async fn drain_provider_turn(
                     &turn_provider_state,
                     &unresolved_thinking,
                     &completed_thinking_ids,
-                    "",
+                    &unattributed_thinking,
                     &turn_text,
                     &[],
                 );
@@ -530,12 +534,12 @@ async fn drain_provider_turn(
         &turn_provider_state,
         &unresolved_thinking,
         &completed_thinking_ids,
-        "",
+        &unattributed_thinking,
         &turn_text,
         &tool_calls,
     );
 
-    if turn_text.is_empty() && tool_calls.is_empty() {
+    if assistant_content.is_empty() {
         tracing::warn!(
             provider_state_items = turn_provider_state.len(),
             "chat provider returned an empty assistant turn"
