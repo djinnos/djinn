@@ -27,6 +27,7 @@ import {
   type CodeGraphCoverage,
   type CodeGraphWorkspace,
 } from "@/api/codeGraph";
+import { fetchGalaxyArtifact } from "@/api/galaxyArtifact";
 import { CoverageGapBanner } from "@/components/codegraph/CoverageGapBanner";
 import { HotspotPanel } from "@/components/codegraph/HotspotPanel";
 import { GalaxyCanvas } from "@/components/galaxy/GalaxyCanvas";
@@ -53,8 +54,8 @@ import {
 } from "@/stores/useProjectStore";
 import { cn } from "@/lib/utils";
 
-/** Ask for everything; the server enforces its own ceiling. */
-const GALAXY_NODE_BUDGET = 1_000_000;
+/** Rollout-only MCP escape hatch; REST artifacts are never bounded by this. */
+const GALAXY_MCP_FALLBACK_NODE_BUDGET = 10_000;
 
 type GalaxyState =
   | { phase: "loading"; message: string }
@@ -103,6 +104,7 @@ export function GalaxyView({ projectId }: { projectId: string }) {
 
   useEffect(() => {
     let cancelled = false;
+    const controller = new AbortController();
     // eslint-disable-next-line react-hooks/set-state-in-effect -- async snapshot-fetch state machine: reset/loading transition around the network read, same convention as the old page's workspace fetch.
     setState({ phase: "loading", message: "Fetching graph…" });
     setWorkspaceSlug(null);
@@ -130,9 +132,14 @@ export function GalaxyView({ projectId }: { projectId: string }) {
 
     void (async () => {
       try {
-        const response = await fetchSnapshot(projectId, GALAXY_NODE_BUDGET);
+        const artifact = await fetchGalaxyArtifact(projectId, { signal: controller.signal });
         if (cancelled) return;
-        const snapshot = parseSnapshotResponse(response);
+        const snapshot =
+          artifact.kind === "artifact"
+            ? artifact.artifact.snapshot
+            : parseSnapshotResponse(
+                await fetchSnapshot(projectId, GALAXY_MCP_FALLBACK_NODE_BUDGET),
+              );
         if (!snapshot) {
           setState({
             phase: "error",
@@ -177,6 +184,7 @@ export function GalaxyView({ projectId }: { projectId: string }) {
 
     return () => {
       cancelled = true;
+      controller.abort();
     };
   }, [projectId]);
 
