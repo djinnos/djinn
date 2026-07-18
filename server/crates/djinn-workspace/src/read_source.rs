@@ -1037,11 +1037,14 @@ fn build_inventory(
 }
 
 fn git(path: &Path, args: &[&str]) -> Result<String, String> {
-    let output = djinn_git::run_git_command_binary_in(
-        path,
-        args.iter().map(|arg| (*arg).to_owned()).collect(),
-    )
-    .map_err(|error| error.to_string())?;
+    // Classification is an inspection boundary. In particular, `git status`
+    // normally refreshes and writes `.git/index`; disable optional Git locks so
+    // looking at an ambiguous legacy checkout cannot mutate its repository
+    // metadata while deciding to fail closed.
+    let mut command = vec!["--no-optional-locks".to_owned()];
+    command.extend(args.iter().map(|arg| (*arg).to_owned()));
+    let output =
+        djinn_git::run_git_command_binary_in(path, command).map_err(|error| error.to_string())?;
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
 }
 
