@@ -1363,6 +1363,7 @@ dependencies = [
  "djinn-memory",
  "djinn-stack",
  "djinn-telemetry",
+ "flate2",
  "futures",
  "hex",
  "libc",
