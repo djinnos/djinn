@@ -4,6 +4,7 @@
 //! do not replace these calls with repository APIs.
 
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use sqlx::postgres::PgConnection;
 use sqlx::{Connection, Executor, Row};
@@ -136,7 +137,7 @@ async fn insert_valid_artifact(
 ) {
     sqlx::query("INSERT INTO repo_graph_galaxy_artifact \
         (artifact_id, generation_id, graph_content_hash, transport_sha256, chunk_count, byte_count, chunk_hashes) \
-        VALUES ($1::text::uuid, $2::text::uuid, 'content-hash', 'transport-hash', 1, 1, '[\"chunk-hash\"]')")
+        VALUES ($1::text::uuid, $2::text::uuid, 'content-hash', '8a8950f7623663222542c9469c73be3c4c81bbdf019e2c577590a61f2ce9a157', 1, 1, '[\"chunk-hash\"]')")
         .bind(artifact.to_string()).bind(generation.to_string()).execute(&mut *conn).await.expect("artifact");
     sqlx::query(
         "INSERT INTO repo_graph_galaxy_chunk \
@@ -233,16 +234,29 @@ async fn exact_legacy_sql_rotates_generations_orders_commits_and_preserves_rollb
         "cache, history, clock and pointer roll back together"
     );
 
-    // Independent connections publish in controlled commit order. The second is started
-    // only after the first commits, proving the committed order selected by old readers.
+    // Both transactions overlap; the second statement blocks on the first's lock.
     let mut second = PgConnection::connect(&url)
         .await
         .expect("second connection");
     first.execute("BEGIN").await.unwrap();
-    legacy_publish(&mut first, "first-commit", b"first").await;
-    first.execute("COMMIT").await.unwrap();
     second.execute("BEGIN").await.unwrap();
-    legacy_publish(&mut second, "later-commit", b"later").await;
+    legacy_publish(&mut first, "first-commit", b"first").await;
+    let blocked = tokio::spawn(async move {
+        legacy_publish(&mut second, "later-commit", b"later").await;
+        second
+    });
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(
+        !blocked.is_finished(),
+        "second publication must wait for project lock"
+    );
+    first.execute("COMMIT").await.unwrap();
+    old_and_current_agree(&mut first).await;
+    let first_observation: (String, String) = sqlx::query_as("SELECT generation_id::text, built_at FROM repo_graph_cache WHERE project_id=$1 AND commit_sha='first-commit'").bind(PROJECT).fetch_one(&mut first).await.unwrap();
+    let mut second = tokio::time::timeout(Duration::from_secs(2), blocked)
+        .await
+        .expect("second publisher must unblock without deadlock")
+        .unwrap();
     second.execute("COMMIT").await.unwrap();
     let latest = sqlx::query(OLD_LATEST)
         .bind(PROJECT)
@@ -251,6 +265,9 @@ async fn exact_legacy_sql_rotates_generations_orders_commits_and_preserves_rollb
         .unwrap();
     assert_eq!(latest.get::<String, _>("commit_sha"), "later-commit");
     old_and_current_agree(&mut first).await;
+    let later_observation: (String, String) = sqlx::query_as("SELECT generation_id::text, built_at FROM repo_graph_cache WHERE project_id=$1 AND commit_sha='later-commit'").bind(PROJECT).fetch_one(&mut first).await.unwrap();
+    assert_ne!(first_observation.0, later_observation.0);
+    assert!(first_observation.1 < later_observation.1);
 
     drop(second);
     drop(first);
