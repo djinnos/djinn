@@ -333,3 +333,308 @@ impl RepoGraphGenerationRepository {
         .await?)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::database::Database;
+    use crate::repositories::repo_graph_cache::{RepoGraphCacheInsert, RepoGraphCacheRepository};
+    use sha2::{Digest, Sha256};
+
+    fn hex_sha256(data: &[u8]) -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(data);
+        format!("{:x}", hasher.finalize())
+    }
+
+    async fn fresh() -> (Database, RepoGraphGenerationRepository) {
+        let db = Database::open_in_memory().expect("in-memory db");
+        db.ensure_initialized().await.expect("initialize database");
+        let repo = RepoGraphGenerationRepository::new(db.clone());
+        (db, repo)
+    }
+
+    async fn insert_project(db: &Database, project_id: &str) {
+        sqlx::query(
+            "INSERT INTO projects(id, name, github_owner, github_repo) \
+             VALUES ($1, $2, 'test-owner', 'test-repo')",
+        )
+        .bind(project_id)
+        .bind(format!("test project {project_id}"))
+        .execute(db.pool())
+        .await
+        .expect("insert project");
+    }
+
+    /// Publish via the legacy unmarked cache upsert.  The migration triggers
+    /// mint a fresh generation (artifact_required = false) and advance
+    /// `repo_graph_current`.
+    async fn legacy_publish(db: &Database, project_id: &str, commit_sha: &str, blob: &[u8]) {
+        let cache_repo = RepoGraphCacheRepository::new(db.clone());
+        cache_repo
+            .upsert(RepoGraphCacheInsert {
+                project_id,
+                commit_sha,
+                graph_blob: blob,
+            })
+            .await
+            .expect("legacy upsert");
+    }
+
+    /// Publish a marked (reserved) generation with a valid single-chunk galaxy
+    /// artifact so the deferred validation trigger accepts the commit.
+    async fn reserved_publish_with_artifact(
+        repo: &RepoGraphGenerationRepository,
+        project_id: &str,
+        commit_sha: &str,
+        blob: &[u8],
+    ) -> (String, String) {
+        let generation_id = uuid::Uuid::now_v7();
+        let artifact_id = uuid::Uuid::now_v7();
+        let gen_str = generation_id.to_string();
+        let art_str = artifact_id.to_string();
+
+        let mut tx = repo
+            .begin_reserved_publication(project_id, &gen_str)
+            .await
+            .expect("begin reserved publication");
+
+        RepoGraphGenerationRepository::reserved_compatibility_upsert_in_transaction(
+            &mut tx, project_id, commit_sha, blob, &gen_str,
+        )
+        .await
+        .expect("reserved upsert");
+
+        let chunk_hash = hex_sha256(blob);
+        RepoGraphGenerationRepository::insert_galaxy_artifact_in_transaction(
+            &mut tx,
+            RepoGraphGalaxyArtifactInsert {
+                artifact_id: &art_str,
+                generation_id: &gen_str,
+                graph_content_hash: "graph_content_hash_domain_value",
+                transport_sha256: "transport_sha256_domain_value",
+                chunk_count: 1,
+                byte_count: blob.len() as i64,
+                chunk_hashes: &format!(r#"["{chunk_hash}"]"#),
+            },
+        )
+        .await
+        .expect("insert artifact");
+
+        RepoGraphGenerationRepository::insert_galaxy_chunk_in_transaction(
+            &mut tx,
+            RepoGraphGalaxyChunkInsert {
+                generation_id: &gen_str,
+                artifact_id: &art_str,
+                chunk_index: 0,
+                sha256: &chunk_hash,
+                bytes: blob,
+            },
+        )
+        .await
+        .expect("insert chunk");
+
+        tx.commit().await.expect("commit reserved publication");
+        (gen_str, art_str)
+    }
+
+    #[tokio::test]
+    async fn select_current_follows_repo_graph_current_pointer() {
+        let (db, repo) = fresh().await;
+        insert_project(&db, "p-current").await;
+        legacy_publish(&db, "p-current", "commit-1", b"graph-blob-1").await;
+
+        let selected = repo
+            .select_project_current_graph("p-current")
+            .await
+            .expect("select");
+        match selected {
+            ProjectCurrentGraph::Current(generation) => {
+                assert_eq!(generation.project_id, "p-current");
+                assert_eq!(generation.commit_sha, "commit-1");
+                assert_eq!(generation.graph_blob, b"graph-blob-1");
+            }
+            other => panic!("expected Current, got {other:?}"),
+        }
+
+        // The pointer-based read agrees with the explicit current lookup.
+        let by_current = repo
+            .current_generation_for_project("p-current")
+            .await
+            .expect("current")
+            .expect("generation exists");
+        assert_eq!(by_current.commit_sha, "commit-1");
+    }
+
+    #[tokio::test]
+    async fn two_same_commit_generations_choose_greatest_publish_seq() {
+        let (db, repo) = fresh().await;
+        insert_project(&db, "p-seq").await;
+        legacy_publish(&db, "p-seq", "same", b"v1").await;
+        legacy_publish(&db, "p-seq", "same", b"v2").await;
+
+        let latest = repo
+            .latest_for_project_commit("p-seq", "same")
+            .await
+            .expect("latest")
+            .expect("generation exists");
+        // The second publication has the greater publish_seq and overwrote
+        // the compatibility graph_blob, so the selector must return v2.
+        assert_eq!(latest.graph_blob, b"v2");
+
+        let greatest = repo
+            .greatest_publish_seq_for_project_commit("p-seq", "same")
+            .await
+            .expect("greatest seq");
+        assert_eq!(greatest, Some(latest.publish_seq));
+    }
+
+    #[tokio::test]
+    async fn legacy_fallback_only_when_pointer_is_absent() {
+        let (db, repo) = fresh().await;
+        insert_project(&db, "p-fallback").await;
+        legacy_publish(&db, "p-fallback", "fb-commit", b"fb-blob").await;
+
+        // A pointer exists, so the selector must never fall back.
+        let with_pointer = repo
+            .select_project_current_graph("p-fallback")
+            .await
+            .expect("select with pointer");
+        assert!(
+            matches!(with_pointer, ProjectCurrentGraph::Current(_)),
+            "pointer exists: expected Current, got {with_pointer:?}"
+        );
+
+        // Simulate the pre-backfill state by removing the pointer while the
+        // compatibility row remains.
+        sqlx::query("DELETE FROM repo_graph_current WHERE project_id = 'p-fallback'")
+            .execute(db.pool())
+            .await
+            .expect("delete current pointer");
+
+        let without_pointer = repo
+            .select_project_current_graph("p-fallback")
+            .await
+            .expect("select without pointer");
+        match without_pointer {
+            ProjectCurrentGraph::LegacyFallback(graph) => {
+                assert_eq!(graph.project_id, "p-fallback");
+                assert_eq!(graph.commit_sha, "fb-commit");
+                assert_eq!(graph.graph_blob, b"fb-blob");
+            }
+            other => panic!("no pointer: expected LegacyFallback, got {other:?}"),
+        }
+
+        // A project with neither pointer nor cache row is Unavailable.
+        let empty = repo
+            .select_project_current_graph("p-fallback-nonexistent")
+            .await
+            .expect("select empty");
+        assert_eq!(empty, ProjectCurrentGraph::Unavailable);
+    }
+
+    #[tokio::test]
+    async fn artifactless_current_is_distinct_from_no_pointer() {
+        let (db, repo) = fresh().await;
+        insert_project(&db, "p-artifactless").await;
+        legacy_publish(&db, "p-artifactless", "c1", b"blob").await;
+
+        // A current generation exists but carries no galaxy artifact.
+        let with_gen = repo
+            .current_galaxy_artifact_for_project("p-artifactless")
+            .await
+            .expect("artifact status");
+        match with_gen {
+            CurrentGalaxyArtifact::ArtifactUnavailable { generation } => {
+                assert_eq!(generation.commit_sha, "c1");
+            }
+            other => panic!("expected ArtifactUnavailable, got {other:?}"),
+        }
+
+        // Removing the pointer yields NoCurrentGeneration — distinct from
+        // having a current generation without an artifact.
+        sqlx::query("DELETE FROM repo_graph_current WHERE project_id = 'p-artifactless'")
+            .execute(db.pool())
+            .await
+            .expect("delete current pointer");
+        let no_gen = repo
+            .current_galaxy_artifact_for_project("p-artifactless")
+            .await
+            .expect("artifact status");
+        assert_eq!(no_gen, CurrentGalaxyArtifact::NoCurrentGeneration);
+    }
+
+    #[tokio::test]
+    async fn current_artifact_metadata_has_distinct_hash_domains() {
+        let (db, repo) = fresh().await;
+        insert_project(&db, "p-meta").await;
+        reserved_publish_with_artifact(&repo, "p-meta", "meta-commit", b"meta-blob").await;
+
+        let result = repo
+            .current_galaxy_artifact_for_project("p-meta")
+            .await
+            .expect("artifact");
+        match result {
+            CurrentGalaxyArtifact::Available {
+                generation,
+                artifact,
+            } => {
+                assert_eq!(generation.commit_sha, "meta-commit");
+                assert_eq!(artifact.chunk_count, 1);
+                assert_eq!(artifact.byte_count, b"meta-blob".len() as i64);
+                assert_ne!(
+                    artifact.graph_content_hash, artifact.transport_sha256,
+                    "graph_content_hash and transport_sha256 must be distinct domains"
+                );
+            }
+            other => panic!("expected Available, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn galaxy_chunk_returns_exactly_one_by_index() {
+        let (db, repo) = fresh().await;
+        insert_project(&db, "p-chunk").await;
+        let (gen_id, art_id) =
+            reserved_publish_with_artifact(&repo, "p-chunk", "chunk-commit", b"chunk-blob").await;
+
+        // Requested chunk index exists and carries the published bytes.
+        let chunk = repo
+            .galaxy_chunk(&gen_id, &art_id, 0)
+            .await
+            .expect("read chunk 0")
+            .expect("chunk 0 exists");
+        assert_eq!(chunk.chunk_index, 0);
+        assert_eq!(chunk.bytes, b"chunk-blob");
+        assert_eq!(chunk.byte_count, b"chunk-blob".len() as i32);
+
+        // An out-of-range index returns None — no aggregation of all chunks.
+        let miss = repo
+            .galaxy_chunk(&gen_id, &art_id, 1)
+            .await
+            .expect("read chunk 1");
+        assert!(miss.is_none(), "chunk index 1 should not exist");
+    }
+
+    #[tokio::test]
+    async fn generation_by_id_round_trips() {
+        let (db, repo) = fresh().await;
+        insert_project(&db, "p-byid").await;
+        legacy_publish(&db, "p-byid", "byid-commit", b"byid-blob").await;
+
+        let current = repo
+            .current_generation_for_project("p-byid")
+            .await
+            .expect("current")
+            .expect("generation exists");
+
+        let by_id = repo
+            .generation_by_id(&current.generation_id)
+            .await
+            .expect("by id")
+            .expect("generation exists");
+        assert_eq!(by_id.generation_id, current.generation_id);
+        assert_eq!(by_id.commit_sha, "byid-commit");
+        assert_eq!(by_id.graph_blob, b"byid-blob");
+    }
+}
