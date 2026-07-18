@@ -111,7 +111,8 @@ const BUILD_SLOTS_IN_USE: &str = "djinn_build_slots_in_use";
 const BUILD_SLOTS_QUEUED: &str = "djinn_build_slots_queued";
 const BUILD_SLOTS_OCCUPIED: &str = "djinn_build_slots_occupied";
 const BUILD_ADMISSION_WOULD_DEFER_TOTAL: &str = "djinn_build_admission_would_defer_total";
-const BUILD_ADMISSION_UNKNOWN_CLASSIFICATION_TOTAL: &str = "djinn_build_admission_unknown_classification_total";
+const BUILD_ADMISSION_UNKNOWN_CLASSIFICATION_TOTAL: &str =
+    "djinn_build_admission_unknown_classification_total";
 const BUILD_ADMISSION_INVENTORY_DEGRADED: &str = "djinn_build_admission_inventory_degraded";
 const BUILD_ADMISSION_JOURNAL_DEGRADED: &str = "djinn_build_admission_journal_degraded";
 const BUILD_ADMISSION_CREATE_UNKNOWN_HEALTH: &str = "djinn_build_admission_create_unknown_health";
@@ -1077,10 +1078,28 @@ fn register_metrics() {
         "Current number of build slots queued for admission across the process. Absolute setter for reconstructed unique state-set cardinality."
     );
     metrics::gauge!(BUILD_SLOTS_QUEUED).set(0.0);
-    metrics::describe_gauge!(BUILD_SLOTS_OCCUPIED, "Deduplicated task-observation and warm-build identities occupying admission capacity.");
-    metrics::describe_counter!(BUILD_ADMISSION_WOULD_DEFER_TOTAL, "Observe-mode admissions that would have been deferred at the effective cap.");
-    metrics::describe_counter!(BUILD_ADMISSION_UNKNOWN_CLASSIFICATION_TOTAL, "Build-admission requests with an unknown workload classification.");
-    for metric in [BUILD_ADMISSION_INVENTORY_DEGRADED, BUILD_ADMISSION_JOURNAL_DEGRADED, BUILD_ADMISSION_CREATE_UNKNOWN_HEALTH] { metrics::describe_gauge!(metric, "Bounded build-admission health signal; one means degraded."); }
+    metrics::describe_gauge!(
+        BUILD_SLOTS_OCCUPIED,
+        "Deduplicated task-observation and warm-build identities occupying admission capacity."
+    );
+    metrics::describe_counter!(
+        BUILD_ADMISSION_WOULD_DEFER_TOTAL,
+        "Observe-mode admissions that would have been deferred at the effective cap."
+    );
+    metrics::describe_counter!(
+        BUILD_ADMISSION_UNKNOWN_CLASSIFICATION_TOTAL,
+        "Build-admission requests with an unknown workload classification."
+    );
+    for metric in [
+        BUILD_ADMISSION_INVENTORY_DEGRADED,
+        BUILD_ADMISSION_JOURNAL_DEGRADED,
+        BUILD_ADMISSION_CREATE_UNKNOWN_HEALTH,
+    ] {
+        metrics::describe_gauge!(
+            metric,
+            "Bounded build-admission health signal; one means degraded."
+        );
+    }
     metrics::describe_counter!(
         AGENT_SESSION_PHASE_SECONDS_TOTAL,
         "Cumulative seconds spent in agent session phases, partitioned by bounded phase and role labels."
@@ -2135,13 +2154,24 @@ pub mod build_slot_occupancy {
 /// Work IDs, UIDs, epochs, and diagnostics must remain in tracing only.
 pub mod build_admission {
     /// Publish the deduplicated occupied and Enforce-deferred queue sizes.
-    pub fn set_slots(effective_mode: &'static str, effective_cap: i64, occupied: usize, queued: usize) {
+    pub fn set_slots(
+        effective_mode: &'static str,
+        effective_cap: i64,
+        occupied: usize,
+        queued: usize,
+    ) {
         let cap = effective_cap.to_string();
         metrics::gauge!(super::BUILD_SLOTS_OCCUPIED, "effective_mode" => effective_mode, "effective_cap" => cap.clone()).set(occupied as f64);
         metrics::gauge!(super::BUILD_SLOTS_QUEUED, "effective_mode" => effective_mode, "effective_cap" => cap).set(queued as f64);
     }
     /// Set readiness-derived health gauges. `true` means degraded.
-    pub fn set_health(effective_mode: &'static str, effective_cap: i64, inventory_degraded: bool, journal_degraded: bool, create_unknown: bool) {
+    pub fn set_health(
+        effective_mode: &'static str,
+        effective_cap: i64,
+        inventory_degraded: bool,
+        journal_degraded: bool,
+        create_unknown: bool,
+    ) {
         let cap = effective_cap.to_string();
         metrics::gauge!(super::BUILD_ADMISSION_INVENTORY_DEGRADED, "effective_mode" => effective_mode, "effective_cap" => cap.clone()).set(f64::from(inventory_degraded));
         metrics::gauge!(super::BUILD_ADMISSION_JOURNAL_DEGRADED, "effective_mode" => effective_mode, "effective_cap" => cap.clone()).set(f64::from(journal_degraded));

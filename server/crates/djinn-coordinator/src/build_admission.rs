@@ -397,17 +397,31 @@ impl BuildAdmissionController {
             djinn_telemetry::build_admission::set_health(mode, self.cap, false, false, false);
             return;
         }
-        let readiness = self.readiness();
-        let occupied = match self.journal.list_active_rows().await {
-            Ok(rows) => rows
-                .into_iter()
-                .filter(|row| matches!(row.key.domain, AdmissionDomain::TaskObservation | AdmissionDomain::WarmBuild))
-                .map(|row| format!("{:?}:{}:{}", row.key.domain, row.key.work_id, row.key.generation))
-                .collect::<HashSet<_>>()
-                .len(),
+        // Keep individual health gauges independent. `readiness()` is a
+        // priority-ordered denial reason, whereas telemetry must show every
+        // simultaneous underlying degradation.
+        let (occupied, journal_snapshot_degraded) = match self.journal.list_active_rows().await {
+            Ok(rows) => (
+                rows.into_iter()
+                    .filter(|row| {
+                        matches!(
+                            row.key.domain,
+                            AdmissionDomain::TaskObservation | AdmissionDomain::WarmBuild
+                        )
+                    })
+                    .map(|row| {
+                        format!(
+                            "{:?}:{}:{}",
+                            row.key.domain, row.key.work_id, row.key.generation
+                        )
+                    })
+                    .collect::<HashSet<_>>()
+                    .len(),
+                false,
+            ),
             Err(error) => {
                 tracing::warn!(%error, "build admission metrics journal snapshot unavailable");
-                0
+                (0, true)
             }
         };
         let queued = if self.mode == BuildAdmissionMode::Enforce {
@@ -419,9 +433,11 @@ impl BuildAdmissionController {
         djinn_telemetry::build_admission::set_health(
             mode,
             self.cap,
-            matches!(readiness, BuildAdmissionReadiness::InventoryPending),
-            matches!(readiness, BuildAdmissionReadiness::JournalRecoveryIncomplete | BuildAdmissionReadiness::JournalUnhealthy),
-            matches!(readiness, BuildAdmissionReadiness::CreateUnknownHealth),
+            !self.inventory_ready.load(Ordering::Acquire),
+            journal_snapshot_degraded
+                || !self.journal_recovered.load(Ordering::Acquire)
+                || !self.journal_healthy.load(Ordering::Acquire),
+            self.create_unknown_pending.load(Ordering::Acquire) > 0,
         );
     }
 
@@ -514,7 +530,10 @@ impl BuildAdmissionController {
             };
             match reservation {
                 ReserveAdmissionResult::Denied { occupancy, cap } => {
-                    self.deferred_enforce.lock().await.insert(permit_key.clone());
+                    self.deferred_enforce
+                        .lock()
+                        .await
+                        .insert(permit_key.clone());
                     self.publish_metrics().await;
                     return Ok(BuildAdmissionDecision::Denied { occupancy, cap });
                 }
@@ -537,6 +556,9 @@ impl BuildAdmissionController {
             .lock()
             .await
             .insert(permit_key, permit.clone());
+        // A durable Reserved row occupies immediately; do not wait for a
+        // later cap denial or terminal release to refresh the gauge.
+        self.publish_metrics().await;
         Ok(BuildAdmissionDecision::Permitted { permit, idempotent })
     }
 
@@ -650,6 +672,12 @@ impl BuildAdmissionController {
     async fn observe_unclassified(&self) {
         let mut count = self.unclassified_observations.lock().await;
         *count = count.saturating_add(1).min(1024);
+        let mode = match self.mode {
+            BuildAdmissionMode::Off => "off",
+            BuildAdmissionMode::Observe => "observe",
+            BuildAdmissionMode::Enforce => "enforce",
+        };
+        djinn_telemetry::build_admission::increment_unknown_classification(mode, self.cap);
         tracing::warn!(
             observations = *count,
             "build admission classification missing or unknown; denying dispatch"
@@ -926,6 +954,9 @@ impl BuildAdmissionController {
             self.over_cap.store(occupancy > self.cap, Ordering::Release);
         }
         let readiness = self.readiness();
+        // Recovery changes active durable rows, including predecessor
+        // CreateInFlight rows converted to CreateUnknown, so export now.
+        self.publish_metrics().await;
         Ok(AdmissionSeedReport {
             retired_reserved: recovery.retired_reserved,
             marked_create_unknown: recovery.marked_create_unknown,
