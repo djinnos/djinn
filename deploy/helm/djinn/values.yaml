@@ -46,6 +46,10 @@ buildAdmission:
 # maxSurge: 0 and maxUnavailable: 1; the chart rejects every other topology.
 server:
   replicas: 1
+  # jemalloc configuration for every djinn-server process in the Deployment,
+  # including the migrate-only initContainer. Quote this because commas and
+  # colons are meaningful to YAML while MALLOC_CONF requires them literally.
+  mallocConf: "background_thread:true,dirty_decay_ms:10000,muzzy_decay_ms:10000"
   strategy:
     type: RollingUpdate
     rollingUpdate:
