@@ -45,7 +45,9 @@ use djinn_git::{
 };
 use djinn_provider::message::{ContentBlock, Conversation, Message};
 use djinn_provider::provider::StreamEvent;
-use djinn_sandbox::final_verification_execution::FinalVerificationExecutionRequest;
+use djinn_sandbox::final_verification_execution::{
+    FinalVerificationExecutionEvidence, FinalVerificationExecutionRequest,
+};
 use tokio_util::sync::CancellationToken;
 
 // ---------------------------------------------------------------------------
@@ -147,6 +149,15 @@ struct ReuseProbe {
     lease_requests: Mutex<usize>,
     lease_acquisitions: Mutex<usize>,
     canonical_executions: Mutex<usize>,
+    evidence: Mutex<Option<FinalVerificationExecutionEvidence>>,
+}
+
+struct ReuseProbeLease;
+
+impl crate::final_verification::FinalVerificationInvocationLease for ReuseProbeLease {
+    fn release<'a>(&'a mut self) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>> {
+        Box::pin(async { Ok(()) })
+    }
 }
 
 impl CompletionIntentCallbacks {
@@ -170,6 +181,7 @@ impl CompletionIntentCallbacks {
                 lease_requests: Mutex::new(0),
                 lease_acquisitions: Mutex::new(0),
                 canonical_executions: Mutex::new(0),
+                evidence: Mutex::new(None),
             }),
         }
     }
@@ -219,6 +231,8 @@ impl SlotHostCallbacks for CompletionIntentCallbacks {
     {
         if let Some(probe) = &self.reuse_probe {
             *probe.canonical_executions.lock().unwrap() += 1;
+            probe.events.lock().unwrap().push("canonical-execution");
+            return probe.evidence.lock().unwrap().clone();
         }
         None
     }
@@ -268,7 +282,14 @@ impl SlotHostCallbacks for CompletionIntentCallbacks {
         Box::pin(async move {
             let probe = probe.ok_or_else(|| "not implemented in test".to_owned())?;
             *probe.lease_acquisitions.lock().unwrap() += 1;
-            Err("lease must not be acquired for a reuse hit".into())
+            if probe.evidence.lock().unwrap().is_some() {
+                Ok(Box::new(ReuseProbeLease)
+                    as Box<
+                        dyn crate::final_verification::FinalVerificationInvocationLease,
+                    >)
+            } else {
+                Err("lease must not be acquired for a reuse hit".into())
+            }
         })
     }
 
