@@ -10,8 +10,11 @@ doctest = false
 [dependencies]
 anyhow = "1"
 djinn-core = { path = "../djinn-core" }
+djinn-db = { path = "../djinn-db" }
 djinn-git = { path = "../djinn-git" }
 git2 = "0.20"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 tempfile = "3"
 thiserror = "2"
 tokio = { version = "1", features = ["fs", "io-util", "macros", "process", "rt", "sync", "time"] }
@@ -19,7 +22,9 @@ tracing = "0.1"
 workspace-hack.workspace = true
 
 [dev-dependencies]
+sqlx = { version = "0.8", default-features = false, features = ["postgres", "runtime-tokio-rustls"] }
 tokio = { version = "1", features = ["full", "test-util"] }
+uuid = { version = "1", features = ["v7"] }
 
 [lints]
 workspace = true

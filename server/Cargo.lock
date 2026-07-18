@@ -1850,12 +1850,17 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "djinn-core",
+ "djinn-db",
  "djinn-git",
  "git2",
+ "serde",
+ "serde_json",
+ "sqlx",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
+ "uuid",
  "workspace-hack",
 ]
 

@@ -70,6 +70,20 @@ impl TaskRunRepository {
         .await?)
     }
 
+    /// Every recorded workspace is migration inventory, not just a live
+    /// workspace: terminal runs can retain a legacy checkout on disk.
+    pub async fn workspace_paths_for_project(&self, project_id: &str) -> Result<Vec<String>> {
+        self.db.ensure_initialized().await?;
+        Ok(sqlx::query_scalar::<_, String>(
+            "SELECT workspace_path FROM task_runs
+             WHERE project_id = $1 AND workspace_path IS NOT NULL
+             ORDER BY started_at",
+        )
+        .bind(project_id)
+        .fetch_all(self.db.pool())
+        .await?)
+    }
+
     /// Update the status of a run.  Terminal statuses (Completed / Failed /
     /// Interrupted) also stamp `ended_at`; the Running status leaves it NULL.
     pub async fn update_status(&self, id: &str, status: TaskRunStatus) -> Result<()> {
@@ -266,6 +280,20 @@ impl TaskRunRepository {
         Ok(sqlx::query_scalar(
             "SELECT id FROM task_runs WHERE status IN ('starting', 'running') AND ended_at IS NULL",
         )
+        .fetch_all(self.db.pool())
+        .await?)
+    }
+
+    /// Workspace paths held by live owner-project runs. Errors are intentionally
+    /// propagated so migration callers cannot mistake DB uncertainty for idle.
+    pub async fn live_workspace_paths_for_project(&self, project_id: &str) -> Result<Vec<String>> {
+        self.db.ensure_initialized().await?;
+        Ok(sqlx::query_scalar(
+            "SELECT workspace_path FROM task_runs WHERE project_id = $1
+             AND status IN ('starting', 'running') AND ended_at IS NULL
+             AND workspace_path IS NOT NULL",
+        )
+        .bind(project_id)
         .fetch_all(self.db.pool())
         .await?)
     }
@@ -592,6 +620,59 @@ mod tests {
         assert!(
             reaped.is_none(),
             "non-terminal status must be a guard-no-op"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn live_workspace_paths_are_owner_scoped_and_only_include_live_runs() {
+        let db = test_db();
+        let (project_id, task_id) = create_task(&db, EventBus::noop()).await;
+        let (other_project_id, other_task_id) = create_task(&db, EventBus::noop()).await;
+        let repo = TaskRunRepository::new(db);
+        let live_id = new_run_id();
+        repo.create(CreateTaskRunParams {
+            id: &live_id,
+            project_id: &project_id,
+            task_id: &task_id,
+            trigger_type: TaskRunTrigger::NewTask.as_str(),
+            status: Some("starting"),
+            workspace_path: Some("/owner/live"),
+            mirror_ref: None,
+        })
+        .await
+        .unwrap();
+        let terminal_id = new_run_id();
+        repo.create(CreateTaskRunParams {
+            id: &terminal_id,
+            project_id: &project_id,
+            task_id: &task_id,
+            trigger_type: TaskRunTrigger::NewTask.as_str(),
+            status: None,
+            workspace_path: Some("/owner/old"),
+            mirror_ref: None,
+        })
+        .await
+        .unwrap();
+        repo.update_status(&terminal_id, TaskRunStatus::Completed)
+            .await
+            .unwrap();
+        let other_id = new_run_id();
+        repo.create(CreateTaskRunParams {
+            id: &other_id,
+            project_id: &other_project_id,
+            task_id: &other_task_id,
+            trigger_type: TaskRunTrigger::NewTask.as_str(),
+            status: None,
+            workspace_path: Some("/other/live"),
+            mirror_ref: None,
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            repo.live_workspace_paths_for_project(&project_id)
+                .await
+                .unwrap(),
+            vec!["/owner/live"]
         );
     }
 
