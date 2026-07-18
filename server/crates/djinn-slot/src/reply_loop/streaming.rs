@@ -35,6 +35,74 @@ pub enum UnresolvedThinkingFragment {
     Unattributed(String),
 }
 
+/// Apply the persistence-relevant portion of one provider event to a turn.
+///
+/// The live stream consumer owns event-bus emission, tool dispatch, and usage
+/// accounting, while this function owns the single source of truth for turn
+/// content that is later finalized or flushed.
+pub fn apply_persistence_event(state: &mut StreamTurnState, event: StreamEvent) {
+    match event {
+        StreamEvent::Delta(ContentBlock::Text { text }) => state.turn_text.push_str(&text),
+        StreamEvent::Delta(tool_use @ ContentBlock::ToolUse { .. }) => {
+            state.turn_tool_calls.push(tool_use);
+        }
+        StreamEvent::Delta(reasoning @ ContentBlock::OpenAIReasoning { .. })
+        | StreamEvent::Delta(reasoning @ ContentBlock::Thinking { .. })
+        | StreamEvent::Delta(reasoning @ ContentBlock::RedactedThinking { .. })
+        | StreamEvent::Delta(reasoning @ ContentBlock::Unknown { .. }) => {
+            state.turn_provider_state.push(reasoning);
+        }
+        StreamEvent::Thinking(thinking) => {
+            state.turn_thinking.push_str(&thinking);
+            state
+                .turn_unresolved_thinking
+                .push(UnresolvedThinkingFragment::Unattributed(thinking));
+        }
+        StreamEvent::ThinkingDelta { id, text } => {
+            state.turn_thinking.push_str(&text);
+            state
+                .turn_unresolved_thinking
+                .push(UnresolvedThinkingFragment::Attributed { id, text });
+        }
+        StreamEvent::ThinkingBlockComplete {
+            id,
+            thinking,
+            signature,
+        } => {
+            state.turn_provider_state.push(ContentBlock::Thinking {
+                thinking,
+                signature,
+            });
+            state.turn_completed_thinking_ids.insert(id);
+        }
+        StreamEvent::Delta(ContentBlock::ToolResult { .. })
+        | StreamEvent::Delta(ContentBlock::Image { .. })
+        | StreamEvent::Delta(ContentBlock::Document { .. })
+        | StreamEvent::Usage(_)
+        | StreamEvent::Done => {}
+    }
+}
+
+/// Drive explicit provider events through the live persistence state consumer.
+///
+/// Host event emission, tool execution, and token accounting are deliberately
+/// outside this test seam; persistence-relevant event handling is the exact
+/// function invoked by [`consume_provider_stream`].
+#[cfg(any(test, feature = "test-support"))]
+pub fn consume_events_for_persistence(
+    events: impl IntoIterator<Item = StreamEvent>,
+) -> StreamTurnState {
+    let mut state = StreamTurnState::new();
+    for event in events {
+        let done = matches!(event, StreamEvent::Done);
+        apply_persistence_event(&mut state, event);
+        if done {
+            break;
+        }
+    }
+    state
+}
+
 pub struct StreamTurnState {
     pub turn_text: String,
     /// Complete arrival-order thinking aggregate for display and telemetry.
@@ -210,7 +278,10 @@ pub(super) async fn consume_provider_stream(
                                 "text": text,
                             }),
                         ));
-                        state.turn_text.push_str(&text);
+                        apply_persistence_event(
+                            &mut state,
+                            StreamEvent::Delta(ContentBlock::Text { text }),
+                        );
                     }
                     StreamEvent::Delta(tool_use @ ContentBlock::ToolUse { .. }) => {
                         let idx = state.turn_tool_calls.len();
@@ -220,7 +291,7 @@ pub(super) async fn consume_provider_stream(
                         } else {
                             false
                         };
-                        state.turn_tool_calls.push(tool_use);
+                        apply_persistence_event(&mut state, StreamEvent::Delta(tool_use));
                         if should_dispatch_now {
                             state.streaming_dispatched.insert(idx);
                             let tool_call = state.turn_tool_calls[idx].clone();
@@ -238,7 +309,7 @@ pub(super) async fn consume_provider_stream(
                     | StreamEvent::Delta(reasoning @ ContentBlock::Thinking { .. })
                     | StreamEvent::Delta(reasoning @ ContentBlock::RedactedThinking { .. })
                     | StreamEvent::Delta(reasoning @ ContentBlock::Unknown { .. }) => {
-                        state.turn_provider_state.push(reasoning);
+                        apply_persistence_event(&mut state, StreamEvent::Delta(reasoning));
                     }
                     StreamEvent::Thinking(thinking) => {
                         ctx.ctx.event_bus.send(DjinnEventEnvelope::session_message(
@@ -251,10 +322,7 @@ pub(super) async fn consume_provider_stream(
                                 "text": thinking,
                             }),
                         ));
-                        state.turn_thinking.push_str(&thinking);
-                        state
-                            .turn_unresolved_thinking
-                            .push(UnresolvedThinkingFragment::Unattributed(thinking));
+                        apply_persistence_event(&mut state, StreamEvent::Thinking(thinking));
                     }
                     StreamEvent::ThinkingDelta { id, text } => {
                         // Display/telemetry aggregate gets the attributed
@@ -269,11 +337,9 @@ pub(super) async fn consume_provider_stream(
                                 "text": text,
                             }),
                         ));
-                        state.turn_thinking.push_str(&text);
-                        // Persistence fragment in arrival order, keyed by
-                        // exact block ID for later reconciliation.
-                        state.turn_unresolved_thinking.push(
-                            UnresolvedThinkingFragment::Attributed { id, text },
+                        apply_persistence_event(
+                            &mut state,
+                            StreamEvent::ThinkingDelta { id, text },
                         );
                     }
                     StreamEvent::ThinkingBlockComplete {
@@ -283,11 +349,14 @@ pub(super) async fn consume_provider_stream(
                     } => {
                         // Materialize the load-bearing completion before
                         // marking its ID complete, making interruption safe.
-                        state.turn_provider_state.push(ContentBlock::Thinking {
-                            thinking,
-                            signature,
-                        });
-                        state.turn_completed_thinking_ids.insert(id);
+                        apply_persistence_event(
+                            &mut state,
+                            StreamEvent::ThinkingBlockComplete {
+                                id,
+                                thinking,
+                                signature,
+                            },
+                        );
                     }
                     StreamEvent::Usage(usage) => {
                         state.turn_tokens_in = usage.input;

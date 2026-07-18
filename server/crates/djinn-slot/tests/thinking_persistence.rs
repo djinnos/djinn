@@ -692,3 +692,104 @@ async fn flush_in_flight_turn_is_idempotent() {
         "idempotent flush must not duplicate messages"
     );
 }
+
+/// Explicit StreamEvents flow through the production persistence state consumer,
+/// then the normal finalizer used by `turn.rs` and the interrupted DB flush.
+#[tokio::test]
+async fn stream_events_drive_normal_flush_and_record_thinking() {
+    use djinn_provider::provider::StreamEvent;
+    use djinn_slot::reply_loop::streaming::consume_events_for_persistence;
+    use djinn_slot::reply_loop::turn::{finalize_normal_turn_content, record_normal_turn_thinking};
+
+    let events = || {
+        vec![
+            StreamEvent::ThinkingDelta {
+                id: 5,
+                text: "A".into(),
+            },
+            StreamEvent::ThinkingBlockComplete {
+                id: 5,
+                thinking: "A".into(),
+                signature: Some("sig-a".into()),
+            },
+            StreamEvent::ThinkingDelta {
+                id: 6,
+                text: "Bpartial".into(),
+            },
+            StreamEvent::Thinking("chat-summary".into()),
+            StreamEvent::Delta(ContentBlock::Text {
+                text: "assistant text".into(),
+            }),
+            StreamEvent::Delta(ContentBlock::ToolUse {
+                id: "call-1".into(),
+                name: "read".into(),
+                input: serde_json::json!({}),
+            }),
+            StreamEvent::Done,
+        ]
+    };
+    let state = consume_events_for_persistence(events());
+    let normal = finalize_normal_turn_content(
+        &state.turn_provider_state,
+        &state.turn_unresolved_thinking,
+        &state.turn_completed_thinking_ids,
+        &state.turn_text,
+        &state.turn_tool_calls,
+    );
+    let mut recorded = None;
+    record_normal_turn_thinking(&state.turn_thinking, |thinking| {
+        recorded = Some(thinking.to_owned())
+    });
+    assert_eq!(recorded.as_deref(), Some("ABpartialchat-summary"));
+    assert_eq!(normal.len(), 4);
+    assert_thinking(&normal[0], "A", Some("sig-a"));
+    assert_thinking(&normal[1], "Bpartialchat-summary", None);
+    assert_text(&normal[2], "assistant text");
+    assert!(matches!(&normal[3], ContentBlock::ToolUse { id, .. } if id == "call-1"));
+
+    let db = create_test_db().await;
+    let (session_id, task_id) = create_test_session(&db).await;
+    let repo = SessionMessageRepository::new(db, EventBus::noop());
+    let mut interrupted = consume_events_for_persistence(events());
+    flush_in_flight_turn(&repo, &session_id, &task_id, 0, &mut interrupted).await;
+    let persisted = repo
+        .load_raw_conversation(&session_id)
+        .await
+        .expect("load flush");
+    assert_eq!(persisted.messages[0].content, normal);
+}
+
+/// OpenAI Chat/Responses and generic `Delta(Thinking)` must be classified by
+/// the production event consumer before normal finalization.
+#[test]
+fn provider_events_preserve_openai_and_generic_fallbacks() {
+    use djinn_provider::provider::StreamEvent;
+    use djinn_slot::reply_loop::streaming::consume_events_for_persistence;
+    use djinn_slot::reply_loop::turn::finalize_normal_turn_content;
+    let state = consume_events_for_persistence(vec![
+        StreamEvent::Thinking("chat".into()),
+        StreamEvent::Delta(ContentBlock::OpenAIReasoning {
+            id: Some("resp".into()),
+            encrypted_content: "state".into(),
+            summary: None,
+            status: None,
+        }),
+        StreamEvent::Thinking("summary".into()),
+        StreamEvent::Delta(ContentBlock::Thinking {
+            thinking: "generic".into(),
+            signature: None,
+        }),
+    ]);
+    let content = finalize_normal_turn_content(
+        &state.turn_provider_state,
+        &state.turn_unresolved_thinking,
+        &state.turn_completed_thinking_ids,
+        &state.turn_text,
+        &state.turn_tool_calls,
+    );
+    assert!(
+        matches!(&content[0], ContentBlock::OpenAIReasoning { id: Some(id), .. } if id == "resp")
+    );
+    assert_thinking(&content[1], "generic", None);
+    assert_thinking(&content[2], "chatsummary", None);
+}

@@ -19,6 +19,9 @@ pub mod phase;
 #[cfg(any(test, feature = "test-support"))]
 pub mod streaming;
 mod tool_dispatch;
+#[cfg(any(test, feature = "test-support"))]
+pub mod turn;
+#[cfg(not(any(test, feature = "test-support")))]
 mod turn;
 mod turn_budget;
 
