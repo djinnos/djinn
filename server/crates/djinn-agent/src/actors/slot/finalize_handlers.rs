@@ -73,6 +73,21 @@ mod tests {
             let project = test_helpers::create_test_project(&db).await;
             let epic = test_helpers::create_test_epic(&db, &project.id).await;
             let task = test_helpers::create_test_task(&db, &project.id, &epic.id).await;
+            // Create a task run so the C2 validation boundary can resolve an
+            // active task_run_id. Without this, validate_or_reverify_completion_intent
+            // errors before reaching the test-injected final_verification_outcome.
+            djinn_db::repositories::task_run::TaskRunRepository::new(db.clone())
+                .create(djinn_db::repositories::task_run::CreateTaskRunParams {
+                    id: &uuid::Uuid::now_v7().to_string(),
+                    project_id: &project.id,
+                    task_id: &task.id,
+                    trigger_type: djinn_core::models::TaskRunTrigger::NewTask.as_str(),
+                    status: None,
+                    workspace_path: None,
+                    mirror_ref: None,
+                })
+                .await
+                .expect("create task run in FinalizeFixtures");
             Self { db, ctx, task }
         }
         fn repo(&self) -> TaskRepository {

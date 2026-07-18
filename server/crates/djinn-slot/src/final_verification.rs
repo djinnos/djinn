@@ -241,7 +241,7 @@ pub async fn coordinate_final_verification(
     // Keep production on the complete resolve/lease/execute/persist path while
     // allowing reply-loop tests to deterministically exercise the typed
     // coordinator boundary without a sandbox or durable verify-run fixture.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     if let Some(outcome) = ctx.callbacks.final_verification_outcome_for_test(&request) {
         return emit_outcome(&request, outcome);
     }
@@ -296,9 +296,9 @@ pub async fn coordinate_final_verification(
         // The delivered executor performs every descriptor in order and returns
         // evidence rather than persistence side effects. Tests inject evidence
         // here while retaining the real resolve/lease/validate/write boundary.
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         let injected_evidence = ctx.callbacks.final_verification_evidence_for_test(&request);
-        #[cfg(not(test))]
+        #[cfg(not(any(test, feature = "test-support")))]
         let injected_evidence: Option<FinalVerificationExecutionEvidence> = None;
         let evidence = match injected_evidence {
             Some(evidence) => evidence,

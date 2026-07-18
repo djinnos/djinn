@@ -525,4 +525,28 @@ impl djinn_slot::host::SlotHostCallbacks for AgentHostCallbacks {
             None => Box::pin(async { Ok(()) }),
         }
     }
+    #[cfg(test)]
+    fn final_verification_outcome_for_test(
+        &self,
+        _request: &djinn_slot::final_verification::FinalVerificationCoordinatorRequest,
+    ) -> Option<djinn_slot::final_verification::FinalVerificationRecordingOutcome> {
+        Some(
+            djinn_slot::final_verification::FinalVerificationRecordingOutcome::Stored {
+                verification_attempt_id: uuid::Uuid::now_v7().to_string(),
+                verify_run_id: uuid::Uuid::now_v7().to_string(),
+                evidence: Box::new(
+                    djinn_slot::final_verification::FinalVerificationSuccessEvidence {
+                        persisted_run_id: uuid::Uuid::now_v7().to_string(),
+                        completed_at: "2025-01-01T00:00:00Z".to_owned(),
+                        ordered_commands: serde_json::json!([]),
+                        covered_checks: serde_json::json!([]),
+                        required_checks: vec![],
+                        verification_input_fingerprint: "test-fingerprint".to_owned(),
+                        manifest_version: "manifest-v1".to_owned(),
+                        environment_identity_digest: "test-identity".to_owned(),
+                    },
+                ),
+            },
+        )
+    }
 }
