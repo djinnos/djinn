@@ -213,6 +213,12 @@ jobs:
         working-directory: server
     env:
       SQLX_OFFLINE: "true"
+      # +fp16 is required on aarch64: gemm-f16 (candle dependency) emits
+      # fullfp16 instructions that the baseline aarch64 target rejects.
+      # Cobalt 100 (Neoverse N2) supports the feature natively. Must be
+      # identical across every server-test cache family job so the cache
+      # stays coherent.
+      RUSTFLAGS: -D warnings -C target-feature=+fp16
     steps:
       - name: Main admission delay
         if: github.event_name == 'push'
@@ -474,6 +480,9 @@ jobs:
       coldStart: ${{ steps.plan.outputs.coldStart }}
     env:
       SQLX_OFFLINE: "true"
+      # Keep identical to every other server-test cache family job (see
+      # cache-warm-arm64-test): gemm-f16 needs +fp16 on aarch64.
+      RUSTFLAGS: -D warnings -C target-feature=+fp16
     steps:
       - uses: actions/checkout@v4
       - run: rustup toolchain install
@@ -642,6 +651,10 @@ jobs:
       - preflight
     if: needs.preflight.outputs.serverTest == 'true' && github.event_name != 'push'
     runs-on: ubuntu-24.04-arm
+    env:
+      # Keep identical to every other server-test cache family job (see
+      # cache-warm-arm64-test): gemm-f16 needs +fp16 on aarch64.
+      RUSTFLAGS: -D warnings -C target-feature=+fp16
     strategy:
       fail-fast: false
       matrix:
@@ -1119,6 +1132,9 @@ jobs:
     env:
       DJINN_TEST_DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5433/postgres
       DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5433/djinn_test_template
+      # Keep identical to every other server-test cache family job (see
+      # cache-warm-arm64-test): gemm-f16 needs +fp16 on aarch64.
+      RUSTFLAGS: -D warnings -C target-feature=+fp16
     services:
       postgres:
         image: postgres:16
