@@ -134,12 +134,19 @@ export function GalaxyView({ projectId }: { projectId: string }) {
       try {
         const artifact = await fetchGalaxyArtifact(projectId, { signal: controller.signal });
         if (cancelled) return;
-        const snapshot =
-          artifact.kind === "artifact"
-            ? artifact.artifact.snapshot
-            : parseSnapshotResponse(
-                await fetchSnapshot(projectId, GALAXY_MCP_FALLBACK_NODE_BUDGET),
-              );
+        let snapshot;
+        if (artifact.kind === "artifact") {
+          snapshot = artifact.artifact.snapshot;
+        } else {
+          const fallback = await fetchSnapshot(
+            projectId,
+            GALAXY_MCP_FALLBACK_NODE_BUDGET,
+          );
+          // MCP calls cannot be aborted, so stop before parsing or mutating
+          // state when this project became obsolete while awaiting fallback.
+          if (cancelled) return;
+          snapshot = parseSnapshotResponse(fallback);
+        }
         if (!snapshot) {
           setState({
             phase: "error",

@@ -1,6 +1,9 @@
 use axum::Router;
 use axum::extract::State;
-use axum::http::header::CONTENT_TYPE;
+use axum::http::{
+    HeaderName,
+    header::{self, CONTENT_TYPE},
+};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 
@@ -112,6 +115,14 @@ fn cors_layer() -> CorsLayer {
         .allow_origin(AllowOrigin::mirror_request())
         .allow_methods(AllowMethods::mirror_request())
         .allow_headers(AllowHeaders::mirror_request())
+        .expose_headers([
+            header::ETAG,
+            HeaderName::from_static(galaxy::HEADER_PROJECT_ID),
+            HeaderName::from_static(galaxy::HEADER_GENERATION_ID),
+            HeaderName::from_static(galaxy::HEADER_COMMIT_SHA),
+            HeaderName::from_static(galaxy::HEADER_ARTIFACT_VERSION),
+            HeaderName::from_static(galaxy::HEADER_SEMANTIC_HASH),
+        ])
         .allow_credentials(true)
 }
 

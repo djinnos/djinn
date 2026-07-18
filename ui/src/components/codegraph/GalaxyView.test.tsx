@@ -1,10 +1,13 @@
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const fetchArtifact = vi.fn();
 const fetchSnapshot = vi.fn();
+const layoutInWorker = vi.fn();
 const snapshotToGalaxy = vi.fn((snapshot: { project_id: string }) => ({
-  nodes: [{ id: snapshot.project_id }], edges: [], serverPositioned: true,
+  nodes: [{ id: snapshot.project_id }],
+  edges: [],
+  serverPositioned: snapshot.project_id !== "old-project",
 }));
 
 vi.mock("@/api/galaxyArtifact", () => ({ fetchGalaxyArtifact: (...args: unknown[]) => fetchArtifact(...args) }));
@@ -19,7 +22,9 @@ vi.mock("@/lib/codeGraphGalaxyAdapter", () => ({
   snapshotHotspots: vi.fn().mockReturnValue([]),
   snapshotToGalaxy: (...args: unknown[]) => snapshotToGalaxy(args[0] as { project_id: string }),
 }));
-vi.mock("@/components/galaxy/galaxyLayoutClient", () => ({ layoutInWorker: vi.fn() }));
+vi.mock("@/components/galaxy/galaxyLayoutClient", () => ({
+  layoutInWorker: (...args: unknown[]) => layoutInWorker(...args),
+}));
 vi.mock("@/components/codegraph/CoverageGapBanner", () => ({ CoverageGapBanner: () => null }));
 vi.mock("@/components/codegraph/HotspotPanel", () => ({ HotspotPanel: () => null }));
 vi.mock("@/components/galaxy/GalaxyCanvas", () => ({
@@ -45,6 +50,7 @@ function snapshot(project_id: string) {
 beforeEach(() => {
   fetchArtifact.mockReset();
   fetchSnapshot.mockReset();
+  layoutInWorker.mockReset();
   snapshotToGalaxy.mockClear();
 });
 afterEach(cleanup);
@@ -64,16 +70,24 @@ describe("GalaxyView REST artifact cutover", () => {
     expect(fetchSnapshot).toHaveBeenCalledWith("fallback-project", 10_000);
   });
 
-  it("never installs a late response from the prior project", async () => {
-    let resolveFirst!: (value: { kind: "artifact"; artifact: { snapshot: ReturnType<typeof snapshot> } }) => void;
-    fetchArtifact.mockImplementationOnce(() => new Promise((resolve) => { resolveFirst = resolve; }));
+  it("ignores a late MCP fallback from the prior project before parsing or layout", async () => {
+    let resolveFallback!: (value: ReturnType<typeof snapshot>) => void;
+    fetchArtifact.mockResolvedValueOnce({ kind: "fallback", reason: "unavailable" });
+    fetchSnapshot.mockImplementationOnce(
+      () => new Promise((resolve) => { resolveFallback = resolve; }),
+    );
     fetchArtifact.mockResolvedValueOnce({ kind: "artifact", artifact: { snapshot: snapshot("new-project") } });
     const rendered = render(<GalaxyView projectId="old-project" />);
+
+    await waitFor(() => expect(fetchSnapshot).toHaveBeenCalledWith("old-project", 10_000));
     rendered.rerender(<GalaxyView projectId="new-project" />);
     await waitFor(() => expect(screen.getByTestId("galaxy")).toHaveTextContent("new-project"));
     expect((fetchArtifact.mock.calls[0][1] as { signal: AbortSignal }).signal.aborted).toBe(true);
-    resolveFirst({ kind: "artifact", artifact: { snapshot: snapshot("old-project") } });
-    await Promise.resolve();
+
+    await act(async () => resolveFallback(snapshot("old-project")));
+
     expect(screen.getByTestId("galaxy")).toHaveTextContent("new-project");
+    expect(snapshotToGalaxy).not.toHaveBeenCalledWith(expect.objectContaining({ project_id: "old-project" }));
+    expect(layoutInWorker).not.toHaveBeenCalled();
   });
 });

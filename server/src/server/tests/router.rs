@@ -1,7 +1,7 @@
 use axum::body::Body;
 use std::time::{Duration, SystemTime};
 
-use axum::http::header::CONTENT_TYPE;
+use axum::http::header::{ACCESS_CONTROL_EXPOSE_HEADERS, CONTENT_TYPE, ORIGIN};
 use djinn_core::clock::{Clock, SystemClock};
 use http_body_util::BodyExt;
 use tower::ServiceExt;
@@ -38,6 +38,37 @@ async fn health_returns_ok() {
     assert_eq!(json["provider_catalog"]["refresh_interval_seconds"], 3600);
     assert_eq!(json["provider_catalog"]["last_refresh_status"], "never");
     assert!(json["provider_catalog"]["last_refresh_error"].is_null());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn galaxy_route_exposes_validator_headers_to_credentialed_origins() {
+    let app = test_helpers::create_test_app();
+    let req = axum::http::Request::builder()
+        .uri("/api/projects/project-id/code-graph/galaxy")
+        .header(ORIGIN, "https://ui.example.test")
+        .header(axum::http::header::COOKIE, "session=credential")
+        .body(Body::empty())
+        .unwrap();
+
+    let response = app.oneshot(req).await.unwrap();
+    let exposed = response.headers()[ACCESS_CONTROL_EXPOSE_HEADERS]
+        .to_str()
+        .unwrap()
+        .split(',')
+        .map(str::trim)
+        .collect::<std::collections::HashSet<_>>();
+
+    assert_eq!(
+        exposed,
+        std::collections::HashSet::from([
+            "etag",
+            super::super::galaxy::HEADER_PROJECT_ID,
+            super::super::galaxy::HEADER_GENERATION_ID,
+            super::super::galaxy::HEADER_COMMIT_SHA,
+            super::super::galaxy::HEADER_ARTIFACT_VERSION,
+            super::super::galaxy::HEADER_SEMANTIC_HASH,
+        ])
+    );
 }
 
 /// Source-tier policy test: verify the catalog-only window used by the health
