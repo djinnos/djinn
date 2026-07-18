@@ -391,13 +391,8 @@ pub struct PinnedGalaxyArtifactMetadata {
 pub enum PinnedGalaxyArtifactSelection {
     NoCurrentGeneration,
     ArtifactUnavailable,
-    UnsupportedVersion {
-        version: u32,
-        encoding: Box<str>,
-    },
-    CorruptMetadata {
-        reason: String,
-    },
+    UnsupportedVersion { version: u32, encoding: Box<str> },
+    CorruptMetadata { reason: String },
     Pinned(PinnedGalaxyArtifact),
 }
 
