@@ -851,9 +851,18 @@ fn register_metrics() {
         metrics::counter!(metric).absolute(0);
     }
     for (metric, description) in [
-        (GALAXY_ARTIFACT_ROUTE_OUTCOMES_TOTAL, "Galaxy artifact REST outcomes by fixed outcome class only."),
-        (GALAXY_ARTIFACT_ROUTE_CHUNKS_TOTAL, "Validated galaxy artifact REST chunks by fixed artifact version only."),
-        (GALAXY_ARTIFACT_ROUTE_BYTES_TOTAL, "Validated galaxy artifact REST transport bytes by fixed artifact version only."),
+        (
+            GALAXY_ARTIFACT_ROUTE_OUTCOMES_TOTAL,
+            "Galaxy artifact REST outcomes by fixed outcome class only.",
+        ),
+        (
+            GALAXY_ARTIFACT_ROUTE_CHUNKS_TOTAL,
+            "Validated galaxy artifact REST chunks by fixed artifact version only.",
+        ),
+        (
+            GALAXY_ARTIFACT_ROUTE_BYTES_TOTAL,
+            "Validated galaxy artifact REST transport bytes by fixed artifact version only.",
+        ),
     ] {
         metrics::describe_counter!(metric, description);
         metrics::counter!(metric).absolute(0);
@@ -5152,12 +5161,15 @@ pub mod galaxy_artifact_route {
     const VERSION: &str = "v1";
 
     pub fn record_outcome(outcome: &'static str) {
-        metrics::counter!(super::GALAXY_ARTIFACT_ROUTE_OUTCOMES_TOTAL, "outcome" => outcome).increment(1);
+        metrics::counter!(super::GALAXY_ARTIFACT_ROUTE_OUTCOMES_TOTAL, "outcome" => outcome)
+            .increment(1);
     }
 
     pub fn record_chunk(bytes: usize) {
-        metrics::counter!(super::GALAXY_ARTIFACT_ROUTE_CHUNKS_TOTAL, "version" => VERSION).increment(1);
-        metrics::counter!(super::GALAXY_ARTIFACT_ROUTE_BYTES_TOTAL, "version" => VERSION).increment(bytes as u64);
+        metrics::counter!(super::GALAXY_ARTIFACT_ROUTE_CHUNKS_TOTAL, "version" => VERSION)
+            .increment(1);
+        metrics::counter!(super::GALAXY_ARTIFACT_ROUTE_BYTES_TOTAL, "version" => VERSION)
+            .increment(bytes as u64);
     }
 }
 
@@ -5219,7 +5231,14 @@ mod galaxy_artifact_route_tests {
         ] {
             assert!(rendered.contains(metric), "missing {metric}:\n{rendered}");
             for line in rendered.lines().filter(|line| line.starts_with(metric)) {
-                for forbidden in ["project", "generation", "commit", "artifact", "etag", "hash"] {
+                for forbidden in [
+                    "project",
+                    "generation",
+                    "commit",
+                    "artifact",
+                    "etag",
+                    "hash",
+                ] {
                     assert!(
                         !line.contains(&format!("{forbidden}=")),
                         "high-cardinality identity label on {metric}: {line}"

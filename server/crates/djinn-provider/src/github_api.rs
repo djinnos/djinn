@@ -49,13 +49,13 @@ pub use error::{GitHubApiError, GitHubErrorSource};
 pub use refresh::{DbBackedRefresher, NoRefresh, UserTokenRefresh};
 pub use transport::UserTokenExpired;
 pub use types::{
-    ActionsJob, ActionsJobStep, AutoMergeRequest, CheckAnnotation, CheckRun, CheckRunsResponse,
-    CiFailureContextBundle, CiFailureContextRequest, CiSetupStep, CreatePrParams, DequeueEvent,
-    GitHubUser, MergeMethod, MergeQueueEntry, MergeQueueEntryState, PrFile, PrMergeQueueState,
-    PrRef, PrReview, PrReviewFeedback, PrState, PullRequest, RepoMergeConfig, ReproductionJob,
-    ReproductionSetupStep, ReproductionStep, RequiredCheckReproduction,
-    RequiredCheckReproductionContext, RequiredCheckUnreproducible,
-    RequiredCheckUnreproducibleReason, ReviewComment, WorkflowRun,
+    ActionsArtifact, ActionsJob, ActionsJobStep, AutoMergeRequest, CheckAnnotation, CheckRun,
+    CheckRunsResponse, CiFailureContextBundle, CiFailureContextRequest, CiSetupStep,
+    CreatePrParams, DequeueEvent, DownloadedArtifact, GitHubUser, MergeMethod, MergeQueueEntry,
+    MergeQueueEntryState, PrFile, PrMergeQueueState, PrRef, PrReview, PrReviewFeedback, PrState,
+    PullRequest, RepoMergeConfig, ReproductionJob, ReproductionSetupStep, ReproductionStep,
+    RequiredCheckReproduction, RequiredCheckReproductionContext, RequiredCheckUnreproducible,
+    RequiredCheckUnreproducibleReason, ReviewComment, RunArtifactsPage, WorkflowRun,
 };
 pub use write_errors::{
     GitHubWriteErrorEnvelope, GitHubWriteErrorInput, github_write_error_envelope,
