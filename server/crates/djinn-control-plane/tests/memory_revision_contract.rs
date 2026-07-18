@@ -48,7 +48,18 @@ async fn seed_reader_contract(harness: &McpTestHarness, fixture: &Value) {
             values.push_bind(project_id);
             values.push_bind(note["permalink"].as_str().expect("permalink"));
             values.push_bind(note["title"].as_str().expect("title"));
-            values.push("'', 'db', 'reference', 'reference', 'active', '[]'");
+            values.push("'', 'db'");
+            values.push_bind(
+                note.get("note_type")
+                    .and_then(Value::as_str)
+                    .unwrap_or("reference"),
+            );
+            values.push_bind(
+                note.get("folder")
+                    .and_then(Value::as_str)
+                    .unwrap_or("reference"),
+            );
+            values.push("'active', '[]'");
             values.push_bind(note["content"].as_str().expect("content"));
             values.push("'[]'");
             values.push_bind(note["confidence"].as_f64().expect("confidence"));
@@ -91,6 +102,17 @@ async fn seed_reader_contract(harness: &McpTestHarness, fixture: &Value) {
             .await
             .expect("append immutable fixed revision event");
     }
+
+    let context = &seed["session_context"];
+    let task_id = context["task_id"].as_str().expect("fixed task id");
+    let session_id = context["session_id"].as_str().expect("fixed session id");
+    let task_run_id = context["task_run_id"].as_str().expect("fixed task run id");
+    sqlx::query("INSERT INTO tasks (id, project_id, short_id, title, description, design, labels, acceptance_criteria, memory_refs) VALUES ($1, $2, 'fixed-task', 'Fixed contract task', '', '', '[]', '[]', '[]')")
+        .bind(task_id).bind(project_id).execute(harness.db().pool()).await.expect("seed fixed task");
+    sqlx::query("INSERT INTO task_runs (id, project_id, task_id, trigger_type, status, started_at) VALUES ($1, $2, $3, 'manual', 'running', '2026-02-04T05:06:07.000Z')")
+        .bind(task_run_id).bind(project_id).bind(task_id).execute(harness.db().pool()).await.expect("seed fixed task run");
+    sqlx::query("INSERT INTO sessions (id, project_id, task_id, task_run_id, model_id, agent_type, started_at, status) VALUES ($1, $2, $3, $4, 'fixture-model', 'worker', '2026-02-04T05:06:07.000Z', 'active')")
+        .bind(session_id).bind(project_id).bind(task_id).bind(task_run_id).execute(harness.db().pool()).await.expect("seed fixed session");
 }
 
 async fn dispatch(harness: &McpTestHarness, tool: &str, args: Value) -> Value {
