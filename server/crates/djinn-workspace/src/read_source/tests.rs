@@ -3,6 +3,7 @@ use djinn_db::{
     CreateTaskRunParams, Database, TaskRunRepository,
     test_support::{UsageTestTaskSeed, drop_table_cascade_for_test, seed_project, seed_task_row},
 };
+use std::os::unix::fs::{FileTypeExt, MetadataExt};
 
 /// Create a bare git repository at `work/mirror.git` with one commit.
 /// Returns the commit SHA.
@@ -465,23 +466,33 @@ async fn valid_destination_plus_dirty_legacy_fails_closed() {
     let project_path = fx.project_legacy_path();
     make_clean_checkout(&fx.mirror_path, &project_path);
     fs::write(project_path.join("README.md"), "dirty\n").unwrap();
+    let dest_before = snapshot_bytes(&dest);
+    let legacy_before = snapshot_bytes(&project_path);
 
     let migrator = fx.migrator();
     let result = migrator
         .migrate(fx.request(vec![fx.legacy_input(LegacyKind::ProjectLocal)]))
         .await;
     assert!(result.is_err(), "must fail closed with dirty legacy input");
-    // Destination preserved byte-for-byte.
     assert_eq!(
         classify(&dest, &fx.target_commit),
         ReadSourcePathState::Clean {
             commit: fx.target_commit.clone()
         }
     );
-    // Legacy input preserved (dirty).
     assert_eq!(
         classify(&project_path, &fx.target_commit),
         ReadSourcePathState::DirtyTracked
+    );
+    assert_eq!(
+        snapshot_bytes(&dest),
+        dest_before,
+        "valid destination preserved byte-for-byte"
+    );
+    assert_eq!(
+        snapshot_bytes(&project_path),
+        legacy_before,
+        "dirty legacy preserved byte-for-byte"
     );
 }
 
@@ -1232,8 +1243,13 @@ fn classify_untracked_in_subdir() {
 
 // ── Byte-for-byte preservation helpers ──────────────────────────────────
 
-/// Snapshot the non-.git contents of a directory tree as bytes for
-/// byte-for-byte comparison before/after a migration attempt.
+/// Snapshot every entry in a directory tree, including Git's index and object
+/// data, for byte-for-byte comparison before/after a migration attempt.
+///
+/// This deliberately uses no-follow metadata and never reads a special file:
+/// opening a FIFO would block and following a symlink would snapshot the wrong
+/// object. For special files the no-follow type, mode, and device identity are
+/// part of the snapshot instead of file contents.
 fn snapshot_bytes(path: &Path) -> Vec<u8> {
     let mut buf = Vec::new();
     snapshot_bytes_into(path, &mut buf);
@@ -1241,37 +1257,61 @@ fn snapshot_bytes(path: &Path) -> Vec<u8> {
 }
 
 fn snapshot_bytes_into(path: &Path, buf: &mut Vec<u8>) {
-    let metadata = match fs::symlink_metadata(path) {
-        Ok(m) => m,
-        Err(_) => return,
-    };
+    let metadata = fs::symlink_metadata(path)
+        .unwrap_or_else(|error| panic!("symlink_metadata {path:?}: {error}"));
+    snapshot_field(buf, path.as_os_str().as_encoded_bytes());
     if metadata.file_type().is_symlink() {
-        let target = fs::read_link(path).unwrap_or_default();
-        buf.extend_from_slice(path.to_string_lossy().as_bytes());
-        buf.push(b'\0');
-        buf.extend_from_slice(target.to_string_lossy().as_bytes());
-        buf.push(b'\0');
+        buf.push(b'l');
+        let target =
+            fs::read_link(path).unwrap_or_else(|error| panic!("read_link {path:?}: {error}"));
+        snapshot_field(buf, target.as_os_str().as_encoded_bytes());
         return;
     }
     if metadata.is_file() {
-        buf.extend_from_slice(path.to_string_lossy().as_bytes());
-        buf.push(b'\0');
-        buf.extend_from_slice(&fs::read(path).unwrap_or_default());
-        buf.push(b'\0');
+        buf.push(b'f');
+        let bytes = fs::read(path).unwrap_or_else(|error| panic!("read {path:?}: {error}"));
+        snapshot_field(buf, &bytes);
         return;
     }
     if metadata.is_dir() {
+        buf.push(b'd');
         let mut entries: Vec<_> = fs::read_dir(path)
             .unwrap_or_else(|e| panic!("read_dir {path:?}: {e}"))
-            .flatten()
+            .map(|entry| entry.unwrap_or_else(|error| panic!("read_dir entry {path:?}: {error}")))
             .collect();
         entries.sort_by_key(|e| e.path());
         for entry in entries {
-            let ep = entry.path();
-            if ep.file_name().is_none_or(|n| n != ".git") {
-                snapshot_bytes_into(&ep, buf);
-            }
+            snapshot_bytes_into(&entry.path(), buf);
         }
+        return;
+    }
+
+    // A special file has no safely-readable byte stream. Preserve its exact
+    // no-follow filesystem identity instead; this distinguishes FIFOs from
+    // devices and sockets and catches a replacement with any other object.
+    buf.push(b's');
+    snapshot_field(buf, special_file_kind(&metadata).as_bytes());
+    buf.extend_from_slice(&metadata.mode().to_le_bytes());
+    buf.extend_from_slice(&metadata.rdev().to_le_bytes());
+}
+
+fn snapshot_field(buf: &mut Vec<u8>, bytes: &[u8]) {
+    buf.extend_from_slice(&(bytes.len() as u64).to_le_bytes());
+    buf.extend_from_slice(bytes);
+}
+
+fn special_file_kind(metadata: &fs::Metadata) -> &'static str {
+    let file_type = metadata.file_type();
+    if file_type.is_fifo() {
+        "fifo"
+    } else if file_type.is_socket() {
+        "socket"
+    } else if file_type.is_block_device() {
+        "block_device"
+    } else if file_type.is_char_device() {
+        "char_device"
+    } else {
+        "unknown_special"
     }
 }
 
@@ -1336,6 +1376,7 @@ async fn classify_special_file_input_preserves_byte_for_byte() {
         .status()
         .expect("mkfifo available on unix");
     assert!(status.success());
+    let before = snapshot_bytes(&project_path);
 
     let migrator = fx.migrator();
     let result = migrator
@@ -1347,8 +1388,11 @@ async fn classify_special_file_input_preserves_byte_for_byte() {
         matches!(&err, ReadSourceMigrationError::Ambiguous(d) if d.contains("special")),
         "expected special classification, got: {err}"
     );
-    // Special file preserved.
-    assert!(fs::symlink_metadata(&project_path).is_ok());
+    assert_eq!(
+        snapshot_bytes(&project_path),
+        before,
+        "special legacy preserves its exact no-follow identity"
+    );
     assert!(!fx.destination().exists());
 }
 
@@ -1931,5 +1975,118 @@ async fn different_targets_isolated_under_same_owner() {
     assert_eq!(
         classify(&dest_b, &commit_b),
         ReadSourcePathState::Clean { commit: commit_b }
+    );
+}
+
+// ── AC3: Valid destination preservation for every ambiguous boundary ────
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn valid_dest_not_accepted_before_invalid_git_legacy() {
+    let fx = Fixture::new().await;
+    let dest = fx.destination();
+    make_clean_checkout(&fx.mirror_path, &dest);
+
+    let project_path = fx.project_legacy_path();
+    fs::create_dir_all(project_path.join(".git")).unwrap();
+    fs::write(project_path.join("README.md"), "partial checkout\n").unwrap();
+    let dest_before = snapshot_bytes(&dest);
+    let legacy_before = snapshot_bytes(&project_path);
+
+    let result = fx
+        .migrator()
+        .migrate(fx.request(vec![fx.legacy_input(LegacyKind::ProjectLocal)]))
+        .await;
+    let error = result.expect_err("invalid git legacy must fail closed");
+    assert!(
+        matches!(&error, ReadSourceMigrationError::Ambiguous(detail) if detail.contains("invalid_git")),
+        "expected invalid_git classification, got: {error}"
+    );
+    assert_eq!(
+        classify(&project_path, &fx.target_commit),
+        ReadSourcePathState::InvalidGit
+    );
+    assert_eq!(
+        snapshot_bytes(&dest),
+        dest_before,
+        "valid destination preserved"
+    );
+    assert_eq!(
+        snapshot_bytes(&project_path),
+        legacy_before,
+        "invalid_git legacy including .git bytes preserved"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn valid_dest_not_accepted_before_special_legacy() {
+    let fx = Fixture::new().await;
+    let dest = fx.destination();
+    make_clean_checkout(&fx.mirror_path, &dest);
+
+    let project_path = fx.project_legacy_path();
+    fs::create_dir_all(project_path.parent().unwrap()).unwrap();
+    let status = std::process::Command::new("mkfifo")
+        .arg(&project_path)
+        .status()
+        .expect("mkfifo available on unix");
+    assert!(status.success());
+    let dest_before = snapshot_bytes(&dest);
+    let legacy_before = snapshot_bytes(&project_path);
+
+    let result = fx
+        .migrator()
+        .migrate(fx.request(vec![fx.legacy_input(LegacyKind::ProjectLocal)]))
+        .await;
+    let error = result.expect_err("special legacy must fail closed");
+    assert!(
+        matches!(&error, ReadSourceMigrationError::Ambiguous(detail) if detail.contains("special")),
+        "expected special classification, got: {error}"
+    );
+    assert_eq!(
+        classify(&project_path, &fx.target_commit),
+        ReadSourcePathState::Special
+    );
+    assert_eq!(
+        snapshot_bytes(&dest),
+        dest_before,
+        "valid destination preserved"
+    );
+    assert_eq!(
+        snapshot_bytes(&project_path),
+        legacy_before,
+        "special legacy preserves exact no-follow identity"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn valid_dest_not_accepted_when_liveness_query_is_uncertain() {
+    let fx = Fixture::new().await;
+    let dest = fx.destination();
+    make_clean_checkout(&fx.mirror_path, &dest);
+    let project_path = fx.project_legacy_path();
+    make_clean_checkout(&fx.mirror_path, &project_path);
+    let dest_before = snapshot_bytes(&dest);
+    let legacy_before = snapshot_bytes(&project_path);
+
+    fx.db.ensure_initialized().await.unwrap();
+    drop_table_cascade_for_test(&fx.db, "task_runs").await;
+
+    let result = fx
+        .migrator()
+        .migrate(fx.request(vec![fx.legacy_input(LegacyKind::ProjectLocal)]))
+        .await;
+    assert!(
+        matches!(result, Err(ReadSourceMigrationError::Database(_))),
+        "liveness-query uncertainty must return its typed database error"
+    );
+    assert_eq!(
+        snapshot_bytes(&dest),
+        dest_before,
+        "valid destination preserved"
+    );
+    assert_eq!(
+        snapshot_bytes(&project_path),
+        legacy_before,
+        "legacy preserved while liveness is uncertain"
     );
 }
