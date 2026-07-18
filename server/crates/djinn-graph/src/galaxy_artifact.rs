@@ -669,3 +669,6 @@ fn spool_gzip(
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod publication_integration_tests;

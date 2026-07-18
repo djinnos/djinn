@@ -1710,7 +1710,12 @@ async fn run_task_run(args: WorkerDefaultArgs) -> Result<()> {
     //    `spawn_post_session_work`). Phase 7-followup: route those reads
     //    through `SupervisorServices` too so the worker can run without a
     //    local Database connection.
-    let agent_context = build_worker_agent_context(in_pod_db, rpc.clone(), spec.project_id.clone());
+    let agent_context = build_worker_agent_context(
+        in_pod_db,
+        rpc.clone(),
+        spec.project_id.clone(),
+        spec.read_source_project_ids.clone(),
+    );
     let worker_services: Arc<dyn SupervisorServices> = Arc::new(WorkerSupervisorServices::new(
         rpc.clone(),
         credentials,
@@ -2288,6 +2293,7 @@ fn build_worker_agent_context(
     db: Database,
     rpc: Arc<RpcServices>,
     project_id: String,
+    read_source_project_ids: Vec<String>,
 ) -> AgentContext {
     use djinn_core::events::DjinnEventEnvelope;
     use djinn_supervisor::services::SerializableDjinnEvent;
@@ -2336,7 +2342,12 @@ fn build_worker_agent_context(
         // remember to pass `project` to every call or burn tokens
         // retrying past the "project is required when multiple projects
         // are configured" error from helpers::resolve_project_id_for_agent_tools.
-        default_project_id: Some(project_id),
+        default_project_id: Some(project_id.clone()),
+        read_source_authorization: djinn_agent::context::ReadSourceAuthorization {
+            owner_project_id: Some(project_id),
+            read_source_project_ids,
+            owner_cache_root: None,
+        },
         reconciliation_sweep: ReconciliationSweepConfig::default(),
         memory_intent_planner: djinn_agent::context::MemoryIntentPlannerConfig::from_env(),
         compaction_cs: djinn_slot::reply_loop::CompactionCriticalSection::default(),

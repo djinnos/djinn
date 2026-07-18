@@ -678,24 +678,38 @@ fn allow_redirect_to_dev_null() {
     assert_allow("echo hello > /dev/null");
 }
 
-// ── Path-scope exclusions: .djinn-read-sources ───────────────────────────
+// ── Path-scope exclusions: owner read-source caches ───────────────────────
 
 #[test]
 fn hard_deny_rm_internal_read_sources() {
-    assert_hard_deny("rm .djinn-read-sources/project/file.rs");
+    assert_hard_deny("rm .task-runtime/read-sources/project/file.rs");
 }
 
 #[test]
 fn hard_deny_mv_internal_read_sources() {
-    assert_hard_deny("mv .djinn-read-sources/a.txt b.txt");
+    assert_hard_deny("mv .task-runtime/read-sources/a.txt b.txt");
 }
 
 #[test]
 fn hard_deny_redirect_to_internal_read_sources() {
-    let decision = classify("echo data > .djinn-read-sources/patch");
+    let decision = classify("echo data > .task-runtime/read-sources/patch");
     assert!(
         matches!(decision, ShellDestructiveDecision::HardDeny { .. }),
-        "expected HardDeny for redirect into .djinn-read-sources, got {decision:?}",
+        "expected HardDeny for redirect into owner read-source cache, got {decision:?}",
+    );
+}
+
+#[test]
+fn hard_deny_rm_legacy_task_local_read_sources() {
+    assert_hard_deny("rm .djinn-read-sources/project/file.rs");
+}
+
+#[test]
+fn hard_deny_redirect_to_legacy_task_local_read_sources() {
+    let decision = classify("echo data > .djinn-read-sources/project/patch");
+    assert!(
+        matches!(decision, ShellDestructiveDecision::HardDeny { .. }),
+        "expected HardDeny for redirect into legacy read-source mount, got {decision:?}",
     );
 }
 
