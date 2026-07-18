@@ -123,7 +123,7 @@ mod tests {
         assert_eq!(parsed[0]["met"], false);
     }
     #[tokio::test]
-    async fn budget_park_logs_extractor_compatible_work_submitted() {
+    async fn budget_park_logs_handoff_without_successful_submission() {
         let f = FinalizeFixtures::new().await;
         handle_budget_park(
             "completed A; B remains",
@@ -133,9 +133,10 @@ mod tests {
         )
         .await;
         let entries = f.repo().list_activity(&f.task.id).await.unwrap();
+        assert!(entries.iter().all(|e| e.event_type != "work_submitted"));
         let work_entries: Vec<_> = entries
             .iter()
-            .filter(|e| e.event_type == "work_submitted")
+            .filter(|e| e.event_type == "work_parked")
             .collect();
         assert_eq!(work_entries.len(), 1);
         let body: serde_json::Value = serde_json::from_str(&work_entries[0].payload).unwrap();
@@ -150,7 +151,7 @@ mod tests {
         let f = FinalizeFixtures::new().await;
         handle_budget_park("   ", "ignored", &f.task.id, &f.ctx).await;
         let entries = f.repo().list_activity(&f.task.id).await.unwrap();
-        assert!(entries.iter().all(|e| e.event_type != "work_submitted"));
+        assert!(entries.iter().all(|e| e.event_type != "work_parked"));
     }
     #[tokio::test]
     async fn submit_work_logs_activity_with_summary_and_files() {

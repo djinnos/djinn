@@ -3,6 +3,7 @@ use crate::finalize_handlers::{
     process_finalize_payload_with_outcome,
 };
 use crate::finalize_types::AcVerdict;
+use crate::output_parser::CompletionIntent;
 use crate::test_helpers;
 use djinn_db::TaskRepository;
 use djinn_db::repositories::task_run::TaskRunRepository;
@@ -54,7 +55,7 @@ fn apply_ac_verdicts_handles_empty_existing_gracefully() {
 }
 
 #[tokio::test]
-async fn budget_park_logs_extractor_compatible_work_submitted() {
+async fn budget_park_logs_handoff_without_successful_submission() {
     let crate::test_helpers::ContextFixture {
         db,
         ctx,
@@ -71,9 +72,10 @@ async fn budget_park_logs_extractor_compatible_work_submitted() {
     .await;
     let repo = TaskRepository::new(db.clone(), ctx.event_bus.clone());
     let entries = repo.list_activity(&task.id).await.unwrap();
+    assert!(entries.iter().all(|e| e.event_type != "work_submitted"));
     let work_entries: Vec<_> = entries
         .iter()
-        .filter(|e| e.event_type == "work_submitted")
+        .filter(|e| e.event_type == "work_parked")
         .collect();
     assert_eq!(work_entries.len(), 1);
     let body: serde_json::Value = serde_json::from_str(&work_entries[0].payload).unwrap();
@@ -96,7 +98,7 @@ async fn budget_park_empty_summary_skips_activity() {
     handle_budget_park("   ", "ignored", &task.id, &ctx).await;
     let repo = TaskRepository::new(db.clone(), ctx.event_bus.clone());
     let entries = repo.list_activity(&task.id).await.unwrap();
-    assert!(entries.iter().all(|e| e.event_type != "work_submitted"));
+    assert!(entries.iter().all(|e| e.event_type != "work_parked"));
 }
 
 #[tokio::test]
@@ -538,7 +540,12 @@ async fn auto_submit_payload_records_model_called_false() {
     // Called via process_auto_submit_payload — this is the settlement/teardown
     // path where the system auto-submits. The `model_called_submit_work` flag
     // should be `false` in the persisted record.
-    let ok = process_auto_submit_payload(&payload, &task.id, &ctx).await;
+    let intent = CompletionIntent {
+        finalize_payload: payload,
+        tool_use_id: format!("auto-submit:{run_id}"),
+        final_verification_evidence: None,
+    };
+    let ok = process_auto_submit_payload(&intent, &task.id, &ctx).await;
     assert!(ok);
     // Auto-submit review record should be persisted with model_called=false.
     let records = djinn_db::repositories::verify_run::AutoSubmitReviewRepository::new(db)

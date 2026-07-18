@@ -197,18 +197,14 @@ pub(crate) async fn validate_or_reverify_completion_intent(
             Ok::<_, String>((derive_current_inputs(&material).await?, material))
         }
         .await;
-        if let Ok((inputs, material)) = current {
-            if candidate.verification_input_fingerprint == inputs.fingerprint
-                && candidate.environment_identity_digest == inputs.identity.digest
-                && candidate.manifest_version == inputs.manifest_version
-                && candidate.required_checks == material.required_checks
-                && coverage_equals_required(
-                    Some(&candidate.covered_checks),
-                    &material.required_checks,
-                )
-            {
-                return Ok(candidate);
-            }
+        if let Ok((inputs, material)) = current
+            && candidate.verification_input_fingerprint == inputs.fingerprint
+            && candidate.environment_identity_digest == inputs.identity.digest
+            && candidate.manifest_version == inputs.manifest_version
+            && candidate.required_checks == material.required_checks
+            && coverage_equals_required(Some(&candidate.covered_checks), &material.required_checks)
+        {
+            return Ok(candidate);
         }
         // Every mismatch/error discards evidence; only the canonical path below
         // may produce replacement evidence for the current inputs.
