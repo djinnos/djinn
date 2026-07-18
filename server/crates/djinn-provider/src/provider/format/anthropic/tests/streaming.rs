@@ -601,8 +601,8 @@ fn test_indexed_thinking_redacted_unknown_and_tool_blocks() {
     let thinking = parse!("content_block_stop", r#"{"index":0}"#);
     let tool = parse!("content_block_stop", r#"{"index":1}"#);
     assert!(matches!(&thinking[..], [
-            StreamEvent::ThinkingBlockComplete { id, thinking, signature: Some(signature) },
-            StreamEvent::Delta(ContentBlock::Thinking { thinking: t2, signature: Some(s2) })
+            StreamEvent::Delta(ContentBlock::Thinking { thinking: t2, signature: Some(s2) }),
+            StreamEvent::ThinkingBlockComplete { id, thinking, signature: Some(signature) }
         ] if *id == 0 && thinking == "reason complete" && signature == "sig_123"
             && t2 == "reason complete" && s2 == "sig_123"));
     assert!(

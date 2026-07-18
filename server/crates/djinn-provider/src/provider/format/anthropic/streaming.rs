@@ -257,21 +257,22 @@ pub(crate) fn parse_anthropic_event(
                         thinking,
                         signature,
                     } => {
-                        // Emit the provenance-aware completion event so
-                        // persistence paths can reconcile unresolved
-                        // ThinkingDelta fragments by exact ID. Also emit
-                        // the Delta(Thinking) block so consumers that route
-                        // thinking through Delta continue to receive the
-                        // signed block.
-                        events.push(StreamEvent::ThinkingBlockComplete {
-                            id: index,
+                        // Emit the retained signed provider block before its
+                        // completion marker. Slot cancellation is checked
+                        // between yielded events, so this guarantees that an
+                        // interrupted turn can persist the block before exact
+                        // ID reconciliation suppresses its delta fragments.
+                        let block = ContentBlock::Thinking {
                             thinking: thinking.clone(),
                             signature: signature.clone(),
-                        });
-                        ContentBlock::Thinking {
+                        };
+                        events.push(StreamEvent::Delta(block));
+                        events.push(StreamEvent::ThinkingBlockComplete {
+                            id: index,
                             thinking,
                             signature,
-                        }
+                        });
+                        return events;
                     }
                     PendingContentBlock::RedactedThinking { data } => {
                         ContentBlock::RedactedThinking { data }
