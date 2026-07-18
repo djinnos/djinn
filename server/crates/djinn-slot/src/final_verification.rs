@@ -78,6 +78,7 @@ pub enum FinalVerificationRecordingOutcome {
     Stored {
         verification_attempt_id: String,
         verify_run_id: String,
+        evidence: Box<FinalVerificationSuccessEvidence>,
     },
     Reused {
         verification_attempt_id: String,
@@ -582,9 +583,23 @@ async fn persist_evidence(
         result = insert => result,
     };
     match insert_result {
-        Ok(_) => FinalVerificationRecordingOutcome::Stored {
+        Ok(row) => FinalVerificationRecordingOutcome::Stored {
             verification_attempt_id: attempt_id.to_owned(),
             verify_run_id: verify_run_id.to_owned(),
+            evidence: Box::new(FinalVerificationSuccessEvidence {
+                persisted_run_id: row.id,
+                completed_at: row.completed_at,
+                ordered_commands: row.ordered_commands.unwrap_or(ordered_commands),
+                covered_checks: row.covered_checks.unwrap_or(covered_checks),
+                required_checks,
+                verification_input_fingerprint: row
+                    .verification_input_fingerprint
+                    .unwrap_or_else(|| f0.fingerprint.clone()),
+                manifest_version: row.manifest_version.unwrap_or(manifest_version),
+                environment_identity_digest: row
+                    .environment_identity_digest
+                    .unwrap_or_else(|| pre.digest.clone()),
+            }),
         },
         Err(error) => error_outcome(
             attempt_id,
@@ -644,6 +659,7 @@ fn emit_outcome(
         FinalVerificationRecordingOutcome::Stored {
             verification_attempt_id,
             verify_run_id,
+            evidence: _,
         } => tracing::info!(
             recording_outcome = "stored", task_id = %request.task_id, task_run_id = %request.task_run_id,
             verification_attempt_id = %verification_attempt_id, verify_run_id = %verify_run_id,
@@ -698,6 +714,16 @@ mod tests {
         FinalVerificationRecordingOutcome::Stored {
             verification_attempt_id: "attempt".to_owned(),
             verify_run_id: "run".to_owned(),
+            evidence: Box::new(FinalVerificationSuccessEvidence {
+                persisted_run_id: "persisted-run".to_owned(),
+                completed_at: "2025-01-01T00:00:00Z".to_owned(),
+                ordered_commands: serde_json::json!([]),
+                covered_checks: serde_json::json!([]),
+                required_checks: vec![],
+                verification_input_fingerprint: "fingerprint".to_owned(),
+                manifest_version: "manifest-v1".to_owned(),
+                environment_identity_digest: "identity".to_owned(),
+            }),
         }
     }
 

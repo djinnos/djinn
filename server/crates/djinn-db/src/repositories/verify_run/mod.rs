@@ -216,8 +216,12 @@ impl VerifyRunRepository {
         validate_eligible_final_pass(&p)?;
         self.db.ensure_initialized().await?;
         let mut tx = self.db.pool().begin().await?;
+        // `check_coverage` is the legacy freshness evaluator's per-check pass
+        // map, while `covered_checks` remains the ordered exact-coverage
+        // contract used by final-verification reuse.
+        let check_coverage = coverage_map(p.covered_checks);
         sqlx::query("INSERT INTO verify_runs (id,task_run_id,verify_source,verify_run_id,completed_at,result,diff_fingerprint,check_coverage,source_phase,verification_attempt_id,ordered_commands,covered_checks,verification_input_fingerprint,manifest_version,environment_identity_json,environment_identity_digest,environment_identity_version) VALUES ($1,$2,$3,$4,$5,'pass',$6,$7,'final_verification',$8,$9,$10,$11,$12,$13,$14,$15)")
-            .bind(p.id).bind(p.task_run_id).bind(p.verify_source).bind(p.verify_run_id).bind(p.completed_at).bind(p.diff_fingerprint).bind(p.covered_checks).bind(p.verification_attempt_id).bind(p.ordered_commands).bind(p.covered_checks).bind(p.verification_input_fingerprint).bind(p.manifest_version).bind(p.environment_identity_json).bind(p.environment_identity_digest).bind(p.environment_identity_version).execute(&mut *tx).await?;
+            .bind(p.id).bind(p.task_run_id).bind(p.verify_source).bind(p.verify_run_id).bind(p.completed_at).bind(p.diff_fingerprint).bind(&check_coverage).bind(p.verification_attempt_id).bind(p.ordered_commands).bind(p.covered_checks).bind(p.verification_input_fingerprint).bind(p.manifest_version).bind(p.environment_identity_json).bind(p.environment_identity_digest).bind(p.environment_identity_version).execute(&mut *tx).await?;
         let row = sqlx::query_as::<_, VerifyRunRecord>("SELECT id,task_run_id,verify_source,verify_run_id,command_version,profile_version,completed_at,result,diff_fingerprint,check_coverage,source_phase,verification_attempt_id,ordered_commands,covered_checks,verification_input_fingerprint,manifest_version,environment_identity_json,environment_identity_digest,environment_identity_version,created_at FROM verify_runs WHERE id=$1").bind(p.id).fetch_one(&mut *tx).await?;
         tx.commit().await?;
         Ok(row)
@@ -321,6 +325,19 @@ fn validate_eligible_final_pass(p: &RecordEligibleFinalVerificationPassParams<'_
         ));
     }
     Ok(())
+}
+
+/// Convert the authoritative covered-check list into the representation used by
+/// `evaluate_freshness`: an object whose true values prove each check passed.
+fn coverage_map(covered_checks: &serde_json::Value) -> serde_json::Value {
+    let entries = covered_checks
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(serde_json::Value::as_str)
+        .map(|check| (check.to_owned(), serde_json::Value::Bool(true)))
+        .collect();
+    serde_json::Value::Object(entries)
 }
 
 // ─── AutoSubmitReviewRepository ───────────────────────────────────────────────
