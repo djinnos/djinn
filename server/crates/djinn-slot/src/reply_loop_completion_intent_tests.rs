@@ -230,8 +230,9 @@ async fn reply_loop_reuse_rejection_matrix_writes_fresh_authoritative_evidence()
         // Every rejection other than the true miss/disabled gate gets a durable,
         // deliberately identifiable candidate.  The writer assertions below then
         // prove that this candidate cannot leak into finalization.
+        let mut candidate_id = None;
         if !matches!(name, "no-compatible-row" | "disabled-gate") {
-            let candidate_id = format!("candidate-or-synthetic-reuse-{name}");
+            let seeded_candidate_id = uuid::Uuid::now_v7().to_string();
             let candidate_commands = serde_json::json!([
                 {"descriptor_id":"format","result":"pass","passed":true},
                 {"descriptor_id":"slot-clippy","result":"pass","passed":true}
@@ -263,7 +264,7 @@ async fn reply_loop_reuse_rejection_matrix_writes_fresh_authoritative_evidence()
             VerifyRunRepository::new(db.clone())
                 .record_eligible_final_verification_pass(
                     RecordEligibleFinalVerificationPassParams {
-                        id: &candidate_id,
+                        id: &seeded_candidate_id,
                         task_run_id: &run_id,
                         verify_source: "worker",
                         verify_run_id: "candidate-run",
@@ -283,6 +284,7 @@ async fn reply_loop_reuse_rejection_matrix_writes_fresh_authoritative_evidence()
                 )
                 .await
                 .unwrap();
+            candidate_id = Some(seeded_candidate_id);
         }
         let callbacks = Arc::new(CompletionIntentCallbacks::for_reuse_with_evidence(
             task.id.clone(),
@@ -351,12 +353,12 @@ async fn reply_loop_reuse_rejection_matrix_writes_fresh_authoritative_evidence()
             .unwrap()
             .final_verification_evidence
             .unwrap();
-        assert!(
-            !evidence
-                .persisted_run_id
-                .starts_with("candidate-or-synthetic-reuse-"),
-            "{name}: candidate evidence reached finalization"
-        );
+        if let Some(candidate_id) = candidate_id.as_deref() {
+            assert_ne!(
+                evidence.persisted_run_id, candidate_id,
+                "{name}: candidate evidence reached finalization"
+            );
+        }
         let verify_runs = VerifyRunRepository::new(slot_ctx.db.clone())
             .list_for_task_run(&run_id)
             .await
@@ -364,7 +366,7 @@ async fn reply_loop_reuse_rejection_matrix_writes_fresh_authoritative_evidence()
         assert_eq!(
             verify_runs
                 .iter()
-                .filter(|row| !row.id.starts_with("candidate-or-synthetic-reuse-"))
+                .filter(|row| candidate_id.as_deref() != Some(row.id.as_str()))
                 .count(),
             1,
             "{name}: exactly one fresh authoritative pass must be persisted"
