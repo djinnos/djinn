@@ -15,8 +15,9 @@ use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 
 use crate::final_verification::{
-    FinalVerificationCoordinatorRequest, FinalVerificationRecordingOutcome,
-    FinalVerificationResolvedMaterial, FinalVerificationSuccessEvidence,
+    FinalVerificationConsultationFailure, FinalVerificationCoordinatorRequest,
+    FinalVerificationRecordingOutcome, FinalVerificationResolvedMaterial,
+    FinalVerificationSuccessEvidence,
 };
 use crate::host::{ResolvedMcpTools, SlotContext, SlotHostCallbacks};
 use crate::reply_loop::{ReplyLoopContext, run_reply_loop};
@@ -113,19 +114,55 @@ async fn reply_loop_reuse_rejection_matrix_writes_fresh_authoritative_evidence()
     // These are deliberately table rows, rather than outcome injection: every
     // row enters consult_reusable_final_verification and falls through to the
     // existing coordinator writer seams.
-    for (name, enabled, mutate_c1) in [
-        ("no-compatible-row", true, false),
-        ("disabled-gate", false, false),
-        ("stale-row", true, false),
-        ("required-coverage-mismatch", true, false),
-        ("manifest-version-mismatch", true, false),
-        ("c1-mutation", true, true),
-        ("lookup-failure", true, false),
-        ("evaluator-failure", true, false),
-        ("context-failure", true, false),
-        ("fingerprint-failure", true, false),
-        ("identity-failure", true, false),
-        ("database-failure", true, false),
+    for (name, enabled, mutate_c1, failure, expected_error_reason) in [
+        ("no-compatible-row", true, false, None, None),
+        ("disabled-gate", false, false, None, None),
+        ("stale-row", true, false, None, None),
+        ("required-coverage-mismatch", true, false, None, None),
+        ("manifest-version-mismatch", true, false, None, None),
+        ("c1-mutation", true, true, None, None),
+        (
+            "lookup-failure",
+            true,
+            false,
+            Some(FinalVerificationConsultationFailure::Lookup),
+            Some("lookup"),
+        ),
+        (
+            "evaluator-failure",
+            true,
+            false,
+            Some(FinalVerificationConsultationFailure::Evaluator),
+            Some("evaluator"),
+        ),
+        (
+            "context-failure",
+            true,
+            false,
+            Some(FinalVerificationConsultationFailure::Context),
+            Some("task_context"),
+        ),
+        (
+            "fingerprint-failure",
+            true,
+            false,
+            Some(FinalVerificationConsultationFailure::Fingerprint),
+            Some("c0_fingerprint"),
+        ),
+        (
+            "identity-failure",
+            true,
+            false,
+            Some(FinalVerificationConsultationFailure::Identity),
+            Some("c0_identity"),
+        ),
+        (
+            "database-failure",
+            true,
+            false,
+            Some(FinalVerificationConsultationFailure::Database),
+            Some("gate_database"),
+        ),
     ] {
         let db = create_test_db();
         let project = create_test_project(&db).await;
@@ -256,6 +293,7 @@ async fn reply_loop_reuse_rejection_matrix_writes_fresh_authoritative_evidence()
                 identity.clone(),
             )),
             mutate_c1,
+            failure,
         ));
         let slot_ctx = agent_context_from_db_with_callbacks(db, callbacks.clone());
         let session = SessionRepository::new(slot_ctx.db.clone(), slot_ctx.event_bus.clone())
@@ -289,6 +327,13 @@ async fn reply_loop_reuse_rejection_matrix_writes_fresh_authoritative_evidence()
         assert!(result.is_ok(), "{name}");
         assert_eq!(callbacks.coordinator_count(), 1, "{name}");
         let probe = callbacks.reuse_probe.as_ref().unwrap();
+        if let Some(reason) = expected_error_reason {
+            assert_eq!(
+                *probe.consultation_outcomes.lock().unwrap(),
+                vec![("error", reason)],
+                "{name}"
+            );
+        }
         assert!(
             callbacks.reuse_events().contains(&"writer-resolution"),
             "{name}"
@@ -306,6 +351,18 @@ async fn reply_loop_reuse_rejection_matrix_writes_fresh_authoritative_evidence()
                 .persisted_run_id
                 .starts_with("candidate-or-synthetic-reuse-"),
             "{name}: candidate evidence reached finalization"
+        );
+        let verify_runs = VerifyRunRepository::new(slot_ctx.db.clone())
+            .list_for_task_run(&run_id)
+            .await
+            .unwrap();
+        assert_eq!(
+            verify_runs
+                .iter()
+                .filter(|row| !row.id.starts_with("candidate-or-synthetic-reuse-"))
+                .count(),
+            1,
+            "{name}: exactly one fresh authoritative pass must be persisted"
         );
         let stored = VerifyRunRepository::new(slot_ctx.db.clone())
             .get(&evidence.persisted_run_id)
@@ -329,7 +386,7 @@ async fn reply_loop_reuse_rejection_matrix_writes_fresh_authoritative_evidence()
             "{name}"
         );
         assert_eq!(
-            stored.ordered_commands,
+            stored.ordered_commands.clone(),
             Some(serde_json::json!([
                 {"descriptor_id":"format","result":"pass","passed":true,"started_at_unix_millis":10,"completed_at_unix_millis":20},
                 {"descriptor_id":"slot-clippy","result":"pass","passed":true,"started_at_unix_millis":10,"completed_at_unix_millis":20}
@@ -356,8 +413,8 @@ async fn reply_loop_reuse_rejection_matrix_writes_fresh_authoritative_evidence()
             "{name}"
         );
         assert_eq!(
-            evidence.ordered_commands.as_array().unwrap().len(),
-            2,
+            evidence.ordered_commands,
+            stored.ordered_commands.unwrap(),
             "{name}"
         );
         assert!(error_ids(&conversation).is_empty(), "{name}");
@@ -451,6 +508,8 @@ struct ReuseProbe {
     canonical_executions: Mutex<usize>,
     evidence: Mutex<Option<FinalVerificationExecutionEvidence>>,
     mutate_before_c1: bool,
+    failure: Option<FinalVerificationConsultationFailure>,
+    consultation_outcomes: Mutex<Vec<(&'static str, &'static str)>>,
 }
 
 struct ReuseProbeLease;
@@ -472,7 +531,7 @@ impl CompletionIntentCallbacks {
     }
 
     fn for_reuse(expected_task_id: String, material: FinalVerificationResolvedMaterial) -> Self {
-        Self::for_reuse_with_evidence(expected_task_id, material, None, false)
+        Self::for_reuse_with_evidence(expected_task_id, material, None, false, None)
     }
 
     fn for_reuse_with_evidence(
@@ -480,6 +539,7 @@ impl CompletionIntentCallbacks {
         material: FinalVerificationResolvedMaterial,
         evidence: Option<FinalVerificationExecutionEvidence>,
         mutate_before_c1: bool,
+        failure: Option<FinalVerificationConsultationFailure>,
     ) -> Self {
         Self {
             outcomes: Mutex::new(VecDeque::new()),
@@ -493,6 +553,8 @@ impl CompletionIntentCallbacks {
                 canonical_executions: Mutex::new(0),
                 evidence: Mutex::new(evidence),
                 mutate_before_c1,
+                failure,
+                consultation_outcomes: Mutex::new(Vec::new()),
             }),
         }
     }
@@ -513,6 +575,26 @@ impl CompletionIntentCallbacks {
 }
 
 impl SlotHostCallbacks for CompletionIntentCallbacks {
+    fn inject_final_verification_consultation_failure_for_test(
+        &self,
+        failure: FinalVerificationConsultationFailure,
+    ) -> bool {
+        self.reuse_probe.as_ref().and_then(|probe| probe.failure) == Some(failure)
+    }
+    fn record_final_verification_consultation_outcome_for_test(
+        &self,
+        outcome: &'static str,
+        reason: &'static str,
+    ) {
+        self.reuse_probe
+            .as_ref()
+            .unwrap()
+            .consultation_outcomes
+            .lock()
+            .unwrap()
+            .push((outcome, reason));
+    }
+
     fn final_verification_outcome_for_test(
         &self,
         request: &FinalVerificationCoordinatorRequest,
