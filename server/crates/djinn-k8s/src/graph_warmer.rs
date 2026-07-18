@@ -615,6 +615,19 @@ impl WarmDispatch {
             cargo_cache_policy.as_ref(),
         );
         job.metadata.name = Some(admission_request.object_name.clone());
+        let labels = job.metadata.labels.get_or_insert_default();
+        labels.insert(
+            crate::workload_inventory::LABEL_ADMISSION_DOMAIN.into(),
+            "warm_build".into(),
+        );
+        labels.insert(
+            crate::workload_inventory::LABEL_ADMISSION_WORK_ID.into(),
+            admission_request.work_id.clone(),
+        );
+        labels.insert(
+            crate::workload_inventory::LABEL_ADMISSION_GENERATION.into(),
+            admission_request.generation.to_string(),
+        );
         let namespace = self.config.namespace.clone();
         let permit = match self.admission.as_ref() {
             Some(admission) => match admission.admit(admission_request).await {
