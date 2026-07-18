@@ -117,6 +117,30 @@ fn truncated_stream_error(text_len: usize, tool_call_count: usize) -> anyhow::Er
         ))
 }
 
+/// Production normal-completion assembly for a consumed turn.
+pub fn finalize_normal_turn_content(
+    provider_state: &[ContentBlock],
+    unresolved_thinking: &[super::streaming::UnresolvedThinkingFragment],
+    completed_thinking_ids: &HashSet<u64>,
+    text: &str,
+    tool_calls: &[ContentBlock],
+) -> Vec<ContentBlock> {
+    super::persistence::assemble_persisted_content(
+        provider_state,
+        unresolved_thinking,
+        completed_thinking_ids,
+        text,
+        tool_calls,
+    )
+}
+
+/// Record the complete display/telemetry thinking aggregate for a normal turn.
+pub fn record_normal_turn_thinking<F: FnOnce(&str)>(turn_thinking: &str, record: F) {
+    if !turn_thinking.is_empty() {
+        record(turn_thinking);
+    }
+}
+
 fn permission_denial_text(text: &str) -> bool {
     let lower = text.to_ascii_lowercase();
     lower.contains("permission denied")
@@ -925,9 +949,9 @@ pub async fn run_reply_loop(
                     if !turn_text.is_empty() {
                         llm.record_output(&turn_text);
                     }
-                    if !turn_thinking.is_empty() {
-                        llm.record_thinking(&turn_thinking);
-                    }
+                    record_normal_turn_thinking(&turn_thinking, |thinking| {
+                        llm.record_thinking(thinking);
+                    });
                     let tool_names: Vec<String> = turn_tool_calls
                         .iter()
                         .filter_map(|tc| {
@@ -1015,7 +1039,7 @@ pub async fn run_reply_loop(
             // Canonical assembly: provider-state blocks, one unsigned
             // thinking block from unresolved fragments (reconciled by exact
             // block ID), assistant text, then tool calls.
-            let assistant_content = super::persistence::assemble_persisted_content(
+            let assistant_content = finalize_normal_turn_content(
                 &turn_provider_state,
                 &turn_unresolved_thinking,
                 &turn_completed_thinking_ids,
