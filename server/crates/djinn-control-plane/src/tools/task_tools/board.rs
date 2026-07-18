@@ -9,6 +9,11 @@ pub(super) async fn board_health_impl(
         return Json(ErrorOr::Error(e));
     }
     let stale_hours = p.stale_threshold_hours.unwrap_or(24).max(1);
+    if let Some(coordinator) = server.state.coordinator().await
+        && let Err(error) = coordinator.trigger_board_health_mismatch_scan().await
+    {
+        tracing::warn!(error = %error, "board_health: mismatch refresh trigger failed");
+    }
     let repo = TaskRepository::new(server.state.db().clone(), server.state.event_bus());
     match repo.board_health(stale_hours).await {
         Ok(report) => match serde_json::from_value::<BoardHealthResponse>(report) {

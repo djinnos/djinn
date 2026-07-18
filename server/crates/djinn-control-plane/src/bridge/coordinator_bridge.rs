@@ -33,6 +33,10 @@ pub struct CoordinatorStatus {
 pub trait CoordinatorOps: Send + Sync {
     fn get_status(&self) -> Result<CoordinatorStatus, String>;
     async fn trigger_dispatch_for_project(&self, project_id: &str) -> Result<(), String>;
+    /// Request the shared, coalescing persisted board-health mismatch scan.
+    async fn trigger_board_health_mismatch_scan(&self) -> Result<(), String> {
+        Ok(())
+    }
     /// Start a proposal refinement run.  The coordinator is authoritative for
     /// duplicate-start rejection — if the proposal already has an active
     /// refinement loop the call returns an error.
