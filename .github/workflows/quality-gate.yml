@@ -11,13 +11,15 @@ on:
 concurrency:
   group: ${{ github.event_name == 'pull_request' && format('ci-pr-{0}', github.event.pull_request.number) || github.event_name == 'push' && 'ci-main' || github.event_name == 'merge_group' && format('ci-merge-group-{0}', github.event.merge_group.head_sha || github.ref) || format('ci-dispatch-{0}', github.run_id) }}
   cancel-in-progress: ${{ github.event_name != 'merge_group' }}
-# actions: read lets the nextest planner restore timing artifacts and the
-# test shards poll for the in-run plan artifact. Fail-fast cancellation
-# lives in ci-fail-fast.yml (workflow_job trigger), which carries its own
-# actions: write grant.
+# actions: write lets the in-shard fail-fast watcher cancel the run when
+# another lane concludes failure (and covers the planner's artifact reads
+# and the shards' plan polling). NOTE: an external workflow_job-triggered
+# cancel workflow is NOT possible — workflow_job is a webhook event, not
+# a workflow trigger; a file declaring it is invalid and produces a red
+# zero-job run on every push.
 permissions:
   contents: read
-  actions: read
+  actions: write
 env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: "0"
@@ -692,6 +694,33 @@ jobs:
           # (the x64 images do). Without it, pg_isready/psql are missing and
           # the template-database wait loop below spins forever.
           sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends postgresql-client
+      - name: Start fail-fast watcher (background)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # Shards are the longest-lived and most expensive jobs, so each
+          # hosts a background watcher: if any lane in this run concludes
+          # failure, the run is cancelled instead of burning the remaining
+          # shard minutes behind an already-failed gate. Cancelling from a
+          # bystander AFTER the culprit concluded preserves its red
+          # "failure" label (a self-cancel races finalization and stamps
+          # it "cancelled"). The process dies with the job; redundant
+          # watchers across shards are idempotent. This replaces both the
+          # old dedicated watchdog job (a full runner slot polling for the
+          # entire run) and the invalid workflow_job-based workflow.
+          nohup bash -c '
+            for _ in $(seq 1 240); do
+              sleep 15
+              failed=$(gh api "repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/jobs?per_page=100" \
+                --jq "[.jobs[] | select(.conclusion == \"failure\") | .name] | first // empty" 2>/dev/null || true)
+              if [ -n "$failed" ]; then
+                echo "Lane $failed failed — cancelling run ${{ github.run_id }}."
+                gh run cancel ${{ github.run_id }} --repo ${{ github.repository }} || true
+                exit 0
+              fi
+            done
+          ' > "$RUNNER_TEMP/fail-fast-watch.log" 2>&1 &
+          echo "fail-fast watcher started"
       - run: rustup toolchain install
         working-directory: server
       - uses: Swatinem/rust-cache@v2
