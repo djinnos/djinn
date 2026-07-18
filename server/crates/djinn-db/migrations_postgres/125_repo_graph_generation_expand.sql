@@ -87,8 +87,9 @@ CREATE INDEX repo_graph_galaxy_chunk_artifact_order
     ON repo_graph_galaxy_chunk (artifact_id, chunk_index);
 
 -- pg_locks cannot distinguish session advisory locks from transaction advisory
--- locks. This token is inserted only after the xact lock is acquired, is bound
--- to the xid/backend, and is removed by a deferred trigger at commit.
+-- locks. Make insertion itself the lock-acquisition boundary so even direct
+-- DML cannot manufacture evidence: the BEFORE trigger always takes the exact
+-- project xact lock and replaces caller-supplied transaction identity.
 CREATE TABLE repo_graph_publish_lock_token (
     project_id          VARCHAR(36) NOT NULL,
     transaction_id      BIGINT NOT NULL,
@@ -98,6 +99,34 @@ CREATE TABLE repo_graph_publish_lock_token (
     CONSTRAINT fk_repo_graph_publish_lock_token_project
         FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
 );
+
+CREATE OR REPLACE FUNCTION repo_graph_guard_publish_lock_token_insert()
+RETURNS TRIGGER LANGUAGE plpgsql AS $$
+BEGIN
+    PERFORM pg_advisory_xact_lock(hashtextextended(NEW.project_id, 0));
+    NEW.transaction_id := txid_current();
+    NEW.backend_pid := pg_backend_pid();
+    RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER repo_graph_guard_publish_lock_token_insert
+BEFORE INSERT ON repo_graph_publish_lock_token
+FOR EACH ROW EXECUTE FUNCTION repo_graph_guard_publish_lock_token_insert();
+
+CREATE OR REPLACE FUNCTION repo_graph_reject_publish_lock_token_update()
+RETURNS TRIGGER LANGUAGE plpgsql AS $$
+BEGIN
+    RAISE EXCEPTION 'repo graph publication lock tokens are immutable';
+END;
+$$;
+
+-- In particular, reserved_generation cannot be changed after the guarded
+-- insertion. A reservation must therefore be present on an insertion which
+-- necessarily acquired the project transaction lock first.
+CREATE TRIGGER repo_graph_reject_publish_lock_token_update
+BEFORE UPDATE ON repo_graph_publish_lock_token
+FOR EACH ROW EXECUTE FUNCTION repo_graph_reject_publish_lock_token_update();
 
 CREATE OR REPLACE FUNCTION repo_graph_release_publish_lock_token()
 RETURNS TRIGGER LANGUAGE plpgsql AS $$
