@@ -9,7 +9,7 @@ use std::time::Duration;
 use sqlx::postgres::PgConnection;
 use sqlx::{Connection, Executor, Row};
 
-const MIGRATION_VERSION: u64 = 125;
+const MIGRATION_VERSION: u64 = 127;
 const PROJECT: &str = "publication-compat-project";
 
 // Kept byte-for-byte semantically identical to RepoGraphCacheRepository::upsert

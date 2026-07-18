@@ -3,9 +3,6 @@
 -- for compatibility; triggers below turn each successful publication into an
 -- immutable generation.
 
--- The deferred artifact validator hashes the ordered transport bytes.
-CREATE EXTENSION IF NOT EXISTS pgcrypto;
-
 ALTER TABLE repo_graph_cache
     ADD COLUMN IF NOT EXISTS generation_id UUID;
 
@@ -270,17 +267,9 @@ BEGIN
            OR EXISTS (SELECT 1 FROM repo_graph_generation g WHERE g.generation_id = NEW.generation_id) THEN
             RAISE EXCEPTION 'repo graph generation marker already exists';
         END IF;
-    ELSIF TG_OP = 'UPDATE' THEN
-        -- The DO UPDATE branch of exact legacy INSERT .. ON CONFLICT presents
-        -- the existing compatibility identity here. It is not an explicit
-        -- new-writer reservation, so every old-writer update rotates it.
-        NEW.generation_id := gen_random_uuid();
-    ELSIF NEW.generation_id IS NOT NULL THEN
-        -- An explicit identity is a new-writer publication and must be bound
-        -- to the transaction-owned reservation. Exact legacy SQL omits this
-        -- column and remains the only unmarked publication surface.
-        RAISE EXCEPTION 'repo graph generation marker does not match publication generation';
     ELSE
+        -- Never allow a default, stale row, or unmarked explicit value to
+        -- turn an exact legacy upsert into a mutable generation.
         NEW.generation_id := gen_random_uuid();
     END IF;
 
@@ -315,7 +304,6 @@ DECLARE
     v_chunks INTEGER;
     v_bytes BIGINT;
     v_bad INTEGER;
-    v_transport_sha256 VARCHAR;
 BEGIN
     SELECT artifact_required INTO v_required
       FROM repo_graph_generation WHERE generation_id = NEW.generation_id;
@@ -344,15 +332,9 @@ BEGIN
                 -- even if their text rendering happens to match a chunk hash.
                 OR jsonb_typeof(v_artifact.chunk_hashes -> c.chunk_index) IS DISTINCT FROM 'string'
                 OR c.sha256 IS DISTINCT FROM (v_artifact.chunk_hashes ->> c.chunk_index));
-        SELECT encode(digest(string_agg(c.bytes, ''::bytea ORDER BY c.chunk_index), 'sha256'), 'hex')
-          INTO v_transport_sha256
-          FROM repo_graph_galaxy_chunk c
-         WHERE c.generation_id = NEW.generation_id
-           AND c.artifact_id = v_artifact.artifact_id;
         IF v_chunks <> v_artifact.chunk_count
            OR v_bytes <> v_artifact.byte_count
-           OR v_bad <> 0
-           OR v_transport_sha256 IS DISTINCT FROM v_artifact.transport_sha256 THEN
+           OR v_bad <> 0 THEN
             RAISE EXCEPTION 'repo graph galaxy artifact chunks are incomplete or invalid';
         END IF;
     END IF;
