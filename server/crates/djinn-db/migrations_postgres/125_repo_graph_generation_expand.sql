@@ -116,6 +116,31 @@ BEGIN
 END;
 $$;
 
+-- `pg_locks` is the authoritative backend lock table.  Do not use the
+-- user-settable marker GUC as lock evidence: a direct UPDATE must already
+-- hold this exact transaction-scoped advisory key.
+CREATE OR REPLACE FUNCTION repo_graph_assert_publish_lock(p_project_id VARCHAR)
+RETURNS VOID LANGUAGE plpgsql AS $$
+DECLARE
+    v_lock_key BIGINT := hashtextextended(p_project_id, 0);
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1
+          FROM pg_locks
+         WHERE locktype = 'advisory'
+           AND pid = pg_backend_pid()
+           AND granted
+           -- pg_advisory_xact_lock(bigint) exposes its 64-bit key as these
+           -- two unsigned 32-bit fields with objsubid = 1.
+           AND classid = (((v_lock_key >> 32) & 4294967295)::oid)
+           AND objid = ((v_lock_key & 4294967295)::oid)
+           AND objsubid = 1
+    ) THEN
+        RAISE EXCEPTION 'repo graph cache UPDATE requires its project publication lock';
+    END IF;
+END;
+$$;
+
 CREATE OR REPLACE FUNCTION repo_graph_next_built_at(p_project_id VARCHAR)
 RETURNS VARCHAR LANGUAGE plpgsql AS $$
 DECLARE
@@ -147,9 +172,8 @@ BEGIN
         -- lands in DO UPDATE has already acquired the transaction lock.
         PERFORM pg_advisory_xact_lock(hashtextextended(NEW.project_id, 0));
         PERFORM set_config('djinn.repo_graph_publish_lock_project', NEW.project_id, true);
-    ELSIF current_setting('djinn.repo_graph_publish_lock_project', true)
-          IS DISTINCT FROM NEW.project_id THEN
-        RAISE EXCEPTION 'repo graph cache UPDATE requires its project publication lock';
+    ELSE
+        PERFORM repo_graph_assert_publish_lock(NEW.project_id);
     END IF;
 
     v_reserved_project := current_setting('djinn.repo_graph_reserved_project', true);
@@ -231,7 +255,10 @@ BEGIN
            AND c.artifact_id = v_artifact.artifact_id
            AND (c.chunk_index < 0
                 OR c.chunk_index >= v_artifact.chunk_count
-                OR c.sha256 <> (v_artifact.chunk_hashes ->> c.chunk_index));
+                -- JSON null and all non-string manifest entries are invalid,
+                -- even if their text rendering happens to match a chunk hash.
+                OR jsonb_typeof(v_artifact.chunk_hashes -> c.chunk_index) IS DISTINCT FROM 'string'
+                OR c.sha256 IS DISTINCT FROM (v_artifact.chunk_hashes ->> c.chunk_index));
         IF v_chunks <> v_artifact.chunk_count
            OR v_bytes <> v_artifact.byte_count
            OR v_bad <> 0 THEN
