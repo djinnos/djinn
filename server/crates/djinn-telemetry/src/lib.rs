@@ -96,6 +96,9 @@ const GALAXY_ARTIFACT_PUBLICATION_SUCCESS_TOTAL: &str =
 const GALAXY_ARTIFACT_OVERSIZE_TOTAL: &str = "djinn_galaxy_artifact_oversize_total";
 const GALAXY_ARTIFACT_PUBLICATION_FAILURE_TOTAL: &str =
     "djinn_galaxy_artifact_publication_failure_total";
+const GALAXY_ARTIFACT_ROUTE_OUTCOMES_TOTAL: &str = "djinn_galaxy_artifact_route_outcomes_total";
+const GALAXY_ARTIFACT_ROUTE_CHUNKS_TOTAL: &str = "djinn_galaxy_artifact_route_chunks_total";
+const GALAXY_ARTIFACT_ROUTE_BYTES_TOTAL: &str = "djinn_galaxy_artifact_route_bytes_total";
 
 // ─── Stale-PR/branch reconciliation sweep ────────────────────────────────
 const STALE_PR_REAPED_TOTAL: &str = "djinn_stale_pr_reaped_total";
@@ -840,6 +843,14 @@ fn register_metrics() {
             GALAXY_ARTIFACT_PUBLICATION_FAILURE_TOTAL,
             "Galaxy artifact build or atomic publication failures.",
         ),
+    ] {
+        metrics::describe_counter!(metric, description);
+        metrics::counter!(metric).absolute(0);
+    }
+    for (metric, description) in [
+        (GALAXY_ARTIFACT_ROUTE_OUTCOMES_TOTAL, "Galaxy artifact REST outcomes by fixed outcome class only."),
+        (GALAXY_ARTIFACT_ROUTE_CHUNKS_TOTAL, "Validated galaxy artifact REST chunks by fixed artifact version only."),
+        (GALAXY_ARTIFACT_ROUTE_BYTES_TOTAL, "Validated galaxy artifact REST transport bytes by fixed artifact version only."),
     ] {
         metrics::describe_counter!(metric, description);
         metrics::counter!(metric).absolute(0);
@@ -5089,6 +5100,22 @@ pub mod galaxy_artifact_publication {
     }
 }
 
+/// Bounded telemetry for the galaxy artifact REST delivery path. Identity
+/// values are intentionally excluded: only fixed outcome and version classes
+/// can become labels.
+pub mod galaxy_artifact_route {
+    const VERSION: &str = "v1";
+
+    pub fn record_outcome(outcome: &'static str) {
+        metrics::counter!(super::GALAXY_ARTIFACT_ROUTE_OUTCOMES_TOTAL, "outcome" => outcome).increment(1);
+    }
+
+    pub fn record_chunk(bytes: usize) {
+        metrics::counter!(super::GALAXY_ARTIFACT_ROUTE_CHUNKS_TOTAL, "version" => VERSION).increment(1);
+        metrics::counter!(super::GALAXY_ARTIFACT_ROUTE_BYTES_TOTAL, "version" => VERSION).increment(bytes as u64);
+    }
+}
+
 #[cfg(test)]
 mod galaxy_artifact_publication_tests {
     use super::*;
@@ -5119,6 +5146,35 @@ mod galaxy_artifact_publication_tests {
             assert!(rendered.contains(metric), "missing {metric}:\n{rendered}");
             for line in rendered.lines().filter(|line| line.starts_with(metric)) {
                 for forbidden in ["project", "commit", "generation", "artifact", "hash"] {
+                    assert!(
+                        !line.contains(&format!("{forbidden}=")),
+                        "high-cardinality identity label on {metric}: {line}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod galaxy_artifact_route_tests {
+    use super::*;
+
+    #[test]
+    fn galaxy_route_metrics_have_only_bounded_labels() {
+        let _guard = crate::tests::test_guard();
+        init().unwrap();
+        galaxy_artifact_route::record_outcome("ok");
+        galaxy_artifact_route::record_chunk(17);
+        let rendered = render().unwrap();
+        for metric in [
+            GALAXY_ARTIFACT_ROUTE_OUTCOMES_TOTAL,
+            GALAXY_ARTIFACT_ROUTE_CHUNKS_TOTAL,
+            GALAXY_ARTIFACT_ROUTE_BYTES_TOTAL,
+        ] {
+            assert!(rendered.contains(metric), "missing {metric}:\n{rendered}");
+            for line in rendered.lines().filter(|line| line.starts_with(metric)) {
+                for forbidden in ["project", "generation", "commit", "artifact", "etag", "hash"] {
                     assert!(
                         !line.contains(&format!("{forbidden}=")),
                         "high-cardinality identity label on {metric}: {line}"
