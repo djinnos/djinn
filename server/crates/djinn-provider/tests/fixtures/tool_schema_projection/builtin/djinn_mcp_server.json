@@ -8659,6 +8659,17 @@
               "items": {
                 "type": "string"
               }
+            },
+            "attribution": {
+              "description": "Latest immutable revision for this note under the audited project.\nAbsent for pre-migration notes with no ledger history.",
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ExtractedNoteAuditAttribution"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             }
           },
           "required": [
@@ -8680,6 +8691,71 @@
             "underspecified",
             "demote_to_working_spec",
             "archive_candidate"
+          ]
+        },
+        "ExtractedNoteAuditAttribution": {
+          "description": "Immutable ledger event that explains the state of an extracted note when\nit was flagged by the audit. Absence means the note predates the revision\nledger; callers must not infer or fabricate provenance.",
+          "type": "object",
+          "properties": {
+            "revision_id": {
+              "type": "string"
+            },
+            "revision_kind": {
+              "type": "string"
+            },
+            "revision_seq": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "int64"
+            },
+            "revision_created_at": {
+              "type": "string"
+            },
+            "actor_kind": {
+              "type": "string"
+            },
+            "actor_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "subsystem": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "session_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "task_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "task_run_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "reason": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "revision_id",
+            "revision_kind",
+            "revision_created_at",
+            "actor_kind",
+            "reason"
           ]
         }
       },
@@ -24770,6 +24846,110 @@
             "timestamp"
           ]
         },
+        "MemoryRevisionEvent": {
+          "description": "One immutable ledger event projected for the MCP reader surfaces.",
+          "type": "object",
+          "properties": {
+            "revision_id": {
+              "type": "string"
+            },
+            "note_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "note_seq": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "int64"
+            },
+            "event_kind": {
+              "description": "Ledger event kind: created, updated, deleted, confidence_changed, or\nextraction_skipped.",
+              "type": "string"
+            },
+            "content_before": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "content_after": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "confidence_before": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "format": "double"
+            },
+            "confidence_after": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "format": "double"
+            },
+            "actor_kind": {
+              "description": "Trusted actor kind: human, agent, or system.",
+              "type": "string"
+            },
+            "actor_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "subsystem": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "session_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "task_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "task_run_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "reason": {
+              "type": "string"
+            },
+            "created_at": {
+              "type": "string"
+            },
+            "content_redacted": {
+              "description": "True when `content_before`/`content_after` were withheld because the\ncaller lacks note-read permission.",
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "revision_id",
+            "event_kind",
+            "actor_kind",
+            "reason",
+            "created_at",
+            "content_redacted"
+          ]
+        },
         "TimelineExtensionLoadDiagnosticEvent": {
           "description": "A canonical extension-load diagnostic placed on a task timeline.\n\nThe diagnostic remains the shared V1 wire object rather than a timeline-\nspecific copy of its fields. `session_id` and `timestamp` provide the\nplacement metadata needed by timeline renderers.",
           "type": "object",
@@ -24823,6 +25003,16 @@
           ],
           "items": {
             "$ref": "#/$defs/TimelineActivity"
+          }
+        },
+        "memory_revision_events": {
+          "description": "Immutable memory revisions caused by this task's sessions, newest-first\nby `(created_at, revision_id)`. Bodies follow the same authorization\nand redaction decision as `memory_session_diff`.",
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "$ref": "#/$defs/MemoryRevisionEvent"
           }
         },
         "extension_load_diagnostic_events": {

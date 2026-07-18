@@ -318,6 +318,24 @@ pub enum ExtractedNoteAuditCategory {
     ArchiveCandidate,
 }
 
+/// Immutable ledger event that explains the state of an extracted note when
+/// it was flagged by the audit. Absence means the note predates the revision
+/// ledger; callers must not infer or fabricate provenance.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq)]
+pub struct ExtractedNoteAuditAttribution {
+    pub revision_id: String,
+    pub revision_kind: String,
+    pub revision_seq: Option<i64>,
+    pub revision_created_at: String,
+    pub actor_kind: String,
+    pub actor_id: Option<String>,
+    pub subsystem: Option<String>,
+    pub session_id: Option<String>,
+    pub task_id: Option<String>,
+    pub task_run_id: Option<String>,
+    pub reason: String,
+}
+
 /// A single extracted note flagged by the ADR-054 audit.
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq)]
 pub struct ExtractedNoteAuditFinding {
@@ -329,6 +347,9 @@ pub struct ExtractedNoteAuditFinding {
     pub category: ExtractedNoteAuditCategory,
     pub reasons: Vec<String>,
     pub related_note_ids: Vec<String>,
+    /// Latest immutable revision for this note under the audited project.
+    /// Absent for pre-migration notes with no ledger history.
+    pub attribution: Option<ExtractedNoteAuditAttribution>,
 }
 
 /// Result of the ADR-054 note-quality classifier — the single source of truth
