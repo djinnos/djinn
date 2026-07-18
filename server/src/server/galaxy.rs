@@ -145,14 +145,72 @@ fn identity_headers(
 }
 
 fn etag_matches(headers: &HeaderMap, expected: &str) -> bool {
+    let Some((expected_opaque_tag, _)) = parse_entity_tag(expected) else {
+        return false;
+    };
+
+    // If-None-Match uses weak comparison for GET, so the weak marker is not
+    // part of the comparison. Multiple header fields are equivalent to a
+    // comma-separated list; a wildcard in any valid field matches the current
+    // representation.
     headers
-        .get(header::IF_NONE_MATCH)
-        .and_then(|value| value.to_str().ok())
-        .is_some_and(|value| {
-            value
-                .split(',')
-                .any(|candidate| candidate.trim() == expected)
-        })
+        .get_all(header::IF_NONE_MATCH)
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .any(|value| if_none_match_value_matches(value, expected_opaque_tag))
+}
+
+fn if_none_match_value_matches(value: &str, expected_opaque_tag: &str) -> bool {
+    let value = trim_ows(value);
+    if value == "*" {
+        return true;
+    }
+
+    let mut remainder = value;
+    let mut matched = false;
+    loop {
+        remainder = trim_ows_start(remainder);
+        let (opaque_tag, rest) = match parse_entity_tag(remainder) {
+            Some(tag) => tag,
+            None => return false,
+        };
+        matched |= opaque_tag == expected_opaque_tag;
+
+        remainder = trim_ows_start(rest);
+        if remainder.is_empty() {
+            return matched;
+        }
+        let Some(after_comma) = remainder.strip_prefix(',') else {
+            return false;
+        };
+        remainder = after_comma;
+    }
+}
+
+/// Parses one entity tag and returns its opaque tag plus the remaining input.
+/// The optional weak marker is intentionally discarded: RFC 9110 specifies
+/// weak comparison for If-None-Match on GET and HEAD.
+fn parse_entity_tag(value: &str) -> Option<(&str, &str)> {
+    let value = value.strip_prefix("W/").unwrap_or(value);
+    let quoted = value.strip_prefix('"')?;
+    let end = quoted.find('"')?;
+    let opaque_tag = &quoted[..end];
+    if !opaque_tag.bytes().all(is_etagc) {
+        return None;
+    }
+    Some((opaque_tag, &quoted[end + 1..]))
+}
+
+fn is_etagc(byte: u8) -> bool {
+    byte == b'!' || (b'#'..=b'~').contains(&byte) || byte >= 0x80
+}
+
+fn trim_ows(value: &str) -> &str {
+    value.trim_matches([' ', '\t'])
+}
+
+fn trim_ows_start(value: &str) -> &str {
+    value.trim_start_matches([' ', '\t'])
 }
 
 fn stream_gzip(
@@ -239,14 +297,31 @@ mod tests {
     }
 
     #[test]
-    fn only_exact_strong_etag_matches() {
+    fn if_none_match_uses_weak_comparison_and_list_grammar() {
         let mut headers = HeaderMap::new();
         headers.insert(
             header::IF_NONE_MATCH,
-            HeaderValue::from_static("\"abc\", \"def\""),
+            HeaderValue::from_static("\"abc\", W/\"def\""),
         );
         assert!(etag_matches(&headers, "\"def\""));
         assert!(!etag_matches(&headers, "def"));
         assert!(!etag_matches(&headers, "\"de\""));
+    }
+
+    #[test]
+    fn if_none_match_wildcard_matches_any_current_representation() {
+        let mut headers = HeaderMap::new();
+        headers.insert(header::IF_NONE_MATCH, HeaderValue::from_static("*"));
+        assert!(etag_matches(&headers, "\"transport-sha256\""));
+    }
+
+    #[test]
+    fn malformed_if_none_match_does_not_match() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::IF_NONE_MATCH,
+            HeaderValue::from_static("W/\"transport-sha256\", invalid"),
+        );
+        assert!(!etag_matches(&headers, "\"transport-sha256\""));
     }
 }
