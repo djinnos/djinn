@@ -390,7 +390,8 @@ impl TaskRepository {
         Ok(task)
     }
 
-    /// Test-only fixture boundary: persist a collision-resistant user and
+    /// Test-only fixture boundary: use an already-persisted ambient test user
+    /// when one is scoped, otherwise persist a collision-resistant user, then
     /// insert with explicit provenance. Production code must use
     /// [`Self::create_in_project_with_provenance`] (no blockers) or
     /// [`Self::create_in_project_with_blockers`] (with blockers).
@@ -409,16 +410,31 @@ impl TaskRepository {
         status: Option<&str>,
         acceptance_criteria: Option<&str>,
     ) -> Result<Task> {
-        let github_id = (uuid::Uuid::now_v7().as_u128() & i64::MAX as u128) as i64;
-        let username = format!("fixture-creator-{github_id}");
-        let user = crate::repositories::user::UserRepository::new(self.db.clone())
-            .upsert_from_github(github_id, &username, Some("Fixture Creator"), None)
-            .await?;
+        let ambient_creator = djinn_core::auth_context::current_user_id();
+        let persisted_creator = match ambient_creator {
+            Some(user_id) => sqlx::query_scalar::<_, String>("SELECT id FROM users WHERE id = $1")
+                .bind(&user_id)
+                .fetch_optional(self.db.pool())
+                .await?
+                .ok_or_else(|| {
+                    Error::Internal(format!(
+                        "scoped fixture creator does not reference a persisted user: {user_id}"
+                    ))
+                })?,
+            None => {
+                let github_id = (uuid::Uuid::now_v7().as_u128() & i64::MAX as u128) as i64;
+                let username = format!("fixture-creator-{github_id}");
+                crate::repositories::user::UserRepository::new(self.db.clone())
+                    .upsert_from_github(github_id, &username, Some("Fixture Creator"), None)
+                    .await?
+                    .id
+            }
+        };
         self.create_in_project_with_provenance(
             project_id,
             epic_id,
             EffectiveCreatorProvenance {
-                explicit_user_id: Some(&user.id),
+                explicit_user_id: Some(&persisted_creator),
                 source_task_id: None,
                 proposal_id: None,
             },
