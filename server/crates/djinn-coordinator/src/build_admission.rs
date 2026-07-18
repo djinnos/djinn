@@ -1042,6 +1042,8 @@ impl WarmAdmission for BuildAdmissionController {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::await_holding_lock)]
+
     use super::*;
     use async_trait::async_trait;
     use djinn_core::events::EventBus;

@@ -40,6 +40,13 @@ impl CoordinatorOps for CoordinatorBridge {
             .map_err(|e| e.to_string())
     }
 
+    async fn trigger_board_health_mismatch_scan(&self) -> Result<(), String> {
+        self.handle
+            .trigger_board_health_mismatch_scan()
+            .await
+            .map_err(|e| e.to_string())
+    }
+
     async fn start_proposal_refinement(
         &self,
         request: ProposalRefinementStartRequest,

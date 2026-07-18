@@ -472,6 +472,10 @@ mod tests {
             closed_parent_open_children_source: None,
             auto_merge_tracker: AutoMergeTracker::default(),
             consolidation_runner: runner,
+            mismatch_scan: crate::doctor::mismatch_scan::MismatchScanCoordinator::new(
+                db.clone(),
+                crate::events::event_bus_for(tx),
+            ),
             last_stale_sweep: StdInstant::now(),
             last_auto_dispatch_sweep: StdInstant::now(),
             last_proposal_review_sweep: StdInstant::now(),

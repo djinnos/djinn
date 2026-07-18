@@ -137,6 +137,7 @@ pub(super) struct CoordinatorActor {
     /// [`AutoMergeFastPathState`].
     pub(super) auto_merge_tracker: AutoMergeTracker,
     pub(super) consolidation_runner: Arc<dyn ConsolidationRunner>,
+    pub(super) mismatch_scan: crate::doctor::mismatch_scan::MismatchScanCoordinator,
     pub(super) last_stale_sweep: StdInstant,
     /// ADR-051 §7 — timestamp of the last auto-dispatch safety-net sweep.
     pub(super) last_auto_dispatch_sweep: StdInstant,
@@ -480,7 +481,7 @@ impl CoordinatorActor {
             cancel,
             tick,
             db: db.clone(),
-            events_tx,
+            events_tx: events_tx.clone(),
             pool,
             build_admission,
             catalog,
@@ -507,6 +508,10 @@ impl CoordinatorActor {
             auto_merge_tracker: Arc::new(std::sync::Mutex::new(HashMap::new())),
             consolidation_runner: consolidation_runner
                 .unwrap_or_else(|| Arc::new(DbConsolidationRunner::new(db.clone()))),
+            mismatch_scan: crate::doctor::mismatch_scan::MismatchScanCoordinator::new(
+                db.clone(),
+                crate::events::event_bus_for(&events_tx),
+            ),
             last_stale_sweep: SystemClock::new().now_instant(),
             last_auto_dispatch_sweep: SystemClock::new().now_instant(),
             last_proposal_review_sweep: SystemClock::new().now_instant(),
@@ -878,6 +883,10 @@ impl CoordinatorActor {
         self.reap_idle_chat_sessions().await;
         self.detect_and_recover_stuck_filtered(None).await;
 
+        self.mismatch_scan
+            .trigger(crate::doctor::mismatch_scan::Trigger::Timer)
+            .await;
+
         // Doctor framework integration (epic 4q1t, task 1lx0). Run only the
         // cheap subset so cluster-facing on-demand checks (e.g. k8s.pod_leak)
         // do not inflate every 30s tick. Failures are isolated by the helper
@@ -1120,6 +1129,11 @@ impl CoordinatorActor {
             }
             CoordinatorMessage::TriggerStuckScan => {
                 self.detect_and_recover_stuck_filtered(None).await;
+            }
+            CoordinatorMessage::TriggerBoardHealthMismatchScan => {
+                self.mismatch_scan
+                    .trigger(crate::doctor::mismatch_scan::Trigger::Api)
+                    .await;
             }
             CoordinatorMessage::UpdateDispatchLimit { limit } => {
                 let limit = limit.max(1);
