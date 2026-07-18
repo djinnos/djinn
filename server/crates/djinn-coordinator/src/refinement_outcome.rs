@@ -910,18 +910,25 @@ impl CoordinatorActor {
         };
 
         // Resolve the attributed user's display identity (their GitHub login)
-        // for the legacy `owner` column so the Kanban board and owner-based
-        // filters (`task_ready owner=…`) render refinement tasks under the real
-        // user instead of "system". `created_by_user_id` (set below) remains the
-        // authoritative ownership field; `tasks.owner` is legacy display/filter
-        // only. Falls back to "system" when the user row can't be resolved so
-        // task creation never fails on the lookup.
-        let owner = match attributed_user_id {
-            Some(uid) => self
-                .resolve_owner_identity(uid)
-                .await
-                .unwrap_or_else(|| "system".to_string()),
-            None => "system".to_string(),
+        // for the legacy `owner` column. Creator attribution is mandatory: an
+        // absent or stale user must stop task creation rather than fabricating a
+        // system owner while the repository rejects the same provenance.
+        let Some(attributed_user_id) = attributed_user_id else {
+            tracing::warn!(
+                proposal_id,
+                agent_type,
+                "Cannot create refinement task: attributed user is unavailable"
+            );
+            return None;
+        };
+        let Some(owner) = self.resolve_owner_identity(attributed_user_id).await else {
+            tracing::warn!(
+                proposal_id,
+                agent_type,
+                attributed_user_id,
+                "Cannot create refinement task: attributed user does not resolve to a persisted user"
+            );
+            return None;
         };
 
         match task_repo
@@ -929,7 +936,7 @@ impl CoordinatorActor {
                 &project_id,
                 None,
                 EffectiveCreatorProvenance {
-                    explicit_user_id: attributed_user_id,
+                    explicit_user_id: Some(attributed_user_id),
                     source_task_id: None,
                     proposal_id: Some(proposal_id),
                 },
