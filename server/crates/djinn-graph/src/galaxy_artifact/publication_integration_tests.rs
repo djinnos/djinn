@@ -5,7 +5,7 @@
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 
 use djinn_db::repositories::repo_graph_generation::ReservedPublicationFailureStage;
 use djinn_db::{
@@ -150,8 +150,16 @@ cp "$DJINN_TEST_SCIP_FIXTURE" "$out"
 /// Exercise the source-bearing warm path end-to-end. This includes the real
 /// reservation, producer inputs, graph-blob selection, manifest conversion,
 /// and warmer publication call; assertions below only inspect stored rows.
+///
+/// Returns the commit SHA and the `RepoDependencyGraph` returned by
+/// `ensure_canonical_graph`. Callers serialize the graph independently — they
+/// never read `graph_blob` back from the compatibility cache to build the
+/// assertion oracle, so a production code path that stores an unrelated blob
+/// is caught.
 #[allow(clippy::await_holding_lock)]
-async fn run_real_full_warm(db: &Database) -> (String, Vec<u8>) {
+async fn run_real_full_warm(
+    db: &Database,
+) -> (String, Arc<crate::repo_graph::RepoDependencyGraph>) {
     let _env_lock = crate::test_helpers::lock_pipeline_env();
     crate::canonical_graph::clear_test_caches().await;
     let temp = crate::test_helpers::workspace_tempdir("full-warm-publication-");
@@ -199,17 +207,12 @@ async fn run_real_full_warm(db: &Database) -> (String, Vec<u8>) {
     )
     .await;
     assert!(result.is_ok(), "real full warm failed: {result:?}");
+    let (_handle, graph) = result.expect("checked ok");
     let commit_sha = djinn_git::head_commit_sha(&project_root)
         .await
         .expect("resolve full-warm fixture HEAD");
-    let graph_blob = RepoGraphCacheRepository::new(db.clone())
-        .get(PROJECT, &commit_sha)
-        .await
-        .expect("read warmer graph blob")
-        .expect("real full-warm cache row")
-        .graph_blob;
     crate::canonical_graph::clear_test_caches().await;
-    (commit_sha, graph_blob)
+    (commit_sha, graph)
 }
 
 // Failure-stage injection is a repository seam by design; the successful
@@ -415,23 +418,66 @@ async fn full_warm_failures_preserve_previous_pointer_and_every_table() {
 async fn unchanged_old_reader_sees_new_warm_and_unmarked_legacy_advances_artifactless_current() {
     let _serial = database_lock().lock().await;
     let (db, repo) = fresh().await;
-    let (commit_sha, blob) = run_real_full_warm(&db).await;
+    let (commit_sha, graph) = run_real_full_warm(&db).await;
+
+    // Independently serialize the graph returned by ensure_canonical_graph —
+    // this is the oracle the old reader and the immutable generation must
+    // agree with.  Neither side of the comparisons below reads graph_blob
+    // back from repo_graph_cache, so a production cutover that stores an
+    // unrelated or empty blob is caught.
+    let serialized_blob = bincode::serialize(&graph.to_artifact()).expect("serialize graph");
+
+    // The unchanged old reader — the exact SELECT the old server shipped.
     let old = sqlx::query(OLD_LATEST)
         .bind(PROJECT)
         .fetch_one(db.pool())
         .await
         .unwrap();
-    assert_eq!(row_string(&old, "project_id"), PROJECT);
-    assert_eq!(row_string(&old, "commit_sha"), commit_sha);
-    assert_eq!(old.get::<Vec<u8>, _>("graph_blob"), blob);
-    let current: String = sqlx::query_scalar(
-        "SELECT generation_id::text FROM repo_graph_current WHERE project_id=$1",
+
+    // The current immutable generation, fetched through repo_graph_current
+    // exactly as old_and_current_agree does in the compatibility test.
+    let current_generation = sqlx::query(
+        "SELECT g.project_id, g.commit_sha, g.graph_blob, g.generation_id::text AS generation_id \
+         FROM repo_graph_current c JOIN repo_graph_generation g \
+           ON (g.project_id, g.generation_id) = (c.project_id, c.generation_id) \
+         WHERE c.project_id = $1",
     )
     .bind(PROJECT)
     .fetch_one(db.pool())
     .await
     .unwrap();
-    assert_eq!(row_string(&old, "generation_id"), current);
+
+    // The old reader's tuple must match the immutable generation row exactly.
+    for column in ["project_id", "commit_sha", "generation_id"] {
+        assert_eq!(
+            old.get::<String, _>(column),
+            current_generation.get::<String, _>(column),
+            "old reader disagrees with immutable generation on {column}"
+        );
+    }
+    assert_eq!(
+        old.get::<Vec<u8>, _>("graph_blob"),
+        current_generation.get::<Vec<u8>, _>("graph_blob"),
+        "old reader graph_blob disagrees with immutable generation"
+    );
+
+    // The old reader's tuple must also match the independently serialized graph.
+    assert_eq!(row_string(&old, "project_id"), PROJECT);
+    assert_eq!(row_string(&old, "commit_sha"), commit_sha);
+    assert_eq!(
+        old.get::<Vec<u8>, _>("graph_blob"),
+        serialized_blob,
+        "old reader graph_blob disagrees with independently serialized ensure_canonical_graph result"
+    );
+    assert_eq!(
+        current_generation.get::<Vec<u8>, _>("graph_blob"),
+        serialized_blob,
+        "immutable generation graph_blob disagrees with independently serialized ensure_canonical_graph result"
+    );
+    assert_eq!(
+        row_string(&old, "generation_id"),
+        row_string(&current_generation, "generation_id")
+    );
 
     sqlx::query(LEGACY_UPSERT)
         .bind(PROJECT)
