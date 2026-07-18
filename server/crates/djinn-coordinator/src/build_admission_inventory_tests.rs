@@ -289,16 +289,18 @@ async fn uid_and_generation_mismatch_or_uncertain_get_retain_live_occupancy() {
         .await;
     let reconciler = BuildAdmissionReconciler::new(controller.clone(), inventory.clone());
     assert_eq!(reconciler.reconcile().await.released, 0);
+    // A terminal object with a different generation is not adopted and cannot
+    // prove the observed Live row terminal; only the original row occupies.
     assert_eq!(
         controller.journal().list_active_rows().await.unwrap().len(),
-        2
+        1
     );
 
     inventory.replace(vec![]).await;
     assert_eq!(reconciler.reconcile().await.released, 0);
     assert_eq!(
         controller.journal().list_active_rows().await.unwrap().len(),
-        2
+        1
     );
 }
 
