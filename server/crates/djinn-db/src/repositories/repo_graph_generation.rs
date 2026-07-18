@@ -8,7 +8,7 @@ use crate::database::Database;
 use crate::repositories::repo_graph_cache::CachedRepoGraph;
 use crate::{Error, Result};
 use sha2::{Digest, Sha256};
-use sqlx::{Postgres, Transaction};
+use sqlx::{Acquire, Postgres, Transaction, pool::PoolConnection};
 
 #[derive(Clone, Debug, PartialEq, Eq, sqlx::FromRow)]
 pub struct RepoGraphGeneration {
@@ -29,6 +29,10 @@ pub struct RepoGraphGalaxyArtifact {
     pub graph_content_hash: String,
     /// SHA-256 over the served transport representation.
     pub transport_sha256: String,
+    /// Version of the persisted galaxy wire artifact.
+    pub artifact_version: i32,
+    /// Content encoding of the persisted galaxy wire artifact.
+    pub encoding: String,
     pub chunk_count: i32,
     pub byte_count: i64,
     /// JSON manifest of ordered chunk SHA-256 values.
@@ -106,7 +110,99 @@ pub struct ReservedGraphPublication {
     pub chunks: Vec<ReservedGalaxyArtifactChunk>,
 }
 
-const MAX_GALAXY_CHUNK_BYTES: usize = 256 * 1024;
+/// The largest chunk the stream reader will ever materialize at once.
+pub const MAX_GALAXY_CHUNK_BYTES: usize = 256 * 1024;
+/// Bound the manifest retained by a pinned reader before response headers form.
+pub const MAX_GALAXY_ARTIFACT_CHUNKS: usize = 4_096;
+/// Bound metadata-advertised stream size before response headers form.
+pub const MAX_GALAXY_ARTIFACT_BYTES: i64 = 1_073_741_824;
+/// The only artifact wire version understood by this schema generation.
+pub const SUPPORTED_GALAXY_ARTIFACT_VERSION: u32 = 1;
+/// The canonical transport encoding produced by the galaxy publisher.
+pub const SUPPORTED_GALAXY_ARTIFACT_ENCODING: &str = "gzip";
+
+/// Namespace for the two-int PostgreSQL advisory key used to pin a generation.
+/// Both readers and retention must use [`generation_stream_pin_key`].
+pub const GENERATION_STREAM_PIN_LOCK_CLASS: i32 = 0x4741_4c58;
+
+/// Canonical PostgreSQL advisory key for a generation stream pin.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct GenerationStreamPinKey {
+    pub class_id: i32,
+    pub object_id: i32,
+}
+
+/// Derive the one shared/exclusive advisory-lock identity for a generation.
+pub fn generation_stream_pin_key(generation_id: &str) -> Result<GenerationStreamPinKey> {
+    let generation = uuid::Uuid::parse_str(generation_id)
+        .map_err(|_| Error::InvalidData("invalid galaxy generation UUID".to_owned()))?;
+    if generation.to_string() != generation_id {
+        return Err(Error::InvalidData(
+            "galaxy generation UUID is not canonical".to_owned(),
+        ));
+    }
+    let mut hasher = Sha256::new();
+    hasher.update(b"djinn:galaxy-stream-pin:v1\0");
+    hasher.update(generation.as_bytes());
+    let digest = hasher.finalize();
+    Ok(GenerationStreamPinKey {
+        class_id: GENERATION_STREAM_PIN_LOCK_CLASS,
+        object_id: i32::from_be_bytes(digest[..4].try_into().expect("SHA-256 prefix")),
+    })
+}
+
+/// Acquire the reader side of the canonical generation stream-pin protocol.
+pub async fn acquire_generation_stream_pin_shared(
+    conn: &mut sqlx::postgres::PgConnection,
+    key: GenerationStreamPinKey,
+) -> std::result::Result<(), sqlx::Error> {
+    sqlx::query("SELECT pg_advisory_lock_shared($1, $2)")
+        .bind(key.class_id)
+        .bind(key.object_id)
+        .execute(conn)
+        .await
+        .map(|_| ())
+}
+
+/// Try the retention side of the canonical generation stream-pin protocol.
+pub async fn try_acquire_generation_stream_pin_exclusive(
+    conn: &mut sqlx::postgres::PgConnection,
+    key: GenerationStreamPinKey,
+) -> std::result::Result<bool, sqlx::Error> {
+    sqlx::query_scalar("SELECT pg_try_advisory_lock($1, $2)")
+        .bind(key.class_id)
+        .bind(key.object_id)
+        .fetch_one(conn)
+        .await
+}
+
+/// Release the reader side of the canonical generation stream-pin protocol.
+///
+/// PostgreSQL tracks shared and exclusive advisory locks separately. Callers
+/// must treat `false` as a protocol error: it means this session did not hold
+/// the shared lock being released.
+pub async fn release_generation_stream_pin_shared(
+    conn: &mut sqlx::postgres::PgConnection,
+    key: GenerationStreamPinKey,
+) -> std::result::Result<bool, sqlx::Error> {
+    sqlx::query_scalar("SELECT pg_advisory_unlock_shared($1, $2)")
+        .bind(key.class_id)
+        .bind(key.object_id)
+        .fetch_one(conn)
+        .await
+}
+
+/// Release the retention side of the canonical generation stream-pin protocol.
+pub async fn release_generation_stream_pin_exclusive(
+    conn: &mut sqlx::postgres::PgConnection,
+    key: GenerationStreamPinKey,
+) -> std::result::Result<bool, sqlx::Error> {
+    sqlx::query_scalar("SELECT pg_advisory_unlock($1, $2)")
+        .bind(key.class_id)
+        .bind(key.object_id)
+        .fetch_one(conn)
+        .await
+}
 
 /// Stage selector used by integration tests to prove partial publications roll
 /// back through the same transaction body as production publication.
@@ -272,6 +368,199 @@ pub enum CurrentGalaxyArtifact {
         generation: RepoGraphGeneration,
     },
     NoCurrentGeneration,
+}
+
+/// Header-safe, bounded artifact metadata retained while a stream is pinned.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PinnedGalaxyArtifactMetadata {
+    pub project_id: String,
+    pub generation_id: String,
+    pub commit_sha: String,
+    pub artifact_id: String,
+    pub graph_content_hash: String,
+    pub transport_sha256: String,
+    pub artifact_version: u32,
+    pub encoding: String,
+    pub chunk_count: i32,
+    pub byte_count: i64,
+}
+
+/// Selection outcome before a route has formed response headers.
+#[allow(clippy::large_enum_variant)]
+#[derive(Debug)]
+pub enum PinnedGalaxyArtifactSelection {
+    NoCurrentGeneration,
+    ArtifactUnavailable,
+    UnsupportedVersion {
+        version: u32,
+        encoding: Box<str>,
+    },
+    CorruptMetadata {
+        reason: String,
+    },
+    Pinned(PinnedGalaxyArtifact),
+}
+
+/// A session-pinned artifact reader. It deliberately retains no chunk payloads.
+pub struct PinnedGalaxyArtifact {
+    metadata: PinnedGalaxyArtifactMetadata,
+    chunk_hashes: Vec<String>,
+    pin_key: GenerationStreamPinKey,
+    connection: Option<PoolConnection<Postgres>>,
+}
+
+impl std::fmt::Debug for PinnedGalaxyArtifact {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PinnedGalaxyArtifact")
+            .field("metadata", &self.metadata)
+            .field("manifest_entries", &self.chunk_hashes.len())
+            .finish_non_exhaustive()
+    }
+}
+
+impl PinnedGalaxyArtifact {
+    pub fn metadata(&self) -> &PinnedGalaxyArtifactMetadata {
+        &self.metadata
+    }
+
+    /// Fetch and verify exactly one expected chunk using the pinned session.
+    pub async fn read_chunk(&mut self, chunk_index: i32) -> Result<RepoGraphGalaxyChunk> {
+        if chunk_index < 0 || chunk_index >= self.metadata.chunk_count {
+            return Err(Error::InvalidData(
+                "galaxy chunk index is out of range".to_owned(),
+            ));
+        }
+        let conn = self.connection.as_mut().ok_or_else(|| {
+            Error::InvalidData("galaxy artifact reader has already finished".to_owned())
+        })?;
+        let row = sqlx::query_as::<_, RepoGraphGalaxyChunk>(
+            "SELECT generation_id::text AS generation_id, artifact_id::text AS artifact_id, \
+                    chunk_index, byte_count, sha256, bytes \
+             FROM repo_graph_galaxy_chunk \
+             WHERE generation_id = $1::uuid AND artifact_id = $2::uuid AND chunk_index = $3",
+        )
+        .bind(&self.metadata.generation_id)
+        .bind(&self.metadata.artifact_id)
+        .bind(chunk_index)
+        .fetch_optional(&mut **conn)
+        .await;
+        let chunk = match row {
+            Ok(Some(chunk)) => chunk,
+            Ok(None) => {
+                return Err(Error::InvalidData(
+                    "expected galaxy chunk is missing".to_owned(),
+                ));
+            }
+            Err(error) => {
+                conn.close_on_drop();
+                return Err(error.into());
+            }
+        };
+        let expected_hash = &self.chunk_hashes[chunk_index as usize];
+        if chunk.generation_id != self.metadata.generation_id
+            || chunk.artifact_id != self.metadata.artifact_id
+            || chunk.chunk_index != chunk_index
+            || chunk.byte_count < 0
+            || chunk.byte_count as usize != chunk.bytes.len()
+            || chunk.bytes.len() > MAX_GALAXY_CHUNK_BYTES
+            || chunk.sha256 != *expected_hash
+            || sha256_hex(&chunk.bytes) != chunk.sha256
+        {
+            conn.close_on_drop();
+            return Err(Error::InvalidData(
+                "corrupt galaxy chunk metadata or bytes".to_owned(),
+            ));
+        }
+        Ok(chunk)
+    }
+
+    /// Explicitly release the session advisory pin before returning its connection.
+    pub async fn finish(mut self) -> Result<()> {
+        let mut conn = self
+            .connection
+            .take()
+            .expect("finished reader has no connection");
+        match release_generation_stream_pin_shared(&mut conn, self.pin_key).await {
+            Ok(true) => Ok(()),
+            Ok(false) => {
+                let _ = conn.close().await;
+                Err(Error::InvalidData(
+                    "galaxy shared stream pin was not held by its session".to_owned(),
+                ))
+            }
+            Err(error) => {
+                let _ = conn.close().await;
+                Err(error.into())
+            }
+        }
+    }
+}
+
+impl Drop for PinnedGalaxyArtifact {
+    fn drop(&mut self) {
+        // Drop cannot await pg_advisory_unlock. Never return a potentially
+        // pinned session to the pool: SQLx closes it and PostgreSQL releases
+        // all session advisory locks with the connection.
+        if let Some(conn) = self.connection.as_mut() {
+            conn.close_on_drop();
+        }
+    }
+}
+
+fn header_safe(value: &str, max_len: usize) -> bool {
+    !value.is_empty()
+        && value.len() <= max_len
+        && value.bytes().all(|byte| (0x21..=0x7e).contains(&byte))
+}
+
+fn sha256_hex_value(value: &str) -> bool {
+    value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+fn validate_pinned_metadata(
+    project_id: &str,
+    generation: &RepoGraphGeneration,
+    artifact: &RepoGraphGalaxyArtifact,
+) -> std::result::Result<Vec<String>, String> {
+    if !header_safe(project_id, 36) || !header_safe(&generation.commit_sha, 64) {
+        return Err("project or commit is not header-safe".to_owned());
+    }
+    for value in [
+        &generation.generation_id,
+        &artifact.generation_id,
+        &artifact.artifact_id,
+    ] {
+        if uuid::Uuid::parse_str(value).ok().map(|id| id.to_string()) != Some(value.clone()) {
+            return Err("generation or artifact UUID is invalid".to_owned());
+        }
+    }
+    if generation.project_id != project_id || artifact.generation_id != generation.generation_id {
+        return Err("current pointer identities disagree".to_owned());
+    }
+    if artifact.chunk_count < 0
+        || artifact.chunk_count as usize > MAX_GALAXY_ARTIFACT_CHUNKS
+        || artifact.byte_count < 0
+        || artifact.byte_count > MAX_GALAXY_ARTIFACT_BYTES
+        || !sha256_hex_value(&artifact.graph_content_hash)
+        || !sha256_hex_value(&artifact.transport_sha256)
+    {
+        return Err("artifact counts or hashes are invalid".to_owned());
+    }
+    let hashes: Vec<String> = serde_json::from_str(&artifact.chunk_hashes)
+        .map_err(|_| "artifact manifest is not a JSON string array".to_owned())?;
+    if hashes.len() != artifact.chunk_count as usize
+        || hashes.iter().any(|hash| !sha256_hex_value(hash))
+    {
+        return Err("artifact manifest length or hash is invalid".to_owned());
+    }
+    Ok(hashes)
+}
+
+#[derive(sqlx::FromRow)]
+struct PinnedSelectorGeneration {
+    generation_id: String,
+    project_id: String,
+    commit_sha: String,
 }
 
 pub struct RepoGraphGenerationRepository {
@@ -572,7 +861,7 @@ impl RepoGraphGenerationRepository {
         };
         let artifact = sqlx::query_as::<_, RepoGraphGalaxyArtifact>(
             "SELECT artifact_id::text AS artifact_id, generation_id::text AS generation_id, \
-                    graph_content_hash, transport_sha256, chunk_count, byte_count, chunk_hashes::text AS chunk_hashes \
+                    graph_content_hash, transport_sha256, artifact_version, encoding, chunk_count, byte_count, chunk_hashes::text AS chunk_hashes \
              FROM repo_graph_galaxy_artifact WHERE generation_id = $1::uuid",
         )
         .bind(&generation.generation_id)
@@ -585,6 +874,88 @@ impl RepoGraphGenerationRepository {
             },
             None => CurrentGalaxyArtifact::ArtifactUnavailable { generation },
         })
+    }
+
+    /// Select metadata under `FOR SHARE`, then retain a shared session pin on
+    /// the same checked-out connection for bounded one-chunk-at-a-time reads.
+    pub async fn pin_current_galaxy_artifact(
+        &self,
+        project_id: &str,
+    ) -> Result<PinnedGalaxyArtifactSelection> {
+        self.db.ensure_initialized().await?;
+        let mut conn = self.db.pool().acquire().await?;
+        let mut tx = conn.begin().await?;
+        let generation = sqlx::query_as::<_, PinnedSelectorGeneration>(
+            "SELECT g.generation_id::text AS generation_id, g.project_id, g.commit_sha \
+             FROM repo_graph_current c JOIN repo_graph_generation g ON g.generation_id = c.generation_id \
+             WHERE c.project_id = $1 FOR SHARE OF c, g",
+        ).bind(project_id).fetch_optional(&mut *tx).await?;
+        let Some(generation) = generation else {
+            tx.commit().await?;
+            return Ok(PinnedGalaxyArtifactSelection::NoCurrentGeneration);
+        };
+        let artifact = sqlx::query_as::<_, RepoGraphGalaxyArtifact>(
+            "SELECT artifact_id::text AS artifact_id, generation_id::text AS generation_id, \
+                    graph_content_hash, transport_sha256, artifact_version, encoding, chunk_count, byte_count, chunk_hashes::text AS chunk_hashes \
+             FROM repo_graph_galaxy_artifact WHERE generation_id = $1::uuid FOR SHARE",
+        ).bind(&generation.generation_id).fetch_optional(&mut *tx).await?;
+        let Some(artifact) = artifact else {
+            tx.commit().await?;
+            return Ok(PinnedGalaxyArtifactSelection::ArtifactUnavailable);
+        };
+        let version = u32::try_from(artifact.artifact_version).map_err(|_| {
+            Error::InvalidData("galaxy artifact version does not fit u32".to_owned())
+        })?;
+        if version != SUPPORTED_GALAXY_ARTIFACT_VERSION
+            || artifact.encoding != SUPPORTED_GALAXY_ARTIFACT_ENCODING
+        {
+            tx.commit().await?;
+            return Ok(PinnedGalaxyArtifactSelection::UnsupportedVersion {
+                version,
+                encoding: artifact.encoding.into(),
+            });
+        }
+        let synthetic = RepoGraphGeneration {
+            generation_id: generation.generation_id.clone(),
+            project_id: generation.project_id.clone(),
+            commit_sha: generation.commit_sha.clone(),
+            graph_blob: Vec::new(),
+            built_at: String::new(),
+            publish_seq: 0,
+            artifact_required: true,
+        };
+        let hashes = match validate_pinned_metadata(project_id, &synthetic, &artifact) {
+            Ok(hashes) => hashes,
+            Err(reason) => {
+                tx.commit().await?;
+                return Ok(PinnedGalaxyArtifactSelection::CorruptMetadata { reason });
+            }
+        };
+        let pin_key = generation_stream_pin_key(&generation.generation_id)?;
+        acquire_generation_stream_pin_shared(&mut tx, pin_key).await?;
+        if let Err(error) = tx.commit().await {
+            conn.close_on_drop();
+            return Err(error.into());
+        }
+        Ok(PinnedGalaxyArtifactSelection::Pinned(
+            PinnedGalaxyArtifact {
+                metadata: PinnedGalaxyArtifactMetadata {
+                    project_id: generation.project_id,
+                    generation_id: generation.generation_id,
+                    commit_sha: generation.commit_sha,
+                    artifact_id: artifact.artifact_id,
+                    graph_content_hash: artifact.graph_content_hash,
+                    transport_sha256: artifact.transport_sha256,
+                    artifact_version: version,
+                    encoding: artifact.encoding,
+                    chunk_count: artifact.chunk_count,
+                    byte_count: artifact.byte_count,
+                },
+                chunk_hashes: hashes,
+                pin_key,
+                connection: Some(conn),
+            },
+        ))
     }
 
     /// Return exactly one chunk for a known artifact and ordered chunk index.
@@ -693,488 +1064,6 @@ impl RepoGraphGenerationRepository {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::database::Database;
-    use crate::repositories::repo_graph_cache::{RepoGraphCacheInsert, RepoGraphCacheRepository};
-
-    async fn fresh() -> (Database, RepoGraphGenerationRepository) {
-        let db = Database::open_in_memory().expect("in-memory db");
-        db.ensure_initialized().await.expect("initialize database");
-        let repo = RepoGraphGenerationRepository::new(db.clone());
-        (db, repo)
-    }
-
-    async fn insert_project(db: &Database, project_id: &str) {
-        sqlx::query(
-            "INSERT INTO projects(id, name, github_owner, github_repo) \
-             VALUES ($1, $2, 'test-owner', 'test-repo')",
-        )
-        .bind(project_id)
-        .bind(format!("test project {project_id}"))
-        .execute(db.pool())
-        .await
-        .expect("insert project");
-    }
-
-    /// Publish via the legacy unmarked cache upsert.  The migration triggers
-    /// mint a fresh generation (artifact_required = false) and advance
-    /// `repo_graph_current`.
-    async fn legacy_publish(db: &Database, project_id: &str, commit_sha: &str, blob: &[u8]) {
-        let cache_repo = RepoGraphCacheRepository::new(db.clone());
-        cache_repo
-            .upsert(RepoGraphCacheInsert {
-                project_id,
-                commit_sha,
-                graph_blob: blob,
-            })
-            .await
-            .expect("legacy upsert");
-    }
-
-    /// Publish a marked (reserved) generation with a valid single-chunk galaxy
-    /// artifact so the deferred validation trigger accepts the commit.
-    async fn reserved_publish_with_artifact(
-        repo: &RepoGraphGenerationRepository,
-        project_id: &str,
-        commit_sha: &str,
-        blob: &[u8],
-    ) -> (String, String) {
-        let generation_id = uuid::Uuid::now_v7();
-        let artifact_id = uuid::Uuid::now_v7();
-        let gen_str = generation_id.to_string();
-        let art_str = artifact_id.to_string();
-
-        let chunk_hash = sha256_hex(blob);
-        repo.publish_reserved_generation(ReservedGraphPublication {
-            project_id: project_id.to_owned(),
-            commit_sha: commit_sha.to_owned(),
-            generation_id: gen_str.clone(),
-            graph_blob: blob.to_vec(),
-            artifact: ReservedGalaxyArtifactManifest {
-                artifact_id: art_str.clone(),
-                generation_id: gen_str.clone(),
-                graph_content_hash: "graph_content_hash_domain_value".to_owned(),
-                transport_sha256: chunk_hash.clone(),
-                chunk_count: 1,
-                byte_count: blob.len() as i64,
-                chunk_hashes: vec![chunk_hash.clone()],
-            },
-            chunks: vec![ReservedGalaxyArtifactChunk {
-                generation_id: gen_str.clone(),
-                artifact_id: art_str.clone(),
-                chunk_index: 0,
-                sha256: chunk_hash,
-                bytes: blob.to_vec(),
-            }],
-        })
-        .await
-        .expect("publish reserved artifact");
-        (gen_str, art_str)
-    }
-
-    fn valid_publication() -> ReservedGraphPublication {
-        let bytes = b"firstsecond";
-        let first_hash = sha256_hex(b"first");
-        let second_hash = sha256_hex(b"second");
-        ReservedGraphPublication {
-            project_id: "project".to_owned(),
-            commit_sha: "commit".to_owned(),
-            generation_id: "generation".to_owned(),
-            graph_blob: b"graph".to_vec(),
-            artifact: ReservedGalaxyArtifactManifest {
-                artifact_id: "artifact".to_owned(),
-                generation_id: "generation".to_owned(),
-                graph_content_hash: "graph-hash".to_owned(),
-                transport_sha256: sha256_hex(bytes),
-                chunk_count: 2,
-                byte_count: bytes.len() as i64,
-                chunk_hashes: vec![first_hash.clone(), second_hash.clone()],
-            },
-            chunks: vec![
-                ReservedGalaxyArtifactChunk {
-                    generation_id: "generation".to_owned(),
-                    artifact_id: "artifact".to_owned(),
-                    chunk_index: 0,
-                    sha256: first_hash,
-                    bytes: b"first".to_vec(),
-                },
-                ReservedGalaxyArtifactChunk {
-                    generation_id: "generation".to_owned(),
-                    artifact_id: "artifact".to_owned(),
-                    chunk_index: 1,
-                    sha256: second_hash,
-                    bytes: b"second".to_vec(),
-                },
-            ],
-        }
-    }
-
-    #[test]
-    fn reserved_publication_validation_rejects_manifest_and_transport_mismatches() {
-        assert!(validate_reserved_publication(&valid_publication()).is_ok());
-
-        let mut identity = valid_publication();
-        identity.chunks[0].artifact_id = "other".to_owned();
-        assert!(validate_reserved_publication(&identity).is_err());
-
-        let mut gap = valid_publication();
-        gap.chunks[1].chunk_index = 2;
-        assert!(validate_reserved_publication(&gap).is_err());
-
-        let mut oversized = valid_publication();
-        oversized.chunks[0].bytes = vec![0; MAX_GALAXY_CHUNK_BYTES + 1];
-        assert!(validate_reserved_publication(&oversized).is_err());
-
-        let mut wrong_count = valid_publication();
-        wrong_count.artifact.chunk_count = 1;
-        assert!(validate_reserved_publication(&wrong_count).is_err());
-
-        let mut wrong_bytes = valid_publication();
-        wrong_bytes.artifact.byte_count += 1;
-        assert!(validate_reserved_publication(&wrong_bytes).is_err());
-
-        let mut wrong_manifest = valid_publication();
-        wrong_manifest.artifact.chunk_hashes.swap(0, 1);
-        assert!(validate_reserved_publication(&wrong_manifest).is_err());
-
-        let mut wrong_transport = valid_publication();
-        wrong_transport.artifact.transport_sha256 = "wrong".to_owned();
-        assert!(validate_reserved_publication(&wrong_transport).is_err());
-    }
-
-    #[tokio::test]
-    async fn select_current_follows_repo_graph_current_pointer() {
-        let (db, repo) = fresh().await;
-        insert_project(&db, "p-current").await;
-        legacy_publish(&db, "p-current", "commit-1", b"graph-blob-1").await;
-
-        let selected = repo
-            .select_project_current_graph("p-current")
-            .await
-            .expect("select");
-        match selected {
-            ProjectCurrentGraph::Current(generation) => {
-                assert_eq!(generation.project_id, "p-current");
-                assert_eq!(generation.commit_sha, "commit-1");
-                assert_eq!(generation.graph_blob, b"graph-blob-1");
-            }
-            other => panic!("expected Current, got {other:?}"),
-        }
-
-        // The pointer-based read agrees with the explicit current lookup.
-        let by_current = repo
-            .current_generation_for_project("p-current")
-            .await
-            .expect("current")
-            .expect("generation exists");
-        assert_eq!(by_current.commit_sha, "commit-1");
-    }
-
-    #[tokio::test]
-    async fn two_same_commit_generations_choose_greatest_publish_seq() {
-        let (db, repo) = fresh().await;
-        insert_project(&db, "p-seq").await;
-        legacy_publish(&db, "p-seq", "same", b"v1").await;
-        legacy_publish(&db, "p-seq", "same", b"v2").await;
-
-        let latest = repo
-            .latest_for_project_commit("p-seq", "same")
-            .await
-            .expect("latest")
-            .expect("generation exists");
-        // The second publication has the greater publish_seq and overwrote
-        // the compatibility graph_blob, so the selector must return v2.
-        assert_eq!(latest.graph_blob, b"v2");
-
-        let greatest = repo
-            .greatest_publish_seq_for_project_commit("p-seq", "same")
-            .await
-            .expect("greatest seq");
-        assert_eq!(greatest, Some(latest.publish_seq));
-    }
-
-    #[tokio::test]
-    async fn legacy_fallback_only_when_pointer_is_absent() {
-        let (db, repo) = fresh().await;
-        insert_project(&db, "p-fallback").await;
-        legacy_publish(&db, "p-fallback", "fb-commit", b"fb-blob").await;
-
-        // A pointer exists, so the selector must never fall back.
-        let with_pointer = repo
-            .select_project_current_graph("p-fallback")
-            .await
-            .expect("select with pointer");
-        assert!(
-            matches!(with_pointer, ProjectCurrentGraph::Current(_)),
-            "pointer exists: expected Current, got {with_pointer:?}"
-        );
-
-        // Simulate the pre-backfill state by removing the pointer while the
-        // compatibility row remains.
-        sqlx::query("DELETE FROM repo_graph_current WHERE project_id = 'p-fallback'")
-            .execute(db.pool())
-            .await
-            .expect("delete current pointer");
-
-        let without_pointer = repo
-            .select_project_current_graph("p-fallback")
-            .await
-            .expect("select without pointer");
-        match without_pointer {
-            ProjectCurrentGraph::LegacyFallback(graph) => {
-                assert_eq!(graph.project_id, "p-fallback");
-                assert_eq!(graph.commit_sha, "fb-commit");
-                assert_eq!(graph.graph_blob, b"fb-blob");
-            }
-            other => panic!("no pointer: expected LegacyFallback, got {other:?}"),
-        }
-
-        // A project with neither pointer nor cache row is Unavailable.
-        let empty = repo
-            .select_project_current_graph("p-fallback-nonexistent")
-            .await
-            .expect("select empty");
-        assert_eq!(empty, ProjectCurrentGraph::Unavailable);
-    }
-
-    #[tokio::test]
-    async fn artifactless_current_is_distinct_from_no_pointer() {
-        let (db, repo) = fresh().await;
-        insert_project(&db, "p-artifactless").await;
-        legacy_publish(&db, "p-artifactless", "c1", b"blob").await;
-
-        // A current generation exists but carries no galaxy artifact.
-        let with_gen = repo
-            .current_galaxy_artifact_for_project("p-artifactless")
-            .await
-            .expect("artifact status");
-        match with_gen {
-            CurrentGalaxyArtifact::ArtifactUnavailable { generation } => {
-                assert_eq!(generation.commit_sha, "c1");
-            }
-            other => panic!("expected ArtifactUnavailable, got {other:?}"),
-        }
-
-        // Removing the pointer yields NoCurrentGeneration — distinct from
-        // having a current generation without an artifact.
-        sqlx::query("DELETE FROM repo_graph_current WHERE project_id = 'p-artifactless'")
-            .execute(db.pool())
-            .await
-            .expect("delete current pointer");
-        let no_gen = repo
-            .current_galaxy_artifact_for_project("p-artifactless")
-            .await
-            .expect("artifact status");
-        assert_eq!(no_gen, CurrentGalaxyArtifact::NoCurrentGeneration);
-    }
-
-    #[tokio::test]
-    async fn current_artifact_metadata_has_distinct_hash_domains() {
-        let (db, repo) = fresh().await;
-        insert_project(&db, "p-meta").await;
-        reserved_publish_with_artifact(&repo, "p-meta", "meta-commit", b"meta-blob").await;
-
-        let result = repo
-            .current_galaxy_artifact_for_project("p-meta")
-            .await
-            .expect("artifact");
-        match result {
-            CurrentGalaxyArtifact::Available {
-                generation,
-                artifact,
-            } => {
-                assert_eq!(generation.commit_sha, "meta-commit");
-                assert_eq!(artifact.chunk_count, 1);
-                assert_eq!(artifact.byte_count, b"meta-blob".len() as i64);
-                assert_ne!(
-                    artifact.graph_content_hash, artifact.transport_sha256,
-                    "graph_content_hash and transport_sha256 must be distinct domains"
-                );
-            }
-            other => panic!("expected Available, got {other:?}"),
-        }
-    }
-
-    #[tokio::test]
-    async fn galaxy_chunk_returns_exactly_one_by_index() {
-        let (db, repo) = fresh().await;
-        insert_project(&db, "p-chunk").await;
-        let (gen_id, art_id) =
-            reserved_publish_with_artifact(&repo, "p-chunk", "chunk-commit", b"chunk-blob").await;
-
-        // Requested chunk index exists and carries the published bytes.
-        let chunk = repo
-            .galaxy_chunk(&gen_id, &art_id, 0)
-            .await
-            .expect("read chunk 0")
-            .expect("chunk 0 exists");
-        assert_eq!(chunk.chunk_index, 0);
-        assert_eq!(chunk.bytes, b"chunk-blob");
-        assert_eq!(chunk.byte_count, b"chunk-blob".len() as i32);
-
-        // An out-of-range index returns None — no aggregation of all chunks.
-        let miss = repo
-            .galaxy_chunk(&gen_id, &art_id, 1)
-            .await
-            .expect("read chunk 1");
-        assert!(miss.is_none(), "chunk index 1 should not exist");
-    }
-
-    #[tokio::test]
-    async fn generation_by_id_round_trips() {
-        let (db, repo) = fresh().await;
-        insert_project(&db, "p-byid").await;
-        legacy_publish(&db, "p-byid", "byid-commit", b"byid-blob").await;
-
-        let current = repo
-            .current_generation_for_project("p-byid")
-            .await
-            .expect("current")
-            .expect("generation exists");
-
-        let by_id = repo
-            .generation_by_id(&current.generation_id)
-            .await
-            .expect("by id")
-            .expect("generation exists");
-        assert_eq!(by_id.generation_id, current.generation_id);
-        assert_eq!(by_id.commit_sha, "byid-commit");
-        assert_eq!(by_id.graph_blob, b"byid-blob");
-    }
-
-    fn reserved_two_chunk_publication(
-        project_id: &str,
-        commit_sha: &str,
-    ) -> ReservedGraphPublication {
-        let generation_id = uuid::Uuid::now_v7().to_string();
-        let artifact_id = uuid::Uuid::now_v7().to_string();
-        let first = b"first".to_vec();
-        let second = b"second".to_vec();
-        let first_hash = sha256_hex(&first);
-        let second_hash = sha256_hex(&second);
-        ReservedGraphPublication {
-            project_id: project_id.to_owned(),
-            commit_sha: commit_sha.to_owned(),
-            generation_id: generation_id.clone(),
-            graph_blob: b"complete graph".to_vec(),
-            artifact: ReservedGalaxyArtifactManifest {
-                artifact_id: artifact_id.clone(),
-                generation_id: generation_id.clone(),
-                graph_content_hash: "semantic-graph-hash".to_owned(),
-                transport_sha256: sha256_hex(&[first.clone(), second.clone()].concat()),
-                chunk_count: 2,
-                byte_count: (first.len() + second.len()) as i64,
-                chunk_hashes: vec![first_hash.clone(), second_hash.clone()],
-            },
-            chunks: vec![
-                ReservedGalaxyArtifactChunk {
-                    generation_id: generation_id.clone(),
-                    artifact_id: artifact_id.clone(),
-                    chunk_index: 0,
-                    sha256: first_hash,
-                    bytes: first,
-                },
-                ReservedGalaxyArtifactChunk {
-                    generation_id,
-                    artifact_id,
-                    chunk_index: 1,
-                    sha256: second_hash,
-                    bytes: second,
-                },
-            ],
-        }
-    }
-
-    #[derive(Debug, PartialEq, Eq)]
-    struct PublicationSnapshot {
-        cache: i64,
-        generations: i64,
-        current: Option<String>,
-        artifacts: i64,
-        chunks: i64,
-        clock: Option<String>,
-    }
-
-    async fn publication_snapshot(db: &Database, project_id: &str) -> PublicationSnapshot {
-        PublicationSnapshot {
-            cache: sqlx::query_scalar("SELECT count(*) FROM repo_graph_cache WHERE project_id = $1").bind(project_id).fetch_one(db.pool()).await.expect("cache"),
-            generations: sqlx::query_scalar("SELECT count(*) FROM repo_graph_generation WHERE project_id = $1").bind(project_id).fetch_one(db.pool()).await.expect("generations"),
-            current: sqlx::query_scalar("SELECT generation_id::text FROM repo_graph_current WHERE project_id = $1").bind(project_id).fetch_optional(db.pool()).await.expect("current"),
-            artifacts: sqlx::query_scalar("SELECT count(*) FROM repo_graph_galaxy_artifact a JOIN repo_graph_generation g ON g.generation_id = a.generation_id WHERE g.project_id = $1").bind(project_id).fetch_one(db.pool()).await.expect("artifacts"),
-            chunks: sqlx::query_scalar("SELECT count(*) FROM repo_graph_galaxy_chunk c JOIN repo_graph_generation g ON g.generation_id = c.generation_id WHERE g.project_id = $1").bind(project_id).fetch_one(db.pool()).await.expect("chunks"),
-            clock: sqlx::query_scalar("SELECT last_built_at::text FROM repo_graph_publish_clock WHERE project_id = $1").bind(project_id).fetch_optional(db.pool()).await.expect("clock"),
-        }
-    }
-
-    #[tokio::test]
-    async fn reserved_publication_persists_complete_write_set_under_reserved_identity() {
-        let (db, repo) = fresh().await;
-        insert_project(&db, "p-complete").await;
-        let publication = reserved_two_chunk_publication("p-complete", "complete-commit");
-        let generation_id = publication.generation_id.clone();
-        let artifact_id = publication.artifact.artifact_id.clone();
-        repo.publish_reserved_generation(publication)
-            .await
-            .expect("publish");
-        let cache_id: String = sqlx::query_scalar(
-            "SELECT generation_id::text FROM repo_graph_cache WHERE project_id = $1",
-        )
-        .bind("p-complete")
-        .fetch_one(db.pool())
-        .await
-        .expect("cache");
-        let current_id: String = sqlx::query_scalar(
-            "SELECT generation_id::text FROM repo_graph_current WHERE project_id = $1",
-        )
-        .bind("p-complete")
-        .fetch_one(db.pool())
-        .await
-        .expect("current");
-        let generation = repo
-            .generation_by_id(&generation_id)
-            .await
-            .expect("generation")
-            .expect("immutable generation");
-        let artifact: RepoGraphGalaxyArtifact = sqlx::query_as("SELECT artifact_id::text AS artifact_id, generation_id::text AS generation_id, graph_content_hash, transport_sha256, chunk_count, byte_count, chunk_hashes::text AS chunk_hashes FROM repo_graph_galaxy_artifact WHERE artifact_id = $1::uuid").bind(&artifact_id).fetch_one(db.pool()).await.expect("artifact");
-        let chunks: Vec<RepoGraphGalaxyChunk> = sqlx::query_as("SELECT generation_id::text AS generation_id, artifact_id::text AS artifact_id, chunk_index, byte_count, sha256, bytes FROM repo_graph_galaxy_chunk WHERE generation_id = $1::uuid ORDER BY chunk_index").bind(&generation_id).fetch_all(db.pool()).await.expect("chunks");
-        assert_eq!(cache_id, generation_id);
-        assert_eq!(generation.generation_id, generation_id);
-        assert_eq!(current_id, generation_id);
-        assert_eq!(artifact.generation_id, generation_id);
-        assert_eq!(artifact.artifact_id, artifact_id);
-        assert_eq!(chunks.len(), 2);
-        for (index, chunk) in chunks.iter().enumerate() {
-            assert_eq!(chunk.generation_id, generation_id);
-            assert_eq!(chunk.artifact_id, artifact_id);
-            assert_eq!(chunk.chunk_index, index as i32);
-        }
-    }
-
-    #[tokio::test]
-    async fn injected_reserved_publication_failures_rollback_every_write_stage() {
-        for stage in [
-            ReservedPublicationFailureStage::CompatibilityUpsert,
-            ReservedPublicationFailureStage::ArtifactInsert,
-            ReservedPublicationFailureStage::FirstChunkInsert,
-        ] {
-            let (db, repo) = fresh().await;
-            insert_project(&db, "p-rollback").await;
-            legacy_publish(&db, "p-rollback", "old", b"old graph").await;
-            let before = publication_snapshot(&db, "p-rollback").await;
-            assert!(
-                repo.publish_reserved_generation_with_failure(
-                    reserved_two_chunk_publication("p-rollback", "new"),
-                    stage
-                )
-                .await
-                .is_err()
-            );
-            assert_eq!(
-                publication_snapshot(&db, "p-rollback").await,
-                before,
-                "stage {stage:?} leaked a transaction write"
-            );
-        }
-    }
-}
+#[cfg(test)]
+#[path = "repo_graph_generation_tests.rs"]
+mod tests;
