@@ -49,6 +49,52 @@ pub struct HandoffSnapshot {
     pub emergency_acknowledgement_allowed: bool,
 }
 
+/// Exact bounded values for `djinn_build_admission_handoff_warning{reason}`.
+///
+/// Keeping this projection beside the protocol interpreter means startup,
+/// telemetry, and deterministic fakes cannot disagree about which incomplete
+/// durable state is a stale-epoch warning. Valid overlap and steady primary
+/// states intentionally produce all zeroes.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct HandoffWarningGauges {
+    pub unexpected_overlap: u8,
+    pub stale_epoch: u8,
+    pub epoch_unreadable: u8,
+}
+
+impl HandoffSnapshot {
+    /// Project the protocol result into the three and only three warning gauges.
+    #[must_use]
+    pub const fn warning_gauges(&self) -> HandoffWarningGauges {
+        match self.state {
+            HandoffState::UnexpectedOverlap => HandoffWarningGauges {
+                unexpected_overlap: 1,
+                stale_epoch: 0,
+                epoch_unreadable: 0,
+            },
+            HandoffState::IncompleteEpoch => HandoffWarningGauges {
+                unexpected_overlap: 0,
+                stale_epoch: 1,
+                epoch_unreadable: 0,
+            },
+            HandoffState::EpochUnreadable => HandoffWarningGauges {
+                unexpected_overlap: 0,
+                stale_epoch: 0,
+                epoch_unreadable: 1,
+            },
+            HandoffState::MissingRow
+            | HandoffState::EmergencyPrimary
+            | HandoffState::ForwardOverlap
+            | HandoffState::InvocationPrimary
+            | HandoffState::RollbackOverlap => HandoffWarningGauges {
+                unexpected_overlap: 0,
+                stale_epoch: 0,
+                epoch_unreadable: 0,
+            },
+        }
+    }
+}
+
 /// Evaluate the durable row before changing the emergency controller.
 ///
 /// Any read failure, stale acknowledgement, or overlap that is not the durable

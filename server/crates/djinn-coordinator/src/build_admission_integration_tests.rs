@@ -6,8 +6,9 @@
 use std::sync::Arc;
 
 use djinn_db::{
-    AdmissionDomain, AdmissionJournalKey, AdmissionJournalRepository, AdmissionState,
-    AdmissionWorkloadKind, Database, ReserveAdmissionInput,
+    AdmissionDomain, AdmissionHandoffAuthority, AdmissionHandoffPhase, AdmissionHandoffRepository,
+    AdmissionJournalKey, AdmissionJournalRepository, AdmissionState, AdmissionWorkloadKind,
+    Database, ReserveAdmissionInput,
 };
 use djinn_k8s::{
     WarmAdmission, WarmAdmissionError, WarmAdmissionPermit, WarmAdmissionRequest,
@@ -18,6 +19,10 @@ use tokio::sync::Barrier;
 use crate::build_admission::{
     AdmissionSeedReport, BuildAdmissionController, BuildAdmissionDecision, BuildAdmissionMode,
     BuildAdmissionReadiness,
+};
+use crate::build_admission_handoff::{
+    EmergencyAuthorityDecision, HandoffState, HandoffWarningGauges, InvocationAuthorityObservation,
+    evaluate_handoff,
 };
 
 fn controller(mode: BuildAdmissionMode, cap: i64) -> BuildAdmissionController {
@@ -841,4 +846,296 @@ async fn forced_loss_safety_depends_on_durable_pre_post_state_not_cooperative_sh
         ),
         "safety depends on durable state, not cooperative shutdown"
     );
+}
+
+#[derive(Clone, Copy, Debug)]
+enum HandoffMatrixAction {
+    Acknowledge(AdmissionHandoffAuthority),
+    Commit(AdmissionHandoffPhase),
+}
+
+fn handoff_next(phase: AdmissionHandoffPhase) -> AdmissionHandoffPhase {
+    match phase {
+        AdmissionHandoffPhase::EmergencyPrimary => AdmissionHandoffPhase::ForwardOverlap,
+        AdmissionHandoffPhase::ForwardOverlap => AdmissionHandoffPhase::InvocationPrimary,
+        AdmissionHandoffPhase::InvocationPrimary => AdmissionHandoffPhase::RollbackOverlap,
+        AdmissionHandoffPhase::RollbackOverlap => AdmissionHandoffPhase::EmergencyPrimary,
+    }
+}
+
+async fn assert_handoff_restart_snapshot(repo: &AdmissionHandoffRepository) {
+    let row = repo.read().await.unwrap().unwrap();
+    let emergency_current = row.emergency_ack_epoch == Some(row.epoch);
+    let invocation_current = row.invocation_ack_epoch == Some(row.epoch);
+    let invocation_enforcing = !matches!(row.phase, AdmissionHandoffPhase::EmergencyPrimary);
+    let emergency_enforcing =
+        !matches!(row.phase, AdmissionHandoffPhase::InvocationPrimary) || !invocation_current;
+    let snapshot = evaluate_handoff(
+        Ok(Some(row.clone())),
+        BuildAdmissionMode::Enforce,
+        emergency_enforcing,
+        BuildAdmissionReadiness::Healthy,
+        InvocationAuthorityObservation {
+            enforcing: invocation_enforcing,
+        },
+    );
+    assert!(emergency_enforcing || invocation_enforcing);
+    assert_eq!(
+        snapshot.emergency_acknowledgement_allowed,
+        emergency_enforcing
+            && !emergency_current
+            && snapshot.emergency == EmergencyAuthorityDecision::RequiredFailClosed,
+    );
+    let complete = match row.phase {
+        AdmissionHandoffPhase::EmergencyPrimary => emergency_current,
+        AdmissionHandoffPhase::ForwardOverlap | AdmissionHandoffPhase::RollbackOverlap => {
+            emergency_current && invocation_current
+        }
+        AdmissionHandoffPhase::InvocationPrimary => invocation_current,
+    };
+    assert_eq!(
+        snapshot.emergency == EmergencyAuthorityDecision::MayDisable,
+        row.phase == AdmissionHandoffPhase::InvocationPrimary && complete,
+    );
+    assert_eq!(
+        snapshot.warning_gauges(),
+        if complete {
+            HandoffWarningGauges::default()
+        } else {
+            HandoffWarningGauges {
+                stale_epoch: 1,
+                ..HandoffWarningGauges::default()
+            }
+        },
+    );
+}
+
+/// Table-driven crash/restart proof for the complete forward and rollback cycle.
+/// Its invocation authority is a typed observation, never a deployed service.
+#[tokio::test]
+async fn handoff_crash_matrix_preserves_authority_and_epoch_guards() {
+    let repo = AdmissionHandoffRepository::new(Database::open_in_memory().unwrap());
+    let actions = [
+        HandoffMatrixAction::Acknowledge(AdmissionHandoffAuthority::Emergency),
+        HandoffMatrixAction::Commit(AdmissionHandoffPhase::ForwardOverlap),
+        HandoffMatrixAction::Acknowledge(AdmissionHandoffAuthority::Emergency),
+        HandoffMatrixAction::Acknowledge(AdmissionHandoffAuthority::Invocation),
+        HandoffMatrixAction::Commit(AdmissionHandoffPhase::InvocationPrimary),
+        HandoffMatrixAction::Acknowledge(AdmissionHandoffAuthority::Invocation),
+        HandoffMatrixAction::Commit(AdmissionHandoffPhase::RollbackOverlap),
+        HandoffMatrixAction::Acknowledge(AdmissionHandoffAuthority::Emergency),
+        HandoffMatrixAction::Acknowledge(AdmissionHandoffAuthority::Invocation),
+        HandoffMatrixAction::Commit(AdmissionHandoffPhase::EmergencyPrimary),
+    ];
+    for action in actions {
+        // Crash immediately before and after each durable acknowledgement/commit.
+        assert_handoff_restart_snapshot(&repo).await;
+        let before = repo.read().await.unwrap().unwrap();
+        match action {
+            HandoffMatrixAction::Acknowledge(authority) => {
+                repo.acknowledge(authority, before.epoch).await.unwrap();
+            }
+            HandoffMatrixAction::Commit(next) => {
+                assert_eq!(next, handoff_next(before.phase));
+                repo.advance(before.epoch, next).await.unwrap();
+            }
+        }
+        assert_handoff_restart_snapshot(&repo).await;
+    }
+
+    let current = repo.read().await.unwrap().unwrap();
+    assert_eq!(current.phase, AdmissionHandoffPhase::EmergencyPrimary);
+    assert!(matches!(
+        repo.acknowledge(AdmissionHandoffAuthority::Emergency, current.epoch - 1)
+            .await,
+        Err(djinn_db::Error::InvalidTransition(_))
+    ));
+    assert!(matches!(
+        repo.advance(current.epoch, AdmissionHandoffPhase::InvocationPrimary)
+            .await,
+        Err(djinn_db::Error::InvalidTransition(_))
+    ));
+    assert!(matches!(
+        repo.advance(current.epoch - 1, AdmissionHandoffPhase::ForwardOverlap)
+            .await,
+        Err(djinn_db::Error::InvalidTransition(_))
+    ));
+
+    let warning_cases = [
+        (
+            "read failure",
+            Err(()),
+            true,
+            true,
+            HandoffWarningGauges {
+                epoch_unreadable: 1,
+                ..HandoffWarningGauges::default()
+            },
+        ),
+        (
+            "missing row",
+            Ok(None),
+            true,
+            false,
+            HandoffWarningGauges::default(),
+        ),
+        (
+            "steady overlap",
+            Ok(None),
+            true,
+            true,
+            HandoffWarningGauges {
+                unexpected_overlap: 1,
+                ..HandoffWarningGauges::default()
+            },
+        ),
+        (
+            "valid overlap",
+            Ok(Some(djinn_db::AdmissionHandoffRow {
+                phase: AdmissionHandoffPhase::ForwardOverlap,
+                epoch: 9,
+                emergency_ack_epoch: Some(9),
+                invocation_ack_epoch: Some(9),
+                updated_at: "test".into(),
+            })),
+            true,
+            true,
+            HandoffWarningGauges::default(),
+        ),
+        (
+            "stale acknowledgement",
+            Ok(Some(djinn_db::AdmissionHandoffRow {
+                phase: AdmissionHandoffPhase::RollbackOverlap,
+                epoch: 9,
+                emergency_ack_epoch: Some(8),
+                invocation_ack_epoch: Some(9),
+                updated_at: "test".into(),
+            })),
+            true,
+            true,
+            HandoffWarningGauges {
+                stale_epoch: 1,
+                ..HandoffWarningGauges::default()
+            },
+        ),
+    ];
+    for (name, row, emergency, invocation, expected) in warning_cases {
+        let snapshot = evaluate_handoff(
+            row,
+            BuildAdmissionMode::Enforce,
+            emergency,
+            BuildAdmissionReadiness::Healthy,
+            InvocationAuthorityObservation {
+                enforcing: invocation,
+            },
+        );
+        assert_eq!(snapshot.warning_gauges(), expected, "{name}");
+    }
+    assert_eq!(
+        evaluate_handoff(
+            Ok(Some(current)),
+            BuildAdmissionMode::Enforce,
+            true,
+            BuildAdmissionReadiness::Healthy,
+            InvocationAuthorityObservation::default(),
+        )
+        .state,
+        HandoffState::IncompleteEpoch,
+    );
+}
+
+#[tokio::test]
+async fn concurrent_invocation_children_share_parent_observation_without_v0_occupancy() {
+    let controller = controller(BuildAdmissionMode::Enforce, 1);
+    let BuildAdmissionDecision::Permitted { permit: parent, .. } = controller
+        .admit_task_run(
+            Some("worker"),
+            AdmissionDomain::TaskObservation,
+            "shared-identity".into(),
+            0,
+            "parent-observation".into(),
+        )
+        .await
+        .unwrap()
+    else {
+        panic!("parent observation reserves the one v0 slot");
+    };
+    let mut children = Vec::new();
+    for child in ["invocation-a", "invocation-b", "invocation-c"] {
+        let BuildAdmissionDecision::Permitted { permit, .. } = controller
+            .admit_task_run(
+                Some("worker"),
+                AdmissionDomain::InvocationBuild,
+                child.into(),
+                0,
+                format!("{child}-job"),
+            )
+            .await
+            .unwrap()
+        else {
+            panic!("concurrent invocation child must not self-block parent");
+        };
+        children.push((child, permit));
+    }
+    assert_eq!(
+        controller
+            .journal()
+            .count_task_or_warm_occupancy()
+            .await
+            .unwrap(),
+        1,
+        "three simultaneously acquired invocation leases never double-count parent occupancy"
+    );
+    for (child, permit) in children {
+        controller
+            .transition(&permit, WarmAdmissionTransition::CreateStarted)
+            .await
+            .unwrap();
+        controller
+            .transition(
+                &permit,
+                WarmAdmissionTransition::Live {
+                    uid: format!("{child}-uid"),
+                },
+            )
+            .await
+            .unwrap();
+        controller
+            .transition(
+                &permit,
+                WarmAdmissionTransition::Terminal {
+                    uid: format!("{child}-uid"),
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            controller
+                .journal()
+                .list_history(AdmissionDomain::InvocationBuild, child)
+                .await
+                .unwrap()
+                .len(),
+            1,
+            "invocation identity retains a separate durable view"
+        );
+    }
+    assert_eq!(
+        controller
+            .journal()
+            .count_task_or_warm_occupancy()
+            .await
+            .unwrap(),
+        1,
+        "child release cannot release or collide with the parent observation"
+    );
+    controller
+        .transition(
+            &parent,
+            WarmAdmissionTransition::DefinitiveFailure {
+                diagnostic: "parent cleanup".into(),
+            },
+        )
+        .await
+        .unwrap();
 }
