@@ -3,6 +3,7 @@ use djinn_db::{
     CreateTaskRunParams, Database, TaskRunRepository,
     test_support::{UsageTestTaskSeed, drop_table_cascade_for_test, seed_project, seed_task_row},
 };
+use matrix::snapshot_bytes;
 
 /// Create a bare git repository at `work/mirror.git` with one commit.
 /// Returns the commit SHA.
@@ -465,23 +466,33 @@ async fn valid_destination_plus_dirty_legacy_fails_closed() {
     let project_path = fx.project_legacy_path();
     make_clean_checkout(&fx.mirror_path, &project_path);
     fs::write(project_path.join("README.md"), "dirty\n").unwrap();
+    let dest_before = snapshot_bytes(&dest);
+    let legacy_before = snapshot_bytes(&project_path);
 
     let migrator = fx.migrator();
     let result = migrator
         .migrate(fx.request(vec![fx.legacy_input(LegacyKind::ProjectLocal)]))
         .await;
     assert!(result.is_err(), "must fail closed with dirty legacy input");
-    // Destination preserved byte-for-byte.
     assert_eq!(
         classify(&dest, &fx.target_commit),
         ReadSourcePathState::Clean {
             commit: fx.target_commit.clone()
         }
     );
-    // Legacy input preserved (dirty).
     assert_eq!(
         classify(&project_path, &fx.target_commit),
         ReadSourcePathState::DirtyTracked
+    );
+    assert_eq!(
+        snapshot_bytes(&dest),
+        dest_before,
+        "valid destination preserved byte-for-byte"
+    );
+    assert_eq!(
+        snapshot_bytes(&project_path),
+        legacy_before,
+        "dirty legacy preserved byte-for-byte"
     );
 }
 
@@ -1080,3 +1091,154 @@ fn classify_file() {
     fs::write(&file, "x").unwrap();
     assert_eq!(classify(&file, "abc"), ReadSourcePathState::File);
 }
+
+#[test]
+fn classify_special_file_fifo() {
+    let tmp = tempfile::tempdir().unwrap();
+    let fifo = tmp.path().join("fifo");
+    // Create a named pipe (fifo) — a platform-supported special file.
+    let status = std::process::Command::new("mkfifo")
+        .arg(&fifo)
+        .status()
+        .expect("mkfifo available on unix");
+    assert!(status.success(), "mkfifo should succeed");
+    assert_eq!(classify(&fifo, "abc"), ReadSourcePathState::Special);
+}
+
+#[test]
+fn classify_symlink_inside_directory_tree() {
+    // A symlink inside the directory tree is classified as Symlink, not
+    // conflated to UnknownEntry.
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    std::os::unix::fs::symlink("/etc/hostname", repo.join("dangling-link")).unwrap();
+    assert_eq!(classify(&repo, "abc"), ReadSourcePathState::Symlink);
+}
+
+#[test]
+fn classify_special_inside_directory_tree() {
+    // A special file inside the directory tree is classified as Special.
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    let fifo = repo.join("myfifo");
+    let status = std::process::Command::new("mkfifo")
+        .arg(&fifo)
+        .status()
+        .expect("mkfifo available on unix");
+    assert!(status.success());
+    assert_eq!(classify(&repo, "abc"), ReadSourcePathState::Special);
+}
+
+#[test]
+fn classify_invalid_git() {
+    // A directory that is not a git repository returns InvalidGit.
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().join("not-a-repo");
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(dir.join("file.txt"), "content").unwrap();
+    assert_eq!(classify(&dir, "abc"), ReadSourcePathState::InvalidGit);
+}
+
+#[test]
+fn classify_clean_detached() {
+    // A clean detached checkout at the target commit returns Clean.
+    let tmp = tempfile::tempdir().unwrap();
+    let commit = init_bare_mirror(tmp.path());
+    let checkout = tmp.path().join("checkout");
+    make_clean_checkout(&tmp.path().join("mirror.git"), &checkout);
+    assert_eq!(
+        classify(&checkout, &commit),
+        ReadSourcePathState::Clean {
+            commit: commit.clone()
+        }
+    );
+}
+
+#[test]
+fn classify_on_branch() {
+    // A checkout on a branch (not detached) returns OnBranch.
+    let tmp = tempfile::tempdir().unwrap();
+    let source = tmp.path().join("source");
+    fs::create_dir_all(&source).unwrap();
+    run_git(&source, &["init"]);
+    run_git(&source, &["config", "user.email", "t@t.com"]);
+    run_git(&source, &["config", "user.name", "T"]);
+    fs::write(source.join("file"), "x").unwrap();
+    run_git(&source, &["add", "."]);
+    run_git(&source, &["commit", "-m", "x"]);
+    // On a branch (master/main), not detached.
+    assert_eq!(classify(&source, "abc"), ReadSourcePathState::OnBranch);
+}
+
+#[test]
+fn classify_identity_mismatch() {
+    // A clean detached checkout at a different commit returns IdentityMismatch.
+    let tmp = tempfile::tempdir().unwrap();
+    let _ = init_bare_mirror(tmp.path());
+    let checkout = tmp.path().join("checkout");
+    make_clean_checkout(&tmp.path().join("mirror.git"), &checkout);
+    assert_eq!(
+        classify(&checkout, "wrongcommit"),
+        ReadSourcePathState::IdentityMismatch {
+            commit: git(&checkout, &["rev-parse", "HEAD"]).unwrap(),
+        }
+    );
+}
+
+#[test]
+fn classify_staged_dirty_tracked() {
+    // Staged-only modifications (`M ` index column) are classified as DirtyTracked.
+    let tmp = tempfile::tempdir().unwrap();
+    let source = tmp.path().join("source");
+    fs::create_dir_all(&source).unwrap();
+    run_git(&source, &["init"]);
+    run_git(&source, &["config", "user.email", "t@t.com"]);
+    run_git(&source, &["config", "user.name", "T"]);
+    fs::write(source.join("file"), "original").unwrap();
+    run_git(&source, &["add", "."]);
+    run_git(&source, &["commit", "-m", "x"]);
+    // Stage a modification.
+    fs::write(source.join("file"), "modified").unwrap();
+    run_git(&source, &["add", "."]);
+    // Detach HEAD so it's not OnBranch.
+    let head = git(&source, &["rev-parse", "HEAD"]).unwrap();
+    run_git(&source, &["checkout", "--detach", &head]);
+    assert_eq!(classify(&source, &head), ReadSourcePathState::DirtyTracked);
+}
+
+#[test]
+fn classify_unstaged_dirty_tracked() {
+    // Unstaged-only modifications (` M` worktree column) are classified as DirtyTracked.
+    let tmp = tempfile::tempdir().unwrap();
+    let source = tmp.path().join("source");
+    fs::create_dir_all(&source).unwrap();
+    run_git(&source, &["init"]);
+    run_git(&source, &["config", "user.email", "t@t.com"]);
+    run_git(&source, &["config", "user.name", "T"]);
+    fs::write(source.join("file"), "original").unwrap();
+    run_git(&source, &["add", "."]);
+    run_git(&source, &["commit", "-m", "x"]);
+    // Unstaged modification.
+    fs::write(source.join("file"), "modified").unwrap();
+    // Detach HEAD so it's not OnBranch.
+    let head = git(&source, &["rev-parse", "HEAD"]).unwrap();
+    run_git(&source, &["checkout", "--detach", &head]);
+    assert_eq!(classify(&source, &head), ReadSourcePathState::DirtyTracked);
+}
+
+#[test]
+fn classify_untracked_in_subdir() {
+    // Untracked content in a subdirectory is classified as Untracked.
+    let tmp = tempfile::tempdir().unwrap();
+    let _ = init_bare_mirror(tmp.path());
+    let checkout = tmp.path().join("checkout");
+    make_clean_checkout(&tmp.path().join("mirror.git"), &checkout);
+    let head = git(&checkout, &["rev-parse", "HEAD"]).unwrap();
+    fs::create_dir_all(checkout.join("subdir")).unwrap();
+    fs::write(checkout.join("subdir/untracked.txt"), "stuff").unwrap();
+    assert_eq!(classify(&checkout, &head), ReadSourcePathState::Untracked);
+}
+
+mod matrix;
