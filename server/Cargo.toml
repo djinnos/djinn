@@ -32,7 +32,7 @@ path = "src/bin/export_usage_schema.rs"
 default = []
 qdrant = ["djinn-db/qdrant"]
 vendored = ["git2/vendored-libgit2", "git2/vendored-openssl"]
-test-support = []
+test-support = ["dep:tower"]
 
 [dependencies]
 djinn-agent = { path = "crates/djinn-agent" }
@@ -98,6 +98,11 @@ petgraph = "0.8"
 scip = "0.7"
 globset = "0.4"
 tempfile = "3"
+# Optional: gated on `test-support` so `test_helpers::oneshot` works in
+# integration tests.  Declared as a regular (optional) dependency, not a
+# dev-dependency, because dev-deps are absent when the crate is compiled as
+# a dependency of another crate's test binary with `test-support` enabled.
+tower = { version = "0.5", features = ["util"], optional = true }
 workspace-hack.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
@@ -112,7 +117,6 @@ insta = { version = "1", features = ["json", "redactions"] }
 proptest = "1"
 rstest = "0.24"
 tokio = { version = "1", features = ["test-util"] }
-tower = { version = "0.5", features = ["util"] }
 
 [profile.dev]
 debug = "line-tables-only"

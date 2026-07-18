@@ -140,6 +140,12 @@ pub struct StreamTurnState {
     pub turn_flushed: bool,
 }
 
+impl Default for StreamTurnState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl StreamTurnState {
     pub fn new() -> Self {
         Self {

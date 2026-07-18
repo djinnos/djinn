@@ -15,9 +15,13 @@ pub mod error_handling;
 pub mod loop_guard;
 #[cfg(any(test, feature = "test-support"))]
 pub mod persistence;
+#[cfg(not(any(test, feature = "test-support")))]
+mod persistence;
 pub mod phase;
 #[cfg(any(test, feature = "test-support"))]
 pub mod streaming;
+#[cfg(not(any(test, feature = "test-support")))]
+mod streaming;
 mod tool_dispatch;
 #[cfg(any(test, feature = "test-support"))]
 pub mod turn;
