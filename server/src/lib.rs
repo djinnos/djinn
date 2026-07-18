@@ -1,5 +1,6 @@
 #![warn(unreachable_pub)]
 
+pub mod allocator;
 pub mod codex_keepalive;
 pub mod db;
 pub mod error;
