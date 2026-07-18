@@ -196,31 +196,26 @@ jobs:
           echo "::notice::cache-family=server-quality shared-key=server-quality cache-hit=${{ steps.rust-cache.outputs.cache-hit }}"
       - name: Build workspace (populate cache)
         run: cargo clippy --all-targets --features qdrant -- -D warnings
-  # The server-test cache family is arm64: the test lane (planner, shards,
-  # qa-smoke) runs on GitHub's free-for-public-repos ubuntu-24.04-arm
-  # runners (4 vCPU Cobalt 100, measurably faster than the x64 hosted
-  # tier). workflow_dispatch is a supported warm route so the arm cache
-  # can be (re)seeded on demand — e.g. from a branch before a runner
+  # workflow_dispatch is a supported warm route so the test cache can be
+  # (re)seeded on demand — e.g. from a branch before a cache-family
   # migration lands — not just on main pushes. The push-only admission
   # delay lives inline as a step because a `needs: main-admission` edge
   # would auto-skip this job on dispatch (skipped dependency).
-  cache-warm-arm64-test:
-    name: Cache Warm arm64 (Test)
+  # NOTE: a full arm64 trial (2026-07-18, PR #2275 branch) measured
+  # GitHub's free ubuntu-24.04-arm runners ~2.3x slower on warm builds
+  # and ~25% slower on test execution than x64 for this workspace —
+  # keep the lane on x64 unless those runners improve.
+  cache-warm-x86_64-test:
+    name: Cache Warm x86_64 (Test)
     needs:
       - preflight
     if: (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && needs.preflight.outputs.serverTest == 'true'
-    runs-on: ubuntu-24.04-arm
+    runs-on: ubuntu-latest
     defaults:
       run:
         working-directory: server
     env:
       SQLX_OFFLINE: "true"
-      # +fp16 is required on aarch64: gemm-f16 (candle dependency) emits
-      # fullfp16 instructions that the baseline aarch64 target rejects.
-      # Cobalt 100 (Neoverse N2) supports the feature natively. Must be
-      # identical across every server-test cache family job so the cache
-      # stays coherent.
-      RUSTFLAGS: -D warnings -C target-feature=+fp16
     steps:
       - name: Main admission delay
         if: github.event_name == 'push'
@@ -476,15 +471,12 @@ jobs:
     name: Plan Server Test Shards
     needs: preflight
     if: needs.preflight.outputs.serverTest == 'true' && github.event_name != 'push'
-    runs-on: ubuntu-24.04-arm
+    runs-on: ubuntu-latest
     outputs:
       matrix: ${{ steps.plan.outputs.matrix }}
       coldStart: ${{ steps.plan.outputs.coldStart }}
     env:
       SQLX_OFFLINE: "true"
-      # Keep identical to every other server-test cache family job (see
-      # cache-warm-arm64-test): gemm-f16 needs +fp16 on aarch64.
-      RUSTFLAGS: -D warnings -C target-feature=+fp16
     steps:
       - uses: actions/checkout@v4
       - run: rustup toolchain install
@@ -652,11 +644,7 @@ jobs:
     needs:
       - preflight
     if: needs.preflight.outputs.serverTest == 'true' && github.event_name != 'push'
-    runs-on: ubuntu-24.04-arm
-    env:
-      # Keep identical to every other server-test cache family job (see
-      # cache-warm-arm64-test): gemm-f16 needs +fp16 on aarch64.
-      RUSTFLAGS: -D warnings -C target-feature=+fp16
+    runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
@@ -690,10 +678,13 @@ jobs:
           sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc
       - name: Install PostgreSQL client tools
         run: |
-          # The arm64 hosted runner images do not preinstall postgresql-client
-          # (the x64 images do). Without it, pg_isready/psql are missing and
-          # the template-database wait loop below spins forever.
-          sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends postgresql-client
+          # The x64 hosted runner images preinstall postgresql-client; the
+          # arm64 images do not, and without it pg_isready/psql are missing
+          # and the template-database wait loop below spins forever. Guarded
+          # so it is a no-op wherever the client already exists.
+          if ! command -v pg_isready >/dev/null 2>&1; then
+            sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends postgresql-client
+          fi
       - name: Start fail-fast watcher (background)
         env:
           GH_TOKEN: ${{ github.token }}
@@ -1158,7 +1149,7 @@ jobs:
     name: qa-smoke
     needs: preflight
     if: needs.preflight.outputs.qaSmoke == 'true' && (github.event_name == 'pull_request' || github.event_name == 'merge_group' || github.event_name == 'workflow_dispatch')
-    runs-on: ubuntu-24.04-arm
+    runs-on: ubuntu-latest
     defaults:
       run:
         working-directory: server
@@ -1167,9 +1158,6 @@ jobs:
     env:
       DJINN_TEST_DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5433/postgres
       DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5433/djinn_test_template
-      # Keep identical to every other server-test cache family job (see
-      # cache-warm-arm64-test): gemm-f16 needs +fp16 on aarch64.
-      RUSTFLAGS: -D warnings -C target-feature=+fp16
     services:
       postgres:
         image: postgres:16
@@ -1182,10 +1170,13 @@ jobs:
       - uses: actions/checkout@v4
       - name: Install PostgreSQL client tools
         run: |
-          # The arm64 hosted runner images do not preinstall postgresql-client
-          # (the x64 images do). Without it, pg_isready/psql are missing and
-          # the template-database wait loop below spins forever.
-          sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends postgresql-client
+          # The x64 hosted runner images preinstall postgresql-client; the
+          # arm64 images do not, and without it pg_isready/psql are missing
+          # and the template-database wait loop below spins forever. Guarded
+          # so it is a no-op wherever the client already exists.
+          if ! command -v pg_isready >/dev/null 2>&1; then
+            sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends postgresql-client
+          fi
       - run: rustup toolchain install
       - uses: Swatinem/rust-cache@v2
         with:

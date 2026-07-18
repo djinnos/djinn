@@ -9,7 +9,7 @@ const WORKFLOW = resolve('.github/workflows/quality-gate.yml');
 // adding its owner here before it can be used in the quality-gate workflow.
 const CACHE_OWNERS = new Map([
   ['server-quality', 'cache-warm-x86_64-quality'],
-  ['server-test', 'cache-warm-arm64-test'],
+  ['server-test', 'cache-warm-x86_64-test'],
   ['server-aarch64-check', 'cache-warm-aarch64'],
 ]);
 
