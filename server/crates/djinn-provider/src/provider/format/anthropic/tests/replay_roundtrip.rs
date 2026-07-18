@@ -12,9 +12,10 @@ use crate::provider::StreamEvent;
 use serde_json::json;
 
 /// Parse a sequence of Anthropic SSE events and return the completed content
-/// blocks (the `StreamEvent::Delta(ContentBlock)` values) in the order they are
-/// emitted. This mirrors how the reply loop would consume the provider stream
-/// before persisting the shared blocks.
+/// blocks in the order they are emitted. Ordinary blocks arrive as
+/// `StreamEvent::Delta(ContentBlock)`, while completed thinking is carried only
+/// by `ThinkingBlockComplete`; this mirrors how production consumers
+/// materialize the load-bearing completion payload before persistence.
 fn parse_event_sequence(events: &[(&str, &str)]) -> Vec<ContentBlock> {
     let mut acc = ContentBlockAcc::default();
     let mut input_tokens = 0u32;
@@ -30,8 +31,17 @@ fn parse_event_sequence(events: &[(&str, &str)]) -> Vec<ContentBlock> {
             &mut cache_read,
             &mut cache_write,
         ) {
-            if let StreamEvent::Delta(block) = event {
-                blocks.push(block);
+            match event {
+                StreamEvent::Delta(block) => blocks.push(block),
+                StreamEvent::ThinkingBlockComplete {
+                    thinking,
+                    signature,
+                    ..
+                } => blocks.push(ContentBlock::Thinking {
+                    thinking,
+                    signature,
+                }),
+                _ => {}
             }
         }
     }

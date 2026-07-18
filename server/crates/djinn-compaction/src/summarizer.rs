@@ -148,7 +148,10 @@ async fn call_llm_for_summary(
                 saw_done = true;
                 break;
             }
-            StreamEvent::Usage(_) | StreamEvent::Thinking(_) => {}
+            StreamEvent::Usage(_)
+            | StreamEvent::Thinking(_)
+            | StreamEvent::ThinkingDelta { .. }
+            | StreamEvent::ThinkingBlockComplete { .. } => {}
         }
     }
 
