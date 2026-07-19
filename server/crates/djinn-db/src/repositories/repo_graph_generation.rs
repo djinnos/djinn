@@ -1044,7 +1044,7 @@ impl RepoGraphGenerationRepository {
         project_id: &str,
         chunk_index: i32,
     ) -> Result<()> {
-        sqlx::query("UPDATE repo_graph_galaxy_chunk k SET bytes = decode('00', 'hex') FROM repo_graph_current c JOIN repo_graph_galaxy_artifact a ON a.generation_id = c.generation_id WHERE c.project_id = $1 AND k.generation_id = a.generation_id AND k.artifact_id = a.artifact_id AND k.chunk_index = $2").bind(project_id).bind(chunk_index).execute(self.db.pool()).await?;
+        sqlx::query("UPDATE repo_graph_galaxy_chunk k SET bytes = decode('00', 'hex'), byte_count = 1 FROM repo_graph_current c JOIN repo_graph_galaxy_artifact a ON a.generation_id = c.generation_id WHERE c.project_id = $1 AND k.generation_id = a.generation_id AND k.artifact_id = a.artifact_id AND k.chunk_index = $2").bind(project_id).bind(chunk_index).execute(self.db.pool()).await?;
         Ok(())
     }
     #[cfg(any(test, feature = "test-support"))]
