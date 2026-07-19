@@ -190,6 +190,11 @@ pub use repositories::{
         generation_stream_pin_key, release_generation_stream_pin_exclusive,
         release_generation_stream_pin_shared, try_acquire_generation_stream_pin_exclusive,
     },
+    repo_graph_retention::{
+        DEFAULT_RETENTION_HISTORY_N, MAX_RETENTION_BATCH, MIN_RETENTION_HISTORY_N,
+        RepoGraphRetentionRepository, RetentionMode, RetentionSkipClass, RetentionSweepOutcome,
+        RetentionSweepRequest,
+    },
     scip_indexer_timing::{
         ScipIndexerTiming, ScipIndexerTimingObservation, ScipIndexerTimingRepository,
         TIMING_STATUS_FAILED, TIMING_STATUS_SUCCESS, TIMING_STATUS_TIMED_OUT,
