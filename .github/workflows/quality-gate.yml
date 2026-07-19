@@ -49,6 +49,10 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+      - name: Verify mold Debian snapshot contracts
+        run: |
+          ./scripts/test-mold-debian-snapshot-contract.sh
+          ./scripts/test-mold-debian-snapshot-contract-regressions.sh
       - name: Verify routed-scope contract
         run: node --test scripts/ci-changed-scope.test.mjs
       - name: Verify cache ownership policy
