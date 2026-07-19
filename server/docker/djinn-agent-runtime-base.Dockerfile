@@ -86,7 +86,11 @@ ENV DEBIAN_FRONTEND=noninteractive
 
 # Shared with scripts/install-rust.sh. The audited snapshot/version and amd64+
 # arm64 availability are recorded in docs/MOLD_DEBIAN_SNAPSHOT.md.
-ARG DEBIAN_SNAPSHOT_URL=https://snapshot.debian.org/archive/debian/20250401T000000Z
+# Plain http: snapshot.debian.org's Fastly edge intermittently fails TLS
+# verification from GitHub runners (two consecutive release failures on
+# 2026-07-19). Integrity does not depend on the transport — apt verifies the
+# snapshot's signed InRelease and per-package SHA256s either way.
+ARG DEBIAN_SNAPSHOT_URL=http://snapshot.debian.org/archive/debian/20250401T000000Z
 ARG MOLD_VERSION=2.37.1+dfsg-1
 
 # Runtime + build toolchain deps. Kept in one RUN so apt layer size stays
