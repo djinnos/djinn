@@ -516,7 +516,7 @@ mod tests {
         assert_eq!(envs.get("CARGO_HOME").copied(), Some("/cache/cargo"));
         assert_eq!(
             envs.get("CARGO_TARGET_DIR").copied(),
-            Some("/cache/cargo-target/proj-xyz"),
+            Some("/cache/cargo-target/proj-xyz/mold-jobs-4"),
         );
         // CARGO_INCREMENTAL=1 + RUSTC_WRAPPER="": all djinn build pods share one
         // incremental-on, sccache-off strategy so the warm seed is reusable.
@@ -537,7 +537,7 @@ mod tests {
         // identically to the task-run pods that seed from it.
         assert_eq!(
             envs.get("CARGO_BUILD_RUSTFLAGS").copied(),
-            Some("-Clink-arg=-fuse-ld=mold"),
+            Some("-Clink-arg=-fuse-ld=mold -Clink-arg=-Wl,--threads=4"),
         );
         // Cargo/nextest parallelism is pinned to the WARM pod's OWN CPU limit
         // (warm_cpu_limit default "4"), not the host core count — the same
@@ -726,18 +726,52 @@ mod tests {
         );
         assert_eq!(
             target_dir,
-            format!("{}/cargo-target/lock-project", crate::job::CACHE_MOUNT_DIR)
+            format!(
+                "{}/cargo-target/lock-project/mold-jobs-7",
+                crate::job::CACHE_MOUNT_DIR
+            )
         );
         assert_eq!(env.get("CARGO_INCREMENTAL").copied(), Some("1"));
         assert_eq!(env.get("CARGO_HOME").copied(), Some("/cache/cargo"));
         assert_eq!(env.get("RUSTC_WRAPPER").copied(), Some(""));
         assert_eq!(
             env.get("CARGO_BUILD_RUSTFLAGS").copied(),
-            Some("-Clink-arg=-fuse-ld=mold")
+            Some("-Clink-arg=-fuse-ld=mold -Clink-arg=-Wl,--threads=7")
         );
         assert_eq!(env.get("SQLX_OFFLINE").copied(), Some("true"));
         assert_eq!(env.get("CARGO_BUILD_JOBS").copied(), Some("7"));
         assert_eq!(env.get("NEXTEST_TEST_THREADS").copied(), Some("7"));
+    }
+
+    #[test]
+    fn warm_manifest_keys_subcore_limit_as_mold_jobs_one() {
+        let mut cfg = KubernetesConfig::for_testing();
+        cfg.warm_cpu_limit = "500m".into();
+        let job = build_warm_job(&cfg, "mold-one", "example/warm:latest", None);
+        let container = &job
+            .spec
+            .as_ref()
+            .and_then(|spec| spec.template.spec.as_ref())
+            .expect("pod spec")
+            .containers[0];
+        let env: BTreeMap<&str, &str> = container
+            .env
+            .as_ref()
+            .expect("container environment")
+            .iter()
+            .map(|entry| (entry.name.as_str(), entry.value.as_deref().unwrap_or_default()))
+            .collect();
+
+        assert_eq!(
+            env.get("CARGO_TARGET_DIR").copied(),
+            Some("/cache/cargo-target/mold-one/mold-jobs-1")
+        );
+        assert_eq!(env.get("CARGO_BUILD_JOBS").copied(), Some("1"));
+        assert_eq!(env.get("NEXTEST_TEST_THREADS").copied(), Some("1"));
+        assert_eq!(
+            env.get("CARGO_BUILD_RUSTFLAGS").copied(),
+            Some("-Clink-arg=-fuse-ld=mold -Clink-arg=-Wl,--threads=1")
+        );
     }
 
     #[test]
