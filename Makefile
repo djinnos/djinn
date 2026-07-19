@@ -29,12 +29,12 @@ test-db-migrate: ## Bootstrap and migrate test Postgres; requires TEST_DB_MIGRAT
 	@test -n "$(strip $(TEST_DB_MIGRATION_GITHUB_ID))" || { echo "ERROR: TEST_DB_MIGRATION_GITHUB_ID is required" >&2; exit 2; }
 	@test -n "$(strip $(TEST_DB_MIGRATION_GITHUB_LOGIN))" || { echo "ERROR: TEST_DB_MIGRATION_GITHUB_LOGIN is required" >&2; exit 2; }
 	@until docker exec djinn-postgres-test pg_isready -U postgres >/dev/null 2>&1; do sleep 1; done
-	@cd $(SERVER_DIR) && DJINN_DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5433/djinn cargo run -p djinn-server -- \
+	@cd $(SERVER_DIR) && DJINN_DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5433/djinn cargo run -p djinn-server --bin djinn-server -- \
 		--bootstrap-designated-operator-only \
 		--migration-designated-operator-user-id "$(TEST_DB_MIGRATION_USER_ID)" \
 		--bootstrap-designated-operator-github-id "$(TEST_DB_MIGRATION_GITHUB_ID)" \
 		--bootstrap-designated-operator-github-login "$(TEST_DB_MIGRATION_GITHUB_LOGIN)" >/dev/null
-	@cd $(SERVER_DIR) && DJINN_DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5433/djinn cargo run -p djinn-server -- \
+	@cd $(SERVER_DIR) && DJINN_DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5433/djinn cargo run -p djinn-server --bin djinn-server -- \
 		--migrate-only \
 		--migration-designated-operator-user-id "$(TEST_DB_MIGRATION_USER_ID)" >/dev/null
 
