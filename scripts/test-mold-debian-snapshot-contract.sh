@@ -56,15 +56,23 @@ verify_snapshot_source() {
     local snapshot_reference="$3"
     local source_line
     local line
+    local source_paths
+    local found_source_line=0
 
     source_line="printf 'deb [check-valid-until=no] %s trixie main\\n' ${snapshot_reference} > /etc/apt/sources.list.d/mold-snapshot.list"
     while IFS= read -r line; do
         [[ "$line" == *'/etc/apt/sources.list'* ]] || continue
+        # A logical command can contain several `&&`-joined source writes.
+        # Require its sole source-list reference to be the mold snapshot list,
+        # rather than accepting a valid write alongside an alternate one.
+        source_paths="$(grep -Eo '/etc/apt/sources\.list(\.d/[[:alnum:]_.-]+)?' <<<"$line" || true)"
+        [[ "$source_paths" == '/etc/apt/sources.list.d/mold-snapshot.list' ]] \
+            || fail "alternate apt source configuration in ${file#$REPO_ROOT/}: $line"
         [[ "$line" == *"$source_line"* ]] \
             || fail "alternate apt source configuration in ${file#$REPO_ROOT/}: $line"
         found_source_line=1
     done < <(logical_commands "$file")
-    [[ "${found_source_line:-}" == 1 ]] \
+    [[ "$found_source_line" == 1 ]] \
         || fail "apt source does not consume its declared Debian snapshot in ${file#$REPO_ROOT/}"
 
     # A literal alternate snapshot URL can otherwise bypass the declaration
