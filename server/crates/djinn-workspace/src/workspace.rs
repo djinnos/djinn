@@ -737,13 +737,105 @@ impl Workspace {
     ///
     /// Refspec is `branch:branch`; the source must be a local ref in this
     /// workspace.
+    ///
+    /// Non-fast-forward reconciliation: a rejection because origin's branch
+    /// carries commits this workspace lacks is *deterministic* — the caller's
+    /// sleep-and-repeat retry loop would fail it identically on every attempt
+    /// (the task unmh failure, 2026-07-19). So on exactly that class of
+    /// rejection we make ONE fetch + rebase attempt and re-push. Rebase (not
+    /// merge, and emphatically not `--force`) is the only safe reconciliation
+    /// here: the mirror's copy of the branch may hold durable work from an
+    /// earlier attempt that exists nowhere else, so remote commits are
+    /// replayed under ours rather than overwritten. If the rebase cannot be
+    /// completed (real conflict, dirty tree) the push fails loudly with the
+    /// reason attached — no force-push fallback.
+    ///
+    /// Mirrors the proven conflict handling in
+    /// `djinn-agent-worker`'s `checkpoint::push_with_lease_retry`, minus its
+    /// alternate-checkpoint-ref escape hatch (that path exists to preserve
+    /// speculative checkpoints; this one must land on the canonical branch or
+    /// fail).
     pub async fn push_to_origin(&self, branch: &str) -> Result<(), djinn_git::GitError> {
+        let push_err = match self.push_branch_once(branch).await {
+            Ok(()) => return Ok(()),
+            Err(e) => e,
+        };
+
+        // Anything that is not a non-fast-forward rejection (auth, network,
+        // read-only origin) is genuinely transient or fatal — surface it
+        // unchanged so the caller's retry loop keeps its existing semantics.
+        if !is_push_conflict_error(&push_err.to_string()) {
+            return Err(push_err);
+        }
+
+        warn!(
+            branch,
+            error = %push_err,
+            "push_to_origin: non-fast-forward rejection; attempting one fetch+rebase reconciliation"
+        );
+
+        if let Err(reason) = self.rebase_onto_origin(branch).await {
+            return Err(djinn_git::GitError::Other(anyhow::anyhow!(
+                "push_to_origin({branch}): non-fast-forward rejection could not be reconciled: \
+                 {reason}; refusing to force-push (origin may hold the only copy of an earlier \
+                 attempt's work). Original rejection: {push_err}"
+            )));
+        }
+
+        self.push_branch_once(branch).await.map_err(|e| {
+            djinn_git::GitError::Other(anyhow::anyhow!(
+                "push_to_origin({branch}): still rejected after fetch+rebase reconciliation: {e}"
+            ))
+        })
+    }
+
+    /// One bare `git push origin <branch>:<branch>`, no reconciliation.
+    async fn push_branch_once(&self, branch: &str) -> Result<(), djinn_git::GitError> {
         djinn_git::run_git_command(
             self.root.path().to_path_buf(),
             vec!["push".into(), "origin".into(), format!("{branch}:{branch}")],
         )
         .await
         .map(|_| ())
+    }
+
+    /// Fetch `origin/<branch>` and replay the checked-out branch's commits on
+    /// top of it. `Err(reason)` carries a human-readable cause for the log /
+    /// surfaced error.
+    ///
+    /// Deliberately unconditional (no "is HEAD already an ancestor?"
+    /// short-circuit): the failure this defends against is precisely the case
+    /// where the local ref was rewound to base and IS an ancestor of the
+    /// remote tip. `git rebase` fast-forwards in that situation, which is the
+    /// correct outcome — the remote's commits are adopted and nothing local is
+    /// lost. Any in-progress rebase is aborted on failure so the workspace is
+    /// left clean for the caller's retry.
+    async fn rebase_onto_origin(&self, branch: &str) -> Result<(), String> {
+        self.run_git(&["fetch", "origin", branch], &[])
+            .await
+            .map_err(|e| format!("fetch origin {branch} failed: {e}"))?;
+
+        // Name the branch explicitly rather than relying on HEAD: the push
+        // refspec is `branch:branch`, so the ref that must be reconciled is
+        // `branch` whatever HEAD happens to be (the resume path can leave HEAD
+        // detached). `git rebase <upstream> <branch>` checks it out first.
+        // The replay needs a committer identity — the ephemeral clone has no
+        // git config of its own. Same `djinn-bot` fallback the merge path in
+        // `git_helpers` uses. Only the COMMITTER is set: rebase preserves each
+        // replayed commit's original author, which is what we want.
+        let identity = [
+            ("GIT_COMMITTER_NAME", "djinn-bot"),
+            ("GIT_COMMITTER_EMAIL", "bot@djinn.local"),
+        ];
+        let upstream = format!("origin/{branch}");
+        if let Err(e) = self
+            .run_git(&["rebase", &upstream, branch], &identity)
+            .await
+        {
+            let _ = self.run_git(&["rebase", "--abort"], &[]).await;
+            return Err(format!("rebase onto {upstream} failed: {e}"));
+        }
+        Ok(())
     }
 
     async fn run_git(
@@ -767,6 +859,24 @@ impl Workspace {
         }
         Ok(out.stdout)
     }
+}
+
+/// Does this push stderr describe a non-fast-forward rejection — i.e. origin
+/// holds commits the local ref does not?
+///
+/// Kept byte-identical to `djinn-agent-worker`'s
+/// `checkpoint::is_push_conflict_error`; duplicated rather than shared because
+/// `djinn-workspace` sits below `djinn-agent-worker` in the dependency graph.
+/// Matching on stderr is unavoidable: git returns exit 1 for every push
+/// failure and carries the distinction only in the message.
+fn is_push_conflict_error(stderr: &str) -> bool {
+    let lower = stderr.to_ascii_lowercase();
+    lower.contains("rejected")
+        || lower.contains("non-fast-forward")
+        || lower.contains("failed to push")
+        || lower.contains("stale info")
+        || lower.contains("fetch first")
+        || lower.contains("tip of your current branch is behind")
 }
 
 // ─── git-status porcelain parsing helpers ──────────────────────────────────
