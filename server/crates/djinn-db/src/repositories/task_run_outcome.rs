@@ -462,6 +462,8 @@ mod tests {
                 role: "worker",
                 dispatch_key: "exact-run-1",
                 session_id: None,
+                dispatch_owner_incarnation_id: None,
+                dispatch_group_id: None,
                 attempt_seq: None,
             })
             .await
@@ -474,6 +476,8 @@ mod tests {
                 role: "worker",
                 dispatch_key: "exact-run-2",
                 session_id: None,
+                dispatch_owner_incarnation_id: None,
+                dispatch_group_id: None,
                 attempt_seq: None,
             })
             .await
@@ -490,6 +494,7 @@ mod tests {
                     status: None,
                     workspace_path: None,
                     mirror_ref: None,
+                    dispatch_group_id: None,
                 },
                 &first.id,
             )
@@ -505,6 +510,7 @@ mod tests {
                     status: None,
                     workspace_path: None,
                     mirror_ref: None,
+                    dispatch_group_id: None,
                 },
                 &second.id,
             )
@@ -588,6 +594,8 @@ mod tests {
                 role: "worker",
                 dispatch_key: "exact-run-no-review",
                 session_id: None,
+                dispatch_owner_incarnation_id: None,
+                dispatch_group_id: None,
                 attempt_seq: None,
             })
             .await
@@ -603,6 +611,7 @@ mod tests {
                     status: None,
                     workspace_path: None,
                     mirror_ref: None,
+                    dispatch_group_id: None,
                 },
                 &third.id,
             )

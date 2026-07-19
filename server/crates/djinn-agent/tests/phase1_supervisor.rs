@@ -116,6 +116,8 @@ async fn create_dispatch_attempt(db: &Database, task_id: &str) -> String {
             role: "worker",
             dispatch_key: &dispatch_key,
             session_id: None,
+            dispatch_owner_incarnation_id: None,
+            dispatch_group_id: None,
             attempt_seq: None,
         })
         .await

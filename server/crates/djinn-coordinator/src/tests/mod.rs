@@ -1329,6 +1329,8 @@ async fn seed_terminated_post_intervention_sessions(
                 role: "worker",
                 dispatch_key: &dispatch_key,
                 session_id: Some(&session.id),
+                dispatch_owner_incarnation_id: None,
+                dispatch_group_id: None,
                 attempt_seq: None,
             })
             .await

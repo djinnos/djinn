@@ -361,6 +361,14 @@ pub struct TaskAttempt {
     /// failed after the mirror push succeeded (m116/vy47).  Absent when
     /// no publication failure occurred.
     pub github_publication_error: Option<String>,
+    /// Immutable coordinator-incarnation UUID that owns this dispatch attempt
+    /// (epic jy7g / migration 131).  NULL for legacy rows created before
+    /// dispatch ownership wiring landed; never backfilled.
+    pub dispatch_owner_incarnation_id: Option<String>,
+    /// Dispatch-group UUID correlating the attempt row with its task run and
+    /// sibling attempts of the same logical dispatch (epic jy7g / migration
+    /// 131).  NULL for legacy rows; never backfilled.
+    pub dispatch_group_id: Option<String>,
     pub created_at: String,
     pub updated_at: String,
     pub submitted_at: Option<String>,
@@ -786,6 +794,8 @@ mod tests {
             mirror_head_sha: None,
             github_head_sha: None,
             github_publication_error: None,
+            dispatch_owner_incarnation_id: None,
+            dispatch_group_id: None,
             created_at: "2026-01-01T00:00:00.000Z".to_string(),
             updated_at: "2026-01-01T00:00:00.000Z".to_string(),
             submitted_at: None,
@@ -904,6 +914,8 @@ mod tests {
             mirror_head_sha: Some("mirror-sha".to_string()),
             github_head_sha: Some("github-sha".to_string()),
             github_publication_error: None,
+            dispatch_owner_incarnation_id: None,
+            dispatch_group_id: None,
             created_at: "2026-01-01T00:00:00.000Z".to_string(),
             updated_at: "2026-01-01T01:00:00.000Z".to_string(),
             submitted_at: Some("2026-01-01T00:30:00.000Z".to_string()),
@@ -965,6 +977,8 @@ mod tests {
             mirror_head_sha: None,
             github_head_sha: None,
             github_publication_error: None,
+            dispatch_owner_incarnation_id: None,
+            dispatch_group_id: None,
             created_at: "2026-01-01T00:00:00.000Z".to_string(),
             updated_at: "2026-01-01T00:00:00.000Z".to_string(),
             submitted_at: None,

@@ -38,6 +38,8 @@ async fn seed_terminal_attempt(
             role: "worker",
             dispatch_key,
             session_id: None,
+            dispatch_owner_incarnation_id: None,
+            dispatch_group_id: None,
             attempt_seq: None,
         })
         .await
@@ -121,6 +123,8 @@ async fn load_prior_attempts_excludes_non_terminal_rows() {
         role: "worker",
         dispatch_key: "dk-pending-1",
         session_id: None,
+        dispatch_owner_incarnation_id: None,
+        dispatch_group_id: None,
         attempt_seq: None,
     })
     .await
@@ -135,6 +139,8 @@ async fn load_prior_attempts_excludes_non_terminal_rows() {
             role: "worker",
             dispatch_key: "dk-submitted-1",
             session_id: None,
+            dispatch_owner_incarnation_id: None,
+            dispatch_group_id: None,
             attempt_seq: None,
         })
         .await
@@ -190,6 +196,8 @@ async fn load_prior_attempts_exposes_dto_fields_without_log_tail() {
             role: "worker",
             dispatch_key: "dk-dto-1",
             session_id: None,
+            dispatch_owner_incarnation_id: None,
+            dispatch_group_id: None,
             attempt_seq: None,
         })
         .await
@@ -417,6 +425,8 @@ async fn seed_attempt_with_meta(
             role: "worker",
             dispatch_key,
             session_id: None,
+            dispatch_owner_incarnation_id: None,
+            dispatch_group_id: None,
             attempt_seq: None,
         })
         .await
@@ -834,6 +844,8 @@ async fn prompt_does_not_leak_log_tail_content() {
             role: "worker",
             dispatch_key: "dk-logtail-1",
             session_id: None,
+            dispatch_owner_incarnation_id: None,
+            dispatch_group_id: None,
             attempt_seq: None,
         })
         .await

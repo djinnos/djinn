@@ -1047,6 +1047,8 @@ async fn loop_guard_second_strike_parks_task() {
             role: "worker",
             dispatch_key: "arbiter-ledger-heads",
             session_id: None,
+            dispatch_owner_incarnation_id: None,
+            dispatch_group_id: None,
             attempt_seq: None,
         })
         .await
@@ -3570,6 +3572,8 @@ async fn park_rung_does_not_park_while_submission_pending_review() {
             role: "worker",
             dispatch_key: &format!("submit-pending-review-{}", submit_attempt_id),
             session_id: None,
+            dispatch_owner_incarnation_id: None,
+            dispatch_group_id: None,
             attempt_seq: None,
         })
         .await
@@ -4122,6 +4126,8 @@ async fn arbiter_dispatch_transition_before_activity_failure_recovers_to_single_
             role: "worker",
             dispatch_key: "arbiter-ledger-heads",
             session_id: None,
+            dispatch_owner_incarnation_id: None,
+            dispatch_group_id: None,
             attempt_seq: None,
         })
         .await
@@ -4660,6 +4666,8 @@ async fn arbiter_dossier_includes_attempt_ledger() {
             role: "worker",
             dispatch_key: &format!("ledger-test-sub-{sub_id}"),
             session_id: None,
+            dispatch_owner_incarnation_id: None,
+            dispatch_group_id: None,
             attempt_seq: None,
         })
         .await
@@ -4687,6 +4695,8 @@ async fn arbiter_dossier_includes_attempt_ledger() {
             role: "worker",
             dispatch_key: &format!("ledger-test-rej-{rej_id}"),
             session_id: None,
+            dispatch_owner_incarnation_id: None,
+            dispatch_group_id: None,
             attempt_seq: None,
         })
         .await
@@ -6179,6 +6189,8 @@ async fn try_create_db_error_parks_with_failure_dossier() {
             role: "worker",
             dispatch_key: "try-create-failure-evidence",
             session_id: None,
+            dispatch_owner_incarnation_id: None,
+            dispatch_group_id: None,
             attempt_seq: None,
         })
         .await

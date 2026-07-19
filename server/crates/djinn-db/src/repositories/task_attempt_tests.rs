@@ -67,6 +67,8 @@ async fn concurrent_auto_seq_allocation_retries_past_unique_race() {
                 role: "worker",
                 dispatch_key: &dispatch_key,
                 session_id: None,
+                dispatch_owner_incarnation_id: None,
+                dispatch_group_id: None,
                 attempt_seq: None,
             })
             .await
@@ -118,6 +120,8 @@ async fn completed_blocker_parent_summaries_orders_and_bounds() {
             role: "worker",
             dispatch_key: &format!("dk-parent-{i}"),
             session_id: None,
+            dispatch_owner_incarnation_id: None,
+            dispatch_group_id: None,
             attempt_seq: None,
         })
         .await

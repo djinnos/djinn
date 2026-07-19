@@ -1114,6 +1114,8 @@ impl TaskRunSpecInputs {
                     .unwrap_or("worker"),
                 dispatch_key: &format!("task-run:{task_run_id}"),
                 session_id: None,
+                dispatch_owner_incarnation_id: None,
+                dispatch_group_id: None,
                 attempt_seq: None,
             })
             .await
@@ -2407,6 +2409,8 @@ mod tests {
                 role: "worker",
                 dispatch_key: "task-run:test-terminalize",
                 session_id: None,
+                dispatch_owner_incarnation_id: None,
+                dispatch_group_id: None,
                 attempt_seq: None,
             })
             .await
@@ -2446,6 +2450,8 @@ mod tests {
                 role: "worker",
                 dispatch_key: "task-run:test-terminalize-submitted",
                 session_id: None,
+                dispatch_owner_incarnation_id: None,
+                dispatch_group_id: None,
                 attempt_seq: None,
             })
             .await
@@ -2483,6 +2489,8 @@ mod tests {
                 role: "reviewer",
                 dispatch_key: "task-run:test-terminalize-nonfailed",
                 session_id: None,
+                dispatch_owner_incarnation_id: None,
+                dispatch_group_id: None,
                 attempt_seq: None,
             })
             .await
@@ -2526,6 +2534,8 @@ mod tests {
                 role: "lead",
                 dispatch_key: &format!("{}:lead:test-dispatch-failure", task.id),
                 session_id: None,
+                dispatch_owner_incarnation_id: None,
+                dispatch_group_id: None,
                 attempt_seq: None,
             })
             .await
@@ -2538,6 +2548,8 @@ mod tests {
                 role: "worker",
                 dispatch_key: "task-run:test-dispatch-failure",
                 session_id: None,
+                dispatch_owner_incarnation_id: None,
+                dispatch_group_id: None,
                 attempt_seq: None,
             })
             .await
@@ -2550,6 +2562,8 @@ mod tests {
                 role: "worker",
                 dispatch_key: "task-run:test-dispatch-failure-submitted",
                 session_id: None,
+                dispatch_owner_incarnation_id: None,
+                dispatch_group_id: None,
                 attempt_seq: None,
             })
             .await

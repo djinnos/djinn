@@ -215,6 +215,7 @@ async fn reply_loop_reuse_rejection_matrix_writes_fresh_authoritative_evidence()
                 status: Some("running"),
                 workspace_path: Some(tree.path().to_str().unwrap()),
                 mirror_ref: None,
+                dispatch_group_id: None,
             })
             .await
             .unwrap();
@@ -856,6 +857,7 @@ async fn make_fixture(outcomes: Vec<FinalVerificationRecordingOutcome>) -> TestF
             status: Some("running"),
             workspace_path: Some(worktree.to_str().unwrap()),
             mirror_ref: None,
+            dispatch_group_id: None,
         })
         .await
         .expect("create task run");
@@ -1102,6 +1104,7 @@ async fn repeat_worker_reuses_compatible_persisted_pass_after_completion_intent(
             status: Some("running"),
             workspace_path: Some(tree.path().to_str().unwrap()),
             mirror_ref: None,
+            dispatch_group_id: None,
         })
         .await
         .unwrap();

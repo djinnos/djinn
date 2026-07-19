@@ -1549,6 +1549,8 @@ mod tests {
                 role: "worker",
                 dispatch_key: &format!("dk-{}", uuid::Uuid::now_v7()),
                 session_id: None,
+                dispatch_owner_incarnation_id: None,
+                dispatch_group_id: None,
                 attempt_seq: None,
             })
             .await

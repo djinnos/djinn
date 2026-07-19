@@ -585,6 +585,7 @@ impl RealPoolKillHarness {
                 status: None,
                 workspace_path: self.project_path.to_str(),
                 mirror_ref: None,
+                dispatch_group_id: None,
             })
             .await
             .expect("task_run create should succeed");

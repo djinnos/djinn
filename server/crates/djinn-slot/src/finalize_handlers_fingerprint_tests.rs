@@ -55,6 +55,7 @@ async fn create_run_with_workspace(
             status: None,
             workspace_path,
             mirror_ref: None,
+            dispatch_group_id: None,
         })
         .await
         .expect("create task run");
@@ -864,6 +865,7 @@ async fn settlement_accepted_and_rejected_paths_store_same_review_fingerprint() 
             status: None,
             workspace_path: None,
             mirror_ref: None,
+            dispatch_group_id: None,
         })
         .await
         .expect("create run_a");
@@ -897,6 +899,7 @@ async fn settlement_accepted_and_rejected_paths_store_same_review_fingerprint() 
             status: None,
             workspace_path: None,
             mirror_ref: None,
+            dispatch_group_id: None,
         })
         .await
         .expect("create run_r");
