@@ -244,16 +244,27 @@ impl ChildReaper {
     }
 
     /// Deterministic drain hook for adopted-child accounting. This becomes idle
-    /// only after callers have acknowledged records through [`Self::drain`].
+    /// only after callers have acknowledged records through [`Self::drain`] and
+    /// every pre-closure admission reservation has resolved. A pending
+    /// reservation may still claim a retained status through
+    /// [`Admission::register_direct`], so shutdown must not treat adopted
+    /// accounting as idle before that claim window closes.
     pub fn wait_for_adopted_idle(&self, timeout: Duration) -> bool {
-        self.wait_until(timeout, |registry| registry.adopted.is_empty())
+        self.wait_until(timeout, |registry| {
+            registry.adopted.is_empty() && registry.pending_admissions == 0
+        })
     }
 
     /// Take all recorded adopted-child terminal statuses. This is the explicit
     /// acknowledgement point used by shutdown/tests; records are never silently
-    /// discarded by the wait loop.
+    /// discarded by the wait loop. While an admission reservation is pending,
+    /// retained statuses remain claimable by `register_direct`, so this returns
+    /// no records rather than racing registration and stranding its PID route.
     pub fn drain(&self) -> Vec<AdoptedChildRecord> {
         let mut registry = self.inner.registry.lock().expect("child registry poisoned");
+        if registry.pending_admissions != 0 {
+            return Vec::new();
+        }
         let records = std::mem::take(&mut registry.adopted);
         self.inner.changed.notify_all();
         records
@@ -696,6 +707,38 @@ mod tests {
             raw_status: 42 << 8,
         });
         assert_eq!(reaper.adopted_children().len(), 1);
+    }
+
+    #[test]
+    fn drain_preserves_status_claimable_by_pending_admission() {
+        // Shutdown can close admission and attempt an adopted drain while a
+        // command that was admitted before closure is between spawn and direct
+        // registration. Its already-reaped status must remain claimable: if
+        // drain removed it, registration would install a route which can never
+        // receive another kernel status.
+        let reaper = ChildReaper::inert_for_test();
+        let admission = reaper.admit("shutdown-race-cmd").unwrap();
+        reaper.record_terminal(TerminalStatus {
+            pid: 999_994,
+            raw_status: 23 << 8,
+        });
+        reaper.close_admission();
+
+        // Pending admission reservations block acknowledgement, preserving the
+        // status for the legitimate pre-closure register_direct call.
+        assert_eq!(reaper.drain(), Vec::<AdoptedChildRecord>::new());
+        assert_eq!(reaper.adopted_children().len(), 1);
+        assert!(!reaper.wait_for_adopted_idle(Duration::ZERO));
+
+        let child = admission.register_direct(999_994, 17).unwrap();
+        let status = child.recv_timeout(Duration::from_millis(50)).unwrap();
+        assert_eq!(status.code(), Some(23));
+
+        // Reconciliation removed the retained record and did not insert a
+        // dead-end supervisor route.
+        assert!(reaper.adopted_children().is_empty());
+        assert!(reaper.wait_for_adopted_idle(Duration::ZERO));
+        assert!(reaper.wait_for_supervisors_idle(Duration::ZERO));
     }
 
     #[test]
