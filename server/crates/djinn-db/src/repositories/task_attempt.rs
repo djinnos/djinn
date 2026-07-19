@@ -6,7 +6,6 @@ use djinn_core::models::task_attempt::{
 };
 
 use uuid::Uuid;
-use sqlx::Acquire;
 
 use crate::Result;
 use crate::database::Database;
@@ -452,7 +451,6 @@ impl TaskAttemptRepository {
         })
     }
 
-
     /// Terminalize every and only `pending` attempt in the supplied exact,
     /// non-NULL dispatch group in one transaction. Legacy NULL-group rows are
     /// deliberately never batch-correlated.
@@ -489,7 +487,9 @@ impl TaskAttemptRepository {
         .fetch_all(&mut *tx).await?;
         tx.commit().await?;
         updated_attempt_ids.sort_unstable();
-        Ok(DispatchGroupTerminalization { updated_attempt_ids })
+        Ok(DispatchGroupTerminalization {
+            updated_attempt_ids,
+        })
     }
     /// Insert a guard-only deferred attempt row. Idempotent on `dispatch_key`.
     pub async fn insert_guard_deferred(
@@ -1324,7 +1324,6 @@ impl TaskAttemptRepository {
             .collect())
     }
 }
-
 
 #[cfg(test)]
 mod tests {

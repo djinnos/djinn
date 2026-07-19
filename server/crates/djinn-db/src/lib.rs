@@ -219,10 +219,9 @@ pub use repositories::{
     },
     task_attempt::{
         CompletedParentSummary, CreateTaskAttemptParams, DispatchGroupTerminalEvidence,
-        DispatchGroupTerminalization, FillTaskAttemptParams,
-        GuardAdoptedPrTaskAttemptParams, GuardDeferTaskAttemptParams, OrphanedPendingAttempt,
-        ReworkMarkerTaskAttemptParams, SubmitTaskAttemptParams, TaskAttemptRepository,
-        TerminalTaskAttemptParams,
+        DispatchGroupTerminalization, FillTaskAttemptParams, GuardAdoptedPrTaskAttemptParams,
+        GuardDeferTaskAttemptParams, OrphanedPendingAttempt, ReworkMarkerTaskAttemptParams,
+        SubmitTaskAttemptParams, TaskAttemptRepository, TerminalTaskAttemptParams,
     },
     task_run::{CreateTaskRunParams, TaskRunRepository},
     usage_analytics::{

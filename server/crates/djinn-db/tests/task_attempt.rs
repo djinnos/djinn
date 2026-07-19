@@ -10,9 +10,8 @@ pub(crate) use djinn_core::models::task_attempt::{
 };
 pub(crate) use djinn_db::{
     CreateTaskAttemptParams, Database, DispatchGroupTerminalEvidence, EpicRepository,
-    FillTaskAttemptParams,
-    GuardDeferTaskAttemptParams, SubmitTaskAttemptParams, TaskAttemptRepository,
-    TerminalTaskAttemptParams,
+    FillTaskAttemptParams, GuardDeferTaskAttemptParams, SubmitTaskAttemptParams,
+    TaskAttemptRepository, TerminalTaskAttemptParams,
 };
 #[path = "task_attempt/create_and_lifecycle.rs"]
 mod create_and_lifecycle;
