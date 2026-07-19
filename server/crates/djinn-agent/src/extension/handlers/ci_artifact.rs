@@ -28,10 +28,6 @@ pub(crate) fn render_ci_artifact_zip(bytes: &[u8]) -> Result<String, String> {
         if file.is_symlink() {
             return Err(format!("ZIP artifact contains symlink entry: {path}"));
         }
-        if file.is_dir() {
-            entries.push(RenderEntry::Skipped(path, "directory"));
-            continue;
-        }
         let mut body = Vec::new();
         let mut chunk = [0_u8; 8192];
         loop {
@@ -51,6 +47,13 @@ pub(crate) fn render_ci_artifact_zip(bytes: &[u8]) -> Result<String, String> {
                 ));
             }
             body.extend_from_slice(&chunk[..read]);
+        }
+        // `ZipFile::is_dir` is inferred from the member name, so consume a
+        // directory-like member before rendering it as metadata. Otherwise a
+        // member named `directory/` could bypass decompression limits.
+        if file.is_dir() {
+            entries.push(RenderEntry::Skipped(path, "directory"));
+            continue;
         }
         let inspected = &body[..body.len().min(BINARY_INSPECTION_BYTES)];
         entries.push(if body.contains(&0) {
@@ -99,39 +102,46 @@ fn is_binary(bytes: &[u8]) -> bool {
 }
 
 fn render_entries(entries: Vec<RenderEntry>) -> String {
-    let mut report = String::new();
-    let mut omitted = Vec::new();
-    let mut stopped = false;
-    let paths: Vec<String> = entries
-        .iter()
+    let rendered: Vec<(String, String)> = entries
+        .into_iter()
         .map(|entry| match entry {
-            RenderEntry::Text(path, _) | RenderEntry::Skipped(path, _) => path.clone(),
+            RenderEntry::Text(path, text) => (path, render_file_text(&text)),
+            RenderEntry::Skipped(path, reason) => (path, format!("[skipped: {reason}]\n")),
         })
         .collect();
-    for (index, entry) in entries.into_iter().enumerate() {
-        let (path, body) = match entry {
-            RenderEntry::Text(p, t) => (p, render_file_text(&t)),
-            RenderEntry::Skipped(p, r) => (p, format!("[skipped: {r}]\n")),
-        };
-        let heading = format!("== {path} ==\n");
-        let future_omissions = omission_footer(&paths[index + 1..]);
-        if stopped
-            || report
-                .len()
-                .saturating_add(heading.len())
-                .saturating_add(body.len())
-                .saturating_add(future_omissions.len())
-                > MAX_REPORT_BYTES
-        {
-            stopped = true;
-            omitted.push(path);
-        } else {
-            report.push_str(&heading);
-            report.push_str(&body);
-        }
+    let paths: Vec<&str> = rendered.iter().map(|(path, _)| path.as_str()).collect();
+    let mut prefix_bytes = Vec::with_capacity(rendered.len() + 1);
+    prefix_bytes.push(0);
+    for (path, body) in &rendered {
+        prefix_bytes.push(
+            prefix_bytes.last().copied().unwrap_or_default()
+                + format!("== {path} ==\n").len()
+                + body.len(),
+        );
     }
-    if !omitted.is_empty() {
-        push_bounded(&mut report, &omission_footer(&omitted));
+
+    // Select the longest archive-order prefix whose bodies and complete
+    // omission footer fit together. This reserves disclosure space rather than
+    // allowing accepted bodies to consume the entire report budget.
+    let selected = (0..=rendered.len())
+        .rev()
+        .find(|&count| {
+            let footer_bytes = if count == rendered.len() {
+                0
+            } else {
+                omission_footer(&paths[count..]).len()
+            };
+            prefix_bytes[count].saturating_add(footer_bytes) <= MAX_REPORT_BYTES
+        })
+        .unwrap_or(0);
+
+    let mut report = String::new();
+    for (path, body) in rendered.iter().take(selected) {
+        report.push_str(&format!("== {path} ==\n"));
+        report.push_str(body);
+    }
+    if selected < paths.len() {
+        push_bounded(&mut report, &omission_footer(&paths[selected..]));
     }
     report
 }
@@ -426,5 +436,38 @@ mod tests {
         assert!(report.len() <= MAX_REPORT_BYTES);
         assert!(report.contains("[report limit reached; omitted paths:]"));
         assert!(report.contains("- later\n"));
+    }
+
+    #[test]
+    fn directory_payloads_are_counted_at_entry_and_aggregate_boundaries() {
+        let exact = render_ci_artifact_zip(&zip(vec![("directory/", vec![b'x'; MAX_ENTRY_BYTES])]))
+            .unwrap();
+        assert!(exact.contains("== directory ==\n[skipped: directory]"));
+        assert!(
+            render_ci_artifact_zip(&zip(vec![("directory/", vec![b'x'; MAX_ENTRY_BYTES + 1],)]))
+                .unwrap_err()
+                .contains("entry exceeds")
+        );
+
+        let names = (0..(MAX_TOTAL_BYTES / MAX_ENTRY_BYTES))
+            .map(|index| format!("directory-{index}/"))
+            .collect::<Vec<_>>();
+        assert!(
+            render_ci_artifact_zip(&zip(names
+                .iter()
+                .map(|name| (name.as_str(), vec![b'x'; MAX_ENTRY_BYTES]))
+                .collect(),))
+            .is_ok()
+        );
+        let mut over = names
+            .iter()
+            .map(|name| (name.as_str(), vec![b'x'; MAX_ENTRY_BYTES]))
+            .collect::<Vec<_>>();
+        over.push(("one-more/", vec![b'x']));
+        assert!(
+            render_ci_artifact_zip(&zip(over))
+                .unwrap_err()
+                .contains("decompressed")
+        );
     }
 }
