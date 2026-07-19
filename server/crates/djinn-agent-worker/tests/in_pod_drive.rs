@@ -490,13 +490,15 @@ async fn worker_drives_real_supervisor_in_pod() {
     let workspace_dir = TempDir::new().expect("tempdir workspace");
 
     let task_id = "task-pod-drive";
+    // One host-minted ID is used by the spec, the K8s-shaped row, and the
+    // worker environment; the supervisor persists using spec.task_run_id.
     let task_run_id = "run-pod-drive";
     let bearer = "fake-bearer-token";
 
     let mut per_role = HashMap::new();
     per_role.insert(RoleKind::Planner, "openai/gpt-4o".to_string());
     let spec = TaskRunSpec {
-        task_run_id: format!("run-{task_id}"),
+        task_run_id: task_run_id.into(),
         task_attempt_id: None,
         task_id: task_id.into(),
         project_id: project_id.into(),

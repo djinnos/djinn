@@ -279,17 +279,19 @@ impl SupervisorServices for WorkerSupervisorServices {
     ) -> Result<StageOutcome, StageError> {
         // Snapshot the supervisor's workspace path on the first stage so
         // `open_pr` can push the worker's task_branch back to the mirror
-        // before delegating the host RPC.  The supervisor passes the same
-        // `&Workspace` to every stage, so capturing on the first call is
-        // sufficient; subsequent calls overwrite with the same path.
+        // before delegating the host RPC. The first stage owns this path; a
+        // later stage must not replace it with another workspace.
         let first_capture = {
             let mut slot = self
                 .captured_workspace_path
                 .lock()
                 .expect("captured_workspace_path mutex poisoned");
-            let first = slot.is_none();
-            *slot = Some(workspace.path().to_path_buf());
-            first
+            if slot.is_none() {
+                *slot = Some(workspace.path().to_path_buf());
+                true
+            } else {
+                false
+            }
         };
         // Persist the workspace path onto the task_runs row exactly once, on
         // the first capture. The coordinator creates K8s pod-run rows with

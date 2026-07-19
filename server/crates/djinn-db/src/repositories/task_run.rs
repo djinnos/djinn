@@ -127,7 +127,13 @@ impl TaskRunRepository {
     /// rejected-submission integrity) see the real path instead of NULL.
     pub async fn set_workspace_path(&self, id: &str, workspace_path: &str) -> Result<()> {
         self.db.ensure_initialized().await?;
-        let result = sqlx::query("UPDATE task_runs SET workspace_path = $2 WHERE id = $1")
+        // The first in-pod stage owns this value. Keep it stable if a later
+        // stage (or a retry racing after the first write) has another clone.
+        let result = sqlx::query(
+            "UPDATE task_runs
+             SET workspace_path = COALESCE(workspace_path, $2)
+             WHERE id = $1",
+        )
             .bind(id)
             .bind(workspace_path)
             .execute(self.db.pool())
@@ -488,6 +494,11 @@ mod tests {
         );
 
         repo.set_workspace_path(&id, "/workspace/run-clone")
+            .await
+            .unwrap();
+        // A later stage must retain the first in-pod clone, even if it sees a
+        // different workspace path.
+        repo.set_workspace_path(&id, "/workspace/second-stage-clone")
             .await
             .unwrap();
         let after = repo.get(&id).await.unwrap().unwrap();
