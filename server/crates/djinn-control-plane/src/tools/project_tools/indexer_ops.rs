@@ -6,29 +6,20 @@ use super::lifecycle_ops::resolve_project;
 use crate::server::DjinnMcpServer;
 use djinn_db::{
     CODELESS_WORKSPACE_SLUG, Database, ProjectImageStatus, ProjectRepository,
-    ProjectWorkspaceGraphRepository, RepoGraphCacheRepository,
+    ProjectWorkspaceGraphRepository,
 };
 use djinn_stack::Stack;
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
 async fn graph_warmed_at_from_freshness(db: Database, project_id: &str) -> Option<String> {
-    if let Some(workspace) = ProjectWorkspaceGraphRepository::new(db.clone())
+    ProjectWorkspaceGraphRepository::new(db)
         .latest_warmed_state(project_id)
         .await
         .ok()
         .flatten()
         .filter(|workspace| !workspace.warmed_at.is_empty())
-    {
-        return Some(workspace.warmed_at);
-    }
-
-    RepoGraphCacheRepository::new(db)
-        .latest_for_project(project_id)
-        .await
-        .ok()
-        .flatten()
-        .map(|row| row.built_at)
+        .map(|workspace| workspace.warmed_at)
 }
 
 /// Derive the banner's `graph_warm_status` from image status + warm stamp.
@@ -88,11 +79,8 @@ fn derive_graph_warm_status_with_workspaces(
 }
 
 /// Build the per-workspace warm-status list from the durable
-/// `project_workspace_graph` rows — the SAME source the `code_graph
-/// workspaces` op reads. The previous implementation read a
-/// `.djinn/graph_warm_status.json` file written by the warm pod, which the
-/// control plane never sees in pod mode, so the list was always empty and a
-/// `timed_out` workspace stayed silently masked as `ready`.
+/// `project_workspace_graph` rows — the same authoritative source the
+/// `code_graph workspaces` op reads.
 async fn workspace_warm_statuses_from_db(
     db: Database,
     project_id: &str,
@@ -233,11 +221,11 @@ pub struct GetProjectDevcontainerStatusResponse {
     /// Human-readable error from the most recent failed build, if any.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub image_last_error: Option<String>,
-    /// ISO-8601 UTC timestamp derived from per-workspace graph freshness
-    /// or the merged repo graph cache. `None` means no freshness source has
-    /// completed yet (cold project or failing pipeline). Dispatch no longer
-    /// blocks on this value; it is badge metadata retained under a
-    /// compatibility field name.
+    /// ISO-8601 UTC timestamp derived exclusively from the durable,
+    /// project-scoped workspace graph state. `None` means no workspace
+    /// graph warm has completed yet. Dispatch no longer blocks on this
+    /// value; it is badge metadata retained under a compatibility field
+    /// name.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub graph_warmed_at: Option<String>,
     /// Derived status for the UI banner. One of
@@ -540,9 +528,9 @@ impl DjinnMcpServer {
         // Prefer the digest-pinned ref the runtime actually uses, else the tag.
         let image_tag = dispatch.pull_ref().or(dispatch.tag);
 
-        // Graph-warm status: derived from per-workspace freshness first, then
-        // the merged repo graph cache. There is no project-table freshness
-        // scalar fallback after the storage migration; a cache-only project must remain visibly warmed during rollout.
+        // Graph-warm status is derived exclusively from the durable,
+        // project-scoped workspace graph rows. A repo-graph cache alone is
+        // not evidence of a completed project graph warm.
         let graph_warmed_at =
             graph_warmed_at_from_freshness(self.state.db().clone(), &input.project).await;
 
@@ -623,10 +611,13 @@ impl DjinnMcpServer {
 mod tests {
     use super::*;
     use djinn_core::events::EventBus;
-    use djinn_db::{ProjectRepository, ProjectWorkspaceGraphUpsert, RepoGraphCacheInsert};
+    use djinn_db::{
+        ProjectRepository, ProjectWorkspaceGraphUpsert, RepoGraphCacheInsert,
+        RepoGraphCacheRepository,
+    };
 
     #[tokio::test]
-    async fn graph_freshness_badge_uses_cache_when_workspace_missing() {
+    async fn graph_freshness_badge_requires_workspace_graph_even_when_cache_exists() {
         let db = Database::open_in_memory().expect("in-memory db");
         let project_repo = ProjectRepository::new(db.clone(), EventBus::noop());
         let cache_repo = RepoGraphCacheRepository::new(db.clone());
@@ -643,16 +634,34 @@ mod tests {
             })
             .await
             .expect("cache upsert");
-        let cache_stamp = cache_repo
-            .latest_for_project(&project.id)
+
+        assert_eq!(
+            graph_warmed_at_from_freshness(db.clone(), &project.id).await,
+            None,
+            "a repo graph cache is not graph-warm authority"
+        );
+
+        let workspace_repo = ProjectWorkspaceGraphRepository::new(db.clone());
+        workspace_repo
+            .upsert(ProjectWorkspaceGraphUpsert {
+                project_id: &project.id,
+                workspace_slug: "server",
+                commit_sha: "workspace-sha",
+                status: "ready",
+            })
             .await
-            .expect("cache latest")
-            .expect("cache row")
-            .built_at;
+            .expect("workspace upsert");
+        let workspace_stamp = workspace_repo
+            .latest_warmed_state(&project.id)
+            .await
+            .expect("workspace latest")
+            .expect("workspace row")
+            .warmed_at;
 
         assert_eq!(
             graph_warmed_at_from_freshness(db, &project.id).await,
-            Some(cache_stamp)
+            Some(workspace_stamp),
+            "only project_workspace_graph can establish graph warmth"
         );
     }
 
@@ -661,20 +670,11 @@ mod tests {
         let db = Database::open_in_memory().expect("in-memory db");
         let project_repo = ProjectRepository::new(db.clone(), EventBus::noop());
         let workspace_repo = ProjectWorkspaceGraphRepository::new(db.clone());
-        let cache_repo = RepoGraphCacheRepository::new(db.clone());
         let project = project_repo
             .create("badge-workspace", "acme", "badge-workspace")
             .await
             .expect("create project");
 
-        cache_repo
-            .upsert(RepoGraphCacheInsert {
-                project_id: &project.id,
-                commit_sha: "cache-sha",
-                graph_blob: b"graph",
-            })
-            .await
-            .expect("cache upsert");
         workspace_repo
             .upsert(ProjectWorkspaceGraphUpsert {
                 project_id: &project.id,

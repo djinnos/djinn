@@ -787,7 +787,9 @@ impl ProjectRepository {
     /// Return the readiness snapshot the dispatch gate consults before it is
     /// willing to run tasks for a project: the current `image_status` plus
     /// whether the canonical-graph warm pipeline has produced freshness in
-    /// `project_workspace_graph` or `repo_graph_cache`. Returns `Ok(None)`
+    /// project-scoped `project_workspace_graph`. `repo_graph_cache` remains a
+    /// non-warm graph-blob cache and never contributes to dispatch readiness.
+    /// Returns `Ok(None)`
     /// when the project id is unknown.
     ///
     pub async fn get_dispatch_readiness(
@@ -799,21 +801,16 @@ impl ProjectRepository {
             r#"WITH project_exists AS (
                    SELECT 1 FROM projects WHERE id = $1
                ), freshness AS (
-                   SELECT warmed_at AS warmed_at, 0 AS source_rank
+                   SELECT warmed_at
                      FROM project_workspace_graph
                     WHERE project_id = $1 AND warmed_at <> ''
-                   UNION ALL
-                   SELECT built_at AS warmed_at, 1 AS source_rank
-                     FROM repo_graph_cache
-                    WHERE project_id = $1 AND built_at <> ''
                )
                SELECT
                    (SELECT warmed_at
                       FROM freshness
-                     ORDER BY source_rank ASC, warmed_at DESC
+                     ORDER BY warmed_at DESC
                      LIMIT 1) AS graph_warmed_at,
-                   EXISTS(SELECT 1 FROM project_workspace_graph WHERE project_id = $1)
-                   OR EXISTS(SELECT 1 FROM repo_graph_cache WHERE project_id = $1) AS has_graph_freshness
+                   EXISTS(SELECT 1 FROM project_workspace_graph WHERE project_id = $1) AS has_graph_freshness
                  FROM project_exists"#,
         )
         .bind(project_id)
@@ -1050,9 +1047,10 @@ pub struct ProjectDispatchReadiness {
     pub image_status: String,
     /// Derived wall-clock timestamp of the most recent successful canonical-
     /// graph warm. For rollout compatibility this field name is retained, but
-    /// the value now comes from `project_workspace_graph.warmed_at` (preferred)
-    /// or `repo_graph_cache.built_at`; it is not read from the legacy project-table graph freshness scalar. `None` means neither freshness source
-    /// has a row for this project.
+    /// the value now comes exclusively from `project_workspace_graph.warmed_at`;
+    /// it is not read from `repo_graph_cache` or the legacy project-table graph
+    /// freshness scalar. `None` means no workspace graph row exists for this
+    /// project.
     pub graph_warmed_at: Option<String>,
 }
 
@@ -1173,7 +1171,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn dispatch_readiness_treats_cache_only_project_as_warmed() {
+    async fn dispatch_readiness_leaves_cache_only_project_unwarmed() {
         let db = test_db();
         let repo = ProjectRepository::new(db.clone(), EventBus::noop());
         let cache_repo = RepoGraphCacheRepository::new(db);
@@ -1192,32 +1190,46 @@ mod tests {
             })
             .await
             .expect("cache upsert");
-        let cache_stamp = cache_repo
+        let cached = cache_repo
             .latest_for_project(&project.id)
             .await
             .expect("cache latest")
-            .expect("cache row")
-            .built_at;
+            .expect("cache row");
+        assert_eq!(cached.graph_blob, b"graph");
 
         assert_eq!(
             dispatch_graph_warmed_at(&repo, &project.id).await,
-            Some(cache_stamp)
+            None,
+            "a graph cache row is not graph-warm authority"
         );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn dispatch_readiness_treats_workspace_only_project_as_warmed() {
+    async fn dispatch_readiness_workspace_warm_is_project_scoped() {
         let db = test_db();
         let repo = ProjectRepository::new(db.clone(), EventBus::noop());
+        let cache_repo = RepoGraphCacheRepository::new(db.clone());
         let workspace_repo = ProjectWorkspaceGraphRepository::new(db);
-        let project = repo
+        let warmed_project = repo
             .create("workspace-only", "acme", "workspace-only")
             .await
             .unwrap();
+        let cache_only_sibling = repo
+            .create("cache-only-sibling", "acme", "cache-only-sibling")
+            .await
+            .unwrap();
 
+        cache_repo
+            .upsert(RepoGraphCacheInsert {
+                project_id: &cache_only_sibling.id,
+                commit_sha: "cache-sha",
+                graph_blob: b"cache",
+            })
+            .await
+            .expect("cache upsert");
         workspace_repo
             .upsert(ProjectWorkspaceGraphUpsert {
-                project_id: &project.id,
+                project_id: &warmed_project.id,
                 workspace_slug: "root",
                 commit_sha: "abc123",
                 status: "ready",
@@ -1225,20 +1237,25 @@ mod tests {
             .await
             .expect("workspace upsert");
         let workspace_stamp = workspace_repo
-            .latest_warmed_state(&project.id)
+            .latest_warmed_state(&warmed_project.id)
             .await
             .expect("workspace latest")
             .expect("workspace row")
             .warmed_at;
 
         assert_eq!(
-            dispatch_graph_warmed_at(&repo, &project.id).await,
+            dispatch_graph_warmed_at(&repo, &warmed_project.id).await,
             Some(workspace_stamp)
+        );
+        assert_eq!(
+            dispatch_graph_warmed_at(&repo, &cache_only_sibling.id).await,
+            None,
+            "a workspace warm record must not warm another project"
         );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn dispatch_readiness_prefers_workspace_stamp_when_both_sources_exist() {
+    async fn dispatch_readiness_ignores_cache_when_workspace_graph_exists() {
         let db = test_db();
         let repo = ProjectRepository::new(db.clone(), EventBus::noop());
         let cache_repo = RepoGraphCacheRepository::new(db.clone());
@@ -1276,7 +1293,7 @@ mod tests {
         assert_eq!(
             dispatch_graph_warmed_at(&repo, &project.id).await,
             Some(workspace_stamp),
-            "workspace freshness is the preferred derived readiness stamp"
+            "workspace freshness is the sole derived readiness stamp"
         );
     }
 

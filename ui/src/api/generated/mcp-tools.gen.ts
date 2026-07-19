@@ -2132,11 +2132,11 @@ export namespace GetProjectDevcontainerStatusOutputSchema {
    */
   graph_warm_status: string
   /**
-   * ISO-8601 UTC timestamp derived from per-workspace graph freshness
-   * or the merged repo graph cache. `None` means no freshness source has
-   * completed yet (cold project or failing pipeline). Dispatch no longer
-   * blocks on this value; it is badge metadata retained under a
-   * compatibility field name.
+   * ISO-8601 UTC timestamp derived exclusively from the durable,
+   * project-scoped workspace graph state. `None` means no workspace
+   * graph warm has completed yet. Dispatch no longer blocks on this
+   * value; it is badge metadata retained under a compatibility field
+   * name.
    */
   graph_warmed_at?: string
   /**
