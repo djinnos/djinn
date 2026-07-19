@@ -41,3 +41,67 @@ pub async fn import_legacy_settings_file(
     tokio::fs::remove_file(source_path).await?;
     Ok(Some(result))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use djinn_db::test_support::seed_project;
+    use tempfile::TempDir;
+
+    async fn database_with_project(project_id: &str) -> Database {
+        let db = Database::ephemeral()
+            .await
+            .expect("open isolated Postgres database");
+        seed_project(&db, project_id, project_id).await;
+        db
+    }
+
+    async fn settings_file(checkout: &TempDir, source: &[u8]) -> std::path::PathBuf {
+        let path = checkout.path().join(LEGACY_SETTINGS_RELATIVE_PATH);
+        tokio::fs::create_dir_all(path.parent().unwrap())
+            .await
+            .unwrap();
+        tokio::fs::write(&path, source).await.unwrap();
+        path
+    }
+
+    #[tokio::test]
+    async fn failure_retains_the_exact_source_file_without_creating_replacements() {
+        let checkout = TempDir::new().unwrap();
+        let source = settings_file(&checkout, br#"{"global_skills":["retired"]}"#).await;
+        let db = database_with_project("legacy-file-failure").await;
+        assert!(
+            import_legacy_settings_file(db, "legacy-file-failure", checkout.path())
+                .await
+                .is_err()
+        );
+        assert!(source.exists());
+        assert!(!checkout.path().join(".agents").exists());
+        assert!(!checkout.path().join("settings.json").exists());
+    }
+
+    #[tokio::test]
+    async fn successful_file_handoff_deletes_only_source_and_restart_is_idempotent() {
+        let checkout = TempDir::new().unwrap();
+        let source = settings_file(&checkout, br#"{"setup":["make setup"]}"#).await;
+        let sibling = checkout.path().join(".djinn/keep.txt");
+        tokio::fs::write(&sibling, "keep").await.unwrap();
+        let db = database_with_project("legacy-file-success").await;
+        assert_eq!(
+            import_legacy_settings_file(db.clone(), "legacy-file-success", checkout.path())
+                .await
+                .unwrap(),
+            Some(LegacySettingsImportResult::Imported)
+        );
+        assert!(!source.exists());
+        assert!(sibling.exists());
+        assert_eq!(
+            import_legacy_settings_file(db, "legacy-file-success", checkout.path())
+                .await
+                .unwrap(),
+            None
+        );
+        assert!(!checkout.path().join(".agents").exists());
+        assert!(!checkout.path().join("settings.json").exists());
+    }
+}

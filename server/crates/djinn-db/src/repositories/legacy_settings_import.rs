@@ -199,3 +199,112 @@ async fn record(
         .await?;
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_support::seed_project;
+
+    async fn fresh_importer(project_id: &str) -> LegacySettingsImport {
+        let db = Database::ephemeral()
+            .await
+            .expect("open isolated Postgres database");
+        seed_project(&db, project_id, project_id).await;
+        LegacySettingsImport::new(db)
+    }
+
+    async fn config(importer: &LegacySettingsImport, project_id: &str) -> Value {
+        sqlx::query_scalar("SELECT environment_config FROM projects WHERE id=$1")
+            .bind(project_id)
+            .fetch_one(importer.db.pool())
+            .await
+            .expect("read environment configuration")
+    }
+
+    #[tokio::test]
+    async fn public_importer_maps_empty_and_populated_settings_losslessly() {
+        let empty = fresh_importer("legacy-empty").await;
+        assert_eq!(
+            empty.import("legacy-empty", br#"{}"#).await.unwrap(),
+            LegacySettingsImportResult::Imported
+        );
+        let empty_config: EnvironmentConfig =
+            serde_json::from_value(config(&empty, "legacy-empty").await).unwrap();
+        assert!(empty_config.agent_mcp_defaults.is_empty());
+        assert!(empty_config.lifecycle.pre_verification.is_empty());
+
+        let populated = fresh_importer("legacy-populated").await;
+        let source = br#"{"agent_mcp_defaults":{"worker":["github","linear"]},"setup":["make setup","./bootstrap"]}"#;
+        assert_eq!(
+            populated.import("legacy-populated", source).await.unwrap(),
+            LegacySettingsImportResult::Imported
+        );
+        let saved: EnvironmentConfig =
+            serde_json::from_value(config(&populated, "legacy-populated").await).unwrap();
+        assert_eq!(saved.agent_mcp_defaults["worker"], ["github", "linear"]);
+        assert_eq!(
+            saved.lifecycle.pre_verification,
+            vec![
+                HookCommand::Shell("make setup".into()),
+                HookCommand::Shell("./bootstrap".into())
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn rejected_input_preserves_config_and_records_actionable_durable_failure() {
+        let importer = fresh_importer("legacy-failure").await;
+        let before = config(&importer, "legacy-failure").await;
+        for source in [
+            br#"{"global_skills":["retired"]}"#.as_slice(),
+            br#"{"unknown":true}"#.as_slice(),
+        ] {
+            assert!(importer.import("legacy-failure", source).await.is_err());
+            assert_eq!(config(&importer, "legacy-failure").await, before);
+        }
+        let outcome: (String, String) = sqlx::query_as("SELECT result, detail FROM project_live_state_migrations WHERE project_id=$1 AND family=$2 AND release=$3")
+            .bind("legacy-failure").bind(FAMILY).bind(RELEASE).fetch_one(importer.db.pool()).await.expect("read durable failure");
+        assert_eq!(outcome.0, "failed");
+        assert!(outcome.1.contains("unparseable input"));
+        let reconstructed = LegacySettingsImport::new(importer.db.clone());
+        assert_eq!(
+            reconstructed.failed_project_ids().await.unwrap(),
+            vec!["legacy-failure"]
+        );
+    }
+
+    #[tokio::test]
+    async fn conflict_and_transaction_failure_never_partially_update_configuration() {
+        let importer = fresh_importer("legacy-atomic").await;
+        sqlx::query("UPDATE projects SET environment_config=$1 WHERE id=$2")
+            .bind(serde_json::json!({"agent_mcp_defaults":{"worker":["existing"]},"lifecycle":{"pre_verification":[]}}))
+            .bind("legacy-atomic").execute(importer.db.pool()).await.unwrap();
+        let before = config(&importer, "legacy-atomic").await;
+        assert!(
+            importer
+                .import(
+                    "legacy-atomic",
+                    br#"{"agent_mcp_defaults":{"worker":["different"]}}"#
+                )
+                .await
+                .is_err()
+        );
+        assert_eq!(config(&importer, "legacy-atomic").await, before);
+
+        let failing = fresh_importer("legacy-rollback").await;
+        let rollback_before = config(&failing, "legacy-rollback").await;
+        sqlx::query("ALTER TABLE project_live_state_migrations ADD CONSTRAINT reject_legacy_success_for_test CHECK (result <> 'succeeded')")
+            .execute(failing.db.pool()).await.unwrap();
+        assert!(
+            failing
+                .import("legacy-rollback", br#"{"setup":["make setup"]}"#)
+                .await
+                .is_err()
+        );
+        assert_eq!(config(&failing, "legacy-rollback").await, rollback_before);
+        assert_eq!(
+            failing.failed_project_ids().await.unwrap(),
+            vec!["legacy-rollback"]
+        );
+    }
+}
