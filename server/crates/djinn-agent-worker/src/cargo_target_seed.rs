@@ -23,6 +23,9 @@ const PARALLELISM_ENV: &str = "DJINN_CARGO_TARGET_SEED_THREADS";
 /// Filesystem convention for the warm, per-project Cargo target base.
 pub const WARM_BASE_ROOT: &str = "/cache/cargo-target";
 
+/// Existing pod environment selector for the Cargo/mold parallelism variant.
+pub const CARGO_BUILD_JOBS_ENV: &str = "CARGO_BUILD_JOBS";
+
 /// Filesystem convention for private, per-task-run Cargo target directories.
 pub const RUN_TARGET_ROOT: &str = "/cache/cargo-target-runs";
 
@@ -135,6 +138,42 @@ impl fmt::Display for CargoTargetSeedFallback {
 /// Derive the conventional warm base dir for a project id.
 pub fn warm_base_dir(project_id: impl AsRef<str>) -> PathBuf {
     Path::new(WARM_BASE_ROOT).join(project_id.as_ref())
+}
+
+/// Derive a positive mold-job variant from the pod's existing Cargo setting.
+/// Missing, zero, and malformed values deliberately fail closed to variant one.
+pub fn cargo_build_jobs_variant() -> usize {
+    std::env::var(CARGO_BUILD_JOBS_ENV)
+        .ok()
+        .and_then(|raw| raw.parse::<usize>().ok())
+        .filter(|&jobs| jobs > 0)
+        .unwrap_or(1)
+}
+
+/// Derive the canonical warm base for an explicit mold-job variant.
+///
+/// Unlike [`warm_base_dir`], this never selects the legacy unkeyed project
+/// directory, so callers cannot substitute a sibling cache variant.
+pub fn warm_base_dir_for_jobs(project_id: impl AsRef<str>, jobs: usize) -> PathBuf {
+    warm_base_dir_for_jobs_at_root(Path::new(WARM_BASE_ROOT), project_id, jobs)
+}
+
+/// Derive a variant warm base below an explicit root. This is useful for
+/// isolated filesystem tests while retaining the same canonical layout.
+pub fn warm_base_dir_for_jobs_at_root(
+    warm_root: impl AsRef<Path>,
+    project_id: impl AsRef<str>,
+    jobs: usize,
+) -> PathBuf {
+    warm_root
+        .as_ref()
+        .join(project_id.as_ref())
+        .join(format!("mold-jobs-{}", jobs.max(1)))
+}
+
+/// Derive the canonical warm base for this pod's existing Cargo job variant.
+pub fn warm_base_dir_for_current_jobs(project_id: impl AsRef<str>) -> PathBuf {
+    warm_base_dir_for_jobs(project_id, cargo_build_jobs_variant())
 }
 
 /// Derive the conventional private target dir for a task-run id.
