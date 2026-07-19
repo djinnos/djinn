@@ -14,6 +14,7 @@ use djinn_db::repositories::task_run::TaskRunRepository;
 use djinn_db::repositories::verify_run::TaskRejectedSubmissionIntegrityRepository;
 use djinn_db::{CreateTaskAttemptParams, TaskAttemptRepository};
 use djinn_git::{ResolvedExternalInputV1, VerificationInputFingerprintConfig};
+use djinn_sandbox::final_verification_execution::FinalVerificationIneligibilityReason;
 
 fn init_git_repo_with_dirty_file() -> tempfile::TempDir {
     let dir = tempfile::Builder::new()
@@ -1028,6 +1029,11 @@ async fn assert_after_c1_mutation_reverifies_before_completion(
     // Lease succeeds; canonical execution then returns failed current evidence.
     let mut failed_execution = fallback_evidence(&material, c2.clone(), identity.clone());
     failed_execution.commands[0].exit_code = Some(1);
+    failed_execution.eligibility_reason =
+        Some(FinalVerificationIneligibilityReason::CommandFailed {
+            check_id: failed_execution.commands[0].descriptor.check_id.clone(),
+            exit_code: Some(1),
+        });
     let failing = Arc::new(CompletionIntentCallbacks::for_reuse_with_evidence(
         task.id.clone(),
         material.clone(),

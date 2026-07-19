@@ -59,8 +59,10 @@ pub async fn process_finalize_payload_with_outcome(
             )
             .await
             {
+                // `Ok(None)` is the typed unconfigured-plan skip: the
+                // submission proceeds with no evidence attached.
                 Ok(evidence) => {
-                    handle_submit_work(payload, task_id, app_state, true, Some(&evidence)).await
+                    handle_submit_work(payload, task_id, app_state, true, evidence.as_ref()).await
                 }
                 Err(error) => {
                     tracing::warn!(task_id = %task_id, error = %error, "finalize_handlers: submit_work verification failed");
@@ -131,13 +133,15 @@ pub async fn process_completion_intent_with_outcome(
             )
             .await
             {
+                // `Ok(None)` is the typed unconfigured-plan skip: the
+                // submission proceeds with no evidence attached.
                 Ok(evidence) => {
                     handle_submit_work(
                         &intent.finalize_payload,
                         task_id,
                         app_state,
                         true,
-                        Some(&evidence),
+                        evidence.as_ref(),
                     )
                     .await
                 }
@@ -200,13 +204,15 @@ pub async fn process_auto_submit_payload(
     )
     .await
     {
+        // `Ok(None)` is the typed unconfigured-plan skip: the auto-submit
+        // proceeds with no evidence attached.
         Ok(evidence) => {
             handle_submit_work(
                 &intent.finalize_payload,
                 task_id,
                 app_state,
                 false,
-                Some(&evidence),
+                evidence.as_ref(),
             )
             .await
         }
