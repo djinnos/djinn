@@ -1,7 +1,7 @@
 use crate::github_api::transport::handle_rate_limit;
 use crate::github_api::types::{
-    ActionsJobsResponse, CheckRunsResponse, CiFailureContextBundle, CiFailureContextRequest,
-    CiSetupStep, ReproductionJob, ReproductionSetupStep, ReproductionStep,
+    ActionsArtifactsResponse, ActionsJobsResponse, CheckRunsResponse, CiFailureContextBundle,
+    CiFailureContextRequest, CiSetupStep, ReproductionJob, ReproductionSetupStep, ReproductionStep,
     RequiredCheckReproduction, RequiredCheckReproductionContext, RequiredCheckUnreproducible,
     RequiredCheckUnreproducibleReason, WorkflowRun, WorkflowRunsResponse,
 };
@@ -9,12 +9,15 @@ use crate::github_api::{
     ActionsJob, ActionsJobStep, CheckAnnotation, CheckRun, GitHubApiClient, GitHubApiError,
 };
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
-use reqwest::StatusCode;
+use futures::StreamExt;
+use reqwest::{StatusCode, header};
 use serde::Deserialize;
 use serde_yaml::Value as YamlValue;
 
 const LOG_TAIL_LINES: usize = 200;
 const LOG_TAIL_BYTES: usize = 24_000;
+/// Maximum compressed artifact response size (32 MiB).
+pub const MAX_ARTIFACT_DOWNLOAD_BYTES: usize = 32 * 1024 * 1024;
 
 #[derive(Debug, Deserialize)]
 struct ContentsFileResponse {
@@ -31,6 +34,157 @@ struct WorkflowStep {
 }
 
 impl GitHubApiClient {
+    /// Fetch one repository-scoped job, including its owning workflow run id.
+    pub async fn get_job(
+        &self,
+        owner: &str,
+        repo: &str,
+        job_id: u64,
+    ) -> std::result::Result<ActionsJob, GitHubApiError> {
+        let path = format!("/repos/{owner}/{repo}/actions/jobs/{job_id}");
+        let url = format!("{}{}", self.base_url, path);
+        let resp = self
+            .send_with_retry(|token| {
+                let url = url.clone();
+                let http = self.http.clone();
+                async move {
+                    handle_rate_limit(
+                        http.get(&url)
+                            .bearer_auth(&token)
+                            .header("Accept", "application/vnd.github+json")
+                            .header("X-GitHub-Api-Version", "2022-11-28")
+                            .send()
+                            .await?,
+                    )
+                    .await
+                }
+            })
+            .await
+            .map_err(|err| artifact_context(err, "get_job", &path, None))?;
+        if !resp.status().is_success() {
+            return Err(artifact_http("get_job", path, resp, None).await);
+        }
+        resp.json().await.map_err(|e| {
+            GitHubApiError::transport(
+                "get_job",
+                format!("/repos/{owner}/{repo}/actions/jobs/{job_id}"),
+                format!("malformed GitHub Actions job response: {e}"),
+            )
+        })
+    }
+
+    /// Return GitHub first artifact page in original order without pagination.
+    pub async fn list_run_artifacts(
+        &self,
+        owner: &str,
+        repo: &str,
+        run_id: u64,
+    ) -> std::result::Result<crate::github_api::RunArtifactsPage, GitHubApiError> {
+        let path = format!("/repos/{owner}/{repo}/actions/runs/{run_id}/artifacts");
+        let url = format!("{}{}?per_page=100", self.base_url, path);
+        let resp = self
+            .send_with_retry(|token| {
+                let url = url.clone();
+                let http = self.http.clone();
+                async move {
+                    handle_rate_limit(
+                        http.get(&url)
+                            .bearer_auth(&token)
+                            .header("Accept", "application/vnd.github+json")
+                            .header("X-GitHub-Api-Version", "2022-11-28")
+                            .send()
+                            .await?,
+                    )
+                    .await
+                }
+            })
+            .await
+            .map_err(|err| artifact_context(err, "list_run_artifacts", &path, Some(run_id)))?;
+        if !resp.status().is_success() {
+            return Err(artifact_http("list_run_artifacts", path, resp, Some(run_id)).await);
+        }
+        let parsed: ActionsArtifactsResponse = resp.json().await.map_err(|e| {
+            GitHubApiError::transport(
+                "list_run_artifacts",
+                format!("/repos/{owner}/{repo}/actions/runs/{run_id}/artifacts"),
+                format!("malformed GitHub Actions artifact response for run {run_id}: {e}"),
+            )
+        })?;
+        let returned = parsed.artifacts.len();
+        let mut artifacts = parsed.artifacts;
+        artifacts.truncate(100);
+        Ok(crate::github_api::RunArtifactsPage {
+            total_count: parsed.total_count,
+            truncated: parsed.total_count > artifacts.len() as u64 || returned > artifacts.len(),
+            artifacts,
+        })
+    }
+
+    /// Download archive bytes without extraction, enforcing a 32 MiB compressed cap.
+    pub async fn download_artifact(
+        &self,
+        owner: &str,
+        repo: &str,
+        run_id: u64,
+        artifact_id: u64,
+    ) -> std::result::Result<crate::github_api::DownloadedArtifact, GitHubApiError> {
+        let path = format!("/repos/{owner}/{repo}/actions/artifacts/{artifact_id}/zip");
+        let url = format!("{}{}", self.base_url, path);
+        let resp = self
+            .send_with_retry(|token| {
+                let url = url.clone();
+                let http = self.http.clone();
+                async move {
+                    handle_rate_limit(
+                        http.get(&url)
+                            .bearer_auth(&token)
+                            .header("Accept", "application/vnd.github+json")
+                            .header("X-GitHub-Api-Version", "2022-11-28")
+                            .send()
+                            .await?,
+                    )
+                    .await
+                }
+            })
+            .await
+            .map_err(|err| artifact_context(err, "download_artifact", &path, Some(run_id)))?;
+        if !resp.status().is_success() {
+            return Err(artifact_http("download_artifact", path, resp, Some(run_id)).await);
+        }
+        let content_type = resp
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .map(ToOwned::to_owned);
+        let content_length = match resp.headers().get(header::CONTENT_LENGTH) { Some(value) => Some(value.to_str().ok().and_then(|v| v.parse::<u64>().ok()).ok_or_else(|| GitHubApiError::transport("download_artifact", format!("/repos/{owner}/{repo}/actions/artifacts/{artifact_id}/zip"), format!("malformed Content-Length while downloading artifact {artifact_id} for run {run_id}")))?), None => None };
+        if content_length.is_some_and(|n| n > MAX_ARTIFACT_DOWNLOAD_BYTES as u64) {
+            return Err(artifact_budget_error(owner, repo, run_id, artifact_id));
+        }
+        let mut bytes = Vec::with_capacity(
+            content_length
+                .unwrap_or_default()
+                .min(MAX_ARTIFACT_DOWNLOAD_BYTES as u64) as usize,
+        );
+        let mut stream = resp.bytes_stream();
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.map_err(|e| {
+                GitHubApiError::transport(
+                    "download_artifact",
+                    format!("/repos/{owner}/{repo}/actions/artifacts/{artifact_id}/zip"),
+                    format!("artifact download stream failed for run {run_id}: {e}"),
+                )
+            })?;
+            if bytes.len().saturating_add(chunk.len()) > MAX_ARTIFACT_DOWNLOAD_BYTES {
+                return Err(artifact_budget_error(owner, repo, run_id, artifact_id));
+            }
+            bytes.extend_from_slice(&chunk);
+        }
+        Ok(crate::github_api::DownloadedArtifact {
+            bytes,
+            content_type,
+            content_length,
+        })
+    }
     /// List workflow runs for a repo filtered by trigger `event` (e.g.
     /// `"merge_group"`), newest first. Used to find the merge-group run that
     /// rejected a PR so we can surface its real failure — the run (and its
@@ -1068,4 +1222,61 @@ fn log_tail_from(logs: &str, line_index: usize) -> String {
     let start = line_index.min(lines.len() - 1);
     let end = (start + MAX_LINES).min(lines.len());
     lines[start..end].join("\n")
+}
+
+fn artifact_context(
+    mut error: GitHubApiError,
+    operation: &'static str,
+    path: &str,
+    run_id: Option<u64>,
+) -> GitHubApiError {
+    error.method = operation;
+    error.path = path.to_owned();
+    let run_context = run_id
+        .map(|id| format!(" for run {id}"))
+        .unwrap_or_default();
+    let failure_context = if error.source == crate::github_api::GitHubErrorSource::Transport {
+        " transport failure (including timeout)"
+    } else {
+        ""
+    };
+    error.body = format!(
+        "GitHub Actions operation {operation}{run_context}{failure_context}: {}",
+        error.body
+    );
+    error
+}
+
+async fn artifact_http(
+    operation: &'static str,
+    path: String,
+    response: reqwest::Response,
+    run_id: Option<u64>,
+) -> GitHubApiError {
+    let status = response.status();
+    let body = response.text().await.unwrap_or_default();
+    let guidance = match status {
+        StatusCode::FORBIDDEN => "GitHub Actions read permission is required",
+        StatusCode::NOT_FOUND => "artifact or workflow run is missing or expired",
+        _ => "GitHub Actions request failed",
+    };
+    let run_context = run_id
+        .map(|id| format!(" for run {id}"))
+        .unwrap_or_default();
+    GitHubApiError::http(
+        operation,
+        path,
+        status,
+        format!("{guidance}{run_context}: {body}"),
+    )
+}
+
+fn artifact_budget_error(owner: &str, repo: &str, run_id: u64, artifact_id: u64) -> GitHubApiError {
+    GitHubApiError::transport(
+        "download_artifact",
+        format!("/repos/{owner}/{repo}/actions/artifacts/{artifact_id}/zip"),
+        format!(
+            "compressed artifact {artifact_id} for run {run_id} exceeds the 32 MiB download limit"
+        ),
+    )
 }
