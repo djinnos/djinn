@@ -16,7 +16,7 @@ pub const EXTENSION_LOAD_DIAGNOSTIC_V1_SCHEMA_VERSION: i32 = 1;
 pub enum ExtensionLoadSourceKind {
     /// Project-configured MCP server (e.g. `tools/list` or handshake failures).
     ProjectMcp,
-    /// Project-configured skill declared in the workspace manifest.
+    /// Project-selected skill from native or repository-convention discovery.
     ProjectSkill,
 }
 
@@ -48,8 +48,6 @@ pub enum ExtensionLoadPhase {
     Frontmatter,
     /// A declared skill file is missing.
     MissingFile,
-    /// Skill manifest has drifted from the loaded file.
-    ManifestDrift,
 }
 
 impl ExtensionLoadPhase {
@@ -63,7 +61,6 @@ impl ExtensionLoadPhase {
             Self::ToolsList => "tools_list",
             Self::Frontmatter => "frontmatter",
             Self::MissingFile => "missing_file",
-            Self::ManifestDrift => "manifest_drift",
         }
     }
 }
@@ -104,8 +101,6 @@ pub enum ExtensionLoadRemedyCode {
     CheckSkillFrontmatter,
     /// Restore a missing or corrupted skill file.
     RestoreSkillFile,
-    /// Update the skill manifest to match the current workspace.
-    UpdateSkillManifest,
 }
 
 impl ExtensionLoadRemedyCode {
@@ -118,7 +113,6 @@ impl ExtensionLoadRemedyCode {
             Self::CheckServer => "check_server",
             Self::CheckSkillFrontmatter => "check_skill_frontmatter",
             Self::RestoreSkillFile => "restore_skill_file",
-            Self::UpdateSkillManifest => "update_skill_manifest",
         }
     }
 }
@@ -294,7 +288,6 @@ mod tests {
             (ExtensionLoadPhase::ToolsList, "tools_list"),
             (ExtensionLoadPhase::Frontmatter, "frontmatter"),
             (ExtensionLoadPhase::MissingFile, "missing_file"),
-            (ExtensionLoadPhase::ManifestDrift, "manifest_drift"),
         ];
         for (variant, expected) in phases {
             let json = serde_json::to_string(variant).unwrap();
@@ -329,10 +322,6 @@ mod tests {
             (
                 ExtensionLoadRemedyCode::RestoreSkillFile,
                 "restore_skill_file",
-            ),
-            (
-                ExtensionLoadRemedyCode::UpdateSkillManifest,
-                "update_skill_manifest",
             ),
         ];
         for (variant, expected) in remedies {
@@ -483,7 +472,6 @@ mod tests {
             "tools_list",
             "frontmatter",
             "missing_file",
-            "manifest_drift",
         ];
         for s in expected {
             let parsed: ExtensionLoadPhase = serde_json::from_str(&format!("\"{s}\"")).unwrap();
@@ -509,7 +497,6 @@ mod tests {
             "check_server",
             "check_skill_frontmatter",
             "restore_skill_file",
-            "update_skill_manifest",
         ];
         for s in expected {
             let parsed: ExtensionLoadRemedyCode =

@@ -9,7 +9,7 @@ SERVER_DIR := $(CURDIR)/server
 # Postgres (docker-compose.yml → `postgres-test` service at :5433) plus the
 # test harness targets that depend on it.
 
-.PHONY: help dev test-db-migrate test-db-postgres-template test-vault test-db-reset sqlx-prepare sqlx-check sqlx-verify skills-manifest-generate skills-manifest-check test test-all validate-taskrun-backstop check-boundaries verify-cache-cleanup check-retirement-manifest
+.PHONY: help dev test-db-migrate test-db-postgres-template test-vault test-db-reset sqlx-prepare sqlx-check sqlx-verify test test-all validate-taskrun-backstop check-boundaries verify-cache-cleanup check-retirement-manifest
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*##' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*##"}; {printf "  \033[36m%-15s\033[0m %s\n", $$1, $$2}'
@@ -123,12 +123,6 @@ sqlx-verify: ## Verify server/.sqlx/ freshness; assumes schema already applied +
 		exit 1; \
 	fi
 	@echo "server/.sqlx/ is up to date ($$(ls $(SERVER_DIR)/.sqlx/query-*.json | wc -l) entries)."
-
-skills-manifest-generate: ## Regenerate .djinn/skills.json after editing skills/references
-		cd $(SERVER_DIR) && cargo run -p djinn-agent --bin djinn-skills-manifest -- generate --root ..
-
-skills-manifest-check: ## Fail if .djinn/skills.json is stale (CI/local drift guard)
-		cd $(SERVER_DIR) && cargo run -p djinn-agent --bin djinn-skills-manifest -- check --root ..
 
 test-db-reset: ## Wipe and restart the test Postgres — cleans out djinn_test_* DBs
 	docker compose stop postgres-test
