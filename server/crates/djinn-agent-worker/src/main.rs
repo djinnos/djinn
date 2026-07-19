@@ -79,8 +79,8 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use cargo_target_seed::{
-    CargoTargetSeedFallback, CargoTargetSeedResult, run_target_dir, seed_cargo_target_dir,
-    teardown_run_dir, warm_base_dir,
+    CargoTargetSeedFallback, CargoTargetSeedResult, cargo_build_jobs_variant, run_target_dir,
+    seed_cargo_target_dir, teardown_run_dir, warm_base_dir_for_current_jobs,
 };
 use clap::{Parser, Subcommand};
 use djinn_agent::context::{AgentContext, ReconciliationSweepConfig};
@@ -522,7 +522,7 @@ async fn prepare_cargo_target_dir(spec: &TaskRunSpec, workspace_path: &Path) -> 
     // the warm-step outcome for the same workspace.
     cargo_metrics::record_resolved_workspace_dir(&spec.project_id, workspace_dir_display.as_str());
 
-    let source_base = warm_base_dir(&spec.project_id);
+    let source_base = warm_base_dir_for_current_jobs(&spec.project_id);
     let fallback_run_dir = run_target_dir(&spec.task_run_id);
     let (destination_run_dir, env_was_present) = match std::env::var_os(CARGO_TARGET_DIR_ENV) {
         Some(raw) if !raw.is_empty() => {
@@ -788,7 +788,8 @@ async fn warm_cargo_target_base(
         project_id,
         "cargo_metrics: warm incremental prune attempt started"
     );
-    let _warm_base_guard = match acquire_warm_base_lock(project_id) {
+    let mold_jobs = cargo_build_jobs_variant();
+    let _warm_base_guard = match acquire_warm_base_lock(project_id, mold_jobs) {
         Ok(guard) => {
             warm_cargo_test_phase("lock");
             guard
@@ -810,10 +811,11 @@ async fn warm_cargo_target_base(
             Path::new(&std::env::var_os(CARGO_TARGET_DIR_ENV).unwrap_or_default()),
             &root,
         ),
-        None => cargo_incremental_prune::prune_warm_incremental(project_id),
+        None => cargo_incremental_prune::prune_warm_incremental_for_jobs(project_id, mold_jobs),
     };
     #[cfg(not(test))]
-    let prune_result = cargo_incremental_prune::prune_warm_incremental(project_id);
+    let prune_result =
+        cargo_incremental_prune::prune_warm_incremental_for_jobs(project_id, mold_jobs);
     match prune_result {
         Ok(result) => {
             warm_cargo_test_phase(result.outcome.as_str());
@@ -1006,6 +1008,7 @@ fn warm_cargo_test_phase(_: &'static str) {}
 /// not synthesize a result or invoke telemetry outside the warm flow.
 fn acquire_warm_base_lock(
     project_id: &str,
+    mold_jobs: usize,
 ) -> Result<cargo_incremental_prune::WarmBaseLock, cargo_incremental_prune::PruneError> {
     #[cfg(test)]
     if let Some(failure) = warm_cargo_take_injected_lock_failure() {
@@ -1028,9 +1031,11 @@ fn acquire_warm_base_lock(
             |error| record_warm_incremental_prune_failure(project_id, error.kind),
         );
     }
-    cargo_incremental_prune::WarmBaseLock::acquire_and_record_failure(project_id, |error| {
-        record_warm_incremental_prune_failure(project_id, error.kind)
-    })
+    let result = cargo_incremental_prune::WarmBaseLock::acquire_for_jobs(project_id, mold_jobs);
+    if let Err(error) = &result {
+        record_warm_incremental_prune_failure(project_id, error.kind);
+    }
+    result
 }
 
 async fn warm_cargo_and_continue<F, Fut>(
