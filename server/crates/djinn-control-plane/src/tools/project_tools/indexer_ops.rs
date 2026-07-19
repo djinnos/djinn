@@ -88,11 +88,8 @@ fn derive_graph_warm_status_with_workspaces(
 }
 
 /// Build the per-workspace warm-status list from the durable
-/// `project_workspace_graph` rows — the SAME source the `code_graph
-/// workspaces` op reads. The previous implementation read a
-/// `.djinn/graph_warm_status.json` file written by the warm pod, which the
-/// control plane never sees in pod mode, so the list was always empty and a
-/// `timed_out` workspace stayed silently masked as `ready`.
+/// `project_workspace_graph` rows — the same authoritative source the
+/// `code_graph workspaces` op reads.
 async fn workspace_warm_statuses_from_db(
     db: Database,
     project_id: &str,

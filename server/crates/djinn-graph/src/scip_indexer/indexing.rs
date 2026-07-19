@@ -1131,8 +1131,6 @@ pub(crate) async fn run_indexers(
 
     let artifacts = collect_scip_artifacts(&output_root, &tally.commands)?;
     apply_artifact_statuses(&artifacts, &mut tally.workspace_statuses);
-    write_workspace_warm_statuses(&project_root, &tally.workspace_statuses)?;
-
     if tally.all_failed {
         return Err(anyhow!(
             "all {} SCIP indexers failed (no index produced)",
@@ -1341,44 +1339,6 @@ fn apply_artifact_statuses(artifacts: &[ScipArtifact], statuses: &mut [Workspace
                 Some("indexer exited successfully but produced no SCIP artifact".to_string());
         }
     }
-}
-
-pub(crate) fn workspace_warm_status_path(project_root: &Path) -> PathBuf {
-    project_root.join(".djinn").join("graph_warm_status.json")
-}
-
-fn write_workspace_warm_statuses(
-    project_root: &Path,
-    statuses: &[WorkspaceWarmStatus],
-) -> Result<()> {
-    let path = workspace_warm_status_path(project_root);
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("create graph warm status dir {}", parent.display()))?;
-    }
-    let json =
-        serde_json::to_string_pretty(statuses).context("serialize workspace warm statuses")?;
-    fs::write(&path, json).with_context(|| format!("write graph warm status {}", path.display()))
-}
-
-/// Append a non-fatal graph-cache warning to the same status file consumed by
-/// the warm-status surface. The synthetic `graph-cache` row deliberately uses a
-/// warning status (not `failed`/`timed_out`) so it is visible without making the
-/// overall graph warm state look like an indexer failure.
-pub(crate) fn append_graph_cache_shrink_warning(
-    project_root: &Path,
-    statuses: &[WorkspaceWarmStatus],
-    detail: String,
-) -> Result<()> {
-    let mut statuses = statuses.to_vec();
-    statuses.push(WorkspaceWarmStatus {
-        workspace_slug: "graph-cache".to_string(),
-        indexer: SupportedIndexer::RustAnalyzer,
-        status: "warning".to_string(),
-        detail: Some(detail),
-        workspace_rel_root: String::new(),
-    });
-    write_workspace_warm_statuses(project_root, &statuses)
 }
 
 pub(crate) fn collect_scip_artifacts(
