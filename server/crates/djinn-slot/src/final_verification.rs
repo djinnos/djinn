@@ -111,9 +111,7 @@ pub enum FinalVerificationRecordingOutcome {
     /// completion-intent path treats this as "proceed without evidence"
     /// (the pre-completion-boundary submission behavior). A configured plan
     /// never reaches this variant — its failures stay `Ineligible`/`Error`.
-    NotConfigured {
-        verification_attempt_id: String,
-    },
+    NotConfigured { verification_attempt_id: String },
 }
 
 /// Run the one authoritative completion boundary for either a model tool call
@@ -228,9 +226,7 @@ pub(crate) async fn validate_or_reverify_completion_intent(
                 // An unconfigured plan cannot revalidate prior evidence; the
                 // canonical path below resolves the typed skip.
                 None => Ok::<_, String>(None),
-                Some(material) => {
-                    Ok(Some((derive_current_inputs(&material).await?, material)))
-                }
+                Some(material) => Ok(Some((derive_current_inputs(&material).await?, material))),
             }
         }
         .await;
