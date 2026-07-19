@@ -1,0 +1,161 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT id, task_id, role, attempt_seq, dispatch_key, session_id,\n                    outcome AS \"outcome!\", guard_decision, guard_reason, summary, summary_json::text,\n                    log_tail, checkpoint_ref, submit_ref, pr_url, mirror_head_sha, github_head_sha, github_publication_error,\n                    dispatch_owner_incarnation_id, dispatch_group_id,\n                    created_at AS \"created_at!\", updated_at AS \"updated_at!\", submitted_at, terminal_at\n                 FROM task_attempts\n                 WHERE task_id = $1 AND role = $2 AND outcome = 'submitted'\n                 ORDER BY created_at DESC\n                 LIMIT 1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 1,
+        "name": "task_id",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 2,
+        "name": "role",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 3,
+        "name": "attempt_seq",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 4,
+        "name": "dispatch_key",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 5,
+        "name": "session_id",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 6,
+        "name": "outcome!",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 7,
+        "name": "guard_decision",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 8,
+        "name": "guard_reason",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 9,
+        "name": "summary",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 10,
+        "name": "summary_json",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 11,
+        "name": "log_tail",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 12,
+        "name": "checkpoint_ref",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 13,
+        "name": "submit_ref",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 14,
+        "name": "pr_url",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 15,
+        "name": "mirror_head_sha",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 16,
+        "name": "github_head_sha",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 17,
+        "name": "github_publication_error",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 18,
+        "name": "dispatch_owner_incarnation_id",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 19,
+        "name": "dispatch_group_id",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 20,
+        "name": "created_at!",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 21,
+        "name": "updated_at!",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 22,
+        "name": "submitted_at",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 23,
+        "name": "terminal_at",
+        "type_info": "Varchar"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      false,
+      true,
+      true,
+      true,
+      null,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      false,
+      false,
+      true,
+      true
+    ]
+  },
+  "hash": "04fd32407d9b5f7eb517b7ffcbb143191b9424830c10418126493dc2ea9e9c87"
+}

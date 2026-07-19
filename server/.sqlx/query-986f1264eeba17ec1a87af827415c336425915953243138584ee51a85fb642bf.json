@@ -1,0 +1,76 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT id, project_id, task_id, trigger_type,\n                status AS \"status!\", started_at, ended_at,\n                workspace_path, mirror_ref, dispatch_group_id\n             FROM task_runs WHERE id = $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 1,
+        "name": "project_id",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 2,
+        "name": "task_id",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 3,
+        "name": "trigger_type",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 4,
+        "name": "status!",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 5,
+        "name": "started_at",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 6,
+        "name": "ended_at",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 7,
+        "name": "workspace_path",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 8,
+        "name": "mirror_ref",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 9,
+        "name": "dispatch_group_id",
+        "type_info": "Varchar"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      true,
+      true,
+      true
+    ]
+  },
+  "hash": "986f1264eeba17ec1a87af827415c336425915953243138584ee51a85fb642bf"
+}
