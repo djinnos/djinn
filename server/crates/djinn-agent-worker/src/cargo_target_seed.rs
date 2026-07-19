@@ -680,6 +680,68 @@ mod tests {
     }
 
     #[test]
+    fn task_variant_one_does_not_seed_sibling_variant_four() {
+        let _guard = metric_test_guard();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let warm_root = tmp.path().join("cargo-target");
+        let project_id = "project";
+        let task_base = warm_base_dir_for_jobs_at_root(&warm_root, project_id, 1);
+        let sibling_base = warm_base_dir_for_jobs_at_root(&warm_root, project_id, 4);
+        let run = tmp.path().join("run-target");
+        let sibling_artifact = Path::new("debug/deps/libsibling.rlib");
+        write_base_file(&sibling_base, sibling_artifact, b"variant four only");
+
+        let result =
+            seed_cargo_target_dir_with_options(&task_base, &run, &CargoTargetSeedOptions::new(1))
+                .expect("missing exact variant should cold-start");
+
+        assert_eq!(
+            result.fallback_reason,
+            Some(CargoTargetSeedFallback::BaseMissing)
+        );
+        assert!(result.cold_started());
+        assert!(
+            !run.join(sibling_artifact).exists(),
+            "a task for mold-jobs-1 must not seed mold-jobs-4 artifacts"
+        );
+    }
+
+    #[test]
+    fn task_variant_one_reuses_only_its_matching_warm_base() {
+        let _guard = metric_test_guard();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let warm_root = tmp.path().join("cargo-target");
+        let project_id = "project";
+        let task_base = warm_base_dir_for_jobs_at_root(&warm_root, project_id, 1);
+        let sibling_base = warm_base_dir_for_jobs_at_root(&warm_root, project_id, 4);
+        let additional_base = warm_base_dir_for_jobs_at_root(&warm_root, project_id, 8);
+        let run = tmp.path().join("run-target");
+        let matching_artifact = Path::new("debug/deps/libmatching.rlib");
+        let sibling_artifact = Path::new("debug/deps/libsibling.rlib");
+
+        assert_ne!(task_base, sibling_base);
+        assert_ne!(task_base, additional_base);
+        assert_ne!(sibling_base, additional_base);
+        write_base_file(&sibling_base, sibling_artifact, b"variant four");
+        write_base_file(&task_base, matching_artifact, b"variant one");
+
+        let result =
+            seed_cargo_target_dir_with_options(&task_base, &run, &CargoTargetSeedOptions::new(1))
+                .expect("matching variant should seed");
+
+        assert_eq!(result.fallback_reason, None);
+        assert!(!result.cold_started());
+        assert_eq!(
+            fs::read(run.join(matching_artifact)).expect("read matching seeded artifact"),
+            b"variant one"
+        );
+        assert!(
+            !run.join(sibling_artifact).exists(),
+            "a matching seed must not include sibling variant artifacts"
+        );
+    }
+
+    #[test]
     fn non_directory_base_returns_cold_start() {
         let _guard = metric_test_guard();
         let tmp = tempfile::tempdir().expect("tempdir");
