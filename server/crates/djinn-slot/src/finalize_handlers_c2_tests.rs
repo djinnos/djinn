@@ -82,8 +82,7 @@ impl IdentityCompatibilityMutation {
                     .allowlisted_environment
                     .insert("RUSTFLAGS".into(), "-Dwarnings".into());
             }
-            Self::ManifestVersion => input.input_manifest.version += 1,
-            Self::MissingIdentityDigest | Self::LegacyIdentityDigest => {}
+            Self::ManifestVersion | Self::MissingIdentityDigest | Self::LegacyIdentityDigest => {}
         }
     }
 
@@ -92,6 +91,13 @@ impl IdentityCompatibilityMutation {
             Self::MissingIdentityDigest => String::new(),
             Self::LegacyIdentityDigest => "environment-identity-v0".into(),
             _ => persisted.to_owned(),
+        }
+    }
+
+    fn stale_manifest_version(self, current: u32) -> String {
+        match self {
+            Self::ManifestVersion => format!("manifest-v{}", current + 1),
+            _ => format!("manifest-v{current}"),
         }
     }
 }
@@ -138,9 +144,11 @@ async fn assert_identity_mismatch_rebuilds_current_evidence(
         "{name}: C2 fingerprint is not the submission-diff fingerprint"
     );
     let stale_identity_digest = mutation.stale_identity_digest(&persisted_identity.digest);
-    assert_ne!(
-        stale_identity_digest, current_identity.digest,
-        "{name}: persisted identity value must differ from current identity"
+    let stale_manifest_version = mutation.stale_manifest_version(manifest_version);
+    assert!(
+        stale_identity_digest != current_identity.digest
+            || stale_manifest_version != format!("manifest-v{manifest_version}"),
+        "{name}: persisted identity or manifest must differ from current evidence"
     );
     let db = test_helpers::create_test_db();
     let project = test_helpers::create_test_project(&db).await;
@@ -172,7 +180,7 @@ async fn assert_identity_mismatch_rebuilds_current_evidence(
         covered_checks: serde_json::json!(["format", "slot-clippy"]),
         required_checks: material.required_checks.clone(),
         verification_input_fingerprint: fingerprint.clone(),
-        manifest_version: "manifest-v1".into(),
+        manifest_version: stale_manifest_version,
         environment_identity_digest: stale_identity_digest,
     };
     let intent = CompletionIntent {
