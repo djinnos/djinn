@@ -175,44 +175,16 @@ async fn connect_mcp_registry(
     }
 }
 
-/// Load and verify project skills from the worktree.
+/// Load read-only repository-convention skills from the worktree.
 async fn load_project_skills(
     worktree_path: &Path,
     task_short_id: &str,
     role_name: &str,
     effective_skills: &[String],
-) -> crate::skills_manifest::DetailedVerifiedSkillsLoad {
-    if effective_skills.is_empty() {
-        return crate::skills_manifest::DetailedVerifiedSkillsLoad {
-            skills: Vec::new(),
-            diagnostics: Vec::new(),
-            error: None,
-        };
-    }
-    let loaded =
-        crate::skills_manifest::load_verified_skills_detailed(worktree_path, effective_skills);
-    match &loaded.error {
-        None => {
-            tracing::info!(
-                task_id = %task_short_id,
-                role = %role_name,
-                requested_count = effective_skills.len(),
-                resolved_count = loaded.skills.len(),
-                "Lifecycle: resolved role skills"
-            );
-            loaded
-        }
-        Some(error) => {
-            tracing::error!(
-                task_id = %task_short_id,
-                role = %role_name,
-                requested_count = effective_skills.len(),
-                error = %error,
-                "Lifecycle: skills manifest verification failed"
-            );
-            loaded
-        }
-    }
+) -> crate::skills::DetailedSkillsLoad {
+    let loaded = crate::skills::load_skills_detailed(worktree_path, effective_skills);
+    tracing::info!(task_id = %task_short_id, role = %role_name, requested_count = effective_skills.len(), resolved_count = loaded.skills.len(), "Lifecycle: resolved repository-convention skills");
+    loaded
 }
 
 /// Persist a lifecycle load pass and return its canonical scoped rows.

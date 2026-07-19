@@ -11,11 +11,6 @@ doctest = false
 # Exposes cluster-free slot-pool factory hooks and test helpers for downstream integration tests.
 test-support = ["tempfile"]
 
-[[bin]]
-name = "djinn-skills-manifest"
-path = "src/bin/skills_manifest.rs"
-required-features = []
-
 [dependencies]
 djinn-core = { path = "../djinn-core" }
 djinn-db = { path = "../djinn-db" }
