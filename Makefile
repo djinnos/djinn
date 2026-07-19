@@ -18,23 +18,16 @@ verify-cache-cleanup: ## Run the read-only cache-cleanup acceptance verifier
 	@./scripts/verify-cache-cleanup.sh
 
 test-db-migrate: ## Ensure schema is applied to the test Postgres (:5433)
-	@command -v sqlx >/dev/null 2>&1 || { echo "Install sqlx-cli: cargo install sqlx-cli --no-default-features --features postgres,rustls"; exit 1; }
 	@until docker exec djinn-postgres-test pg_isready -U postgres >/dev/null 2>&1; do sleep 1; done
-	@cd $(SERVER_DIR)/crates/djinn-db && DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5433/djinn sqlx migrate run --source migrations_postgres >/dev/null
+	@cd $(SERVER_DIR) && DJINN_DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5433/djinn cargo run -p djinn-server -- --migrate-only >/dev/null
 
 test-db-postgres-template: ## Build the djinn_test_template DB Postgres clones from
-	@command -v sqlx >/dev/null 2>&1 || { echo "Install sqlx-cli: cargo install sqlx-cli --no-default-features --features postgres,rustls"; exit 1; }
 	@until docker exec djinn-postgres-test pg_isready -U postgres >/dev/null 2>&1; do echo "waiting for postgres-test..."; sleep 1; done
 	@# Evict any sessions still attached to the template before dropping; Postgres
 	@# refuses DROP DATABASE while connections remain.
 	@docker exec djinn-postgres-test psql -U postgres -d postgres -v ON_ERROR_STOP=1 -c "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname='djinn_test_template' AND pid <> pg_backend_pid()" >/dev/null
 	@docker exec djinn-postgres-test psql -U postgres -d postgres -v ON_ERROR_STOP=1 -c "DROP DATABASE IF EXISTS djinn_test_template" >/dev/null
-	@docker exec djinn-postgres-test psql -U postgres -d postgres -v ON_ERROR_STOP=1 -c "CREATE DATABASE djinn_test_template" >/dev/null
-	@cd $(SERVER_DIR)/crates/djinn-db && DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5433/djinn_test_template sqlx migrate run --source migrations_postgres >/dev/null
-	@# Mark the template as a TEMPLATE so it can be used as a fast clone source
-	@# (CREATE DATABASE x TEMPLATE djinn_test_template). Required for the test-
-	@# harness clone path in Database::open_in_memory().
-	@docker exec djinn-postgres-test psql -U postgres -d postgres -v ON_ERROR_STOP=1 -c "UPDATE pg_database SET datistemplate = TRUE WHERE datname = 'djinn_test_template'" >/dev/null
+	@cd $(SERVER_DIR) && DJINN_TEST_DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5433/djinn cargo test -p djinn-db --test setup_test_template -- --ignored >/dev/null
 	@echo "djinn_test_template ready"
 
 test-vault: ## Create the test-only vault key at $DJINN_VAULT_KEY_PATH (idempotent)

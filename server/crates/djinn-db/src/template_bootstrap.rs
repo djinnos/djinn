@@ -226,6 +226,17 @@ async fn run_template_migrations(server_prefix: &str) -> DbResult<()> {
     // Reserved exclusively for the clone template; production code has no
     // access to this constant or this module.
     const TEMPLATE_OPERATOR_ID: &str = "00000000-0000-7000-8000-000000000001";
+    migrations::bootstrap_designated_operator(
+        &template_url,
+        &migrations::DesignatedOperatorBootstrap {
+            user_id: TEMPLATE_OPERATOR_ID.to_owned(),
+            github_id: 9_000_000_001,
+            github_login: "djinn-test-template-operator".to_owned(),
+            github_name: Some("Djinn test template operator".to_owned()),
+            github_avatar_url: None,
+        },
+    )
+    .await?;
     migrations::run_postgres_migrations(
         &template_url,
         &MigrationContext {

@@ -7,7 +7,7 @@ use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use tokio::sync::{OnceCell, OwnedSemaphorePermit, Semaphore};
 
 use crate::error::{DbError, DbResult};
-use crate::migrations::{self, MigrationContext};
+use crate::migrations::{self, DesignatedOperatorBootstrap, MigrationContext};
 use crate::template_bootstrap;
 
 /// Default number of concurrent background full-text "fan-out" searches
@@ -457,6 +457,23 @@ impl Database {
         }
 
         Ok(())
+    }
+
+    /// Fresh-install-only provisioning entry point. It uses a dedicated
+    /// connection and is unavailable to cloned test databases.
+    pub async fn bootstrap_designated_operator(
+        &self,
+        operator: DesignatedOperatorBootstrap,
+    ) -> DbResult<()> {
+        if self.readonly || self.test_branch.is_some() {
+            return Err(DbError::InvalidData(
+                "designated operator bootstrap is unavailable for readonly or test databases"
+                    .to_owned(),
+            ));
+        }
+        let url = self.bootstrap.target.clone();
+        migrations::ensure_postgres_database_exists(&url).await?;
+        migrations::bootstrap_designated_operator(&url, &operator).await
     }
 
     /// App and worker pods must **never** run the migrator: it takes the
