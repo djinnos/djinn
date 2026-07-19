@@ -1332,6 +1332,7 @@ dependencies = [
  "chrono",
  "dirs 6.0.0",
  "djinn-core",
+ "djinn-db",
  "djinn-memory",
  "djinn-stack",
  "futures",

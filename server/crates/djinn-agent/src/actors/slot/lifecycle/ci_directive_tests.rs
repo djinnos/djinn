@@ -3,7 +3,7 @@
 use super::*;
 
 use djinn_core::events::EventBus;
-use djinn_db::{Database, TaskRepository};
+use djinn_db::{Database, EffectiveCreatorProvenance, TaskRepository};
 
 use crate::roles::{AgentRole, ReviewerRole, WorkerRole};
 
@@ -65,15 +65,23 @@ async fn task_with_structured_red_ci_and_audit_activity(
     )
     .await;
     let task_repo = TaskRepository::new(db.clone(), events.clone());
+    let creator = crate::test_helpers::create_test_creator(db).await;
     let task = task_repo
-        .create(
-            &epic.id,
+        .create_in_project_with_provenance(
+            &project.id,
+            Some(&epic.id),
+            EffectiveCreatorProvenance {
+                explicit_user_id: Some(&creator.id),
+                source_task_id: None,
+                proposal_id: None,
+            },
             "Fix structured CI failure",
             "The task has red required CI.",
             "Use the durable CI snapshot, not activity prose.",
             "task",
             1,
             "test-owner",
+            None,
             None,
         )
         .await
