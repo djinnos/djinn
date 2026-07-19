@@ -1618,16 +1618,18 @@ mod tests {
     fn mold_linker_flags_follow_each_pods_derived_job_count() {
         let project_id = "mold-job-variants";
         let task_run_id = Uuid::now_v7().to_string();
-        let warm_four: BTreeMap<&str, &str> = warm_cache_env_vars(project_id, "4", None)
+        let warm_four_vars = warm_cache_env_vars(project_id, "4", None);
+        let warm_four: BTreeMap<&str, &str> = warm_four_vars
             .iter()
             .map(|env| (env.name.as_str(), env.value.as_deref().unwrap_or_default()))
             .collect();
-        let task_one: BTreeMap<&str, &str> =
-            task_run_cache_env_vars(project_id, &task_run_id, "1500m", None)
-                .iter()
-                .map(|env| (env.name.as_str(), env.value.as_deref().unwrap_or_default()))
-                .collect();
-        let warm_one: BTreeMap<&str, &str> = warm_cache_env_vars(project_id, "500m", None)
+        let task_one_vars = task_run_cache_env_vars(project_id, &task_run_id, "1500m", None);
+        let task_one: BTreeMap<&str, &str> = task_one_vars
+            .iter()
+            .map(|env| (env.name.as_str(), env.value.as_deref().unwrap_or_default()))
+            .collect();
+        let warm_one_vars = warm_cache_env_vars(project_id, "500m", None);
+        let warm_one: BTreeMap<&str, &str> = warm_one_vars
             .iter()
             .map(|env| (env.name.as_str(), env.value.as_deref().unwrap_or_default()))
             .collect();
