@@ -1,9 +1,0 @@
-{
-  "agent_mcp_defaults": {
-    "*": [
-      "Tavilly"
-    ]
-  },
-  "global_skills": [],
-  "setup": []
-}

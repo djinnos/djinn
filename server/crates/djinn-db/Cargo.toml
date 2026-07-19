@@ -16,6 +16,7 @@ anyhow = "1"
 async-trait = "0.1"
 base64 = "0.22"
 djinn-core = { path = "../djinn-core", features = ["sqlx"] }
+djinn-stack = { path = "../djinn-stack" }
 djinn-memory = { path = "../djinn-memory", features = ["sqlx"] }
 dirs = "6"
 globset = "0.4"
