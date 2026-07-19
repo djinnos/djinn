@@ -34,7 +34,9 @@ use crate::refinement_dispatch::refinement_cap_tests::{
 };
 use djinn_core::events::{DjinnEventEnvelope, EventBus};
 use djinn_core::models::NeedsEvidenceClaim;
-use djinn_db::{ProposalDebateTrailCreateInput, ProposalRepository, TaskRepository};
+use djinn_db::{
+    EffectiveCreatorProvenance, ProposalDebateTrailCreateInput, ProposalRepository, TaskRepository,
+};
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -79,9 +81,14 @@ async fn seed_linked_spike(
     let proposal_repo = ProposalRepository::new(db.clone(), EventBus::noop());
 
     let spike_task_id = task_repo
-        .create_in_project(
+        .create_in_project_with_provenance(
             &fixture.project_id,
             None,
+            EffectiveCreatorProvenance {
+                explicit_user_id: Some(&fixture.user_id),
+                source_task_id: None,
+                proposal_id: None,
+            },
             "Evidence spike",
             "Investigate the load-bearing claim",
             "",
@@ -97,9 +104,14 @@ async fn seed_linked_spike(
 
     // Record a Judge task so the claim has a valid created_by_task_id.
     let judge_task_id = task_repo
-        .create_in_project(
+        .create_in_project_with_provenance(
             &fixture.project_id,
             None,
+            EffectiveCreatorProvenance {
+                explicit_user_id: Some(&fixture.user_id),
+                source_task_id: None,
+                proposal_id: None,
+            },
             "Judge for refinement",
             "Judge the proposal",
             "refinement",
@@ -714,9 +726,14 @@ async fn two_judge_demands_cannot_create_two_linked_spikes() {
 
     // Create a Judge task and link the first spike.
     let judge_task_id = task_repo
-        .create_in_project(
+        .create_in_project_with_provenance(
             &fixture.project_id,
             None,
+            EffectiveCreatorProvenance {
+                explicit_user_id: Some(&fixture.user_id),
+                source_task_id: None,
+                proposal_id: None,
+            },
             "Judge for refinement",
             "Judge the proposal",
             "refinement",
@@ -732,9 +749,14 @@ async fn two_judge_demands_cannot_create_two_linked_spikes() {
     let claim = sample_claim(&judge_task_id);
 
     let spike1 = task_repo
-        .create_in_project(
+        .create_in_project_with_provenance(
             &fixture.project_id,
             None,
+            EffectiveCreatorProvenance {
+                explicit_user_id: Some(&fixture.user_id),
+                source_task_id: None,
+                proposal_id: None,
+            },
             "First spike",
             "First investigation",
             "",
@@ -754,9 +776,14 @@ async fn two_judge_demands_cannot_create_two_linked_spikes() {
 
     // A second demand attempts to link another spike.
     let spike2 = task_repo
-        .create_in_project(
+        .create_in_project_with_provenance(
             &fixture.project_id,
             None,
+            EffectiveCreatorProvenance {
+                explicit_user_id: Some(&fixture.user_id),
+                source_task_id: None,
+                proposal_id: None,
+            },
             "Second spike",
             "Second investigation",
             "",
@@ -806,9 +833,14 @@ async fn sibling_refinement_completions_after_awaiting_evidence_do_not_enqueue_e
     // already recorded.  Mimic production: `issue_type = "refinement"` with
     // `agent_type` set separately via `update_agent_type`.
     let advocate_task_id = task_repo
-        .create_in_project(
+        .create_in_project_with_provenance(
             &fixture.project_id,
             None,
+            EffectiveCreatorProvenance {
+                explicit_user_id: Some(&fixture.user_id),
+                source_task_id: None,
+                proposal_id: None,
+            },
             "Advocate for refinement",
             "Advocate the proposal",
             "",

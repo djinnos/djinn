@@ -838,4 +838,17 @@ impl TaskRepository {
         // Flatten: outer None = no row, inner None = NULL column value.
         Ok(row.flatten())
     }
+
+    /// Count exact-title matches for integration tests that verify transactional
+    /// task insertion rollback without issuing SQL outside the repository layer.
+    #[cfg(any(test, feature = "test-support"))]
+    pub async fn count_by_title(&self, title: &str) -> Result<i64> {
+        self.db.ensure_initialized().await?;
+        Ok(
+            sqlx::query_scalar("SELECT COUNT(*) FROM tasks WHERE title = $1")
+                .bind(title)
+                .fetch_one(self.db.pool())
+                .await?,
+        )
+    }
 }

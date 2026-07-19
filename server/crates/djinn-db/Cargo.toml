@@ -35,6 +35,7 @@ uuid = { version = "1", features = ["v7"] }
 workspace-hack.workspace = true
 
 [dev-dependencies]
+djinn-db = { path = ".", features = ["test-support"] }
 futures = "0.3"
 proptest = "1"
 rstest = "0.24"

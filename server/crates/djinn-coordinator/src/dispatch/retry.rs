@@ -8,6 +8,7 @@ use djinn_core::models::task_attempt::{TaskAttemptLedgerRow, TaskAttemptOutcome}
 use djinn_core::models::{ReopenClass, TransitionAction};
 #[cfg(not(test))]
 use djinn_db::AgentRepository;
+use djinn_db::EffectiveCreatorProvenance;
 use djinn_db::repositories::task_arbitration::{
     CreateArbitrationParams, TaskArbitrationRecord, TaskArbitrationRepository, TryCreateResult,
     UpdateDispatchLedgerParams,
@@ -2685,10 +2686,15 @@ impl CoordinatorActor {
         };
         let review_task = match djinn_core::auth_context::SESSION_USER_ID
             .scope(
-                source_creator,
-                task_repo.create_in_project(
+                source_creator.clone(),
+                task_repo.create_in_project_with_provenance(
                     project_id,
                     None,
+                    EffectiveCreatorProvenance {
+                        explicit_user_id: source_creator.as_deref(),
+                        source_task_id: source_task.as_ref().map(|task| task.id.as_str()),
+                        proposal_id: None,
+                    },
                     &title,
                     &description,
                     instructions,

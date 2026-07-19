@@ -10,7 +10,9 @@ use djinn_control_plane::tools::epic_ops::{
 };
 use djinn_control_plane::tools::proposal_readiness::evaluate_proposal_readiness;
 use djinn_core::models::{Proposal, ProposalDebateTrail, TransitionAction};
-use djinn_db::{ProposalRepository, TaskRepository, UserSettingsRepository};
+use djinn_db::{
+    EffectiveCreatorProvenance, ProposalRepository, TaskRepository, UserSettingsRepository,
+};
 
 use super::refinement::{
     AdversaryPassOutcome, AdversaryPassResult, JudgeVerdictResult, RefinementLoopState,
@@ -908,24 +910,36 @@ impl CoordinatorActor {
         };
 
         // Resolve the attributed user's display identity (their GitHub login)
-        // for the legacy `owner` column so the Kanban board and owner-based
-        // filters (`task_ready owner=…`) render refinement tasks under the real
-        // user instead of "system". `created_by_user_id` (set below) remains the
-        // authoritative ownership field; `tasks.owner` is legacy display/filter
-        // only. Falls back to "system" when the user row can't be resolved so
-        // task creation never fails on the lookup.
-        let owner = match attributed_user_id {
-            Some(uid) => self
-                .resolve_owner_identity(uid)
-                .await
-                .unwrap_or_else(|| "system".to_string()),
-            None => "system".to_string(),
+        // for the legacy `owner` column. Creator attribution is mandatory: an
+        // absent or stale user must stop task creation rather than fabricating a
+        // system owner while the repository rejects the same provenance.
+        let Some(attributed_user_id) = attributed_user_id else {
+            tracing::warn!(
+                proposal_id,
+                agent_type,
+                "Cannot create refinement task: attributed user is unavailable"
+            );
+            return None;
+        };
+        let Some(owner) = self.resolve_owner_identity(attributed_user_id).await else {
+            tracing::warn!(
+                proposal_id,
+                agent_type,
+                attributed_user_id,
+                "Cannot create refinement task: attributed user does not resolve to a persisted user"
+            );
+            return None;
         };
 
         match task_repo
-            .create_in_project(
+            .create_in_project_with_provenance(
                 &project_id,
                 None,
+                EffectiveCreatorProvenance {
+                    explicit_user_id: Some(attributed_user_id),
+                    source_task_id: None,
+                    proposal_id: Some(proposal_id),
+                },
                 &title,
                 &description,
                 "",
@@ -949,15 +963,6 @@ impl CoordinatorActor {
                         agent_type,
                         error = %e,
                         "Failed to set agent_type on refinement task"
-                    );
-                }
-                if let Some(uid) = attributed_user_id
-                    && let Err(e) = task_repo2.set_created_by_user_id(&task.id, uid).await
-                {
-                    tracing::warn!(
-                        task_id = %task.id,
-                        error = %e,
-                        "Failed to attribute refinement task to user"
                     );
                 }
                 Some(task.id)
