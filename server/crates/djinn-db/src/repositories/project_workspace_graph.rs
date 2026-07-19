@@ -633,6 +633,62 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn repository_reinstantiation_preserves_rows_and_isolates_projects() {
+        // `open_in_memory` is the template-cloned PostgreSQL harness, so this
+        // exercises the durable database boundary rather than an in-process map.
+        let repo = fresh().await;
+        seed_project(&repo, "p1").await;
+        seed_project(&repo, "p2").await;
+        let db = repo.db.clone();
+
+        repo.upsert(ProjectWorkspaceGraphUpsert {
+            project_id: "p1",
+            workspace_slug: "server",
+            commit_sha: "p1-sha",
+            status: "ready",
+        })
+        .await
+        .expect("write p1");
+        drop(repo);
+
+        // Simulate a server restart: a newly constructed repository over the
+        // same Postgres pool must observe only its project durable rows.
+        let restarted = ProjectWorkspaceGraphRepository::new(db);
+        let p1 = restarted
+            .get("p1", "server")
+            .await
+            .expect("read p1")
+            .expect("p1 row persists");
+        assert_eq!(p1.commit_sha, "p1-sha");
+        assert!(
+            restarted
+                .get("p2", "server")
+                .await
+                .expect("read p2")
+                .is_none()
+        );
+
+        restarted
+            .upsert(ProjectWorkspaceGraphUpsert {
+                project_id: "p2",
+                workspace_slug: "server",
+                commit_sha: "p2-sha",
+                status: "timed_out",
+            })
+            .await
+            .expect("write p2");
+        assert_eq!(
+            restarted
+                .get("p1", "server")
+                .await
+                .expect("re-read p1")
+                .expect("p1 remains")
+                .status,
+            "ready"
+        );
+    }
+
+    #[tokio::test]
     async fn deleting_project_cascades_workspace_graph_rows() {
         let repo = fresh().await;
         seed_project(&repo, "p1").await;
