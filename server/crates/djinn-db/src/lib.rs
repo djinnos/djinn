@@ -218,7 +218,8 @@ pub use repositories::{
         TaskArbitrationRepository, TryCreateResult, UpdateDispatchLedgerParams,
     },
     task_attempt::{
-        CompletedParentSummary, CreateTaskAttemptParams, FillTaskAttemptParams,
+        CompletedParentSummary, CreateTaskAttemptParams, DispatchGroupTerminalEvidence,
+        DispatchGroupTerminalization, FillTaskAttemptParams,
         GuardAdoptedPrTaskAttemptParams, GuardDeferTaskAttemptParams, OrphanedPendingAttempt,
         ReworkMarkerTaskAttemptParams, SubmitTaskAttemptParams, TaskAttemptRepository,
         TerminalTaskAttemptParams,

@@ -9,12 +9,15 @@ pub(crate) use djinn_core::models::task_attempt::{
     TASK_ATTEMPT_SUMMARY_MAX_LEN, TaskAttemptOutcome,
 };
 pub(crate) use djinn_db::{
-    CreateTaskAttemptParams, Database, EpicRepository, FillTaskAttemptParams,
+    CreateTaskAttemptParams, Database, DispatchGroupTerminalEvidence, EpicRepository,
+    FillTaskAttemptParams,
     GuardDeferTaskAttemptParams, SubmitTaskAttemptParams, TaskAttemptRepository,
     TerminalTaskAttemptParams,
 };
 #[path = "task_attempt/create_and_lifecycle.rs"]
 mod create_and_lifecycle;
+#[path = "task_attempt/dispatch_group_terminalization.rs"]
+mod dispatch_group_terminalization;
 #[path = "task_attempt/infra_death_persistence.rs"]
 mod infra_death_persistence;
 #[path = "task_attempt/lookups_and_bounds.rs"]
