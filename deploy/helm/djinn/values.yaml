@@ -382,6 +382,12 @@ database:
   externalUrl: ""
   existingSecret: ""
 
+# Required only by migration init containers. This caller-owned Secret contains
+# user_id, github_id, github_login, github_name, and github_avatar_url for the
+# explicit designated operator; it is never injected into the app container.
+migration:
+  designatedOperatorSecret: ""
+
 # -----------------------------------------------------------------------------
 # Qdrant (bundled vector store)
 # -----------------------------------------------------------------------------

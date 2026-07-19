@@ -140,22 +140,25 @@ async fn async_main(cli: Cli) {
         tracing::warn!(error = %e, "failed to initialize Prometheus telemetry");
     }
 
+    let has_bootstrap_identity = cli.bootstrap_designated_operator_github_id.is_some()
+        || cli.bootstrap_designated_operator_github_login.is_some()
+        || cli.bootstrap_designated_operator_github_name.is_some()
+        || cli
+            .bootstrap_designated_operator_github_avatar_url
+            .is_some();
+    // Bootstrap is its own one-shot migration mode, not normal application
+    // startup. Do not make it unreachable by treating its required inputs as
+    // normal-mode migration inputs.
     if !cli.migrate_only
-        && (cli.migration_designated_operator_user_id.is_some()
-            || cli.bootstrap_designated_operator_only
-            || cli.bootstrap_designated_operator_github_id.is_some()
-            || cli.bootstrap_designated_operator_github_login.is_some()
-            || cli.bootstrap_designated_operator_github_name.is_some()
-            || cli
-                .bootstrap_designated_operator_github_avatar_url
-                .is_some())
+        && !cli.bootstrap_designated_operator_only
+        && (cli.migration_designated_operator_user_id.is_some() || has_bootstrap_identity)
     {
         tracing::error!(
             "migration and bootstrap designated operator input requires a migration mode"
         );
         std::process::exit(2);
     }
-    if cli.migrate_only && cli.bootstrap_designated_operator_only {
+    if cli.migrate_only && (cli.bootstrap_designated_operator_only || has_bootstrap_identity) {
         tracing::error!(
             "--migrate-only and --bootstrap-designated-operator-only are mutually exclusive"
         );
