@@ -42,7 +42,6 @@ pub mod roles;
 pub mod runtime_bridge;
 pub(crate) mod sandbox;
 pub mod skills;
-pub mod skills_manifest;
 pub mod supervisor;
 pub(crate) mod supervisor_impl;
 pub mod task_confidence;

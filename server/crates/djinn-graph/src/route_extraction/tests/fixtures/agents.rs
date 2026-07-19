@@ -452,7 +452,6 @@ fn discover_skill_names(project_root: &StdPath) -> Vec<String> {
     let dirs = [
         project_root.join(".claude").join("skills"),
         project_root.join(".opencode").join("skills"),
-        project_root.join(".djinn").join("skills"),
     ];
     for dir in &dirs {
         if let Ok(entries) = std::fs::read_dir(dir) {

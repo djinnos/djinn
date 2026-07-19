@@ -67,8 +67,9 @@ export const KNOWLEDGE_DISPOSITIONS = new Set([
 /**
  * Knowledge families (folders / singletons) that constitute the project-local
  * tracked knowledge set. Non-knowledge tracked files under `.djinn/`
- * (`.gitignore`, `settings.json`, `skills.json`) are intentionally excluded
- * because they are operational/generated, not knowledge artifacts.
+ * (`.gitignore`, `settings.json`) are intentionally excluded because they are
+ * operational/generated, not knowledge artifacts. `.djinn/skills.json` was
+ * retired and must not reappear (see RETIRED_OPERATIONAL_PATHS).
  */
 export const KNOWLEDGE_FAMILIES = [
   'decisions',
@@ -97,6 +98,14 @@ export const KNOWLEDGE_SINGLETONS = new Set([
 export const NON_KNOWLEDGE_TRACKED = new Set([
   '.djinn/.gitignore',
   '.djinn/settings.json',
+]);
+
+/**
+ * Operational paths that were intentionally removed during Phase 2 retirement
+ * and must never be reintroduced. The post-cutover guard rejects any current
+ * tracked file matching one of these paths.
+ */
+export const RETIRED_OPERATIONAL_PATHS = new Set([
   '.djinn/skills.json',
 ]);
 
@@ -150,9 +159,10 @@ export function sha256Hex(bytes) {
  * `.djinn/` knowledge set.
  *
  * The knowledge set is every tracked `.djinn/` file EXCEPT the explicit
- * non-knowledge operational/generated files (`.gitignore`, `settings.json`,
- * `skills.json`). All other tracked `.djinn/**` markdown / metadata files are
- * knowledge artifacts in scope for retirement reconciliation.
+ * non-knowledge operational/generated files (`.gitignore`, `settings.json`).
+ * `.djinn/skills.json` was retired in Phase 2 and is tracked separately via
+ * RETIRED_OPERATIONAL_PATHS. All other tracked `.djinn/**` markdown / metadata
+ * files are knowledge artifacts in scope for retirement reconciliation.
  */
 export function isKnowledgePath(repoPath) {
   if (typeof repoPath !== 'string' || repoPath.length === 0) return false;
@@ -162,6 +172,7 @@ export function isKnowledgePath(repoPath) {
   // Reject bare directory paths (must be a file, not a folder).
   if (norm.endsWith('/')) return false;
   if (NON_KNOWLEDGE_TRACKED.has(norm)) return false;
+  if (RETIRED_OPERATIONAL_PATHS.has(norm)) return false;
   return true;
 }
 
@@ -1009,6 +1020,13 @@ export function validateRetirementCutover(currentPathBytes, ledger, guidanceFixt
     if (!sourceBlob.equals(currentBlob)) {
       throw new ManifestError(`operational path changed during cutover: ${operationalPath}`, {
         code: 'operational_path_changed', entry: { repository_path: operationalPath },
+      });
+    }
+  }
+  for (const retiredPath of RETIRED_OPERATIONAL_PATHS) {
+    if (currentSet.has(retiredPath)) {
+      throw new ManifestError(`retired operational path was reintroduced: ${retiredPath}`, {
+        code: 'retired_path_reintroduced', entry: { repository_path: retiredPath },
       });
     }
   }

@@ -280,10 +280,14 @@ fn adr_050_code_graph_boundary_is_architect_and_chat_only() {
 #[test]
 fn loaded_skills_and_progressive_disclosure_reference_only_registered_worker_tools() {
     let project_root = crate::test_helpers::test_tempdir("djinn-skill-lockstep-");
-    let skill_dir = project_root.path().join(".djinn").join("skills");
+    let skill_dir = project_root
+        .path()
+        .join(".claude")
+        .join("skills")
+        .join("lockstep");
     std::fs::create_dir_all(&skill_dir).expect("create skill dir");
     std::fs::write(
-        skill_dir.join("lockstep.md"),
+        skill_dir.join("SKILL.md"),
         r#"---
 name: lockstep
 	description: Fixture that references real worker tools.
