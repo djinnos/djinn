@@ -16,6 +16,7 @@ pub mod extension_load_diagnostic_tests;
 pub mod git_settings;
 pub mod image;
 pub mod init;
+pub mod legacy_settings_import;
 pub mod liveness;
 pub mod llm_call_attempt;
 pub mod models;
@@ -47,6 +48,7 @@ pub mod task_attempt;
 pub mod task_attempt_tests;
 pub mod task_run;
 pub mod task_run_outcome;
+#[cfg(any(test, feature = "test-support"))]
 pub mod test_support;
 pub mod tool_call_evaluator;
 #[cfg(test)]

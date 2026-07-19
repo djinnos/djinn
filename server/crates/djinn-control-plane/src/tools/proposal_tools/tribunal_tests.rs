@@ -7,8 +7,8 @@ mod p4_tribunal_regression_tests {
     use crate::state::stubs::test_mcp_state;
     use djinn_core::events::EventBus;
     use djinn_db::{
-        Database, ProjectRepository, ProposalCreateInput, ProposalDebateTrailCreateInput,
-        ProposalRepository, TaskRepository, UserRepository,
+        Database, EffectiveCreatorProvenance, ProjectRepository, ProposalCreateInput,
+        ProposalDebateTrailCreateInput, ProposalRepository, TaskRepository, UserRepository,
     };
 
     /// A well-formed body that passes all deterministic readiness checks.
@@ -235,10 +235,25 @@ What happens if D fails?
 
         let targets = repo.targets(&proposal.id).await.unwrap();
         let target_project_id = &targets[0].project_id;
+        let spike_creator_key = uuid::Uuid::now_v7();
+        let spike_creator = UserRepository::new(db.clone())
+            .upsert_from_github(
+                spike_creator_key.as_u128() as i64,
+                &format!("p4-spike-{spike_creator_key}"),
+                None,
+                None,
+            )
+            .await
+            .unwrap();
         let spike = task_repo
-            .create_in_project(
+            .create_in_project_with_provenance(
                 target_project_id,
                 None,
+                EffectiveCreatorProvenance {
+                    explicit_user_id: Some(&spike_creator.id),
+                    source_task_id: None,
+                    proposal_id: None,
+                },
                 "Spike: feasibility of X",
                 "Research whether X is feasible",
                 "Research whether X is feasible",
@@ -474,9 +489,14 @@ What happens if D fails?
 
         let targets = repo.targets(&proposal.id).await.unwrap();
         let spike = task_repo
-            .create_in_project(
+            .create_in_project_with_provenance(
                 &targets[0].project_id,
                 None,
+                EffectiveCreatorProvenance {
+                    explicit_user_id: Some(&user_id),
+                    source_task_id: None,
+                    proposal_id: None,
+                },
                 "Spike: Y feasibility",
                 "Can Y handle load?",
                 "Can Y handle load?",

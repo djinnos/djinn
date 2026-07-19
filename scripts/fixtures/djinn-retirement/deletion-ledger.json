@@ -1,7 +1,7 @@
 {
   "schema": "djinn-retirement-deletion-ledger/v1",
   "generated_from_revision": "ee172b83f7a06029efd5216d8144d0050d4c46dd",
-  "knowledge_count": 168,
+  "knowledge_count": 169,
   "entries": [
     {
       "repository_path": ".djinn/brief.md",
@@ -2522,6 +2522,16 @@
       "disposition": "equivalent",
       "rationale": "DB record normalized-content hash matches the committed file",
       "approving_task_id": null
+    },
+    {
+      "repository_path": ".djinn/settings.json",
+      "blob_sha256": "2ed097cc08ffa22d58c018ce3284310c4076ec1d230bf319b28b7dc0be6fdd30",
+      "normalized_sha256": "2ed097cc08ffa22d58c018ce3284310c4076ec1d230bf319b28b7dc0be6fdd30",
+      "permalink": "settings",
+      "db_selection": null,
+      "disposition": "approved_discard",
+      "rationale": "Legacy settings were imported into project-scoped Postgres before source deletion.",
+      "approving_task_id": "cps3"
     }
   ]
 }

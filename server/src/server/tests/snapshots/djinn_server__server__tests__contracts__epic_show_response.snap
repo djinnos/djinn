@@ -16,6 +16,7 @@ expression: epic_show
   "closed_at": null,
   "memory_refs": [],
   "auto_breakdown": true,
+  "created_by_user_id": "[UUID]",
   "task_count": 1,
   "open_count": 1,
   "in_progress_count": 0,

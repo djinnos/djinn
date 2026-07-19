@@ -183,7 +183,7 @@ mod tests {
         epic_id: &str,
     ) -> djinn_core::models::Task {
         TaskRepository::new(db.clone(), EventBus::noop())
-            .create_in_project(
+            .create_fixture_in_project(
                 project_id,
                 Some(epic_id),
                 "Task",

@@ -3,9 +3,12 @@
 use super::*;
 use djinn_db::{
     AuditSamplerRepository, AuditStratum, CreateSampleFrameParams, CreateSamplePolicyParams,
-    CreateSelectionParams, Database, EpicRepository, SelectionRow,
+    CreateSelectionParams, Database, EpicRepository, SelectionRow, UserRepository,
 };
 use serde_json::json;
+use std::sync::atomic::{AtomicI64, Ordering};
+
+static NEXT_SOURCE_GITHUB_ID: AtomicI64 = AtomicI64::new(9_000_000_000);
 
 fn test_config() -> AuditSchedulerConfig {
     AuditSchedulerConfig {
@@ -35,6 +38,31 @@ async fn seed_selection(
     created_at: &str,
 ) -> SelectionRow {
     let repo = AuditSamplerRepository::new(db.clone());
+    let source_github_id = NEXT_SOURCE_GITHUB_ID.fetch_add(1, Ordering::Relaxed);
+    let source_user = UserRepository::new(db.clone())
+        .upsert_from_github(
+            source_github_id,
+            &format!("audit-source-{source_github_id}"),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    let source_user_id = source_user.id;
+    let source_task_id = djinn_db::test_support::seed_task_row(
+        db,
+        djinn_db::test_support::UsageTestTaskSeed {
+            project_id,
+            status: "closed",
+            close_reason: None,
+            total_reopen_count: 0,
+        },
+    )
+    .await;
+    TaskRepository::new(db.clone(), djinn_core::events::EventBus::noop())
+        .set_created_by_user_id(&source_task_id, &source_user_id)
+        .await
+        .unwrap();
 
     // Seed or reuse one policy per project; repeated helper calls for the
     // same project must not violate uq_audit_sample_policies_project_rev.
@@ -84,7 +112,7 @@ async fn seed_selection(
     let mc = repo
         .upsert_merged_change(djinn_db::UpsertMergedChangeParams {
             project_id,
-            task_id: Some("task-source-1"),
+            task_id: Some(&source_task_id),
             pr_number: Some(42),
             head_sha: Some("head-sha-1"),
             merge_commit_sha: merge_sha,
@@ -582,7 +610,7 @@ async fn task_description_includes_provenance_data() {
     assert!(desc.contains("revealed"), "seed status");
     assert!(desc.contains("Frame revision"), "frame revision");
     assert!(desc.contains("Policy revision"), "policy revision");
-    assert!(desc.contains("task-source-1"), "source task id");
+    assert!(desc.contains("Source task"), "source task label");
     assert!(desc.contains("42"), "PR number");
     assert!(desc.contains("head-sha-1"), "head SHA");
     assert!(desc.contains("Gate provenance"), "gate provenance section");
@@ -727,12 +755,26 @@ async fn atomic_materialization_creates_task_and_links_in_one_tx() {
     // Ensure the audit epic exists.
     let epic_id = ensure_audit_epic(&epic_repo, &project_id).await.unwrap();
 
-    // Call the atomic method directly.
+    // Pass source-task provenance from the selection; it must determine the creator.
+    let source_task_id = audit_repo
+        .list_unmaterialized_selections()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|item| item.selection_id == sel.id)
+        .and_then(|item| item.task_id)
+        .expect("seeded selection has source task provenance");
+    let source_creator_id = task_repo
+        .created_by_user_id(&source_task_id)
+        .await
+        .unwrap()
+        .expect("seeded source task has a creator");
     let task_id = audit_repo
         .materialize_audit_task_atomic(
             &sel.id,
             &project_id,
             Some(&epic_id),
+            Some(&source_task_id),
             "Audit review: test",
             "test description",
         )
@@ -743,6 +785,10 @@ async fn atomic_materialization_creates_task_and_links_in_one_tx() {
     let task = task_repo.get(&task_id).await.unwrap().unwrap();
     assert_eq!(task.issue_type, "task");
     assert_eq!(task.description, "test description");
+    assert_eq!(
+        task.created_by_user_id.as_deref(),
+        Some(source_creator_id.as_str())
+    );
 
     // Verify the selection is linked.
     let updated = audit_repo
@@ -757,5 +803,119 @@ async fn atomic_materialization_creates_task_and_links_in_one_tx() {
     assert!(
         !unmaterialized.iter().any(|u| u.selection_id == sel.id),
         "linked selection must not appear in unmaterialized list"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn atomic_materialization_rolls_back_when_creator_is_unavailable() {
+    let db = test_db();
+    let project_id = uuid::Uuid::now_v7().to_string();
+    djinn_db::test_support::seed_project(&db, &project_id, &format!("proj-{project_id}")).await;
+    let sel = seed_selection(
+        &db,
+        &project_id,
+        "sha-creator-unavailable",
+        "unflagged_merged",
+        0,
+        "2026-07-09T12:00:00Z",
+    )
+    .await;
+    let audit_repo = AuditSamplerRepository::new(db.clone());
+    let source_task_id = audit_repo
+        .list_unmaterialized_selections()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|item| item.selection_id == sel.id)
+        .and_then(|item| item.task_id)
+        .unwrap();
+    TaskRepository::new(db.clone(), djinn_core::events::EventBus::noop())
+        .clear_created_by_user_id(&source_task_id)
+        .await
+        .unwrap();
+    let error = audit_repo
+        .materialize_audit_task_atomic(
+            &sel.id,
+            &project_id,
+            None,
+            Some(&source_task_id),
+            "Audit review: unavailable creator",
+            "must roll back",
+        )
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("effective_creator_unavailable"));
+    assert_eq!(
+        TaskRepository::new(db.clone(), djinn_core::events::EventBus::noop())
+            .count_by_title("Audit review: unavailable creator")
+            .await
+            .unwrap(),
+        0
+    );
+    assert!(
+        audit_repo
+            .get_selection_by_id(&sel.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .audit_task_id
+            .is_none()
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn atomic_materialization_rolls_back_when_selection_link_fails() {
+    let db = test_db();
+    let project_id = uuid::Uuid::now_v7().to_string();
+    djinn_db::test_support::seed_project(&db, &project_id, &format!("proj-{project_id}")).await;
+    let sel = seed_selection(
+        &db,
+        &project_id,
+        "sha-link-failure",
+        "unflagged_merged",
+        0,
+        "2026-07-09T12:00:00Z",
+    )
+    .await;
+    let audit_repo = AuditSamplerRepository::new(db.clone());
+    let source_task_id = audit_repo
+        .list_unmaterialized_selections()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|item| item.selection_id == sel.id)
+        .and_then(|item| item.task_id)
+        .unwrap();
+    let error = audit_repo
+        .materialize_audit_task_atomic(
+            &uuid::Uuid::now_v7().to_string(),
+            &project_id,
+            None,
+            Some(&source_task_id),
+            "Audit review: link failure",
+            "must roll back",
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("audit_selection_not_unmaterialized")
+    );
+    assert_eq!(
+        TaskRepository::new(db.clone(), djinn_core::events::EventBus::noop())
+            .count_by_title("Audit review: link failure")
+            .await
+            .unwrap(),
+        0
+    );
+    assert!(
+        audit_repo
+            .get_selection_by_id(&sel.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .audit_task_id
+            .is_none()
     );
 }

@@ -1,0 +1,72 @@
+{
+  "phase": "expand",
+  "description": "Callsite-exact inventory of every production task-create writer. The rollout test validates each entry's enclosing symbol calls a provenance-bound boundary method, rejects legacy/default calls and NULL-capable paths, and rejects adjacent post-insert creator patches at enclosing-function scope.",
+  "writers": [
+    {
+      "path": "server/crates/djinn-control-plane/src/tools/task_tools/ops.rs",
+      "enclosing_symbol": "create_task",
+      "boundary_method": "create_in_project_with_blockers",
+      "provenance_kind": "explicit_session"
+    },
+    {
+      "path": "server/crates/djinn-control-plane/src/tools/proposal_tools/lifecycle.rs",
+      "enclosing_symbol": "proposal_graduate",
+      "boundary_method": "create_in_project_with_provenance",
+      "provenance_kind": "explicit_proposal_owner"
+    },
+    {
+      "path": "server/crates/djinn-control-plane/src/tools/refinement_tools.rs",
+      "enclosing_symbol": "proposal_refinement_demand_evidence",
+      "boundary_method": "create_in_project_with_provenance",
+      "provenance_kind": "explicit_proposal_owner"
+    },
+    {
+      "path": "server/crates/djinn-coordinator/src/rules.rs",
+      "enclosing_symbol": "dispatch_proposal_reconcile",
+      "boundary_method": "create_in_project_with_provenance",
+      "provenance_kind": "explicit_proposal_owner"
+    },
+    {
+      "path": "server/crates/djinn-coordinator/src/rules.rs",
+      "enclosing_symbol": "dispatch_proposal_review",
+      "boundary_method": "create_in_project_with_provenance",
+      "provenance_kind": "explicit_proposal_owner"
+    },
+    {
+      "path": "server/crates/djinn-coordinator/src/rules.rs",
+      "enclosing_symbol": "create_planning_task_by_ids",
+      "boundary_method": "create_in_project_with_provenance",
+      "provenance_kind": "parent_epic"
+    },
+    {
+      "path": "server/crates/djinn-coordinator/src/wave.rs",
+      "enclosing_symbol": "create_planning_task",
+      "boundary_method": "create_in_project_with_provenance",
+      "provenance_kind": "parent_epic_proposal"
+    },
+    {
+      "path": "server/crates/djinn-coordinator/src/dispatch/retry.rs",
+      "enclosing_symbol": "create_remediation_task",
+      "boundary_method": "create_in_project_with_provenance",
+      "provenance_kind": "explicit_source_creator"
+    },
+    {
+      "path": "server/crates/djinn-agent/src/direct_services.rs",
+      "enclosing_symbol": "create_arbiter_planner_escalation",
+      "boundary_method": "create_in_project_with_provenance",
+      "provenance_kind": "explicit_source_creator"
+    },
+    {
+      "path": "server/crates/djinn-coordinator/src/refinement_outcome.rs",
+      "enclosing_symbol": "create_refinement_task_with_context",
+      "boundary_method": "create_in_project_with_provenance",
+      "provenance_kind": "explicit_proposal_owner"
+    },
+    {
+      "path": "server/crates/djinn-db/src/repositories/audit_sampler.rs",
+      "enclosing_symbol": "materialize_audit_task_atomic",
+      "boundary_method": "resolve_effective_creator",
+      "provenance_kind": "source_task_parent_epic"
+    }
+  ]
+}

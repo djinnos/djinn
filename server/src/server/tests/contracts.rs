@@ -79,10 +79,16 @@ async fn mcp_contract_desktop_critical_tools_success_shapes() {
 async fn mcp_contract_task_and_epic_snapshot_shapes() {
     use insta::assert_json_snapshot;
 
-    let (app, project_path, _project_dir) = test_helpers::create_test_app_with_project().await;
-    let session_id = test_helpers::initialize_mcp_session(&app).await;
+    let (app, project_path, db, _project_dir) =
+        test_helpers::create_test_app_with_project_and_db().await;
+    // The effective-creator cutover requires task_create to resolve a concrete
+    // creator. Seed an authenticated session and pass the cookie so
+    // SESSION_USER_ID is populated for epic_create and task_create.
+    let cookie = test_helpers::seed_session_cookie(&db, "contract-snapshot-user").await;
+    let auth_headers: &[(&str, &str)] = &[("cookie", &format!("djinn_session={cookie}"))];
+    let session_id = test_helpers::initialize_mcp_session_with_headers(&app, auth_headers).await;
 
-    let epic = test_helpers::mcp_call_tool(
+    let epic = test_helpers::mcp_call_tool_with_headers(
         &app,
         &session_id,
         "epic_create",
@@ -91,10 +97,11 @@ async fn mcp_contract_task_and_epic_snapshot_shapes() {
             "title": "Snapshot Epic",
             "description": "Epic used for MCP snapshot contract testing"
         }),
+        auth_headers,
     )
     .await;
 
-    let task = test_helpers::mcp_call_tool(
+    let task = test_helpers::mcp_call_tool_with_headers(
         &app,
         &session_id,
         "task_create",
@@ -109,6 +116,7 @@ async fn mcp_contract_task_and_epic_snapshot_shapes() {
             // real task shape (the contract this test is meant to pin).
             "acceptance_criteria": ["Snapshot task acceptance criterion"]
         }),
+        auth_headers,
     )
     .await;
 
@@ -128,7 +136,8 @@ async fn mcp_contract_task_and_epic_snapshot_shapes() {
         ".project_id" => "[UUID]",
         ".short_id" => "[SHORT_ID]",
         ".created_at" => "[TIMESTAMP]",
-        ".updated_at" => "[TIMESTAMP]"
+        ".updated_at" => "[TIMESTAMP]",
+        ".created_by_user_id" => "[UUID]"
     });
 
     let task_list = test_helpers::mcp_call_tool(
@@ -144,7 +153,8 @@ async fn mcp_contract_task_and_epic_snapshot_shapes() {
         ".tasks.**.project_id" => "[UUID]",
         ".tasks.**.short_id" => "[SHORT_ID]",
         ".tasks.**.created_at" => "[TIMESTAMP]",
-        ".tasks.**.updated_at" => "[TIMESTAMP]"
+        ".tasks.**.updated_at" => "[TIMESTAMP]",
+        ".tasks.**.created_by_user_id" => "[UUID]"
     });
 
     let task_count_plain = test_helpers::mcp_call_tool(
@@ -218,7 +228,8 @@ async fn mcp_contract_task_and_epic_snapshot_shapes() {
         ".project_id" => "[UUID]",
         ".short_id" => "[SHORT_ID]",
         ".created_at" => "[TIMESTAMP]",
-        ".updated_at" => "[TIMESTAMP]"
+        ".updated_at" => "[TIMESTAMP]",
+        ".created_by_user_id" => "[UUID]"
     });
 
     let epic_list = test_helpers::mcp_call_tool(
@@ -233,7 +244,8 @@ async fn mcp_contract_task_and_epic_snapshot_shapes() {
         ".epics.**.project_id" => "[UUID]",
         ".epics.**.short_id" => "[SHORT_ID]",
         ".epics.**.created_at" => "[TIMESTAMP]",
-        ".epics.**.updated_at" => "[TIMESTAMP]"
+        ".epics.**.updated_at" => "[TIMESTAMP]",
+        ".epics.**.created_by_user_id" => "[UUID]"
     });
 
     let blockers = test_helpers::mcp_call_tool(
