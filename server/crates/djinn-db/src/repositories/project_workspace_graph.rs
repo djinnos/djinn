@@ -660,7 +660,13 @@ mod tests {
             .expect("read p1")
             .expect("p1 row persists");
         assert_eq!(p1.commit_sha, "p1-sha");
-        assert!(restarted.get("p2", "server").await.expect("read p2").is_none());
+        assert!(
+            restarted
+                .get("p2", "server")
+                .await
+                .expect("read p2")
+                .is_none()
+        );
 
         restarted
             .upsert(ProjectWorkspaceGraphUpsert {

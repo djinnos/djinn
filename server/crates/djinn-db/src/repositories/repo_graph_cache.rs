@@ -50,7 +50,7 @@ impl RepoGraphCacheRepository {
         .await?)
     }
 
-    /// Return the most recently warmed entry for `project_id`, regardless
+    /// Return the most recently cached entry for `project_id`, regardless
     /// of `commit_sha`. Used by server-side readers (`code_graph` mcp ops,
     /// Pulse status) to surface the latest-available graph — even if
     /// `origin/main` has since advanced past the pinned commit.
@@ -69,7 +69,7 @@ impl RepoGraphCacheRepository {
         .await?)
     }
 
-    /// Return only the `commit_sha` of the most recently warmed entry for
+    /// Return only the `commit_sha` of the most recently cached entry for
     /// `project_id`, without fetching the (potentially multi-MB) graph blob.
     ///
     /// Used by the server-side read path's commit-aware revalidation backstop
