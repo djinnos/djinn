@@ -90,6 +90,7 @@ async fn pressure_execute_dry_run_reports_planner_prefix_without_locking() {
     let base = old_base(&temp, "018f8b9a-0d70-7f0a-8000-000000000001");
     let planned = WarmBaseEntry {
         project_id: "018f8b9a-0d70-7f0a-8000-000000000001".into(),
+        mold_jobs: 1,
         path: base.clone(),
         size_bytes: 99,
     };
@@ -159,14 +160,93 @@ fn executable_pressure_config() -> crate::context::CacheCleanupConfig {
 }
 
 fn eligible_three_rung_unit(base: &Path, target: &Path, rung: PressureRung) -> PressurePlanUnit {
+    let variant_name = base
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or_default();
+    let (project_id, mold_jobs) = variant_name
+        .strip_prefix("mold-jobs-")
+        .and_then(|jobs| jobs.parse().ok())
+        .and_then(|mold_jobs| {
+            base.parent()
+                .and_then(|project| project.file_name())
+                .and_then(|project| project.to_str())
+                .map(|project_id| (project_id.to_owned(), mold_jobs))
+        })
+        .unwrap_or_else(|| (variant_name.to_owned(), 1));
     PressurePlanUnit {
         rung,
-        project_id: base.file_name().unwrap().to_str().unwrap().into(),
+        project_id,
+        mold_jobs,
         canonical_base: base.to_path_buf(),
         canonical_target: target.to_path_buf(),
         projected_allocated_bytes: 0,
         disposition: PressurePlanDisposition::Eligible,
     }
+}
+
+fn canonical_variant_base(temp: &tempfile::TempDir, project_id: &str, mold_jobs: u32) -> PathBuf {
+    let base = temp
+        .path()
+        .join(project_id)
+        .join(format!("mold-jobs-{mold_jobs}"));
+    std::fs::create_dir_all(&base).expect("canonical variant directory");
+    filetime::set_file_mtime(
+        &base,
+        filetime::FileTime::from_system_time(SystemTime::UNIX_EPOCH),
+    )
+    .unwrap();
+    base
+}
+
+#[tokio::test]
+async fn pressure_lock_for_one_variant_neither_substitutes_nor_evicts_its_sibling() {
+    let temp = tempfile::tempdir().unwrap();
+    let project_id = "018f8b9a-0d70-7f0a-8000-000000000019";
+    let mold_one = canonical_variant_base(&temp, project_id, 1);
+    let mold_four = canonical_variant_base(&temp, project_id, 4);
+    std::fs::write(mold_one.join("keep"), b"mold one").unwrap();
+    std::fs::write(mold_four.join("reclaim"), b"mold four").unwrap();
+    let one_unit = eligible_three_rung_unit(&mold_one, &mold_one, PressureRung::WholeBase);
+    let four_unit = eligible_three_rung_unit(&mold_four, &mold_four, PressureRung::WholeBase);
+
+    let lock = SharedWarmBaseLock;
+    let held_one = lock.try_lock(&mold_one).unwrap().expect("hold mold-jobs-1");
+    let result = execute_three_rung_pressure_plan(
+        &ThreeRungPressurePlan {
+            units: vec![one_unit.clone(), four_unit.clone()],
+        },
+        &Activity(Ok(snapshot())),
+        &Warm(Ok(false)),
+        &lock,
+        &SequenceCapacity(Mutex::new(std::collections::VecDeque::from([
+            Ok(CapacitySnapshot {
+                total_bytes: 100,
+                available_bytes: 10,
+            }),
+            Ok(CapacitySnapshot {
+                total_bytes: 100,
+                available_bytes: 10,
+            }),
+        ]))),
+        &executable_pressure_config(),
+        &three_rung_clock(),
+        temp.path(),
+    )
+    .await;
+    drop(held_one);
+
+    assert_eq!(result.planned, vec![one_unit.clone(), four_unit.clone()]);
+    assert_eq!(result.retained, vec![one_unit]);
+    assert_eq!(result.deleted, vec![four_unit]);
+    assert!(
+        mold_one.exists(),
+        "a busy mold-jobs-1 must not be replaced by mold-jobs-4"
+    );
+    assert!(
+        !mold_four.exists(),
+        "the independently unlocked mold-jobs-4 variant must be selected and evicted"
+    );
 }
 
 fn three_rung_clock() -> TestClock {
@@ -1363,7 +1443,7 @@ fn frozen_coordinator_fixture_records_exact_three_rung_cases() {
     assert_eq!(fixture["dry_run"]["removals"], 0);
     assert_eq!(
         fixture["delete"]["lock_path"],
-        ".warm-locks/<project-id>.lock"
+        ".warm-locks/<project-id>/mold-jobs-1.lock"
     );
     assert_eq!(fixture["delete"]["fail_closed"], true);
     assert_eq!(
@@ -1759,10 +1839,37 @@ async fn frozen_two_actor_schedule_serializes_warm_work_and_pressure_retry() {
             use std::io::Write;
             writeln!(file, "{line}").unwrap();
         };
-        let _guard = djinn_agent_worker::cargo_incremental_prune::run_warm_work_at_root(
-            &id, &root, &workspace, observe,
-        )
-        .unwrap();
+        let mold_jobs = 1;
+        let base = root.join(&id).join(format!("mold-jobs-{mold_jobs}"));
+        // Match the production worker lock identity rather than coordinator adapter.
+        let lock_dir = root.join(".warm-locks").join(&id);
+        std::fs::create_dir_all(&lock_dir).unwrap();
+        let worker_lock = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(lock_dir.join(format!("mold-jobs-{mold_jobs}.lock")))
+            .unwrap();
+        let rc = unsafe {
+            libc::flock(
+                std::os::fd::AsRawFd::as_raw_fd(&worker_lock),
+                libc::LOCK_EX | libc::LOCK_NB,
+            )
+        };
+        assert_eq!(rc, 0, "warm actor acquires production variant lock");
+        observe(djinn_agent_worker::cargo_incremental_prune::WarmWorkPhase::TraversalEnter);
+        std::fs::create_dir_all(base.join("debug/incremental")).unwrap();
+        observe(djinn_agent_worker::cargo_incremental_prune::WarmWorkPhase::TraversalExit);
+        observe(djinn_agent_worker::cargo_incremental_prune::WarmWorkPhase::CompilationEnter);
+        let status = Command::new("cargo")
+            .args(["check", "--quiet"])
+            .current_dir(&workspace)
+            .env("CARGO_TARGET_DIR", &base)
+            .status()
+            .expect("run warm Cargo compilation");
+        observe(djinn_agent_worker::cargo_incremental_prune::WarmWorkPhase::CompilationExit);
+        assert!(status.success(), "warm Cargo compilation must succeed");
         // Signal the parent that the warm actor holds the lock and is alive.
         std::fs::write(root.join("warm-lock-held"), b"held").unwrap();
         loop {
@@ -1774,7 +1881,13 @@ async fn frozen_two_actor_schedule_serializes_warm_work_and_pressure_retry() {
     let fixture = frozen_coordinator_fixture();
     let temp = tempfile::tempdir().unwrap();
     let id = "018f8b9a-0d70-7f0a-8000-000000000299";
-    let base = old_base(&temp, id);
+    let base = canonical_variant_base(&temp, id, 1);
+    let sibling = canonical_variant_base(&temp, id, 4);
+    std::fs::write(
+        sibling.join("sibling-artifact"),
+        b"must survive mold-jobs-1 pressure",
+    )
+    .unwrap();
     let workspace = temp.path().join("warm-workspace");
     std::fs::create_dir_all(workspace.join("src")).unwrap();
     std::fs::write(
@@ -1786,8 +1899,8 @@ async fn frozen_two_actor_schedule_serializes_warm_work_and_pressure_retry() {
     let log_path = temp.path().join("two-actor-recorder.jsonl");
     let _ = std::fs::File::create(&log_path).unwrap();
 
-    // The warm child drives the real WarmBaseLock::acquire -> prune traversal ->
-    // cargo check path and appends structured warm events to the shared recorder.
+    // The warm child locks the exact canonical variant path before traversing
+    // and compiling it, then appends structured events to the shared recorder.
     let mut warm = Command::new(std::env::current_exe().unwrap())
         .args([
             "cargo_warm_base_gc::tests::pressure_execution::frozen_two_actor_schedule_serializes_warm_work_and_pressure_retry",
@@ -1941,6 +2054,10 @@ async fn frozen_two_actor_schedule_serializes_warm_work_and_pressure_retry() {
         !base.exists(),
         "pressure retry removes only after owner death releases the lock"
     );
+    assert!(
+        sibling.exists(),
+        "evicting mold-jobs-1 must not remove the mold-jobs-4 sibling"
+    );
 
     // Exactly one pressure traversal enter/exit and one removal enter/exit
     // (4 callback boundaries total).
@@ -1995,7 +2112,7 @@ async fn frozen_two_actor_schedule_serializes_warm_work_and_pressure_retry() {
 
     assert_eq!(
         fixture["two_actor"]["lock_path"],
-        ".warm-locks/<project-id>.lock"
+        ".warm-locks/<project-id>/mold-jobs-1.lock"
     );
     assert_eq!(fixture["two_actor"]["loser_removals"], 0);
     assert_eq!(fixture["two_actor"]["retry_removals"], result.deleted.len());
