@@ -7,15 +7,13 @@ use crate::finalize_handlers::{
 };
 use crate::output_parser::CompletionIntent;
 use crate::reply_loop_completion_intent_tests::{
-    CompletionIntentCallbacks, fallback_evidence, reuse_material,
+    CompletionIntentCallbacks, fallback_evidence, reuse_material_with_fingerprint_config,
 };
 use crate::test_helpers;
 use djinn_db::repositories::task_run::TaskRunRepository;
 use djinn_db::repositories::verify_run::TaskRejectedSubmissionIntegrityRepository;
-use djinn_git::{
-    ResolvedExternalInputV1, VerificationInputFingerprint, VerificationInputFingerprintConfig,
-    compute_verification_input_fingerprint_with_config,
-};
+use djinn_db::{CreateTaskAttemptParams, TaskAttemptRepository};
+use djinn_git::{ResolvedExternalInputV1, VerificationInputFingerprintConfig};
 
 fn init_git_repo_with_dirty_file() -> tempfile::TempDir {
     let dir = tempfile::Builder::new()
@@ -946,34 +944,38 @@ async fn settlement_accepted_and_rejected_paths_store_same_review_fingerprint() 
          from the same shared submission fingerprint source"
     );
 }
-
-/// Complete C2 input fingerprint mutation matrix. These cases model evidence
-/// captured at C1 and prove every declared input class changes the value the
-/// completion validator must compare before consuming that evidence.
 async fn c2_fingerprint(
     worktree: &std::path::Path,
     config: &VerificationInputFingerprintConfig,
 ) -> String {
-    match compute_verification_input_fingerprint_with_config(worktree, config)
+    match djinn_git::compute_verification_input_fingerprint_with_config(worktree, config)
         .await
         .expect("compute C2 fingerprint")
     {
-        VerificationInputFingerprint::Available(digest) => digest.fingerprint,
-        VerificationInputFingerprint::Unavailable(reason) => panic!("C2 unavailable: {reason}"),
+        djinn_git::VerificationInputFingerprint::Available(digest) => digest.fingerprint,
+        djinn_git::VerificationInputFingerprint::Unavailable(reason) => {
+            panic!("C2 unavailable: {reason}")
+        }
     }
 }
 
+/// Exercise the production completion-consumption boundary after compatible C1
+/// evidence exists. `setup` establishes the input before C1; `mutate` changes
+/// that same input before production C2 validation.
 async fn assert_after_c1_mutation_reverifies_before_completion(
     name: &str,
     config: VerificationInputFingerprintConfig,
+    setup: impl FnOnce(&std::path::Path),
     mutate: impl FnOnce(&std::path::Path),
 ) {
     let worktree = init_git_repo_with_dirty_file();
-    let c1 = c2_fingerprint(worktree.path(), &config).await;
-    mutate(worktree.path());
-    let c2 = c2_fingerprint(worktree.path(), &config).await;
-    assert_ne!(c1, c2, "{name}: stale C1 evidence must not match C2");
-    let material = reuse_material(worktree.path().to_path_buf());
+    setup(worktree.path());
+    let material = reuse_material_with_fingerprint_config(worktree.path().to_path_buf(), config);
+    let c1 = c2_fingerprint(
+        worktree.path(),
+        &material.execution_request.fingerprint_config,
+    )
+    .await;
     let identity = djinn_core::canonical_verify::EnvironmentIdentityV1::derive(
         (material.execution_request.resolve_environment_identity)().unwrap(),
     )
@@ -984,10 +986,17 @@ async fn assert_after_c1_mutation_reverifies_before_completion(
         ordered_commands: serde_json::json!([]),
         covered_checks: serde_json::json!(["format", "slot-clippy"]),
         required_checks: material.required_checks.clone(),
-        verification_input_fingerprint: c1,
+        verification_input_fingerprint: c1.clone(),
         manifest_version: "manifest-v1".into(),
         environment_identity_digest: identity.digest.clone(),
     };
+    mutate(worktree.path());
+    let c2 = c2_fingerprint(
+        worktree.path(),
+        &material.execution_request.fingerprint_config,
+    )
+    .await;
+    assert_ne!(c1, c2, "{name}: stale C1 evidence must not match C2");
     let db = test_helpers::create_test_db();
     let project = test_helpers::create_test_project(&db).await;
     let epic = test_helpers::create_test_epic(&db, &project.id).await;
@@ -999,15 +1008,30 @@ async fn assert_after_c1_mutation_reverifies_before_completion(
         Some(worktree.path().to_str().unwrap()),
     )
     .await;
+    let attempt_id = uuid::Uuid::now_v7().to_string();
+    TaskAttemptRepository::new(db.clone())
+        .create_or_get_pending(CreateTaskAttemptParams {
+            id: &attempt_id,
+            task_id: &task.id,
+            role: "worker",
+            dispatch_key: &format!("c2-{name}-{}", uuid::Uuid::now_v7()),
+            session_id: None,
+            attempt_seq: None,
+        })
+        .await
+        .expect("seed pending attempt");
     let intent = CompletionIntent {
         finalize_payload: serde_json::json!({"task_id":task.id,"commit_title":"C2","summary":"C2","files_changed":[],"remaining_concerns":[]}),
         tool_use_id: "C1".into(),
         final_verification_evidence: Some(stale),
     };
+    // Lease succeeds; canonical execution then returns failed current evidence.
+    let mut failed_execution = fallback_evidence(&material, c2.clone(), identity.clone());
+    failed_execution.commands[0].exit_code = Some(1);
     let failing = Arc::new(CompletionIntentCallbacks::for_reuse_with_evidence(
         task.id.clone(),
         material.clone(),
-        None,
+        Some(failed_execution),
         false,
         None,
     ));
@@ -1017,12 +1041,16 @@ async fn assert_after_c1_mutation_reverifies_before_completion(
         "{name}: failed canonical C2 blocks finalization"
     );
     assert!(
-        failing.reuse_events().contains(&"writer-resolution"),
-        "{name}: C2 resolves changed inputs"
-    );
-    assert!(
         failing.reuse_events().contains(&"canonical-execution"),
         "{name}: stale evidence invokes canonical executor"
+    );
+    assert!(
+        failing
+            .resolved_fingerprints()
+            .iter()
+            .all(|actual| actual == &c2)
+            && failing.resolved_fingerprints().len() >= 2,
+        "{name}: production C2 resolver observed changed current material"
     );
     assert!(
         !djinn_db::TaskRepository::new(db.clone(), fail_ctx.event_bus.clone())
@@ -1033,6 +1061,16 @@ async fn assert_after_c1_mutation_reverifies_before_completion(
             .any(|e| e.event_type == "work_submitted"),
         "{name}: failed C2 has no completion side effect"
     );
+    assert_eq!(
+        TaskAttemptRepository::new(db.clone())
+            .get(&attempt_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .outcome,
+        "pending",
+        "{name}: failed C2 does not advance the pending attempt"
+    );
     let passing = Arc::new(CompletionIntentCallbacks::for_reuse_with_evidence(
         task.id.clone(),
         material.clone(),
@@ -1042,11 +1080,18 @@ async fn assert_after_c1_mutation_reverifies_before_completion(
     ));
     let pass_ctx = test_helpers::agent_context_from_db_with_callbacks(db.clone(), passing.clone());
     assert!(
-        process_completion_intent_with_outcome(&intent, "submit_work", &task.id, &pass_ctx).await,
-        "{name}: current canonical C2 pass finalizes"
+        process_completion_intent_with_outcome(&intent, "submit_work", &task.id, &pass_ctx).await
     );
     assert!(passing.reuse_events().contains(&"canonical-execution"));
-    let entries = djinn_db::TaskRepository::new(db, pass_ctx.event_bus.clone())
+    assert!(
+        passing
+            .resolved_fingerprints()
+            .iter()
+            .all(|actual| actual == &c2)
+            && passing.resolved_fingerprints().len() >= 2,
+        "{name}: replacement execution resolved the changed C2 material"
+    );
+    let entries = djinn_db::TaskRepository::new(db.clone(), pass_ctx.event_bus.clone())
         .list_activity(&task.id)
         .await
         .unwrap();
@@ -1062,6 +1107,30 @@ async fn assert_after_c1_mutation_reverifies_before_completion(
         completion_payload["final_verification_evidence"]["verification_input_fingerprint"], c2,
         "{name}: completion uses replacement C2 evidence"
     );
+    assert_eq!(
+        TaskAttemptRepository::new(db)
+            .get(&attempt_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .outcome,
+        "submitted",
+        "{name}: only successful current evidence advances the attempt"
+    );
+}
+
+fn git_in(root: &std::path::Path, args: &[&str]) {
+    let out = std::process::Command::new("git")
+        .args(args)
+        .current_dir(root)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "git {:?}: {}",
+        args,
+        String::from_utf8_lossy(&out.stderr)
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1069,11 +1138,11 @@ async fn after_c1_tracked_text_mutation_changes_c2() {
     assert_after_c1_mutation_reverifies_before_completion(
         "tracked text",
         VerificationInputFingerprintConfig::default(),
+        |_| {},
         |root| std::fs::write(root.join("README.md"), "hello\nchanged after C1\n").unwrap(),
     )
     .await;
 }
-
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn after_c1_ignored_generated_configuration_mutation_changes_c2() {
     assert_after_c1_mutation_reverifies_before_completion(
@@ -1081,36 +1150,66 @@ async fn after_c1_ignored_generated_configuration_mutation_changes_c2() {
         VerificationInputFingerprintConfig::default(),
         |root| {
             std::fs::write(root.join(".gitignore"), "generated.conf\n").unwrap();
-            std::fs::write(root.join("generated.conf"), "changed after C1\n").unwrap();
+            std::fs::write(root.join("generated.conf"), "before C1\n").unwrap();
         },
+        |root| std::fs::write(root.join("generated.conf"), "changed after C1\n").unwrap(),
     )
     .await;
 }
-
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn after_c1_untracked_binary_mutation_changes_c2() {
     assert_after_c1_mutation_reverifies_before_completion(
         "untracked binary",
         VerificationInputFingerprintConfig::default(),
+        |root| std::fs::write(root.join("generated.bin"), [0_u8, 255, 17, 1]).unwrap(),
         |root| std::fs::write(root.join("generated.bin"), [0_u8, 255, 17, 42]).unwrap(),
     )
     .await;
 }
-
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn after_c1_submodule_state_mutation_changes_c2() {
+    let source = tempfile::tempdir().unwrap();
     assert_after_c1_mutation_reverifies_before_completion(
         "submodule state",
         VerificationInputFingerprintConfig::default(),
         |root| {
-            std::fs::write(root.join(".gitmodules"), "[submodule \"vendor/input\"]\npath = vendor/input\nurl = https://example.invalid/input\n").unwrap();
-            std::fs::create_dir_all(root.join("vendor/input")).unwrap();
-            std::fs::write(root.join("vendor/input/.git"), "gitdir: ../.git/modules/input\n").unwrap();
+            git_in(source.path(), &["init"]);
+            git_in(source.path(), &["config", "user.email", "test@test.com"]);
+            git_in(source.path(), &["config", "user.name", "Test User"]);
+            std::fs::write(source.path().join("input.txt"), "before C1\n").unwrap();
+            git_in(source.path(), &["add", "input.txt"]);
+            git_in(source.path(), &["commit", "-m", "first"]);
+            git_in(source.path(), &["branch", "-M", "main"]);
+            let source_path = source.path().to_str().unwrap();
+            git_in(
+                root,
+                &[
+                    "-c",
+                    "protocol.file.allow=always",
+                    "submodule",
+                    "add",
+                    source_path,
+                    "vendor/input",
+                ],
+            );
+            git_in(root, &["add", ".gitmodules", "vendor/input"]);
+            git_in(root, &["commit", "-m", "add real gitlink"]);
+        },
+        |root| {
+            std::fs::write(source.path().join("input.txt"), "changed after C1\n").unwrap();
+            git_in(source.path(), &["add", "input.txt"]);
+            git_in(source.path(), &["commit", "-m", "second"]);
+            let submodule = root.join("vendor/input");
+            git_in(&submodule, &["fetch", "origin", "main"]);
+            git_in(&submodule, &["checkout", "FETCH_HEAD"]);
+            // Advance the actual tracked gitlink, keeping the checkout
+            // consistent for the production fingerprint resolver.
+            git_in(root, &["add", "vendor/input"]);
+            git_in(root, &["commit", "-m", "advance real gitlink"]);
         },
     )
     .await;
 }
-
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn after_c1_declared_external_input_mutation_changes_c2() {
     let external = tempfile::tempdir().unwrap();
@@ -1129,9 +1228,8 @@ async fn after_c1_declared_external_input_mutation_changes_c2() {
     assert_after_c1_mutation_reverifies_before_completion(
         "declared external input",
         config,
-        |_: &std::path::Path| {
-            std::fs::write(external.path().join("toolchain.txt"), "v2 after C1\n").unwrap();
-        },
+        |_| {},
+        |_| std::fs::write(external.path().join("toolchain.txt"), "v2 after C1\n").unwrap(),
     )
     .await;
 }

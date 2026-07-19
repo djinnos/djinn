@@ -29,7 +29,7 @@ use djinn_core::{
     canonical_verify::{
         CanonicalCommandDescriptorV1, CanonicalFinalVerificationPlanV1, CanonicalHermeticityV1,
         EnvironmentIdentityV1, ImmutableImageV1, ResolvedEnvironmentIdentityInputV1,
-        ToolProbeStatus, ToolProbeV1, VerificationInputManifestV1,
+        ToolProbeStatus, ToolProbeV1,
     },
     models::{Task, VerifySource},
 };
@@ -437,14 +437,19 @@ async fn reply_loop_reuse_rejection_matrix_writes_fresh_authoritative_evidence()
 }
 
 pub(crate) fn reuse_material(worktree: std::path::PathBuf) -> FinalVerificationResolvedMaterial {
+    reuse_material_with_fingerprint_config(worktree, VerificationInputFingerprintConfig::default())
+}
+
+/// Construct the same production resolved material used by the reuse fixtures,
+/// retaining a caller-provided complete input configuration. Boundary tests use
+/// this to ensure C2 resolution observes external inputs as well as worktree
+/// inputs instead of comparing a separately computed test-only digest.
+pub(crate) fn reuse_material_with_fingerprint_config(
+    worktree: std::path::PathBuf,
+    fingerprint_config: VerificationInputFingerprintConfig,
+) -> FinalVerificationResolvedMaterial {
     let required_checks = vec!["format".to_owned(), "slot-clippy".to_owned()];
-    let manifest = VerificationInputManifestV1 {
-        version: 1,
-        repo_paths: vec![],
-        environment_names: vec![],
-        read_only_external_inputs: vec![],
-        output_only_globs: vec![],
-    };
+    let manifest = fingerprint_config.manifest.clone();
     let commands = required_checks
         .iter()
         .map(|check_id| CanonicalCommandDescriptorV1 {
@@ -500,11 +505,7 @@ pub(crate) fn reuse_material(worktree: std::path::PathBuf) -> FinalVerificationR
         execution_request: FinalVerificationExecutionRequest {
             worktree,
             resolve_environment_identity: Arc::new(move || Ok(input.clone())),
-            fingerprint_config: VerificationInputFingerprintConfig {
-                base_ref: "main".into(),
-                manifest,
-                external_inputs: vec![],
-            },
+            fingerprint_config,
             tool_runtime: vec![],
             read_only_external_mounts: vec![],
             output_directories: vec![],
@@ -521,6 +522,7 @@ struct ReuseProbe {
     lease_requests: Mutex<usize>,
     lease_acquisitions: Mutex<usize>,
     canonical_executions: Mutex<usize>,
+    resolved_fingerprints: Mutex<Vec<String>>,
     evidence: Mutex<Option<FinalVerificationExecutionEvidence>>,
     mutate_before_c1: bool,
     failure: Option<FinalVerificationConsultationFailure>,
@@ -566,6 +568,7 @@ impl CompletionIntentCallbacks {
                 lease_requests: Mutex::new(0),
                 lease_acquisitions: Mutex::new(0),
                 canonical_executions: Mutex::new(0),
+                resolved_fingerprints: Mutex::new(Vec::new()),
                 evidence: Mutex::new(evidence),
                 mutate_before_c1,
                 failure,
@@ -583,6 +586,16 @@ impl CompletionIntentCallbacks {
             .as_ref()
             .unwrap()
             .events
+            .lock()
+            .unwrap()
+            .clone()
+    }
+
+    pub(crate) fn resolved_fingerprints(&self) -> Vec<String> {
+        self.reuse_probe
+            .as_ref()
+            .unwrap()
+            .resolved_fingerprints
             .lock()
             .unwrap()
             .clone()
@@ -673,6 +686,25 @@ impl SlotHostCallbacks for CompletionIntentCallbacks {
                 )
                 .map_err(|error| error.to_string())?;
             }
+            if verify_run_id != "reuse-c0" && verify_run_id != "reuse-c1" {
+                let fingerprint = match compute_verification_input_fingerprint_with_config(
+                    &probe.material.execution_request.worktree,
+                    &probe.material.execution_request.fingerprint_config,
+                )
+                .await
+                .map_err(|error| error.to_string())?
+                {
+                    VerificationInputFingerprint::Available(value) => value.fingerprint,
+                    VerificationInputFingerprint::Unavailable(reason) => {
+                        return Err(reason.to_string());
+                    }
+                };
+                probe
+                    .resolved_fingerprints
+                    .lock()
+                    .unwrap()
+                    .push(fingerprint);
+            }
             Ok(probe.material.clone())
         })
     }
@@ -701,14 +733,10 @@ impl SlotHostCallbacks for CompletionIntentCallbacks {
         Box::pin(async move {
             let probe = probe.ok_or_else(|| "not implemented in test".to_owned())?;
             *probe.lease_acquisitions.lock().unwrap() += 1;
-            if probe.evidence.lock().unwrap().is_some() {
-                Ok(Box::new(ReuseProbeLease)
-                    as Box<
-                        dyn crate::final_verification::FinalVerificationInvocationLease,
-                    >)
-            } else {
-                Err("lease must not be acquired for a reuse hit".into())
-            }
+            Ok(Box::new(ReuseProbeLease)
+                as Box<
+                    dyn crate::final_verification::FinalVerificationInvocationLease,
+                >)
         })
     }
 
