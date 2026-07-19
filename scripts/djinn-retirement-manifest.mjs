@@ -96,7 +96,6 @@ export const KNOWLEDGE_SINGLETONS = new Set([
  */
 export const NON_KNOWLEDGE_TRACKED = new Set([
   '.djinn/.gitignore',
-  '.djinn/settings.json',
   '.djinn/skills.json',
 ]);
 

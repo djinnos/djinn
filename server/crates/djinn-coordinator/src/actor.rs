@@ -28,6 +28,27 @@ use djinn_provider::catalog::health::HealthTracker;
 use djinn_provider::rate_limit::suppression_remaining;
 use djinn_slot::SlotPoolHandle;
 
+/// Proof token produced only after every enumerated legacy-settings import
+/// attempt has completed. The dispatch loop requires this token so startup
+/// cannot enter normal dispatch while an import future is still pending.
+struct StartupLegacySettingsImportsComplete;
+
+/// Run the finite legacy-settings startup phase to completion before handing
+/// its proof token to the normal-dispatch phase.
+async fn complete_legacy_settings_import_phase<T, Import, ImportFuture>(
+    projects: impl IntoIterator<Item = T>,
+    mut import: Import,
+) -> StartupLegacySettingsImportsComplete
+where
+    Import: FnMut(T) -> ImportFuture,
+    ImportFuture: std::future::Future<Output = ()>,
+{
+    for project in projects {
+        import(project).await;
+    }
+    StartupLegacySettingsImportsComplete
+}
+
 // ─── Actor (≤20 fields — AGENT-11) ───────────────────────────────────────────
 
 /// Coordinator actor state.
@@ -345,6 +366,45 @@ mod rehydration_tests {
         let elapsed = instant_now.duration_since(marker_instant);
         assert!(elapsed >= StdDuration::from_secs(29));
         assert!(elapsed <= StdDuration::from_secs(31));
+    }
+}
+
+#[cfg(test)]
+mod legacy_settings_startup_tests {
+    use super::*;
+    use std::sync::{Arc, Mutex};
+
+    #[tokio::test]
+    async fn every_legacy_settings_import_attempt_finishes_before_dispatch_can_begin() {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let import_events = Arc::clone(&events);
+        let imports_complete = complete_legacy_settings_import_phase(
+            ["project-a", "project-b", "project-c"],
+            move |project| {
+                let import_events = Arc::clone(&import_events);
+                async move {
+                    import_events
+                        .lock()
+                        .unwrap()
+                        .push(format!("import:{project}:complete"));
+                }
+            },
+        )
+        .await;
+
+        // Normal dispatch is type-gated on the proof returned only after every
+        // enumerated import attempt has resolved.
+        let _imports_complete = imports_complete;
+        events.lock().unwrap().push("dispatch:entered".to_owned());
+        assert_eq!(
+            *events.lock().unwrap(),
+            [
+                "import:project-a:complete",
+                "import:project-b:complete",
+                "import:project-c:complete",
+                "dispatch:entered",
+            ]
+        );
     }
 }
 
@@ -786,7 +846,7 @@ impl CoordinatorActor {
     pub(super) async fn run(mut self) {
         tracing::info!("CoordinatorActor started");
 
-        match ProjectRepository::new(
+        let _startup_imports_complete = match ProjectRepository::new(
             self.db.clone(),
             crate::events::event_bus_for(&self.events_tx),
         )
@@ -794,24 +854,32 @@ impl CoordinatorActor {
         .await
         {
             Ok(projects) => {
-                for project in projects {
-                    let checkout =
-                        djinn_core::paths::project_dir(&project.github_owner, &project.github_repo);
-                    if let Err(error) = djinn_workspace::import_legacy_settings_file(
-                        self.db.clone(),
-                        &project.id,
-                        &checkout,
-                    )
-                    .await
-                    {
-                        tracing::error!(project_id = %project.id, checkout = %checkout.display(), %error, "legacy settings import failed; retained source for this project");
+                let db = self.db.clone();
+                complete_legacy_settings_import_phase(projects, move |project| {
+                    let db = db.clone();
+                    async move {
+                        let checkout = djinn_core::paths::project_dir(
+                            &project.github_owner,
+                            &project.github_repo,
+                        );
+                        if let Err(error) = djinn_workspace::import_legacy_settings_file(
+                            db,
+                            &project.id,
+                            &checkout,
+                        )
+                        .await
+                        {
+                            tracing::error!(project_id = %project.id, checkout = %checkout.display(), %error, "legacy settings import failed; retained source for this project");
+                        }
                     }
-                }
+                })
+                .await
             }
             Err(error) => {
-                tracing::error!(%error, "cannot enumerate projects for legacy settings import")
+                tracing::error!(%error, "cannot enumerate projects for legacy settings import");
+                StartupLegacySettingsImportsComplete
             }
-        }
+        };
 
         // Log detected system memory at startup.
         if let Some(mem) = crate::resource_monitor::MemoryStatus::read() {
@@ -853,6 +921,13 @@ impl CoordinatorActor {
         // for failed spikes the proposal remains blocked.
         self.recover_terminal_linked_spike_evidence().await;
 
+        self.run_dispatch_loop(_startup_imports_complete).await;
+        tracing::info!("CoordinatorActor stopped");
+    }
+
+    /// Enter the normal, potentially infinite dispatch loop only after the
+    /// finite startup import phase has completed.
+    async fn run_dispatch_loop(&mut self, _imports_complete: StartupLegacySettingsImportsComplete) {
         loop {
             tokio::select! {
                 biased;
@@ -896,7 +971,6 @@ impl CoordinatorActor {
                 }
             }
         }
-        tracing::info!("CoordinatorActor stopped");
     }
 
     #[tracing::instrument(

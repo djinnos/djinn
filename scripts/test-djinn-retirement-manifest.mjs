@@ -557,10 +557,11 @@ test('splitNulPaths returns empty array for empty input', () => {
   assert.deepEqual(splitNulPaths(Buffer.alloc(0)), []);
 });
 
-test('isKnowledgePath excludes non-knowledge tracked files', () => {
+test('isKnowledgePath guards retired settings consistently with the retirement set', () => {
   assert.equal(isKnowledgePath('.djinn/decisions/a.md'), true);
   assert.equal(isKnowledgePath('.djinn/brief.md'), true);
   assert.equal(isKnowledgePath('.djinn/.gitignore'), false);
+  assert.equal(NON_KNOWLEDGE_TRACKED.has('.djinn/settings.json'), false);
   assert.equal(isKnowledgePath('.djinn/settings.json'), true);
   assert.equal(isKnowledgePath('.djinn/skills.json'), false);
   assert.equal(isKnowledgePath('server/src/lib.rs'), false);
