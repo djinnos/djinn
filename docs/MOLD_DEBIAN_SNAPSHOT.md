@@ -3,7 +3,7 @@
 Both Rust image installation paths use the following Debian snapshot and exact
 package version:
 
-- snapshot URL: `https://snapshot.debian.org/archive/debian/20250401T000000Z`
+- snapshot URL: `http://snapshot.debian.org/archive/debian/20250401T000000Z` (plain http: the Fastly edge intermittently fails TLS verification from CI runners; integrity comes from apt's signed InRelease + per-package SHA256s)
 - snapshot date: `2025-04-01T00:00:00Z`
 - suite/component: `trixie main`
 - package: `mold=2.37.1+dfsg-1`

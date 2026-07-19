@@ -232,7 +232,7 @@ impl djinn_slot::host::SlotHostCallbacks for AgentHostCallbacks {
         Box<
             dyn Future<
                     Output = Result<
-                        djinn_slot::final_verification::FinalVerificationResolvedMaterial,
+                        Option<djinn_slot::final_verification::FinalVerificationResolvedMaterial>,
                         String,
                     >,
                 > + Send
@@ -247,18 +247,23 @@ impl djinn_slot::host::SlotHostCallbacks for AgentHostCallbacks {
                 .await
                 .map_err(|e| e.to_string())?
                 .ok_or("task run missing")?;
-            let worktree = run
-                .workspace_path
-                .map(PathBuf::from)
-                .ok_or("task run has no worktree")?;
             let plan =
                 crate::environment::environment_config_for_project_id(&agent.db, &run.project_id)
                     .await
                     .lifecycle
                     .final_verification;
+            // Typed skip, checked BEFORE the worktree requirement: a project
+            // with zero final-verification commands has no completion boundary
+            // to enforce, so submission must not depend on a resolvable
+            // worktree. A configured plan keeps the fail-closed worktree
+            // requirement below.
             if plan.commands.is_empty() {
-                return Err("final-verification plan is not configured".into());
+                return Ok(None);
             }
+            let worktree = run
+                .workspace_path
+                .map(PathBuf::from)
+                .ok_or("task run has no worktree")?;
             let commands: Vec<_> = plan
                 .commands
                 .iter()
@@ -333,7 +338,7 @@ impl djinn_slot::host::SlotHostCallbacks for AgentHostCallbacks {
             };
             let resolver: EnvironmentIdentityResolver = Arc::new(move || Ok(identity.clone()));
             let output_directories = output_directories(&manifest.output_only_globs)?;
-            Ok(
+            Ok(Some(
                 djinn_slot::final_verification::FinalVerificationResolvedMaterial {
                     execution_request: FinalVerificationExecutionRequest {
                         worktree,
@@ -354,7 +359,7 @@ impl djinn_slot::host::SlotHostCallbacks for AgentHostCallbacks {
                     required_checks: plan.required_checks,
                     diff_fingerprint: String::new(),
                 },
-            )
+            ))
         })
     }
     fn acquire_final_verification_lease<'a>(
@@ -548,5 +553,130 @@ impl djinn_slot::host::SlotHostCallbacks for AgentHostCallbacks {
                 ),
             },
         )
+    }
+}
+
+#[cfg(test)]
+mod resolve_final_verification_tests {
+    use djinn_core::events::EventBus;
+    use djinn_db::ProjectRepository;
+    use djinn_db::repositories::task_run::CreateTaskRunParams;
+    use djinn_slot::host::SlotHostCallbacks;
+    use djinn_stack::environment::{EnvironmentConfig, FinalVerificationCommand};
+    use tokio_util::sync::CancellationToken;
+
+    use super::*;
+    use crate::test_helpers::{
+        agent_context_from_db, create_test_db, create_test_epic, create_test_project,
+        create_test_task,
+    };
+
+    struct Fixture {
+        agent: AgentContext,
+        project_id: String,
+        task_id: String,
+        task_run_id: String,
+    }
+
+    /// Seed a project/epic/task and a task_run row shaped like a K8s pod run
+    /// (coordinator-inserted, `workspace_path` as given).
+    async fn fixture(workspace_path: Option<&str>) -> Fixture {
+        let db = create_test_db();
+        let project = create_test_project(&db).await;
+        let epic = create_test_epic(&db, &project.id).await;
+        let task = create_test_task(&db, &project.id, &epic.id).await;
+        let task_run_id = uuid::Uuid::now_v7().to_string();
+        TaskRunRepository::new(db.clone())
+            .create(CreateTaskRunParams {
+                id: &task_run_id,
+                project_id: &project.id,
+                task_id: &task.id,
+                trigger_type: "dispatch",
+                status: Some("running"),
+                workspace_path,
+                mirror_ref: None,
+            })
+            .await
+            .unwrap();
+        Fixture {
+            agent: agent_context_from_db(db, CancellationToken::new()),
+            project_id: project.id,
+            task_id: task.id,
+            task_run_id,
+        }
+    }
+
+    async fn configure_final_verification_plan(fx: &Fixture) {
+        let mut cfg = EnvironmentConfig::empty();
+        cfg.lifecycle.final_verification.commands = vec![FinalVerificationCommand {
+            check_id: "lint".into(),
+            executable: "true".into(),
+            ..Default::default()
+        }];
+        cfg.lifecycle.final_verification.required_checks = vec!["lint".into()];
+        ProjectRepository::new(fx.agent.db.clone(), EventBus::noop())
+            .set_environment_config(&fx.project_id, &serde_json::to_string(&cfg).unwrap())
+            .await
+            .unwrap();
+    }
+
+    async fn resolve(
+        fx: &Fixture,
+    ) -> Result<Option<djinn_slot::final_verification::FinalVerificationResolvedMaterial>, String>
+    {
+        let callbacks = AgentHostCallbacks::dispatch(&fx.agent);
+        let ctx = agent_to_slot_context(&fx.agent);
+        callbacks
+            .resolve_final_verification(&fx.task_id, &fx.task_run_id, "attempt", "run", &ctx)
+            .await
+    }
+
+    /// Defect 2 regression: a project with no final-verification plan resolves
+    /// the typed `Ok(None)` skip — even when the pod run's `workspace_path` is
+    /// NULL — instead of erroring and blocking every submission.
+    #[tokio::test]
+    async fn unconfigured_plan_resolves_typed_skip_even_without_worktree() {
+        let fx = fixture(None).await;
+        let resolved = resolve(&fx).await;
+        assert!(
+            matches!(resolved, Ok(None)),
+            "unconfigured plan must resolve the typed skip, got {:?}",
+            resolved.map(|m| m.map(|_| "material"))
+        );
+    }
+
+    /// A configured plan keeps the fail-closed worktree requirement: a run row
+    /// without a workspace_path is a hard resolution error, never a skip.
+    #[tokio::test]
+    async fn configured_plan_with_missing_worktree_fails_closed() {
+        let fx = fixture(None).await;
+        configure_final_verification_plan(&fx).await;
+        let resolved = resolve(&fx).await;
+        match resolved {
+            Err(detail) => assert!(
+                detail.contains("task run has no worktree"),
+                "configured plan without a worktree must fail closed, got {detail}"
+            ),
+            Ok(material) => panic!(
+                "configured plan without a worktree must not resolve, got {:?}",
+                material.map(|_| "material")
+            ),
+        }
+    }
+
+    /// A configured plan with a recorded worktree resolves full material.
+    #[tokio::test]
+    async fn configured_plan_with_worktree_resolves_material() {
+        let fx = fixture(Some("/workspace/run-clone")).await;
+        configure_final_verification_plan(&fx).await;
+        let material = resolve(&fx)
+            .await
+            .expect("configured plan with worktree must resolve")
+            .expect("configured plan must not be a typed skip");
+        assert_eq!(
+            material.execution_request.worktree,
+            PathBuf::from("/workspace/run-clone")
+        );
+        assert_eq!(material.required_checks, vec!["lint"]);
     }
 }
