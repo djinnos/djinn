@@ -32,6 +32,8 @@ pub use database::{
     SqliteVecStatus, default_db_path,
 };
 pub use error::{DbError as Error, DbResult as Result};
+#[cfg(any(test, feature = "test-support"))]
+pub use repositories::repo_graph_generation::ReservedPublicationFailureStage;
 pub use repositories::tool_call_evaluator::{
     Decision, EvalInput, GateResult, GateThresholds, GoStopReport, ManualAuditResult, SampleMinima,
     WindowSpec, evaluate, matched_baseline_rows,
@@ -179,11 +181,10 @@ pub use repositories::{
         ProjectCurrentGraph, RepoGraphGalaxyArtifact, RepoGraphGalaxyArtifactInsert,
         RepoGraphGalaxyChunk, RepoGraphGalaxyChunkInsert, RepoGraphGeneration,
         RepoGraphGenerationRepository, ReservedGalaxyArtifactChunk, ReservedGalaxyArtifactManifest,
-        ReservedGraphPublication, ReservedPublicationFailureStage,
-        SUPPORTED_GALAXY_ARTIFACT_ENCODING, SUPPORTED_GALAXY_ARTIFACT_VERSION,
-        acquire_generation_stream_pin_shared, generation_stream_pin_key,
-        release_generation_stream_pin_exclusive, release_generation_stream_pin_shared,
-        try_acquire_generation_stream_pin_exclusive,
+        ReservedGraphPublication, SUPPORTED_GALAXY_ARTIFACT_ENCODING,
+        SUPPORTED_GALAXY_ARTIFACT_VERSION, acquire_generation_stream_pin_shared,
+        generation_stream_pin_key, release_generation_stream_pin_exclusive,
+        release_generation_stream_pin_shared, try_acquire_generation_stream_pin_exclusive,
     },
     scip_indexer_timing::{
         ScipIndexerTiming, ScipIndexerTimingObservation, ScipIndexerTimingRepository,
