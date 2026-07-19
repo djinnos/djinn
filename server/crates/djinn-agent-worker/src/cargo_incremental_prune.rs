@@ -13,7 +13,9 @@ use std::process::Command;
 
 use thiserror::Error;
 
-use crate::cargo_target_seed::{WARM_BASE_ROOT, warm_base_dir};
+use crate::cargo_target_seed::{
+    WARM_BASE_ROOT, warm_base_dir, warm_base_dir_for_jobs, warm_base_dir_for_jobs_at_root,
+};
 
 const CARGO_TARGET_DIR: &str = "CARGO_TARGET_DIR";
 const LOCK_DIRECTORY: &str = ".warm-locks";
@@ -30,6 +32,60 @@ pub enum PruneErrorKind {
     LockOpen,
     LockProbe,
     LockAcquire,
+}
+
+/// Validate and prune only the exact configured mold-job warm variant.
+pub fn prune_warm_incremental_for_jobs(
+    project_id: &str,
+    jobs: usize,
+) -> Result<PruneResult, PruneError> {
+    let configured = std::env::var_os(CARGO_TARGET_DIR).ok_or_else(|| {
+        PruneError::new(PruneErrorKind::TargetMismatch, "CARGO_TARGET_DIR is unset")
+    })?;
+    prune_warm_incremental_for_target_for_jobs(project_id, jobs, Path::new(&configured))
+}
+
+/// Explicit-target seam for exact variant validation.
+pub(crate) fn prune_warm_incremental_for_target_for_jobs(
+    project_id: &str,
+    jobs: usize,
+    configured_target: &Path,
+) -> Result<PruneResult, PruneError> {
+    validate_project_id(project_id)?;
+    let base = warm_base_dir_for_jobs(project_id, jobs);
+    if configured_target != base {
+        return Err(PruneError::new(
+            PruneErrorKind::TargetMismatch,
+            format!(
+                "configured {} does not exactly match {}",
+                configured_target.display(),
+                base.display()
+            ),
+        ));
+    }
+    prune_derived_base(&base, Path::new(WARM_BASE_ROOT))
+}
+
+/// Isolated-root counterpart of [`prune_warm_incremental_for_jobs`].
+pub fn prune_warm_incremental_for_root_and_jobs(
+    project_id: &str,
+    jobs: usize,
+    configured_target: &Path,
+    warm_root: &Path,
+) -> Result<PruneResult, PruneError> {
+    validate_project_id(project_id)?;
+    let base = warm_base_dir_for_jobs_at_root(warm_root, project_id, jobs);
+    if configured_target != base {
+        return Err(PruneError::new(
+            PruneErrorKind::TargetMismatch,
+            format!(
+                "configured {} does not exactly match {}",
+                configured_target.display(),
+                base.display()
+            ),
+        ));
+    }
+    prune_derived_base(&base, warm_root)
 }
 
 impl PruneErrorKind {
@@ -525,6 +581,30 @@ impl WarmBaseLock {
             || {},
             flock_exclusive,
         )
+    }
+
+    /// Acquire the lock for one exact mold-job warm base. Variant locks cannot
+    /// contend with, or authorize mutation of, legacy and sibling bases.
+    pub fn acquire_for_jobs(project_id: &str, jobs: usize) -> Result<Self, PruneError> {
+        validate_project_id(project_id)?;
+        let lock_dir = Path::new(WARM_BASE_ROOT)
+            .join(LOCK_DIRECTORY)
+            .join(project_id);
+        fs::create_dir_all(&lock_dir)
+            .map_err(|error| PruneError::new(PruneErrorKind::LockOpen, error))?;
+        probe_advisory_lock(&lock_dir)
+            .map_err(|error| PruneError::new(PruneErrorKind::LockProbe, error))?;
+        let path = lock_dir.join(format!("mold-jobs-{}.lock", jobs.max(1)));
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(path)
+            .map_err(|error| PruneError::new(PruneErrorKind::LockOpen, error))?;
+        flock_exclusive(&file)
+            .map_err(|error| PruneError::new(PruneErrorKind::LockAcquire, error))?;
+        Ok(Self { _file: file })
     }
 
     /// Acquire through the warm flow's terminal recorder boundary. The callback
