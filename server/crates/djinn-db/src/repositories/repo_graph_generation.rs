@@ -566,6 +566,51 @@ impl RepoGraphGenerationRepository {
         Self { db }
     }
 
+
+    /// Create isolated project fixtures for live galaxy-route tests.
+    #[cfg(any(test, feature = "test-support"))]
+    pub async fn reset_galaxy_route_fixture(&self, project_id: &str, github_owner: &str, github_repo: &str) -> Result<()> {
+        sqlx::query("DELETE FROM projects WHERE id = $1").bind(project_id).execute(self.db.pool()).await?;
+        sqlx::query("INSERT INTO projects(id, name, github_owner, github_repo) VALUES ($1, 'galaxy route fixture', $2, $3)")
+            .bind(project_id).bind(github_owner).bind(github_repo).execute(self.db.pool()).await?;
+        Ok(())
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub async fn set_galaxy_fixture_artifact_metadata(&self, artifact_id: &str, artifact_version: i32, chunk_hashes: Option<&str>) -> Result<()> {
+        sqlx::query("UPDATE repo_graph_galaxy_artifact SET artifact_version = $2, chunk_hashes = COALESCE($3::jsonb, chunk_hashes) WHERE artifact_id = $1::uuid")
+            .bind(artifact_id).bind(artifact_version).bind(chunk_hashes).execute(self.db.pool()).await?;
+        Ok(())
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub async fn corrupt_galaxy_fixture_chunk_hash(&self, generation_id: &str, artifact_id: &str, chunk_index: i32, sha256: &str) -> Result<()> {
+        sqlx::query("UPDATE repo_graph_galaxy_chunk SET sha256 = $1 WHERE generation_id = $2::uuid AND artifact_id = $3::uuid AND chunk_index = $4")
+            .bind(sha256).bind(generation_id).bind(artifact_id).bind(chunk_index).execute(self.db.pool()).await?;
+        Ok(())
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub async fn advance_galaxy_fixture_to_legacy_graph(&self, project_id: &str, commit_sha: &str, graph_blob: &[u8]) -> Result<()> {
+        sqlx::query("INSERT INTO repo_graph_cache(project_id, commit_sha, graph_blob, built_at) VALUES ($1, $2, $3, CURRENT_TIMESTAMP) ON CONFLICT (project_id, commit_sha) DO UPDATE SET graph_blob = EXCLUDED.graph_blob")
+            .bind(project_id).bind(commit_sha).bind(graph_blob).execute(self.db.pool()).await?;
+        Ok(())
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub async fn repoint_galaxy_fixture_current_generation(&self, project_id: &str, generation_id: &str) -> Result<()> {
+        sqlx::query("UPDATE repo_graph_current SET generation_id = $1::uuid WHERE project_id = $2")
+            .bind(generation_id).bind(project_id).execute(self.db.pool()).await?;
+        Ok(())
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub async fn repoint_galaxy_fixture_current_artifact(&self, project_id: &str, artifact_id: &str) -> Result<()> {
+        sqlx::query("UPDATE repo_graph_current SET generation_id = (SELECT generation_id FROM repo_graph_galaxy_artifact WHERE artifact_id = $1::uuid) WHERE project_id = $2")
+            .bind(artifact_id).bind(project_id).execute(self.db.pool()).await?;
+        Ok(())
+    }
+
     /// Publish compatibility data and a complete artifact under one reserved
     /// UUIDv7 generation. No collision or marker failure is retried here.
     pub async fn publish_reserved_generation(

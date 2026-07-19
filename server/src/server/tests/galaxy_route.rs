@@ -49,21 +49,18 @@ async fn fresh() -> Option<(
     db.ensure_initialized()
         .await
         .expect("migrate live Postgres database");
-    sqlx::query("DELETE FROM projects WHERE id = $1")
-        .bind(PROJECT)
-        .execute(db.pool())
-        .await
-        .expect("clear route fixture project");
-    sqlx::query("INSERT INTO projects(id, name, github_owner, github_repo) VALUES ($1, 'galaxy route fixture', 'test-owner', 'test-repo')")
-        .bind(PROJECT).execute(db.pool()).await.expect("insert route fixture project");
+    let repo = RepoGraphGenerationRepository::new(db.clone());
+    let fixture_identity = uuid::Uuid::now_v7().simple().to_string();
+    repo.reset_galaxy_route_fixture(
+        PROJECT,
+        &format!("galaxy-route-{fixture_identity}"),
+        &format!("fixture-{fixture_identity}"),
+    )
+    .await
+    .expect("reset isolated route fixture project");
     let token = seed_admin(&db).await;
     let app = server::router(AppState::new(db.clone(), CancellationToken::new()), false);
-    Some((
-        db.clone(),
-        RepoGraphGenerationRepository::new(db),
-        app,
-        token,
-    ))
+    Some((db, repo, app, token))
 }
 
 async fn seed_admin(db: &Database) -> String {
@@ -209,7 +206,7 @@ async fn galaxy_route_returns_200_identity_headers_and_304() {
 #[tokio::test]
 async fn galaxy_route_machine_codes_unavailable_unsupported_and_preheader_corruption() {
     let _serial = database_lock().lock().await;
-    let Some((db, repo, app, token)) = fresh().await else {
+    let Some((_db, repo, app, token)) = fresh().await else {
         return;
     };
     let unavailable = get(&app, &token, None).await;
@@ -222,13 +219,9 @@ async fn galaxy_route_machine_codes_unavailable_unsupported_and_preheader_corrup
     );
 
     let (generation, artifact) = publish(&repo, "unsupported", vec![b"chunk".to_vec()]).await;
-    sqlx::query(
-        "UPDATE repo_graph_galaxy_artifact SET artifact_version = 2 WHERE artifact_id = $1::uuid",
-    )
-    .bind(&artifact)
-    .execute(db.pool())
-    .await
-    .expect("set unsupported version");
+    repo.set_galaxy_fixture_artifact_metadata(&artifact, 2, None)
+        .await
+        .expect("set unsupported version");
     let unsupported = get(&app, &token, None).await;
     assert_eq!(unsupported.status(), StatusCode::CONFLICT);
     assert_eq!(
@@ -238,8 +231,9 @@ async fn galaxy_route_machine_codes_unavailable_unsupported_and_preheader_corrup
         br#"{"code":"galaxy_artifact_unsupported"}"#
     );
 
-    sqlx::query("UPDATE repo_graph_galaxy_artifact SET artifact_version = 1, chunk_hashes = '[\"bad\"]'::jsonb WHERE artifact_id = $1::uuid")
-        .bind(&artifact).execute(db.pool()).await.expect("make manifest corrupt");
+    repo.set_galaxy_fixture_artifact_metadata(&artifact, 1, Some(r#"["bad"]"#))
+        .await
+        .expect("make manifest corrupt");
     let corrupt = get(&app, &token, None).await;
     assert_eq!(corrupt.status(), StatusCode::INTERNAL_SERVER_ERROR);
     assert_eq!(
@@ -255,7 +249,7 @@ async fn galaxy_route_machine_codes_unavailable_unsupported_and_preheader_corrup
 #[tokio::test]
 async fn galaxy_route_aborts_after_headers_when_a_later_chunk_is_corrupt() {
     let _serial = database_lock().lock().await;
-    let Some((db, repo, app, token)) = fresh().await else {
+    let Some((_db, repo, app, token)) = fresh().await else {
         return;
     };
     let (generation, artifact) = publish(
@@ -270,16 +264,9 @@ async fn galaxy_route_aborts_after_headers_when_a_later_chunk_is_corrupt() {
         StatusCode::OK,
         "headers are committed first"
     );
-    sqlx::query(
-        "UPDATE repo_graph_galaxy_chunk SET sha256 = $1 \
-         WHERE generation_id = $2::uuid AND artifact_id = $3::uuid AND chunk_index = 1",
-    )
-    .bind(digest(b"wrong"))
-    .bind(&generation)
-    .bind(&artifact)
-    .execute(db.pool())
-    .await
-    .expect("corrupt second persisted chunk after headers");
+    repo.corrupt_galaxy_fixture_chunk_hash(&generation, &artifact, 1, &digest(b"wrong"))
+        .await
+        .expect("corrupt second persisted chunk after headers");
     let mut body = response.into_body();
     let first = body
         .frame()
@@ -302,7 +289,7 @@ async fn galaxy_route_aborts_after_headers_when_a_later_chunk_is_corrupt() {
 #[tokio::test]
 async fn galaxy_route_artifactless_pointer_and_failed_publication_keep_prior_artifact() {
     let _serial = database_lock().lock().await;
-    let Some((db, repo, app, token)) = fresh().await else {
+    let Some((_db, repo, app, token)) = fresh().await else {
         return;
     };
     let (_, artifact) = publish(&repo, "prior", vec![b"prior".to_vec()]).await;
@@ -311,15 +298,17 @@ async fn galaxy_route_artifactless_pointer_and_failed_publication_keep_prior_art
         .unwrap()
         .to_owned();
     // The legacy compatibility write advances the current pointer without an artifact.
-    sqlx::query("INSERT INTO repo_graph_cache(project_id, commit_sha, graph_blob, built_at) VALUES ($1, 'artifactless', $2, CURRENT_TIMESTAMP) ON CONFLICT (project_id, commit_sha) DO UPDATE SET graph_blob = EXCLUDED.graph_blob")
-        .bind(PROJECT).bind(b"legacy graph".as_slice()).execute(db.pool()).await.expect("advance artifactless pointer");
+    repo.advance_galaxy_fixture_to_legacy_graph(PROJECT, "artifactless", b"legacy graph")
+        .await
+        .expect("advance artifactless pointer");
     let unavailable = get(&app, &token, None).await;
     assert_eq!(unavailable.status(), StatusCode::NOT_FOUND);
 
     // Restore a valid current artifact, then fail the landed publication transaction
     // after it has written compatibility, artifact, and first-chunk records.
-    sqlx::query("UPDATE repo_graph_current SET generation_id = (SELECT generation_id FROM repo_graph_galaxy_artifact WHERE artifact_id = $1::uuid) WHERE project_id = $2")
-        .bind(&artifact).bind(PROJECT).execute(db.pool()).await.expect("restore prior pointer");
+    repo.repoint_galaxy_fixture_current_artifact(PROJECT, &artifact)
+        .await
+        .expect("restore prior pointer");
     let before = get(&app, &token, None).await;
     let prior_etag = before.headers()["etag"].to_str().unwrap().to_owned();
     assert_eq!(
@@ -387,12 +376,9 @@ async fn galaxy_route_pins_g1_until_completion_and_cancellation_then_releases() 
     );
 
     // Start another G1 stream by repointing current, then cancel after its first frame.
-    sqlx::query("UPDATE repo_graph_current SET generation_id = $1::uuid WHERE project_id = $2")
-        .bind(&g1)
-        .bind(PROJECT)
-        .execute(db.pool())
+    repo.repoint_galaxy_fixture_current_generation(PROJECT, &g1)
         .await
-        .unwrap();
+        .expect("repoint current to G1");
     let cancelled = get(&app, &token, None).await;
     let mut body = cancelled.into_body();
     assert!(
@@ -484,7 +470,7 @@ fn galaxy_allocation_shape_guard_rejects_finite_mutation_table() {
         }
     "#;
     const GOOD_READER: &str = r#"
-        let row = sqlx::query_as(
+        let row = query_as(
             "SELECT bytes FROM repo_graph_galaxy_chunk WHERE artifact_id = $1::uuid AND chunk_index = $2"
         ).bind(&self.metadata.artifact_id).bind(chunk_index)
           .fetch_optional(&mut **conn).await;
@@ -549,27 +535,27 @@ fn galaxy_allocation_shape_guard_rejects_finite_mutation_table() {
     let bad_readers = [
         (
             "missing artifact identity",
-            r#"sqlx::query("SELECT bytes FROM repo_graph_galaxy_chunk WHERE chunk_index = $2").bind(chunk_index).fetch_optional(conn).await"#,
+            r#"query_as("SELECT bytes FROM repo_graph_galaxy_chunk WHERE chunk_index = $2").bind(chunk_index).fetch_optional(conn).await"#,
         ),
         (
             "missing indexed predicate",
-            r#"sqlx::query("SELECT bytes FROM repo_graph_galaxy_chunk WHERE artifact_id = $1::uuid").bind(&self.metadata.artifact_id).fetch_optional(conn).await"#,
+            r#"query_as("SELECT bytes FROM repo_graph_galaxy_chunk WHERE artifact_id = $1::uuid").bind(&self.metadata.artifact_id).fetch_optional(conn).await"#,
         ),
         (
             "wrong chunk parameter",
-            r#"sqlx::query("SELECT bytes FROM repo_graph_galaxy_chunk WHERE artifact_id = $1::uuid AND chunk_index = $3").bind(&self.metadata.artifact_id).bind(chunk_index).fetch_optional(conn).await"#,
+            r#"query_as("SELECT bytes FROM repo_graph_galaxy_chunk WHERE artifact_id = $1::uuid AND chunk_index = $3").bind(&self.metadata.artifact_id).bind(chunk_index).fetch_optional(conn).await"#,
         ),
         (
             "multi-row fetch_all",
-            r#"sqlx::query("SELECT bytes FROM repo_graph_galaxy_chunk WHERE artifact_id = $1::uuid AND chunk_index = $2").bind(&self.metadata.artifact_id).bind(chunk_index).fetch_all(conn).await"#,
+            r#"query_as("SELECT bytes FROM repo_graph_galaxy_chunk WHERE artifact_id = $1::uuid AND chunk_index = $2").bind(&self.metadata.artifact_id).bind(chunk_index).fetch_all(conn).await"#,
         ),
         (
             "multi-row fetch stream",
-            r#"sqlx::query("SELECT bytes FROM repo_graph_galaxy_chunk WHERE artifact_id = $1::uuid AND chunk_index = $2").bind(&self.metadata.artifact_id).bind(chunk_index).fetch(conn)"#,
+            r#"query_as("SELECT bytes FROM repo_graph_galaxy_chunk WHERE artifact_id = $1::uuid AND chunk_index = $2").bind(&self.metadata.artifact_id).bind(chunk_index).fetch(conn)"#,
         ),
         (
             "reader payload collect",
-            r#"let all = rows.try_collect::<Vec<_>>().await; sqlx::query("SELECT bytes FROM repo_graph_galaxy_chunk WHERE artifact_id = $1::uuid AND chunk_index = $2").bind(&self.metadata.artifact_id).bind(chunk_index).fetch_optional(conn).await"#,
+            r#"let all = rows.try_collect::<Vec<_>>().await; query_as("SELECT bytes FROM repo_graph_galaxy_chunk WHERE artifact_id = $1::uuid AND chunk_index = $2").bind(&self.metadata.artifact_id).bind(chunk_index).fetch_optional(conn).await"#,
         ),
     ];
     for (mutation, reader) in bad_readers {
