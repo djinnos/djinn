@@ -5,13 +5,15 @@ use crate::finalize_handlers::{
     process_auto_submit_payload, process_completion_intent_with_outcome,
 };
 use crate::finalize_handlers_fingerprint_tests::{
-    c2_fingerprint, create_run_with_workspace, init_git_repo_with_dirty_file,
+    c2_fingerprint, create_k8s_run_then_persist_workspace, create_run_with_workspace,
+    init_git_repo_with_dirty_file,
 };
 use crate::output_parser::CompletionIntent;
 use crate::reply_loop_completion_intent_tests::{
     CompletionIntentCallbacks, fallback_evidence, reuse_material_with_fingerprint_config,
 };
 use crate::test_helpers;
+use djinn_db::repositories::task_run::TaskRunRepository;
 use djinn_db::{CreateTaskAttemptParams, TaskAttemptRepository};
 use djinn_git::VerificationInputFingerprintConfig;
 use djinn_sandbox::final_verification_execution::FinalVerificationIneligibilityReason;
@@ -30,6 +32,7 @@ enum IdentityCompatibilityMutation {
     ManifestVersion,
     MissingIdentityDigest,
     LegacyIdentityDigest,
+    RequiredCoverage,
 }
 
 impl IdentityCompatibilityMutation {
@@ -47,6 +50,7 @@ impl IdentityCompatibilityMutation {
             Self::ManifestVersion => "manifest-version",
             Self::MissingIdentityDigest => "missing-identity-digest",
             Self::LegacyIdentityDigest => "legacy-identity-digest",
+            Self::RequiredCoverage => "required-coverage-mismatch",
         }
     }
 
@@ -82,7 +86,10 @@ impl IdentityCompatibilityMutation {
                     .allowlisted_environment
                     .insert("RUSTFLAGS".into(), "-Dwarnings".into());
             }
-            Self::ManifestVersion | Self::MissingIdentityDigest | Self::LegacyIdentityDigest => {}
+            Self::ManifestVersion
+            | Self::MissingIdentityDigest
+            | Self::LegacyIdentityDigest
+            | Self::RequiredCoverage => {}
         }
     }
 
@@ -98,6 +105,13 @@ impl IdentityCompatibilityMutation {
         match self {
             Self::ManifestVersion => format!("manifest-v{}", current + 1),
             _ => format!("manifest-v{current}"),
+        }
+    }
+
+    fn stale_covered_checks(self) -> serde_json::Value {
+        match self {
+            Self::RequiredCoverage => serde_json::json!(["format", "slot-clippy", "unexpected"]),
+            _ => serde_json::json!(["format", "slot-clippy"]),
         }
     }
 }
@@ -147,18 +161,19 @@ async fn assert_identity_mismatch_rebuilds_current_evidence(
     let stale_manifest_version = mutation.stale_manifest_version(manifest_version);
     assert!(
         stale_identity_digest != current_identity.digest
-            || stale_manifest_version != format!("manifest-v{manifest_version}"),
+            || stale_manifest_version != format!("manifest-v{manifest_version}")
+            || mutation.stale_covered_checks() != serde_json::json!(material.required_checks),
         "{name}: persisted identity or manifest must differ from current evidence"
     );
     let db = test_helpers::create_test_db();
     let project = test_helpers::create_test_project(&db).await;
     let epic = test_helpers::create_test_epic(&db, &project.id).await;
     let task = test_helpers::create_test_task(&db, &project.id, &epic.id).await;
-    create_run_with_workspace(
+    create_k8s_run_then_persist_workspace(
         &db,
         &project.id,
         &task.id,
-        Some(worktree.path().to_str().unwrap()),
+        worktree.path().to_str().unwrap(),
     )
     .await;
     let attempt_id = uuid::Uuid::now_v7().to_string();
@@ -177,7 +192,7 @@ async fn assert_identity_mismatch_rebuilds_current_evidence(
         persisted_run_id: format!("persisted-{name}"),
         completed_at: "2026-01-01T00:00:00Z".into(),
         ordered_commands: serde_json::json!([{"descriptor_id":"format"},{"descriptor_id":"slot-clippy"}]),
-        covered_checks: serde_json::json!(["format", "slot-clippy"]),
+        covered_checks: mutation.stale_covered_checks(),
         required_checks: material.required_checks.clone(),
         verification_input_fingerprint: fingerprint.clone(),
         manifest_version: stale_manifest_version,
@@ -330,6 +345,7 @@ async fn c2_identity_compatibility_matrix_rebuilds_every_mismatch() {
         IdentityCompatibilityMutation::ManifestVersion,
         IdentityCompatibilityMutation::MissingIdentityDigest,
         IdentityCompatibilityMutation::LegacyIdentityDigest,
+        IdentityCompatibilityMutation::RequiredCoverage,
     ] {
         assert_identity_mismatch_rebuilds_current_evidence(mutation).await;
     }
@@ -359,11 +375,11 @@ async fn c2_fully_compatible_evidence_finalizes_without_canonical_rebuild() {
     let project = test_helpers::create_test_project(&db).await;
     let epic = test_helpers::create_test_epic(&db, &project.id).await;
     let task = test_helpers::create_test_task(&db, &project.id, &epic.id).await;
-    create_run_with_workspace(
+    create_k8s_run_then_persist_workspace(
         &db,
         &project.id,
         &task.id,
-        Some(worktree.path().to_str().unwrap()),
+        worktree.path().to_str().unwrap(),
     )
     .await;
     let attempt_id = uuid::Uuid::now_v7().to_string();
@@ -463,11 +479,11 @@ async fn auto_submit_stale_identity_failed_reverification_has_no_success_side_ef
     let project = test_helpers::create_test_project(&db).await;
     let epic = test_helpers::create_test_epic(&db, &project.id).await;
     let task = test_helpers::create_test_task(&db, &project.id, &epic.id).await;
-    create_run_with_workspace(
+    create_k8s_run_then_persist_workspace(
         &db,
         &project.id,
         &task.id,
-        Some(worktree.path().to_str().unwrap()),
+        worktree.path().to_str().unwrap(),
     )
     .await;
     let attempt_id = uuid::Uuid::now_v7().to_string();
@@ -532,4 +548,112 @@ async fn auto_submit_stale_identity_failed_reverification_has_no_success_side_ef
             .outcome,
         "pending"
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn configured_null_workspace_blocks_direct_and_auto_submit_without_consuming_evidence() {
+    for (name, auto_submit) in [("direct", false), ("auto", true)] {
+        let worktree = init_git_repo_with_dirty_file();
+        let material = reuse_material_with_fingerprint_config(
+            worktree.path().to_path_buf(),
+            VerificationInputFingerprintConfig::default(),
+        );
+        assert!(
+            !material.required_checks.is_empty(),
+            "{name}: this regression must exercise a configured plan"
+        );
+        let fingerprint = c2_fingerprint(
+            worktree.path(),
+            &material.execution_request.fingerprint_config,
+        )
+        .await;
+        let identity = djinn_core::canonical_verify::EnvironmentIdentityV1::derive(
+            (material.execution_request.resolve_environment_identity)().unwrap(),
+        )
+        .unwrap();
+        let db = test_helpers::create_test_db();
+        let project = test_helpers::create_test_project(&db).await;
+        let epic = test_helpers::create_test_epic(&db, &project.id).await;
+        let task = test_helpers::create_test_task(&db, &project.id, &epic.id).await;
+        let run_id = create_run_with_workspace(&db, &project.id, &task.id, None).await;
+        assert_eq!(
+            TaskRunRepository::new(db.clone())
+                .get(&run_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .workspace_path,
+            None,
+            "{name}: k8s dispatch row must remain NULL before configured resolution"
+        );
+        let attempt_id = uuid::Uuid::now_v7().to_string();
+        TaskAttemptRepository::new(db.clone())
+            .create_or_get_pending(CreateTaskAttemptParams {
+                id: &attempt_id,
+                task_id: &task.id,
+                role: "worker",
+                dispatch_key: &format!("null-workspace-{name}"),
+                session_id: None,
+                attempt_seq: None,
+            })
+            .await
+            .unwrap();
+        let stale = FinalVerificationSuccessEvidence {
+            persisted_run_id: format!("stale-null-workspace-{name}"),
+            completed_at: "2026-01-01T00:00:00Z".into(),
+            ordered_commands: serde_json::json!([{"descriptor_id":"format"},{"descriptor_id":"slot-clippy"}]),
+            covered_checks: serde_json::json!(["format", "slot-clippy"]),
+            required_checks: material.required_checks.clone(),
+            verification_input_fingerprint: fingerprint,
+            manifest_version: "manifest-v1".into(),
+            environment_identity_digest: identity.digest,
+        };
+        let callbacks = Arc::new(CompletionIntentCallbacks::for_reuse_requiring_workspace(
+            task.id.clone(),
+            material,
+        ));
+        let ctx = test_helpers::agent_context_from_db_with_callbacks(db.clone(), callbacks.clone());
+        let intent = CompletionIntent {
+            finalize_payload: serde_json::json!({"task_id":task.id,"commit_title":"NULL workspace","summary":"must fail closed","files_changed":[],"remaining_concerns":[]}),
+            tool_use_id: format!("null-workspace-{name}"),
+            final_verification_evidence: Some(stale),
+        };
+        let accepted = if auto_submit {
+            process_auto_submit_payload(&intent, &task.id, &ctx).await
+        } else {
+            process_completion_intent_with_outcome(&intent, "submit_work", &task.id, &ctx).await
+        };
+        assert!(
+            !accepted,
+            "{name}: configured NULL workspace must fail closed"
+        );
+        assert!(
+            callbacks.reuse_events().contains(&"writer-resolution"),
+            "{name}: production completion validation must reach configured resolution"
+        );
+        assert!(
+            !callbacks.reuse_events().contains(&"canonical-execution"),
+            "{name}: no workspace means no replacement can consume stale evidence"
+        );
+        let activity = djinn_db::TaskRepository::new(db.clone(), ctx.event_bus.clone())
+            .list_activity(&task.id)
+            .await
+            .unwrap();
+        assert!(
+            activity
+                .iter()
+                .all(|entry| entry.event_type != "work_submitted"),
+            "{name}: failed C2 emits no successful submission"
+        );
+        assert_eq!(
+            TaskAttemptRepository::new(db)
+                .get(&attempt_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .outcome,
+            "pending",
+            "{name}: failed C2 leaves the attempt pending"
+        );
+    }
 }
