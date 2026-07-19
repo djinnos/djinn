@@ -6,7 +6,7 @@
 //! appropriate tool-group helper.
 //!
 //! Tools that require djinn-agent internals (workspace, task_merge,
-//! coordinator, skills_manifest) return [`DispatchResult::Unhandled`]
+//! coordinator) return [`DispatchResult::Unhandled`]
 //! so the calling façade can handle them with its concrete context.
 
 use std::path::Path;

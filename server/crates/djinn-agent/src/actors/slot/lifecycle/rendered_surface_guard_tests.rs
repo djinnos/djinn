@@ -150,7 +150,7 @@ async fn runtime_and_serialized_surfaces_reject_project_local_djinn_paths() {
     for path in [
         ".DJINN/MEMORY/example.md",
         "project/.DjInN/decisions/example.md",
-        "/workspace/project/.djinn/skills/example.md",
+        "project/.djinn/skills/example/SKILL.md",
         "project/~/.djinn/memory/example.md",
         "/workspace/~/.DjInN/memory/example.md",
         "project/$DJINN_HOME/.djinn/memory/example.md",
