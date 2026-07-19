@@ -122,11 +122,41 @@ test('memory ranking selects memory evaluation and server policy', () => {
   assertOnlyJobs(result, protectedJobs);
 });
 
-test('workflow CI changes route every job', () => {
+test('gate workflow changes route every job', () => {
   const result = plan(['.github/workflows/quality-gate.yml']);
   assert.equal(result.lanes.workflowCi, true);
   assert.equal(result.jobs.qaSmoke, true);
   assertOnlyJobs(result, Object.keys(result.jobs));
+});
+
+test('enumerated sibling workflows route narrowly on pull requests', () => {
+  for (const path of [
+    '.github/workflows/release.yml',
+    '.github/workflows/cla.yml',
+    '.github/workflows/stale-branches.yml',
+    '.github/workflows/memory-qa-nightly.yml',
+  ]) {
+    const result = plan([path]);
+    assert.equal(result.lanes.workflowSibling, true, path);
+    assert.equal(result.lanes.workflowCi, false, path);
+    assert.equal(result.lanes.unknown, false, path);
+    assertOnlyJobs(result, []);
+  }
+});
+
+test('sibling-workflow-only merge_group entries still run the protected server set', () => {
+  const result = plan(['.github/workflows/release.yml'], { event: 'merge_group' });
+  for (const name of protectedJobs) assert.equal(result.jobs[name], true, name);
+  assert.equal(result.jobs.ui, false);
+  assert.equal(result.jobs.aarch64, false);
+});
+
+test('unrecognized workflow files fail closed', () => {
+  for (const path of ['.github/workflows/deploy.yml', '.github/workflows/quality-gate2.yml']) {
+    const result = plan([path]);
+    assert.equal(result.lanes.unknown, true, path);
+    assertOnlyJobs(result, Object.keys(result.jobs));
+  }
 });
 
 test('full validation selects every job regardless of a docs-only diff', () => {
