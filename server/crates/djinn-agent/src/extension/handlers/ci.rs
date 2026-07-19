@@ -1,5 +1,6 @@
 use super::*;
 use djinn_provider::github_api::{ActionsJob, WorkflowRun};
+use std::time::Duration;
 
 /// How many workflow runs to request when scanning a PR head for the failing
 /// run. The relevant run is always the newest one, so a small page is plenty;
@@ -10,6 +11,8 @@ const RUN_SCAN_PER_PAGE: u32 = 20;
 /// the run for *this* PR may be several entries back. Mirrors the PR poller's
 /// dequeue-enrichment page size (`pr_commands.rs`).
 const MERGE_GROUP_SCAN_PER_PAGE: u32 = 50;
+/// Artifact discovery is deliberately subordinate to a successful log fetch.
+const ARTIFACT_HINT_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Fetch the failing GitHub Actions CI log for a task's PR.
 ///
@@ -89,10 +92,19 @@ pub(crate) async fn call_ci_job_log(
             .get_job_logs(&owner, &repo, job_id)
             .await
             .map_err(|e| format!("failed to fetch job log for job_id={job_id}: {e}"))?;
-        return Ok(serde_json::Value::String(render_log(
-            &raw_log,
-            p.step.as_deref(),
-        )));
+        let output = render_log(&raw_log, p.step.as_deref());
+        return Ok(serde_json::Value::String(
+            append_artifact_hint(
+                &gh_client,
+                &owner,
+                &repo,
+                task_id,
+                Some(job_id),
+                None,
+                output,
+            )
+            .await,
+        ));
     }
 
     // ── Discovery mode ─────────────────────────────────────────────────────
@@ -142,7 +154,19 @@ pub(crate) async fn call_ci_job_log(
             .get_job_logs(&owner, &repo, job.id)
             .await
             .map_err(|e| format!("failed to fetch job log for job_id={}: {e}", job.id))?;
-        return Ok(serde_json::Value::String(render_log(&raw_log, Some(step))));
+        let output = render_log(&raw_log, Some(step));
+        return Ok(serde_json::Value::String(
+            append_artifact_hint(
+                &gh_client,
+                &owner,
+                &repo,
+                task_id,
+                Some(job.id),
+                Some(resolved.run_id),
+                output,
+            )
+            .await,
+        ));
     }
 
     // Fetch the FIRST failing job's log. When several jobs failed, prepend a
@@ -164,7 +188,112 @@ pub(crate) async fn call_ci_job_log(
         body
     };
 
-    Ok(serde_json::Value::String(output))
+    Ok(serde_json::Value::String(
+        append_artifact_hint(
+            &gh_client,
+            &owner,
+            &repo,
+            task_id,
+            Some(first.id),
+            Some(resolved.run_id),
+            output,
+        )
+        .await,
+    ))
+}
+
+/// Append a bounded, read-only artifact hint without changing successful log
+/// semantics. Discovery already owns a verified run ID; direct-job mode obtains
+/// it from GitHub's repository-scoped job detail endpoint.
+async fn append_artifact_hint(
+    client: &GitHubApiClient,
+    owner: &str,
+    repo: &str,
+    task_id: &str,
+    job_id: Option<u64>,
+    known_run_id: Option<u64>,
+    output: String,
+) -> String {
+    match tokio::time::timeout(
+        ARTIFACT_HINT_TIMEOUT,
+        artifact_hint(client, owner, repo, job_id, known_run_id),
+    )
+    .await
+    {
+        Ok(Ok(Some(hint))) => format!("{output}\n\n{hint}"),
+        Ok(Ok(None)) => output,
+        Ok(Err(error)) => {
+            tracing::warn!(
+                operation = "ci_job_log_artifact_hint",
+                outcome = "suppressed_provider_error",
+                task_id,
+                job_id = ?job_id,
+                run_id = ?known_run_id,
+                error = %error,
+                "ci_job_log artifact hint lookup failed; returning successful log unchanged"
+            );
+            output
+        }
+        Err(_) => {
+            tracing::warn!(
+                operation = "ci_job_log_artifact_hint",
+                outcome = "suppressed_timeout",
+                task_id,
+                job_id = ?job_id,
+                run_id = ?known_run_id,
+                timeout_ms = ARTIFACT_HINT_TIMEOUT.as_millis(),
+                "ci_job_log artifact hint lookup timed out; returning successful log unchanged"
+            );
+            output
+        }
+    }
+}
+
+/// Make at most one bounded list request. This intentionally never downloads
+/// an artifact: the public `ci_artifact` tool remains responsible for fetches.
+async fn artifact_hint(
+    client: &GitHubApiClient,
+    owner: &str,
+    repo: &str,
+    job_id: Option<u64>,
+    known_run_id: Option<u64>,
+) -> Result<Option<String>, String> {
+    let run_id = match known_run_id {
+        Some(run_id) => run_id,
+        None => {
+            let job_id = job_id.ok_or("no job or workflow run was available for artifact hint")?;
+            client
+                .get_job(owner, repo, job_id)
+                .await
+                .map_err(|error| {
+                    format!("failed to fetch job detail for job_id={job_id}: {error}")
+                })?
+                .run_id
+                .ok_or_else(|| {
+                    format!("job detail for job_id={job_id} did not include a workflow run ID")
+                })?
+        }
+    };
+    let artifacts = client
+        .list_run_artifacts(owner, repo, run_id)
+        .await
+        .map_err(|error| format!("failed to list artifacts for run {run_id}: {error}"))?;
+    if artifacts.artifacts.is_empty() {
+        return Ok(None);
+    }
+
+    // Provider order is GitHub's order. Keep it intact so the user can copy an
+    // exact name into the concrete fetch example below.
+    let names = artifacts
+        .artifacts
+        .iter()
+        .map(|artifact| format!("`{}`", artifact.name))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let first_name = &artifacts.artifacts[0].name;
+    Ok(Some(format!(
+        "Workflow run {run_id} has artifacts: {names}. List them with `ci_artifact(action=\"list\", run_id={run_id})`. Fetch an exact artifact name with `ci_artifact(action=\"fetch\", run_id={run_id}, artifact=\"{first_name}\")`."
+    )))
 }
 
 /// An implicitly discovered run must itself have completed with a failing
@@ -719,6 +848,87 @@ mod tests {
         assert_eq!(p.job_id, Some(12345));
         assert_eq!(p.pr_number, Some(42));
         assert_eq!(p.step.as_deref(), Some("Tests"));
+    }
+
+    #[tokio::test]
+    async fn artifact_hint_preserves_empty_and_provider_failure_log_output() {
+        for response in [
+            ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "total_count": 0,
+                "artifacts": []
+            })),
+            ResponseTemplate::new(403),
+            ResponseTemplate::new(404),
+            ResponseTemplate::new(200).set_body_string("not json"),
+        ] {
+            let server = MockServer::start().await;
+            Mock::given(method("GET"))
+                .and(path(format!(
+                    "/repos/{OWNER}/{REPO}/actions/runs/123/artifacts"
+                )))
+                .respond_with(response)
+                .mount(&server)
+                .await;
+            let output = append_artifact_hint(
+                &mock_client(&server),
+                OWNER,
+                REPO,
+                "task",
+                Some(900),
+                Some(123),
+                "existing cleaned log".to_string(),
+            )
+            .await;
+            assert_eq!(output, "existing cleaned log");
+        }
+    }
+
+    #[tokio::test]
+    async fn artifact_hint_uses_direct_job_run_and_preserves_artifact_order() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path(format!("/repos/{OWNER}/{REPO}/actions/jobs/900")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": 900, "run_id": 123, "name": "tests", "status": "completed",
+                "conclusion": "failure", "html_url": "https://example.test/jobs/900"
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path(format!(
+                "/repos/{OWNER}/{REPO}/actions/runs/123/artifacts"
+            )))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "total_count": 2,
+                "artifacts": [
+                    {"id": 1, "name": "first.zip", "size_in_bytes": 1, "expired": false},
+                    {"id": 2, "name": "second.zip", "size_in_bytes": 2, "expired": false}
+                ]
+            })))
+            .mount(&server)
+            .await;
+        let output = append_artifact_hint(
+            &mock_client(&server),
+            OWNER,
+            REPO,
+            "task",
+            Some(900),
+            None,
+            "existing cleaned log".to_string(),
+        )
+        .await;
+        assert!(output.starts_with("existing cleaned log\n\nWorkflow run 123"));
+        assert!(output.contains("`first.zip`, `second.zip`"));
+        assert!(output.contains("ci_artifact(action=\"list\", run_id=123)"));
+        assert!(
+            output.contains("ci_artifact(action=\"fetch\", run_id=123, artifact=\"first.zip\")")
+        );
+        let requests = server.received_requests().await.unwrap();
+        assert_eq!(
+            requests.len(),
+            2,
+            "direct mode gets one detail and one list"
+        );
     }
 
     async fn mount_runs(server: &MockServer, query: (&str, &str), runs: serde_json::Value) {
