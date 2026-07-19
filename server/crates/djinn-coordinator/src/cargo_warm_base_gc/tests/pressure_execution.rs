@@ -1443,7 +1443,7 @@ fn frozen_coordinator_fixture_records_exact_three_rung_cases() {
     assert_eq!(fixture["dry_run"]["removals"], 0);
     assert_eq!(
         fixture["delete"]["lock_path"],
-        ".warm-locks/<project-id>-mold-jobs-1.lock"
+        ".warm-locks/<project-id>/mold-jobs-1.lock"
     );
     assert_eq!(fixture["delete"]["fail_closed"], true);
     assert_eq!(
@@ -1841,10 +1841,13 @@ async fn frozen_two_actor_schedule_serializes_warm_work_and_pressure_retry() {
         };
         let mold_jobs = 1;
         let base = root.join(&id).join(format!("mold-jobs-{mold_jobs}"));
-        let _guard = SharedWarmBaseLock
-            .try_lock(&base)
-            .expect("canonical variant lock path")
-            .expect("warm actor acquires canonical variant lock");
+        // Match the production worker lock identity rather than coordinator adapter.
+        let lock_dir = root.join(".warm-locks").join(&id);
+        std::fs::create_dir_all(&lock_dir).unwrap();
+        let worker_lock = std::fs::OpenOptions::new().read(true).write(true).create(true)
+            .open(lock_dir.join(format!("mold-jobs-{mold_jobs}.lock"))).unwrap();
+        let rc = unsafe { libc::flock(std::os::fd::AsRawFd::as_raw_fd(&worker_lock), libc::LOCK_EX | libc::LOCK_NB) };
+        assert_eq!(rc, 0, "warm actor acquires production variant lock");
         observe(djinn_agent_worker::cargo_incremental_prune::WarmWorkPhase::TraversalEnter);
         std::fs::create_dir_all(base.join("debug/incremental")).unwrap();
         observe(djinn_agent_worker::cargo_incremental_prune::WarmWorkPhase::TraversalExit);
@@ -2099,7 +2102,7 @@ async fn frozen_two_actor_schedule_serializes_warm_work_and_pressure_retry() {
 
     assert_eq!(
         fixture["two_actor"]["lock_path"],
-        ".warm-locks/<project-id>-mold-jobs-1.lock"
+        ".warm-locks/<project-id>/mold-jobs-1.lock"
     );
     assert_eq!(fixture["two_actor"]["loser_removals"], 0);
     assert_eq!(fixture["two_actor"]["retry_removals"], result.deleted.len());

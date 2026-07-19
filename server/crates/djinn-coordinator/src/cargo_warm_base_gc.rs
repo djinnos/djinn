@@ -85,10 +85,14 @@ impl BaseLock for SharedWarmBaseLock {
             return Err("invalid project id".into());
         }
         let root = project_dir.parent().ok_or("project has no warm root")?;
-        let lock_dir = root.join(".warm-locks");
+        // This is deliberately the same identity used by
+        // `WarmBaseLock::acquire_for_jobs` in djinn-agent-worker. Keep the
+        // project directory in the lock path: a flat, hyphenated name would
+        // let maintenance lock a different inode than the warm writer.
+        let lock_dir = root.join(".warm-locks").join(project_id);
         std::fs::create_dir_all(&lock_dir)
             .map_err(|error| format!("failed to create warm lock directory: {error}"))?;
-        let lock_path = lock_dir.join(format!("{project_id}-mold-jobs-{mold_jobs}.lock"));
+        let lock_path = lock_dir.join(format!("mold-jobs-{mold_jobs}.lock"));
         let file = std::fs::OpenOptions::new()
             .read(true)
             .write(true)
