@@ -1245,11 +1245,15 @@ enum IdentityCompatibilityMutation {
     OrderedCommandDescriptors,
     ProfileRevision,
     ImmutableImage,
+    ImmutableToolchainVersion,
+    ImmutableToolchainDigest,
     RunnerVersion,
-    LockfileAndFeatures,
+    Lockfile,
+    Features,
     AllowlistedEnvironment,
     ManifestVersion,
-    LegacyIdentityValues,
+    MissingIdentityDigest,
+    LegacyIdentityDigest,
 }
 
 impl IdentityCompatibilityMutation {
@@ -1258,11 +1262,15 @@ impl IdentityCompatibilityMutation {
             Self::OrderedCommandDescriptors => "ordered-command-descriptors",
             Self::ProfileRevision => "profile-revision",
             Self::ImmutableImage => "immutable-image",
+            Self::ImmutableToolchainVersion => "immutable-toolchain-version",
+            Self::ImmutableToolchainDigest => "immutable-toolchain-digest",
             Self::RunnerVersion => "runner-version",
-            Self::LockfileAndFeatures => "lockfile-and-features",
+            Self::Lockfile => "lockfile",
+            Self::Features => "features",
             Self::AllowlistedEnvironment => "allowlisted-environment",
             Self::ManifestVersion => "manifest-version",
-            Self::LegacyIdentityValues => "legacy-identity-values",
+            Self::MissingIdentityDigest => "missing-identity-digest",
+            Self::LegacyIdentityDigest => "legacy-identity-digest",
         }
     }
 
@@ -1274,8 +1282,13 @@ impl IdentityCompatibilityMutation {
                 input.image.digest =
                     "sha256:abcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcd".into()
             }
+            Self::ImmutableToolchainVersion => input.tool_probes[0].version = "test-next".into(),
+            Self::ImmutableToolchainDigest => {
+                input.tool_probes[0].executable_digest =
+                    "sha256:abcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcd".into()
+            }
             Self::RunnerVersion => input.runner_version = "test-runner-next".into(),
-            Self::LockfileAndFeatures => {
+            Self::Lockfile => {
                 input
                     .lockfile_digests
                     .push(djinn_core::canonical_verify::LockfileDigestV1 {
@@ -1284,6 +1297,8 @@ impl IdentityCompatibilityMutation {
                         "sha256:abcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcd"
                             .into(),
                 });
+            }
+            Self::Features => {
                 input.features.push("next-feature".into());
             }
             Self::AllowlistedEnvironment => {
@@ -1292,7 +1307,15 @@ impl IdentityCompatibilityMutation {
                     .insert("RUSTFLAGS".into(), "-Dwarnings".into());
             }
             Self::ManifestVersion => input.input_manifest.version += 1,
-            Self::LegacyIdentityValues => {}
+            Self::MissingIdentityDigest | Self::LegacyIdentityDigest => {}
+        }
+    }
+
+    fn stale_identity_digest(self, persisted: &str) -> String {
+        match self {
+            Self::MissingIdentityDigest => String::new(),
+            Self::LegacyIdentityDigest => "environment-identity-v0".into(),
+            _ => persisted.to_owned(),
         }
     }
 }
@@ -1335,8 +1358,13 @@ async fn assert_identity_mismatch_rebuilds_current_evidence(
     )
     .await;
     assert_ne!(
-        persisted_identity.digest, current_identity.digest,
-        "{name}: mutation changes identity"
+        fingerprint, material.diff_fingerprint,
+        "{name}: C2 fingerprint is not the submission-diff fingerprint"
+    );
+    let stale_identity_digest = mutation.stale_identity_digest(&persisted_identity.digest);
+    assert_ne!(
+        stale_identity_digest, current_identity.digest,
+        "{name}: persisted identity value must differ from current identity"
     );
     let db = test_helpers::create_test_db();
     let project = test_helpers::create_test_project(&db).await;
@@ -1368,22 +1396,8 @@ async fn assert_identity_mismatch_rebuilds_current_evidence(
         covered_checks: serde_json::json!(["format", "slot-clippy"]),
         required_checks: material.required_checks.clone(),
         verification_input_fingerprint: fingerprint.clone(),
-        manifest_version: if matches!(
-            mutation,
-            IdentityCompatibilityMutation::LegacyIdentityValues
-        ) {
-            "manifest-legacy".into()
-        } else {
-            "manifest-v1".into()
-        },
-        environment_identity_digest: if matches!(
-            mutation,
-            IdentityCompatibilityMutation::LegacyIdentityValues
-        ) {
-            String::new()
-        } else {
-            persisted_identity.digest.clone()
-        },
+        manifest_version: "manifest-v1".into(),
+        environment_identity_digest: stale_identity_digest,
     };
     let intent = CompletionIntent {
         finalize_payload: serde_json::json!({"task_id":task.id,"commit_title":"identity","summary":"identity","files_changed":[],"remaining_concerns":[]}),
@@ -1523,14 +1537,129 @@ async fn c2_identity_compatibility_matrix_rebuilds_every_mismatch() {
         IdentityCompatibilityMutation::OrderedCommandDescriptors,
         IdentityCompatibilityMutation::ProfileRevision,
         IdentityCompatibilityMutation::ImmutableImage,
+        IdentityCompatibilityMutation::ImmutableToolchainVersion,
+        IdentityCompatibilityMutation::ImmutableToolchainDigest,
         IdentityCompatibilityMutation::RunnerVersion,
-        IdentityCompatibilityMutation::LockfileAndFeatures,
+        IdentityCompatibilityMutation::Lockfile,
+        IdentityCompatibilityMutation::Features,
         IdentityCompatibilityMutation::AllowlistedEnvironment,
         IdentityCompatibilityMutation::ManifestVersion,
-        IdentityCompatibilityMutation::LegacyIdentityValues,
+        IdentityCompatibilityMutation::MissingIdentityDigest,
+        IdentityCompatibilityMutation::LegacyIdentityDigest,
     ] {
         assert_identity_mismatch_rebuilds_current_evidence(mutation).await;
     }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn c2_fully_compatible_evidence_finalizes_without_canonical_rebuild() {
+    let worktree = init_git_repo_with_dirty_file();
+    let compatible_material = reuse_material_with_fingerprint_config(
+        worktree.path().to_path_buf(),
+        VerificationInputFingerprintConfig::default(),
+    );
+    let current_identity = djinn_core::canonical_verify::EnvironmentIdentityV1::derive(
+        (compatible_material
+            .execution_request
+            .resolve_environment_identity)()
+        .unwrap(),
+    )
+    .unwrap();
+    let manifest_version = 1;
+    let fingerprint = c2_fingerprint(
+        worktree.path(),
+        &compatible_material.execution_request.fingerprint_config,
+    )
+    .await;
+    let db = test_helpers::create_test_db();
+    let project = test_helpers::create_test_project(&db).await;
+    let epic = test_helpers::create_test_epic(&db, &project.id).await;
+    let task = test_helpers::create_test_task(&db, &project.id, &epic.id).await;
+    create_run_with_workspace(
+        &db,
+        &project.id,
+        &task.id,
+        Some(worktree.path().to_str().unwrap()),
+    )
+    .await;
+    let attempt_id = uuid::Uuid::now_v7().to_string();
+    TaskAttemptRepository::new(db.clone())
+        .create_or_get_pending(CreateTaskAttemptParams {
+            id: &attempt_id,
+            task_id: &task.id,
+            role: "worker",
+            dispatch_key: "compatible-c2",
+            session_id: None,
+            attempt_seq: None,
+        })
+        .await
+        .unwrap();
+    let candidate = FinalVerificationSuccessEvidence {
+        persisted_run_id: "compatible-c2-run".into(),
+        completed_at: "2026-01-01T00:00:00Z".into(),
+        ordered_commands: serde_json::json!([{"descriptor_id":"format"},{"descriptor_id":"slot-clippy"}]),
+        covered_checks: serde_json::json!(["format", "slot-clippy"]),
+        required_checks: compatible_material.required_checks.clone(),
+        verification_input_fingerprint: fingerprint.clone(),
+        manifest_version: format!("manifest-v{manifest_version}"),
+        environment_identity_digest: current_identity.digest.clone(),
+    };
+    let intent = CompletionIntent {
+        finalize_payload: serde_json::json!({"task_id":task.id,"commit_title":"compatible","summary":"compatible","files_changed":[],"remaining_concerns":[]}),
+        tool_use_id: "compatible-c2".into(),
+        final_verification_evidence: Some(candidate.clone()),
+    };
+    let callbacks = Arc::new(CompletionIntentCallbacks::for_reuse_with_evidence(
+        task.id.clone(),
+        compatible_material,
+        None,
+        false,
+        None,
+    ));
+    let ctx = test_helpers::agent_context_from_db_with_callbacks(db.clone(), callbacks.clone());
+    assert!(process_completion_intent_with_outcome(&intent, "submit_work", &task.id, &ctx).await);
+    assert!(
+        !callbacks.reuse_events().contains(&"canonical-execution"),
+        "compatible C2 evidence must be consumed without canonical rebuilding"
+    );
+    let activity = djinn_db::TaskRepository::new(db.clone(), ctx.event_bus.clone())
+        .list_activity(&task.id)
+        .await
+        .unwrap();
+    let submitted = activity
+        .iter()
+        .find(|entry| entry.event_type == "work_submitted")
+        .expect("compatible evidence emits work_submitted");
+    let evidence: serde_json::Value =
+        serde_json::from_str(&submitted.payload).unwrap()["final_verification_evidence"].clone();
+    assert_eq!(evidence["persisted_run_id"], candidate.persisted_run_id);
+    assert_eq!(evidence["verification_input_fingerprint"], fingerprint);
+    assert_eq!(
+        evidence["environment_identity_digest"],
+        current_identity.digest
+    );
+    assert_eq!(
+        evidence["manifest_version"],
+        format!("manifest-v{manifest_version}")
+    );
+    assert_eq!(evidence["ordered_commands"], candidate.ordered_commands);
+    assert_eq!(
+        evidence["required_checks"],
+        serde_json::json!(["format", "slot-clippy"])
+    );
+    assert_eq!(
+        evidence["covered_checks"],
+        serde_json::json!(["format", "slot-clippy"])
+    );
+    assert_eq!(
+        TaskAttemptRepository::new(db)
+            .get(&attempt_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .outcome,
+        "submitted"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
