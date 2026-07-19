@@ -1,4 +1,4 @@
--- Migration 131: Durable coordinator-incarnation leases and dispatch
+-- Migration 132: Durable coordinator-incarnation leases and dispatch
 -- ownership/correlation columns (epic jy7g / proposal 9gg5).
 --
 -- This migration is purely additive:

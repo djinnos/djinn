@@ -1,10 +1,10 @@
-//! Migration 131 — `coordinator_incarnations` table + nullable
+//! Migration 132 — `coordinator_incarnations` table + nullable
 //! `dispatch_owner_incarnation_id` / `dispatch_group_id` correlation columns on
 //! `task_attempts` and `dispatch_group_id` on `task_runs` (epic jy7g / proposal
 //! 9gg5).
 //!
 //! Verifies the migration applies cleanly on a fresh database AND on top of the
-//! prior schema (V1..V130), and that pre-existing task_attempts and task_runs
+//! prior schema (V1..V131), and that pre-existing task_attempts and task_runs
 //! survive the additive migration with NULL owner/group identifiers — no
 //! heuristic backfill occurs.
 
@@ -13,8 +13,8 @@ use std::path::{Path, PathBuf};
 use sqlx::postgres::{PgConnection, PgPoolOptions};
 use sqlx::{Connection, Executor};
 
-const MIGRATION_VERSION: u64 = 131;
-const MIGRATION_FILE: &str = "131_dispatch_ownership_correlation.sql";
+const MIGRATION_VERSION: u64 = 132;
+const MIGRATION_FILE: &str = "132_dispatch_ownership_correlation.sql";
 
 fn base_database_url() -> String {
     std::env::var("DJINN_TEST_DATABASE_URL")
@@ -121,15 +121,15 @@ async fn apply_prior_migrations(conn: &mut PgConnection) {
     }
 }
 
-async fn apply_migration_131(conn: &mut PgConnection) {
+async fn apply_migration_132(conn: &mut PgConnection) {
     let migration = migrations_dir().join(MIGRATION_FILE);
-    let sql = std::fs::read_to_string(&migration).expect("read migration 131 sql");
+    let sql = std::fs::read_to_string(&migration).expect("read migration 132 sql");
     conn.execute(sql.as_str())
         .await
-        .expect("apply migration 131 after prior migrations");
+        .expect("apply migration 132 after prior migrations");
 }
 
-/// Assert the schema additions from migration 131 are present.
+/// Assert the schema additions from migration 132 are present.
 async fn assert_dispatch_ownership_schema(pool: &sqlx::PgPool) {
     // ── coordinator_incarnations table ───────────────────────────────────
     let table: Option<String> = sqlx::query_scalar(
@@ -278,12 +278,12 @@ async fn assert_dispatch_ownership_schema(pool: &sqlx::PgPool) {
 }
 
 /// Seed a project / task / task_attempt / task_run so we can prove that old
-/// rows from a pre-migration-131 database stay readable after the migration is
+/// rows from a pre-migration-132 database stay readable after the migration is
 /// applied. This is the "old rows remain readable without backfill" invariant.
 async fn seed_legacy_rows(pool: &sqlx::PgPool) {
     sqlx::query(
         "INSERT INTO projects (id, name, github_owner, github_repo) \
-         VALUES ('project-131', 'project-131', 'djinnos', 'djinn-131')",
+         VALUES ('project-132', 'project-132', 'djinnos', 'djinn-132')",
     )
     .execute(pool)
     .await
@@ -291,7 +291,7 @@ async fn seed_legacy_rows(pool: &sqlx::PgPool) {
 
     sqlx::query(
         "INSERT INTO tasks (id, project_id, short_id, title, description, design, labels, acceptance_criteria, memory_refs) \
-         VALUES ('task-131', 'project-131', 't131', 'title', 'description', 'design', '[]'::jsonb, '[]'::jsonb, '[]'::jsonb)",
+         VALUES ('task-132', 'project-132', 't132', 'title', 'description', 'design', '[]'::jsonb, '[]'::jsonb, '[]'::jsonb)",
     )
     .execute(pool)
     .await
@@ -299,7 +299,7 @@ async fn seed_legacy_rows(pool: &sqlx::PgPool) {
 
     sqlx::query(
         "INSERT INTO task_runs (id, project_id, task_id, trigger_type, status) \
-         VALUES ('run-131', 'project-131', 'task-131', 'manual', 'pending')",
+         VALUES ('run-132', 'project-132', 'task-132', 'manual', 'pending')",
     )
     .execute(pool)
     .await
@@ -307,7 +307,7 @@ async fn seed_legacy_rows(pool: &sqlx::PgPool) {
 
     sqlx::query(
         "INSERT INTO task_attempts (id, task_id, role, attempt_seq, dispatch_key, outcome) \
-         VALUES ('attempt-131', 'task-131', 'worker', 1, 'dk-131', 'pending')",
+         VALUES ('attempt-132', 'task-132', 'worker', 1, 'dk-132', 'pending')",
     )
     .execute(pool)
     .await
@@ -319,7 +319,7 @@ async fn seed_legacy_rows(pool: &sqlx::PgPool) {
 async fn assert_legacy_rows_null_and_readable(pool: &sqlx::PgPool) {
     let (owner, group): (Option<String>, Option<String>) = sqlx::query_as(
         "SELECT dispatch_owner_incarnation_id, dispatch_group_id \
-         FROM task_attempts WHERE id = 'attempt-131'",
+         FROM task_attempts WHERE id = 'attempt-132'",
     )
     .fetch_one(pool)
     .await
@@ -335,7 +335,7 @@ async fn assert_legacy_rows_null_and_readable(pool: &sqlx::PgPool) {
 
     let (group,): (Option<String>,) = sqlx::query_as(
         "SELECT dispatch_group_id \
-         FROM task_runs WHERE id = 'run-131'",
+         FROM task_runs WHERE id = 'run-132'",
     )
     .fetch_one(pool)
     .await
@@ -347,7 +347,7 @@ async fn assert_legacy_rows_null_and_readable(pool: &sqlx::PgPool) {
 }
 
 #[tokio::test]
-async fn migration_131_applies_on_fresh_database() {
+async fn migration_132_applies_on_fresh_database() {
     with_temp_database("fresh_dispatch_ownership", |db_url| async move {
         let pool = PgPoolOptions::new()
             .max_connections(1)
@@ -369,14 +369,14 @@ async fn migration_131_applies_on_fresh_database() {
 }
 
 #[tokio::test]
-async fn migration_131_applies_after_prior_migrations_and_preserves_legacy_rows() {
+async fn migration_132_applies_after_prior_migrations_and_preserves_legacy_rows() {
     with_temp_database("prior_dispatch_ownership", |db_url| async move {
         let mut conn = PgConnection::connect(&db_url)
             .await
             .expect("connect prior migration database");
         apply_prior_migrations(&mut conn).await;
 
-        // Seed legacy rows BEFORE migration 131 applies so we can prove the
+        // Seed legacy rows BEFORE migration 132 applies so we can prove the
         // migration does not require backfill for old task_attempts/task_runs.
         let pool = PgPoolOptions::new()
             .max_connections(1)
@@ -386,7 +386,7 @@ async fn migration_131_applies_after_prior_migrations_and_preserves_legacy_rows(
         seed_legacy_rows(&pool).await;
         pool.close().await;
 
-        apply_migration_131(&mut conn).await;
+        apply_migration_132(&mut conn).await;
         drop(conn);
 
         let pool = PgPoolOptions::new()
