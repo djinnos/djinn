@@ -137,6 +137,195 @@ fn current_rss_bytes() -> Option<u64> {
     }
     None
 }
+
+/// Extract only a named production function body, excluding unrelated source.
+fn function_body<'a>(source: &'a str, function: &str) -> &'a str {
+    let start = source
+        .find(function)
+        .unwrap_or_else(|| panic!("missing function `{function}`"));
+    let open = source[start..]
+        .find('{')
+        .map(|offset| start + offset)
+        .unwrap_or_else(|| panic!("function `{function}` has no body"));
+    let bytes = source.as_bytes();
+    let mut depth = 0usize;
+    let mut index = open;
+    let mut quoted = None;
+    let mut escaped = false;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        if let Some(quote) = quoted {
+            if escaped {
+                escaped = false;
+            } else if byte == b'\\' {
+                escaped = true;
+            } else if byte == quote {
+                quoted = None;
+            }
+        } else if matches!(byte, b'\"' | b'\'') {
+            quoted = Some(byte);
+        } else if byte == b'{' {
+            depth += 1;
+        } else if byte == b'}' {
+            depth -= 1;
+            if depth == 0 {
+                return &source[open + 1..index];
+            }
+        }
+        index += 1;
+    }
+    panic!("function `{function}` has an unclosed body");
+}
+
+#[derive(Clone, Copy)]
+enum GalaxyBodyContract {
+    Stream,
+    ChunkRead,
+}
+
+/// Finite structural guard shared by the landed bodies and reviewer mutations.
+/// The 150 MiB live RSS test below remains its behavioral backstop.
+fn assert_galaxy_body_contract(contract: GalaxyBodyContract, body: &str) -> Result<(), String> {
+    let compact = body.split_whitespace().collect::<String>();
+    match contract {
+        GalaxyBodyContract::Stream => {
+            if !compact.contains("forindexin0..chunk_count{") {
+                return Err("stream must iterate indexed chunks".into());
+            }
+            let loop_body = function_body(body, "for index in 0..chunk_count");
+            if loop_body.matches("reader.read_chunk(index).await").count() != 1
+                || body.matches("reader.read_chunk(index).await").count() != 1
+            {
+                return Err("stream must read exactly one indexed chunk per iteration".into());
+            }
+            let has_vec_allocation = ["Vec::new()", "Vec::with_capacity(", "Vec::<", "Vec<"]
+                .iter()
+                .any(|needle| body.contains(needle));
+            if has_vec_allocation && (body.contains(".push(") || body.contains(".extend(")) {
+                return Err("stream must not accumulate chunks in a Vec".into());
+            }
+            let denied = [
+                ".collect(",
+                ".try_collect(",
+                ".to_vec(",
+                ".concat(",
+                "BytesMut",
+                "GzEncoder",
+                "GzDecoder",
+                "GzipEncoder",
+                "GzipDecoder",
+                "decompress",
+                "compress(",
+                "decode_all",
+                "encode_all",
+                "read_to_end",
+                "read_to_string",
+            ];
+            if let Some(needle) = denied.iter().find(|needle| body.contains(**needle)) {
+                return Err(format!(
+                    "stream contains forbidden whole-payload operation `{needle}`"
+                ));
+            }
+        }
+        GalaxyBodyContract::ChunkRead => {
+            if !compact.contains("artifact_id=$1") || !compact.contains("chunk_index=$2") {
+                return Err(
+                    "chunk query must constrain artifact identity and chunk_index = $2".into(),
+                );
+            }
+            if !body.contains(".fetch_optional(") && !body.contains(".fetch_one(") {
+                return Err("chunk query must use a one-row fetch path".into());
+            }
+            if body.contains(".fetch_all(") || body.contains(".fetch_many(") {
+                return Err("chunk query must not use a multi-row fetch path".into());
+            }
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn galaxy_allocation_shape_mutation_contract() {
+    let stream = function_body(include_str!("../galaxy.rs"), "fn stream_gzip(");
+    let read_chunk = function_body(
+        include_str!("../../../crates/djinn-db/src/repositories/repo_graph_generation.rs"),
+        "pub async fn read_chunk(",
+    );
+    assert_galaxy_body_contract(GalaxyBodyContract::Stream, stream).unwrap();
+    assert_galaxy_body_contract(GalaxyBodyContract::ChunkRead, read_chunk).unwrap();
+
+    let stream_mutations = [
+        (
+            "reviewed inferred Vec second-read push",
+            r#"
+                for index in 0..chunk_count {
+                    match reader.read_chunk(index).await { Ok(chunk) => yield Ok(Bytes::from(chunk.bytes)), Err(_) => return }
+                    let mut all = Vec::new(); all.push(reader.read_chunk(index).await.unwrap().bytes);
+                }
+            "#,
+        ),
+        (
+            "typed Vec extend",
+            "for index in 0..chunk_count { let mut all = Vec::<u8>::with_capacity(1); all.extend(reader.read_chunk(index).await.unwrap().bytes); }",
+        ),
+        (
+            "inferred Vec capacity push",
+            "for index in 0..chunk_count { let mut all = Vec::with_capacity(1); all.push(reader.read_chunk(index).await.unwrap().bytes); }",
+        ),
+        (
+            "typed Vec new extend",
+            "for index in 0..chunk_count { let mut all = Vec<u8>::new(); all.extend(reader.read_chunk(index).await.unwrap().bytes); }",
+        ),
+        (
+            "collect",
+            "for index in 0..chunk_count { let _ = reader.read_chunk(index).await; } let _: Vec<_> = stream.collect().await;",
+        ),
+        (
+            "try_collect",
+            "for index in 0..chunk_count { let _ = reader.read_chunk(index).await; } let _: Vec<_> = stream.try_collect().await;",
+        ),
+        (
+            "to_vec",
+            "for index in 0..chunk_count { let _ = reader.read_chunk(index).await; let _ = chunk.bytes.to_vec(); }",
+        ),
+        (
+            "concat",
+            "for index in 0..chunk_count { let _ = reader.read_chunk(index).await; } let _ = chunks.concat();",
+        ),
+        (
+            "BytesMut",
+            "for index in 0..chunk_count { let _ = reader.read_chunk(index).await; let _ = BytesMut::new(); }",
+        ),
+        (
+            "whole payload codec",
+            "for index in 0..chunk_count { let _ = reader.read_chunk(index).await; } let _ = GzDecoder::new(payload);",
+        ),
+    ];
+    for (name, body) in stream_mutations {
+        assert!(
+            assert_galaxy_body_contract(GalaxyBodyContract::Stream, body).is_err(),
+            "mutation `{name}` unexpectedly passed"
+        );
+    }
+
+    let query_mutations = [
+        (
+            "omitted index",
+            "sqlx::query_as(\"SELECT bytes FROM repo_graph_galaxy_chunk WHERE artifact_id = $1\").fetch_optional(conn).await",
+        ),
+        (
+            "multi-row fetch",
+            "sqlx::query_as(\"SELECT bytes FROM repo_graph_galaxy_chunk WHERE artifact_id = $1 AND chunk_index = $2\").fetch_all(conn).await",
+        ),
+    ];
+    for (name, body) in query_mutations {
+        assert!(
+            assert_galaxy_body_contract(GalaxyBodyContract::ChunkRead, body).is_err(),
+            "mutation `{name}` unexpectedly passed"
+        );
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn live_outcomes_rollback_and_pinning() {
     let db = test_helpers::create_test_db();
