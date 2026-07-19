@@ -664,6 +664,25 @@ mod resolve_final_verification_tests {
         }
     }
 
+    /// A configured plan reads the path persisted onto a pod-shaped NULL row.
+    #[tokio::test]
+    async fn configured_plan_reads_persisted_pod_workspace_path() {
+        let fx = fixture(None).await;
+        TaskRunRepository::new(fx.agent.db.clone())
+            .set_workspace_path(&fx.task_run_id, "/workspace/pod-clone")
+            .await
+            .expect("first in-pod stage persists workspace path");
+        configure_final_verification_plan(&fx).await;
+        let material = resolve(&fx)
+            .await
+            .expect("configured plan with persisted worktree must resolve")
+            .expect("configured plan must not be a typed skip");
+        assert_eq!(
+            material.execution_request.worktree,
+            PathBuf::from("/workspace/pod-clone")
+        );
+    }
+
     /// A configured plan with a recorded worktree resolves full material.
     #[tokio::test]
     async fn configured_plan_with_worktree_resolves_material() {

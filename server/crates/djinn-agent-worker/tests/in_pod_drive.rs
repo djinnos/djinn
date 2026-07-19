@@ -49,6 +49,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use djinn_core::models::{SessionRecord, Task, TaskRunStatus, TaskRunTrigger};
+use djinn_db::repositories::task_run::{CreateTaskRunParams, TaskRunRepository};
 use djinn_runtime::{
     ResolvedCredentials, RoleKind, SerializableCredential, SupervisorFlow, TaskRunSpec, WorkerEvent,
 };
@@ -583,6 +584,47 @@ async fn worker_drives_real_supervisor_in_pod() {
         .table_exists("tasks")
         .await
         .expect("clone djinn_test_template into per-test worker db");
+
+    // K8s dispatch inserts this exact row before the pod has a clone path.
+    sqlx::query(
+        "INSERT INTO projects (id, name, github_owner, github_repo) VALUES ($1, $2, 'test', $2)",
+    )
+    .bind(project_id)
+    .bind(project_id)
+    .execute(worker_db.pool())
+    .await
+    .expect("seed pod-drive project");
+    sqlx::query(
+        "INSERT INTO tasks (id, project_id, short_id, title, description, design, issue_type, status, labels, acceptance_criteria, memory_refs, total_reopen_count) VALUES ($1, $2, 'pod-drive', 'pod drive', '', '', 'task', 'open', '[]'::jsonb, '[]'::jsonb, '[]'::jsonb, 0)",
+    )
+    .bind(task_id)
+    .bind(project_id)
+    .execute(worker_db.pool())
+    .await
+    .expect("seed pod-drive task");
+    let task_runs = TaskRunRepository::new(worker_db.clone());
+    task_runs
+        .create(CreateTaskRunParams {
+            id: task_run_id,
+            project_id,
+            task_id,
+            trigger_type: TaskRunTrigger::NewTask.as_str(),
+            status: Some("starting"),
+            workspace_path: None,
+            mirror_ref: None,
+        })
+        .await
+        .expect("insert K8s-shaped task-run row");
+    assert!(
+        task_runs
+            .get(task_run_id)
+            .await
+            .expect("read K8s-shaped task-run row")
+            .expect("K8s-shaped task-run row exists")
+            .workspace_path
+            .is_none(),
+        "dispatch must not pre-populate workspace_path"
+    );
     let worker_db_url = worker_db.bootstrap_info().target.clone();
 
     // 5. Spawn the worker binary against the migrated per-test database.
@@ -684,6 +726,18 @@ async fn worker_drives_real_supervisor_in_pod() {
     assert!(
         log.get_environment_config >= 1,
         "expected at least one get_environment_config RPC"
+    );
+
+    let persisted_workspace = task_runs
+        .get(task_run_id)
+        .await
+        .expect("read task-run after production stage boundary")
+        .expect("task-run must survive worker execution")
+        .workspace_path
+        .expect("first in-pod stage must durably persist its clone path");
+    assert!(
+        !persisted_workspace.is_empty(),
+        "persisted workspace path must be the real in-pod clone path"
     );
 
     // Terminal report should have surfaced via Event frame.

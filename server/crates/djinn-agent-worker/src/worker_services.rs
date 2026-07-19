@@ -296,24 +296,19 @@ impl SupervisorServices for WorkerSupervisorServices {
         // `workspace_path = NULL` (it cannot know the in-pod clone path), and
         // the completion boundary (`resolve_final_verification`) and the
         // auto-submit fingerprint path resolve the run's worktree from that
-        // row — a NULL there fails every `submit_work`. Best-effort: a write
-        // failure is logged and never fails the stage.
+        // row — a NULL there fails every configured completion boundary. This
+        // is a prerequisite for stage execution: continuing after a failed
+        // write would leave the run unable to resolve its own worktree.
         if first_capture {
             let workspace_path = workspace.path().to_string_lossy().into_owned();
-            if let Err(e) = djinn_db::repositories::task_run::TaskRunRepository::new(
-                self.agent_context.db.clone(),
-            )
-            .set_workspace_path(task_run_id, &workspace_path)
-            .await
-            {
-                tracing::warn!(
-                    task_run_id = %task_run_id,
-                    workspace_path = %workspace_path,
-                    error = %e,
-                    "worker_services::execute_stage: failed to persist workspace_path \
-                     on the task_runs row; final verification may not resolve the worktree"
-                );
-            }
+            djinn_db::repositories::task_run::TaskRunRepository::new(self.agent_context.db.clone())
+                .set_workspace_path(task_run_id, &workspace_path)
+                .await
+                .map_err(|e| {
+                    StageError::Setup(format!(
+                        "persist workspace_path for task run {task_run_id} before stage execution: {e}"
+                    ))
+                })?;
         }
 
         let cred = self.credentials.per_role.get(&role_kind).ok_or_else(|| {
