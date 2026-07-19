@@ -851,113 +851,111 @@ mod output_stash_gc_tests {
 /// Matches `djinn_agent_worker::cargo_target_seed::WARM_BASE_ROOT`.
 const WARM_BASE_ROOT: &str = "/cache/cargo-target";
 
-/// Per-project cargo cache health summary extracted from the current
-/// Prometheus metrics and warm-base filesystem state.
-#[derive(Debug, Clone)]
+/// Per-variant cargo cache health summary.
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct CargoCacheProjectHealth {
     project_id: String,
+    mold_jobs: u32,
     seed_hit_count: u64,
     cold_fallback_count: u64,
     warm_base_age_seconds: Option<u64>,
 }
 
-/// Read warm-base directories and seed metrics from Prometheus counters,
-/// then log a structured health line per project.
-///
-/// Called from [`sweep_stale_resources`] on every periodic tick.
 async fn sweep_cargo_health() {
     sweep_cargo_health_under(Path::new(WARM_BASE_ROOT)).await;
 }
 
-/// Testable implementation that accepts an explicit warm-base root.
 async fn sweep_cargo_health_under(warm_base_root: &Path) {
-    let now_unix_secs = time::OffsetDateTime::now_utc().unix_timestamp();
-    let now_u64 = u64::try_from(now_unix_secs).unwrap_or(0);
-
-    // Parse seed metrics from Prometheus text output.
-    let seed_metrics = match djinn_telemetry::render() {
-        Ok(text) => parse_seed_metrics_from_text(&text),
-        Err(e) => {
-            tracing::debug!(
-                error = %e,
-                "CoordinatorActor: cargo cache health sweep skipped metrics; render failed"
-            );
-            Vec::new()
+    let now = u64::try_from(time::OffsetDateTime::now_utc().unix_timestamp()).unwrap_or(0);
+    let metrics: HashMap<_, _> = djinn_telemetry::render()
+        .map(|text| parse_seed_metrics_from_text(&text))
+        .unwrap_or_default()
+        .into_iter()
+        .map(|(project_id, hits, colds)| (project_id, (hits, colds)))
+        .collect();
+    let healths = match inventory_cargo_cache_health_under(warm_base_root, now) {
+        Ok(healths) => healths,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
+        Err(error) => {
+            tracing::warn!(error = %error, root = %warm_base_root.display(), "CoordinatorActor: cargo cache health sweep failed to enumerate warm-base root");
+            return;
         }
     };
-
-    let mut project_healths: HashMap<String, CargoCacheProjectHealth> = HashMap::new();
-
-    // Populate from Prometheus counter metrics.
-    for (project_id, hits, colds) in seed_metrics {
-        project_healths
-            .entry(project_id.clone())
-            .and_modify(|h| {
-                h.seed_hit_count = hits;
-                h.cold_fallback_count = colds;
-            })
-            .or_insert(CargoCacheProjectHealth {
-                project_id,
-                seed_hit_count: hits,
-                cold_fallback_count: colds,
-                warm_base_age_seconds: None,
-            });
-    }
-
-    // Scan warm-base directories for freshness.
-    match tokio::fs::read_dir(warm_base_root).await {
-        Ok(mut entries) => {
-            while let Ok(Some(entry)) = entries.next_entry().await {
-                let Ok(file_type) = entry.file_type().await else {
-                    continue;
-                };
-                if !file_type.is_dir() {
-                    continue;
-                }
-                let Some(project_id) = entry.file_name().to_str().map(ToOwned::to_owned) else {
-                    continue;
-                };
-                let age = compute_warm_base_age_secs(&entry.path(), now_u64).await;
-                project_healths
-                    .entry(project_id.clone())
-                    .and_modify(|h| h.warm_base_age_seconds = age)
-                    .or_insert(CargoCacheProjectHealth {
-                        project_id,
-                        seed_hit_count: 0,
-                        cold_fallback_count: 0,
-                        warm_base_age_seconds: age,
-                    });
-            }
+    for mut health in healths {
+        if let Some((hits, colds)) = metrics.get(&health.project_id) {
+            health.seed_hit_count = *hits;
+            health.cold_fallback_count = *colds;
         }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            tracing::debug!(
-                root = %warm_base_root.display(),
-                "CoordinatorActor: cargo cache health sweep skipped; warm-base root does not exist"
-            );
-        }
-        Err(e) => {
-            tracing::warn!(
-                error = %e,
-                root = %warm_base_root.display(),
-                "CoordinatorActor: cargo cache health sweep failed to enumerate warm-base root"
-            );
-        }
-    }
-
-    // Log structured health line per project.
-    for health in project_healths.values() {
         let seed_hit_rate =
             compute_seed_hit_rate(health.seed_hit_count, health.cold_fallback_count);
-        tracing::info!(
-            project_id = %health.project_id,
-            seed_hit_rate,
-            cold_fallback_count = health.cold_fallback_count,
-            warm_base_age_seconds = ?health.warm_base_age_seconds,
-            "cargo cache health"
-        );
+        tracing::info!(project_id = %health.project_id, mold_jobs = health.mold_jobs, seed_hit_rate, cold_fallback_count = health.cold_fallback_count, warm_base_age_seconds = ?health.warm_base_age_seconds, "cargo cache health");
     }
 }
 
+/// Inventory only direct canonical `UUID/mold-jobs-N` directories. Legacy,
+/// malformed, and symlinked entries are deliberately not health substitutes.
+fn inventory_cargo_cache_health_under(
+    root: &Path,
+    now: u64,
+) -> std::io::Result<Vec<CargoCacheProjectHealth>> {
+    let mut healths = Vec::new();
+    for project in std::fs::read_dir(root)? {
+        let Ok(project) = project else { continue };
+        if !project.file_type().is_ok_and(|kind| kind.is_dir()) {
+            continue;
+        }
+        let Some(project_id) = project.file_name().to_str().map(str::to_owned) else {
+            continue;
+        };
+        let Ok(uuid) = uuid::Uuid::parse_str(&project_id) else {
+            continue;
+        };
+        if uuid.to_string() != project_id {
+            continue;
+        }
+        let Ok(variants) = std::fs::read_dir(project.path()) else {
+            continue;
+        };
+        for variant in variants {
+            let Ok(variant) = variant else { continue };
+            if !variant.file_type().is_ok_and(|kind| kind.is_dir()) {
+                continue;
+            }
+            let Some(mold_jobs) = variant
+                .file_name()
+                .to_str()
+                .and_then(canonical_mold_jobs_name)
+            else {
+                continue;
+            };
+            let age = variant
+                .metadata()
+                .ok()
+                .and_then(|m| m.modified().ok())
+                .and_then(|m| m.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|m| now.saturating_sub(m.as_secs()));
+            healths.push(CargoCacheProjectHealth {
+                project_id: project_id.clone(),
+                mold_jobs,
+                seed_hit_count: 0,
+                cold_fallback_count: 0,
+                warm_base_age_seconds: age,
+            });
+        }
+    }
+    healths.sort_by(|a, b| {
+        a.project_id
+            .cmp(&b.project_id)
+            .then(a.mold_jobs.cmp(&b.mold_jobs))
+    });
+    Ok(healths)
+}
+
+fn canonical_mold_jobs_name(name: &str) -> Option<u32> {
+    let suffix = name.strip_prefix("mold-jobs-")?;
+    let jobs = suffix.parse::<u32>().ok()?;
+    (jobs >= 1 && name == format!("mold-jobs-{jobs}")).then_some(jobs)
+}
 /// Parse `djinn_cargo_seed_hit_total` and `djinn_cargo_seed_cold_total` counter
 /// values from a Prometheus text exposition. Returns `(project_id, hit_count,
 /// cold_count)` tuples aggregated per project.
@@ -1021,6 +1019,7 @@ fn parse_seed_metrics_from_text(rendered: &str) -> Vec<(String, u64, u64)> {
 
 /// Compute the age (in seconds) of a warm-base directory from its mtime.
 /// Returns `None` if the directory metadata cannot be read.
+#[cfg(test)]
 async fn compute_warm_base_age_secs(dir: &Path, now_unix_secs: u64) -> Option<u64> {
     let metadata = tokio::fs::metadata(dir).await.ok()?;
     let modified = metadata.modified().ok()?;
@@ -1155,26 +1154,30 @@ mod cargo_cache_health_tests {
         assert!(metrics.is_empty());
     }
 
-    // ── End-to-end health sweep with mock filesystem ────────────────────
-
-    #[tokio::test]
-    async fn sweep_cargo_health_under_logs_per_project() {
+    #[test]
+    fn health_inventory_reports_deployed_variants_without_substitution() {
         let tmp = tempfile::TempDir::new().unwrap();
+        let project = "018f8b9a-0d70-7f0a-8000-000000000099";
         let root = tmp.path();
-
-        // Create two warm-base dirs.
-        std::fs::create_dir(root.join("proj-alpha")).unwrap();
-        std::fs::create_dir(root.join("proj-beta")).unwrap();
-
-        // Run the sweep (metrics portion will be empty in test context
-        // unless telemetry was initialized; the filesystem scan is the
-        // primary assertion here).
-        sweep_cargo_health_under(root).await;
-
-        // No assertion on log output — tracing subscriber is not captured
-        // in unit tests. The function's contract is that it doesn't panic
-        // and runs to completion. Structured logging is validated by the
-        // acceptance criteria review.
+        for name in [
+            "mold-jobs-1",
+            "mold-jobs-4",
+            "mold-jobs-7",
+            "mold-jobs-0",
+            "mold-jobs-01",
+        ] {
+            std::fs::create_dir_all(root.join(project).join(name)).unwrap();
+        }
+        std::fs::create_dir_all(root.join("legacy-project").join("mold-jobs-1")).unwrap();
+        std::fs::create_dir_all(root.join(project).join("legacy-unkeyed")).unwrap();
+        let entries = inventory_cargo_cache_health_under(root, 1_700_000_000).unwrap();
+        assert_eq!(
+            entries
+                .iter()
+                .map(|entry| (entry.project_id.as_str(), entry.mold_jobs))
+                .collect::<Vec<_>>(),
+            vec![(project, 1), (project, 4), (project, 7)]
+        );
     }
 }
 
@@ -3502,7 +3505,10 @@ async fn sweep_cargo_warm_base_guard(
         );
     }
     let clock = SystemClock::new();
-    let locks = gc::FlockBaseLock;
+    // Idle deletion must serialize with worker warm writes using the exact
+    // production variant lock identity under `.warm-locks`. Project activity
+    // and in-flight checks remain project-scoped inside the evictor.
+    let locks = gc::SharedWarmBaseLock;
     let activity = gc::DbActivityGuard::new(db.clone());
 
     // Capture the pressure inventory and immutable plan before either legacy
