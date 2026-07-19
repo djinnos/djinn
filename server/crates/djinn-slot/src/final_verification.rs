@@ -207,6 +207,13 @@ pub(crate) async fn validate_or_reverify_completion_intent(
     slot_ctx: &SlotContext,
     submit_tool_label: &str,
 ) -> Result<Option<FinalVerificationSuccessEvidence>, String> {
+    // C1 already made the typed legacy-path decision. Unlike a missing
+    // evidence value, this is authoritative: C2 must carry it through without
+    // resolving the plan again (and therefore without a second consultation
+    // audit outcome.
+    if intent.final_verification_disposition == FinalVerificationDisposition::NotConfigured {
+        return Ok(None);
+    }
     let task_run_id = match task_run_id {
         Some(id) => id.to_owned(),
         None => djinn_db::repositories::task_run::TaskRunRepository::new(slot_ctx.db.clone())

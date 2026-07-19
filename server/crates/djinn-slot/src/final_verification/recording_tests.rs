@@ -1,3 +1,5 @@
+// djinn:allow-oversize — integration tests exercise the complete recording and
+// completion boundaries with shared pod-shaped fixtures.
 //! End-to-end regression matrix for the authoritative post-authoring writer.
 //!
 //! Every case drives the real `coordinate_final_verification` boundary —
