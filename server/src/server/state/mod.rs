@@ -3666,9 +3666,13 @@ mod retention_preflight_tests {
 #[cfg(test)]
 mod build_admission_config_tests {
     use super::*;
-    use djinn_db::AdmissionHandoffPhase;
+    use djinn_db::{
+        AdmissionDomain, AdmissionHandoffPhase, AdmissionJournalKey, AdmissionJournalRepository,
+        AdmissionWorkloadKind, AdoptLiveAdmissionInput,
+    };
 
     static BUILD_ADMISSION_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    static BUILD_ADMISSION_TELEMETRY_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     fn state_for_admission_config(config: BuildAdmissionConfig) -> AppState {
         let db = Database::open_in_memory().expect("test database");
@@ -3699,6 +3703,16 @@ mod build_admission_config_tests {
 
     fn handoff_repository(state: &AppState) -> AdmissionHandoffRepository {
         AdmissionHandoffRepository::new(state.db().clone())
+    }
+
+    fn gauge_value(rendered: &str, metric: &str) -> f64 {
+        rendered
+            .lines()
+            .find(|line| line.starts_with(metric) && !line.contains('{'))
+            .unwrap_or_else(|| panic!("missing unlabelled sample {metric} in:\n{rendered}"))
+            .rsplit_once(' ')
+            .and_then(|(_, value)| value.parse::<f64>().ok())
+            .unwrap_or_else(|| panic!("sample should end with a number for {metric}"))
     }
 
     async fn advance_handoff(
@@ -4253,5 +4267,102 @@ mod build_admission_config_tests {
         state.confirm_build_admission_topology().await;
         assert_eq!(admission.readiness(), BuildAdmissionReadiness::Healthy);
         assert!(admission.is_ready());
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn replacement_recovery_restores_distinct_active_and_durable_ready_identities() {
+        let _telemetry_guard = BUILD_ADMISSION_TELEMETRY_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        djinn_telemetry::init().expect("telemetry initializes");
+
+        // Build the durable predecessor state first: one task is already live
+        // in the admission journal while a distinct task remains dispatchable
+        // in the exact ready-query source production recovery reads.
+        let db = Database::open_in_memory().expect("test database");
+        let state = state_for_admission_config_with_db(
+            db.clone(),
+            BuildAdmissionConfig {
+                mode: BuildAdmissionMode::Enforce,
+                cap: 3,
+            },
+        );
+        let project = ProjectRepository::new(db.clone(), state.event_bus())
+            .create("admission-restart", "test", "admission-restart")
+            .await
+            .expect("create durable project");
+        let deferred_task = TaskRepository::new(db.clone(), state.event_bus())
+            .create_in_project(
+                &project.id,
+                None,
+                "durably denied ready task",
+                "",
+                "",
+                "task",
+                1,
+                "test",
+                Some("open"),
+                None,
+            )
+            .await
+            .expect("create durable ready task");
+        let active_key = AdmissionJournalKey {
+            domain: AdmissionDomain::TaskObservation,
+            work_id: "active-predecessor-task".into(),
+            generation: 0,
+        };
+        AdmissionJournalRepository::new(db.clone())
+            .adopt_live(&AdoptLiveAdmissionInput {
+                key: active_key.clone(),
+                workload_kind: AdmissionWorkloadKind::Task,
+                creator_server_epoch: "predecessor".into(),
+                object_name: "active-predecessor-job".into(),
+                object_uid: "active-predecessor-uid".into(),
+            })
+            .await
+            .expect("seed predecessor active journal identity");
+
+        // These are the two durable sources used by a replacement: the
+        // journal's active snapshot and TaskRepository::list_ready. Their
+        // identities must be distinct before the production seams reconcile
+        // them into controller occupancy and deferred lifecycle membership.
+        let ready = TaskRepository::new(db.clone(), state.event_bus())
+            .list_ready(ReadyQuery {
+                limit: i64::MAX,
+                ..Default::default()
+            })
+            .await
+            .expect("list durable ready tasks");
+        let ready_ids: HashSet<_> = ready.into_iter().map(|task| task.id).collect();
+        let active_ids: HashSet<_> = AdmissionJournalRepository::new(db.clone())
+            .list_active_rows()
+            .await
+            .expect("list active journal rows")
+            .into_iter()
+            .filter(|row| row.key.domain == AdmissionDomain::TaskObservation)
+            .map(|row| row.key.work_id)
+            .collect();
+        assert_eq!(ready_ids, HashSet::from([deferred_task.id.clone()]));
+        assert_eq!(active_ids, HashSet::from([active_key.work_id.clone()]));
+        assert!(ready_ids.is_disjoint(&active_ids));
+
+        // Invoke the same ordered recovery seams AppState::initialize uses on
+        // coordinator startup/replacement, rather than the controller helper
+        // directly. The ready task was previously denied/deferred; it must be
+        // restored alongside, but never overlap, the active journal identity.
+        state.initialize_build_admission_recovery().await;
+        state.initialize_build_admission_deferred_recovery().await;
+        let rendered = djinn_telemetry::render().expect("render recovery gauges");
+        assert_eq!(gauge_value(&rendered, "djinn_build_slots_in_use"), 1.0);
+        assert_eq!(gauge_value(&rendered, "djinn_build_slots_queued"), 1.0);
+
+        // Repeating the actual production deferred-recovery seam is
+        // idempotent: it must retain exactly the same unique, disjoint source
+        // cardinalities and never increment either gauge.
+        state.initialize_build_admission_deferred_recovery().await;
+        let rendered = djinn_telemetry::render().expect("render repeated recovery gauges");
+        assert_eq!(gauge_value(&rendered, "djinn_build_slots_in_use"), 1.0);
+        assert_eq!(gauge_value(&rendered, "djinn_build_slots_queued"), 1.0);
     }
 }
