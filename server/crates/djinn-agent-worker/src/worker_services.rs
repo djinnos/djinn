@@ -282,12 +282,38 @@ impl SupervisorServices for WorkerSupervisorServices {
         // before delegating the host RPC.  The supervisor passes the same
         // `&Workspace` to every stage, so capturing on the first call is
         // sufficient; subsequent calls overwrite with the same path.
-        {
+        let first_capture = {
             let mut slot = self
                 .captured_workspace_path
                 .lock()
                 .expect("captured_workspace_path mutex poisoned");
+            let first = slot.is_none();
             *slot = Some(workspace.path().to_path_buf());
+            first
+        };
+        // Persist the workspace path onto the task_runs row exactly once, on
+        // the first capture. The coordinator creates K8s pod-run rows with
+        // `workspace_path = NULL` (it cannot know the in-pod clone path), and
+        // the completion boundary (`resolve_final_verification`) and the
+        // auto-submit fingerprint path resolve the run's worktree from that
+        // row — a NULL there fails every `submit_work`. Best-effort: a write
+        // failure is logged and never fails the stage.
+        if first_capture {
+            let workspace_path = workspace.path().to_string_lossy().into_owned();
+            if let Err(e) = djinn_db::repositories::task_run::TaskRunRepository::new(
+                self.agent_context.db.clone(),
+            )
+            .set_workspace_path(task_run_id, &workspace_path)
+            .await
+            {
+                tracing::warn!(
+                    task_run_id = %task_run_id,
+                    workspace_path = %workspace_path,
+                    error = %e,
+                    "worker_services::execute_stage: failed to persist workspace_path \
+                     on the task_runs row; final verification may not resolve the worktree"
+                );
+            }
         }
 
         let cred = self.credentials.per_role.get(&role_kind).ok_or_else(|| {

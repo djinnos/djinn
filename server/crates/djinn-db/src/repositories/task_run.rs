@@ -117,6 +117,24 @@ impl TaskRunRepository {
         Ok(())
     }
 
+    /// Record the workspace path for a run once it is known.
+    ///
+    /// K8s pod runs are created by the coordinator with `workspace_path =
+    /// NULL` because the in-pod supervisor clones its ephemeral workspace
+    /// after dispatch. The in-pod worker calls this on its first
+    /// `execute_stage` so consumers that resolve the run's worktree from the
+    /// row (final-verification resolution, auto-submit diff fingerprinting,
+    /// rejected-submission integrity) see the real path instead of NULL.
+    pub async fn set_workspace_path(&self, id: &str, workspace_path: &str) -> Result<()> {
+        self.db.ensure_initialized().await?;
+        sqlx::query("UPDATE task_runs SET workspace_path = $2 WHERE id = $1")
+            .bind(id)
+            .bind(workspace_path)
+            .execute(self.db.pool())
+            .await?;
+        Ok(())
+    }
+
     pub async fn list_for_task(&self, task_id: &str) -> Result<Vec<TaskRunRecord>> {
         self.db.ensure_initialized().await?;
         Ok(sqlx::query_as!(
@@ -433,6 +451,38 @@ mod tests {
         assert_eq!(fetched.trigger_type, "conflict_retry");
         assert!(fetched.workspace_path.is_none());
         assert!(fetched.mirror_ref.is_none());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn set_workspace_path_populates_null_row() {
+        let db = test_db();
+        let (project_id, task_id) = create_task(&db, EventBus::noop()).await;
+        let repo = TaskRunRepository::new(db);
+
+        // K8s pod-run shape: the coordinator inserts the row with no
+        // workspace_path.
+        let id = new_run_id();
+        repo.create(CreateTaskRunParams {
+            id: &id,
+            project_id: &project_id,
+            task_id: &task_id,
+            trigger_type: TaskRunTrigger::NewTask.as_str(),
+            status: Some("starting"),
+            workspace_path: None,
+            mirror_ref: None,
+        })
+        .await
+        .unwrap();
+        assert!(repo.get(&id).await.unwrap().unwrap().workspace_path.is_none());
+
+        repo.set_workspace_path(&id, "/workspace/run-clone")
+            .await
+            .unwrap();
+        let after = repo.get(&id).await.unwrap().unwrap();
+        assert_eq!(after.workspace_path.as_deref(), Some("/workspace/run-clone"));
+        // Nothing else on the row changes.
+        assert_eq!(after.status, "starting");
+        assert!(after.ended_at.is_none());
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

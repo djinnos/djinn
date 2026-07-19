@@ -532,26 +532,6 @@ mod tests {
                             end_line: 116,
                             node: 6,
                         },
-                        RepoGraphArtifactSymbolRange {
-                            start_line: 140,
-                            end_line: 148,
-                            node: 7,
-                        },
-                        RepoGraphArtifactSymbolRange {
-                            start_line: 150,
-                            end_line: 162,
-                            node: 8,
-                        },
-                        RepoGraphArtifactSymbolRange {
-                            start_line: 164,
-                            end_line: 176,
-                            node: 9,
-                        },
-                        RepoGraphArtifactSymbolRange {
-                            start_line: 178,
-                            end_line: 188,
-                            node: 10,
-                        },
                     ],
                 ),
                 (
@@ -560,27 +540,27 @@ mod tests {
                         RepoGraphArtifactSymbolRange {
                             start_line: 98,
                             end_line: 115,
-                            node: 12,
+                            node: 8,
                         },
                         RepoGraphArtifactSymbolRange {
                             start_line: 117,
                             end_line: 120,
-                            node: 13,
+                            node: 9,
                         },
                         RepoGraphArtifactSymbolRange {
                             start_line: 122,
                             end_line: 127,
-                            node: 14,
+                            node: 10,
                         },
                         RepoGraphArtifactSymbolRange {
                             start_line: 129,
                             end_line: 133,
-                            node: 15,
+                            node: 11,
                         },
                         RepoGraphArtifactSymbolRange {
                             start_line: 135,
                             end_line: 140,
-                            node: 16,
+                            node: 12,
                         },
                     ],
                 ),
@@ -589,7 +569,7 @@ mod tests {
                     vec![RepoGraphArtifactSymbolRange {
                         start_line: 1,
                         end_line: 3,
-                        node: 18,
+                        node: 14,
                     }],
                 ),
             ]),
