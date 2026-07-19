@@ -32,6 +32,8 @@ pub use database::{
     SqliteVecStatus, default_db_path,
 };
 pub use error::{DbError as Error, DbResult as Result};
+#[cfg(any(test, feature = "test-support"))]
+pub use repositories::repo_graph_generation::ReservedPublicationFailureStage;
 pub use repositories::tool_call_evaluator::{
     Decision, EvalInput, GateResult, GateThresholds, GoStopReport, ManualAuditResult, SampleMinima,
     WindowSpec, evaluate, matched_baseline_rows,

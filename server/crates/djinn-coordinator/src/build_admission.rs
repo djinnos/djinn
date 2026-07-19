@@ -837,22 +837,49 @@ impl BuildAdmissionController {
         if self.mode() != BuildAdmissionMode::Enforce {
             return;
         }
+        let mut deferred: HashSet<_> = task_ids
+            .into_iter()
+            .map(|(work_id, generation)| {
+                permit_key(&AdmissionJournalKey {
+                    domain: AdmissionDomain::TaskObservation,
+                    work_id,
+                    generation,
+                })
+            })
+            .collect();
+        // The ready queue is durable but a task can have been claimed between
+        // its ready-queue snapshot and this recovery pass. Journal rows remain
+        // authoritative for in-use identities, so never restore the same task
+        // generation as deferred as well.
+        let active = match self.journal.list_active_rows().await {
+            Ok(rows) => rows
+                .into_iter()
+                .filter(|row| row.key.domain == AdmissionDomain::TaskObservation)
+                .map(|row| permit_key(&row.key))
+                .collect::<HashSet<_>>(),
+            Err(error) => {
+                tracing::warn!(%error, "build admission deferred recovery journal snapshot unavailable");
+                self.publish_metrics().await;
+                return;
+            }
+        };
+        deferred.retain(|key| !active.contains(key));
         {
             let mut queued = self
                 .queued_lifecycle
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
-            for (work_id, generation) in task_ids {
+            // Reconcile task-queue membership to the durable ready source while
+            // preserving warm-build waiters, which have no task ready-queue
+            // representation. This also removes a previously reconstructed
+            // task identity if it has since become active.
+            let task_prefix = format!("{:?}:", AdmissionDomain::TaskObservation);
+            queued.retain(|key, _| !key.starts_with(&task_prefix) || deferred.contains(key));
+            for key in deferred {
                 // Recovery rebuilds membership; a fresh monotonic start time is
                 // installed so the lifecycle record is complete. The original
                 // first-denial time is not recoverable across a process restart.
-                queued
-                    .entry(permit_key(&AdmissionJournalKey {
-                        domain: AdmissionDomain::TaskObservation,
-                        work_id,
-                        generation,
-                    }))
-                    .or_insert_with(|| self.queue_clock.now());
+                queued.entry(key).or_insert_with(|| self.queue_clock.now());
             }
         }
         self.publish_metrics().await;
