@@ -1506,3 +1506,70 @@ async fn idle_eviction_deletes_only_the_selected_mold_variant() {
         "evicting mold-jobs-1 must not substitute mold-jobs-4"
     );
 }
+
+#[tokio::test]
+async fn idle_eviction_honors_worker_variant_lock_without_blocking_unlocked_sibling() {
+    let temp = tempfile::tempdir().expect("temp");
+    let id = "018f8b9a-0d70-7f0a-8000-000000000001";
+    let project = temp.path().join(id);
+    let one = project.join("mold-jobs-1");
+    let four = project.join("mold-jobs-4");
+    std::fs::create_dir_all(&one).expect("mold-jobs-1");
+    std::fs::create_dir_all(&four).expect("mold-jobs-4");
+    std::fs::write(one.join("artifact"), b"one").unwrap();
+    std::fs::write(four.join("artifact"), b"four").unwrap();
+    for variant in [&one, &four] {
+        filetime::set_file_mtime(
+            variant,
+            filetime::FileTime::from_system_time(SystemTime::UNIX_EPOCH),
+        )
+        .unwrap();
+    }
+
+    // Acquire the lock by its worker production identity rather than through
+    // the coordinator adapter. This independently proves idle GC contends on
+    // `.warm-locks/<project-id>/mold-jobs-N.lock`.
+    let worker_lock_dir = temp.path().join(".warm-locks").join(id);
+    std::fs::create_dir_all(&worker_lock_dir).unwrap();
+    let worker_lock_path = worker_lock_dir.join("mold-jobs-1.lock");
+    let worker_lock = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&worker_lock_path)
+        .unwrap();
+    assert_eq!(
+        unsafe { libc::flock(worker_lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) },
+        0,
+        "worker-compatible lock must be acquired"
+    );
+
+    let result = evict_idle_warm_bases(
+        inventory_under(temp.path()).unwrap(),
+        &Activity(Ok(snapshot())),
+        &Warm(Ok(false)),
+        &SharedWarmBaseLock,
+        &default_config(),
+        &TestClock::new(future(15), std::time::Instant::now()),
+        crate::context::CacheCleanupMode::Delete,
+        temp.path(),
+    )
+    .await;
+
+    assert_eq!(result.deleted.len(), 1);
+    assert_eq!(result.deleted[0].mold_jobs, 4);
+    assert_eq!(result.retained, vec![(id.into(), RetainReason::LockBusy)]);
+    assert!(one.exists(), "held mold-jobs-1 variant must be retained");
+    assert!(
+        !four.exists(),
+        "locked mold-jobs-1 must not block or substitute for mold-jobs-4"
+    );
+    assert_eq!(
+        worker_lock_path,
+        temp.path()
+            .join(".warm-locks")
+            .join(id)
+            .join("mold-jobs-1.lock")
+    );
+}

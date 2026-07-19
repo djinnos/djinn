@@ -3456,7 +3456,10 @@ async fn sweep_cargo_warm_base_guard(
         );
     }
     let clock = SystemClock::new();
-    let locks = gc::FlockBaseLock;
+    // Idle deletion must serialize with worker warm writes using the exact
+    // production variant lock identity under `.warm-locks`. Project activity
+    // and in-flight checks remain project-scoped inside the evictor.
+    let locks = gc::SharedWarmBaseLock;
     let activity = gc::DbActivityGuard::new(db.clone());
 
     // Capture the pressure inventory and immutable plan before either legacy
