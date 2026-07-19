@@ -10,6 +10,10 @@ const WORKFLOW = resolve('.github/workflows/quality-gate.yml');
 const CACHE_OWNERS = new Map([
   ['server-quality', 'cache-warm-x86_64-quality'],
   ['server-test', 'cache-warm-x86_64-test'],
+  // Saved on main so tag-triggered release runs can restore it: caches
+  // saved on a tag ref are invisible to every other ref, so release.yml
+  // itself must stay a restore-only consumer of this family.
+  ['release-bins', 'cache-warm-x86_64-release'],
   ['server-aarch64-check', 'cache-warm-aarch64'],
 ]);
 

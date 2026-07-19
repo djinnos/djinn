@@ -84,12 +84,32 @@ const UI_CODEGEN_INPUTS = new Set([
   'server/schemas/usage-analytics.schema.json',
 ]);
 
+// Only the quality gate's own workflow can change what this PR/merge-queue
+// pipeline does, so only it fails closed into full validation. The
+// enumerated siblings cannot affect the gate (Release triggers on tag
+// pushes; the others are independent automations) and are validated by
+// preflight's always-on actionlint pass instead. A workflow file on
+// NEITHER list — a new or renamed workflow — stays fail-closed via the
+// unknown lane: an unreviewed workflow could still interact with the gate
+// (for example through a colliding concurrency group).
+const GATE_WORKFLOW = '.github/workflows/quality-gate.yml';
+const SIBLING_WORKFLOWS = new Set([
+  '.github/workflows/release.yml',
+  '.github/workflows/cla.yml',
+  '.github/workflows/stale-branches.yml',
+  '.github/workflows/memory-qa-nightly.yml',
+]);
+
+function isKnownWorkflow(path) {
+  return path === GATE_WORKFLOW || SIBLING_WORKFLOWS.has(path);
+}
+
 function isUnclassifiedNonDocumentation(path) {
   // Documentation, the explicitly enumerated local-dev contract, and
   // deterministic QA smoke inputs are narrow lanes. Every other
   // executable/configuration path receives fail-closed full validation.
   return !isDocumentation(path) && !matches(path, 'ui') && !matches(path, 'server') &&
-    !matches(path, '.github/workflows') && !isTiltContract(path) && !isQaSmoke(path);
+    !isKnownWorkflow(path) && !isTiltContract(path) && !isQaSmoke(path);
 }
 
 /**
@@ -111,6 +131,7 @@ export function classifyChangedScope(files) {
     tiltContracts: false,
     qaSmoke: false,
     workflowCi: false,
+    workflowSibling: false,
     unknown: false,
   };
   for (const path of normalizedFiles) {
@@ -128,7 +149,8 @@ export function classifyChangedScope(files) {
     if (isMemoryRanking(path)) lanes.memoryRanking = true;
     if (isTiltContract(path)) lanes.tiltContracts = true;
     if (isQaSmoke(path)) lanes.qaSmoke = true;
-    if (matches(path, '.github/workflows')) lanes.workflowCi = true;
+    if (path === GATE_WORKFLOW) lanes.workflowCi = true;
+    if (SIBLING_WORKFLOWS.has(path)) lanes.workflowSibling = true;
     if (isUnclassifiedNonDocumentation(path)) lanes.unknown = true;
   }
   // A source/configuration path that is not a recognized UI, server, or local
@@ -163,9 +185,10 @@ export function planChangedScope(input) {
   if (lanes.ui || lanes.workflowCi || fullValidation || lanes.unknown) jobs.ui = true;
   if (lanes.qaSmoke || lanes.workflowCi || fullValidation || lanes.unknown) jobs.qaSmoke = true;
 
-  // Merge queues must validate the server policy set even for docs-only changes;
-  // UI remains intentionally independent so docs queue entries do not pay it.
-  if (event === 'merge_group' && lanes.docs && !lanes.unknown) {
+  // Merge queues must validate the server policy set even for docs-only or
+  // sibling-workflow-only changes; UI remains intentionally independent so
+  // those queue entries do not pay it.
+  if (event === 'merge_group' && (lanes.docs || lanes.workflowSibling) && !lanes.unknown) {
     for (const name of PROTECTED_SERVER_JOBS) jobs[name] = true;
   }
 
