@@ -652,8 +652,13 @@ impl SlotHostCallbacks for CompletionIntentCallbacks {
         _verification_attempt_id: &'a str,
         verify_run_id: &'a str,
         _ctx: &'a SlotContext,
-    ) -> Pin<Box<dyn Future<Output = Result<FinalVerificationResolvedMaterial, String>> + Send + 'a>>
-    {
+    ) -> Pin<
+        Box<
+            dyn Future<Output = Result<Option<FinalVerificationResolvedMaterial>, String>>
+                + Send
+                + 'a,
+        >,
+    > {
         let probe = self.reuse_probe.as_ref();
         Box::pin(async move {
             let probe = probe.ok_or_else(|| "not implemented in test".to_owned())?;
@@ -673,7 +678,7 @@ impl SlotHostCallbacks for CompletionIntentCallbacks {
                 )
                 .map_err(|error| error.to_string())?;
             }
-            Ok(probe.material.clone())
+            Ok(Some(probe.material.clone()))
         })
     }
 

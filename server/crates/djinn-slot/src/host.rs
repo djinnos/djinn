@@ -108,6 +108,15 @@ pub trait SlotHostCallbacks: Send + Sync + 'static {
         None
     }
     /// Resolve canonical material for an authoritative final-verification call.
+    ///
+    /// `Ok(Some(material))` is a configured plan and keeps the full
+    /// fail-closed completion boundary. `Ok(None)` is the typed
+    /// "no final-verification plan is configured" signal: the coordinator
+    /// records a [`FinalVerificationRecordingOutcome::NotConfigured`] outcome
+    /// and the completion-intent path proceeds without evidence instead of
+    /// blocking submission. Hosts must return `Ok(None)` only when the
+    /// project genuinely declares zero final-verification commands — every
+    /// resolution failure for a configured plan stays `Err` (fail closed).
     /// The default fails closed until a host wires completion intent.
     fn resolve_final_verification<'a>(
         &'a self,
@@ -116,8 +125,13 @@ pub trait SlotHostCallbacks: Send + Sync + 'static {
         _verification_attempt_id: &'a str,
         _verify_run_id: &'a str,
         _ctx: &'a SlotContext,
-    ) -> Pin<Box<dyn Future<Output = Result<FinalVerificationResolvedMaterial, String>> + Send + 'a>>
-    {
+    ) -> Pin<
+        Box<
+            dyn Future<Output = Result<Option<FinalVerificationResolvedMaterial>, String>>
+                + Send
+                + 'a,
+        >,
+    > {
         Box::pin(async { Err("final verification resolution is not available".to_owned()) })
     }
     /// Acquire the ordinary per-invocation verification lease.
