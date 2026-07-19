@@ -34,7 +34,11 @@ EOF
 {
     printf 'pub static PAYLOAD: [u64; 1048576] = ['
     awk 'BEGIN { for (i = 0; i < 1048576; i++) printf "0," }'
-    printf '];\nfn main() { println!("%d", PAYLOAD.len()); }\n'
+    # Rust's own placeholder is `{}`, and it must survive printf verbatim.
+    # `%d` here was consumed by printf itself (no argument -> substituted "0"),
+    # emitting `println!("0", PAYLOAD.len())`, which fails to compile with
+    # "argument never used" and took the whole release gate down.
+    printf '];\nfn main() { println!("{}", PAYLOAD.len()); }\n'
 } > "$work/src/main.rs"
 
 (
