@@ -199,6 +199,8 @@ export function splitNulPaths(bytes) {
  */
 export function detectPermalink(repoPath) {
   const norm = repoPath.split('\\').join('/');
+  // Legacy settings are a retired source artifact recorded in the durable ledger.
+  if (norm === '.djinn/settings.json') return 'settings';
   if (!norm.startsWith('.djinn/') || !norm.endsWith('.md')) {
     return null;
   }

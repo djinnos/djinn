@@ -573,6 +573,7 @@ test('detectPermalink derives folder/slug and singleton permalinks', () => {
   assert.equal(detectPermalink('.djinn/brief.md'), 'brief');
   assert.equal(detectPermalink('.djinn/roadmap.md'), 'roadmap');
   assert.equal(detectPermalink('.djinn/catalog.md'), 'catalog');
+  assert.equal(detectPermalink('.djinn/settings.json'), 'settings');
   assert.equal(detectPermalink('.djinn/decisions/a.md'), 'decisions/a');
   assert.equal(detectPermalink('.djinn/research/technical/spike.md'), 'research/technical/spike');
   assert.equal(detectPermalink('.djinn/reference/adr-029-x.md'), 'reference/adr-029-x');
