@@ -441,6 +441,7 @@ async fn materialize_one(
             &item.selection_id,
             &item.project_id,
             Some(&epic_id),
+            item.task_id.as_deref(),
             &title,
             &description,
         )

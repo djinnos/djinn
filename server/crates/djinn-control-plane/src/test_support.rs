@@ -35,7 +35,7 @@ use djinn_core::events::EventBus;
 use djinn_core::extension_diagnostics::ExtensionLoadDiagnosticV1;
 use djinn_core::models::DjinnSettings;
 use djinn_db::{
-    Database,
+    Database, UserRepository,
     error::{DbError, DbResult},
     repositories::note::{
         EmbeddedNote, EmbeddingQueryContext, NoteEmbeddingMatch, NoteEmbeddingProvider,
@@ -762,6 +762,25 @@ impl McpTestHarness {
     /// name-keyed match against the `#[tool_router]` methods — so what tests
     /// assert on is the live tool surface, not a bespoke test router.
     pub async fn call_tool(&self, name: &str, args: Value) -> Result<Value> {
+        if name == "task_create" {
+            let github_id = (uuid::Uuid::now_v7().as_u128() % i64::MAX as u128) as i64;
+            let user = UserRepository::new(self.db.clone())
+                .upsert_from_github(
+                    github_id,
+                    &format!("mcp-test-harness-{github_id}"),
+                    None,
+                    None,
+                )
+                .await?;
+            return djinn_core::auth_context::SESSION_USER_ID
+                .scope(Some(user.id), async {
+                    self.server
+                        .dispatch_tool(name, args)
+                        .await
+                        .map_err(|e| anyhow!("call_tool({name}) failed: {e}"))
+                })
+                .await;
+        }
         self.server
             .dispatch_tool(name, args)
             .await

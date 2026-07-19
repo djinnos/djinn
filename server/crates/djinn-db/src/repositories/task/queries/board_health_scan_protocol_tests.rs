@@ -72,7 +72,7 @@ async fn evaluate_pass_with_query_tracking(
 async fn multi_page_high_water_and_behind_cursor_changes_are_deferred_to_next_pass() {
     let (db, repo, project) = setup_repo().await;
     let behind = repo
-        .create_in_project(
+        .create_fixture_in_project(
             &project, None, "behind", "ordinary", "", "task", 0, "", None, None,
         )
         .await
@@ -217,7 +217,7 @@ async fn ten_thousand_candidates_finish_in_forty_bounded_pages_under_two_minutes
 
 async fn candidate(repo: &TaskRepository, db: &Database, project: &str, title: &str) -> String {
     let task = repo
-        .create_in_project(
+        .create_fixture_in_project(
             project,
             None,
             title,
@@ -310,7 +310,7 @@ async fn empty_pass_restart_preserves_identity_then_completion_resets() {
 async fn pages_are_bounded_retryable_guarded_fenced_and_reset_for_behind_cursor_rows() {
     let (db, repo, project) = setup_repo().await;
     let behind = repo
-        .create_in_project(
+        .create_fixture_in_project(
             &project, None, "behind", "ordinary", "", "task", 0, "", None, None,
         )
         .await

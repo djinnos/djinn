@@ -12,7 +12,7 @@ use djinn_core::clock::{Clock, SystemClock};
 use djinn_core::models::IssueType;
 use djinn_core::models::task::{PRIORITY_CRITICAL, PROPOSAL_REVIEW_TITLE_PREFIX};
 use djinn_db::repositories::proposal::TerminalLinkedEvidenceSpikeOutcome;
-use djinn_db::{EpicRepository, ProposalRepository};
+use djinn_db::{EffectiveCreatorProvenance, EpicRepository, ProposalRepository};
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -458,9 +458,14 @@ impl CoordinatorActor {
         .to_string();
 
         match task_repo
-            .create_in_project(
+            .create_in_project_with_provenance(
                 &home_project_id,
                 None,
+                EffectiveCreatorProvenance {
+                    explicit_user_id: proposal.build_owner_user_id.as_deref(),
+                    source_task_id: None,
+                    proposal_id: Some(&proposal.id),
+                },
                 &title,
                 &design,
                 &design,
@@ -473,11 +478,6 @@ impl CoordinatorActor {
             .await
         {
             Ok(task) => {
-                // Attribute to the build owner so any new epics/commits resolve
-                // to a real account (mirrors graduation and proposal review).
-                if let Some(owner) = proposal.build_owner_user_id.as_deref() {
-                    let _ = task_repo.set_created_by_user_id(&task.id, owner).await;
-                }
                 tracing::info!(
                     proposal_id = %proposal.id,
                     proposal_short_id = %proposal.short_id,
@@ -679,9 +679,14 @@ impl CoordinatorActor {
         .to_string();
 
         match task_repo
-            .create_in_project(
+            .create_in_project_with_provenance(
                 &home_project_id,
                 None,
+                EffectiveCreatorProvenance {
+                    explicit_user_id: proposal.build_owner_user_id.as_deref(),
+                    source_task_id: None,
+                    proposal_id: Some(&proposal.id),
+                },
                 &title,
                 &design,
                 &design,
@@ -694,11 +699,6 @@ impl CoordinatorActor {
             .await
         {
             Ok(task) => {
-                // Attribute to the build owner so any new epics/commits resolve
-                // to a real account (mirrors graduation).
-                if let Some(owner) = proposal.build_owner_user_id.as_deref() {
-                    let _ = task_repo.set_created_by_user_id(&task.id, owner).await;
-                }
                 tracing::info!(
                     proposal_id = %proposal.id,
                     proposal_short_id = %proposal.short_id,
@@ -834,9 +834,14 @@ impl CoordinatorActor {
     ) {
         let title = format!("Plan next wave ({trigger})");
         match task_repo
-            .create_in_project(
+            .create_in_project_with_provenance(
                 project_id,
                 Some(epic_id),
+                EffectiveCreatorProvenance {
+                    explicit_user_id: None,
+                    source_task_id: None,
+                    proposal_id: None,
+                },
                 &title,
                 "Plan the next wave of work for this epic. Review completed work, update the roadmap, and create 3–5 tasks.",
                 "",
@@ -1105,26 +1110,56 @@ mod tests {
         )
     }
 
+    async fn make_fixture_user(db: &Database, purpose: &str) -> djinn_db::User {
+        let fixture_key = uuid::Uuid::now_v7();
+        let mut github_id_bytes = [0_u8; 8];
+        github_id_bytes.copy_from_slice(&fixture_key.as_bytes()[8..]);
+        let github_id = i64::from_be_bytes(github_id_bytes) & i64::MAX;
+        djinn_db::UserRepository::new(db.clone())
+            .upsert_from_github(
+                github_id,
+                &format!("rules-{purpose}-{fixture_key}"),
+                Some("rules coordinator fixture owner"),
+                None,
+            )
+            .await
+            .expect("create persisted rules fixture owner")
+    }
+
+    async fn set_building_with_fixture_owner(
+        db: &Database,
+        proposal_repo: &djinn_db::ProposalRepository,
+        proposal_id: &str,
+    ) -> djinn_db::Result<djinn_core::models::Proposal> {
+        let owner = make_fixture_user(db, "proposal-build-owner").await;
+        proposal_repo.set_building(proposal_id, &owner.id).await
+    }
+
     async fn make_epic(
         db: &Database,
         project_id: &str,
         tx: &broadcast::Sender<DjinnEventEnvelope>,
     ) -> djinn_core::models::Epic {
-        EpicRepository::new(db.clone(), crate::events::event_bus_for(tx))
-            .create_for_project(
-                project_id,
-                djinn_db::EpicCreateInput {
-                    title: "Test Epic",
-                    description: "",
-                    emoji: "",
-                    color: "",
-                    owner: "",
-                    memory_refs: None,
-                    status: Some("open"),
-                    auto_breakdown: None,
-                    originating_adr_id: None,
-                    blocked_by: None,
-                },
+        let owner = make_fixture_user(db, "epic-owner").await;
+        djinn_core::auth_context::SESSION_USER_ID
+            .scope(
+                Some(owner.id),
+                EpicRepository::new(db.clone(), crate::events::event_bus_for(tx))
+                    .create_for_project(
+                        project_id,
+                        djinn_db::EpicCreateInput {
+                            title: "Test Epic",
+                            description: "",
+                            emoji: "",
+                            color: "",
+                            owner: "",
+                            memory_refs: None,
+                            status: Some("open"),
+                            auto_breakdown: None,
+                            originating_adr_id: None,
+                            blocked_by: None,
+                        },
+                    ),
             )
             .await
             .unwrap()
@@ -1139,7 +1174,7 @@ mod tests {
         tx: &broadcast::Sender<DjinnEventEnvelope>,
     ) -> djinn_core::models::Task {
         TaskRepository::new(db.clone(), crate::events::event_bus_for(tx))
-            .create_in_project(
+            .create_fixture_in_project(
                 project_id,
                 Some(epic_id),
                 title,
@@ -1778,8 +1813,7 @@ mod tests {
             .link_epic(&proposal.id, &e2.id, &project.id)
             .await
             .unwrap();
-        proposal_repo
-            .set_building(&proposal.id, "user-x")
+        set_building_with_fixture_owner(&db, &proposal_repo, &proposal.id)
             .await
             .unwrap();
 
@@ -1845,8 +1879,7 @@ mod tests {
             .link_epic(&proposal.id, &e1.id, &project.id)
             .await
             .unwrap();
-        proposal_repo
-            .set_building(&proposal.id, "user-x")
+        set_building_with_fixture_owner(&db, &proposal_repo, &proposal.id)
             .await
             .unwrap();
         epic_repo.close(&e1.id).await.unwrap();
@@ -1910,8 +1943,7 @@ mod tests {
             .link_epic(&proposal.id, &epic.id, &project.id)
             .await
             .unwrap();
-        let building = proposal_repo
-            .set_building(&proposal.id, "user-x")
+        let building = set_building_with_fixture_owner(&db, &proposal_repo, &proposal.id)
             .await
             .unwrap();
 
@@ -1971,8 +2003,7 @@ mod tests {
             .link_epic(&proposal.id, &epic.id, &project.id)
             .await
             .unwrap();
-        let building = proposal_repo
-            .set_building(&proposal.id, "user-x")
+        let building = set_building_with_fixture_owner(&db, &proposal_repo, &proposal.id)
             .await
             .unwrap();
 
@@ -2053,8 +2084,7 @@ mod tests {
             .link_epic(&proposal.id, &epic.id, &project.id)
             .await
             .unwrap();
-        let building = proposal_repo
-            .set_building(&proposal.id, "user-x")
+        let building = set_building_with_fixture_owner(&db, &proposal_repo, &proposal.id)
             .await
             .unwrap();
 
@@ -2160,8 +2190,7 @@ mod tests {
             .link_epic(&clean.id, &epic.id, &project.id)
             .await
             .unwrap();
-        let clean_building = proposal_repo
-            .set_building(&clean.id, "user-x")
+        let clean_building = set_building_with_fixture_owner(&db, &proposal_repo, &clean.id)
             .await
             .unwrap();
 
@@ -2371,7 +2400,7 @@ mod tests {
             .unwrap();
 
         let breakdown = task_repo
-            .create_in_project(
+            .create_fixture_in_project(
                 &project.id,
                 None,
                 &format!("Break down proposal: {}", proposal.title),
@@ -2495,8 +2524,7 @@ mod tests {
             .add_target(&proposal.id, &project.id, "primary")
             .await
             .unwrap();
-        let building = proposal_repo
-            .set_building(&proposal.id, "user-x")
+        let building = set_building_with_fixture_owner(&db, &proposal_repo, &proposal.id)
             .await
             .unwrap();
 

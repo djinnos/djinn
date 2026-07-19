@@ -30,7 +30,7 @@ expression: task_list
       "close_reason": null,
       "merge_commit_sha": null,
       "unresolved_blocker_count": 0,
-      "created_by_user_id": null,
+      "created_by_user_id": "[UUID]",
       "session_count": 0,
       "ci_status": "unknown",
       "ci_gate_state": "unknown"

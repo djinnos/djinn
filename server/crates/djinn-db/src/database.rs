@@ -647,6 +647,7 @@ fn is_safe_database_identifier(name: &str) -> bool {
 
 /// Workspace-local tempdir helper retained for tests that still stage
 /// on-disk fixtures (project filesystems, worktree mirrors, etc.).
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) fn test_tempdir() -> DbResult<tempfile::TempDir> {
     let base = workspace_test_tmp_dir()?;
     tempfile::Builder::new()
@@ -655,6 +656,7 @@ pub(crate) fn test_tempdir() -> DbResult<tempfile::TempDir> {
         .map_err(|e| DbError::InvalidData(e.to_string()))
 }
 
+#[cfg(any(test, feature = "test-support"))]
 fn workspace_test_tmp_dir() -> DbResult<std::path::PathBuf> {
     use std::path::PathBuf;
 
@@ -679,6 +681,7 @@ fn workspace_test_tmp_dir() -> DbResult<std::path::PathBuf> {
     Ok(fallback)
 }
 
+#[cfg(any(test, feature = "test-support"))]
 fn workspace_root_from_current_dir() -> Option<std::path::PathBuf> {
     let mut current = std::env::current_dir().ok()?;
 

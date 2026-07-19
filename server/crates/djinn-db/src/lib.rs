@@ -10,6 +10,7 @@ pub mod retry;
 pub mod short_id;
 mod template_bootstrap;
 
+#[cfg(any(test, feature = "test-support"))]
 pub mod test_support {
     pub use crate::repositories::test_support::{
         HousekeepingFixture, HousekeepingFixtureExpectedCounts, HousekeepingFixtureProject,
@@ -204,8 +205,8 @@ pub use repositories::{
     task::{
         ActivityQuery, BlockerRef, BoardHealthMismatchCandidate, ChildDisposition, CountQuery,
         CreateTaskInProjectParams, CreateTaskParams, DispositionCounts, DispositionFinding,
-        DispositionPlan, DispositionScope, ListQuery, ListResult, ReadyQuery, UpdateTaskParams,
-        evaluate_board_health_mismatch_candidate,
+        DispositionPlan, DispositionScope, EffectiveCreatorProvenance, ListQuery, ListResult,
+        ReadyQuery, UpdateTaskParams, evaluate_board_health_mismatch_candidate,
     },
     task_arbitration::{
         ArbitrationState, CreateArbitrationParams, TaskArbitrationRecord,

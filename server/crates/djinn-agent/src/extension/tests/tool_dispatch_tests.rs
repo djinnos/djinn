@@ -169,38 +169,43 @@ async fn call_tool_dispatches_task_create_with_public_response_shape() {
         .to_string_lossy()
         .into_owned();
     let epic = create_test_epic(&db, &project.id).await;
+    let creator = crate::test_helpers::create_test_creator(&db).await;
     let mut state = agent_context_from_db(db.clone(), CancellationToken::new());
     state.task_ops_project_path_override = Some(project_path.clone().into());
 
-    let response = call_tool(
-        &state,
-        &crate::test_helpers::test_services(),
-        "task_create",
-        Some(
-            serde_json::json!({
-                "epic_id": epic.short_id,
-                "title": "Dispatch-created task",
-                "description": "Created through extension dispatch",
-                "design": "Keep the response shape stable",
-                "priority": 3,
-                "owner": "planner",
-                "acceptance_criteria": ["first criterion"],
-                "memory_refs": ["decisions/adr-041-unified-tool-service-layer-in-djinn-mcp"],
-                "agent_type": "rust-expert"
-            })
-            .as_object()
-            .expect("task_create args object")
-            .clone(),
-        ),
-        Path::new(&project_path),
-        None,
-        Some("planner"),
-        None,
-        None,
-        &crate::extension::ToolCancellation::never(),
-    )
-    .await
-    .expect("task_create dispatch should succeed");
+    let response = djinn_core::auth_context::SESSION_USER_ID
+        .scope(
+            Some(creator.id),
+            call_tool(
+                &state,
+                &crate::test_helpers::test_services(),
+                "task_create",
+                Some(
+                    serde_json::json!({
+                        "epic_id": epic.short_id,
+                        "title": "Dispatch-created task",
+                        "description": "Created through extension dispatch",
+                        "design": "Keep the response shape stable",
+                        "priority": 3,
+                        "owner": "planner",
+                        "acceptance_criteria": ["first criterion"],
+                        "memory_refs": ["decisions/adr-041-unified-tool-service-layer-in-djinn-mcp"],
+                        "agent_type": "rust-expert"
+                    })
+                    .as_object()
+                    .expect("task_create args object")
+                    .clone(),
+                ),
+                Path::new(&project_path),
+                None,
+                Some("planner"),
+                None,
+                None,
+                &crate::extension::ToolCancellation::never(),
+            ),
+        )
+        .await
+        .expect("task_create dispatch should succeed");
 
     assert_eq!(
         response.get("title").and_then(|v| v.as_str()),
