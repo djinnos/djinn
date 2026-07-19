@@ -1,6 +1,6 @@
 // CLI binary: print!/eprintln! are the correct output channels for a
 // command-line tool, matching the established pattern across other djinn
-// binaries (e.g. `djinn-agent/src/bin/skills_manifest.rs`).
+// binaries.
 #![allow(clippy::print_stdout, clippy::print_stderr)]
 
 use std::{

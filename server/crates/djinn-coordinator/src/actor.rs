@@ -1537,6 +1537,10 @@ impl CoordinatorActor {
                     return;
                 };
                 if task.status == "closed" {
+                    // A cap-denied task has no runtime task-run to emit a terminal callback.
+                    if let Some(admission) = &self.build_admission {
+                        admission.cancel_deferred_task(&task.id).await;
+                    }
                     // Terminalize the live attempt when a task closes via a
                     // force-close path. Best-effort; does not block the event.
                     self.terminalize_force_close_attempt(&task).await;

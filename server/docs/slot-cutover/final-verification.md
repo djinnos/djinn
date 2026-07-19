@@ -991,7 +991,7 @@ agent-only types and call paths that the next supervisor-dispatch slice owns:
    task worktree, and memory context loading. Moving it safely requires a richer
    prompt-context callback/context seam rather than copying those host adapters.
 2. `mcp_resolve.rs` depends on agent `ResolvedSkill`, `native_skills`,
-   `skills_manifest`, `mcp_settings`, and `McpToolRegistry`. The host-independent
+   `mcp_settings`, and `McpToolRegistry`. The host-independent
    native-skill merge can move after `ResolvedSkill`/native skill assets have a
    canonical slot home; otherwise `djinn-slot` would need a second copy of the
    native registry.

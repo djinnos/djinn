@@ -268,7 +268,7 @@ pub(super) async fn dispatch_tool_call(
         }
 
         // ── Skill read (agent-local) ────────────────────────────────────
-        // Needs native_skills, skills_manifest, task lookup for session context.
+        // Needs native skills and repository-convention discovery for session context.
         "skill_read" => {
             let root = state.working_root_for(worktree_path);
             call_skill_read(&call.arguments, &root, state, session_role, session_task_id).await
@@ -297,8 +297,8 @@ pub(super) async fn dispatch_tool_call(
 /// Load the full content of an assigned skill on demand (G5 progressive
 /// disclosure).  For native skills (platform-owned, compiled-in), the body is
 /// served from the immutable native registry rather than the worktree.  For
-/// project/worktree skills, the body is resolved from `.djinn/skills/` (or
-/// `.claude/`, `.opencode/`) with manifest verification.
+/// project/worktree skills, the body is resolved read-only from `.claude/skills/`
+/// or `.opencode/skills/`.
 ///
 /// Native skills are only served when the session role has the skill assigned
 /// (i.e., the native skill is recommended for the role AND the session's
@@ -378,8 +378,7 @@ async fn call_skill_read(
     }
 
     // ── Project/worktree skill path ────────────────────────────────────────
-    let skill = crate::skills_manifest::load_verified_skills(worktree_root, &[name.to_string()])
-        .map_err(|err| format!("skill_read refused to serve `{name}`: {err}"))?
+    let skill = crate::skills::load_skills(worktree_root, &[name.to_string()])
         .into_iter()
         .next()
         .ok_or_else(|| format!("unknown skill `{name}`: not an assigned skill for this session"))?;
