@@ -526,6 +526,7 @@ struct ReuseProbe {
     evidence: Mutex<Option<FinalVerificationExecutionEvidence>>,
     mutate_before_c1: bool,
     failure: Option<FinalVerificationConsultationFailure>,
+    require_workspace_path: bool,
     consultation_outcomes: Mutex<Vec<(&'static str, &'static str)>>,
 }
 
@@ -572,9 +573,26 @@ impl CompletionIntentCallbacks {
                 evidence: Mutex::new(evidence),
                 mutate_before_c1,
                 failure,
+                require_workspace_path: false,
                 consultation_outcomes: Mutex::new(Vec::new()),
             }),
         }
+    }
+
+    /// Model the configured production resolver's task-run worktree precondition
+    /// while retaining the reusable material/executor probe used by C2 tests.
+    pub(crate) fn for_reuse_requiring_workspace(
+        expected_task_id: String,
+        material: FinalVerificationResolvedMaterial,
+    ) -> Self {
+        let mut callbacks =
+            Self::for_reuse_with_evidence(expected_task_id, material, None, false, None);
+        callbacks
+            .reuse_probe
+            .as_mut()
+            .expect("reuse probe")
+            .require_workspace_path = true;
+        callbacks
     }
 
     fn coordinator_count(&self) -> usize {
@@ -661,10 +679,10 @@ impl SlotHostCallbacks for CompletionIntentCallbacks {
     fn resolve_final_verification<'a>(
         &'a self,
         _task_id: &'a str,
-        _task_run_id: &'a str,
+        task_run_id: &'a str,
         _verification_attempt_id: &'a str,
         verify_run_id: &'a str,
-        _ctx: &'a SlotContext,
+        ctx: &'a SlotContext,
     ) -> Pin<
         Box<
             dyn Future<Output = Result<Option<FinalVerificationResolvedMaterial>, String>>
@@ -690,6 +708,18 @@ impl SlotHostCallbacks for CompletionIntentCallbacks {
                     "changed",
                 )
                 .map_err(|error| error.to_string())?;
+            }
+            if probe.require_workspace_path {
+                let task_run = TaskRunRepository::new(ctx.db.clone())
+                    .get(task_run_id)
+                    .await
+                    .map_err(|error| error.to_string())?
+                    .ok_or_else(|| {
+                        "task run disappeared during configured resolution".to_owned()
+                    })?;
+                if task_run.workspace_path.is_none() {
+                    return Err("task run has no worktree".to_owned());
+                }
             }
             if verify_run_id != "reuse-c0" && verify_run_id != "reuse-c1" {
                 let fingerprint = match compute_verification_input_fingerprint_with_config(
