@@ -1844,9 +1844,19 @@ async fn frozen_two_actor_schedule_serializes_warm_work_and_pressure_retry() {
         // Match the production worker lock identity rather than coordinator adapter.
         let lock_dir = root.join(".warm-locks").join(&id);
         std::fs::create_dir_all(&lock_dir).unwrap();
-        let worker_lock = std::fs::OpenOptions::new().read(true).write(true).create(true)
-            .open(lock_dir.join(format!("mold-jobs-{mold_jobs}.lock"))).unwrap();
-        let rc = unsafe { libc::flock(std::os::fd::AsRawFd::as_raw_fd(&worker_lock), libc::LOCK_EX | libc::LOCK_NB) };
+        let worker_lock = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(lock_dir.join(format!("mold-jobs-{mold_jobs}.lock")))
+            .unwrap();
+        let rc = unsafe {
+            libc::flock(
+                std::os::fd::AsRawFd::as_raw_fd(&worker_lock),
+                libc::LOCK_EX | libc::LOCK_NB,
+            )
+        };
         assert_eq!(rc, 0, "warm actor acquires production variant lock");
         observe(djinn_agent_worker::cargo_incremental_prune::WarmWorkPhase::TraversalEnter);
         std::fs::create_dir_all(base.join("debug/incremental")).unwrap();

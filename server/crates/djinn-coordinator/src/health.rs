@@ -851,7 +851,6 @@ mod output_stash_gc_tests {
 /// Matches `djinn_agent_worker::cargo_target_seed::WARM_BASE_ROOT`.
 const WARM_BASE_ROOT: &str = "/cache/cargo-target";
 
-
 /// Per-variant cargo cache health summary.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct CargoCacheProjectHealth {
@@ -887,31 +886,68 @@ async fn sweep_cargo_health_under(warm_base_root: &Path) {
             health.seed_hit_count = *hits;
             health.cold_fallback_count = *colds;
         }
-        let seed_hit_rate = compute_seed_hit_rate(health.seed_hit_count, health.cold_fallback_count);
+        let seed_hit_rate =
+            compute_seed_hit_rate(health.seed_hit_count, health.cold_fallback_count);
         tracing::info!(project_id = %health.project_id, mold_jobs = health.mold_jobs, seed_hit_rate, cold_fallback_count = health.cold_fallback_count, warm_base_age_seconds = ?health.warm_base_age_seconds, "cargo cache health");
     }
 }
 
 /// Inventory only direct canonical `UUID/mold-jobs-N` directories. Legacy,
 /// malformed, and symlinked entries are deliberately not health substitutes.
-fn inventory_cargo_cache_health_under(root: &Path, now: u64) -> std::io::Result<Vec<CargoCacheProjectHealth>> {
+fn inventory_cargo_cache_health_under(
+    root: &Path,
+    now: u64,
+) -> std::io::Result<Vec<CargoCacheProjectHealth>> {
     let mut healths = Vec::new();
     for project in std::fs::read_dir(root)? {
         let Ok(project) = project else { continue };
-        if !project.file_type().is_ok_and(|kind| kind.is_dir()) { continue; }
-        let Some(project_id) = project.file_name().to_str().map(str::to_owned) else { continue; };
-        let Ok(uuid) = uuid::Uuid::parse_str(&project_id) else { continue; };
-        if uuid.to_string() != project_id { continue; }
-        let Ok(variants) = std::fs::read_dir(project.path()) else { continue; };
+        if !project.file_type().is_ok_and(|kind| kind.is_dir()) {
+            continue;
+        }
+        let Some(project_id) = project.file_name().to_str().map(str::to_owned) else {
+            continue;
+        };
+        let Ok(uuid) = uuid::Uuid::parse_str(&project_id) else {
+            continue;
+        };
+        if uuid.to_string() != project_id {
+            continue;
+        }
+        let Ok(variants) = std::fs::read_dir(project.path()) else {
+            continue;
+        };
         for variant in variants {
             let Ok(variant) = variant else { continue };
-            if !variant.file_type().is_ok_and(|kind| kind.is_dir()) { continue; }
-            let Some(mold_jobs) = variant.file_name().to_str().and_then(canonical_mold_jobs_name) else { continue; };
-            let age = variant.metadata().ok().and_then(|m| m.modified().ok()).and_then(|m| m.duration_since(std::time::UNIX_EPOCH).ok()).map(|m| now.saturating_sub(m.as_secs()));
-            healths.push(CargoCacheProjectHealth { project_id: project_id.clone(), mold_jobs, seed_hit_count: 0, cold_fallback_count: 0, warm_base_age_seconds: age });
+            if !variant.file_type().is_ok_and(|kind| kind.is_dir()) {
+                continue;
+            }
+            let Some(mold_jobs) = variant
+                .file_name()
+                .to_str()
+                .and_then(canonical_mold_jobs_name)
+            else {
+                continue;
+            };
+            let age = variant
+                .metadata()
+                .ok()
+                .and_then(|m| m.modified().ok())
+                .and_then(|m| m.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|m| now.saturating_sub(m.as_secs()));
+            healths.push(CargoCacheProjectHealth {
+                project_id: project_id.clone(),
+                mold_jobs,
+                seed_hit_count: 0,
+                cold_fallback_count: 0,
+                warm_base_age_seconds: age,
+            });
         }
     }
-    healths.sort_by(|a, b| a.project_id.cmp(&b.project_id).then(a.mold_jobs.cmp(&b.mold_jobs)));
+    healths.sort_by(|a, b| {
+        a.project_id
+            .cmp(&b.project_id)
+            .then(a.mold_jobs.cmp(&b.mold_jobs))
+    });
     Ok(healths)
 }
 
@@ -983,6 +1019,7 @@ fn parse_seed_metrics_from_text(rendered: &str) -> Vec<(String, u64, u64)> {
 
 /// Compute the age (in seconds) of a warm-base directory from its mtime.
 /// Returns `None` if the directory metadata cannot be read.
+#[cfg(test)]
 async fn compute_warm_base_age_secs(dir: &Path, now_unix_secs: u64) -> Option<u64> {
     let metadata = tokio::fs::metadata(dir).await.ok()?;
     let modified = metadata.modified().ok()?;
@@ -1122,13 +1159,25 @@ mod cargo_cache_health_tests {
         let tmp = tempfile::TempDir::new().unwrap();
         let project = "018f8b9a-0d70-7f0a-8000-000000000099";
         let root = tmp.path();
-        for name in ["mold-jobs-1", "mold-jobs-4", "mold-jobs-7", "mold-jobs-0", "mold-jobs-01"] {
+        for name in [
+            "mold-jobs-1",
+            "mold-jobs-4",
+            "mold-jobs-7",
+            "mold-jobs-0",
+            "mold-jobs-01",
+        ] {
             std::fs::create_dir_all(root.join(project).join(name)).unwrap();
         }
         std::fs::create_dir_all(root.join("legacy-project").join("mold-jobs-1")).unwrap();
         std::fs::create_dir_all(root.join(project).join("legacy-unkeyed")).unwrap();
         let entries = inventory_cargo_cache_health_under(root, 1_700_000_000).unwrap();
-        assert_eq!(entries.iter().map(|entry| (entry.project_id.as_str(), entry.mold_jobs)).collect::<Vec<_>>(), vec![(project, 1), (project, 4), (project, 7)]);
+        assert_eq!(
+            entries
+                .iter()
+                .map(|entry| (entry.project_id.as_str(), entry.mold_jobs))
+                .collect::<Vec<_>>(),
+            vec![(project, 1), (project, 4), (project, 7)]
+        );
     }
 }
 

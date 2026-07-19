@@ -78,7 +78,10 @@ async fn idle_eviction_deletes_only_the_selected_mold_variant() {
     )
     .await;
     assert_eq!(result.deleted[0].mold_jobs, 1);
-    assert_eq!(locks.attempts.lock().unwrap().as_slice(), &[one.clone()]);
+    assert_eq!(
+        locks.attempts.lock().unwrap().as_slice(),
+        std::slice::from_ref(&one)
+    );
     assert!(!one.exists());
     assert!(
         four.exists(),
