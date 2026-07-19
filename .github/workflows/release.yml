@@ -151,7 +151,41 @@ jobs:
             type=semver,pattern={{major}}.{{minor}}
             type=raw,value=${{ inputs.tag }},enable=${{ inputs.tag != '' }}
           flavor: latest=auto
-      - uses: docker/build-push-action@v6
+      - name: Build runtime-base locally
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: server/docker/djinn-agent-runtime-base.Dockerfile
+          platforms: linux/amd64
+          load: true
+          tags: djinn-agent-runtime-base:validation
+          cache-from: type=gha,scope=djinn-agent-runtime-base
+          cache-to: type=gha,scope=djinn-agent-runtime-base,mode=max
+      - name: Build representative generated Rust image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: scripts/image-ci/generated-rust.Dockerfile
+          platforms: linux/amd64
+          load: true
+          tags: djinn-generated-rust:validation
+      - name: Validate mold compatibility for both installation paths
+        run: |
+          set -euo pipefail
+          mkdir -p evidence/runtime-base evidence/generated-rust
+          docker run --rm -v "$PWD:/validation" --entrypoint bash djinn-agent-runtime-base:validation /validation/scripts/image-ci/probe-mold-compatibility.sh --evidence-dir /validation/evidence/runtime-base
+          docker run --rm -v "$PWD:/validation" --entrypoint bash djinn-generated-rust:validation /validation/scripts/image-ci/probe-mold-compatibility.sh --evidence-dir /validation/evidence/generated-rust
+      - name: Run runtime-base mold thread-cap smoke
+        run: docker run --rm -v "$PWD:/validation" --entrypoint bash djinn-agent-runtime-base:validation /validation/scripts/image-ci/run-mold-thread-smoke.sh --threads 4 --evidence-dir /validation/evidence/runtime-base
+      - name: Upload mold image validation evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mold-image-validation-evidence
+          path: evidence
+          if-no-files-found: warn
+      - name: Publish validated runtime-base image
+        uses: docker/build-push-action@v6
         with:
           context: .
           file: server/docker/djinn-agent-runtime-base.Dockerfile
@@ -159,8 +193,6 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          # Heavy image (LSP tarballs, rustup, apt). GHA cache amortises
-          # cold runs — a no-op Dockerfile edit finishes in ~30s vs. 8min.
           cache-from: type=gha,scope=djinn-agent-runtime-base
           cache-to: type=gha,scope=djinn-agent-runtime-base,mode=max
 

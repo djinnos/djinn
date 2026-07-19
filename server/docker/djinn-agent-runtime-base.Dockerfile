@@ -168,6 +168,11 @@ RUN groupadd --system --gid 10001 djinn \
 # docker-run env (LocalDockerRuntime) if a task needs per-task-specific
 # overrides (notably DJINN_IPC_SOCKET).
 #
+# Mold 2.37's documented `--threads=COUNT` semantics mean COUNT is the total
+# number of linker threads. Keep this an explicit build-time input: deriving it
+# from host CPU topology would make local task images nondeterministic.
+ARG MOLD_THREADS=4
+#
 # Notes:
 #   - CARGO_HOME points at /cache/cargo (registry + git fetch cache survive
 #     across tasks). Rustup itself lives under /usr/local/cargo, and
@@ -189,5 +194,5 @@ ENV CARGO_HOME=/cache/cargo \
     RUSTC_WRAPPER=sccache \
     SCCACHE_DIR=/cache/sccache \
     SCCACHE_CACHE_SIZE=10G \
-    CARGO_BUILD_RUSTFLAGS=-Clink-arg=-fuse-ld=mold \
+    CARGO_BUILD_RUSTFLAGS="-Clink-arg=-fuse-ld=mold -Clink-arg=-Wl,--threads=${MOLD_THREADS}" \
     PATH=/usr/local/cargo/bin:/opt/node/bin:/usr/local/bin:/usr/bin:/bin
