@@ -69,9 +69,17 @@ pub struct SharedWarmBaseLock;
 
 impl BaseLock for SharedWarmBaseLock {
     fn try_lock(&self, path: &Path) -> Result<Option<Box<dyn LockGuard>>, String> {
-        let mold_jobs = canonical_mold_jobs_name(path.file_name().and_then(|name| name.to_str()).ok_or("invalid mold-job variant")?).ok_or("invalid mold-job variant")?;
+        let mold_jobs = canonical_mold_jobs_name(
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .ok_or("invalid mold-job variant")?,
+        )
+        .ok_or("invalid mold-job variant")?;
         let project_dir = path.parent().ok_or("variant has no project directory")?;
-        let project_id = project_dir.file_name().and_then(|name| name.to_str()).ok_or("invalid project id")?;
+        let project_id = project_dir
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or("invalid project id")?;
         let parsed = Uuid::parse_str(project_id).map_err(|_| "invalid project id")?;
         if parsed.to_string() != project_id {
             return Err("invalid project id".into());

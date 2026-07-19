@@ -1443,7 +1443,11 @@ fn inventory_returns_each_canonical_mold_variant_without_substitution() {
         inventory
             .entries
             .iter()
-            .map(|entry| (entry.project_id.as_str(), entry.mold_jobs, entry.path.file_name().unwrap()))
+            .map(|entry| (
+                entry.project_id.as_str(),
+                entry.mold_jobs,
+                entry.path.file_name().unwrap()
+            ))
             .collect::<Vec<_>>(),
         vec![
             (id, 1, std::ffi::OsStr::new("mold-jobs-1")),
@@ -1465,18 +1469,40 @@ async fn idle_eviction_deletes_only_the_selected_mold_variant() {
     std::fs::create_dir_all(&four).expect("four");
     std::fs::write(one.join("artifact"), b"one").unwrap();
     std::fs::write(four.join("artifact"), b"four").unwrap();
-    filetime::set_file_mtime(&one, filetime::FileTime::from_system_time(SystemTime::UNIX_EPOCH)).unwrap();
+    filetime::set_file_mtime(
+        &one,
+        filetime::FileTime::from_system_time(SystemTime::UNIX_EPOCH),
+    )
+    .unwrap();
     let inventory = inventory_under(temp.path()).unwrap();
-    let selected = inventory.entries.into_iter().find(|entry| entry.mold_jobs == 1).unwrap();
-    let locks = RecordingBaseLock { attempts: std::sync::Mutex::new(Vec::new()), succeed: true };
+    let selected = inventory
+        .entries
+        .into_iter()
+        .find(|entry| entry.mold_jobs == 1)
+        .unwrap();
+    let locks = RecordingBaseLock {
+        attempts: std::sync::Mutex::new(Vec::new()),
+        succeed: true,
+    };
     let result = evict_idle_warm_bases(
-        WarmBaseInventory { entries: vec![selected], ignored: 0 },
-        &Activity(Ok(snapshot())), &Warm(Ok(false)), &locks, &default_config(),
+        WarmBaseInventory {
+            entries: vec![selected],
+            ignored: 0,
+        },
+        &Activity(Ok(snapshot())),
+        &Warm(Ok(false)),
+        &locks,
+        &default_config(),
         &TestClock::new(future(15), std::time::Instant::now()),
-        crate::context::CacheCleanupMode::Delete, temp.path(),
-    ).await;
+        crate::context::CacheCleanupMode::Delete,
+        temp.path(),
+    )
+    .await;
     assert_eq!(result.deleted[0].mold_jobs, 1);
     assert_eq!(locks.attempts.lock().unwrap().as_slice(), &[one.clone()]);
     assert!(!one.exists());
-    assert!(four.exists(), "evicting mold-jobs-1 must not substitute mold-jobs-4");
+    assert!(
+        four.exists(),
+        "evicting mold-jobs-1 must not substitute mold-jobs-4"
+    );
 }

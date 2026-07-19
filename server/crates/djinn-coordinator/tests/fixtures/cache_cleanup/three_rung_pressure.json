@@ -2,7 +2,7 @@
   "contract": "frozen coordinator three-rung pressure schedule",
   "rung_order": ["incremental", "stale_profile", "whole_base"],
   "dry_run": {"locks": 0, "rechecks": 0, "removals": 0, "plan_units": ["incremental", "stale_profile", "whole_base"]},
-  "delete": {"lock_path": ".warm-locks/<project-id>.lock", "fail_closed": true, "plan_units": ["incremental", "stale_profile", "whole_base"], "outcomes": {"planned": 3, "eligible": 3, "attempted": 3, "deleted": 3, "retained": 0, "failed": 0}},
+  "delete": {"lock_path": ".warm-locks/<project-id>-mold-jobs-1.lock", "fail_closed": true, "plan_units": ["incremental", "stale_profile", "whole_base"], "outcomes": {"planned": 3, "eligible": 3, "attempted": 3, "deleted": 3, "retained": 0, "failed": 0}},
   "cold_rebuild_cases": [
     {"name": "incremental", "removed": "debug/incremental", "preserved": ["debug/sibling", "release/artifact"], "rebuild": "debug/incremental/rebuilt"},
     {"name": "stale_profile", "removed": "debug", "preserved": ["release/artifact", "base-sibling"], "rebuild": "debug/rebuilt"},
@@ -25,7 +25,7 @@
     {"name": "post_measurement_failure", "capacity_calls": 2, "planned": 2, "attempted": 1, "deleted": 1, "retained": 1, "failed": 1, "removal_calls": 1, "termination": "remeasure_failed"}
   ],
   "two_actor": {
-    "lock_path": ".warm-locks/<project-id>.lock",
+    "lock_path": ".warm-locks/<project-id>-mold-jobs-1.lock",
     "timeline": ["warm_lock", "warm_traverse", "warm_compile", "pressure_busy", "warm_process_death", "pressure_lock", "pressure_traverse", "pressure_remove", "pressure_retry_complete"],
     "overlap": {"traversal": 0, "removal": 0, "compilation": 0},
     "loser_removals": 0,
