@@ -69,6 +69,41 @@ pub(crate) async fn create_run_with_workspace(
     id
 }
 
+/// Create the exact row shape emitted by k8s dispatch, then model the in-pod
+/// transition that durably records the clone path before completion handling.
+pub(crate) async fn create_k8s_run_then_persist_workspace(
+    db: &djinn_db::Database,
+    project_id: &str,
+    task_id: &str,
+    workspace_path: &str,
+) -> String {
+    let run_id = create_run_with_workspace(db, project_id, task_id, None).await;
+    let runs = TaskRunRepository::new(db.clone());
+    assert_eq!(
+        runs.get(&run_id)
+            .await
+            .expect("load k8s-shaped task run")
+            .expect("k8s-shaped task run exists")
+            .workspace_path,
+        None,
+        "k8s dispatch inserts workspace_path = NULL"
+    );
+    runs.set_workspace_path(&run_id, workspace_path)
+        .await
+        .expect("in-pod worker persists workspace path");
+    assert_eq!(
+        runs.get(&run_id)
+            .await
+            .expect("reload persisted task run")
+            .expect("persisted task run exists")
+            .workspace_path
+            .as_deref(),
+        Some(workspace_path),
+        "configured completion resolution uses the persisted in-pod path"
+    );
+    run_id
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn rejected_review_records_fingerprint_when_worktree_has_diff() {
     let crate::test_helpers::ContextFixture {
@@ -1002,11 +1037,11 @@ async fn assert_after_c1_mutation_reverifies_before_completion(
     let project = test_helpers::create_test_project(&db).await;
     let epic = test_helpers::create_test_epic(&db, &project.id).await;
     let task = test_helpers::create_test_task(&db, &project.id, &epic.id).await;
-    create_run_with_workspace(
+    create_k8s_run_then_persist_workspace(
         &db,
         &project.id,
         &task.id,
-        Some(worktree.path().to_str().unwrap()),
+        worktree.path().to_str().unwrap(),
     )
     .await;
     let attempt_id = uuid::Uuid::now_v7().to_string();
@@ -1025,6 +1060,7 @@ async fn assert_after_c1_mutation_reverifies_before_completion(
         finalize_payload: serde_json::json!({"task_id":task.id,"commit_title":"C2","summary":"C2","files_changed":[],"remaining_concerns":[]}),
         tool_use_id: "C1".into(),
         final_verification_evidence: Some(stale),
+        final_verification_disposition: crate::output_parser::FinalVerificationDisposition::Pending,
     };
     // Lease succeeds; canonical execution then returns failed current evidence.
     let mut failed_execution = fallback_evidence(&material, c2.clone(), identity.clone());

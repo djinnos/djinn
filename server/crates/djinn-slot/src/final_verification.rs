@@ -25,7 +25,7 @@ use time::format_description::well_known::Rfc3339;
 use tokio_util::sync::CancellationToken;
 
 use crate::host::SlotContext;
-use crate::output_parser::CompletionIntent;
+use crate::output_parser::{CompletionIntent, FinalVerificationDisposition};
 
 /// Material the host resolves from the current canonical plan, manifest, and
 /// environment. It is intentionally an execution request rather than a second
@@ -135,6 +135,12 @@ pub(crate) async fn verify_completion_intent(
     slot_ctx: &SlotContext,
     submit_tool_label: &str,
 ) -> Result<Option<FinalVerificationSuccessEvidence>, String> {
+    // C1 made this typed decision before any reuse consultation. The legacy
+    // path has no evidence by design, so inspecting `Option` here would reopen
+    // the coordinator and emit a duplicate audit outcome.
+    if intent.final_verification_disposition == FinalVerificationDisposition::NotConfigured {
+        return Ok(None);
+    }
     let task_run_id = match task_run_id {
         Some(task_run_id) => task_run_id.to_owned(),
         None => {
@@ -165,6 +171,7 @@ pub(crate) async fn verify_completion_intent(
         | FinalVerificationRecordingOutcome::Reused { evidence, .. } => {
             let evidence = *evidence;
             intent.final_verification_evidence = Some(evidence.clone());
+            intent.final_verification_disposition = FinalVerificationDisposition::Pending;
             Ok(Some(evidence))
         }
         FinalVerificationRecordingOutcome::NotConfigured { .. } => {
@@ -172,6 +179,7 @@ pub(crate) async fn verify_completion_intent(
             // completion boundary has nothing to enforce. Proceed with no
             // evidence — never synthesize a success record.
             intent.final_verification_evidence = None;
+            intent.final_verification_disposition = FinalVerificationDisposition::NotConfigured;
             tracing::info!(
                 task_id = %task_id,
                 submit_tool = %submit_tool_label,

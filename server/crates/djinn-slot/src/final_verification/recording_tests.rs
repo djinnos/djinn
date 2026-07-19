@@ -804,6 +804,7 @@ async fn unconfigured_plan_is_typed_skip_and_submission_proceeds_without_evidenc
         finalize_payload: serde_json::json!({}),
         tool_use_id: "finalize-tool-use".to_owned(),
         final_verification_evidence: None,
+        final_verification_disposition: crate::output_parser::FinalVerificationDisposition::Pending,
     };
     let proceed = verify_completion_intent(
         &mut intent,
@@ -1308,26 +1309,17 @@ async fn assert_unconfigured_pod_counters(
 #[tokio::test]
 async fn pod_unconfigured_plan_model_submit_work_finalizes_via_legacy_skip() {
     let (ctx, request, probe) = pod_rig(PodProbe::unconfigured()).await;
-    let outcome = coordinate_final_verification(request.clone(), &ctx).await;
-    assert!(
-        matches!(
-            outcome,
-            FinalVerificationRecordingOutcome::NotConfigured { .. }
-        ),
-        "unconfigured plan must produce the typed skip, got {outcome:?}"
-    );
-    assert_eq!(
-        probe.events.lock().unwrap().clone(),
-        vec!["resolve"],
-        "the plan must be resolved exactly once before returning the skip"
-    );
-    assert_unconfigured_pod_counters(&ctx, &request, &probe).await;
-
-    // The completion-intent boundary maps the skip to Ok(None) — no evidence.
     let mut intent = crate::output_parser::CompletionIntent {
-        finalize_payload: serde_json::json!({}),
+        finalize_payload: serde_json::json!({
+            "task_id": request.task_id,
+            "commit_title": "legacy unconfigured submit",
+            "summary": "finalize through the typed legacy skip",
+            "files_changed": [],
+            "remaining_concerns": []
+        }),
         tool_use_id: "finalize-tool-use".to_owned(),
         final_verification_evidence: None,
+        final_verification_disposition: crate::output_parser::FinalVerificationDisposition::Pending,
     };
     let proceed = verify_completion_intent(
         &mut intent,
@@ -1338,24 +1330,36 @@ async fn pod_unconfigured_plan_model_submit_work_finalizes_via_legacy_skip() {
         "submit_work",
     )
     .await;
-    assert!(
-        matches!(proceed, Ok(None)),
-        "unconfigured plan must let submission proceed without evidence, got {proceed:?}"
-    );
-    assert!(
-        intent.final_verification_evidence.is_none(),
-        "no evidence may be synthesized"
-    );
-    // Two coordinator calls (direct + via completion intent), each with one
-    // disabled/plan_unconfigured audit outcome.
+    assert!(matches!(proceed, Ok(None)));
     assert_eq!(
-        probe.consultation_outcomes.lock().unwrap().clone(),
-        vec![
-            ("disabled", "plan_unconfigured"),
-            ("disabled", "plan_unconfigured"),
-        ],
-        "each unconfigured completion emits exactly one plan_unconfigured outcome"
+        intent.final_verification_disposition,
+        crate::output_parser::FinalVerificationDisposition::NotConfigured
     );
+    assert!(
+        crate::finalize_handlers::process_completion_intent_with_outcome(
+            &intent,
+            "submit_work",
+            &request.task_id,
+            &ctx
+        )
+        .await,
+        "the actual model-submit finalizer must consume the typed skip"
+    );
+    assert_eq!(probe.events.lock().unwrap().clone(), vec!["resolve"]);
+    let activity = djinn_db::TaskRepository::new(ctx.db.clone(), ctx.event_bus.clone())
+        .list_activity(&request.task_id)
+        .await
+        .unwrap();
+    let submitted = activity
+        .iter()
+        .find(|entry| entry.event_type == "work_submitted")
+        .expect("model submit must write work_submitted");
+    let payload: serde_json::Value = serde_json::from_str(&submitted.payload).unwrap();
+    assert_eq!(
+        payload["final_verification_evidence"],
+        serde_json::Value::Null
+    );
+    assert_unconfigured_pod_counters(&ctx, &request, &probe).await;
 }
 
 /// Pod-shaped auto-submit: an unconfigured plan with workspace_path = NULL must
