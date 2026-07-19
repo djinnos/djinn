@@ -19,9 +19,37 @@ extract_value() {
 }
 
 # A shared declaration is insufficient unless the command configuring apt's
-# source actually consumes it. Each path is allowed to remove Debian's default
-# deb822 source, but may configure only the shared snapshot-backed trixie/main
-# source below.
+# additional source actually consumes it. The ordinary Debian source remains
+# available for the rest of each image's packages; only mold's dated snapshot
+# source may be added.
+logical_commands() {
+    local file="$1"
+
+    # Join shell/Dockerfile continuations so the source command can be checked
+    # as a unit, while ignoring comments that merely document source paths.
+    awk '
+        {
+            line = $0
+            sub(/[[:space:]]*#.*/, "", line)
+            if (line == "") next
+            command = command (command == "" ? "" : " ") line
+            if (line ~ /\\[[:space:]]*$/) {
+                sub(/\\[[:space:]]*$/, "", command)
+                next
+            }
+            gsub(/[[:space:]]+/, " ", command)
+            print command
+            command = ""
+        }
+        END {
+            if (command != "") {
+                gsub(/[[:space:]]+/, " ", command)
+                print command
+            }
+        }
+    ' "$file"
+}
+
 verify_snapshot_source() {
     local file="$1"
     local expected_snapshot="$2"
@@ -29,26 +57,22 @@ verify_snapshot_source() {
     local source_line
     local line
 
-    source_line="printf 'deb [check-valid-until=no] %s trixie main\\n' ${snapshot_reference} > /etc/apt/sources.list"
-    grep -Fq "$source_line" "$file" \
-        || fail "apt source does not consume its declared Debian snapshot in ${file#$REPO_ROOT/}"
-
-    # A second source-file write could select another repository or snapshot
-    # after the canonical source. Restrict source configuration to the line
-    # above and removal of the default deb822 source.
+    source_line="printf 'deb [check-valid-until=no] %s trixie main\\n' ${snapshot_reference} > /etc/apt/sources.list.d/mold-snapshot.list"
     while IFS= read -r line; do
-        case "$line" in
-            *"$source_line"* | *"rm -f /etc/apt/sources.list.d/debian.sources"*) ;;
-            *) fail "alternate apt source configuration in ${file#$REPO_ROOT/}: $line" ;;
-        esac
-    done < <(grep -F '/etc/apt/sources.list' "$file" || true)
+        [[ "$line" == *'/etc/apt/sources.list'* ]] || continue
+        [[ "$line" == *"$source_line"* ]] \
+            || fail "alternate apt source configuration in ${file#$REPO_ROOT/}: $line"
+        found_source_line=1
+    done < <(logical_commands "$file")
+    [[ "${found_source_line:-}" == 1 ]] \
+        || fail "apt source does not consume its declared Debian snapshot in ${file#$REPO_ROOT/}"
 
     # A literal alternate snapshot URL can otherwise bypass the declaration
     # while leaving its value unchanged.
     while IFS= read -r source_url; do
         [[ "$source_url" == "$expected_snapshot" ]] \
             || fail "alternate Debian snapshot in ${file#$REPO_ROOT/}: $source_url"
-    done < <(grep -Eo 'https://snapshot\.debian\.org/archive/debian/[0-9]{8}T[0-9]{6}Z' "$file" || true)
+    done < <(grep -Eo 'https?://snapshot\.debian\.org/archive/debian/[0-9]{8}T[0-9]{6}Z' "$file" || true)
 }
 
 rust_snapshot="$(extract_value "$RUST_INSTALLER" DEBIAN_SNAPSHOT_URL)"
@@ -65,7 +89,7 @@ done
     || fail "Debian snapshot drift: $rust_snapshot != $runtime_snapshot"
 [[ "$rust_version" == "$runtime_version" ]] \
     || fail "mold version drift: $rust_version != $runtime_version"
-[[ "$rust_snapshot" =~ ^https://snapshot\.debian\.org/archive/debian/[0-9]{8}T[0-9]{6}Z$ ]] \
+[[ "$rust_snapshot" =~ ^http://snapshot\.debian\.org/archive/debian/[0-9]{8}T[0-9]{6}Z$ ]] \
     || fail "snapshot URL is not a dated Debian snapshot: $rust_snapshot"
 [[ "$rust_version" != *'${'* && "$rust_version" != *'$'* ]] \
     || fail "mold version must be literal: $rust_version"
