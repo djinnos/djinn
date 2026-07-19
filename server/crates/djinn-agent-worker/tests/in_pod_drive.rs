@@ -48,11 +48,14 @@ use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
 
+use djinn_core::events::EventBus;
 use djinn_core::models::{SessionRecord, Task, TaskRunStatus, TaskRunTrigger};
+use djinn_db::ProjectRepository;
 use djinn_db::repositories::task_run::{CreateTaskRunParams, TaskRunRepository};
 use djinn_runtime::{
     ResolvedCredentials, RoleKind, SerializableCredential, SupervisorFlow, TaskRunSpec, WorkerEvent,
 };
+use djinn_stack::environment::{EnvironmentConfig, FinalVerificationCommand};
 use djinn_supervisor::services::{
     SerializableCreateSessionParams, SerializableCreateTaskRunParams,
 };
@@ -668,6 +671,30 @@ async fn worker_drives_real_supervisor_in_pod() {
         });
     }
 
+    // Observe the exact clone while the production stage is still running.
+    // The row is written before provider execution, so this verifies the
+    // persisted value names a real ephemeral git worktree rather than merely
+    // any non-empty string.
+    let expected_workspace = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if let Some(path) = task_runs
+                .get(task_run_id)
+                .await
+                .expect("poll task-run during production stage")
+                .and_then(|run| run.workspace_path)
+            {
+                let path = PathBuf::from(path);
+                if path.join(".git").is_dir() {
+                    run_git(&["git", "rev-parse", "--is-inside-work-tree"], &path).await;
+                    break path;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .expect("first-stage persistence must expose its live ephemeral clone");
+
     // 5. Wait for the worker to exit. The OAuth credential's `base_url`
     //    points at `127.0.0.1:1` (no listener), so the provider stream
     //    fails fast with "connection refused", surfaces as
@@ -737,9 +764,10 @@ async fn worker_drives_real_supervisor_in_pod() {
         .expect("task-run must survive worker execution")
         .workspace_path
         .expect("first in-pod stage must durably persist its clone path");
-    assert!(
-        !persisted_workspace.is_empty(),
-        "persisted workspace path must be the real in-pod clone path"
+    assert_eq!(
+        PathBuf::from(&persisted_workspace),
+        expected_workspace,
+        "first stage must persist the exact host-materialized workspace it executes in"
     );
 
     // Terminal report should have surfaced via Event frame.
@@ -760,6 +788,35 @@ async fn worker_drives_real_supervisor_in_pod() {
         TaskRunOutcome::Failed { .. } | TaskRunOutcome::Closed { .. } => {}
         other => panic!("unexpected terminal outcome: {other:?}"),
     }
+
+    drop(log);
+
+    // Configure a non-empty plan after the production first-stage boundary.
+    // The completion resolver must consume the path it persisted, not a
+    // session path or a test-injected task-run workspace.
+    let mut config = EnvironmentConfig::empty();
+    config.lifecycle.final_verification.commands = vec![FinalVerificationCommand {
+        check_id: "pod-workspace".into(),
+        executable: "true".into(),
+        ..Default::default()
+    }];
+    config.lifecycle.final_verification.required_checks = vec!["pod-workspace".into()];
+    ProjectRepository::new(worker_db.clone(), EventBus::noop())
+        .set_environment_config(
+            project_id,
+            &serde_json::to_string(&config).expect("encode plan"),
+        )
+        .await
+        .expect("configure final-verification plan");
+    let material =
+        djinn_agent::actors::slot::resolve_final_verification_for_task_run(&worker_db, task_run_id)
+            .await
+            .expect("configured completion boundary must resolve persisted workspace")
+            .expect("configured completion boundary must not take legacy skip");
+    assert_eq!(
+        material.execution_request.worktree, expected_workspace,
+        "completion resolution must consume the first-stage persisted workspace"
+    );
 }
 
 // ── Object-safety smoke test ────────────────────────────────────────────────
