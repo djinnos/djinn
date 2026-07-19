@@ -146,6 +146,7 @@ async fn live_outcomes_rollback_and_pinning() {
         .flat_map(|x| x.bytes.clone())
         .collect::<Vec<_>>();
     let tag = format!("\"{}\"", g.artifact.transport_sha256);
+    let semantic_hash = g.artifact.graph_content_hash.clone();
     r.publish_reserved_generation(g).await.unwrap();
     let x = get(&a, &t, p).await;
     assert_eq!(x.status(), StatusCode::OK);
@@ -156,10 +157,7 @@ async fn live_outcomes_rollback_and_pinning() {
     assert_eq!(x.headers()[HEADER_GENERATION_ID], gid);
     assert_eq!(x.headers()[HEADER_COMMIT_SHA], "g1");
     assert_eq!(x.headers()[HEADER_ARTIFACT_VERSION], "1");
-    assert_eq!(
-        x.headers()[HEADER_SEMANTIC_HASH],
-        g.artifact.graph_content_hash
-    );
+    assert_eq!(x.headers()[HEADER_SEMANTIC_HASH], semantic_hash);
     assert_eq!(
         x.into_body().collect().await.unwrap().to_bytes().as_ref(),
         bytes.as_slice()
