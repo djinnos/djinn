@@ -5,7 +5,7 @@ use crate::finalize_handlers::{
     process_auto_submit_payload, process_completion_intent_with_outcome,
 };
 use crate::finalize_handlers_fingerprint_tests::{
-    c2_fingerprint, create_run_with_workspace, init_git_repo_with_dirty_file,
+    c2_fingerprint, create_k8s_run_then_persist_workspace, init_git_repo_with_dirty_file,
 };
 use crate::output_parser::CompletionIntent;
 use crate::reply_loop_completion_intent_tests::{
@@ -154,11 +154,11 @@ async fn assert_identity_mismatch_rebuilds_current_evidence(
     let project = test_helpers::create_test_project(&db).await;
     let epic = test_helpers::create_test_epic(&db, &project.id).await;
     let task = test_helpers::create_test_task(&db, &project.id, &epic.id).await;
-    create_run_with_workspace(
+    create_k8s_run_then_persist_workspace(
         &db,
         &project.id,
         &task.id,
-        Some(worktree.path().to_str().unwrap()),
+        worktree.path().to_str().unwrap(),
     )
     .await;
     let attempt_id = uuid::Uuid::now_v7().to_string();
@@ -359,11 +359,11 @@ async fn c2_fully_compatible_evidence_finalizes_without_canonical_rebuild() {
     let project = test_helpers::create_test_project(&db).await;
     let epic = test_helpers::create_test_epic(&db, &project.id).await;
     let task = test_helpers::create_test_task(&db, &project.id, &epic.id).await;
-    create_run_with_workspace(
+    create_k8s_run_then_persist_workspace(
         &db,
         &project.id,
         &task.id,
-        Some(worktree.path().to_str().unwrap()),
+        worktree.path().to_str().unwrap(),
     )
     .await;
     let attempt_id = uuid::Uuid::now_v7().to_string();
@@ -463,11 +463,11 @@ async fn auto_submit_stale_identity_failed_reverification_has_no_success_side_ef
     let project = test_helpers::create_test_project(&db).await;
     let epic = test_helpers::create_test_epic(&db, &project.id).await;
     let task = test_helpers::create_test_task(&db, &project.id, &epic.id).await;
-    create_run_with_workspace(
+    create_k8s_run_then_persist_workspace(
         &db,
         &project.id,
         &task.id,
-        Some(worktree.path().to_str().unwrap()),
+        worktree.path().to_str().unwrap(),
     )
     .await;
     let attempt_id = uuid::Uuid::now_v7().to_string();
