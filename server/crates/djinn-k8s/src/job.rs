@@ -742,13 +742,17 @@ fn common_cache_env_vars(project_id: &str, cpu_limit: &str) -> Vec<EnvVar> {
         // task-run cold-rebuilds. Single-sourcing it here makes that drift
         // impossible — the same class of guarantee the SCCACHE_DIR/CARGO_HOME
         // routing above relies on. Mirrors the local-docker path, where
-        // djinn-agent-runtime-base.Dockerfile bakes the identical
-        // `CARGO_BUILD_RUSTFLAGS=-Clink-arg=-fuse-ld=mold` as an image ENV.
+        // djinn-agent-runtime-base.Dockerfile bakes the mold linker selection
+        // as an image ENV. Pod manifests additionally cap mold's linker
+        // threads to this pod's derived job count.
         //
         // Shipping this is a ONE-TIME warm-base invalidation (the effective
         // rustflags change → fingerprints change → the first warm after deploy
         // rebuilds the per-project base); steady state is fast links thereafter.
-        env_var("CARGO_BUILD_RUSTFLAGS", "-Clink-arg=-fuse-ld=mold"),
+        env_var(
+            "CARGO_BUILD_RUSTFLAGS",
+            &format!("-Clink-arg=-fuse-ld=mold -Clink-arg=-Wl,--threads={jobs}"),
+        ),
         // Pin cargo's parallel job count to the pod's CPU limit (see the
         // load-103 incident note above). Without it cargo reads the host core
         // count through the cgroup and oversubscribes the node.
@@ -784,13 +788,15 @@ fn cpu_limit_to_jobs(cpu_limit: &str) -> u32 {
 }
 
 /// Base cache env vars routing CARGO_TARGET_DIR at the shared per-project warm
-/// base. Warm Pods write this base directly; task-run Pods seed a private
-/// run dir from it (the worker overrides CARGO_TARGET_DIR to a private run dir).
+/// base keyed by its derived mold linker thread count. Warm Pods write this base
+/// directly; task-run Pods retain their private run dir (the worker overrides
+/// CARGO_TARGET_DIR to it).
 pub(crate) fn cache_env_vars(project_id: &str, cpu_limit: &str) -> Vec<EnvVar> {
     let mut env = common_cache_env_vars(project_id, cpu_limit);
+    let jobs = cpu_limit_to_jobs(cpu_limit);
     env.push(env_var(
         "CARGO_TARGET_DIR",
-        &format!("{CACHE_MOUNT_DIR}/cargo-target/{project_id}"),
+        &format!("{CACHE_MOUNT_DIR}/cargo-target/{project_id}/mold-jobs-{jobs}"),
     ));
     env
 }
@@ -1377,7 +1383,7 @@ mod tests {
         );
         assert_eq!(
             envs.get("CARGO_BUILD_RUSTFLAGS").copied(),
-            Some("-Clink-arg=-fuse-ld=mold"),
+            Some("-Clink-arg=-fuse-ld=mold -Clink-arg=-Wl,--threads=2"),
             "task-runs default to the mold fast linker (installed in the devcontainer image)"
         );
         // Cargo/nextest parallelism is capped at the task-run pod's CPU LIMIT
@@ -1392,6 +1398,36 @@ mod tests {
             envs.get("NEXTEST_TEST_THREADS").copied(),
             Some("2"),
             "task-run NEXTEST_TEST_THREADS must match the pod's CPU limit"
+        );
+    }
+
+    #[test]
+    fn task_manifest_uses_its_own_mold_job_count_and_private_target() {
+        let mut cfg = KubernetesConfig::for_testing();
+        cfg.cpu_limit = "1500m".into();
+        let job = build_task_run_job(
+            &cfg,
+            &Uuid::now_v7(),
+            "mold-job-variants",
+            "task-secret",
+            "example/task:latest",
+            &[],
+            None,
+            false,
+        );
+        let env = task_run_job_envs(&job);
+
+        assert_eq!(env.get("CARGO_BUILD_JOBS").copied(), Some("1"));
+        assert_eq!(env.get("NEXTEST_TEST_THREADS").copied(), Some("1"));
+        assert_eq!(
+            env.get("CARGO_BUILD_RUSTFLAGS").copied(),
+            Some("-Clink-arg=-fuse-ld=mold -Clink-arg=-Wl,--threads=1")
+        );
+        assert!(
+            env.get("CARGO_TARGET_DIR")
+                .expect("task target directory")
+                .starts_with("/cache/cargo-target-runs/"),
+            "task target output must remain private per run"
         );
     }
 
@@ -1417,7 +1453,7 @@ mod tests {
             .iter()
             .map(|e| (e.name.as_str(), e.value.as_deref().unwrap_or_default()))
             .collect();
-        let worker_vars = task_run_cache_env_vars(project_id, &task_run_id, "2", None);
+        let worker_vars = task_run_cache_env_vars(project_id, &task_run_id, "4", None);
         let worker_env: BTreeMap<&str, &str> = worker_vars
             .iter()
             .map(|e| (e.name.as_str(), e.value.as_deref().unwrap_or_default()))
@@ -1467,7 +1503,7 @@ mod tests {
             .expect("worker CARGO_TARGET_DIR set");
 
         assert_eq!(
-            *warm_target, "/cache/cargo-target/test-project",
+            *warm_target, "/cache/cargo-target/test-project/mold-jobs-4",
             "warm CARGO_TARGET_DIR must be the per-project shared base"
         );
         assert!(
@@ -1523,7 +1559,7 @@ mod tests {
         );
         assert_eq!(
             warm_env.get("CARGO_BUILD_RUSTFLAGS").copied(),
-            Some("-Clink-arg=-fuse-ld=mold"),
+            Some("-Clink-arg=-fuse-ld=mold -Clink-arg=-Wl,--threads=4"),
         );
     }
 
@@ -1575,6 +1611,52 @@ mod tests {
             warm_env.get("CARGO_BUILD_JOBS"),
             worker_env.get("CARGO_BUILD_JOBS"),
             "each pod type derives CARGO_BUILD_JOBS from its own limit (parity != identical value)"
+        );
+    }
+
+    #[test]
+    fn mold_linker_flags_follow_each_pods_derived_job_count() {
+        let project_id = "mold-job-variants";
+        let task_run_id = Uuid::now_v7().to_string();
+        let warm_four_vars = warm_cache_env_vars(project_id, "4", None);
+        let warm_four: BTreeMap<&str, &str> = warm_four_vars
+            .iter()
+            .map(|env| (env.name.as_str(), env.value.as_deref().unwrap_or_default()))
+            .collect();
+        let task_one_vars = task_run_cache_env_vars(project_id, &task_run_id, "1500m", None);
+        let task_one: BTreeMap<&str, &str> = task_one_vars
+            .iter()
+            .map(|env| (env.name.as_str(), env.value.as_deref().unwrap_or_default()))
+            .collect();
+        let warm_one_vars = warm_cache_env_vars(project_id, "500m", None);
+        let warm_one: BTreeMap<&str, &str> = warm_one_vars
+            .iter()
+            .map(|env| (env.name.as_str(), env.value.as_deref().unwrap_or_default()))
+            .collect();
+
+        assert_eq!(
+            warm_four.get("CARGO_BUILD_RUSTFLAGS").copied(),
+            Some("-Clink-arg=-fuse-ld=mold -Clink-arg=-Wl,--threads=4")
+        );
+        assert_eq!(
+            task_one.get("CARGO_BUILD_RUSTFLAGS").copied(),
+            Some("-Clink-arg=-fuse-ld=mold -Clink-arg=-Wl,--threads=1")
+        );
+        assert_eq!(
+            warm_one.get("CARGO_BUILD_RUSTFLAGS"),
+            task_one.get("CARGO_BUILD_RUSTFLAGS"),
+            "distinct quantity spellings with equal derived counts share byte-identical flags"
+        );
+        assert_eq!(
+            warm_four.get("CARGO_TARGET_DIR").copied(),
+            Some("/cache/cargo-target/mold-job-variants/mold-jobs-4")
+        );
+        assert!(
+            task_one
+                .get("CARGO_TARGET_DIR")
+                .expect("task target directory")
+                .starts_with("/cache/cargo-target-runs/"),
+            "task target output must remain private per run"
         );
     }
 
@@ -1676,7 +1758,7 @@ mod tests {
             .expect("worker CARGO_TARGET_DIR set");
 
         assert_eq!(
-            *warm_target, "/cache/cargo-target/single-crate-project",
+            *warm_target, "/cache/cargo-target/single-crate-project/mold-jobs-4",
             "warm CARGO_TARGET_DIR must be the per-project shared base (no-sccache)"
         );
         assert!(
@@ -2090,7 +2172,7 @@ mod tests {
             .get("CARGO_TARGET_DIR")
             .expect("worker CARGO_TARGET_DIR set");
         assert_eq!(
-            *warm_target, "/cache/cargo-target/consistency-test",
+            *warm_target, "/cache/cargo-target/consistency-test/mold-jobs-4",
             "warm CARGO_TARGET_DIR must be the per-project shared base"
         );
         assert!(
