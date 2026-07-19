@@ -432,9 +432,8 @@ impl PinnedGalaxyArtifact {
             "SELECT generation_id::text AS generation_id, artifact_id::text AS artifact_id, \
                     chunk_index, byte_count, sha256, bytes \
              FROM repo_graph_galaxy_chunk \
-             WHERE generation_id = $1::uuid AND artifact_id = $2::uuid AND chunk_index = $3",
+             WHERE artifact_id = $1::uuid AND chunk_index = $2",
         )
-        .bind(&self.metadata.generation_id)
         .bind(&self.metadata.artifact_id)
         .bind(chunk_index)
         .fetch_optional(&mut **conn)
