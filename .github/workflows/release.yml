@@ -35,6 +35,9 @@ on:
 permissions:
   contents: read
   packages: write
+  # actions: read lets the binaries job poll for and download the ui-dist
+  # artifact produced concurrently in this same run.
+  actions: read
 
 env:
   REGISTRY: ghcr.io
@@ -161,29 +164,12 @@ jobs:
           cache-from: type=gha,scope=djinn-agent-runtime-base
           cache-to: type=gha,scope=djinn-agent-runtime-base,mode=max
 
-  # ── Rust binary job (produces artifacts the image jobs COPY in) ───────
-  # Both release binaries build in ONE job sharing a single `server/target`
-  # dir + one Swatinem cache, so the common dependency graph (tokio, sqlx,
-  # axum, …) compiles ONCE instead of twice. Two SEQUENTIAL cargo builds —
-  # NOT a unified `-p A -p B` — keep each binary's exact feature resolution
-  # (a unified build would feature-unify qdrant onto worker deps). Worker
-  # first (default features, no qdrant), then server (adds qdrant on top),
-  # reusing the on-disk artifacts of the shared non-qdrant deps.
-  binaries:
-    name: djinn-server + djinn-agent-worker binaries (+ UI embed)
+  # ── UI build (parallel with the worker cargo build) ───────────────────
+  ui-dist:
+    name: UI dist for server embed
     runs-on: ubuntu-24.04
-    defaults:
-      run:
-        working-directory: server
-    env:
-      SQLX_OFFLINE: "true"
-      RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
     steps:
       - uses: actions/checkout@v4
-
-      # UI first — rust-embed reads `ui/dist/` at compile time and bakes
-      # it into the server binary. Without this step the binary would
-      # embed only the `<p>UI not built.</p>` placeholder from build.rs.
       - uses: pnpm/action-setup@v4
         with:
           version: 9
@@ -197,7 +183,38 @@ jobs:
         run: |
           pnpm install --frozen-lockfile
           pnpm build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ui-dist
+          path: ui/dist
+          retention-days: 1
+          if-no-files-found: error
 
+  # ── Rust binary job (produces artifacts the image jobs COPY in) ───────
+  # Both release binaries build in ONE job sharing a single `server/target`
+  # dir + one Swatinem cache, so the common dependency graph (tokio, sqlx,
+  # axum, …) compiles ONCE instead of twice. Two SEQUENTIAL cargo builds —
+  # NOT a unified `-p A -p B` — keep each binary's exact feature resolution
+  # (a unified build would feature-unify qdrant onto worker deps). Worker
+  # first (default features, no qdrant), then server (adds qdrant on top),
+  # reusing the on-disk artifacts of the shared non-qdrant deps.
+  #
+  # The UI builds in the parallel ui-dist job above; rust-embed reads
+  # `ui/dist/` at compile time during the SERVER build only, so the worker
+  # build starts immediately and the dist artifact is fetched between the
+  # two cargo builds (deliberately no `needs:` edge — that would serialize
+  # the ~3-minute pnpm build ahead of the worker compile).
+  binaries:
+    name: djinn-server + djinn-agent-worker binaries (+ UI embed)
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: server
+    env:
+      SQLX_OFFLINE: "true"
+      RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
+    steps:
+      - uses: actions/checkout@v4
       - run: rustup toolchain install
       - name: Install mold
         run: |
@@ -223,6 +240,38 @@ jobs:
       # reusing every shared non-qdrant artifact already on disk.
       - name: Cargo build worker
         run: cargo build --release --locked -p djinn-agent-worker
+      - name: Wait for and fetch UI dist for the server embed
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # The ui-dist job (~3 min) runs concurrently with the worker
+          # build above (longer even when warm), so this normally exits on
+          # the first probe. Fail-closed: the server binary must never
+          # ship the build.rs placeholder UI.
+          for attempt in $(seq 1 60); do
+            artifact_id=$(gh api "repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/artifacts?name=ui-dist" \
+              --jq '.artifacts[0].id // empty')
+            if [ -n "$artifact_id" ]; then
+              mkdir -p ../ui/dist
+              gh api "repos/${{ github.repository }}/actions/artifacts/$artifact_id/zip" > /tmp/ui-dist.zip
+              unzip -q -o /tmp/ui-dist.zip -d ../ui/dist
+              rm /tmp/ui-dist.zip
+              test -s ../ui/dist/index.html || { echo "::error::ui-dist artifact lacks index.html"; exit 1; }
+              exit 0
+            fi
+            ui_state=$(gh api "repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/jobs?per_page=100" \
+              --jq '[.jobs[] | select(.name == "UI dist for server embed")][0].conclusion // empty')
+            case "$ui_state" in
+              failure|cancelled|timed_out)
+                echo "::error::UI dist job concluded '$ui_state' without publishing an artifact."
+                exit 1
+                ;;
+            esac
+            sleep 10
+          done
+          echo "::error::Timed out waiting for the ui-dist artifact."
+          exit 1
       - name: Cargo build server
         run: cargo build --release --locked --features qdrant -p djinn-server
       - name: Stage + strip binaries
