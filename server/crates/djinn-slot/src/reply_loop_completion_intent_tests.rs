@@ -340,7 +340,7 @@ async fn reply_loop_reuse_rejection_matrix_writes_fresh_authoritative_evidence()
             callbacks
                 .reuse_events()
                 .iter()
-                .filter(|event| **event == "writer-resolution")
+                .filter(|event| **event == "plan-resolution")
                 .count(),
             1,
             "{name}"
@@ -676,9 +676,8 @@ impl SlotHostCallbacks for CompletionIntentCallbacks {
         Box::pin(async move {
             let probe = probe.ok_or_else(|| "not implemented in test".to_owned())?;
             probe.events.lock().unwrap().push(match verify_run_id {
-                "reuse-c0" => "consult-reuse-c0",
                 "reuse-c1" => "consult-reuse-c1",
-                _ => "writer-resolution",
+                _ => "plan-resolution",
             });
             if verify_run_id == "reuse-c1" && probe.mutate_before_c1 {
                 std::fs::write(
@@ -691,7 +690,11 @@ impl SlotHostCallbacks for CompletionIntentCallbacks {
                 )
                 .map_err(|error| error.to_string())?;
             }
-            if verify_run_id != "reuse-c0" && verify_run_id != "reuse-c1" {
+            // The plan-resolution call (real verify_run_id) computes the
+            // fingerprint used by the writer path's C2 validation. The C1
+            // consultation call does not need it — consultation derives its
+            // own C1 inputs from the material.
+            if verify_run_id != "reuse-c1" {
                 let fingerprint = match compute_verification_input_fingerprint_with_config(
                     &probe.material.execution_request.worktree,
                     &probe.material.execution_request.fingerprint_config,
@@ -1231,7 +1234,7 @@ async fn repeat_worker_reuses_compatible_persisted_pass_after_completion_intent(
         callbacks.reuse_events(),
         vec![
             "completion-intent-accepted",
-            "consult-reuse-c0",
+            "plan-resolution",
             "consult-reuse-c1"
         ]
     );

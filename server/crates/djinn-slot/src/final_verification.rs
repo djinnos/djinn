@@ -278,17 +278,12 @@ pub async fn coordinate_final_verification(
     if let Some(outcome) = ctx.callbacks.final_verification_outcome_for_test(&request) {
         return emit_outcome(&request, outcome);
     }
-    if let Some(evidence) =
-        consult_reusable_final_verification(&request, &verification_attempt_id, ctx).await
-    {
-        return emit_outcome(
-            &request,
-            FinalVerificationRecordingOutcome::Reused {
-                verification_attempt_id,
-                evidence: Box::new(evidence),
-            },
-        );
-    }
+    // Resolve the plan's configured/unconfigured state BEFORE any settings
+    // lookup, VerifyRun repository construction, C0 derivation, or cache
+    // consultation. A zero-command plan produces exactly one bounded lookup
+    // outcome `disabled`/`plan_unconfigured` and returns the typed legacy
+    // skip; a configured plan continues to the consult-or-run boundary with
+    // all fail-closed resolution/workspace semantics intact.
     let material = match ctx
         .callbacks
         .resolve_final_verification(
@@ -302,9 +297,24 @@ pub async fn coordinate_final_verification(
     {
         Ok(Some(material)) => material,
         // Typed skip: the host resolved "no plan configured". Return before
-        // any lease, execution, or persistence — there is nothing to verify
-        // and nothing may be recorded.
+        // any consultation, lease, execution, or persistence — there is
+        // nothing to verify and nothing may be recorded. Emit exactly one
+        // bounded lookup outcome so audit telemetry attributes the skip to
+        // the unconfigured plan rather than to reuse being disabled or a
+        // cache miss.
         Ok(None) => {
+            emit_lookup_outcome(
+                "disabled",
+                &request,
+                &verification_attempt_id,
+                "plan_unconfigured",
+                "",
+            );
+            ctx.callbacks
+                .record_final_verification_consultation_outcome_for_test(
+                    "disabled",
+                    "plan_unconfigured",
+                );
             return emit_outcome(
                 &request,
                 FinalVerificationRecordingOutcome::NotConfigured {
@@ -314,6 +324,21 @@ pub async fn coordinate_final_verification(
         }
         Err(detail) => return emit_error(&request, &verification_attempt_id, &detail),
     };
+    // Consultation runs only for configured plans. The material resolved
+    // above is reused for C0 derivation so no second plan resolution or
+    // settings-gate round-trip is needed before the lookup.
+    if let Some(evidence) =
+        consult_reusable_final_verification(&request, &verification_attempt_id, &material, ctx)
+            .await
+    {
+        return emit_outcome(
+            &request,
+            FinalVerificationRecordingOutcome::Reused {
+                verification_attempt_id,
+                evidence: Box::new(evidence),
+            },
+        );
+    }
     if request.cancellation.is_cancelled() {
         return emit_ineligible(&request, &verification_attempt_id, "cancelled before lease");
     }
@@ -391,10 +416,14 @@ pub async fn coordinate_final_verification(
 }
 
 /// Resolve the project gate before constructing a verify-run repository. Every
-/// miss, stale verdict, or error returns to the original writer path.
+/// miss, stale verdict, or error returns to the original writer path. The
+/// plan's configured material is already resolved by the caller (a
+/// zero-command plan never reaches this function), so C0 reuses it rather than
+/// performing a second plan resolution.
 async fn consult_reusable_final_verification(
     request: &FinalVerificationCoordinatorRequest,
     attempt_id: &str,
+    material: &FinalVerificationResolvedMaterial,
     ctx: &SlotContext,
 ) -> Option<FinalVerificationSuccessEvidence> {
     if injected_consultation_failure(
@@ -434,23 +463,6 @@ async fn consult_reusable_final_verification(
     if !enabled {
         return lookup_none("disabled", request, attempt_id, "default_off", "");
     }
-    let material = match ctx
-        .callbacks
-        .resolve_final_verification(
-            &request.task_id,
-            &request.task_run_id,
-            attempt_id,
-            "reuse-c0",
-            ctx,
-        )
-        .await
-    {
-        Ok(Some(material)) => material,
-        // No plan configured: nothing is reusable; the writer path resolves
-        // the typed NotConfigured skip.
-        Ok(None) => return lookup_none("miss", request, attempt_id, "not_configured", ""),
-        Err(error) => return lookup_none("error", request, attempt_id, "resolution", &error),
-    };
     if injected_consultation_failure(
         ctx,
         FinalVerificationConsultationFailure::Identity,
@@ -466,7 +478,7 @@ async fn consult_reusable_final_verification(
     ) {
         return None;
     }
-    let c0 = match derive_current_inputs(&material).await {
+    let c0 = match derive_current_inputs(material).await {
         Ok(inputs) => inputs,
         Err(error) => return lookup_none("error", request, attempt_id, "c0", &error),
     };

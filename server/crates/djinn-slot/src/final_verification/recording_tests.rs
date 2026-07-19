@@ -122,6 +122,11 @@ struct CoordinatorProbe {
     resolve_not_configured: bool,
     cancel_on_evidence: bool,
     resolved_ids: Mutex<Vec<(String, String)>>,
+    /// Tracks every bounded lookup outcome emitted during a coordinator call.
+    consultation_outcomes: Mutex<Vec<(&'static str, &'static str)>>,
+    lease_requests: Mutex<usize>,
+    lease_acquisitions: Mutex<usize>,
+    canonical_executions: Mutex<usize>,
 }
 
 impl CoordinatorProbe {
@@ -134,6 +139,10 @@ impl CoordinatorProbe {
             resolve_not_configured: false,
             cancel_on_evidence: false,
             resolved_ids: Mutex::new(Vec::new()),
+            consultation_outcomes: Mutex::new(Vec::new()),
+            lease_requests: Mutex::new(0),
+            lease_acquisitions: Mutex::new(0),
+            canonical_executions: Mutex::new(0),
         }
     }
     fn inject_evidence(&self, evidence: FinalVerificationExecutionEvidence) {
@@ -144,6 +153,9 @@ impl CoordinatorProbe {
     }
     fn resolved_ids(&self) -> Vec<(String, String)> {
         self.resolved_ids.lock().unwrap().clone()
+    }
+    fn consultation_outcomes(&self) -> Vec<(&'static str, &'static str)> {
+        self.consultation_outcomes.lock().unwrap().clone()
     }
 }
 
@@ -163,6 +175,16 @@ impl FinalVerificationInvocationLease for ProbeLease {
 }
 
 impl SlotHostCallbacks for CoordinatorProbe {
+    fn record_final_verification_consultation_outcome_for_test(
+        &self,
+        outcome: &'static str,
+        reason: &'static str,
+    ) {
+        self.consultation_outcomes
+            .lock()
+            .unwrap()
+            .push((outcome, reason));
+    }
     fn final_verification_outcome_for_test(
         &self,
         _request: &FinalVerificationCoordinatorRequest,
@@ -175,6 +197,7 @@ impl SlotHostCallbacks for CoordinatorProbe {
         request: &FinalVerificationCoordinatorRequest,
     ) -> Option<FinalVerificationExecutionEvidence> {
         self.events.lock().unwrap().push("evidence");
+        *self.canonical_executions.lock().unwrap() += 1;
         if self.cancel_on_evidence {
             request.cancellation.cancel();
         }
@@ -224,6 +247,8 @@ impl SlotHostCallbacks for CoordinatorProbe {
         >,
     > {
         self.events.lock().unwrap().push("lease-acquire");
+        *self.lease_requests.lock().unwrap() += 1;
+        *self.lease_acquisitions.lock().unwrap() += 1;
         let events = Arc::clone(&self.events);
         Box::pin(async move {
             Ok(Box::new(ProbeLease { events }) as Box<dyn FinalVerificationInvocationLease>)
@@ -979,4 +1004,529 @@ async fn setup_pre_verification_records_nothing_and_stores_only_post_authoring_f
     );
     assert_eq!(rows[0].result, "pass");
     assert_eq!(rows[0].source_phase.as_deref(), Some("final_verification"));
+}
+
+// ---------------------------------------------------------------------------
+// Criterion 4: pod-shaped unconfigured-plan legacy decision before consultation
+//
+// These tests insert task_runs exactly as djinn-k8s dispatch does
+// (workspace_path = NULL) and prove that every completion path — model-called
+// submit_work, auto-submit, and controlled termination — resolves the plan's
+// unconfigured state before any lookup, lease, or execution, emits exactly one
+// `disabled`/`plan_unconfigured` audit, and finalizes through the legacy skip
+// with no evidence, no canonical command, no invocation lease, and no verify-
+// run row. A configured-plan control with no workspace stays fail-closed.
+// ---------------------------------------------------------------------------
+
+/// A probe variant that can resolve a configured plan but fail on a missing
+/// worktree (mirroring the production host adapter's worktree requirement for
+/// configured plans) while also tracking all consultation/lease/execution
+/// counters needed by the pod-shaped regression matrix.
+struct PodProbe {
+    events: Arc<Mutex<Vec<&'static str>>>,
+    resolve_not_configured: bool,
+    /// When false and the plan is configured, resolve returns an error
+    /// (simulating "task run has no worktree" for a pod with no persisted path).
+    configured_with_worktree: bool,
+    consultation_outcomes: Mutex<Vec<(&'static str, &'static str)>>,
+    lease_requests: Mutex<usize>,
+    lease_acquisitions: Mutex<usize>,
+    canonical_executions: Mutex<usize>,
+    resolved_ids: Mutex<Vec<(String, String)>>,
+}
+
+impl PodProbe {
+    fn unconfigured() -> Self {
+        Self {
+            events: Arc::new(Mutex::new(Vec::new())),
+            resolve_not_configured: true,
+            configured_with_worktree: false,
+            consultation_outcomes: Mutex::new(Vec::new()),
+            lease_requests: Mutex::new(0),
+            lease_acquisitions: Mutex::new(0),
+            canonical_executions: Mutex::new(0),
+            resolved_ids: Mutex::new(Vec::new()),
+        }
+    }
+    fn configured_no_worktree() -> Self {
+        Self {
+            events: Arc::new(Mutex::new(Vec::new())),
+            resolve_not_configured: false,
+            configured_with_worktree: false,
+            consultation_outcomes: Mutex::new(Vec::new()),
+            lease_requests: Mutex::new(0),
+            lease_acquisitions: Mutex::new(0),
+            canonical_executions: Mutex::new(0),
+            resolved_ids: Mutex::new(Vec::new()),
+        }
+    }
+}
+
+struct PodProbeLease;
+
+impl FinalVerificationInvocationLease for PodProbeLease {
+    fn release<'a>(&'a mut self) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>> {
+        Box::pin(async { Ok(()) })
+    }
+}
+
+impl SlotHostCallbacks for PodProbe {
+    fn record_final_verification_consultation_outcome_for_test(
+        &self,
+        outcome: &'static str,
+        reason: &'static str,
+    ) {
+        self.consultation_outcomes
+            .lock()
+            .unwrap()
+            .push((outcome, reason));
+    }
+    fn final_verification_outcome_for_test(
+        &self,
+        _request: &FinalVerificationCoordinatorRequest,
+    ) -> Option<FinalVerificationRecordingOutcome> {
+        None
+    }
+    fn final_verification_evidence_for_test(
+        &self,
+        _request: &FinalVerificationCoordinatorRequest,
+    ) -> Option<FinalVerificationExecutionEvidence> {
+        *self.canonical_executions.lock().unwrap() += 1;
+        None
+    }
+    fn resolve_final_verification<'a>(
+        &'a self,
+        _task_id: &'a str,
+        _task_run_id: &'a str,
+        verification_attempt_id: &'a str,
+        verify_run_id: &'a str,
+        _ctx: &'a SlotContext,
+    ) -> Pin<
+        Box<
+            dyn Future<Output = Result<Option<FinalVerificationResolvedMaterial>, String>>
+                + Send
+                + 'a,
+        >,
+    > {
+        self.events.lock().unwrap().push("resolve");
+        self.resolved_ids
+            .lock()
+            .unwrap()
+            .push((verification_attempt_id.to_owned(), verify_run_id.to_owned()));
+        let not_configured = self.resolve_not_configured;
+        let has_worktree = self.configured_with_worktree;
+        let mat = material(vec!["lint".to_owned(), "test".to_owned()]);
+        Box::pin(async move {
+            if not_configured {
+                Ok(None)
+            } else if !has_worktree {
+                Err("task run has no worktree".to_owned())
+            } else {
+                Ok(Some(mat))
+            }
+        })
+    }
+    fn acquire_final_verification_lease<'a>(
+        &'a self,
+        _task_id: &'a str,
+        _task_run_id: &'a str,
+        _verification_attempt_id: &'a str,
+        _ctx: &'a SlotContext,
+    ) -> Pin<
+        Box<
+            dyn Future<Output = Result<Box<dyn FinalVerificationInvocationLease>, String>>
+                + Send
+                + 'a,
+        >,
+    > {
+        *self.lease_requests.lock().unwrap() += 1;
+        *self.lease_acquisitions.lock().unwrap() += 1;
+        Box::pin(async { Ok(Box::new(PodProbeLease) as Box<dyn FinalVerificationInvocationLease>) })
+    }
+    fn interrupt_paused_worker_session<'a>(
+        &'a self,
+        _task_id: &'a str,
+        _ctx: &'a SlotContext,
+    ) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
+        Box::pin(async {})
+    }
+    fn resolve_mcp_tools<'a>(
+        &'a self,
+        _worktree_path: &'a str,
+        _role_name: &'a str,
+        _ctx: &'a SlotContext,
+    ) -> Pin<Box<dyn Future<Output = Result<ResolvedMcpTools, String>> + Send + 'a>> {
+        Box::pin(async { Err("not implemented in test".into()) })
+    }
+    fn render_prompt(
+        &self,
+        _role_name: &str,
+        _task: &Task,
+        _context_json: &serde_json::Value,
+    ) -> String {
+        String::new()
+    }
+    fn initial_user_message<'a>(
+        &'a self,
+        _task_id: &'a str,
+        _ctx: &'a SlotContext,
+    ) -> Pin<Box<dyn Future<Output = String> + Send + 'a>> {
+        Box::pin(async { String::new() })
+    }
+    fn build_mcp_state(&self, _ctx: &SlotContext) -> djinn_control_plane::McpState {
+        panic!("build_mcp_state not needed in pod-shaped tests")
+    }
+    fn require_project_id_for_task_ops<'a>(
+        &'a self,
+        _project: &'a str,
+        _ctx: &'a SlotContext,
+    ) -> Pin<
+        Box<
+            dyn Future<
+                    Output = Result<String, djinn_control_plane::tools::task_tools::ErrorResponse>,
+                > + Send
+                + 'a,
+        >,
+    > {
+        Box::pin(async {
+            Err(djinn_control_plane::tools::task_tools::ErrorResponse {
+                error: "not implemented".into(),
+            })
+        })
+    }
+    fn resolve_provider_credential<'a>(
+        &'a self,
+        _provider_id: &'a str,
+        _ctx: &'a SlotContext,
+    ) -> Pin<Box<dyn Future<Output = Result<crate::helpers::ProviderCredential, String>> + Send + 'a>>
+    {
+        Box::pin(async { Err("not implemented in test".into()) })
+    }
+    fn run_task_dispatch<'a>(
+        &'a self,
+        _task_id: String,
+        _project_path: String,
+        _model_id: String,
+        _ctx: SlotContext,
+        _kill: CancellationToken,
+        _pause: CancellationToken,
+        _resume_lifecycle_metadata: Option<serde_json::Value>,
+    ) -> Pin<Box<dyn Future<Output = anyhow::Result<()>> + Send + 'a>> {
+        Box::pin(async { Ok(()) })
+    }
+    fn touch_activity_rpc<'a>(
+        &'a self,
+        _task_id: String,
+    ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>> {
+        Box::pin(async { Ok(()) })
+    }
+    fn flush_session_tokens_rpc<'a>(
+        &'a self,
+        _session_id: String,
+        _tokens_in: i64,
+        _tokens_out: i64,
+        _cache_read: i64,
+        _cache_write: i64,
+    ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>> {
+        Box::pin(async { Ok(()) })
+    }
+}
+
+/// Build a k8s-shaped fixture: task_run with `workspace_path = NULL`, exactly
+/// as djinn-k8s dispatch creates it.
+async fn pod_rig(
+    probe: PodProbe,
+) -> (
+    SlotContext,
+    FinalVerificationCoordinatorRequest,
+    Arc<PodProbe>,
+) {
+    let db = crate::test_helpers::create_test_db();
+    let project = crate::test_helpers::create_test_project(&db).await;
+    let epic = crate::test_helpers::create_test_epic(&db, &project.id).await;
+    let task = crate::test_helpers::create_test_task(&db, &project.id, &epic.id).await;
+    let run = uuid::Uuid::now_v7().to_string();
+    // workspace_path = NULL matches djinn-k8s dispatch (pod runs never populate it).
+    TaskRunRepository::new(db.clone())
+        .create(CreateTaskRunParams {
+            id: &run,
+            project_id: &project.id,
+            task_id: &task.id,
+            trigger_type: "dispatch",
+            status: Some("running"),
+            workspace_path: None,
+            mirror_ref: None,
+        })
+        .await
+        .unwrap();
+    let probe = Arc::new(probe);
+    let ctx = crate::test_helpers::agent_context_from_db_with_callbacks(db, probe.clone());
+    let request = FinalVerificationCoordinatorRequest {
+        task_id: task.id,
+        task_run_id: run,
+        cancellation: CancellationToken::new(),
+    };
+    (ctx, request, probe)
+}
+
+/// Assert zero lookup (beyond the single plan_unconfigured), zero lease, zero
+/// execution, and zero verify-run writes for an unconfigured pod completion.
+async fn assert_unconfigured_pod_counters(
+    ctx: &SlotContext,
+    request: &FinalVerificationCoordinatorRequest,
+    probe: &PodProbe,
+) {
+    assert_eq!(
+        probe.consultation_outcomes.lock().unwrap().clone(),
+        vec![("disabled", "plan_unconfigured")],
+        "exactly one disabled/plan_unconfigured audit outcome"
+    );
+    assert_eq!(
+        *probe.lease_requests.lock().unwrap(),
+        0,
+        "zero lease requests"
+    );
+    assert_eq!(
+        *probe.lease_acquisitions.lock().unwrap(),
+        0,
+        "zero lease acquisitions"
+    );
+    assert_eq!(
+        *probe.canonical_executions.lock().unwrap(),
+        0,
+        "zero canonical command executions"
+    );
+    assert!(
+        recorded_rows(ctx, &request.task_run_id).await.is_empty(),
+        "no verify-run row may be written"
+    );
+}
+
+/// Pod-shaped model-called submit_work: an unconfigured plan with
+/// workspace_path = NULL must resolve before consultation and finalize through
+/// the legacy skip.
+#[tokio::test]
+async fn pod_unconfigured_plan_model_submit_work_finalizes_via_legacy_skip() {
+    let (ctx, request, probe) = pod_rig(PodProbe::unconfigured()).await;
+    let outcome = coordinate_final_verification(request.clone(), &ctx).await;
+    assert!(
+        matches!(
+            outcome,
+            FinalVerificationRecordingOutcome::NotConfigured { .. }
+        ),
+        "unconfigured plan must produce the typed skip, got {outcome:?}"
+    );
+    assert_eq!(
+        probe.events.lock().unwrap().clone(),
+        vec!["resolve"],
+        "the plan must be resolved exactly once before returning the skip"
+    );
+    assert_unconfigured_pod_counters(&ctx, &request, &probe).await;
+
+    // The completion-intent boundary maps the skip to Ok(None) — no evidence.
+    let mut intent = crate::output_parser::CompletionIntent {
+        finalize_payload: serde_json::json!({}),
+        tool_use_id: "finalize-tool-use".to_owned(),
+        final_verification_evidence: None,
+    };
+    let proceed = verify_completion_intent(
+        &mut intent,
+        &request.task_id,
+        Some(&request.task_run_id),
+        CancellationToken::new(),
+        &ctx,
+        "submit_work",
+    )
+    .await;
+    assert!(
+        matches!(proceed, Ok(None)),
+        "unconfigured plan must let submission proceed without evidence, got {proceed:?}"
+    );
+    assert!(
+        intent.final_verification_evidence.is_none(),
+        "no evidence may be synthesized"
+    );
+    // Two coordinator calls (direct + via completion intent), each with one
+    // disabled/plan_unconfigured audit outcome.
+    assert_eq!(
+        probe.consultation_outcomes.lock().unwrap().clone(),
+        vec![
+            ("disabled", "plan_unconfigured"),
+            ("disabled", "plan_unconfigured"),
+        ],
+        "each unconfigured completion emits exactly one plan_unconfigured outcome"
+    );
+}
+
+/// Pod-shaped auto-submit: an unconfigured plan with workspace_path = NULL must
+/// finalize through the legacy skip when the lifecycle generates an auto-submit
+/// settlement.
+#[tokio::test]
+async fn pod_unconfigured_plan_auto_submit_finalizes_via_legacy_skip() {
+    use crate::lifecycle::teardown::AutoSubmitSettlementOutcome;
+    use djinn_core::auto_submit_decision::{
+        AutoSubmitDecision, ReviewAutoSubmitDecisionEvent, VerifyFreshnessEvaluatedEvent,
+    };
+    use djinn_core::canonical_verify::FreshnessVerdict;
+    use djinn_core::models::{AutoSubmitTriggerReason, VerifyRunRecord};
+    let (ctx, request, probe) = pod_rig(PodProbe::unconfigured()).await;
+    // Build an eligible auto-submit settlement for this task run.
+    let settlement = crate::output_parser::AutoSubmitSettlement {
+        task_run_id: request.task_run_id.clone(),
+        decision: AutoSubmitDecision {
+            eligible: true,
+            trigger_reason: AutoSubmitTriggerReason::Idle,
+            block_reason: None,
+            freshness_verdict: FreshnessVerdict::accept(),
+        },
+        freshness_event: VerifyFreshnessEvaluatedEvent {
+            diff_fingerprint: "diff-123".to_string(),
+            has_verify_run: true,
+            freshness_verdict: FreshnessVerdict::accept(),
+            trigger_reason: AutoSubmitTriggerReason::Idle,
+            submit_id: None,
+        },
+        review_event: ReviewAutoSubmitDecisionEvent {
+            eligible: true,
+            trigger_reason: AutoSubmitTriggerReason::Idle,
+            block_reason: None,
+            diff_fingerprint: "diff-123".to_string(),
+            freshness_verdict: FreshnessVerdict::accept(),
+            submit_id: None,
+            session_id: Some("session-1".to_string()),
+            model_id: Some("model-1".to_string()),
+            no_progress_streak: 0,
+            model_called_submit_work: false,
+        },
+        verify_run: Some(VerifyRunRecord {
+            id: "verify-1".to_string(),
+            task_run_id: request.task_run_id.clone(),
+            verify_source: "ci".to_string(),
+            verify_run_id: "ci-run-1".to_string(),
+            completed_at: "2026-07-01T00:00:00.000Z".to_string(),
+            result: "pass".to_string(),
+            diff_fingerprint: "diff-123".to_string(),
+            created_at: "2026-07-01T00:00:01.000Z".to_string(),
+            ..VerifyRunRecord::default()
+        }),
+        commit_title: Some("auto-submit title".to_string()),
+        summary: Some("auto-submit summary".to_string()),
+        files_changed: vec!["src/lib.rs".to_string()],
+        remaining_concerns: vec![],
+    };
+    let mut output = crate::output_parser::ParsedAgentOutput::empty();
+    output.auto_submit = Some(settlement);
+    let task_id = request.task_id.clone();
+    let outcome =
+        crate::lifecycle::teardown::settle_auto_submit_if_eligible(&task_id, &ctx, &output).await;
+    assert_eq!(
+        outcome,
+        AutoSubmitSettlementOutcome::Submitted,
+        "auto-submit for an unconfigured pod plan must finalize through the legacy skip"
+    );
+    assert_unconfigured_pod_counters(&ctx, &request, &probe).await;
+}
+
+/// Pod-shaped controlled termination: an unconfigured plan with
+/// workspace_path = NULL must finalize through the legacy skip when the
+/// lifecycle generates a controlled-termination auto-submit.
+#[tokio::test]
+async fn pod_unconfigured_plan_controlled_termination_finalizes_via_legacy_skip() {
+    use crate::lifecycle::teardown::AutoSubmitSettlementOutcome;
+    use djinn_core::auto_submit_decision::{
+        AutoSubmitDecision, ReviewAutoSubmitDecisionEvent, VerifyFreshnessEvaluatedEvent,
+    };
+    use djinn_core::canonical_verify::FreshnessVerdict;
+    use djinn_core::models::{AutoSubmitTriggerReason, VerifyRunRecord};
+    let (ctx, request, probe) = pod_rig(PodProbe::unconfigured()).await;
+    let settlement = crate::output_parser::AutoSubmitSettlement {
+        task_run_id: request.task_run_id.clone(),
+        decision: AutoSubmitDecision {
+            eligible: true,
+            trigger_reason: AutoSubmitTriggerReason::ControlledTermination,
+            block_reason: None,
+            freshness_verdict: FreshnessVerdict::accept(),
+        },
+        freshness_event: VerifyFreshnessEvaluatedEvent {
+            diff_fingerprint: "diff-123".to_string(),
+            has_verify_run: true,
+            freshness_verdict: FreshnessVerdict::accept(),
+            trigger_reason: AutoSubmitTriggerReason::ControlledTermination,
+            submit_id: None,
+        },
+        review_event: ReviewAutoSubmitDecisionEvent {
+            eligible: true,
+            trigger_reason: AutoSubmitTriggerReason::ControlledTermination,
+            block_reason: None,
+            diff_fingerprint: "diff-123".to_string(),
+            freshness_verdict: FreshnessVerdict::accept(),
+            submit_id: None,
+            session_id: Some("session-1".to_string()),
+            model_id: Some("model-1".to_string()),
+            no_progress_streak: 0,
+            model_called_submit_work: false,
+        },
+        verify_run: Some(VerifyRunRecord {
+            id: "verify-1".to_string(),
+            task_run_id: request.task_run_id.clone(),
+            verify_source: "ci".to_string(),
+            verify_run_id: "ci-run-1".to_string(),
+            completed_at: "2026-07-01T00:00:00.000Z".to_string(),
+            result: "pass".to_string(),
+            diff_fingerprint: "diff-123".to_string(),
+            created_at: "2026-07-01T00:00:01.000Z".to_string(),
+            ..VerifyRunRecord::default()
+        }),
+        commit_title: Some("controlled-termination title".to_string()),
+        summary: Some("controlled-termination summary".to_string()),
+        files_changed: vec!["src/lib.rs".to_string()],
+        remaining_concerns: vec![],
+    };
+    let mut output = crate::output_parser::ParsedAgentOutput::empty();
+    output.auto_submit = Some(settlement);
+    let task_id = request.task_id.clone();
+    let outcome =
+        crate::lifecycle::teardown::settle_auto_submit_if_eligible(&task_id, &ctx, &output).await;
+    assert_eq!(
+        outcome,
+        AutoSubmitSettlementOutcome::Submitted,
+        "controlled termination for an unconfigured pod plan must finalize through the legacy skip"
+    );
+    assert_unconfigured_pod_counters(&ctx, &request, &probe).await;
+}
+
+/// Configured-plan control: a pod with a configured plan but no persisted
+/// workspace (workspace_path = NULL) must remain fail-closed — the host
+/// resolver errors on the missing worktree, and no completion side effects
+/// occur. This proves the plan resolution order does not weaken configured-plan
+/// fail-closed semantics.
+#[tokio::test]
+async fn pod_configured_plan_with_no_workspace_remains_fail_closed() {
+    let (ctx, request, probe) = pod_rig(PodProbe::configured_no_worktree()).await;
+    let outcome = coordinate_final_verification(request.clone(), &ctx).await;
+    assert!(
+        matches!(outcome, FinalVerificationRecordingOutcome::Error { .. }),
+        "configured plan with no workspace must error (fail-closed), got {outcome:?}"
+    );
+    // The plan was resolved (configured) but the host returned a resolution
+    // error for the missing worktree. No consultation outcome was emitted
+    // because the plan resolution failed before reaching consultation.
+    assert!(
+        probe.consultation_outcomes.lock().unwrap().is_empty(),
+        "no lookup outcome may be emitted for a configured plan that fails resolution"
+    );
+    assert_eq!(
+        *probe.lease_requests.lock().unwrap(),
+        0,
+        "zero lease requests for a resolution failure"
+    );
+    assert_eq!(
+        *probe.canonical_executions.lock().unwrap(),
+        0,
+        "zero canonical executions for a resolution failure"
+    );
+    assert!(
+        recorded_rows(&ctx, &request.task_run_id).await.is_empty(),
+        "no verify-run row for a resolution failure"
+    );
 }
