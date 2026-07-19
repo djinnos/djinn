@@ -175,8 +175,14 @@ jobs:
           mkdir -p evidence/runtime-base evidence/generated-rust
           docker run --rm -v "$PWD:/validation" --entrypoint bash djinn-agent-runtime-base:validation /validation/scripts/image-ci/probe-mold-compatibility.sh --evidence-dir /validation/evidence/runtime-base
           docker run --rm -v "$PWD:/validation" --entrypoint bash djinn-generated-rust:validation /validation/scripts/image-ci/probe-mold-compatibility.sh --evidence-dir /validation/evidence/generated-rust
+      # RUSTUP_HOME must point at the BAKED toolchain. The image ships
+      # RUSTUP_HOME=/cache/rustup (an empty dir) and relies on the top image's
+      # entrypoint to seed it from RUSTUP_SEED_DIR=/usr/local/rustup on first
+      # start. `--entrypoint bash` bypasses that seeding, so rustup finds no
+      # default toolchain and cargo dies with "could not choose a version of
+      # cargo to run" before mold is ever invoked.
       - name: Run runtime-base mold thread-cap smoke
-        run: docker run --rm -v "$PWD:/validation" --entrypoint bash djinn-agent-runtime-base:validation /validation/scripts/image-ci/run-mold-thread-smoke.sh --threads 4 --evidence-dir /validation/evidence/runtime-base
+        run: docker run --rm -e RUSTUP_HOME=/usr/local/rustup -v "$PWD:/validation" --entrypoint bash djinn-agent-runtime-base:validation /validation/scripts/image-ci/run-mold-thread-smoke.sh --threads 4 --evidence-dir /validation/evidence/runtime-base
       - name: Upload mold image validation evidence
         if: always()
         uses: actions/upload-artifact@v4
