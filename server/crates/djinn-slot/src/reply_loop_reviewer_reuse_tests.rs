@@ -202,15 +202,20 @@ impl SlotHostCallbacks for ReviewerReuseCallbacks {
         _verification_attempt_id: &'a str,
         verify_run_id: &'a str,
         _ctx: &'a SlotContext,
-    ) -> Pin<Box<dyn Future<Output = Result<FinalVerificationResolvedMaterial, String>> + Send + 'a>>
-    {
+    ) -> Pin<
+        Box<
+            dyn Future<Output = Result<Option<FinalVerificationResolvedMaterial>, String>>
+                + Send
+                + 'a,
+        >,
+    > {
         self.events.lock().unwrap().push(match verify_run_id {
             "reuse-c0" => "consult-reuse-c0",
             "reuse-c1" => "consult-reuse-c1",
             _ => "writer-resolution",
         });
         let material = self.material.clone();
-        Box::pin(async move { Ok(material) })
+        Box::pin(async move { Ok(Some(material)) })
     }
 
     fn acquire_final_verification_lease<'a>(

@@ -297,10 +297,12 @@ jobs:
       SQLX_OFFLINE: "true"
       RUSTFLAGS: -C link-arg=-fuse-ld=mold
     steps:
+      # checkout must precede the admission delay: the job-level
+      # working-directory (server) does not exist until the repo is checked out.
+      - uses: actions/checkout@v4
       - name: Main admission delay
         if: github.event_name == 'push'
         run: sleep 90
-      - uses: actions/checkout@v4
       - run: rustup toolchain install
         working-directory: server
       - name: Install mold
