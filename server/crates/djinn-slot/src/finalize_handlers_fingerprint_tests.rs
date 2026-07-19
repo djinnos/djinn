@@ -16,7 +16,7 @@ use djinn_db::{CreateTaskAttemptParams, TaskAttemptRepository};
 use djinn_git::{ResolvedExternalInputV1, VerificationInputFingerprintConfig};
 use djinn_sandbox::final_verification_execution::FinalVerificationIneligibilityReason;
 
-fn init_git_repo_with_dirty_file() -> tempfile::TempDir {
+pub(crate) fn init_git_repo_with_dirty_file() -> tempfile::TempDir {
     let dir = tempfile::Builder::new()
         .prefix("djinn-test-git-")
         .tempdir()
@@ -47,7 +47,7 @@ fn init_git_repo_with_dirty_file() -> tempfile::TempDir {
     dir
 }
 
-async fn create_run_with_workspace(
+pub(crate) async fn create_run_with_workspace(
     db: &djinn_db::Database,
     project_id: &str,
     task_id: &str,
@@ -948,7 +948,7 @@ async fn settlement_accepted_and_rejected_paths_store_same_review_fingerprint() 
          from the same shared submission fingerprint source"
     );
 }
-async fn c2_fingerprint(
+pub(crate) async fn c2_fingerprint(
     worktree: &std::path::Path,
     config: &VerificationInputFingerprintConfig,
 ) -> String {

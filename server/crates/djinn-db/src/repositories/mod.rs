@@ -17,6 +17,7 @@ pub mod extension_load_diagnostic_tests;
 pub mod git_settings;
 pub mod image;
 pub mod init;
+pub mod legacy_settings_import;
 pub mod liveness;
 pub mod llm_call_attempt;
 pub mod models;

@@ -55,6 +55,8 @@ pub mod session_extraction;
 mod supervisor_runner;
 
 #[cfg(test)]
+mod finalize_handlers_c2_tests;
+#[cfg(test)]
 mod finalize_handlers_fingerprint_tests;
 #[cfg(test)]
 mod finalize_handlers_tests;

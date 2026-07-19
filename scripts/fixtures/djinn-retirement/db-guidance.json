@@ -1,7 +1,7 @@
 {
   "schema": "djinn-retirement-db-guidance/v1",
   "generated_from_revision": "HEAD",
-  "record_count": 168,
+  "record_count": 169,
   "records": [
     {
       "uuid": "retire-29a8825bd242f14386ee528d",
@@ -2018,6 +2018,18 @@
       "superseded_by": null,
       "supersedes": null,
       "source_repository_path": ".djinn/roadmap.md"
+    },
+    {
+      "uuid": "retire-cde0fb0dec1400c54a0f7e7e",
+      "permalink": "settings",
+      "status": "deprecated",
+      "normalized_sha256": "2ed097cc08ffa22d58c018ce3284310c4076ec1d230bf319b28b7dc0be6fdd30",
+      "classification": "preserve",
+      "disposition": "approved_discard",
+      "rationale": "Legacy settings were imported into project-scoped Postgres before source deletion.",
+      "superseded_by": "project configuration store",
+      "supersedes": null,
+      "source_repository_path": ".djinn/settings.json"
     }
   ]
 }
