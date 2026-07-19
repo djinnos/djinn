@@ -3351,7 +3351,7 @@ mod inflight_ledger_tests {
                 let mut ids = Vec::with_capacity(count);
                 for i in 0..count {
                     let task = task_repo
-                        .create_in_project(
+                        .create_fixture_in_project(
                             &project.id,
                             None,
                             &format!("wnd1 dispatch race fixture task {i}"),
@@ -4482,7 +4482,7 @@ mod inflight_ledger_tests {
                 let mut ids = Vec::new();
                 for i in 0..2 {
                     let t = task_repo
-                        .create_in_project(
+                        .create_fixture_in_project(
                             &project.id,
                             None,
                             &format!("mixed-role seeded task {i}"),
@@ -4539,7 +4539,7 @@ mod inflight_ledger_tests {
                 let mut ids = Vec::new();
                 // Worker-variant: an open task → dispatches as "worker".
                 let worker_task = task_repo
-                    .create_in_project(
+                    .create_fixture_in_project(
                         &project.id,
                         None,
                         "mixed-role ready worker task",
@@ -4557,7 +4557,7 @@ mod inflight_ledger_tests {
 
                 // Reviewer-variant: a needs_task_review task → dispatches as "reviewer".
                 let reviewer_task = task_repo
-                    .create_in_project(
+                    .create_fixture_in_project(
                         &project.id,
                         None,
                         "mixed-role ready reviewer task",
@@ -7285,7 +7285,7 @@ mod monitored_reopen_no_eligible_model_tests {
         let task_repo =
             djinn_db::TaskRepository::new(db.clone(), djinn_core::events::EventBus::noop());
         let task = task_repo
-            .create_in_project(
+            .create_fixture_in_project(
                 project_id,
                 None,
                 "No-eligible-model test",

@@ -160,11 +160,28 @@ async fn ci_same_signature_deadlock_routes_to_planner_escalation() {
 
 /// Create a closed `planner-park-escalation` review task that blocks `source`,
 /// simulating one prior autonomous escalation round.
-async fn seed_prior_escalation(repo: &TaskRepository, source: &djinn_core::models::Task, n: usize) {
+async fn seed_prior_escalation(
+    db: &djinn_db::Database,
+    repo: &TaskRepository,
+    source: &djinn_core::models::Task,
+    n: usize,
+) {
+    let fixture_identity = uuid::Uuid::now_v7();
+    let github_id = (fixture_identity.as_u128() % 9_000_000_000_000_000_000) as i64;
+    let user = djinn_db::UserRepository::new(db.clone())
+        .upsert_from_github(
+            github_id,
+            &format!("escalation-ceiling-fixture-{fixture_identity}"),
+            Some("Escalation ceiling fixture"),
+            None,
+        )
+        .await
+        .expect("persist escalation fixture user");
     let escalation = repo
-        .create_in_project(
+        .create_in_project_with_provenance(
             &source.project_id,
             None,
+            djinn_db::EffectiveCreatorProvenance::explicit_user_id(&user.id),
             &format!(
                 "Planner remediation [{}]: prior escalation {n}",
                 source.short_id
@@ -209,7 +226,7 @@ async fn below_ceiling_creates_planner_escalation_and_parks() {
     let task = repo.get(&task.id).await.unwrap().unwrap();
 
     // One prior escalation already spent — still below the ceiling.
-    seed_prior_escalation(&repo, &task, 1).await;
+    seed_prior_escalation(&db, &repo, &task, 1).await;
 
     let parked = actor
         .escalate_to_planner_or_terminally_fail(&task, "loop not converging")
@@ -272,7 +289,7 @@ async fn at_ceiling_terminally_fails_source_instead_of_parking() {
 
     // Spend the full escalation ceiling on this source.
     for n in 0..(MAX_AUTONOMOUS_ESCALATIONS as usize) {
-        seed_prior_escalation(&repo, &task, n).await;
+        seed_prior_escalation(&db, &repo, &task, n).await;
     }
 
     let parked = actor

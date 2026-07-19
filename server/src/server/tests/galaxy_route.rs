@@ -125,6 +125,18 @@ async fn assert_pin_released_after_cancellation(r: &RepoGraphGenerationRepositor
     }
     panic!("cancelled response did not release its generation stream pin");
 }
+
+/// Read the current process RSS from `/proc/self/status` (Linux only).
+fn current_rss_bytes() -> Option<u64> {
+    let status = std::fs::read_to_string("/proc/self/status").ok()?;
+    for line in status.lines() {
+        if let Some(rest) = line.strip_prefix("VmRSS:") {
+            let kib: u64 = rest.split_whitespace().next()?.parse().ok()?;
+            return Some(kib * 1024);
+        }
+    }
+    None
+}
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn live_outcomes_rollback_and_pinning() {
     let db = test_helpers::create_test_db();
@@ -289,4 +301,63 @@ async fn unsupported_and_corruption_boundaries() {
         .await
         .unwrap();
     assert!(x.into_body().collect().await.is_err());
+}
+
+/// Publish 600 ordered 256 KiB chunks (150 MiB) and prove the streamed request
+/// keeps peak RSS growth bounded: the production reader yields one verified
+/// chunk at a time without ever aggregating the full payload.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn peak_rss_growth_for_600_chunk_stream_is_bounded() {
+    let chunk_size = 256 * 1024;
+    let chunk_count = 600usize;
+    // A repeating 256 KiB pattern that is cheap to generate but distinct enough
+    // to force real per-chunk hashing in the production stream.
+    let chunk: Vec<u8> = (0..chunk_size).map(|i| (i & 0xff) as u8).collect();
+
+    let db = test_helpers::create_test_db();
+    let r = RepoGraphGenerationRepository::new(db.clone());
+    let p = "galaxy-rss";
+    r.prepare_publication_test_project(p).await.unwrap();
+    let (a, t) = app(db).await;
+
+    // Publish all producer/setup buffers inside a scope so they are released
+    // before the RSS baseline. `publish_reserved_generation` consumes and drops
+    // the publication (600 × 256 KiB chunk vectors), and the source buffer is
+    // dropped below so producer memory is not charged as streaming growth.
+    {
+        let chunks: Vec<&[u8]> = vec![chunk.as_slice(); chunk_count];
+        r.publish_reserved_generation(publication(p, "rss1", &chunks))
+            .await
+            .unwrap();
+    }
+    drop(chunk);
+
+    // Start the request before measuring the baseline so reader/pin allocation
+    // is part of the steady-state the test bounds.
+    let response = get(&a, &t, p).await;
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let baseline = current_rss_bytes().expect("VmRSS must be readable on Linux");
+    let mut peak = baseline;
+    let mut consumed_chunks = 0usize;
+    let mut body = response.into_body();
+    while let Some(frame) = body.frame().await {
+        let frame = frame.expect("stream frame should succeed");
+        if frame.is_data() {
+            consumed_chunks += 1;
+        }
+        // Sample RSS during every consumption step while the response is still
+        // actively yielding frames.
+        if let Some(rss) = current_rss_bytes() {
+            peak = peak.max(rss);
+        }
+    }
+    assert_eq!(consumed_chunks, chunk_count);
+
+    let growth = peak.saturating_sub(baseline);
+    assert!(
+        growth <= 32 * 1024 * 1024,
+        "peak request RSS growth {growth} bytes exceeds the 32 MiB bound \
+         (baseline={baseline}, peak={peak})"
+    );
 }
