@@ -1021,6 +1021,8 @@ async fn assert_after_c1_mutation_reverifies_before_completion(
             dispatch_key: &format!("c2-{name}-{}", uuid::Uuid::now_v7()),
             session_id: None,
             attempt_seq: None,
+            dispatch_owner_incarnation_id: None,
+            dispatch_group_id: None,
         })
         .await
         .expect("seed pending attempt");
