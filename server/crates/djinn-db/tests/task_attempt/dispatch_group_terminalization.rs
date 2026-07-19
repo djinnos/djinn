@@ -31,3 +31,51 @@ async fn terminalize_dispatch_group_is_exact_forward_only_and_idempotent() {
     assert!(repeated.updated_attempt_ids.is_empty());
     assert_eq!(repo.get(&ids[0]).await.unwrap().unwrap().outcome, "spawn_failed");
 }
+
+/// AC4: A deterministic partial-failure regression proving the explicit
+/// transaction rolls back ALL member updates when an in-transaction constraint
+/// violation occurs. Uses a temporary CHECK constraint (a supported database
+/// constraint mechanism, not external infrastructure) to force the UPDATE to
+/// fail mid-transaction, then asserts every member retains its pre-call
+/// outcome and evidence.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn terminalize_dispatch_group_rolls_back_all_members_on_constraint_failure() {
+    let db = test_db();
+    let (_project_id, task_id) = create_task(&db).await;
+    let repo = TaskAttemptRepository::new(db.clone());
+    let group = uuid::Uuid::now_v7().to_string();
+    let ids: Vec<String> = (0..3).map(|_| new_attempt_id()).collect();
+
+    // Three pending members in the exact group with differing roles and
+    // dispatch keys, so no task/role/dispatch-key heuristic could correlate
+    // them — only the exact group UUID does.
+    insert_attempt(&db, &ids[0], &task_id, "coordinator", "rb-key-a", 1, Some(&group), "pending").await;
+    insert_attempt(&db, &ids[1], &task_id, "supervisor", "rb-key-b", 2, Some(&group), "pending").await;
+    insert_attempt(&db, &ids[2], &task_id, "worker", "rb-key-c", 3, Some(&group), "pending").await;
+
+    // Install a temporary CHECK constraint that the terminal outcome would
+    // violate, deterministically forcing the in-transaction UPDATE to fail.
+    sqlx::query("ALTER TABLE task_attempts ADD CONSTRAINT test_rb_guard CHECK (outcome != 'spawn_failed')")
+        .execute(db.pool()).await.unwrap();
+
+    // The terminalization must fail because the CHECK constraint rejects the
+    // outcome the UPDATE attempts to write on every matched row.
+    let result = repo.terminalize_dispatch_group(&group, TaskAttemptOutcome::SpawnFailed, DispatchGroupTerminalEvidence { summary: Some("dispatch setup failed"), summary_json: Some(r#"{"failure_class":"dispatch_failure_orphan"}"#) }).await;
+    assert!(result.is_err(), "terminalize_dispatch_group must return an error when a constraint is violated");
+
+    // Drop the guard constraint so subsequent assertions operate on the real
+    // schema (each test_db() is fresh, but be explicit).
+    sqlx::query("ALTER TABLE task_attempts DROP CONSTRAINT IF EXISTS test_rb_guard")
+        .execute(db.pool()).await.unwrap();
+
+    // Every member must retain its pre-call outcome and evidence — the
+    // transaction rolled back all member updates atomically. No row was
+    // advanced, no evidence was persisted, no terminal_at was stamped.
+    for id in &ids {
+        let row = repo.get(id).await.unwrap().unwrap();
+        assert_eq!(row.outcome, "pending", "member {} must remain pending after rollback", id);
+        assert!(row.summary.is_none(), "member {} summary must be absent after rollback", id);
+        assert!(row.summary_json.is_none(), "member {} summary_json must be absent after rollback", id);
+        assert!(row.terminal_at.is_none(), "member {} terminal_at must be unset after rollback", id);
+    }
+}
