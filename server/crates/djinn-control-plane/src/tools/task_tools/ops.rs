@@ -29,7 +29,7 @@ use crate::tools::task_tools::types::{
     task_ci_gate_state, task_ci_status,
 };
 use djinn_core::models::{ActivityEntry, Task, TaskStatus, TransitionAction};
-use djinn_db::{EpicRepository, TaskRepository};
+use djinn_db::{EffectiveCreatorProvenance, EpicRepository, TaskRepository};
 
 const IMPACT_CHECK_WARNING: &str = "This task appears to involve a removal or rename. Consider calling `impact_check` before proceeding to avoid breaking compile-time consumers in other crates. See the planner prompt contract for details.";
 const DESTRUCTIVE_TASK_KEYWORDS: [&str; 8] = [
@@ -284,6 +284,14 @@ pub async fn create_task(
         .create_in_project_with_blockers(
             project_id,
             epic_id.as_deref(),
+            // Authenticated MCP task creation: the current session user is the
+            // explicit creator. If no session is present, resolution falls back
+            // to parent-epic / proposal provenance inside the insert transaction.
+            EffectiveCreatorProvenance {
+                explicit_user_id: djinn_core::auth_context::current_user_id().as_deref(),
+                source_task_id: None,
+                proposal_id: None,
+            },
             &request.title,
             &request.description,
             &request.design,
@@ -634,6 +642,7 @@ mod tests {
     use djinn_core::events::EventBus;
     use djinn_db::{
         Database, EpicCreateInput, EpicRepository, ProjectRepository, ReadyQuery, TaskRepository,
+        UserRepository,
     };
 
     fn epic_input<'a>(title: &'a str) -> EpicCreateInput<'a> {
@@ -727,7 +736,7 @@ mod tests {
             .unwrap();
 
         let open_foundation_task = task_repo
-            .create_in_project(
+            .create_fixture_in_project(
                 &project.id,
                 Some(&foundation_epic.id),
                 "open foundation task",
@@ -742,7 +751,7 @@ mod tests {
             .await
             .unwrap();
         let closed_foundation_task = task_repo
-            .create_in_project(
+            .create_fixture_in_project(
                 &project.id,
                 Some(&foundation_epic.id),
                 "closed foundation task",
@@ -762,12 +771,26 @@ mod tests {
             .await
             .unwrap();
 
-        let Json(created) = create_task(
-            &server,
-            &project.id,
-            planning_task_request("dependent task", &blocked_epic.short_id),
-        )
-        .await;
+        let github_id = (uuid::Uuid::now_v7().as_u128() % i64::MAX as u128) as i64;
+        let creator = UserRepository::new(db)
+            .upsert_from_github(
+                github_id,
+                &format!("blocked-epic-task-fixture-{github_id}"),
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        let Json(created) = djinn_core::auth_context::SESSION_USER_ID
+            .scope(Some(creator.id), async {
+                create_task(
+                    &server,
+                    &project.id,
+                    planning_task_request("dependent task", &blocked_epic.short_id),
+                )
+                .await
+            })
+            .await;
         let dependent_task = match created {
             ErrorOr::Ok(task) => task,
             ErrorOr::Error(err) => panic!("task_create failed: {}", err.error),

@@ -2367,7 +2367,7 @@ async fn review_hold_release_lifecycle_proves_dispatch_readiness_recovery() {
     // ── Phase 4: Prove a normal (non-review) blocker has identical semantics ──
     // Add a normal blocker to the same source.
     let normal_blocker = repo
-        .create_in_project(
+        .create_fixture_in_project(
             &parked.project_id,
             parked.epic_id.as_deref(),
             "Normal blocker task",
@@ -2458,7 +2458,7 @@ async fn normal_blocker_release_via_transition_fires_unblocked_event() {
 
     // Source task — a normal full-lifecycle work item.
     let source = repo
-        .create_in_project(
+        .create_fixture_in_project(
             &project.id,
             Some(&epic.id),
             "Source task",
@@ -2477,7 +2477,7 @@ async fn normal_blocker_release_via_transition_fires_unblocked_event() {
     // closed) so `transition(Close)` from `open` is a valid state-machine
     // move. This mirrors a real non-review blocker task.
     let normal_blocker = repo
-        .create_in_project(
+        .create_fixture_in_project(
             &project.id,
             Some(&epic.id),
             "Dependency spike",
@@ -5357,7 +5357,7 @@ async fn arbiter_park_persists_decision_creates_planner_escalation() {
          closing THIS task releases the blocked source.\n\nReason: {dossier_text}"
     );
     let review_task = repo
-        .create_in_project(
+        .create_fixture_in_project(
             &task.project_id,
             None,
             &format!(
@@ -5702,7 +5702,7 @@ async fn planner_escalation_description_contains_arbiter_dossier() {
         serde_json::to_string_pretty(&dossier).unwrap()
     );
     let review_task = repo
-        .create_in_project(
+        .create_fixture_in_project(
             &task.project_id,
             None,
             "Test escalation",
@@ -6682,7 +6682,7 @@ async fn hold_release_yields_fresh_arbitration_on_next_strike() {
     // park_source_human_review path does when the arbiter parks.
     let project_id = repo.get(&task.id).await.unwrap().unwrap().project_id;
     let hold_task = repo
-        .create_in_project(
+        .create_fixture_in_project(
             &project_id,
             None,
             &format!("HumanReview hold for {}", task.short_id),

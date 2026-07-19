@@ -33,6 +33,7 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
+use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex, OnceLock};
 
 use djinn_agent::context::{AgentContext, ReconciliationSweepConfig};
@@ -46,9 +47,9 @@ use djinn_agent::supervisor::{
 use djinn_core::events::EventBus;
 use djinn_core::models::TaskRunTrigger;
 use djinn_db::{
-    CreateTaskAttemptParams, Database, EpicCreateInput, EpicRepository, ProjectRepository,
-    SessionMessageRepository, SessionRepository, TaskAttemptRepository, TaskRepository,
-    TaskRunRepository,
+    CreateTaskAttemptParams, Database, EffectiveCreatorProvenance, EpicCreateInput, EpicRepository,
+    ProjectRepository, SessionMessageRepository, SessionRepository, TaskAttemptRepository,
+    TaskRepository, TaskRunRepository, UserRepository,
 };
 use djinn_provider::catalog::{CatalogService, HealthTracker};
 use djinn_provider::message::{ContentBlock, Conversation, Role};
@@ -68,6 +69,8 @@ use tracing_subscriber::{Layer, registry::LookupSpan};
 // Test fixtures (inlined because `djinn_agent::test_helpers` is `#[cfg(test)]`
 // which does not cross the integration-test compilation unit boundary.)
 // ──────────────────────────────────────────────────────────────────────────────
+
+static NEXT_FIXTURE_GITHUB_ID: AtomicI64 = AtomicI64::new(9_400_000_000);
 
 fn test_agent_context(db: Database) -> AgentContext {
     AgentContext {
@@ -296,10 +299,25 @@ async fn supervisor_clones_from_mirror_without_worktrees() {
         .await
         .expect("create epic");
     let task_repo = TaskRepository::new(db.clone(), events.clone());
+    let github_id = NEXT_FIXTURE_GITHUB_ID.fetch_add(1, Ordering::Relaxed);
+    let creator = UserRepository::new(db.clone())
+        .upsert_from_github(
+            github_id,
+            &format!("phase1-supervisor-fixture-{github_id}"),
+            Some("Phase 1 Supervisor Fixture"),
+            None,
+        )
+        .await
+        .expect("create task creator");
     let task = task_repo
-        .create_in_project(
+        .create_in_project_with_provenance(
             &project.id,
             Some(&epic.id),
+            EffectiveCreatorProvenance {
+                explicit_user_id: Some(&creator.id),
+                source_task_id: None,
+                proposal_id: None,
+            },
             "phase1-task",
             "phase1 test task description",
             "phase1 test task design",
@@ -556,10 +574,25 @@ async fn supervisor_spike_runs_to_close_with_stubbed_provider() {
     // `spike` issue_type so the coordinator-side flow-for-task rules would
     // also pick SupervisorFlow::Spike — we set the spec.flow explicitly below
     // regardless, but keep the row consistent.
+    let github_id = NEXT_FIXTURE_GITHUB_ID.fetch_add(1, Ordering::Relaxed);
+    let creator = UserRepository::new(db.clone())
+        .upsert_from_github(
+            github_id,
+            &format!("phase1-supervisor-fixture-{github_id}"),
+            Some("Phase 1 Supervisor Fixture"),
+            None,
+        )
+        .await
+        .expect("create task creator");
     let task = task_repo
-        .create_in_project(
+        .create_in_project_with_provenance(
             &project.id,
             Some(&epic.id),
+            EffectiveCreatorProvenance {
+                explicit_user_id: Some(&creator.id),
+                source_task_id: None,
+                proposal_id: None,
+            },
             "phase1-stub-task",
             "phase1 stub task description",
             "phase1 stub task design",
@@ -861,10 +894,25 @@ async fn proactive_sync_merges_advanced_base_into_behind_task_branch() {
         .await
         .expect("create epic");
     let task_repo = TaskRepository::new(db.clone(), events.clone());
+    let github_id = NEXT_FIXTURE_GITHUB_ID.fetch_add(1, Ordering::Relaxed);
+    let creator = UserRepository::new(db.clone())
+        .upsert_from_github(
+            github_id,
+            &format!("phase1-proactive-sync-fixture-{github_id}"),
+            Some("Phase 1 Proactive Sync Fixture"),
+            None,
+        )
+        .await
+        .expect("create task creator");
     let task = task_repo
-        .create_in_project(
+        .create_in_project_with_provenance(
             &project.id,
             Some(&epic.id),
+            EffectiveCreatorProvenance {
+                explicit_user_id: Some(&creator.id),
+                source_task_id: None,
+                proposal_id: None,
+            },
             "sync-task",
             "sync task description",
             "sync task design",

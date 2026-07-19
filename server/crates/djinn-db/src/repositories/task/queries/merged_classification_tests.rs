@@ -47,7 +47,7 @@ async fn parent_closed_child_is_not_counted_as_merged() {
         .unwrap();
 
     let child = task_repo
-        .create_in_project(
+        .create_fixture_in_project(
             &project_id,
             Some(&epic.id),
             "child task",
@@ -154,7 +154,7 @@ async fn true_merged_classifications_still_count_as_merged() {
 
     // merge_commit_sha IS NOT NULL
     let merged_sha = repo
-        .create_in_project(
+        .create_fixture_in_project(
             &project_id,
             None,
             "merged by sha",
@@ -179,7 +179,7 @@ async fn true_merged_classifications_still_count_as_merged() {
 
     // pr_url IS NOT NULL AND close_reason = 'completed'
     let merged_pr = repo
-        .create_in_project(
+        .create_fixture_in_project(
             &project_id,
             None,
             "merged by pr",
