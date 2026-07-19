@@ -1,24 +1,56 @@
 //! Internal-only bounded GitHub Actions artifact operations.
-use std::io::{Cursor, Read};
-use std::time::Duration;
+use super::ci::{WorkflowRunResolutionRequest, resolve_workflow_run};
 use djinn_provider::github_api::{ActionsArtifact, GitHubApiClient};
 use serde::Serialize;
-use super::ci::{resolve_workflow_run, WorkflowRunResolutionRequest};
+use std::io::{Cursor, Read};
+use std::time::Duration;
 const OP_TIMEOUT: Duration = Duration::from_secs(30);
 #[derive(Debug, Serialize)]
-pub(crate) struct ArtifactListReport { pub run_id: u64, pub lane: &'static str, pub artifacts: Vec<ArtifactSummary>, pub truncated: bool }
+pub(crate) struct ArtifactListReport {
+    pub run_id: u64,
+    pub lane: &'static str,
+    pub artifacts: Vec<ArtifactSummary>,
+    pub truncated: bool,
+}
 #[derive(Debug, Serialize)]
-pub(crate) struct ArtifactSummary { pub name: String, pub size_bytes: u64, pub expired: bool, pub expires_at: Option<String>, pub artifact_id: u64 }
+pub(crate) struct ArtifactSummary {
+    pub name: String,
+    pub size_bytes: u64,
+    pub expired: bool,
+    pub expires_at: Option<String>,
+    pub artifact_id: u64,
+}
 /// Resolution and listing share a single cancellable operation deadline.
-pub(crate) async fn list_artifacts(client: &GitHubApiClient, owner: &str, repo: &str, request: WorkflowRunResolutionRequest) -> Result<ArtifactListReport, String> {
+pub(crate) async fn list_artifacts(
+    client: &GitHubApiClient,
+    owner: &str,
+    repo: &str,
+    request: WorkflowRunResolutionRequest,
+) -> Result<ArtifactListReport, String> {
     tokio::time::timeout(OP_TIMEOUT, async {
         let resolved = resolve_workflow_run(client, owner, repo, request).await?;
-        let page = client.list_run_artifacts(owner, repo, resolved.run_id).await.map_err(|e| format!("failed to list artifacts for run {}: {e}", resolved.run_id))?;
-        Ok(ArtifactListReport { run_id: resolved.run_id, lane: resolved.lane.label(), artifacts: page.artifacts.into_iter().map(summary).collect(), truncated: page.truncated })
-    }).await.map_err(|_| "ci_artifact list exceeded its 30-second deadline".to_string())?
+        let page = client
+            .list_run_artifacts(owner, repo, resolved.run_id)
+            .await
+            .map_err(|e| format!("failed to list artifacts for run {}: {e}", resolved.run_id))?;
+        Ok(ArtifactListReport {
+            run_id: resolved.run_id,
+            lane: resolved.lane.label(),
+            artifacts: page.artifacts.into_iter().map(summary).collect(),
+            truncated: page.truncated,
+        })
+    })
+    .await
+    .map_err(|_| "ci_artifact list exceeded its 30-second deadline".to_string())?
 }
 /// Resolution, list, download, and in-memory rendering share one deadline.
-pub(crate) async fn fetch_artifact(client: &GitHubApiClient, owner: &str, repo: &str, request: WorkflowRunResolutionRequest, name: &str) -> Result<String, String> {
+pub(crate) async fn fetch_artifact(
+    client: &GitHubApiClient,
+    owner: &str,
+    repo: &str,
+    request: WorkflowRunResolutionRequest,
+    name: &str,
+) -> Result<String, String> {
     tokio::time::timeout(OP_TIMEOUT, async {
         let resolved = resolve_workflow_run(client, owner, repo, request).await?;
         let page = client.list_run_artifacts(owner, repo, resolved.run_id).await.map_err(|e| format!("failed to list artifacts for run {}: {e}", resolved.run_id))?;
@@ -28,7 +60,15 @@ pub(crate) async fn fetch_artifact(client: &GitHubApiClient, owner: &str, repo: 
         render_ci_artifact_zip(&download.bytes)
     }).await.map_err(|_| "ci_artifact fetch exceeded its 30-second deadline; no artifact report was returned".to_string())?
 }
-fn summary(artifact: ActionsArtifact) -> ArtifactSummary { ArtifactSummary { name: artifact.name, size_bytes: artifact.size_in_bytes, expired: artifact.expired, expires_at: artifact.expires_at, artifact_id: artifact.id } }
+fn summary(artifact: ActionsArtifact) -> ArtifactSummary {
+    ArtifactSummary {
+        name: artifact.name,
+        size_bytes: artifact.size_in_bytes,
+        expired: artifact.expired,
+        expires_at: artifact.expires_at,
+        artifact_id: artifact.id,
+    }
+}
 const MAX_ENTRIES: usize = 256;
 const MAX_ENTRY_BYTES: usize = 2 * 1024 * 1024;
 const MAX_TOTAL_BYTES: usize = 16 * 1024 * 1024;

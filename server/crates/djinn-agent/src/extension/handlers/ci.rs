@@ -167,6 +167,13 @@ pub(crate) async fn call_ci_job_log(
     Ok(serde_json::Value::String(output))
 }
 
+/// An implicitly discovered run must itself have completed with a failing
+/// conclusion. A failed job alone is not sufficient: GitHub can expose a
+/// completed failed job while its enclosing workflow remains in progress.
+fn is_implicit_failing_run(run: &WorkflowRun) -> bool {
+    is_failing_conclusion(run.conclusion.as_deref())
+}
+
 /// Which lane discovery resolved the failing jobs from — surfaced in the
 /// multi-job header so the agent knows whether it is looking at the PR head or
 /// the merge-queue run.
@@ -492,6 +499,18 @@ mod tests {
         );
     }
 
+    #[test]
+    fn implicit_run_requires_a_failing_workflow_conclusion() {
+        // A recorded merge-queue run can have a failed completed job while the
+        // enclosing workflow is still running. It must not be selected until
+        // GitHub reports a failure-flavor workflow conclusion.
+        assert!(!is_implicit_failing_run(&run(1, None, None)));
+        assert!(!is_implicit_failing_run(&run(2, Some("success"), None)));
+        assert!(is_implicit_failing_run(&run(3, Some("failure"), None)));
+        assert!(is_implicit_failing_run(&run(4, Some("timed_out"), None)));
+        assert!(is_implicit_failing_run(&run(5, Some("cancelled"), None)));
+    }
+
     // ── select_merge_group_run ────────────────────────────────────────────
     #[test]
     fn select_merge_group_run_matches_pr_marker() {
@@ -688,30 +707,98 @@ pub(crate) struct WorkflowRunResolutionRequest {
 
 /// Resolve a repository-scoped run. Passing and in-progress runs are never
 /// selected implicitly; an explicit run is repository-verified and may have any conclusion.
-pub(crate) async fn resolve_workflow_run(client: &GitHubApiClient, owner: &str, repo: &str, request: WorkflowRunResolutionRequest) -> Result<ResolvedWorkflowRun, String> {
+pub(crate) async fn resolve_workflow_run(
+    client: &GitHubApiClient,
+    owner: &str,
+    repo: &str,
+    request: WorkflowRunResolutionRequest,
+) -> Result<ResolvedWorkflowRun, String> {
     if let Some(run_id) = request.explicit_run_id {
-        if run_id == 0 { return Err("explicit workflow run ID must be positive".to_string()); }
-        client.get_workflow_run(owner, repo, run_id).await.map_err(|e| format!("explicit run {run_id} is not accessible in repository {owner}/{repo}: {e}"))?;
-        return Ok(ResolvedWorkflowRun { run_id, lane: WorkflowRunLane::Explicit });
+        if run_id == 0 {
+            return Err("explicit workflow run ID must be positive".to_string());
+        }
+        client
+            .get_workflow_run(owner, repo, run_id)
+            .await
+            .map_err(|e| {
+                format!("explicit run {run_id} is not accessible in repository {owner}/{repo}: {e}")
+            })?;
+        return Ok(ResolvedWorkflowRun {
+            run_id,
+            lane: WorkflowRunLane::Explicit,
+        });
     }
-    let pr = request.pr_number.ok_or("no explicit workflow run ID or PR number was available to resolve CI artifacts")?;
+    let pr = request
+        .pr_number
+        .ok_or("no explicit workflow run ID or PR number was available to resolve CI artifacts")?;
     let sha = match request.recorded_head_sha.filter(|s| !s.is_empty()) {
         Some(s) => s,
-        None => client.get_pull_request(owner, repo, pr).await.map_err(|e| format!("failed to fetch PR #{pr}: {e}"))?.0.head.sha,
+        None => {
+            client
+                .get_pull_request(owner, repo, pr)
+                .await
+                .map_err(|e| format!("failed to fetch PR #{pr}: {e}"))?
+                .0
+                .head
+                .sha
+        }
     };
-    let runs = client.list_workflow_runs_for_head_sha(owner, repo, &sha, RUN_SCAN_PER_PAGE).await.map_err(|e| format!("failed to list workflow runs for head {sha}: {e}"))?;
-    for run in runs.iter().filter(|r| is_failing_conclusion(r.conclusion.as_deref())) {
-        if run_has_failing_job(client, owner, repo, run.id).await? { return Ok(ResolvedWorkflowRun { run_id: run.id, lane: WorkflowRunLane::PrHead }); }
+    let runs = client
+        .list_workflow_runs_for_head_sha(owner, repo, &sha, RUN_SCAN_PER_PAGE)
+        .await
+        .map_err(|e| format!("failed to list workflow runs for head {sha}: {e}"))?;
+    for run in runs.iter().filter(|run| is_implicit_failing_run(run)) {
+        if run_has_failing_job(client, owner, repo, run.id).await? {
+            return Ok(ResolvedWorkflowRun {
+                run_id: run.id,
+                lane: WorkflowRunLane::PrHead,
+            });
+        }
     }
-    if let Some(id) = request.recorded_merge_queue_run_id && run_has_failing_job(client, owner, repo, id).await? { return Ok(ResolvedWorkflowRun { run_id: id, lane: WorkflowRunLane::RecordedMergeQueue }); }
-    let runs = client.list_workflow_runs_for_event(owner, repo, "merge_group", MERGE_GROUP_SCAN_PER_PAGE).await.map_err(|e| format!("failed to list merge_group runs: {e}"))?;
+    if let Some(id) = request.recorded_merge_queue_run_id {
+        let run = client
+            .get_workflow_run(owner, repo, id)
+            .await
+            .map_err(|e| format!("failed to verify recorded merge-queue run {id}: {e}"))?;
+        if is_implicit_failing_run(&run) && run_has_failing_job(client, owner, repo, id).await? {
+            return Ok(ResolvedWorkflowRun {
+                run_id: id,
+                lane: WorkflowRunLane::RecordedMergeQueue,
+            });
+        }
+    }
+    let runs = client
+        .list_workflow_runs_for_event(owner, repo, "merge_group", MERGE_GROUP_SCAN_PER_PAGE)
+        .await
+        .map_err(|e| format!("failed to list merge_group runs: {e}"))?;
     let marker = format!("pr-{pr}-");
-    for run in runs.iter().filter(|r| is_failing_conclusion(r.conclusion.as_deref()) && r.head_branch.as_deref().is_some_and(|b| b.contains(&marker))) {
-        if run_has_failing_job(client, owner, repo, run.id).await? { return Ok(ResolvedWorkflowRun { run_id: run.id, lane: WorkflowRunLane::LiveMergeGroup }); }
+    for run in runs.iter().filter(|run| {
+        is_implicit_failing_run(run)
+            && run
+                .head_branch
+                .as_deref()
+                .is_some_and(|branch| branch.contains(&marker))
+    }) {
+        if run_has_failing_job(client, owner, repo, run.id).await? {
+            return Ok(ResolvedWorkflowRun {
+                run_id: run.id,
+                lane: WorkflowRunLane::LiveMergeGroup,
+            });
+        }
     }
-    Err(format!("no failing workflow run with failing jobs found for PR #{pr}; CI may be passing or still in progress"))
+    Err(format!(
+        "no failing workflow run with failing jobs found for PR #{pr}; CI may be passing or still in progress"
+    ))
 }
-async fn run_has_failing_job(client: &GitHubApiClient, owner: &str, repo: &str, run_id: u64) -> Result<bool, String> {
-    let jobs = client.list_run_jobs(owner, repo, run_id).await.map_err(|e| format!("failed to list jobs for run {run_id}: {e}"))?;
+async fn run_has_failing_job(
+    client: &GitHubApiClient,
+    owner: &str,
+    repo: &str,
+    run_id: u64,
+) -> Result<bool, String> {
+    let jobs = client
+        .list_run_jobs(owner, repo, run_id)
+        .await
+        .map_err(|e| format!("failed to list jobs for run {run_id}: {e}"))?;
     Ok(!select_failing_jobs(&jobs).is_empty())
 }
