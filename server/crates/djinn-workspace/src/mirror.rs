@@ -616,6 +616,49 @@ impl MirrorManager {
         .and_then(|o| o.stdout.trim().parse::<u64>().ok())
         .is_some_and(|ahead| ahead > 0)
     }
+
+    /// Does `refs/heads/{branch}` exist in the bare mirror for `project_id`?
+    ///
+    /// Exists so a caller can classify a failed
+    /// [`MirrorManager::clone_ephemeral`] into "the branch genuinely does not
+    /// exist yet" versus "a transient failure". That classification CANNOT be
+    /// done on the [`MirrorError`] variant: `MirrorError::Missing` means the
+    /// mirror DIRECTORY is absent, while an absent branch fails inside
+    /// `git clone --branch` (`fatal: Remote branch <b> not found in upstream
+    /// origin`) and arrives as the same `MirrorError::Git` as a genuinely
+    /// transient git failure. Only a direct ref probe separates them.
+    ///
+    /// Probes with `git show-ref --verify`, which asks purely about ref
+    /// existence. A ref that exists but does not resolve (partially fetched /
+    /// corrupt mirror) exits 128 and surfaces as `Err` — deliberately NOT
+    /// `Ok(false)`, because "I cannot answer" must never be read as "the
+    /// branch is absent".
+    ///
+    /// A missing mirror is likewise an `Err(MirrorError::Missing)`: there is
+    /// no repository to answer the question against.
+    pub async fn branch_exists(&self, project_id: &str, branch: &str) -> Result<bool, MirrorError> {
+        let mirror = self.mirror_path(project_id);
+        if !mirror.exists() {
+            return Err(MirrorError::Missing(project_id.to_string()));
+        }
+        let out = run_git_command(
+            mirror,
+            vec![
+                "show-ref".into(),
+                "--verify".into(),
+                "--quiet".into(),
+                format!("refs/heads/{branch}"),
+            ],
+        )
+        .await;
+        match out {
+            Ok(_) => Ok(true),
+            // `show-ref --verify --quiet` exits 1 (silently) when the ref does
+            // not exist. That is the genuine-absence answer, not a failure.
+            Err(djinn_git::GitError::CommandFailed { code: 1, .. }) => Ok(false),
+            Err(e) => Err(git_err_to_mirror("git show-ref --verify", e)),
+        }
+    }
 }
 
 /// Is `key` set in the repo config at `mirror`? `git config --get`
@@ -994,6 +1037,62 @@ mod ahead_of_base_tests {
         let root = TempDir::new().unwrap();
         let mgr = MirrorManager::new(root.path().to_path_buf());
         assert!(!mgr.branch_ahead_of_base("absent", "task", "main").await);
+    }
+
+    #[tokio::test]
+    async fn branch_exists_true_for_present_branch() {
+        let root = TempDir::new().unwrap();
+        let mgr = seed_mirror(root.path(), "be1", true).await;
+        assert!(mgr.branch_exists("be1", "task").await.expect("probe"));
+        assert!(mgr.branch_exists("be1", "main").await.expect("probe"));
+    }
+
+    #[tokio::test]
+    async fn branch_exists_false_for_absent_branch() {
+        // The genuine first-cycle shape: mirror is healthy, task branch has
+        // never been pushed. This is the ONLY case that may fall back to base.
+        let root = TempDir::new().unwrap();
+        let mgr = seed_mirror(root.path(), "be2", false).await;
+        assert!(!mgr.branch_exists("be2", "task").await.expect("probe"));
+    }
+
+    #[tokio::test]
+    async fn branch_exists_errs_when_mirror_missing() {
+        let root = TempDir::new().unwrap();
+        let mgr = MirrorManager::new(root.path().to_path_buf());
+        assert!(
+            matches!(
+                mgr.branch_exists("absent", "task").await,
+                Err(MirrorError::Missing(_))
+            ),
+            "a missing mirror cannot answer the question and must not read as \
+             'branch absent'"
+        );
+    }
+
+    #[tokio::test]
+    async fn branch_exists_errs_when_ref_is_unresolvable() {
+        // Partially fetched / corrupt mirror: the ref file exists but points
+        // at an object the mirror does not have. `git clone --branch` fails
+        // here, and this probe must NOT answer `Ok(false)` — reading that as
+        // "first cycle" is exactly what rewinds the task branch to base.
+        let root = TempDir::new().unwrap();
+        let mgr = seed_mirror(root.path(), "be3", false).await;
+        let broken = root.path().join("be3.git/refs/heads/task");
+        tokio::fs::create_dir_all(broken.parent().unwrap())
+            .await
+            .unwrap();
+        tokio::fs::write(
+            &broken,
+            "0000000000000000000000000000000000000001\n".as_bytes(),
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            mgr.branch_exists("be3", "task").await.is_err(),
+            "an unresolvable ref must surface as an error, never as absence"
+        );
     }
 }
 
