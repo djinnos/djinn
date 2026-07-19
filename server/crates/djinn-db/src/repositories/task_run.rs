@@ -473,13 +473,23 @@ mod tests {
         })
         .await
         .unwrap();
-        assert!(repo.get(&id).await.unwrap().unwrap().workspace_path.is_none());
+        assert!(
+            repo.get(&id)
+                .await
+                .unwrap()
+                .unwrap()
+                .workspace_path
+                .is_none()
+        );
 
         repo.set_workspace_path(&id, "/workspace/run-clone")
             .await
             .unwrap();
         let after = repo.get(&id).await.unwrap().unwrap();
-        assert_eq!(after.workspace_path.as_deref(), Some("/workspace/run-clone"));
+        assert_eq!(
+            after.workspace_path.as_deref(),
+            Some("/workspace/run-clone")
+        );
         // Nothing else on the row changes.
         assert_eq!(after.status, "starting");
         assert!(after.ended_at.is_none());

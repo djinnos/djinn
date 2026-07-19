@@ -3065,7 +3065,7 @@ mod tests {
             )
             .await
             .unwrap();
-        let replacement = WarmAdmission::admit(&controller, warm("admitted"))
+        let _replacement = WarmAdmission::admit(&controller, warm("admitted"))
             .await
             .unwrap();
         let rendered = djinn_telemetry::render().unwrap();
@@ -3119,7 +3119,6 @@ mod tests {
             queue_histogram_value(&rendered, "shutdown", "sum") - before_shutdown_sum,
             13.0
         );
-        drop(replacement);
     }
 
     /// Gauges equal disjoint unique state cardinalities after every transition.
@@ -3234,7 +3233,7 @@ mod tests {
             )
             .await
             .unwrap();
-        let admitted = WarmAdmission::admit(&controller, warm("queued-b"))
+        let _admitted = WarmAdmission::admit(&controller, warm("queued-b"))
             .await
             .unwrap();
         let rendered = djinn_telemetry::render().unwrap();
@@ -3257,7 +3256,6 @@ mod tests {
             0.0,
             "shutdown drain with no queued identities must leave gauge at 0"
         );
-        drop(admitted);
     }
 
     /// A task-close cancellation via `cancel_deferred_task` emits exactly one
