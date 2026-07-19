@@ -28,7 +28,7 @@ use djinn_core::clock::{Clock, SystemClock as SystemClockTrait};
 use djinn_db::{
     AdmissionHandoffAuthority, AdmissionHandoffRepository, Database, NoopNoteVectorStore,
     NoteVectorStore, ProjectRepository, QdrantCodeChunkConfig, QdrantCodeChunkVectorStore,
-    QdrantConfig, QdrantNoteVectorStore, SettingsRepository,
+    QdrantConfig, QdrantNoteVectorStore, ReadyQuery, SettingsRepository, TaskRepository,
 };
 use djinn_git::{GitActorHandle, GitError};
 use djinn_image_controller::{
@@ -948,6 +948,40 @@ impl AppState {
                 admission.publish_metrics().await;
             }
         }
+    }
+
+    /// Restore task identities that were durably ready when the previous
+    /// coordinator was replaced. The admission controller owns the lifecycle
+    /// bookkeeping and filters journal-active identities, while this production
+    /// startup seam supplies the canonical ready-query snapshot used by normal
+    /// coordinator dispatch.
+    async fn initialize_build_admission_deferred_recovery(&self) {
+        let Some(admission) = self.inner.build_admission.clone() else {
+            return;
+        };
+        let ready = match TaskRepository::new(self.db().clone(), self.event_bus())
+            .list_ready(ReadyQuery {
+                limit: i64::MAX,
+                ..Default::default()
+            })
+            .await
+        {
+            Ok(tasks) => tasks,
+            Err(error) => {
+                tracing::error!(%error, "build_admission: durable ready queue recovery failed");
+                admission.publish_metrics().await;
+                return;
+            }
+        };
+        let recovered = ready.len();
+        admission
+            .reconcile_deferred_tasks(ready.into_iter().map(|task| (task.id, 0)))
+            .await;
+        tracing::info!(
+            mode = ?admission.mode(),
+            durable_ready_tasks = recovered,
+            "build_admission: reconstructed deferred task identities from durable ready queue"
+        );
     }
 
     /// Run the broad Kubernetes build-capable inventory and advance the
@@ -2077,6 +2111,7 @@ impl AppState {
         // because the warmer can create warm jobs under the shared cap.
         self.initialize_build_admission_handoff().await;
         self.initialize_build_admission_recovery().await;
+        self.initialize_build_admission_deferred_recovery().await;
 
         // Phase 3 PR 8: pick the canonical-graph warmer impl (K8s or
         // in-process) and cache it. This is just a cached handle (the actual
