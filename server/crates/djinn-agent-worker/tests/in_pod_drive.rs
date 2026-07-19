@@ -50,8 +50,8 @@ use std::time::Duration;
 
 use djinn_core::events::EventBus;
 use djinn_core::models::{SessionRecord, Task, TaskRunStatus, TaskRunTrigger};
-use djinn_db::ProjectRepository;
 use djinn_db::repositories::task_run::{CreateTaskRunParams, TaskRunRepository};
+use djinn_db::{ProjectRepository, TaskRepository};
 use djinn_runtime::{
     ResolvedCredentials, RoleKind, SerializableCredential, SupervisorFlow, TaskRunSpec, WorkerEvent,
 };
@@ -488,11 +488,43 @@ async fn worker_drives_real_supervisor_in_pod() {
         .await
         .expect("ensure_mirror");
 
-    // 2. Seed the spec + credentials files the worker reads at boot.
+    // 2. Provision a migrated per-test Postgres database for the worker.
+    // The in-Pod bootstrap verifies migrations but intentionally does not run
+    // them, so keep this initialized handle alive for the subprocess lifetime.
+    let worker_db = djinn_db::Database::open_in_memory().expect("allocate per-test worker db");
+    worker_db
+        .table_exists("tasks")
+        .await
+        .expect("clone djinn_test_template into per-test worker db");
+
+    // Seed through djinn-db's SQL ownership boundaries. The repository-minted
+    // task id is then used canonically by the spec, fake host, and task-run.
+    let events = EventBus::noop();
+    ProjectRepository::new(worker_db.clone(), events.clone())
+        .create_with_id(project_id, project_id, "test", project_id)
+        .await
+        .expect("seed pod-drive project");
+    let task = TaskRepository::new(worker_db.clone(), events)
+        .create_fixture_in_project(
+            project_id,
+            None,
+            "pod drive",
+            "",
+            "",
+            "task",
+            0,
+            "test-owner",
+            Some("open"),
+            None,
+        )
+        .await
+        .expect("seed pod-drive task");
+    let task_id = task.id;
+
+    // 3. Seed the spec + credentials files the worker reads at boot.
     let cfg_dir = TempDir::new().expect("tempdir cfg");
     let workspace_dir = TempDir::new().expect("tempdir workspace");
 
-    let task_id = "task-pod-drive";
     // One host-minted ID is used by the spec, the K8s-shaped row, and the
     // worker environment; the supervisor persists using spec.task_run_id.
     let task_run_id = "run-pod-drive";
@@ -503,7 +535,7 @@ async fn worker_drives_real_supervisor_in_pod() {
     let spec = TaskRunSpec {
         task_run_id: task_run_id.into(),
         task_attempt_id: None,
-        task_id: task_id.into(),
+        task_id: task_id.clone(),
         project_id: project_id.into(),
         trigger: TaskRunTrigger::NewTask,
         base_branch: "main".into(),
@@ -560,7 +592,7 @@ async fn worker_drives_real_supervisor_in_pod() {
     // 3. Bring up the fake TCP server with the audit log.
     let audit: Arc<Mutex<RpcAuditLog>> = Arc::new(Mutex::new(RpcAuditLog::default()));
     let (addr, server) = start_fake_server(
-        task_id.into(),
+        task_id.clone(),
         project_id.into(),
         bearer.into(),
         task_run_id.into(),
@@ -568,51 +600,13 @@ async fn worker_drives_real_supervisor_in_pod() {
     )
     .await;
 
-    // 4. Provision a migrated per-test Postgres database for the worker
-    //    subprocess. The worker's `bootstrap_warm_database()` opens
-    //    `DJINN_DATABASE_URL` and calls `verify_and_mark_initialized()`,
-    //    which is deliberately lock-free and DOES NOT run migrations (in
-    //    production the Helm pre-upgrade Job migrates first). So we cannot
-    //    hand the worker the bare `…/postgres` admin DB — it has no
-    //    `_sqlx_migrations` table and the worker would die at boot with
-    //    "schema is behind / _sqlx_migrations table missing".
-    //
-    //    `Database::open_in_memory()` allocates a fresh
-    //    `djinn_test_<uuid>` database; forcing initialization (any query
-    //    via `table_exists`) clones it from the pre-built
-    //    `djinn_test_template` (all migrations applied). We then read the
-    //    resulting per-test DSN off `bootstrap_info().target` and hand
-    //    *that* to the worker. The handle is kept alive for the duration
-    //    of the test so the database stays around for the subprocess.
-    let worker_db = djinn_db::Database::open_in_memory().expect("allocate per-test worker db");
-    worker_db
-        .table_exists("tasks")
-        .await
-        .expect("clone djinn_test_template into per-test worker db");
-
     // K8s dispatch inserts this exact row before the pod has a clone path.
-    sqlx::query(
-        "INSERT INTO projects (id, name, github_owner, github_repo) VALUES ($1, $2, 'test', $2)",
-    )
-    .bind(project_id)
-    .bind(project_id)
-    .execute(worker_db.pool())
-    .await
-    .expect("seed pod-drive project");
-    sqlx::query(
-        "INSERT INTO tasks (id, project_id, short_id, title, description, design, issue_type, status, labels, acceptance_criteria, memory_refs, total_reopen_count) VALUES ($1, $2, 'pod-drive', 'pod drive', '', '', 'task', 'open', '[]'::jsonb, '[]'::jsonb, '[]'::jsonb, 0)",
-    )
-    .bind(task_id)
-    .bind(project_id)
-    .execute(worker_db.pool())
-    .await
-    .expect("seed pod-drive task");
     let task_runs = TaskRunRepository::new(worker_db.clone());
     task_runs
         .create(CreateTaskRunParams {
             id: task_run_id,
             project_id,
-            task_id,
+            task_id: &task_id,
             trigger_type: TaskRunTrigger::NewTask.as_str(),
             status: Some("starting"),
             workspace_path: None,

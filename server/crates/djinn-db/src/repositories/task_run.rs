@@ -134,10 +134,10 @@ impl TaskRunRepository {
              SET workspace_path = COALESCE(workspace_path, $2)
              WHERE id = $1",
         )
-            .bind(id)
-            .bind(workspace_path)
-            .execute(self.db.pool())
-            .await?;
+        .bind(id)
+        .bind(workspace_path)
+        .execute(self.db.pool())
+        .await?;
         if result.rows_affected() != 1 {
             return Err(crate::Error::Internal(format!(
                 "task run {id} does not exist while recording workspace path"
