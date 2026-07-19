@@ -244,7 +244,8 @@ async fn mcp_contract_task_and_epic_snapshot_shapes() {
         ".epics.**.project_id" => "[UUID]",
         ".epics.**.short_id" => "[SHORT_ID]",
         ".epics.**.created_at" => "[TIMESTAMP]",
-        ".epics.**.updated_at" => "[TIMESTAMP]"
+        ".epics.**.updated_at" => "[TIMESTAMP]",
+        ".epics.**.created_by_user_id" => "[UUID]"
     });
 
     let blockers = test_helpers::mcp_call_tool(
