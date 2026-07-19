@@ -223,7 +223,9 @@ test('post-cutover guard accepts absent retired operational paths', () => {
   const fixtureDir = join(REPO_ROOT, 'scripts', 'fixtures', 'djinn-retirement');
   const ledger = JSON.parse(readFileSync(join(fixtureDir, 'deletion-ledger.json'), 'utf8'));
   const guidance = loadDbGuidanceFixture(join(fixtureDir, 'db-guidance.json'));
-  const paths = nulBytes([...NON_KNOWLEDGE_TRACKED]);
+  const paths = nulBytes(
+    [...NON_KNOWLEDGE_TRACKED].filter((path) => !RETIRED_OPERATIONAL_PATHS.has(path)),
+  );
   // Must not throw: all retired operational paths are absent.
   validateRetirementCutover(paths, ledger, guidance, { cwd: REPO_ROOT });
 });

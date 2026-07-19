@@ -1015,6 +1015,7 @@ export function validateRetirementCutover(currentPathBytes, ledger, guidanceFixt
   }
   const currentSet = new Set(currentPaths);
   for (const operationalPath of NON_KNOWLEDGE_TRACKED) {
+    if (RETIRED_OPERATIONAL_PATHS.has(operationalPath)) continue;
     if (!currentSet.has(operationalPath)) {
       throw new ManifestError(`required operational path is missing: ${operationalPath}`, {
         code: 'operational_path_missing', entry: { repository_path: operationalPath },
