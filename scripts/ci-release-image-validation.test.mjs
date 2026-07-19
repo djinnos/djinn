@@ -42,8 +42,10 @@ test('generated Rust validation uses the real installer and runtime smoke has ex
   assert.match(generatedDockerfile, /install-rust\.sh/,
     'representative image must exercise install-rust.sh');
   const job = runtimeBaseBlock();
-  assert.match(job, /probe-mold-compatibility\.sh --evidence-dir evidence\/runtime-base/);
-  assert.match(job, /probe-mold-compatibility\.sh --evidence-dir evidence\/generated-rust/);
-  assert.match(job, /run-mold-thread-smoke\.sh --threads 4 --evidence-dir evidence\/runtime-base/,
+  assert.match(job, /probe-mold-compatibility\.sh --evidence-dir \/validation\/evidence\/runtime-base/);
+  assert.match(job, /probe-mold-compatibility\.sh --evidence-dir \/validation\/evidence\/generated-rust/);
+  assert.match(job, /run-mold-thread-smoke\.sh --threads 4 --evidence-dir \/validation\/evidence\/runtime-base/,
     'runtime smoke must specify a deterministic explicit thread count');
+  assert.match(job, /path:\s*evidence/,
+    'version, help, and task-count evidence must be retained as an artifact');
 });

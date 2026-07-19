@@ -21,8 +21,12 @@ expected="$(sed -nE 's/^[[:space:]]*readonly[[:space:]]+MOLD_VERSION="([^"]+)".*
 mold --version > "$EVIDENCE_DIR/mold-version.txt" 2>&1
 mold --help > "$EVIDENCE_DIR/mold-help.txt" 2>&1
 
-if ! grep -Fq "$expected" "$EVIDENCE_DIR/mold-version.txt"; then
-    echo "mold version does not contain pinned package version $expected" >&2
+# Debian's package revision (for example, +dfsg-1) is intentionally absent
+# from mold --version. Preserve that raw upstream output above, and verify the
+# package pin through dpkg rather than comparing two different version formats.
+dpkg-query -W -f='${Version}\n' mold > "$EVIDENCE_DIR/mold-package-version.txt" 2>&1
+if ! grep -Fxq "$expected" "$EVIDENCE_DIR/mold-package-version.txt"; then
+    echo "installed mold package does not match pinned version $expected" >&2
     exit 1
 fi
 

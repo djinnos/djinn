@@ -16,6 +16,9 @@ done
 mkdir -p "$EVIDENCE_DIR"
 SAMPLES="$EVIDENCE_DIR/mold-task-counts.txt"
 : > "$SAMPLES"
+# Tests may provide a synthetic proc tree to deterministically prove process
+# identification and fail-closed accounting. Production always uses /proc.
+PROC_ROOT="${MOLD_SMOKE_PROC_ROOT:-/proc}"
 
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
@@ -43,16 +46,16 @@ build_pid=$!
 
 # /proc is authoritative and works without procps in the runtime image.
 while kill -0 "$build_pid" 2>/dev/null; do
-    for proc in /proc/[0-9]*; do
-        pid="${proc#/proc/}"
-        [[ -r "$proc/cmdline" && -d "$proc/task" ]] || continue
-        cmdline="$(tr '\0' ' ' < "$proc/cmdline" 2>/dev/null || true)"
-        case "$cmdline" in
-            *mold*)
-                count="$(find "$proc/task" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l)"
-                printf '%s pid=%s tasks=%s\n' "$(date -u +%FT%T.%NZ)" "$pid" "$count" >> "$SAMPLES"
-                ;;
-        esac
+    for proc in "$PROC_ROOT"/[0-9]*; do
+        pid="${proc#"$PROC_ROOT"/}"
+        [[ -d "$proc/task" ]] || continue
+        # cmdline includes the invoking shell and this script's own pathname in
+        # CI. Inspect the executable target instead so only the actual linker
+        # contributes samples or satisfies the no-observation guard.
+        executable="$(readlink -f "$proc/exe" 2>/dev/null || true)"
+        [[ "${executable##*/}" == mold ]] || continue
+        count="$(find "$proc/task" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l)"
+        printf '%s pid=%s tasks=%s\n' "$(date -u +%FT%T.%NZ)" "$pid" "$count" >> "$SAMPLES"
     done
     sleep 0.002
 done
