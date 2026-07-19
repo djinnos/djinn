@@ -951,6 +951,7 @@ jobs:
         if: steps.shard.outputs.active == 'true'
         env:
           NEXTEST_PROFILE: ${{ github.event_name == 'pull_request' && 'pull-request' || github.event_name == 'merge_group' && 'merge-group' || 'full-validation' }}
+          RUST_MIN_STACK: "8388608"
         run: |
           set -uo pipefail
           started_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
