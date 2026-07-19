@@ -27,7 +27,7 @@ mod indexing;
 mod warm_cost_regression;
 pub mod workspaces;
 
-pub(crate) use indexing::{append_graph_cache_shrink_warning, run_indexers_already_locked};
+pub(crate) use indexing::run_indexers_already_locked;
 pub use workspaces::workspace_slug;
 
 /// Tracks `(project_root, indexer)` pairs we have already logged a

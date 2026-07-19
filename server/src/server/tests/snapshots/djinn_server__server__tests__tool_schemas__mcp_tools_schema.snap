@@ -4253,7 +4253,7 @@ expression: signatures
           "type": "string"
         },
         "graph_warmed_at": {
-          "description": "ISO-8601 UTC timestamp derived from per-workspace graph freshness\nor the merged repo graph cache. `None` means no freshness source has\ncompleted yet (cold project or failing pipeline). Dispatch no longer\nblocks on this value; it is badge metadata retained under a\ncompatibility field name.",
+          "description": "ISO-8601 UTC timestamp derived exclusively from the durable,\nproject-scoped workspace graph state. `None` means no workspace\ngraph warm has completed yet. Dispatch no longer blocks on this\nvalue; it is badge metadata retained under a compatibility field\nname.",
           "type": [
             "string",
             "null"
