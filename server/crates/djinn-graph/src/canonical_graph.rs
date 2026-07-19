@@ -885,7 +885,7 @@ pub async fn ensure_canonical_graph<C: WarmContext>(
 
     let output_dir_for_blocking = output_dir.clone();
     let artifacts = run.artifacts;
-    let workspace_statuses = run.workspace_statuses;
+    let mut workspace_statuses = run.workspace_statuses;
     let project_root_for_blocking = handle.path().to_path_buf();
     // Proposal lmkv: the galaxy layout seed is derived from the project id
     // (FNV-1a) so warm runs and cache reloads reproduce the same 3D galaxy.
@@ -1301,18 +1301,17 @@ pub async fn ensure_canonical_graph<C: WarmContext>(
             "workspace_status_summary": warning.workspace_status_summary,
         })
         .to_string();
-        if let Err(e) = crate::scip_indexer::append_graph_cache_shrink_warning(
-            handle.path(),
-            &workspace_statuses,
-            detail,
-        ) {
-            tracing::warn!(
-                project_id = %project_id,
-                commit_sha = %commit_sha,
-                error = %e,
-                "ensure_canonical_graph: failed to persist graph cache shrink warning status"
-            );
-        }
+        // The workspace-graph replace-set below persists this synthetic row
+        // with the rest of the warm result. Keeping it in the same DB-backed
+        // authority makes it visible after a server restart and removes the
+        // former project-local status-file side channel.
+        workspace_statuses.push(crate::scip_indexer::WorkspaceWarmStatus {
+            workspace_slug: "graph-cache".to_string(),
+            indexer: crate::scip_indexer::SupportedIndexer::RustAnalyzer,
+            status: "warning".to_string(),
+            detail: Some(detail),
+            workspace_rel_root: String::new(),
+        });
     }
 
     // Reserve one UUIDv7 before canonical JSON/hash/gzip serialization. The
@@ -1895,6 +1894,22 @@ async fn persist_workspace_graph_freshness_best_effort<C: WarmContext>(
                 status: &status.status,
             });
         }
+    }
+
+    // Graph-cache shrink warnings are part of the warm-result projection too.
+    // They are not graph nodes or indexer failures, so neither collection above
+    // includes them; store the synthetic row explicitly in the same replace-set
+    // rather than recreating a project-local status file.
+    for status in workspace_statuses
+        .iter()
+        .filter(|status| status.status == "warning")
+    {
+        rows.push(ProjectWorkspaceGraphUpsert {
+            project_id,
+            workspace_slug: &status.workspace_slug,
+            commit_sha,
+            status: &status.status,
+        });
     }
 
     let workspace_count = rows.len();

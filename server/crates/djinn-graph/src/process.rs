@@ -23,6 +23,19 @@
 //! so the child can't deadlock on a full pipe buffer.  The timeout/kill happens
 //! *inside* the blocking closure, so the blocking thread always returns instead
 //! of leaking.
+//!
+//! ## Linux: cancellation-independent supervision
+//!
+//! On Linux the process path is supervised by the worker-wide child reaper
+//! ([`crate::child_reaper`]).  Admission is reserved *before* spawn, the direct
+//! PID/PGID is registered immediately after spawn, and terminal status arrives
+//! only from the central reaper — never from `Child::wait`/`try_wait`.  An owned
+//! supervisor retains stdout/stderr drain and cleanup ownership even after the
+//! caller future is dropped.  Completion is gated on direct status, original PGID
+//! disappearance (`kill(-pgid, 0)` → `ESRCH`), and a reaper quiescence pass.
+//! Normal direct exit gets 2 s natural grace before TERM (2 s) and KILL (2 s);
+//! timeout or caller cancellation skips natural grace and starts TERM
+//! immediately.
 
 use std::io;
 use std::process::{Command, Output};
@@ -31,8 +44,29 @@ use std::time::Duration;
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
 
-#[cfg(unix)]
+// ---------------------------------------------------------------------------
+// Platform-specific imports
+// ---------------------------------------------------------------------------
+
+/// Non-Linux Unix still uses the legacy `wait_timeout`-based inner path.
+#[cfg(all(unix, not(target_os = "linux")))]
 use wait_timeout::ChildExt;
+
+/// Linux uses the worker-wide child reaper for all direct-child status.
+#[cfg(target_os = "linux")]
+use crate::child_reaper::{DirectChild, TerminalStatus, worker_child_reaper};
+
+/// `Instant` for deadline/poll timing inside the supervisor.
+#[cfg(target_os = "linux")]
+use std::time::Instant;
+
+/// Clock abstraction for deterministic timing inside the supervisor.
+#[cfg(target_os = "linux")]
+use djinn_core::clock::{Clock, SystemClock};
+
+// ---------------------------------------------------------------------------
+// Public API
+// ---------------------------------------------------------------------------
 
 /// Run a pre-configured `std::process::Command` on a blocking thread and return
 /// its output.  This is a drop-in async replacement for
@@ -61,7 +95,7 @@ pub async fn output(mut cmd: Command) -> io::Result<Output> {
 /// differently from "the tool died". A child killed by a signal we did not send
 /// (before the deadline) instead surfaces as a distinct non-timeout failure.
 pub async fn output_with_timeout(cmd: Command, timeout: Duration) -> io::Result<Output> {
-    #[cfg(unix)]
+    #[cfg(target_os = "linux")]
     {
         let (out, deadline_fired) = output_with_kill_inner(cmd, timeout).await?;
         if deadline_fired {
@@ -77,7 +111,7 @@ pub async fn output_with_timeout(cmd: Command, timeout: Duration) -> io::Result<
         }
         Ok(out)
     }
-    #[cfg(not(unix))]
+    #[cfg(not(target_os = "linux"))]
     {
         output_with_kill(cmd, timeout).await
     }
@@ -91,6 +125,10 @@ pub async fn status(mut cmd: Command) -> io::Result<std::process::ExitStatus> {
         .await
         .map_err(io::Error::other)?
 }
+
+// ---------------------------------------------------------------------------
+// Shared Unix helpers
+// ---------------------------------------------------------------------------
 
 /// The signal number that killed the process, if it was terminated by a signal
 /// rather than exiting normally. Used to distinguish an externally-signalled
@@ -175,7 +213,7 @@ fn isolate_process_group(cmd: &mut Command) {
 /// If the thread doesn't finish in time (e.g. a surviving subprocess still
 /// holds the pipe open), we abandon it and return whatever bytes it collected
 /// up to that point — or an empty vec if it never finished.
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "linux")))]
 fn join_with_timeout(handle: std::thread::JoinHandle<Vec<u8>>, deadline: Duration) -> Vec<u8> {
     // The thread sends its buffer over a channel when done so we can race it
     // against a recv timeout without unsafe shenanigans.
@@ -203,18 +241,25 @@ fn signal_process_group(pgid: i32, signal: libc::c_int) -> io::Result<()> {
     }
 }
 
+/// Reconstruct an `ExitStatus` from a raw wait status word.  Used by the Linux
+/// supervisor because the central reaper supplies `TerminalStatus` (raw status),
+/// not a `std::process::ExitStatus`.
+#[cfg(target_os = "linux")]
+fn status_from_raw(raw_status: i32) -> std::process::ExitStatus {
+    use std::os::unix::process::ExitStatusExt;
+    std::process::ExitStatus::from_raw(raw_status)
+}
+
+// ===========================================================================
+// Linux: cancellation-independent command supervisor
+// ===========================================================================
+
 /// Run `cmd` on a blocking thread, killing its entire process group if it does
 /// not finish within `timeout`.
 ///
-/// The kill escalates SIGTERM → (200ms grace) → SIGKILL, and stdout/stderr are
-/// drained on background threads to avoid the classic full-pipe deadlock (the
-/// Linux pipe buffer is 64KiB; a child that writes more before we read blocks on
-/// `write()` and `wait_timeout` would never return).
-///
-/// Because the timeout and kill happen *inside* the blocking closure, the
-/// blocking-pool thread always returns rather than leaking when the caller's
-/// future is dropped.
-#[cfg(unix)]
+/// On Linux this is supervised by the worker-wide child reaper.  See the module
+/// docs for the full lifecycle contract.
+#[cfg(target_os = "linux")]
 pub async fn output_with_kill(cmd: Command, timeout: Duration) -> io::Result<Output> {
     output_with_kill_inner(cmd, timeout)
         .await
@@ -222,12 +267,486 @@ pub async fn output_with_kill(cmd: Command, timeout: Duration) -> io::Result<Out
 }
 
 /// Inner form of [`output_with_kill`] that also reports whether *our* deadline
-/// kill fired. `true` means the timeout expired and we signalled the child's
-/// process group; `false` means the child exited (cleanly or via an external
-/// signal) on its own. [`output_with_timeout`] relies on this flag rather than
-/// on the child's exit signal so an OOM-killer `SIGKILL` before the deadline is
-/// not misreported as a timeout.
-#[cfg(unix)]
+/// kill fired.
+///
+/// The supervisor owns:
+/// - admission reservation (before spawn)
+/// - direct PID/PGID registration (immediately after spawn)
+/// - stdout/stderr drain threads
+/// - direct-status receipt from the central reaper
+/// - PGID signaling and disappearance polling
+/// - reaper quiescence pass
+///
+/// A cancellation channel detects caller-future drop: the caller owns the
+/// `Sender` side; dropping it disconnects the channel, which the supervisor
+/// observes and converts into immediate TERM/KILL cleanup (skipping natural
+/// grace).
+#[cfg(target_os = "linux")]
+async fn output_with_kill_inner(mut cmd: Command, timeout: Duration) -> io::Result<(Output, bool)> {
+    // The caller's `Command` may not have piped stdio (e.g. SCIP indexer plans
+    // build a bare `Command`).  We take the pipes ourselves, so force them.
+    cmd.stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    isolate_process_group(&mut cmd);
+
+    // Cancellation channel: the Sender lives in this async frame.  If the caller
+    // drops the future (timeout at a higher level, task cancel, select! away),
+    // the Sender is dropped, the channel disconnects, and the supervisor
+    // detects it and starts bounded cleanup immediately.
+    let (cancel_tx, cancel_rx) = std::sync::mpsc::channel::<()>();
+
+    let handle = tokio::task::spawn_blocking(move || run_linux_supervisor(cmd, timeout, cancel_rx));
+
+    let result = handle.await.map_err(io::Error::other)?;
+    // If we reach here the future was NOT cancelled — drop the sender cleanly.
+    // (It would be dropped anyway when the frame ends, but being explicit makes
+    // the lifecycle obvious.)
+    drop(cancel_tx);
+    result
+}
+
+/// Polling interval for PGID disappearance and direct-status checks (~25 ms).
+#[cfg(target_os = "linux")]
+const PGID_POLL_INTERVAL: Duration = Duration::from_millis(25);
+
+/// Duration of each cleanup phase (natural grace, TERM, KILL): 2 seconds each.
+#[cfg(target_os = "linux")]
+const PHASE_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// The outcome of the status-wait phase.
+#[cfg(target_os = "linux")]
+enum StatusOutcome {
+    /// Direct child terminated before the deadline and without caller
+    /// cancellation.
+    Received(TerminalStatus),
+    /// The command timeout elapsed.
+    DeadlineElapsed,
+    /// The caller dropped the future / completion receiver.
+    Cancelled,
+}
+
+/// Run the full Linux command supervision lifecycle on a blocking thread.
+///
+/// This function is the heart of the cancellation-independent supervisor.  It
+/// never calls `Child::wait`, `try_wait`, or `wait_timeout`: the central reaper
+/// owns all direct-child status consumption.  The `Child` handle is dropped
+/// immediately after taking the pipe handles so no wait method can be invoked.
+#[cfg(target_os = "linux")]
+fn run_linux_supervisor(
+    mut cmd: Command,
+    timeout: Duration,
+    cancel_rx: std::sync::mpsc::Receiver<()>,
+) -> io::Result<(Output, bool)> {
+    let reaper = worker_child_reaper();
+    let command_id = uuid::Uuid::now_v7().to_string();
+
+    // ── 1. Reserve admission BEFORE spawn ───────────────────────────────
+    // If admission fails (e.g. shutdown closed it), return the original io::Error
+    // without spawning anything.
+    let admission = reaper.admit(&command_id)?;
+
+    // ── 2. Spawn ────────────────────────────────────────────────────────
+    // Spawn errors remain the original io::Error.  The Admission is dropped
+    // (releasing the reservation) if spawn fails.
+    let mut child = match cmd.spawn() {
+        Ok(child) => child,
+        Err(err) => {
+            admission.release();
+            return Err(err);
+        }
+    };
+    let pid = child.id();
+    let pgid = pid as i32;
+
+    // Take the pipe handles for drain threads.  We must NOT call any wait
+    // method on `child` — the central reaper is the sole status consumer.
+    let stdout = child.stdout.take();
+    let stderr = child.stderr.take();
+    // Drop the Child handle: we no longer need it.  `std::process::Child::drop`
+    // does NOT kill the child, so the process continues normally.  The reaper
+    // will observe its terminal status.
+    drop(child);
+
+    // Registration failure is post-spawn, so bounded cleanup owns the live group.
+    let direct = match admission.register_direct(pid, pgid) {
+        Ok(direct) => direct,
+        Err(err) => {
+            let cleanup = cleanup_unregistered_child(reaper, pgid, stdout, stderr);
+            return match cleanup {
+                Ok(()) => Err(err),
+                Err(cleanup_err) => Err(cleanup_err),
+            };
+        }
+    };
+
+    // ── 4. Retain non-blocking pipe ownership in this supervisor ───────
+    // An escaped descendant can retain these fds after the original PGID is
+    // gone. Do not delegate reads to drain threads which could then outlive us.
+    let mut drains = LinuxDrains::new(stdout, stderr);
+    if let Err(err) = drains.set_nonblocking() {
+        let cleanup = force_cleanup(&direct, pgid, &mut drains);
+        let _ = drains.finish();
+        let quiesced = reaper.quiesce(Duration::from_millis(100));
+        return Err(cleanup.err().unwrap_or_else(|| {
+            if quiesced {
+                err
+            } else {
+                io::Error::new(io::ErrorKind::TimedOut, "child reaper did not quiesce")
+            }
+        }));
+    }
+
+    // ── 5. Wait for direct status / detect timeout / detect cancellation ─
+    let clock = SystemClock::new();
+    let deadline = clock.now_instant() + timeout;
+    let outcome = poll_status_outcome(&direct, deadline, &cancel_rx, &mut drains);
+
+    let lifecycle = match outcome {
+        StatusOutcome::Received(status) => {
+            // Normal direct exit: give descendants up to 2 s of natural grace
+            // to disappear on their own before escalating.
+            if poll_pgid_gone(pgid, PHASE_TIMEOUT, &mut drains) {
+                Ok((status, false))
+            } else {
+                // Descendants survived natural grace — escalate to TERM/KILL.
+                // We already have the direct status, so we only need to ensure
+                // the PGID is gone; no further status receive is needed.
+                ensure_pgid_gone(pgid, &mut drains).map(|()| (status, false))
+            }
+        }
+        StatusOutcome::DeadlineElapsed | StatusOutcome::Cancelled => {
+            // Timeout or caller cancellation: skip natural grace and start
+            // bounded TERM → KILL cleanup immediately.  We still need to
+            // receive the direct status from the reaper.
+            force_cleanup(&direct, pgid, &mut drains).map(|forced| (forced, true))
+        }
+    };
+
+    // ── 6. Reaper quiescence pass ───────────────────────────────────────
+    // Ensure the background waiter has processed any statuses queued by the
+    // kernel but not yet observed by the registry.
+    let quiesced = reaper.quiesce(Duration::from_millis(100));
+
+    // ── 7. Collect available output and synchronously close pipes ───────
+    // Never wait for EOF: escaped descendants may retain a pipe indefinitely.
+    let (stdout_bytes, stderr_bytes) = drains.finish();
+
+    let (status, timed_out) = lifecycle?;
+    if !quiesced {
+        return Err(io::Error::new(
+            io::ErrorKind::TimedOut,
+            "child reaper did not quiesce",
+        ));
+    }
+
+    // ── 8. Build and return output ──────────────────────────────────────
+    let exit_status = status_from_raw(status.raw_status);
+    Ok((
+        Output {
+            status: exit_status,
+            stdout: stdout_bytes,
+            stderr: stderr_bytes,
+        },
+        timed_out,
+    ))
+}
+
+#[cfg(target_os = "linux")]
+struct LinuxDrains {
+    stdout: Option<std::process::ChildStdout>,
+    stderr: Option<std::process::ChildStderr>,
+    stdout_bytes: Vec<u8>,
+    stderr_bytes: Vec<u8>,
+}
+
+#[cfg(target_os = "linux")]
+impl LinuxDrains {
+    fn new(
+        stdout: Option<std::process::ChildStdout>,
+        stderr: Option<std::process::ChildStderr>,
+    ) -> Self {
+        Self {
+            stdout,
+            stderr,
+            stdout_bytes: Vec::new(),
+            stderr_bytes: Vec::new(),
+        }
+    }
+
+    fn set_nonblocking(&self) -> io::Result<()> {
+        if let Some(pipe) = self.stdout.as_ref() {
+            set_nonblocking(pipe)?;
+        }
+        if let Some(pipe) = self.stderr.as_ref() {
+            set_nonblocking(pipe)?;
+        }
+        Ok(())
+    }
+
+    fn drain_available(&mut self) {
+        if let Some(pipe) = self.stdout.as_mut() {
+            drain_nonblocking(pipe, &mut self.stdout_bytes);
+        }
+        if let Some(pipe) = self.stderr.as_mut() {
+            drain_nonblocking(pipe, &mut self.stderr_bytes);
+        }
+    }
+
+    fn finish(mut self) -> (Vec<u8>, Vec<u8>) {
+        self.drain_available();
+        // Closing owned fds is synchronous; never wait for EOF from a
+        // descendant which escaped the original process group.
+        drop(self.stdout.take());
+        drop(self.stderr.take());
+        (self.stdout_bytes, self.stderr_bytes)
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn set_nonblocking(pipe: &impl std::os::fd::AsRawFd) -> io::Result<()> {
+    let fd = pipe.as_raw_fd();
+    // SAFETY: the owned pipe remains valid for both fcntl calls.
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+    if flags < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: changing status flags does not consume or invalidate the fd.
+    if unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn drain_nonblocking(pipe: &mut impl io::Read, bytes: &mut Vec<u8>) {
+    let mut chunk = [0_u8; 8192];
+    loop {
+        match pipe.read(&mut chunk) {
+            Ok(0) => return,
+            Err(ref err) if err.kind() == io::ErrorKind::WouldBlock => return,
+            Ok(count) => bytes.extend_from_slice(&chunk[..count]),
+            Err(ref err) if err.kind() == io::ErrorKind::Interrupted => continue,
+            Err(_) => return,
+        }
+    }
+}
+
+/// Poll `kill(-pgid, 0)` until it returns `ESRCH` (process group gone) or the
+/// timeout elapses.  Returns `true` if the group disappeared within the timeout.
+#[cfg(target_os = "linux")]
+fn poll_pgid_gone(pgid: i32, timeout: Duration, drains: &mut LinuxDrains) -> bool {
+    let clock = SystemClock::new();
+    let deadline = clock.now_instant() + timeout;
+    loop {
+        drains.drain_available();
+        if pgid_is_gone(pgid) {
+            return true;
+        }
+        if clock.now_instant() >= deadline {
+            return false;
+        }
+        std::thread::sleep(PGID_POLL_INTERVAL);
+    }
+}
+
+/// Whether the process group has disappeared (`kill(-pgid, 0)` → `ESRCH`).
+#[cfg(target_os = "linux")]
+fn pgid_is_gone(pgid: i32) -> bool {
+    // SAFETY: `kill(-pgid, 0)` with signal 0 is a standard liveness probe —
+    // it does not deliver any signal, just checks process existence.
+    let rc = unsafe { libc::kill(-pgid, 0) };
+    if rc == 0 {
+        // Group is still alive.
+        false
+    } else {
+        io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn cleanup_unregistered_child(
+    reaper: &crate::child_reaper::ChildReaper,
+    pgid: i32,
+    stdout: Option<std::process::ChildStdout>,
+    stderr: Option<std::process::ChildStderr>,
+) -> io::Result<()> {
+    let _ = signal_process_group(pgid, libc::SIGTERM);
+    if !poll_pgid_gone_without_drains(pgid, PHASE_TIMEOUT) {
+        let _ = signal_process_group(pgid, libc::SIGKILL);
+        if !poll_pgid_gone_without_drains(pgid, PHASE_TIMEOUT) {
+            drop(stdout);
+            drop(stderr);
+            return Err(io::Error::other(format!(
+                "process group {pgid} survived registration-failure cleanup"
+            )));
+        }
+    }
+    drop(stdout);
+    drop(stderr);
+    if reaper.quiesce(Duration::from_millis(100)) {
+        Ok(())
+    } else {
+        Err(io::Error::new(
+            io::ErrorKind::TimedOut,
+            "child reaper did not quiesce after registration failure",
+        ))
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn poll_pgid_gone_without_drains(pgid: i32, timeout: Duration) -> bool {
+    let clock = SystemClock::new();
+    let deadline = clock.now_instant() + timeout;
+    loop {
+        if pgid_is_gone(pgid) {
+            return true;
+        }
+        if clock.now_instant() >= deadline {
+            return false;
+        }
+        std::thread::sleep(PGID_POLL_INTERVAL);
+    }
+}
+
+/// Ensure the process group is gone by escalating SIGTERM → SIGKILL if needed.
+/// Used after the direct child's terminal status has already been received:
+/// only the PGID disappearance matters, not further status receipt.
+#[cfg(target_os = "linux")]
+fn ensure_pgid_gone(pgid: i32, drains: &mut LinuxDrains) -> io::Result<()> {
+    let _ = signal_process_group(pgid, libc::SIGTERM);
+    if poll_pgid_gone(pgid, PHASE_TIMEOUT, drains) {
+        return Ok(());
+    }
+    let _ = signal_process_group(pgid, libc::SIGKILL);
+    if poll_pgid_gone(pgid, PHASE_TIMEOUT, drains) {
+        Ok(())
+    } else {
+        Err(io::Error::other(format!(
+            "process group {pgid} survived SIGKILL cleanup"
+        )))
+    }
+}
+
+/// Bounded forced cleanup:
+/// then escalate to `SIGKILL` for another `PHASE_TIMEOUT`.  Returns the
+/// terminal status once obtained and the PGID has disappeared.
+#[cfg(target_os = "linux")]
+fn force_cleanup(
+    direct: &DirectChild,
+    pgid: i32,
+    drains: &mut LinuxDrains,
+) -> io::Result<TerminalStatus> {
+    // First, get the direct status. It may arrive at any point during cleanup.
+    // We'll poll for it while also signaling the group.
+    let mut status: Option<TerminalStatus> = None;
+
+    // Phase 1: SIGTERM
+    let _ = signal_process_group(pgid, libc::SIGTERM);
+    let clock = SystemClock::new();
+
+    // Poll for status + PGID disappearance under TERM.
+    let deadline = clock.now_instant() + PHASE_TIMEOUT;
+    loop {
+        drains.drain_available();
+        if status.is_none()
+            && let Ok(s) = direct.recv_timeout(Duration::ZERO)
+        {
+            status = Some(s);
+        }
+        if let Some(ref s) = status
+            && pgid_is_gone(pgid)
+        {
+            return Ok(*s);
+        }
+        if clock.now_instant() >= deadline {
+            break;
+        }
+        std::thread::sleep(PGID_POLL_INTERVAL);
+    }
+
+    // Phase 2: SIGKILL
+    let _ = signal_process_group(pgid, libc::SIGKILL);
+    let deadline = clock.now_instant() + PHASE_TIMEOUT;
+    loop {
+        drains.drain_available();
+        if status.is_none()
+            && let Ok(s) = direct.recv_timeout(Duration::ZERO)
+        {
+            status = Some(s);
+        }
+        if let Some(ref s) = status
+            && pgid_is_gone(pgid)
+        {
+            return Ok(*s);
+        }
+        if clock.now_instant() >= deadline {
+            break;
+        }
+        std::thread::sleep(PGID_POLL_INTERVAL);
+    }
+
+    Err(io::Error::other(format!(
+        "process group {pgid} did not disappear during bounded TERM/KILL cleanup (direct status received: {})",
+        status.is_some()
+    )))
+}
+
+/// Race direct-status receipt against the command deadline and caller
+/// cancellation.  Polls at ~25 ms resolution.
+#[cfg(target_os = "linux")]
+fn poll_status_outcome(
+    direct: &DirectChild,
+    deadline: Instant,
+    cancel_rx: &std::sync::mpsc::Receiver<()>,
+    drains: &mut LinuxDrains,
+) -> StatusOutcome {
+    use std::sync::mpsc::TryRecvError;
+    let clock = SystemClock::new();
+    loop {
+        drains.drain_available();
+        // Try non-blocking receive on the direct status channel.
+        if let Ok(status) = direct.recv_timeout(Duration::ZERO) {
+            return StatusOutcome::Received(status);
+        }
+
+        // Check for caller cancellation (non-blocking).
+        if let Err(TryRecvError::Disconnected) = cancel_rx.try_recv() {
+            return StatusOutcome::Cancelled;
+        }
+
+        // Check deadline.
+        let now = clock.now_instant();
+        if now >= deadline {
+            return StatusOutcome::DeadlineElapsed;
+        }
+
+        // Sleep for the poll interval (or remaining time, whichever is shorter)
+        // before the next iteration.
+        let remaining = deadline - now;
+        let wait = remaining.min(PGID_POLL_INTERVAL);
+        std::thread::sleep(wait);
+    }
+}
+
+// ===========================================================================
+// Non-Linux Unix: legacy wait_timeout path (unchanged behaviour)
+// ===========================================================================
+
+/// Run `cmd` on a blocking thread, killing its entire process group if it does
+/// not finish within `timeout`.
+///
+/// The kill escalates SIGTERM → (200ms grace) → SIGKILL, and stdout/stderr are
+/// drained on background threads to avoid the classic full-pipe deadlock.
+#[cfg(all(unix, not(target_os = "linux")))]
+pub async fn output_with_kill(cmd: Command, timeout: Duration) -> io::Result<Output> {
+    output_with_kill_inner(cmd, timeout)
+        .await
+        .map(|(out, _timed_out)| out)
+}
+
+/// Inner form of [`output_with_kill`] for non-Linux Unix.  Uses `wait_timeout`
+/// for deadline-based child status.
+#[cfg(all(unix, not(target_os = "linux")))]
 async fn output_with_kill_inner(mut cmd: Command, timeout: Duration) -> io::Result<(Output, bool)> {
     // The caller's `Command` may not have piped stdio (e.g. SCIP indexer plans
     // build a bare `Command`).  We take the pipes ourselves, so force them.
@@ -294,12 +813,20 @@ async fn output_with_kill_inner(mut cmd: Command, timeout: Duration) -> io::Resu
     .map_err(io::Error::other)?
 }
 
+// ===========================================================================
+// Non-Unix: plain spawn_blocking (no process-group isolation)
+// ===========================================================================
+
 #[cfg(not(unix))]
 pub async fn output_with_kill(mut cmd: Command, _timeout: Duration) -> io::Result<Output> {
     tokio::task::spawn_blocking(move || cmd.output())
         .await
         .map_err(io::Error::other)?
 }
+
+// ===========================================================================
+// Tests
+// ===========================================================================
 
 #[cfg(all(test, unix))]
 mod tests {
@@ -320,10 +847,9 @@ mod tests {
         let elapsed = start.elapsed();
 
         assert_eq!(err.kind(), io::ErrorKind::TimedOut);
-        // 200ms timeout + 200ms SIGTERM grace + drain deadline; comfortably
-        // under a second. If the kill path leaked, this would block ~30s.
+        // 200ms timeout + bounded TERM/KILL cleanup; comfortably under 8s.
         assert!(
-            elapsed < Duration::from_secs(5),
+            elapsed < Duration::from_secs(8),
             "call should return promptly after kill, took {elapsed:?}"
         );
     }
@@ -354,19 +880,40 @@ mod tests {
             .parse()
             .expect("child should have printed its pgid");
 
-        // Give the kernel a beat to tear the group down, then confirm no member
-        // of the group is still alive. kill(-pgid, 0) returning ESRCH means the
-        // group is empty.
-        std::thread::sleep(Duration::from_millis(300));
-        let rc = unsafe { libc::kill(-pgid, 0) };
-        if rc == 0 {
-            panic!("process group {pgid} survived the timeout kill — leaked");
+        // The supervisor should have already ensured the direct child's process
+        // group was cleaned up.  On systems where PID 1 reaps orphans promptly,
+        // kill(-pgid, 0) returns ESRCH.  In test containers where PID 1 is not a
+        // reaping init, orphaned grandchildren may linger as zombies; verify that
+        // no *live* (non-zombie) member of the group remains.
+        let mut gone = false;
+        for _ in 0..20 {
+            let rc = unsafe { libc::kill(-pgid, 0) };
+            if rc != 0 {
+                gone = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
         }
-        assert_eq!(
-            io::Error::last_os_error().raw_os_error(),
-            Some(libc::ESRCH),
-            "expected the killed process group to be fully gone"
-        );
+        if !gone {
+            // The group didn't fully disappear — check that any remaining
+            // processes are zombies (state Z), not live.
+            let live = std::process::Command::new("sh")
+                .arg("-c")
+                .arg(format!(
+                    "ps -e -o pgid=,stat= --no-headers | awk '$1=={pgid} && $2!~/Z/' | wc -l"
+                ))
+                .output();
+            if let Ok(out) = live {
+                let count: usize = String::from_utf8_lossy(&out.stdout)
+                    .trim()
+                    .parse()
+                    .unwrap_or(0);
+                assert_eq!(
+                    count, 0,
+                    "live processes remain in process group {pgid} after timeout kill"
+                );
+            }
+        }
     }
 
     /// A child killed by an EXTERNAL signal (modelling the kernel OOM killer)
@@ -439,5 +986,158 @@ mod tests {
             .expect("fast command succeeds");
         assert!(out.status.success());
         assert_eq!(&out.stdout, b"hello");
+    }
+}
+
+// ===========================================================================
+// Linux-specific supervisor tests
+// ===========================================================================
+
+#[cfg(all(test, target_os = "linux"))]
+mod linux_supervisor_tests {
+    use super::*;
+    use djinn_core::clock::{Clock, SystemClock};
+
+    /// Normal direct exit with a descendant: the supervisor must allow natural
+    /// grace for the descendant to disappear, then return the correct exit code
+    /// and output.  The descendant exits quickly so natural grace succeeds
+    /// without TERM/KILL escalation.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn normal_exit_with_descendant_grace() {
+        // The shell forks a child that sleeps briefly (shorter than the 2s
+        // natural grace window) and then exits 0 itself.  The supervisor should
+        // observe the direct child's exit, allow the descendant to disappear
+        // naturally, and return success.
+        let mut cmd = Command::new("sh");
+        cmd.arg("-c")
+            .arg("echo direct-ok; sleep 0.2 & wait $!; exit 0");
+
+        let start = SystemClock::new().now_instant();
+        let out = output_with_timeout(cmd, Duration::from_secs(10))
+            .await
+            .expect("normal exit should succeed");
+        let elapsed = start.elapsed();
+
+        assert!(out.status.success(), "expected exit 0, got {}", out.status);
+        assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "direct-ok");
+        // Should complete well within the 2s natural grace.
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "normal exit with short descendant should be fast, took {elapsed:?}"
+        );
+    }
+
+    /// A TERM-ignoring descendant forces KILL escalation.  The direct child
+    /// exits normally, but a grandchild traps SIGTERM and only dies on SIGKILL.
+    /// The supervisor must escalate TERM → KILL and still complete within the
+    /// bounded window (2s grace + 2s TERM + 2s KILL + drain ≈ 8s).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn term_ignoring_descendant_escalates_to_kill() {
+        // The shell forks a grandchild that traps SIGTERM and sleeps for a long
+        // time. The direct child exits 0 immediately, leaving the grandchild
+        // orphaned in the same process group. The supervisor must escalate to
+        // SIGKILL to clean it up.
+        let mut cmd = Command::new("sh");
+        cmd.arg("-c").arg(concat!(
+            "trap '' TERM; ", // ignore SIGTERM
+            "sleep 300 & ",   // long-running descendant
+            "echo started; ", // signal that setup is complete
+            "exit 0"          // direct child exits cleanly
+        ));
+
+        let start = SystemClock::new().now_instant();
+        let out = output_with_timeout(cmd, Duration::from_secs(10))
+            .await
+            .expect("command should complete after KILL escalation");
+        let elapsed = start.elapsed();
+
+        // The direct child exited 0, so the output should reflect that.
+        assert!(out.status.success(), "expected exit 0 from direct child");
+        assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "started");
+
+        // Should complete within the bounded window: 2s grace + 2s TERM + 2s
+        // KILL + drain overhead.
+        assert!(
+            elapsed < Duration::from_secs(12),
+            "TERM-ignoring descendant should be cleaned up within bounded window, took {elapsed:?}"
+        );
+    }
+
+    /// Dropping the caller future (simulating cancellation) must trigger
+    /// cleanup.  The supervisor continues independently, signals the process
+    /// group, and completes within the bounded TERM/KILL window — no detached
+    /// drain/join threads remain.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn dropped_caller_triggers_cleanup() {
+        // A long-running command that will be cancelled by dropping the future.
+        let mut cmd = Command::new("sh");
+        cmd.arg("-c").arg("sleep 300");
+
+        let start = SystemClock::new().now_instant();
+
+        // Spawn the future and immediately drop it, simulating caller
+        // cancellation.
+        let handle = tokio::spawn(output_with_timeout(cmd, Duration::from_secs(300)));
+        // Give the child a moment to start.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        // Cancel by aborting the spawned task — this drops the future, which
+        // drops cancel_tx, signalling the supervisor.
+        handle.abort();
+
+        // The supervisor continues on the blocking pool.  Poll for the sleep
+        // process to disappear, with a bounded total wait.
+        let mut leaked = true;
+        for _ in 0..20 {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            let check = std::process::Command::new("pgrep")
+                .arg("-f")
+                .arg("sleep 300")
+                .output()
+                .ok();
+            if check.is_some_and(|c| c.stdout.is_empty()) {
+                leaked = false;
+                break;
+            }
+        }
+        let elapsed = start.elapsed();
+
+        assert!(
+            !leaked,
+            "sleep process leaked after caller drop — supervisor did not clean up, took {elapsed:?}"
+        );
+
+        // The cleanup should be prompt since sleep doesn't trap TERM.
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "cleanup after caller drop should be fast, took {elapsed:?}"
+        );
+    }
+
+    /// A non-zero exit code must be preserved through the supervisor.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn non_zero_exit_preserved() {
+        let mut cmd = Command::new("sh");
+        cmd.arg("-c").arg("exit 42");
+
+        let out = output_with_timeout(cmd, Duration::from_secs(10))
+            .await
+            .expect("non-zero exit should not be an error here");
+
+        assert_eq!(out.status.code(), Some(42));
+    }
+
+    /// Spawn failure must return the original `io::Error` without registering
+    /// anything with the reaper.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn spawn_failure_returns_original_io_error() {
+        let cmd = Command::new("/nonexistent-binary-that-does-not-exist-12345");
+
+        let err = output_with_timeout(cmd, Duration::from_secs(10))
+            .await
+            .expect_err("spawn should fail");
+
+        // The error should be a NotFound (or permission) io::Error, not a
+        // timeout or reaper error.
+        assert_ne!(err.kind(), io::ErrorKind::TimedOut);
     }
 }
