@@ -682,6 +682,10 @@ pub async fn run_offline_fixture_replay(
         .await
         .map_err(|error| error.to_string())?;
     let notes = NoteRepository::new(db.clone(), events.clone());
+    let creator = djinn_db::UserRepository::new(db.clone())
+        .upsert_from_github(910_001, "offline-replay-fixture", None, None)
+        .await
+        .map_err(|error| error.to_string())?;
     let mut cases = Vec::with_capacity(fixtures.len());
     // Fixture target labels are stable report values, while note creation
     // assigns disposable UUIDs required by production-path candidate matching.
@@ -709,9 +713,14 @@ pub async fn run_offline_fixture_replay(
             *target = candidate.id;
         }
         let task = djinn_db::TaskRepository::new(db.clone(), events.clone())
-            .create_in_project(
+            .create_in_project_with_provenance(
                 &eval.id,
                 None,
+                djinn_db::EffectiveCreatorProvenance {
+                    explicit_user_id: Some(&creator.id),
+                    source_task_id: None,
+                    proposal_id: None,
+                },
                 &format!("replay {}", fixture.id),
                 "offline replay fixture",
                 "",

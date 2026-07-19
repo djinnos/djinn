@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex as StdMutex};
 use futures::stream;
 
 use djinn_core::events::EventBus;
-use djinn_db::Database;
+use djinn_db::{Database, EffectiveCreatorProvenance, UserRepository};
 use djinn_provider::message::{ContentBlock, Conversation};
 use djinn_provider::provider::{LlmProvider, StreamEvent, ToolChoice};
 use serde_json::Value;
@@ -677,9 +677,27 @@ pub async fn create_test_task(
 ) -> djinn_core::models::Task {
     let event_bus = test_events();
     let repo = djinn_db::TaskRepository::new(db.clone(), event_bus);
-    repo.create_in_project(
+    // This shared helper may be called outside an auth-context scope. Persist a
+    // distinct fixture user rather than depending on an ambient identity.
+    let fixture_identity = uuid::Uuid::now_v7();
+    let github_id = (fixture_identity.as_u128() % 9_000_000_000_000_000_000) as i64;
+    let user = UserRepository::new(db.clone())
+        .upsert_from_github(
+            github_id,
+            &format!("slot-test-fixture-{fixture_identity}"),
+            Some("Slot test fixture user"),
+            None,
+        )
+        .await
+        .expect("persist slot test fixture user");
+    repo.create_in_project_with_provenance(
         project_id,
         Some(epic_id),
+        EffectiveCreatorProvenance {
+            explicit_user_id: Some(&user.id),
+            source_task_id: None,
+            proposal_id: None,
+        },
         "Test task",
         "Test task description",
         "",

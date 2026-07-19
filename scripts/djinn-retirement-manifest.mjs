@@ -66,10 +66,9 @@ export const KNOWLEDGE_DISPOSITIONS = new Set([
 
 /**
  * Knowledge families (folders / singletons) that constitute the project-local
- * tracked knowledge set. Non-knowledge tracked files under `.djinn/`
- * (`.gitignore`, `settings.json`) are intentionally excluded because they are
- * operational/generated, not knowledge artifacts. `.djinn/skills.json` was
- * retired and must not reappear (see RETIRED_OPERATIONAL_PATHS).
+ * tracked knowledge set. The sole non-knowledge tracked file under `.djinn/`
+ * is `.gitignore`; retired operational paths remain knowledge-classified so
+ * the post-cutover guard rejects them.
  */
 export const KNOWLEDGE_FAMILIES = [
   'decisions',
@@ -97,7 +96,7 @@ export const KNOWLEDGE_SINGLETONS = new Set([
  */
 export const NON_KNOWLEDGE_TRACKED = new Set([
   '.djinn/.gitignore',
-  '.djinn/settings.json',
+  '.djinn/skills.json',
 ]);
 
 /**
@@ -106,6 +105,7 @@ export const NON_KNOWLEDGE_TRACKED = new Set([
  * tracked file matching one of these paths.
  */
 export const RETIRED_OPERATIONAL_PATHS = new Set([
+  '.djinn/settings.json',
   '.djinn/skills.json',
 ]);
 
@@ -158,11 +158,9 @@ export function sha256Hex(bytes) {
  * Decide whether a tracked repository path belongs to the project-local
  * `.djinn/` knowledge set.
  *
- * The knowledge set is every tracked `.djinn/` file EXCEPT the explicit
- * non-knowledge operational/generated files (`.gitignore`, `settings.json`).
- * `.djinn/skills.json` was retired in Phase 2 and is tracked separately via
- * RETIRED_OPERATIONAL_PATHS. All other tracked `.djinn/**` markdown / metadata
- * files are knowledge artifacts in scope for retirement reconciliation.
+ * non-knowledge operational/generated file (`.gitignore`). Retired operational
+ * paths remain classified here so a current tracked path is rejected by the
+ * same guard; source-revision ledger validation excludes them explicitly.
  */
 export function isKnowledgePath(repoPath) {
   if (typeof repoPath !== 'string' || repoPath.length === 0) return false;
@@ -172,7 +170,6 @@ export function isKnowledgePath(repoPath) {
   // Reject bare directory paths (must be a file, not a folder).
   if (norm.endsWith('/')) return false;
   if (NON_KNOWLEDGE_TRACKED.has(norm)) return false;
-  if (RETIRED_OPERATIONAL_PATHS.has(norm)) return false;
   return true;
 }
 
@@ -212,6 +209,8 @@ export function splitNulPaths(bytes) {
  */
 export function detectPermalink(repoPath) {
   const norm = repoPath.split('\\').join('/');
+  // Legacy settings are a retired source artifact recorded in the durable ledger.
+  if (norm === '.djinn/settings.json') return 'settings';
   if (!norm.startsWith('.djinn/') || !norm.endsWith('.md')) {
     return null;
   }
@@ -467,7 +466,9 @@ export function buildKnowledgeEntry(repoPath, revision, dbSelection, opts = {}) 
  */
 export function generateKnowledgeManifest(pathBytes, revision, dbSelection, opts = {}) {
   const allPaths = splitNulPaths(pathBytes);
-  const knowledgePaths = allPaths.filter(isKnowledgePath);
+  const knowledgePaths = allPaths
+    .filter(isKnowledgePath)
+    .filter((path) => !RETIRED_OPERATIONAL_PATHS.has(path));
 
   // Enforce no duplicate repository paths.
   const seen = new Set();
@@ -933,7 +934,9 @@ export function validateRetirementCutover(currentPathBytes, ledger, guidanceFixt
       code: 'ledger_source_revision',
     });
   }
-  const sourceKnowledge = new Set(splitNulPaths(sourcePathBytes).filter(isKnowledgePath));
+  const sourceKnowledge = new Set(
+    splitNulPaths(sourcePathBytes).filter(isKnowledgePath),
+  );
   validateKnowledgeManifest(ledger, {
     knowledgeCount: sourceKnowledge.size,
     knowledgeSet: sourceKnowledge,
@@ -1002,14 +1005,18 @@ export function validateRetirementCutover(currentPathBytes, ledger, guidanceFixt
   const currentPaths = splitNulPaths(
     Buffer.isBuffer(currentPathBytes) ? currentPathBytes : Buffer.from(currentPathBytes || '', 'binary'),
   );
-  const currentKnowledge = currentPaths.filter(isKnowledgePath);
+  const currentKnowledge = currentPaths
+    .filter(isKnowledgePath)
+    .filter((path) => !RETIRED_OPERATIONAL_PATHS.has(path));
   if (currentKnowledge.length > 0) {
     throw new ManifestError(`tracked project-local knowledge was reintroduced: ${currentKnowledge[0]}`, {
       code: 'knowledge_reintroduced', entry: { repository_path: currentKnowledge[0] },
     });
   }
   const currentSet = new Set(currentPaths);
-  for (const operationalPath of NON_KNOWLEDGE_TRACKED) {
+  const preservedOperationalPaths = [...NON_KNOWLEDGE_TRACKED]
+    .filter((path) => !RETIRED_OPERATIONAL_PATHS.has(path));
+  for (const operationalPath of preservedOperationalPaths) {
     if (!currentSet.has(operationalPath)) {
       throw new ManifestError(`required operational path is missing: ${operationalPath}`, {
         code: 'operational_path_missing', entry: { repository_path: operationalPath },
@@ -1062,7 +1069,11 @@ export function generateAll(pathBytes, opts = {}) {
 
   // Compute expected knowledge set/count for strict validation.
   const allPaths = splitNulPaths(Buffer.isBuffer(pathBytes) ? pathBytes : Buffer.from(pathBytes || '', 'binary'));
-  const expectedKnowledgeSet = new Set(allPaths.filter(isKnowledgePath));
+  const expectedKnowledgeSet = new Set(
+    allPaths
+      .filter(isKnowledgePath)
+      .filter((path) => !RETIRED_OPERATIONAL_PATHS.has(path)),
+  );
   validateKnowledgeManifest(knowledgeManifest, {
     knowledgeCount: expectedKnowledgeSet.size,
     knowledgeSet: expectedKnowledgeSet,

@@ -17,8 +17,9 @@ use tokio_util::sync::CancellationToken;
 
 use djinn_core::message::{ContentBlock, Message, Role};
 use djinn_db::{
-    CreateSessionParams, EpicCreateInput, EpicRepository, NoteConsolidationRepository,
-    NoteDedupCandidate, NoteRepository, ProjectRepository, SessionRepository, TaskRepository,
+    CreateSessionParams, EffectiveCreatorProvenance, EpicCreateInput, EpicRepository,
+    NoteConsolidationRepository, NoteDedupCandidate, NoteRepository, ProjectRepository,
+    SessionRepository, TaskRepository, UserRepository,
 };
 
 use crate::llm_extraction::{
@@ -141,10 +142,22 @@ async fn make_fixture() -> TestFixture {
         )
         .await
         .expect("create epic");
+    let fixture_identity = uuid::Uuid::now_v7();
+    let github_id = (fixture_identity.as_u128() % 9_000_000_000_000_000_000) as i64;
+    let user = UserRepository::new(db.clone())
+        .upsert_from_github(
+            github_id,
+            &format!("llm-extraction-fixture-{fixture_identity}"),
+            Some("LLM extraction fixture"),
+            None,
+        )
+        .await
+        .expect("persist LLM extraction fixture user");
     let task = task_repo
-        .create_in_project(
+        .create_in_project_with_provenance(
             &project.id,
             Some(&epic.id),
+            EffectiveCreatorProvenance::explicit_user_id(&user.id),
             "test-task",
             "implement the test feature",
             "test design",

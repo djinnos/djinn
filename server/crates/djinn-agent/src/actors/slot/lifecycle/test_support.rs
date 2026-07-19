@@ -3,11 +3,15 @@ use super::*;
 use djinn_core::events::EventBus;
 use djinn_core::extension_diagnostics::ExtensionLoadDiagnosticV1;
 use djinn_core::models::{Epic, Task};
-use djinn_db::{Database, EpicCreateInput, EpicRepository, TaskRepository};
+use djinn_db::{
+    Database, EffectiveCreatorProvenance, EpicCreateInput, EpicRepository, TaskRepository,
+};
 use tokio_util::sync::CancellationToken;
 
 use crate::roles::AgentRole;
-use crate::test_helpers::{agent_context_from_db, create_test_project, test_tempdir};
+use crate::test_helpers::{
+    agent_context_from_db, create_test_creator, create_test_project, test_tempdir,
+};
 
 pub(crate) async fn create_epic(
     db: &Database,
@@ -44,9 +48,21 @@ pub(crate) async fn create_task(
     title: &str,
     status: Option<&str>,
 ) -> Task {
+    let epic = EpicRepository::new(db.clone(), events.clone())
+        .get(epic_id)
+        .await
+        .expect("load test task epic")
+        .expect("test task epic exists");
+    let creator = create_test_creator(db).await;
     TaskRepository::new(db.clone(), events.clone())
-        .create(
-            epic_id,
+        .create_in_project_with_provenance(
+            &epic.project_id,
+            Some(epic_id),
+            EffectiveCreatorProvenance {
+                explicit_user_id: Some(&creator.id),
+                source_task_id: None,
+                proposal_id: None,
+            },
             title,
             "description",
             "design",
@@ -54,6 +70,7 @@ pub(crate) async fn create_task(
             1,
             "test-owner",
             status,
+            None,
         )
         .await
         .expect("create task")

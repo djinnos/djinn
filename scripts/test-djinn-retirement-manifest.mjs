@@ -74,7 +74,6 @@ function syntheticRepo() {
   // `.djinn/skills.json` is included to prove it is excluded from knowledge
   // classification even after retirement (it is now in RETIRED_OPERATIONAL_PATHS).
   writeFileSync(join(dir, '.djinn', '.gitignore'), 'worktrees/\n');
-  writeFileSync(join(dir, '.djinn', 'settings.json'), '{}\n');
   writeFileSync(join(dir, '.djinn', 'skills.json'), '[]\n');
   // A path with a space (proves NUL-delimiting handles it).
   mkdirSync(join(dir, '.djinn', 'research'), { recursive: true });
@@ -224,7 +223,9 @@ test('post-cutover guard accepts absent retired operational paths', () => {
   const fixtureDir = join(REPO_ROOT, 'scripts', 'fixtures', 'djinn-retirement');
   const ledger = JSON.parse(readFileSync(join(fixtureDir, 'deletion-ledger.json'), 'utf8'));
   const guidance = loadDbGuidanceFixture(join(fixtureDir, 'db-guidance.json'));
-  const paths = nulBytes([...NON_KNOWLEDGE_TRACKED]);
+  const paths = nulBytes(
+    [...NON_KNOWLEDGE_TRACKED].filter((path) => !RETIRED_OPERATIONAL_PATHS.has(path)),
+  );
   // Must not throw: all retired operational paths are absent.
   validateRetirementCutover(paths, ledger, guidance, { cwd: REPO_ROOT });
 });
@@ -583,11 +584,12 @@ test('splitNulPaths returns empty array for empty input', () => {
   assert.deepEqual(splitNulPaths(Buffer.alloc(0)), []);
 });
 
-test('isKnowledgePath excludes non-knowledge tracked files', () => {
+test('isKnowledgePath guards retired settings consistently with the retirement set', () => {
   assert.equal(isKnowledgePath('.djinn/decisions/a.md'), true);
   assert.equal(isKnowledgePath('.djinn/brief.md'), true);
   assert.equal(isKnowledgePath('.djinn/.gitignore'), false);
-  assert.equal(isKnowledgePath('.djinn/settings.json'), false);
+  assert.equal(NON_KNOWLEDGE_TRACKED.has('.djinn/settings.json'), false);
+  assert.equal(isKnowledgePath('.djinn/settings.json'), true);
   assert.equal(isKnowledgePath('.djinn/skills.json'), false);
   assert.equal(isKnowledgePath('server/src/lib.rs'), false);
   assert.equal(isKnowledgePath(''), false);
@@ -598,6 +600,7 @@ test('detectPermalink derives folder/slug and singleton permalinks', () => {
   assert.equal(detectPermalink('.djinn/brief.md'), 'brief');
   assert.equal(detectPermalink('.djinn/roadmap.md'), 'roadmap');
   assert.equal(detectPermalink('.djinn/catalog.md'), 'catalog');
+  assert.equal(detectPermalink('.djinn/settings.json'), 'settings');
   assert.equal(detectPermalink('.djinn/decisions/a.md'), 'decisions/a');
   assert.equal(detectPermalink('.djinn/research/technical/spike.md'), 'research/technical/spike');
   assert.equal(detectPermalink('.djinn/reference/adr-029-x.md'), 'reference/adr-029-x');
