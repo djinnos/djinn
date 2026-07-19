@@ -433,6 +433,30 @@ fn extract_step_log(cleaned_log: &str, step_name: &str) -> Option<String> {
 mod tests {
     use super::*;
     use djinn_provider::github_api::{ActionsJob, ActionsJobStep, WorkflowRun};
+    use wiremock::matchers::{method, path, query_param};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    const OWNER: &str = "named-owner";
+    const REPO: &str = "named-repository";
+
+    fn mock_client(server: &MockServer) -> GitHubApiClient {
+        GitHubApiClient::for_user_token_with_base_url("test-token".into(), server.uri())
+    }
+
+    fn run_json(id: u64, conclusion: Option<&str>, branch: Option<&str>) -> serde_json::Value {
+        serde_json::json!({
+            "id": id, "head_sha": format!("sha-{id}"), "head_branch": branch,
+            "status": if conclusion.is_some() { "completed" } else { "in_progress" },
+            "conclusion": conclusion
+        })
+    }
+
+    fn jobs_json(conclusion: &str) -> serde_json::Value {
+        serde_json::json!({"jobs": [{
+            "id": 900, "name": "tests", "status": "completed",
+            "conclusion": conclusion, "html_url": "https://example.test/jobs/900", "steps": []
+        }]})
+    }
 
     fn run(id: u64, conclusion: Option<&str>, head_branch: Option<&str>) -> WorkflowRun {
         WorkflowRun {
@@ -693,6 +717,133 @@ mod tests {
         assert_eq!(p.job_id, Some(12345));
         assert_eq!(p.pr_number, Some(42));
         assert_eq!(p.step.as_deref(), Some("Tests"));
+    }
+
+    async fn mount_runs(server: &MockServer, query: (&str, &str), runs: serde_json::Value) {
+        Mock::given(method("GET"))
+            .and(path(format!("/repos/{OWNER}/{REPO}/actions/runs")))
+            .and(query_param(query.0, query.1))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({"workflow_runs": runs})),
+            )
+            .mount(server)
+            .await;
+    }
+
+    #[tokio::test]
+    async fn resolver_pr_head_failure_precedes_recorded_and_live_merge_queue() {
+        let server = MockServer::start().await;
+        mount_runs(
+            &server,
+            ("head_sha", "recorded-sha"),
+            serde_json::json!([run_json(101, Some("failure"), Some("feature"))]),
+        )
+        .await;
+        Mock::given(method("GET"))
+            .and(path(format!("/repos/{OWNER}/{REPO}/actions/runs/101/jobs")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(jobs_json("failure")))
+            .mount(&server)
+            .await;
+        let resolved = resolve_workflow_run(
+            &mock_client(&server),
+            OWNER,
+            REPO,
+            WorkflowRunResolutionRequest {
+                pr_number: Some(42),
+                recorded_head_sha: Some("recorded-sha".into()),
+                recorded_merge_queue_run_id: Some(202),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(resolved.run_id, 101);
+        assert_eq!(resolved.lane, WorkflowRunLane::PrHead);
+        let requests = server.received_requests().await.unwrap();
+        assert_eq!(
+            requests.len(),
+            2,
+            "recorded/live merge queue must not be queried"
+        );
+        assert!(requests[0].url.path().ends_with("/actions/runs"));
+        assert!(requests[1].url.path().ends_with("/actions/runs/101/jobs"));
+    }
+
+    #[tokio::test]
+    async fn resolver_live_merge_group_requires_failing_job_verification() {
+        let server = MockServer::start().await;
+        mount_runs(&server, ("head_sha", "head"), serde_json::json!([])).await;
+        mount_runs(
+            &server,
+            ("event", "merge_group"),
+            serde_json::json!([run_json(
+                303,
+                Some("failure"),
+                Some("gh-readonly-queue/main/pr-42-deadbeef")
+            )]),
+        )
+        .await;
+        Mock::given(method("GET"))
+            .and(path(format!("/repos/{OWNER}/{REPO}/actions/runs/303/jobs")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(jobs_json("failure")))
+            .mount(&server)
+            .await;
+        let resolved = resolve_workflow_run(
+            &mock_client(&server),
+            OWNER,
+            REPO,
+            WorkflowRunResolutionRequest {
+                pr_number: Some(42),
+                recorded_head_sha: Some("head".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(resolved.lane, WorkflowRunLane::LiveMergeGroup);
+        let paths = server
+            .received_requests()
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|r| r.url.path().to_owned())
+            .collect::<Vec<_>>();
+        assert!(paths[2].ends_with("/actions/runs/303/jobs"));
+    }
+
+    #[tokio::test]
+    async fn resolver_nonfailing_candidates_return_final_no_failure_error() {
+        let server = MockServer::start().await;
+        mount_runs(
+            &server,
+            ("head_sha", "head"),
+            serde_json::json!([run_json(1, Some("success"), None), run_json(2, None, None)]),
+        )
+        .await;
+        mount_runs(
+            &server,
+            ("event", "merge_group"),
+            serde_json::json!([
+                run_json(3, Some("success"), Some("gh-readonly-queue/main/pr-42-x")),
+                run_json(4, None, Some("gh-readonly-queue/main/pr-42-y"))
+            ]),
+        )
+        .await;
+        let error = resolve_workflow_run(
+            &mock_client(&server),
+            OWNER,
+            REPO,
+            WorkflowRunResolutionRequest {
+                pr_number: Some(42),
+                recorded_head_sha: Some("head".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(error.contains("no failing workflow run"));
+        assert_eq!(server.received_requests().await.unwrap().len(), 2);
     }
 }
 

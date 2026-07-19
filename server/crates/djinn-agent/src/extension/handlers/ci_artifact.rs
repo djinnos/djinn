@@ -27,7 +27,17 @@ pub(crate) async fn list_artifacts(
     repo: &str,
     request: WorkflowRunResolutionRequest,
 ) -> Result<ArtifactListReport, String> {
-    tokio::time::timeout(OP_TIMEOUT, async {
+    list_artifacts_with_timeout(client, owner, repo, request, OP_TIMEOUT).await
+}
+
+async fn list_artifacts_with_timeout(
+    client: &GitHubApiClient,
+    owner: &str,
+    repo: &str,
+    request: WorkflowRunResolutionRequest,
+    deadline: Duration,
+) -> Result<ArtifactListReport, String> {
+    tokio::time::timeout(deadline, async {
         let resolved = resolve_workflow_run(client, owner, repo, request).await?;
         let page = client
             .list_run_artifacts(owner, repo, resolved.run_id)
@@ -51,7 +61,18 @@ pub(crate) async fn fetch_artifact(
     request: WorkflowRunResolutionRequest,
     name: &str,
 ) -> Result<String, String> {
-    tokio::time::timeout(OP_TIMEOUT, async {
+    fetch_artifact_with_timeout(client, owner, repo, request, name, OP_TIMEOUT).await
+}
+
+async fn fetch_artifact_with_timeout(
+    client: &GitHubApiClient,
+    owner: &str,
+    repo: &str,
+    request: WorkflowRunResolutionRequest,
+    name: &str,
+    deadline: Duration,
+) -> Result<String, String> {
+    tokio::time::timeout(deadline, async {
         let resolved = resolve_workflow_run(client, owner, repo, request).await?;
         let page = client.list_run_artifacts(owner, repo, resolved.run_id).await.map_err(|e| format!("failed to list artifacts for run {}: {e}", resolved.run_id))?;
         let artifact = page.artifacts.iter().find(|a| a.name == name).ok_or_else(|| format!("artifact `{name}` was not found in run {}.{}", resolved.run_id, if page.truncated { " The first artifact page was truncated, so a matching artifact may exist on a later page." } else { "" }))?;
@@ -263,7 +284,34 @@ fn push_bounded(target: &mut String, value: &str) {
 mod tests {
     use super::*;
     use std::io::Write;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
     use zip::write::SimpleFileOptions;
+
+    const OWNER: &str = "named-owner";
+    const REPO: &str = "named-repository";
+
+    fn client(server: &MockServer) -> GitHubApiClient {
+        GitHubApiClient::for_user_token_with_base_url("test-token".into(), server.uri())
+    }
+
+    fn explicit(run_id: u64) -> WorkflowRunResolutionRequest {
+        WorkflowRunResolutionRequest {
+            explicit_run_id: Some(run_id),
+            ..Default::default()
+        }
+    }
+
+    fn run_json(run_id: u64) -> serde_json::Value {
+        serde_json::json!({"id": run_id, "head_sha": "sha", "status": "completed", "conclusion": "success"})
+    }
+
+    fn artifacts_json() -> serde_json::Value {
+        serde_json::json!({"total_count": 1, "artifacts": [{
+            "id": 77, "name": "report", "size_in_bytes": 123,
+            "expired": false, "expires_at": "2030-01-01T00:00:00Z"
+        }]})
+    }
 
     fn zip(entries: Vec<(&str, Vec<u8>)>) -> Vec<u8> {
         let mut w = zip::ZipWriter::new(Cursor::new(Vec::new()));
@@ -272,6 +320,136 @@ mod tests {
             w.write_all(&b).unwrap();
         }
         w.finish().unwrap().into_inner()
+    }
+
+    #[tokio::test]
+    async fn foreign_explicit_run_stops_before_artifact_io() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path(format!("/repos/{OWNER}/{REPO}/actions/runs/999")))
+            .respond_with(ResponseTemplate::new(404).set_body_string("foreign run"))
+            .mount(&server)
+            .await;
+        let error = list_artifacts(&client(&server), OWNER, REPO, explicit(999))
+            .await
+            .unwrap_err();
+        assert!(error.contains("not accessible"));
+        let requests = server.received_requests().await.unwrap();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(
+            requests[0].url.path(),
+            format!("/repos/{OWNER}/{REPO}/actions/runs/999")
+        );
+    }
+
+    #[tokio::test]
+    async fn list_deadline_encloses_resolution_and_listing() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path(format!("/repos/{OWNER}/{REPO}/actions/runs/10")))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_delay(Duration::from_millis(40))
+                    .set_body_json(run_json(10)),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path(format!(
+                "/repos/{OWNER}/{REPO}/actions/runs/10/artifacts"
+            )))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_delay(Duration::from_millis(40))
+                    .set_body_json(artifacts_json()),
+            )
+            .mount(&server)
+            .await;
+        let error = list_artifacts_with_timeout(
+            &client(&server),
+            OWNER,
+            REPO,
+            explicit(10),
+            Duration::from_millis(60),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error, "ci_artifact list exceeded its 30-second deadline");
+    }
+
+    #[tokio::test]
+    async fn fetch_timeout_returns_only_no_report_error() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path(format!("/repos/{OWNER}/{REPO}/actions/runs/10")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(run_json(10)))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path(format!(
+                "/repos/{OWNER}/{REPO}/actions/runs/10/artifacts"
+            )))
+            .respond_with(ResponseTemplate::new(200).set_body_json(artifacts_json()))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path(format!(
+                "/repos/{OWNER}/{REPO}/actions/artifacts/77/zip"
+            )))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_delay(Duration::from_millis(100))
+                    .set_body_bytes(zip(vec![("partial.txt", b"must-not-escape".to_vec())])),
+            )
+            .mount(&server)
+            .await;
+        let error = fetch_artifact_with_timeout(
+            &client(&server),
+            OWNER,
+            REPO,
+            explicit(10),
+            "report",
+            Duration::from_millis(30),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            error,
+            "ci_artifact fetch exceeded its 30-second deadline; no artifact report was returned"
+        );
+        assert!(!error.contains("must-not-escape"));
+    }
+
+    #[tokio::test]
+    async fn fetch_entry_point_downloads_and_renders_through_transport() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path(format!("/repos/{OWNER}/{REPO}/actions/runs/10")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(run_json(10)))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path(format!(
+                "/repos/{OWNER}/{REPO}/actions/runs/10/artifacts"
+            )))
+            .respond_with(ResponseTemplate::new(200).set_body_json(artifacts_json()))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path(format!(
+                "/repos/{OWNER}/{REPO}/actions/artifacts/77/zip"
+            )))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_bytes(zip(vec![("result.txt", b"rendered body\n".to_vec())])),
+            )
+            .mount(&server)
+            .await;
+        let report = fetch_artifact(&client(&server), OWNER, REPO, explicit(10), "report")
+            .await
+            .unwrap();
+        assert_eq!(report, "== result.txt ==\nrendered body\n");
+        assert_eq!(server.received_requests().await.unwrap().len(), 3);
     }
 
     #[test]

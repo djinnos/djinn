@@ -65,6 +65,7 @@ workspace-hack.workspace = true
 
 [dev-dependencies]
 axum = "0.8"
+wiremock = "0.6"
 tokio = { version = "1", features = ["test-util", "macros", "rt-multi-thread"] }
 tempfile = "3"
 insta = { version = "1", features = ["json"] }
