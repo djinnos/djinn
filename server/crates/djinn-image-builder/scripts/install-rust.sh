@@ -41,8 +41,10 @@ if command -v apt-get >/dev/null 2>&1; then
     # InRelease and per-package SHA256s carry the integrity guarantee.
     readonly DEBIAN_SNAPSHOT_URL="http://snapshot.debian.org/archive/debian/20250401T000000Z"
     readonly MOLD_VERSION="2.37.1+dfsg-1"
-    printf 'deb [check-valid-until=no] %s trixie main\n' "${DEBIAN_SNAPSHOT_URL}" > /etc/apt/sources.list
-    rm -f /etc/apt/sources.list.d/debian.sources
+    # Additional source, not a replacement: snapshot-only resolution conflicts
+    # with newer preinstalled essentials (see runtime-base Dockerfile comment).
+    printf 'deb [check-valid-until=no] %s trixie main\n' "${DEBIAN_SNAPSHOT_URL}" \
+        > /etc/apt/sources.list.d/mold-snapshot.list
     apt-get update
     apt-get install -y --no-install-recommends clang lld mold=2.37.1+dfsg-1
     apt-get install -y --no-install-recommends sccache \
