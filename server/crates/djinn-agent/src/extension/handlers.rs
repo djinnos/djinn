@@ -43,6 +43,8 @@ use super::sandbox;
 use super::types::*;
 
 mod ci;
+// Internal renderer retained for focused coverage until artifact fetch wiring lands.
+#[allow(dead_code)]
 mod ci_artifact;
 mod code_intel;
 mod gate_guard;
