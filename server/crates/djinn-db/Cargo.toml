@@ -16,6 +16,7 @@ anyhow = "1"
 async-trait = "0.1"
 base64 = "0.22"
 djinn-core = { path = "../djinn-core", features = ["sqlx"] }
+djinn-stack = { path = "../djinn-stack" }
 djinn-memory = { path = "../djinn-memory", features = ["sqlx"] }
 dirs = "6"
 globset = "0.4"
@@ -35,6 +36,7 @@ uuid = { version = "1", features = ["v7"] }
 workspace-hack.workspace = true
 
 [dev-dependencies]
+djinn-db = { path = ".", features = ["test-support"] }
 futures = "0.3"
 proptest = "1"
 rstest = "0.24"

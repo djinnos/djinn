@@ -26,11 +26,12 @@ mod tests {
     use std::collections::HashMap;
     use std::path::PathBuf;
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicI64, Ordering};
 
     use djinn_core::events::{DjinnEventEnvelope, EventBus};
     use djinn_db::{
-        Database, EpicCreateInput, EpicRepository, NoteRepository, ProjectRepository,
-        TaskRepository,
+        Database, EffectiveCreatorProvenance, EpicCreateInput, EpicRepository, NoteRepository,
+        ProjectRepository, TaskRepository, UserRepository,
         repositories::retrieval_trace::{
             CandidateOutcome, CreateRetrievalTraceParams, RetrievalTraceEntryPoint,
             RetrievalTraceRepository, SkippedReason, TraceCandidate,
@@ -46,6 +47,8 @@ mod tests {
         StubSlotPoolOps,
     };
     use crate::tools::memory_tools::{RecallTraceParams, ops};
+
+    static NEXT_FIXTURE_GITHUB_ID: AtomicI64 = AtomicI64::new(9_520_000_000);
 
     struct SetupResult {
         server: DjinnMcpServer,
@@ -254,11 +257,26 @@ mod tests {
             )
             .await
             .unwrap();
+        let github_id = NEXT_FIXTURE_GITHUB_ID.fetch_add(1, Ordering::Relaxed);
+        let creator = UserRepository::new(db.clone())
+            .upsert_from_github(
+                github_id,
+                &format!("recall-trace-fixture-{github_id}"),
+                Some("Recall Trace Fixture"),
+                None,
+            )
+            .await
+            .unwrap();
         let task_repo = TaskRepository::new(db, events);
         task_repo
-            .create_in_project(
+            .create_in_project_with_provenance(
                 project_id,
                 Some(&epic.id),
+                EffectiveCreatorProvenance {
+                    explicit_user_id: Some(&creator.id),
+                    source_task_id: None,
+                    proposal_id: None,
+                },
                 "test-task",
                 description,
                 "test design",

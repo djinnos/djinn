@@ -40,7 +40,7 @@ async fn list_ready_projects_created_by_user_id() {
     // Insert under SESSION_USER_ID so the row is stamped with the creator.
     let task_id = SESSION_USER_ID
         .scope(Some(user_id.clone()), async {
-            repo.create_in_project(
+            repo.create_fixture_in_project(
                 &project_id,
                 None,
                 "ready + attributed",
@@ -126,7 +126,7 @@ async fn frozen_proposal_build_holds_its_epic_tasks_from_dispatch() {
         .unwrap();
 
     let epic_task = repo
-        .create_in_project(
+        .create_fixture_in_project(
             &project_id,
             Some(&epic_id),
             "under epic",
@@ -143,7 +143,7 @@ async fn frozen_proposal_build_holds_its_epic_tasks_from_dispatch() {
         .id;
     // An epic-less task (mirrors the epic_breakdown task: epic_id IS NULL).
     let loose_task = repo
-        .create_in_project(
+        .create_fixture_in_project(
             &project_id,
             None,
             "no epic",
@@ -226,7 +226,7 @@ async fn list_by_status_filtered_projects_created_by_user_id() {
     let repo = TaskRepository::new(db.clone(), EventBus::noop());
     let task_id = SESSION_USER_ID
         .scope(Some(user_id.clone()), async {
-            repo.create_in_project(
+            repo.create_fixture_in_project(
                 &project_id,
                 None,
                 "needs review + attributed",

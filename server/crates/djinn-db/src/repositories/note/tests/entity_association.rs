@@ -717,8 +717,8 @@ async fn list_filters_by_min_weight_and_limit() {
 // Mirrors the flow: proposal_graduate → link_epic → task under epic →
 // session extraction records `derived_from` edges from proposal to notes.
 
-use crate::TaskRepository;
 use crate::repositories::epic::{EpicCreateInput, EpicRepository};
+use crate::{EffectiveCreatorProvenance, TaskRepository, UserRepository};
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn proposal_derived_from_edges_via_epic_task_notes_fixture() {
@@ -760,11 +760,23 @@ async fn proposal_derived_from_edges_via_epic_task_notes_fixture() {
         .await
         .unwrap();
 
-    // 4. Create a task under the epic.
+    // 4. Create a task under the epic with an insertion-time fixture creator.
+    let fixture_identity = uuid::Uuid::now_v7();
+    let github_id = (fixture_identity.as_u128() % 9_000_000_000_000_000_000) as i64;
+    let user = UserRepository::new(db.clone())
+        .upsert_from_github(
+            github_id,
+            &format!("note-association-fixture-{fixture_identity}"),
+            Some("Note association fixture"),
+            None,
+        )
+        .await
+        .unwrap();
     let task = task_repo
-        .create_in_project(
+        .create_in_project_with_provenance(
             &project.id,
             Some(&epic.id),
+            EffectiveCreatorProvenance::explicit_user_id(&user.id),
             "Implement feature",
             "Do the work",
             "Design doc",

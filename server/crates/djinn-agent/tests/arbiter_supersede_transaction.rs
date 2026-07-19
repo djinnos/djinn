@@ -10,6 +10,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicI64, Ordering};
 
 use djinn_agent::context::AgentContext;
 use djinn_agent::file_time::FileTime;
@@ -21,12 +22,17 @@ use djinn_core::models::{Task, TransitionAction};
 use djinn_db::repositories::task_arbitration::{
     ArbitrationState, CreateArbitrationParams, TaskArbitrationRepository,
 };
-use djinn_db::{Database, EpicCreateInput, EpicRepository, ProjectRepository, TaskRepository};
+use djinn_db::{
+    Database, EffectiveCreatorProvenance, EpicCreateInput, EpicRepository, ProjectRepository,
+    TaskRepository, UserRepository,
+};
 use djinn_provider::catalog::{CatalogService, HealthTracker};
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 
 // ── Helpers (mirror arbiter_park_transaction.rs) ─────────────────────────
+
+static NEXT_FIXTURE_GITHUB_ID: AtomicI64 = AtomicI64::new(9_300_000_000);
 
 fn test_agent_context(db: Database) -> AgentContext {
     AgentContext {
@@ -94,10 +100,25 @@ async fn create_project_and_epic(db: &Database) -> (String, String) {
 
 async fn create_task(db: &Database, project_id: &str, epic_id: &str, title: &str) -> Task {
     let events = EventBus::noop();
+    let github_id = NEXT_FIXTURE_GITHUB_ID.fetch_add(1, Ordering::Relaxed);
+    let creator = UserRepository::new(db.clone())
+        .upsert_from_github(
+            github_id,
+            &format!("arbiter-supersede-fixture-{github_id}"),
+            Some("Arbiter Supersede Fixture"),
+            None,
+        )
+        .await
+        .expect("create task creator");
     TaskRepository::new(db.clone(), events)
-        .create_in_project(
+        .create_in_project_with_provenance(
             project_id,
             Some(epic_id),
+            EffectiveCreatorProvenance {
+                explicit_user_id: Some(&creator.id),
+                source_task_id: None,
+                proposal_id: None,
+            },
             title,
             "task description",
             "task design",
