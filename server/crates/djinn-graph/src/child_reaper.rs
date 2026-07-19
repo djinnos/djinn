@@ -10,7 +10,7 @@
 use std::collections::HashMap;
 use std::io;
 use std::sync::mpsc;
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::time::Duration;
 
 use djinn_core::clock::{Clock, SystemClock};
@@ -82,6 +82,8 @@ struct Registry {
     pending_admissions: usize,
     supervisors: HashMap<u32, SupervisorEntry>,
     adopted: Vec<AdoptedChildRecord>,
+    /// Advances after the Linux waiter completes a full `waitpid` pass.
+    reaper_generation: u64,
 }
 
 #[derive(Debug)]
@@ -98,6 +100,17 @@ struct Inner {
 #[derive(Clone, Debug)]
 pub struct ChildReaper {
     inner: Arc<Inner>,
+}
+
+/// The worker-wide lifecycle registry used by graph command supervisors.
+///
+/// A process may have only one `waitpid(-1, ...)` consumer. This accessor
+/// makes that ownership explicit while allowing graph callers outside the warm
+/// binary to use the same registry.
+#[must_use]
+pub fn worker_child_reaper() -> &'static ChildReaper {
+    static REAPER: OnceLock<ChildReaper> = OnceLock::new();
+    REAPER.get_or_init(ChildReaper::new)
 }
 
 /// A command has passed the admission gate but has not yet exposed its spawned
@@ -255,6 +268,16 @@ impl ChildReaper {
         })
     }
 
+    /// Wait for an acknowledged Linux `waitpid(-1, WNOHANG)` pass.
+    pub fn quiesce(&self, timeout: Duration) -> bool {
+        let generation = self
+            .inner
+            .registry
+            .lock()
+            .expect("child registry poisoned")
+            .reaper_generation;
+        self.wait_until(timeout, |registry| registry.reaper_generation > generation)
+    }
     /// Take all recorded adopted-child terminal statuses. This is the explicit
     /// acknowledgement point used by shutdown/tests; records are never silently
     /// discarded by the wait loop. While an admission reservation is pending,
@@ -320,6 +343,13 @@ impl ChildReaper {
     }
 
     #[cfg(target_os = "linux")]
+    fn completed_wait_pass(&self) {
+        let mut registry = self.inner.registry.lock().expect("child registry poisoned");
+        registry.reaper_generation = registry.reaper_generation.wrapping_add(1);
+        self.inner.changed.notify_all();
+    }
+
+    #[cfg(target_os = "linux")]
     fn start_linux_waiter(&self) {
         let reaper = self.clone();
         std::thread::Builder::new()
@@ -350,6 +380,7 @@ impl ChildReaper {
                         }
                         break;
                     }
+                    reaper.completed_wait_pass();
                     // `waitpid` has no portable notification fd here. A short sleep
                     // avoids SIGCHLD-handler races while keeping registry hooks
                     // deterministic and shutdown polling bounded.

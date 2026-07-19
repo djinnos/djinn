@@ -60,6 +60,7 @@ impl BaseLock for NoopBaseLock {
 fn entry() -> WarmBaseEntry {
     WarmBaseEntry {
         project_id: "018f8b9a-0d70-7f0a-8000-000000000001".into(),
+        mold_jobs: 1,
         path: PathBuf::from("base"),
         size_bytes: 7,
     }
@@ -91,6 +92,7 @@ fn old_base(temp: &tempfile::TempDir, id: &str) -> PathBuf {
 fn make_entry(base: &Path) -> WarmBaseEntry {
     WarmBaseEntry {
         project_id: base.file_name().unwrap().to_str().unwrap().into(),
+        mold_jobs: 1,
         path: base.to_path_buf(),
         size_bytes: directory_size(base),
     }
@@ -258,7 +260,7 @@ async fn activity_and_measurement_errors_retain() {
 fn strict_inventory_ignores_malformed_and_files() {
     let temp = tempfile::tempdir().expect("temp");
     let id = "018f8b9a-0d70-7f0a-8000-000000000001";
-    std::fs::create_dir(temp.path().join(id)).expect("dir");
+    std::fs::create_dir_all(temp.path().join(id).join("mold-jobs-1")).expect("variant");
     std::fs::create_dir(temp.path().join("018f8b9a0d707f0a8000000000000001")).expect("bad");
     std::fs::write(temp.path().join("file"), b"x").expect("file");
     let inventory = inventory_under(temp.path()).expect("inventory");
@@ -330,6 +332,7 @@ async fn idle_eviction_retains_young_base_by_mtime() {
     let clock = TestClock::new(SystemTime::now(), std::time::Instant::now());
     let entry = WarmBaseEntry {
         project_id: id.into(),
+        mold_jobs: 1,
         path: base.clone(),
         size_bytes: 1,
     };
@@ -381,6 +384,7 @@ async fn idle_eviction_db_activity_takes_precedence_over_mtime() {
     );
     let entry = WarmBaseEntry {
         project_id: id.into(),
+        mold_jobs: 1,
         path: base.clone(),
         size_bytes: 1,
     };
@@ -668,6 +672,7 @@ async fn dry_run_and_delete_select_same_candidates() {
     let base = old_base(&temp, id);
     let entry = WarmBaseEntry {
         project_id: id.into(),
+        mold_jobs: 1,
         path: base.clone(),
         size_bytes: 42,
     };
@@ -724,6 +729,7 @@ async fn dry_run_and_delete_parity_with_flock_lock() {
     let base = old_base(&temp, id);
     let entry = WarmBaseEntry {
         project_id: id.into(),
+        mold_jobs: 1,
         path: base.clone(),
         size_bytes: 42,
     };
@@ -907,6 +913,7 @@ fn pressure_config(low: f64, high: f64) -> crate::context::CacheCleanupConfig {
 fn pressure_entry(id: &str, size: u64) -> WarmBaseEntry {
     WarmBaseEntry {
         project_id: id.into(),
+        mold_jobs: 1,
         path: PathBuf::from(id),
         size_bytes: size,
     }
@@ -1413,4 +1420,5 @@ async fn pressure_lock_busy_and_error_retained() {
 
 mod fingerprint_inventory;
 mod fingerprint_sweep;
+mod idle_variant_lock;
 mod pressure_execution;
