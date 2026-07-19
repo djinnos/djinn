@@ -18,6 +18,7 @@ use djinn_db::Database;
 pub mod access_classifier;
 pub mod architect;
 pub mod canonical_graph;
+pub mod child_reaper;
 pub mod chunk_and_embed;
 pub mod cluster_doc;
 pub mod cochange;
