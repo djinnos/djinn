@@ -4,6 +4,8 @@ mod agents;
 mod contracts;
 #[path = "tests/debug.rs"]
 mod debug;
+#[path = "tests/galaxy_route.rs"]
+mod galaxy_route;
 #[path = "tests/helpers.rs"]
 mod helpers;
 #[path = "tests/metrics_debug_dispatch.rs"]

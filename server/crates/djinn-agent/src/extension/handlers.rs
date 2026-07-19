@@ -43,6 +43,7 @@ use super::sandbox;
 use super::types::*;
 
 mod ci;
+#[allow(dead_code)]
 mod ci_artifact;
 mod code_intel;
 mod gate_guard;
