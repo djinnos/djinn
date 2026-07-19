@@ -104,84 +104,34 @@ pub(crate) async fn call_ci_job_log(
              Pass `pr_number` naming the PR whose failing CI you want to read.",
         )?;
 
-    // PR-head SHA: the recorded snapshot head when the task's own PR is the
-    // target, otherwise resolve the PR head live via the GitHub API.
-    let head_sha = if task.ci_pr_number == Some(pr_number as i64) {
-        task.ci_head_sha.clone().filter(|s| !s.is_empty())
-    } else {
-        None
-    };
-    let head_sha = match head_sha {
-        Some(s) => s,
-        None => {
-            let (pr, _checks) = gh_client
-                .get_pull_request(&owner, &repo, pr_number)
-                .await
-                .map_err(|e| format!("failed to fetch PR #{pr_number}: {e}"))?;
-            pr.head.sha
-        }
-    };
-
-    // ── PR-head lane ───────────────────────────────────────────────────────
-    let mut lane = DiscoveryLane::None;
-    let mut failing_jobs: Vec<ActionsJob> = Vec::new();
-
-    let head_runs = gh_client
-        .list_workflow_runs_for_head_sha(&owner, &repo, &head_sha, RUN_SCAN_PER_PAGE)
+    let resolved = resolve_workflow_run(
+        &gh_client,
+        &owner,
+        &repo,
+        WorkflowRunResolutionRequest {
+            explicit_run_id: None,
+            pr_number: Some(pr_number),
+            recorded_head_sha: (task.ci_pr_number == Some(pr_number as i64))
+                .then(|| task.ci_head_sha.clone())
+                .flatten(),
+            recorded_merge_queue_run_id: task.ci_mq_run_id.and_then(|id| u64::try_from(id).ok()),
+        },
+    )
+    .await
+    .map_err(|error| format!("ci_job_log: {error}"))?;
+    let jobs = gh_client
+        .list_run_jobs(&owner, &repo, resolved.run_id)
         .await
-        .map_err(|e| format!("failed to list workflow runs for head {head_sha}: {e}"))?;
-    if let Some(run) = select_failing_run(&head_runs) {
-        let jobs = gh_client
-            .list_run_jobs(&owner, &repo, run.id)
-            .await
-            .map_err(|e| format!("failed to list jobs for run {}: {e}", run.id))?;
-        let selected = select_failing_jobs(&jobs);
-        if !selected.is_empty() {
-            failing_jobs = selected.into_iter().cloned().collect();
-            lane = DiscoveryLane::PrHead;
+        .map_err(|e| format!("failed to list jobs for run {}: {e}", resolved.run_id))?;
+    let failing_jobs: Vec<ActionsJob> = select_failing_jobs(&jobs).into_iter().cloned().collect();
+    debug_assert!(!failing_jobs.is_empty());
+    let lane = match resolved.lane {
+        WorkflowRunLane::PrHead => DiscoveryLane::PrHead,
+        WorkflowRunLane::RecordedMergeQueue | WorkflowRunLane::LiveMergeGroup => {
+            DiscoveryLane::MergeQueue
         }
-    }
-
-    // ── Merge-queue lane fallback ──────────────────────────────────────────
-    if failing_jobs.is_empty() {
-        // Prefer the durable snapshot run id; otherwise scan the merge_group
-        // event for this PR's failed run (same logic as the PR poller's
-        // dequeue enrichment in `pr_commands.rs`).
-        let mq_run_id = match task.ci_mq_run_id.and_then(|v| u64::try_from(v).ok()) {
-            Some(id) => Some(id),
-            None => {
-                let mg_runs = gh_client
-                    .list_workflow_runs_for_event(
-                        &owner,
-                        &repo,
-                        "merge_group",
-                        MERGE_GROUP_SCAN_PER_PAGE,
-                    )
-                    .await
-                    .map_err(|e| format!("failed to list merge_group runs: {e}"))?;
-                select_merge_group_run(&mg_runs, pr_number).map(|r| r.id)
-            }
-        };
-        if let Some(run_id) = mq_run_id {
-            let jobs = gh_client
-                .list_run_jobs(&owner, &repo, run_id)
-                .await
-                .map_err(|e| format!("failed to list jobs for merge_group run {run_id}: {e}"))?;
-            let selected = select_failing_jobs(&jobs);
-            if !selected.is_empty() {
-                failing_jobs = selected.into_iter().cloned().collect();
-                lane = DiscoveryLane::MergeQueue;
-            }
-        }
-    }
-
-    if failing_jobs.is_empty() {
-        return Err(format!(
-            "ci_job_log: no failing jobs found for PR #{pr_number} \
-             (head lane: sha {head_sha}, merge-queue lane: none). \
-             CI may still be running, or it passed — re-check the PR status."
-        ));
-    }
+        WorkflowRunLane::Explicit => DiscoveryLane::None,
+    };
 
     // If a step was given and it uniquely identifies one of the failing jobs,
     // treat it as an unambiguous single-job fetch.
@@ -217,6 +167,13 @@ pub(crate) async fn call_ci_job_log(
     Ok(serde_json::Value::String(output))
 }
 
+/// An implicitly discovered run must itself have completed with a failing
+/// conclusion. A failed job alone is not sufficient: GitHub can expose a
+/// completed failed job while its enclosing workflow remains in progress.
+fn is_implicit_failing_run(run: &WorkflowRun) -> bool {
+    is_failing_conclusion(run.conclusion.as_deref())
+}
+
 /// Which lane discovery resolved the failing jobs from — surfaced in the
 /// multi-job header so the agent knows whether it is looking at the PR head or
 /// the merge-queue run.
@@ -237,6 +194,32 @@ impl DiscoveryLane {
     }
 }
 
+/// A concrete repository-scoped workflow run retained by CI discovery.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ResolvedWorkflowRun {
+    pub(crate) run_id: u64,
+    pub(crate) lane: WorkflowRunLane,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WorkflowRunLane {
+    Explicit,
+    PrHead,
+    RecordedMergeQueue,
+    LiveMergeGroup,
+}
+
+impl WorkflowRunLane {
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::Explicit => "explicit",
+            Self::PrHead => "pr_head",
+            Self::RecordedMergeQueue => "recorded_merge_queue",
+            Self::LiveMergeGroup => "merge_group",
+        }
+    }
+}
+
 /// True when a workflow-run / job / step conclusion is a failure flavor the
 /// worker must act on. GitHub reports `failure`, `timed_out`, and `cancelled`
 /// as distinct conclusions; all three keep a required gate red.
@@ -248,6 +231,7 @@ fn is_failing_conclusion(conclusion: Option<&str>) -> bool {
 }
 
 /// Select the newest failed workflow run from a newest-first list.
+#[cfg(test)]
 fn select_failing_run(runs: &[WorkflowRun]) -> Option<&WorkflowRun> {
     runs.iter()
         .find(|r| is_failing_conclusion(r.conclusion.as_deref()))
@@ -260,6 +244,7 @@ fn select_failing_run(runs: &[WorkflowRun]) -> Option<&WorkflowRun> {
 /// match on the `pr-<number>-` marker. Mirrors the PR poller's dequeue
 /// enrichment in `pr_commands.rs` (which matches conclusion `"failure"` only;
 /// here we accept the broader failure set for robustness).
+#[cfg(test)]
 fn select_merge_group_run(runs: &[WorkflowRun], pr_number: u64) -> Option<&WorkflowRun> {
     let marker = format!("pr-{pr_number}-");
     runs.iter().find(|r| {
@@ -450,6 +435,30 @@ fn extract_step_log(cleaned_log: &str, step_name: &str) -> Option<String> {
 mod tests {
     use super::*;
     use djinn_provider::github_api::{ActionsJob, ActionsJobStep, WorkflowRun};
+    use wiremock::matchers::{method, path, query_param};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    const OWNER: &str = "named-owner";
+    const REPO: &str = "named-repository";
+
+    fn mock_client(server: &MockServer) -> GitHubApiClient {
+        GitHubApiClient::for_user_token_with_base_url("test-token".into(), server.uri())
+    }
+
+    fn run_json(id: u64, conclusion: Option<&str>, branch: Option<&str>) -> serde_json::Value {
+        serde_json::json!({
+            "id": id, "head_sha": format!("sha-{id}"), "head_branch": branch,
+            "status": if conclusion.is_some() { "completed" } else { "in_progress" },
+            "conclusion": conclusion
+        })
+    }
+
+    fn jobs_json(conclusion: &str) -> serde_json::Value {
+        serde_json::json!({"jobs": [{
+            "id": 900, "name": "tests", "status": "completed",
+            "conclusion": conclusion, "html_url": "https://example.test/jobs/900", "steps": []
+        }]})
+    }
 
     fn run(id: u64, conclusion: Option<&str>, head_branch: Option<&str>) -> WorkflowRun {
         WorkflowRun {
@@ -514,6 +523,18 @@ mod tests {
             select_failing_run(&[run(6, Some("cancelled"), None)]).map(|r| r.id),
             Some(6)
         );
+    }
+
+    #[test]
+    fn implicit_run_requires_a_failing_workflow_conclusion() {
+        // A recorded merge-queue run can have a failed completed job while the
+        // enclosing workflow is still running. It must not be selected until
+        // GitHub reports a failure-flavor workflow conclusion.
+        assert!(!is_implicit_failing_run(&run(1, None, None)));
+        assert!(!is_implicit_failing_run(&run(2, Some("success"), None)));
+        assert!(is_implicit_failing_run(&run(3, Some("failure"), None)));
+        assert!(is_implicit_failing_run(&run(4, Some("timed_out"), None)));
+        assert!(is_implicit_failing_run(&run(5, Some("cancelled"), None)));
     }
 
     // ── select_merge_group_run ────────────────────────────────────────────
@@ -699,4 +720,238 @@ mod tests {
         assert_eq!(p.pr_number, Some(42));
         assert_eq!(p.step.as_deref(), Some("Tests"));
     }
+
+    async fn mount_runs(server: &MockServer, query: (&str, &str), runs: serde_json::Value) {
+        Mock::given(method("GET"))
+            .and(path(format!("/repos/{OWNER}/{REPO}/actions/runs")))
+            .and(query_param(query.0, query.1))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({"workflow_runs": runs})),
+            )
+            .mount(server)
+            .await;
+    }
+
+    #[tokio::test]
+    async fn resolver_pr_head_failure_precedes_recorded_and_live_merge_queue() {
+        let server = MockServer::start().await;
+        mount_runs(
+            &server,
+            ("head_sha", "recorded-sha"),
+            serde_json::json!([run_json(101, Some("failure"), Some("feature"))]),
+        )
+        .await;
+        Mock::given(method("GET"))
+            .and(path(format!("/repos/{OWNER}/{REPO}/actions/runs/101/jobs")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(jobs_json("failure")))
+            .mount(&server)
+            .await;
+        let resolved = resolve_workflow_run(
+            &mock_client(&server),
+            OWNER,
+            REPO,
+            WorkflowRunResolutionRequest {
+                pr_number: Some(42),
+                recorded_head_sha: Some("recorded-sha".into()),
+                recorded_merge_queue_run_id: Some(202),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(resolved.run_id, 101);
+        assert_eq!(resolved.lane, WorkflowRunLane::PrHead);
+        let requests = server.received_requests().await.unwrap();
+        assert_eq!(
+            requests.len(),
+            2,
+            "recorded/live merge queue must not be queried"
+        );
+        assert!(requests[0].url.path().ends_with("/actions/runs"));
+        assert!(requests[1].url.path().ends_with("/actions/runs/101/jobs"));
+    }
+
+    #[tokio::test]
+    async fn resolver_live_merge_group_requires_failing_job_verification() {
+        let server = MockServer::start().await;
+        mount_runs(&server, ("head_sha", "head"), serde_json::json!([])).await;
+        mount_runs(
+            &server,
+            ("event", "merge_group"),
+            serde_json::json!([run_json(
+                303,
+                Some("failure"),
+                Some("gh-readonly-queue/main/pr-42-deadbeef")
+            )]),
+        )
+        .await;
+        Mock::given(method("GET"))
+            .and(path(format!("/repos/{OWNER}/{REPO}/actions/runs/303/jobs")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(jobs_json("failure")))
+            .mount(&server)
+            .await;
+        let resolved = resolve_workflow_run(
+            &mock_client(&server),
+            OWNER,
+            REPO,
+            WorkflowRunResolutionRequest {
+                pr_number: Some(42),
+                recorded_head_sha: Some("head".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(resolved.lane, WorkflowRunLane::LiveMergeGroup);
+        let paths = server
+            .received_requests()
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|r| r.url.path().to_owned())
+            .collect::<Vec<_>>();
+        assert!(paths[2].ends_with("/actions/runs/303/jobs"));
+    }
+
+    #[tokio::test]
+    async fn resolver_nonfailing_candidates_return_final_no_failure_error() {
+        let server = MockServer::start().await;
+        mount_runs(
+            &server,
+            ("head_sha", "head"),
+            serde_json::json!([run_json(1, Some("success"), None), run_json(2, None, None)]),
+        )
+        .await;
+        mount_runs(
+            &server,
+            ("event", "merge_group"),
+            serde_json::json!([
+                run_json(3, Some("success"), Some("gh-readonly-queue/main/pr-42-x")),
+                run_json(4, None, Some("gh-readonly-queue/main/pr-42-y"))
+            ]),
+        )
+        .await;
+        let error = resolve_workflow_run(
+            &mock_client(&server),
+            OWNER,
+            REPO,
+            WorkflowRunResolutionRequest {
+                pr_number: Some(42),
+                recorded_head_sha: Some("head".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(error.contains("no failing workflow run"));
+        assert_eq!(server.received_requests().await.unwrap().len(), 2);
+    }
+}
+
+/// Inputs captured from a task before resolving an artifact or CI-log run.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct WorkflowRunResolutionRequest {
+    pub(crate) explicit_run_id: Option<u64>,
+    pub(crate) pr_number: Option<u64>,
+    pub(crate) recorded_head_sha: Option<String>,
+    pub(crate) recorded_merge_queue_run_id: Option<u64>,
+}
+
+/// Resolve a repository-scoped run. Passing and in-progress runs are never
+/// selected implicitly; an explicit run is repository-verified and may have any conclusion.
+pub(crate) async fn resolve_workflow_run(
+    client: &GitHubApiClient,
+    owner: &str,
+    repo: &str,
+    request: WorkflowRunResolutionRequest,
+) -> Result<ResolvedWorkflowRun, String> {
+    if let Some(run_id) = request.explicit_run_id {
+        if run_id == 0 {
+            return Err("explicit workflow run ID must be positive".to_string());
+        }
+        client
+            .get_workflow_run(owner, repo, run_id)
+            .await
+            .map_err(|e| {
+                format!("explicit run {run_id} is not accessible in repository {owner}/{repo}: {e}")
+            })?;
+        return Ok(ResolvedWorkflowRun {
+            run_id,
+            lane: WorkflowRunLane::Explicit,
+        });
+    }
+    let pr = request
+        .pr_number
+        .ok_or("no explicit workflow run ID or PR number was available to resolve CI artifacts")?;
+    let sha = match request.recorded_head_sha.filter(|s| !s.is_empty()) {
+        Some(s) => s,
+        None => {
+            client
+                .get_pull_request(owner, repo, pr)
+                .await
+                .map_err(|e| format!("failed to fetch PR #{pr}: {e}"))?
+                .0
+                .head
+                .sha
+        }
+    };
+    let runs = client
+        .list_workflow_runs_for_head_sha(owner, repo, &sha, RUN_SCAN_PER_PAGE)
+        .await
+        .map_err(|e| format!("failed to list workflow runs for head {sha}: {e}"))?;
+    for run in runs.iter().filter(|run| is_implicit_failing_run(run)) {
+        if run_has_failing_job(client, owner, repo, run.id).await? {
+            return Ok(ResolvedWorkflowRun {
+                run_id: run.id,
+                lane: WorkflowRunLane::PrHead,
+            });
+        }
+    }
+    if let Some(id) = request.recorded_merge_queue_run_id {
+        let run = client
+            .get_workflow_run(owner, repo, id)
+            .await
+            .map_err(|e| format!("failed to verify recorded merge-queue run {id}: {e}"))?;
+        if is_implicit_failing_run(&run) && run_has_failing_job(client, owner, repo, id).await? {
+            return Ok(ResolvedWorkflowRun {
+                run_id: id,
+                lane: WorkflowRunLane::RecordedMergeQueue,
+            });
+        }
+    }
+    let runs = client
+        .list_workflow_runs_for_event(owner, repo, "merge_group", MERGE_GROUP_SCAN_PER_PAGE)
+        .await
+        .map_err(|e| format!("failed to list merge_group runs: {e}"))?;
+    let marker = format!("pr-{pr}-");
+    for run in runs.iter().filter(|run| {
+        is_implicit_failing_run(run)
+            && run
+                .head_branch
+                .as_deref()
+                .is_some_and(|branch| branch.contains(&marker))
+    }) {
+        if run_has_failing_job(client, owner, repo, run.id).await? {
+            return Ok(ResolvedWorkflowRun {
+                run_id: run.id,
+                lane: WorkflowRunLane::LiveMergeGroup,
+            });
+        }
+    }
+    Err(format!(
+        "no failing workflow run with failing jobs found for PR #{pr}; CI may be passing or still in progress"
+    ))
+}
+async fn run_has_failing_job(
+    client: &GitHubApiClient,
+    owner: &str,
+    repo: &str,
+    run_id: u64,
+) -> Result<bool, String> {
+    let jobs = client
+        .list_run_jobs(owner, repo, run_id)
+        .await
+        .map_err(|e| format!("failed to list jobs for run {run_id}: {e}"))?;
+    Ok(!select_failing_jobs(&jobs).is_empty())
 }
