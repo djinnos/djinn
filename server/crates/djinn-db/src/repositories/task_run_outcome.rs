@@ -114,9 +114,10 @@ impl TaskRunOutcomeRepository {
         self.db.ensure_initialized().await?;
         let status = params.status.unwrap_or("running");
         let mut tx = self.db.pool().begin().await?;
-        sqlx::query("INSERT INTO task_runs (id, project_id, task_id, trigger_type, status, workspace_path, mirror_ref) VALUES ($1, $2, $3, $4, $5, $6, $7)")
+        sqlx::query("INSERT INTO task_runs (id, project_id, task_id, trigger_type, status, workspace_path, mirror_ref, dispatch_group_id) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)")
             .bind(params.id).bind(params.project_id).bind(params.task_id).bind(params.trigger_type)
-            .bind(status).bind(params.workspace_path).bind(params.mirror_ref).execute(&mut *tx).await?;
+            .bind(status).bind(params.workspace_path).bind(params.mirror_ref)
+            .bind(params.dispatch_group_id).execute(&mut *tx).await?;
         let attempt: Option<(String, Option<String>, i32)> = sqlx::query_as(
             "SELECT task_id, task_run_id, attempt_seq FROM task_attempts WHERE id = $1 FOR UPDATE",
         )
@@ -141,7 +142,7 @@ impl TaskRunOutcomeRepository {
             .await?;
         sqlx::query("INSERT INTO task_run_outcome_facts (task_run_id, attempt_seq, outcome) VALUES ($1, $2, 'observed')")
             .bind(params.id).bind(attempt_seq).execute(&mut *tx).await?;
-        let run = sqlx::query_as("SELECT id, project_id, task_id, trigger_type, status, started_at, ended_at, workspace_path, mirror_ref FROM task_runs WHERE id = $1")
+        let run = sqlx::query_as("SELECT id, project_id, task_id, trigger_type, status, started_at, ended_at, workspace_path, mirror_ref, dispatch_group_id FROM task_runs WHERE id = $1")
             .bind(params.id).fetch_one(&mut *tx).await?;
         tx.commit().await?;
         Ok(run)
@@ -484,7 +485,8 @@ mod tests {
             .unwrap();
         let run_one = uuid::Uuid::now_v7().to_string();
         let run_two = uuid::Uuid::now_v7().to_string();
-        outcomes
+        let dispatch_group_id = uuid::Uuid::now_v7().to_string();
+        let created_run = outcomes
             .create_run_for_attempt(
                 CreateTaskRunParams {
                     id: &run_one,
@@ -494,12 +496,16 @@ mod tests {
                     status: None,
                     workspace_path: None,
                     mirror_ref: None,
-                    dispatch_group_id: None,
+                    dispatch_group_id: Some(&dispatch_group_id),
                 },
                 &first.id,
             )
             .await
             .unwrap();
+        assert_eq!(
+            created_run.dispatch_group_id.as_deref(),
+            Some(dispatch_group_id.as_str())
+        );
         outcomes
             .create_run_for_attempt(
                 CreateTaskRunParams {
