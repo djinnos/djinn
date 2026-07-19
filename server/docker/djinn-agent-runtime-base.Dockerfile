@@ -86,7 +86,11 @@ ENV DEBIAN_FRONTEND=noninteractive
 
 # Shared with scripts/install-rust.sh. The audited snapshot/version and amd64+
 # arm64 availability are recorded in docs/MOLD_DEBIAN_SNAPSHOT.md.
-ARG DEBIAN_SNAPSHOT_URL=https://snapshot.debian.org/archive/debian/20250401T000000Z
+# Plain http: snapshot.debian.org's Fastly edge intermittently fails TLS
+# verification from GitHub runners (two consecutive release failures on
+# 2026-07-19). Integrity does not depend on the transport — apt verifies the
+# snapshot's signed InRelease and per-package SHA256s either way.
+ARG DEBIAN_SNAPSHOT_URL=http://snapshot.debian.org/archive/debian/20250401T000000Z
 ARG MOLD_VERSION=2.37.1+dfsg-1
 
 # Runtime + build toolchain deps. Kept in one RUN so apt layer size stays
@@ -101,8 +105,14 @@ ARG MOLD_VERSION=2.37.1+dfsg-1
 #   - sccache: compilation-result cache, keyed by (rustc version + source
 #     hash + flags). Shared across task runs via /cache/sccache, so
 #     identical rustc invocations in different tasks hit the cache.
-RUN printf 'deb [check-valid-until=no] %s trixie main\n' "$DEBIAN_SNAPSHOT_URL" > /etc/apt/sources.list \
-    && rm -f /etc/apt/sources.list.d/debian.sources \
+# The snapshot is an ADDITIONAL source used only to resolve the exact pinned
+# mold version. Replacing the whole sources.list with the snapshot breaks the
+# solver: the base image's preinstalled essentials (e.g. perl-base) are newer
+# than the snapshot, so snapshot-only resolution of build-essential is
+# unsatisfiable ("perl : Depends: perl-base (= 5.40.1-2) but 5.40.1-6 is to
+# be installed", 2026-07-19 release failures).
+RUN printf 'deb [check-valid-until=no] %s trixie main\n' "$DEBIAN_SNAPSHOT_URL" \
+        > /etc/apt/sources.list.d/mold-snapshot.list \
     && apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates \
         git \

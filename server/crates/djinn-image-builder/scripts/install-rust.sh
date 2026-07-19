@@ -36,10 +36,15 @@ if command -v apt-get >/dev/null 2>&1; then
     # Keep mold reproducible across generated Rust images and the agent runtime.
     # The audited snapshot/version and amd64+arm64 availability are recorded in
     # docs/MOLD_DEBIAN_SNAPSHOT.md; update both installation paths together.
-    readonly DEBIAN_SNAPSHOT_URL="https://snapshot.debian.org/archive/debian/20250401T000000Z"
+    # Plain http like the runtime-base Dockerfile: snapshot.debian.org's Fastly
+    # edge intermittently fails TLS verification from CI runners; apt's signed
+    # InRelease and per-package SHA256s carry the integrity guarantee.
+    readonly DEBIAN_SNAPSHOT_URL="http://snapshot.debian.org/archive/debian/20250401T000000Z"
     readonly MOLD_VERSION="2.37.1+dfsg-1"
-    printf 'deb [check-valid-until=no] %s trixie main\n' "${DEBIAN_SNAPSHOT_URL}" > /etc/apt/sources.list
-    rm -f /etc/apt/sources.list.d/debian.sources
+    # Additional source, not a replacement: snapshot-only resolution conflicts
+    # with newer preinstalled essentials (see runtime-base Dockerfile comment).
+    printf 'deb [check-valid-until=no] %s trixie main\n' "${DEBIAN_SNAPSHOT_URL}" \
+        > /etc/apt/sources.list.d/mold-snapshot.list
     apt-get update
     apt-get install -y --no-install-recommends clang lld mold=2.37.1+dfsg-1
     apt-get install -y --no-install-recommends sccache \

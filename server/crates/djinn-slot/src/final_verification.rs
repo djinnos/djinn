@@ -104,6 +104,16 @@ pub enum FinalVerificationRecordingOutcome {
         verification_attempt_id: String,
         detail: String,
     },
+    /// The host resolved a typed "no final-verification plan is configured"
+    /// signal (`Ok(None)` from `resolve_final_verification`): the project
+    /// declares zero canonical commands. No lease is acquired, no command is
+    /// executed, no evidence is fabricated, and no row is written; the
+    /// completion-intent path treats this as "proceed without evidence"
+    /// (the pre-completion-boundary submission behavior). A configured plan
+    /// never reaches this variant — its failures stay `Ineligible`/`Error`.
+    NotConfigured {
+        verification_attempt_id: String,
+    },
 }
 
 /// Run the one authoritative completion boundary for either a model tool call
@@ -112,6 +122,13 @@ pub enum FinalVerificationRecordingOutcome {
 /// `submit_tool_label` names the finalize tool that initiated verification
 /// (e.g. `"submit_work"` for a worker or `"submit_review"` for a reviewer) so
 /// error messages reference the correct request without hard-coding a role.
+///
+/// Returns `Ok(Some(evidence))` for a stored/reused pass, `Ok(None)` when the
+/// project has no final-verification plan configured (the typed
+/// [`FinalVerificationRecordingOutcome::NotConfigured`] skip — the submission
+/// proceeds without evidence, as it did before the completion boundary
+/// existed), and `Err` for every ineligible/error outcome of a configured
+/// plan (submission stays blocked, fail closed).
 pub(crate) async fn verify_completion_intent(
     intent: &mut CompletionIntent,
     task_id: &str,
@@ -119,7 +136,7 @@ pub(crate) async fn verify_completion_intent(
     cancellation: CancellationToken,
     slot_ctx: &SlotContext,
     submit_tool_label: &str,
-) -> Result<FinalVerificationSuccessEvidence, String> {
+) -> Result<Option<FinalVerificationSuccessEvidence>, String> {
     let task_run_id = match task_run_id {
         Some(task_run_id) => task_run_id.to_owned(),
         None => {
@@ -150,7 +167,20 @@ pub(crate) async fn verify_completion_intent(
         | FinalVerificationRecordingOutcome::Reused { evidence, .. } => {
             let evidence = *evidence;
             intent.final_verification_evidence = Some(evidence.clone());
-            Ok(evidence)
+            Ok(Some(evidence))
+        }
+        FinalVerificationRecordingOutcome::NotConfigured { .. } => {
+            // Typed skip: no plan is configured for this project, so the
+            // completion boundary has nothing to enforce. Proceed with no
+            // evidence — never synthesize a success record.
+            intent.final_verification_evidence = None;
+            tracing::info!(
+                task_id = %task_id,
+                submit_tool = %submit_tool_label,
+                "final verification skipped: no final-verification plan is configured; \
+                 proceeding without evidence"
+            );
+            Ok(None)
         }
         FinalVerificationRecordingOutcome::Ineligible { reason, .. } => Err(format!(
             "Final verification rejected this {submit_tool_label} request: {reason}. Fix the worktree and resubmit."
@@ -170,7 +200,7 @@ pub(crate) async fn validate_or_reverify_completion_intent(
     cancellation: CancellationToken,
     slot_ctx: &SlotContext,
     submit_tool_label: &str,
-) -> Result<FinalVerificationSuccessEvidence, String> {
+) -> Result<Option<FinalVerificationSuccessEvidence>, String> {
     let task_run_id = match task_run_id {
         Some(id) => id.to_owned(),
         None => djinn_db::repositories::task_run::TaskRunRepository::new(slot_ctx.db.clone())
@@ -184,7 +214,7 @@ pub(crate) async fn validate_or_reverify_completion_intent(
     };
     if let Some(candidate) = intent.final_verification_evidence.clone() {
         let current = async {
-            let material = slot_ctx
+            match slot_ctx
                 .callbacks
                 .resolve_final_verification(
                     task_id,
@@ -193,18 +223,25 @@ pub(crate) async fn validate_or_reverify_completion_intent(
                     "completion-c2",
                     slot_ctx,
                 )
-                .await?;
-            Ok::<_, String>((derive_current_inputs(&material).await?, material))
+                .await?
+            {
+                // An unconfigured plan cannot revalidate prior evidence; the
+                // canonical path below resolves the typed skip.
+                None => Ok::<_, String>(None),
+                Some(material) => {
+                    Ok(Some((derive_current_inputs(&material).await?, material)))
+                }
+            }
         }
         .await;
-        if let Ok((inputs, material)) = current
+        if let Ok(Some((inputs, material))) = current
             && candidate.verification_input_fingerprint == inputs.fingerprint
             && candidate.environment_identity_digest == inputs.identity.digest
             && candidate.manifest_version == inputs.manifest_version
             && candidate.required_checks == material.required_checks
             && coverage_equals_required(Some(&candidate.covered_checks), &material.required_checks)
         {
-            return Ok(candidate);
+            return Ok(Some(candidate));
         }
         // Every mismatch/error discards evidence; only the canonical path below
         // may produce replacement evidence for the current inputs.
@@ -267,7 +304,18 @@ pub async fn coordinate_final_verification(
         )
         .await
     {
-        Ok(material) => material,
+        Ok(Some(material)) => material,
+        // Typed skip: the host resolved "no plan configured". Return before
+        // any lease, execution, or persistence — there is nothing to verify
+        // and nothing may be recorded.
+        Ok(None) => {
+            return emit_outcome(
+                &request,
+                FinalVerificationRecordingOutcome::NotConfigured {
+                    verification_attempt_id,
+                },
+            );
+        }
         Err(detail) => return emit_error(&request, &verification_attempt_id, &detail),
     };
     if request.cancellation.is_cancelled() {
@@ -401,7 +449,10 @@ async fn consult_reusable_final_verification(
         )
         .await
     {
-        Ok(material) => material,
+        Ok(Some(material)) => material,
+        // No plan configured: nothing is reusable; the writer path resolves
+        // the typed NotConfigured skip.
+        Ok(None) => return lookup_none("miss", request, attempt_id, "not_configured", ""),
         Err(error) => return lookup_none("error", request, attempt_id, "resolution", &error),
     };
     if injected_consultation_failure(
@@ -488,7 +539,8 @@ async fn consult_reusable_final_verification(
         )
         .await
     {
-        Ok(material) => material,
+        Ok(Some(material)) => material,
+        Ok(None) => return lookup_none("miss", request, attempt_id, "c1_not_configured", ""),
         Err(error) => return lookup_none("error", request, attempt_id, "c1_resolution", &error),
     };
     let c1 = match derive_current_inputs(&c1_material).await {
@@ -839,6 +891,13 @@ fn emit_outcome(
         } => tracing::error!(
             recording_outcome = "error", task_id = %request.task_id, task_run_id = %request.task_run_id,
             verification_attempt_id = %verification_attempt_id, detail = %detail,
+            "final verification recording completed"
+        ),
+        FinalVerificationRecordingOutcome::NotConfigured {
+            verification_attempt_id,
+        } => tracing::info!(
+            recording_outcome = "not_configured", task_id = %request.task_id, task_run_id = %request.task_run_id,
+            verification_attempt_id = %verification_attempt_id,
             "final verification recording completed"
         ),
     }
