@@ -1,4 +1,4 @@
-//! Migration 110 — `extension_load_diagnostics` table (epic wvg5 / proposal 0h1s).
+//! Migration 131 — retire manifest-specific `extension_load_diagnostics` values.
 //!
 //! Verifies the new migration applies cleanly on a fresh database and on top of
 //! the prior schema, and that the resulting schema carries the V1 columns,
@@ -9,8 +9,8 @@ use std::path::{Path, PathBuf};
 use sqlx::postgres::{PgConnection, PgPoolOptions};
 use sqlx::{Connection, Executor};
 
-const MIGRATION_VERSION: u64 = 110;
-const MIGRATION_FILE: &str = "110_extension_load_diagnostics.sql";
+const MIGRATION_VERSION: u64 = 131;
+const MIGRATION_FILE: &str = "131_retire_skill_manifest_diagnostics.sql";
 
 fn base_database_url() -> String {
     std::env::var("TEST_POSTGRES_URL")
@@ -115,12 +115,12 @@ async fn apply_prior_migrations(conn: &mut PgConnection) {
     }
 }
 
-async fn apply_migration_110(conn: &mut PgConnection) {
+async fn apply_migration_131(conn: &mut PgConnection) {
     let migration = migrations_dir().join(MIGRATION_FILE);
-    let sql = std::fs::read_to_string(&migration).expect("read migration 110 sql");
+    let sql = std::fs::read_to_string(&migration).expect("read migration 131 sql");
     conn.execute(sql.as_str())
         .await
-        .expect("apply migration 110 after prior migrations");
+        .expect("apply migration 131 after prior migrations");
 }
 
 async fn assert_schema(pool: &sqlx::PgPool) {
@@ -236,7 +236,6 @@ async fn assert_schema(pool: &sqlx::PgPool) {
                 "tools_list",
                 "frontmatter",
                 "missing_file",
-                "manifest_drift",
             ],
         ),
         (
@@ -248,7 +247,6 @@ async fn assert_schema(pool: &sqlx::PgPool) {
                 "check_server",
                 "check_skill_frontmatter",
                 "restore_skill_file",
-                "update_skill_manifest",
             ],
         ),
     ] {
@@ -396,7 +394,7 @@ async fn assert_extension_load_diagnostics_schema(db_url: &str) {
 }
 
 #[tokio::test]
-async fn migration_110_applies_on_fresh_database() {
+async fn migration_131_applies_on_fresh_database() {
     with_temp_database("fresh_extension_load", |db_url| async move {
         let pool = PgPoolOptions::new()
             .max_connections(1)
@@ -415,13 +413,13 @@ async fn migration_110_applies_on_fresh_database() {
 }
 
 #[tokio::test]
-async fn migration_110_applies_after_prior_migrations() {
+async fn migration_131_applies_after_prior_migrations() {
     with_temp_database("prior_extension_load", |db_url| async move {
         let mut conn = PgConnection::connect(&db_url)
             .await
             .expect("connect prior migration database");
         apply_prior_migrations(&mut conn).await;
-        apply_migration_110(&mut conn).await;
+        apply_migration_131(&mut conn).await;
         drop(conn);
 
         assert_extension_load_diagnostics_schema(&db_url).await;
@@ -521,13 +519,13 @@ async fn insert_diagnostic(
 }
 
 #[tokio::test]
-async fn migration_110_enforces_project_ownership_and_lifecycle() {
+async fn migration_131_enforces_project_ownership_and_lifecycle() {
     with_temp_database("ownership_extension_load", |db_url| async move {
         let mut conn = PgConnection::connect(&db_url)
             .await
             .expect("connect ownership migration database");
         apply_prior_migrations(&mut conn).await;
-        apply_migration_110(&mut conn).await;
+        apply_migration_131(&mut conn).await;
         drop(conn);
 
         let pool = PgPoolOptions::new()

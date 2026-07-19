@@ -13,7 +13,7 @@ use crate::mcp_settings::{
     effective_mcp_server_names, effective_skill_names, load_mcp_server_registry,
     resolve_mcp_servers,
 };
-use crate::skills_manifest::load_verified_skills_detailed;
+use crate::skills::load_skills_detailed;
 
 /// Runs one fresh, read-only doctor extension diagnostics attempt.
 pub async fn probe_project_extensions(
@@ -31,7 +31,7 @@ pub async fn probe_project_extensions(
         .map(|(name, config)| (name, config.clone()))
         .collect::<Vec<_>>();
     let mcp = connect_and_discover_with_diagnostics("doctor", "doctor", &servers, app_state).await;
-    let skills = load_verified_skills_detailed(canonical_workspace, &skill_names);
+    let skills = load_skills_detailed(canonical_workspace, &skill_names);
     let mut facts = mcp.diagnostics;
     facts.extend(skills.diagnostics);
     persist_extension_diagnostic_batch(
