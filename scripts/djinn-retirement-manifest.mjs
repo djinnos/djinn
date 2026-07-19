@@ -934,14 +934,8 @@ export function validateRetirementCutover(currentPathBytes, ledger, guidanceFixt
       code: 'ledger_source_revision',
     });
   }
-  // Settings and skills are guarded as retired paths, not ledger knowledge.
-  // Excluding them here keeps the immutable Phase 1 ledger scoped to the
-  // knowledge artifacts it actually recorded while `isKnowledgePath` still
-  // classifies any current reintroduction for the shared guard.
   const sourceKnowledge = new Set(
-    splitNulPaths(sourcePathBytes)
-      .filter(isKnowledgePath)
-      .filter((path) => !RETIRED_OPERATIONAL_PATHS.has(path)),
+    splitNulPaths(sourcePathBytes).filter(isKnowledgePath),
   );
   validateKnowledgeManifest(ledger, {
     knowledgeCount: sourceKnowledge.size,
