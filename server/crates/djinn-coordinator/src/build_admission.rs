@@ -10,8 +10,10 @@ use std::sync::{
     Arc,
     atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering},
 };
+use std::time::Instant;
 
 use async_trait::async_trait;
+use djinn_core::clock::{Clock, SystemClock};
 use djinn_db::{
     AdmissionDomain, AdmissionJournalKey, AdmissionJournalRepository, AdmissionJournalRow,
     AdmissionRecoveryResult, AdmissionState, AdmissionWorkloadKind, CreateStartedInput,
@@ -171,6 +173,18 @@ struct PermitState {
     create_unknown_outstanding: bool,
 }
 
+trait QueueClock: Send + Sync {
+    fn now(&self) -> Instant;
+}
+
+struct SystemQueueClock;
+
+impl QueueClock for SystemQueueClock {
+    fn now(&self) -> Instant {
+        SystemClock::new().now_instant()
+    }
+}
+
 /// Outcome of durable predecessor-epoch recovery and controller seeding.
 ///
 /// The controller seeds in-memory permit bookkeeping from the durable active
@@ -228,7 +242,8 @@ pub struct BuildAdmissionController {
     /// reservations are blocked while this is set; Observe/Off are unaffected.
     draining: AtomicBool,
     released: Notify,
-    deferred_enforce: Mutex<HashSet<String>>,
+    queued_lifecycle: std::sync::Mutex<HashMap<String, Instant>>,
+    queue_clock: Arc<dyn QueueClock>,
 }
 
 impl BuildAdmissionController {
@@ -257,8 +272,22 @@ impl BuildAdmissionController {
             topology_ready: AtomicBool::new(true),
             draining: AtomicBool::new(false),
             released: Notify::new(),
-            deferred_enforce: Mutex::new(HashSet::new()),
+            queued_lifecycle: std::sync::Mutex::new(HashMap::new()),
+            queue_clock: Arc::new(SystemQueueClock),
         }
+    }
+
+    #[cfg(test)]
+    fn new_with_queue_clock(
+        journal: Arc<AdmissionJournalRepository>,
+        mode: BuildAdmissionMode,
+        cap: i64,
+        creator_server_epoch: impl Into<String>,
+        queue_clock: Arc<dyn QueueClock>,
+    ) -> Self {
+        let mut controller = Self::new(journal, mode, cap, creator_server_epoch);
+        controller.queue_clock = queue_clock;
+        controller
     }
 
     /// Construct an Enforce controller which cannot admit work until every
@@ -396,6 +425,10 @@ impl BuildAdmissionController {
     /// while draining; in-flight permits may still transition to terminal.
     pub fn begin_draining(&self) {
         self.draining.store(true, Ordering::Release);
+        // finish_all_queued_waits drains the single lifecycle map atomically,
+        // clearing both membership and timestamps in one critical section.
+        self.finish_all_queued_waits(djinn_telemetry::build_slot_queue::OUTCOME_SHUTDOWN);
+        djinn_telemetry::build_slot_occupancy::set_slots_queued(0);
     }
 
     #[must_use]
@@ -433,7 +466,8 @@ impl BuildAdmissionController {
             BuildAdmissionMode::Enforce => "enforce",
         };
         if self.mode() == BuildAdmissionMode::Off {
-            djinn_telemetry::build_admission::set_slots(mode, self.cap, 0, 0);
+            djinn_telemetry::build_slot_occupancy::set_slots_in_use(0);
+            djinn_telemetry::build_slot_occupancy::set_slots_queued(0);
             djinn_telemetry::build_admission::set_health(mode, self.cap, false, false, false);
             return;
         }
@@ -465,11 +499,15 @@ impl BuildAdmissionController {
             }
         };
         let queued = if self.mode() == BuildAdmissionMode::Enforce {
-            self.deferred_enforce.lock().await.len()
+            self.queued_lifecycle
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .len()
         } else {
             0
         };
-        djinn_telemetry::build_admission::set_slots(mode, self.cap, occupied, queued);
+        djinn_telemetry::build_slot_occupancy::set_slots_in_use(occupied);
+        djinn_telemetry::build_slot_occupancy::set_slots_queued(queued);
         djinn_telemetry::build_admission::set_health(
             mode,
             self.cap,
@@ -574,10 +612,26 @@ impl BuildAdmissionController {
             };
             match reservation {
                 ReserveAdmissionResult::Denied { occupancy, cap } => {
-                    self.deferred_enforce
-                        .lock()
-                        .await
-                        .insert(permit_key.clone());
+                    // Atomically install one queued lifecycle record containing
+                    // the monotonic start time. Membership and timestamp are
+                    // installed under a single lock, so a concurrent
+                    // cancellation can never observe membership before the
+                    // timestamp exists. A retry (Occupied entry) reuses the
+                    // original start time, preserving first-denial timing.
+                    {
+                        let mut lifecycle = self
+                            .queued_lifecycle
+                            .lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner());
+                        match lifecycle.entry(permit_key.clone()) {
+                            std::collections::hash_map::Entry::Vacant(slot) => {
+                                slot.insert(self.queue_clock.now());
+                            }
+                            std::collections::hash_map::Entry::Occupied(_) => {
+                                // Retry: keep the original first-denial start time.
+                            }
+                        }
+                    }
                     self.publish_metrics().await;
                     return Ok(BuildAdmissionDecision::Denied { occupancy, cap });
                 }
@@ -586,8 +640,13 @@ impl BuildAdmissionController {
                 } => {
                     idempotent = value;
                     // This exact identity has successfully left deferred state.
+                    // Atomically remove membership and extract the start time
+                    // under one lock; emit exactly one admitted observation.
                     // Other waiters remain queued until their own retry succeeds.
-                    self.deferred_enforce.lock().await.remove(&permit_key);
+                    self.finish_queued_wait(
+                        &permit_key,
+                        djinn_telemetry::build_slot_queue::OUTCOME_ADMITTED,
+                    );
                 }
             }
         }
@@ -733,6 +792,109 @@ impl BuildAdmissionController {
         );
     }
 
+    /// Cancel a deferred request. Duplicate signals are idempotent:
+    /// [`Self::finish_queued_wait`] atomically removes the lifecycle record
+    /// (membership + timestamp) under one lock and observes exactly once, so
+    /// a duplicate cancel finds the key absent and emits no observation.
+    pub async fn cancel_deferred(&self, domain: AdmissionDomain, work_id: &str, generation: i64) {
+        let key = permit_key(&AdmissionJournalKey {
+            domain,
+            work_id: work_id.to_owned(),
+            generation,
+        });
+        self.finish_queued_wait(&key, djinn_telemetry::build_slot_queue::OUTCOME_CANCELLED);
+        self.publish_metrics().await;
+    }
+
+    /// Cancel every deferred generation for a task that has become terminal.
+    /// Each matching key is terminated atomically by [`Self::finish_queued_wait`],
+    /// which removes membership and extracts the timestamp under one lock, so no
+    /// cancelled observation is lost and no timestamp is orphaned.
+    pub async fn cancel_deferred_task(&self, work_id: &str) {
+        let prefix = format!("{:?}:{work_id}:", AdmissionDomain::TaskObservation);
+        let matching: Vec<String> = {
+            let lifecycle = self
+                .queued_lifecycle
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            lifecycle
+                .keys()
+                .filter(|key| key.starts_with(&prefix))
+                .cloned()
+                .collect()
+        };
+        for key in matching {
+            self.finish_queued_wait(&key, djinn_telemetry::build_slot_queue::OUTCOME_CANCELLED);
+        }
+        self.publish_metrics().await;
+    }
+
+    /// Rebuild deferred identities from the durable coordinator ready queue.
+    pub async fn reconcile_deferred_tasks<I>(&self, task_ids: I)
+    where
+        I: IntoIterator<Item = (String, i64)>,
+    {
+        if self.mode() != BuildAdmissionMode::Enforce {
+            return;
+        }
+        {
+            let mut queued = self
+                .queued_lifecycle
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            for (work_id, generation) in task_ids {
+                // Recovery rebuilds membership; a fresh monotonic start time is
+                // installed so the lifecycle record is complete. The original
+                // first-denial time is not recoverable across a process restart.
+                queued
+                    .entry(permit_key(&AdmissionJournalKey {
+                        domain: AdmissionDomain::TaskObservation,
+                        work_id,
+                        generation,
+                    }))
+                    .or_insert_with(|| self.queue_clock.now());
+            }
+        }
+        self.publish_metrics().await;
+    }
+
+    /// Atomically terminate one queued lifecycle record. Removes membership
+    /// and extracts the monotonic start time under a single lock, then emits
+    /// exactly one terminal observation. If the key is absent (duplicate signal,
+    /// or cancellation raced ahead of admission), no observation is emitted.
+    fn finish_queued_wait(&self, key: &str, outcome: &'static str) {
+        let queued_at = self
+            .queued_lifecycle
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(key);
+        if let Some(queued_at) = queued_at {
+            djinn_telemetry::build_slot_queue::record_wait_seconds(
+                outcome,
+                self.queue_clock.now().saturating_duration_since(queued_at),
+            );
+        }
+    }
+
+    /// Atomically drain every queued lifecycle record (membership + timestamp)
+    /// under one lock and emit one terminal observation per record. Used by the
+    /// graceful-shutdown drain path so no queued identity loses its observation.
+    fn finish_all_queued_waits(&self, outcome: &'static str) {
+        let waiters = {
+            let mut lifecycle = self
+                .queued_lifecycle
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            std::mem::take(&mut *lifecycle)
+        };
+        for queued_at in waiters.into_values() {
+            djinn_telemetry::build_slot_queue::record_wait_seconds(
+                outcome,
+                self.queue_clock.now().saturating_duration_since(queued_at),
+            );
+        }
+    }
+
     async fn transition_permit(
         &self,
         permit: &WarmAdmissionPermit,
@@ -850,7 +1012,14 @@ impl BuildAdmissionController {
             }
             // Waking one waiter cannot prove unrelated identities have left
             // deferred state. Only remove this terminal identity, if present.
-            self.deferred_enforce.lock().await.remove(&state_permit_key);
+            // Using finish_queued_wait atomically removes membership + timestamp
+            // so no timestamp is orphaned after a permit goes terminal. If the
+            // identity was already admitted (which removed the record), this is
+            // an idempotent no-op.
+            self.finish_queued_wait(
+                &state_permit_key,
+                djinn_telemetry::build_slot_queue::OUTCOME_ADMITTED,
+            );
             self.publish_metrics().await;
             // A terminal release can bring seeded occupancy back within the
             // cap; refresh the over-cap gate from the durable journal rather
@@ -2181,6 +2350,19 @@ mod tests {
     }
 
     fn sample_value(rendered: &str, metric: &str, labels: &[(&str, &str)]) -> f64 {
+        if matches!(
+            metric,
+            "djinn_build_slots_in_use" | "djinn_build_slots_queued"
+        ) {
+            let line = rendered
+                .lines()
+                .find(|line| line.starts_with(metric) && !line.contains("{"))
+                .unwrap_or_else(|| panic!("missing unlabelled sample {metric} in:\n{rendered}"));
+            return line
+                .rsplit_once(' ')
+                .and_then(|(_, value)| value.parse::<f64>().ok())
+                .unwrap_or_else(|| panic!("sample should end with a number: {line}"));
+        }
         let line = rendered
             .lines()
             .find(|l| {
@@ -2231,14 +2413,14 @@ mod tests {
         let rendered = djinn_telemetry::render().unwrap();
         let occupied = sample_value(
             &rendered,
-            "djinn_build_slots_occupied",
+            "djinn_build_slots_in_use",
             &[("effective_mode", "enforce"), ("effective_cap", "3")],
         );
         assert_eq!(
             occupied, 1.0,
             "occupied gauge must reflect the newly reserved row immediately"
         );
-        assert_no_identity_labels(&rendered, "djinn_build_slots_occupied");
+        assert_no_identity_labels(&rendered, "djinn_build_slots_in_use");
     }
 
     #[tokio::test]
@@ -2304,7 +2486,7 @@ mod tests {
         let rendered = djinn_telemetry::render().unwrap();
         let occupied = sample_value(
             &rendered,
-            "djinn_build_slots_occupied",
+            "djinn_build_slots_in_use",
             &[("effective_mode", "enforce"), ("effective_cap", "64")],
         );
         assert_eq!(
@@ -2324,7 +2506,7 @@ mod tests {
         let rendered = djinn_telemetry::render().unwrap();
         let occupied = sample_value(
             &rendered,
-            "djinn_build_slots_occupied",
+            "djinn_build_slots_in_use",
             &[("effective_mode", "off"), ("effective_cap", "0")],
         );
         assert_eq!(occupied, 0.0, "Off must report zero occupancy");
@@ -2425,7 +2607,22 @@ mod tests {
     async fn telemetry_queue_tracks_unique_waiters_until_each_reenters() {
         let _guard = telemetry_guard();
         djinn_telemetry::init().unwrap();
-        let c = controller(BuildAdmissionMode::Enforce, 1);
+        // Use a fake clock pinned at t=0 so the admitted observation this test
+        // emits contributes a deterministic 0.0s to the shared histogram rather
+        // than a non-deterministic real-time gap that pollutes sibling tests
+        // asserting exact histogram sums.
+        let db = Database::open_in_memory().unwrap();
+        db.ensure_initialized().await.unwrap();
+        let c = BuildAdmissionController::new_with_queue_clock(
+            Arc::new(AdmissionJournalRepository::new(db)),
+            BuildAdmissionMode::Enforce,
+            1,
+            "queue-tracks",
+            Arc::new(FakeQueueClock {
+                base: Instant::now(),
+                elapsed_seconds: AtomicU64::new(0),
+            }),
+        );
         c.mark_ready();
         let first = WarmAdmission::admit(&c, warm("release-a")).await.unwrap();
         assert!(WarmAdmission::admit(&c, warm("release-b")).await.is_err());
@@ -2435,7 +2632,7 @@ mod tests {
             sample_value(
                 &djinn_telemetry::render().unwrap(),
                 "djinn_build_slots_queued",
-                &[("effective_mode", "enforce"), ("effective_cap", "1")]
+                &[]
             ),
             2.0
         );
@@ -2455,7 +2652,7 @@ mod tests {
             sample_value(
                 &djinn_telemetry::render().unwrap(),
                 "djinn_build_slots_queued",
-                &[("effective_mode", "enforce"), ("effective_cap", "1")]
+                &[]
             ),
             2.0
         );
@@ -2464,7 +2661,7 @@ mod tests {
             sample_value(
                 &djinn_telemetry::render().unwrap(),
                 "djinn_build_slots_queued",
-                &[("effective_mode", "enforce"), ("effective_cap", "1")]
+                &[]
             ),
             1.0
         );
@@ -2628,7 +2825,7 @@ mod tests {
         let rendered = djinn_telemetry::render().unwrap();
         let occupied = sample_value(
             &rendered,
-            "djinn_build_slots_occupied",
+            "djinn_build_slots_in_use",
             &[("effective_mode", "enforce"), ("effective_cap", "3")],
         );
         assert_eq!(
@@ -2668,7 +2865,7 @@ mod tests {
         let rendered = djinn_telemetry::render().unwrap();
         let occupied = sample_value(
             &rendered,
-            "djinn_build_slots_occupied",
+            "djinn_build_slots_in_use",
             &[("effective_mode", "enforce"), ("effective_cap", "1")],
         );
         assert_eq!(
@@ -2699,7 +2896,7 @@ mod tests {
         let rendered = djinn_telemetry::render().unwrap();
         let occupied = sample_value(
             &rendered,
-            "djinn_build_slots_occupied",
+            "djinn_build_slots_in_use",
             &[("effective_mode", "enforce"), ("effective_cap", "1")],
         );
         assert_eq!(
@@ -2787,10 +2984,371 @@ mod tests {
             "djinn_build_admission_inventory_degraded",
             "djinn_build_admission_journal_degraded",
             "djinn_build_admission_create_unknown_health",
-            "djinn_build_slots_occupied",
+            "djinn_build_slots_in_use",
             "djinn_build_slots_queued",
         ] {
             assert_no_identity_labels(&rendered, metric);
         }
+    }
+
+    struct FakeQueueClock {
+        base: Instant,
+        elapsed_seconds: AtomicU64,
+    }
+    impl FakeQueueClock {
+        fn advance(&self, seconds: u64) {
+            self.elapsed_seconds.store(seconds, Ordering::Release);
+        }
+    }
+    impl QueueClock for FakeQueueClock {
+        fn now(&self) -> Instant {
+            self.base
+                .checked_add(std::time::Duration::from_secs(
+                    self.elapsed_seconds.load(Ordering::Acquire),
+                ))
+                .unwrap()
+        }
+    }
+    fn queue_histogram_value(rendered: &str, outcome: &str, suffix: &str) -> f64 {
+        rendered
+            .lines()
+            .find(|line| {
+                line.starts_with(&format!("djinn_build_slot_queue_wait_seconds_{suffix}"))
+                    && line.contains(&format!("outcome=\"{outcome}\""))
+            })
+            .and_then(|line| line.rsplit_once(' '))
+            .and_then(|(_, value)| value.parse().ok())
+            .unwrap_or(0.0)
+    }
+    #[tokio::test]
+    async fn queue_wait_uses_first_denial_and_observes_each_terminal_once() {
+        let _guard = telemetry_guard();
+        djinn_telemetry::init().unwrap();
+        let clock = Arc::new(FakeQueueClock {
+            base: Instant::now(),
+            elapsed_seconds: AtomicU64::new(0),
+        });
+        let db = Database::open_in_memory().unwrap();
+        db.ensure_initialized().await.unwrap();
+        let controller = BuildAdmissionController::new_with_queue_clock(
+            Arc::new(AdmissionJournalRepository::new(db)),
+            BuildAdmissionMode::Enforce,
+            1,
+            "fake-clock",
+            clock.clone(),
+        );
+        controller.mark_ready();
+        let occupied = WarmAdmission::admit(&controller, warm("occupied"))
+            .await
+            .unwrap();
+        let before_admitted_count =
+            queue_histogram_value(&djinn_telemetry::render().unwrap(), "admitted", "count");
+        let before_admitted_sum =
+            queue_histogram_value(&djinn_telemetry::render().unwrap(), "admitted", "sum");
+        assert!(
+            WarmAdmission::admit(&controller, warm("admitted"))
+                .await
+                .is_err()
+        );
+        clock.advance(7);
+        assert!(
+            WarmAdmission::admit(&controller, warm("admitted"))
+                .await
+                .is_err()
+        );
+        controller
+            .transition(
+                &occupied,
+                WarmAdmissionTransition::DefinitiveFailure {
+                    diagnostic: "free".into(),
+                },
+            )
+            .await
+            .unwrap();
+        let _replacement = WarmAdmission::admit(&controller, warm("admitted"))
+            .await
+            .unwrap();
+        let rendered = djinn_telemetry::render().unwrap();
+        assert_eq!(
+            queue_histogram_value(&rendered, "admitted", "count") - before_admitted_count,
+            1.0
+        );
+        assert_eq!(
+            queue_histogram_value(&rendered, "admitted", "sum") - before_admitted_sum,
+            7.0
+        );
+        let before_cancelled_count = queue_histogram_value(&rendered, "cancelled", "count");
+        let before_cancelled_sum = queue_histogram_value(&rendered, "cancelled", "sum");
+        assert!(
+            WarmAdmission::admit(&controller, warm("cancelled"))
+                .await
+                .is_err()
+        );
+        clock.advance(18);
+        controller
+            .cancel_deferred(AdmissionDomain::WarmBuild, "cancelled", 0)
+            .await;
+        controller
+            .cancel_deferred(AdmissionDomain::WarmBuild, "cancelled", 0)
+            .await;
+        let rendered = djinn_telemetry::render().unwrap();
+        assert_eq!(
+            queue_histogram_value(&rendered, "cancelled", "count") - before_cancelled_count,
+            1.0
+        );
+        assert_eq!(
+            queue_histogram_value(&rendered, "cancelled", "sum") - before_cancelled_sum,
+            11.0
+        );
+        let before_shutdown_count = queue_histogram_value(&rendered, "shutdown", "count");
+        let before_shutdown_sum = queue_histogram_value(&rendered, "shutdown", "sum");
+        assert!(
+            WarmAdmission::admit(&controller, warm("shutdown"))
+                .await
+                .is_err()
+        );
+        clock.advance(31);
+        controller.begin_draining();
+        controller.begin_draining();
+        let rendered = djinn_telemetry::render().unwrap();
+        assert_eq!(
+            queue_histogram_value(&rendered, "shutdown", "count") - before_shutdown_count,
+            1.0
+        );
+        assert_eq!(
+            queue_histogram_value(&rendered, "shutdown", "sum") - before_shutdown_sum,
+            13.0
+        );
+    }
+
+    /// Gauges equal disjoint unique state cardinalities after every transition.
+    ///
+    /// After each lifecycle event we assert both the histogram count AND the
+    /// `djinn_build_slots_queued` gauge. Duplicate terminal signals must be
+    /// no-ops on the gauge (no double-decrement), and the queued gauge must
+    /// always equal the number of unique queued identities.
+    #[tokio::test]
+    async fn queue_gauges_match_cardinality_after_every_transition() {
+        let _guard = telemetry_guard();
+        djinn_telemetry::init().unwrap();
+        let clock = Arc::new(FakeQueueClock {
+            base: Instant::now(),
+            elapsed_seconds: AtomicU64::new(0),
+        });
+        let db = Database::open_in_memory().unwrap();
+        db.ensure_initialized().await.unwrap();
+        let controller = BuildAdmissionController::new_with_queue_clock(
+            Arc::new(AdmissionJournalRepository::new(db)),
+            BuildAdmissionMode::Enforce,
+            1,
+            "gauge-test",
+            clock.clone(),
+        );
+        controller.mark_ready();
+
+        // One slot occupied → in_use=1, queued=0.
+        let occupied = WarmAdmission::admit(&controller, warm("occupied"))
+            .await
+            .unwrap();
+        let rendered = djinn_telemetry::render().unwrap();
+        assert_eq!(
+            sample_value(&rendered, "djinn_build_slots_in_use", &[]),
+            1.0,
+            "in_use gauge must reflect the one admitted identity"
+        );
+        assert_eq!(
+            sample_value(&rendered, "djinn_build_slots_queued", &[]),
+            0.0,
+            "queued gauge must be zero before any denial"
+        );
+
+        // Deny "queued-a": one identity enters deferred state.
+        assert!(
+            WarmAdmission::admit(&controller, warm("queued-a"))
+                .await
+                .is_err()
+        );
+        let rendered = djinn_telemetry::render().unwrap();
+        assert_eq!(
+            sample_value(&rendered, "djinn_build_slots_queued", &[]),
+            1.0,
+            "queued gauge must be 1 after first denial"
+        );
+
+        // Deny "queued-b": second unique identity enters deferred state.
+        assert!(
+            WarmAdmission::admit(&controller, warm("queued-b"))
+                .await
+                .is_err()
+        );
+        let rendered = djinn_telemetry::render().unwrap();
+        assert_eq!(
+            sample_value(&rendered, "djinn_build_slots_queued", &[]),
+            2.0,
+            "queued gauge must be 2 after two distinct denials"
+        );
+
+        // Retry "queued-a" (still denied): gauge stays 2 (reuses the record).
+        assert!(
+            WarmAdmission::admit(&controller, warm("queued-a"))
+                .await
+                .is_err()
+        );
+        let rendered = djinn_telemetry::render().unwrap();
+        assert_eq!(
+            sample_value(&rendered, "djinn_build_slots_queued", &[]),
+            2.0,
+            "retry must not double-count a queued identity"
+        );
+
+        // Cancel "queued-a": gauge drops to 1.
+        controller
+            .cancel_deferred(AdmissionDomain::WarmBuild, "queued-a", 0)
+            .await;
+        let rendered = djinn_telemetry::render().unwrap();
+        assert_eq!(
+            sample_value(&rendered, "djinn_build_slots_queued", &[]),
+            1.0,
+            "cancel must decrement the queued gauge"
+        );
+
+        // Duplicate cancel of "queued-a": gauge stays 1 (idempotent no-op).
+        controller
+            .cancel_deferred(AdmissionDomain::WarmBuild, "queued-a", 0)
+            .await;
+        let rendered = djinn_telemetry::render().unwrap();
+        assert_eq!(
+            sample_value(&rendered, "djinn_build_slots_queued", &[]),
+            1.0,
+            "duplicate cancel must be a no-op on the gauge"
+        );
+
+        // Free the occupied slot → admit "queued-b": queued drops to 0, in_use stays 1.
+        controller
+            .transition(
+                &occupied,
+                WarmAdmissionTransition::DefinitiveFailure {
+                    diagnostic: "free".into(),
+                },
+            )
+            .await
+            .unwrap();
+        let _admitted = WarmAdmission::admit(&controller, warm("queued-b"))
+            .await
+            .unwrap();
+        let rendered = djinn_telemetry::render().unwrap();
+        assert_eq!(
+            sample_value(&rendered, "djinn_build_slots_queued", &[]),
+            0.0,
+            "admitting the last queued identity must drain the queued gauge"
+        );
+        assert_eq!(
+            sample_value(&rendered, "djinn_build_slots_in_use", &[]),
+            1.0,
+            "in_use must remain 1 after the replacement admit"
+        );
+
+        // Shutdown drain with no remaining queued identities: gauge stays 0.
+        controller.begin_draining();
+        let rendered = djinn_telemetry::render().unwrap();
+        assert_eq!(
+            sample_value(&rendered, "djinn_build_slots_queued", &[]),
+            0.0,
+            "shutdown drain with no queued identities must leave gauge at 0"
+        );
+    }
+
+    /// A task-close cancellation via `cancel_deferred_task` emits exactly one
+    /// cancelled observation per queued generation and never orphans state.
+    #[tokio::test]
+    async fn cancel_deferred_task_terminates_every_queued_generation_once() {
+        let _guard = telemetry_guard();
+        djinn_telemetry::init().unwrap();
+        let clock = Arc::new(FakeQueueClock {
+            base: Instant::now(),
+            elapsed_seconds: AtomicU64::new(0),
+        });
+        let db = Database::open_in_memory().unwrap();
+        db.ensure_initialized().await.unwrap();
+        let controller = BuildAdmissionController::new_with_queue_clock(
+            Arc::new(AdmissionJournalRepository::new(db)),
+            BuildAdmissionMode::Enforce,
+            1,
+            "cancel-task-test",
+            clock.clone(),
+        );
+        controller.mark_ready();
+        let _occupied = WarmAdmission::admit(&controller, warm("occupied"))
+            .await
+            .unwrap();
+
+        // Queue two generations of the same task (task-id "gen-task").
+        let gen0 = controller
+            .admit_task_run(
+                Some("worker"),
+                AdmissionDomain::TaskObservation,
+                "gen-task".into(),
+                0,
+                "run-0".into(),
+            )
+            .await
+            .unwrap();
+        assert!(
+            matches!(gen0, BuildAdmissionDecision::Denied { .. }),
+            "gen-0 must be denied (cap full): {gen0:?}"
+        );
+        let gen1 = controller
+            .admit_task_run(
+                Some("worker"),
+                AdmissionDomain::TaskObservation,
+                "gen-task".into(),
+                1,
+                "run-1".into(),
+            )
+            .await
+            .unwrap();
+        assert!(
+            matches!(gen1, BuildAdmissionDecision::Denied { .. }),
+            "gen-1 must be denied (cap full): {gen1:?}"
+        );
+        let rendered = djinn_telemetry::render().unwrap();
+        assert_eq!(
+            sample_value(&rendered, "djinn_build_slots_queued", &[]),
+            2.0,
+            "two distinct generations must both be queued"
+        );
+
+        let before_cancelled =
+            queue_histogram_value(&djinn_telemetry::render().unwrap(), "cancelled", "count");
+        clock.advance(5);
+
+        // Task closes: cancel_deferred_task cancels ALL generations of "gen-task".
+        controller.cancel_deferred_task("gen-task").await;
+
+        let rendered = djinn_telemetry::render().unwrap();
+        assert_eq!(
+            sample_value(&rendered, "djinn_build_slots_queued", &[]),
+            0.0,
+            "all queued generations must be removed after task-close cancel"
+        );
+        assert_eq!(
+            queue_histogram_value(&rendered, "cancelled", "count") - before_cancelled,
+            2.0,
+            "both generations must emit exactly one cancelled observation each"
+        );
+
+        // Duplicate task-close cancel: no-op.
+        controller.cancel_deferred_task("gen-task").await;
+        let rendered = djinn_telemetry::render().unwrap();
+        assert_eq!(
+            sample_value(&rendered, "djinn_build_slots_queued", &[]),
+            0.0,
+            "duplicate cancel must not change the gauge"
+        );
+        assert_eq!(
+            queue_histogram_value(&rendered, "cancelled", "count") - before_cancelled,
+            2.0,
+            "duplicate cancel must not emit additional observations"
+        );
     }
 }
