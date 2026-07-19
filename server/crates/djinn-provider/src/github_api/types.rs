@@ -97,6 +97,36 @@ pub struct ActionsJob {
     pub steps: Vec<ActionsJobStep>,
 }
 
+/// A GitHub Actions workflow artifact from one bounded run-artifact page.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ActionsArtifact {
+    pub id: u64,
+    pub name: String,
+    #[serde(default)]
+    pub size_in_bytes: u64,
+    #[serde(default)]
+    pub expired: bool,
+    #[serde(default)]
+    pub expires_at: Option<String>,
+}
+
+/// Exactly one repository-scoped artifact page; the provider never paginates.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RunArtifactsPage {
+    pub total_count: u64,
+    pub artifacts: Vec<ActionsArtifact>,
+    pub truncated: bool,
+}
+
+/// Bounded compressed archive bytes and response metadata. ZIP extraction is
+/// intentionally owned by the agent rather than the provider transport.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DownloadedArtifact {
+    pub bytes: Vec<u8>,
+    pub content_type: Option<String>,
+    pub content_length: Option<u64>,
+}
+
 /// A single step within a GitHub Actions job.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ActionsJobStep {
@@ -178,6 +208,12 @@ pub enum RequiredCheckUnreproducibleReason {
 #[derive(Debug, Clone, Deserialize)]
 pub(super) struct ActionsJobsResponse {
     pub(super) jobs: Vec<ActionsJob>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub(super) struct ActionsArtifactsResponse {
+    pub(super) total_count: u64,
+    pub(super) artifacts: Vec<ActionsArtifact>,
 }
 
 /// A GitHub Actions workflow run (subset). Used to locate the `merge_group`
