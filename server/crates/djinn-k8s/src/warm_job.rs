@@ -759,7 +759,12 @@ mod tests {
             .as_ref()
             .expect("container environment")
             .iter()
-            .map(|entry| (entry.name.as_str(), entry.value.as_deref().unwrap_or_default()))
+            .map(|entry| {
+                (
+                    entry.name.as_str(),
+                    entry.value.as_deref().unwrap_or_default(),
+                )
+            })
             .collect();
 
         assert_eq!(

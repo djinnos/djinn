@@ -206,7 +206,9 @@ fn assert_galaxy_body_contract(contract: GalaxyBodyContract, body: &str) -> Resu
             }
             let denied = [
                 ".collect(",
+                ".collect::<",
                 ".try_collect(",
+                ".try_collect::<",
                 ".to_vec(",
                 ".concat(",
                 "BytesMut",
@@ -283,6 +285,14 @@ fn galaxy_allocation_shape_mutation_contract() {
         (
             "try_collect",
             "for index in 0..chunk_count { let _ = reader.read_chunk(index).await; } let _: Vec<_> = stream.try_collect().await;",
+        ),
+        (
+            "collect turbofish",
+            "for index in 0..chunk_count { let _ = reader.read_chunk(index).await; } let _ = stream.collect::<Vec<_>>().await;",
+        ),
+        (
+            "try_collect turbofish",
+            "for index in 0..chunk_count { let _ = reader.read_chunk(index).await; } let _ = stream.try_collect::<Vec<_>>().await;",
         ),
         (
             "to_vec",
