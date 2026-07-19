@@ -12,6 +12,7 @@ use tracing_subscriber::util::SubscriberInitExt;
 use djinn_agent::runtime_bridge::{RuntimeKind, runtime_kind};
 use djinn_core::clock::{Clock, SystemClock as SystemClockTrait};
 use djinn_core::doctor::RetrievalHealthConfig;
+use djinn_db::migrations::MigrationContext;
 use djinn_server::db::runtime::{DatabaseRuntimeConfig, DatabaseRuntimeManager};
 use djinn_server::logging;
 use djinn_server::server::{self, AppState};
@@ -55,6 +56,10 @@ struct Cli {
     /// useful standalone for debugging: `djinn-server --migrate-only`.
     #[arg(long, env = "DJINN_MIGRATE_ONLY", default_value_t = false)]
     migrate_only: bool,
+
+    /// Stable user id passed only to the migration connection.
+    #[arg(long, env = "DJINN_MIGRATION_DESIGNATED_OPERATOR_USER_ID")]
+    migration_designated_operator_user_id: Option<String>,
 
     /// Validate MALLOC_CONF and report the effective managed jemalloc settings.
     ///
@@ -123,6 +128,11 @@ async fn async_main(cli: Cli) {
         tracing::warn!(error = %e, "failed to initialize Prometheus telemetry");
     }
 
+    if !cli.migrate_only && cli.migration_designated_operator_user_id.is_some() {
+        tracing::error!("migration designated operator input requires --migrate-only");
+        std::process::exit(2);
+    }
+
     let cancel = CancellationToken::new();
 
     let shutdown_cancel = cancel.clone();
@@ -170,7 +180,12 @@ async fn async_main(cli: Cli) {
     // racing the app pod's connections.
     if cli.migrate_only {
         tracing::info!("migrate-only mode: applying pending migrations");
-        if let Err(e) = db.ensure_initialized().await {
+        if let Err(e) = db
+            .migrate(MigrationContext {
+                designated_operator_user_id: cli.migration_designated_operator_user_id.clone(),
+            })
+            .await
+        {
             tracing::error!(
                 error = %e,
                 "migrate-only: schema migration failed",

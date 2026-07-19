@@ -10,12 +10,61 @@
 //! diverges. Tests enforce this (`tests/migrations_immutable.rs`).
 use std::str::FromStr;
 
-use sqlx::postgres::PgConnectOptions;
+use sqlx::postgres::{PgConnectOptions, PgConnection};
 use sqlx::{ConnectOptions, Connection, Executor};
 
 use crate::error::{DbError, DbResult};
 
-/// Ensure a Postgres database named in `db_url` exists on the server,
+/// Inputs that exist only for a migration session, never a runtime pool.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct MigrationContext {
+    pub designated_operator_user_id: Option<String>,
+}
+
+/// Run the embedded Postgres migrator on one owned connection.
+///
+/// The setting is deliberately session scoped and this connection is closed
+/// before returning, so it cannot reach normal application query traffic.
+pub async fn run_postgres_migrations(db_url: &str, context: &MigrationContext) -> DbResult<()> {
+    let options = PgConnectOptions::from_str(db_url)
+        .map_err(|e| DbError::InvalidData(format!("invalid postgres url: {e}")))?;
+    let mut conn = options.connect().await.map_err(DbError::from)?;
+    let result = run_postgres_migrations_on_connection(&mut conn, context).await;
+    let close_result = conn.close().await.map_err(DbError::from);
+    result?;
+    close_result
+}
+
+/// Exact-connection variant used by the isolated test-template bootstrap and
+/// migration fixtures. It is not suitable for runtime pool connections.
+pub async fn run_postgres_migrations_on_connection(
+    conn: &mut PgConnection,
+    context: &MigrationContext,
+) -> DbResult<()> {
+    sqlx::query("SET statement_timeout = 0")
+        .execute(&mut *conn)
+        .await
+        .map_err(DbError::from)?;
+    if let Some(operator_id) = context.designated_operator_user_id.as_deref() {
+        let operator_id = operator_id.trim();
+        if operator_id.is_empty() {
+            return Err(DbError::InvalidData(
+                "migration designated operator user id must not be blank".to_owned(),
+            ));
+        }
+        sqlx::query("SELECT set_config('djinn.migration_designated_operator_user_id', $1, false)")
+            .bind(operator_id)
+            .execute(&mut *conn)
+            .await
+            .map_err(DbError::from)?;
+    }
+    sqlx::migrate!("./migrations_postgres")
+        .run_direct(&mut *conn)
+        .await
+        .map_err(|e: sqlx::migrate::MigrateError| DbError::InvalidData(e.to_string()))
+}
+
+/// Run only migrations before the creator-contract boundary for the two
 /// creating it via a side connection to the `postgres` maintenance database
 /// if necessary.
 ///
