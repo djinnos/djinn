@@ -521,6 +521,19 @@ impl Database {
                         // regular query traffic.
                         let migrate_pool = PgPoolOptions::new()
                             .max_connections(1)
+                            // The 30s bound can also arrive from server-level
+                            // Postgres configuration (the VPS chart sets it
+                            // globally), so lift it explicitly for the
+                            // migration session rather than merely omitting
+                            // the pool-level SET.
+                            .after_connect(|conn, _meta| {
+                                Box::pin(async move {
+                                    sqlx::query("SET statement_timeout = 0")
+                                        .execute(&mut *conn)
+                                        .await?;
+                                    Ok(())
+                                })
+                            })
                             .connect_lazy_with(PgConnectOptions::from_str(&url)?);
                         let migrate_result = sqlx::migrate!("./migrations_postgres")
                             .run(&migrate_pool)
