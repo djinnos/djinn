@@ -248,6 +248,67 @@ jobs:
           echo "cache-hit=${{ steps.rust-cache.outputs.cache-hit }}"
           echo "::notice::cache-family=server-test shared-key=server-test cache-hit=${{ steps.rust-cache.outputs.cache-hit }}"
         if: always()
+  # Release builds trigger only on v* tag pushes, and GitHub caches saved on
+  # a tag ref are invisible to every other ref — so a cache saved BY a
+  # release run can never be restored by the next release, and every release
+  # cold-compiled the workspace (~22 min of a ~25 min run). Caches created
+  # on the DEFAULT branch are readable from all refs, so main owns the
+  # release-bins family and release.yml is a restore-only consumer.
+  # The env below must stay byte-identical to the release binaries job's
+  # cargo-relevant env (RUSTFLAGS, CARGO_*): Swatinem/rust-cache hashes
+  # those env vars into the cache key, and any drift silently produces a
+  # second, unreachable cache family.
+  cache-warm-x86_64-release:
+    name: Cache Warm x86_64 (Release)
+    needs:
+      - preflight
+    if: (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && needs.preflight.outputs.serverTest == 'true'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: server
+    env:
+      SQLX_OFFLINE: "true"
+      RUSTFLAGS: -C link-arg=-fuse-ld=mold
+    steps:
+      - name: Main admission delay
+        if: github.event_name == 'push'
+        run: sleep 90
+      - uses: actions/checkout@v4
+      - run: rustup toolchain install
+        working-directory: server
+      - name: Install mold
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y mold
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: server
+          shared-key: release-bins
+          cache-on-failure: true
+          save-if: true
+          cache-all-crates: true
+        id: rust-cache
+      - name: Log cache family and restore status
+        run: |-
+          echo "cache-family=release-bins"
+          echo "shared-key=release-bins"
+          echo "runner-os=${{ runner.os }}"
+          echo "rustc=$(rustc --version || echo 'unknown')"
+          echo "cache-hit=${{ steps.rust-cache.outputs.cache-hit }}"
+          echo "::notice::cache-family=release-bins shared-key=release-bins cache-hit=${{ steps.rust-cache.outputs.cache-hit }}"
+      # No UI build here: rust-embed bakes ui/dist at compile time, so
+      # warming without it embeds the build.rs placeholder. That only
+      # affects the final djinn-server crate's own artifact — every
+      # dependency and intermediate workspace artifact still populates the
+      # cache the release job restores. Worker first, then server, in the
+      # same order and with the same flags as release.yml so feature
+      # resolution matches (a unified build would feature-unify qdrant
+      # onto worker deps).
+      - name: Cargo build worker (populate cache)
+        run: cargo build --release --locked -p djinn-agent-worker
+      - name: Cargo build server (populate cache)
+        run: cargo build --release --locked --features qdrant -p djinn-server
   cache-warm-aarch64:
     name: Cache Warm aarch64
     needs:
