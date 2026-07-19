@@ -4,6 +4,7 @@ use djinn_provider::github_api::{ActionsArtifact, GitHubApiClient};
 use serde::Serialize;
 use std::io::{Cursor, Read};
 use std::time::Duration;
+use tokio_util::sync::CancellationToken;
 const OP_TIMEOUT: Duration = Duration::from_secs(30);
 #[derive(Debug, Serialize)]
 pub(crate) struct ArtifactListReport {
@@ -70,16 +71,111 @@ async fn fetch_artifact_with_timeout(
     repo: &str,
     request: WorkflowRunResolutionRequest,
     name: &str,
-    deadline: Duration,
+    timeout: Duration,
 ) -> Result<String, String> {
-    tokio::time::timeout(deadline, async {
+    fetch_artifact_with_timeout_inner(
+        client,
+        owner,
+        repo,
+        request,
+        name,
+        timeout,
+        #[cfg(test)]
+        None,
+    )
+    .await
+}
+
+async fn fetch_artifact_with_timeout_inner(
+    client: &GitHubApiClient,
+    owner: &str,
+    repo: &str,
+    request: WorkflowRunResolutionRequest,
+    name: &str,
+    timeout: Duration,
+    #[cfg(test)] render_hook: Option<RenderTestHook>,
+) -> Result<String, String> {
+    let deadline = tokio::time::Instant::now() + timeout;
+    let cancellation = CancellationToken::new();
+    let render_cancellation = RenderCancellation {
+        deadline: Some(deadline),
+        cancellation: cancellation.clone(),
+    };
+    let operation = async move {
         let resolved = resolve_workflow_run(client, owner, repo, request).await?;
-        let page = client.list_run_artifacts(owner, repo, resolved.run_id).await.map_err(|e| format!("failed to list artifacts for run {}: {e}", resolved.run_id))?;
+        let page = client
+            .list_run_artifacts(owner, repo, resolved.run_id)
+            .await
+            .map_err(|e| format!("failed to list artifacts for run {}: {e}", resolved.run_id))?;
         let artifact = page.artifacts.iter().find(|a| a.name == name).ok_or_else(|| format!("artifact `{name}` was not found in run {}.{}", resolved.run_id, if page.truncated { " The first artifact page was truncated, so a matching artifact may exist on a later page." } else { "" }))?;
-        if artifact.expired { return Err(format!("artifact `{name}` in run {} has expired and can no longer be downloaded", resolved.run_id)); }
-        let download = client.download_artifact(owner, repo, resolved.run_id, artifact.id).await.map_err(|e| format!("failed to download artifact `{name}` from run {}: {e}", resolved.run_id))?;
-        render_ci_artifact_zip(&download.bytes)
-    }).await.map_err(|_| "ci_artifact fetch exceeded its 30-second deadline; no artifact report was returned".to_string())?
+        if artifact.expired {
+            return Err(format!(
+                "artifact `{name}` in run {} has expired and can no longer be downloaded",
+                resolved.run_id
+            ));
+        }
+        let download = client
+            .download_artifact(owner, repo, resolved.run_id, artifact.id)
+            .await
+            .map_err(|e| {
+                format!(
+                    "failed to download artifact `{name}` from run {}: {e}",
+                    resolved.run_id
+                )
+            })?;
+        tokio::task::spawn_blocking(move || {
+            render_ci_artifact_zip_controlled(
+                &download.bytes,
+                &render_cancellation,
+                #[cfg(test)]
+                render_hook,
+            )
+        })
+        .await
+        .map_err(|error| format!("artifact ZIP renderer failed to join: {error}"))?
+    };
+    match tokio::time::timeout_at(deadline, operation).await {
+        Ok(Ok(report)) => Ok(report),
+        Ok(Err(error)) if error == RENDER_CANCELLED => Err(fetch_timeout_error()),
+        Ok(Err(error)) => Err(error),
+        Err(_) => {
+            cancellation.cancel();
+            Err(fetch_timeout_error())
+        }
+    }
+}
+
+const RENDER_CANCELLED: &str = "artifact ZIP rendering cancelled at operation deadline";
+
+fn fetch_timeout_error() -> String {
+    "ci_artifact fetch exceeded its 30-second deadline; no artifact report was returned".to_string()
+}
+
+#[derive(Clone)]
+struct RenderCancellation {
+    deadline: Option<tokio::time::Instant>,
+    cancellation: CancellationToken,
+}
+
+impl RenderCancellation {
+    fn unbounded() -> Self {
+        Self {
+            deadline: None,
+            cancellation: CancellationToken::new(),
+        }
+    }
+
+    fn check(&self) -> Result<(), String> {
+        if self.cancellation.is_cancelled()
+            || self
+                .deadline
+                .is_some_and(|deadline| deadline <= tokio::time::Instant::now())
+        {
+            Err(RENDER_CANCELLED.to_string())
+        } else {
+            Ok(())
+        }
+    }
 }
 fn summary(artifact: ActionsArtifact) -> ArtifactSummary {
     ArtifactSummary {
@@ -100,6 +196,22 @@ const MAX_REPORT_BYTES: usize = 2 * 1024 * 1024;
 
 /// Render a ZIP artifact wholly in memory, enforcing limits while reading.
 pub(crate) fn render_ci_artifact_zip(bytes: &[u8]) -> Result<String, String> {
+    render_ci_artifact_zip_controlled(
+        bytes,
+        &RenderCancellation::unbounded(),
+        #[cfg(test)]
+        None,
+    )
+}
+
+fn render_ci_artifact_zip_controlled(
+    bytes: &[u8],
+    cancellation: &RenderCancellation,
+    #[cfg(test)] render_hook: Option<RenderTestHook>,
+) -> Result<String, String> {
+    #[cfg(test)]
+    let _completion = render_hook.map(RenderTestHook::stall);
+    cancellation.check()?;
     let mut archive = zip::ZipArchive::new(Cursor::new(bytes))
         .map_err(|error| format!("invalid ZIP artifact: {error}"))?;
     if archive.len() > MAX_ENTRIES {
@@ -108,6 +220,7 @@ pub(crate) fn render_ci_artifact_zip(bytes: &[u8]) -> Result<String, String> {
     let mut total = 0usize;
     let mut entries = Vec::with_capacity(archive.len());
     for index in 0..archive.len() {
+        cancellation.check()?;
         let mut file = archive
             .by_index(index)
             .map_err(|e| format!("failed to read ZIP entry {index}: {e}"))?;
@@ -118,6 +231,7 @@ pub(crate) fn render_ci_artifact_zip(bytes: &[u8]) -> Result<String, String> {
         let mut body = Vec::new();
         let mut chunk = [0_u8; 8192];
         loop {
+            cancellation.check()?;
             let read = file
                 .read(&mut chunk)
                 .map_err(|e| format!("failed to decompress ZIP entry {path}: {e}"))?;
@@ -153,7 +267,7 @@ pub(crate) fn render_ci_artifact_zip(bytes: &[u8]) -> Result<String, String> {
             RenderEntry::Text(path, String::from_utf8(body).expect("validated UTF-8"))
         });
     }
-    Ok(render_entries(entries))
+    render_entries(entries, cancellation)
 }
 
 enum RenderEntry {
@@ -188,14 +302,18 @@ fn is_binary(bytes: &[u8]) -> bool {
         .any(|b| matches!(*b, 1..=8 | 11..=12 | 14..=31))
 }
 
-fn render_entries(entries: Vec<RenderEntry>) -> String {
-    let rendered: Vec<(String, String)> = entries
-        .into_iter()
-        .map(|entry| match entry {
+fn render_entries(
+    entries: Vec<RenderEntry>,
+    cancellation: &RenderCancellation,
+) -> Result<String, String> {
+    let mut rendered = Vec::with_capacity(entries.len());
+    for entry in entries {
+        cancellation.check()?;
+        rendered.push(match entry {
             RenderEntry::Text(path, text) => (path, render_file_text(&text)),
             RenderEntry::Skipped(path, reason) => (path, format!("[skipped: {reason}]\n")),
-        })
-        .collect();
+        });
+    }
     let paths: Vec<&str> = rendered.iter().map(|(path, _)| path.as_str()).collect();
     let mut prefix_bytes = Vec::with_capacity(rendered.len() + 1);
     prefix_bytes.push(0);
@@ -224,13 +342,15 @@ fn render_entries(entries: Vec<RenderEntry>) -> String {
 
     let mut report = String::new();
     for (path, body) in rendered.iter().take(selected) {
+        cancellation.check()?;
         report.push_str(&format!("== {path} ==\n"));
         report.push_str(body);
     }
     if selected < paths.len() {
         push_bounded(&mut report, &omission_footer(&paths[selected..]));
     }
-    report
+    cancellation.check()?;
+    Ok(report)
 }
 
 fn omission_footer(paths: &[impl AsRef<str>]) -> String {
@@ -278,6 +398,32 @@ fn push_bounded(target: &mut String, value: &str) {
         end -= 1;
     }
     target.push_str(&value[..end]);
+}
+
+#[cfg(test)]
+struct RenderTestHook {
+    started: tokio::sync::oneshot::Sender<()>,
+    release: std::sync::mpsc::Receiver<()>,
+    completed: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+#[cfg(test)]
+impl RenderTestHook {
+    fn stall(self) -> RenderCompletionGuard {
+        let _ = self.started.send(());
+        let _ = self.release.recv();
+        RenderCompletionGuard(self.completed)
+    }
+}
+
+#[cfg(test)]
+struct RenderCompletionGuard(std::sync::Arc<std::sync::atomic::AtomicBool>);
+
+#[cfg(test)]
+impl Drop for RenderCompletionGuard {
+    fn drop(&mut self) {
+        self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
 }
 
 #[cfg(test)]
@@ -418,6 +564,70 @@ mod tests {
             "ci_artifact fetch exceeded its 30-second deadline; no artifact report was returned"
         );
         assert!(!error.contains("must-not-escape"));
+    }
+
+    #[tokio::test]
+    async fn fetch_deadline_expires_during_active_rendering_without_partial_report() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path(format!("/repos/{OWNER}/{REPO}/actions/runs/10")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(run_json(10)))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path(format!(
+                "/repos/{OWNER}/{REPO}/actions/runs/10/artifacts"
+            )))
+            .respond_with(ResponseTemplate::new(200).set_body_json(artifacts_json()))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path(format!(
+                "/repos/{OWNER}/{REPO}/actions/artifacts/77/zip"
+            )))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_bytes(zip(vec![("partial.txt", b"must-not-escape".to_vec())])),
+            )
+            .mount(&server)
+            .await;
+
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let completed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let hook = RenderTestHook {
+            started: started_tx,
+            release: release_rx,
+            completed: completed.clone(),
+        };
+        let client = client(&server);
+        let fetch = tokio::spawn(async move {
+            fetch_artifact_with_timeout_inner(
+                &client,
+                OWNER,
+                REPO,
+                explicit(10),
+                "report",
+                Duration::from_millis(30),
+                Some(hook),
+            )
+            .await
+        });
+        started_rx.await.expect("renderer did not start");
+        tokio::time::sleep(Duration::from_millis(60)).await;
+        release_tx.send(()).unwrap();
+
+        let error = fetch.await.unwrap().unwrap_err();
+        assert_eq!(error, fetch_timeout_error());
+        assert!(!error.contains("must-not-escape"));
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !completed.load(std::sync::atomic::Ordering::SeqCst) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("blocking renderer did not stop after release");
+        assert_eq!(server.received_requests().await.unwrap().len(), 3);
     }
 
     #[tokio::test]
