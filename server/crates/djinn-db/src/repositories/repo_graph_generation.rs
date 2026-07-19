@@ -1023,6 +1023,46 @@ impl RepoGraphGenerationRepository {
         })
     }
 
+    /// Mutate only route-fixture state; server tests never issue raw SQL.
+    #[cfg(any(test, feature = "test-support"))]
+    pub async fn set_current_artifact_version_for_test(
+        &self,
+        project_id: &str,
+        version: i32,
+    ) -> Result<()> {
+        sqlx::query("UPDATE repo_graph_galaxy_artifact a SET artifact_version = $2 FROM repo_graph_current c WHERE c.project_id = $1 AND a.generation_id = c.generation_id").bind(project_id).bind(version).execute(self.db.pool()).await?;
+        Ok(())
+    }
+    #[cfg(any(test, feature = "test-support"))]
+    pub async fn corrupt_current_artifact_metadata_for_test(&self, project_id: &str) -> Result<()> {
+        sqlx::query("UPDATE repo_graph_galaxy_artifact a SET transport_sha256 = 'invalid' FROM repo_graph_current c WHERE c.project_id = $1 AND a.generation_id = c.generation_id").bind(project_id).execute(self.db.pool()).await?;
+        Ok(())
+    }
+    #[cfg(any(test, feature = "test-support"))]
+    pub async fn corrupt_current_artifact_chunk_for_test(
+        &self,
+        project_id: &str,
+        chunk_index: i32,
+    ) -> Result<()> {
+        sqlx::query("UPDATE repo_graph_galaxy_chunk k SET bytes = decode('00', 'hex'), byte_count = 1 FROM repo_graph_current c JOIN repo_graph_galaxy_artifact a ON a.generation_id = c.generation_id WHERE c.project_id = $1 AND k.generation_id = a.generation_id AND k.artifact_id = a.artifact_id AND k.chunk_index = $2").bind(project_id).bind(chunk_index).execute(self.db.pool()).await?;
+        Ok(())
+    }
+    #[cfg(any(test, feature = "test-support"))]
+    pub async fn try_generation_stream_pin_exclusive_for_test(
+        &self,
+        generation_id: &str,
+    ) -> Result<bool> {
+        let key = generation_stream_pin_key(generation_id)?;
+        let mut conn = self.db.pool().acquire().await?;
+        let acquired = try_acquire_generation_stream_pin_exclusive(&mut conn, key).await?;
+        if acquired && !release_generation_stream_pin_exclusive(&mut conn, key).await? {
+            return Err(Error::InvalidData(
+                "test exclusive galaxy stream pin was not held".to_owned(),
+            ));
+        }
+        Ok(acquired)
+    }
+
     /// Execute the exact unmarked SQL shipped by the legacy warmer.
     #[cfg(any(test, feature = "test-support"))]
     pub async fn legacy_upsert_for_publication_test(
