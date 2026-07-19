@@ -40,7 +40,7 @@ use djinn_workspace::{
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 
 pub mod services;
 
@@ -635,6 +635,89 @@ where
     result
 }
 
+/// Clone the ephemeral workspace on `task_branch`, falling back to
+/// `base_branch` ONLY when the task branch is *verified absent* from the
+/// mirror — i.e. the genuine first cycle of a task, before the worker has
+/// ever pushed.
+///
+/// Why the verification instead of a catch-all `Err(_) => fall back`: every
+/// caller runs `Workspace::ensure_branch(task_branch)` immediately after this,
+/// which is `git checkout -B task/<id>` — from *base_branch's* HEAD on the
+/// fallback path. If the task branch actually exists in the mirror, that
+/// silently rewinds the local ref to base and discards every prior cycle's
+/// commits. The stage's subsequent `push_to_origin` is then rejected
+/// deterministically with
+/// `! [rejected] task/<id> -> task/<id> (non-fast-forward) ... tip of your
+/// current branch is behind its remote counterpart`, identically on all three
+/// retries because nothing about the local ref changes between them (observed
+/// on task unmh, 2026-07-19). A transient mirror failure must fail the run so
+/// the coordinator can redispatch — never quietly reset the branch to base.
+///
+/// The classification cannot be made from the [`MirrorError`] variant:
+/// `MirrorError::Missing` means the mirror DIRECTORY is gone, whereas an
+/// absent branch fails inside `git clone --branch` and arrives as
+/// `MirrorError::Git` — indistinguishable from a transient git failure. Hence
+/// the explicit [`MirrorManager::branch_exists`] probe, and hence a probe that
+/// itself fails is treated as "cannot prove absence" (no fallback).
+async fn clone_task_branch_or_first_cycle_base(
+    mirror: &MirrorManager,
+    project_id: &str,
+    task_branch: &str,
+    base_branch: &str,
+    clock: &dyn Clock,
+    cancel: &CancellationToken,
+) -> Result<Workspace, MirrorError> {
+    let clone_err = match timed_clone_attempt(clock, cancel, async {
+        mirror.clone_ephemeral(project_id, task_branch).await
+    })
+    .await
+    {
+        Ok(ws) => return Ok(ws),
+        Err(e) => e,
+    };
+
+    match mirror.branch_exists(project_id, task_branch).await {
+        Ok(false) => {
+            info!(
+                project_id,
+                task_branch,
+                base_branch,
+                error = %clone_err,
+                "task_branch verified absent from mirror; cloning on base_branch (first cycle)"
+            );
+            // Distinct attempt: the base-branch fallback clone starts its own
+            // timing window only here (when the second operation actually
+            // begins).
+            timed_clone_attempt(clock, cancel, async {
+                mirror.clone_ephemeral(project_id, base_branch).await
+            })
+            .await
+        }
+        Ok(true) => {
+            error!(
+                project_id,
+                task_branch,
+                error = %clone_err,
+                "clone_ephemeral(task_branch) failed but the branch EXISTS in the mirror — \
+                 transient failure; refusing the base_branch fallback because it would rewind \
+                 task_branch to base and lose the prior cycle's commits"
+            );
+            Err(clone_err)
+        }
+        Err(probe_err) => {
+            error!(
+                project_id,
+                task_branch,
+                error = %clone_err,
+                probe_error = %probe_err,
+                "clone_ephemeral(task_branch) failed and the mirror ref probe also failed — \
+                 cannot prove first-cycle absence; refusing the base_branch fallback"
+            );
+            Err(clone_err)
+        }
+    }
+}
+
 // ── Workspace cleanup telemetry (proposal zp5t) ──────────────────────────────
 //
 // Every returned owned-workspace teardown attempt emits exactly one
@@ -839,35 +922,21 @@ async fn prepare_resume_workspace(
         };
 
         // Stage 1: ensure the task branch is materialised in the clone so the
-        // detached checkout has a populated alternates pool. Fall back to
-        // base_branch if the task branch is missing (preserves existing
-        // legacy semantics for first-cycle runs).
-        let workspace = match timed_clone_attempt(clock, cancel, async {
-            mirror.clone_ephemeral(project_id, task_branch).await
-        })
-        .await
-        {
-            Ok(ws) => ws,
-            Err(
-                MirrorError::Missing(_)
-                | MirrorError::Git(_)
-                | MirrorError::Io(_)
-                | MirrorError::GcGuard(_),
-            ) => {
-                debug!(
-                    task_branch,
-                    "resume: task branch not in mirror for safe checkpoint — \
-                     cloning base_branch for checkout"
-                );
-                // Distinct attempt: the base-branch fallback clone starts its
-                // own timing window only here (when the second operation
-                // actually begins).
-                timed_clone_attempt(clock, cancel, async {
-                    mirror.clone_ephemeral(project_id, base_branch).await
-                })
-                .await?
-            }
-        };
+        // detached checkout has a populated alternates pool. Falls back to
+        // base_branch only when the task branch is verified absent from the
+        // mirror (first-cycle runs) — the previous shape matched EVERY
+        // MirrorError variant here, so a transient mirror failure took the
+        // fallback and let `ensure_branch` rewind task_branch to base. See
+        // [`clone_task_branch_or_first_cycle_base`].
+        let workspace = clone_task_branch_or_first_cycle_base(
+            mirror,
+            project_id,
+            task_branch,
+            base_branch,
+            clock,
+            cancel,
+        )
+        .await?;
         // Stage 2: detach HEAD on the selected SHA. `Workspace::checkout_ref`
         // surfaces fetch / checkout errors so the caller can machine-classify
         // the fallback (rather than panicking on a vanished SHA).
@@ -1158,40 +1227,26 @@ impl TaskRunSupervisor {
         // throwing away every prior cycle's worker progress. Observed on
         // task avoy: 3/3 ACs met in cycle 1, dropped to 1/3 in cycle 2 after
         // CI bounced the task back to open.
-        let workspace = match timed_clone_attempt(&*self.clock, self.services.cancel(), async {
-            self.mirror
-                .clone_ephemeral(&spec.project_id, &spec.task_branch)
-                .await
-        })
-        .await
-        {
-            Ok(ws) => {
-                debug!(
-                    task_run_id = %run_id,
-                    branch = %spec.task_branch,
-                    path = ?ws.path(),
-                    "ephemeral workspace ready (continuing on existing task_branch)"
-                );
-                ws
-            }
-            Err(e) => {
-                debug!(
-                    task_run_id = %run_id,
-                    branch = %spec.task_branch,
-                    error = %e,
-                    "task_branch not in mirror; cloning on base_branch (first cycle)"
-                );
-                // Distinct attempt: the base-branch fallback clone starts its
-                // own timing window only here (when the second operation
-                // actually begins).
-                timed_clone_attempt(&*self.clock, self.services.cancel(), async {
-                    self.mirror
-                        .clone_ephemeral(&spec.project_id, &spec.base_branch)
-                        .await
-                })
-                .await?
-            }
-        };
+        // The fallback is gated on a verified-absent task branch: a transient
+        // mirror failure must NOT take the base_branch path, because
+        // `ensure_branch` below would then rewind task_branch to base's HEAD
+        // and the stage's push would be rejected as non-fast-forward. See
+        // [`clone_task_branch_or_first_cycle_base`].
+        let workspace = clone_task_branch_or_first_cycle_base(
+            &self.mirror,
+            &spec.project_id,
+            &spec.task_branch,
+            &spec.base_branch,
+            &*self.clock,
+            self.services.cancel(),
+        )
+        .await?;
+        debug!(
+            task_run_id = %run_id,
+            branch = %spec.task_branch,
+            path = ?workspace.path(),
+            "ephemeral workspace ready"
+        );
 
         let task = match self.services.load_task(spec.task_id.clone()).await {
             Ok(task) => task,
@@ -5085,6 +5140,116 @@ mod tests {
         }
 
         (mgr, tip)
+    }
+
+    /// First cycle of a task: the mirror is healthy and the task branch has
+    /// simply never been pushed. This is the one case that may legitimately
+    /// clone on base_branch.
+    #[tokio::test]
+    async fn clone_fallback_uses_base_branch_when_task_branch_verified_absent() {
+        // `timed_clone_attempt` records into the process-global Prometheus
+        // recorder; serialize with the telemetry-scrape tests so their
+        // delta assertions are not polluted by this test's samples.
+        let _guard = clone_telemetry_guard();
+        let tmp = tempfile::tempdir().expect("mirrors tempdir");
+        let (mgr, _tip) = build_resume_test_mirror(tmp.path(), false).await;
+        let (clock, cancel) = resume_test_clock_and_cancel();
+
+        let ws = clone_task_branch_or_first_cycle_base(
+            &mgr,
+            RESUME_TEST_PROJECT_ID,
+            RESUME_TEST_TASK,
+            RESUME_TEST_BASE,
+            &*clock,
+            &cancel,
+        )
+        .await
+        .expect("absent task branch must fall back to base_branch");
+        assert_eq!(
+            ws.branch(),
+            RESUME_TEST_BASE,
+            "first-cycle fallback must land on base_branch"
+        );
+    }
+
+    /// An existing task branch must be cloned directly — no fallback, so the
+    /// prior cycle's commits stay reachable from the local ref.
+    #[tokio::test]
+    async fn clone_uses_task_branch_when_present() {
+        // `timed_clone_attempt` records into the process-global Prometheus
+        // recorder; serialize with the telemetry-scrape tests so their
+        // delta assertions are not polluted by this test's samples.
+        let _guard = clone_telemetry_guard();
+        let tmp = tempfile::tempdir().expect("mirrors tempdir");
+        let (mgr, _tip) = build_resume_test_mirror(tmp.path(), false).await;
+        let mirror_path = mgr.mirror_path(RESUME_TEST_PROJECT_ID);
+        run_git(
+            &mirror_path,
+            &["branch", RESUME_TEST_TASK, RESUME_TEST_BASE],
+        );
+        let (clock, cancel) = resume_test_clock_and_cancel();
+
+        let ws = clone_task_branch_or_first_cycle_base(
+            &mgr,
+            RESUME_TEST_PROJECT_ID,
+            RESUME_TEST_TASK,
+            RESUME_TEST_BASE,
+            &*clock,
+            &cancel,
+        )
+        .await
+        .expect("existing task branch must clone directly");
+        assert_eq!(ws.branch(), RESUME_TEST_TASK);
+    }
+
+    /// Regression (task unmh, 2026-07-19): a clone failure that is NOT
+    /// "the branch does not exist" must propagate, never take the base_branch
+    /// fallback. The old catch-all `Err(_) => clone(base_branch)` sent this
+    /// case down the fallback path, where `ensure_branch` rewound the local
+    /// task ref to base's HEAD and every subsequent push was rejected
+    /// non-fast-forward — identically on all three retries.
+    ///
+    /// Simulated with a ref that exists but does not resolve (partially
+    /// fetched / corrupt mirror): `git clone --branch` fails, and the absence
+    /// probe cannot prove the branch is missing.
+    #[tokio::test]
+    async fn transient_clone_failure_does_not_fall_back_to_base_branch() {
+        // `timed_clone_attempt` records into the process-global Prometheus
+        // recorder; serialize with the telemetry-scrape tests so their
+        // delta assertions are not polluted by this test's samples.
+        let _guard = clone_telemetry_guard();
+        let tmp = tempfile::tempdir().expect("mirrors tempdir");
+        let (mgr, _tip) = build_resume_test_mirror(tmp.path(), false).await;
+
+        let broken = mgr
+            .mirror_path(RESUME_TEST_PROJECT_ID)
+            .join(format!("refs/heads/{RESUME_TEST_TASK}"));
+        std::fs::create_dir_all(broken.parent().expect("ref parent")).expect("mkdir refs");
+        std::fs::write(&broken, "0000000000000000000000000000000000000001\n")
+            .expect("write broken ref");
+
+        let (clock, cancel) = resume_test_clock_and_cancel();
+        let result = clone_task_branch_or_first_cycle_base(
+            &mgr,
+            RESUME_TEST_PROJECT_ID,
+            RESUME_TEST_TASK,
+            RESUME_TEST_BASE,
+            &*clock,
+            &cancel,
+        )
+        .await;
+
+        let Err(e) = result else {
+            panic!(
+                "a transient task_branch clone failure must propagate, not silently \
+                 produce a base_branch workspace (that rewinds the task branch)"
+            );
+        };
+        // The propagated error must be the original task_branch clone failure.
+        assert!(
+            matches!(e, MirrorError::Git(_)),
+            "expected the task_branch clone error to propagate; got {e:?}"
+        );
     }
 
     /// `None` metadata (default/off dispatch path) must return `Ok(None)`
