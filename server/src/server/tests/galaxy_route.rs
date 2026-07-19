@@ -1,6 +1,12 @@
 //! Live Postgres route contract for pinned galaxy artifacts.
 use crate::{
-    server::{self, AppState},
+    server::{
+        self, AppState,
+        galaxy::{
+            ERROR_CORRUPT, ERROR_UNAVAILABLE, ERROR_UNSUPPORTED, HEADER_ARTIFACT_VERSION,
+            HEADER_COMMIT_SHA, HEADER_GENERATION_ID, HEADER_PROJECT_ID, HEADER_SEMANTIC_HASH,
+        },
+    },
     test_helpers,
 };
 use axum::{
@@ -14,6 +20,7 @@ use djinn_db::{
 };
 use http_body_util::BodyExt;
 use sha2::{Digest, Sha256};
+use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 use tower::ServiceExt;
 fn hex(b: &[u8]) -> String {
@@ -93,6 +100,31 @@ async fn get(a: &axum::Router, t: &str, p: &str) -> axum::response::Response {
         .await
         .unwrap()
 }
+async fn assert_error_code(response: axum::response::Response, status: StatusCode, code: &str) {
+    assert_eq!(response.status(), status);
+    assert_eq!(
+        response
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .as_ref(),
+        format!(r#"{{"code":"{code}"}}"#).as_bytes()
+    );
+}
+async fn assert_pin_released_after_cancellation(r: &RepoGraphGenerationRepository, gid: &str) {
+    for _ in 0..20 {
+        if r.try_generation_stream_pin_exclusive_for_test(gid)
+            .await
+            .unwrap()
+        {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("cancelled response did not release its generation stream pin");
+}
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn live_outcomes_rollback_and_pinning() {
     let db = test_helpers::create_test_db();
@@ -100,7 +132,12 @@ async fn live_outcomes_rollback_and_pinning() {
     let p = "galaxy-live";
     r.prepare_publication_test_project(p).await.unwrap();
     let (a, t) = app(db).await;
-    assert_eq!(get(&a, &t, p).await.status(), StatusCode::NOT_FOUND);
+    assert_error_code(
+        get(&a, &t, p).await,
+        StatusCode::NOT_FOUND,
+        ERROR_UNAVAILABLE,
+    )
+    .await;
     let g = publication(p, "g1", &[b"gzip-", b"bytes"]);
     let gid = g.generation_id.clone();
     let bytes = g
@@ -115,6 +152,14 @@ async fn live_outcomes_rollback_and_pinning() {
     assert_eq!(x.headers()[header::ETAG], tag);
     assert_eq!(x.headers()[header::CONTENT_TYPE], "application/gzip");
     assert!(x.headers().get(header::CONTENT_ENCODING).is_none());
+    assert_eq!(x.headers()[HEADER_PROJECT_ID], p);
+    assert_eq!(x.headers()[HEADER_GENERATION_ID], gid);
+    assert_eq!(x.headers()[HEADER_COMMIT_SHA], "g1");
+    assert_eq!(x.headers()[HEADER_ARTIFACT_VERSION], "1");
+    assert_eq!(
+        x.headers()[HEADER_SEMANTIC_HASH],
+        g.artifact.graph_content_hash
+    );
     assert_eq!(
         x.into_body().collect().await.unwrap().to_bytes().as_ref(),
         bytes.as_slice()
@@ -139,9 +184,9 @@ async fn live_outcomes_rollback_and_pinning() {
             .await
             .unwrap()
     );
-    r.publish_reserved_generation(publication(p, "g2", &[b"new"]))
-        .await
-        .unwrap();
+    let g2 = publication(p, "g2", &[b"new"]);
+    let g2id = g2.generation_id.clone();
+    r.publish_reserved_generation(g2).await.unwrap();
     assert_eq!(
         selected
             .into_body()
@@ -157,10 +202,23 @@ async fn live_outcomes_rollback_and_pinning() {
             .await
             .unwrap()
     );
+    let cancelled = get(&a, &t, p).await;
+    assert!(
+        !r.try_generation_stream_pin_exclusive_for_test(&g2id)
+            .await
+            .unwrap()
+    );
+    drop(cancelled);
+    assert_pin_released_after_cancellation(&r, &g2id).await;
     r.legacy_upsert_for_publication_test(p, "legacy", b"none")
         .await
         .unwrap();
-    assert_eq!(get(&a, &t, p).await.status(), StatusCode::NOT_FOUND);
+    assert_error_code(
+        get(&a, &t, p).await,
+        StatusCode::NOT_FOUND,
+        ERROR_UNAVAILABLE,
+    )
+    .await;
     r.publish_reserved_generation(publication(p, "g3", &[b"prior"]))
         .await
         .unwrap();
@@ -208,15 +266,22 @@ async fn unsupported_and_corruption_boundaries() {
         .await
         .unwrap();
     r.set_current_artifact_version_for_test(p, 2).await.unwrap();
-    assert_eq!(get(&a, &t, p).await.status(), StatusCode::CONFLICT);
+    assert_error_code(
+        get(&a, &t, p).await,
+        StatusCode::CONFLICT,
+        ERROR_UNSUPPORTED,
+    )
+    .await;
     r.set_current_artifact_version_for_test(p, 1).await.unwrap();
     r.corrupt_current_artifact_metadata_for_test(p)
         .await
         .unwrap();
-    assert_eq!(
-        get(&a, &t, p).await.status(),
-        StatusCode::INTERNAL_SERVER_ERROR
-    );
+    assert_error_code(
+        get(&a, &t, p).await,
+        StatusCode::INTERNAL_SERVER_ERROR,
+        ERROR_CORRUPT,
+    )
+    .await;
     r.publish_reserved_generation(publication(p, "c2", &[b"first", b"second"]))
         .await
         .unwrap();
