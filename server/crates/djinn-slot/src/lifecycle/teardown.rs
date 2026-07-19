@@ -235,7 +235,8 @@ pub(crate) async fn settle_auto_submit_if_eligible(
     }
     // This is the same intent/coordinator boundary as model-called submit_work.
     // Constructing or persisting an auto-submit payload is forbidden until it
-    // returns `Stored`.
+    // returns a stored/reused pass — or the typed `NotConfigured` skip
+    // (`Ok(None)`), in which case the settlement proceeds without evidence.
     let mut intent = CompletionIntent::auto_submit(&settlement.task_run_id);
     if let Err(error) = verify_completion_intent(
         &mut intent,
