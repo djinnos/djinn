@@ -59,6 +59,29 @@ jobs:
         run: node --test scripts/test-djinn-retirement-manifest.mjs
       - name: Run retirement manifest strict reconciliation guard
         run: ./scripts/check-djinn-retirement-manifest.sh
+      - name: Lint all workflow files (actionlint)
+        env:
+          ACTIONLINT_VERSION: 1.7.12
+          ACTIONLINT_SHA256: 8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
+        run: |
+          set -euo pipefail
+          # Sibling workflows (release.yml, cla.yml, stale-branches.yml,
+          # memory-qa-nightly.yml) route narrowly in the scope router, so
+          # this always-on lint is their gate. It also catches invalid
+          # triggers that GitHub only surfaces as a red zero-job run on
+          # every subsequent push (e.g. `on: workflow_job`, which is a
+          # webhook event, not a workflow trigger — the exact bug shipped
+          # in #2221's ci-fail-fast.yml).
+          curl --fail --silent --show-error --location \
+            --retry 3 --connect-timeout 10 --max-time 60 \
+            --output "$RUNNER_TEMP/actionlint.tar.gz" \
+            "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
+          printf '%s  %s\n' "$ACTIONLINT_SHA256" "$RUNNER_TEMP/actionlint.tar.gz" | sha256sum --check --strict
+          tar -xzf "$RUNNER_TEMP/actionlint.tar.gz" -C "$RUNNER_TEMP" actionlint
+          # shellcheck/pyflakes deliberately disabled: schema, trigger, and
+          # expression checks only, so run-block style nits cannot wedge
+          # the gate.
+          "$RUNNER_TEMP/actionlint" -shellcheck= -pyflakes= .github/workflows/*.yml
       - name: Compute safe event diff and route it
         id: router
         env:
