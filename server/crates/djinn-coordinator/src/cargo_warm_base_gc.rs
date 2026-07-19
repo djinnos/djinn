@@ -54,6 +54,7 @@ pub async fn snapshot_three_rung_pressure_bases(
             .map(system_time_from_offset);
         snapshots.push(PressureBaseSnapshot {
             project_id: entry.project_id,
+            mold_jobs: entry.mold_jobs,
             canonical_base: std::fs::canonicalize(&entry.path).unwrap_or(entry.path),
             effective_latest_activity,
         });
@@ -68,19 +69,18 @@ pub struct SharedWarmBaseLock;
 
 impl BaseLock for SharedWarmBaseLock {
     fn try_lock(&self, path: &Path) -> Result<Option<Box<dyn LockGuard>>, String> {
-        let project_id = path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .ok_or("invalid project id")?;
+        let mold_jobs = canonical_mold_jobs_name(path.file_name().and_then(|name| name.to_str()).ok_or("invalid mold-job variant")?).ok_or("invalid mold-job variant")?;
+        let project_dir = path.parent().ok_or("variant has no project directory")?;
+        let project_id = project_dir.file_name().and_then(|name| name.to_str()).ok_or("invalid project id")?;
         let parsed = Uuid::parse_str(project_id).map_err(|_| "invalid project id")?;
         if parsed.to_string() != project_id {
             return Err("invalid project id".into());
         }
-        let root = path.parent().ok_or("base has no warm root")?;
+        let root = project_dir.parent().ok_or("project has no warm root")?;
         let lock_dir = root.join(".warm-locks");
         std::fs::create_dir_all(&lock_dir)
             .map_err(|error| format!("failed to create warm lock directory: {error}"))?;
-        let lock_path = lock_dir.join(format!("{project_id}.lock"));
+        let lock_path = lock_dir.join(format!("{project_id}-mold-jobs-{mold_jobs}.lock"));
         let file = std::fs::OpenOptions::new()
             .read(true)
             .write(true)
@@ -143,17 +143,17 @@ pub async fn execute_three_rung_pressure_plan(
     }
     let mut blocked = HashSet::new();
     for (index, unit) in plan.units.iter().enumerate() {
-        if blocked.contains(&unit.project_id)
+        if blocked.contains(&unit.canonical_base)
             || !matches!(unit.disposition, PressurePlanDisposition::Eligible)
         {
-            blocked.insert(unit.project_id.clone());
+            blocked.insert(unit.canonical_base.clone());
             result.retained.push(unit.clone());
             continue;
         }
         let guard = match locks.try_lock(&unit.canonical_base) {
             Ok(Some(guard)) => guard,
             Ok(None) | Err(_) => {
-                blocked.insert(unit.project_id.clone());
+                blocked.insert(unit.canonical_base.clone());
                 result.retained.push(unit.clone());
                 continue;
             }
@@ -162,7 +162,7 @@ pub async fn execute_three_rung_pressure_plan(
             .await
             .is_err()
         {
-            blocked.insert(unit.project_id.clone());
+            blocked.insert(unit.canonical_base.clone());
             result.retained.push(unit.clone());
             drop(guard);
             continue;
@@ -170,12 +170,12 @@ pub async fn execute_three_rung_pressure_plan(
         // `NotFound` from a concurrent safe remover is idempotent; it does
         // not make the broader rung eligible for escalation in this pass.
         if !unit.canonical_target.exists() {
-            blocked.insert(unit.project_id.clone());
+            blocked.insert(unit.canonical_base.clone());
             drop(guard);
             continue;
         }
         if !execution_target_is_still_canonical_directory(unit) {
-            blocked.insert(unit.project_id.clone());
+            blocked.insert(unit.canonical_base.clone());
             result.retained.push(unit.clone());
             drop(guard);
             continue;
@@ -185,7 +185,7 @@ pub async fn execute_three_rung_pressure_plan(
             Ok(bytes) => bytes,
             Err(()) => {
                 observe_pressure_operation(PressureOperation::TraversalExit);
-                blocked.insert(unit.project_id.clone());
+                blocked.insert(unit.canonical_base.clone());
                 result.retained.push(unit.clone());
                 drop(guard);
                 continue;
@@ -292,10 +292,10 @@ pub async fn execute_three_rung_pressure_plan(
             // That no-op is idempotent, but it still makes this base's planned
             // state stale, so never escalate to a broader rung this pass.
             Ok(Removal::Absent) => {
-                blocked.insert(unit.project_id.clone());
+                blocked.insert(unit.canonical_base.clone());
             }
             Err(()) => {
-                blocked.insert(unit.project_id.clone());
+                blocked.insert(unit.canonical_base.clone());
                 result.retained.push(unit.clone());
                 result.failed.push(unit.clone());
                 metrics::increment_pressure_unit(
@@ -793,6 +793,8 @@ async fn recheck_pressure_after_lock(
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WarmBaseEntry {
     pub project_id: String,
+    /// The positive linker parallelism count encoded in this canonical variant.
+    pub mold_jobs: u32,
     pub path: PathBuf,
     pub size_bytes: u64,
 }
@@ -803,8 +805,9 @@ pub struct WarmBaseInventory {
     pub ignored: usize,
 }
 
-/// Inventory immediate children only.  Symlinks and files are intentionally
-/// ignored: a warm base must be a real directory named by a canonical UUID.
+/// Inventory canonical `/cache/cargo-target/<project-id>/mold-jobs-N` entries.
+/// Symlinks, legacy unkeyed project contents, and malformed variants are
+/// intentionally ignored rather than being substituted for another `N`.
 pub fn inventory_under(root: &Path) -> Result<WarmBaseInventory, String> {
     let mut entries = Vec::new();
     let mut ignored = 0;
@@ -836,20 +839,59 @@ pub fn inventory_under(root: &Path) -> Result<WarmBaseInventory, String> {
             ignored += 1;
             continue;
         };
-        // Parse_str accepts compact UUIDs; base names are deliberately stricter.
         if uuid.to_string() != name {
             ignored += 1;
             continue;
         }
-        let size_bytes = directory_size(&child.path());
-        entries.push(WarmBaseEntry {
-            project_id: name,
-            path: child.path(),
-            size_bytes,
-        });
+        let variants = match std::fs::read_dir(child.path()) {
+            Ok(variants) => variants,
+            Err(_) => {
+                ignored += 1;
+                continue;
+            }
+        };
+        for variant in variants {
+            let Ok(variant) = variant else {
+                ignored += 1;
+                continue;
+            };
+            let Ok(variant_type) = variant.file_type() else {
+                ignored += 1;
+                continue;
+            };
+            if !variant_type.is_dir() {
+                ignored += 1;
+                continue;
+            }
+            let Some(variant_name) = variant.file_name().to_str().map(str::to_owned) else {
+                ignored += 1;
+                continue;
+            };
+            let Some(mold_jobs) = canonical_mold_jobs_name(&variant_name) else {
+                ignored += 1;
+                continue;
+            };
+            let path = variant.path();
+            entries.push(WarmBaseEntry {
+                project_id: name.clone(),
+                mold_jobs,
+                size_bytes: directory_size(&path),
+                path,
+            });
+        }
     }
-    entries.sort_by(|left, right| left.project_id.cmp(&right.project_id));
+    entries.sort_by(|left, right| {
+        left.project_id
+            .cmp(&right.project_id)
+            .then_with(|| left.mold_jobs.cmp(&right.mold_jobs))
+    });
     Ok(WarmBaseInventory { entries, ignored })
+}
+
+fn canonical_mold_jobs_name(name: &str) -> Option<u32> {
+    let suffix = name.strip_prefix("mold-jobs-")?;
+    let jobs = suffix.parse::<u32>().ok()?;
+    (jobs >= 1 && name == format!("mold-jobs-{jobs}")).then_some(jobs)
 }
 
 fn directory_size(root: &Path) -> u64 {

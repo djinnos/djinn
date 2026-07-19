@@ -60,6 +60,7 @@ impl BaseLock for NoopBaseLock {
 fn entry() -> WarmBaseEntry {
     WarmBaseEntry {
         project_id: "018f8b9a-0d70-7f0a-8000-000000000001".into(),
+        mold_jobs: 1,
         path: PathBuf::from("base"),
         size_bytes: 7,
     }
@@ -91,6 +92,7 @@ fn old_base(temp: &tempfile::TempDir, id: &str) -> PathBuf {
 fn make_entry(base: &Path) -> WarmBaseEntry {
     WarmBaseEntry {
         project_id: base.file_name().unwrap().to_str().unwrap().into(),
+        mold_jobs: 1,
         path: base.to_path_buf(),
         size_bytes: directory_size(base),
     }
@@ -258,7 +260,7 @@ async fn activity_and_measurement_errors_retain() {
 fn strict_inventory_ignores_malformed_and_files() {
     let temp = tempfile::tempdir().expect("temp");
     let id = "018f8b9a-0d70-7f0a-8000-000000000001";
-    std::fs::create_dir(temp.path().join(id)).expect("dir");
+    std::fs::create_dir_all(temp.path().join(id).join("mold-jobs-1")).expect("variant");
     std::fs::create_dir(temp.path().join("018f8b9a0d707f0a8000000000000001")).expect("bad");
     std::fs::write(temp.path().join("file"), b"x").expect("file");
     let inventory = inventory_under(temp.path()).expect("inventory");
@@ -330,6 +332,7 @@ async fn idle_eviction_retains_young_base_by_mtime() {
     let clock = TestClock::new(SystemTime::now(), std::time::Instant::now());
     let entry = WarmBaseEntry {
         project_id: id.into(),
+        mold_jobs: 1,
         path: base.clone(),
         size_bytes: 1,
     };
@@ -381,6 +384,7 @@ async fn idle_eviction_db_activity_takes_precedence_over_mtime() {
     );
     let entry = WarmBaseEntry {
         project_id: id.into(),
+        mold_jobs: 1,
         path: base.clone(),
         size_bytes: 1,
     };
@@ -668,6 +672,7 @@ async fn dry_run_and_delete_select_same_candidates() {
     let base = old_base(&temp, id);
     let entry = WarmBaseEntry {
         project_id: id.into(),
+        mold_jobs: 1,
         path: base.clone(),
         size_bytes: 42,
     };
@@ -724,6 +729,7 @@ async fn dry_run_and_delete_parity_with_flock_lock() {
     let base = old_base(&temp, id);
     let entry = WarmBaseEntry {
         project_id: id.into(),
+        mold_jobs: 1,
         path: base.clone(),
         size_bytes: 42,
     };
@@ -907,6 +913,7 @@ fn pressure_config(low: f64, high: f64) -> crate::context::CacheCleanupConfig {
 fn pressure_entry(id: &str, size: u64) -> WarmBaseEntry {
     WarmBaseEntry {
         project_id: id.into(),
+        mold_jobs: 1,
         path: PathBuf::from(id),
         size_bytes: size,
     }
@@ -1414,3 +1421,62 @@ async fn pressure_lock_busy_and_error_retained() {
 mod fingerprint_inventory;
 mod fingerprint_sweep;
 mod pressure_execution;
+
+#[test]
+fn inventory_returns_each_canonical_mold_variant_without_substitution() {
+    let temp = tempfile::tempdir().expect("temp");
+    let id = "018f8b9a-0d70-7f0a-8000-000000000001";
+    let project = temp.path().join(id);
+    for jobs in [1_u32, 4, 7] {
+        let variant = project.join(format!("mold-jobs-{jobs}"));
+        std::fs::create_dir_all(&variant).expect("canonical variant");
+        std::fs::write(variant.join("artifact"), b"artifact").expect("artifact");
+    }
+    std::fs::write(project.join("legacy-artifact"), b"legacy").expect("legacy file");
+    std::fs::create_dir(project.join("mold-jobs-0")).expect("zero variant");
+    std::fs::create_dir(project.join("mold-jobs-04")).expect("noncanonical variant");
+    std::fs::create_dir(project.join("mold-jobs-x")).expect("malformed variant");
+
+    let inventory = inventory_under(temp.path()).expect("inventory");
+    assert_eq!(inventory.entries.len(), 3);
+    assert_eq!(
+        inventory
+            .entries
+            .iter()
+            .map(|entry| (entry.project_id.as_str(), entry.mold_jobs, entry.path.file_name().unwrap()))
+            .collect::<Vec<_>>(),
+        vec![
+            (id, 1, std::ffi::OsStr::new("mold-jobs-1")),
+            (id, 4, std::ffi::OsStr::new("mold-jobs-4")),
+            (id, 7, std::ffi::OsStr::new("mold-jobs-7")),
+        ]
+    );
+    assert_eq!(inventory.ignored, 4);
+}
+
+#[tokio::test]
+async fn idle_eviction_deletes_only_the_selected_mold_variant() {
+    let temp = tempfile::tempdir().expect("temp");
+    let id = "018f8b9a-0d70-7f0a-8000-000000000001";
+    let project = temp.path().join(id);
+    let one = project.join("mold-jobs-1");
+    let four = project.join("mold-jobs-4");
+    std::fs::create_dir_all(&one).expect("one");
+    std::fs::create_dir_all(&four).expect("four");
+    std::fs::write(one.join("artifact"), b"one").unwrap();
+    std::fs::write(four.join("artifact"), b"four").unwrap();
+    filetime::set_file_mtime(&one, filetime::FileTime::from_system_time(SystemTime::UNIX_EPOCH)).unwrap();
+    let inventory = inventory_under(temp.path()).unwrap();
+    let selected = inventory.entries.into_iter().find(|entry| entry.mold_jobs == 1).unwrap();
+    let locks = RecordingBaseLock { attempts: std::sync::Mutex::new(Vec::new()), succeed: true };
+    let result = evict_idle_warm_bases(
+        WarmBaseInventory { entries: vec![selected], ignored: 0 },
+        &Activity(Ok(snapshot())), &Warm(Ok(false)), &locks, &default_config(),
+        &TestClock::new(future(15), std::time::Instant::now()),
+        crate::context::CacheCleanupMode::Delete, temp.path(),
+    ).await;
+    assert_eq!(result.deleted[0].mold_jobs, 1);
+    assert_eq!(locks.attempts.lock().unwrap().as_slice(), &[one.clone()]);
+    assert!(!one.exists());
+    assert!(four.exists(), "evicting mold-jobs-1 must not substitute mold-jobs-4");
+}

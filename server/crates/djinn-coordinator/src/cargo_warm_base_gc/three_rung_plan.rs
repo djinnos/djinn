@@ -37,6 +37,7 @@ pub enum PressurePlanRetainReason {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PressureBaseSnapshot {
     pub project_id: String,
+    pub mold_jobs: u32,
     /// Canonical base path captured by the caller's inventory snapshot.
     pub canonical_base: PathBuf,
     /// DB-derived effective latest project activity. `None` is conservatively
@@ -48,6 +49,7 @@ pub struct PressureBaseSnapshot {
 pub struct PressurePlanUnit {
     pub rung: PressureRung,
     pub project_id: String,
+    pub mold_jobs: u32,
     pub canonical_base: PathBuf,
     pub canonical_target: PathBuf,
     pub projected_allocated_bytes: u64,
@@ -87,6 +89,7 @@ pub fn build_three_rung_pressure_plan(
             Err(reason) => whole_bases.push(PressurePlanUnit {
                 rung: PressureRung::WholeBase,
                 project_id: base.project_id,
+                mold_jobs: base.mold_jobs,
                 canonical_base: base.canonical_base.clone(),
                 canonical_target: base.canonical_base,
                 projected_allocated_bytes: 0,
@@ -134,6 +137,7 @@ fn scan_base(
             |rung, target, projected_allocated_bytes, disposition| PressurePlanUnit {
                 rung,
                 project_id: base.project_id.clone(),
+                mold_jobs: base.mold_jobs,
                 canonical_base: actual_base.clone(),
                 canonical_target: target,
                 projected_allocated_bytes,
@@ -167,6 +171,7 @@ fn scan_base(
     let whole = PressurePlanUnit {
         rung: PressureRung::WholeBase,
         project_id: base.project_id.clone(),
+        mold_jobs: base.mold_jobs,
         canonical_base: actual_base.clone(),
         canonical_target: actual_base,
         projected_allocated_bytes: whole_bytes,
@@ -276,6 +281,7 @@ mod tests {
     fn snapshot(base: &Path, id: &str, activity: Option<SystemTime>) -> PressureBaseSnapshot {
         PressureBaseSnapshot {
             project_id: id.into(),
+            mold_jobs: 1,
             canonical_base: fs::canonicalize(base).expect("canonical base"),
             effective_latest_activity: activity,
         }
@@ -427,11 +433,13 @@ mod tests {
             vec![
                 PressureBaseSnapshot {
                     project_id: "file".into(),
+                    mold_jobs: 1,
                     canonical_base: file,
                     effective_latest_activity: Some(UNIX_EPOCH),
                 },
                 PressureBaseSnapshot {
                     project_id: "missing".into(),
+                    mold_jobs: 1,
                     canonical_base: missing,
                     effective_latest_activity: Some(UNIX_EPOCH),
                 },

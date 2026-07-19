@@ -41,6 +41,7 @@ fn fixture_snapshot(base: &Path) -> Vec<FixtureEntry> {
 fn fixture_entry(base: &Path) -> WarmBaseEntry {
     WarmBaseEntry {
         project_id: base.file_name().unwrap().to_str().unwrap().into(),
+        mold_jobs: 1,
         path: base.to_path_buf(),
         size_bytes: 0,
     }
@@ -152,6 +153,7 @@ async fn dry_run_and_delete_report_identical_candidates_and_preserve_artifacts()
 
     let entry = WarmBaseEntry {
         project_id: id.into(),
+        mold_jobs: 1,
         path: base.clone(),
         size_bytes: 0,
     };
@@ -194,6 +196,7 @@ async fn dry_run_and_delete_report_identical_candidates_and_preserve_artifacts()
 async fn active_task_run_retains_base() {
     let entry = WarmBaseEntry {
         project_id: "018f8b9a-0d70-7f0a-8000-000000000001".into(),
+        mold_jobs: 1,
         path: PathBuf::from("base"),
         size_bytes: 0,
     };
@@ -225,6 +228,7 @@ async fn active_task_run_retains_base() {
 async fn guard_error_retains_base_and_reports_error() {
     let entry = WarmBaseEntry {
         project_id: "018f8b9a-0d70-7f0a-8000-000000000001".into(),
+        mold_jobs: 1,
         path: PathBuf::from("base"),
         size_bytes: 0,
     };

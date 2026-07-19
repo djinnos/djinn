@@ -90,6 +90,7 @@ async fn pressure_execute_dry_run_reports_planner_prefix_without_locking() {
     let base = old_base(&temp, "018f8b9a-0d70-7f0a-8000-000000000001");
     let planned = WarmBaseEntry {
         project_id: "018f8b9a-0d70-7f0a-8000-000000000001".into(),
+        mold_jobs: 1,
         path: base.clone(),
         size_bytes: 99,
     };
@@ -162,6 +163,7 @@ fn eligible_three_rung_unit(base: &Path, target: &Path, rung: PressureRung) -> P
     PressurePlanUnit {
         rung,
         project_id: base.file_name().unwrap().to_str().unwrap().into(),
+        mold_jobs: 1,
         canonical_base: base.to_path_buf(),
         canonical_target: target.to_path_buf(),
         projected_allocated_bytes: 0,
