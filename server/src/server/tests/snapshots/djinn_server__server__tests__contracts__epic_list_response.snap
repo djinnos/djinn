@@ -17,7 +17,8 @@ expression: epic_list
       "updated_at": "[TIMESTAMP]",
       "closed_at": null,
       "memory_refs": [],
-      "auto_breakdown": true
+      "auto_breakdown": true,
+      "created_by_user_id": "[UUID]"
     }
   ],
   "total_count": 1,

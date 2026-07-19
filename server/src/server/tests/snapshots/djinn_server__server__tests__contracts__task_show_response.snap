@@ -27,7 +27,7 @@ expression: task_show
   "closed_at": null,
   "close_reason": null,
   "merge_commit_sha": null,
-  "created_by_user_id": null,
+  "created_by_user_id": "[UUID]",
   "ci_status": "unknown",
   "ci_gate_state": "unknown",
   "session_count": 0,

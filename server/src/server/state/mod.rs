@@ -4293,7 +4293,7 @@ mod build_admission_config_tests {
             .await
             .expect("create durable project");
         let deferred_task = TaskRepository::new(db.clone(), state.event_bus())
-            .create_in_project(
+            .create_fixture_in_project(
                 &project.id,
                 None,
                 "durably denied ready task",

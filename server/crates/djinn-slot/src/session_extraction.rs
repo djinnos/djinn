@@ -1457,7 +1457,7 @@ mod tests {
             .await
             .expect("link proposal epic");
         let task = task_repo
-            .create_in_project(
+            .create_fixture_in_project(
                 &project.id,
                 Some(&epic.id),
                 "worker task",
@@ -1545,7 +1545,7 @@ mod tests {
             .await
             .expect("create proposal");
         let breakdown_task = task_repo
-            .create_in_project(
+            .create_fixture_in_project(
                 &project.id,
                 None,
                 "Break down proposal",

@@ -3849,7 +3849,7 @@ mod tests {
             .await
             .expect("create epic");
         let task = task_repo
-            .create_in_project(
+            .create_fixture_in_project(
                 &project.id,
                 Some(&epic.id),
                 "test-task",

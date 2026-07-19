@@ -15,7 +15,7 @@ mod common;
 
 use djinn_control_plane::test_support::McpTestHarness;
 use djinn_core::{
-    auth_context::{REVISION_CALLER_CONTEXT, TrustedRevisionCallerContext},
+    auth_context::{REVISION_CALLER_CONTEXT, SESSION_USER_ID, TrustedRevisionCallerContext},
     events::EventBus,
 };
 use djinn_db::{NoteRepository, ProjectRepository};
@@ -29,6 +29,24 @@ async fn dispatch_as_authenticated_human(
 ) -> anyhow::Result<Value> {
     REVISION_CALLER_CONTEXT
         .scope(Some(caller.clone()), harness.call_tool(tool, arguments))
+        .await
+}
+
+async fn dispatch_as_attributed_human(
+    caller: &TrustedRevisionCallerContext,
+    creator_id: &str,
+    harness: &McpTestHarness,
+    tool: &str,
+    arguments: Value,
+) -> anyhow::Result<Value> {
+    REVISION_CALLER_CONTEXT
+        .scope(
+            Some(caller.clone()),
+            SESSION_USER_ID.scope(
+                Some(creator_id.to_owned()),
+                harness.call_tool(tool, arguments),
+            ),
+        )
         .await
 }
 
@@ -800,6 +818,7 @@ struct GraduatedProposalFixture {
 async fn build_graduated_proposal_fixture(harness: &McpTestHarness) -> GraduatedProposalFixture {
     let caller = TrustedRevisionCallerContext::authenticated_human("memory-tools-test-user")
         .expect("test revision caller must be non-blank");
+    let creator_id = common::create_test_creator(harness.db()).await;
     let (project_row, _dir) = common::create_test_project_with_dir(harness.db()).await;
     let project = project_row.slug();
 
@@ -891,44 +910,48 @@ async fn build_graduated_proposal_fixture(harness: &McpTestHarness) -> Graduated
     let epic_two_id = epic_two["id"].as_str().expect("epic two id").to_string();
 
     // Task under epic 1: carries task_note + shared_note (shared also on the epic → dedup check).
-    let task_one = harness
-        .call_tool(
-            "task_create",
-            json!({
-                "project": project,
-                "epic_id": &epic_one_id,
-                "title": "Task with memory refs",
-                "issue_type": "task",
-                "priority": 2,
-                "status": "open",
-                "memory_refs": [task_note_permalink, shared_note_permalink],
-                "acceptance_criteria": ["task has memory refs"],
-            }),
-        )
-        .await
-        .expect("task_create one should dispatch");
+    let task_one = dispatch_as_attributed_human(
+        &caller,
+        &creator_id,
+        harness,
+        "task_create",
+        json!({
+            "project": project,
+            "epic_id": &epic_one_id,
+            "title": "Task with memory refs",
+            "issue_type": "task",
+            "priority": 2,
+            "status": "open",
+            "memory_refs": [task_note_permalink, shared_note_permalink],
+            "acceptance_criteria": ["task has memory refs"],
+        }),
+    )
+    .await
+    .expect("task_create one should dispatch");
     assert!(
         task_one.get("error").is_none(),
         "task_create returned error: {task_one}"
     );
 
     // Task under epic 2: references the task_note independently.
-    let _task_two = harness
-        .call_tool(
-            "task_create",
-            json!({
-                "project": project,
-                "epic_id": &epic_two_id,
-                "title": "Second task with memory refs",
-                "issue_type": "task",
-                "priority": 2,
-                "status": "open",
-                "memory_refs": [task_note_permalink],
-                "acceptance_criteria": ["task has memory refs"],
-            }),
-        )
-        .await
-        .expect("task_create two should dispatch");
+    let _task_two = dispatch_as_attributed_human(
+        &caller,
+        &creator_id,
+        harness,
+        "task_create",
+        json!({
+            "project": project,
+            "epic_id": &epic_two_id,
+            "title": "Second task with memory refs",
+            "issue_type": "task",
+            "priority": 2,
+            "status": "open",
+            "memory_refs": [task_note_permalink],
+            "acceptance_criteria": ["task has memory refs"],
+        }),
+    )
+    .await
+    .expect("task_create two should dispatch");
 
     GraduatedProposalFixture {
         project_slug: project,

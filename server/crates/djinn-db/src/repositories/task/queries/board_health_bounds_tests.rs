@@ -8,7 +8,8 @@
 //! the liveness probe. Closed tasks must appear in NEITHER section.
 use crate::database::Database;
 use crate::repositories::epic::EpicCreateInput;
-use crate::repositories::task::TaskRepository;
+use crate::repositories::task::{EffectiveCreatorProvenance, TaskRepository};
+use crate::repositories::user::UserRepository;
 use djinn_core::events::EventBus;
 
 async fn setup_project(db: &Database) -> (String, String) {
@@ -46,6 +47,21 @@ async fn setup_project(db: &Database) -> (String, String) {
     (project_id, epic.id)
 }
 
+/// Persist a real fixture user for insertion-time task attribution.
+async fn fixture_creator_id(db: &Database) -> String {
+    let github_id = (uuid::Uuid::now_v7().as_u128() & 0x7fff_ffff_ffff_ffff) as i64;
+    UserRepository::new(db.clone())
+        .upsert_from_github(
+            github_id,
+            "board-health-fixture",
+            Some("Board Health Fixture"),
+            None,
+        )
+        .await
+        .unwrap()
+        .id
+}
+
 /// A closed task with heavy reopen churn and planner-toolset signals must NOT
 /// surface as a role/tool mismatch — the report is advisory about live work,
 /// and pulling closed history made the candidate scan unbounded.
@@ -55,15 +71,21 @@ async fn board_health_mismatch_candidates_exclude_closed_tasks() {
     db.ensure_initialized().await.unwrap();
     let (project_id, epic_id) = setup_project(&db).await;
     let task_repo = TaskRepository::new(db.clone(), EventBus::noop());
+    let creator_id = fixture_creator_id(&db).await;
 
     // Two identical churn-heavy tasks whose text carries planner signals
     // ("task_create") while the dispatched role for a plain `task` is worker.
     let mut ids = Vec::new();
     for title in ["live mismatch", "closed mismatch"] {
         let task = task_repo
-            .create_in_project(
+            .create_in_project_with_provenance(
                 &project_id,
                 Some(&epic_id),
+                EffectiveCreatorProvenance {
+                    explicit_user_id: Some(&creator_id),
+                    source_task_id: None,
+                    proposal_id: None,
+                },
                 title,
                 "this needs task_create and epic_update to proceed",
                 "",
@@ -126,10 +148,16 @@ async fn create_signal_fixture(
     description: &str,
     reopen_count: i64,
 ) -> String {
+    let creator_id = fixture_creator_id(db).await;
     let task = task_repo
-        .create_in_project(
+        .create_in_project_with_provenance(
             project_id,
             Some(epic_id),
+            EffectiveCreatorProvenance {
+                explicit_user_id: Some(&creator_id),
+                source_task_id: None,
+                proposal_id: None,
+            },
             title,
             description,
             "",
@@ -435,11 +463,17 @@ async fn board_health_review_queue_excludes_closed_tasks() {
     db.ensure_initialized().await.unwrap();
     let (project_id, epic_id) = setup_project(&db).await;
     let task_repo = TaskRepository::new(db.clone(), EventBus::noop());
+    let creator_id = fixture_creator_id(&db).await;
 
     let waiting = task_repo
-        .create_in_project(
+        .create_in_project_with_provenance(
             &project_id,
             Some(&epic_id),
+            EffectiveCreatorProvenance {
+                explicit_user_id: Some(&creator_id),
+                source_task_id: None,
+                proposal_id: None,
+            },
             "waiting for review",
             "",
             "",
@@ -460,9 +494,14 @@ async fn board_health_review_queue_excludes_closed_tasks() {
     .unwrap();
 
     let done = task_repo
-        .create_in_project(
+        .create_in_project_with_provenance(
             &project_id,
             Some(&epic_id),
+            EffectiveCreatorProvenance {
+                explicit_user_id: Some(&creator_id),
+                source_task_id: None,
+                proposal_id: None,
+            },
             "already closed",
             "",
             "",
