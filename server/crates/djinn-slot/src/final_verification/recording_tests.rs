@@ -118,6 +118,8 @@ struct CoordinatorProbe {
     material: FinalVerificationResolvedMaterial,
     evidence: Mutex<Option<FinalVerificationExecutionEvidence>>,
     resolve_error: Option<String>,
+    /// Resolve the typed "no plan configured" signal (`Ok(None)`).
+    resolve_not_configured: bool,
     cancel_on_evidence: bool,
     resolved_ids: Mutex<Vec<(String, String)>>,
 }
@@ -129,6 +131,7 @@ impl CoordinatorProbe {
             material,
             evidence: Mutex::new(None),
             resolve_error: None,
+            resolve_not_configured: false,
             cancel_on_evidence: false,
             resolved_ids: Mutex::new(Vec::new()),
         }
@@ -184,8 +187,13 @@ impl SlotHostCallbacks for CoordinatorProbe {
         verification_attempt_id: &'a str,
         verify_run_id: &'a str,
         _ctx: &'a SlotContext,
-    ) -> Pin<Box<dyn Future<Output = Result<FinalVerificationResolvedMaterial, String>> + Send + 'a>>
-    {
+    ) -> Pin<
+        Box<
+            dyn Future<Output = Result<Option<FinalVerificationResolvedMaterial>, String>>
+                + Send
+                + 'a,
+        >,
+    > {
         self.events.lock().unwrap().push("resolve");
         self.resolved_ids
             .lock()
@@ -193,10 +201,12 @@ impl SlotHostCallbacks for CoordinatorProbe {
             .push((verification_attempt_id.to_owned(), verify_run_id.to_owned()));
         let material = self.material.clone();
         let error = self.resolve_error.clone();
+        let not_configured = self.resolve_not_configured;
         Box::pin(async move {
             match error {
                 Some(detail) => Err(detail),
-                None => Ok(material),
+                None if not_configured => Ok(None),
+                None => Ok(Some(material)),
             }
         })
     }
@@ -727,6 +737,77 @@ async fn resolution_failures_record_no_row_and_never_lease() {
             "{label} failure must record no passing row"
         );
     }
+}
+
+/// Defect regression (post-#2270 production outage): a project with no
+/// final-verification plan is a typed `NotConfigured` skip, not an error. The
+/// coordinator returns before any lease/execution/persistence, and the
+/// completion-intent path proceeds with `Ok(None)` — no fabricated evidence,
+/// no blocked submission.
+#[tokio::test]
+async fn unconfigured_plan_is_typed_skip_and_submission_proceeds_without_evidence() {
+    let rig = build_rig(&["lint", "test"], |probe| {
+        probe.resolve_not_configured = true;
+        // Evidence is injected but must never be consulted: the typed skip
+        // returns before the executor seam.
+        probe.inject_evidence(passing("never-executed"));
+    })
+    .await;
+    let outcome = coordinate_final_verification(rig.request.clone(), &rig.ctx).await;
+    assert!(
+        matches!(
+            outcome,
+            FinalVerificationRecordingOutcome::NotConfigured { .. }
+        ),
+        "unconfigured plan must produce the typed skip, got {outcome:?}"
+    );
+    assert_eq!(
+        rig.probe.events(),
+        vec!["resolve"],
+        "the typed skip must never lease, execute, or release"
+    );
+    assert!(
+        recorded_rows(&rig.ctx, &rig.request.task_run_id)
+            .await
+            .is_empty(),
+        "the typed skip must record no verify-run row"
+    );
+
+    // The completion-intent boundary maps the typed skip to "proceed without
+    // evidence": Ok(None), and the intent carries no evidence.
+    let mut intent = crate::output_parser::CompletionIntent {
+        finalize_payload: serde_json::json!({}),
+        tool_use_id: "finalize-tool-use".to_owned(),
+        final_verification_evidence: None,
+    };
+    let proceed = verify_completion_intent(
+        &mut intent,
+        &rig.request.task_id,
+        Some(&rig.request.task_run_id),
+        CancellationToken::new(),
+        &rig.ctx,
+        "submit_work",
+    )
+    .await;
+    assert!(
+        matches!(proceed, Ok(None)),
+        "unconfigured plan must let the submission proceed without evidence, got {proceed:?}"
+    );
+    assert!(
+        intent.final_verification_evidence.is_none(),
+        "no evidence may be synthesized for an unconfigured plan"
+    );
+    assert_eq!(
+        rig.probe.events(),
+        vec!["resolve", "resolve"],
+        "the completion-intent path must also stop at resolution"
+    );
+    assert!(
+        recorded_rows(&rig.ctx, &rig.request.task_run_id)
+            .await
+            .is_empty(),
+        "the completion-intent path must record no verify-run row"
+    );
 }
 
 /// Cancellation observed while injected executor evidence is in flight:
