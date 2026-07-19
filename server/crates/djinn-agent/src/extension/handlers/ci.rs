@@ -237,6 +237,32 @@ impl DiscoveryLane {
     }
 }
 
+/// A concrete repository-scoped workflow run retained by CI discovery.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ResolvedWorkflowRun {
+    pub(crate) run_id: u64,
+    pub(crate) lane: WorkflowRunLane,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WorkflowRunLane {
+    Explicit,
+    PrHead,
+    RecordedMergeQueue,
+    LiveMergeGroup,
+}
+
+impl WorkflowRunLane {
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::Explicit => "explicit",
+            Self::PrHead => "pr_head",
+            Self::RecordedMergeQueue => "recorded_merge_queue",
+            Self::LiveMergeGroup => "merge_group",
+        }
+    }
+}
+
 /// True when a workflow-run / job / step conclusion is a failure flavor the
 /// worker must act on. GitHub reports `failure`, `timed_out`, and `cancelled`
 /// as distinct conclusions; all three keep a required gate red.
