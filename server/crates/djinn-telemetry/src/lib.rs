@@ -142,7 +142,6 @@ const BUILD_SLOT_QUEUE_WAIT_BUCKETS: [f64; 15] = [
 ];
 const BUILD_SLOTS_IN_USE: &str = "djinn_build_slots_in_use";
 const BUILD_SLOTS_QUEUED: &str = "djinn_build_slots_queued";
-const BUILD_SLOTS_OCCUPIED: &str = "djinn_build_slots_occupied";
 const BUILD_ADMISSION_WOULD_DEFER_TOTAL: &str = "djinn_build_admission_would_defer_total";
 const BUILD_ADMISSION_UNKNOWN_CLASSIFICATION_TOTAL: &str =
     "djinn_build_admission_unknown_classification_total";
@@ -1304,10 +1303,6 @@ fn register_metrics() {
         "Current number of build slots queued for admission across the process. Absolute setter for reconstructed unique state-set cardinality."
     );
     metrics::gauge!(BUILD_SLOTS_QUEUED).set(0.0);
-    metrics::describe_gauge!(
-        BUILD_SLOTS_OCCUPIED,
-        "Deduplicated task-observation and warm-build identities occupying admission capacity."
-    );
     metrics::describe_counter!(
         BUILD_ADMISSION_WOULD_DEFER_TOTAL,
         "Observe-mode admissions that would have been deferred at the effective cap."
@@ -2395,17 +2390,6 @@ pub mod build_admission {
         }
     }
 
-    /// Publish the deduplicated occupied and Enforce-deferred queue sizes.
-    pub fn set_slots(
-        effective_mode: &'static str,
-        effective_cap: i64,
-        occupied: usize,
-        queued: usize,
-    ) {
-        let cap = effective_cap.to_string();
-        metrics::gauge!(super::BUILD_SLOTS_OCCUPIED, "effective_mode" => effective_mode, "effective_cap" => cap.clone()).set(occupied as f64);
-        metrics::gauge!(super::BUILD_SLOTS_QUEUED, "effective_mode" => effective_mode, "effective_cap" => cap).set(queued as f64);
-    }
     /// Set readiness-derived health gauges. `true` means degraded.
     pub fn set_health(
         effective_mode: &'static str,
