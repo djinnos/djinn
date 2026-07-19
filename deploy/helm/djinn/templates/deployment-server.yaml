@@ -1,7 +1,10 @@
 {{- $githubAppConfigAttempted := include "djinn.githubAppConfigAttempted" . -}}
 {{- $buildAdmission := .Values.buildAdmission -}}
 {{- $server := .Values.server -}}
-{{- $migrationOperatorSecret := required "migration.designatedOperatorSecret is required for owned PostgreSQL migrations" .Values.migration.designatedOperatorSecret -}}
+{{- $migrationOperatorSecret := default "" .Values.migration.designatedOperatorSecret -}}
+{{- if .Release.IsInstall -}}
+  {{- $migrationOperatorSecret = required "migration.designatedOperatorSecret is required on fresh installs to bootstrap the caller-owned designated operator" .Values.migration.designatedOperatorSecret -}}
+{{- end -}}
 {{- if eq $buildAdmission.mode "enforce" -}}
   {{- if ne (int $server.replicas) 1 -}}
     {{- fail "buildAdmission.mode=enforce requires server.replicas=1" -}}
@@ -140,6 +143,9 @@ spec:
           envFrom:
             - configMapRef:
                 name: {{ include "djinn.fullname" . }}-server
+            {{- with .Values.extraEnvFrom }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
           env:
             - name: DJINN_MIGRATION_DESIGNATED_OPERATOR_USER_ID
               valueFrom:
@@ -156,6 +162,14 @@ spec:
                 secretKeyRef:
                   name: {{ $migrationOperatorSecret | quote }}
                   key: github_login
+            {{- if .Values.database.existingSecret }}
+            # Use the same caller-owned URL as migrate and the application.
+            - name: DJINN_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.database.existingSecret | quote }}
+                  key: url
+            {{- end }}
             - name: DJINN_UI_ENABLED
               value: "false"
             - name: MALLOC_CONF
@@ -173,11 +187,13 @@ spec:
             {{- toYaml . | nindent 12 }}
             {{- end }}
           env:
+            {{- if $migrationOperatorSecret }}
             - name: DJINN_MIGRATION_DESIGNATED_OPERATOR_USER_ID
               valueFrom:
                 secretKeyRef:
                   name: {{ $migrationOperatorSecret | quote }}
                   key: user_id
+            {{- end }}
             {{- if .Values.database.existingSecret }}
             # External DB URL from a caller-owned Secret — the ConfigMap omits
             # DJINN_DATABASE_URL in this mode, mirroring the app container.

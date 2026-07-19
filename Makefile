@@ -1,6 +1,13 @@
 UI_DIR := $(CURDIR)/ui
 SERVER_DIR := $(CURDIR)/server
 
+# `test-db-migrate` identity inputs. Supply all three on the make command line
+# or in the environment; use a stable caller-owned test user, never the reserved
+# synthetic identity owned by the PostgreSQL template fixture.
+TEST_DB_MIGRATION_USER_ID ?=
+TEST_DB_MIGRATION_GITHUB_ID ?=
+TEST_DB_MIGRATION_GITHUB_LOGIN ?=
+
 # Local-dev inner loop: `tilt up` at the repo root. It bootstraps the kind
 # cluster + local registry, compiles djinn-server + djinn-agent-worker once
 # (via scripts/tilt/build-binaries.sh), builds the agent-runtime base +
@@ -17,9 +24,19 @@ help: ## Show this help
 verify-cache-cleanup: ## Run the read-only cache-cleanup acceptance verifier
 	@./scripts/verify-cache-cleanup.sh
 
-test-db-migrate: ## Ensure schema is applied to the test Postgres (:5433)
+test-db-migrate: ## Bootstrap and migrate test Postgres; requires TEST_DB_MIGRATION_{USER_ID,GITHUB_ID,GITHUB_LOGIN}
+	@test -n "$(strip $(TEST_DB_MIGRATION_USER_ID))" || { echo "ERROR: TEST_DB_MIGRATION_USER_ID is required and must be a stable local-test user ID" >&2; exit 2; }
+	@test -n "$(strip $(TEST_DB_MIGRATION_GITHUB_ID))" || { echo "ERROR: TEST_DB_MIGRATION_GITHUB_ID is required" >&2; exit 2; }
+	@test -n "$(strip $(TEST_DB_MIGRATION_GITHUB_LOGIN))" || { echo "ERROR: TEST_DB_MIGRATION_GITHUB_LOGIN is required" >&2; exit 2; }
 	@until docker exec djinn-postgres-test pg_isready -U postgres >/dev/null 2>&1; do sleep 1; done
-	@cd $(SERVER_DIR) && DJINN_DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5433/djinn cargo run -p djinn-server -- --migrate-only >/dev/null
+	@cd $(SERVER_DIR) && DJINN_DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5433/djinn cargo run -p djinn-server -- \
+		--bootstrap-designated-operator-only \
+		--migration-designated-operator-user-id "$(TEST_DB_MIGRATION_USER_ID)" \
+		--bootstrap-designated-operator-github-id "$(TEST_DB_MIGRATION_GITHUB_ID)" \
+		--bootstrap-designated-operator-github-login "$(TEST_DB_MIGRATION_GITHUB_LOGIN)" >/dev/null
+	@cd $(SERVER_DIR) && DJINN_DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5433/djinn cargo run -p djinn-server -- \
+		--migrate-only \
+		--migration-designated-operator-user-id "$(TEST_DB_MIGRATION_USER_ID)" >/dev/null
 
 test-db-postgres-template: ## Build the djinn_test_template DB Postgres clones from
 	@until docker exec djinn-postgres-test pg_isready -U postgres >/dev/null 2>&1; do echo "waiting for postgres-test..."; sleep 1; done

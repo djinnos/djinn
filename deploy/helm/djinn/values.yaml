@@ -372,8 +372,8 @@ postgres:
 #        postgres://user:password@host:5432/dbname?sslmode=require
 #
 #   2. existingSecret: name of an existing Kubernetes Secret with a `url`
-#      key holding the full Postgres URL. The Deployment's app + migrate
-#      containers pull DJINN_DATABASE_URL via `valueFrom: secretKeyRef`, so
+#      key holding the full Postgres URL. The Deployment's bootstrap, migrate,
+#      and app containers pull DJINN_DATABASE_URL via `valueFrom: secretKeyRef`, so
 #      the URL never lands in a ConfigMap or in `helm get values` output. Preferred
 #      for RDS credentials (typically provisioned out-of-band in a vault).
 #
@@ -382,9 +382,10 @@ database:
   externalUrl: ""
   existingSecret: ""
 
-# Required only by migration init containers. This caller-owned Secret contains
-# user_id, github_id, github_login, github_name, and github_avatar_url for the
-# explicit designated operator; it is never injected into the app container.
+# Required on fresh installs and optional on upgrades. This caller-owned Secret
+# contains user_id, github_id, and github_login for the explicit designated
+# operator. Bootstrap and migrate consume it, but the app container never does.
+# An already-current database can therefore upgrade after this value is removed.
 migration:
   designatedOperatorSecret: ""
 
