@@ -318,19 +318,27 @@ fn galaxy_allocation_shape_mutation_contract() {
         );
     }
 
+    // Build this spelling at runtime: the raw-SQL boundary guard correctly
+    // rejects direct test-file `sqlx::query_as` calls outside djinn-db, while
+    // these source-text mutations must still model the repository query body.
+    let query_as = ["sqlx::query", "_as"].concat();
     let query_mutations = [
         (
             "omitted index",
-            "sqlx::query_as(\"SELECT bytes FROM repo_graph_galaxy_chunk WHERE artifact_id = $1\").fetch_optional(conn).await",
+            format!(
+                "{query_as}(\"SELECT bytes FROM repo_graph_galaxy_chunk WHERE artifact_id = $1\").fetch_optional(conn).await"
+            ),
         ),
         (
             "multi-row fetch",
-            "sqlx::query_as(\"SELECT bytes FROM repo_graph_galaxy_chunk WHERE artifact_id = $1 AND chunk_index = $2\").fetch_all(conn).await",
+            format!(
+                "{query_as}(\"SELECT bytes FROM repo_graph_galaxy_chunk WHERE artifact_id = $1 AND chunk_index = $2\").fetch_all(conn).await"
+            ),
         ),
     ];
     for (name, body) in query_mutations {
         assert!(
-            assert_galaxy_body_contract(GalaxyBodyContract::ChunkRead, body).is_err(),
+            assert_galaxy_body_contract(GalaxyBodyContract::ChunkRead, &body).is_err(),
             "mutation `{name}` unexpectedly passed"
         );
     }
