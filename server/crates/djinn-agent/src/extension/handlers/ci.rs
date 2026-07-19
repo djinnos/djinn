@@ -231,6 +231,7 @@ fn is_failing_conclusion(conclusion: Option<&str>) -> bool {
 }
 
 /// Select the newest failed workflow run from a newest-first list.
+#[cfg(test)]
 fn select_failing_run(runs: &[WorkflowRun]) -> Option<&WorkflowRun> {
     runs.iter()
         .find(|r| is_failing_conclusion(r.conclusion.as_deref()))
@@ -243,6 +244,7 @@ fn select_failing_run(runs: &[WorkflowRun]) -> Option<&WorkflowRun> {
 /// match on the `pr-<number>-` marker. Mirrors the PR poller's dequeue
 /// enrichment in `pr_commands.rs` (which matches conclusion `"failure"` only;
 /// here we accept the broader failure set for robustness).
+#[cfg(test)]
 fn select_merge_group_run(runs: &[WorkflowRun], pr_number: u64) -> Option<&WorkflowRun> {
     let marker = format!("pr-{pr_number}-");
     runs.iter().find(|r| {
