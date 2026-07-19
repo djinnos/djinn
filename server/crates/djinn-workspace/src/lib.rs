@@ -12,12 +12,14 @@
 
 pub mod commit_safety;
 pub mod git_helpers;
+pub mod legacy_settings_import;
 pub mod merge_safety;
 pub mod mirror;
 pub mod read_source;
 pub mod workspace;
 pub mod workspace_store;
 
+pub use legacy_settings_import::{LegacySettingsFileImportError, import_legacy_settings_file};
 pub use merge_safety::{
     CHECKPOINT_REF_PREFIX, MergeSafetyDecision, PROTECTED_REFS, RefRole, classify_ref,
     evaluate_merge_head, is_checkpoint_ref, is_protected_ref,

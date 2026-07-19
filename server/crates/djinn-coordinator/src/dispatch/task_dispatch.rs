@@ -45,6 +45,18 @@ fn record_dispatch_live_state(cooldowns_active: usize, inflight_ledger_size: usi
     djinn_telemetry::dispatch::set_inflight_ledger_size(inflight_ledger_size);
 }
 
+/// Convert durable import outcomes into the per-pass admission gate.
+///
+/// `None` is deliberately fail-closed: callers must abandon the entire pass
+/// when durable outcomes cannot be read rather than admit an unseen failure.
+fn legacy_settings_dispatch_admission<E>(
+    outcomes: Result<Vec<String>, E>,
+) -> Option<HashSet<String>> {
+    outcomes
+        .ok()
+        .map(|project_ids| project_ids.into_iter().collect())
+}
+
 /// Map a free-form failover / rotation reason string from the activity log
 /// onto the typed [`crate::ModelRotationReason`] enum. The mapping accepts
 /// both the snake_case serde form (`no_durable_progress_streak`) and the
@@ -1583,6 +1595,20 @@ impl CoordinatorActor {
             }
         };
 
+        let blocked_projects = match legacy_settings_dispatch_admission(
+            djinn_db::LegacySettingsImport::new(self.db.clone())
+                .failed_project_ids()
+                .await,
+        ) {
+            Some(project_ids) => project_ids,
+            None => {
+                tracing::error!(
+                    "CoordinatorActor: cannot read legacy settings outcomes; deferring dispatch pass"
+                );
+                return;
+            }
+        };
+
         for status in ["needs_task_review", "needs_lead_intervention"] {
             match repo.list_by_status_filtered(status, true).await {
                 Ok(mut tasks) => ready.append(&mut tasks),
@@ -1785,6 +1811,10 @@ impl CoordinatorActor {
             if let Some(project_id) = project_filter
                 && task.project_id != project_id
             {
+                continue;
+            }
+            if blocked_projects.contains(&task.project_id) {
+                tracing::error!(task_id = %task.short_id, project_id = %task.project_id, "CoordinatorActor: dispatch blocked by failed legacy settings import");
                 continue;
             }
             if let Some((pause_scope, pause_target_id, pause)) =
@@ -3049,6 +3079,45 @@ mod inflight_ledger_tests {
             ci_mq_last_seen_at: None,
             unresolved_blocker_count: 0,
         }
+    }
+
+    #[tokio::test]
+    async fn legacy_settings_admission_reconstructs_durable_failure_per_project() {
+        use djinn_db::test_support::seed_project;
+        use djinn_db::{Database, LegacySettingsImport};
+
+        let db = Database::ephemeral()
+            .await
+            .expect("open isolated Postgres database");
+        seed_project(&db, "failed-project", "failed-project").await;
+        seed_project(&db, "healthy-project", "healthy-project").await;
+
+        let importer = LegacySettingsImport::new(db.clone());
+        assert!(
+            importer
+                .import("failed-project", b"not JSON")
+                .await
+                .is_err()
+        );
+
+        // A fresh repository represents coordinator reconstruction after a
+        // restart: the failed row, not actor-local state, controls admission.
+        let reconstructed = LegacySettingsImport::new(db);
+        let blocked = legacy_settings_dispatch_admission(reconstructed.failed_project_ids().await)
+            .expect("durable outcome read permits a scoped dispatch pass");
+
+        assert!(blocked.contains("failed-project"));
+        assert!(!blocked.contains("healthy-project"));
+    }
+
+    #[test]
+    fn legacy_settings_admission_fails_closed_when_outcomes_cannot_be_read() {
+        assert!(
+            legacy_settings_dispatch_admission(Err::<Vec<String>, _>(
+                "outcome repository unavailable",
+            ))
+            .is_none()
+        );
     }
 
     #[test]
