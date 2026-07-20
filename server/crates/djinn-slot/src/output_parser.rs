@@ -14,6 +14,10 @@ use crate::final_verification::FinalVerificationSuccessEvidence;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FinalVerificationDisposition {
     Pending,
+    /// C1 resolved a configured plan. Evidence may subsequently become stale,
+    /// but C2 must still use the configured writer path rather than confusing
+    /// absent or discarded evidence with the legacy skip.
+    Configured,
     NotConfigured,
 }
 

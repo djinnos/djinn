@@ -621,7 +621,7 @@ async fn configured_null_workspace_blocks_direct_and_auto_submit_without_consumi
             tool_use_id: format!("null-workspace-{name}"),
             final_verification_evidence: Some(stale),
             final_verification_disposition:
-                crate::output_parser::FinalVerificationDisposition::Pending,
+                crate::output_parser::FinalVerificationDisposition::Configured,
         };
         let accepted = if auto_submit {
             process_auto_submit_payload(&intent, &task.id, &ctx).await

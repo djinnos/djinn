@@ -171,7 +171,7 @@ pub(crate) async fn verify_completion_intent(
         | FinalVerificationRecordingOutcome::Reused { evidence, .. } => {
             let evidence = *evidence;
             intent.final_verification_evidence = Some(evidence.clone());
-            intent.final_verification_disposition = FinalVerificationDisposition::Pending;
+            intent.final_verification_disposition = FinalVerificationDisposition::Configured;
             Ok(Some(evidence))
         }
         FinalVerificationRecordingOutcome::NotConfigured { .. } => {
