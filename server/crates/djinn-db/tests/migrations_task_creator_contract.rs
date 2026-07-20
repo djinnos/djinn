@@ -126,7 +126,7 @@ INSERT INTO users (id, github_id, github_login, is_member_of_org) VALUES
  ('00000000-0000-7000-8000-000000000404', 9404, 'author', true),
  ('00000000-0000-7000-8000-000000000405', 9405, 'lifecycle', true),
  ('00000000-0000-7000-8000-000000000406', 9406, 'gone-source', true);
-INSERT INTO projects (id, name, path, verification_rules) VALUES ('00000000-0000-7000-8000-000000000400', 'creator fixture', '/creator-fixture', '[]'::jsonb);
+INSERT INTO projects (id, name, github_owner, github_repo) VALUES ('00000000-0000-7000-8000-000000000400', 'creator fixture', 'creator-fixture', 'creator-fixture');
 INSERT INTO proposals (id, short_id, title, author_user_id, build_owner_user_id) VALUES
  ('00000000-0000-7000-8000-000000000410', 'build', '', '00000000-0000-7000-8000-000000000404', '00000000-0000-7000-8000-000000000403'),
  ('00000000-0000-7000-8000-000000000411', 'author', '', '00000000-0000-7000-8000-000000000404', NULL),
@@ -157,7 +157,7 @@ INSERT INTO tasks (id, project_id, short_id, epic_id, title, description, design
  ('00000000-0000-7000-8000-000000000452', $P$, 'creatorless', NULL, '', '', '', 'task', '', '[]', '[]', '[]', NULL),
  ('00000000-0000-7000-8000-000000000453', $P$, 'preserved', NULL, '', '', '', 'task', '', '[]', '[]', '[]', '00000000-0000-7000-8000-000000000401'),
  ('00000000-0000-7000-8000-000000000454', $P$, 'lifecycle', NULL, '', '', '', 'task', '', '[]', '[]', '[]', '00000000-0000-7000-8000-000000000405');
-"#.replace("$P$", PROJECT).as_str()).await.expect("seed valid task rows");
+"#.replace("$P$", format!("'{PROJECT}'").as_str()).as_str()).await.expect("seed valid task rows");
     conn.execute(r#"
 INSERT INTO blockers (task_id, blocking_task_id) VALUES
  ('00000000-0000-7000-8000-000000000430', '00000000-0000-7000-8000-000000000440'),
@@ -176,7 +176,7 @@ DELETE FROM tasks WHERE id = '00000000-0000-7000-8000-000000000433';
 DELETE FROM users WHERE id = '00000000-0000-7000-8000-000000000406';
 DELETE FROM epics WHERE id = '00000000-0000-7000-8000-000000000423';
 DELETE FROM proposals WHERE id = '00000000-0000-7000-8000-000000000412';
-"#.replace("$P$", PROJECT).as_str()).await.expect("seed legal disappearance");
+"#.replace("$P$", format!("'{PROJECT}'").as_str()).as_str()).await.expect("seed legal disappearance");
 }
 
 fn base_url() -> String {
