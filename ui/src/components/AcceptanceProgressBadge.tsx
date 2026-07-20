@@ -33,7 +33,7 @@ export function AcceptanceProgressBadge(props: AcceptanceProgressBadgeProps) {
   const items = "criteria" in props ? props.criteria ?? [] : [];
   const total = "total" in props ? props.total : items.length;
   if (total === 0) return null;
-  const met = "met" in props
+  const met = props.met !== undefined
     ? props.met
     : items.filter((c) => typeof c === "object" && c !== null && c.met).length;
 
