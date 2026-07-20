@@ -42,8 +42,8 @@ in addition to ordered chunk and transport hashes.
 
 ## Reproducibility
 
-The generator uses only the stable profile seed and a specified xorshift32 byte
-stream. `manifest.json` stores expected SHA-256 values for the graph bytes,
+The generator uses the stable profile seed, fixed artifact identity/timestamp,
+and deterministic landed-schema serialization. `manifest.json` stores expected SHA-256 values for the graph bytes,
 board JSONL, artifact transport, and artifact manifest. Generation and
 validation both compare observed hashes to those values, so a seed, formatter,
 count, range, chunk ordering, payload byte, or checksum drift fails before the
@@ -51,5 +51,7 @@ fixture can be used.
 
 `smoke` exercises the identical schemas and validators with 256 graph nodes,
 1,024 edges, a 1 MiB blob, 40 eligible board tasks, and six contiguous 256 KiB
-chunks (1.5 MiB total). It is the routine worker check; it is not a substitute
-for the external production-equivalent run.
+chunks (1.5 MiB total). The wrapper sets `OPENSSL_NO_VENDOR=1` for its Cargo
+child so the worker image's system OpenSSL is used instead of attempting a
+vendored OpenSSL build that needs `make`. It is the routine worker check; it is
+not a substitute for the external production-equivalent run.

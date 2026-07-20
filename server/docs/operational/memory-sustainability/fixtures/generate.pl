@@ -24,6 +24,9 @@ sub compare_expected { my ($p,$r)=@_; for my $k (keys %{$p->{checksums}//{}}){fa
 sub graph_tool {
   my ($action,$p,$out)=@_; my $g=$p->{graph}; my $a=$p->{galaxy_artifact};
   my @cmd=('cargo','run','--quiet','--manifest-path',"$ROOT/server/Cargo.toml",'-p','djinn-graph','--example','memory_sustainability_fixture','--',$action,$out,$g->{requested_nodes},$g->{requested_edges},$g->{requested_blob_bytes},$a->{requested_chunks},$a->{requested_total_bytes});
+  # Use system OpenSSL: worker images intentionally do not include `make` for
+  # openssl-sys vendoring; both fixture profiles use this landed producer path.
+  local $ENV{OPENSSL_NO_VENDOR}=1;
   system @cmd; fail("landed graph/artifact $action failed (exit ".($?>>8).")") if $? != 0;
 }
 sub generate {
@@ -39,7 +42,7 @@ sub validate_output {
   graph_tool('validate',$p,$out); # deserializes real bincode plus gzip payload schema/hash
   my @rows=map {decode_json($_)} grep {length} split(/\n/,read_raw("$out/board-health-tasks.jsonl")); fail('board eligibility/count drift') unless @rows==$p->{board_health}{requested_eligible_tasks} && !grep {!eligible($_)} @rows;
   my $a_bytes=read_raw("$out/galaxy-artifact/manifest.json"); my $a=decode_json($a_bytes); my $c=$p->{galaxy_artifact}; fail('artifact manifest metadata drift') unless $a->{schema} eq 'galaxy-artifact-spool-fixture/v2' && $a->{artifact_version}==1 && $a->{encoding} eq 'gzip' && $a->{generation_id} eq $a->{artifact_id} && $a->{graph_content_hash}=~/\A[0-9a-f]{64}\z/;
-  opendir my $dh,"$out/galaxy-artifact" or fail("cannot inspect artifact directory: $!"); my @files=sort grep {!/^manifest\.json$/} readdir($dh); closedir $dh; my @wanted=map {sprintf('chunk-%05d.bin',$_)} 0..$c->{requested_chunks}-1; fail('artifact directory has unexpected, duplicate, nonconforming, missing, or out-of-range chunk files') unless @files==@wanted && join("\0",@files) eq join("\0",@wanted);
+  opendir my $dh,"$out/galaxy-artifact" or fail("cannot inspect artifact directory: $!"); my @files=sort grep {!/^\.?\.?$/ && !/^manifest\.json$/} readdir($dh); closedir $dh; my @wanted=map {sprintf('chunk-%05d.bin',$_)} 0..$c->{requested_chunks}-1; fail('artifact directory has unexpected, duplicate, nonconforming, missing, or out-of-range chunk files') unless @files==@wanted && join("\0",@files) eq join("\0",@wanted);
   fail('artifact count or total byte drift') unless $a->{chunk_count}==$c->{requested_chunks} && $a->{byte_count}==$c->{requested_total_bytes} && @{$a->{chunk_hashes}}==$a->{chunk_count}; my $transport=''; my $total=0; for my $i (0..$a->{chunk_count}-1){my $b=read_raw(sprintf("$out/galaxy-artifact/chunk-%05d.bin",$i)); fail("chunk $i contiguity, size, or checksum drift") unless length($b)==$c->{requested_chunk_bytes} && sha256_hex($b) eq $a->{chunk_hashes}[$i]; $total+=length($b); $transport.=$b} fail('artifact transport checksum or total byte drift') unless $total==$a->{byte_count} && sha256_hex($transport) eq $a->{transport_sha256};
   my $r=decode_json(read_raw("$out/fixture-report.json")); my %got=(canonical_graph_sha256=>sha256_hex($graph),board_tasks_sha256=>sha256_hex(read_raw("$out/board-health-tasks.jsonl")),artifact_transport_sha256=>$a->{transport_sha256},artifact_manifest_sha256=>sha256_hex($a_bytes)); for my $k(keys %got){fail("fixture report checksum drift for $k") unless $r->{checksums}{$k} eq $got{$k}} compare_expected($p,$r); $r
 }

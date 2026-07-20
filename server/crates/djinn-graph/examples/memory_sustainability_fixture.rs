@@ -153,23 +153,26 @@ fn payload(padding: usize) -> (Vec<u8>, String) {
     )
 }
 fn gzip_target(total: usize) -> (Vec<u8>, String) {
-    // Compression::none emits RFC1951 stored blocks (5 bytes each) in a normal
-    // flate2 gzip member, allowing an exact 600×256KiB transport without fake bytes.
-    let payload_len = (1..=((total - 18) / 5 + 1))
-        .find_map(|blocks| {
-            let n = total.checked_sub(18 + 5 * blocks)?;
-            (n > 0 && (n + 65_534) / 65_535 == blocks).then_some(n)
-        })
-        .expect("target cannot be represented by gzip stored blocks");
+    // Stored DEFLATE blocks add a small framing cost. Measure the landed flate2
+    // transport and correct JSON padding to make the compressed size exact.
     let (empty, _) = payload(0);
-    assert!(empty.len() <= payload_len, "artifact target too small");
-    let (payload, graph_content_hash) = payload(payload_len - empty.len());
-    assert_eq!(payload.len(), payload_len);
-    let mut encoder = GzEncoder::new(Vec::new(), Compression::none());
-    encoder.write_all(&payload).expect("gzip payload");
-    let compressed = encoder.finish().expect("finish gzip");
-    assert_eq!(compressed.len(), total, "gzip stored-block size drifted");
-    (compressed, graph_content_hash)
+    let mut padding = total
+        .checked_sub(18 + empty.len())
+        .expect("artifact target too small");
+    for _ in 0..3 {
+        let (payload, graph_content_hash) = payload(padding);
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::none());
+        encoder.write_all(&payload).expect("gzip payload");
+        let compressed = encoder.finish().expect("finish gzip");
+        let drift = compressed.len() as isize - total as isize;
+        if drift == 0 {
+            return (compressed, graph_content_hash);
+        }
+        padding = padding
+            .checked_add_signed(-drift)
+            .expect("artifact padding correction overflow");
+    }
+    panic!("gzip stored-block size drifted");
 }
 fn generate(
     out: &Path,
@@ -229,9 +232,10 @@ fn validate(out: &Path, nodes: usize, edges: usize) {
         graph_content_hash: None,
         ..payload.clone()
     };
+    let expected_content_hash = hash(&serde_json::to_vec(&input).expect("hash input"));
     assert_eq!(
         payload.graph_content_hash.as_deref(),
-        Some(&hash(&serde_json::to_vec(&input).expect("hash input"))),
+        Some(expected_content_hash.as_str()),
         "graph content hash drift"
     );
 }
@@ -240,7 +244,7 @@ fn main() {
     if args.len() != 8 {
         panic!("usage: fixture <generate|validate> OUT NODES EDGES GRAPH_BYTES CHUNKS TOTAL_BYTES");
     }
-    let n = |i| args[i].parse::<usize>().expect("numeric argument");
+    let n = |i: usize| args[i].parse::<usize>().expect("numeric argument");
     match args[1].as_str() {
         "generate" => generate(Path::new(&args[2]), n(3), n(4), n(5), n(6), n(7)),
         "validate" => validate(Path::new(&args[2]), n(3), n(4)),
