@@ -671,6 +671,14 @@ fn emit_lookup_outcome(
     reason: &str,
     detail: &str,
 ) {
+    // The metric has only the bounded outcome label. Rich identifiers and
+    // diagnostics are emitted in the structured audit event below.
+    if djinn_telemetry::final_verification::increment_lookup(outcome).is_err() {
+        tracing::warn!(verify_run_lookup_outcome = outcome, task_id = %request.task_id,
+            task_run_id = %request.task_run_id, verification_attempt_id = %attempt_id,
+            audit_reason = reason, audit_detail = detail,
+            "final verification reuse telemetry emission failed");
+    }
     tracing::info!(verify_run_lookup_outcome = outcome, task_id = %request.task_id,
         task_run_id = %request.task_run_id, verification_attempt_id = %attempt_id,
         audit_reason = reason, audit_detail = detail, "final verification reuse consultation");
@@ -886,36 +894,64 @@ fn emit_outcome(
         FinalVerificationRecordingOutcome::Stored {
             verification_attempt_id,
             verify_run_id,
-            evidence: _,
-        } => tracing::info!(
-            recording_outcome = "stored", task_id = %request.task_id, task_run_id = %request.task_run_id,
-            verification_attempt_id = %verification_attempt_id, verify_run_id = %verify_run_id,
-            "final verification recording completed"
-        ),
+            evidence,
+        } => {
+            let _ = djinn_telemetry::final_verification::increment_record(
+                djinn_telemetry::final_verification::RECORD_STORED,
+            );
+            tracing::info!(
+                recording_outcome = "stored", task_id = %request.task_id, task_run_id = %request.task_run_id,
+                verification_attempt_id = %verification_attempt_id, verify_run_id = %verify_run_id,
+                persisted_run_id = %evidence.persisted_run_id,
+                ordered_commands = %evidence.ordered_commands,
+                covered_checks = %evidence.covered_checks,
+                required_checks = ?evidence.required_checks,
+                verification_input_fingerprint = %evidence.verification_input_fingerprint,
+                manifest_version = %evidence.manifest_version,
+                environment_identity_digest = %evidence.environment_identity_digest,
+                "final verification recording completed"
+            )
+        }
         FinalVerificationRecordingOutcome::Reused {
             verification_attempt_id,
             evidence,
         } => tracing::info!(
             recording_outcome = "reused", task_id = %request.task_id, task_run_id = %request.task_run_id,
             verification_attempt_id = %verification_attempt_id, verify_run_id = %evidence.persisted_run_id,
+            ordered_commands = %evidence.ordered_commands,
+            covered_checks = %evidence.covered_checks,
+            required_checks = ?evidence.required_checks,
+            verification_input_fingerprint = %evidence.verification_input_fingerprint,
+            manifest_version = %evidence.manifest_version,
+            environment_identity_digest = %evidence.environment_identity_digest,
             "final verification recording completed"
         ),
         FinalVerificationRecordingOutcome::Ineligible {
             verification_attempt_id,
             reason,
-        } => tracing::info!(
-            recording_outcome = "ineligible", task_id = %request.task_id, task_run_id = %request.task_run_id,
-            verification_attempt_id = %verification_attempt_id, reason = %reason,
-            "final verification recording completed"
-        ),
+        } => {
+            let _ = djinn_telemetry::final_verification::increment_record(
+                djinn_telemetry::final_verification::RECORD_INELIGIBLE,
+            );
+            tracing::info!(
+                recording_outcome = "ineligible", task_id = %request.task_id, task_run_id = %request.task_run_id,
+                verification_attempt_id = %verification_attempt_id, reason = %reason,
+                "final verification recording completed"
+            )
+        }
         FinalVerificationRecordingOutcome::Error {
             verification_attempt_id,
             detail,
-        } => tracing::error!(
-            recording_outcome = "error", task_id = %request.task_id, task_run_id = %request.task_run_id,
-            verification_attempt_id = %verification_attempt_id, detail = %detail,
-            "final verification recording completed"
-        ),
+        } => {
+            let _ = djinn_telemetry::final_verification::increment_record(
+                djinn_telemetry::final_verification::RECORD_ERROR,
+            );
+            tracing::error!(
+                recording_outcome = "error", task_id = %request.task_id, task_run_id = %request.task_run_id,
+                verification_attempt_id = %verification_attempt_id, detail = %detail,
+                "final verification recording completed"
+            )
+        }
         FinalVerificationRecordingOutcome::NotConfigured {
             verification_attempt_id,
         } => tracing::info!(
@@ -1005,3 +1041,5 @@ mod tests {
 
 #[cfg(test)]
 mod recording_tests;
+#[cfg(test)]
+mod telemetry_contract_tests;
