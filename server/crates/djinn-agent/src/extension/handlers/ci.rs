@@ -202,6 +202,13 @@ pub(crate) async fn call_ci_job_log(
     ))
 }
 
+/// A suppressed hint failure retains the concrete run once direct-job lookup
+/// has resolved it, so operational telemetry remains actionable.
+struct ArtifactHintFailure {
+    run_id: Option<u64>,
+    error: String,
+}
+
 /// Append a bounded, read-only artifact hint without changing successful log
 /// semantics. Discovery already owns a verified run ID; direct-job mode obtains
 /// it from GitHub's repository-scoped job detail endpoint.
@@ -222,14 +229,14 @@ async fn append_artifact_hint(
     {
         Ok(Ok(Some(hint))) => format!("{output}\n\n{hint}"),
         Ok(Ok(None)) => output,
-        Ok(Err(error)) => {
+        Ok(Err(failure)) => {
             tracing::warn!(
                 operation = "ci_job_log_artifact_hint",
                 outcome = "suppressed_provider_error",
                 task_id,
                 job_id = ?job_id,
-                run_id = ?known_run_id,
-                error = %error,
+                run_id = ?failure.run_id.or(known_run_id),
+                error = %failure.error,
                 "ci_job_log artifact hint lookup failed; returning successful log unchanged"
             );
             output
@@ -257,27 +264,37 @@ async fn artifact_hint(
     repo: &str,
     job_id: Option<u64>,
     known_run_id: Option<u64>,
-) -> Result<Option<String>, String> {
+) -> Result<Option<String>, ArtifactHintFailure> {
     let run_id = match known_run_id {
         Some(run_id) => run_id,
         None => {
-            let job_id = job_id.ok_or("no job or workflow run was available for artifact hint")?;
+            let job_id = job_id.ok_or_else(|| ArtifactHintFailure {
+                run_id: None,
+                error: "no job or workflow run was available for artifact hint".to_string(),
+            })?;
             client
                 .get_job(owner, repo, job_id)
                 .await
-                .map_err(|error| {
-                    format!("failed to fetch job detail for job_id={job_id}: {error}")
+                .map_err(|error| ArtifactHintFailure {
+                    run_id: None,
+                    error: format!("failed to fetch job detail for job_id={job_id}: {error}"),
                 })?
                 .run_id
-                .ok_or_else(|| {
-                    format!("job detail for job_id={job_id} did not include a workflow run ID")
+                .ok_or_else(|| ArtifactHintFailure {
+                    run_id: None,
+                    error: format!(
+                        "job detail for job_id={job_id} did not include a workflow run ID"
+                    ),
                 })?
         }
     };
     let artifacts = client
         .list_run_artifacts(owner, repo, run_id)
         .await
-        .map_err(|error| format!("failed to list artifacts for run {run_id}: {error}"))?;
+        .map_err(|error| ArtifactHintFailure {
+            run_id: Some(run_id),
+            error: format!("failed to list artifacts for run {run_id}: {error}"),
+        })?;
     if artifacts.artifacts.is_empty() {
         return Ok(None);
     }
@@ -564,6 +581,12 @@ fn extract_step_log(cleaned_log: &str, step_name: &str) -> Option<String> {
 mod tests {
     use super::*;
     use djinn_provider::github_api::{ActionsJob, ActionsJobStep, WorkflowRun};
+    use std::collections::BTreeMap;
+    use std::sync::{Arc, Mutex};
+    use tracing::field::{Field, Visit};
+    use tracing::{Event, Subscriber};
+    use tracing_subscriber::layer::{Context, Layer};
+    use tracing_subscriber::prelude::*;
     use wiremock::matchers::{method, path, query_param};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -850,23 +873,83 @@ mod tests {
         assert_eq!(p.step.as_deref(), Some("Tests"));
     }
 
-    #[tokio::test]
-    async fn artifact_hint_preserves_empty_and_provider_failure_log_output() {
-        for response in [
-            ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "total_count": 0,
-                "artifacts": []
-            })),
-            ResponseTemplate::new(403),
-            ResponseTemplate::new(404),
-            ResponseTemplate::new(200).set_body_string("not json"),
-        ] {
+    #[derive(Clone, Copy, Debug)]
+    enum SuppressedArtifactListResponse {
+        Empty,
+        Forbidden,
+        Missing,
+        RateLimited,
+        Timeout,
+        Malformed,
+        ProviderError,
+    }
+
+    impl SuppressedArtifactListResponse {
+        fn response(self) -> ResponseTemplate {
+            match self {
+                Self::Empty => ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "total_count": 0,
+                    "artifacts": []
+                })),
+                Self::Forbidden => ResponseTemplate::new(403),
+                Self::Missing => ResponseTemplate::new(404),
+                Self::RateLimited => ResponseTemplate::new(429),
+                Self::Timeout => ResponseTemplate::new(200)
+                    .set_delay(ARTIFACT_HINT_TIMEOUT + Duration::from_millis(100)),
+                Self::Malformed => ResponseTemplate::new(200).set_body_string("not json"),
+                Self::ProviderError => ResponseTemplate::new(500),
+            }
+        }
+    }
+
+    fn successful_ci_job_log_branches() -> Vec<(&'static str, String, Option<u64>)> {
+        let direct = render_log("2026-03-24T17:10:50.0448487Z direct job log", None);
+        let unique_step = render_log(
+            "Run focused tests\nfailed assertion\nPost cleanup",
+            Some("focused"),
+        );
+        let single_discovered = render_log("2026-03-24T17:10:50.0448487Z single job log", None);
+        let failing_jobs = vec![
+            job(900, "first", Some("failure")),
+            job(901, "second", Some("timed_out")),
+        ];
+        let multi_job = format!(
+            "{}\n\n{}",
+            format_failing_jobs_header(&failing_jobs, DiscoveryLane::PrHead),
+            render_log("2026-03-24T17:10:50.0448487Z multi job log", None)
+        );
+        vec![
+            ("direct job", direct, None),
+            ("unique step", unique_step, Some(123)),
+            ("single discovered job", single_discovered, Some(123)),
+            ("multi-job header", multi_job, Some(123)),
+        ]
+    }
+
+    async fn mount_direct_job_detail(server: &MockServer) {
+        Mock::given(method("GET"))
+            .and(path(format!("/repos/{OWNER}/{REPO}/actions/jobs/900")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": 900, "run_id": 123, "name": "tests", "status": "completed",
+                "conclusion": "failure", "html_url": "https://example.test/jobs/900"
+            })))
+            .mount(server)
+            .await;
+    }
+
+    async fn assert_suppressed_artifact_hint_preserves_each_success_branch(
+        response_kind: SuppressedArtifactListResponse,
+    ) {
+        for (branch, expected, known_run_id) in successful_ci_job_log_branches() {
             let server = MockServer::start().await;
+            if known_run_id.is_none() {
+                mount_direct_job_detail(&server).await;
+            }
             Mock::given(method("GET"))
                 .and(path(format!(
                     "/repos/{OWNER}/{REPO}/actions/runs/123/artifacts"
                 )))
-                .respond_with(response)
+                .respond_with(response_kind.response())
                 .mount(&server)
                 .await;
             let output = append_artifact_hint(
@@ -875,12 +958,119 @@ mod tests {
                 REPO,
                 "task",
                 Some(900),
-                Some(123),
-                "existing cleaned log".to_string(),
+                known_run_id,
+                expected.clone(),
             )
             .await;
-            assert_eq!(output, "existing cleaned log");
+            assert_eq!(
+                output, expected,
+                "{response_kind:?} changed {branch} output"
+            );
         }
+    }
+
+    macro_rules! suppressed_artifact_hint_preservation_test {
+        ($name:ident, $kind:expr) => {
+            #[tokio::test]
+            async fn $name() {
+                assert_suppressed_artifact_hint_preserves_each_success_branch($kind).await;
+            }
+        };
+    }
+
+    suppressed_artifact_hint_preservation_test!(
+        artifact_hint_empty_list_preserves_every_success_branch,
+        SuppressedArtifactListResponse::Empty
+    );
+    suppressed_artifact_hint_preservation_test!(
+        artifact_hint_403_preserves_every_success_branch,
+        SuppressedArtifactListResponse::Forbidden
+    );
+    suppressed_artifact_hint_preservation_test!(
+        artifact_hint_404_preserves_every_success_branch,
+        SuppressedArtifactListResponse::Missing
+    );
+    suppressed_artifact_hint_preservation_test!(
+        artifact_hint_rate_limit_preserves_every_success_branch,
+        SuppressedArtifactListResponse::RateLimited
+    );
+    suppressed_artifact_hint_preservation_test!(
+        artifact_hint_timeout_preserves_every_success_branch,
+        SuppressedArtifactListResponse::Timeout
+    );
+    suppressed_artifact_hint_preservation_test!(
+        artifact_hint_malformed_response_preserves_every_success_branch,
+        SuppressedArtifactListResponse::Malformed
+    );
+    suppressed_artifact_hint_preservation_test!(
+        artifact_hint_generic_provider_error_preserves_every_success_branch,
+        SuppressedArtifactListResponse::ProviderError
+    );
+
+    #[derive(Clone, Default)]
+    struct WarningCapture(Arc<Mutex<Vec<BTreeMap<String, String>>>>);
+
+    struct FieldCapture(BTreeMap<String, String>);
+
+    impl Visit for FieldCapture {
+        fn record_str(&mut self, field: &Field, value: &str) {
+            self.0.insert(field.name().to_string(), value.to_string());
+        }
+
+        fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+            self.0
+                .insert(field.name().to_string(), format!("{value:?}"));
+        }
+    }
+
+    impl<S: Subscriber> Layer<S> for WarningCapture {
+        fn on_event(&self, event: &Event<'_>, _context: Context<'_, S>) {
+            let mut fields = FieldCapture(BTreeMap::new());
+            event.record(&mut fields);
+            self.0.lock().unwrap().push(fields.0);
+        }
+    }
+
+    #[tokio::test]
+    async fn direct_job_hint_failure_telemetry_retains_resolved_run_id() {
+        let server = MockServer::start().await;
+        mount_direct_job_detail(&server).await;
+        Mock::given(method("GET"))
+            .and(path(format!(
+                "/repos/{OWNER}/{REPO}/actions/runs/123/artifacts"
+            )))
+            .respond_with(ResponseTemplate::new(403))
+            .mount(&server)
+            .await;
+        let telemetry = WarningCapture::default();
+        let subscriber = tracing_subscriber::registry().with(telemetry.clone());
+        let _subscriber_guard = tracing::subscriber::set_default(subscriber);
+
+        let output = append_artifact_hint(
+            &mock_client(&server),
+            OWNER,
+            REPO,
+            "task-telemetry",
+            Some(900),
+            None,
+            "direct job log".to_string(),
+        )
+        .await;
+
+        assert_eq!(output, "direct job log");
+        let events = telemetry.0.lock().unwrap();
+        let warning = events
+            .iter()
+            .find(|fields| {
+                fields.get("operation").map(String::as_str) == Some("ci_job_log_artifact_hint")
+            })
+            .expect("suppressed artifact-list failure emits telemetry");
+        assert_eq!(
+            warning.get("outcome").map(String::as_str),
+            Some("suppressed_provider_error")
+        );
+        assert_eq!(warning.get("job_id").map(String::as_str), Some("Some(900)"));
+        assert_eq!(warning.get("run_id").map(String::as_str), Some("Some(123)"));
     }
 
     #[tokio::test]
