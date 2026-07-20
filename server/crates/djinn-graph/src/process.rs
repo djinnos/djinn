@@ -40,6 +40,7 @@
 use std::io;
 use std::process::{Command, Output};
 use std::time::Duration;
+use std::{error::Error, fmt};
 
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
@@ -67,6 +68,88 @@ use djinn_core::clock::{Clock, SystemClock};
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
+
+/// The bounded lifecycle phase which was unable to establish cleanup.
+///
+/// `Term` and `Kill` refer to the respective process-group signal windows;
+/// `ReaperQuiescence` means the group disappeared but the worker-wide reaper
+/// did not complete its final acknowledgement pass.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CleanupPhase {
+    /// The SIGTERM cleanup window expired before the group disappeared.
+    Term,
+    /// The SIGKILL cleanup window expired before the group disappeared.
+    Kill,
+    /// The group was gone but the child reaper did not quiesce.
+    ReaperQuiescence,
+}
+
+impl fmt::Display for CleanupPhase {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Term => f.write_str("SIGTERM"),
+            Self::Kill => f.write_str("SIGKILL"),
+            Self::ReaperQuiescence => f.write_str("reaper quiescence"),
+        }
+    }
+}
+
+/// Diagnostic returned when the Linux command supervisor exhausts cleanup.
+///
+/// Process APIs retain their `io::Result` signatures. On this exceptional path
+/// the returned [`io::Error`] contains this type as its source, and this error
+/// in turn exposes the command's original timeout/failure through
+/// [`Error::source`].
+#[derive(Debug)]
+pub struct CleanupExhaustionError {
+    /// Supervisor-generated command identifier.
+    pub command_id: String,
+    /// Original process group identifier.
+    pub pgid: i32,
+    /// Terminal status for the registered direct child, if it was reaped.
+    pub direct_status: Option<crate::child_reaper::TerminalStatus>,
+    /// Last lifecycle phase attempted before cleanup was declared exhausted.
+    pub phase: CleanupPhase,
+    /// PIDs still present in Linux `/proc` for this process group at exhaustion.
+    pub surviving_pids: Vec<u32>,
+    source: Box<dyn Error + Send + Sync>,
+}
+
+impl CleanupExhaustionError {
+    fn new(
+        command_id: String,
+        pgid: i32,
+        direct_status: Option<crate::child_reaper::TerminalStatus>,
+        phase: CleanupPhase,
+        surviving_pids: Vec<u32>,
+        source: impl Error + Send + Sync + 'static,
+    ) -> Self {
+        Self {
+            command_id,
+            pgid,
+            direct_status,
+            phase,
+            surviving_pids,
+            source: Box::new(source),
+        }
+    }
+}
+
+impl fmt::Display for CleanupExhaustionError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "command {} cleanup exhausted during {} for process group {} (surviving /proc PIDs: {:?})",
+            self.command_id, self.phase, self.pgid, self.surviving_pids
+        )
+    }
+}
+
+impl Error for CleanupExhaustionError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        Some(self.source.as_ref())
+    }
+}
 
 /// Run a pre-configured `std::process::Command` on a blocking thread and return
 /// its output.  This is a drop-in async replacement for
@@ -325,6 +408,45 @@ enum StatusOutcome {
     Cancelled,
 }
 
+#[cfg(target_os = "linux")]
+#[derive(Debug)]
+struct CleanupFailure {
+    phase: CleanupPhase,
+    direct_status: Option<TerminalStatus>,
+}
+
+#[cfg(target_os = "linux")]
+fn cleanup_exhaustion_io(
+    command_id: String,
+    pgid: i32,
+    failure: CleanupFailure,
+    original: io::Error,
+) -> io::Error {
+    let kind = original.kind();
+    io::Error::new(
+        kind,
+        CleanupExhaustionError::new(
+            command_id,
+            pgid,
+            failure.direct_status,
+            failure.phase,
+            proc_group_members(pgid),
+            original,
+        ),
+    )
+}
+
+#[cfg(target_os = "linux")]
+fn original_command_error(timed_out: bool, status: Option<TerminalStatus>) -> io::Error {
+    if timed_out {
+        io::Error::new(io::ErrorKind::TimedOut, "process timed out")
+    } else {
+        io::Error::other(format!(
+            "command ended before cleanup completed (direct status: {status:?})"
+        ))
+    }
+}
+
 /// Run the full Linux command supervision lifecycle on a blocking thread.
 ///
 /// This function is the heart of the cancellation-independent supervisor.  It
@@ -387,19 +509,21 @@ fn run_linux_supervisor(
         let cleanup = force_cleanup(&direct, pgid, &mut drains);
         let _ = drains.finish();
         let quiesced = reaper.quiesce(Duration::from_millis(100));
-        return Err(cleanup.err().unwrap_or_else(|| {
-            if quiesced {
-                err
-            } else {
-                io::Error::new(io::ErrorKind::TimedOut, "child reaper did not quiesce")
-            }
-        }));
+        if let Err(failure) = cleanup {
+            return Err(cleanup_exhaustion_io(command_id, pgid, failure, err));
+        }
+        return Err(if quiesced {
+            err
+        } else {
+            io::Error::new(io::ErrorKind::TimedOut, "child reaper did not quiesce")
+        });
     }
 
     // ── 5. Wait for direct status / detect timeout / detect cancellation ─
     let clock = SystemClock::new();
     let deadline = clock.now_instant() + timeout;
     let outcome = poll_status_outcome(&direct, deadline, &cancel_rx, &mut drains);
+    let deadline_fired = matches!(&outcome, StatusOutcome::DeadlineElapsed);
 
     let lifecycle = match outcome {
         StatusOutcome::Received(status) => {
@@ -411,7 +535,7 @@ fn run_linux_supervisor(
                 // Descendants survived natural grace — escalate to TERM/KILL.
                 // We already have the direct status, so we only need to ensure
                 // the PGID is gone; no further status receive is needed.
-                ensure_pgid_gone(pgid, &mut drains).map(|()| (status, false))
+                ensure_pgid_gone(pgid, status, &mut drains).map(|()| (status, false))
             }
         }
         StatusOutcome::DeadlineElapsed | StatusOutcome::Cancelled => {
@@ -431,11 +555,22 @@ fn run_linux_supervisor(
     // Never wait for EOF: escaped descendants may retain a pipe indefinitely.
     let (stdout_bytes, stderr_bytes) = drains.finish();
 
-    let (status, timed_out) = lifecycle?;
+    let (status, timed_out) = match lifecycle {
+        Ok(lifecycle) => lifecycle,
+        Err(failure) => {
+            let original = original_command_error(deadline_fired, failure.direct_status);
+            return Err(cleanup_exhaustion_io(command_id, pgid, failure, original));
+        }
+    };
     if !quiesced {
-        return Err(io::Error::new(
-            io::ErrorKind::TimedOut,
-            "child reaper did not quiesce",
+        return Err(cleanup_exhaustion_io(
+            command_id,
+            pgid,
+            CleanupFailure {
+                phase: CleanupPhase::ReaperQuiescence,
+                direct_status: Some(status),
+            },
+            original_command_error(timed_out, Some(status)),
         ));
     }
 
@@ -612,7 +747,11 @@ fn poll_pgid_gone_without_drains(pgid: i32, timeout: Duration) -> bool {
 /// Used after the direct child's terminal status has already been received:
 /// only the PGID disappearance matters, not further status receipt.
 #[cfg(target_os = "linux")]
-fn ensure_pgid_gone(pgid: i32, drains: &mut LinuxDrains) -> io::Result<()> {
+fn ensure_pgid_gone(
+    pgid: i32,
+    direct_status: TerminalStatus,
+    drains: &mut LinuxDrains,
+) -> Result<(), CleanupFailure> {
     let _ = signal_process_group(pgid, libc::SIGTERM);
     if poll_pgid_gone(pgid, PHASE_TIMEOUT, drains) {
         return Ok(());
@@ -621,9 +760,10 @@ fn ensure_pgid_gone(pgid: i32, drains: &mut LinuxDrains) -> io::Result<()> {
     if poll_pgid_gone(pgid, PHASE_TIMEOUT, drains) {
         Ok(())
     } else {
-        Err(io::Error::other(format!(
-            "process group {pgid} survived SIGKILL cleanup"
-        )))
+        Err(CleanupFailure {
+            phase: CleanupPhase::Kill,
+            direct_status: Some(direct_status),
+        })
     }
 }
 
@@ -635,7 +775,7 @@ fn force_cleanup(
     direct: &DirectChild,
     pgid: i32,
     drains: &mut LinuxDrains,
-) -> io::Result<TerminalStatus> {
+) -> Result<TerminalStatus, CleanupFailure> {
     // First, get the direct status. It may arrive at any point during cleanup.
     // We'll poll for it while also signaling the group.
     let mut status: Option<TerminalStatus> = None;
@@ -685,10 +825,42 @@ fn force_cleanup(
         std::thread::sleep(PGID_POLL_INTERVAL);
     }
 
-    Err(io::Error::other(format!(
-        "process group {pgid} did not disappear during bounded TERM/KILL cleanup (direct status received: {})",
-        status.is_some()
-    )))
+    Err(CleanupFailure {
+        phase: CleanupPhase::Kill,
+        direct_status: status,
+    })
+}
+
+/// Snapshot PIDs which still have `pgid` as their process-group ID. A process
+/// can disappear between directory enumeration and stat read; that race is
+/// intentionally ignored, so `ESRCH`/missing `/proc` entries are never reported
+/// as survivors.
+#[cfg(target_os = "linux")]
+fn proc_group_members(pgid: i32) -> Vec<u32> {
+    let Ok(entries) = std::fs::read_dir("/proc") else {
+        return Vec::new();
+    };
+    let mut survivors = entries
+        .flatten()
+        .filter_map(|entry| entry.file_name().to_string_lossy().parse::<u32>().ok())
+        .filter(|pid| {
+            let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else {
+                return false;
+            };
+            // `comm` may contain spaces and parentheses. Everything after its
+            // final ')' begins with state, ppid, then pgrp (field 5).
+            let Some((_, after_comm)) = stat.rsplit_once(") ") else {
+                return false;
+            };
+            after_comm
+                .split_whitespace()
+                .nth(2)
+                .and_then(|field| field.parse::<i32>().ok())
+                == Some(pgid)
+        })
+        .collect::<Vec<_>>();
+    survivors.sort_unstable();
+    survivors
 }
 
 /// Race direct-status receipt against the command deadline and caller
@@ -832,6 +1004,45 @@ pub async fn output_with_kill(mut cmd: Command, _timeout: Duration) -> io::Resul
 mod tests {
     use super::*;
     use djinn_core::clock::{Clock, SystemClock};
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn cleanup_exhaustion_preserves_all_diagnostic_fields_and_source_chain() {
+        let direct_status = TerminalStatus {
+            pid: 41,
+            raw_status: 9,
+        };
+        let original = io::Error::new(io::ErrorKind::TimedOut, "process timed out");
+        let err = io::Error::new(
+            io::ErrorKind::TimedOut,
+            CleanupExhaustionError::new(
+                "command-42".to_owned(),
+                42,
+                Some(direct_status),
+                CleanupPhase::Kill,
+                vec![41, 43],
+                original,
+            ),
+        );
+
+        assert_eq!(err.kind(), io::ErrorKind::TimedOut);
+        let diagnostic = err
+            .get_ref()
+            .and_then(|source| source.downcast_ref::<CleanupExhaustionError>())
+            .expect("io error must retain typed cleanup diagnostic");
+        assert_eq!(diagnostic.command_id, "command-42");
+        assert_eq!(diagnostic.pgid, 42);
+        assert_eq!(diagnostic.direct_status, Some(direct_status));
+        assert_eq!(diagnostic.phase, CleanupPhase::Kill);
+        assert_eq!(diagnostic.surviving_pids, vec![41, 43]);
+
+        let typed_source = diagnostic.source().expect("original error source");
+        let timeout = typed_source
+            .downcast_ref::<io::Error>()
+            .expect("original timeout error must remain in source chain");
+        assert_eq!(timeout.kind(), io::ErrorKind::TimedOut);
+        assert!(timeout.source().is_none());
+    }
 
     /// A hung child (`sleep 30`) must be terminated within the grace window and
     /// the call must return promptly rather than hanging.
