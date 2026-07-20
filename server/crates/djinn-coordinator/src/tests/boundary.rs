@@ -28,22 +28,28 @@ fn boundary_djinn_slot_has_no_coordinator_or_agent_dependency() {
     }
 }
 
-/// `djinn-coordinator` must NOT depend on `djinn-agent`.
+/// `djinn-coordinator` production code must NOT depend on `djinn-agent`.
 ///
 /// The coordinator crate owns dispatch, doctor, PR polling, and supervisor
 /// disposition logic.  It depends on `djinn-slot` and `djinn-orchestration-types`
-/// but must never depend on the agent facade.
+/// but must never pull the agent facade into its production dependency graph.
+/// A test-only edge is permitted for cross-crate integration regressions.
 #[test]
 fn boundary_djinn_coordinator_has_no_agent_dependency() {
     let cargo_toml = include_str!("../../../djinn-coordinator/Cargo.toml");
     let dep_pattern = "djinn-agent =";
-    let has_dep = cargo_toml.lines().any(|line| {
-        let trimmed = line.trim_start();
-        !trimmed.starts_with('#') && trimmed.starts_with(dep_pattern)
-    });
+    let has_dep = cargo_toml
+        .lines()
+        .skip_while(|line| line.trim() != "[dependencies]")
+        .skip(1)
+        .take_while(|line| !line.trim_start().starts_with('['))
+        .any(|line| {
+            let trimmed = line.trim_start();
+            !trimmed.starts_with('#') && trimmed.starts_with(dep_pattern)
+        });
     assert!(
         !has_dep,
-        "djinn-coordinator Cargo.toml must not contain a dependency on djinn-agent"
+        "djinn-coordinator production dependencies must not include djinn-agent"
     );
 }
 

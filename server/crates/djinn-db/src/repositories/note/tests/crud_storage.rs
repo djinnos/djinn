@@ -20,10 +20,12 @@ async fn create_and_get_note() {
     assert_eq!(note.permalink, "decisions/my-adr");
     // Notes are now stored db-only; `file_path` is the empty-string vestige.
     assert_eq!(note.file_path, "");
+    assert_eq!(note.lifecycle_changed_at, None);
 
     let fetched = repo.get(&note.id).await.unwrap().unwrap();
     assert_eq!(fetched.title, "My ADR");
     assert_eq!(fetched.status, djinn_memory::note_status::ACTIVE);
+    assert_eq!(fetched.lifecycle_changed_at, None);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -61,6 +63,7 @@ async fn note_status_archives_filters_and_restores_without_delete() {
         .await
         .unwrap();
     assert_eq!(created_archived.status, djinn_memory::note_status::ARCHIVED);
+    assert_eq!(created_archived.lifecycle_changed_at, None);
 
     let archived = repo
         .update_status(&archived.id, djinn_memory::note_status::ARCHIVED)
