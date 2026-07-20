@@ -21,20 +21,23 @@ impl NoteRepository {
     pub async fn graph(&self, project_id: &str) -> Result<GraphResponse> {
         self.db.ensure_initialized().await?;
 
-        let node_rows = sqlx::query!(
-            r#"SELECT n.id AS "id!", n.permalink AS "permalink!",
-                    n.title AS "title!", n.note_type AS "note_type!",
-                    n.folder AS "folder!", n.status AS "status!",
-                    n.lifecycle_changed_at AS "lifecycle_changed_at?", n.created_at AS "created_at!",
+        // This projection includes the additive lifecycle timestamp, which is
+        // intentionally read through the runtime API so the graph contract
+        // remains buildable with the checked-in offline SQLx cache.
+        let node_rows = sqlx::query(
+            r#"SELECT n.id, n.permalink,
+                    n.title, n.note_type,
+                    n.folder, n.status,
+                    n.lifecycle_changed_at, n.created_at,
                     (SELECT COUNT(*) FROM note_links WHERE source_id = n.id
                        AND target_id IS NOT NULL)
                     + (SELECT COUNT(*) FROM note_links WHERE target_id = n.id)
-                      AS "connection_count!: i64"
+                      AS connection_count
              FROM notes n
              WHERE n.project_id = $1 AND n.status = 'active'
              ORDER BY n.folder, n.title"#,
-            project_id
         )
+        .bind(project_id)
         .fetch_all(self.db.pool())
         .await?;
 
@@ -65,18 +68,21 @@ impl NoteRepository {
         let mut nodes: Vec<GraphNode> = node_rows
             .into_iter()
             .map(|row| GraphNode {
-                is_orphan: orphans.contains(&row.id),
-                broken_targets: broken.get(&row.id).cloned().unwrap_or_default(),
-                id: row.id,
-                permalink: row.permalink,
-                title: row.title,
-                note_type: row.note_type,
-                folder: row.folder,
-                status: row.status,
-                lifecycle_changed_at: row.lifecycle_changed_at,
-                connection_count: row.connection_count,
+                is_orphan: orphans.contains(row.get::<String, _>("id").as_str()),
+                broken_targets: broken
+                    .get(row.get::<String, _>("id").as_str())
+                    .cloned()
+                    .unwrap_or_default(),
+                id: row.get("id"),
+                permalink: row.get("permalink"),
+                title: row.get("title"),
+                note_type: row.get("note_type"),
+                folder: row.get("folder"),
+                status: row.get("status"),
+                lifecycle_changed_at: row.get("lifecycle_changed_at"),
+                connection_count: row.get("connection_count"),
                 entity_type: "note".to_string(),
-                created_at: Some(row.created_at),
+                created_at: Some(row.get("created_at")),
             })
             .collect();
 
@@ -129,7 +135,10 @@ impl NoteRepository {
         let returned_node_ids: HashSet<String> = nodes.iter().map(|node| node.id.clone()).collect();
         let edges = edge_rows
             .into_iter()
-            .filter(|row| returned_node_ids.contains(&row.source_id) && returned_node_ids.contains(&row.target_id))
+            .filter(|row| {
+                returned_node_ids.contains(&row.source_id)
+                    && returned_node_ids.contains(&row.target_id)
+            })
             .map(|row| GraphEdge {
                 source_id: row.source_id,
                 target_id: row.target_id,
@@ -207,14 +216,16 @@ impl NoteRepository {
         typed_edges.extend(mea_rows.into_iter().filter_map(|row| {
             let source_id: String = row.get("source_id");
             let target_id: String = row.get("target_id");
-            (returned_node_ids.contains(&source_id) && returned_node_ids.contains(&target_id)).then(|| TypedEdge {
-                source_id,
-                target_id,
-                kind: row.get("kind"),
-                weight: row.get("weight"),
-                source_entity_type: row.get("source_entity_type"),
-                target_entity_type: row.get("target_entity_type"),
-            })
+            (returned_node_ids.contains(&source_id) && returned_node_ids.contains(&target_id)).then(
+                || TypedEdge {
+                    source_id,
+                    target_id,
+                    kind: row.get("kind"),
+                    weight: row.get("weight"),
+                    source_entity_type: row.get("source_entity_type"),
+                    target_entity_type: row.get("target_entity_type"),
+                },
+            )
         }));
 
         Ok(GraphResponse {
@@ -284,9 +295,11 @@ impl NoteRepository {
                 created_at: Some(row.get("created_at")),
             });
         }
-        let inactive_returned = (graph.nodes.iter().filter(|node| {
-            node.entity_type == "note" && node.status != "active"
-        }).count()) as i64;
+        let inactive_returned = (graph
+            .nodes
+            .iter()
+            .filter(|node| node.entity_type == "note" && node.status != "active")
+            .count()) as i64;
         // The compatibility graph has active-only edges. Reload all layers
         // after final lifecycle selection, keeping included inactive edges and
         // rejecting every endpoint omitted by the cap.
@@ -311,28 +324,46 @@ impl NoteRepository {
             r#"SELECT l.source_id, l.target_id, l.target_raw FROM note_links l
                JOIN notes src ON src.id = l.source_id AND src.project_id = $1
                WHERE l.target_id IS NOT NULL"#,
-        ).bind(project_id).fetch_all(self.db.pool()).await?.into_iter().filter_map(|row| {
+        )
+        .bind(project_id)
+        .fetch_all(self.db.pool())
+        .await?
+        .into_iter()
+        .filter_map(|row| {
             let source_id: String = row.get("source_id");
             let target_id: String = row.get("target_id");
             (ids.contains(&source_id) && ids.contains(&target_id)).then(|| GraphEdge {
-                source_id, target_id, raw_text: row.get("target_raw"),
+                source_id,
+                target_id,
+                raw_text: row.get("target_raw"),
             })
-        }).collect();
+        })
+        .collect();
         let note_rows = sqlx::query(
             r#"SELECT na.note_a_id AS source_id, na.note_b_id AS target_id, na.kind, na.weight
                FROM note_associations na
                JOIN notes a ON a.id = na.note_a_id AND a.project_id = $1
                JOIN notes b ON b.id = na.note_b_id AND b.project_id = $1
                WHERE na.kind <> 'co_access'"#,
-        ).bind(project_id).fetch_all(self.db.pool()).await?;
-        let mut typed_edges = note_rows.into_iter().filter_map(|row| {
-            let source_id: String = row.get("source_id");
-            let target_id: String = row.get("target_id");
-            (ids.contains(&source_id) && ids.contains(&target_id)).then(|| TypedEdge {
-                source_id, target_id, kind: row.get("kind"), weight: row.get("weight"),
-                source_entity_type: "note".into(), target_entity_type: "note".into(),
+        )
+        .bind(project_id)
+        .fetch_all(self.db.pool())
+        .await?;
+        let mut typed_edges = note_rows
+            .into_iter()
+            .filter_map(|row| {
+                let source_id: String = row.get("source_id");
+                let target_id: String = row.get("target_id");
+                (ids.contains(&source_id) && ids.contains(&target_id)).then(|| TypedEdge {
+                    source_id,
+                    target_id,
+                    kind: row.get("kind"),
+                    weight: row.get("weight"),
+                    source_entity_type: "note".into(),
+                    target_entity_type: "note".into(),
+                })
             })
-        }).collect::<Vec<_>>();
+            .collect::<Vec<_>>();
         let entity_rows = sqlx::query(
             r#"SELECT mea.source_entity_type, mea.source_id, mea.target_entity_type, mea.target_id, mea.kind, mea.weight
                FROM memory_entity_associations mea
@@ -345,8 +376,12 @@ impl NoteRepository {
             let source_id: String = row.get("source_id");
             let target_id: String = row.get("target_id");
             (ids.contains(&source_id) && ids.contains(&target_id)).then(|| TypedEdge {
-                source_id, target_id, kind: row.get("kind"), weight: row.get("weight"),
-                source_entity_type: row.get("source_entity_type"), target_entity_type: row.get("target_entity_type"),
+                source_id,
+                target_id,
+                kind: row.get("kind"),
+                weight: row.get("weight"),
+                source_entity_type: row.get("source_entity_type"),
+                target_entity_type: row.get("target_entity_type"),
             })
         }));
         Ok((wikilinks, typed_edges))
