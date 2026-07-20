@@ -292,95 +292,25 @@ async fn run_tick(state: &AppState, config: &GraphRetentionConfig) {
     }
 
     let project_repo = ProjectRepository::new(state.db().clone(), state.event_bus());
-    let projects = match project_repo.list().await {
-        Ok(p) => p,
-        Err(err) => {
-            tracing::warn!(error = %err, "graph_retention: project list failed; skipping tick");
-            return;
-        }
-    };
-
     let retention_repo = RepoGraphRetentionRepository::new(state.db().clone());
-
-    // Bounded aggregate accumulators — we only keep totals, never per-project
-    // result collections, so memory stays O(1) regardless of project count.
+    // Only a fixed-size page of IDs is retained at once; graph blobs never
+    // leave the retention repository.
+    const PROJECT_PAGE_SIZE: i64 = 100;
+    let mut after_id: Option<String> = None;
+    let mut project_count = 0u64;
     let mut total_candidates = 0u64;
     let mut total_deleted = 0u64;
     let mut total_skipped = 0u64;
     let mut total_retries = 0u64;
     let mut total_errors = 0u64;
-    let project_count = projects.len();
 
-    for project in &projects {
-        // Check cancellation between projects so a long tick can be aborted.
-        if state.cancel().is_cancelled() {
-            tracing::debug!("graph_retention: cancelled mid-tick");
-            break;
-        }
-
-        let request = djinn_db::RetentionSweepRequest {
-            project_id: &project.id,
-            mode: config.mode,
-            history_n: config.history_n,
-        };
-
-        match retention_repo.sweep(request).await {
-            Ok(outcome) => {
-                // Emit telemetry with fixed labels only. The outcome carries
-                // bounded counts and fixed skip classes — never identity.
-                telemetry::increment(
-                    mode_label(config.mode),
-                    telemetry::OUTCOME_CANDIDATE,
-                    telemetry::REASON_NONE,
-                    outcome.candidates as u64,
-                );
-                if outcome.deleted > 0 {
-                    telemetry::increment(
-                        mode_label(config.mode),
-                        telemetry::OUTCOME_DELETE,
-                        telemetry::REASON_NONE,
-                        outcome.deleted as u64,
-                    );
-                }
-                if outcome.skipped_active_pin > 0 {
-                    telemetry::increment(
-                        mode_label(config.mode),
-                        telemetry::OUTCOME_SKIP,
-                        telemetry::REASON_ACTIVE_PIN,
-                        outcome.skipped_active_pin as u64,
-                    );
-                }
-                if outcome.skipped_now_survivor > 0 {
-                    telemetry::increment(
-                        mode_label(config.mode),
-                        telemetry::OUTCOME_SKIP,
-                        telemetry::REASON_NOW_SURVIVOR,
-                        outcome.skipped_now_survivor as u64,
-                    );
-                }
-                if outcome.skipped_removed_concurrently > 0 {
-                    telemetry::increment(
-                        mode_label(config.mode),
-                        telemetry::OUTCOME_SKIP,
-                        telemetry::REASON_REMOVED_CONCURRENTLY,
-                        outcome.skipped_removed_concurrently as u64,
-                    );
-                }
-                if outcome.retries > 0 {
-                    telemetry::increment(
-                        mode_label(config.mode),
-                        telemetry::OUTCOME_RETRY,
-                        telemetry::REASON_NONE,
-                        outcome.retries as u64,
-                    );
-                }
-
-                total_candidates += outcome.candidates as u64;
-                total_deleted += outcome.deleted as u64;
-                total_skipped += outcome.total_skipped() as u64;
-                total_retries += outcome.retries as u64;
-            }
-            Err(err) => {
+    loop {
+        let page = match project_repo
+            .list_ids_page_after(after_id.as_deref(), PROJECT_PAGE_SIZE)
+            .await
+        {
+            Ok(page) => page,
+            Err(_) => {
                 total_errors += 1;
                 telemetry::increment(
                     mode_label(config.mode),
@@ -388,14 +318,102 @@ async fn run_tick(state: &AppState, config: &GraphRetentionConfig) {
                     telemetry::REASON_NONE,
                     1,
                 );
-                // Log the error without project identity — only the bounded
-                // aggregate is logged at tick end. Per-project errors are
-                // counted but not individually retained.
-                tracing::warn!(error = %err, "graph_retention: sweep failed for a project");
+                break;
+            }
+        };
+        if page.is_empty() || state.cancel().is_cancelled() {
+            break;
+        }
+        after_id = page.last().cloned();
+
+        for project_id in page {
+            project_count += 1;
+            // Check cancellation between projects so a long tick can be aborted.
+            if state.cancel().is_cancelled() {
+                tracing::debug!("graph_retention: cancelled mid-tick");
+                break;
+            }
+
+            let request = djinn_db::RetentionSweepRequest {
+                project_id: &project_id,
+                mode: config.mode,
+                history_n: config.history_n,
+            };
+
+            match retention_repo
+                .sweep_with_retry(request, config.max_retries)
+                .await
+            {
+                Ok(outcome) => {
+                    // Emit telemetry with fixed labels only. The outcome carries
+                    // bounded counts and fixed skip classes — never identity.
+                    telemetry::increment(
+                        mode_label(config.mode),
+                        telemetry::OUTCOME_CANDIDATE,
+                        telemetry::REASON_NONE,
+                        outcome.candidates as u64,
+                    );
+                    if outcome.deleted > 0 {
+                        telemetry::increment(
+                            mode_label(config.mode),
+                            telemetry::OUTCOME_DELETE,
+                            telemetry::REASON_NONE,
+                            outcome.deleted as u64,
+                        );
+                    }
+                    if outcome.skipped_active_pin > 0 {
+                        telemetry::increment(
+                            mode_label(config.mode),
+                            telemetry::OUTCOME_SKIP,
+                            telemetry::REASON_ACTIVE_PIN,
+                            outcome.skipped_active_pin as u64,
+                        );
+                    }
+                    if outcome.skipped_now_survivor > 0 {
+                        telemetry::increment(
+                            mode_label(config.mode),
+                            telemetry::OUTCOME_SKIP,
+                            telemetry::REASON_NOW_SURVIVOR,
+                            outcome.skipped_now_survivor as u64,
+                        );
+                    }
+                    if outcome.skipped_removed_concurrently > 0 {
+                        telemetry::increment(
+                            mode_label(config.mode),
+                            telemetry::OUTCOME_SKIP,
+                            telemetry::REASON_REMOVED_CONCURRENTLY,
+                            outcome.skipped_removed_concurrently as u64,
+                        );
+                    }
+                    if outcome.retries > 0 {
+                        telemetry::increment(
+                            mode_label(config.mode),
+                            telemetry::OUTCOME_RETRY,
+                            telemetry::REASON_NONE,
+                            outcome.retries as u64,
+                        );
+                    }
+
+                    total_candidates += outcome.candidates as u64;
+                    total_deleted += outcome.deleted as u64;
+                    total_skipped += outcome.total_skipped() as u64;
+                    total_retries += outcome.retries as u64;
+                }
+                Err(_) => {
+                    total_errors += 1;
+                    telemetry::increment(
+                        mode_label(config.mode),
+                        telemetry::OUTCOME_ERROR,
+                        telemetry::REASON_NONE,
+                        1,
+                    );
+                    // Log the error without project identity — only the bounded
+                    // aggregate is logged at tick end. Per-project errors are
+                    // counted but not individually retained.
+                }
             }
         }
     }
-
     // Single bounded tick summary — no per-project results accumulated.
     tracing::info!(
         mode = mode_label(config.mode),
@@ -704,18 +722,15 @@ mod tests {
     // ── Leader-only composition tests ─────────────────────────────────
 
     #[test]
-    fn spawn_is_started_from_become_leader_not_initialize() {
-        // This is a compile-time / source-level contract: `spawn` takes an
-        // `AppState` and is called from `become_leader`. The standby
-        // initialization path (`initialize`) does not call `spawn`.
-        //
-        // We verify the function signature is compatible with AppState.
-        // The actual composition is verified by reading the source: spawn
-        // is called from become_leader (see server/state/mod.rs), never
-        // from initialize or the HTTP setup path.
-        //
-        // This test exists to prevent accidental removal of the leader gate.
-        let _ = spawn as fn(AppState);
+    fn spawn_is_composed_only_in_become_leader() {
+        let state_source = include_str!("server/state/mod.rs");
+        let spawn = "crate::graph_retention::spawn(self.clone())";
+        assert_eq!(state_source.matches(spawn).count(), 1);
+        let leader = state_source.find("pub async fn become_leader").unwrap();
+        let retention = state_source.find(spawn).unwrap();
+        assert!(retention > leader);
+        let initialize = state_source.find("pub async fn initialize(&self)").unwrap();
+        assert!(!state_source[initialize..leader].contains(spawn));
     }
 
     #[test]
