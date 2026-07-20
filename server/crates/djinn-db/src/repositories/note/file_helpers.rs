@@ -8,7 +8,8 @@
 
 /// Return the storage folder for a given note type.
 ///
-/// Singleton types (`brief`, `roadmap`) map to `""` (project .djinn/ root).
+/// Singleton types (`brief`, `roadmap`) map to `""`, the virtual root of the
+/// database-backed note namespace.
 pub fn folder_for_type(note_type: &str) -> &'static str {
     match note_type {
         "adr" => "decisions",
@@ -38,7 +39,7 @@ pub fn folder_for_type(note_type: &str) -> &'static str {
         // in the Memory graph UI; `infer_note_type` round-trips the mapping.
         "entity" => "reference/entities",
         "claim" => "reference/claims",
-        // Singletons live at the .djinn/ root, no subfolder.
+        // Singletons use the virtual root, with no subfolder.
         "brief" | "roadmap" => "",
         // Unknown types fall back to reference.
         _ => "reference",

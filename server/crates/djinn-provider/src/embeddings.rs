@@ -570,4 +570,15 @@ mod tests {
             other => panic!("expected degraded outcome, got {other:?}"),
         }
     }
+
+    #[test]
+    fn default_cache_dir_uses_the_server_cache_root() {
+        let cache_dir = default_embedding_cache_dir();
+
+        assert_eq!(cache_dir, djinn_core::paths::cache_root().join("models"));
+        assert_eq!(
+            cache_dir.file_name().and_then(|name| name.to_str()),
+            Some("models")
+        );
+    }
 }
