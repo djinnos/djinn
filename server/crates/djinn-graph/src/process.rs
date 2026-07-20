@@ -61,6 +61,14 @@ use crate::child_reaper::{DirectChild, TerminalStatus, worker_child_reaper};
 #[cfg(target_os = "linux")]
 use std::time::Instant;
 
+/// Unit-only lifecycle acknowledgement for the Linux supervisor. The child
+/// reaper removes a direct-PID route as soon as it receives terminal status,
+/// which is intentionally earlier than closing the supervisor-owned pipes.
+/// Keep this separate from the production registry so regression fixtures can
+/// prove the latter ownership has ended.
+#[cfg(all(test, target_os = "linux"))]
+use std::sync::atomic::{AtomicUsize, Ordering};
+
 /// Clock abstraction for deterministic timing inside the supervisor.
 #[cfg(target_os = "linux")]
 use djinn_core::clock::{Clock, SystemClock};
@@ -396,6 +404,39 @@ const PGID_POLL_INTERVAL: Duration = Duration::from_millis(25);
 #[cfg(target_os = "linux")]
 const PHASE_TIMEOUT: Duration = Duration::from_secs(2);
 
+/// Number of Linux supervisors which have not returned from
+/// [`run_linux_supervisor`]. This is deliberately test-only: it acknowledges
+/// completion after `LinuxDrains::finish` has synchronously closed pipe FDs,
+/// unlike the child-reaper registry whose direct route is removed at status
+/// delivery time.
+#[cfg(all(test, target_os = "linux"))]
+static ACTIVE_LINUX_SUPERVISORS: AtomicUsize = AtomicUsize::new(0);
+
+#[cfg(all(test, target_os = "linux"))]
+struct ActiveLinuxSupervisor;
+
+#[cfg(all(test, target_os = "linux"))]
+impl ActiveLinuxSupervisor {
+    fn enter() -> Self {
+        ACTIVE_LINUX_SUPERVISORS.fetch_add(1, Ordering::SeqCst);
+        Self
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+impl Drop for ActiveLinuxSupervisor {
+    fn drop(&mut self) {
+        ACTIVE_LINUX_SUPERVISORS.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+/// Test-only acknowledgement that all Linux supervisors, including their
+/// synchronous pipe-drain closure, have returned.
+#[cfg(all(test, target_os = "linux"))]
+fn active_linux_supervisor_count_for_test() -> usize {
+    ACTIVE_LINUX_SUPERVISORS.load(Ordering::SeqCst)
+}
+
 /// The outcome of the status-wait phase.
 #[cfg(target_os = "linux")]
 enum StatusOutcome {
@@ -459,6 +500,11 @@ fn run_linux_supervisor(
     timeout: Duration,
     cancel_rx: std::sync::mpsc::Receiver<()>,
 ) -> io::Result<(Output, bool)> {
+    // Declare this before every other local so it drops last, after `drains`
+    // and all pipe handles. This is an end-of-supervisor acknowledgement, not
+    // merely an indication that the reaper delivered direct-child status.
+    #[cfg(test)]
+    let _active_supervisor = ActiveLinuxSupervisor::enter();
     let reaper = worker_child_reaper();
     let command_id = uuid::Uuid::now_v7().to_string();
 
@@ -1201,154 +1247,7 @@ mod tests {
 }
 
 // ===========================================================================
-// Linux-specific supervisor tests
-// ===========================================================================
 
 #[cfg(all(test, target_os = "linux"))]
-mod linux_supervisor_tests {
-    use super::*;
-    use djinn_core::clock::{Clock, SystemClock};
-
-    /// Normal direct exit with a descendant: the supervisor must allow natural
-    /// grace for the descendant to disappear, then return the correct exit code
-    /// and output.  The descendant exits quickly so natural grace succeeds
-    /// without TERM/KILL escalation.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn normal_exit_with_descendant_grace() {
-        // The shell forks a child that sleeps briefly (shorter than the 2s
-        // natural grace window) and then exits 0 itself.  The supervisor should
-        // observe the direct child's exit, allow the descendant to disappear
-        // naturally, and return success.
-        let mut cmd = Command::new("sh");
-        cmd.arg("-c")
-            .arg("echo direct-ok; sleep 0.2 & wait $!; exit 0");
-
-        let start = SystemClock::new().now_instant();
-        let out = output_with_timeout(cmd, Duration::from_secs(10))
-            .await
-            .expect("normal exit should succeed");
-        let elapsed = start.elapsed();
-
-        assert!(out.status.success(), "expected exit 0, got {}", out.status);
-        assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "direct-ok");
-        // Should complete well within the 2s natural grace.
-        assert!(
-            elapsed < Duration::from_secs(5),
-            "normal exit with short descendant should be fast, took {elapsed:?}"
-        );
-    }
-
-    /// A TERM-ignoring descendant forces KILL escalation.  The direct child
-    /// exits normally, but a grandchild traps SIGTERM and only dies on SIGKILL.
-    /// The supervisor must escalate TERM → KILL and still complete within the
-    /// bounded window (2s grace + 2s TERM + 2s KILL + drain ≈ 8s).
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn term_ignoring_descendant_escalates_to_kill() {
-        // The shell forks a grandchild that traps SIGTERM and sleeps for a long
-        // time. The direct child exits 0 immediately, leaving the grandchild
-        // orphaned in the same process group. The supervisor must escalate to
-        // SIGKILL to clean it up.
-        let mut cmd = Command::new("sh");
-        cmd.arg("-c").arg(concat!(
-            "trap '' TERM; ", // ignore SIGTERM
-            "sleep 300 & ",   // long-running descendant
-            "echo started; ", // signal that setup is complete
-            "exit 0"          // direct child exits cleanly
-        ));
-
-        let start = SystemClock::new().now_instant();
-        let out = output_with_timeout(cmd, Duration::from_secs(10))
-            .await
-            .expect("command should complete after KILL escalation");
-        let elapsed = start.elapsed();
-
-        // The direct child exited 0, so the output should reflect that.
-        assert!(out.status.success(), "expected exit 0 from direct child");
-        assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "started");
-
-        // Should complete within the bounded window: 2s grace + 2s TERM + 2s
-        // KILL + drain overhead.
-        assert!(
-            elapsed < Duration::from_secs(12),
-            "TERM-ignoring descendant should be cleaned up within bounded window, took {elapsed:?}"
-        );
-    }
-
-    /// Dropping the caller future (simulating cancellation) must trigger
-    /// cleanup.  The supervisor continues independently, signals the process
-    /// group, and completes within the bounded TERM/KILL window — no detached
-    /// drain/join threads remain.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn dropped_caller_triggers_cleanup() {
-        // A long-running command that will be cancelled by dropping the future.
-        let mut cmd = Command::new("sh");
-        cmd.arg("-c").arg("sleep 300");
-
-        let start = SystemClock::new().now_instant();
-
-        // Spawn the future and immediately drop it, simulating caller
-        // cancellation.
-        let handle = tokio::spawn(output_with_timeout(cmd, Duration::from_secs(300)));
-        // Give the child a moment to start.
-        tokio::time::sleep(Duration::from_millis(200)).await;
-        // Cancel by aborting the spawned task — this drops the future, which
-        // drops cancel_tx, signalling the supervisor.
-        handle.abort();
-
-        // The supervisor continues on the blocking pool.  Poll for the sleep
-        // process to disappear, with a bounded total wait.
-        let mut leaked = true;
-        for _ in 0..20 {
-            tokio::time::sleep(Duration::from_millis(200)).await;
-            let check = std::process::Command::new("pgrep")
-                .arg("-f")
-                .arg("sleep 300")
-                .output()
-                .ok();
-            if check.is_some_and(|c| c.stdout.is_empty()) {
-                leaked = false;
-                break;
-            }
-        }
-        let elapsed = start.elapsed();
-
-        assert!(
-            !leaked,
-            "sleep process leaked after caller drop — supervisor did not clean up, took {elapsed:?}"
-        );
-
-        // The cleanup should be prompt since sleep doesn't trap TERM.
-        assert!(
-            elapsed < Duration::from_secs(5),
-            "cleanup after caller drop should be fast, took {elapsed:?}"
-        );
-    }
-
-    /// A non-zero exit code must be preserved through the supervisor.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn non_zero_exit_preserved() {
-        let mut cmd = Command::new("sh");
-        cmd.arg("-c").arg("exit 42");
-
-        let out = output_with_timeout(cmd, Duration::from_secs(10))
-            .await
-            .expect("non-zero exit should not be an error here");
-
-        assert_eq!(out.status.code(), Some(42));
-    }
-
-    /// Spawn failure must return the original `io::Error` without registering
-    /// anything with the reaper.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn spawn_failure_returns_original_io_error() {
-        let cmd = Command::new("/nonexistent-binary-that-does-not-exist-12345");
-
-        let err = output_with_timeout(cmd, Duration::from_secs(10))
-            .await
-            .expect_err("spawn should fail");
-
-        // The error should be a NotFound (or permission) io::Error, not a
-        // timeout or reaper error.
-        assert_ne!(err.kind(), io::ErrorKind::TimedOut);
-    }
-}
+#[path = "process_linux_supervisor_tests.rs"]
+mod linux_supervisor_tests;
