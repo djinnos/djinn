@@ -1391,13 +1391,6 @@ fn evidence_spike_all_schemas_are_read_only_except_finalize() {
     }
 }
 
-// ── Cut-over regression guards (10qg) ───────────────────────────────────
-// These assertions pin the MCP extension role tool surfaces so future
-// changes cannot regress the request_lead → request_planner cut-over
-// or the Lead arbiter-only surface.
-
-/// Worker and reviewer schemas must expose `request_planner` and must NOT
-/// expose `request_lead` (epic 10qg).
 #[test]
 fn worker_reviewer_schemas_expose_request_planner_not_request_lead() {
     for role in ["worker", "reviewer"] {
@@ -1441,16 +1434,6 @@ fn lead_schema_does_not_expose_request_planner_or_escalate() {
         names
     );
 }
-
-// ── Expanded evidence-spike mutation exclusion tests ────────────────────────
-
-// ── Stale DB-system token guard (tool descriptions) ────────────────────────
-// Ensures no tool description in the canonical schema surfaces contains the
-// stale DB-system reference. If this test fails, a tool description was
-// reintroduced with the old wording instead of accurate memory_* MCP
-// guidance. The comprehensive runtime and serialized-surface guard lives in
-// djinn-agent beside production prompt-context assembly, where it can execute
-// both prompt renderers and recursively inspect these schemas.
 
 #[test]
 fn no_stale_db_token_in_tool_descriptions() {
