@@ -22,6 +22,7 @@
 //! are similarly bounded: they carry aggregate counts only, never per-project
 //! result collections.
 
+use std::future::Future;
 use std::time::Duration;
 
 use djinn_db::{
@@ -256,28 +257,41 @@ pub fn spawn(state: AppState) {
     };
     let cancel = state.cancel().clone();
     tokio::spawn(async move {
-        run_loop(state, config, cancel).await;
+        run_loop(config.interval, cancel, move || {
+            let state = state.clone();
+            let config = config.clone();
+            async move { run_tick(&state, &config).await }
+        })
+        .await;
     });
 }
 
-/// The core ticker loop, extracted for testability. Runs until `cancel` fires.
-async fn run_loop(state: AppState, config: GraphRetentionConfig, cancel: CancellationToken) {
-    tracing::info!(?config, "graph_retention loop starting");
-    let mut ticker = tokio::time::interval(config.interval);
+/// Ticker seam shared by production and cancellation tests.
+async fn run_loop<F, Fut>(interval: Duration, cancel: CancellationToken, mut tick: F)
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = ()>,
+{
+    let mut ticker = tokio::time::interval(interval);
     ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
-    // Consume the immediate first tick so we don't sweep right at boot during
-    // the leadership transition.
     ticker.tick().await;
     loop {
         tokio::select! {
-            _ = cancel.cancelled() => {
-                tracing::debug!("graph_retention loop cancelled");
-                break;
-            }
-            _ = ticker.tick() => {
-                run_tick(&state, &config).await;
-            }
+            _ = cancel.cancelled() => break,
+            _ = ticker.tick() => tick().await,
         }
+    }
+}
+
+/// DB-call seam: off never invokes its callback; other modes pass the exact mode.
+async fn dispatch_sweep<F, Fut, T>(mode: RetentionMode, sweep: F) -> Option<T>
+where
+    F: FnOnce(RetentionMode) -> Fut,
+    Fut: Future<Output = T>,
+{
+    match mode {
+        RetentionMode::Off => None,
+        _ => Some(sweep(mode).await),
     }
 }
 
@@ -340,10 +354,14 @@ async fn run_tick(state: &AppState, config: &GraphRetentionConfig) {
                 history_n: config.history_n,
             };
 
-            match retention_repo
-                .sweep_with_retry(request, config.max_retries)
-                .await
-            {
+            let Some(sweep_result) = dispatch_sweep(config.mode, |_| {
+                retention_repo.sweep_with_retry(request, config.max_retries)
+            })
+            .await
+            else {
+                continue;
+            };
+            match sweep_result {
                 Ok(outcome) => {
                     // Emit telemetry with fixed labels only. The outcome carries
                     // bounded counts and fixed skip classes — never identity.
@@ -590,53 +608,59 @@ mod tests {
 
     // ── Mode dispatch tests ───────────────────────────────────────────
 
-    #[test]
-    fn mode_dispatch_off_performs_no_db_calls() {
-        // In `off` mode, run_tick returns immediately without touching the
-        // retention repository. We verify this via the config's mode field:
-        // the dispatch check `config.mode == RetentionMode::Off` short-
-        // circuits before any DB call.
-        let config = GraphRetentionConfig::parse(Some("off"), None, None, None).unwrap();
-        assert_eq!(config.mode, RetentionMode::Off);
-        // The run_tick function checks `config.mode == Off` and returns before
-        // constructing any repository. This test documents that contract.
+    #[tokio::test]
+    async fn mode_dispatch_off_performs_no_db_calls() {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        };
+        let calls = Arc::new(AtomicUsize::new(0));
+        let observed = calls.clone();
+        assert_eq!(
+            dispatch_sweep(RetentionMode::Off, move |_| {
+                observed.fetch_add(1, Ordering::SeqCst);
+                async {}
+            })
+            .await,
+            None
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
     }
 
-    #[test]
-    fn mode_dispatch_dry_run_vs_delete() {
-        let dry_run = GraphRetentionConfig::parse(Some("dry_run"), None, None, None).unwrap();
-        assert_eq!(dry_run.mode, RetentionMode::DryRun);
-
-        let delete = GraphRetentionConfig::parse(Some("delete"), None, None, None).unwrap();
-        assert_eq!(delete.mode, RetentionMode::Delete);
-
-        // The actual DB dispatch difference (non-mutating vs delete) is
-        // handled by RepoGraphRetentionRepository::sweep, which selects
-        // dry_run vs delete paths internally. This loop passes the mode
-        // through faithfully.
-        assert_ne!(dry_run.mode, delete.mode);
+    #[tokio::test]
+    async fn mode_dispatch_dry_run_vs_delete() {
+        use std::sync::{Arc, Mutex};
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        for expected in [RetentionMode::DryRun, RetentionMode::Delete] {
+            let observed = seen.clone();
+            assert_eq!(
+                dispatch_sweep(expected, move |mode| async move {
+                    observed.lock().unwrap().push(mode)
+                })
+                .await,
+                Some(())
+            );
+        }
+        assert_eq!(
+            *seen.lock().unwrap(),
+            vec![RetentionMode::DryRun, RetentionMode::Delete]
+        );
     }
-
-    // ── Cancellation tests ────────────────────────────────────────────
 
     #[tokio::test]
     async fn run_loop_cancels_cleanly() {
-        let config = GraphRetentionConfig::default();
         let cancel = CancellationToken::new();
-
-        // We can't easily build a full AppState in a unit test, but we can
-        // verify the cancellation token wiring: the loop's select! branch on
-        // cancel.cancelled() must fire.
-        //
-        // Instead of a full AppState, test the cancellation semantics
-        // directly: the token is the same type used by git_maintenance.
+        let handle = tokio::spawn(run_loop(
+            Duration::from_secs(60),
+            cancel.clone(),
+            || async {},
+        ));
+        tokio::task::yield_now().await;
         cancel.cancel();
-        assert!(cancel.is_cancelled());
-
-        // A real run_loop would break on the next select! iteration. The
-        // config.mode == Off means run_tick is a no-op, so the loop would
-        // just wait on the ticker — cancellation fires immediately.
-        let _ = config; // suppress unused warning
+        tokio::time::timeout(Duration::from_secs(1), handle)
+            .await
+            .expect("loop exits after cancellation")
+            .expect("loop does not panic");
     }
 
     #[tokio::test]
