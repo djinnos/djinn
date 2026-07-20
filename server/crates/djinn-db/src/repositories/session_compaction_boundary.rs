@@ -303,23 +303,26 @@ impl SessionCompactionBoundaryRepository {
         .fetch_optional(self.db.pool())
         .await?;
 
-        Ok(row.map(|r| CompactionBoundary {
-            id: r.id,
-            session_id: r.session_id,
-            phase: parse_phase(&r.phase),
-            schema_version: r.schema_version,
-            first_message_id: r.first_message_id,
-            last_compacted_message_id: r.last_compacted_message_id,
-            first_retained_message_id: r.first_retained_message_id,
-            retained_tail_hash: r.retained_tail_hash,
-            summary_text: r.summary_text,
-            marker_metadata: r.marker_metadata,
-            trigger: parse_trigger(r.trigger)?,
-            current_context_tokens_before: r.current_context_tokens_before,
-            current_context_tokens_after: r.current_context_tokens_after,
-            created_at: r.created_at,
-            completed_at: r.completed_at,
-        }))
+        row.map(|r| -> Result<CompactionBoundary> {
+            Ok(CompactionBoundary {
+                id: r.id,
+                session_id: r.session_id,
+                phase: parse_phase(&r.phase),
+                schema_version: r.schema_version,
+                first_message_id: r.first_message_id,
+                last_compacted_message_id: r.last_compacted_message_id,
+                first_retained_message_id: r.first_retained_message_id,
+                retained_tail_hash: r.retained_tail_hash,
+                summary_text: r.summary_text,
+                marker_metadata: r.marker_metadata,
+                trigger: parse_trigger(r.trigger)?,
+                current_context_tokens_before: r.current_context_tokens_before,
+                current_context_tokens_after: r.current_context_tokens_after,
+                created_at: r.created_at,
+                completed_at: r.completed_at,
+            })
+        })
+        .transpose()
     }
 
     /// Count all boundary rows (any phase) for a session.
@@ -345,7 +348,13 @@ fn parse_phase(s: &str) -> CompactionPhase {
 }
 
 fn parse_trigger(value: Option<String>) -> Result<Option<CompactionTrigger>> {
-    value.map(|value| CompactionTrigger::parse(&value).ok_or_else(|| crate::Error::InvalidData(format!("unknown compaction trigger: {value}")))).transpose()
+    value
+        .map(|value| {
+            CompactionTrigger::parse(&value).ok_or_else(|| {
+                crate::Error::InvalidData(format!("unknown compaction trigger: {value}"))
+            })
+        })
+        .transpose()
 }
 
 // ---------------------------------------------------------------------------
@@ -450,6 +459,16 @@ mod tests {
         assert!(boundary.summary_text.is_none());
         assert!(boundary.completed_at.is_none());
         assert!(!boundary.created_at.is_empty());
+        // Null telemetry must remain readable (historic-row compatibility).
+        assert!(boundary.trigger.is_none());
+        assert!(boundary.current_context_tokens_before.is_none());
+        assert!(boundary.current_context_tokens_after.is_none());
+
+        // Re-fetch to prove null telemetry survives the SELECT/fetch_by_id path.
+        let fetched = repo.fetch_by_id(&boundary.id).await.unwrap();
+        assert!(fetched.trigger.is_none());
+        assert!(fetched.current_context_tokens_before.is_none());
+        assert!(fetched.current_context_tokens_after.is_none());
     }
 
     // ── Happy path: started → ended transition ────────────────────────
@@ -519,7 +538,11 @@ mod tests {
         assert_eq!(fetched.trigger, Some(CompactionTrigger::Proactive));
         assert_eq!(fetched.current_context_tokens_before, Some(1_024));
         assert_eq!(fetched.current_context_tokens_after, Some(256));
-        let latest = repo.latest_completed_boundary(&session_id).await.unwrap().unwrap();
+        let latest = repo
+            .latest_completed_boundary(&session_id)
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(latest.trigger, Some(CompactionTrigger::Proactive));
         assert_eq!(latest.current_context_tokens_before, Some(1_024));
         assert_eq!(latest.current_context_tokens_after, Some(256));
@@ -554,7 +577,7 @@ mod tests {
         repo.complete_compaction_boundary(CompleteCompactionParams {
             boundary_id: &started.id,
             schema_version: 1,
-                current_context_tokens_after: None,
+            current_context_tokens_after: None,
             first_message_id: Some("m1"),
             last_compacted_message_id: Some("m5"),
             first_retained_message_id: Some("m6"),
@@ -651,7 +674,7 @@ mod tests {
         repo.complete_compaction_boundary(CompleteCompactionParams {
             boundary_id: &b1.id,
             schema_version: 1,
-                current_context_tokens_after: None,
+            current_context_tokens_after: None,
             first_message_id: Some("m1"),
             last_compacted_message_id: Some("m5"),
             first_retained_message_id: Some("m6"),
@@ -681,7 +704,7 @@ mod tests {
         repo.complete_compaction_boundary(CompleteCompactionParams {
             boundary_id: &b2.id,
             schema_version: 1,
-                current_context_tokens_after: None,
+            current_context_tokens_after: None,
             first_message_id: Some("m6"),
             last_compacted_message_id: Some("m10"),
             first_retained_message_id: Some("m11"),
@@ -700,6 +723,10 @@ mod tests {
 
         assert_eq!(latest.summary_text.as_deref(), Some("second summary"));
         assert_eq!(latest.id, b2.id);
+        // Null telemetry must remain readable through latest_completed_boundary.
+        assert!(latest.trigger.is_none());
+        assert!(latest.current_context_tokens_before.is_none());
+        assert!(latest.current_context_tokens_after.is_none());
     }
 
     // ── latest_completed_boundary ignores started-only rows ───────────
@@ -716,8 +743,8 @@ mod tests {
         repo.record_compaction_started(BeginCompactionParams {
             session_id: &session_id,
             schema_version: 1,
-                trigger: None,
-                current_context_tokens_before: None,
+            trigger: None,
+            current_context_tokens_before: None,
             first_message_id: Some("m1"),
             last_compacted_message_id: Some("m5"),
             first_retained_message_id: Some("m6"),
@@ -750,8 +777,8 @@ mod tests {
         repo.record_compaction_started(BeginCompactionParams {
             session_id: &session_id,
             schema_version: 1,
-                trigger: None,
-                current_context_tokens_before: None,
+            trigger: None,
+            current_context_tokens_before: None,
             first_message_id: None,
             last_compacted_message_id: None,
             first_retained_message_id: None,
@@ -784,7 +811,7 @@ mod tests {
         repo.complete_compaction_boundary(CompleteCompactionParams {
             boundary_id: &b2.id,
             schema_version: 1,
-                current_context_tokens_after: None,
+            current_context_tokens_after: None,
             first_message_id: None,
             last_compacted_message_id: None,
             first_retained_message_id: None,
@@ -1021,7 +1048,7 @@ mod tests {
         repo.complete_compaction_boundary(CompleteCompactionParams {
             boundary_id: &completed.id,
             schema_version: 1,
-                current_context_tokens_after: None,
+            current_context_tokens_after: None,
             first_message_id: Some("msg-1"),
             last_compacted_message_id: Some("msg-5"),
             first_retained_message_id: Some("msg-6"),
@@ -1067,5 +1094,87 @@ mod tests {
             Some("First successful summary.")
         );
         assert_eq!(latest.id, completed.id);
+    }
+
+    // ── Telemetry round-trip: all committed trigger values ────────────
+
+    /// Every committed trigger string round-trips through INSERT/SELECT with
+    /// populated before/after occupancy, surviving both `fetch_by_id` and
+    /// `latest_completed_boundary`. Unknown strings must never be accepted as a
+    /// committed trigger.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn nullable_trigger_telemetry_round_trips() {
+        let db = test_db();
+        let (_project_id, _task_id, session_id) =
+            create_session(db.clone(), EventBus::noop()).await;
+
+        let repo = SessionCompactionBoundaryRepository::new(db);
+
+        for trigger in CompactionTrigger::ALL {
+            let started = repo
+                .record_compaction_started(BeginCompactionParams {
+                    session_id: &session_id,
+                    schema_version: 1,
+                    trigger: Some(trigger),
+                    current_context_tokens_before: Some(10_000),
+                    first_message_id: Some("m1"),
+                    last_compacted_message_id: Some("m5"),
+                    first_retained_message_id: Some("m6"),
+                    retained_tail_hash: Some("h"),
+                    marker_metadata: None,
+                })
+                .await
+                .expect("record_compaction_started");
+
+            // The started row reflects the trigger + before occupancy.
+            assert_eq!(started.trigger, Some(trigger));
+            assert_eq!(started.current_context_tokens_before, Some(10_000));
+
+            let completed = repo
+                .complete_compaction_boundary(CompleteCompactionParams {
+                    boundary_id: &started.id,
+                    schema_version: 1,
+                    current_context_tokens_after: Some(2_000),
+                    first_message_id: Some("m1"),
+                    last_compacted_message_id: Some("m5"),
+                    first_retained_message_id: Some("m6"),
+                    retained_tail_hash: Some("h"),
+                    summary_text: "summary",
+                    marker_metadata: None,
+                })
+                .await
+                .expect("complete_compaction_boundary");
+
+            // fetch_by_id round-trip.
+            assert_eq!(completed.trigger, Some(trigger));
+            assert_eq!(completed.current_context_tokens_before, Some(10_000));
+            assert_eq!(completed.current_context_tokens_after, Some(2_000));
+
+            let fetched = repo.fetch_by_id(&started.id).await.unwrap();
+            assert_eq!(fetched.trigger, Some(trigger));
+            assert_eq!(fetched.current_context_tokens_before, Some(10_000));
+            assert_eq!(fetched.current_context_tokens_after, Some(2_000));
+
+            // latest_completed_boundary round-trip (this is the most recent
+            // completed boundary, so it should be the one we just finished).
+            let latest = repo
+                .latest_completed_boundary(&session_id)
+                .await
+                .unwrap()
+                .expect("completed boundary");
+            assert_eq!(latest.trigger, Some(trigger));
+            assert_eq!(latest.current_context_tokens_before, Some(10_000));
+            assert_eq!(latest.current_context_tokens_after, Some(2_000));
+        }
+
+        // Unknown trigger strings are rejected by the parser.
+        assert!(CompactionTrigger::parse("unknown").is_none());
+        assert!(CompactionTrigger::parse("").is_none());
+
+        // All six committed strings parse and convert back exactly.
+        for trigger in CompactionTrigger::ALL {
+            let s = trigger.as_str();
+            assert_eq!(CompactionTrigger::parse(s), Some(trigger));
+        }
     }
 }
