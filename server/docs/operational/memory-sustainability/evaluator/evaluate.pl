@@ -149,7 +149,9 @@ sub evalrun {
         if ( $ph eq 'T0' ) {
             # T0 is recorded with NO graph installed.
             # graph_generation_id MUST be null (JSON null, not absent/empty).
-            if ( defined $x->{graph_generation_id} ) {
+            if ( !exists $x->{graph_generation_id} ) {
+                push @e, "$p.graph_generation_id is required at T0";
+            } elsif ( defined $x->{graph_generation_id} ) {
                 push @e, "$p.graph_generation_id must be null at T0";
             }
             # graph_slot_present MUST be a JSON boolean and exactly false.

@@ -173,6 +173,26 @@ sub enc { JSON::PP->new->canonical->encode( $_[0] ) }
     ($a) = run_eval($x);
     is( $a->{candidate}{status}, 'fail',
         'T0 graph_generation_id non-null fails' );
+
+    $x = raw();
+    delete $x->{samples}[0]{graph_generation_id};
+    my ( $missing, undef, $missing_rc ) = run_eval($x);
+    is( $missing->{candidate}{status}, 'fail',
+        'T0 graph_generation_id missing fails' );
+    isnt( $missing_rc, 0,
+        'T0 graph_generation_id missing exits nonzero' );
+    like( enc( $missing->{candidate}{checks} ),
+        qr/samples\[0\]\.graph_generation_id is required at T0/,
+        'T0 graph_generation_id missing identifies the required signal' );
+
+    $x = raw();
+    $x->{route_samples}[0]{rss_after_bytes}--;
+    $x->{samples}[0]{graph_generation_id} = undef;
+    my ( $null, undef, $null_rc ) = run_eval($x);
+    is( $null->{candidate}{status}, 'pass',
+        'T0 graph_generation_id explicit JSON null remains valid' );
+    is( $null_rc, 0,
+        'T0 graph_generation_id explicit JSON null exits 0' );
 }
 
 # ===================================================================
