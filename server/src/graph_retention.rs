@@ -649,11 +649,21 @@ mod tests {
 
     #[tokio::test]
     async fn run_loop_cancels_cleanly() {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        };
+
         let cancel = CancellationToken::new();
+        let ticks = Arc::new(AtomicUsize::new(0));
+        let observed = ticks.clone();
         let handle = tokio::spawn(run_loop(
             Duration::from_secs(60),
             cancel.clone(),
-            || async {},
+            move || {
+                observed.fetch_add(1, Ordering::SeqCst);
+                async {}
+            },
         ));
         tokio::task::yield_now().await;
         cancel.cancel();
@@ -661,6 +671,7 @@ mod tests {
             .await
             .expect("loop exits after cancellation")
             .expect("loop does not panic");
+        assert_eq!(ticks.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test]
