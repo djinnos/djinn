@@ -585,8 +585,6 @@ impl CompletionIntentCallbacks {
         }
     }
 
-    /// Model the configured production resolver's task-run worktree precondition
-    /// while retaining the reusable material/executor probe used by C2 tests.
     pub(crate) fn for_reuse_requiring_workspace(
         expected_task_id: String,
         material: FinalVerificationResolvedMaterial,
@@ -1299,102 +1297,6 @@ async fn repeat_worker_reuses_compatible_persisted_pass_after_completion_intent(
     assert_eq!(*probe.lease_acquisitions.lock().unwrap(), 0);
     assert_eq!(*probe.canonical_executions.lock().unwrap(), 0);
     assert!(error_ids(&conversation).is_empty());
-}
-
-#[tokio::test]
-async fn configured_pod_row_without_persisted_workspace_fails_closed() {
-    let db = create_test_db();
-    let project = create_test_project(&db).await;
-    let epic = create_test_epic(&db, &project.id).await;
-    let task = create_test_task(&db, &project.id, &epic.id).await;
-    let tree = test_tempdir("reply-loop-configured-null-workspace-");
-    let run_id = uuid::Uuid::now_v7().to_string();
-    let runs = TaskRunRepository::new(db.clone());
-    runs.create(CreateTaskRunParams {
-        id: &run_id,
-        project_id: &project.id,
-        task_id: &task.id,
-        trigger_type: "dispatch",
-        status: Some("running"),
-        // This is deliberately left NULL: unlike the hit/fallback fixtures, no
-        // first-stage workspace persistence occurs before configured resolution.
-        workspace_path: None,
-        mirror_ref: None,
-    })
-    .await
-    .unwrap();
-    assert!(
-        runs.get(&run_id)
-            .await
-            .unwrap()
-            .expect("k8s-shaped row exists")
-            .workspace_path
-            .is_none(),
-        "configured pod rows fail closed until the in-pod stage persists a workspace"
-    );
-    SettingsRepository::new(db.clone(), crate::test_helpers::test_events())
-        .set(
-            &format!("project.{}.verify_run_reuse_enabled", project.id),
-            "true",
-        )
-        .await
-        .unwrap();
-    let callbacks = Arc::new(CompletionIntentCallbacks::for_reuse_requiring_workspace(
-        task.id.clone(),
-        reuse_material(tree.path().to_path_buf()),
-    ));
-    let slot_ctx = agent_context_from_db_with_callbacks(db, callbacks.clone());
-    let session = SessionRepository::new(slot_ctx.db.clone(), slot_ctx.event_bus.clone())
-        .create(CreateSessionParams {
-            project_id: &project.id,
-            task_id: Some(&task.id),
-            model: "synthetic/test-model",
-            agent_type: "worker",
-            metadata_json: None,
-            task_run_id: Some(&run_id),
-            pricing: None,
-            cost_basis: None,
-        })
-        .await
-        .unwrap();
-    let provider = FakeProvider::script_with_terminal_error(
-        vec![submit_turn("submit-null-workspace", &task.id, "configured")],
-        "terminal provider failure after configured workspace rejection",
-    );
-    let mut conversation = base_conversation();
-    let cancel = CancellationToken::new();
-    let (result, output, _, _, _, _) = run_with_provider(
-        &provider,
-        &[dummy_tool_schema("submit_work")],
-        &mut conversation,
-        &slot_ctx,
-        tree.path().to_str().unwrap(),
-        &task.id,
-        &session.id,
-        &cancel,
-    )
-    .await;
-
-    assert!(
-        result.is_err(),
-        "configured resolution must reject the NULL row"
-    );
-    assert!(output.completion_intent.is_none());
-    assert!(output.finalize_payload.is_none());
-    assert_eq!(callbacks.coordinator_count(), 1);
-    let probe = callbacks.reuse_probe.as_ref().unwrap();
-    assert_eq!(*probe.lease_requests.lock().unwrap(), 0);
-    assert_eq!(*probe.lease_acquisitions.lock().unwrap(), 0);
-    assert_eq!(*probe.canonical_executions.lock().unwrap(), 0);
-    assert!(
-        runs.get(&run_id)
-            .await
-            .unwrap()
-            .expect("configured row remains")
-            .workspace_path
-            .is_none(),
-        "the failed boundary must not synthesize a workspace or a reuse hit"
-    );
 }
 
 #[tokio::test]

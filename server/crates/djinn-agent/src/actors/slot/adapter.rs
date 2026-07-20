@@ -682,20 +682,26 @@ mod resolve_final_verification_tests {
         }
     }
 
-    /// A configured plan with a recorded worktree resolves full material.
+    /// Every completion role reaches this production resolver. A pod-shaped
+    /// row must therefore resolve from the durable first-stage update rather
+    /// than from a worktree supplied by a reply-loop fixture.
     #[tokio::test]
-    async fn configured_plan_with_worktree_resolves_material() {
-        let fx = fixture().await;
-        configure_final_verification_plan(&fx).await;
-        persist_stage_workspace(&fx, "/workspace/run-clone").await;
-        let material = resolve(&fx)
-            .await
-            .expect("configured plan with worktree must resolve")
-            .expect("configured plan must not be a typed skip");
-        assert_eq!(
-            material.execution_request.worktree,
-            PathBuf::from("/workspace/run-clone")
-        );
-        assert_eq!(material.required_checks, vec!["lint"]);
+    async fn production_resolver_uses_persisted_pod_workspace_for_completion_roles() {
+        for role in ["worker", "repeat-worker", "reviewer"] {
+            let fx = fixture().await;
+            configure_final_verification_plan(&fx).await;
+            let workspace = format!("/workspace/{role}-clone");
+            persist_stage_workspace(&fx, &workspace).await;
+            let material = resolve(&fx)
+                .await
+                .expect("configured plan with worktree must resolve")
+                .expect("configured plan must not be a typed skip");
+            assert_eq!(
+                material.execution_request.worktree,
+                PathBuf::from(&workspace),
+                "{role} completion must use the path stored after pod dispatch"
+            );
+            assert_eq!(material.required_checks, vec!["lint"]);
+        }
     }
 }
