@@ -462,11 +462,16 @@ async fn reviewer_reuses_post_authoring_worker_pass_with_zero_commands_and_zero_
             task_id: &task.id,
             trigger_type: "dispatch",
             status: Some("closed"),
-            workspace_path: Some(tree.path().to_str().unwrap()),
+            // The worker row begins exactly as djinn-k8s dispatch creates it.
+            workspace_path: None,
             mirror_ref: None,
         })
         .await
         .unwrap();
+    TaskRunRepository::new(db.clone())
+        .set_workspace_path(&worker_run_id, tree.path().to_str().unwrap())
+        .await
+        .expect("worker stage persists the pod workspace path");
 
     // Enable reuse so the reviewer consultation is live.
     SettingsRepository::new(db.clone(), crate::test_helpers::test_events())
@@ -524,11 +529,16 @@ async fn reviewer_reuses_post_authoring_worker_pass_with_zero_commands_and_zero_
             task_id: &task.id,
             trigger_type: "dispatch",
             status: Some("running"),
-            workspace_path: Some(tree.path().to_str().unwrap()),
+            // Reviewer pod rows likewise have no workspace at dispatch.
+            workspace_path: None,
             mirror_ref: None,
         })
         .await
         .unwrap();
+    TaskRunRepository::new(db.clone())
+        .set_workspace_path(&reviewer_run_id, tree.path().to_str().unwrap())
+        .await
+        .expect("reviewer stage persists the pod workspace path");
 
     let callbacks = Arc::new(ReviewerReuseCallbacks::new(material));
     let slot_ctx = agent_context_from_db_with_callbacks(db, callbacks.clone());
@@ -684,11 +694,15 @@ async fn reviewer_arbitrary_shell_command_is_not_intercepted_by_reuse() {
             task_id: &task.id,
             trigger_type: "dispatch",
             status: Some("running"),
-            workspace_path: Some(tree.path().to_str().unwrap()),
+            workspace_path: None,
             mirror_ref: None,
         })
         .await
         .unwrap();
+    TaskRunRepository::new(db.clone())
+        .set_workspace_path(&run_id, tree.path().to_str().unwrap())
+        .await
+        .expect("reviewer stage persists the pod workspace path");
     SettingsRepository::new(db.clone(), crate::test_helpers::test_events())
         .set(
             &format!("project.{}.verify_run_reuse_enabled", project.id),
