@@ -29,6 +29,12 @@ image:
 cacheCleanup:
   mode: dry_run
 
+# Keep the local chart explicit about the production-safe graph-retention
+# rollout posture: report candidates without deleting generations.
+graphRetention:
+  mode: dry_run
+  historyN: 3
+
 # Tilt owns this stable local-development identity and creates the referenced
 # Secret alongside the rendered chart. Production callers supply their own.
 migration:

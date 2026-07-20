@@ -54,6 +54,11 @@ pub struct CreateTaskAttemptParams<'a> {
     pub session_id: Option<&'a str>,
     /// If `None`, the next per-task `attempt_seq` is allocated automatically.
     pub attempt_seq: Option<i32>,
+    /// Immutable coordinator-incarnation UUID that owns this dispatch.
+    /// `None` preserves legacy NULL storage.
+    pub dispatch_owner_incarnation_id: Option<&'a str>,
+    /// Exact dispatch-group UUID. `None` preserves legacy NULL storage.
+    pub dispatch_group_id: Option<&'a str>,
 }
 
 /// Parameters for advancing an attempt to `submitted`.
@@ -187,6 +192,14 @@ impl TaskAttemptRepository {
         Ok(())
     }
 
+    fn validate_optional_uuid(name: &str, value: Option<&str>) -> Result<()> {
+        if let Some(value) = value {
+            Uuid::parse_str(value)
+                .map_err(|_| DbError::InvalidData(format!("{name} must be a UUID")))?;
+        }
+        Ok(())
+    }
+
     fn validate_bounded_field(name: &str, value: Option<&str>, max: usize) -> Result<()> {
         if let Some(v) = value
             && v.len() > max
@@ -234,6 +247,11 @@ impl TaskAttemptRepository {
     ) -> Result<TaskAttempt> {
         self.db.ensure_initialized().await?;
         Self::validate_dispatch_key(params.dispatch_key)?;
+        Self::validate_optional_uuid(
+            "dispatch_owner_incarnation_id",
+            params.dispatch_owner_incarnation_id,
+        )?;
+        Self::validate_optional_uuid("dispatch_group_id", params.dispatch_group_id)?;
         if let Some(seq) = params.attempt_seq
             && seq <= 0
         {
@@ -251,8 +269,9 @@ impl TaskAttemptRepository {
 
             let insert = sqlx::query!(
                 r#"INSERT INTO task_attempts
-                    (id, task_id, role, attempt_seq, dispatch_key, session_id, outcome)
-                 VALUES ($1, $2, $3, $4, $5, $6, 'pending')
+                    (id, task_id, role, attempt_seq, dispatch_key, session_id, outcome,
+                     dispatch_owner_incarnation_id, dispatch_group_id)
+                 VALUES ($1, $2, $3, $4, $5, $6, 'pending', $7, $8)
                  ON CONFLICT (dispatch_key) DO NOTHING"#,
                 params.id,
                 params.task_id,
@@ -260,6 +279,8 @@ impl TaskAttemptRepository {
                 attempt_seq,
                 params.dispatch_key,
                 params.session_id,
+                params.dispatch_owner_incarnation_id,
+                params.dispatch_group_id,
             )
             .execute(self.db.pool())
             .await;
@@ -319,6 +340,7 @@ impl TaskAttemptRepository {
             r#"SELECT id, task_id, role, attempt_seq, dispatch_key, session_id,
                 outcome AS "outcome!", guard_decision, guard_reason, summary, summary_json::text,
                 log_tail, checkpoint_ref, submit_ref, pr_url, mirror_head_sha, github_head_sha, github_publication_error,
+                dispatch_owner_incarnation_id, dispatch_group_id,
                 created_at AS "created_at!", updated_at AS "updated_at!", submitted_at, terminal_at
              FROM task_attempts WHERE id = $1"#,
             id
@@ -334,6 +356,7 @@ impl TaskAttemptRepository {
             r#"SELECT id, task_id, role, attempt_seq, dispatch_key, session_id,
                 outcome AS "outcome!", guard_decision, guard_reason, summary, summary_json::text,
                 log_tail, checkpoint_ref, submit_ref, pr_url, mirror_head_sha, github_head_sha, github_publication_error,
+                dispatch_owner_incarnation_id, dispatch_group_id,
                 created_at AS "created_at!", updated_at AS "updated_at!", submitted_at, terminal_at
              FROM task_attempts WHERE dispatch_key = $1"#,
             dispatch_key
@@ -794,6 +817,7 @@ impl TaskAttemptRepository {
             r#"SELECT id, task_id, role, attempt_seq, dispatch_key, session_id,
                 outcome AS "outcome!", guard_decision, guard_reason, summary, summary_json::text,
                 log_tail, checkpoint_ref, submit_ref, pr_url, mirror_head_sha, github_head_sha, github_publication_error,
+                dispatch_owner_incarnation_id, dispatch_group_id,
                 created_at AS "created_at!", updated_at AS "updated_at!", submitted_at, terminal_at
              FROM task_attempts
              WHERE task_id = $1
@@ -818,6 +842,7 @@ impl TaskAttemptRepository {
                 r#"SELECT id, task_id, role, attempt_seq, dispatch_key, session_id,
                     outcome AS "outcome!", guard_decision, guard_reason, summary, summary_json::text,
                     log_tail, checkpoint_ref, submit_ref, pr_url, mirror_head_sha, github_head_sha, github_publication_error,
+                    dispatch_owner_incarnation_id, dispatch_group_id,
                     created_at AS "created_at!", updated_at AS "updated_at!", submitted_at, terminal_at
                  FROM task_attempts
                  WHERE task_id = $1 AND role = $2 AND outcome IN ('pending', 'submitted')
@@ -834,6 +859,7 @@ impl TaskAttemptRepository {
                 r#"SELECT id, task_id, role, attempt_seq, dispatch_key, session_id,
                     outcome AS "outcome!", guard_decision, guard_reason, summary, summary_json::text,
                     log_tail, checkpoint_ref, submit_ref, pr_url, mirror_head_sha, github_head_sha, github_publication_error,
+                    dispatch_owner_incarnation_id, dispatch_group_id,
                     created_at AS "created_at!", updated_at AS "updated_at!", submitted_at, terminal_at
                  FROM task_attempts
                  WHERE task_id = $1 AND outcome IN ('pending', 'submitted')
@@ -1010,6 +1036,7 @@ impl TaskAttemptRepository {
                 r#"SELECT id, task_id, role, attempt_seq, dispatch_key, session_id,
                     outcome AS "outcome!", guard_decision, guard_reason, summary, summary_json::text,
                     log_tail, checkpoint_ref, submit_ref, pr_url, mirror_head_sha, github_head_sha, github_publication_error,
+                    dispatch_owner_incarnation_id, dispatch_group_id,
                     created_at AS "created_at!", updated_at AS "updated_at!", submitted_at, terminal_at
                  FROM task_attempts
                  WHERE task_id = $1 AND role = $2 AND outcome = 'submitted'
@@ -1026,6 +1053,7 @@ impl TaskAttemptRepository {
                 r#"SELECT id, task_id, role, attempt_seq, dispatch_key, session_id,
                     outcome AS "outcome!", guard_decision, guard_reason, summary, summary_json::text,
                     log_tail, checkpoint_ref, submit_ref, pr_url, mirror_head_sha, github_head_sha, github_publication_error,
+                    dispatch_owner_incarnation_id, dispatch_group_id,
                     created_at AS "created_at!", updated_at AS "updated_at!", submitted_at, terminal_at
                  FROM task_attempts
                  WHERE task_id = $1 AND outcome = 'submitted'
@@ -1052,6 +1080,7 @@ impl TaskAttemptRepository {
                 r#"SELECT id, task_id, role, attempt_seq, dispatch_key, session_id,
                     outcome AS "outcome!", guard_decision, guard_reason, summary, summary_json::text,
                     log_tail, checkpoint_ref, submit_ref, pr_url, mirror_head_sha, github_head_sha, github_publication_error,
+                    dispatch_owner_incarnation_id, dispatch_group_id,
                     created_at AS "created_at!", updated_at AS "updated_at!", submitted_at, terminal_at
                  FROM task_attempts
                  WHERE task_id = $1 AND role = $2 AND outcome = 'pending'
@@ -1068,6 +1097,7 @@ impl TaskAttemptRepository {
                 r#"SELECT id, task_id, role, attempt_seq, dispatch_key, session_id,
                     outcome AS "outcome!", guard_decision, guard_reason, summary, summary_json::text,
                     log_tail, checkpoint_ref, submit_ref, pr_url, mirror_head_sha, github_head_sha, github_publication_error,
+                    dispatch_owner_incarnation_id, dispatch_group_id,
                     created_at AS "created_at!", updated_at AS "updated_at!", submitted_at, terminal_at
                  FROM task_attempts
                  WHERE task_id = $1 AND outcome = 'pending'
@@ -1268,6 +1298,7 @@ impl TaskAttemptRepository {
                 outcome, guard_decision, guard_reason, summary, summary_json::text,
                 log_tail, checkpoint_ref, submit_ref, pr_url,
                 mirror_head_sha, github_head_sha, github_publication_error,
+                dispatch_owner_incarnation_id, dispatch_group_id,
                 created_at, updated_at, submitted_at, terminal_at
              FROM task_attempts"#;
 
@@ -1381,6 +1412,8 @@ mod tests {
                 dispatch_key: "dk-1",
                 session_id: None,
                 attempt_seq: None,
+                dispatch_owner_incarnation_id: None,
+                dispatch_group_id: None,
             })
             .await
             .unwrap();
@@ -1411,6 +1444,8 @@ mod tests {
                 dispatch_key: "dk-idem",
                 session_id: None,
                 attempt_seq: None,
+                dispatch_owner_incarnation_id: None,
+                dispatch_group_id: None,
             })
             .await
             .unwrap();
@@ -1424,6 +1459,8 @@ mod tests {
                 dispatch_key: "dk-idem",
                 session_id: None,
                 attempt_seq: None,
+                dispatch_owner_incarnation_id: None,
+                dispatch_group_id: None,
             })
             .await
             .unwrap();
@@ -1449,6 +1486,8 @@ mod tests {
                 dispatch_key: &format!("dk-{i}"),
                 session_id: None,
                 attempt_seq: None,
+                dispatch_owner_incarnation_id: None,
+                dispatch_group_id: None,
             })
             .await
             .unwrap();
@@ -1474,6 +1513,8 @@ mod tests {
                 dispatch_key: "dk-submit",
                 session_id: None,
                 attempt_seq: None,
+                dispatch_owner_incarnation_id: None,
+                dispatch_group_id: None,
             })
             .await
             .unwrap();
@@ -1536,6 +1577,8 @@ mod tests {
                 dispatch_key: "dk-term",
                 session_id: None,
                 attempt_seq: None,
+                dispatch_owner_incarnation_id: None,
+                dispatch_group_id: None,
             })
             .await
             .unwrap();
@@ -1634,6 +1677,8 @@ mod tests {
                 dispatch_key: "dk-fill",
                 session_id: None,
                 attempt_seq: None,
+                dispatch_owner_incarnation_id: None,
+                dispatch_group_id: None,
             })
             .await
             .unwrap();
@@ -1724,6 +1769,8 @@ mod tests {
                 dispatch_key: "dk-latest-1",
                 session_id: None,
                 attempt_seq: None,
+                dispatch_owner_incarnation_id: None,
+                dispatch_group_id: None,
             })
             .await
             .unwrap();
@@ -1737,6 +1784,8 @@ mod tests {
                 dispatch_key: "dk-latest-2",
                 session_id: None,
                 attempt_seq: None,
+                dispatch_owner_incarnation_id: None,
+                dispatch_group_id: None,
             })
             .await
             .unwrap();
@@ -1799,6 +1848,8 @@ mod tests {
                     dispatch_key: &format!("dk-order-{i}"),
                     session_id: None,
                     attempt_seq: None,
+                    dispatch_owner_incarnation_id: None,
+                    dispatch_group_id: None,
                 })
                 .await
                 .unwrap();
@@ -1848,6 +1899,8 @@ mod tests {
                 dispatch_key: "dk-1",
                 session_id: None,
                 attempt_seq: None,
+                dispatch_owner_incarnation_id: None,
+                dispatch_group_id: None,
             })
             .await
             .unwrap();
@@ -1900,6 +1953,8 @@ mod tests {
                 dispatch_key: "dk-infra",
                 session_id: None,
                 attempt_seq: None,
+                dispatch_owner_incarnation_id: None,
+                dispatch_group_id: None,
             })
             .await
             .unwrap();
@@ -1942,6 +1997,8 @@ mod tests {
                 dispatch_key: "dk-infra-merge",
                 session_id: None,
                 attempt_seq: None,
+                dispatch_owner_incarnation_id: None,
+                dispatch_group_id: None,
             })
             .await
             .unwrap();
@@ -1982,6 +2039,8 @@ mod tests {
                 dispatch_key: "dk-infra-term",
                 session_id: None,
                 attempt_seq: None,
+                dispatch_owner_incarnation_id: None,
+                dispatch_group_id: None,
             })
             .await
             .unwrap();
@@ -2036,6 +2095,8 @@ mod tests {
                 dispatch_key: &format!("dk-ledger-{i}"),
                 session_id: None,
                 attempt_seq: None,
+                dispatch_owner_incarnation_id: None,
+                dispatch_group_id: None,
             })
             .await
             .unwrap();
@@ -2123,6 +2184,8 @@ mod tests {
             dispatch_key: "dk-ledger-role-w",
             session_id: None,
             attempt_seq: None,
+            dispatch_owner_incarnation_id: None,
+            dispatch_group_id: None,
         })
         .await
         .unwrap();
@@ -2192,6 +2255,8 @@ mod tests {
             dispatch_key: "dk-ledger-meta",
             session_id: None,
             attempt_seq: None,
+            dispatch_owner_incarnation_id: None,
+            dispatch_group_id: None,
         })
         .await
         .unwrap();
@@ -2261,6 +2326,8 @@ mod tests {
             dispatch_key: &format!("{task_id}:worker:dispatch-1"),
             session_id: None,
             attempt_seq: None,
+            dispatch_owner_incarnation_id: None,
+            dispatch_group_id: None,
         })
         .await
         .unwrap();

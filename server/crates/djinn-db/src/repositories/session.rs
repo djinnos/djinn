@@ -1614,6 +1614,7 @@ mod tests {
                 status: Some("starting"),
                 workspace_path: None,
                 mirror_ref: None,
+                dispatch_group_id: None,
             })
             .await
             .unwrap();
@@ -1689,6 +1690,7 @@ mod tests {
                 status: Some("starting"),
                 workspace_path: None,
                 mirror_ref: None,
+                dispatch_group_id: None,
             })
             .await
             .unwrap();
@@ -2428,6 +2430,7 @@ mod tests {
                 status: Some("running"),
                 workspace_path: None,
                 mirror_ref: None,
+                dispatch_group_id: None,
             })
             .await
             .unwrap();

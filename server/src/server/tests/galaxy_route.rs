@@ -14,13 +14,15 @@ use axum::{
     http::{Request, StatusCode, header},
 };
 use djinn_db::{
-    CreateUserAuthSession, Database, RepoGraphGenerationRepository, ReservedGalaxyArtifactChunk,
-    ReservedGalaxyArtifactManifest, ReservedGraphPublication, ReservedPublicationFailureStage,
-    SessionAuthRepository, UserRepository,
+    CreateUserAuthSession, Database, MAX_RETENTION_BATCH, RepoGraphGenerationRepository,
+    RepoGraphRetentionRepository, ReservedGalaxyArtifactChunk, ReservedGalaxyArtifactManifest,
+    ReservedGraphPublication, ReservedPublicationFailureStage, RetentionMode,
+    RetentionSweepRequest, SessionAuthRepository, UserRepository,
 };
 use http_body_util::BodyExt;
 use sha2::{Digest, Sha256};
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
+use tokio::sync::Barrier;
 use tokio_util::sync::CancellationToken;
 use tower::ServiceExt;
 fn hex(b: &[u8]) -> String {
@@ -566,5 +568,205 @@ async fn peak_rss_growth_for_600_chunk_stream_is_bounded() {
         growth <= 32 * 1024 * 1024,
         "peak request RSS growth {growth} bytes exceeds the 32 MiB bound \
          (baseline={baseline}, peak={peak})"
+    );
+}
+
+/// A selected route response holds G's canonical shared session pin until its
+/// final frame. Retention must skip G without waiting, fill its batch from
+/// later unpinned candidates, and only prune G once that pin is released.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn pinned_route_stream_survives_retention_then_prunes_after_final_frame() {
+    let db = test_helpers::create_test_db();
+    let generations = RepoGraphGenerationRepository::new(db.clone());
+    let p = "galaxy-retention-pin";
+    generations
+        .prepare_publication_test_project(p)
+        .await
+        .unwrap();
+    let (router, token) = app(db.clone()).await;
+
+    let g = publication(p, "stream-g", &[b"G-first-", b"G-middle-", b"G-final"]);
+    let gid = g.generation_id.clone();
+    let g_chunks: Vec<Vec<u8>> = g.chunks.iter().map(|chunk| chunk.bytes.clone()).collect();
+    let g_tag = format!("\"{}\"", g.artifact.transport_sha256);
+    generations.publish_reserved_generation(g).await.unwrap();
+
+    // Selection forms headers and acquires G's shared pin before body polling.
+    let response = get(&router, &token, p).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()[HEADER_GENERATION_ID], gid);
+    assert_eq!(response.headers()[header::ETAG], g_tag);
+    assert!(
+        !generations
+            .try_generation_stream_pin_exclusive_for_test(&gid)
+            .await
+            .unwrap(),
+        "selected response must own G's shared stream pin"
+    );
+
+    // Begin the selected response before moving the pointer. This makes the
+    // later assertions specifically about G's *remaining* frames.
+    let mut body = response.into_body();
+    let first = tokio::time::timeout(Duration::from_secs(2), body.frame())
+        .await
+        .expect("G's first frame must be ready")
+        .expect("G must have a first frame")
+        .expect("pinned G first frame must remain readable")
+        .into_data()
+        .expect("galaxy route emits data frames");
+    assert_eq!(first.as_ref(), g_chunks[0].as_slice());
+    let mut delivered = vec![first];
+
+    // G comes first in publish order, so the sweep sees its active pin before
+    // continuing to these candidates and filling all 25 batch slots.
+    let mut blocked_candidate_id = None;
+    for candidate_index in 0..MAX_RETENTION_BATCH {
+        let commit = format!("retention-candidate-{candidate_index}");
+        let candidate = publication(p, &commit, &[b"candidate"]);
+        if candidate_index == 0 {
+            blocked_candidate_id = Some(candidate.generation_id.clone());
+        }
+        generations
+            .publish_reserved_generation(candidate)
+            .await
+            .unwrap();
+    }
+    let blocked_candidate_id = blocked_candidate_id.expect("first candidate identity");
+    let history = publication(p, "retained-history", &[b"history"]);
+    let history_id = history.generation_id.clone();
+    generations
+        .publish_reserved_generation(history)
+        .await
+        .unwrap();
+    let g2 = publication(p, "stream-g2", &[b"G2-current"]);
+    let g2id = g2.generation_id.clone();
+    generations.publish_reserved_generation(g2).await.unwrap();
+
+    // Hold the first unpinned candidate's row lock. Because G is older, a live
+    // production sweep can reach this lock only after probing and skipping G's
+    // shared pin. This keeps the sweep in flight while the route consumes G's
+    // remaining frames, without sleeps or a parallel route fixture.
+    let row_locked = Arc::new(Barrier::new(2));
+    let release_row_lock = Arc::new(Barrier::new(2));
+    let lock_generations = RepoGraphGenerationRepository::new(db.clone());
+    let lock_ready = row_locked.clone();
+    let lock_release = release_row_lock.clone();
+    let row_locker = tokio::spawn(async move {
+        lock_generations
+            .hold_generation_row_lock_for_test(&blocked_candidate_id, lock_ready, lock_release)
+            .await
+    });
+    row_locked.wait().await;
+
+    // Start the production sweep at a deterministic barrier. History N=2
+    // preserves current G2 and the history row.
+    let start = Arc::new(Barrier::new(2));
+    let sweep_start = start.clone();
+    let sweep_db = db.clone();
+    let mut sweep = tokio::spawn(async move {
+        sweep_start.wait().await;
+        RepoGraphRetentionRepository::new(sweep_db)
+            .sweep(RetentionSweepRequest {
+                project_id: p,
+                mode: RetentionMode::Delete,
+                history_n: 2,
+            })
+            .await
+    });
+    start.wait().await;
+
+    // Bounded waiting proves the sweep is blocked after its nonblocking G pin
+    // probe, rather than waiting for the reader. Consume every remaining frame
+    // while that production sweep is still live.
+    assert!(
+        tokio::time::timeout(Duration::from_millis(250), &mut sweep)
+            .await
+            .is_err(),
+        "retention must remain live at the deliberately locked unpinned candidate"
+    );
+    while let Some(frame) = body.frame().await {
+        let bytes = frame
+            .expect("pinned G frame must remain readable")
+            .into_data()
+            .expect("galaxy route emits data frames");
+        let index = delivered.len();
+        assert_eq!(bytes.as_ref(), g_chunks[index].as_slice());
+        delivered.push(bytes);
+    }
+    assert_eq!(delivered.len(), g_chunks.len());
+
+    // Let the live sweep fill its batch and complete only after all of G has
+    // been delivered and its reader pin has been released.
+    release_row_lock.wait().await;
+    tokio::time::timeout(Duration::from_secs(2), row_locker)
+        .await
+        .expect("candidate row lock must release")
+        .expect("candidate row lock task must not panic")
+        .expect("candidate row lock transaction must roll back");
+    let first_sweep = tokio::time::timeout(Duration::from_secs(2), sweep)
+        .await
+        .expect("retention must finish after candidate row unlock")
+        .expect("retention task must not panic")
+        .expect("production retention sweep must succeed");
+    assert_eq!(first_sweep.skipped_active_pin, 1);
+    assert_eq!(first_sweep.candidates, MAX_RETENTION_BATCH);
+    assert_eq!(first_sweep.deleted, MAX_RETENTION_BATCH);
+
+    assert!(
+        generations
+            .try_generation_stream_pin_exclusive_for_test(&gid)
+            .await
+            .unwrap(),
+        "final frame consumption must release G's reader pin"
+    );
+
+    let later_sweep = tokio::time::timeout(
+        Duration::from_secs(2),
+        RepoGraphRetentionRepository::new(db.clone()).sweep(RetentionSweepRequest {
+            project_id: p,
+            mode: RetentionMode::Delete,
+            history_n: 2,
+        }),
+    )
+    .await
+    .expect("later retention sweep must finish")
+    .expect("later production retention sweep must succeed");
+    assert_eq!(
+        later_sweep.deleted, 1,
+        "released G becomes the sole candidate"
+    );
+
+    // Production deletion removes compatibility before immutable G, then FK
+    // cascades its artifact/chunks. The only published survivors are H and G2.
+    assert!(
+        generations
+            .compatibility_generation_id(p, "stream-g")
+            .await
+            .is_err(),
+        "G compatibility row must be deleted"
+    );
+    assert!(
+        generations
+            .galaxy_chunks_for_test(&gid)
+            .await
+            .unwrap()
+            .is_empty(),
+        "G artifact chunks must cascade with its immutable generation"
+    );
+    let snapshot = generations.publication_snapshot_for_test(p).await.unwrap();
+    assert_eq!(snapshot.current.as_deref(), Some(g2id.as_str()));
+    assert_eq!(snapshot.cache, 2, "G2 and configured history survive");
+    assert_eq!(snapshot.generations, 2, "G immutable generation is pruned");
+    assert_eq!(
+        snapshot.artifacts, 2,
+        "only G2 and history artifacts remain"
+    );
+    assert_eq!(snapshot.chunks, 2, "only G2 and history chunks remain");
+    assert_eq!(
+        generations
+            .compatibility_generation_id(p, "retained-history")
+            .await
+            .unwrap(),
+        history_id
     );
 }

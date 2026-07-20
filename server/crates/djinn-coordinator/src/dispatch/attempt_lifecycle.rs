@@ -38,6 +38,8 @@ pub async fn record_dispatch_start(
             dispatch_key,
             session_id,
             attempt_seq: None,
+            dispatch_owner_incarnation_id: None,
+            dispatch_group_id: None,
         })
         .await
     {

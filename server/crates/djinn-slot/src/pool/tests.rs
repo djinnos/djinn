@@ -114,6 +114,7 @@ async fn seed_running_session_with_task_run(
             status: None,
             workspace_path: None,
             mirror_ref: None,
+            dispatch_group_id: None,
         })
         .await
         .expect("task_run create should succeed");
@@ -150,6 +151,7 @@ async fn seed_running_session_with_task_run_in_project(
             status: None,
             workspace_path: None,
             mirror_ref: None,
+            dispatch_group_id: None,
         })
         .await
         .expect("task_run create should succeed");

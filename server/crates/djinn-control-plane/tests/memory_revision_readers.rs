@@ -809,6 +809,7 @@ async fn seed_executed_revision_fixture(
             status: None,
             workspace_path: None,
             mirror_ref: None,
+            dispatch_group_id: None,
         })
         .await
         .expect("create task run");

@@ -602,6 +602,7 @@ async fn architect_spike_with_real_adr_file_routes_through_pr_flow_via_worktree_
             status: None,
             workspace_path: Some(worktree_path.to_str().unwrap()),
             mirror_ref: None,
+            dispatch_group_id: None,
         })
         .await
         .unwrap();

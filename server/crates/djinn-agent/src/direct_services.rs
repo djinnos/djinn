@@ -944,6 +944,7 @@ impl SupervisorServices for DirectServices {
                     status: params.status.as_deref(),
                     workspace_path: params.workspace_path.as_deref(),
                     mirror_ref: params.mirror_ref.as_deref(),
+                    dispatch_group_id: None,
                 },
                 attempt_id,
             )

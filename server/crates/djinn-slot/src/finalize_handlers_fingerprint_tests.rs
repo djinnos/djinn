@@ -63,6 +63,7 @@ pub(crate) async fn create_run_with_workspace(
             status: None,
             workspace_path,
             mirror_ref: None,
+            dispatch_group_id: None,
         })
         .await
         .expect("create task run");
@@ -907,6 +908,7 @@ async fn settlement_accepted_and_rejected_paths_store_same_review_fingerprint() 
             status: None,
             workspace_path: None,
             mirror_ref: None,
+            dispatch_group_id: None,
         })
         .await
         .expect("create run_a");
@@ -940,6 +942,7 @@ async fn settlement_accepted_and_rejected_paths_store_same_review_fingerprint() 
             status: None,
             workspace_path: None,
             mirror_ref: None,
+            dispatch_group_id: None,
         })
         .await
         .expect("create run_r");
@@ -1053,6 +1056,8 @@ async fn assert_after_c1_mutation_reverifies_before_completion(
             dispatch_key: &format!("c2-{name}-{}", uuid::Uuid::now_v7()),
             session_id: None,
             attempt_seq: None,
+            dispatch_owner_incarnation_id: None,
+            dispatch_group_id: None,
         })
         .await
         .expect("seed pending attempt");
