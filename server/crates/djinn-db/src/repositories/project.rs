@@ -85,6 +85,29 @@ impl ProjectRepository {
         .await?)
     }
 
+    /// Return one bounded keyset page of project IDs.
+    ///
+    /// Background jobs that only need to visit projects must use this rather
+    /// than [`Self::list`], which materializes every full project row. IDs are
+    /// ordered by their stable primary key and the cursor is exclusive, so a
+    /// caller can drop each page before fetching the next one.
+    pub async fn list_ids_page_after(
+        &self,
+        after_id: Option<&str>,
+        limit: i64,
+    ) -> Result<Vec<String>> {
+        self.db.ensure_initialized().await?;
+        Ok(sqlx::query_scalar(
+            "SELECT id FROM projects \
+             WHERE ($1::TEXT IS NULL OR id > $1) \
+             ORDER BY id LIMIT $2",
+        )
+        .bind(after_id)
+        .bind(limit)
+        .fetch_all(self.db.pool())
+        .await?)
+    }
+
     pub async fn get(&self, id: &str) -> Result<Option<Project>> {
         self.db.ensure_initialized().await?;
         Ok(sqlx::query_as!(
