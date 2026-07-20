@@ -1,4 +1,4 @@
-//! Migration 134 is additive: it must not infer a lifecycle transition time
+//! Migration 135 is additive: it must not infer a lifecycle transition time
 //! from `updated_at` for existing inactive notes.
 
 use std::path::{Path, PathBuf};
@@ -81,8 +81,8 @@ async fn existing_inactive_note_retains_null_lifecycle_transition_time() {
     apply_prior_migrations(&mut connection).await;
     connection
         .execute(
-            "INSERT INTO projects (id, name, path, verification_rules) \
-             VALUES ('lifecycle-project', 'lifecycle-project', '/lifecycle-project', '[]')",
+            "INSERT INTO projects (id, name, github_owner, github_repo) \
+             VALUES ('lifecycle-project', 'lifecycle-project', 'lifecycle-owner', 'lifecycle-repo')",
         )
         .await
         .expect("seed project");
