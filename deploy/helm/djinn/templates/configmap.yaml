@@ -12,6 +12,10 @@ data:
   DJINN_HOME: "/var/lib/djinn"
   RUST_LOG: {{ .Values.env.rustLog | quote }}
   DJINN_VECTOR_BACKEND: "qdrant"
+  # Graph retention is deliberately chart-controlled and literal: operators
+  # observe dry-run candidates before choosing destructive deletion.
+  DJINN_GRAPH_RETENTION_MODE: {{ .Values.graphRetention.mode | quote }}
+  DJINN_GRAPH_RETENTION_HISTORY_N: {{ .Values.graphRetention.historyN | quote }}
   # DJINN_DATABASE_URL is only rendered into the ConfigMap when the URL is
   # safe to expose there:
   #   - postgres.enabled=true: in-cluster URL with chart-known credentials.
