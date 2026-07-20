@@ -22,7 +22,7 @@ pub struct MigrationContext {
     pub designated_operator_user_id: Option<String>,
 }
 
-pub const CREATOR_CONTRACT_MIGRATION_VERSION: i64 = 132;
+pub const CREATOR_CONTRACT_MIGRATION_VERSION: i64 = 134;
 
 /// Exact caller-selected identity for the fresh-install-only provisioner.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -60,11 +60,6 @@ pub async fn run_postgres_migrations_on_connection(
         .map_err(DbError::from)?;
     if let Some(operator_id) = context.designated_operator_user_id.as_deref() {
         let operator_id = operator_id.trim();
-        if operator_id.is_empty() {
-            return Err(DbError::InvalidData(
-                "migration designated operator user id must not be blank".to_owned(),
-            ));
-        }
         sqlx::query("SELECT set_config('djinn.migration_designated_operator_user_id', $1, false)")
             .bind(operator_id)
             .execute(&mut *conn)

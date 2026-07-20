@@ -44,6 +44,16 @@ pub async fn seed_task_row(db: &Database, seed: UsageTestTaskSeed<'_>) -> String
     let id = task_uuid.to_string();
     let compact_id = task_uuid.simple().to_string();
     let short_id = format!("task-{}-{}", &compact_id[..8], &compact_id[20..32]);
+    let creator_uuid = uuid::Uuid::now_v7();
+    let creator_id = creator_uuid.to_string();
+    let creator_github_id = (creator_uuid.as_u128() & i64::MAX as u128) as i64;
+    sqlx::query("INSERT INTO users (id, github_id, github_login) VALUES ($1, $2, $3)")
+        .bind(&creator_id)
+        .bind(creator_github_id)
+        .bind(format!("task-fixture-{creator_id}"))
+        .execute(db.pool())
+        .await
+        .expect("failed to seed task creator");
     sqlx::query(
         "INSERT INTO tasks \
          (id, project_id, short_id, epic_id, title, description, design, \
@@ -51,13 +61,14 @@ pub async fn seed_task_row(db: &Database, seed: UsageTestTaskSeed<'_>) -> String
           reopen_count, continuation_count, verification_failure_count, \
           total_reopen_count, \
           intervention_count, created_at, updated_at, closed_at, close_reason, \
-          merge_commit_sha, memory_refs, merge_conflict_metadata, agent_type, pr_url) \
+          merge_commit_sha, memory_refs, merge_conflict_metadata, agent_type, pr_url, \
+          created_by_user_id) \
          VALUES ($1, $2, $3, NULL, 'test title', 'test desc', 'test design', \
                  'task', $4, 0, '', '[]', '[]', \
                  0, 0, 0, \
                  $5, \
                  0, '2025-01-01T00:00:00Z', '2025-01-01T00:00:00Z', NULL, $6, \
-                 NULL, '[]', NULL, NULL, NULL)",
+                 NULL, '[]', NULL, NULL, NULL, $7)",
     )
     .bind(&id)
     .bind(seed.project_id)
@@ -65,6 +76,7 @@ pub async fn seed_task_row(db: &Database, seed: UsageTestTaskSeed<'_>) -> String
     .bind(seed.status)
     .bind(seed.total_reopen_count)
     .bind(seed.close_reason)
+    .bind(&creator_id)
     .execute(db.pool())
     .await
     .expect("failed to seed task row");
@@ -988,6 +1000,7 @@ pub async fn seed_eval_task_with_memory_refs(
     db: &Database,
     project_id: &str,
     epic_id: &str,
+    created_by_user_id: &str,
     fixture_task_id: &str,
     memory_refs_json: &str,
 ) -> String {
@@ -1001,8 +1014,9 @@ pub async fn seed_eval_task_with_memory_refs(
     sqlx::query(
         r#"INSERT INTO tasks
             (id, project_id, short_id, epic_id, title, description, design,
-             issue_type, priority, owner, status, continuation_count, memory_refs)
-         VALUES ($1, $2, $3, $4, $5, '', '', 'task', 0, '', 'open', 0, $6::jsonb)"#,
+             issue_type, priority, owner, status, continuation_count, memory_refs,
+             created_by_user_id)
+         VALUES ($1, $2, $3, $4, $5, '', '', 'task', 0, '', 'open', 0, $6::jsonb, $7)"#,
     )
     .bind(&task_id)
     .bind(project_id)
@@ -1010,6 +1024,7 @@ pub async fn seed_eval_task_with_memory_refs(
     .bind(epic_id)
     .bind(format!("Eval task {}", fixture_task_id))
     .bind(memory_refs_json)
+    .bind(created_by_user_id)
     .execute(db.pool())
     .await
     .unwrap_or_else(|e| {

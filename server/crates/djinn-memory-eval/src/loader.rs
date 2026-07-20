@@ -18,6 +18,7 @@ use djinn_core::models::Project;
 use djinn_db::database::Database;
 use djinn_db::repositories::note::{NoteRepository, UpsertNoteEmbedding};
 use djinn_db::repositories::test_support::make_project;
+use djinn_db::repositories::user::UserRepository;
 
 use crate::fixtures::{
     self, BadCaseRow, CorpusNoteRow, EmbeddingRef, FixtureManifest, FixturePaths,
@@ -327,6 +328,14 @@ pub async fn load_fixtures(db: &Database, fixtures: &Phase1Fixtures) -> Result<L
     let project = make_project(db, Path::new("memory-eval")).await;
     info!(project_id = %project.id, "created eval project");
 
+    // The contracted task schema requires every fixture task to retain a real
+    // creator. The eval database is isolated, so a fixed synthetic GitHub ID
+    // gives all benchmark tasks one deterministic, FK-valid identity.
+    let eval_user = UserRepository::new(db.clone())
+        .upsert_from_github(-1, "memory-eval", Some("Memory Eval"), None)
+        .await
+        .context("creating memory-eval fixture user")?;
+
     // Create an epic for task rows (required FK)
     let epic_id = create_epic(db, &project.id, "memory-eval-epic").await;
     info!(epic_id = %epic_id, "created eval epic");
@@ -498,10 +507,16 @@ pub async fn load_fixtures(db: &Database, fixtures: &Phase1Fixtures) -> Result<L
             task_memory_ref_note_ids(fixtures, fixture_task_id, &note_id_by_permalink);
 
         // Create the task with memory_refs pointing to note IDs
-        let db_task_id =
-            create_task_with_memory_refs(db, &project.id, &epic_id, fixture_task_id, &memory_refs)
-                .await
-                .with_context(|| format!("creating task '{}'", fixture_task_id))?;
+        let db_task_id = create_task_with_memory_refs(
+            db,
+            &project.id,
+            &epic_id,
+            &eval_user.id,
+            fixture_task_id,
+            &memory_refs,
+        )
+        .await
+        .with_context(|| format!("creating task '{}'", fixture_task_id))?;
 
         task_id_map.insert(fixture_task_id.clone(), db_task_id);
     }
@@ -593,6 +608,7 @@ async fn create_task_with_memory_refs(
     db: &Database,
     project_id: &str,
     epic_id: &str,
+    created_by_user_id: &str,
     fixture_task_id: &str,
     memory_refs_note_ids: &[String],
 ) -> Result<String> {
@@ -601,6 +617,7 @@ async fn create_task_with_memory_refs(
         db,
         project_id,
         epic_id,
+        created_by_user_id,
         fixture_task_id,
         &memory_refs_json,
     )
