@@ -925,3 +925,28 @@ mod tests {
         );
     }
 }
+
+/// Public handler used by the supervisor service. It resolves the task's
+/// repository before using the bounded internal list/fetch implementation.
+pub(crate) async fn call_ci_artifact(
+    state: &crate::context::AgentContext,
+    arguments: &Option<serde_json::Map<String, serde_json::Value>>,
+    session_task_id: Option<&str>,
+) -> Result<serde_json::Value, String> {
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Params { action: String, run_id: Option<u64>, pr_number: Option<u64>, artifact: Option<String> }
+    let params: Params = serde_json::from_value(serde_json::Value::Object(arguments.clone().unwrap_or_default())).map_err(|e| format!("invalid ci_artifact arguments: {e}"))?;
+    if !matches!(params.action.as_str(), "list" | "fetch") { return Err("ci_artifact action must be `list` or `fetch`".into()); }
+    if params.run_id == Some(0) || params.pr_number == Some(0) || (params.run_id.is_some() && params.pr_number.is_some()) { return Err("ci_artifact selectors must be positive and mutually exclusive".into()); }
+    if (params.action == "list" && params.artifact.is_some()) || (params.action == "fetch" && params.artifact.as_deref().is_none_or(str::is_empty)) { return Err("ci_artifact requires artifact only for fetch, where it must be non-empty".into()); }
+    use djinn_db::TaskRepository;
+    let task_id = session_task_id.ok_or("ci_artifact requires a task context (session_task_id)")?;
+    let tasks = TaskRepository::new(state.db.clone(), state.event_bus.clone());
+    let projects = djinn_db::ProjectRepository::new(state.db.clone(), state.event_bus.clone());
+    let task = tasks.get(task_id).await.map_err(|e| format!("failed to load task {task_id}: {e}"))?.ok_or_else(|| format!("ci_artifact: task {task_id} not found"))?;
+    let (owner, repo) = projects.get_github_coords(&task.project_id).await.map_err(|e| format!("failed to resolve project GitHub coordinates: {e}"))?.ok_or("ci_artifact: task project has no GitHub coordinates")?;
+    let client = super::ci::resolve_installation_client_for_task(&projects, &task.project_id, &owner, &repo).await.ok_or("ci_artifact: no GitHub App installation found for task project")?;
+    let request = WorkflowRunResolutionRequest { explicit_run_id: params.run_id, pr_number: params.pr_number.or_else(|| task.ci_pr_number.and_then(|id| u64::try_from(id).ok())), recorded_head_sha: task.ci_head_sha.clone(), recorded_merge_queue_run_id: task.ci_mq_run_id.and_then(|id| u64::try_from(id).ok()) };
+    if params.action == "list" { serde_json::to_value(list_artifacts(&client, &owner, &repo, request).await?).map_err(|e| e.to_string()) } else { Ok(serde_json::Value::String(fetch_artifact(&client, &owner, &repo, request, params.artifact.as_deref().expect("validated")).await?)) }
+}

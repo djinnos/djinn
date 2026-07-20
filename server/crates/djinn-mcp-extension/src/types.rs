@@ -6,6 +6,13 @@
 
 use serde::Deserialize;
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CiArtifactParams { pub action: CiArtifactAction, pub run_id: Option<u64>, pub pr_number: Option<u64>, pub artifact: Option<String> }
+#[derive(Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum CiArtifactAction { List, Fetch }
+
+#[derive(Deserialize)]
 pub struct MemoryRetrievalOutcomesReportParams {
     pub start: String,
     pub end: String,

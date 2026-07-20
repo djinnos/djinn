@@ -590,6 +590,8 @@ impl SupervisorServices for WorkerSupervisorServices {
         self.rpc.tool_ci_job_log(session_task_id, arguments).await
     }
 
+    async fn tool_ci_artifact(&self, session_task_id: Option<String>, arguments: serde_json::Map<String, serde_json::Value>) -> Result<serde_json::Value, String> { self.rpc.tool_ci_artifact(session_task_id, arguments).await }
+
     async fn record_arbiter_decision(
         &self,
         task_id: String,

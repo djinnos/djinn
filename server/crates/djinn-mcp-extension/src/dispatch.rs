@@ -453,6 +453,9 @@ async fn dispatch_supervisor_tools(
                 )
                 .await,
         ),
+        "ci_artifact" => Some(
+            services.tool_ci_artifact(session_task_id.map(str::to_string), args.clone().unwrap_or_default()).await,
+        ),
         "github_search" => Some(
             services
                 .tool_github_search(
