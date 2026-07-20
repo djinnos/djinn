@@ -2041,14 +2041,17 @@ async fn preservation_gate_called_during_terminal_task_failure() {
 /// trigger labels.
 #[test]
 fn preservation_telemetry_counter_increments() {
-    djinn_telemetry::init().unwrap();
+    // `request_session_preservation` increments this exact series whenever a
+    // stall reap runs without runtime_ops, and those recovery tests share this
+    // process's recorder. Emit into a thread-private registry so the count
+    // reflects this test's single increment and nothing else.
+    let (_, rendered) = djinn_telemetry::render_isolated(|| {
+        djinn_telemetry::preservation::increment_attempt(
+            djinn_telemetry::preservation::OUTCOME_RUNTIME_UNAVAILABLE,
+            djinn_telemetry::preservation::TRIGGER_STALL,
+        );
+    });
 
-    djinn_telemetry::preservation::increment_attempt(
-        djinn_telemetry::preservation::OUTCOME_RUNTIME_UNAVAILABLE,
-        djinn_telemetry::preservation::TRIGGER_STALL,
-    );
-
-    let rendered = djinn_telemetry::render().unwrap();
     let stall_line = rendered
         .lines()
         .find(|line| {

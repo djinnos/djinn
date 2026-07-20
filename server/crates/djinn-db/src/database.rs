@@ -7,7 +7,7 @@ use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use tokio::sync::{OnceCell, OwnedSemaphorePermit, Semaphore};
 
 use crate::error::{DbError, DbResult};
-use crate::migrations;
+use crate::migrations::{self, DesignatedOperatorBootstrap, MigrationContext};
 use crate::template_bootstrap;
 
 /// Default number of concurrent background full-text "fan-out" searches
@@ -459,6 +459,23 @@ impl Database {
         Ok(())
     }
 
+    /// Fresh-install-only provisioning entry point. It uses a dedicated
+    /// connection and is unavailable to cloned test databases.
+    pub async fn bootstrap_designated_operator(
+        &self,
+        operator: DesignatedOperatorBootstrap,
+    ) -> DbResult<()> {
+        if self.readonly || self.test_branch.is_some() {
+            return Err(DbError::InvalidData(
+                "designated operator bootstrap is unavailable for readonly or test databases"
+                    .to_owned(),
+            ));
+        }
+        let url = self.bootstrap.target.clone();
+        migrations::ensure_postgres_database_exists(&url).await?;
+        migrations::bootstrap_designated_operator(&url, &operator).await
+    }
+
     /// App and worker pods must **never** run the migrator: it takes the
     /// migrator's global advisory lock (`pg_advisory_lock`), which contends
     /// with the migrate-Job and peer pods. Under our 10s `lock_timeout` that
@@ -481,12 +498,29 @@ impl Database {
         Ok(())
     }
 
+    /// Explicit migration entry point. The migration context is supplied by a
+    /// migrate-only caller and is never read from the ambient environment.
+    pub async fn migrate(&self, context: MigrationContext) -> DbResult<()> {
+        if self.readonly {
+            return Ok(());
+        }
+        if self.test_branch.is_some() {
+            return Err(DbError::InvalidData(
+                "test databases must be created from djinn_test_template".to_owned(),
+            ));
+        }
+        let url = self.bootstrap.target.clone();
+        migrations::ensure_postgres_database_exists(&url).await?;
+        migrations::run_postgres_migrations(&url, &context).await?;
+        let _ = self.initialized.set(());
+        Ok(())
+    }
+
     pub async fn ensure_initialized(&self) -> DbResult<()> {
         if self.readonly {
             return Ok(());
         }
 
-        let url = self.bootstrap.target.clone();
         let test_branch = self.test_branch.clone();
         self.initialized
             .get_or_try_init(|| async move {
@@ -510,40 +544,7 @@ impl Database {
                         template_bootstrap::ensure_test_template(&init.server_prefix).await?;
                         clone_postgres_test_template(&init.server_prefix, &init.test_db).await?;
                     }
-                    None => {
-                        migrations::ensure_postgres_database_exists(&url).await?;
-                        // Migrations may backfill over production-scale data
-                        // (migration 125 rewrites every repo_graph_cache blob),
-                        // so the runtime pool's 30s per-statement bound must
-                        // not apply. Run them on a dedicated single-connection
-                        // pool without that bound, closed as soon as the run
-                        // finishes so the unbounded setting cannot leak into
-                        // regular query traffic.
-                        let migrate_pool = PgPoolOptions::new()
-                            .max_connections(1)
-                            // The 30s bound can also arrive from server-level
-                            // Postgres configuration (the VPS chart sets it
-                            // globally), so lift it explicitly for the
-                            // migration session rather than merely omitting
-                            // the pool-level SET.
-                            .after_connect(|conn, _meta| {
-                                Box::pin(async move {
-                                    sqlx::query("SET statement_timeout = 0")
-                                        .execute(&mut *conn)
-                                        .await?;
-                                    Ok(())
-                                })
-                            })
-                            .connect_lazy_with(PgConnectOptions::from_str(&url)?);
-                        let migrate_result = sqlx::migrate!("./migrations_postgres")
-                            .run(&migrate_pool)
-                            .await
-                            .map_err(|e: sqlx::migrate::MigrateError| {
-                                DbError::InvalidData(e.to_string())
-                            });
-                        migrate_pool.close().await;
-                        migrate_result?;
-                    }
+                    None => self.verify_schema_is_current().await?,
                 }
                 Ok::<(), DbError>(())
             })
