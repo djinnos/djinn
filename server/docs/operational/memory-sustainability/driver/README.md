@@ -12,7 +12,8 @@ written to JSONL), and supply commands that emit JSON:
 
 ```sh
 export DJINN_METRICS_URL=https://server.example/metrics
-export DJINN_GALAXY_URL=https://server.example/api/galaxy/artifact
+export PROJECT_ID='<approved-project-id>'
+export DJINN_GALAXY_URL="https://server.example/api/projects/$PROJECT_ID/code-graph/galaxy"
 export DJINN_GALAXY_TOKEN=... # never pass this as a flag
 export DJINN_GRAPH_INSTALL_COMMAND='operator-installed graph loader command'
 export DJINN_BOARD_SCAN_COMMAND='operator command invoking the landed board scanner; emits {"pages":40}'
@@ -25,12 +26,19 @@ perl server/docs/operational/memory-sustainability/driver/memory_workload.pl \
 ```
 
 Defaults are the release protocol: T0 1800 seconds with no graph, graph-install
-peak, T1 900 seconds with the same graph, a 7200-second burst with 300-second
-board ticks and 100 sequential 200/304 requests, then T2 after 300 seconds.
+peak, T1 900 seconds with the same graph, then a 7200-second burst. The 100
+sequential alternating 200/304 requests are scheduled on monotonic targets
+spanning the burst (the first at burst start and the final at burst end), while
+300-second board ticks are scheduled independently. T2 is sampled no sooner
+than 300 seconds after the actual final galaxy response completes.
 Before mutation it verifies commands, observed fixture identity, cgroup signals,
 metrics, a 40-page board pass, and 200/304 galaxy responses. It rejects malformed
 `memory.current`/`memory.events`, OOM/restart deltas, generation replacement, and
 a missing resident slot; JSONL includes observed fixture identity and warm/server peaks.
+For every burst route request it also samples `djinn_process_rss_bytes` immediately
+before and after the landed galaxy request and records those two values in the
+`galaxy_request` evidence. The final server peak includes those route-boundary
+samples as well as the phase samples and graph-install peak.
 
 Evidence is append-only `memory-sustainability-raw/v1` JSONL. The final filename
 is created atomically only after every phase completes. Failures and SIGINT/SIGTERM
