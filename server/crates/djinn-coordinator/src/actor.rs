@@ -2492,6 +2492,10 @@ mod tests {
             .unwrap();
         assert_eq!(first_registered.id, first.coordinator_incarnation_id);
         assert_eq!(second_registered.id, second.coordinator_incarnation_id);
+        assert_ne!(
+            first_registered.id, second_registered.id,
+            "startup registration must create separate durable leases for overlapping runtimes"
+        );
 
         tokio::time::sleep(StdDuration::from_millis(10)).await;
         first.renew_coordinator_incarnation().await;
@@ -2507,8 +2511,16 @@ mod tests {
             .unwrap();
         assert!(first_after_first.last_renewed_at > first_registered.last_renewed_at);
         assert_eq!(
+            first_after_first.registered_at, first_registered.registered_at,
+            "renewal must not replace the first runtime's immutable lease"
+        );
+        assert_eq!(
             second_after_first.last_renewed_at,
             second_registered.last_renewed_at
+        );
+        assert_eq!(
+            second_after_first.registered_at, second_registered.registered_at,
+            "first runtime renewal must not alter the second runtime's durable lease"
         );
 
         tokio::time::sleep(StdDuration::from_millis(10)).await;
@@ -2527,6 +2539,14 @@ mod tests {
             first_after_second.last_renewed_at,
             first_after_first.last_renewed_at
         );
+        assert_eq!(
+            first_after_second.registered_at, first_after_first.registered_at,
+            "second runtime renewal must not alter the first runtime's durable lease"
+        );
         assert!(second_after_second.last_renewed_at > second_after_first.last_renewed_at);
+        assert_eq!(
+            second_after_second.registered_at, second_after_first.registered_at,
+            "renewal must not replace the second runtime's immutable lease"
+        );
     }
 }
