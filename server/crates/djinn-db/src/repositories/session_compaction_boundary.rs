@@ -14,6 +14,55 @@ pub enum CompactionPhase {
     Ended,
 }
 
+/// The validated reason a compaction boundary was recorded.
+///
+/// Values are persisted verbatim and match migration 134's `trigger`
+/// constraint. Unknown persisted values are rejected rather than coerced.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum CompactionTrigger {
+    Proactive,
+    ContextError,
+    OrphanRepair,
+    OversizedTransport,
+    ManualTest,
+    Fallback,
+}
+
+impl CompactionTrigger {
+    pub const ALL: [Self; 6] = [
+        Self::Proactive,
+        Self::ContextError,
+        Self::OrphanRepair,
+        Self::OversizedTransport,
+        Self::ManualTest,
+        Self::Fallback,
+    ];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Proactive => "proactive",
+            Self::ContextError => "context-error",
+            Self::OrphanRepair => "orphan-repair",
+            Self::OversizedTransport => "oversized-transport",
+            Self::ManualTest => "manual/test",
+            Self::Fallback => "fallback",
+        }
+    }
+
+    /// Parse only a committed persisted trigger value.
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "proactive" => Some(Self::Proactive),
+            "context-error" => Some(Self::ContextError),
+            "orphan-repair" => Some(Self::OrphanRepair),
+            "oversized-transport" => Some(Self::OversizedTransport),
+            "manual/test" => Some(Self::ManualTest),
+            "fallback" => Some(Self::Fallback),
+            _ => None,
+        }
+    }
+}
+
 impl CompactionPhase {
     pub fn as_str(&self) -> &'static str {
         match self {
@@ -36,6 +85,11 @@ pub struct CompactionBoundary {
     pub retained_tail_hash: Option<String>,
     pub summary_text: Option<String>,
     pub marker_metadata: Option<serde_json::Value>,
+    pub trigger: Option<CompactionTrigger>,
+    /// Current-context occupancy at compaction start, never lifetime spend.
+    pub current_context_tokens_before: Option<i64>,
+    /// Current-context occupancy after compaction, never lifetime spend.
+    pub current_context_tokens_after: Option<i64>,
     pub created_at: String,
     pub completed_at: Option<String>,
 }
@@ -49,6 +103,9 @@ pub struct BeginCompactionParams<'a> {
     pub first_retained_message_id: Option<&'a str>,
     pub retained_tail_hash: Option<&'a str>,
     pub marker_metadata: Option<&'a serde_json::Value>,
+    pub trigger: Option<CompactionTrigger>,
+    /// Current-context occupancy at compaction start, not lifetime spend.
+    pub current_context_tokens_before: Option<i64>,
 }
 
 /// Parameters for completing (ending) an existing compaction boundary.
@@ -61,6 +118,8 @@ pub struct CompleteCompactionParams<'a> {
     pub retained_tail_hash: Option<&'a str>,
     pub summary_text: &'a str,
     pub marker_metadata: Option<&'a serde_json::Value>,
+    /// Current-context occupancy after compaction, not lifetime spend.
+    pub current_context_tokens_after: Option<i64>,
 }
 
 // ---------------------------------------------------------------------------
@@ -99,9 +158,9 @@ impl SessionCompactionBoundaryRepository {
             "INSERT INTO session_compaction_boundaries
                 (id, session_id, phase, schema_version,
                  first_message_id, last_compacted_message_id,
-                 first_retained_message_id, retained_tail_hash,
-                 marker_metadata)
-             VALUES ($1, $2, 'started', $3, $4, $5, $6, $7, $8)",
+                 first_retained_message_id, retained_tail_hash, marker_metadata,
+                 trigger, current_context_tokens_before)
+             VALUES ($1, $2, 'started', $3, $4, $5, $6, $7, $8, $9, $10)",
             id,
             params.session_id,
             params.schema_version,
@@ -110,6 +169,8 @@ impl SessionCompactionBoundaryRepository {
             params.first_retained_message_id,
             params.retained_tail_hash,
             params.marker_metadata,
+            params.trigger.map(CompactionTrigger::as_str),
+            params.current_context_tokens_before,
         )
         .execute(self.db.pool())
         .await?;
@@ -140,6 +201,7 @@ impl SessionCompactionBoundaryRepository {
                    retained_tail_hash = $6,
                    summary_text = $7,
                    marker_metadata = $8,
+                   current_context_tokens_after = $9,
                    completed_at = to_char(now() AT TIME ZONE 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
                WHERE id = $1 AND phase = 'started'"#,
             params.boundary_id,
@@ -150,6 +212,7 @@ impl SessionCompactionBoundaryRepository {
             params.retained_tail_hash,
             params.summary_text,
             params.marker_metadata,
+            params.current_context_tokens_after,
         )
         .execute(self.db.pool())
         .await?;
@@ -186,8 +249,8 @@ impl SessionCompactionBoundaryRepository {
                 id, session_id, phase, schema_version,
                 first_message_id, last_compacted_message_id,
                 first_retained_message_id, retained_tail_hash,
-                summary_text,
-                marker_metadata,
+                summary_text, marker_metadata, trigger, current_context_tokens_before,
+                current_context_tokens_after,
                 created_at, completed_at
              FROM session_compaction_boundaries
              WHERE id = $1"#,
@@ -207,6 +270,9 @@ impl SessionCompactionBoundaryRepository {
             retained_tail_hash: row.retained_tail_hash,
             summary_text: row.summary_text,
             marker_metadata: row.marker_metadata,
+            trigger: parse_trigger(row.trigger)?,
+            current_context_tokens_before: row.current_context_tokens_before,
+            current_context_tokens_after: row.current_context_tokens_after,
             created_at: row.created_at,
             completed_at: row.completed_at,
         })
@@ -225,8 +291,8 @@ impl SessionCompactionBoundaryRepository {
                 id, session_id, phase, schema_version,
                 first_message_id, last_compacted_message_id,
                 first_retained_message_id, retained_tail_hash,
-                summary_text,
-                marker_metadata,
+                summary_text, marker_metadata, trigger, current_context_tokens_before,
+                current_context_tokens_after,
                 created_at, completed_at
              FROM session_compaction_boundaries
              WHERE session_id = $1 AND phase = 'ended'
@@ -248,6 +314,9 @@ impl SessionCompactionBoundaryRepository {
             retained_tail_hash: r.retained_tail_hash,
             summary_text: r.summary_text,
             marker_metadata: r.marker_metadata,
+            trigger: parse_trigger(r.trigger)?,
+            current_context_tokens_before: r.current_context_tokens_before,
+            current_context_tokens_after: r.current_context_tokens_after,
             created_at: r.created_at,
             completed_at: r.completed_at,
         }))
@@ -273,6 +342,10 @@ fn parse_phase(s: &str) -> CompactionPhase {
         "ended" => CompactionPhase::Ended,
         _ => CompactionPhase::Started,
     }
+}
+
+fn parse_trigger(value: Option<String>) -> Result<Option<CompactionTrigger>> {
+    value.map(|value| CompactionTrigger::parse(&value).ok_or_else(|| crate::Error::InvalidData(format!("unknown compaction trigger: {value}")))).transpose()
 }
 
 // ---------------------------------------------------------------------------
@@ -347,6 +420,8 @@ mod tests {
             .record_compaction_started(BeginCompactionParams {
                 session_id: &session_id,
                 schema_version: 1,
+                trigger: None,
+                current_context_tokens_before: None,
                 first_message_id: Some("msg-001"),
                 last_compacted_message_id: Some("msg-010"),
                 first_retained_message_id: Some("msg-011"),
@@ -391,6 +466,8 @@ mod tests {
             .record_compaction_started(BeginCompactionParams {
                 session_id: &session_id,
                 schema_version: 1,
+                trigger: Some(CompactionTrigger::Proactive),
+                current_context_tokens_before: Some(1_024),
                 first_message_id: Some("msg-001"),
                 last_compacted_message_id: Some("msg-010"),
                 first_retained_message_id: Some("msg-011"),
@@ -406,6 +483,7 @@ mod tests {
             .complete_compaction_boundary(CompleteCompactionParams {
                 boundary_id: &started.id,
                 schema_version: 1,
+                current_context_tokens_after: Some(256),
                 first_message_id: Some("msg-001"),
                 last_compacted_message_id: Some("msg-010"),
                 first_retained_message_id: Some("msg-011"),
@@ -434,6 +512,17 @@ mod tests {
                 .unwrap(),
             42
         );
+        assert_eq!(completed.trigger, Some(CompactionTrigger::Proactive));
+        assert_eq!(completed.current_context_tokens_before, Some(1_024));
+        assert_eq!(completed.current_context_tokens_after, Some(256));
+        let fetched = repo.fetch_by_id(&started.id).await.unwrap();
+        assert_eq!(fetched.trigger, Some(CompactionTrigger::Proactive));
+        assert_eq!(fetched.current_context_tokens_before, Some(1_024));
+        assert_eq!(fetched.current_context_tokens_after, Some(256));
+        let latest = repo.latest_completed_boundary(&session_id).await.unwrap().unwrap();
+        assert_eq!(latest.trigger, Some(CompactionTrigger::Proactive));
+        assert_eq!(latest.current_context_tokens_before, Some(1_024));
+        assert_eq!(latest.current_context_tokens_after, Some(256));
     }
 
     // ── Double-completion is rejected ─────────────────────────────────
@@ -450,6 +539,8 @@ mod tests {
             .record_compaction_started(BeginCompactionParams {
                 session_id: &session_id,
                 schema_version: 1,
+                trigger: None,
+                current_context_tokens_before: None,
                 first_message_id: None,
                 last_compacted_message_id: None,
                 first_retained_message_id: None,
@@ -463,6 +554,7 @@ mod tests {
         repo.complete_compaction_boundary(CompleteCompactionParams {
             boundary_id: &started.id,
             schema_version: 1,
+                current_context_tokens_after: None,
             first_message_id: Some("m1"),
             last_compacted_message_id: Some("m5"),
             first_retained_message_id: Some("m6"),
@@ -478,6 +570,7 @@ mod tests {
             .complete_compaction_boundary(CompleteCompactionParams {
                 boundary_id: &started.id,
                 schema_version: 1,
+                current_context_tokens_after: None,
                 first_message_id: Some("m1"),
                 last_compacted_message_id: Some("m5"),
                 first_retained_message_id: Some("m6"),
@@ -510,6 +603,7 @@ mod tests {
             .complete_compaction_boundary(CompleteCompactionParams {
                 boundary_id: "nonexistent-id",
                 schema_version: 1,
+                current_context_tokens_after: None,
                 first_message_id: None,
                 last_compacted_message_id: None,
                 first_retained_message_id: None,
@@ -543,6 +637,8 @@ mod tests {
             .record_compaction_started(BeginCompactionParams {
                 session_id: &session_id,
                 schema_version: 1,
+                trigger: None,
+                current_context_tokens_before: None,
                 first_message_id: Some("m1"),
                 last_compacted_message_id: Some("m5"),
                 first_retained_message_id: Some("m6"),
@@ -555,6 +651,7 @@ mod tests {
         repo.complete_compaction_boundary(CompleteCompactionParams {
             boundary_id: &b1.id,
             schema_version: 1,
+                current_context_tokens_after: None,
             first_message_id: Some("m1"),
             last_compacted_message_id: Some("m5"),
             first_retained_message_id: Some("m6"),
@@ -570,6 +667,8 @@ mod tests {
             .record_compaction_started(BeginCompactionParams {
                 session_id: &session_id,
                 schema_version: 1,
+                trigger: None,
+                current_context_tokens_before: None,
                 first_message_id: Some("m6"),
                 last_compacted_message_id: Some("m10"),
                 first_retained_message_id: Some("m11"),
@@ -582,6 +681,7 @@ mod tests {
         repo.complete_compaction_boundary(CompleteCompactionParams {
             boundary_id: &b2.id,
             schema_version: 1,
+                current_context_tokens_after: None,
             first_message_id: Some("m6"),
             last_compacted_message_id: Some("m10"),
             first_retained_message_id: Some("m11"),
@@ -616,6 +716,8 @@ mod tests {
         repo.record_compaction_started(BeginCompactionParams {
             session_id: &session_id,
             schema_version: 1,
+                trigger: None,
+                current_context_tokens_before: None,
             first_message_id: Some("m1"),
             last_compacted_message_id: Some("m5"),
             first_retained_message_id: Some("m6"),
@@ -648,6 +750,8 @@ mod tests {
         repo.record_compaction_started(BeginCompactionParams {
             session_id: &session_id,
             schema_version: 1,
+                trigger: None,
+                current_context_tokens_before: None,
             first_message_id: None,
             last_compacted_message_id: None,
             first_retained_message_id: None,
@@ -663,6 +767,8 @@ mod tests {
             .record_compaction_started(BeginCompactionParams {
                 session_id: &session_id,
                 schema_version: 1,
+                trigger: None,
+                current_context_tokens_before: None,
                 first_message_id: None,
                 last_compacted_message_id: None,
                 first_retained_message_id: None,
@@ -678,6 +784,7 @@ mod tests {
         repo.complete_compaction_boundary(CompleteCompactionParams {
             boundary_id: &b2.id,
             schema_version: 1,
+                current_context_tokens_after: None,
             first_message_id: None,
             last_compacted_message_id: None,
             first_retained_message_id: None,
@@ -711,6 +818,8 @@ mod tests {
             .record_compaction_started(BeginCompactionParams {
                 session_id: &session_id,
                 schema_version: 2,
+                trigger: None,
+                current_context_tokens_before: None,
                 first_message_id: Some("first-msg"),
                 last_compacted_message_id: Some("last-compacted"),
                 first_retained_message_id: Some("first-retained"),
@@ -724,6 +833,7 @@ mod tests {
             .complete_compaction_boundary(CompleteCompactionParams {
                 boundary_id: &started.id,
                 schema_version: 2,
+                current_context_tokens_after: None,
                 first_message_id: Some("first-msg"),
                 last_compacted_message_id: Some("last-compacted"),
                 first_retained_message_id: Some("first-retained"),
@@ -855,6 +965,8 @@ mod tests {
             repo.record_compaction_started(BeginCompactionParams {
                 session_id: &session_id,
                 schema_version: 1,
+                trigger: None,
+                current_context_tokens_before: None,
                 first_message_id: Some(&format!("msg-{i}-first")),
                 last_compacted_message_id: Some(&format!("msg-{i}-last")),
                 first_retained_message_id: Some(&format!("msg-{i}-retained")),
@@ -895,6 +1007,8 @@ mod tests {
             .record_compaction_started(BeginCompactionParams {
                 session_id: &session_id,
                 schema_version: 1,
+                trigger: None,
+                current_context_tokens_before: None,
                 first_message_id: Some("msg-1"),
                 last_compacted_message_id: Some("msg-5"),
                 first_retained_message_id: Some("msg-6"),
@@ -907,6 +1021,7 @@ mod tests {
         repo.complete_compaction_boundary(CompleteCompactionParams {
             boundary_id: &completed.id,
             schema_version: 1,
+                current_context_tokens_after: None,
             first_message_id: Some("msg-1"),
             last_compacted_message_id: Some("msg-5"),
             first_retained_message_id: Some("msg-6"),
@@ -922,6 +1037,8 @@ mod tests {
             repo.record_compaction_started(BeginCompactionParams {
                 session_id: &session_id,
                 schema_version: 1,
+                trigger: None,
+                current_context_tokens_before: None,
                 first_message_id: Some(&format!("retry-{i}-first")),
                 last_compacted_message_id: Some(&format!("retry-{i}-last")),
                 first_retained_message_id: Some(&format!("retry-{i}-retained")),
