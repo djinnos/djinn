@@ -845,14 +845,24 @@ impl CoordinatorActor {
         .await;
     }
 
-    pub(super) async fn run(mut self) {
-        tracing::info!("CoordinatorActor started");
+    /// Register this runtime's immutable incarnation lease during startup.
+    async fn register_coordinator_incarnation(&self) {
         if let Err(error) = djinn_db::CoordinatorIncarnationRepository::new(self.db.clone())
             .register(&self.coordinator_incarnation_id)
             .await
         {
             tracing::error!(incarnation_id = %self.coordinator_incarnation_id, %error, "CoordinatorActor: failed to register coordinator incarnation lease");
         }
+    }
+
+    /// Renew this runtime's immutable incarnation lease on the maintenance cadence.
+    async fn renew_coordinator_incarnation(&self) {
+        health::renew_coordinator_incarnation(&self.db, &self.coordinator_incarnation_id).await;
+    }
+
+    pub(super) async fn run(mut self) {
+        tracing::info!("CoordinatorActor started");
+        self.register_coordinator_incarnation().await;
 
         let _startup_imports_complete = match ProjectRepository::new(
             self.db.clone(),
@@ -1082,7 +1092,7 @@ impl CoordinatorActor {
         if self.last_stale_sweep.elapsed() >= STALE_SWEEP_INTERVAL {
             let app_state = self.maintenance_context();
             health::sweep_stale_resources(&self.db, &app_state).await;
-            health::renew_coordinator_incarnation(&self.db, &self.coordinator_incarnation_id).await;
+            self.renew_coordinator_incarnation().await;
             self.last_stale_sweep = SystemClock::new().now_instant();
         }
         if self.last_auto_dispatch_sweep.elapsed() >= AUTO_DISPATCH_SWEEP_INTERVAL {
@@ -2321,11 +2331,14 @@ mod tests {
         );
     }
 
+    fn minimal_test_actor() -> CoordinatorActor {
+        actor_with_test_db(crate::test_helpers::create_test_db())
+    }
+
     /// Create a minimal actor for message-handling tests without spawning the
     /// full run-loop.  Returns the actor and a oneshot-capable sender.
-    fn minimal_test_actor() -> CoordinatorActor {
+    fn actor_with_test_db(db: Database) -> CoordinatorActor {
         use crate::test_helpers;
-        let db = test_helpers::create_test_db();
         let (events_tx, _events_rx) = broadcast::channel(16);
         let cancel = CancellationToken::new();
         let pool = SlotPoolHandle::spawn(
@@ -2450,17 +2463,90 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn coordinator_runtime_instances_mint_distinct_immutable_incarnation_owners() {
-        let first = minimal_test_actor();
-        let second = minimal_test_actor();
+    async fn overlapping_coordinator_runtimes_register_and_renew_only_their_own_incarnations() {
+        let db = crate::test_helpers::create_test_db();
+        let first = actor_with_test_db(db.clone());
+        let second = actor_with_test_db(db.clone());
 
         assert_ne!(
-            first.coordinator_incarnation_id, second.coordinator_incarnation_id,
-            "each coordinator process runtime must receive its own immutable owner"
+            first.coordinator_incarnation_id,
+            second.coordinator_incarnation_id
         );
-        uuid::Uuid::parse_str(&first.coordinator_incarnation_id)
-            .expect("first coordinator owner must be a UUID");
-        uuid::Uuid::parse_str(&second.coordinator_incarnation_id)
-            .expect("second coordinator owner must be a UUID");
+        uuid::Uuid::parse_str(&first.coordinator_incarnation_id).expect("first owner is a UUID");
+        uuid::Uuid::parse_str(&second.coordinator_incarnation_id).expect("second owner is a UUID");
+
+        // Use the startup lifecycle, not repository seeding, for both actors.
+        first.register_coordinator_incarnation().await;
+        second.register_coordinator_incarnation().await;
+
+        let leases = djinn_db::CoordinatorIncarnationRepository::new(db);
+        let first_registered = leases
+            .get(&first.coordinator_incarnation_id)
+            .await
+            .unwrap()
+            .unwrap();
+        let second_registered = leases
+            .get(&second.coordinator_incarnation_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(first_registered.id, first.coordinator_incarnation_id);
+        assert_eq!(second_registered.id, second.coordinator_incarnation_id);
+        assert_ne!(
+            first_registered.id, second_registered.id,
+            "startup registration must create separate durable leases for overlapping runtimes"
+        );
+
+        tokio::time::sleep(StdDuration::from_millis(10)).await;
+        first.renew_coordinator_incarnation().await;
+        let first_after_first = leases
+            .get(&first.coordinator_incarnation_id)
+            .await
+            .unwrap()
+            .unwrap();
+        let second_after_first = leases
+            .get(&second.coordinator_incarnation_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(first_after_first.last_renewed_at > first_registered.last_renewed_at);
+        assert_eq!(
+            first_after_first.registered_at, first_registered.registered_at,
+            "renewal must not replace the first runtime's immutable lease"
+        );
+        assert_eq!(
+            second_after_first.last_renewed_at,
+            second_registered.last_renewed_at
+        );
+        assert_eq!(
+            second_after_first.registered_at, second_registered.registered_at,
+            "first runtime renewal must not alter the second runtime's durable lease"
+        );
+
+        tokio::time::sleep(StdDuration::from_millis(10)).await;
+        second.renew_coordinator_incarnation().await;
+        let first_after_second = leases
+            .get(&first.coordinator_incarnation_id)
+            .await
+            .unwrap()
+            .unwrap();
+        let second_after_second = leases
+            .get(&second.coordinator_incarnation_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            first_after_second.last_renewed_at,
+            first_after_first.last_renewed_at
+        );
+        assert_eq!(
+            first_after_second.registered_at, first_after_first.registered_at,
+            "second runtime renewal must not alter the first runtime's durable lease"
+        );
+        assert!(second_after_second.last_renewed_at > second_after_first.last_renewed_at);
+        assert_eq!(
+            second_after_second.registered_at, second_after_first.registered_at,
+            "renewal must not replace the second runtime's immutable lease"
+        );
     }
 }
