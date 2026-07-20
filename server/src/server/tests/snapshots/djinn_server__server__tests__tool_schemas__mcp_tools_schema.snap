@@ -11144,7 +11144,7 @@ expression: signatures
               "type": "string"
             },
             "score": {
-              "default": 0.0,
+              "default": 0,
               "description": "RRF fusion score (higher = more relevant). Defaults to 0.0 for backward compat.",
               "format": "double",
               "type": "number"
@@ -17763,8 +17763,22 @@ expression: signatures
             "null"
           ]
         },
+        "include_acceptance_criteria": {
+          "description": "When `true`, include structured criteria. Omitted and `false` are equivalent.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
         "include_bodies": {
-          "description": "When `true`, include the full `body` string on each list row.\nDefault `false` — rows omit the full body and carry only\n`body_excerpt` (first 512 Unicode scalars) and `body_truncated`.",
+          "description": "When `true`, include the full body. Omitted and `false` are equivalent;\nbodies imply excerpt metadata.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "include_excerpts": {
+          "description": "When `true`, include excerpt metadata. Omitted and `false` are equivalent.",
           "type": [
             "boolean",
             "null"
@@ -17842,14 +17856,27 @@ expression: signatures
           "type": "object"
         },
         "ProposalListRow": {
-          "description": "List-specific proposal row model.\n\nBy default (`include_bodies = false`) the full `body` field is omitted\nfrom serialization; callers receive only `body_excerpt` and\n`body_truncated`.  When `include_bodies = true`, the full `body` is\nincluded alongside the excerpt metadata so callers that need the\ncomplete text can still get it in a single list call.",
+          "description": "List-specific proposal row model.\n\nThe default wire shape is a bounded summary. Body data and criteria are\nopt-in; callers needing complete proposal detail use `proposal_show`.",
           "properties": {
+            "ac_met": {
+              "description": "Criteria explicitly marked `{ met: true }`.",
+              "format": "int64",
+              "type": "integer"
+            },
+            "ac_total": {
+              "description": "Total criteria, including legacy strings.",
+              "format": "int64",
+              "type": "integer"
+            },
             "acceptance_criteria": {
-              "description": "Structured acceptance criteria (`{criterion, met}` or plain string),\nsame shape as tasks. `met` means \"agreed during scoping\".",
+              "description": "Structured acceptance criteria (`{criterion, met}` or plain string),\nincluded only when requested.",
               "items": {
                 "$ref": "#/$defs/AcceptanceCriterionItem"
               },
-              "type": "array"
+              "type": [
+                "array",
+                "null"
+              ]
             },
             "author_user_id": {
               "type": [
@@ -17865,25 +17892,20 @@ expression: signatures
               ]
             },
             "body_excerpt": {
-              "description": "First 512 Unicode scalar values of the proposal body.  Always\npresent regardless of `include_bodies`.",
-              "type": "string"
-            },
-            "body_format": {
-              "description": "Body encoding: `markdown` (legacy default) or `mdx` (block-aware).",
-              "type": "string"
-            },
-            "body_truncated": {
-              "description": "`true` when the original body exceeded the 512-scalar cap.",
-              "type": "boolean"
-            },
-            "build_owner_user_id": {
-              "description": "Build owner once graduated.",
               "type": [
                 "string",
                 "null"
               ]
             },
-            "closed_at": {
+            "body_truncated": {
+              "description": "`true` when the original body exceeded the 512-scalar cap.",
+              "type": [
+                "boolean",
+                "null"
+              ]
+            },
+            "build_owner_user_id": {
+              "description": "Build owner once graduated.",
               "type": [
                 "string",
                 "null"
@@ -17894,26 +17916,6 @@ expression: signatures
             },
             "id": {
               "type": "string"
-            },
-            "last_reconciled_revision_seq": {
-              "description": "Last proposal revision that the in-flight build has reconciled against.",
-              "format": "int32",
-              "type": [
-                "integer",
-                "null"
-              ]
-            },
-            "latest_revision_seq": {
-              "description": "Head revision number (sign-offs anchored earlier are stale).",
-              "format": "int32",
-              "type": "integer"
-            },
-            "linked_spike_task_id": {
-              "description": "When parked for needs-evidence: the linked spike task id.",
-              "type": [
-                "string",
-                "null"
-              ]
             },
             "list_summary": {
               "anyOf": [
@@ -17926,13 +17928,6 @@ expression: signatures
               ],
               "description": "Compact tribunal/readiness summary — populated only on `proposal_list`\n(batched across the page) for non-terminal proposals."
             },
-            "needs_evidence_claim": {
-              "description": "When parked for needs-evidence: the named feasibility claim.",
-              "type": [
-                "string",
-                "null"
-              ]
-            },
             "pending_reconcile": {
               "description": "True when the in-flight build is behind the latest proposal revision.",
               "type": "boolean"
@@ -17943,12 +17938,6 @@ expression: signatures
             "status": {
               "description": "Lifecycle: draft | in_review | approved | building | done | rejected |\narchived | superseded.",
               "type": "string"
-            },
-            "superseded_by": {
-              "type": [
-                "string",
-                "null"
-              ]
             },
             "title": {
               "type": "string"
@@ -17967,15 +17956,12 @@ expression: signatures
             "id",
             "short_id",
             "title",
-            "body_excerpt",
-            "body_truncated",
-            "body_format",
-            "acceptance_criteria",
             "status",
             "created_at",
             "updated_at",
-            "latest_revision_seq",
-            "pending_reconcile"
+            "pending_reconcile",
+            "ac_total",
+            "ac_met"
           ],
           "type": "object"
         },

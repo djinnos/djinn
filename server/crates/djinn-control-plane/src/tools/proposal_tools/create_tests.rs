@@ -302,16 +302,17 @@ mod body_excerpt_tests {
         assert!(truncated);
     }
 
-    /// Default `proposal_list` rows omit full body, include excerpt + truncated.
+    /// Default `proposal_list` rows are bounded summaries: omit body, excerpt
+    /// metadata, and criteria; always carry `ac_total`/`ac_met`.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn default_list_omits_full_body() {
+    async fn default_list_omits_full_body_and_excerpt_metadata() {
         let (server, db) = test_server().await;
         let repo = ProposalRepository::new(db.clone(), EventBus::noop());
         let body = "This is a short test body for excerpt verification.";
         repo.create(ProposalCreateInput {
             title: "Excerpt Test",
             body,
-            acceptance_criteria: None,
+            acceptance_criteria: Some(r#"[{"criterion":"one","met":true},{"criterion":"two"}]"#),
             status: None,
             body_format: None,
         })
@@ -328,18 +329,17 @@ mod body_excerpt_tests {
         assert!(!rows.is_empty());
         let row = &rows[0];
 
-        // Excerpt metadata present.
-        assert_eq!(row["body_excerpt"].as_str().unwrap(), body);
-        assert!(!row["body_truncated"].as_bool().unwrap());
-
-        // Full body must NOT be serialized when include_bodies is omitted.
-        assert!(
-            row.get("body").is_none(),
-            "full body must be absent on default list rows"
-        );
+        // Default rows omit body, excerpt metadata, and criteria.
+        assert!(row.get("body").is_none(), "body must be absent on default rows");
+        assert!(row.get("body_excerpt").is_none(), "body_excerpt must be absent");
+        assert!(row.get("body_truncated").is_none(), "body_truncated must be absent");
+        assert!(row.get("acceptance_criteria").is_none(), "criteria must be absent");
+        // Always-present integer counts.
+        assert_eq!(row["ac_total"].as_i64(), Some(2));
+        assert_eq!(row["ac_met"].as_i64(), Some(1));
     }
 
-    /// `include_bodies: true` restores full body and retains excerpt metadata.
+    /// `include_bodies: true` restores full body and implies excerpt metadata.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn include_bodies_true_restores_full_body() {
         let (server, db) = test_server().await;
@@ -366,12 +366,12 @@ mod body_excerpt_tests {
 
         // Full body present.
         assert_eq!(row["body"].as_str().unwrap(), body);
-        // Excerpt metadata still present.
+        // Excerpt metadata implied by include_bodies.
         assert_eq!(row["body_excerpt"].as_str().unwrap(), body);
         assert!(!row["body_truncated"].as_bool().unwrap());
     }
 
-    /// `include_bodies: false` explicitly — same as omitted (no full body).
+    /// `include_bodies: false` explicitly — same as omitted (no full body or excerpt).
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn include_bodies_false_explicit() {
         let (server, db) = test_server().await;
@@ -397,9 +397,14 @@ mod body_excerpt_tests {
             rows[0].get("body").is_none(),
             "full body must be absent when include_bodies=false"
         );
+        assert!(
+            rows[0].get("body_excerpt").is_none(),
+            "excerpt metadata must be absent when include_bodies=false"
+        );
     }
 
-    /// Long body is properly truncated in excerpt but full body available.
+    /// Long body is properly truncated in excerpt (when requested) and full body
+    /// is available via `include_bodies`.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn long_body_truncated_in_excerpt() {
         let (server, db) = test_server().await;
@@ -415,9 +420,18 @@ mod body_excerpt_tests {
         .await
         .unwrap();
 
-        // Default: excerpt truncated, no full body.
+        // Default: no excerpt, no body.
         let list = server
             .dispatch_tool("proposal_list", serde_json::json!({ "limit": 10 }))
+            .await
+            .unwrap();
+        let row = &list["proposals"].as_array().unwrap()[0];
+        assert!(row.get("body_excerpt").is_none());
+        assert!(row.get("body").is_none());
+
+        // With include_excerpts: true — excerpt present, truncated, no full body.
+        let list = server
+            .dispatch_tool("proposal_list", serde_json::json!({ "limit": 10, "include_excerpts": true }))
             .await
             .unwrap();
         let row = &list["proposals"].as_array().unwrap()[0];
@@ -436,9 +450,9 @@ mod body_excerpt_tests {
         assert!(row["body_truncated"].as_bool().unwrap());
     }
 
-    /// Pagination, filters, and list_summary still work with the new row model.
+    /// Pagination, filters, and counts work with the new lean row model.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn list_preserves_pagination_and_summary() {
+    async fn list_preserves_pagination_and_counts() {
         let (server, db) = test_server().await;
         let repo = ProposalRepository::new(db.clone(), EventBus::noop());
 
@@ -466,9 +480,303 @@ mod body_excerpt_tests {
 
         let rows = list["proposals"].as_array().unwrap();
         assert_eq!(rows.len(), 2);
-        // Rows carry excerpt fields.
-        assert!(rows[0].get("body_excerpt").is_some());
-        assert!(rows[0].get("body_truncated").is_some());
+        // Rows carry counts.
+        assert!(rows[0].get("ac_total").is_some());
+        assert!(rows[0].get("ac_met").is_some());
+    }
+
+    // ── Flag truth table and tolerant count tests ──────────────────────────────
+
+    /// Exercise all eight include_bodies/include_excerpts/include_acceptance_criteria
+    /// combinations and assert the correct optional fields appear/are omitted in
+    /// each mode, while counts are always present.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn list_flag_truth_table_all_eight_combinations() {
+        let (server, db) = test_server().await;
+        let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+        // Two criteria: one met-true object, one legacy string.
+        const CRITERIA: &str =
+            r#"[{"criterion":"met one","met":true},"legacy string"]"#;
+        let body = "truth table body content for testing";
+        repo.create(ProposalCreateInput {
+            title: "Flag Table",
+            body,
+            acceptance_criteria: Some(CRITERIA),
+            status: None,
+            body_format: None,
+        })
+        .await
+        .unwrap();
+
+        for (bodies, excerpts, criteria) in [
+            (false, false, false),
+            (false, false, true),
+            (false, true, false),
+            (false, true, true),
+            (true, false, false),
+            (true, false, true),
+            (true, true, false),
+            (true, true, true),
+        ] {
+            let req = serde_json::json!({
+                "limit": 10,
+                "include_bodies": bodies,
+                "include_excerpts": excerpts,
+                "include_acceptance_criteria": criteria,
+            });
+            let list = server
+                .dispatch_tool("proposal_list", req)
+                .await
+                .unwrap();
+            assert!(list.get("error").is_none(), "flags b={bodies} e={excerpts} c={criteria} failed");
+            let row = &list["proposals"].as_array().unwrap()[0];
+
+            // Counts are always present.
+            assert_eq!(row["ac_total"].as_i64(), Some(2), "b={bodies} e={excerpts} c={criteria}");
+            assert_eq!(row["ac_met"].as_i64(), Some(1), "b={bodies} e={excerpts} c={criteria}");
+
+            // Body appears only when include_bodies is true.
+            let expect_body = bodies;
+            assert_eq!(
+                row.get("body").is_some(),
+                expect_body,
+                "b={bodies} e={excerpts} c={criteria}: body presence mismatch"
+            );
+            if expect_body {
+                assert_eq!(row["body"].as_str(), Some(body));
+            }
+
+            // Excerpt metadata appears when bodies or excerpts is true.
+            let expect_excerpt = bodies || excerpts;
+            assert_eq!(
+                row.get("body_excerpt").is_some(),
+                expect_excerpt,
+                "b={bodies} e={excerpts} c={criteria}: body_excerpt presence mismatch"
+            );
+            assert_eq!(
+                row.get("body_truncated").is_some(),
+                expect_excerpt,
+                "b={bodies} e={excerpts} c={criteria}: body_truncated presence mismatch"
+            );
+
+            // Criteria appear only when include_acceptance_criteria is true.
+            assert_eq!(
+                row.get("acceptance_criteria").is_some(),
+                criteria,
+                "b={bodies} e={excerpts} c={criteria}: criteria presence mismatch"
+            );
+        }
+    }
+
+    /// Omitted flags and explicit `false` produce identical row shapes.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn list_omitted_equals_explicit_false() {
+        let (server, db) = test_server().await;
+        let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+        repo.create(ProposalCreateInput {
+            title: "Equivalence",
+            body: "equivalence body",
+            acceptance_criteria: Some(r#"[{"criterion":"x","met":true}]"#),
+            status: None,
+            body_format: None,
+        })
+        .await
+        .unwrap();
+
+        let omitted = server
+            .dispatch_tool("proposal_list", serde_json::json!({ "limit": 10 }))
+            .await
+            .unwrap();
+        let explicit_false = server
+            .dispatch_tool("proposal_list", serde_json::json!({
+                "limit": 10,
+                "include_bodies": false,
+                "include_excerpts": false,
+                "include_acceptance_criteria": false,
+            }))
+            .await
+            .unwrap();
+
+        let r1 = &omitted["proposals"].as_array().unwrap()[0];
+        let r2 = &explicit_false["proposals"].as_array().unwrap()[0];
+
+        // Both omit the same optional fields.
+        for field in ["body", "body_excerpt", "body_truncated", "acceptance_criteria"] {
+            assert_eq!(
+                r1.get(field).is_none(),
+                r2.get(field).is_none(),
+                "field {field} differs between omitted and explicit-false"
+            );
+        }
+        // Both carry the same counts.
+        assert_eq!(r1["ac_total"], r2["ac_total"]);
+        assert_eq!(r1["ac_met"], r2["ac_met"]);
+    }
+
+    /// Independent flags: requesting criteria does not add excerpts, and vice
+    /// versa. Bodies imply excerpts but not criteria.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn list_flags_are_independent() {
+        let (server, db) = test_server().await;
+        let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+        repo.create(ProposalCreateInput {
+            title: "Independent",
+            body: "independent body content here",
+            acceptance_criteria: Some(r#"[{"criterion":"a","met":false}]"#),
+            status: None,
+            body_format: None,
+        })
+        .await
+        .unwrap();
+
+        // Criteria only — no excerpt, no body.
+        let list = server
+            .dispatch_tool("proposal_list", serde_json::json!({
+                "limit": 10,
+                "include_acceptance_criteria": true,
+            }))
+            .await
+            .unwrap();
+        let row = &list["proposals"].as_array().unwrap()[0];
+        assert!(row.get("acceptance_criteria").is_some());
+        assert!(row.get("body_excerpt").is_none());
+        assert!(row.get("body").is_none());
+
+        // Excerpts only — no criteria, no body.
+        let list = server
+            .dispatch_tool("proposal_list", serde_json::json!({
+                "limit": 10,
+                "include_excerpts": true,
+            }))
+            .await
+            .unwrap();
+        let row = &list["proposals"].as_array().unwrap()[0];
+        assert!(row.get("body_excerpt").is_some());
+        assert!(row.get("body_truncated").is_some());
+        assert!(row.get("acceptance_criteria").is_none());
+        assert!(row.get("body").is_none());
+
+        // Bodies — implies excerpt metadata but not criteria.
+        let list = server
+            .dispatch_tool("proposal_list", serde_json::json!({
+                "limit": 10,
+                "include_bodies": true,
+            }))
+            .await
+            .unwrap();
+        let row = &list["proposals"].as_array().unwrap()[0];
+        assert!(row.get("body").is_some());
+        assert!(row.get("body_excerpt").is_some());
+        assert!(row.get("body_truncated").is_some());
+        assert!(row.get("acceptance_criteria").is_none());
+    }
+
+    /// Tolerant count semantics: legacy strings count as total/not-met; object
+    /// met:true counts as met; false/missing met counts as not-met; empty/absent/
+    /// malformed non-array storage yields 0/0.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn list_tolerant_counts() {
+        let (server, db) = test_server().await;
+        let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+
+        // Legacy strings: two items, zero met.
+        let p_strings = repo
+            .create(ProposalCreateInput {
+                title: "Legacy strings",
+                body: "body",
+                acceptance_criteria: Some(r#"["first string","second string"]"#),
+                status: None,
+                body_format: None,
+            })
+            .await
+            .unwrap();
+        // Objects: two met:true, one met:false, one missing met.
+        let p_objects = repo
+            .create(ProposalCreateInput {
+                title: "Objects mixed",
+                body: "body",
+                acceptance_criteria: Some(
+                    r#"[
+                        {"criterion":"m1","met":true},
+                        {"criterion":"m2","met":true},
+                        {"criterion":"n1","met":false},
+                        {"criterion":"n2"}
+                    ]"#,
+                ),
+                status: None,
+                body_format: None,
+            })
+            .await
+            .unwrap();
+        // Empty array.
+        let p_empty = repo
+            .create(ProposalCreateInput {
+                title: "Empty criteria",
+                body: "body",
+                acceptance_criteria: Some("[]"),
+                status: None,
+                body_format: None,
+            })
+            .await
+            .unwrap();
+        // Absent criteria (null in storage).
+        let p_absent = repo
+            .create(ProposalCreateInput {
+                title: "Absent criteria",
+                body: "body",
+                acceptance_criteria: None,
+                status: None,
+                body_format: None,
+            })
+            .await
+            .unwrap();
+        // Malformed non-array (a plain JSON object, not an array).
+        let p_malformed = repo
+            .create(ProposalCreateInput {
+                title: "Malformed object",
+                body: "body",
+                acceptance_criteria: Some(r#"{"not":"an array"}"#),
+                status: None,
+                body_format: None,
+            })
+            .await
+            .unwrap();
+
+        let list = server
+            .dispatch_tool("proposal_list", serde_json::json!({ "limit": 10 }))
+            .await
+            .unwrap();
+        let rows = list["proposals"].as_array().unwrap();
+        let find = |pid: &str| -> &serde_json::Value {
+            rows.iter()
+                .find(|r| r["id"].as_str() == Some(pid))
+                .unwrap_or_else(|| panic!("row {pid} not found"))
+        };
+
+        // Legacy strings: total=2, met=0.
+        let r = find(&p_strings.id);
+        assert_eq!(r["ac_total"].as_i64(), Some(2));
+        assert_eq!(r["ac_met"].as_i64(), Some(0));
+
+        // Objects: total=4, met=2.
+        let r = find(&p_objects.id);
+        assert_eq!(r["ac_total"].as_i64(), Some(4));
+        assert_eq!(r["ac_met"].as_i64(), Some(2));
+
+        // Empty: total=0, met=0.
+        let r = find(&p_empty.id);
+        assert_eq!(r["ac_total"].as_i64(), Some(0));
+        assert_eq!(r["ac_met"].as_i64(), Some(0));
+
+        // Absent: total=0, met=0.
+        let r = find(&p_absent.id);
+        assert_eq!(r["ac_total"].as_i64(), Some(0));
+        assert_eq!(r["ac_met"].as_i64(), Some(0));
+
+        // Malformed non-array: total=0, met=0 (fail closed).
+        let r = find(&p_malformed.id);
+        assert_eq!(r["ac_total"].as_i64(), Some(0));
+        assert_eq!(r["ac_met"].as_i64(), Some(0));
     }
 
     // ── proposal_show field / revision body mode tests ───────────────────────
@@ -675,54 +983,84 @@ mod body_excerpt_tests {
 
     // ── Payload budget tests ─────────────────────────────────────────────────
 
-    /// 50 list rows with 4,096-char bodies stay <= 64 KiB serialized by default,
-    /// and `include_bodies: true` exposes the full body strings.
+    /// Exactly 50 deterministic rows with 4,096-byte bodies and multiple criteria
+    /// stay <= 32,768 UTF-8 bytes as the complete serialized envelope, omitting
+    /// body/excerpt/criteria by default, while always carrying ac_total/ac_met.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn list_payload_budget_default() {
+    async fn list_envelope_compact_50_rows() {
         let (server, db) = test_server().await;
         let repo = ProposalRepository::new(db.clone(), EventBus::noop());
-        const BUDGET_KIB: usize = 64;
-        const BUDGET_BYTES: usize = BUDGET_KIB * 1024;
-        const BODY_LEN: usize = 4096;
+        const MAX_ENVELOPE_BYTES: usize = 32_768;
+        const BODY_LEN: usize = 4_096;
+        // Mix of legacy strings and objects, including met-true, met-false,
+        // and bare criterion objects. Criteria are omitted by default but the
+        // count fields prove they were counted from the stored data.
+        const CRITERIA_JSON: &str = r#"[
+            {"criterion":"Must handle a thing","met":true},
+            {"criterion":"Should handle another","met":false},
+            "Legacy plain string criterion",
+            {"criterion":"No met field at all"}
+        ]"#;
 
-        let body = "p".repeat(BODY_LEN);
+        let large_body = "B".repeat(BODY_LEN);
         for i in 0..50 {
-            repo.create(ProposalCreateInput {
-                title: &format!("Budget {i}"),
-                body: &body,
-                acceptance_criteria: None,
-                status: None,
-                body_format: None,
-            })
-            .await
-            .unwrap();
+            let title = format!("Proposal {i:02} summary row budget fixture");
+            let proposal = repo
+                .create(ProposalCreateInput {
+                    title: &title,
+                    body: &large_body,
+                    acceptance_criteria: Some(CRITERIA_JSON),
+                    status: None,
+                    body_format: None,
+                })
+                .await
+                .unwrap();
+            // Normalize timestamps to a fixed production-length constant so the
+            // measurement is deterministic regardless of test wall-clock.
+            sqlx::query("UPDATE proposals SET created_at = $1, updated_at = $1 WHERE id = $2")
+                .bind("2026-01-15T12:34:56.789Z")
+                .bind(&proposal.id)
+                .execute(db.pool())
+                .await
+                .unwrap();
         }
 
-        let list = server
-            .dispatch_tool("proposal_list", serde_json::json!({ "limit": 100 }))
+        let response = server
+            .dispatch_tool("proposal_list", serde_json::json!({ "limit": 50, "offset": 0 }))
             .await
             .unwrap();
-        let json = serde_json::to_string(&list).expect("list serializes");
-        assert!(
-            json.len() <= BUDGET_BYTES,
-            "default list payload {} bytes exceeds {} KiB budget",
-            json.len(),
-            BUDGET_KIB
-        );
-        assert!(list["proposals"].as_array().unwrap().iter().all(|r| r.get("body").is_none()));
 
-        let full = server
-            .dispatch_tool("proposal_list", serde_json::json!({ "limit": 100, "include_bodies": true }))
-            .await
-            .unwrap();
+        // Assert complete envelope metadata before measuring.
+        assert_eq!(response["total_count"].as_i64(), Some(50));
+        assert_eq!(response["limit"].as_i64(), Some(50));
+        assert_eq!(response["offset"].as_i64(), Some(0));
+        assert_eq!(response["has_more"].as_bool(), Some(false));
+
+        let rows = response["proposals"].as_array().expect("proposals array");
+        assert_eq!(rows.len(), 50, "expected exactly 50 rows");
+
+        // Every default row omits body, excerpt metadata, and criteria.
+        for (i, row) in rows.iter().enumerate() {
+            assert!(row.get("body").is_none(), "row {i}: body must be absent");
+            assert!(row.get("body_excerpt").is_none(), "row {i}: body_excerpt must be absent");
+            assert!(row.get("body_truncated").is_none(), "row {i}: body_truncated must be absent");
+            assert!(row.get("acceptance_criteria").is_none(), "row {i}: criteria must be absent");
+            // Always-present integer counts from the mixed criteria fixture.
+            assert_eq!(row["ac_total"].as_i64(), Some(4), "row {i}: ac_total");
+            assert_eq!(row["ac_met"].as_i64(), Some(1), "row {i}: ac_met (only met:true counts)");
+        }
+
+        let envelope = serde_json::to_vec(&response).expect("response serializes");
         assert!(
-            full["proposals"].as_array().unwrap().iter().all(|r| r["body"].as_str() == Some(&body)),
-            "include_bodies should expose the full body strings"
+            envelope.len() <= MAX_ENVELOPE_BYTES,
+            "50-row default list envelope is {} bytes, exceeds {} byte ceiling",
+            envelope.len(),
+            MAX_ENVELOPE_BYTES
         );
     }
 
     /// proposal_show with 25 revisions of 4,096-char bodies is <= 64 KiB by default,
-    /// and `revision_bodies: "full"` exposes all full revision bodies.
+    /// and `revision_bodies: \"full\"` exposes all full revision bodies.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn show_payload_budget_default() {
         let (server, db) = test_server().await;

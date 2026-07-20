@@ -1911,9 +1911,7 @@ export namespace EpicTasksOutputSchema {
   [k: string]: any
   }
   export interface EpicTaskModel {
-  acceptance_criteria?: AcceptanceCriterionItem[]
-  ac_total: number
-  ac_met: number
+  acceptance_criteria: AcceptanceCriterionItem[]
   close_reason?: string
   closed_at?: string
   continuation_count: number
@@ -6888,8 +6886,6 @@ export namespace ProposalBlockPatchOutputSchema {
    * same shape as tasks. `met` means "agreed during scoping".
    */
   acceptance_criteria?: AcceptanceCriterionItem[]
-  ac_total: number
-  ac_met: number
   author_user_id?: string
   body?: string
   /**
@@ -7062,8 +7058,6 @@ export namespace ProposalCreateInputSchema {
    * Acceptance criteria: plain strings or `{criterion, met}` objects.
    */
   acceptance_criteria?: AcceptanceCriterionItem[]
-  ac_total: number
-  ac_met: number
   /**
    * Spec body (markdown or MDX depending on `body_format`).
    */
@@ -7102,8 +7096,6 @@ export namespace ProposalCreateOutputSchema {
    * same shape as tasks. `met` means "agreed during scoping".
    */
   acceptance_criteria?: AcceptanceCriterionItem[]
-  ac_total: number
-  ac_met: number
   author_user_id?: string
   body?: string
   /**
@@ -7585,8 +7577,6 @@ export namespace ProposalExportOutputSchema {
    * same shape as tasks. `met` means "agreed during scoping".
    */
   acceptance_criteria?: AcceptanceCriterionItem[]
-  ac_total: number
-  ac_met: number
   author_user_id?: string
   body?: string
   /**
@@ -7835,8 +7825,6 @@ export namespace ProposalGraduateOutputSchema {
    * same shape as tasks. `met` means "agreed during scoping".
    */
   acceptance_criteria?: AcceptanceCriterionItem[]
-  ac_total: number
-  ac_met: number
   author_user_id?: string
   body?: string
   /**
@@ -7970,8 +7958,6 @@ export namespace ProposalImportOutputSchema {
    * same shape as tasks. `met` means "agreed during scoping".
    */
   acceptance_criteria?: AcceptanceCriterionItem[]
-  ac_total: number
-  ac_met: number
   author_user_id?: string
   body?: string
   /**
@@ -8092,15 +8078,18 @@ export namespace ProposalListInputSchema {
    */
   author?: string
   /**
-   * When `true`, include the full `body` string on each list row.
-   * Default `false` — rows omit the full body and carry only
-   * `body_excerpt` (first 512 Unicode scalars) and `body_truncated`.
+   * When `true`, include structured criteria. Omitted and `false` are equivalent.
+   */
+  include_acceptance_criteria?: boolean
+  /**
+   * When `true`, include the full body. Omitted and `false` are equivalent;
+   * bodies imply excerpt metadata.
    */
   include_bodies?: boolean
-  /** When true, include excerpt metadata. */
+  /**
+   * When `true`, include excerpt metadata. Omitted and `false` are equivalent.
+   */
   include_excerpts?: boolean
-  /** When true, include structured criteria. */
-  include_acceptance_criteria?: boolean
   limit?: number
   offset?: number
   /**
@@ -8136,34 +8125,29 @@ export namespace ProposalListOutputSchema {
   /**
    * List-specific proposal row model.
    * 
-   * By default (`include_bodies = false`) the full `body` field is omitted
-   * from serialization; callers receive only `body_excerpt` and
-   * `body_truncated`.  When `include_bodies = true`, the full `body` is
-   * included alongside the excerpt metadata so callers that need the
-   * complete text can still get it in a single list call.
+   * The default wire shape is a bounded summary. Body data and criteria are
+   * opt-in; callers needing complete proposal detail use `proposal_show`.
    */
   export interface ProposalListRow {
   /**
+   * Criteria explicitly marked `{ met: true }`.
+   */
+  ac_met: number
+  /**
+   * Total criteria, including legacy strings.
+   */
+  ac_total: number
+  /**
    * Structured acceptance criteria (`{criterion, met}` or plain string),
-   * same shape as tasks. `met` means "agreed during scoping".
+   * included only when requested.
    */
   acceptance_criteria?: AcceptanceCriterionItem[]
-  ac_total: number
-  ac_met: number
   author_user_id?: string
   /**
    * Full proposal body — **only serialized when `include_bodies = true`**.
    */
   body?: string
-  /**
-   * First 512 Unicode scalar values of the proposal body.  Always
-   * present regardless of `include_bodies`.
-   */
   body_excerpt?: string
-  /**
-   * Body encoding: `markdown` (legacy default) or `mdx` (block-aware).
-   */
-  body_format: string
   /**
    * `true` when the original body exceeded the 512-scalar cap.
    */
@@ -8172,30 +8156,13 @@ export namespace ProposalListOutputSchema {
    * Build owner once graduated.
    */
   build_owner_user_id?: string
-  closed_at?: string
   created_at: string
   id: string
-  /**
-   * Last proposal revision that the in-flight build has reconciled against.
-   */
-  last_reconciled_revision_seq?: number
-  /**
-   * Head revision number (sign-offs anchored earlier are stale).
-   */
-  latest_revision_seq: number
-  /**
-   * When parked for needs-evidence: the linked spike task id.
-   */
-  linked_spike_task_id?: string
   /**
    * Compact tribunal/readiness summary — populated only on `proposal_list`
    * (batched across the page) for non-terminal proposals.
    */
   list_summary?: (ProposalListSummary | null)
-  /**
-   * When parked for needs-evidence: the named feasibility claim.
-   */
-  needs_evidence_claim?: string
   /**
    * True when the in-flight build is behind the latest proposal revision.
    */
@@ -8206,7 +8173,6 @@ export namespace ProposalListOutputSchema {
    * archived | superseded.
    */
   status: string
-  superseded_by?: string
   title: string
   /**
    * Count of unresolved feedback entries — drives the per-row badge in the
@@ -9348,9 +9314,7 @@ export namespace ProposalShowOutputSchema {
    * Structured acceptance criteria (`{criterion, met}` or plain string),
    * same shape as tasks. `met` means "agreed during scoping".
    */
-  acceptance_criteria?: AcceptanceCriterionItem[]
-  ac_total: number
-  ac_met: number
+  acceptance_criteria: AcceptanceCriterionItem[]
   author_user_id?: string
   body: string
   /**
@@ -9515,9 +9479,7 @@ export namespace ProposalShowOutputSchema {
   [k: string]: any
   }
   export interface ProposalRevisionModel {
-  acceptance_criteria?: AcceptanceCriterionItem[]
-  ac_total: number
-  ac_met: number
+  acceptance_criteria: AcceptanceCriterionItem[]
   /**
    * Full revision body — present only when `revision_bodies = "full"`.
    */
@@ -9612,8 +9574,6 @@ export namespace ProposalSignoffOutputSchema {
    * same shape as tasks. `met` means "agreed during scoping".
    */
   acceptance_criteria?: AcceptanceCriterionItem[]
-  ac_total: number
-  ac_met: number
   author_user_id?: string
   body?: string
   /**
@@ -9751,8 +9711,6 @@ export namespace ProposalSignoffClearOutputSchema {
    * same shape as tasks. `met` means "agreed during scoping".
    */
   acceptance_criteria?: AcceptanceCriterionItem[]
-  ac_total: number
-  ac_met: number
   author_user_id?: string
   body?: string
   /**
@@ -9947,8 +9905,6 @@ export namespace ProposalUpdateInputSchema {
    * Acceptance criteria: plain strings or `{criterion, met}` objects.
    */
   acceptance_criteria?: AcceptanceCriterionItem[]
-  ac_total: number
-  ac_met: number
   body?: string
   /**
    * Body encoding: `markdown` (default) or `mdx` (block-aware).
@@ -9986,8 +9942,6 @@ export namespace ProposalUpdateOutputSchema {
    * same shape as tasks. `met` means "agreed during scoping".
    */
   acceptance_criteria?: AcceptanceCriterionItem[]
-  ac_total: number
-  ac_met: number
   author_user_id?: string
   body?: string
   /**
@@ -11150,8 +11104,6 @@ export namespace TaskCreateInputSchema {
 
   export interface TaskCreateInput {
   acceptance_criteria?: AcceptanceCriterionItem[]
-  ac_total: number
-  ac_met: number
   /**
    * Specialist role name to route this task (e.g. "rust-expert").
    */
@@ -11256,9 +11208,7 @@ export namespace TaskListOutputSchema {
   [k: string]: any
   }
   export interface TaskListItem {
-  acceptance_criteria?: AcceptanceCriterionItem[]
-  ac_total: number
-  ac_met: number
+  acceptance_criteria: AcceptanceCriterionItem[]
   /**
    * Active running session for this task, if any.
    */
@@ -11798,8 +11748,6 @@ export namespace TaskUpdateInputSchema {
    * Full replacement for acceptance_criteria.
    */
   acceptance_criteria?: AcceptanceCriterionItem[]
-  ac_total: number
-  ac_met: number
   /**
    * Specialist role name to assign (set None/"" to clear).
    */
