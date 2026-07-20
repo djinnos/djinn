@@ -24211,11 +24211,8 @@ expression: signatures
               "type": "string"
             },
             "created_by_user_id": {
-              "description": "Stable `users.id` of whoever this task belongs to (session creator, or\nthe parent epic's creator for Planner-spawned tasks). `None` for tasks\nwith no human owner. Resolve to a display name via the org user list.",
-              "type": [
-                "string",
-                "null"
-              ]
+              "description": "Stable `users.id` of whoever this task belongs to. Resolve to a display\nname via the org user list.",
+              "type": "string"
             },
             "description": {
               "type": "string"
@@ -24333,6 +24330,7 @@ expression: signatures
             "total_reopen_count",
             "intervention_count",
             "created_at",
+            "created_by_user_id",
             "updated_at",
             "unresolved_blocker_count",
             "session_count",

@@ -24131,11 +24131,8 @@
               ]
             },
             "created_by_user_id": {
-              "description": "Stable `users.id` of whoever this task belongs to (session creator, or\nthe parent epic's creator for Planner-spawned tasks). `None` for tasks\nwith no human owner. Resolve to a display name via the org user list.",
-              "type": [
-                "string",
-                "null"
-              ]
+              "description": "Stable `users.id` of whoever this task belongs to. Resolve to a display\nname via the org user list.",
+              "type": "string"
             },
             "active_session": {
               "description": "Active running session for this task, if any.",
@@ -24234,6 +24231,7 @@
             "created_at",
             "updated_at",
             "unresolved_blocker_count",
+            "created_by_user_id",
             "session_count",
             "ci_status",
             "ci_gate_state"
