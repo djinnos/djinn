@@ -11269,11 +11269,10 @@ export namespace TaskListOutputSchema {
   continuation_count: number
   created_at: string
   /**
-   * Stable `users.id` of whoever this task belongs to (session creator, or
-   * the parent epic's creator for Planner-spawned tasks). `None` for tasks
-   * with no human owner. Resolve to a display name via the org user list.
+   * Stable `users.id` of whoever this task belongs to. Resolve to a display
+   * name via the org user list.
    */
-  created_by_user_id?: string
+  created_by_user_id: string
   description: string
   design: string
   epic_id?: string
