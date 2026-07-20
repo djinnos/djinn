@@ -224,8 +224,10 @@ test('qa-smoke owns only a restore-only test cache and a disposable database', (
   assert.match(source, /^ {6}DATABASE_URL:\s*postgres:\/\/postgres:postgres@127\.0\.0\.1:5433\/djinn_test_template\s*$/m,
     'SQLx compilation must use the migrated template database');
   assert.match(source, /CREATE DATABASE djinn_test_template/, 'qa-smoke must create its template database');
-  assert.match(source, /DATABASE_URL="\$DATABASE_URL" sqlx migrate run --source migrations_postgres/,
-    'qa-smoke must migrate the template before compiling SQLx consumers');
+  assert.match(source, /cargo test -p djinn-db --test setup_test_template -- --ignored/,
+    'qa-smoke must build the template through the repository-owned migration runner before compiling SQLx consumers');
+  assert.doesNotMatch(source, /sqlx\s+migrate\s+run|migrations_postgres(?:\/|\\)/,
+    'qa-smoke must not bypass the repository-owned migration runner');
   assert.match(source, /UPDATE pg_database SET datistemplate = TRUE WHERE datname = 'djinn_test_template'/,
     'qa-smoke must mark its dedicated database as a template');
   assertQaJobHasNoLiveDependencies(qa);

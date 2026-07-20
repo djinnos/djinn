@@ -694,7 +694,6 @@ impl SlotHostCallbacks for CompletionIntentCallbacks {
         Box::pin(async move {
             let probe = probe.ok_or_else(|| "not implemented in test".to_owned())?;
             probe.events.lock().unwrap().push(match verify_run_id {
-                "reuse-c0" => "consult-reuse-c0",
                 "reuse-c1" => "consult-reuse-c1",
                 _ => "writer-resolution",
             });
@@ -709,6 +708,10 @@ impl SlotHostCallbacks for CompletionIntentCallbacks {
                 )
                 .map_err(|error| error.to_string())?;
             }
+            // The writer-resolution call (real verify_run_id) computes the
+            // fingerprint used by the writer path's C2 validation. The C1
+            // consultation call does not need it — consultation derives its
+            // own C1 inputs from the material.
             if probe.require_workspace_path {
                 let task_run = TaskRunRepository::new(ctx.db.clone())
                     .get(task_run_id)
@@ -1261,7 +1264,7 @@ async fn repeat_worker_reuses_compatible_persisted_pass_after_completion_intent(
         callbacks.reuse_events(),
         vec![
             "completion-intent-accepted",
-            "consult-reuse-c0",
+            "writer-resolution",
             "consult-reuse-c1"
         ]
     );

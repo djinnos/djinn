@@ -86,7 +86,9 @@ jobs:
         working-directory: server/crates/djinn-db
         env:
           DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5433/djinn
-        run: sqlx migrate run --source migrations_postgres
+        run: |
+          SQLX_OFFLINE=true DJINN_DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5433/djinn cargo run -p djinn-server --bin djinn-server -- --bootstrap-designated-operator-only --migration-designated-operator-user-id 00000000-0000-7000-8000-000000000002 --bootstrap-designated-operator-github-id 9000000002 --bootstrap-designated-operator-github-login djinn-ci-migration-operator
+          SQLX_OFFLINE=true DJINN_DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5433/djinn cargo run -p djinn-server --bin djinn-server -- --migrate-only --migration-designated-operator-user-id 00000000-0000-7000-8000-000000000002
 
       - name: Build Postgres test template
         env:
@@ -95,7 +97,7 @@ jobs:
           until pg_isready -h 127.0.0.1 -p 5433 -U postgres >/dev/null 2>&1; do sleep 1; done
           psql -h 127.0.0.1 -p 5433 -U postgres -d postgres -v ON_ERROR_STOP=1 -c "DROP DATABASE IF EXISTS djinn_test_template"
           psql -h 127.0.0.1 -p 5433 -U postgres -d postgres -v ON_ERROR_STOP=1 -c "CREATE DATABASE djinn_test_template"
-          cd crates/djinn-db && DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5433/djinn_test_template sqlx migrate run --source migrations_postgres
+          SQLX_OFFLINE=true DJINN_TEST_DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5433/postgres cargo test -p djinn-db --test setup_test_template -- --ignored
           psql -h 127.0.0.1 -p 5433 -U postgres -d postgres -v ON_ERROR_STOP=1 -c "UPDATE pg_database SET datistemplate = TRUE WHERE datname = 'djinn_test_template'"
 
       - name: Create test vault key

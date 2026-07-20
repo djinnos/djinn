@@ -99,7 +99,9 @@ assert_contains 'existingSecret still mounts private-key path' \
     'mountPath: /var/run/secrets/djinn/github-app' "$existing"
 
 defaults="$TMP_DIR/defaults.yaml"
-render "$defaults"
+# This case inspects production upgrade defaults. Fresh-install migration
+# identity requirements are covered by the dedicated lifecycle render test.
+render "$defaults" --is-upgrade
 assert_contains 'production default disables self-setup' \
     'DJINN_ENABLE_SELF_SETUP: "false"' "$defaults"
 assert_contains 'production default remains organization-only' \
