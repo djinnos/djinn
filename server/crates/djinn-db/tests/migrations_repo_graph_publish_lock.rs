@@ -8,9 +8,7 @@ use sqlx::{Connection, Executor, Row};
 const MIGRATION_VERSION: u64 = 125;
 
 fn base_database_url() -> String {
-    std::env::var("TEST_POSTGRES_URL")
-        .or_else(|_| std::env::var("DJINN_TEST_DATABASE_URL"))
-        .expect("live PostgreSQL URL")
+    djinn_db::test_database_base_url()
 }
 
 fn server_prefix(base: &str) -> String {

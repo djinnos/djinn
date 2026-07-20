@@ -14,6 +14,8 @@ import type {
   ProposalEpic,
   ProposalFeedback,
   ProposalGateStatus,
+  ProposalListRow,
+  ProposalListSummary,
   ProposalRefinementStatus,
   ProposalSignoff,
   ProposalTarget,
@@ -488,11 +490,11 @@ export const graduatedDetail: ProposalDetail = {
 
 // ── List rows (with per-row tribunal/gate summaries) ─────────────────────────
 
-type ListRow = Proposal;
+type ListRow = ProposalListRow;
 
 const listSummary = (
-  over: Partial<Proposal["list_summary"] & object>,
-): NonNullable<Proposal["list_summary"]> => ({
+  over: Partial<ProposalListSummary>,
+): ProposalListSummary => ({
   awaiting_review: false,
   current_round: 0,
   dor_ready: false,
@@ -503,9 +505,18 @@ const listSummary = (
   ...over,
 });
 
+/** Base lean list-row fields shared by all list fixtures. */
+const baseListRow = {
+  pending_reconcile: false,
+  ac_total: 3,
+  ac_met: 2,
+  created_at: ISO(days(6)),
+  updated_at: ISO(days(1)),
+};
+
 export const listProposals: ListRow[] = [
   {
-    ...baseProposal,
+    ...baseListRow,
     id: "prop-building",
     short_id: "b9k1",
     title: "Graduated: tribunal chips shipped",
@@ -515,7 +526,7 @@ export const listProposals: ListRow[] = [
     unresolved_feedback_count: 0,
   },
   {
-    ...baseProposal,
+    ...baseListRow,
     id: "prop-approved",
     short_id: "a3p8",
     title: "Per-user spend limits on the dispatch pool",
@@ -525,7 +536,7 @@ export const listProposals: ListRow[] = [
     unresolved_feedback_count: 0,
   },
   {
-    ...baseProposal,
+    ...baseListRow,
     id: "prop-refine",
     short_id: "r7x2",
     title: "Tribunal chips on the proposals list",
@@ -536,7 +547,7 @@ export const listProposals: ListRow[] = [
     unresolved_feedback_count: 2,
   },
   {
-    ...baseProposal,
+    ...baseListRow,
     id: "prop-running",
     short_id: "d5m0",
     title: "Slack chat → tasks bridge",
@@ -547,7 +558,7 @@ export const listProposals: ListRow[] = [
     unresolved_feedback_count: 1,
   },
   {
-    ...baseProposal,
+    ...baseListRow,
     id: "prop-blocked",
     short_id: "e1q9",
     title: "Read-only multi-repo fan-out",
@@ -558,7 +569,7 @@ export const listProposals: ListRow[] = [
     unresolved_feedback_count: 0,
   },
   {
-    ...baseProposal,
+    ...baseListRow,
     id: "prop-evidence",
     short_id: "f8t4",
     title: "Coordinator advisory-lock leadership",
@@ -569,7 +580,7 @@ export const listProposals: ListRow[] = [
     unresolved_feedback_count: 3,
   },
   {
-    ...baseProposal,
+    ...baseListRow,
     id: "prop-triage",
     short_id: "g2w7",
     title: "Untriaged: revive the OKF importer",
@@ -580,7 +591,7 @@ export const listProposals: ListRow[] = [
     unresolved_feedback_count: 0,
   },
   {
-    ...baseProposal,
+    ...baseListRow,
     id: "prop-rejected",
     short_id: "h6y3",
     title: "In-house per-repo preapproval gate",
@@ -591,7 +602,7 @@ export const listProposals: ListRow[] = [
     unresolved_feedback_count: 0,
   },
   {
-    ...baseProposal,
+    ...baseListRow,
     id: "prop-superseded",
     short_id: "j0z5",
     title: "Old draft: Dolt-backed revision ledger",

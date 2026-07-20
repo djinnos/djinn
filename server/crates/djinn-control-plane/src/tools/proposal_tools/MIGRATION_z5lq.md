@@ -12,24 +12,22 @@ must opt in explicitly.
 
 **Before:** every list row included the full `body` string.
 
-**After (default):** rows omit `body` and carry only:
+**After (default):** rows are bounded summaries with identity, lifecycle/time, workflow fields, optional `list_summary`, and integer `ac_total`/`ac_met`. They omit body, excerpt metadata, criteria, and detail bookkeeping.
 
-| Field            | Type    | Description                             |
-|------------------|---------|-----------------------------------------|
-| `body_excerpt`   | string  | First 512 Unicode scalars of the body   |
-| `body_truncated` | boolean | `true` when the stored body > 512 chars |
+| Field | Type | Description |
+|---|---|---|
+| `ac_total` | integer | All stored criteria, including legacy strings |
+| `ac_met` | integer | Object criteria explicitly marked `met: true` |
 
 ### Migration
 
-Pass `include_bodies: true` to restore the full `body` string alongside the
-excerpt metadata:
+Request optional list fields independently. Omitted and `false` are equivalent; `include_bodies: true` also implies excerpt metadata:
 
 ```json
-{ "include_bodies": true }
+{ "include_excerpts": true, "include_acceptance_criteria": true }
 ```
 
-The excerpt fields (`body_excerpt`, `body_truncated`) are always present
-regardless of `include_bodies`.
+Use `proposal_show` as the sole complete deep dive for body format, revision, closure, evidence, and other omitted detail.
 
 ---
 
@@ -81,8 +79,7 @@ always full when the `proposal` field is selected — it is never excerpted.
 
 ## Payload budget guarantees
 
-- **`proposal_list`** with 50 rows of 4,096-character bodies stays ≤ 64 KiB by
-  default (excerpt mode).  Full bodies are available with `include_bodies: true`.
+- **`proposal_list`** with 50 rows of 4,096-character bodies stays ≤ 32,768 bytes by default (summary mode). Full bodies are opt-in.
 - **`proposal_show`** with 25 revisions of 4,096-character bodies stays ≤ 64 KiB
   by default (excerpt mode).  Full revision bodies are available with
   `revision_bodies: "full"`.
