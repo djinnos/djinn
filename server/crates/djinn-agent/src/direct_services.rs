@@ -3260,3 +3260,327 @@ mod dispatch_identity_validation_tests {
         assert!(validate_optional_dispatch_uuid(Some("not-a-uuid"), "dispatch_group_id").is_err());
     }
 }
+
+#[cfg(test)]
+mod dispatch_identity_persistence_tests {
+    use super::DirectServices;
+    use djinn_db::TaskRunRepository;
+    use djinn_db::repositories::task_attempt::{CreateTaskAttemptParams, TaskAttemptRepository};
+    use djinn_supervisor::SupervisorServices;
+    use djinn_supervisor::services::SerializableCreateTaskRunParams;
+    use tokio_util::sync::CancellationToken;
+
+    #[tokio::test]
+    async fn direct_service_persists_present_and_omitted_dispatch_identity() {
+        let db = crate::test_helpers::create_test_db();
+        let project = crate::test_helpers::create_test_project(&db).await;
+        let epic = crate::test_helpers::create_test_epic(&db, &project.id).await;
+        let task = crate::test_helpers::create_test_task(&db, &project.id, &epic.id).await;
+        let services = DirectServices::new(
+            crate::test_helpers::agent_context_from_db(db.clone(), CancellationToken::new()),
+            CancellationToken::new(),
+        );
+        let attempts = TaskAttemptRepository::new(db.clone());
+        let owner = uuid::Uuid::now_v7().to_string();
+        let group = uuid::Uuid::now_v7().to_string();
+        let exact_attempt = uuid::Uuid::now_v7().to_string();
+        attempts
+            .create_or_get_pending(CreateTaskAttemptParams {
+                id: &exact_attempt,
+                task_id: &task.id,
+                role: "worker",
+                dispatch_key: "direct-present",
+                session_id: None,
+                attempt_seq: None,
+                dispatch_owner_incarnation_id: Some(&owner),
+                dispatch_group_id: Some(&group),
+            })
+            .await
+            .unwrap();
+        let run = uuid::Uuid::now_v7().to_string();
+        services
+            .create_task_run(SerializableCreateTaskRunParams {
+                id: run.clone(),
+                task_attempt_id: Some(exact_attempt.clone()),
+                project_id: project.id.clone(),
+                task_id: task.id.clone(),
+                trigger_type: "new_task".into(),
+                status: None,
+                workspace_path: None,
+                mirror_ref: None,
+                dispatch_owner_incarnation_id: Some(owner.clone()),
+                dispatch_group_id: Some(group.clone()),
+            })
+            .await
+            .unwrap();
+        let persisted_attempt = attempts.get(&exact_attempt).await.unwrap().unwrap();
+        let persisted_run = TaskRunRepository::new(db.clone())
+            .get(&run)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            persisted_attempt.dispatch_owner_incarnation_id.as_deref(),
+            Some(owner.as_str())
+        );
+        assert_eq!(
+            persisted_attempt.dispatch_group_id.as_deref(),
+            Some(group.as_str())
+        );
+        assert_eq!(
+            persisted_run.dispatch_group_id.as_deref(),
+            Some(group.as_str())
+        );
+
+        // Legacy workers omit both additive fields; role/key differ, forbidding inference.
+        let legacy_attempt = uuid::Uuid::now_v7().to_string();
+        attempts
+            .create_or_get_pending(CreateTaskAttemptParams {
+                id: &legacy_attempt,
+                task_id: &task.id,
+                role: "reviewer",
+                dispatch_key: "direct-legacy",
+                session_id: None,
+                attempt_seq: None,
+                dispatch_owner_incarnation_id: None,
+                dispatch_group_id: None,
+            })
+            .await
+            .unwrap();
+        let legacy_run = uuid::Uuid::now_v7().to_string();
+        services
+            .create_task_run(SerializableCreateTaskRunParams {
+                id: legacy_run.clone(),
+                task_attempt_id: Some(legacy_attempt.clone()),
+                project_id: project.id.clone(),
+                task_id: task.id.clone(),
+                trigger_type: "new_task".into(),
+                status: None,
+                workspace_path: None,
+                mirror_ref: None,
+                dispatch_owner_incarnation_id: None,
+                dispatch_group_id: None,
+            })
+            .await
+            .unwrap();
+        let persisted_legacy_attempt = attempts.get(&legacy_attempt).await.unwrap().unwrap();
+        let persisted_legacy_run = TaskRunRepository::new(db)
+            .get(&legacy_run)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            persisted_legacy_attempt
+                .dispatch_owner_incarnation_id
+                .is_none()
+        );
+        assert!(persisted_legacy_attempt.dispatch_group_id.is_none());
+        assert!(persisted_legacy_run.dispatch_group_id.is_none());
+    }
+
+    #[tokio::test]
+    async fn direct_service_rejects_malformed_owner_and_group_before_writing_run() {
+        let db = crate::test_helpers::create_test_db();
+        let project = crate::test_helpers::create_test_project(&db).await;
+        let epic = crate::test_helpers::create_test_epic(&db, &project.id).await;
+        let task = crate::test_helpers::create_test_task(&db, &project.id, &epic.id).await;
+        let services = DirectServices::new(
+            crate::test_helpers::agent_context_from_db(db.clone(), CancellationToken::new()),
+            CancellationToken::new(),
+        );
+        for (owner, group) in [(Some("bad-owner"), None), (None, Some("bad-group"))] {
+            let attempt = uuid::Uuid::now_v7().to_string();
+            TaskAttemptRepository::new(db.clone())
+                .create_or_get_pending(CreateTaskAttemptParams {
+                    id: &attempt,
+                    task_id: &task.id,
+                    role: "worker",
+                    dispatch_key: &attempt,
+                    session_id: None,
+                    attempt_seq: None,
+                    dispatch_owner_incarnation_id: None,
+                    dispatch_group_id: None,
+                })
+                .await
+                .unwrap();
+            let run = uuid::Uuid::now_v7().to_string();
+            assert!(
+                services
+                    .create_task_run(SerializableCreateTaskRunParams {
+                        id: run.clone(),
+                        task_attempt_id: Some(attempt),
+                        project_id: project.id.clone(),
+                        task_id: task.id.clone(),
+                        trigger_type: "new_task".into(),
+                        status: None,
+                        workspace_path: None,
+                        mirror_ref: None,
+                        dispatch_owner_incarnation_id: owner.map(str::to_owned),
+                        dispatch_group_id: group.map(str::to_owned),
+                    })
+                    .await
+                    .is_err()
+            );
+            assert!(
+                TaskRunRepository::new(db.clone())
+                    .get(&run)
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod dispatch_identity_rpc_persistence_tests {
+    use super::DirectServices;
+    use djinn_db::TaskRunRepository;
+    use djinn_db::repositories::task_attempt::{CreateTaskAttemptParams, TaskAttemptRepository};
+    use djinn_supervisor::SupervisorServices;
+    use djinn_supervisor::services::SerializableCreateTaskRunParams;
+    use djinn_supervisor::{RpcServices, serve_on_unix_socket};
+    use std::sync::Arc;
+    use tokio_util::sync::CancellationToken;
+
+    #[tokio::test]
+    async fn serialized_rpc_to_real_direct_service_preserves_present_and_null_identity() {
+        let db = crate::test_helpers::create_test_db();
+        let project = crate::test_helpers::create_test_project(&db).await;
+        let epic = crate::test_helpers::create_test_epic(&db, &project.id).await;
+        let task = crate::test_helpers::create_test_task(&db, &project.id, &epic.id).await;
+        let host = Arc::new(DirectServices::new(
+            crate::test_helpers::agent_context_from_db(db.clone(), CancellationToken::new()),
+            CancellationToken::new(),
+        ));
+        // Unix-domain socket paths are limited to roughly 108 bytes. The
+        // standard test temp root is nested beneath Cargo's target directory,
+        // which exceeds that limit on CI checkout paths.
+        let dir = tempfile::Builder::new()
+            .prefix("dj-rpc-")
+            .tempdir_in("/var/tmp")
+            .unwrap();
+        let socket = dir.path().join("supervisor.sock");
+        let server = serve_on_unix_socket(&socket, host).await.unwrap();
+        let cancel = CancellationToken::new();
+        let (rpc, background) = RpcServices::connect_unix(&socket, cancel.clone())
+            .await
+            .unwrap();
+        let attempts = TaskAttemptRepository::new(db.clone());
+
+        let owner = uuid::Uuid::now_v7().to_string();
+        let group = uuid::Uuid::now_v7().to_string();
+        let present_attempt = uuid::Uuid::now_v7().to_string();
+        attempts
+            .create_or_get_pending(CreateTaskAttemptParams {
+                id: &present_attempt,
+                task_id: &task.id,
+                role: "worker",
+                dispatch_key: "rpc-present",
+                session_id: None,
+                attempt_seq: None,
+                dispatch_owner_incarnation_id: Some(&owner),
+                dispatch_group_id: Some(&group),
+            })
+            .await
+            .unwrap();
+        let present_run = uuid::Uuid::now_v7().to_string();
+        rpc.create_task_run(SerializableCreateTaskRunParams {
+            id: present_run.clone(),
+            task_attempt_id: Some(present_attempt.clone()),
+            project_id: project.id.clone(),
+            task_id: task.id.clone(),
+            trigger_type: "new_task".into(),
+            status: None,
+            workspace_path: None,
+            mirror_ref: None,
+            dispatch_owner_incarnation_id: Some(owner.clone()),
+            dispatch_group_id: Some(group.clone()),
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            attempts
+                .get(&present_attempt)
+                .await
+                .unwrap()
+                .unwrap()
+                .dispatch_owner_incarnation_id
+                .as_deref(),
+            Some(owner.as_str())
+        );
+        assert_eq!(
+            TaskRunRepository::new(db.clone())
+                .get(&present_run)
+                .await
+                .unwrap()
+                .unwrap()
+                .dispatch_group_id
+                .as_deref(),
+            Some(group.as_str())
+        );
+
+        let legacy_attempt = uuid::Uuid::now_v7().to_string();
+        attempts
+            .create_or_get_pending(CreateTaskAttemptParams {
+                id: &legacy_attempt,
+                task_id: &task.id,
+                role: "reviewer",
+                dispatch_key: "rpc-legacy",
+                session_id: None,
+                attempt_seq: None,
+                dispatch_owner_incarnation_id: None,
+                dispatch_group_id: None,
+            })
+            .await
+            .unwrap();
+        let legacy_run = uuid::Uuid::now_v7().to_string();
+        rpc.create_task_run(SerializableCreateTaskRunParams {
+            id: legacy_run.clone(),
+            task_attempt_id: Some(legacy_attempt.clone()),
+            project_id: project.id.clone(),
+            task_id: task.id.clone(),
+            trigger_type: "new_task".into(),
+            status: None,
+            workspace_path: None,
+            mirror_ref: None,
+            dispatch_owner_incarnation_id: None,
+            dispatch_group_id: None,
+        })
+        .await
+        .unwrap();
+        assert!(
+            attempts
+                .get(&legacy_attempt)
+                .await
+                .unwrap()
+                .unwrap()
+                .dispatch_owner_incarnation_id
+                .is_none()
+        );
+        assert!(
+            attempts
+                .get(&legacy_attempt)
+                .await
+                .unwrap()
+                .unwrap()
+                .dispatch_group_id
+                .is_none()
+        );
+        assert!(
+            TaskRunRepository::new(db)
+                .get(&legacy_run)
+                .await
+                .unwrap()
+                .unwrap()
+                .dispatch_group_id
+                .is_none()
+        );
+        drop(rpc);
+        cancel.cancel();
+        let _ = background.reader.await;
+        let _ = background.writer.await;
+        server.cancel();
+        let _ = server.join.await;
+    }
+}

@@ -1818,6 +1818,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "djinn-spec-lint"
+version = "0.1.0"
+dependencies = [
+ "markdown",
+ "regex",
+ "schemars 1.2.1",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+]
+
+[[package]]
 name = "djinn-stack"
 version = "0.1.0"
 dependencies = [
