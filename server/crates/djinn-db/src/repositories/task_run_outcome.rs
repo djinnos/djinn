@@ -113,10 +113,14 @@ impl TaskRunOutcomeRepository {
     ) -> Result<djinn_core::models::TaskRunRecord> {
         self.db.ensure_initialized().await?;
         let status = params.status.unwrap_or("running");
+        if let Some(group_id) = params.dispatch_group_id {
+            uuid::Uuid::parse_str(group_id)
+                .map_err(|_| DbError::InvalidData("dispatch_group_id must be a UUID".to_owned()))?;
+        }
         let mut tx = self.db.pool().begin().await?;
-        sqlx::query("INSERT INTO task_runs (id, project_id, task_id, trigger_type, status, workspace_path, mirror_ref) VALUES ($1, $2, $3, $4, $5, $6, $7)")
+        sqlx::query("INSERT INTO task_runs (id, project_id, task_id, trigger_type, status, workspace_path, mirror_ref, dispatch_group_id) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)")
             .bind(params.id).bind(params.project_id).bind(params.task_id).bind(params.trigger_type)
-            .bind(status).bind(params.workspace_path).bind(params.mirror_ref).execute(&mut *tx).await?;
+            .bind(status).bind(params.workspace_path).bind(params.mirror_ref).bind(params.dispatch_group_id).execute(&mut *tx).await?;
         let attempt: Option<(String, Option<String>, i32)> = sqlx::query_as(
             "SELECT task_id, task_run_id, attempt_seq FROM task_attempts WHERE id = $1 FOR UPDATE",
         )

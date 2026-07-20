@@ -121,6 +121,7 @@ pub(crate) fn build_refinement_actor(
         cancel: cancel.clone(),
         tick: tokio::time::interval(STUCK_INTERVAL),
         db: db.clone(),
+        coordinator_incarnation_id: uuid::Uuid::now_v7().to_string(),
         events_tx: events_tx.clone(),
         pool,
         build_admission: None,

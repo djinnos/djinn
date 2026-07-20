@@ -18,7 +18,7 @@
 
 use super::*;
 use crate::dispatch::PostInterventionHistory;
-use crate::dispatch::attempt_lifecycle::{make_dispatch_key, record_dispatch_start};
+use crate::dispatch::attempt_lifecycle::{make_dispatch_key, record_legacy_start};
 use crate::dispatch::respawn_guard::{
     RespawnGuardDecision, record_adopted_pr_attempt, record_guard_deferred_attempt,
     run_respawn_guard,
@@ -508,7 +508,7 @@ async fn i3mv_pending_attempt_causes_guard_defer() {
 
     // Dispatch starts a pending attempt.
     let dk = make_dispatch_key(&task.id, "worker");
-    record_dispatch_start(&db, &task.id, "worker", None, &dk)
+    record_legacy_start(&db, &task.id, "worker", None, &dk)
         .await
         .expect("dispatch start should succeed");
 
@@ -586,7 +586,7 @@ async fn i3mv_guard_delegates_to_attempt_repository() {
 
     // Insert a pending attempt via the repository.
     let dk = make_dispatch_key(&task.id, "worker");
-    record_dispatch_start(&db, &task.id, "worker", None, &dk)
+    record_legacy_start(&db, &task.id, "worker", None, &dk)
         .await
         .expect("dispatch start");
 
@@ -956,7 +956,7 @@ async fn audit_guard_defer_records_decision_and_reason_with_counter_proof() {
 
     // Seed an in-flight pending attempt so the guard will defer.
     let dk = make_dispatch_key(&task.id, "worker");
-    record_dispatch_start(&db, &task.id, "worker", None, &dk)
+    record_legacy_start(&db, &task.id, "worker", None, &dk)
         .await
         .expect("dispatch start should succeed");
 
@@ -1034,7 +1034,7 @@ async fn audit_guard_defer_leaves_actor_counters_unchanged() {
 
     // Seed a pending in-flight attempt.
     let dk = make_dispatch_key(&task.id, "worker");
-    record_dispatch_start(&db, &task.id, "worker", None, &dk)
+    record_legacy_start(&db, &task.id, "worker", None, &dk)
         .await
         .expect("dispatch start");
 
@@ -1314,7 +1314,7 @@ async fn audit_adopted_pr_in_attempt_history_with_idempotent_guard_evaluation() 
 // ─── AC-guard-audit-3: Genuine dispatch delegates to lifecycle/breaker APIs ─
 
 /// After a guard `Allow`, the genuine dispatch path writes a `pending`
-/// attempt row via `record_dispatch_start` (the shipped lifecycle API).
+/// attempt row via `record_legacy_start` (the shipped lifecycle API).
 /// This proves the dispatch-to-pool path delegates attempt creation to the
 /// attempt lifecycle module rather than inlining the row insert.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1333,12 +1333,12 @@ async fn audit_genuine_dispatch_delegates_attempt_creation_to_lifecycle_api() {
         "guard must allow when no prior attempts or open PR"
     );
 
-    // Simulate the genuine dispatch path: record_dispatch_start (the
+    // Simulate the genuine dispatch path: record_legacy_start (the
     // same call made at task_dispatch.rs:1944).
     let dk = make_dispatch_key(&task.id, "worker");
-    record_dispatch_start(&db, &task.id, "worker", None, &dk)
+    record_legacy_start(&db, &task.id, "worker", None, &dk)
         .await
-        .expect("record_dispatch_start should succeed");
+        .expect("record_legacy_start should succeed");
 
     // ── Assert: a pending attempt exists ────────────────────────────────
     let attempt_repo = TaskAttemptRepository::new(db.clone());
@@ -1348,7 +1348,7 @@ async fn audit_genuine_dispatch_delegates_attempt_creation_to_lifecycle_api() {
         .unwrap();
     assert!(
         in_flight.is_some(),
-        "record_dispatch_start must create a pending attempt row"
+        "record_legacy_start must create a pending attempt row"
     );
     let attempt = in_flight.unwrap();
     assert_eq!(attempt.outcome, TaskAttemptOutcome::Pending.as_str());
