@@ -835,7 +835,9 @@ jobs:
         working-directory: server/crates/djinn-db
         env:
           DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5433/djinn
-        run: sqlx migrate run --source migrations_postgres
+        run: |
+          SQLX_OFFLINE=true DJINN_DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5433/djinn cargo run -p djinn-server --bin djinn-server -- --bootstrap-designated-operator-only --migration-designated-operator-user-id 00000000-0000-7000-8000-000000000002 --bootstrap-designated-operator-github-id 9000000002 --bootstrap-designated-operator-github-login djinn-ci-migration-operator
+          SQLX_OFFLINE=true DJINN_DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5433/djinn cargo run -p djinn-server --bin djinn-server -- --migrate-only --migration-designated-operator-user-id 00000000-0000-7000-8000-000000000002
       - name: Build Postgres test template
         env:
           PGPASSWORD: postgres
@@ -843,7 +845,7 @@ jobs:
           until pg_isready -h 127.0.0.1 -p 5433 -U postgres >/dev/null 2>&1; do sleep 1; done
           psql -h 127.0.0.1 -p 5433 -U postgres -d postgres -v ON_ERROR_STOP=1 -c "DROP DATABASE IF EXISTS djinn_test_template"
           psql -h 127.0.0.1 -p 5433 -U postgres -d postgres -v ON_ERROR_STOP=1 -c "CREATE DATABASE djinn_test_template"
-          cd crates/djinn-db && DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5433/djinn_test_template sqlx migrate run --source migrations_postgres
+          SQLX_OFFLINE=true DJINN_TEST_DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5433/postgres cargo test -p djinn-db --test setup_test_template -- --ignored
           psql -h 127.0.0.1 -p 5433 -U postgres -d postgres -v ON_ERROR_STOP=1 -c "UPDATE pg_database SET datistemplate = TRUE WHERE datname = 'djinn_test_template'"
       - name: Create test vault key
         run: |
@@ -870,19 +872,26 @@ jobs:
           # time the build finishes the plan artifact is normally already
           # uploaded, so this loop usually exits on the first probe. If the
           # planner concludes without publishing a plan, fail immediately
-          # instead of burning the full timeout.
+          # instead of burning the full timeout. GitHub's API occasionally
+          # returns a transient 5xx; treat that as an empty probe and retry.
           for attempt in $(seq 1 60); do
             artifact_id=$(gh api "repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/artifacts?name=nextest-plan-${{ github.run_id }}" \
-              --jq '.artifacts[0].id // empty')
+              --jq '.artifacts[0].id // empty' 2>/dev/null || true)
             if [ -n "$artifact_id" ]; then
               mkdir -p nextest-plan
-              gh api "repos/${{ github.repository }}/actions/artifacts/$artifact_id/zip" > nextest-plan/plan.zip
+              if ! gh api "repos/${{ github.repository }}/actions/artifacts/$artifact_id/zip" \
+                > nextest-plan/plan.zip; then
+                rm -f nextest-plan/plan.zip
+                sleep 10
+                continue
+              fi
               unzip -o nextest-plan/plan.zip -d nextest-plan
               rm nextest-plan/plan.zip
               exit 0
             fi
             planner=$(gh api "repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/jobs?per_page=100" \
-              --jq '[.jobs[] | select(.name == "Plan Server Test Shards")][0].conclusion // empty')
+              --jq '[.jobs[] | select(.name == "Plan Server Test Shards")][0].conclusion // empty' \
+              2>/dev/null || true)
             case "$planner" in
               failure|cancelled|timed_out)
                 echo "::error::Plan Server Test Shards concluded '$planner' without publishing a plan."
@@ -1151,7 +1160,9 @@ jobs:
           tool: sqlx-cli
       - name: Apply djinn-db migrations
         working-directory: server/crates/djinn-db
-        run: sqlx migrate run --source migrations_postgres
+        run: |
+          SQLX_OFFLINE=true DJINN_DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5433/djinn cargo run -p djinn-server --bin djinn-server -- --bootstrap-designated-operator-only --migration-designated-operator-user-id 00000000-0000-7000-8000-000000000002 --bootstrap-designated-operator-github-id 9000000002 --bootstrap-designated-operator-github-login djinn-ci-migration-operator
+          SQLX_OFFLINE=true DJINN_DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5433/djinn cargo run -p djinn-server --bin djinn-server -- --migrate-only --migration-designated-operator-user-id 00000000-0000-7000-8000-000000000002
       - name: Verify .sqlx offline cache is up to date
         working-directory: .
         run: make sqlx-verify
@@ -1201,7 +1212,9 @@ jobs:
         working-directory: server/crates/djinn-db
         env:
           DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5433/djinn
-        run: sqlx migrate run --source migrations_postgres
+        run: |
+          SQLX_OFFLINE=true DJINN_DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5433/djinn cargo run -p djinn-server --bin djinn-server -- --bootstrap-designated-operator-only --migration-designated-operator-user-id 00000000-0000-7000-8000-000000000002 --bootstrap-designated-operator-github-id 9000000002 --bootstrap-designated-operator-github-login djinn-ci-migration-operator
+          SQLX_OFFLINE=true DJINN_DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5433/djinn cargo run -p djinn-server --bin djinn-server -- --migrate-only --migration-designated-operator-user-id 00000000-0000-7000-8000-000000000002
       - name: Build Postgres test template
         env:
           PGPASSWORD: postgres
@@ -1209,7 +1222,7 @@ jobs:
           until pg_isready -h 127.0.0.1 -p 5433 -U postgres >/dev/null 2>&1; do sleep 1; done
           psql -h 127.0.0.1 -p 5433 -U postgres -d postgres -v ON_ERROR_STOP=1 -c "DROP DATABASE IF EXISTS djinn_test_template"
           psql -h 127.0.0.1 -p 5433 -U postgres -d postgres -v ON_ERROR_STOP=1 -c "CREATE DATABASE djinn_test_template"
-          cd crates/djinn-db && DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5433/djinn_test_template sqlx migrate run --source migrations_postgres
+          SQLX_OFFLINE=true DJINN_TEST_DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5433/postgres cargo test -p djinn-db --test setup_test_template -- --ignored
           psql -h 127.0.0.1 -p 5433 -U postgres -d postgres -v ON_ERROR_STOP=1 -c "UPDATE pg_database SET datistemplate = TRUE WHERE datname = 'djinn_test_template'"
       - name: Create test vault key
         run: |
@@ -1302,7 +1315,7 @@ jobs:
           set -euo pipefail
           until pg_isready -h 127.0.0.1 -p 5433 -U postgres >/dev/null 2>&1; do sleep 1; done
           psql -h 127.0.0.1 -p 5433 -U postgres -d postgres -v ON_ERROR_STOP=1 -c "CREATE DATABASE djinn_test_template"
-          (cd crates/djinn-db && DATABASE_URL="$DATABASE_URL" sqlx migrate run --source migrations_postgres)
+          SQLX_OFFLINE=true DJINN_TEST_DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5433/postgres cargo test -p djinn-db --test setup_test_template -- --ignored
           psql -h 127.0.0.1 -p 5433 -U postgres -d postgres -v ON_ERROR_STOP=1 -c "UPDATE pg_database SET datistemplate = TRUE WHERE datname = 'djinn_test_template'"
       - name: Build qa runner once
         run: cargo build -p djinn-qa

@@ -48,6 +48,8 @@ pub async fn process_finalize_payload_with_outcome(
                 finalize_payload: payload.clone(),
                 tool_use_id: "finalize-payload".to_owned(),
                 final_verification_evidence: None,
+                final_verification_disposition:
+                    crate::output_parser::FinalVerificationDisposition::Pending,
             };
             match validate_or_reverify_completion_intent(
                 &mut intent,
@@ -75,6 +77,8 @@ pub async fn process_finalize_payload_with_outcome(
                 finalize_payload: payload.clone(),
                 tool_use_id: "finalize-payload".to_owned(),
                 final_verification_evidence: None,
+                final_verification_disposition:
+                    crate::output_parser::FinalVerificationDisposition::Pending,
             };
             match validate_or_reverify_completion_intent(
                 &mut intent,

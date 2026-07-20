@@ -51,6 +51,7 @@ use sqlx::ConnectOptions;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 use crate::error::{DbError, DbResult};
+use crate::migrations::{self, MigrationContext};
 
 /// Process-wide semaphore guarding `djinn_test_template` bootstrap.
 ///
@@ -222,18 +223,27 @@ async fn create_and_migrate_template(
 
 async fn run_template_migrations(server_prefix: &str) -> DbResult<()> {
     let template_url = format!("{server_prefix}/djinn_test_template");
-    let pool = sqlx::postgres::PgPoolOptions::new()
-        .max_connections(1)
-        .connect(&template_url)
-        .await
-        .map_err(DbError::from)?;
-    sqlx::migrate!("./migrations_postgres")
-        .run(&pool)
-        .await
-        .map_err(|e: sqlx::migrate::MigrateError| DbError::InvalidData(e.to_string()))?;
-    pool.close().await;
-
-    Ok(())
+    // Reserved exclusively for the clone template; production code has no
+    // access to this constant or this module.
+    const TEMPLATE_OPERATOR_ID: &str = "00000000-0000-7000-8000-000000000001";
+    migrations::bootstrap_designated_operator(
+        &template_url,
+        &migrations::DesignatedOperatorBootstrap {
+            user_id: TEMPLATE_OPERATOR_ID.to_owned(),
+            github_id: 9_000_000_001,
+            github_login: "djinn-test-template-operator".to_owned(),
+            github_name: Some("Djinn test template operator".to_owned()),
+            github_avatar_url: None,
+        },
+    )
+    .await?;
+    migrations::run_postgres_migrations(
+        &template_url,
+        &MigrationContext {
+            designated_operator_user_id: Some(TEMPLATE_OPERATOR_ID.to_owned()),
+        },
+    )
+    .await
 }
 
 async fn verify_template_migrations(server_prefix: &str) -> DbResult<()> {
