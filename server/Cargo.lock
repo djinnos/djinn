@@ -1262,6 +1262,7 @@ dependencies = [
  "anyhow",
  "async-stream",
  "async-trait",
+ "djinn-agent",
  "djinn-agent-worker",
  "djinn-control-plane",
  "djinn-core",
