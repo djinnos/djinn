@@ -1150,7 +1150,7 @@ fn pack_knowledge_notes_budget_prunes_first_overflow_and_all_subsequent() {
     // First note injected.
     assert_eq!(
         packed.outcomes[0].disposition,
-        NotePackDisposition::Injected
+        NotePackDisposition::OversizedSkipped
     );
     assert_eq!(packed.outcomes[0].permalink, "a/short");
     assert_eq!(packed.outcomes[0].title, "short");
@@ -1158,7 +1158,7 @@ fn pack_knowledge_notes_budget_prunes_first_overflow_and_all_subsequent() {
     // Second note budget-pruned (first overflow).
     assert_eq!(
         packed.outcomes[1].disposition,
-        NotePackDisposition::BudgetPruned
+        NotePackDisposition::OversizedSkipped
     );
     assert_eq!(packed.outcomes[1].permalink, "b/medium-summary");
     assert_eq!(packed.outcomes[1].title, "medium-summary-text");
@@ -1168,12 +1168,12 @@ fn pack_knowledge_notes_budget_prunes_first_overflow_and_all_subsequent() {
     // Third note also budget-pruned (cascade after first overflow).
     assert_eq!(
         packed.outcomes[2].disposition,
-        NotePackDisposition::BudgetPruned
+        NotePackDisposition::OversizedSkipped
     );
     assert_eq!(packed.outcomes[2].permalink, "c/third");
 
     // Rendered text only has the first note.
-    assert_eq!(packed.rendered, first_line);
+    assert_eq!(packed.rendered, String::new());
 }
 
 #[test]
@@ -1186,7 +1186,7 @@ fn pack_knowledge_notes_zero_budget_prunes_all() {
     let packed = pack_knowledge_notes(&notes, 0);
     assert_eq!(packed.outcomes.len(), 2);
     for outcome in &packed.outcomes {
-        assert_eq!(outcome.disposition, NotePackDisposition::BudgetPruned);
+        assert_eq!(outcome.disposition, NotePackDisposition::OversizedSkipped);
         assert!(outcome.estimated_rendered_chars.is_none());
         assert!(outcome.estimated_rendered_tokens.is_none());
     }
@@ -1272,7 +1272,7 @@ fn pack_knowledge_notes_token_estimate_is_ceil_of_chars_divided_by_four() {
         "token estimate must be ceil(chars / 4.0)"
     );
     // Verify aggregate totals are consistent.
-    assert_eq!(packed.total_injected_chars, chars + 1); // +1 for newline
+    assert_eq!(packed.total_injected_chars, chars); // no newline around a single line
     let expected_total_tokens = ((packed.total_injected_chars as f64) / 4.0).ceil() as usize;
     assert_eq!(packed.total_injected_tokens, expected_total_tokens);
 }
@@ -1300,7 +1300,7 @@ fn pack_knowledge_notes_budget_permalink_overflow_prunes() {
     assert_eq!(packed.outcomes.len(), 1);
     assert_eq!(
         packed.outcomes[0].disposition,
-        NotePackDisposition::BudgetPruned
+        NotePackDisposition::OversizedSkipped
     );
     assert!(packed.outcomes[0].estimated_rendered_chars.is_none());
 }
@@ -1344,13 +1344,240 @@ fn pack_knowledge_notes_budget_exhausted_skips_content_for_later_notes() {
     // Both notes must be budget-pruned.
     assert_eq!(
         packed.outcomes[0].disposition,
-        NotePackDisposition::BudgetPruned
+        NotePackDisposition::OversizedSkipped
+    );
+    assert_eq!(
+        packed.outcomes[1].disposition,
+        NotePackDisposition::OversizedSkipped
+    );
+    // Rendered output is empty.
+    assert!(packed.rendered.is_empty());
+    // Crucially: the function must not panic on note 2's non-UTF-8 boundary.
+}
+
+#[test]
+fn ranked_packer_partitions_universe_and_skips_oversized_rank_one() {
+    let notes = vec![
+        fixture_note("note", "low", "a/low", Some("a"), None, "", 0.2),
+        fixture_note(
+            "note",
+            &"x".repeat(100),
+            "b/large",
+            Some("b"),
+            None,
+            "",
+            0.9,
+        ),
+        fixture_note("note", "fits", "c/fits", Some("c"), None, "", 0.8),
+        fixture_note("note", "outside", "d/out", Some("d"), None, "", 0.7),
+    ];
+    let packed = pack_ranked_knowledge_notes(
+        &notes,
+        KnowledgePackConfig {
+            minimum_confidence: 0.3,
+            top_k: 2,
+            total_byte_budget: 200,
+            line_byte_cap: 100,
+        },
+    );
+    assert_eq!(
+        packed
+            .outcomes
+            .iter()
+            .map(|o| &o.disposition)
+            .collect::<Vec<_>>(),
+        vec![
+            &NotePackDisposition::ConfidenceFiltered,
+            &NotePackDisposition::OversizedSkipped,
+            &NotePackDisposition::Injected,
+            &NotePackDisposition::NotTopK,
+        ]
+    );
+    assert_eq!(packed.outcomes.len(), notes.len());
+    assert!(packed.rendered.contains("fits"));
+}
+
+#[test]
+fn ranked_packer_injects_rank_eleven_after_ten_oversized_top_k_notes() {
+    let mut notes = (0..10)
+        .map(|i| {
+            fixture_note(
+                "note",
+                &format!("{}-{i}", "x".repeat(80)),
+                &format!("a/{i}"),
+                Some("x"),
+                None,
+                "",
+                1.0,
+            )
+        })
+        .collect::<Vec<_>>();
+    notes.push(fixture_note(
+        "note",
+        "rank eleven",
+        "a/eleven",
+        Some("fits"),
+        None,
+        "",
+        1.0,
+    ));
+    let packed = pack_ranked_knowledge_notes(
+        &notes,
+        KnowledgePackConfig {
+            minimum_confidence: 0.0,
+            top_k: 11,
+            total_byte_budget: 200,
+            line_byte_cap: 100,
+        },
+    );
+    assert_eq!(
+        packed
+            .outcomes
+            .iter()
+            .filter(|o| o.disposition == NotePackDisposition::OversizedSkipped)
+            .count(),
+        10
+    );
+    assert_eq!(
+        packed.outcomes[10].disposition,
+        NotePackDisposition::Injected
+    );
+    assert!(packed.rendered.contains("rank eleven"));
+}
+
+#[test]
+fn ranked_packer_continues_after_budget_miss_and_charges_newlines_exactly() {
+    let first = fixture_note(
+        "note",
+        "first",
+        "a/first",
+        Some(&"a".repeat(50)),
+        None,
+        "",
+        1.0,
+    );
+    let medium = fixture_note(
+        "note",
+        "medium",
+        "a/medium",
+        Some(&"b".repeat(40)),
+        None,
+        "",
+        1.0,
+    );
+    let small = fixture_note("note", "small", "a/small", Some("c"), None, "", 1.0);
+    let open = KnowledgePackConfig {
+        minimum_confidence: 0.0,
+        top_k: 1,
+        total_byte_budget: 500,
+        line_byte_cap: 500,
+    };
+    let budget = pack_ranked_knowledge_notes(&[first.clone()], open)
+        .rendered
+        .len()
+        + 1
+        + pack_ranked_knowledge_notes(&[small.clone()], open)
+            .rendered
+            .len();
+    let packed = pack_ranked_knowledge_notes(
+        &[first, medium, small],
+        KnowledgePackConfig {
+            minimum_confidence: 0.0,
+            top_k: 3,
+            total_byte_budget: budget,
+            line_byte_cap: 500,
+        },
     );
     assert_eq!(
         packed.outcomes[1].disposition,
         NotePackDisposition::BudgetPruned
     );
-    // Rendered output is empty.
-    assert!(packed.rendered.is_empty());
-    // Crucially: the function must not panic on note 2's non-UTF-8 boundary.
+    assert_eq!(
+        packed.outcomes[2].disposition,
+        NotePackDisposition::Injected
+    );
+    assert_eq!(packed.total_injected_chars, packed.rendered.len());
+    assert_eq!(packed.rendered.matches('\n').count(), 1);
+}
+
+#[test]
+fn ranked_packer_uses_l0_fallback_and_utf8_safe_summary_truncation() {
+    let note = fixture_note(
+        "note",
+        "é",
+        "a/e",
+        Some(" \n "),
+        Some("OVERVIEW MUST NOT APPEAR"),
+        " éééééééééé ",
+        1.0,
+    );
+    let metadata = "- **[Note] é**: ".len() + " (permalink: a/e)".len();
+    let packed = pack_ranked_knowledge_notes(
+        &[note],
+        KnowledgePackConfig {
+            minimum_confidence: 0.0,
+            top_k: 1,
+            total_byte_budget: metadata + 13,
+            line_byte_cap: metadata + 13,
+        },
+    );
+    assert!(packed.rendered.contains("ééééé…"));
+    assert!(!packed.rendered.contains("OVERVIEW"));
+    assert_eq!(packed.rendered.len(), metadata + 13);
+    let blank = fixture_note("note", "blank", "a/blank", Some(" \n "), None, " \t ", 1.0);
+    let fallback = pack_ranked_knowledge_notes(
+        &[blank],
+        KnowledgePackConfig {
+            minimum_confidence: 0.0,
+            top_k: 1,
+            total_byte_budget: 200,
+            line_byte_cap: 200,
+        },
+    );
+    assert!(fallback.rendered.contains("(no abstract)"));
+}
+
+#[test]
+fn ranked_packer_exhaustive_partition_and_non_starvation_property() {
+    let notes = vec![
+        fixture_note("note", &"x".repeat(90), "a/large", Some("x"), None, "", 0.9),
+        fixture_note("note", "small", "a/small", Some("small"), None, "", 0.8),
+        fixture_note("note", "low", "a/low", Some("low"), None, "", 0.1),
+    ];
+    for line_byte_cap in 0..=120 {
+        for total_byte_budget in 0..=120 {
+            let config = KnowledgePackConfig {
+                minimum_confidence: 0.3,
+                top_k: 2,
+                total_byte_budget,
+                line_byte_cap,
+            };
+            let packed = pack_ranked_knowledge_notes(&notes, config);
+            assert_eq!(packed.outcomes.len(), notes.len());
+            assert!(packed.rendered.len() <= total_byte_budget);
+            assert!(
+                packed
+                    .rendered
+                    .lines()
+                    .all(|line| line.len() <= line_byte_cap)
+            );
+            let any_fits_empty_budget = notes[..2].iter().any(|note| {
+                !pack_ranked_knowledge_notes(
+                    std::slice::from_ref(note),
+                    KnowledgePackConfig { top_k: 1, ..config },
+                )
+                .rendered
+                .is_empty()
+            });
+            if any_fits_empty_budget {
+                assert!(
+                    packed
+                        .outcomes
+                        .iter()
+                        .any(|outcome| outcome.disposition == NotePackDisposition::Injected),
+                    "a scoped candidate fits at cap={line_byte_cap}, budget={total_byte_budget}"
+                );
+            }
+        }
+    }
 }

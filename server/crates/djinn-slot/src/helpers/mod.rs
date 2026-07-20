@@ -57,9 +57,9 @@ mod reviewer_diff;
 mod tests;
 
 pub use code_context::{
-    NotePackDisposition, NotePackOutcome, PackedKnowledgeNotes, build_role_code_graph_context,
-    derive_task_scope_paths, format_knowledge_notes, is_role_auto_code_context_enabled,
-    pack_knowledge_notes,
+    KnowledgePackConfig, NotePackDisposition, NotePackOutcome, PackedKnowledgeNotes,
+    build_role_code_graph_context, derive_task_scope_paths, format_knowledge_notes,
+    is_role_auto_code_context_enabled, pack_knowledge_notes, pack_ranked_knowledge_notes,
 };
 #[cfg(test)]
 pub(crate) use feedback::log_snippet;
