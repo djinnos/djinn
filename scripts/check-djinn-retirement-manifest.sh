@@ -4,7 +4,8 @@
 set -eu
 
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-REPO_ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)
+DEFAULT_REPO_ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)
+REPO_ROOT=${DJINN_REPO_ROOT:-$DEFAULT_REPO_ROOT}
 GENERATOR="$SCRIPT_DIR/djinn-retirement-manifest.mjs"
 FIXTURE_DIR="$SCRIPT_DIR/fixtures/djinn-retirement"
 LEDGER="$FIXTURE_DIR/deletion-ledger.json"
@@ -28,7 +29,12 @@ fi
 
 printf 'Validating durable retirement ledger and post-cutover tracked state...\n'
 cd "$REPO_ROOT"
-git ls-files -z '.djinn/*' | "$NODE_BIN" "$GENERATOR" \
+PATHS_FILE="$REPO_ROOT/.task-runtime/djinn-retirement-paths.$"
+mkdir -p "$(dirname "$PATHS_FILE")"
+trap 'rm -f "$PATHS_FILE"' EXIT HUP INT TERM
+git ls-files -z > "$PATHS_FILE"
+"$NODE_BIN" "$GENERATOR" \
+  --paths-file "$PATHS_FILE" \
   --deletion-ledger "$LEDGER" \
   --db-guidance "$DB_GUIDANCE"
 printf 'OK: durable deletion evidence is valid and tracked project-local knowledge is empty.\n'
