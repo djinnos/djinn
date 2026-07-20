@@ -135,11 +135,22 @@ impl TaskRunRepository {
     /// rejected-submission integrity) see the real path instead of NULL.
     pub async fn set_workspace_path(&self, id: &str, workspace_path: &str) -> Result<()> {
         self.db.ensure_initialized().await?;
-        sqlx::query("UPDATE task_runs SET workspace_path = $2 WHERE id = $1")
-            .bind(id)
-            .bind(workspace_path)
-            .execute(self.db.pool())
-            .await?;
+        // The first in-pod stage owns this value. Keep it stable if a later
+        // stage (or a retry racing after the first write) has another clone.
+        let result = sqlx::query(
+            "UPDATE task_runs
+             SET workspace_path = COALESCE(workspace_path, $2)
+             WHERE id = $1",
+        )
+        .bind(id)
+        .bind(workspace_path)
+        .execute(self.db.pool())
+        .await?;
+        if result.rows_affected() != 1 {
+            return Err(crate::Error::Internal(format!(
+                "task run {id} does not exist while recording workspace path"
+            )));
+        }
         Ok(())
     }
 
@@ -543,6 +554,11 @@ mod tests {
         repo.set_workspace_path(&id, "/workspace/run-clone")
             .await
             .unwrap();
+        // A later stage must retain the first in-pod clone, even if it sees a
+        // different workspace path.
+        repo.set_workspace_path(&id, "/workspace/second-stage-clone")
+            .await
+            .unwrap();
         let after = repo.get(&id).await.unwrap().unwrap();
         assert_eq!(
             after.workspace_path.as_deref(),
@@ -551,6 +567,21 @@ mod tests {
         // Nothing else on the row changes.
         assert_eq!(after.status, "starting");
         assert!(after.ended_at.is_none());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn set_workspace_path_rejects_missing_row() {
+        let db = test_db();
+        let repo = TaskRunRepository::new(db);
+
+        let error = repo
+            .set_workspace_path("missing-task-run", "/workspace/run-clone")
+            .await
+            .expect_err("a missing task-run row must not report persistence success");
+        assert!(
+            error.to_string().contains("missing-task-run"),
+            "error must identify the row that was not updated: {error}"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

@@ -220,6 +220,129 @@ impl AgentHostCallbacks {
     }
 }
 
+/// Resolve production final-verification material from the persisted task-run.
+/// The completion callback delegates here so pod tests exercise the same
+/// configured-plan/worktree resolution boundary as completion.
+pub async fn resolve_final_verification_for_task_run(
+    db: &djinn_db::Database,
+    task_run_id: &str,
+) -> Result<Option<djinn_slot::final_verification::FinalVerificationResolvedMaterial>, String> {
+    let run = TaskRunRepository::new(db.clone())
+        .get(task_run_id)
+        .await
+        .map_err(|e| e.to_string())?
+        .ok_or("task run missing")?;
+    let plan = crate::environment::environment_config_for_project_id(db, &run.project_id)
+        .await
+        .lifecycle
+        .final_verification;
+    // Typed skip, checked BEFORE the worktree requirement: a project
+    // with zero final-verification commands has no completion boundary
+    // to enforce, so submission must not depend on a resolvable
+    // worktree. A configured plan keeps the fail-closed worktree
+    // requirement below.
+    if plan.commands.is_empty() {
+        return Ok(None);
+    }
+    let worktree = run
+        .workspace_path
+        .map(PathBuf::from)
+        .ok_or("task run has no worktree")?;
+    let commands: Vec<_> = plan
+        .commands
+        .iter()
+        .map(|c| CanonicalCommandDescriptorV1 {
+            check_id: c.check_id.clone(),
+            executable: c.executable.clone(),
+            argv: c.argv.clone(),
+            working_directory: c.working_directory.clone(),
+            environment_names: c.environment_names.clone(),
+            timeout_seconds: c.timeout_seconds,
+            descriptor_revision: c.descriptor_revision,
+        })
+        .collect();
+    let manifest = VerificationInputManifestV1 {
+        version: plan.input_manifest.version,
+        repo_paths: plan.input_manifest.repo_paths.clone(),
+        environment_names: plan.input_manifest.environment_names.clone(),
+        read_only_external_inputs: plan
+            .read_only_external_inputs
+            .iter()
+            .map(|i| DeclaredExternalInputV1 {
+                id: i.id.clone(),
+                locator: i.locator.clone(),
+            })
+            .collect(),
+        output_only_globs: plan.output_only_globs.clone(),
+    };
+    let external_inputs: Vec<_> = plan
+        .read_only_external_inputs
+        .iter()
+        .map(|i| {
+            Ok(ResolvedExternalInputV1 {
+                id: i.id.clone(),
+                path: PathBuf::from(&i.locator),
+            })
+        })
+        .collect::<Result<_, String>>()?;
+    let identity = ResolvedEnvironmentIdentityInputV1 {
+        schema_version: 1,
+        canonicalization_version: 1,
+        plan: CanonicalFinalVerificationPlanV1 {
+            version: plan.version,
+            profile_id: plan.profile_id.clone(),
+            profile_revision: plan.profile_revision,
+            commands: commands.clone(),
+            required_checks: plan.required_checks.clone(),
+            hermeticity: CanonicalHermeticityV1 {
+                hermetic: plan.hermeticity.hermetic,
+                reusable: plan.hermeticity.reusable,
+                network_access: plan.hermeticity.network_access,
+            },
+        },
+        input_manifest: manifest.clone(),
+        image: ImmutableImageV1 {
+            reference: "host".into(),
+            digest: UNKNOWN_IMAGE_DIGEST.into(),
+        },
+        tool_probes: commands
+            .iter()
+            .map(|c| ToolProbeV1 {
+                tool: c.executable.clone(),
+                version: "host".into(),
+                executable_digest: UNKNOWN_IMAGE_DIGEST.into(),
+                status: ToolProbeStatus::Passed,
+            })
+            .collect(),
+        runner_version: env!("CARGO_PKG_VERSION").into(),
+        lockfile_digests: Vec::new(),
+        target: std::env::consts::ARCH.into(),
+        features: Vec::new(),
+        allowlisted_environment: BTreeMap::new(),
+    };
+    let resolver: EnvironmentIdentityResolver = Arc::new(move || Ok(identity.clone()));
+    let output_directories = output_directories(&manifest.output_only_globs)?;
+    Ok(Some(
+        djinn_slot::final_verification::FinalVerificationResolvedMaterial {
+            execution_request: FinalVerificationExecutionRequest {
+                worktree,
+                resolve_environment_identity: resolver,
+                fingerprint_config: VerificationInputFingerprintConfig {
+                    base_ref: "main".into(),
+                    manifest,
+                    external_inputs: external_inputs.clone(),
+                },
+                tool_runtime: canonical_tool_runtime(),
+                read_only_external_mounts: external_inputs.into_iter().map(|i| i.path).collect(),
+                output_directories,
+            },
+            verify_source: VerifySource::Worker,
+            required_checks: plan.required_checks,
+            diff_fingerprint: String::new(),
+        },
+    ))
+}
+
 impl djinn_slot::host::SlotHostCallbacks for AgentHostCallbacks {
     fn resolve_final_verification<'a>(
         &'a self,
@@ -239,128 +362,9 @@ impl djinn_slot::host::SlotHostCallbacks for AgentHostCallbacks {
                 + 'a,
         >,
     > {
-        let agent = self.agent.clone();
+        let db = self.agent.db.clone();
         let id = task_run_id.to_owned();
-        Box::pin(async move {
-            let run = TaskRunRepository::new(agent.db.clone())
-                .get(&id)
-                .await
-                .map_err(|e| e.to_string())?
-                .ok_or("task run missing")?;
-            let plan =
-                crate::environment::environment_config_for_project_id(&agent.db, &run.project_id)
-                    .await
-                    .lifecycle
-                    .final_verification;
-            // Typed skip, checked BEFORE the worktree requirement: a project
-            // with zero final-verification commands has no completion boundary
-            // to enforce, so submission must not depend on a resolvable
-            // worktree. A configured plan keeps the fail-closed worktree
-            // requirement below.
-            if plan.commands.is_empty() {
-                return Ok(None);
-            }
-            let worktree = run
-                .workspace_path
-                .map(PathBuf::from)
-                .ok_or("task run has no worktree")?;
-            let commands: Vec<_> = plan
-                .commands
-                .iter()
-                .map(|c| CanonicalCommandDescriptorV1 {
-                    check_id: c.check_id.clone(),
-                    executable: c.executable.clone(),
-                    argv: c.argv.clone(),
-                    working_directory: c.working_directory.clone(),
-                    environment_names: c.environment_names.clone(),
-                    timeout_seconds: c.timeout_seconds,
-                    descriptor_revision: c.descriptor_revision,
-                })
-                .collect();
-            let manifest = VerificationInputManifestV1 {
-                version: plan.input_manifest.version,
-                repo_paths: plan.input_manifest.repo_paths.clone(),
-                environment_names: plan.input_manifest.environment_names.clone(),
-                read_only_external_inputs: plan
-                    .read_only_external_inputs
-                    .iter()
-                    .map(|i| DeclaredExternalInputV1 {
-                        id: i.id.clone(),
-                        locator: i.locator.clone(),
-                    })
-                    .collect(),
-                output_only_globs: plan.output_only_globs.clone(),
-            };
-            let external_inputs: Vec<_> = plan
-                .read_only_external_inputs
-                .iter()
-                .map(|i| {
-                    Ok(ResolvedExternalInputV1 {
-                        id: i.id.clone(),
-                        path: PathBuf::from(&i.locator),
-                    })
-                })
-                .collect::<Result<_, String>>()?;
-            let identity = ResolvedEnvironmentIdentityInputV1 {
-                schema_version: 1,
-                canonicalization_version: 1,
-                plan: CanonicalFinalVerificationPlanV1 {
-                    version: plan.version,
-                    profile_id: plan.profile_id.clone(),
-                    profile_revision: plan.profile_revision,
-                    commands: commands.clone(),
-                    required_checks: plan.required_checks.clone(),
-                    hermeticity: CanonicalHermeticityV1 {
-                        hermetic: plan.hermeticity.hermetic,
-                        reusable: plan.hermeticity.reusable,
-                        network_access: plan.hermeticity.network_access,
-                    },
-                },
-                input_manifest: manifest.clone(),
-                image: ImmutableImageV1 {
-                    reference: "host".into(),
-                    digest: UNKNOWN_IMAGE_DIGEST.into(),
-                },
-                tool_probes: commands
-                    .iter()
-                    .map(|c| ToolProbeV1 {
-                        tool: c.executable.clone(),
-                        version: "host".into(),
-                        executable_digest: UNKNOWN_IMAGE_DIGEST.into(),
-                        status: ToolProbeStatus::Passed,
-                    })
-                    .collect(),
-                runner_version: env!("CARGO_PKG_VERSION").into(),
-                lockfile_digests: Vec::new(),
-                target: std::env::consts::ARCH.into(),
-                features: Vec::new(),
-                allowlisted_environment: BTreeMap::new(),
-            };
-            let resolver: EnvironmentIdentityResolver = Arc::new(move || Ok(identity.clone()));
-            let output_directories = output_directories(&manifest.output_only_globs)?;
-            Ok(Some(
-                djinn_slot::final_verification::FinalVerificationResolvedMaterial {
-                    execution_request: FinalVerificationExecutionRequest {
-                        worktree,
-                        resolve_environment_identity: resolver,
-                        fingerprint_config: VerificationInputFingerprintConfig {
-                            base_ref: "main".into(),
-                            manifest,
-                            external_inputs: external_inputs.clone(),
-                        },
-                        tool_runtime: canonical_tool_runtime(),
-                        read_only_external_mounts: external_inputs
-                            .into_iter()
-                            .map(|i| i.path)
-                            .collect(),
-                        output_directories,
-                    },
-                    verify_source: VerifySource::Worker,
-                    required_checks: plan.required_checks,
-                    diff_fingerprint: String::new(),
-                },
-            ))
-        })
+        Box::pin(async move { resolve_final_verification_for_task_run(&db, &id).await })
     }
     fn acquire_final_verification_lease<'a>(
         &'a self,
@@ -663,6 +667,25 @@ mod resolve_final_verification_tests {
                 material.map(|_| "material")
             ),
         }
+    }
+
+    /// A configured plan reads the path persisted onto a pod-shaped NULL row.
+    #[tokio::test]
+    async fn configured_plan_reads_persisted_pod_workspace_path() {
+        let fx = fixture(None).await;
+        TaskRunRepository::new(fx.agent.db.clone())
+            .set_workspace_path(&fx.task_run_id, "/workspace/pod-clone")
+            .await
+            .expect("first in-pod stage persists workspace path");
+        configure_final_verification_plan(&fx).await;
+        let material = resolve(&fx)
+            .await
+            .expect("configured plan with persisted worktree must resolve")
+            .expect("configured plan must not be a typed skip");
+        assert_eq!(
+            material.execution_request.worktree,
+            PathBuf::from("/workspace/pod-clone")
+        );
     }
 
     /// A configured plan with a recorded worktree resolves full material.
