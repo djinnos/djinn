@@ -902,6 +902,13 @@ fn emit_outcome(
             tracing::info!(
                 recording_outcome = "stored", task_id = %request.task_id, task_run_id = %request.task_run_id,
                 verification_attempt_id = %verification_attempt_id, verify_run_id = %verify_run_id,
+                persisted_run_id = %evidence.persisted_run_id,
+                ordered_commands = %evidence.ordered_commands,
+                covered_checks = %evidence.covered_checks,
+                required_checks = ?evidence.required_checks,
+                verification_input_fingerprint = %evidence.verification_input_fingerprint,
+                manifest_version = %evidence.manifest_version,
+                environment_identity_digest = %evidence.environment_identity_digest,
                 "final verification recording completed"
             )
         }
@@ -911,6 +918,12 @@ fn emit_outcome(
         } => tracing::info!(
             recording_outcome = "reused", task_id = %request.task_id, task_run_id = %request.task_run_id,
             verification_attempt_id = %verification_attempt_id, verify_run_id = %evidence.persisted_run_id,
+            ordered_commands = %evidence.ordered_commands,
+            covered_checks = %evidence.covered_checks,
+            required_checks = ?evidence.required_checks,
+            verification_input_fingerprint = %evidence.verification_input_fingerprint,
+            manifest_version = %evidence.manifest_version,
+            environment_identity_digest = %evidence.environment_identity_digest,
             "final verification recording completed"
         ),
         FinalVerificationRecordingOutcome::Ineligible {
