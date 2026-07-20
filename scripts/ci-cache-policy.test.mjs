@@ -23,13 +23,14 @@ function cacheWorkflows() {
 
 // Each family has exactly one job permitted to save it. Adding a family requires
 // adding its owner here before it can be used in the quality-gate workflow.
+// `server-quality` and `release-bins` were retired. GitHub caps a repo at
+// 10 GB and evicts LRU, and four families sat at ~8.94 GB — so every family
+// was competing with the one CI actually reads on every run. server-quality
+// served a single job after #2342; release-bins served ~1.9 releases a day
+// against ~298 CI runs. Their ~4 GB funds cache-workspace-crates on
+// server-test. Adding a family back means finding budget for it first.
 const CACHE_OWNERS = new Map([
-  ['server-quality', 'cache-warm-x86_64-quality'],
   ['server-test', 'cache-warm-x86_64-test'],
-  // Saved on main so tag-triggered release runs can restore it: caches
-  // saved on a tag ref are invisible to every other ref, so release.yml
-  // itself must stay a restore-only consumer of this family.
-  ['release-bins', 'cache-warm-x86_64-release'],
   ['server-aarch64-check', 'cache-warm-aarch64'],
 ]);
 
