@@ -14,13 +14,15 @@ use axum::{
     http::{Request, StatusCode, header},
 };
 use djinn_db::{
-    CreateUserAuthSession, Database, RepoGraphGenerationRepository, ReservedGalaxyArtifactChunk,
-    ReservedGalaxyArtifactManifest, ReservedGraphPublication, ReservedPublicationFailureStage,
-    SessionAuthRepository, UserRepository,
+    CreateUserAuthSession, Database, MAX_RETENTION_BATCH, RepoGraphGenerationRepository,
+    RepoGraphRetentionRepository, ReservedGalaxyArtifactChunk, ReservedGalaxyArtifactManifest,
+    ReservedGraphPublication, ReservedPublicationFailureStage, RetentionMode,
+    RetentionSweepRequest, SessionAuthRepository, UserRepository,
 };
 use http_body_util::BodyExt;
 use sha2::{Digest, Sha256};
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
+use tokio::sync::Barrier;
 use tokio_util::sync::CancellationToken;
 use tower::ServiceExt;
 fn hex(b: &[u8]) -> String {
@@ -566,5 +568,156 @@ async fn peak_rss_growth_for_600_chunk_stream_is_bounded() {
         growth <= 32 * 1024 * 1024,
         "peak request RSS growth {growth} bytes exceeds the 32 MiB bound \
          (baseline={baseline}, peak={peak})"
+    );
+}
+
+/// A selected route response holds G's canonical shared session pin until its
+/// final frame. Retention must skip G without waiting, fill its batch from
+/// later unpinned candidates, and only prune G once that pin is released.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn pinned_route_stream_survives_retention_then_prunes_after_final_frame() {
+    let db = test_helpers::create_test_db();
+    let generations = RepoGraphGenerationRepository::new(db.clone());
+    let p = "galaxy-retention-pin";
+    generations
+        .prepare_publication_test_project(p)
+        .await
+        .unwrap();
+    let (router, token) = app(db.clone()).await;
+
+    let g = publication(p, "stream-g", &[b"G-first-", b"G-middle-", b"G-final"]);
+    let gid = g.generation_id.clone();
+    let g_chunks: Vec<Vec<u8>> = g.chunks.iter().map(|chunk| chunk.bytes.clone()).collect();
+    let g_tag = format!("\"{}\"", g.artifact.transport_sha256);
+    generations.publish_reserved_generation(g).await.unwrap();
+
+    // Selection forms headers and acquires G's shared pin before body polling.
+    let response = get(&router, &token, p).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()[HEADER_GENERATION_ID], gid);
+    assert_eq!(response.headers()[header::ETAG], g_tag);
+    assert!(
+        !generations
+            .try_generation_stream_pin_exclusive_for_test(&gid)
+            .await
+            .unwrap(),
+        "selected response must own G's shared stream pin"
+    );
+
+    // G comes first in publish order, so the sweep sees its active pin before
+    // continuing to these candidates and filling all 25 batch slots.
+    for candidate in 0..MAX_RETENTION_BATCH {
+        let commit = format!("retention-candidate-{candidate}");
+        generations
+            .publish_reserved_generation(publication(p, &commit, &[b"candidate"]))
+            .await
+            .unwrap();
+    }
+    let history = publication(p, "retained-history", &[b"history"]);
+    let history_id = history.generation_id.clone();
+    generations
+        .publish_reserved_generation(history)
+        .await
+        .unwrap();
+    let g2 = publication(p, "stream-g2", &[b"G2-current"]);
+    let g2id = g2.generation_id.clone();
+    generations.publish_reserved_generation(g2).await.unwrap();
+
+    // Start the production sweep at a deterministic barrier and bound its
+    // completion: its matching exclusive pin must be nonblocking, not wait for
+    // G's route reader. History N=2 preserves current G2 and the history row.
+    let start = Arc::new(Barrier::new(2));
+    let sweep_start = start.clone();
+    let sweep_db = db.clone();
+    let sweep = tokio::spawn(async move {
+        sweep_start.wait().await;
+        RepoGraphRetentionRepository::new(sweep_db)
+            .sweep(RetentionSweepRequest {
+                project_id: p,
+                mode: RetentionMode::Delete,
+                history_n: 2,
+            })
+            .await
+    });
+    start.wait().await;
+    let first_sweep = tokio::time::timeout(Duration::from_secs(2), sweep)
+        .await
+        .expect("retention must not wait for G's route pin")
+        .expect("retention task must not panic")
+        .expect("production retention sweep must succeed");
+    assert_eq!(first_sweep.skipped_active_pin, 1);
+    assert_eq!(first_sweep.candidates, MAX_RETENTION_BATCH);
+    assert_eq!(first_sweep.deleted, MAX_RETENTION_BATCH);
+
+    // Retention is complete but every selected G chunk remains ordered and
+    // byte-identical through the final frame.
+    let mut body = response.into_body();
+    let mut delivered = Vec::new();
+    while let Some(frame) = body.frame().await {
+        let bytes = frame
+            .expect("pinned G frame must remain readable")
+            .into_data()
+            .expect("galaxy route emits data frames");
+        let index = delivered.len();
+        assert_eq!(bytes.as_ref(), g_chunks[index].as_slice());
+        delivered.push(bytes);
+    }
+    assert_eq!(delivered.len(), g_chunks.len());
+    assert!(
+        generations
+            .try_generation_stream_pin_exclusive_for_test(&gid)
+            .await
+            .unwrap(),
+        "final frame consumption must release G's reader pin"
+    );
+
+    let later_sweep = tokio::time::timeout(
+        Duration::from_secs(2),
+        RepoGraphRetentionRepository::new(db.clone()).sweep(RetentionSweepRequest {
+            project_id: p,
+            mode: RetentionMode::Delete,
+            history_n: 2,
+        }),
+    )
+    .await
+    .expect("later retention sweep must finish")
+    .expect("later production retention sweep must succeed");
+    assert_eq!(
+        later_sweep.deleted, 1,
+        "released G becomes the sole candidate"
+    );
+
+    // Production deletion removes compatibility before immutable G, then FK
+    // cascades its artifact/chunks. The only published survivors are H and G2.
+    assert!(
+        generations
+            .compatibility_generation_id(p, "stream-g")
+            .await
+            .is_err(),
+        "G compatibility row must be deleted"
+    );
+    assert!(
+        generations
+            .galaxy_chunks_for_test(&gid)
+            .await
+            .unwrap()
+            .is_empty(),
+        "G artifact chunks must cascade with its immutable generation"
+    );
+    let snapshot = generations.publication_snapshot_for_test(p).await.unwrap();
+    assert_eq!(snapshot.current.as_deref(), Some(g2id.as_str()));
+    assert_eq!(snapshot.cache, 2, "G2 and configured history survive");
+    assert_eq!(snapshot.generations, 2, "G immutable generation is pruned");
+    assert_eq!(
+        snapshot.artifacts, 2,
+        "only G2 and history artifacts remain"
+    );
+    assert_eq!(snapshot.chunks, 2, "only G2 and history chunks remain");
+    assert_eq!(
+        generations
+            .compatibility_generation_id(p, "retained-history")
+            .await
+            .unwrap(),
+        history_id
     );
 }
