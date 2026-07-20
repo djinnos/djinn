@@ -205,6 +205,7 @@ async fn dropped_caller_triggers_cleanup() {
     // These are deliberately separate completion oracles: registry idle proves
     // the direct status route is gone, while supervisor idle acknowledges the
     // later return from `run_linux_supervisor` after synchronous drain closure.
+    // Keep both checks: route removal can precede closure of inherited pipe FDs.
     assert!(
         worker_child_reaper().wait_for_supervisors_idle(Duration::from_secs(4)),
         "independent supervisor did not empty its registry after caller cancellation"
