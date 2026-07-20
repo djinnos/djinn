@@ -141,7 +141,7 @@ impl TaskRunOutcomeRepository {
             .await?;
         sqlx::query("INSERT INTO task_run_outcome_facts (task_run_id, attempt_seq, outcome) VALUES ($1, $2, 'observed')")
             .bind(params.id).bind(attempt_seq).execute(&mut *tx).await?;
-        let run = sqlx::query_as("SELECT id, project_id, task_id, trigger_type, status, started_at, ended_at, workspace_path, mirror_ref FROM task_runs WHERE id = $1")
+        let run = sqlx::query_as("SELECT id, project_id, task_id, trigger_type, status, started_at, ended_at, workspace_path, mirror_ref, dispatch_group_id FROM task_runs WHERE id = $1")
             .bind(params.id).fetch_one(&mut *tx).await?;
         tx.commit().await?;
         Ok(run)

@@ -984,12 +984,14 @@ async fn proactive_sync_merges_advanced_base_into_behind_task_branch() {
         is_evidence_spike: false,
     };
 
-    // 5. Drive the run. The stubbed worker/reviewer may not perfectly satisfy
-    //    every downstream assertion, but the proactive sync runs BEFORE the
-    //    worker stage regardless of how the stages resolve — so the merge must
-    //    land on the mirror's task branch either way. We tolerate any non-fatal
-    //    outcome and assert on the git topology, which is the contract.
-    let _ = supervisor.run(spec).await;
+    // 5. Drive the run. A supervisor error before the proactive-sync block is
+    //    a fixture failure, not a topology failure, so surface it directly.
+    //    Successful terminal outcomes may vary with the stubbed stages; the git
+    //    assertions below remain the behavioral contract under test.
+    supervisor
+        .run(spec)
+        .await
+        .expect("fixture must reach proactive dispatch-time sync");
 
     // 6. Mirror's task branch tip now has the advanced main as an ancestor.
     let task_tip_after = rev_parse(&mirror_path, task_branch).await;
