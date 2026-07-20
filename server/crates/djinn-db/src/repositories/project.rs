@@ -1388,7 +1388,7 @@ mod tests {
         repo.delete(&project.id).await.unwrap();
         assert!(repo.get(&project.id).await.unwrap().is_none());
         let tombstone: Option<String> =
-            sqlx::query_scalar!("SELECT project_id FROM deleted_projects WHERE project_id = $1")
+            sqlx::query_scalar("SELECT project_id FROM deleted_projects WHERE project_id = $1")
                 .bind(&project.id)
                 .fetch_optional(repo.db.pool())
                 .await
