@@ -45,9 +45,9 @@ async fn guard_defers_when_pending_attempt_exists() {
 
     // Insert a pending attempt (simulating a dispatch-start that landed).
     let dk = super::super::attempt_lifecycle::make_dispatch_key(&task.id, "worker");
-    super::super::attempt_lifecycle::record_dispatch_start(&db, &task.id, "worker", None, &dk)
+    super::super::attempt_lifecycle::record_legacy_start(&db, &task.id, "worker", None, &dk)
         .await
-        .expect("record_dispatch_start should succeed");
+        .expect("record_legacy_start should succeed");
 
     let decision = run_respawn_guard(&db, &task.id, "worker", None, None).await;
     assert_eq!(
@@ -63,9 +63,9 @@ async fn guard_defers_when_submitted_attempt_exists() {
 
     // Insert a pending attempt, then advance it to submitted.
     let dk = super::super::attempt_lifecycle::make_dispatch_key(&task.id, "worker");
-    super::super::attempt_lifecycle::record_dispatch_start(&db, &task.id, "worker", None, &dk)
+    super::super::attempt_lifecycle::record_legacy_start(&db, &task.id, "worker", None, &dk)
         .await
-        .expect("record_dispatch_start should succeed");
+        .expect("record_legacy_start should succeed");
 
     super::super::attempt_lifecycle::advance_to_submitted(
         &db,
@@ -96,9 +96,9 @@ async fn guard_allows_after_terminal_attempt() {
 
     // Create and terminally close an attempt.
     let dk = super::super::attempt_lifecycle::make_dispatch_key(&task.id, "worker");
-    super::super::attempt_lifecycle::record_dispatch_start(&db, &task.id, "worker", None, &dk)
+    super::super::attempt_lifecycle::record_legacy_start(&db, &task.id, "worker", None, &dk)
         .await
-        .expect("record_dispatch_start should succeed");
+        .expect("record_legacy_start should succeed");
 
     super::super::attempt_lifecycle::advance_latest_to_terminal(
         &db,
@@ -129,9 +129,9 @@ async fn guard_allows_for_different_role() {
 
     // Insert a pending attempt for "reviewer".
     let dk = super::super::attempt_lifecycle::make_dispatch_key(&task.id, "reviewer");
-    super::super::attempt_lifecycle::record_dispatch_start(&db, &task.id, "reviewer", None, &dk)
+    super::super::attempt_lifecycle::record_legacy_start(&db, &task.id, "reviewer", None, &dk)
         .await
-        .expect("record_dispatch_start should succeed");
+        .expect("record_legacy_start should succeed");
 
     // Guard for "worker" role should allow (different role).
     let decision = run_respawn_guard(&db, &task.id, "worker", None, None).await;
@@ -297,7 +297,7 @@ async fn guard_ordering_pending_before_submitted() {
 
     // Create a pending attempt.
     let dk = super::super::attempt_lifecycle::make_dispatch_key(&task.id, "worker");
-    super::super::attempt_lifecycle::record_dispatch_start(&db, &task.id, "worker", None, &dk)
+    super::super::attempt_lifecycle::record_legacy_start(&db, &task.id, "worker", None, &dk)
         .await
         .unwrap();
 
@@ -349,9 +349,9 @@ async fn guard_pr_adoption_takes_precedence_over_pending_attempt() {
 
     // Insert a pending attempt.
     let dk = super::super::attempt_lifecycle::make_dispatch_key(&task.id, "worker");
-    super::super::attempt_lifecycle::record_dispatch_start(&db, &task.id, "worker", None, &dk)
+    super::super::attempt_lifecycle::record_legacy_start(&db, &task.id, "worker", None, &dk)
         .await
-        .expect("record_dispatch_start should succeed");
+        .expect("record_legacy_start should succeed");
 
     // Even with a pending attempt, if pr_url is set, the guard adopts.
     let decision = run_respawn_guard(
@@ -435,9 +435,9 @@ async fn guard_defers_when_ci_gate_failing_and_pending_attempt_exists() {
 
     // A remediation worker is already in flight (pending attempt).
     let dk = super::super::attempt_lifecycle::make_dispatch_key(&task.id, "worker");
-    super::super::attempt_lifecycle::record_dispatch_start(&db, &task.id, "worker", None, &dk)
+    super::super::attempt_lifecycle::record_legacy_start(&db, &task.id, "worker", None, &dk)
         .await
-        .expect("record_dispatch_start should succeed");
+        .expect("record_legacy_start should succeed");
 
     // Open PR + failing required CI: adoption is bypassed, but step 2
     // still defers so no duplicate remediation worker is dispatched.
@@ -515,9 +515,9 @@ async fn guard_defers_when_merge_conflict_and_pending_attempt_exists() {
 
     // A conflict-resolution worker is already in flight (pending attempt).
     let dk = super::super::attempt_lifecycle::make_dispatch_key(&task.id, "worker");
-    super::super::attempt_lifecycle::record_dispatch_start(&db, &task.id, "worker", None, &dk)
+    super::super::attempt_lifecycle::record_legacy_start(&db, &task.id, "worker", None, &dk)
         .await
-        .expect("record_dispatch_start should succeed");
+        .expect("record_legacy_start should succeed");
 
     // Open PR + merge conflict: adoption is bypassed, but step 2 still
     // defers so no duplicate conflict-resolution worker is dispatched.
@@ -548,9 +548,9 @@ async fn guard_does_not_adopt_when_latest_attempt_reopened() {
     // these paths, so the guard's latest-attempt fallback must bypass
     // adoption and Allow a rework worker.
     let dk = super::super::attempt_lifecycle::make_dispatch_key(&task.id, "worker");
-    super::super::attempt_lifecycle::record_dispatch_start(&db, &task.id, "worker", None, &dk)
+    super::super::attempt_lifecycle::record_legacy_start(&db, &task.id, "worker", None, &dk)
         .await
-        .expect("record_dispatch_start should succeed");
+        .expect("record_legacy_start should succeed");
     super::super::attempt_lifecycle::advance_latest_to_terminal(
         &db,
         super::super::attempt_lifecycle::TerminalAdvancementParams {
@@ -590,9 +590,9 @@ async fn guard_reopened_fallback_ignores_guard_only_audit_rows() {
     // production tasks accumulated) must still bypass adoption: guard
     // rows must not mask the rework signal.
     let dk = super::super::attempt_lifecycle::make_dispatch_key(&task.id, "worker");
-    super::super::attempt_lifecycle::record_dispatch_start(&db, &task.id, "worker", None, &dk)
+    super::super::attempt_lifecycle::record_legacy_start(&db, &task.id, "worker", None, &dk)
         .await
-        .expect("record_dispatch_start should succeed");
+        .expect("record_legacy_start should succeed");
     super::super::attempt_lifecycle::advance_latest_to_terminal(
         &db,
         super::super::attempt_lifecycle::TerminalAdvancementParams {
@@ -649,9 +649,9 @@ async fn guard_adopts_when_latest_attempt_completed() {
     // (e.g. the 422-adopt backstop): adoption must be preserved even
     // though an older attempt cycle could have been reopened before.
     let dk = super::super::attempt_lifecycle::make_dispatch_key(&task.id, "worker");
-    super::super::attempt_lifecycle::record_dispatch_start(&db, &task.id, "worker", None, &dk)
+    super::super::attempt_lifecycle::record_legacy_start(&db, &task.id, "worker", None, &dk)
         .await
-        .expect("record_dispatch_start should succeed");
+        .expect("record_legacy_start should succeed");
     super::super::attempt_lifecycle::advance_latest_to_terminal(
         &db,
         super::super::attempt_lifecycle::TerminalAdvancementParams {
@@ -694,9 +694,9 @@ async fn guard_reopened_fallback_is_role_scoped() {
     // A `reopened` attempt for a DIFFERENT role must not bypass adoption
     // for this role.
     let dk = super::super::attempt_lifecycle::make_dispatch_key(&task.id, "reviewer");
-    super::super::attempt_lifecycle::record_dispatch_start(&db, &task.id, "reviewer", None, &dk)
+    super::super::attempt_lifecycle::record_legacy_start(&db, &task.id, "reviewer", None, &dk)
         .await
-        .expect("record_dispatch_start should succeed");
+        .expect("record_legacy_start should succeed");
     super::super::attempt_lifecycle::advance_latest_to_terminal(
         &db,
         super::super::attempt_lifecycle::TerminalAdvancementParams {
@@ -769,9 +769,9 @@ async fn guard_defers_reviewer_role_when_reviewer_attempt_in_flight() {
     // With adoption skipped for reviewers, the step-2 in-flight dedup still
     // prevents a duplicate reviewer even when an open PR is present.
     let dk = super::super::attempt_lifecycle::make_dispatch_key(&task.id, "reviewer");
-    super::super::attempt_lifecycle::record_dispatch_start(&db, &task.id, "reviewer", None, &dk)
+    super::super::attempt_lifecycle::record_legacy_start(&db, &task.id, "reviewer", None, &dk)
         .await
-        .expect("record_dispatch_start should succeed");
+        .expect("record_legacy_start should succeed");
 
     let decision = run_respawn_guard(
         &db,
@@ -796,9 +796,9 @@ async fn rework_reopen_terminalizes_inflight_submitted_and_guard_allows_worker()
 
     // Worker submitted its work (task-review stage): pending → submitted.
     let dk = super::super::attempt_lifecycle::make_dispatch_key(&task.id, "worker");
-    super::super::attempt_lifecycle::record_dispatch_start(&db, &task.id, "worker", None, &dk)
+    super::super::attempt_lifecycle::record_legacy_start(&db, &task.id, "worker", None, &dk)
         .await
-        .expect("record_dispatch_start should succeed");
+        .expect("record_legacy_start should succeed");
     super::super::attempt_lifecycle::advance_to_submitted(
         &db,
         super::super::attempt_lifecycle::SubmitAdvancementParams {
@@ -915,9 +915,9 @@ async fn rework_reopen_inserts_marker_when_no_inflight_and_guard_allows_then_def
     // with the open PR present, step-1 adoption resumes (dedup — matching
     // `guard_pr_adoption_takes_precedence_over_pending_attempt`).
     let dk = super::super::attempt_lifecycle::make_dispatch_key(&task.id, "worker");
-    super::super::attempt_lifecycle::record_dispatch_start(&db, &task.id, "worker", None, &dk)
+    super::super::attempt_lifecycle::record_legacy_start(&db, &task.id, "worker", None, &dk)
         .await
-        .expect("record_dispatch_start should succeed");
+        .expect("record_legacy_start should succeed");
     let decision2 = run_respawn_guard(
         &db,
         &task.id,
@@ -1078,9 +1078,9 @@ async fn guard_allows_when_no_pr_url_and_no_pending() {
 /// Seed a `submitted` worker attempt (pending → submitted) for a task.
 async fn seed_submitted_attempt(db: &Database, task_id: &str) {
     let dk = super::super::attempt_lifecycle::make_dispatch_key(task_id, "worker");
-    super::super::attempt_lifecycle::record_dispatch_start(db, task_id, "worker", None, &dk)
+    super::super::attempt_lifecycle::record_legacy_start(db, task_id, "worker", None, &dk)
         .await
-        .expect("record_dispatch_start should succeed");
+        .expect("record_legacy_start should succeed");
     super::super::attempt_lifecycle::advance_to_submitted(
         db,
         super::super::attempt_lifecycle::SubmitAdvancementParams {

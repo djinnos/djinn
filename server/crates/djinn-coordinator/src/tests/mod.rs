@@ -403,6 +403,7 @@ fn coordinator_actor_for_tests(
         cancel: CancellationToken::new(),
         tick: tokio::time::interval(STUCK_INTERVAL),
         db: db.clone(),
+        coordinator_incarnation_id: uuid::Uuid::now_v7().to_string(),
         events_tx: tx.clone(),
         pool: SlotPoolHandle::spawn_with_factory(
             test_helpers::agent_context_from_db(db.clone(), CancellationToken::new()),
