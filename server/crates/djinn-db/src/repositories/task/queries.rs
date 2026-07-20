@@ -684,7 +684,8 @@ impl TaskRepository {
                             total_reopen_count,
                             intervention_count, last_intervention_at,
                             created_at, updated_at, closed_at,
-                            close_reason, merge_commit_sha, pr_url, merge_conflict_metadata, memory_refs::text AS memory_refs
+                            close_reason, merge_commit_sha, pr_url, merge_conflict_metadata, memory_refs::text AS memory_refs,
+                            created_by_user_id
                      FROM tasks
                      WHERE status = 'in_progress'
                        AND updated_at < to_char((now() at time zone 'utc') - (interval '1 hour' * {stale_hours}), 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')"#
