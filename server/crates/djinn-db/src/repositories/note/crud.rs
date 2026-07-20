@@ -680,18 +680,42 @@ impl NoteRepository {
             )));
         }
 
-        sqlx::query!(
-            r#"UPDATE notes SET
-                status = $1,
-                updated_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
-             WHERE id = $2"#,
-            status,
-            id
+        // The conditional update and fallback projection share one statement:
+        // a same-status request returns the stored row without writing it,
+        // while a real transition stamps both lifecycle fields atomically.
+        let note = sqlx::query_as::<_, Note>(
+            r#"WITH updated AS (
+                    UPDATE notes
+                    SET status = $1,
+                        updated_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
+                        lifecycle_changed_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
+                    WHERE id = $2
+                      AND status IS DISTINCT FROM $1
+                    RETURNING id, project_id, permalink, title, file_path,
+                              storage, note_type, folder, status, tags::text AS tags, content,
+                              retrieval_anchor, created_at, updated_at, lifecycle_changed_at,
+                              last_accessed, access_count, confidence, abstract AS abstract_,
+                              overview, scope_paths::text AS scope_paths
+                )
+                SELECT id, project_id, permalink, title, file_path,
+                       storage, note_type, folder, status, tags, content,
+                       retrieval_anchor, created_at, updated_at, lifecycle_changed_at,
+                       last_accessed, access_count, confidence, abstract_, overview, scope_paths
+                FROM updated
+                UNION ALL
+                SELECT id, project_id, permalink, title, file_path,
+                       storage, note_type, folder, status, tags::text AS tags, content,
+                       retrieval_anchor, created_at, updated_at, lifecycle_changed_at,
+                       last_accessed, access_count, confidence, abstract AS abstract_, overview,
+                       scope_paths::text AS scope_paths
+                FROM notes
+                WHERE id = $2
+                  AND NOT EXISTS (SELECT 1 FROM updated)"#,
         )
-        .execute(self.db.pool())
+        .bind(&status)
+        .bind(id)
+        .fetch_one(self.db.pool())
         .await?;
-
-        let note = note_select_where_id!(id).fetch_one(self.db.pool()).await?;
         self.events.send(djinn_memory::events::note_updated(&note));
         Ok(note)
     }
