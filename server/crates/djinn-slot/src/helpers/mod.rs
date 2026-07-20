@@ -51,6 +51,9 @@ mod feedback;
 pub mod provider_resolution;
 mod reviewer_diff;
 
+#[cfg(test)]
+mod code_context_tests;
+
 // Tests hold `AUTO_CODE_CONTEXT_ENV_LOCK` across `.await` on purpose.
 #[cfg(test)]
 #[allow(clippy::await_holding_lock)]
