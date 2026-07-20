@@ -345,6 +345,7 @@ async fn build_rig(required_checks: &[&str], configure: impl FnOnce(&mut Coordin
             status: Some("running"),
             workspace_path: None,
             mirror_ref: None,
+            dispatch_group_id: None,
         })
         .await
         .unwrap();
@@ -404,6 +405,7 @@ async fn fixture() -> (SlotContext, FinalVerificationCoordinatorRequest) {
             status: Some("running"),
             workspace_path: None,
             mirror_ref: None,
+            dispatch_group_id: None,
         })
         .await
         .unwrap();

@@ -447,6 +447,7 @@ async fn submit_work_with_auto_submit_metadata_records_model_called_true() {
             status: None,
             workspace_path: None,
             mirror_ref: None,
+            dispatch_group_id: None,
         })
         .await
         .expect("create task run");
@@ -516,6 +517,7 @@ async fn auto_submit_payload_records_model_called_false() {
             status: None,
             workspace_path: None,
             mirror_ref: None,
+            dispatch_group_id: None,
         })
         .await
         .expect("create task run");

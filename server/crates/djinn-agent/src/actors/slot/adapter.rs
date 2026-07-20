@@ -595,6 +595,7 @@ mod resolve_final_verification_tests {
                 status: Some("running"),
                 workspace_path,
                 mirror_ref: None,
+                dispatch_group_id: None,
             })
             .await
             .unwrap();

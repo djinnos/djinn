@@ -636,6 +636,7 @@ async fn active_workspace_fails_closed() {
             status: Some("running"),
             workspace_path: Some(&workspace),
             mirror_ref: None,
+            dispatch_group_id: None,
         })
         .await
         .unwrap();

@@ -185,6 +185,8 @@ async fn assert_identity_mismatch_rebuilds_current_evidence(
             dispatch_key: &format!("identity-{name}-{}", uuid::Uuid::now_v7()),
             session_id: None,
             attempt_seq: None,
+            dispatch_owner_incarnation_id: None,
+            dispatch_group_id: None,
         })
         .await
         .unwrap();
@@ -391,6 +393,8 @@ async fn c2_fully_compatible_evidence_finalizes_without_canonical_rebuild() {
             dispatch_key: "compatible-c2",
             session_id: None,
             attempt_seq: None,
+            dispatch_owner_incarnation_id: None,
+            dispatch_group_id: None,
         })
         .await
         .unwrap();
@@ -495,6 +499,8 @@ async fn auto_submit_stale_identity_failed_reverification_has_no_success_side_ef
             dispatch_key: "auto-stale-identity",
             session_id: None,
             attempt_seq: None,
+            dispatch_owner_incarnation_id: None,
+            dispatch_group_id: None,
         })
         .await
         .unwrap();
@@ -595,6 +601,8 @@ async fn configured_null_workspace_blocks_direct_and_auto_submit_without_consumi
                 dispatch_key: &format!("null-workspace-{name}"),
                 session_id: None,
                 attempt_seq: None,
+                dispatch_owner_incarnation_id: None,
+                dispatch_group_id: None,
             })
             .await
             .unwrap();

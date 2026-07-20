@@ -888,6 +888,7 @@ mod tests {
             status: Some("running".into()),
             workspace_path: Some("/workspace".into()),
             mirror_ref: Some("refs/mirror/p1".into()),
+            dispatch_group_id: None,
         };
         let f = Frame {
             correlation_id: 11,

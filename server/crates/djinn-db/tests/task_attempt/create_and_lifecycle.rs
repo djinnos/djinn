@@ -14,6 +14,8 @@ async fn create_or_get_pending_creates_row_and_returns_record() {
             dispatch_key: "dk-1",
             session_id: None,
             attempt_seq: None,
+            dispatch_owner_incarnation_id: None,
+            dispatch_group_id: None,
         })
         .await
         .unwrap();
@@ -44,6 +46,8 @@ async fn create_or_get_pending_is_idempotent_on_dispatch_key() {
             dispatch_key: "dk-idem",
             session_id: None,
             attempt_seq: None,
+            dispatch_owner_incarnation_id: None,
+            dispatch_group_id: None,
         })
         .await
         .unwrap();
@@ -57,6 +61,8 @@ async fn create_or_get_pending_is_idempotent_on_dispatch_key() {
             dispatch_key: "dk-idem",
             session_id: None,
             attempt_seq: None,
+            dispatch_owner_incarnation_id: None,
+            dispatch_group_id: None,
         })
         .await
         .unwrap();
@@ -82,6 +88,8 @@ async fn attempt_seq_is_monotonic_per_task() {
             dispatch_key: &format!("dk-{i}"),
             session_id: None,
             attempt_seq: None,
+            dispatch_owner_incarnation_id: None,
+            dispatch_group_id: None,
         })
         .await
         .unwrap();
@@ -107,6 +115,8 @@ async fn advance_to_submitted_moves_pending_forward() {
             dispatch_key: "dk-submit",
             session_id: None,
             attempt_seq: None,
+            dispatch_owner_incarnation_id: None,
+            dispatch_group_id: None,
         })
         .await
         .unwrap();
@@ -169,6 +179,8 @@ async fn advance_to_terminal_is_forward_only_and_idempotent() {
             dispatch_key: "dk-term",
             session_id: None,
             attempt_seq: None,
+            dispatch_owner_incarnation_id: None,
+            dispatch_group_id: None,
         })
         .await
         .unwrap();
@@ -293,6 +305,8 @@ async fn advance_to_submitted_does_not_roll_back_terminal() {
             dispatch_key: "dk-submit-on-terminal",
             session_id: None,
             attempt_seq: None,
+            dispatch_owner_incarnation_id: None,
+            dispatch_group_id: None,
         })
         .await
         .unwrap();
@@ -348,6 +362,8 @@ async fn fill_nullable_fields_fills_without_rolling_back_outcome() {
             dispatch_key: "dk-fill",
             session_id: None,
             attempt_seq: None,
+            dispatch_owner_incarnation_id: None,
+            dispatch_group_id: None,
         })
         .await
         .unwrap();
@@ -438,6 +454,8 @@ async fn latest_pending_or_submitted_and_lookups_work() {
             dispatch_key: "dk-latest-1",
             session_id: None,
             attempt_seq: None,
+            dispatch_owner_incarnation_id: None,
+            dispatch_group_id: None,
         })
         .await
         .unwrap();
@@ -451,6 +469,8 @@ async fn latest_pending_or_submitted_and_lookups_work() {
             dispatch_key: "dk-latest-2",
             session_id: None,
             attempt_seq: None,
+            dispatch_owner_incarnation_id: None,
+            dispatch_group_id: None,
         })
         .await
         .unwrap();
@@ -513,6 +533,8 @@ async fn prompt_summaries_and_history_ordered_newest_first() {
                 dispatch_key: &format!("dk-order-{i}"),
                 session_id: None,
                 attempt_seq: None,
+                dispatch_owner_incarnation_id: None,
+                dispatch_group_id: None,
             })
             .await
             .unwrap();
@@ -562,6 +584,8 @@ async fn bounded_fields_rejected_when_too_large() {
             dispatch_key: "dk-1",
             session_id: None,
             attempt_seq: None,
+            dispatch_owner_incarnation_id: None,
+            dispatch_group_id: None,
         })
         .await
         .unwrap();
@@ -614,6 +638,8 @@ async fn invalid_summary_json_rejected() {
             dispatch_key: "dk-json",
             session_id: None,
             attempt_seq: None,
+            dispatch_owner_incarnation_id: None,
+            dispatch_group_id: None,
         })
         .await
         .unwrap();
@@ -698,6 +724,8 @@ async fn dispatch_key_length_bound_enforced() {
             dispatch_key: &long_key,
             session_id: None,
             attempt_seq: None,
+            dispatch_owner_incarnation_id: None,
+            dispatch_group_id: None,
         })
         .await;
     assert!(err.is_err());
@@ -712,6 +740,8 @@ async fn dispatch_key_length_bound_enforced() {
             dispatch_key: &max_key,
             session_id: None,
             attempt_seq: None,
+            dispatch_owner_incarnation_id: None,
+            dispatch_group_id: None,
         })
         .await
         .unwrap();
@@ -776,6 +806,8 @@ async fn no_historical_backfill_after_task_run_and_session_creation() {
             dispatch_key: "dk-backfill",
             session_id: Some(&session_id),
             attempt_seq: None,
+            dispatch_owner_incarnation_id: None,
+            dispatch_group_id: None,
         })
         .await
         .unwrap();

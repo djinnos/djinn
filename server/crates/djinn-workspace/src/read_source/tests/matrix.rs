@@ -541,6 +541,7 @@ async fn valid_dest_not_accepted_before_active_workspace() {
             status: Some("running"),
             workspace_path: Some(&workspace),
             mirror_ref: None,
+            dispatch_group_id: None,
         })
         .await
         .unwrap();
