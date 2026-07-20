@@ -872,19 +872,26 @@ jobs:
           # time the build finishes the plan artifact is normally already
           # uploaded, so this loop usually exits on the first probe. If the
           # planner concludes without publishing a plan, fail immediately
-          # instead of burning the full timeout.
+          # instead of burning the full timeout. GitHub's API occasionally
+          # returns a transient 5xx; treat that as an empty probe and retry.
           for attempt in $(seq 1 60); do
             artifact_id=$(gh api "repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/artifacts?name=nextest-plan-${{ github.run_id }}" \
-              --jq '.artifacts[0].id // empty')
+              --jq '.artifacts[0].id // empty' 2>/dev/null || true)
             if [ -n "$artifact_id" ]; then
               mkdir -p nextest-plan
-              gh api "repos/${{ github.repository }}/actions/artifacts/$artifact_id/zip" > nextest-plan/plan.zip
+              if ! gh api "repos/${{ github.repository }}/actions/artifacts/$artifact_id/zip" \
+                > nextest-plan/plan.zip; then
+                rm -f nextest-plan/plan.zip
+                sleep 10
+                continue
+              fi
               unzip -o nextest-plan/plan.zip -d nextest-plan
               rm nextest-plan/plan.zip
               exit 0
             fi
             planner=$(gh api "repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/jobs?per_page=100" \
-              --jq '[.jobs[] | select(.name == "Plan Server Test Shards")][0].conclusion // empty')
+              --jq '[.jobs[] | select(.name == "Plan Server Test Shards")][0].conclusion // empty' \
+              2>/dev/null || true)
             case "$planner" in
               failure|cancelled|timed_out)
                 echo "::error::Plan Server Test Shards concluded '$planner' without publishing a plan."
