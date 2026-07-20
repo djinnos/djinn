@@ -48,10 +48,14 @@ use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
 
+use djinn_core::events::EventBus;
 use djinn_core::models::{SessionRecord, Task, TaskRunStatus, TaskRunTrigger};
+use djinn_db::repositories::task_run::{CreateTaskRunParams, TaskRunRepository};
+use djinn_db::{ProjectRepository, TaskRepository};
 use djinn_runtime::{
     ResolvedCredentials, RoleKind, SerializableCredential, SupervisorFlow, TaskRunSpec, WorkerEvent,
 };
+use djinn_stack::environment::{EnvironmentConfig, FinalVerificationCommand};
 use djinn_supervisor::services::{
     SerializableCreateSessionParams, SerializableCreateTaskRunParams,
 };
@@ -123,31 +127,36 @@ fn fixture_task(task_id: &str, project_id: &str) -> Task {
 }
 
 async fn run_git(cmd: &[&str], cwd: &Path) {
-    let output = Command::new(cmd[0])
-        .args(&cmd[1..])
-        .current_dir(cwd)
-        .output()
-        .await
-        .expect("git");
-    assert!(
-        output.status.success(),
-        "cmd {cmd:?} failed: stderr={}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    djinn_git::run_git_command(
+        cwd.to_path_buf(),
+        cmd.iter().map(|arg| (*arg).to_owned()).collect(),
+    )
+    .await
+    .expect("git");
+}
+
+async fn git_stdout(args: &[&str], cwd: &Path) -> String {
+    let output = djinn_git::run_git_command(
+        cwd.to_path_buf(),
+        args.iter().map(|arg| (*arg).to_owned()).collect(),
+    )
+    .await
+    .expect("git");
+    output.stdout.trim().to_owned()
 }
 
 /// Initialise a tiny source repo + a single commit on `main`. The
 /// `MirrorManager` clones from this as `file://...` to materialise the
 /// bare mirror the worker will then `clone_ephemeral` from.
 async fn make_source_repo(path: &Path) {
-    run_git(&["git", "init", "-b", "main"], path).await;
-    run_git(&["git", "config", "user.email", "test@example.com"], path).await;
-    run_git(&["git", "config", "user.name", "Test"], path).await;
+    run_git(&["init", "-b", "main"], path).await;
+    run_git(&["config", "user.email", "test@example.com"], path).await;
+    run_git(&["config", "user.name", "Test"], path).await;
     tokio::fs::write(path.join("README.md"), "hello")
         .await
         .unwrap();
-    run_git(&["git", "add", "."], path).await;
-    run_git(&["git", "commit", "-m", "init"], path).await;
+    run_git(&["add", "."], path).await;
+    run_git(&["commit", "-m", "init"], path).await;
 }
 
 /// In-memory record of every RPC method the worker invoked. Used at the
@@ -483,21 +492,57 @@ async fn worker_drives_real_supervisor_in_pod() {
         .ensure_mirror(project_id, &source_url)
         .await
         .expect("ensure_mirror");
+    let expected_mirror =
+        std::fs::canonicalize(mirror.mirror_path(project_id)).expect("canonicalize fixture mirror");
 
-    // 2. Seed the spec + credentials files the worker reads at boot.
+    // 2. Provision a migrated per-test Postgres database for the worker.
+    // The in-Pod bootstrap verifies migrations but intentionally does not run
+    // them, so keep this initialized handle alive for the subprocess lifetime.
+    let worker_db = djinn_db::Database::open_in_memory().expect("allocate per-test worker db");
+    worker_db
+        .table_exists("tasks")
+        .await
+        .expect("clone djinn_test_template into per-test worker db");
+
+    // Seed through djinn-db's SQL ownership boundaries. The repository-minted
+    // task id is then used canonically by the spec, fake host, and task-run.
+    let events = EventBus::noop();
+    ProjectRepository::new(worker_db.clone(), events.clone())
+        .create_with_id(project_id, project_id, "test", project_id)
+        .await
+        .expect("seed pod-drive project");
+    let task = TaskRepository::new(worker_db.clone(), events)
+        .create_fixture_in_project(
+            project_id,
+            None,
+            "pod drive",
+            "",
+            "",
+            "task",
+            0,
+            "test-owner",
+            Some("open"),
+            None,
+        )
+        .await
+        .expect("seed pod-drive task");
+    let task_id = task.id;
+
+    // 3. Seed the spec + credentials files the worker reads at boot.
     let cfg_dir = TempDir::new().expect("tempdir cfg");
     let workspace_dir = TempDir::new().expect("tempdir workspace");
 
-    let task_id = "task-pod-drive";
+    // One host-minted ID is used by the spec, the K8s-shaped row, and the
+    // worker environment; the supervisor persists using spec.task_run_id.
     let task_run_id = "run-pod-drive";
     let bearer = "fake-bearer-token";
 
     let mut per_role = HashMap::new();
     per_role.insert(RoleKind::Planner, "openai/gpt-4o".to_string());
     let spec = TaskRunSpec {
-        task_run_id: format!("run-{task_id}"),
+        task_run_id: task_run_id.into(),
         task_attempt_id: None,
-        task_id: task_id.into(),
+        task_id: task_id.clone(),
         project_id: project_id.into(),
         trigger: TaskRunTrigger::NewTask,
         base_branch: "main".into(),
@@ -554,7 +599,7 @@ async fn worker_drives_real_supervisor_in_pod() {
     // 3. Bring up the fake TCP server with the audit log.
     let audit: Arc<Mutex<RpcAuditLog>> = Arc::new(Mutex::new(RpcAuditLog::default()));
     let (addr, server) = start_fake_server(
-        task_id.into(),
+        task_id.clone(),
         project_id.into(),
         bearer.into(),
         task_run_id.into(),
@@ -562,27 +607,30 @@ async fn worker_drives_real_supervisor_in_pod() {
     )
     .await;
 
-    // 4. Provision a migrated per-test Postgres database for the worker
-    //    subprocess. The worker's `bootstrap_warm_database()` opens
-    //    `DJINN_DATABASE_URL` and calls `verify_and_mark_initialized()`,
-    //    which is deliberately lock-free and DOES NOT run migrations (in
-    //    production the Helm pre-upgrade Job migrates first). So we cannot
-    //    hand the worker the bare `…/postgres` admin DB — it has no
-    //    `_sqlx_migrations` table and the worker would die at boot with
-    //    "schema is behind / _sqlx_migrations table missing".
-    //
-    //    `Database::open_in_memory()` allocates a fresh
-    //    `djinn_test_<uuid>` database; forcing initialization (any query
-    //    via `table_exists`) clones it from the pre-built
-    //    `djinn_test_template` (all migrations applied). We then read the
-    //    resulting per-test DSN off `bootstrap_info().target` and hand
-    //    *that* to the worker. The handle is kept alive for the duration
-    //    of the test so the database stays around for the subprocess.
-    let worker_db = djinn_db::Database::open_in_memory().expect("allocate per-test worker db");
-    worker_db
-        .table_exists("tasks")
+    // K8s dispatch inserts this exact row before the pod has a clone path.
+    let task_runs = TaskRunRepository::new(worker_db.clone());
+    task_runs
+        .create(CreateTaskRunParams {
+            id: task_run_id,
+            project_id,
+            task_id: &task_id,
+            trigger_type: TaskRunTrigger::NewTask.as_str(),
+            status: Some("starting"),
+            workspace_path: None,
+            mirror_ref: None,
+        })
         .await
-        .expect("clone djinn_test_template into per-test worker db");
+        .expect("insert K8s-shaped task-run row");
+    assert!(
+        task_runs
+            .get(task_run_id)
+            .await
+            .expect("read K8s-shaped task-run row")
+            .expect("K8s-shaped task-run row exists")
+            .workspace_path
+            .is_none(),
+        "dispatch must not pre-populate workspace_path"
+    );
     let worker_db_url = worker_db.bootstrap_info().target.clone();
 
     // 5. Spawn the worker binary against the migrated per-test database.
@@ -623,6 +671,36 @@ async fn worker_drives_real_supervisor_in_pod() {
             }
         });
     }
+
+    // Observe the exact clone while the production stage is still running.
+    // The row is written before provider execution, so this verifies the
+    // persisted value names a real ephemeral git worktree rather than merely
+    // any non-empty string.
+    let expected_workspace = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if let Some(path) = task_runs
+                .get(task_run_id)
+                .await
+                .expect("poll task-run during production stage")
+                .and_then(|run| run.workspace_path)
+            {
+                let path = PathBuf::from(path);
+                if path.join(".git").is_dir() {
+                    let origin = git_stdout(&["remote", "get-url", "origin"], &path).await;
+                    assert_eq!(
+                        std::fs::canonicalize(origin).expect("canonicalize workspace origin"),
+                        expected_mirror,
+                        "persisted workspace must be the supervisor's ephemeral clone of the fixture mirror"
+                    );
+                    run_git(&["rev-parse", "--is-inside-work-tree"], &path).await;
+                    break path;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .expect("first-stage persistence must expose its live ephemeral clone");
 
     // 5. Wait for the worker to exit. The OAuth credential's `base_url`
     //    points at `127.0.0.1:1` (no listener), so the provider stream
@@ -686,6 +764,19 @@ async fn worker_drives_real_supervisor_in_pod() {
         "expected at least one get_environment_config RPC"
     );
 
+    let persisted_workspace = task_runs
+        .get(task_run_id)
+        .await
+        .expect("read task-run after production stage boundary")
+        .expect("task-run must survive worker execution")
+        .workspace_path
+        .expect("first in-pod stage must durably persist its clone path");
+    assert_eq!(
+        PathBuf::from(&persisted_workspace),
+        expected_workspace,
+        "first stage must persist the exact host-materialized workspace it executes in"
+    );
+
     // Terminal report should have surfaced via Event frame.
     let report = log.terminal_report.as_ref().unwrap_or_else(|| {
         panic!(
@@ -704,6 +795,35 @@ async fn worker_drives_real_supervisor_in_pod() {
         TaskRunOutcome::Failed { .. } | TaskRunOutcome::Closed { .. } => {}
         other => panic!("unexpected terminal outcome: {other:?}"),
     }
+
+    drop(log);
+
+    // Configure a non-empty plan after the production first-stage boundary.
+    // The completion resolver must consume the path it persisted, not a
+    // session path or a test-injected task-run workspace.
+    let mut config = EnvironmentConfig::empty();
+    config.lifecycle.final_verification.commands = vec![FinalVerificationCommand {
+        check_id: "pod-workspace".into(),
+        executable: "true".into(),
+        ..Default::default()
+    }];
+    config.lifecycle.final_verification.required_checks = vec!["pod-workspace".into()];
+    ProjectRepository::new(worker_db.clone(), EventBus::noop())
+        .set_environment_config(
+            project_id,
+            &serde_json::to_string(&config).expect("encode plan"),
+        )
+        .await
+        .expect("configure final-verification plan");
+    let material =
+        djinn_agent::actors::slot::resolve_final_verification_for_task_run(&worker_db, task_run_id)
+            .await
+            .expect("configured completion boundary must resolve persisted workspace")
+            .expect("configured completion boundary must not take legacy skip");
+    assert_eq!(
+        material.execution_request.worktree, expected_workspace,
+        "completion resolution must consume the first-stage persisted workspace"
+    );
 }
 
 // ── Object-safety smoke test ────────────────────────────────────────────────
