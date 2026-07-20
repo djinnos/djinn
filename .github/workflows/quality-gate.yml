@@ -872,7 +872,7 @@ jobs:
             DJINN_MIGRATE_OPERATOR_USER_ID=00000000-0000-7000-8000-000000000002 \
             DJINN_MIGRATE_OPERATOR_GITHUB_ID=9000000002 \
             DJINN_MIGRATE_OPERATOR_LOGIN=djinn-ci-migration-operator \
-            cargo test -p djinn-db --test apply_migrations -- --ignored --nocapture
+            cargo test -p djinn-db --features qdrant --test apply_migrations -- --ignored --nocapture
       - name: Build Postgres test template
         env:
           PGPASSWORD: postgres
@@ -1231,7 +1231,7 @@ jobs:
             DJINN_MIGRATE_OPERATOR_USER_ID=00000000-0000-7000-8000-000000000002 \
             DJINN_MIGRATE_OPERATOR_GITHUB_ID=9000000002 \
             DJINN_MIGRATE_OPERATOR_LOGIN=djinn-ci-migration-operator \
-            cargo test -p djinn-db --test apply_migrations -- --ignored --nocapture
+            cargo test -p djinn-db --features qdrant --test apply_migrations -- --ignored --nocapture
       - name: Verify .sqlx offline cache is up to date
         working-directory: .
         run: make sqlx-verify
@@ -1305,7 +1305,7 @@ jobs:
             DJINN_MIGRATE_OPERATOR_USER_ID=00000000-0000-7000-8000-000000000002 \
             DJINN_MIGRATE_OPERATOR_GITHUB_ID=9000000002 \
             DJINN_MIGRATE_OPERATOR_LOGIN=djinn-ci-migration-operator \
-            cargo test -p djinn-db --test apply_migrations -- --ignored --nocapture
+            cargo test -p djinn-db --features qdrant --test apply_migrations -- --ignored --nocapture
       - name: Build Postgres test template
         env:
           PGPASSWORD: postgres
