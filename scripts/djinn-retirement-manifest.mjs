@@ -164,6 +164,72 @@ export function isStructurallyAllowedSurfaceCandidate(candidate) {
     origin.startsWith('scripts/fixtures/djinn-retirement/');
 }
 
+function closingRustModuleBrace(text, openingBrace) {
+  let depth = 1;
+  for (let index = openingBrace + 1; index < text.length; index += 1) {
+    // Rust block comments nest. Their contents, like line comments, are not
+    // syntax and therefore must not contribute braces to a module boundary.
+    if (text.startsWith('//', index)) {
+      const newline = text.indexOf('\n', index + 2);
+      index = newline < 0 ? text.length : newline;
+      continue;
+    }
+    if (text.startsWith('/*', index)) {
+      let commentDepth = 1;
+      index += 2;
+      while (index < text.length && commentDepth > 0) {
+        if (text.startsWith('/*', index)) {
+          commentDepth += 1;
+          index += 2;
+        } else if (text.startsWith('*/', index)) {
+          commentDepth -= 1;
+          index += 2;
+        } else {
+          index += 1;
+        }
+      }
+      index -= 1;
+      continue;
+    }
+    // Skip ordinary and byte strings, including escaped quotes.
+    if (text[index] === '"' || (text[index] === 'b' && text[index + 1] === '"')) {
+      if (text[index] === 'b') index += 1;
+      index += 1;
+      while (index < text.length) {
+        if (text[index] === '\\') index += 2;
+        else if (text[index] === '"') break;
+        else index += 1;
+      }
+      continue;
+    }
+    // Raw strings use a matching number of hash delimiters: r#"..."#.
+    // Only attempt the expression at a possible raw-string prefix; slicing at
+    // every byte would make scans of large tracked sources quadratic.
+    const raw = (text[index] === 'r' || (text[index] === 'b' && text[index + 1] === 'r')) &&
+      /^(?:b)?r(#{0,})"/.exec(text.slice(index));
+    if (raw) {
+      const terminator = `"${raw[1]}`;
+      const end = text.indexOf(terminator, index + raw[0].length);
+      index = end < 0 ? text.length : end + terminator.length - 1;
+      continue;
+    }
+    // A character literal can itself contain a brace. Restrict this to actual
+    // one-character/escaped character literals so Rust lifetimes are not read
+    // as unterminated quoted text.
+    if (text[index] === "'" &&
+        (text[index + 2] === "'" || (text[index + 1] === '\\' && text[index + 3] === "'"))) {
+      index += text[index + 1] === '\\' ? 3 : 2;
+      continue;
+    }
+    if (text[index] === '{') depth += 1;
+    if (text[index] === '}') {
+      depth -= 1;
+      if (depth === 0) return index + 1;
+    }
+  }
+  return null;
+}
+
 export function discoverProjectLocalDjinnSurfaces(trackedPaths, opts = {}) {
   const cwd = opts.cwd || process.cwd();
   const candidates = [];
@@ -225,13 +291,8 @@ export function discoverProjectLocalDjinnSurfaces(trackedPaths, opts = {}) {
     // code after a test module cannot inherit the exemption.
     const testRanges = [];
     for (const marker of text.matchAll(/#\s*\[\s*cfg\s*\(\s*test\s*\)\s*\]\s*(?:pub\s+)?mod\s+[A-Za-z_][A-Za-z0-9_]*\s*\{/g)) {
-      let depth = 1;
-      let index = marker.index + marker[0].length;
-      for (; index < text.length && depth > 0; index += 1) {
-        if (text[index] === '{') depth += 1;
-        if (text[index] === '}') depth -= 1;
-      }
-      if (depth === 0) testRanges.push([marker.index, index]);
+      const end = closingRustModuleBrace(text, marker.index + marker[0].length - 1);
+      if (end !== null) testRanges.push([marker.index, end]);
     }
     const isTestSource = /(^|\/)(?:test-[^/]+|[^/]+\.test\.[^/]+)$/.test(repositoryPath);
     const isNegativeTestLocation = (offset) => isTestSource || testRanges.some(([start, end]) => offset >= start && offset < end);

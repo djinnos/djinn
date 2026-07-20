@@ -271,11 +271,15 @@ test('repository-wired guard rejects staged scaffolding and generated schema sur
     assert.equal(runGuard().status, 1, 'staged direct std::fs write fails');
     writeFileSync(join(dir, 'src', 'direct.rs'), 'Historical .djinn settings prose in the worktree.\n');
     assert.equal(runGuard().status, 1, 'the guard reads the forbidden staged blob, not divergent worktree bytes');
-    execFileSync('git', ['-C', dir, 'rm', '--cached', '-q', 'src/direct.rs']);
+    execFileSync('git', ['-C', dir, 'rm', '--cached', '-q', '-f', 'src/direct.rs']);
     writeFileSync(join(dir, 'src', 'after-test.rs'), '#[cfg(test)]\nmod tests { fn negative() { std::fs::write(".djinn/settings.json", b"x"); } }\nstd::fs::write(".djinn/settings.json", b"x");\n');
     execFileSync('git', ['-C', dir, 'add', 'src/after-test.rs']);
     assert.equal(runGuard().status, 1, 'production literal after a test module fails');
     execFileSync('git', ['-C', dir, 'rm', '--cached', '-q', 'src/after-test.rs']);
+    writeFileSync(join(dir, 'src', 'comment-brace-after-test.rs'), 'mod outer { #[cfg(test)] mod tests { /* { */ } fn save() { std::fs::write(".djinn/settings.json", b"x").unwrap(); } }\n');
+    execFileSync('git', ['-C', dir, 'add', 'src/comment-brace-after-test.rs']);
+    assert.equal(runGuard().status, 1, 'a comment brace cannot extend a test-module exemption into production code');
+    execFileSync('git', ['-C', dir, 'rm', '--cached', '-q', 'src/comment-brace-after-test.rs']);
     mkdirSync(join(dir, 'generated'), { recursive: true });
     writeFileSync(join(dir, 'generated', 'schema.json'), '{"legacy_path":".djinn/graph_warm_status.json"}\n');
     execFileSync('git', ['-C', dir, 'add', 'generated/schema.json']);
