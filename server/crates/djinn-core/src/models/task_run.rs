@@ -126,4 +126,7 @@ pub struct TaskRunRecord {
     pub ended_at: Option<String>,
     pub workspace_path: Option<String>,
     pub mirror_ref: Option<String>,
+    /// Dispatch-group UUID correlating this run with its attempt rows.
+    /// NULL for legacy rows and never backfilled.
+    pub dispatch_group_id: Option<String>,
 }

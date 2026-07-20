@@ -16,6 +16,8 @@ async fn attempt_seq_independent_across_tasks() {
             dispatch_key: &format!("dk-a-{i}"),
             session_id: None,
             attempt_seq: None,
+            dispatch_owner_incarnation_id: None,
+            dispatch_group_id: None,
         })
         .await
         .unwrap();
@@ -31,6 +33,8 @@ async fn attempt_seq_independent_across_tasks() {
             dispatch_key: "dk-b-1",
             session_id: None,
             attempt_seq: None,
+            dispatch_owner_incarnation_id: None,
+            dispatch_group_id: None,
         })
         .await
         .unwrap();
@@ -53,6 +57,8 @@ async fn dispatch_key_unique_constraint_prevents_cross_id_collision() {
         dispatch_key: "dk-unique",
         session_id: None,
         attempt_seq: None,
+        dispatch_owner_incarnation_id: None,
+        dispatch_group_id: None,
     })
     .await
     .unwrap();
@@ -68,6 +74,8 @@ async fn dispatch_key_unique_constraint_prevents_cross_id_collision() {
             dispatch_key: "dk-unique",
             session_id: None,
             attempt_seq: Some(999),
+            dispatch_owner_incarnation_id: None,
+            dispatch_group_id: None,
         })
         .await
         .unwrap();
@@ -92,6 +100,8 @@ async fn pending_to_terminal_direct_skipping_submitted() {
             dispatch_key: "dk-direct-term",
             session_id: None,
             attempt_seq: None,
+            dispatch_owner_incarnation_id: None,
+            dispatch_group_id: None,
         })
         .await
         .unwrap();
@@ -134,6 +144,8 @@ async fn advance_to_terminal_rejects_non_terminal_outcome() {
             dispatch_key: "dk-nonterm",
             session_id: None,
             attempt_seq: None,
+            dispatch_owner_incarnation_id: None,
+            dispatch_group_id: None,
         })
         .await
         .unwrap();
@@ -190,6 +202,8 @@ async fn terminal_outcome_is_frozen_after_first_terminal() {
             dispatch_key: "dk-frozen",
             session_id: None,
             attempt_seq: None,
+            dispatch_owner_incarnation_id: None,
+            dispatch_group_id: None,
         })
         .await
         .unwrap();
@@ -313,6 +327,8 @@ async fn pending_rows_start_with_nullable_refs() {
             dispatch_key: "dk-nullable",
             session_id: Some(&session_id),
             attempt_seq: None,
+            dispatch_owner_incarnation_id: None,
+            dispatch_group_id: None,
         })
         .await
         .unwrap();
@@ -346,6 +362,8 @@ async fn guard_only_row_without_session_id() {
             dispatch_key: "dk-no-session",
             session_id: None,
             attempt_seq: None,
+            dispatch_owner_incarnation_id: None,
+            dispatch_group_id: None,
         })
         .await
         .unwrap();
@@ -369,6 +387,8 @@ async fn fill_forward_preserves_existing_values() {
             dispatch_key: "dk-fill-preserve",
             session_id: None,
             attempt_seq: None,
+            dispatch_owner_incarnation_id: None,
+            dispatch_group_id: None,
         })
         .await
         .unwrap();
@@ -432,6 +452,8 @@ async fn latest_pending_or_submitted_returns_none_when_all_terminal() {
                 dispatch_key: &format!("dk-all-term-{i}"),
                 session_id: None,
                 attempt_seq: None,
+                dispatch_owner_incarnation_id: None,
+                dispatch_group_id: None,
             })
             .await
             .unwrap();
@@ -480,6 +502,8 @@ async fn history_for_task_with_role_filter() {
             dispatch_key: "dk-role-w",
             session_id: None,
             attempt_seq: None,
+            dispatch_owner_incarnation_id: None,
+            dispatch_group_id: None,
         })
         .await
         .unwrap();
@@ -508,6 +532,8 @@ async fn history_for_task_with_role_filter() {
             dispatch_key: "dk-role-p",
             session_id: None,
             attempt_seq: None,
+            dispatch_owner_incarnation_id: None,
+            dispatch_group_id: None,
         })
         .await
         .unwrap();
@@ -563,6 +589,8 @@ async fn prompt_summaries_zero_limit_returns_empty() {
         dispatch_key: "dk-zero",
         session_id: None,
         attempt_seq: None,
+        dispatch_owner_incarnation_id: None,
+        dispatch_group_id: None,
     })
     .await
     .unwrap();
@@ -601,6 +629,8 @@ async fn history_row_shape_includes_all_expected_fields() {
             dispatch_key: "dk-shape",
             session_id: None,
             attempt_seq: None,
+            dispatch_owner_incarnation_id: None,
+            dispatch_group_id: None,
         })
         .await
         .unwrap();
@@ -673,6 +703,8 @@ async fn empty_dispatch_key_rejected() {
             dispatch_key: "",
             session_id: None,
             attempt_seq: None,
+            dispatch_owner_incarnation_id: None,
+            dispatch_group_id: None,
         })
         .await;
     assert!(err.is_err());
@@ -707,6 +739,8 @@ async fn negative_attempt_seq_rejected() {
             dispatch_key: "dk-neg-seq",
             session_id: None,
             attempt_seq: Some(-1),
+            dispatch_owner_incarnation_id: None,
+            dispatch_group_id: None,
         })
         .await;
     assert!(err.is_err());
@@ -719,6 +753,8 @@ async fn negative_attempt_seq_rejected() {
             dispatch_key: "dk-zero-seq",
             session_id: None,
             attempt_seq: Some(0),
+            dispatch_owner_incarnation_id: None,
+            dispatch_group_id: None,
         })
         .await;
     assert!(err.is_err());
@@ -778,6 +814,8 @@ async fn terminal_rejects_invalid_summary_json() {
             dispatch_key: "dk-term-json",
             session_id: None,
             attempt_seq: None,
+            dispatch_owner_incarnation_id: None,
+            dispatch_group_id: None,
         })
         .await
         .unwrap();
@@ -836,6 +874,8 @@ async fn terminal_rejects_oversize_summary_and_log_tail() {
             dispatch_key: "dk-term-oversize",
             session_id: None,
             attempt_seq: None,
+            dispatch_owner_incarnation_id: None,
+            dispatch_group_id: None,
         })
         .await
         .unwrap();

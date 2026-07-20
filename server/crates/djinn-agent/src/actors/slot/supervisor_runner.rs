@@ -1115,6 +1115,8 @@ impl TaskRunSpecInputs {
                 dispatch_key: &format!("task-run:{task_run_id}"),
                 session_id: None,
                 attempt_seq: None,
+                dispatch_owner_incarnation_id: None,
+                dispatch_group_id: None,
             })
             .await
             .map(|attempt| attempt.id)
@@ -2408,6 +2410,8 @@ mod tests {
                 dispatch_key: "task-run:test-terminalize",
                 session_id: None,
                 attempt_seq: None,
+                dispatch_owner_incarnation_id: None,
+                dispatch_group_id: None,
             })
             .await
             .expect("create pending attempt");
@@ -2447,6 +2451,8 @@ mod tests {
                 dispatch_key: "task-run:test-terminalize-submitted",
                 session_id: None,
                 attempt_seq: None,
+                dispatch_owner_incarnation_id: None,
+                dispatch_group_id: None,
             })
             .await
             .expect("create second attempt");
@@ -2484,6 +2490,8 @@ mod tests {
                 dispatch_key: "task-run:test-terminalize-nonfailed",
                 session_id: None,
                 attempt_seq: None,
+                dispatch_owner_incarnation_id: None,
+                dispatch_group_id: None,
             })
             .await
             .expect("create third attempt");
@@ -2527,6 +2535,8 @@ mod tests {
                 dispatch_key: &format!("{}:lead:test-dispatch-failure", task.id),
                 session_id: None,
                 attempt_seq: None,
+                dispatch_owner_incarnation_id: None,
+                dispatch_group_id: None,
             })
             .await
             .expect("create coordinator pending row");
@@ -2539,6 +2549,8 @@ mod tests {
                 dispatch_key: "task-run:test-dispatch-failure",
                 session_id: None,
                 attempt_seq: None,
+                dispatch_owner_incarnation_id: None,
+                dispatch_group_id: None,
             })
             .await
             .expect("create supervisor pending row");
@@ -2551,6 +2563,8 @@ mod tests {
                 dispatch_key: "task-run:test-dispatch-failure-submitted",
                 session_id: None,
                 attempt_seq: None,
+                dispatch_owner_incarnation_id: None,
+                dispatch_group_id: None,
             })
             .await
             .expect("create submitted row");

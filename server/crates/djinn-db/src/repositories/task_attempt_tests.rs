@@ -68,6 +68,8 @@ async fn concurrent_auto_seq_allocation_retries_past_unique_race() {
                 dispatch_key: &dispatch_key,
                 session_id: None,
                 attempt_seq: None,
+                dispatch_owner_incarnation_id: None,
+                dispatch_group_id: None,
             })
             .await
         }));
@@ -119,6 +121,8 @@ async fn completed_blocker_parent_summaries_orders_and_bounds() {
             dispatch_key: &format!("dk-parent-{i}"),
             session_id: None,
             attempt_seq: None,
+            dispatch_owner_incarnation_id: None,
+            dispatch_group_id: None,
         })
         .await
         .unwrap();

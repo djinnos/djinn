@@ -1048,6 +1048,8 @@ async fn loop_guard_second_strike_parks_task() {
             dispatch_key: "arbiter-ledger-heads",
             session_id: None,
             attempt_seq: None,
+            dispatch_owner_incarnation_id: None,
+            dispatch_group_id: None,
         })
         .await
         .unwrap();
@@ -3571,6 +3573,8 @@ async fn park_rung_does_not_park_while_submission_pending_review() {
             dispatch_key: &format!("submit-pending-review-{}", submit_attempt_id),
             session_id: None,
             attempt_seq: None,
+            dispatch_owner_incarnation_id: None,
+            dispatch_group_id: None,
         })
         .await
         .unwrap();
@@ -4123,6 +4127,8 @@ async fn arbiter_dispatch_transition_before_activity_failure_recovers_to_single_
             dispatch_key: "arbiter-ledger-heads",
             session_id: None,
             attempt_seq: None,
+            dispatch_owner_incarnation_id: None,
+            dispatch_group_id: None,
         })
         .await
         .unwrap();
@@ -4661,6 +4667,8 @@ async fn arbiter_dossier_includes_attempt_ledger() {
             dispatch_key: &format!("ledger-test-sub-{sub_id}"),
             session_id: None,
             attempt_seq: None,
+            dispatch_owner_incarnation_id: None,
+            dispatch_group_id: None,
         })
         .await
         .unwrap();
@@ -4688,6 +4696,8 @@ async fn arbiter_dossier_includes_attempt_ledger() {
             dispatch_key: &format!("ledger-test-rej-{rej_id}"),
             session_id: None,
             attempt_seq: None,
+            dispatch_owner_incarnation_id: None,
+            dispatch_group_id: None,
         })
         .await
         .unwrap();
@@ -6180,6 +6190,8 @@ async fn try_create_db_error_parks_with_failure_dossier() {
             dispatch_key: "try-create-failure-evidence",
             session_id: None,
             attempt_seq: None,
+            dispatch_owner_incarnation_id: None,
+            dispatch_group_id: None,
         })
         .await
         .unwrap();

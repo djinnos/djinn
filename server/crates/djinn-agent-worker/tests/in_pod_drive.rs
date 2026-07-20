@@ -618,6 +618,7 @@ async fn worker_drives_real_supervisor_in_pod() {
             status: Some("starting"),
             workspace_path: None,
             mirror_ref: None,
+            dispatch_group_id: None,
         })
         .await
         .expect("insert K8s-shaped task-run row");

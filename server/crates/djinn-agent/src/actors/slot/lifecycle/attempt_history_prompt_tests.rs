@@ -39,6 +39,8 @@ async fn seed_terminal_attempt(
             dispatch_key,
             session_id: None,
             attempt_seq: None,
+            dispatch_owner_incarnation_id: None,
+            dispatch_group_id: None,
         })
         .await
         .expect("create pending attempt");
@@ -122,6 +124,8 @@ async fn load_prior_attempts_excludes_non_terminal_rows() {
         dispatch_key: "dk-pending-1",
         session_id: None,
         attempt_seq: None,
+        dispatch_owner_incarnation_id: None,
+        dispatch_group_id: None,
     })
     .await
     .expect("create pending");
@@ -136,6 +140,8 @@ async fn load_prior_attempts_excludes_non_terminal_rows() {
             dispatch_key: "dk-submitted-1",
             session_id: None,
             attempt_seq: None,
+            dispatch_owner_incarnation_id: None,
+            dispatch_group_id: None,
         })
         .await
         .expect("create pending");
@@ -191,6 +197,8 @@ async fn load_prior_attempts_exposes_dto_fields_without_log_tail() {
             dispatch_key: "dk-dto-1",
             session_id: None,
             attempt_seq: None,
+            dispatch_owner_incarnation_id: None,
+            dispatch_group_id: None,
         })
         .await
         .expect("create pending");
@@ -418,6 +426,8 @@ async fn seed_attempt_with_meta(
             dispatch_key,
             session_id: None,
             attempt_seq: None,
+            dispatch_owner_incarnation_id: None,
+            dispatch_group_id: None,
         })
         .await
         .expect("create pending attempt");
@@ -835,6 +845,8 @@ async fn prompt_does_not_leak_log_tail_content() {
             dispatch_key: "dk-logtail-1",
             session_id: None,
             attempt_seq: None,
+            dispatch_owner_incarnation_id: None,
+            dispatch_group_id: None,
         })
         .await
         .expect("create pending");

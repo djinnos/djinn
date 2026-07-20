@@ -63,6 +63,8 @@ async fn seed_submitted_attempt(
             dispatch_key: &dispatch_key,
             session_id: None,
             attempt_seq: None,
+            dispatch_owner_incarnation_id: None,
+            dispatch_group_id: None,
         })
         .await
         .unwrap();
@@ -97,6 +99,8 @@ async fn seed_pending_attempt(db: &Database, task_id: &str, role: &str) -> Strin
             dispatch_key: &dispatch_key,
             session_id: None,
             attempt_seq: None,
+            dispatch_owner_incarnation_id: None,
+            dispatch_group_id: None,
         })
         .await
         .unwrap()

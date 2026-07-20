@@ -361,6 +361,12 @@ pub struct TaskAttempt {
     /// failed after the mirror push succeeded (m116/vy47).  Absent when
     /// no publication failure occurred.
     pub github_publication_error: Option<String>,
+    /// Immutable coordinator-incarnation UUID that owns this dispatch attempt.
+    /// NULL for legacy rows and never backfilled.
+    pub dispatch_owner_incarnation_id: Option<String>,
+    /// Dispatch-group UUID correlating this attempt with its task run and
+    /// sibling attempts. NULL for legacy rows and never backfilled.
+    pub dispatch_group_id: Option<String>,
     pub created_at: String,
     pub updated_at: String,
     pub submitted_at: Option<String>,
@@ -772,6 +778,8 @@ mod tests {
             task_id: "task-1".to_string(),
             role: "worker".to_string(),
             attempt_seq: 1,
+            dispatch_owner_incarnation_id: None,
+            dispatch_group_id: None,
             dispatch_key: "dk-1".to_string(),
             session_id: None,
             outcome: "submitted".to_string(),
@@ -890,6 +898,8 @@ mod tests {
             task_id: "task-1".to_string(),
             role: "worker".to_string(),
             attempt_seq: 2,
+            dispatch_owner_incarnation_id: None,
+            dispatch_group_id: None,
             dispatch_key: "dk-2".to_string(),
             session_id: Some("s-1".to_string()),
             outcome: "crashed".to_string(),
@@ -951,6 +961,8 @@ mod tests {
             task_id: "task-2".to_string(),
             role: "guard".to_string(),
             attempt_seq: 1,
+            dispatch_owner_incarnation_id: None,
+            dispatch_group_id: None,
             dispatch_key: "dk-guard".to_string(),
             session_id: None,
             outcome: "deferred".to_string(),
