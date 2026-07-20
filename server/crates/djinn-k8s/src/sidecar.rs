@@ -617,7 +617,7 @@ mod tests {
     /// into the metadata the runtime logs as `task_run_services_resolved`.
     #[test]
     fn injected_service_metadata_has_no_pretask_fields() {
-        let requested = vec!["preset-postgres-18".to_string()];
+        let requested = ["preset-postgres-18".to_string()];
         let mut services = Vec::new();
         let mut injected = Vec::new();
         let mut skipped = Vec::new();
