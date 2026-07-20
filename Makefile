@@ -29,12 +29,16 @@ test-db-migrate: ## Bootstrap and migrate test Postgres; requires TEST_DB_MIGRAT
 	@test -n "$(strip $(TEST_DB_MIGRATION_GITHUB_ID))" || { echo "ERROR: TEST_DB_MIGRATION_GITHUB_ID is required" >&2; exit 2; }
 	@test -n "$(strip $(TEST_DB_MIGRATION_GITHUB_LOGIN))" || { echo "ERROR: TEST_DB_MIGRATION_GITHUB_LOGIN is required" >&2; exit 2; }
 	@until docker exec djinn-postgres-test pg_isready -U postgres >/dev/null 2>&1; do sleep 1; done
-	@cd $(SERVER_DIR) && SQLX_OFFLINE=true DJINN_DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5433/djinn cargo run -p djinn-server --bin djinn-server -- \
+	@# djinn-db's own migrator, not the full server binary: same embedded
+	@# migrations through the same owned runner, ~200 fewer packages to build.
+	@cd $(SERVER_DIR) && SQLX_OFFLINE=true cargo run -p djinn-db --bin djinn-migrate -- \
+		--database-url postgres://postgres:postgres@127.0.0.1:5433/djinn \
 		--bootstrap-designated-operator-only \
 		--migration-designated-operator-user-id "$(TEST_DB_MIGRATION_USER_ID)" \
 		--bootstrap-designated-operator-github-id "$(TEST_DB_MIGRATION_GITHUB_ID)" \
 		--bootstrap-designated-operator-github-login "$(TEST_DB_MIGRATION_GITHUB_LOGIN)" >/dev/null
-	@cd $(SERVER_DIR) && SQLX_OFFLINE=true DJINN_DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5433/djinn cargo run -p djinn-server --bin djinn-server -- \
+	@cd $(SERVER_DIR) && SQLX_OFFLINE=true cargo run -p djinn-db --bin djinn-migrate -- \
+		--database-url postgres://postgres:postgres@127.0.0.1:5433/djinn \
 		--migrate-only \
 		--migration-designated-operator-user-id "$(TEST_DB_MIGRATION_USER_ID)" >/dev/null
 
@@ -59,7 +63,6 @@ dev: ## Start the Vite web client standalone (Tilt also runs it — this is for 
 	cd $(UI_DIR) && pnpm dev
 
 sqlx-prepare: ## Regenerate server/.sqlx/ offline cache (uses test Postgres on :5433 via .cargo/config.toml)
-	@command -v sqlx >/dev/null 2>&1 || { echo "Install sqlx-cli: cargo install sqlx-cli --no-default-features --features postgres,rustls"; exit 1; }
 	@$(MAKE) --no-print-directory test-db-migrate
 	@# Use `cargo check --all-targets --all-features` instead of `cargo sqlx prepare --workspace`:
 	@# the latter (as of sqlx-cli 0.8.6) skips test targets, so queries inside
@@ -83,7 +86,6 @@ sqlx-prepare: ## Regenerate server/.sqlx/ offline cache (uses test Postgres on :
 	@echo "server/.sqlx/ regenerated ($$(ls $(SERVER_DIR)/.sqlx/query-*.json | wc -l) entries) — run 'git add server/.sqlx' and commit."
 
 sqlx-check: ## Fail if server/.sqlx/ is stale vs. current queries (local)
-	@command -v sqlx >/dev/null 2>&1 || { echo "Install sqlx-cli: cargo install sqlx-cli --no-default-features --features postgres,rustls"; exit 1; }
 	@# Local convenience: bring the docker test Postgres up to schema, then
 	@# run the DB-agnostic verifier. CI applies migrations with its own step
 	@# (service container, no `docker exec`) and calls `sqlx-verify` directly.
@@ -91,7 +93,10 @@ sqlx-check: ## Fail if server/.sqlx/ is stale vs. current queries (local)
 	@$(MAKE) --no-print-directory sqlx-verify
 
 sqlx-verify: ## Verify server/.sqlx/ freshness; assumes schema already applied + DATABASE_URL reachable (CI)
-	@command -v sqlx >/dev/null 2>&1 || { echo "Install sqlx-cli: cargo install sqlx-cli --no-default-features --features postgres,rustls"; exit 1; }
+	@# No sqlx-cli guard here on purpose: this target never shells out to
+	@# `sqlx`, it regenerates via `cargo check` + SQLX_OFFLINE_DIR and diffs
+	@# the result. The old guard made every caller install sqlx-cli for a
+	@# binary it does not invoke.
 	@# Regenerate into a scratch dir using the EXACT same surface as
 	@# `sqlx-prepare` (--all-targets --all-features) and force macro
 	@# re-execution by touching every sqlx::query file, then diff against the

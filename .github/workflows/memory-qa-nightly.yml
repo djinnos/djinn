@@ -42,6 +42,7 @@ jobs:
   memory-qa-phase2:
     name: Phase 2 Memory QA Judge
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     defaults:
       run:
         working-directory: server
@@ -74,21 +75,26 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: server
-          shared-key: server-quality
+          # save-if MUST stay false. rust-cache defaults to saving, and this
+          # job runs on `schedule`, i.e. on the default branch — so without
+          # this it silently becomes a second writer to a cache family owned
+          # by quality-gate.yml's warm lane, which scripts/ci-cache-policy
+          # cannot see from here.
+          save-if: false
+          # server-test (codegen), not server-quality (clippy/rmeta only):
+          # this job builds and runs djinn-migrate and djinn-memory-eval.
+          shared-key: server-test
           cache-on-failure: true
           cache-all-crates: true
-
-      - uses: taiki-e/install-action@v2
-        with:
-          tool: sqlx-cli
 
       - name: Apply djinn-db migrations
         working-directory: server/crates/djinn-db
         env:
           DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5433/djinn
         run: |
-          SQLX_OFFLINE=true DJINN_DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5433/djinn cargo run -p djinn-server --bin djinn-server -- --bootstrap-designated-operator-only --migration-designated-operator-user-id 00000000-0000-7000-8000-000000000002 --bootstrap-designated-operator-github-id 9000000002 --bootstrap-designated-operator-github-login djinn-ci-migration-operator
-          SQLX_OFFLINE=true DJINN_DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5433/djinn cargo run -p djinn-server --bin djinn-server -- --migrate-only --migration-designated-operator-user-id 00000000-0000-7000-8000-000000000002
+          # djinn-db's own migrator — see the same step in quality-gate.yml.
+          SQLX_OFFLINE=true cargo run -p djinn-db --bin djinn-migrate -- --database-url postgres://postgres:postgres@127.0.0.1:5433/djinn --bootstrap-designated-operator-only --migration-designated-operator-user-id 00000000-0000-7000-8000-000000000002 --bootstrap-designated-operator-github-id 9000000002 --bootstrap-designated-operator-github-login djinn-ci-migration-operator
+          SQLX_OFFLINE=true cargo run -p djinn-db --bin djinn-migrate -- --database-url postgres://postgres:postgres@127.0.0.1:5433/djinn --migrate-only --migration-designated-operator-user-id 00000000-0000-7000-8000-000000000002
 
       - name: Build Postgres test template
         env:
