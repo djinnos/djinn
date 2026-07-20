@@ -285,6 +285,9 @@ pub mod jit_pitfalls {
 /// identifiers, commands, fingerprints, manifest versions, identity digests,
 /// and detailed causes stay in structured tracing fields at the coordinator.
 pub mod final_verification {
+    #[cfg(feature = "test-support")]
+    use std::cell::Cell;
+
     pub const LOOKUP_HIT: &str = "hit";
     pub const LOOKUP_MISS: &str = "miss";
     pub const LOOKUP_STALE: &str = "stale";
@@ -296,13 +299,41 @@ pub mod final_verification {
     pub const RECORD_ERROR: &str = "error";
 
     /// Increment the one terminal outcome for a cache consultation.
-    pub fn increment_lookup(outcome: &'static str) {
+    pub fn increment_lookup(outcome: &'static str) -> Result<(), ()> {
+        if injected_failure() {
+            return Err(());
+        }
         metrics::counter!(super::VERIFY_CACHE_LOOKUP_TOTAL, "outcome" => outcome).increment(1);
+        Ok(())
     }
 
     /// Increment the one terminal outcome for a writer attempt.
-    pub fn increment_record(outcome: &'static str) {
+    pub fn increment_record(outcome: &'static str) -> Result<(), ()> {
+        if injected_failure() {
+            return Err(());
+        }
         metrics::counter!(super::VERIFY_RUN_RECORD_TOTAL, "outcome" => outcome).increment(1);
+        Ok(())
+    }
+
+    #[cfg(feature = "test-support")]
+    thread_local! {
+        static FAIL_NEXT_EMISSION: Cell<bool> = const { Cell::new(false) };
+    }
+
+    /// Cause one emission to fail in deterministic coordinator tests.
+    #[cfg(feature = "test-support")]
+    pub fn fail_next_emission_for_test() {
+        FAIL_NEXT_EMISSION.with(|failure| failure.set(true));
+    }
+
+    fn injected_failure() -> bool {
+        #[cfg(feature = "test-support")]
+        {
+            return FAIL_NEXT_EMISSION.with(|failure| failure.replace(false));
+        }
+        #[cfg(not(feature = "test-support"))]
+        false
     }
 }
 

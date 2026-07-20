@@ -673,7 +673,12 @@ fn emit_lookup_outcome(
 ) {
     // The metric has only the bounded outcome label. Rich identifiers and
     // diagnostics are emitted in the structured audit event below.
-    djinn_telemetry::final_verification::increment_lookup(outcome);
+    if djinn_telemetry::final_verification::increment_lookup(outcome).is_err() {
+        tracing::warn!(verify_run_lookup_outcome = outcome, task_id = %request.task_id,
+            task_run_id = %request.task_run_id, verification_attempt_id = %attempt_id,
+            audit_reason = reason, audit_detail = detail,
+            "final verification reuse telemetry emission failed");
+    }
     tracing::info!(verify_run_lookup_outcome = outcome, task_id = %request.task_id,
         task_run_id = %request.task_run_id, verification_attempt_id = %attempt_id,
         audit_reason = reason, audit_detail = detail, "final verification reuse consultation");
@@ -889,9 +894,9 @@ fn emit_outcome(
         FinalVerificationRecordingOutcome::Stored {
             verification_attempt_id,
             verify_run_id,
-            evidence: _,
+            evidence,
         } => {
-            djinn_telemetry::final_verification::increment_record(
+            let _ = djinn_telemetry::final_verification::increment_record(
                 djinn_telemetry::final_verification::RECORD_STORED,
             );
             tracing::info!(
@@ -912,7 +917,7 @@ fn emit_outcome(
             verification_attempt_id,
             reason,
         } => {
-            djinn_telemetry::final_verification::increment_record(
+            let _ = djinn_telemetry::final_verification::increment_record(
                 djinn_telemetry::final_verification::RECORD_INELIGIBLE,
             );
             tracing::info!(
@@ -925,7 +930,7 @@ fn emit_outcome(
             verification_attempt_id,
             detail,
         } => {
-            djinn_telemetry::final_verification::increment_record(
+            let _ = djinn_telemetry::final_verification::increment_record(
                 djinn_telemetry::final_verification::RECORD_ERROR,
             );
             tracing::error!(
@@ -1023,3 +1028,5 @@ mod tests {
 
 #[cfg(test)]
 mod recording_tests;
+#[cfg(test)]
+mod telemetry_contract_tests;
