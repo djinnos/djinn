@@ -1481,7 +1481,7 @@ mod tests {
     #[test]
     fn plan_indexer_commands_only_includes_available_indexers() {
         let project_root = PathBuf::from("/tmp/example-project");
-        let output_root = PathBuf::from("/tmp/example-project/.djinn/scip");
+        let output_root = PathBuf::from("/tmp/example-project/.task-runtime/scip");
         let available = vec![
             IndexerAvailability {
                 indexer: SupportedIndexer::RustAnalyzer,
@@ -1519,7 +1519,7 @@ mod tests {
                 "scip",
                 ".",
                 "--output",
-                "/tmp/example-project/.djinn/scip/example-project-rust-root.scip"
+                "/tmp/example-project/.task-runtime/scip/example-project-rust-root.scip"
             ]
         );
         assert_eq!(plans[1].indexer, SupportedIndexer::TypeScript);
@@ -1529,7 +1529,7 @@ mod tests {
             vec![
                 "index",
                 "--output",
-                "/tmp/example-project/.djinn/scip/example-project-typescript-root.scip"
+                "/tmp/example-project/.task-runtime/scip/example-project-typescript-root.scip"
             ]
         );
     }
@@ -1538,7 +1538,7 @@ mod tests {
     fn monorepo_command_planning_emits_per_workspace_outputs() {
         let tmp = tempdir_in_tmp();
         let project_root = tmp.path().join("djinn");
-        let output_root = project_root.join(".djinn/scip");
+        let output_root = project_root.join(".task-runtime/scip");
         fs::create_dir_all(project_root.join("server")).expect("create server dir");
         fs::create_dir_all(project_root.join("desktop")).expect("create desktop dir");
         fs::create_dir_all(project_root.join("website")).expect("create website dir");
@@ -1630,7 +1630,7 @@ mod tests {
     #[test]
     fn command_planning_falls_back_to_project_root_when_no_workspace_detected() {
         let project_root = PathBuf::from("/workspace/repo");
-        let output_root = PathBuf::from("/workspace/repo/.djinn/scip");
+        let output_root = PathBuf::from("/workspace/repo/.task-runtime/scip");
         let available = vec![IndexerAvailability {
             indexer: SupportedIndexer::Python,
             binary: "scip-python".to_string(),
@@ -1647,7 +1647,7 @@ mod tests {
             vec![
                 "index",
                 "--output",
-                "/workspace/repo/.djinn/scip/repo-python-root.scip"
+                "/workspace/repo/.task-runtime/scip/repo-python-root.scip"
             ]
         );
     }
@@ -1808,7 +1808,7 @@ mod tests {
     #[test]
     fn command_planning_covers_all_supported_indexers() {
         let project_root = PathBuf::from("/workspace/repo");
-        let output_root = PathBuf::from("/workspace/repo/.djinn/scip");
+        let output_root = PathBuf::from("/workspace/repo/.task-runtime/scip");
 
         let available: Vec<_> = SupportedIndexer::ALL
             .into_iter()
@@ -1835,7 +1835,7 @@ mod tests {
                 "scip",
                 ".",
                 "--output",
-                "/workspace/repo/.djinn/scip/repo-rust-root.scip"
+                "/workspace/repo/.task-runtime/scip/repo-rust-root.scip"
             ]
         );
         assert_eq!(
@@ -1843,7 +1843,7 @@ mod tests {
             vec![
                 "index",
                 "--output",
-                "/workspace/repo/.djinn/scip/repo-typescript-root.scip"
+                "/workspace/repo/.task-runtime/scip/repo-typescript-root.scip"
             ]
         );
         assert_eq!(
@@ -1851,7 +1851,7 @@ mod tests {
             vec![
                 "index",
                 "--output",
-                "/workspace/repo/.djinn/scip/repo-python-root.scip"
+                "/workspace/repo/.task-runtime/scip/repo-python-root.scip"
             ]
         );
         assert_eq!(
@@ -1859,7 +1859,7 @@ mod tests {
             vec![
                 "index",
                 "-o",
-                "/workspace/repo/.djinn/scip/repo-go-root.scip"
+                "/workspace/repo/.task-runtime/scip/repo-go-root.scip"
             ]
         );
         assert_eq!(
@@ -1867,7 +1867,7 @@ mod tests {
             vec![
                 "index",
                 "--output",
-                "/workspace/repo/.djinn/scip/repo-java-root.scip"
+                "/workspace/repo/.task-runtime/scip/repo-java-root.scip"
             ]
         );
     }
@@ -2996,7 +2996,7 @@ mod tests {
             "[workspace]\nmembers = [\"crates/*\"]\n",
         )
         .expect("write fixture workspace");
-        let output_root = project_root.join(".djinn/scip");
+        let output_root = project_root.join(".task-runtime/scip");
 
         let available = vec![IndexerAvailability {
             indexer: SupportedIndexer::RustAnalyzer,
@@ -3036,7 +3036,7 @@ mod tests {
             "[workspace]\nmembers = []\n",
         )
         .expect("write rust workspace");
-        let output_root = project_root.join(".djinn/scip");
+        let output_root = project_root.join(".task-runtime/scip");
 
         let available = vec![IndexerAvailability {
             indexer: SupportedIndexer::RustAnalyzer,
@@ -3077,7 +3077,7 @@ mod tests {
         .expect("write rust workspace");
         fs::write(project_root.join("desktop/tsconfig.json"), "{}\n")
             .expect("write desktop tsconfig");
-        let output_root = project_root.join(".djinn/scip");
+        let output_root = project_root.join(".task-runtime/scip");
 
         let available = vec![
             IndexerAvailability {
@@ -3127,7 +3127,7 @@ mod tests {
             "[workspace]\nmembers = []\n",
         )
         .expect("write rust workspace");
-        let output_root = project_root.join(".djinn/scip");
+        let output_root = project_root.join(".task-runtime/scip");
 
         let available = vec![IndexerAvailability {
             indexer: SupportedIndexer::RustAnalyzer,
