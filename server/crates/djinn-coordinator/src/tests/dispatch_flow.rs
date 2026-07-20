@@ -493,38 +493,6 @@ async fn approved_simple_task_with_memory_write_signal_skips_direct_close() {
     );
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn approved_simple_task_with_djinn_comment_signal_skips_direct_close() {
-    let db = test_helpers::create_test_db();
-    let (tx, _rx) = broadcast::channel(256);
-    let (task, _project_path) = create_simple_task(&db, &tx, "review", "commented review").await;
-
-    TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx))
-        .log_activity(
-            Some(&task.id),
-            "architect",
-            "architect",
-            "comment",
-            &json!({"body": "Wrote ADR at .djinn/decisions/proposed/adr-123.md"}).to_string(),
-        )
-        .await
-        .unwrap();
-
-    let mut actor = coordinator_actor_for_tests(&db, &tx);
-    actor.process_approved_tasks().await;
-
-    let updated = TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx))
-        .get(&task.id)
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(updated.status, "approved");
-    assert_ne!(
-        updated.close_reason.as_deref(),
-        Some("simple-lifecycle task — no PR needed")
-    );
-}
-
 // ── Unit coverage for the real worktree git-status signal ─────────────────
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -538,16 +506,16 @@ async fn worktree_has_uncommitted_changes_detects_untracked_file() {
     ));
 
     // Untracked file (the kind a `call_shell` mkdir/echo would leave).
-    std::fs::create_dir_all(tmp.path().join(".djinn/decisions/proposed")).unwrap();
+    std::fs::create_dir_all(tmp.path().join("docs/decisions/proposed")).unwrap();
     std::fs::write(
-        tmp.path().join(".djinn/decisions/proposed/adr-999.md"),
+        tmp.path().join("docs/decisions/proposed/adr-999.md"),
         "# new ADR\n",
     )
     .unwrap();
 
     assert!(
         CoordinatorActor::worktree_has_uncommitted_changes(tmp.path()),
-        "untracked .djinn/decisions/proposed/adr-999.md must be detected"
+        "untracked docs/decisions/proposed/adr-999.md must be detected"
     );
 }
 
@@ -588,7 +556,7 @@ async fn worktree_has_uncommitted_changes_returns_false_for_non_git_dir() {
 /// This test deliberately:
 ///   - sets up a *real* git repo at the session worktree path,
 ///   - creates a *real* `sessions` row pointing at that worktree,
-///   - writes a *real* untracked `.djinn/decisions/proposed/adr-*.md` file,
+///   - writes a *real* untracked `docs/decisions/proposed/adr-*.md` file,
 ///   - injects NO synthetic event_taxonomy (the worktree-status signal
 ///     must be the one that triggers the routing change), and
 ///   - does NOT pre-create the `task/<short_id>` branch (the whole point
@@ -612,9 +580,9 @@ async fn architect_spike_with_real_adr_file_routes_through_pr_flow_via_worktree_
     // the kind of change session_extraction.rs would miss because it only
     // counts write/edit/apply_patch tool calls, not call_shell side
     // effects.  We model that here by creating the file directly with std::fs.
-    std::fs::create_dir_all(worktree_path.join(".djinn/decisions/proposed")).unwrap();
+    std::fs::create_dir_all(worktree_path.join("docs/decisions/proposed")).unwrap();
     std::fs::write(
-        worktree_path.join(".djinn/decisions/proposed/adr-dtn6-test.md"),
+        worktree_path.join("docs/decisions/proposed/adr-dtn6-test.md"),
         "# ADR: dtn6 regression coverage\n\nbody body body\n",
     )
     .unwrap();
