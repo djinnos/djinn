@@ -244,6 +244,19 @@ pub struct BuildAdmissionController {
     released: Notify,
     queued_lifecycle: std::sync::Mutex<HashMap<String, Instant>>,
     queue_clock: Arc<dyn QueueClock>,
+    /// Whether this controller writes the process-global admission metrics.
+    ///
+    /// Always set in production. Test builds default it OFF because the
+    /// Prometheus recorder is a process-wide singleton while cargo runs every
+    /// test in the binary as a thread of one process: the occupancy gauges are
+    /// unlabelled and written with `set`, so any controller publishing
+    /// concurrently makes another test's reading arbitrary. Only the tests that
+    /// actually assert on these series opt in, via
+    /// `enable_process_metrics_for_test`, and they serialize against each other
+    /// on [`telemetry_guard`]. Gating emission at the writer means a
+    /// test that never opts in cannot corrupt the reading no matter what
+    /// admission path it exercises.
+    emit_process_metrics: AtomicBool,
 }
 
 impl BuildAdmissionController {
@@ -274,7 +287,21 @@ impl BuildAdmissionController {
             released: Notify::new(),
             queued_lifecycle: std::sync::Mutex::new(HashMap::new()),
             queue_clock: Arc::new(SystemQueueClock),
+            emit_process_metrics: AtomicBool::new(!cfg!(test)),
         }
+    }
+
+    /// Whether this controller may write the process-global admission metrics.
+    fn process_metrics_enabled(&self) -> bool {
+        self.emit_process_metrics.load(Ordering::Acquire)
+    }
+
+    /// Opt this controller into publishing the process-global admission
+    /// metrics. Only for tests that assert on those series, and only while
+    /// holding [`telemetry_guard`].
+    #[cfg(test)]
+    pub(crate) fn enable_process_metrics_for_test(&self) {
+        self.emit_process_metrics.store(true, Ordering::Release);
     }
 
     #[cfg(test)]
@@ -428,7 +455,9 @@ impl BuildAdmissionController {
         // finish_all_queued_waits drains the single lifecycle map atomically,
         // clearing both membership and timestamps in one critical section.
         self.finish_all_queued_waits(djinn_telemetry::build_slot_queue::OUTCOME_SHUTDOWN);
-        djinn_telemetry::build_slot_occupancy::set_slots_queued(0);
+        if self.process_metrics_enabled() {
+            djinn_telemetry::build_slot_occupancy::set_slots_queued(0);
+        }
     }
 
     #[must_use]
@@ -460,6 +489,13 @@ impl BuildAdmissionController {
     /// Export bounded admission metrics from the durable journal snapshot.
     /// InvocationBuild rows are intentionally excluded from all v0 views.
     pub async fn publish_metrics(&self) {
+        // Every emission below targets the process-global registry; a
+        // controller that has not opted in stays out of it entirely. The body
+        // is pure export — a journal read plus gauge writes — so skipping it
+        // changes no admission state.
+        if !self.process_metrics_enabled() {
+            return;
+        }
         let mode = match self.mode() {
             BuildAdmissionMode::Off => "off",
             BuildAdmissionMode::Observe => "observe",
@@ -593,7 +629,11 @@ impl BuildAdmissionController {
                 if observed.would_defer {
                     let mut count = self.would_defer_observations.lock().await;
                     *count = count.saturating_add(1).min(1024);
-                    djinn_telemetry::build_admission::increment_would_defer("observe", self.cap);
+                    if self.process_metrics_enabled() {
+                        djinn_telemetry::build_admission::increment_would_defer(
+                            "observe", self.cap,
+                        );
+                    }
                 }
                 observed.reservation
             } else {
@@ -785,7 +825,9 @@ impl BuildAdmissionController {
             BuildAdmissionMode::Observe => "observe",
             BuildAdmissionMode::Enforce => "enforce",
         };
-        djinn_telemetry::build_admission::increment_unknown_classification(mode, self.cap);
+        if self.process_metrics_enabled() {
+            djinn_telemetry::build_admission::increment_unknown_classification(mode, self.cap);
+        }
         tracing::warn!(
             observations = *count,
             "build admission classification missing or unknown; denying dispatch"
@@ -895,7 +937,9 @@ impl BuildAdmissionController {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .remove(key);
-        if let Some(queued_at) = queued_at {
+        if let Some(queued_at) = queued_at
+            && self.process_metrics_enabled()
+        {
             djinn_telemetry::build_slot_queue::record_wait_seconds(
                 outcome,
                 self.queue_clock.now().saturating_duration_since(queued_at),
@@ -914,6 +958,9 @@ impl BuildAdmissionController {
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             std::mem::take(&mut *lifecycle)
         };
+        if !self.process_metrics_enabled() {
+            return;
+        }
         for queued_at in waiters.into_values() {
             djinn_telemetry::build_slot_queue::record_wait_seconds(
                 outcome,
@@ -1274,6 +1321,25 @@ impl WarmAdmission for BuildAdmissionController {
     ) -> Result<(), WarmAdmissionError> {
         self.transition_permit(permit, transition).await
     }
+}
+
+/// Serializes every test that asserts on the process-global build-admission
+/// metrics, across all modules in this crate.
+///
+/// The occupancy gauges are unlabelled and the health gauges are keyed only by
+/// mode and cap, so two tests publishing at once make each other's reading
+/// arbitrary. `enable_process_metrics_for_test` decides *which* controllers may
+/// write at all; this lock decides that only one of them writes at a time. Both
+/// are needed — the flag alone would still let two opted-in tests collide.
+///
+/// Poisoning is recovered rather than propagated so one failing test reports
+/// its own assertion instead of turning its peers into unwrap panics.
+#[cfg(test)]
+pub(crate) fn telemetry_guard() -> std::sync::MutexGuard<'static, ()> {
+    static TELEMETRY_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    TELEMETRY_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 #[cfg(test)]
@@ -2364,17 +2430,10 @@ mod tests {
 
     // ── Build-admission telemetry regression tests ──────────────────────
     //
-    // The Prometheus recorder is a process-global singleton shared by every
-    // test in the binary. These tests serialize through a static mutex to
-    // avoid cross-test metric interference, and each initializes the recorder
-    // (idempotent) before rendering.
-    static TELEMETRY_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-    fn telemetry_guard() -> std::sync::MutexGuard<'static, ()> {
-        TELEMETRY_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-    }
+    // Each of these holds `telemetry_guard()` for its whole assertion window
+    // and opts its controller into publishing via
+    // `enable_process_metrics_for_test`, so exactly one controller is writing
+    // the process-global admission series at a time.
 
     fn sample_value(rendered: &str, metric: &str, labels: &[(&str, &str)]) -> f64 {
         if matches!(
@@ -2426,6 +2485,7 @@ mod tests {
         // immediately refresh the occupied gauge — it must not wait for a
         // later cap denial or terminal release.
         let c = controller(BuildAdmissionMode::Enforce, 3);
+        c.enable_process_metrics_for_test();
         c.mark_ready();
         c.admit_task_run(
             Some("worker"),
@@ -2490,6 +2550,7 @@ mod tests {
         }
         let controller =
             BuildAdmissionController::new_closed(Arc::clone(&journal), 64, "replacement-epoch");
+        controller.enable_process_metrics_for_test();
         controller
             .recover_all_predecessors_and_seed()
             .await
@@ -2528,6 +2589,7 @@ mod tests {
         djinn_telemetry::init().unwrap();
 
         let c = controller(BuildAdmissionMode::Off, 0);
+        c.enable_process_metrics_for_test();
         c.publish_metrics().await;
 
         let rendered = djinn_telemetry::render().unwrap();
@@ -2551,6 +2613,7 @@ mod tests {
         djinn_telemetry::init().unwrap();
 
         let c = controller(BuildAdmissionMode::Enforce, 3);
+        c.enable_process_metrics_for_test();
         c.mark_ready();
         // A NonBuild request with an empty audit reason triggers unknown
         // classification.
@@ -2588,6 +2651,7 @@ mod tests {
         djinn_telemetry::init().unwrap();
 
         let c = controller(BuildAdmissionMode::Observe, 1);
+        c.enable_process_metrics_for_test();
         // First admission succeeds.
         let _ = WarmAdmission::admit(&c, warm("first")).await.unwrap();
         // Second admission would exceed the cap (but Observe permits anyway).
@@ -2611,6 +2675,7 @@ mod tests {
         djinn_telemetry::init().unwrap();
 
         let c = controller(BuildAdmissionMode::Enforce, 1);
+        c.enable_process_metrics_for_test();
         c.mark_ready();
         // Fill the cap.
         let _ = WarmAdmission::admit(&c, warm("queued-a")).await.unwrap();
@@ -2650,6 +2715,7 @@ mod tests {
                 elapsed_seconds: AtomicU64::new(0),
             }),
         );
+        c.enable_process_metrics_for_test();
         c.mark_ready();
         let first = WarmAdmission::admit(&c, warm("release-a")).await.unwrap();
         assert!(WarmAdmission::admit(&c, warm("release-b")).await.is_err());
@@ -2722,6 +2788,7 @@ mod tests {
 
         let controller =
             BuildAdmissionController::new_closed(Arc::clone(&journal), 64, "replacement-epoch");
+        controller.enable_process_metrics_for_test();
         controller
             .recover_all_predecessors_and_seed()
             .await
@@ -2775,6 +2842,7 @@ mod tests {
         // Use a non-closed controller (journal is healthy by default) and
         // simulate the post-recovery state where inventory is still pending.
         let c = controller(BuildAdmissionMode::Enforce, 3);
+        c.enable_process_metrics_for_test();
         c.mark_ready();
         c.mark_inventory_pending();
         c.publish_metrics().await;
@@ -2811,6 +2879,7 @@ mod tests {
         djinn_telemetry::init().unwrap();
 
         let c = controller(BuildAdmissionMode::Enforce, 3);
+        c.enable_process_metrics_for_test();
         c.mark_journal_unhealthy();
         c.publish_metrics().await;
 
@@ -2833,6 +2902,7 @@ mod tests {
         djinn_telemetry::init().unwrap();
 
         let c = controller(BuildAdmissionMode::Enforce, 3);
+        c.enable_process_metrics_for_test();
         c.mark_ready();
         // Reserve an InvocationBuild row — it must not appear in occupied.
         let _ = c
@@ -2867,6 +2937,7 @@ mod tests {
         djinn_telemetry::init().unwrap();
 
         let c = controller(BuildAdmissionMode::Enforce, 1);
+        c.enable_process_metrics_for_test();
         c.mark_ready();
         // Reserve a task — occupies 1.
         let task = c
@@ -2946,6 +3017,7 @@ mod tests {
             1,
             "epoch",
         );
+        c.enable_process_metrics_for_test();
 
         // An Observe journal failure must permit dispatch (telemetry-only)
         // but must surface the degradation.
@@ -2977,6 +3049,7 @@ mod tests {
             1,
             "transition-failure",
         );
+        c.enable_process_metrics_for_test();
         let permit = WarmAdmission::admit(&c, warm("transition-down"))
             .await
             .unwrap();
@@ -3003,6 +3076,7 @@ mod tests {
         djinn_telemetry::init().unwrap();
 
         let c = controller(BuildAdmissionMode::Enforce, 5);
+        c.enable_process_metrics_for_test();
         c.mark_ready();
         c.publish_metrics().await;
 
@@ -3064,6 +3138,7 @@ mod tests {
             "fake-clock",
             clock.clone(),
         );
+        controller.enable_process_metrics_for_test();
         controller.mark_ready();
         let occupied = WarmAdmission::admit(&controller, warm("occupied"))
             .await
@@ -3171,6 +3246,7 @@ mod tests {
             "gauge-test",
             clock.clone(),
         );
+        controller.enable_process_metrics_for_test();
         controller.mark_ready();
 
         // One slot occupied → in_use=1, queued=0.
@@ -3304,6 +3380,7 @@ mod tests {
             "cancel-task-test",
             clock.clone(),
         );
+        controller.enable_process_metrics_for_test();
         controller.mark_ready();
         let _occupied = WarmAdmission::admit(&controller, warm("occupied"))
             .await
