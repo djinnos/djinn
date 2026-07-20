@@ -13,10 +13,7 @@ async fn setup_test_template() {
     use sqlx::postgres::PgConnection;
 
     const TEMPLATE_OPERATOR_ID: &str = "00000000-0000-7000-8000-000000000001";
-    let base = std::env::var("DJINN_TEST_DATABASE_URL").unwrap_or_else(|_| {
-        "postgres://djinn:VipjO1uAdxAGvNSA6EcJdZMdHAquYeJj@djinn-postgres.djinn.svc.cluster.local:5432/djinn"
-            .to_owned()
-    });
+    let base = djinn_db::test_database_base_url();
     let server_prefix = base
         .rsplit_once('/')
         .map(|(prefix, _)| prefix)
