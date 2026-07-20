@@ -13,7 +13,7 @@
 //! # Contract
 //!
 //! 1. **Write sentinel** — Before any file-based cache mutation, write a
-//!    sentinel file (`.djinn/graph_warm.inprogress`) containing a small JSON
+//!    sentinel file under the SCIP cache root containing a small JSON
 //!    payload with the timestamp and commit SHA.
 //!
 //! 2. **Atomic mutation** — Cache writes already use tmp+rename (see
