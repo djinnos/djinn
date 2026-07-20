@@ -258,21 +258,12 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y mold
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: server
-          shared-key: release-bins
-          cache-on-failure: true
-          cache-all-crates: true
-          # Restore-only: this workflow runs on v* tag refs, and a cache
-          # saved on one tag ref is invisible to every other ref — a
-          # `save-if: true` here writes a cache no future release can
-          # restore (verified: three consecutive releases each logged
-          # "No cache found" then "Saving cache"). The release-bins family
-          # is owned and saved by quality-gate.yml's
-          # cache-warm-x86_64-release job on main pushes; default-branch
-          # caches are readable from all refs, including tag runs.
-          save-if: false
+      # No Rust cache here on purpose. The release-bins family was retired:
+      # it held ~1.53 GB of a 10 GB repo-wide budget to serve ~1.9 releases
+      # a day, while CI runs ~298 times a day and its cache was starved by
+      # the same budget. Releases now cold-compile (~22 min); the budget
+      # went to cache-workspace-crates on server-test, which every CI run
+      # reads. Revisit if release cadence rises or the budget grows.
       # Worker FIRST so its deps resolve WITHOUT qdrant (default features);
       # the server build then layers only the qdrant-extra deps on top,
       # reusing every shared non-qdrant artifact already on disk.
