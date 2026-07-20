@@ -219,18 +219,25 @@ jobs:
           cache-on-failure: true
           save-if: true
           cache-all-crates: true
-          # rust-cache strips workspace-member artifacts before saving by
-          # default, so every consumer recompiled the ~30 djinn-* crates even
-          # on a "full match" restore — that is the whole cost of the shards'
-          # `Build test binaries` step (4.85-4.97 min x 4, on the critical
-          # path). Budget for this comes from retiring the server-quality and
-          # release-bins families in this same change.
+          # Do NOT re-add `cache-workspace-crates: true`. It was tried in
+          # #2349 and measured worthless: the saved cache grew 1267 MB ->
+          # 2283 MB (+1016 MB of a 10 GB repo budget) and the shards' `Build
+          # test binaries` step did not move (4.6-5.0 min before, 4.8-5.1 min
+          # after, across four runs).
           #
-          # This only affects the SAVE path and is NOT part of the cache key,
-          # so it belongs on the owner alone; restore-only consumers need no
-          # change. If the shards' build time does not drop, revert this line
-          # and keep the reclaimed budget.
-          cache-workspace-crates: true
+          # Why it cannot help here: cargo fingerprints path/workspace crates
+          # by source MTIME, and a fresh `actions/checkout` stamps every file
+          # with a new mtime (git does not record them). Restored workspace
+          # artifacts are therefore stale on arrival and rebuilt regardless —
+          # rust-lang/cargo#11682, "crates always considered dirty when
+          # building in a fresh git clone". rust-cache excludes workspace
+          # members by default for exactly this reason, and documents the
+          # option as useful only for "libraries that are only updated
+          # sporadically". All 29 djinn-* crates churn constantly, so the
+          # option's precondition does not hold for this workspace.
+          #
+          # Fixing this needs CONTENT-addressed compilation caching (sccache,
+          # cargo-hold), not more mtime-based artifact caching.
         id: rust-cache
       - uses: taiki-e/install-action@nextest
       - name: Build test binaries (populate cache)
