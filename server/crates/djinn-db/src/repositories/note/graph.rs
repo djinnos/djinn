@@ -24,13 +24,14 @@ impl NoteRepository {
         let node_rows = sqlx::query!(
             r#"SELECT n.id AS "id!", n.permalink AS "permalink!",
                     n.title AS "title!", n.note_type AS "note_type!",
-                    n.folder AS "folder!", n.created_at AS "created_at!",
+                    n.folder AS "folder!", n.status AS "status!",
+                    n.lifecycle_changed_at AS "lifecycle_changed_at?", n.created_at AS "created_at!",
                     (SELECT COUNT(*) FROM note_links WHERE source_id = n.id
                        AND target_id IS NOT NULL)
                     + (SELECT COUNT(*) FROM note_links WHERE target_id = n.id)
                       AS "connection_count!: i64"
              FROM notes n
-             WHERE n.project_id = $1
+             WHERE n.project_id = $1 AND n.status = 'active'
              ORDER BY n.folder, n.title"#,
             project_id
         )
@@ -71,6 +72,8 @@ impl NoteRepository {
                 title: row.title,
                 note_type: row.note_type,
                 folder: row.folder,
+                status: row.status,
+                lifecycle_changed_at: row.lifecycle_changed_at,
                 connection_count: row.connection_count,
                 entity_type: "note".to_string(),
                 created_at: Some(row.created_at),
@@ -110,6 +113,8 @@ impl NoteRepository {
                 title,
                 note_type: "proposal".to_string(),
                 folder: "".to_string(),
+                status: "active".to_string(),
+                lifecycle_changed_at: None,
                 connection_count,
                 is_orphan: false,
                 broken_targets: Vec::new(),
@@ -118,8 +123,13 @@ impl NoteRepository {
             });
         }
 
+        // Lifecycle selection has completed before edge loading. Keep the
+        // rendered graph endpoint-closed even when an inactive note was not
+        // selected by a bounded request.
+        let returned_node_ids: HashSet<String> = nodes.iter().map(|node| node.id.clone()).collect();
         let edges = edge_rows
             .into_iter()
+            .filter(|row| returned_node_ids.contains(&row.source_id) && returned_node_ids.contains(&row.target_id))
             .map(|row| GraphEdge {
                 source_id: row.source_id,
                 target_id: row.target_id,
@@ -151,6 +161,10 @@ impl NoteRepository {
 
         let mut typed_edges: Vec<TypedEdge> = typed_edge_rows
             .into_iter()
+            .filter(|row| {
+                returned_node_ids.contains(row.get::<String, _>("source_id").as_str())
+                    && returned_node_ids.contains(row.get::<String, _>("target_id").as_str())
+            })
             .map(|row| TypedEdge {
                 source_id: row.get("source_id"),
                 target_id: row.get("target_id"),
@@ -205,7 +219,78 @@ impl NoteRepository {
             nodes,
             edges,
             typed_edges,
+            lifecycle_summary: None,
         })
+    }
+
+    /// Additive lifecycle-aware graph entry point. The default wrapper above
+    /// deliberately remains the active-only compatibility API.
+    pub async fn graph_with_options(
+        &self,
+        project_id: &str,
+        options: GraphOptions,
+    ) -> Result<GraphResponse> {
+        let Some(statuses) = options.statuses else {
+            return self.graph(project_id).await;
+        };
+        let include_active = statuses.iter().any(|status| status == "active");
+        let requested_inactive: HashSet<&str> = statuses
+            .iter()
+            .filter_map(|status| match status.as_str() {
+                "archived" | "deprecated" => Some(status.as_str()),
+                _ => None,
+            })
+            .collect();
+        let limit = options.lifecycle_limit.unwrap_or(500).clamp(0, 1000);
+        let mut graph = self.graph(project_id).await?;
+        if !include_active {
+            graph.nodes.retain(|node| node.entity_type == "proposal");
+            graph.edges.clear();
+            graph.typed_edges.retain(|edge| {
+                edge.source_entity_type == "proposal" && edge.target_entity_type == "proposal"
+            });
+        }
+
+        let mut inactive_rows = sqlx::query(
+            r#"SELECT id, permalink, title, note_type, folder, status, created_at,
+                      lifecycle_changed_at
+               FROM notes
+               WHERE project_id = $1 AND status IN ('archived', 'deprecated')
+               ORDER BY lifecycle_changed_at DESC NULLS LAST, id"#,
+        )
+        .bind(project_id)
+        .fetch_all(self.db.pool())
+        .await?
+        .into_iter()
+        .filter(|row| requested_inactive.contains(row.get::<String, _>("status").as_str()))
+        .collect::<Vec<_>>();
+        let inactive_total = inactive_rows.len() as i64;
+        inactive_rows.truncate(limit as usize);
+        for row in inactive_rows {
+            graph.nodes.push(GraphNode {
+                id: row.get("id"),
+                permalink: row.get("permalink"),
+                title: row.get("title"),
+                note_type: row.get("note_type"),
+                folder: row.get("folder"),
+                status: row.get("status"),
+                lifecycle_changed_at: row.get("lifecycle_changed_at"),
+                connection_count: 0,
+                is_orphan: false,
+                broken_targets: Vec::new(),
+                entity_type: "note".to_string(),
+                created_at: Some(row.get("created_at")),
+            });
+        }
+        let inactive_returned = (graph.nodes.iter().filter(|node| {
+            node.entity_type == "note" && node.status != "active"
+        }).count()) as i64;
+        graph.lifecycle_summary = Some(LifecycleGraphSummary {
+            inactive_total,
+            inactive_returned,
+            inactive_omitted: inactive_total - inactive_returned,
+        });
+        Ok(graph)
     }
 
     /// All wikilinks in a project whose target note does not exist.
