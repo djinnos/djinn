@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO session_compaction_boundaries\n                (id, session_id, phase, schema_version,\n                 first_message_id, last_compacted_message_id,\n                 first_retained_message_id, retained_tail_hash, marker_metadata,\n                 trigger, current_context_tokens_before)\n             VALUES ($1, $2, 'started', $3, $4, $5, $6, $7, $8, $9, $10)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Varchar",
+        "Varchar",
+        "Int4",
+        "Varchar",
+        "Varchar",
+        "Varchar",
+        "Text",
+        "Jsonb",
+        "Varchar",
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "82b7ea35d084f246af2a0daa2f49d49cd192563012ffcc45a3f9287971188960"
+}

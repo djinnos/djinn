@@ -5,6 +5,7 @@ use std::collections::HashSet;
 use tokio::sync::broadcast;
 
 use crate::database::Database;
+use crate::repositories::note::lifecycle::NoteStatus;
 use crate::repositories::note::{NoteRepository, NoteSearchParams};
 use crate::repositories::test_support::{event_bus_for, make_project};
 
@@ -85,6 +86,77 @@ async fn note_status(db: &Database, note_id: &str) -> String {
         .fetch_one(db.pool())
         .await
         .unwrap()
+}
+
+async fn lifecycle_changed_at(db: &Database, note_id: &str) -> Option<String> {
+    sqlx::query_scalar("SELECT lifecycle_changed_at FROM notes WHERE id = $1")
+        .bind(note_id)
+        .fetch_one(db.pool())
+        .await
+        .unwrap()
+}
+
+async fn set_lifecycle_changed_at(db: &Database, note_id: &str, timestamp: &str) {
+    sqlx::query("UPDATE notes SET lifecycle_changed_at = $1 WHERE id = $2")
+        .bind(timestamp)
+        .bind(note_id)
+        .execute(db.pool())
+        .await
+        .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn guarded_status_transitions_stamp_only_real_matching_transitions() {
+    let (db, repo, project_id) = setup().await;
+    let note = repo
+        .create(
+            &project_id,
+            "Guarded Lifecycle Timestamp",
+            "guarded status transition body",
+            "case",
+            "[]",
+        )
+        .await
+        .unwrap();
+    let original_timestamp = "2001-02-03T04:05:06.789Z";
+    set_lifecycle_changed_at(&db, &note.id, original_timestamp).await;
+
+    assert!(
+        !repo
+            .set_note_status(&note.id, NoteStatus::Archived, NoteStatus::Deprecated)
+            .await
+            .unwrap(),
+        "a wrong expected status must not update the row"
+    );
+    assert_eq!(
+        lifecycle_changed_at(&db, &note.id).await.as_deref(),
+        Some(original_timestamp)
+    );
+
+    assert!(
+        !repo
+            .set_note_status(&note.id, NoteStatus::Active, NoteStatus::Active)
+            .await
+            .unwrap(),
+        "a same-status request must be a no-op even when the guard matches"
+    );
+    assert_eq!(
+        lifecycle_changed_at(&db, &note.id).await.as_deref(),
+        Some(original_timestamp)
+    );
+
+    assert!(
+        repo.set_note_status(&note.id, NoteStatus::Active, NoteStatus::Archived)
+            .await
+            .unwrap()
+    );
+    assert_eq!(note_status(&db, &note.id).await, "archived");
+    let transitioned_timestamp = lifecycle_changed_at(&db, &note.id).await;
+    assert!(
+        transitioned_timestamp.is_some(),
+        "real transition must be stamped"
+    );
+    assert_ne!(transitioned_timestamp.as_deref(), Some(original_timestamp));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -264,6 +336,53 @@ async fn archive_audit_candidates_flips_only_active_candidates_to_archived() {
     assert_eq!(note_status(&db, &eligible_case.id).await, "archived");
     assert_eq!(note_status(&db, &eligible_pitfall.id).await, "archived");
     assert_eq!(note_status(&db, &recent_access.id).await, "active");
+    assert!(lifecycle_changed_at(&db, &eligible_case.id).await.is_some());
+    assert!(
+        lifecycle_changed_at(&db, &eligible_pitfall.id)
+            .await
+            .is_some()
+    );
+    assert_eq!(lifecycle_changed_at(&db, &recent_access.id).await, None);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn archive_sweep_transition_is_reversible_and_preserves_content_and_tags() {
+    let (_db, repo, project_id) = setup().await;
+    let content = ARCHIVE_SHAPED_BODY;
+    let tags = r#"["lifecycle", "retained"]"#;
+    let note = repo
+        .create(
+            &project_id,
+            "Restorable Archive Candidate",
+            content,
+            "case",
+            tags,
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        repo.archive_audit_candidates(&project_id, TEST_WINDOW_DAYS)
+            .await
+            .unwrap(),
+        1
+    );
+    let archived = repo.get(&note.id).await.unwrap().unwrap();
+    assert_eq!(archived.status, "archived");
+    assert_eq!(archived.content, content);
+    assert_eq!(archived.tags, tags);
+    assert!(archived.lifecycle_changed_at.is_some());
+
+    assert!(
+        repo.set_note_status(&note.id, NoteStatus::Archived, NoteStatus::Active)
+            .await
+            .unwrap()
+    );
+    let restored = repo.get(&note.id).await.unwrap().unwrap();
+    assert_eq!(restored.status, "active");
+    assert_eq!(restored.content, content);
+    assert_eq!(restored.tags, tags);
+    assert!(restored.lifecycle_changed_at.is_some());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
