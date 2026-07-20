@@ -215,8 +215,7 @@ impl Database {
     /// Open an isolated test database.
     ///
     /// Uses the Postgres template-clone approach: take the base URL from
-    /// `DJINN_TEST_DATABASE_URL` (falling back to `TEST_POSTGRES_URL`, then
-    /// `postgres://postgres:postgres@127.0.0.1:5433/postgres`), strip any
+    /// [`test_database_base_url`], strip any
     /// trailing `/<db>` segment, then construct an admin connection against
     /// `<base>/postgres`, `CREATE DATABASE djinn_test_<uuid> TEMPLATE
     /// djinn_test_template`, and connect the per-test pool to it.
@@ -228,9 +227,7 @@ impl Database {
     /// Each test gets a UUIDv7-named database — no collisions under
     /// `cargo nextest` parallelism.
     pub fn open_in_memory() -> DbResult<Self> {
-        let base = std::env::var("DJINN_TEST_DATABASE_URL")
-            .or_else(|_| std::env::var("TEST_POSTGRES_URL"))
-            .unwrap_or_else(|_| "postgres://postgres:postgres@127.0.0.1:5433/postgres".to_owned());
+        let base = test_database_base_url();
         let server_prefix = strip_server_prefix(&base);
         let test_db = format!("djinn_test_{}", uuid::Uuid::now_v7().simple());
         let url = format!("{server_prefix}/{test_db}");
@@ -551,6 +548,41 @@ impl Database {
             .await?;
         Ok(())
     }
+}
+
+/// Default base URL for the ephemeral test Postgres server.
+///
+/// Deliberately a local, unprivileged address: a test helper must never be
+/// able to fall back onto a real deployment's database.
+const DEFAULT_TEST_DATABASE_URL: &str = "postgres://postgres:postgres@127.0.0.1:5433/postgres";
+
+/// Base URL of the Postgres server that integration tests should use.
+///
+/// Resolution order is `TEST_POSTGRES_URL`, then `DJINN_TEST_DATABASE_URL`,
+/// then [`DEFAULT_TEST_DATABASE_URL`]. **The order matters and is not
+/// arbitrary:**
+///
+/// - Task-run Pods inject `TEST_POSTGRES_URL` pointing at the in-Pod
+///   `svc-postgres` sidecar on `127.0.0.1:5432`.
+/// - `server/.cargo/config.toml` bakes `DJINN_TEST_DATABASE_URL` at `:5433`
+///   for local development, and CI sets the same value explicitly.
+///
+/// Cargo's `[env]` table applies to every process cargo launches, so when
+/// `DJINN_TEST_DATABASE_URL` was checked first, `cargo test` inside a Pod
+/// always dialled `:5433` — where nothing listens — while running the
+/// compiled test binary directly worked, because cargo was not in the loop to
+/// inject the variable. That split is what made in-Pod database tests look
+/// intermittently flaky when they were in fact deterministic.
+///
+/// Checking `TEST_POSTGRES_URL` first is correct everywhere: neither CI nor
+/// local development sets it, so both fall through to `:5433` unchanged.
+///
+/// Every integration test must use this helper rather than reading the
+/// environment directly, so the precedence exists in exactly one place.
+pub fn test_database_base_url() -> String {
+    std::env::var("TEST_POSTGRES_URL")
+        .or_else(|_| std::env::var("DJINN_TEST_DATABASE_URL"))
+        .unwrap_or_else(|_| DEFAULT_TEST_DATABASE_URL.to_owned())
 }
 
 fn strip_server_prefix(base_url: &str) -> String {

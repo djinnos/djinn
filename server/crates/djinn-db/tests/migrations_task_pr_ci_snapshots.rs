@@ -8,12 +8,7 @@ const MIGRATION_VERSION: u64 = 85;
 const MIGRATION_FILE: &str = "85_task_pr_ci_snapshots.sql";
 
 fn base_database_url() -> String {
-    std::env::var("DJINN_TEST_DATABASE_URL")
-        .or_else(|_| std::env::var("TEST_POSTGRES_URL"))
-        .unwrap_or_else(|_| {
-            "postgres://djinn:VipjO1uAdxAGvNSA6EcJdZMdHAquYeJj@djinn-postgres.djinn.svc.cluster.local:5432/djinn"
-                .to_owned()
-        })
+    djinn_db::test_database_base_url()
 }
 
 fn server_prefix(base: &str) -> String {

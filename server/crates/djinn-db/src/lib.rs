@@ -30,7 +30,7 @@ pub mod test_support {
 pub use database::{
     Database, DatabaseBackendCapabilities, DatabaseBackendKind, DatabaseBootstrapInfo,
     DatabaseConnectConfig, NoteSearchBackend, NoteVectorBackend, PostgresDatabaseConfig,
-    SqliteVecStatus, default_db_path,
+    SqliteVecStatus, default_db_path, test_database_base_url,
 };
 pub use error::{DbError as Error, DbResult as Result};
 #[cfg(any(test, feature = "test-support"))]
