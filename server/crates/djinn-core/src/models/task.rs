@@ -437,13 +437,9 @@ pub struct Task {
     /// When set, the slot lifecycle loads this Agent instead of the project default.
     #[cfg_attr(feature = "sqlx", sqlx(default))]
     pub agent_type: Option<String>,
-    /// Stable `users.id` of whoever created this task. Stamped from the
-    /// session user at the MCP dispatch root; for background/agent callers
-    /// with no session it falls back to the parent epic's creator (so
-    /// Planner-spawned tasks inherit the human who owns the epic). `None`
-    /// only for tasks with neither a session user nor an owned epic.
-    #[cfg_attr(feature = "sqlx", sqlx(default))]
-    pub created_by_user_id: Option<String>,
+    /// Stable `users.id` of whoever created this task. The effective-creator
+    /// writer boundary resolves inherited provenance before insertion.
+    pub created_by_user_id: String,
     /// Promoted current-head PR CI status from `task_pr_ci_snapshots`.
     /// Defaults to `unknown` when no snapshot exists for the task PR.
     #[cfg_attr(feature = "sqlx", sqlx(default))]

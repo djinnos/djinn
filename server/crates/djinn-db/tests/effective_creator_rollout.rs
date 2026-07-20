@@ -2,6 +2,8 @@
 use serde_json::Value;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
+#[path = "migrations_task_creator_contract.rs"]
+mod migrations_task_creator_contract;
 
 const LEGACY_CREATE_METHODS: &[&str] = &[
     ".create_in_project_with_ac(",
@@ -811,4 +813,42 @@ pub async fn runtime_writer() { repo.create_in_project_with_provenance(); }"#,
         )]),
         "a writer after a bounded cfg(test) module remains a production candidate"
     );
+}
+
+#[test]
+fn release_creator_contract_is_concrete_and_legacy_guards_remain_intentional() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../");
+    let task_model =
+        std::fs::read_to_string(root.join("server/crates/djinn-core/src/models/task.rs"))
+            .expect("Task model readable");
+    let task_field = task_model
+        .split_once("pub created_by_user_id:")
+        .expect("Task creator field");
+    assert!(
+        task_field.1.starts_with(" String,"),
+        "Task creator must be concrete String"
+    );
+    assert!(
+        !task_field.0.ends_with("sqlx(default))]\n    "),
+        "Task creator must not silently decode a missing SQL column"
+    );
+    let writes = std::fs::read_to_string(
+        root.join("server/crates/djinn-db/src/repositories/task/writes.rs"),
+    )
+    .expect("task writer readable");
+    assert!(!writes.contains("clear_created_by_user_id"));
+    assert!(writes.contains("EFFECTIVE_CREATOR_UNAVAILABLE"));
+    let board_health = std::fs::read_to_string(
+        root.join("server/crates/djinn-db/src/repositories/task/board_health.rs"),
+    )
+    .expect("board-health source readable");
+    assert!(
+        board_health.contains("t.created_by_user_id IS NULL"),
+        "preserve legacy guard until 3qi0"
+    );
+    let recovery = std::fs::read_to_string(
+        root.join("server/crates/djinn-coordinator/src/refinement_recovery.rs"),
+    )
+    .expect("refinement recovery source readable");
+    assert!(recovery.contains("proposal.refinement_owner_user_id.clone()"));
 }
