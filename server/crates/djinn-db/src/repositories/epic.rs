@@ -1192,13 +1192,28 @@ mod tests {
     }
 
     async fn insert_epic_child(db: &Database, epic: &Epic, short_id: &str, status: &str) -> String {
-        let id = uuid::Uuid::now_v7().to_string();
+        let task_uuid = uuid::Uuid::now_v7();
+        let id = task_uuid.to_string();
+        let compact_id = task_uuid.simple().to_string();
+        let creator_github_id = (task_uuid.as_u128() & i64::MAX as u128) as i64;
+        let creator_github_login = format!("epic-child-fixture-{compact_id}");
         let title = format!("Child {short_id}");
         sqlx::query(
+            "INSERT INTO users (id, github_id, github_login) VALUES ($1, $2, $3) \
+             ON CONFLICT (id) DO NOTHING",
+        )
+        .bind(&id)
+        .bind(creator_github_id)
+        .bind(&creator_github_login)
+        .execute(db.pool())
+        .await
+        .unwrap();
+        sqlx::query(
             r#"INSERT INTO tasks (id, project_id, short_id, epic_id, title, description, design,
-                    issue_type, priority, owner, status, labels, acceptance_criteria, memory_refs)
+                    issue_type, priority, owner, status, labels, acceptance_criteria, memory_refs,
+                    created_by_user_id)
                VALUES ($1, $2, $3, $4, $5, '', '', 'task', 1, '', $6,
-                       '[]'::jsonb, '[]'::jsonb, '[]'::jsonb)"#,
+                       '[]'::jsonb, '[]'::jsonb, '[]'::jsonb, $7)"#,
         )
         .bind(&id)
         .bind(&epic.project_id)
@@ -1206,6 +1221,7 @@ mod tests {
         .bind(&epic.id)
         .bind(&title)
         .bind(status)
+        .bind(&id)
         .execute(db.pool())
         .await
         .unwrap();
