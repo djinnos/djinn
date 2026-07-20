@@ -648,7 +648,7 @@ async fn pinned_route_stream_survives_retention_then_prunes_after_final_frame() 
     // remaining frames, without sleeps or a parallel route fixture.
     let row_locked = Arc::new(Barrier::new(2));
     let release_row_lock = Arc::new(Barrier::new(2));
-    let lock_generations = generations.clone();
+    let lock_generations = RepoGraphGenerationRepository::new(db.clone());
     let lock_ready = row_locked.clone();
     let lock_release = release_row_lock.clone();
     let row_locker = tokio::spawn(async move {
