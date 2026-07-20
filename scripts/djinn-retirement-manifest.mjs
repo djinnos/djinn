@@ -43,7 +43,6 @@ import {
 } from 'node:fs';
 import { resolve } from 'node:path';
 import { parseArgs } from 'node:util';
-import { readSync } from 'node:fs';
 
 // ── Public data-contract types (documented for the follow-up DB task) ────────
 
@@ -94,10 +93,7 @@ export const KNOWLEDGE_SINGLETONS = new Set([
  * excludes from the knowledge set. They are operational/generated artifacts,
  * not knowledge, and are owned by other retirement tasks.
  */
-export const NON_KNOWLEDGE_TRACKED = new Set([
-  '.djinn/.gitignore',
-  '.djinn/skills.json',
-]);
+export const NON_KNOWLEDGE_TRACKED = new Set();
 
 /**
  * Operational paths that were intentionally removed during Phase 2 retirement
@@ -105,6 +101,7 @@ export const NON_KNOWLEDGE_TRACKED = new Set([
  * tracked file matching one of these paths.
  */
 export const RETIRED_OPERATIONAL_PATHS = new Set([
+  '.djinn/.gitignore',
   '.djinn/settings.json',
   '.djinn/skills.json',
 ]);
@@ -123,6 +120,92 @@ export class ManifestError extends Error {
     this.code = code || 'manifest_error';
     if (entry) this.entry = entry;
   }
+}
+
+export function assertNoProjectLocalDjinnSurface(candidates) {
+  for (const candidate of candidates) {
+    if (!candidate || typeof candidate.path !== 'string') continue;
+    if (isStructurallyAllowedSurfaceCandidate(candidate)) continue;
+    const path = candidate.path.split('\\').join('/');
+    if (path === '~/.djinn' || path.startsWith('~/.djinn/') ||
+        path === '$DJINN_HOME/.djinn' || path.startsWith('$DJINN_HOME/.djinn/')) continue;
+    if (path === '.djinn' || path.startsWith('.djinn/') || path.includes('/.djinn/') ||
+        path.endsWith('/.djinn') || path.includes('/~/.djinn') || path.includes('/$DJINN_HOME/.djinn')) {
+      throw new ManifestError(`project-local .djinn surface was reintroduced: ${path}`, {
+        code: 'project_local_surface_reintroduced', entry: { repository_path: path },
+      });
+    }
+  }
+}
+
+export function isStructurallyAllowedSurfaceCandidate(candidate) {
+  const origin = typeof candidate?.repository_path === 'string'
+    ? candidate.repository_path.split('\\').join('/') : '';
+  const surface = typeof candidate?.path === 'string'
+    ? candidate.path.split('\\').join('/') : '';
+  // The workspace handoff is the sole cleanup boundary permitted to inspect
+  // the retired settings source. This exact repository location and retired
+  // path shape are required; callers cannot bypass the policy with a `kind`.
+  if (origin === 'server/crates/djinn-workspace/src/legacy_settings_import.rs' &&
+      surface === '.djinn/settings.json') return true;
+  // The residue gate is the matching no-follow cleanup boundary for the
+  // retired directory itself; it inspects and removes only legacy residue.
+  if (origin === 'server/crates/djinn-workspace/src/project_residue.rs' &&
+      surface === '.djinn') return true;
+  // The live-state migration record is immutable evidence of the retired
+  // read-source location, not a runtime producer or consumer.
+  if (origin === 'server/crates/djinn-db/src/repositories/project_live_state_migration.rs' &&
+      surface === '.djinn/read-sources/target-a') return true;
+  return origin === 'docs/DEVELOPMENT.md' || origin === 'scripts/README.md' ||
+    origin === 'scripts/ci-changed-scope.test.mjs' ||
+    origin === 'scripts/djinn-retirement-manifest.mjs' ||
+    origin === 'scripts/test-djinn-retirement-manifest.mjs' ||
+    origin.startsWith('scripts/fixtures/djinn-retirement/');
+}
+
+export function discoverProjectLocalDjinnSurfaces(trackedPaths, opts = {}) {
+  const cwd = opts.cwd || process.cwd();
+  const candidates = [];
+  // Scan path literals only where their surrounding syntax makes them a
+  // runtime/scaffolding operation, rather than treating historical prose or a
+  // bare `.djinn` token as a policy violation. A join receiver is deliberately
+  // not name-limited: `project_root.join`, `root.join`, and a path expression
+  // passed to `create_dir_all` all construct the same retired project surface.
+  // The server-home construction is normalized to its immediately rooted
+  // namespace before the shared structural policy evaluates it.
+  const joinedPath = /(?<receiver>\b(?:[A-Za-z_][A-Za-z0-9_]*|(?:(?:std\s*::\s*path\s*::\s*)?(?:PathBuf|Path))\s*::\s*from\s*\([^\r\n)]*\)))\s*\.\s*join\(\s*(?<quote>["'])(?<path>\.djinn(?:\/[^"'\r\n\s]*)?)\k<quote>/g;
+  const pathConstructor = /\b(?:(?:std\s*::\s*path\s*::\s*)?(?:PathBuf|Path))\s*::\s*(?:from|new)\(\s*(["'])(\.djinn(?:\/[^"'\r\n\s]*)?)\1/g;
+  // Constants are intentional path declarations; this covers the one-time
+  // cleanup handoff without classifying prose or arbitrary string literals.
+  const declaredPath = /\b(?:const|let|static)\s+[A-Za-z_][A-Za-z0-9_]*[^=\r\n]*=\s*(["'])(\.djinn(?:\/[^"'\r\n\s]*)?)\1/g;
+  const configuredPath = /(?:[:=]\s*)(?:(["'])(\.djinn(?:\/[^\s,}\]]*)?)\1|(\.djinn(?:\/[^\s,}\]]*)?))/g;
+  for (const repositoryPath of trackedPaths) {
+    const absolutePath = resolve(cwd, repositoryPath);
+    if (!existsSync(absolutePath)) continue;
+    const bytes = readFileSync(absolutePath);
+    if (bytes.includes(0)) continue;
+    const text = bytes.toString('utf8');
+    // Inline Rust regression modules are explicit negative-test locations.
+    // This is derived from source structure, rather than a caller-provided kind.
+    const isNegativeTestLocation = (offset) => text.lastIndexOf('#[cfg(test)]', offset) >= 0;
+    for (const match of text.matchAll(joinedPath)) {
+      if (isNegativeTestLocation(match.index)) continue;
+      const receiver = match.groups.receiver.replace(/\s/g, '');
+      const surface = /(?:^|[(&])home\)?$/i.test(receiver)
+        ? `$DJINN_HOME/${match.groups.path}` : match.groups.path;
+      candidates.push({ path: surface, repository_path: repositoryPath });
+    }
+    for (const match of text.matchAll(pathConstructor)) {
+      if (!isNegativeTestLocation(match.index)) candidates.push({ path: match[2], repository_path: repositoryPath });
+    }
+    for (const match of text.matchAll(declaredPath)) {
+      if (!isNegativeTestLocation(match.index)) candidates.push({ path: match[2], repository_path: repositoryPath });
+    }
+    for (const match of text.matchAll(configuredPath)) {
+      if (!isNegativeTestLocation(match.index)) candidates.push({ path: match[2] || match[3], repository_path: repositoryPath });
+    }
+  }
+  return candidates;
 }
 
 // ── Normalization ────────────────────────────────────────────────────────────
@@ -169,7 +252,8 @@ export function isKnowledgePath(repoPath) {
   if (!norm.startsWith('.djinn/')) return false;
   // Reject bare directory paths (must be a file, not a folder).
   if (norm.endsWith('/')) return false;
-  if (NON_KNOWLEDGE_TRACKED.has(norm)) return false;
+  if (norm === '.djinn/.gitignore' || norm === '.djinn/skills.json' ||
+      NON_KNOWLEDGE_TRACKED.has(norm)) return false;
   return true;
 }
 
@@ -935,7 +1019,8 @@ export function validateRetirementCutover(currentPathBytes, ledger, guidanceFixt
     });
   }
   const sourceKnowledge = new Set(
-    splitNulPaths(sourcePathBytes).filter(isKnowledgePath),
+    splitNulPaths(sourcePathBytes).filter(isKnowledgePath)
+      .filter((path) => path !== '.djinn/.gitignore' && path !== '.djinn/skills.json'),
   );
   validateKnowledgeManifest(ledger, {
     knowledgeCount: sourceKnowledge.size,
@@ -1005,6 +1090,16 @@ export function validateRetirementCutover(currentPathBytes, ledger, guidanceFixt
   const currentPaths = splitNulPaths(
     Buffer.isBuffer(currentPathBytes) ? currentPathBytes : Buffer.from(currentPathBytes || '', 'binary'),
   );
+  const currentSet = new Set(currentPaths);
+  for (const retiredPath of RETIRED_OPERATIONAL_PATHS) {
+    if (currentSet.has(retiredPath)) {
+      throw new ManifestError(`retired operational path was reintroduced: ${retiredPath}`, {
+        code: 'retired_path_reintroduced', entry: { repository_path: retiredPath },
+      });
+    }
+  }
+  assertNoProjectLocalDjinnSurface(currentPaths.map((path) => ({ path })));
+  if (opts.scanCurrentTree) assertNoProjectLocalDjinnSurface(discoverProjectLocalDjinnSurfaces(currentPaths, opts));
   const currentKnowledge = currentPaths
     .filter(isKnowledgePath)
     .filter((path) => !RETIRED_OPERATIONAL_PATHS.has(path));
@@ -1013,7 +1108,6 @@ export function validateRetirementCutover(currentPathBytes, ledger, guidanceFixt
       code: 'knowledge_reintroduced', entry: { repository_path: currentKnowledge[0] },
     });
   }
-  const currentSet = new Set(currentPaths);
   const preservedOperationalPaths = [...NON_KNOWLEDGE_TRACKED]
     .filter((path) => !RETIRED_OPERATIONAL_PATHS.has(path));
   for (const operationalPath of preservedOperationalPaths) {
@@ -1027,13 +1121,6 @@ export function validateRetirementCutover(currentPathBytes, ledger, guidanceFixt
     if (!sourceBlob.equals(currentBlob)) {
       throw new ManifestError(`operational path changed during cutover: ${operationalPath}`, {
         code: 'operational_path_changed', entry: { repository_path: operationalPath },
-      });
-    }
-  }
-  for (const retiredPath of RETIRED_OPERATIONAL_PATHS) {
-    if (currentSet.has(retiredPath)) {
-      throw new ManifestError(`retired operational path was reintroduced: ${retiredPath}`, {
-        code: 'retired_path_reintroduced', entry: { repository_path: retiredPath },
       });
     }
   }
@@ -1109,6 +1196,7 @@ function parseCliArgs(argv) {
       'deletion-ledger': { type: 'string' },
       'output-dir': { type: 'string', short: 'o' },
       'paths-file': { type: 'string' },
+      'scan-current-tree': { type: 'boolean' },
       help: { type: 'boolean', short: 'h' },
     },
     allowNegative: true,
@@ -1134,6 +1222,7 @@ function main(argv) {
         '      --deletion-ledger <path> validate durable ledger and post-cutover state',
         '  -o, --output-dir <dir>      output directory (default target/djinn-retirement)',
         '      --paths-file <path>     read NUL-delimited paths from a file instead of stdin',
+        '      --scan-current-tree     inspect tracked source and generated text for live surfaces',
         '  -h, --help                  show this help',
         '',
       ].join('\n'),
@@ -1145,24 +1234,7 @@ function main(argv) {
   if (values['paths-file']) {
     pathBytes = readFileSync(values['paths-file']);
   } else {
-    // Read all of stdin as raw bytes (NUL-delimited).
-    const chunks = [];
-    const fd = process.stdin.fd;
-    const buf = Buffer.alloc(64 * 1024);
-    // Use blocking reads on the stdin fd.
-    // eslint-disable-next-line no-constant-condition
-    while (true) {
-      let n;
-      try {
-        n = readSync(fd, buf, 0, buf.length, null);
-      } catch (e) {
-        if (e.code === 'EOF') break;
-        throw e;
-      }
-      if (n === 0) break;
-      chunks.push(Buffer.from(buf.subarray(0, n)));
-    }
-    pathBytes = Buffer.concat(chunks);
+    pathBytes = readFileSync(process.stdin.fd);
   }
 
   if (values['deletion-ledger']) {
@@ -1175,7 +1247,9 @@ function main(argv) {
       });
     }
     const guidance = loadDbGuidanceFixture(values['db-guidance']);
-    const result = validateRetirementCutover(pathBytes, ledger, guidance);
+    const result = validateRetirementCutover(pathBytes, ledger, guidance, {
+      scanCurrentTree: values['scan-current-tree'],
+    });
     process.stderr.write(
       `validated ${result.ledger.knowledge_count} durable deletion entries and ` +
         `${result.guidanceManifest.record_count} guidance entries; tracked knowledge set is empty\n`,

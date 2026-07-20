@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import {
   mkdtempSync,
   writeFileSync,
@@ -31,6 +31,7 @@ import {
   validateKnowledgeManifest,
   validateDbGuidanceManifest,
   validateRetirementCutover,
+  assertNoProjectLocalDjinnSurface,
   generateAll,
 } from './djinn-retirement-manifest.mjs';
 
@@ -43,7 +44,10 @@ function nulBytes(paths) {
 }
 
 function scratchDir() {
-  return mkdtempSync(join(tmpdir(), 'djinn-retire-test-'));
+  const cache = process.env.XDG_CACHE_HOME || join(process.env.HOME, '.cache');
+  const parent = join(cache, 'djinn');
+  mkdirSync(parent, { recursive: true });
+  return mkdtempSync(join(parent, 'djinn-retire-test-'));
 }
 
 /**
@@ -185,14 +189,91 @@ test('durable ledger matches the source revision and current tracked knowledge i
   const fixtureDir = join(REPO_ROOT, 'scripts', 'fixtures', 'djinn-retirement');
   const ledger = JSON.parse(readFileSync(join(fixtureDir, 'deletion-ledger.json'), 'utf8'));
   const guidance = loadDbGuidanceFixture(join(fixtureDir, 'db-guidance.json'));
-  const currentPaths = execFileSync('git', ['ls-files', '-z', '.djinn/*'], {
+  const currentPaths = nulBytes(splitNulPaths(execFileSync('git', ['ls-files', '-z'], {
     cwd: REPO_ROOT,
     maxBuffer: 64 * 1024 * 1024,
-  });
+  })).filter((path) => existsSync(join(REPO_ROOT, path))));
   const result = validateRetirementCutover(currentPaths, ledger, guidance, { cwd: REPO_ROOT });
   assert.equal(result.ledger.knowledge_count, result.ledger.entries.length);
   assert.equal(result.guidanceManifest.record_count, result.ledger.knowledge_count);
   assert.deepEqual(splitNulPaths(currentPaths).filter(isKnowledgePath), []);
+});
+
+test('surface policy preserves allowed evidence and rejects classification spoofing', () => {
+  assert.doesNotThrow(() => assertNoProjectLocalDjinnSurface([
+    { path: '~/.djinn/cache' },
+    { path: '$DJINN_HOME/.djinn/cache' },
+    { path: '.djinn/brief.md', repository_path: 'scripts/fixtures/djinn-retirement/deletion-ledger.json' },
+    { path: '.djinn/settings.json', repository_path: 'scripts/test-djinn-retirement-manifest.mjs' },
+    {
+      path: '.djinn/settings.json',
+      repository_path: 'server/crates/djinn-workspace/src/legacy_settings_import.rs',
+    },
+    {
+      path: '.djinn/read-sources/target-a',
+      repository_path: 'server/crates/djinn-db/src/repositories/project_live_state_migration.rs',
+    },
+  ]));
+  assert.throws(
+    () => assertNoProjectLocalDjinnSurface([{
+      path: '.djinn/settings.json',
+      repository_path: 'server/crates/djinn-workspace/src/unrelated_runtime.rs',
+      kind: 'legacy_cleanup_inspection',
+    }]),
+    (err) => err instanceof ManifestError && err.code === 'project_local_surface_reintroduced',
+  );
+  for (const path of ['.djinn/settings.json', 'project/~/.djinn/cache', 'project/$DJINN_HOME/.djinn/cache']) {
+    assert.throws(
+      () => assertNoProjectLocalDjinnSurface([{ path, kind: 'historical_prose' }]),
+      (err) => err instanceof ManifestError && err.code === 'project_local_surface_reintroduced',
+    );
+  }
+});
+
+test('repository-wired guard rejects staged scaffolding and generated schema surfaces', () => {
+  const dir = scratchDir();
+  try {
+    execFileSync('git', ['clone', '-q', '--shared', REPO_ROOT, dir]);
+    execFileSync('git', ['-C', dir, 'rm', '-r', '--cached', '-q', '.']);
+    const guard = join(REPO_ROOT, 'scripts', 'check-djinn-retirement-manifest.sh');
+    const runGuard = () => spawnSync(guard, [], {
+      cwd: REPO_ROOT,
+      env: { ...process.env, DJINN_REPO_ROOT: dir },
+      encoding: 'utf8',
+    });
+    assert.equal(runGuard().status, 0, 'clean synthetic index passes the actual guard');
+    mkdirSync(join(dir, 'docs'), { recursive: true });
+    writeFileSync(join(dir, 'docs', 'DEVELOPMENT.md'), 'Historical `.djinn/settings.json` evidence.\n');
+    execFileSync('git', ['-C', dir, 'add', 'docs/DEVELOPMENT.md']);
+    assert.equal(runGuard().status, 0, 'historical prose remains allowed');
+    execFileSync('git', ['-C', dir, 'rm', '--cached', '-q', 'docs/DEVELOPMENT.md']);
+    execFileSync('git', ['-C', dir, 'add', 'server/crates/djinn-workspace/src/legacy_settings_import.rs']);
+    assert.equal(runGuard().status, 0, 'the structural legacy cleanup inspection remains allowed');
+    execFileSync('git', ['-C', dir, 'rm', '--cached', '-q', 'server/crates/djinn-workspace/src/legacy_settings_import.rs']);
+    mkdirSync(join(dir, 'src'), { recursive: true });
+    writeFileSync(join(dir, 'src', 'scaffold.rs'), 'let state = project_root.join(".djinn/settings.json");\n');
+    execFileSync('git', ['-C', dir, 'add', 'src/scaffold.rs']);
+    assert.equal(runGuard().status, 1, 'staged Rust scaffolding fails');
+    execFileSync('git', ['-C', dir, 'config', 'user.email', 'test@example.com']);
+    execFileSync('git', ['-C', dir, 'config', 'user.name', 'Test']);
+    execFileSync('git', ['-C', dir, 'commit', '-q', '-m', 'committed scaffold']);
+    assert.equal(runGuard().status, 1, 'committed Rust scaffolding fails');
+    execFileSync('git', ['-C', dir, 'rm', '--cached', '-q', 'src/scaffold.rs']);
+    writeFileSync(join(dir, 'src', 'pathbuf.rs'), 'let state = PathBuf::from(".djinn/settings.json");\n');
+    execFileSync('git', ['-C', dir, 'add', 'src/pathbuf.rs']);
+    assert.equal(runGuard().status, 1, 'staged PathBuf scaffolding fails');
+    execFileSync('git', ['-C', dir, 'rm', '--cached', '-q', 'src/pathbuf.rs']);
+    writeFileSync(join(dir, 'src', 'runtime.rs'), 'create_dir_all(root.join(".djinn"));\n');
+    execFileSync('git', ['-C', dir, 'add', 'src/runtime.rs']);
+    assert.equal(runGuard().status, 1, 'staged directory recreation fails');
+    execFileSync('git', ['-C', dir, 'rm', '--cached', '-q', 'src/runtime.rs']);
+    mkdirSync(join(dir, 'generated'), { recursive: true });
+    writeFileSync(join(dir, 'generated', 'schema.json'), '{"legacy_path":".djinn/graph_warm_status.json"}\n');
+    execFileSync('git', ['-C', dir, 'add', 'generated/schema.json']);
+    assert.equal(runGuard().status, 1, 'staged generated schema fails');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test('post-cutover guard rejects a newly invented tracked knowledge path', () => {
@@ -202,7 +283,7 @@ test('post-cutover guard rejects a newly invented tracked knowledge path', () =>
   const paths = nulBytes([...NON_KNOWLEDGE_TRACKED, '.djinn/patterns/newly-invented.md']);
   assert.throws(
     () => validateRetirementCutover(paths, ledger, guidance, { cwd: REPO_ROOT }),
-    (err) => err instanceof ManifestError && err.code === 'knowledge_reintroduced',
+    (err) => err instanceof ManifestError && err.code === 'project_local_surface_reintroduced',
   );
 });
 
