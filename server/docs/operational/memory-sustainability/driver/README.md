@@ -18,6 +18,8 @@ export DJINN_GRAPH_INSTALL_COMMAND='operator-installed graph loader command'
 export DJINN_BOARD_SCAN_COMMAND='operator command invoking the landed board scanner; emits {"pages":40}'
 export DJINN_GRAPH_GENERATION_COMMAND='operator command emitting {"generation":"..."}'
 export DJINN_RESTART_COUNTER_COMMAND='operator command emitting {"restarts":0}'
+# Emits observed seed/checksums plus graph, board_health, and galaxy_artifact identity.
+export DJINN_FIXTURE_INSPECTION_COMMAND='operator fixture inspection command'
 perl server/docs/operational/memory-sustainability/driver/memory_workload.pl \
   --output /var/tmp/memory-sustainability/raw.jsonl
 ```
@@ -25,11 +27,10 @@ perl server/docs/operational/memory-sustainability/driver/memory_workload.pl \
 Defaults are the release protocol: T0 1800 seconds with no graph, graph-install
 peak, T1 900 seconds with the same graph, a 7200-second burst with 300-second
 board ticks and 100 sequential 200/304 requests, then T2 after 300 seconds.
-The driver requires cgroup v2 `memory.max == 4294967296`, all process/jemalloc
-and canonical-slot gauges, an initially empty graph slot, manifest graph counts
-and bytes, a stable generation, 40-page board results, ETags for 200 responses,
-and unchanged restart counter. It samples cgroup `memory.current`/`memory.events`
-and all required metrics at each phase boundary.
+Before mutation it verifies commands, observed fixture identity, cgroup signals,
+metrics, a 40-page board pass, and 200/304 galaxy responses. It rejects malformed
+`memory.current`/`memory.events`, OOM/restart deltas, generation replacement, and
+a missing resident slot; JSONL includes observed fixture identity and warm/server peaks.
 
 Evidence is append-only `memory-sustainability-raw/v1` JSONL. The final filename
 is created atomically only after every phase completes. Failures and SIGINT/SIGTERM
