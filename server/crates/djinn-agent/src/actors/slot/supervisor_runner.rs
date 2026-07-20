@@ -259,16 +259,54 @@ async fn persist_infra_death_on_attempt(
 async fn terminalize_failed_run_attempt(
     app_state: &AgentContext,
     task_attempt_id: Option<&str>,
+    dispatch_group_id: Option<&str>,
     task: &Task,
     report: &TaskRunReport,
 ) {
     let TaskRunOutcome::Failed { stage, reason, .. } = &report.outcome else {
         return;
     };
+    let attempt_repo = TaskAttemptRepository::new(app_state.db.clone());
+    let truncated_reason: String = reason.chars().take(500).collect();
+    let summary = format!("run failed at stage {stage}: {truncated_reason}");
+    let summary_json = serde_json::json!({
+        "recovery_classifier": "failed_run_report",
+        "stage": stage,
+    })
+    .to_string();
+    if let Some(group_id) = dispatch_group_id {
+        match attempt_repo
+            .terminalize_dispatch_group(
+                group_id,
+                djinn_core::models::task_attempt::TaskAttemptOutcome::Crashed,
+                djinn_db::DispatchGroupTerminalEvidence {
+                    summary: Some(&summary),
+                    summary_json: Some(&summary_json),
+                },
+            )
+            .await
+        {
+            Ok(result) => tracing::info!(
+                task_id = %task.short_id,
+                dispatch_group_id = %group_id,
+                terminalized_attempts = result.updated_attempt_ids.len(),
+                "supervisor dispatch: terminalized failed run's pending dispatch group"
+            ),
+            Err(e) => tracing::warn!(
+                task_id = %task.short_id,
+                dispatch_group_id = %group_id,
+                error = %e,
+                "supervisor dispatch: failed to terminalize failed run's pending dispatch group"
+            ),
+        }
+        return;
+    }
+    // Mixed-version dispatches have no group to correlate. Preserve the
+    // conservative single-row cleanup rather than widening by task or role.
     let Some(attempt_id) = task_attempt_id else {
+        tracing::debug!(task_id = %task.short_id, "supervisor dispatch: failed run has no dispatch group or exact attempt ID; leaving legacy attempts untouched");
         return;
     };
-    let attempt_repo = TaskAttemptRepository::new(app_state.db.clone());
     let attempt = match attempt_repo.get(attempt_id).await {
         Ok(Some(attempt)) => attempt,
         Ok(None) => return,
@@ -285,13 +323,6 @@ async fn terminalize_failed_run_attempt(
     if attempt.outcome != djinn_core::models::task_attempt::TaskAttemptOutcome::Pending.as_str() {
         return;
     }
-    let truncated_reason: String = reason.chars().take(500).collect();
-    let summary = format!("run failed at stage {stage}: {truncated_reason}");
-    let summary_json = serde_json::json!({
-        "recovery_classifier": "failed_run_report",
-        "stage": stage,
-    })
-    .to_string();
     match attempt_repo
         .advance_to_terminal(djinn_db::TerminalTaskAttemptParams {
             id: &attempt.id,
@@ -475,6 +506,12 @@ pub(super) async fn dispatch_task_runtime(
 ) -> anyhow::Result<()> {
     let task_repo = TaskRepository::new(app_state.db.clone(), app_state.event_bus.clone());
     let task = load_task_or_bail(&task_id, &task_repo).await?;
+    // This coordinator-minted opaque identity is the only batch correlation
+    // allowed on terminal paths. NULL remains NULL for mixed-version dispatches.
+    let dispatch_group_id = resume_lifecycle_metadata
+        .as_ref()
+        .and_then(|value| serde_json::from_value::<ResumeLifecycleMetadata>(value.clone()).ok())
+        .and_then(|metadata| metadata.dispatch_group_id);
     let ctx = DispatchContext::resolve(&task, &app_state).await;
     let flow = resolve_effective_flow(&ctx, &app_state).await;
     let loop_guard_intervention_role = flow
@@ -614,6 +651,7 @@ pub(super) async fn dispatch_task_runtime(
             terminalize_failed_run_attempt(
                 &app_state,
                 spec.task_attempt_id.as_deref(),
+                dispatch_group_id.as_deref(),
                 &task,
                 &report,
             )
@@ -677,83 +715,51 @@ pub(super) async fn dispatch_task_runtime(
     }
     .await;
     if let Err(error) = &dispatch_result {
-        terminalize_orphaned_dispatch_attempts(&app_state, &task, error).await;
+        terminalize_dispatch_group_after_dispatch_failure(
+            &app_state,
+            dispatch_group_id.as_deref(),
+            &task,
+            error,
+        )
+        .await;
     }
     dispatch_result
 }
 
-/// Terminalize every still-`pending` attempt row for the task as
-/// `spawn_failed` after `dispatch_task_runtime` fails without a terminal
-/// report.
-///
-/// Every dispatch writes up to two `pending` rows — the coordinator's
-/// dispatch-start row (keyed `{task}:{role}:{uuid}`, whose role is the
-/// coordinator's dispatched role) and the supervisor's exact-attempt row
-/// (keyed `task-run:{id}`, whose role is the flow's first role) — and the two
-/// roles can differ (a lead intervention dispatch writes a `lead` coordinator
-/// row and a `worker` supervisor row).  On a dispatch/setup failure nothing is
-/// live for this task, so all of its `pending` rows are orphans; leaving any
-/// behind makes the respawn guard defer that (task, role) pair until the
-/// periodic orphan sweep (incident m0ed: a lost `attempt_seq` allocation race
-/// hard-failed the dispatch and wedged the spike's architect lane for the full
-/// sweep window).
-///
-/// Best-effort: errors are logged and never propagated — the dispatch error
-/// itself stays authoritative.
-async fn terminalize_orphaned_dispatch_attempts(
+/// Terminalize only the supplied dispatch group's pending attempts as
+/// `spawn_failed` after a dispatch failure without a terminal report.
+/// Mixed-version NULL-group rows are deliberately never batch-correlated.
+async fn terminalize_dispatch_group_after_dispatch_failure(
     app_state: &AgentContext,
+    dispatch_group_id: Option<&str>,
     task: &Task,
     error: &anyhow::Error,
 ) {
     let attempt_repo = TaskAttemptRepository::new(app_state.db.clone());
-    let attempts = match attempt_repo.list_for_task(&task.id).await {
-        Ok(attempts) => attempts,
-        Err(e) => {
-            tracing::warn!(
-                task_id = %task.short_id,
-                error = %e,
-                "supervisor dispatch: failed to list attempts for dispatch-failure terminalization"
-            );
-            return;
-        }
+    let Some(group_id) = dispatch_group_id else {
+        tracing::debug!(task_id = %task.short_id, "supervisor dispatch: dispatch failure has no group ID; leaving legacy attempts for conservative single-row/orphan handling");
+        return;
     };
     let truncated_error: String = format!("{error:#}").chars().take(500).collect();
     let summary = format!("dispatch failed before a terminal report: {truncated_error}");
-    let summary_json = serde_json::json!({
-        "recovery_classifier": "dispatch_failure_orphan",
-    })
-    .to_string();
-    let pending = djinn_core::models::task_attempt::TaskAttemptOutcome::Pending.as_str();
-    for attempt in attempts.iter().filter(|a| a.outcome == pending) {
-        match attempt_repo
-            .advance_to_terminal(djinn_db::TerminalTaskAttemptParams {
-                id: &attempt.id,
-                outcome: djinn_core::models::task_attempt::TaskAttemptOutcome::SpawnFailed,
-                pr_url: None,
-                submit_ref: None,
-                checkpoint_ref: None,
-                mirror_head_sha: None,
-                github_head_sha: None,
+    let summary_json =
+        serde_json::json!({ "recovery_classifier": "dispatch_failure_orphan" }).to_string();
+    match attempt_repo
+        .terminalize_dispatch_group(
+            group_id,
+            djinn_core::models::task_attempt::TaskAttemptOutcome::SpawnFailed,
+            djinn_db::DispatchGroupTerminalEvidence {
                 summary: Some(&summary),
                 summary_json: Some(&summary_json),
-                log_tail: None,
-            })
-            .await
-        {
-            Ok(updated) => tracing::info!(
-                task_id = %task.short_id,
-                attempt_id = %updated.id,
-                role = %attempt.role,
-                dispatch_key = %attempt.dispatch_key,
-                outcome = %updated.outcome,
-                "supervisor dispatch: terminalized orphaned pending attempt after dispatch failure"
-            ),
-            Err(e) => tracing::warn!(
-                task_id = %task.short_id,
-                attempt_id = %attempt.id,
-                error = %e,
-                "supervisor dispatch: failed to terminalize orphaned pending attempt"
-            ),
+            },
+        )
+        .await
+    {
+        Ok(result) => {
+            tracing::info!(task_id = %task.short_id, dispatch_group_id = %group_id, terminalized_attempts = result.updated_attempt_ids.len(), "supervisor dispatch: terminalized pending dispatch group after dispatch failure")
+        }
+        Err(e) => {
+            tracing::warn!(task_id = %task.short_id, dispatch_group_id = %group_id, error = %e, "supervisor dispatch: failed to terminalize pending dispatch group after dispatch failure")
         }
     }
 }
@@ -2449,7 +2455,7 @@ mod tests {
                 body_excerpt: None,
             },
         );
-        terminalize_failed_run_attempt(&app_state, Some(&attempt.id), &task, &failed).await;
+        terminalize_failed_run_attempt(&app_state, Some(&attempt.id), None, &task, &failed).await;
 
         let after = attempt_repo
             .get(&attempt.id)
@@ -2490,7 +2496,7 @@ mod tests {
             })
             .await
             .expect("advance to submitted");
-        terminalize_failed_run_attempt(&app_state, Some(&submitted.id), &task, &failed).await;
+        terminalize_failed_run_attempt(&app_state, Some(&submitted.id), None, &task, &failed).await;
         let after_submitted = attempt_repo
             .get(&submitted.id)
             .await
@@ -2517,8 +2523,14 @@ mod tests {
             .await
             .expect("create third attempt");
         let submitted_outcome = report("ok-run", vec![], TaskRunOutcome::WorkerSubmitted);
-        terminalize_failed_run_attempt(&app_state, Some(&pending.id), &task, &submitted_outcome)
-            .await;
+        terminalize_failed_run_attempt(
+            &app_state,
+            Some(&pending.id),
+            None,
+            &task,
+            &submitted_outcome,
+        )
+        .await;
         let after_pending = attempt_repo
             .get(&pending.id)
             .await
@@ -2532,7 +2544,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn dispatch_failure_terminalizes_all_pending_attempts_as_spawn_failed() {
+    async fn dispatch_failure_terminalizes_only_its_exact_group_as_spawn_failed() {
         use crate::test_helpers;
         use djinn_core::models::task_attempt::TaskAttemptOutcome;
         use tokio_util::sync::CancellationToken;
@@ -2544,6 +2556,8 @@ mod tests {
         let app_state = test_helpers::agent_context_from_db(db.clone(), CancellationToken::new());
 
         let attempt_repo = TaskAttemptRepository::new(db.clone());
+        let current_group = uuid::Uuid::now_v7().to_string();
+        let other_group = uuid::Uuid::now_v7().to_string();
         // Coordinator-style dispatch-start row: role is the coordinator's
         // dispatched role, which can DIFFER from the flow's first role (a lead
         // intervention writes a `lead` coordinator row and a `worker`
@@ -2557,7 +2571,7 @@ mod tests {
                 session_id: None,
                 attempt_seq: None,
                 dispatch_owner_incarnation_id: None,
-                dispatch_group_id: None,
+                dispatch_group_id: Some(&current_group),
             })
             .await
             .expect("create coordinator pending row");
@@ -2571,10 +2585,39 @@ mod tests {
                 session_id: None,
                 attempt_seq: None,
                 dispatch_owner_incarnation_id: None,
-                dispatch_group_id: None,
+                dispatch_group_id: Some(&current_group),
             })
             .await
             .expect("create supervisor pending row");
+        // Same task, distinct dispatch group: must remain pending.
+        let other_group_row = attempt_repo
+            .create_or_get_pending(djinn_db::CreateTaskAttemptParams {
+                id: &uuid::Uuid::now_v7().to_string(),
+                task_id: &task.id,
+                role: "reviewer",
+                dispatch_key: "task-run:test-dispatch-failure-other-group",
+                session_id: None,
+                attempt_seq: None,
+                dispatch_owner_incarnation_id: None,
+                dispatch_group_id: Some(&other_group),
+            })
+            .await
+            .expect("create other-group pending row");
+        // Legacy NULL-group rows must not be inferred into a batch.
+        let legacy_row = attempt_repo
+            .create_or_get_pending(djinn_db::CreateTaskAttemptParams {
+                id: &uuid::Uuid::now_v7().to_string(),
+                task_id: &task.id,
+                role: "worker",
+                dispatch_key: "task-run:test-dispatch-failure-legacy",
+                session_id: None,
+                attempt_seq: None,
+                dispatch_owner_incarnation_id: None,
+                dispatch_group_id: None,
+            })
+            .await
+            .expect("create legacy pending row");
+
         // A submitted row is owned by the review/PR lifecycle — untouched.
         let submitted_row = attempt_repo
             .create_or_get_pending(djinn_db::CreateTaskAttemptParams {
@@ -2607,7 +2650,13 @@ mod tests {
             "supervisor dispatch: failed to allocate exact attempt: duplicate key value \
              violates unique constraint \"task_attempts_task_id_attempt_seq_unique\""
         );
-        terminalize_orphaned_dispatch_attempts(&app_state, &task, &error).await;
+        terminalize_dispatch_group_after_dispatch_failure(
+            &app_state,
+            Some(&current_group),
+            &task,
+            &error,
+        )
+        .await;
 
         for (label, id) in [
             ("coordinator", &coordinator_row.id),
@@ -2637,5 +2686,24 @@ mod tests {
             TaskAttemptOutcome::Submitted.as_str(),
             "submitted rows are owned by the review/PR lifecycle and must be untouched"
         );
+        // Repeating the helper is idempotent, and an absent mixed-version group
+        // must never fall back to task-wide correlation.
+        terminalize_dispatch_group_after_dispatch_failure(&app_state, None, &task, &error).await;
+
+        for (label, id) in [
+            ("other group", &other_group_row.id),
+            ("legacy NULL group", &legacy_row.id),
+        ] {
+            let after = attempt_repo
+                .get(id)
+                .await
+                .expect("read attempt")
+                .expect("attempt exists");
+            assert_eq!(
+                after.outcome,
+                TaskAttemptOutcome::Pending.as_str(),
+                "{label} must remain pending because it is not in the current exact group"
+            );
+        }
     }
 }
