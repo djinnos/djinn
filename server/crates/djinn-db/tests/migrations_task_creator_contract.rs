@@ -1,4 +1,4 @@
-//! Compact, row-auditable live-Postgres proof for migration 133.
+//! Compact, row-auditable live-Postgres proof for the creator-contract migration.
 //! All fixture rows are valid under the pre-contract schema; disappearance is
 //! modeled only by legal deletes and their documented ON DELETE effects.
 
