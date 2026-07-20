@@ -318,18 +318,14 @@ pub async fn coordinate_final_verification(
         // the unconfigured plan rather than to reuse being disabled or a
         // cache miss.
         Ok(None) => {
-            emit_lookup_outcome(
+            emit_lookup_outcome_with_test_observation(
                 "disabled",
                 &request,
                 &verification_attempt_id,
                 "plan_unconfigured",
                 "",
+                ctx,
             );
-            ctx.callbacks
-                .record_final_verification_consultation_outcome_for_test(
-                    "disabled",
-                    "plan_unconfigured",
-                );
             return emit_outcome(
                 &request,
                 FinalVerificationRecordingOutcome::NotConfigured {
@@ -452,7 +448,9 @@ async fn consult_reusable_final_verification(
     }
     let task = match ctx.load_task(&request.task_id).await {
         Ok(task) => task,
-        Err(error) => return lookup_none("error", request, attempt_id, "task_context", &error),
+        Err(error) => {
+            return lookup_none("error", request, attempt_id, "task_context", &error, ctx);
+        }
     };
     let key = format!("project.{}.verify_run_reuse_enabled", task.project_id);
     if injected_consultation_failure(
@@ -473,10 +471,19 @@ async fn consult_reusable_final_verification(
     {
         Ok(Some(setting)) => matches!(setting.value.trim(), "true" | "1"),
         Ok(None) => false,
-        Err(error) => return lookup_none("error", request, attempt_id, "gate", &error.to_string()),
+        Err(error) => {
+            return lookup_none(
+                "error",
+                request,
+                attempt_id,
+                "gate",
+                &error.to_string(),
+                ctx,
+            );
+        }
     };
     if !enabled {
-        return lookup_none("disabled", request, attempt_id, "default_off", "");
+        return lookup_none("disabled", request, attempt_id, "default_off", "", ctx);
     }
     if injected_consultation_failure(
         ctx,
@@ -495,7 +502,7 @@ async fn consult_reusable_final_verification(
     }
     let c0 = match derive_current_inputs(material).await {
         Ok(inputs) => inputs,
-        Err(error) => return lookup_none("error", request, attempt_id, "c0", &error),
+        Err(error) => return lookup_none("error", request, attempt_id, "c0", &error, ctx),
     };
     if injected_consultation_failure(
         ctx,
@@ -517,9 +524,16 @@ async fn consult_reusable_final_verification(
         .await
     {
         Ok(Some(row)) => row,
-        Ok(None) => return lookup_none("miss", request, attempt_id, "no_candidate", ""),
+        Ok(None) => return lookup_none("miss", request, attempt_id, "no_candidate", "", ctx),
         Err(error) => {
-            return lookup_none("error", request, attempt_id, "lookup", &error.to_string());
+            return lookup_none(
+                "error",
+                request,
+                attempt_id,
+                "lookup",
+                &error.to_string(),
+                ctx,
+            );
         }
     };
     let compatibility = FreshnessCompatibilityInput {
@@ -547,7 +561,14 @@ async fn consult_reusable_final_verification(
     .fresh
         || !coverage_equals_required(candidate.covered_checks.as_ref(), &material.required_checks)
     {
-        return lookup_none("stale", request, attempt_id, "freshness_or_coverage", "");
+        return lookup_none(
+            "stale",
+            request,
+            attempt_id,
+            "freshness_or_coverage",
+            "",
+            ctx,
+        );
     }
     // C1 is recomputed immediately before execution is suppressed, while no
     // invocation lease exists.
@@ -563,12 +584,14 @@ async fn consult_reusable_final_verification(
         .await
     {
         Ok(Some(material)) => material,
-        Ok(None) => return lookup_none("miss", request, attempt_id, "c1_not_configured", ""),
-        Err(error) => return lookup_none("error", request, attempt_id, "c1_resolution", &error),
+        Ok(None) => return lookup_none("miss", request, attempt_id, "c1_not_configured", "", ctx),
+        Err(error) => {
+            return lookup_none("error", request, attempt_id, "c1_resolution", &error, ctx);
+        }
     };
     let c1 = match derive_current_inputs(&c1_material).await {
         Ok(inputs) => inputs,
-        Err(error) => return lookup_none("error", request, attempt_id, "c1", &error),
+        Err(error) => return lookup_none("error", request, attempt_id, "c1", &error, ctx),
     };
     if c0 != c1
         || candidate.verification_input_fingerprint.as_deref() != Some(c1.fingerprint.as_str())
@@ -579,9 +602,9 @@ async fn consult_reusable_final_verification(
             &c1_material.required_checks,
         )
     {
-        return lookup_none("stale", request, attempt_id, "c1_mismatch", "");
+        return lookup_none("stale", request, attempt_id, "c1_mismatch", "", ctx);
     }
-    emit_lookup_outcome("hit", request, attempt_id, "verified_c1", "");
+    emit_lookup_outcome_with_test_observation("hit", request, attempt_id, "verified_c1", "", ctx);
     Some(FinalVerificationSuccessEvidence {
         persisted_run_id: candidate.id,
         completed_at: candidate.completed_at,
@@ -605,9 +628,9 @@ fn injected_consultation_failure(
         .callbacks
         .inject_final_verification_consultation_failure_for_test(failure)
     {
-        emit_lookup_outcome("error", request, attempt_id, reason, "injected");
-        ctx.callbacks
-            .record_final_verification_consultation_outcome_for_test("error", reason);
+        emit_lookup_outcome_with_test_observation(
+            "error", request, attempt_id, reason, "injected", ctx,
+        );
         true
     } else {
         false
@@ -657,10 +680,11 @@ fn lookup_none<T>(
     outcome: &'static str,
     request: &FinalVerificationCoordinatorRequest,
     attempt_id: &str,
-    reason: &str,
+    reason: &'static str,
     detail: &str,
+    ctx: &SlotContext,
 ) -> Option<T> {
-    emit_lookup_outcome(outcome, request, attempt_id, reason, detail);
+    emit_lookup_outcome_with_test_observation(outcome, request, attempt_id, reason, detail, ctx);
     None
 }
 
@@ -682,6 +706,19 @@ fn emit_lookup_outcome(
     tracing::info!(verify_run_lookup_outcome = outcome, task_id = %request.task_id,
         task_run_id = %request.task_run_id, verification_attempt_id = %attempt_id,
         audit_reason = reason, audit_detail = detail, "final verification reuse consultation");
+}
+
+fn emit_lookup_outcome_with_test_observation(
+    outcome: &'static str,
+    request: &FinalVerificationCoordinatorRequest,
+    attempt_id: &str,
+    reason: &'static str,
+    detail: &str,
+    ctx: &SlotContext,
+) {
+    emit_lookup_outcome(outcome, request, attempt_id, reason, detail);
+    ctx.callbacks
+        .record_final_verification_consultation_outcome_for_test(outcome, reason);
 }
 
 /// Release before any durable write. This is the commit protocol boundary: the
