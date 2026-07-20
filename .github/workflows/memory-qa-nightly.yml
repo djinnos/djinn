@@ -42,6 +42,7 @@ jobs:
   memory-qa-phase2:
     name: Phase 2 Memory QA Judge
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     defaults:
       run:
         working-directory: server
@@ -74,21 +75,40 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: server
-          shared-key: server-quality
+          # save-if MUST stay false. rust-cache defaults to saving, and this
+          # job runs on `schedule`, i.e. on the default branch — so without
+          # this it silently becomes a second writer to a cache family owned
+          # by quality-gate.yml's warm lane, which scripts/ci-cache-policy
+          # cannot see from here.
+          save-if: false
+          # server-test (codegen), not server-quality (clippy/rmeta only):
+          # this job builds the djinn-db migration test and djinn-memory-eval.
+          shared-key: server-test
           cache-on-failure: true
           cache-all-crates: true
 
-      - uses: taiki-e/install-action@v2
-        with:
-          tool: sqlx-cli
-
       - name: Apply djinn-db migrations
-        working-directory: server/crates/djinn-db
+        # NO `working-directory: server/crates/djinn-db` here. The workflow
+        # sets `CARGO_BUILD_BUILD_DIR: target` (env, line ~26), and cargo
+        # resolves a RELATIVE build-dir against the process CWD — so running
+        # from the crate directory sends every intermediate rlib/rmeta to
+        # server/crates/djinn-db/target (1.2 GB, reproduced locally) while the
+        # restored cache sits in server/target. That is why this step rebuilt
+        # 352 crates from proc-macro2 on a "full match: true" restore, and why
+        # qa-smoke's near-identical `cargo test -p djinn-db` — which runs from
+        # server/ — finished in 20s off the same cache. Note build-dir is NOT
+        # target-dir: final artifacts still land in server/target, which is
+        # what makes this misread as working.
         env:
           DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5433/djinn
         run: |
-          SQLX_OFFLINE=true DJINN_DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5433/djinn cargo run -p djinn-server --bin djinn-server -- --bootstrap-designated-operator-only --migration-designated-operator-user-id 00000000-0000-7000-8000-000000000002 --bootstrap-designated-operator-github-id 9000000002 --bootstrap-designated-operator-github-login djinn-ci-migration-operator
-          SQLX_OFFLINE=true DJINN_DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5433/djinn cargo run -p djinn-server --bin djinn-server -- --migrate-only --migration-designated-operator-user-id 00000000-0000-7000-8000-000000000002
+          # djinn-db's own migrator — see the same step in quality-gate.yml.
+          SQLX_OFFLINE=true \
+            DJINN_MIGRATE_DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5433/djinn \
+            DJINN_MIGRATE_OPERATOR_USER_ID=00000000-0000-7000-8000-000000000002 \
+            DJINN_MIGRATE_OPERATOR_GITHUB_ID=9000000002 \
+            DJINN_MIGRATE_OPERATOR_LOGIN=djinn-ci-migration-operator \
+            cargo test -p djinn-db --test apply_migrations -- --ignored --nocapture
 
       - name: Build Postgres test template
         env:
