@@ -27,9 +27,7 @@ const OLD_LATEST: &str = "SELECT project_id, commit_sha, graph_blob, built_at, g
                           FROM repo_graph_cache WHERE project_id = $1 ORDER BY built_at DESC LIMIT 1";
 
 fn base_url() -> String {
-    std::env::var("TEST_POSTGRES_URL")
-        .or_else(|_| std::env::var("DJINN_TEST_DATABASE_URL"))
-        .expect("live PostgreSQL URL")
+    djinn_db::test_database_base_url()
 }
 
 async fn assert_strict_history_order(conn: &mut PgConnection) {

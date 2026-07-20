@@ -32,12 +32,7 @@ const MIGRATION_FILE: &str = "119_retrieval_traces_rollout_outcome.sql";
 const ABSENT_CANDIDATES_FIXTURE_ID: &str = "rt-absent-candidates-default";
 
 fn base_database_url() -> String {
-    std::env::var("DJINN_TEST_DATABASE_URL")
-        .or_else(|_| std::env::var("TEST_POSTGRES_URL"))
-        .unwrap_or_else(|_| {
-            "postgres://djinn:VipjO1uAdxAGvNSA6EcJdZMdHAquYeJj@djinn-postgres.djinn.svc.cluster.local:5432/djinn"
-                .to_owned()
-        })
+    djinn_db::test_database_base_url()
 }
 
 fn server_prefix(base: &str) -> String {

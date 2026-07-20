@@ -762,7 +762,7 @@ impl DjinnMcpServer {
 
     /// List proposals (global) with optional filters and pagination.
     #[tool(
-        description = "List proposals globally (not scoped to a project) with optional filters: status, author, target_project (UUID or owner/repo slug), text. Offset-based pagination. Rows carry body_excerpt (first 512 chars) and body_truncated by default; pass include_bodies=true for full body strings. Returns {proposals[], total_count, limit, offset, has_more}."
+        description = "List proposal summaries globally with optional filters and offset pagination. Default rows contain identity, time, workflow summary, and acceptance counts only. Pass include_excerpts=true for body_excerpt/body_truncated, include_acceptance_criteria=true for criteria, or include_bodies=true for body plus excerpt metadata. For complete proposal detail, use proposal_show (the sole deep dive). Returns {proposals[], total_count, limit, offset, has_more}."
     )]
     pub async fn proposal_list(
         &self,
@@ -829,12 +829,20 @@ impl DjinnMcpServer {
         };
 
         let include_bodies = p.include_bodies.unwrap_or(false);
+        let include_excerpts = p.include_excerpts.unwrap_or(false);
+        let include_acceptance_criteria = p.include_acceptance_criteria.unwrap_or(false);
 
         let rows: Vec<ProposalListRow> = result
             .proposals
             .iter()
             .map(|(p, count)| {
-                let model = ProposalListRow::from_proposal(p, *count, include_bodies);
+                let model = ProposalListRow::from_proposal(
+                    p,
+                    *count,
+                    include_bodies,
+                    include_excerpts,
+                    include_acceptance_criteria,
+                );
                 match summaries.get(&p.id) {
                     Some(raw) => model.with_list_summary(build_list_summary(p, raw)),
                     None => model,

@@ -680,18 +680,43 @@ impl NoteRepository {
             )));
         }
 
-        sqlx::query!(
-            r#"UPDATE notes SET
-                status = $1,
-                updated_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
-             WHERE id = $2"#,
-            status,
-            id
+        // Lock before comparing status so a concurrent transition cannot make
+        // an UPDATE fallback return a row from an earlier statement snapshot.
+        // The locked row is also the same-status result, without a write.
+        let mut tx = self.db.pool().begin().await?;
+        let current: Note = sqlx::query_as(
+            r#"SELECT id, project_id, permalink, title, file_path,
+                      storage, note_type, folder, status, tags::text AS tags, content,
+                      retrieval_anchor, created_at, updated_at, lifecycle_changed_at,
+                      last_accessed, access_count, confidence, abstract AS abstract_,
+                      overview, scope_paths::text AS scope_paths
+               FROM notes WHERE id = $1 FOR UPDATE"#,
         )
-        .execute(self.db.pool())
+        .bind(id)
+        .fetch_one(&mut *tx)
         .await?;
 
-        let note = note_select_where_id!(id).fetch_one(self.db.pool()).await?;
+        let note = if current.status == status {
+            current
+        } else {
+            sqlx::query_as(
+                r#"UPDATE notes
+                   SET status = $1,
+                       updated_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
+                       lifecycle_changed_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
+                   WHERE id = $2
+                   RETURNING id, project_id, permalink, title, file_path,
+                             storage, note_type, folder, status, tags::text AS tags, content,
+                             retrieval_anchor, created_at, updated_at, lifecycle_changed_at,
+                             last_accessed, access_count, confidence, abstract AS abstract_,
+                             overview, scope_paths::text AS scope_paths"#,
+            )
+            .bind(&status)
+            .bind(id)
+            .fetch_one(&mut *tx)
+            .await?
+        };
+        tx.commit().await?;
         self.events.send(djinn_memory::events::note_updated(&note));
         Ok(note)
     }

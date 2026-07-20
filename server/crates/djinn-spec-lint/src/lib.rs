@@ -6,6 +6,7 @@ mod catalog;
 mod document;
 mod lint;
 mod parser;
+mod rules;
 mod types;
 
 use schemars::JsonSchema;

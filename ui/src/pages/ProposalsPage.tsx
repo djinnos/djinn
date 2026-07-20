@@ -454,9 +454,7 @@ function ProposalsListView() {
                               )}
                             </span>
                             <span className="flex w-11 shrink-0 justify-end">
-                              <AcceptanceProgressBadge
-                                criteria={p.acceptance_criteria}
-                              />
+                              <AcceptanceProgressBadge met={p.ac_met ?? 0} total={p.ac_total ?? 0} />
                             </span>
                             <span className="hidden w-10 shrink-0 text-right font-mono text-xs text-muted-foreground sm:inline-block">
                               {p.short_id}
