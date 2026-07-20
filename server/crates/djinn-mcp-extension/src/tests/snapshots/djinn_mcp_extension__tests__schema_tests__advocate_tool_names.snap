@@ -19,6 +19,7 @@ expression: names
   "github_search",
   "output_view",
   "output_grep",
+  "output_list",
   "write",
   "edit",
   "memory_build_context",

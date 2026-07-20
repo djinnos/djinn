@@ -1441,7 +1441,9 @@ async fn run_chat_loop(ctx: ChatLoopContext) {
     // so `output_view`/`output_grep` resolve within the same user turn; across
     // turns the persisted text is already truncated and the serializer clamp in
     // `Conversation::to_openai_responses_input` is the final backstop.
-    let output_stash = Arc::new(Mutex::new(djinn_agent::output_stash::OutputStash::new()));
+    let output_stash = Arc::new(Mutex::new(
+        djinn_agent::output_stash::OutputStash::with_session_id(session_id.clone()),
+    ));
 
     loop {
         if loop_count >= MAX_TOOL_ITERATIONS {

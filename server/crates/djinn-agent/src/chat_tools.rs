@@ -133,8 +133,8 @@ fn chat_shell_safety_annotations() -> crate::extension::shared_schemas::ToolSafe
 pub fn chat_extension_tool_schemas() -> Vec<serde_json::Value> {
     use crate::extension::shared_schemas::ToolSafetyAnnotations;
     use crate::extension::tool_defs::{
-        tool_code_graph, tool_code_search, tool_github_search, tool_output_grep, tool_output_view,
-        tool_pr_review_context,
+        tool_code_graph, tool_code_search, tool_github_search, tool_output_grep, tool_output_list,
+        tool_output_view, tool_pr_review_context,
     };
 
     vec![
@@ -160,6 +160,7 @@ pub fn chat_extension_tool_schemas() -> Vec<serde_json::Value> {
         // but excluded from `CHAT_EXTENSION_TOOLS`.
         serialize_chat_tool(tool_output_view(), ToolSafetyAnnotations::read_only()),
         serialize_chat_tool(tool_output_grep(), ToolSafetyAnnotations::read_only()),
+        serialize_chat_tool(tool_output_list(), ToolSafetyAnnotations::read_only()),
     ]
 }
 
@@ -700,6 +701,7 @@ mod tests {
             // against the chat loop's OutputStash, not via dispatch_chat_tool.
             "output_view",
             "output_grep",
+            "output_list",
         ]
         .iter()
         .map(ToString::to_string)
@@ -727,6 +729,7 @@ mod tests {
             ("project_list", (true, false, true, false)),
             ("output_view", (true, false, true, false)),
             ("output_grep", (true, false, true, false)),
+            ("output_list", (true, false, true, false)),
         ]);
 
         for schema in chat_extension_tool_schemas() {
@@ -839,12 +842,15 @@ mod tests {
         // Advertised + allowed…
         assert!(is_chat_stash_tool("output_view"));
         assert!(is_chat_stash_tool("output_grep"));
+        assert!(is_chat_stash_tool("output_list"));
         assert!(is_chat_allowed_tool("output_view"));
         assert!(is_chat_allowed_tool("output_grep"));
+        assert!(is_chat_allowed_tool("output_list"));
         // …but NOT routed through dispatch_chat_tool (the handler intercepts
         // them against the OutputStash before the extension/MCP tiers).
         assert!(!is_chat_extension_tool("output_view"));
         assert!(!is_chat_extension_tool("output_grep"));
+        assert!(!is_chat_extension_tool("output_list"));
         assert!(!is_chat_allowed_mcp_tool("output_view"));
     }
 

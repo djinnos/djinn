@@ -18,6 +18,7 @@ expression: section
 - `github_search(query, language?, path?, repo?)`
 - `output_view(tool_use_id, limit?, offset?)`
 - `output_grep(pattern, tool_use_id, context_lines?)`
+- `output_list()`
 - `memory_build_context(edge_kinds?, limit?, min_confidence?, query?, task_id?)`
 - `request_planner(id, reason)`
 - `submit_review(task_id, verdict, acceptance_criteria?, feedback?)`
