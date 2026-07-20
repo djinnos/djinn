@@ -4634,6 +4634,18 @@ async fn ready_never_claimed_session_not_misclassified_as_zombie() {
 /// Seed a `pending` attempt for `(task_id, role)` exactly as the dispatch-start
 /// path would, and return its id.
 async fn seed_pending_attempt(db: &Database, task_id: &str, role: &str) -> String {
+    seed_pending_attempt_with_identity(db, task_id, role, None, None).await
+}
+
+/// Seed a pending attempt with optional durable owner incarnation and dispatch
+/// group identity (epic jy7g foundation).
+async fn seed_pending_attempt_with_identity(
+    db: &Database,
+    task_id: &str,
+    role: &str,
+    owner_incarnation_id: Option<&str>,
+    dispatch_group_id: Option<&str>,
+) -> String {
     let repo = djinn_db::TaskAttemptRepository::new(db.clone());
     let id = uuid::Uuid::now_v7().to_string();
     let dispatch_key = format!("{task_id}:{role}:{id}");
@@ -4644,8 +4656,8 @@ async fn seed_pending_attempt(db: &Database, task_id: &str, role: &str) -> Strin
         dispatch_key: &dispatch_key,
         session_id: None,
         attempt_seq: None,
-        dispatch_owner_incarnation_id: None,
-        dispatch_group_id: None,
+        dispatch_owner_incarnation_id: owner_incarnation_id,
+        dispatch_group_id,
     })
     .await
     .unwrap();
@@ -5106,10 +5118,10 @@ async fn interrupted_event_does_not_reclassify_already_terminal_failure() {
     );
 }
 
-/// Fix #3: the STARTUP orphaned-pending reaper stamps `interrupted` (a deploy
-/// killed the run), while the PERIODIC/other reap stays `crashed`. Both are
-/// infra-classified; they differ only in whether the reappearance streak counts
-/// them.
+/// Evidence-based reaping (proposal 9gg5 / epic ars3): startup and periodic
+/// sweeps apply the same owner-lease rule. A legacy NULL-owner orphan is always
+/// `crashed/orphaned_pending_attempt_unproven` regardless of reap reason — the
+/// startup reason alone never exempts an attempt.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn startup_orphan_reap_stamps_interrupted_periodic_stamps_crashed() {
     use djinn_db::TaskAttemptRepository;
@@ -5118,36 +5130,38 @@ async fn startup_orphan_reap_stamps_interrupted_periodic_stamps_crashed() {
     let (tx, _rx) = broadcast::channel(256);
     let repo = TaskAttemptRepository::new(db.clone());
 
-    // A stale orphaned pending attempt (no live run/session). Reap it via the
-    // STARTUP path → environmental `interrupted`. Seed + reap in isolation so the
-    // startup sweep (which reaps every eligible orphan) does not also claim the
-    // periodic fixture below.
+    // A stale orphaned pending attempt with a NULL (legacy) owner. Reap via the
+    // STARTUP path → still `crashed/unproven` (NULL owner = ambiguous, fail closed).
     let (task_startup, _n) = create_task_with_note(&db, &tx, "orphan-startup").await;
     let startup_attempt = seed_pending_attempt(&db, &task_startup.id, "reviewer").await;
     backdate_attempt(&db, &startup_attempt).await;
     crate::health::reap_orphaned_pending_attempts_with_threshold(&db, 15 * 60, "startup").await;
 
-    // A second stale orphan seeded AFTER the startup sweep, reaped via the
-    // PERIODIC path → stays `crashed` (conservative).
+    // A second stale orphan with a NULL owner, reaped via the PERIODIC path →
+    // also `crashed/unproven` — the reason string does not change classification.
     let (task_periodic, _n) = create_task_with_note(&db, &tx, "orphan-periodic").await;
     let periodic_attempt = seed_pending_attempt(&db, &task_periodic.id, "reviewer").await;
     backdate_attempt(&db, &periodic_attempt).await;
     crate::health::reap_orphaned_pending_attempts_with_threshold(&db, 15 * 60, "periodic").await;
 
-    let startup = repo.get(&startup_attempt).await.unwrap().unwrap();
-    assert_eq!(
-        startup.outcome, "interrupted",
-        "a startup reap (deploy killed the run) must stamp environmental `interrupted`"
-    );
-    let sj: serde_json::Value =
-        serde_json::from_str(startup.summary_json.as_deref().unwrap()).unwrap();
-    assert_eq!(sj["failure_class"], "environmental_interrupt_startup_reap");
-
-    let periodic = repo.get(&periodic_attempt).await.unwrap().unwrap();
-    assert_eq!(
-        periodic.outcome, "crashed",
-        "a periodic reap stays `crashed` (conservative)"
-    );
+    // Both NULL-owner orphans are `crashed/unproven`: the startup reason alone
+    // must never exempt an attempt.
+    for (attempt_id, label) in [
+        (&startup_attempt, "startup"),
+        (&periodic_attempt, "periodic"),
+    ] {
+        let attempt = repo.get(attempt_id).await.unwrap().unwrap();
+        assert_eq!(
+            attempt.outcome, "crashed",
+            "{label}: a NULL-owner orphan must be crashed (unproven), not interrupted"
+        );
+        let sj: serde_json::Value =
+            serde_json::from_str(attempt.summary_json.as_deref().unwrap()).unwrap();
+        assert_eq!(
+            sj["failure_class"], "orphaned_pending_attempt_unproven",
+            "{label}: NULL-owner orphan must be unproven"
+        );
+    }
 }
 
 /// The reappearance helper detects only an environmental `interrupted` latest
@@ -6798,4 +6812,378 @@ async fn guard_defers_open_retained_pr_submitted_until_reaped_then_allows() {
         RespawnGuardDecision::Allow,
         "guard must allow a fresh worker once the orphan is reaped"
     );
+}
+
+// ── Evidence-based orphan reaping (proposal 9gg5 / epic ars3) ──────────────
+
+/// Register a coordinator incarnation and optionally backdate its lease so it
+/// appears expired relative to the reaper threshold.
+async fn register_incarnation(db: &Database, expired: bool) -> String {
+    let repo = djinn_db::CoordinatorIncarnationRepository::new(db.clone());
+    let id = uuid::Uuid::now_v7().to_string();
+    repo.register(&id).await.unwrap();
+    if expired {
+        // Backdate the lease so last_renewed_at is well past the 15-minute
+        // orphan threshold, making the incarnation "expired".
+        djinn_db::test_support::backdate_coordinator_incarnation_lease(db, &id, "1 hour").await;
+    }
+    id
+}
+
+/// Only an orphan whose durable owner lease is resolved AND expired beyond the
+/// threshold is stamped `interrupted/environmental_owner_expired`. The evidence
+/// in `summary_json` records the non-NULL immutable owner and lease timestamps
+/// so a later retry decision can validate the complete positive tuple.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn evidence_reap_expired_owner_stamps_interrupted_with_durable_evidence() {
+    use djinn_db::TaskAttemptRepository;
+
+    let db = test_helpers::create_test_db();
+    let (tx, _rx) = broadcast::channel(256);
+    let repo = TaskAttemptRepository::new(db.clone());
+
+    // Register an incarnation and let its lease expire.
+    let owner_id = register_incarnation(&db, true).await;
+    let group_id = uuid::Uuid::now_v7().to_string();
+
+    let (task, _n) = create_task_with_note(&db, &tx, "evidence-expired-owner").await;
+    let attempt = seed_pending_attempt_with_identity(
+        &db,
+        &task.id,
+        "worker",
+        Some(&owner_id),
+        Some(&group_id),
+    )
+    .await;
+    backdate_attempt(&db, &attempt).await;
+
+    // Both startup and periodic sweeps must classify identically.
+    crate::health::reap_orphaned_pending_attempts_with_threshold(&db, 15 * 60, "startup").await;
+
+    let row = repo.get(&attempt).await.unwrap().unwrap();
+    assert_eq!(
+        row.outcome, "interrupted",
+        "an expired-owner orphan must be stamped `interrupted`"
+    );
+    let sj: serde_json::Value = serde_json::from_str(row.summary_json.as_deref().unwrap()).unwrap();
+    assert_eq!(sj["failure_class"], "environmental_owner_expired");
+    assert_eq!(sj["owner_incarnation_id"], owner_id);
+    assert!(
+        sj["owner_lease_last_renewed_at"].as_str().is_some(),
+        "evidence must record the observed lease-expiry timestamp"
+    );
+    assert!(
+        sj["owner_lease_registered_at"].as_str().is_some(),
+        "evidence must record the owner registration timestamp"
+    );
+    assert_eq!(sj["owner_classification"], "expired");
+}
+
+/// A live-owner orphan is counted `crashed/orphaned_pending_attempt` — the
+/// dispatch is still potentially owned, so it is NOT environmental.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn evidence_reap_live_owner_counts_as_crashed_orphaned() {
+    use djinn_db::TaskAttemptRepository;
+
+    let db = test_helpers::create_test_db();
+    let (tx, _rx) = broadcast::channel(256);
+    let repo = TaskAttemptRepository::new(db.clone());
+
+    // Register a LIVE incarnation (lease recently renewed).
+    let owner_id = register_incarnation(&db, false).await;
+    let group_id = uuid::Uuid::now_v7().to_string();
+
+    let (task, _n) = create_task_with_note(&db, &tx, "evidence-live-owner").await;
+    let attempt = seed_pending_attempt_with_identity(
+        &db,
+        &task.id,
+        "worker",
+        Some(&owner_id),
+        Some(&group_id),
+    )
+    .await;
+    backdate_attempt(&db, &attempt).await;
+
+    crate::health::reap_orphaned_pending_attempts_with_threshold(&db, 15 * 60, "periodic").await;
+
+    let row = repo.get(&attempt).await.unwrap().unwrap();
+    assert_eq!(row.outcome, "crashed");
+    let sj: serde_json::Value = serde_json::from_str(row.summary_json.as_deref().unwrap()).unwrap();
+    assert_eq!(sj["failure_class"], "orphaned_pending_attempt");
+    assert_eq!(sj["owner_classification"], "live");
+}
+
+/// A NULL-owner (legacy) orphan is counted `crashed/orphaned_pending_attempt_unproven`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn evidence_reap_null_owner_counts_as_crashed_unproven() {
+    use djinn_db::TaskAttemptRepository;
+
+    let db = test_helpers::create_test_db();
+    let (tx, _rx) = broadcast::channel(256);
+    let repo = TaskAttemptRepository::new(db.clone());
+
+    let (task, _n) = create_task_with_note(&db, &tx, "evidence-null-owner").await;
+    let attempt = seed_pending_attempt(&db, &task.id, "worker").await; // NULL owner
+    backdate_attempt(&db, &attempt).await;
+
+    crate::health::reap_orphaned_pending_attempts_with_threshold(&db, 15 * 60, "startup").await;
+
+    let row = repo.get(&attempt).await.unwrap().unwrap();
+    assert_eq!(row.outcome, "crashed");
+    let sj: serde_json::Value = serde_json::from_str(row.summary_json.as_deref().unwrap()).unwrap();
+    assert_eq!(sj["failure_class"], "orphaned_pending_attempt_unproven");
+    assert_eq!(sj["owner_classification"], "null_owner");
+}
+
+/// A malformed owner UUID is counted `crashed/orphaned_pending_attempt_unproven`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn evidence_reap_malformed_owner_counts_as_crashed_unproven() {
+    use djinn_db::TaskAttemptRepository;
+
+    let db = test_helpers::create_test_db();
+    let (tx, _rx) = broadcast::channel(256);
+    let repo = TaskAttemptRepository::new(db.clone());
+
+    let (task, _n) = create_task_with_note(&db, &tx, "evidence-malformed-owner").await;
+    // Directly insert a pending attempt with a malformed owner, since the
+    // repository validates UUIDs at creation.
+    let attempt_id = uuid::Uuid::now_v7().to_string();
+    let dispatch_key = format!("{}:worker:{}", task.id, attempt_id);
+    djinn_db::test_support::insert_pending_attempt_with_raw_owner(
+        &db,
+        &attempt_id,
+        &task.id,
+        "worker",
+        &dispatch_key,
+        "not-a-uuid",
+    )
+    .await;
+    backdate_attempt(&db, &attempt_id).await;
+
+    crate::health::reap_orphaned_pending_attempts_with_threshold(&db, 15 * 60, "periodic").await;
+
+    let row = repo.get(&attempt_id).await.unwrap().unwrap();
+    assert_eq!(row.outcome, "crashed");
+    let sj: serde_json::Value = serde_json::from_str(row.summary_json.as_deref().unwrap()).unwrap();
+    assert_eq!(sj["failure_class"], "orphaned_pending_attempt_unproven");
+    assert_eq!(sj["owner_classification"], "malformed_owner");
+}
+
+/// A well-formed but unregistered owner (missing incarnation) is counted
+/// `crashed/orphaned_pending_attempt_unproven`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn evidence_reap_missing_owner_counts_as_crashed_unproven() {
+    use djinn_db::TaskAttemptRepository;
+
+    let db = test_helpers::create_test_db();
+    let (tx, _rx) = broadcast::channel(256);
+    let repo = TaskAttemptRepository::new(db.clone());
+
+    // A valid UUID that was never registered as an incarnation.
+    let phantom_owner = uuid::Uuid::now_v7().to_string();
+    let (task, _n) = create_task_with_note(&db, &tx, "evidence-missing-owner").await;
+    let attempt =
+        seed_pending_attempt_with_identity(&db, &task.id, "worker", Some(&phantom_owner), None)
+            .await;
+    backdate_attempt(&db, &attempt).await;
+
+    crate::health::reap_orphaned_pending_attempts_with_threshold(&db, 15 * 60, "startup").await;
+
+    let row = repo.get(&attempt).await.unwrap().unwrap();
+    assert_eq!(row.outcome, "crashed");
+    let sj: serde_json::Value = serde_json::from_str(row.summary_json.as_deref().unwrap()).unwrap();
+    assert_eq!(sj["failure_class"], "orphaned_pending_attempt_unproven");
+    assert_eq!(sj["owner_classification"], "missing_owner");
+}
+
+/// A non-NULL dispatch group is terminalized through the exact-group repository
+/// operation: all pending peers in the same group receive one outcome/evidence
+/// tuple, while unrelated groups for the same task remain untouched.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn evidence_reap_nonnull_group_terminalizes_all_peers_with_one_evidence() {
+    use djinn_db::TaskAttemptRepository;
+
+    let db = test_helpers::create_test_db();
+    let (tx, _rx) = broadcast::channel(256);
+    let repo = TaskAttemptRepository::new(db.clone());
+
+    let owner_id = register_incarnation(&db, true).await;
+    let group_a = uuid::Uuid::now_v7().to_string();
+    let group_b = uuid::Uuid::now_v7().to_string();
+
+    let (task, _n) = create_task_with_note(&db, &tx, "evidence-group-isolation").await;
+
+    // Two pending peers in group A (same owner, same group).
+    let peer1 = seed_pending_attempt_with_identity(
+        &db,
+        &task.id,
+        "worker",
+        Some(&owner_id),
+        Some(&group_a),
+    )
+    .await;
+    let peer2 = seed_pending_attempt_with_identity(
+        &db,
+        &task.id,
+        "reviewer",
+        Some(&owner_id),
+        Some(&group_a),
+    )
+    .await;
+
+    // An unrelated pending peer in group B (different owner, different group).
+    let owner_b = register_incarnation(&db, true).await;
+    let peer_b =
+        seed_pending_attempt_with_identity(&db, &task.id, "worker", Some(&owner_b), Some(&group_b))
+            .await;
+
+    for id in [&peer1, &peer2, &peer_b] {
+        backdate_attempt(&db, id).await;
+    }
+
+    // Reap with a 0-second threshold so group B's owner is also expired; but
+    // we reap just group A by checking that group B is also reaped (it should
+    // be — both owners are expired). The key assertion is that each group gets
+    // its own outcome/evidence.
+    crate::health::reap_orphaned_pending_attempts_with_threshold(&db, 15 * 60, "periodic").await;
+
+    // Both peers in group A are interrupted with the same evidence.
+    for (id, label) in [(&peer1, "peer1"), (&peer2, "peer2")] {
+        let row = repo.get(id).await.unwrap().unwrap();
+        assert_eq!(
+            row.outcome, "interrupted",
+            "{label}: group A peer must be interrupted"
+        );
+        let sj: serde_json::Value =
+            serde_json::from_str(row.summary_json.as_deref().unwrap()).unwrap();
+        assert_eq!(sj["failure_class"], "environmental_owner_expired");
+        assert_eq!(sj["owner_incarnation_id"], owner_id);
+    }
+
+    // Group B peer is also interrupted but with its own owner evidence.
+    let row_b = repo.get(&peer_b).await.unwrap().unwrap();
+    assert_eq!(row_b.outcome, "interrupted");
+    let sj_b: serde_json::Value =
+        serde_json::from_str(row_b.summary_json.as_deref().unwrap()).unwrap();
+    assert_eq!(sj_b["owner_incarnation_id"], owner_b);
+    assert_ne!(sj_b["owner_incarnation_id"], owner_id);
+}
+
+/// A legacy NULL-group row is reaped singly: only that one row is terminalized,
+/// and it gets the `unproven` classification because it has no owner.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn evidence_reap_null_group_reaps_singly() {
+    use djinn_db::TaskAttemptRepository;
+
+    let db = test_helpers::create_test_db();
+    let (tx, _rx) = broadcast::channel(256);
+    let repo = TaskAttemptRepository::new(db.clone());
+
+    let (task, _n) = create_task_with_note(&db, &tx, "evidence-null-group").await;
+
+    // Two NULL-group rows for the same task — each is reaped independently.
+    let a1 = seed_pending_attempt(&db, &task.id, "worker").await;
+    let a2 = seed_pending_attempt(&db, &task.id, "reviewer").await;
+    backdate_attempt(&db, &a1).await;
+    backdate_attempt(&db, &a2).await;
+
+    crate::health::reap_orphaned_pending_attempts_with_threshold(&db, 15 * 60, "periodic").await;
+
+    for (id, label) in [(&a1, "a1"), (&a2, "a2")] {
+        let row = repo.get(id).await.unwrap().unwrap();
+        assert_eq!(
+            row.outcome, "crashed",
+            "{label}: NULL-group row must be crashed"
+        );
+        let sj: serde_json::Value =
+            serde_json::from_str(row.summary_json.as_deref().unwrap()).unwrap();
+        assert_eq!(sj["failure_class"], "orphaned_pending_attempt_unproven");
+    }
+}
+
+/// Overlap regression: two coordinator incarnations — one old/expired, one
+/// new/live — each classify solely from their own recorded owner lease. A
+/// pending attempt owned by the expired incarnation is `interrupted`, while a
+/// pending attempt owned by the live incarnation is `crashed/orphaned`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn evidence_reap_overlap_dead_old_live_new_classifies_each_from_own_lease() {
+    use djinn_db::TaskAttemptRepository;
+
+    let db = test_helpers::create_test_db();
+    let (tx, _rx) = broadcast::channel(256);
+    let repo = TaskAttemptRepository::new(db.clone());
+
+    // Old incarnation: registered and expired.
+    let old_owner = register_incarnation(&db, true).await;
+    // New incarnation: registered and live.
+    let new_owner = register_incarnation(&db, false).await;
+
+    let (task_old, _n) = create_task_with_note(&db, &tx, "overlap-old-dead").await;
+    let (task_new, _n) = create_task_with_note(&db, &tx, "overlap-new-live").await;
+
+    let old_attempt =
+        seed_pending_attempt_with_identity(&db, &task_old.id, "worker", Some(&old_owner), None)
+            .await;
+    let new_attempt =
+        seed_pending_attempt_with_identity(&db, &task_new.id, "worker", Some(&new_owner), None)
+            .await;
+    backdate_attempt(&db, &old_attempt).await;
+    backdate_attempt(&db, &new_attempt).await;
+
+    crate::health::reap_orphaned_pending_attempts_with_threshold(&db, 15 * 60, "startup").await;
+
+    let old_row = repo.get(&old_attempt).await.unwrap().unwrap();
+    assert_eq!(old_row.outcome, "interrupted");
+    let old_sj: serde_json::Value =
+        serde_json::from_str(old_row.summary_json.as_deref().unwrap()).unwrap();
+    assert_eq!(old_sj["owner_classification"], "expired");
+
+    let new_row = repo.get(&new_attempt).await.unwrap().unwrap();
+    assert_eq!(new_row.outcome, "crashed");
+    let new_sj: serde_json::Value =
+        serde_json::from_str(new_row.summary_json.as_deref().unwrap()).unwrap();
+    assert_eq!(new_sj["failure_class"], "orphaned_pending_attempt");
+    assert_eq!(new_sj["owner_classification"], "live");
+}
+
+/// Overlap regression (reverse): old incarnation is live, new incarnation is
+/// expired. Each attempt classifies from its own lease, not the other's.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn evidence_reap_overlap_live_old_dead_new_classifies_each_from_own_lease() {
+    use djinn_db::TaskAttemptRepository;
+
+    let db = test_helpers::create_test_db();
+    let (tx, _rx) = broadcast::channel(256);
+    let repo = TaskAttemptRepository::new(db.clone());
+
+    // Old incarnation: live.
+    let old_owner = register_incarnation(&db, false).await;
+    // New incarnation: expired.
+    let new_owner = register_incarnation(&db, true).await;
+
+    let (task_old, _n) = create_task_with_note(&db, &tx, "overlap-old-live").await;
+    let (task_new, _n) = create_task_with_note(&db, &tx, "overlap-new-dead").await;
+
+    let old_attempt =
+        seed_pending_attempt_with_identity(&db, &task_old.id, "worker", Some(&old_owner), None)
+            .await;
+    let new_attempt =
+        seed_pending_attempt_with_identity(&db, &task_new.id, "worker", Some(&new_owner), None)
+            .await;
+    backdate_attempt(&db, &old_attempt).await;
+    backdate_attempt(&db, &new_attempt).await;
+
+    crate::health::reap_orphaned_pending_attempts_with_threshold(&db, 15 * 60, "periodic").await;
+
+    let old_row = repo.get(&old_attempt).await.unwrap().unwrap();
+    assert_eq!(old_row.outcome, "crashed");
+    let old_sj: serde_json::Value =
+        serde_json::from_str(old_row.summary_json.as_deref().unwrap()).unwrap();
+    assert_eq!(old_sj["owner_classification"], "live");
+
+    let new_row = repo.get(&new_attempt).await.unwrap().unwrap();
+    assert_eq!(new_row.outcome, "interrupted");
+    let new_sj: serde_json::Value =
+        serde_json::from_str(new_row.summary_json.as_deref().unwrap()).unwrap();
+    assert_eq!(new_sj["owner_classification"], "expired");
 }

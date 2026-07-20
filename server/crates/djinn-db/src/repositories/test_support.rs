@@ -371,6 +371,58 @@ pub async fn close_task_at(db: &Database, task_id: &str, closed_at: &str) {
         .expect("failed to close task at timestamp");
 }
 
+/// Backdate a `coordinator_incarnations` row's `last_renewed_at` by a
+/// PostgreSQL `interval` string (e.g. `'1 hour'`).
+///
+/// Test-fixture helper for the coordinator's orphaned-pending-attempt reaper,
+/// which classifies orphans from the durable owner lease's expiry relative to
+/// the orphan threshold.
+pub async fn backdate_coordinator_incarnation_lease(
+    db: &Database,
+    incarnation_id: &str,
+    interval: &str,
+) {
+    db.ensure_initialized().await.unwrap();
+    sqlx::query(
+        "UPDATE coordinator_incarnations SET last_renewed_at = to_char(
+             now() AT TIME ZONE 'utc' - $1::interval,
+             'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"')
+         WHERE id = $2",
+    )
+    .bind(interval)
+    .bind(incarnation_id)
+    .execute(db.pool())
+    .await
+    .unwrap();
+}
+
+/// Insert a pending `task_attempts` row with an arbitrary (possibly malformed)
+/// `dispatch_owner_incarnation_id`, bypassing the repository's UUID validation.
+/// Used by reaper evidence tests to seed a malformed-owner orphan.
+pub async fn insert_pending_attempt_with_raw_owner(
+    db: &Database,
+    id: &str,
+    task_id: &str,
+    role: &str,
+    dispatch_key: &str,
+    owner_incarnation_id: &str,
+) {
+    db.ensure_initialized().await.unwrap();
+    sqlx::query(
+        r#"INSERT INTO task_attempts (id, task_id, role, attempt_seq, dispatch_key, outcome,
+           dispatch_owner_incarnation_id, dispatch_group_id)
+           VALUES ($1, $2, $3, 1, $4, 'pending', $5, NULL)"#,
+    )
+    .bind(id)
+    .bind(task_id)
+    .bind(role)
+    .bind(dispatch_key)
+    .bind(owner_incarnation_id)
+    .execute(db.pool())
+    .await
+    .unwrap();
+}
+
 /// Wire a blocker edge: `blocking_task_id` blocks `task_id`. Test-fixture helper.
 pub async fn add_blocker_edge(db: &Database, task_id: &str, blocking_task_id: &str) {
     db.ensure_initialized().await.unwrap();
