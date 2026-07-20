@@ -39,11 +39,11 @@ import {
   existsSync,
   mkdirSync,
   readFileSync,
+  readSync,
   writeFileSync,
 } from 'node:fs';
 import { resolve } from 'node:path';
 import { parseArgs } from 'node:util';
-import { readSync } from 'node:fs';
 
 // ── Public data-contract types (documented for the follow-up DB task) ────────
 
@@ -94,10 +94,7 @@ export const KNOWLEDGE_SINGLETONS = new Set([
  * excludes from the knowledge set. They are operational/generated artifacts,
  * not knowledge, and are owned by other retirement tasks.
  */
-export const NON_KNOWLEDGE_TRACKED = new Set([
-  '.djinn/.gitignore',
-  '.djinn/skills.json',
-]);
+export const NON_KNOWLEDGE_TRACKED = new Set();
 
 /**
  * Operational paths that were intentionally removed during Phase 2 retirement
@@ -105,6 +102,7 @@ export const NON_KNOWLEDGE_TRACKED = new Set([
  * tracked file matching one of these paths.
  */
 export const RETIRED_OPERATIONAL_PATHS = new Set([
+  '.djinn/.gitignore',
   '.djinn/settings.json',
   '.djinn/skills.json',
 ]);
@@ -123,6 +121,223 @@ export class ManifestError extends Error {
     this.code = code || 'manifest_error';
     if (entry) this.entry = entry;
   }
+}
+
+export function assertNoProjectLocalDjinnSurface(candidates) {
+  for (const candidate of candidates) {
+    if (!candidate || typeof candidate.path !== 'string') continue;
+    if (isStructurallyAllowedSurfaceCandidate(candidate)) continue;
+    const path = candidate.path.split('\\').join('/');
+    if (path === '~/.djinn' || path.startsWith('~/.djinn/') ||
+        path === '$DJINN_HOME/.djinn' || path.startsWith('$DJINN_HOME/.djinn/')) continue;
+    if (path === '.djinn' || path.startsWith('.djinn/') || path.includes('/.djinn/') ||
+        path.endsWith('/.djinn') || path.includes('/~/.djinn') || path.includes('/$DJINN_HOME/.djinn')) {
+      throw new ManifestError(`project-local .djinn surface was reintroduced: ${path}`, {
+        code: 'project_local_surface_reintroduced', entry: { repository_path: path },
+      });
+    }
+  }
+}
+
+export function isStructurallyAllowedSurfaceCandidate(candidate) {
+  const origin = typeof candidate?.repository_path === 'string'
+    ? candidate.repository_path.split('\\').join('/') : '';
+  const surface = typeof candidate?.path === 'string'
+    ? candidate.path.split('\\').join('/') : '';
+  // The workspace handoff is the sole cleanup boundary permitted to inspect
+  // the retired settings source. This exact repository location and retired
+  // path shape are required; callers cannot bypass the policy with a `kind`.
+  if (origin === 'server/crates/djinn-workspace/src/legacy_settings_import.rs' &&
+      surface === '.djinn/settings.json') return true;
+  // The residue gate is the matching no-follow cleanup boundary for the
+  // retired directory itself; it inspects and removes only legacy residue.
+  if (origin === 'server/crates/djinn-workspace/src/project_residue.rs' &&
+      surface === '.djinn') return true;
+  // The live-state migration record is immutable evidence of the retired
+  // read-source location, not a runtime producer or consumer.
+  if (origin === 'server/crates/djinn-db/src/repositories/project_live_state_migration.rs' &&
+      surface === '.djinn/read-sources/target-a') return true;
+  // The ledger and its generated fixtures are immutable deletion evidence.
+  // Test sources are allowed only through the structural test-range rule below.
+  return origin === 'scripts/djinn-retirement-manifest.mjs' ||
+    origin === 'scripts/test-djinn-retirement-manifest.mjs' ||
+    origin.startsWith('scripts/fixtures/djinn-retirement/');
+}
+
+// Whole-file negative-test exemptions are deliberately limited to the exact
+// repository fixtures which exercise this retirement policy. Test-like names
+// elsewhere are not policy: production code can legitimately live in files
+// named `test-*` or `*.test.*`, so their contents must remain scanned.
+const NEGATIVE_TEST_FIXTURE_PATHS = new Set([
+  'scripts/ci-changed-scope.test.mjs',
+  'scripts/test-djinn-retirement-manifest.mjs',
+]);
+
+function rustSyntaxMask(text) {
+  // Keep a byte-level map of Rust syntax, excluding comments and literals.
+  // This is intentionally a lexer rather than a Rust parser: the structural
+  // allowance only needs trustworthy attribute and brace locations.
+  const syntax = new Uint8Array(text.length).fill(1);
+  const exclude = (start, end) => syntax.fill(0, start, Math.min(end, text.length));
+  for (let index = 0; index < text.length; index += 1) {
+    if (text.startsWith('//', index)) {
+      const end = text.indexOf('\n', index + 2);
+      exclude(index, end < 0 ? text.length : end);
+      index = end < 0 ? text.length : end;
+      continue;
+    }
+    if (text.startsWith('/*', index)) {
+      const start = index;
+      let depth = 1;
+      index += 2;
+      while (index < text.length && depth > 0) {
+        if (text.startsWith('/*', index)) { depth += 1; index += 2; }
+        else if (text.startsWith('*/', index)) { depth -= 1; index += 2; }
+        else index += 1;
+      }
+      exclude(start, index);
+      index -= 1;
+      continue;
+    }
+    const rawStart = text[index] === 'r' ? index + 1 :
+      (text[index] === 'b' && text[index + 1] === 'r' ? index + 2 : null);
+    if (rawStart !== null) {
+      let delimiter = rawStart;
+      while (text[delimiter] === '#') delimiter += 1;
+      if (text[delimiter] === '"') {
+        const terminator = `"${'#'.repeat(delimiter - rawStart)}`;
+        const end = text.indexOf(terminator, delimiter + 1);
+        const after = end < 0 ? text.length : end + terminator.length;
+        exclude(index, after);
+        index = after - 1;
+        continue;
+      }
+    }
+    if (text[index] === '"' || (text[index] === 'b' && text[index + 1] === '"')) {
+      const start = index;
+      index += text[index] === 'b' ? 2 : 1;
+      while (index < text.length) {
+        if (text[index] === '\\') index += 2;
+        else if (text[index++] === '"') break;
+      }
+      exclude(start, index);
+      index -= 1;
+      continue;
+    }
+    if (text[index] === "'" &&
+        (text[index + 2] === "'" || (text[index + 1] === '\\' && text[index + 3] === "'"))) {
+      const end = index + (text[index + 1] === '\\' ? 4 : 3);
+      exclude(index, end);
+      index = end - 1;
+    }
+  }
+  return syntax;
+}
+
+function closingRustModuleBrace(text, syntax, openingBrace) {
+  let depth = 1;
+  for (let index = openingBrace + 1; index < text.length; index += 1) {
+    if (!syntax[index]) continue;
+    if (text[index] === '{') depth += 1;
+    if (text[index] === '}') {
+      depth -= 1;
+      if (depth === 0) return index + 1;
+    }
+  }
+  return null;
+}
+export function discoverProjectLocalDjinnSurfaces(trackedPaths, opts = {}) {
+  const cwd = opts.cwd || process.cwd();
+  const candidates = [];
+  // Scan path literals only where their surrounding syntax makes them a
+  // runtime/scaffolding operation, rather than treating historical prose or a
+  // bare `.djinn` token as a policy violation. A join receiver is deliberately
+  // not name-limited: `project_root.join`, `root.join`, and a path expression
+  // passed to `create_dir_all` all construct the same retired project surface.
+  // The server-home construction is normalized to its immediately rooted
+  // namespace before the shared structural policy evaluates it.
+  const joinedPath = /(?<receiver>\b(?:[A-Za-z_][A-Za-z0-9_]*|(?:(?:std\s*::\s*path\s*::\s*)?(?:PathBuf|Path))\s*::\s*from\s*\([^\r\n)]*\)))\s*\.\s*join\(\s*(?<quote>["'])(?<path>\.djinn(?:\/[^"'\r\n\s]*)?)\k<quote>/g;
+  const pathConstructor = /\b(?:(?:std\s*::\s*path\s*::\s*)?(?:PathBuf|Path))\s*::\s*(?:from|new)\(\s*(["'])(\.djinn(?:\/[^"'\r\n\s]*)?)\1/g;
+  const directFilesystemOperation = /\b(?:(?:std\s*::\s*fs|fs|node:fs|tokio\s*::\s*fs)\s*::\s*|(?:fs\s*\.\s*)?)(?:read(?:_to_string|_dir)?|write|create(?:_dir(?:_all)?|_new)?|open|metadata|remove_(?:file|dir|dir_all)|rename|copy)\s*\(\s*(["'])(\.djinn(?:\/[^"'\r\n\s]*)?)\1/g;
+  // Constants are intentional path declarations; this covers the one-time
+  // cleanup handoff without classifying prose or arbitrary string literals.
+  const declaredPath = /\b(?:const|let|static)\s+[A-Za-z_][A-Za-z0-9_]*[^=\r\n]*=\s*(["'])(\.djinn(?:\/[^"'\r\n\s]*)?)\1/g;
+  const configuredPath = /(?:[:=]\s*)(?:(["'])(\.djinn(?:\/[^\s,}\]]*)?)\1|(\.djinn(?:\/[^\s,}\]]*)?))/g;
+  const indexBlobs = new Map();
+  if (!opts.readIndexBlob) {
+    const ordinaryPaths = trackedPaths.filter((path) => !path.includes('\n'));
+    if (ordinaryPaths.length > 0) {
+      try {
+        const batch = execFileSync(opts.git || 'git', ['cat-file', '--batch'], {
+          cwd,
+          input: Buffer.from(ordinaryPaths.map((path) => `:${path}\n`).join('')),
+          maxBuffer: 64 * 1024 * 1024,
+        });
+        let offset = 0;
+        for (const path of ordinaryPaths) {
+          const newline = batch.indexOf(10, offset);
+          if (newline < 0) break;
+          const header = batch.subarray(offset, newline).toString('utf8');
+          offset = newline + 1;
+          const match = /^[0-9a-f]+ blob (\d+)$/.exec(header);
+          if (!match) continue;
+          const size = Number(match[1]);
+          indexBlobs.set(path, batch.subarray(offset, offset + size));
+          offset += size + 1;
+        }
+      } catch {
+        // Fall back to individual index reads below when batch lookup fails.
+      }
+    }
+  }
+  for (const repositoryPath of trackedPaths) {
+    let bytes;
+    try {
+      // The policy input is the staged blob, not a potentially divergent
+      // worktree file. Tests may inject an equivalent blob reader.
+      bytes = opts.readIndexBlob
+        ? opts.readIndexBlob(repositoryPath)
+        : indexBlobs.get(repositoryPath) || execFileSync(opts.git || 'git', ['show', `:${repositoryPath}`], { cwd, maxBuffer: 64 * 1024 * 1024 });
+    } catch {
+      continue;
+    }
+    if (bytes.includes(0)) continue;
+    const text = bytes.toString('utf8');
+    // An exemption is bounded to a cfg(test) module's braces, so production
+    // code after a test module cannot inherit the exemption.
+    const testRanges = [];
+    let syntax;
+    for (const marker of text.matchAll(/#\s*\[\s*cfg\s*\(\s*test\s*\)\s*\]\s*(?:pub\s+)?mod\s+[A-Za-z_][A-Za-z0-9_]*\s*\{/g)) {
+      syntax ||= rustSyntaxMask(text);
+      // A lookalike in prose, a comment, or a literal is not an attribute.
+      if (![...marker[0]].every((_, offset) => syntax[marker.index + offset])) continue;
+      const end = closingRustModuleBrace(text, syntax, marker.index + marker[0].length - 1);
+      if (end !== null) testRanges.push([marker.index, end]);
+    }
+    const isNegativeTestLocation = (offset) =>
+      NEGATIVE_TEST_FIXTURE_PATHS.has(repositoryPath) ||
+      testRanges.some(([start, end]) => offset >= start && offset < end);
+    for (const match of text.matchAll(joinedPath)) {
+      if (isNegativeTestLocation(match.index)) continue;
+      const receiver = match.groups.receiver.replace(/\s/g, '');
+      const surface = /(?:^|[(&])home\)?$/i.test(receiver)
+        ? `$DJINN_HOME/${match.groups.path}` : match.groups.path;
+      candidates.push({ path: surface, repository_path: repositoryPath });
+    }
+    for (const match of text.matchAll(pathConstructor)) {
+      if (!isNegativeTestLocation(match.index)) candidates.push({ path: match[2], repository_path: repositoryPath });
+    }
+    for (const match of text.matchAll(directFilesystemOperation)) {
+      if (!isNegativeTestLocation(match.index)) candidates.push({ path: match[2], repository_path: repositoryPath });
+    }
+    for (const match of text.matchAll(declaredPath)) {
+      if (!isNegativeTestLocation(match.index)) candidates.push({ path: match[2], repository_path: repositoryPath });
+    }
+    for (const match of text.matchAll(configuredPath)) {
+      if (!isNegativeTestLocation(match.index)) candidates.push({ path: match[2] || match[3], repository_path: repositoryPath });
+    }
+  }
+  return candidates;
 }
 
 // ── Normalization ────────────────────────────────────────────────────────────
@@ -169,7 +384,8 @@ export function isKnowledgePath(repoPath) {
   if (!norm.startsWith('.djinn/')) return false;
   // Reject bare directory paths (must be a file, not a folder).
   if (norm.endsWith('/')) return false;
-  if (NON_KNOWLEDGE_TRACKED.has(norm)) return false;
+  if (norm === '.djinn/.gitignore' || norm === '.djinn/skills.json' ||
+      NON_KNOWLEDGE_TRACKED.has(norm)) return false;
   return true;
 }
 
@@ -935,7 +1151,8 @@ export function validateRetirementCutover(currentPathBytes, ledger, guidanceFixt
     });
   }
   const sourceKnowledge = new Set(
-    splitNulPaths(sourcePathBytes).filter(isKnowledgePath),
+    splitNulPaths(sourcePathBytes).filter(isKnowledgePath)
+      .filter((path) => path !== '.djinn/.gitignore' && path !== '.djinn/skills.json'),
   );
   validateKnowledgeManifest(ledger, {
     knowledgeCount: sourceKnowledge.size,
@@ -1005,6 +1222,16 @@ export function validateRetirementCutover(currentPathBytes, ledger, guidanceFixt
   const currentPaths = splitNulPaths(
     Buffer.isBuffer(currentPathBytes) ? currentPathBytes : Buffer.from(currentPathBytes || '', 'binary'),
   );
+  const currentSet = new Set(currentPaths);
+  for (const retiredPath of RETIRED_OPERATIONAL_PATHS) {
+    if (currentSet.has(retiredPath)) {
+      throw new ManifestError(`retired operational path was reintroduced: ${retiredPath}`, {
+        code: 'retired_path_reintroduced', entry: { repository_path: retiredPath },
+      });
+    }
+  }
+  assertNoProjectLocalDjinnSurface(currentPaths.map((path) => ({ path })));
+  assertNoProjectLocalDjinnSurface(discoverProjectLocalDjinnSurfaces(currentPaths, opts));
   const currentKnowledge = currentPaths
     .filter(isKnowledgePath)
     .filter((path) => !RETIRED_OPERATIONAL_PATHS.has(path));
@@ -1013,7 +1240,6 @@ export function validateRetirementCutover(currentPathBytes, ledger, guidanceFixt
       code: 'knowledge_reintroduced', entry: { repository_path: currentKnowledge[0] },
     });
   }
-  const currentSet = new Set(currentPaths);
   const preservedOperationalPaths = [...NON_KNOWLEDGE_TRACKED]
     .filter((path) => !RETIRED_OPERATIONAL_PATHS.has(path));
   for (const operationalPath of preservedOperationalPaths) {
@@ -1027,13 +1253,6 @@ export function validateRetirementCutover(currentPathBytes, ledger, guidanceFixt
     if (!sourceBlob.equals(currentBlob)) {
       throw new ManifestError(`operational path changed during cutover: ${operationalPath}`, {
         code: 'operational_path_changed', entry: { repository_path: operationalPath },
-      });
-    }
-  }
-  for (const retiredPath of RETIRED_OPERATIONAL_PATHS) {
-    if (currentSet.has(retiredPath)) {
-      throw new ManifestError(`retired operational path was reintroduced: ${retiredPath}`, {
-        code: 'retired_path_reintroduced', entry: { repository_path: retiredPath },
       });
     }
   }
@@ -1145,22 +1364,23 @@ function main(argv) {
   if (values['paths-file']) {
     pathBytes = readFileSync(values['paths-file']);
   } else {
-    // Read all of stdin as raw bytes (NUL-delimited).
+    // Pipes can return EAGAIN with Node's one-shot readFileSync. Read raw
+    // NUL-delimited stdin incrementally so the shell guard is reliable.
     const chunks = [];
-    const fd = process.stdin.fd;
-    const buf = Buffer.alloc(64 * 1024);
-    // Use blocking reads on the stdin fd.
-    // eslint-disable-next-line no-constant-condition
+    // stdin is nonblocking under the Node test runner and some CI shells.
+    if (process.stdin._handle?.setBlocking) process.stdin._handle.setBlocking(true);
+    const buffer = Buffer.alloc(64 * 1024);
     while (true) {
-      let n;
+      let count;
       try {
-        n = readSync(fd, buf, 0, buf.length, null);
-      } catch (e) {
-        if (e.code === 'EOF') break;
-        throw e;
+        count = readSync(process.stdin.fd, buffer, 0, buffer.length, null);
+      } catch (err) {
+        if (err.code === 'EAGAIN') continue;
+        if (err.code === 'EOF') break;
+        throw err;
       }
-      if (n === 0) break;
-      chunks.push(Buffer.from(buf.subarray(0, n)));
+      if (count === 0) break;
+      chunks.push(Buffer.from(buffer.subarray(0, count)));
     }
     pathBytes = Buffer.concat(chunks);
   }
