@@ -437,6 +437,21 @@ LOCAL_VALUES_PATH = 'deploy/helm/djinn/values.local.yaml'
 # `local(helm_cmd)` cannot infer file dependencies from argv. Register the
 # values file explicitly so resource/capacity edits re-render the chart.
 read_file(LOCAL_VALUES_PATH)
+# Caller-owned identity used only by the fresh-install bootstrap and migration
+# init containers. Keeping this as a separate Secret proves the application
+# container does not inherit migration identity through shared configuration.
+k8s_yaml(blob("""
+apiVersion: v1
+kind: Secret
+metadata:
+  name: djinn-local-migration-operator
+  namespace: {}
+type: Opaque
+stringData:
+  user_id: 00000000-0000-7000-8000-000000000003
+  github_id: "9000000003"
+  github_login: djinn-local-migration-operator
+""".format(NS)))
 helm_cmd = [
     'helm', 'template', 'djinn', 'deploy/helm/djinn',
     '--namespace', NS,

@@ -1,6 +1,13 @@
 UI_DIR := $(CURDIR)/ui
 SERVER_DIR := $(CURDIR)/server
 
+# `test-db-migrate` identity inputs. Supply all three on the make command line
+# or in the environment; use a stable caller-owned test user, never the reserved
+# synthetic identity owned by the PostgreSQL template fixture.
+TEST_DB_MIGRATION_USER_ID ?=
+TEST_DB_MIGRATION_GITHUB_ID ?=
+TEST_DB_MIGRATION_GITHUB_LOGIN ?=
+
 # Local-dev inner loop: `tilt up` at the repo root. It bootstraps the kind
 # cluster + local registry, compiles djinn-server + djinn-agent-worker once
 # (via scripts/tilt/build-binaries.sh), builds the agent-runtime base +
@@ -17,24 +24,27 @@ help: ## Show this help
 verify-cache-cleanup: ## Run the read-only cache-cleanup acceptance verifier
 	@./scripts/verify-cache-cleanup.sh
 
-test-db-migrate: ## Ensure schema is applied to the test Postgres (:5433)
-	@command -v sqlx >/dev/null 2>&1 || { echo "Install sqlx-cli: cargo install sqlx-cli --no-default-features --features postgres,rustls"; exit 1; }
+test-db-migrate: ## Bootstrap and migrate test Postgres; requires TEST_DB_MIGRATION_{USER_ID,GITHUB_ID,GITHUB_LOGIN}
+	@test -n "$(strip $(TEST_DB_MIGRATION_USER_ID))" || { echo "ERROR: TEST_DB_MIGRATION_USER_ID is required and must be a stable local-test user ID" >&2; exit 2; }
+	@test -n "$(strip $(TEST_DB_MIGRATION_GITHUB_ID))" || { echo "ERROR: TEST_DB_MIGRATION_GITHUB_ID is required" >&2; exit 2; }
+	@test -n "$(strip $(TEST_DB_MIGRATION_GITHUB_LOGIN))" || { echo "ERROR: TEST_DB_MIGRATION_GITHUB_LOGIN is required" >&2; exit 2; }
 	@until docker exec djinn-postgres-test pg_isready -U postgres >/dev/null 2>&1; do sleep 1; done
-	@cd $(SERVER_DIR)/crates/djinn-db && DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5433/djinn sqlx migrate run --source migrations_postgres >/dev/null
+	@cd $(SERVER_DIR) && SQLX_OFFLINE=true DJINN_DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5433/djinn cargo run -p djinn-server --bin djinn-server -- \
+		--bootstrap-designated-operator-only \
+		--migration-designated-operator-user-id "$(TEST_DB_MIGRATION_USER_ID)" \
+		--bootstrap-designated-operator-github-id "$(TEST_DB_MIGRATION_GITHUB_ID)" \
+		--bootstrap-designated-operator-github-login "$(TEST_DB_MIGRATION_GITHUB_LOGIN)" >/dev/null
+	@cd $(SERVER_DIR) && SQLX_OFFLINE=true DJINN_DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5433/djinn cargo run -p djinn-server --bin djinn-server -- \
+		--migrate-only \
+		--migration-designated-operator-user-id "$(TEST_DB_MIGRATION_USER_ID)" >/dev/null
 
 test-db-postgres-template: ## Build the djinn_test_template DB Postgres clones from
-	@command -v sqlx >/dev/null 2>&1 || { echo "Install sqlx-cli: cargo install sqlx-cli --no-default-features --features postgres,rustls"; exit 1; }
 	@until docker exec djinn-postgres-test pg_isready -U postgres >/dev/null 2>&1; do echo "waiting for postgres-test..."; sleep 1; done
 	@# Evict any sessions still attached to the template before dropping; Postgres
 	@# refuses DROP DATABASE while connections remain.
 	@docker exec djinn-postgres-test psql -U postgres -d postgres -v ON_ERROR_STOP=1 -c "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname='djinn_test_template' AND pid <> pg_backend_pid()" >/dev/null
 	@docker exec djinn-postgres-test psql -U postgres -d postgres -v ON_ERROR_STOP=1 -c "DROP DATABASE IF EXISTS djinn_test_template" >/dev/null
-	@docker exec djinn-postgres-test psql -U postgres -d postgres -v ON_ERROR_STOP=1 -c "CREATE DATABASE djinn_test_template" >/dev/null
-	@cd $(SERVER_DIR)/crates/djinn-db && DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5433/djinn_test_template sqlx migrate run --source migrations_postgres >/dev/null
-	@# Mark the template as a TEMPLATE so it can be used as a fast clone source
-	@# (CREATE DATABASE x TEMPLATE djinn_test_template). Required for the test-
-	@# harness clone path in Database::open_in_memory().
-	@docker exec djinn-postgres-test psql -U postgres -d postgres -v ON_ERROR_STOP=1 -c "UPDATE pg_database SET datistemplate = TRUE WHERE datname = 'djinn_test_template'" >/dev/null
+	@cd $(SERVER_DIR) && SQLX_OFFLINE=true DJINN_TEST_DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5433/djinn cargo test -p djinn-db --test setup_test_template -- --ignored >/dev/null
 	@echo "djinn_test_template ready"
 
 test-vault: ## Create the test-only vault key at $DJINN_VAULT_KEY_PATH (idempotent)
