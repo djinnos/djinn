@@ -1065,6 +1065,7 @@ async fn assert_after_c1_mutation_reverifies_before_completion(
         finalize_payload: serde_json::json!({"task_id":task.id,"commit_title":"C2","summary":"C2","files_changed":[],"remaining_concerns":[]}),
         tool_use_id: "C1".into(),
         final_verification_evidence: Some(stale),
+        final_verification_disposition: crate::output_parser::FinalVerificationDisposition::Pending,
     };
     // Lease succeeds; canonical execution then returns failed current evidence.
     let mut failed_execution = fallback_evidence(&material, c2.clone(), identity.clone());

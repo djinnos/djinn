@@ -10,6 +10,17 @@ use djinn_core::models::VerifyRunRecord;
 
 use crate::final_verification::FinalVerificationSuccessEvidence;
 
+/// Typed C1 decision carried into C2 independently of optional evidence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FinalVerificationDisposition {
+    Pending,
+    /// C1 resolved a configured plan. Evidence may subsequently become stale,
+    /// but C2 must still use the configured writer path rather than confusing
+    /// absent or discarded evidence with the legacy skip.
+    Configured,
+    NotConfigured,
+}
+
 /// Validated worker completion awaiting authoritative verification.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CompletionIntent {
@@ -17,6 +28,9 @@ pub struct CompletionIntent {
     pub tool_use_id: String,
     /// Complete proof accepted at the authoritative completion boundary.
     pub final_verification_evidence: Option<FinalVerificationSuccessEvidence>,
+    /// A typed legacy-path skip is not the same as absent evidence: C2 must
+    /// consume it without reopening the coordinator.
+    pub final_verification_disposition: FinalVerificationDisposition,
 }
 
 impl CompletionIntent {
@@ -27,6 +41,7 @@ impl CompletionIntent {
             finalize_payload: serde_json::Value::Null,
             tool_use_id: format!("auto-submit:{task_run_id}"),
             final_verification_evidence: None,
+            final_verification_disposition: FinalVerificationDisposition::Pending,
         }
     }
 }

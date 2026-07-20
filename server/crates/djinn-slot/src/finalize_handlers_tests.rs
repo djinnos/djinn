@@ -546,6 +546,7 @@ async fn auto_submit_payload_records_model_called_false() {
         finalize_payload: payload,
         tool_use_id: format!("auto-submit:{run_id}"),
         final_verification_evidence: None,
+        final_verification_disposition: crate::output_parser::FinalVerificationDisposition::Pending,
     };
     let ok = process_auto_submit_payload(&intent, &task.id, &ctx).await;
     assert!(ok);

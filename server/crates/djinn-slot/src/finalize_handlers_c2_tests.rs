@@ -204,6 +204,7 @@ async fn assert_identity_mismatch_rebuilds_current_evidence(
         finalize_payload: serde_json::json!({"task_id":task.id,"commit_title":"identity","summary":"identity","files_changed":[],"remaining_concerns":[]}),
         tool_use_id: format!("identity-{name}"),
         final_verification_evidence: Some(stale.clone()),
+        final_verification_disposition: crate::output_parser::FinalVerificationDisposition::Pending,
     };
     let mut failed = fallback_evidence(&material, fingerprint.clone(), current_identity.clone());
     failed.manifest_version = manifest_version;
@@ -412,6 +413,7 @@ async fn c2_fully_compatible_evidence_finalizes_without_canonical_rebuild() {
         finalize_payload: serde_json::json!({"task_id":task.id,"commit_title":"compatible","summary":"compatible","files_changed":[],"remaining_concerns":[]}),
         tool_use_id: "compatible-c2".into(),
         final_verification_evidence: Some(candidate.clone()),
+        final_verification_disposition: crate::output_parser::FinalVerificationDisposition::Pending,
     };
     let callbacks = Arc::new(CompletionIntentCallbacks::for_reuse_with_evidence(
         task.id.clone(),
@@ -533,6 +535,7 @@ async fn auto_submit_stale_identity_failed_reverification_has_no_success_side_ef
         finalize_payload: serde_json::json!({"task_id":task.id,"commit_title":"auto","summary":"auto","files_changed":[],"remaining_concerns":[]}),
         tool_use_id: "auto-stale-identity".into(),
         final_verification_evidence: Some(stale),
+        final_verification_disposition: crate::output_parser::FinalVerificationDisposition::Pending,
     };
     assert!(!process_auto_submit_payload(&intent, &task.id, &ctx).await);
     assert!(callbacks.reuse_events().contains(&"canonical-execution"));
@@ -625,6 +628,8 @@ async fn configured_null_workspace_blocks_direct_and_auto_submit_without_consumi
             finalize_payload: serde_json::json!({"task_id":task.id,"commit_title":"NULL workspace","summary":"must fail closed","files_changed":[],"remaining_concerns":[]}),
             tool_use_id: format!("null-workspace-{name}"),
             final_verification_evidence: Some(stale),
+            final_verification_disposition:
+                crate::output_parser::FinalVerificationDisposition::Configured,
         };
         let accepted = if auto_submit {
             process_auto_submit_payload(&intent, &task.id, &ctx).await
