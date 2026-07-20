@@ -224,7 +224,7 @@ macro_rules! note_select_where_id {
         ::sqlx::query_as::<_, ::djinn_memory::Note>(
             r#"SELECT id, project_id, permalink, title, file_path,
                 storage, note_type, folder, status, tags::text AS tags, content,
-                retrieval_anchor, created_at, updated_at, last_accessed,
+                retrieval_anchor, created_at, updated_at, lifecycle_changed_at, last_accessed,
                 access_count, confidence, abstract as abstract_, overview,
                 scope_paths::text AS scope_paths
              FROM notes WHERE id = $1"#,

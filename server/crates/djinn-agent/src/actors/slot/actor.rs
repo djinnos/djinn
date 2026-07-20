@@ -119,7 +119,10 @@ impl SlotHandle {
         self.inner.drain().await
     }
     #[cfg(any(test, feature = "test-support"))]
-    pub(crate) fn into_djinn_slot(self) -> djinn_slot::SlotHandle {
+    /// Expose the canonical production slot for downstream integration tests.
+    /// The facade's `spawn` path has already installed the real host callback,
+    /// including `supervisor_runner::dispatch_task_runtime` persistence.
+    pub fn into_djinn_slot(self) -> djinn_slot::SlotHandle {
         self.inner
     }
 }
