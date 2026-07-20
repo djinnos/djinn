@@ -62,6 +62,8 @@ impl ReportFixture {
                 dispatch_key: &dispatch_key,
                 session_id: None,
                 attempt_seq: Some(self.next_attempt),
+                dispatch_owner_incarnation_id: None,
+                dispatch_group_id: None,
             })
             .await
             .unwrap();
@@ -76,6 +78,7 @@ impl ReportFixture {
                     status: None,
                     workspace_path: None,
                     mirror_ref: None,
+                    dispatch_group_id: None,
                 },
                 &attempt.id,
             )

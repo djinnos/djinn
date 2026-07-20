@@ -73,6 +73,7 @@ async fn seed_running_session_with_task_run(
             status: Some("running"),
             workspace_path: None,
             mirror_ref: None,
+            dispatch_group_id: None,
         })
         .await
         .expect("create test task run");

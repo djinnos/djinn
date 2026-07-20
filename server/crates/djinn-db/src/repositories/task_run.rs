@@ -2,6 +2,8 @@ use djinn_core::models::{TaskRunRecord, TaskRunStatus};
 
 use crate::Result;
 use crate::database::Database;
+use crate::error::DbError;
+use uuid::Uuid;
 
 pub struct TaskRunRepository {
     db: Database,
@@ -16,6 +18,7 @@ pub struct CreateTaskRunParams<'a> {
     pub status: Option<&'a str>,
     pub workspace_path: Option<&'a str>,
     pub mirror_ref: Option<&'a str>,
+    pub dispatch_group_id: Option<&'a str>,
 }
 
 impl TaskRunRepository {
@@ -27,10 +30,14 @@ impl TaskRunRepository {
         self.db.ensure_initialized().await?;
 
         let status = params.status.unwrap_or("running");
+        if let Some(group_id) = params.dispatch_group_id {
+            Uuid::parse_str(group_id)
+                .map_err(|_| DbError::InvalidData("dispatch_group_id must be a UUID".to_owned()))?;
+        }
         sqlx::query!(
             "INSERT INTO task_runs
-                (id, project_id, task_id, trigger_type, status, workspace_path, mirror_ref)
-             VALUES ($1, $2, $3, $4, $5, $6, $7)",
+                (id, project_id, task_id, trigger_type, status, workspace_path, mirror_ref, dispatch_group_id)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
             params.id,
             params.project_id,
             params.task_id,
@@ -38,6 +45,7 @@ impl TaskRunRepository {
             status,
             params.workspace_path,
             params.mirror_ref,
+            params.dispatch_group_id,
         )
         .execute(self.db.pool())
         .await?;
@@ -46,7 +54,7 @@ impl TaskRunRepository {
             TaskRunRecord,
             r#"SELECT id, project_id, task_id, trigger_type,
                 status AS "status!", started_at, ended_at,
-                workspace_path, mirror_ref
+                workspace_path, mirror_ref, dispatch_group_id
              FROM task_runs WHERE id = $1"#,
             params.id
         )
@@ -62,7 +70,7 @@ impl TaskRunRepository {
             TaskRunRecord,
             r#"SELECT id, project_id, task_id, trigger_type,
                 status AS "status!", started_at, ended_at,
-                workspace_path, mirror_ref
+                workspace_path, mirror_ref, dispatch_group_id
              FROM task_runs WHERE id = $1"#,
             id
         )
@@ -152,7 +160,7 @@ impl TaskRunRepository {
             TaskRunRecord,
             r#"SELECT id, project_id, task_id, trigger_type,
                 status AS "status!", started_at, ended_at,
-                workspace_path, mirror_ref
+                workspace_path, mirror_ref, dispatch_group_id
              FROM task_runs WHERE task_id = $1 ORDER BY started_at DESC"#,
             task_id
         )
@@ -260,7 +268,7 @@ impl TaskRunRepository {
             TaskRunRecord,
             r#"SELECT id, project_id, task_id, trigger_type,
                 status AS "status!", started_at, ended_at,
-                workspace_path, mirror_ref
+                workspace_path, mirror_ref, dispatch_group_id
              FROM task_runs
              WHERE task_id = $1 AND status = 'starting' AND ended_at IS NULL
              ORDER BY started_at DESC LIMIT 1"#,
@@ -289,7 +297,7 @@ impl TaskRunRepository {
             r#"SELECT DISTINCT ON (task_id)
                 id, project_id, task_id, trigger_type,
                 status AS "status!", started_at, ended_at,
-                workspace_path, mirror_ref
+                workspace_path, mirror_ref, dispatch_group_id
              FROM task_runs
              WHERE task_id = ANY($1) AND status = 'starting' AND ended_at IS NULL
              ORDER BY task_id, started_at DESC"#,
@@ -405,6 +413,7 @@ mod tests {
                 status: None,
                 workspace_path: Some("/tmp/djinn-workspace"),
                 mirror_ref: Some("refs/djinn/runs/abc"),
+                dispatch_group_id: None,
             })
             .await
             .unwrap();
@@ -424,6 +433,53 @@ mod tests {
         );
         assert_eq!(run.workspace_path.as_deref(), Some("/tmp/djinn-workspace"));
         assert_eq!(run.mirror_ref.as_deref(), Some("refs/djinn/runs/abc"));
+        assert!(run.dispatch_group_id.is_none());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn create_and_read_round_trip_dispatch_group_id() {
+        let db = test_db();
+        let (project_id, task_id) = create_task(&db, EventBus::noop()).await;
+        let repo = TaskRunRepository::new(db);
+        let id = new_run_id();
+        let group_id = uuid::Uuid::now_v7().to_string();
+
+        let created = repo
+            .create(CreateTaskRunParams {
+                id: &id,
+                project_id: &project_id,
+                task_id: &task_id,
+                trigger_type: TaskRunTrigger::NewTask.as_str(),
+                status: None,
+                workspace_path: None,
+                mirror_ref: None,
+                dispatch_group_id: Some(&group_id),
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            created.dispatch_group_id.as_deref(),
+            Some(group_id.as_str())
+        );
+        assert_eq!(
+            repo.get(&id)
+                .await
+                .unwrap()
+                .unwrap()
+                .dispatch_group_id
+                .as_deref(),
+            Some(group_id.as_str())
+        );
+        assert_eq!(
+            repo.list_for_task(&task_id)
+                .await
+                .unwrap()
+                .pop()
+                .unwrap()
+                .dispatch_group_id
+                .as_deref(),
+            Some(group_id.as_str())
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -453,6 +509,7 @@ mod tests {
                 status: None,
                 workspace_path: None,
                 mirror_ref: None,
+                dispatch_group_id: None,
             })
             .await
             .unwrap();
@@ -481,6 +538,7 @@ mod tests {
             status: Some("starting"),
             workspace_path: None,
             mirror_ref: None,
+            dispatch_group_id: None,
         })
         .await
         .unwrap();
@@ -542,6 +600,7 @@ mod tests {
             status: None,
             workspace_path: None,
             mirror_ref: None,
+            dispatch_group_id: None,
         })
         .await
         .unwrap();
@@ -570,6 +629,7 @@ mod tests {
                 status: None,
                 workspace_path: None,
                 mirror_ref: None,
+                dispatch_group_id: None,
             })
             .await
             .unwrap();
@@ -607,6 +667,7 @@ mod tests {
                 status: None,
                 workspace_path: None,
                 mirror_ref: None,
+                dispatch_group_id: None,
             })
             .await
             .unwrap();
@@ -626,6 +687,7 @@ mod tests {
             status: None,
             workspace_path: None,
             mirror_ref: None,
+            dispatch_group_id: None,
         })
         .await
         .unwrap();
@@ -657,6 +719,7 @@ mod tests {
             status: None,
             workspace_path: None,
             mirror_ref: None,
+            dispatch_group_id: None,
         })
         .await
         .unwrap();
@@ -673,6 +736,7 @@ mod tests {
             status: None,
             workspace_path: None,
             mirror_ref: None,
+            dispatch_group_id: None,
         })
         .await
         .unwrap();
@@ -754,6 +818,7 @@ mod tests {
             status: Some("starting"),
             workspace_path: Some("/owner/live"),
             mirror_ref: None,
+            dispatch_group_id: None,
         })
         .await
         .unwrap();
@@ -766,6 +831,7 @@ mod tests {
             status: None,
             workspace_path: Some("/owner/old"),
             mirror_ref: None,
+            dispatch_group_id: None,
         })
         .await
         .unwrap();
@@ -781,6 +847,7 @@ mod tests {
             status: None,
             workspace_path: Some("/other/live"),
             mirror_ref: None,
+            dispatch_group_id: None,
         })
         .await
         .unwrap();
@@ -807,6 +874,7 @@ mod tests {
             status: None,
             workspace_path: None,
             mirror_ref: None,
+            dispatch_group_id: None,
         })
         .await
         .unwrap();

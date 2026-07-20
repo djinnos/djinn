@@ -463,6 +463,7 @@ async fn reviewer_reuses_post_authoring_worker_pass_with_zero_commands_and_zero_
             status: Some("closed"),
             workspace_path: Some(tree.path().to_str().unwrap()),
             mirror_ref: None,
+            dispatch_group_id: None,
         })
         .await
         .unwrap();
@@ -525,6 +526,7 @@ async fn reviewer_reuses_post_authoring_worker_pass_with_zero_commands_and_zero_
             status: Some("running"),
             workspace_path: Some(tree.path().to_str().unwrap()),
             mirror_ref: None,
+            dispatch_group_id: None,
         })
         .await
         .unwrap();
@@ -685,6 +687,7 @@ async fn reviewer_arbitrary_shell_command_is_not_intercepted_by_reuse() {
             status: Some("running"),
             workspace_path: Some(tree.path().to_str().unwrap()),
             mirror_ref: None,
+            dispatch_group_id: None,
         })
         .await
         .unwrap();

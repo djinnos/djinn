@@ -1330,6 +1330,8 @@ async fn seed_terminated_post_intervention_sessions(
                 dispatch_key: &dispatch_key,
                 session_id: Some(&session.id),
                 attempt_seq: None,
+                dispatch_owner_incarnation_id: None,
+                dispatch_group_id: None,
             })
             .await
             .unwrap();

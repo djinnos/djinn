@@ -351,6 +351,7 @@ async fn global_pause_does_not_reap_or_kill_active_worker_sessions() {
             status: Some("running"),
             workspace_path: None,
             mirror_ref: None,
+            dispatch_group_id: None,
         })
         .await
         .unwrap();
