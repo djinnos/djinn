@@ -471,6 +471,8 @@ pub fn selection_to_metadata(selection: &ResumeSourceSelection) -> ResumeLifecyc
     extra.insert("skipped".to_string(), serde_json::json!(selection.skipped));
 
     ResumeLifecycleMetadata {
+        dispatch_owner_incarnation_id: None,
+        dispatch_group_id: None,
         considered: true,
         checkpoint_id: None,
         commit_sha: selection.checkpoint_sha.clone(),
