@@ -711,6 +711,37 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn undeclared_host_environment_is_ineligible_before_the_launcher_runs() {
+        let worktree = git_worktree();
+        let mut input = identity_input(vec![descriptor("check")], Vec::new());
+        input.plan.commands[0].environment_names = vec!["HOST_SECRET".into()];
+        let request = request(worktree.path(), input.clone(), static_resolver(input));
+        let launches = Arc::new(AtomicUsize::new(0));
+        let observed = Arc::clone(&launches);
+
+        let evidence = execute_final_verification_with_launcher(request, move |_, _| {
+            observed.fetch_add(1, Ordering::SeqCst);
+            Ok(succeeded())
+        })
+        .await;
+
+        assert_eq!(launches.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            evidence.eligibility_reason,
+            Some(
+                FinalVerificationIneligibilityReason::UndeclaredCommandEnvironment {
+                    name: "HOST_SECRET".into(),
+                }
+            )
+        );
+        assert!(
+            evidence.fingerprint_f0.is_some(),
+            "F0 precedes command admission"
+        );
+        assert!(evidence.fingerprint_f1.is_none());
+    }
+
+    #[tokio::test]
     async fn commands_launch_in_order_and_each_must_pass() {
         let worktree = git_worktree();
         let input = identity_input(vec![descriptor("first"), descriptor("second")], Vec::new());
