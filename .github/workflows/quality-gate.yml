@@ -848,7 +848,17 @@ jobs:
           echo "::notice::cache-family=server-test shared-key=server-test cache-hit=${{ steps.rust-cache.outputs.cache-hit }}"
       - uses: taiki-e/install-action@nextest
       - name: Apply djinn-db migrations
-        working-directory: server/crates/djinn-db
+        # NO `working-directory: server/crates/djinn-db` here. The workflow
+        # sets `CARGO_BUILD_BUILD_DIR: target` (env, line ~26), and cargo
+        # resolves a RELATIVE build-dir against the process CWD — so running
+        # from the crate directory sends every intermediate rlib/rmeta to
+        # server/crates/djinn-db/target (1.2 GB, reproduced locally) while the
+        # restored cache sits in server/target. That is why this step rebuilt
+        # 352 crates from proc-macro2 on a "full match: true" restore, and why
+        # qa-smoke's near-identical `cargo test -p djinn-db` — which runs from
+        # server/ — finished in 20s off the same cache. Note build-dir is NOT
+        # target-dir: final artifacts still land in server/target, which is
+        # what makes this misread as working.
         env:
           DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5433/djinn
         run: |
@@ -1218,7 +1228,17 @@ jobs:
           echo "cache-hit=${{ steps.rust-cache.outputs.cache-hit }}"
           echo "::notice::cache-family=server-test shared-key=server-test cache-hit=${{ steps.rust-cache.outputs.cache-hit }}"
       - name: Apply djinn-db migrations
-        working-directory: server/crates/djinn-db
+        # NO `working-directory: server/crates/djinn-db` here. The workflow
+        # sets `CARGO_BUILD_BUILD_DIR: target` (env, line ~26), and cargo
+        # resolves a RELATIVE build-dir against the process CWD — so running
+        # from the crate directory sends every intermediate rlib/rmeta to
+        # server/crates/djinn-db/target (1.2 GB, reproduced locally) while the
+        # restored cache sits in server/target. That is why this step rebuilt
+        # 352 crates from proc-macro2 on a "full match: true" restore, and why
+        # qa-smoke's near-identical `cargo test -p djinn-db` — which runs from
+        # server/ — finished in 20s off the same cache. Note build-dir is NOT
+        # target-dir: final artifacts still land in server/target, which is
+        # what makes this misread as working.
         run: |
           # djinn-db's own migrator, NOT `cargo run -p djinn-server`: the
           # server binary drags in ~200 packages it never executes here
@@ -1299,7 +1319,17 @@ jobs:
           echo "cache-hit=${{ steps.rust-cache.outputs.cache-hit }}"
           echo "::notice::cache-family=server-test shared-key=server-test cache-hit=${{ steps.rust-cache.outputs.cache-hit }}"
       - name: Apply djinn-db migrations
-        working-directory: server/crates/djinn-db
+        # NO `working-directory: server/crates/djinn-db` here. The workflow
+        # sets `CARGO_BUILD_BUILD_DIR: target` (env, line ~26), and cargo
+        # resolves a RELATIVE build-dir against the process CWD — so running
+        # from the crate directory sends every intermediate rlib/rmeta to
+        # server/crates/djinn-db/target (1.2 GB, reproduced locally) while the
+        # restored cache sits in server/target. That is why this step rebuilt
+        # 352 crates from proc-macro2 on a "full match: true" restore, and why
+        # qa-smoke's near-identical `cargo test -p djinn-db` — which runs from
+        # server/ — finished in 20s off the same cache. Note build-dir is NOT
+        # target-dir: final artifacts still land in server/target, which is
+        # what makes this misread as working.
         env:
           DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5433/djinn
         run: |
