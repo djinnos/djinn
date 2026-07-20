@@ -4,7 +4,7 @@ use djinn_core::models::task_attempt::{
     TASK_ATTEMPT_SUMMARY_MAX_LEN, TaskAttempt, TaskAttemptHistoryRow, TaskAttemptLedgerRow,
     TaskAttemptOutcome, TaskAttemptPromptSummary,
 };
-#[cfg(test)]
+
 use uuid::Uuid;
 
 use crate::Result;
@@ -82,6 +82,21 @@ pub struct TerminalTaskAttemptParams<'a> {
     pub summary: Option<&'a str>,
     pub summary_json: Option<&'a str>,
     pub log_tail: Option<&'a str>,
+}
+
+/// Evidence recorded consistently on every pending member terminalized as part
+/// of an exact dispatch group.
+#[derive(Clone, Debug, Default)]
+pub struct DispatchGroupTerminalEvidence<'a> {
+    pub summary: Option<&'a str>,
+    pub summary_json: Option<&'a str>,
+}
+
+/// Stable result of exact dispatch-group terminalization. An empty list is an
+/// idempotent repeat/no-op; returned IDs are sorted for deterministic callers.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct DispatchGroupTerminalization {
+    pub updated_attempt_ids: Vec<String>,
 }
 
 /// Parameters for inserting a guard-only deferred attempt row.
@@ -418,6 +433,7 @@ impl TaskAttemptRepository {
             params.id,
             outcome_str,
             params.pr_url,
+
             params.submit_ref,
             params.checkpoint_ref,
             params.mirror_head_sha,
@@ -435,7 +451,47 @@ impl TaskAttemptRepository {
         })
     }
 
-    /// Insert a guard-only deferred attempt row.  Idempotent on `dispatch_key`.
+    /// Terminalize every and only `pending` attempt in the supplied exact,
+    /// non-NULL dispatch group in one transaction. Legacy NULL-group rows are
+    /// deliberately never batch-correlated.
+    pub async fn terminalize_dispatch_group(
+        &self,
+        group_id: &str,
+        outcome: TaskAttemptOutcome,
+        evidence: DispatchGroupTerminalEvidence<'_>,
+    ) -> Result<DispatchGroupTerminalization> {
+        self.db.ensure_initialized().await?;
+        Uuid::parse_str(group_id)
+            .map_err(|_| DbError::InvalidData("dispatch_group_id must be a UUID".to_owned()))?;
+        if outcome.is_non_terminal() {
+            return Err(DbError::InvalidTransition(format!(
+                "terminalize_dispatch_group requires a terminal outcome, got {}",
+                outcome.as_str()
+            )));
+        }
+        Self::validate_summary(evidence.summary)?;
+        Self::validate_summary_json(evidence.summary_json)?;
+        let mut tx = self.db.pool().begin().await?;
+        let mut updated_attempt_ids: Vec<String> = sqlx::query_scalar(
+            r#"UPDATE task_attempts
+               SET outcome = $2,
+                   terminal_at = COALESCE(terminal_at, to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')),
+                   updated_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
+                   summary = $3,
+                   summary_json = $4::text::jsonb
+             WHERE dispatch_group_id IS NOT NULL
+               AND dispatch_group_id = $1
+               AND outcome = 'pending'
+             RETURNING id"#,
+        ).bind(group_id).bind(outcome.as_str()).bind(evidence.summary).bind(evidence.summary_json)
+        .fetch_all(&mut *tx).await?;
+        tx.commit().await?;
+        updated_attempt_ids.sort_unstable();
+        Ok(DispatchGroupTerminalization {
+            updated_attempt_ids,
+        })
+    }
+    /// Insert a guard-only deferred attempt row. Idempotent on `dispatch_key`.
     pub async fn insert_guard_deferred(
         &self,
         params: GuardDeferTaskAttemptParams<'_>,
