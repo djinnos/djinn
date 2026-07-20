@@ -67,22 +67,17 @@ use crate::sidecar::ImageServiceResolution;
 trait ReadSourcePreparation: Send + Sync {
     async fn github_coords(&self, project_id: &str) -> Result<Option<(String, String)>, String>;
 
-    async fn migrate(
-        &self,
-        request: djinn_workspace::ReadSourceMigrationRequest,
-    ) -> Result<(), String>;
+    async fn materialize(&self, request: djinn_workspace::ReadSourceRequest) -> Result<(), String>;
 }
 
 struct HostReadSourcePreparation {
     projects: ProjectRepository,
-    migrator: djinn_workspace::ReadSourceMigrator,
 }
 
 impl HostReadSourcePreparation {
     fn new(db: &Database) -> Self {
         Self {
             projects: ProjectRepository::new(db.clone(), djinn_core::events::EventBus::noop()),
-            migrator: djinn_workspace::ReadSourceMigrator::new(db.clone()),
         }
     }
 }
@@ -96,21 +91,15 @@ impl ReadSourcePreparation for HostReadSourcePreparation {
             .map_err(|error| error.to_string())
     }
 
-    async fn migrate(
-        &self,
-        request: djinn_workspace::ReadSourceMigrationRequest,
-    ) -> Result<(), String> {
-        self.migrator
-            .migrate(request)
-            .await
+    async fn materialize(&self, request: djinn_workspace::ReadSourceRequest) -> Result<(), String> {
+        djinn_workspace::ReadSourceMaterializer::ensure(request)
             .map(|_| ())
             .map_err(|error| error.to_string())
     }
 }
 
-/// Populate the owner-scoped cache before any task-run resource exists. The
-/// migrator owns durable active-run and ambiguity checks, so every error is a
-/// fail-closed dispatch deferral rather than an in-Pod recovery.
+/// Populate the owner-scoped cache from its authoritative mirror before any
+/// task-run resource exists. Every materialization error defers dispatch.
 async fn pre_materialize_read_sources_with(
     preparation: &dyn ReadSourcePreparation,
     spec: &TaskRunSpec,
@@ -148,19 +137,13 @@ async fn pre_materialize_read_sources_with(
             .ok_or_else(|| RuntimeError::Prepare(format!(
                 "authorized read-source project {target_project_id} does not exist"
             )))?;
-        let request = djinn_workspace::ReadSourceMigrationRequest::new(
+        let request = djinn_workspace::ReadSourceRequest::new(
             spec.project_id.clone(),
             target_project_id.clone(),
             owner_root.clone(),
             djinn_workspace::mirror_path_for(target_project_id),
-            vec![djinn_workspace::LegacyReadSource {
-                kind: djinn_workspace::LegacyKind::ProjectLocal,
-                path: owner_root
-                    .join(".djinn/read-sources")
-                    .join(target_project_id),
-            }],
         );
-        preparation.migrate(request).await.map_err(|error| {
+        preparation.materialize(request).await.map_err(|error| {
             RuntimeError::Prepare(format!(
                 "read-source pre-materialization for owner {} target {target_project_id} deferred: {error}",
                 spec.project_id
@@ -1476,9 +1459,9 @@ mod tests {
     #[derive(Default)]
     struct FakeReadSourcePreparation {
         coords: HashMap<String, Result<Option<(String, String)>, String>>,
-        migration_error: Option<String>,
+        materialization_error: Option<String>,
         events: Arc<StdMutex<Vec<String>>>,
-        requests: StdMutex<Vec<djinn_workspace::ReadSourceMigrationRequest>>,
+        requests: StdMutex<Vec<djinn_workspace::ReadSourceRequest>>,
     }
 
     #[async_trait]
@@ -1497,16 +1480,16 @@ mod tests {
                 .unwrap_or_else(|| Ok(None))
         }
 
-        async fn migrate(
+        async fn materialize(
             &self,
-            request: djinn_workspace::ReadSourceMigrationRequest,
+            request: djinn_workspace::ReadSourceRequest,
         ) -> Result<(), String> {
             self.events.lock().unwrap().push(format!(
-                "migrate:{}:{}",
+                "materialize:{}:{}",
                 request.owner_project_id, request.target_project_id
             ));
             self.requests.lock().unwrap().push(request);
-            match &self.migration_error {
+            match &self.materialization_error {
                 Some(error) => Err(error.clone()),
                 None => Ok(()),
             }
@@ -1637,7 +1620,7 @@ mod tests {
                     djinn_core::paths::project_dir("canonical-owner", "canonical-repo")
                 );
                 assert_eq!(
-                    djinn_workspace::ReadSourceMigrator::destination_for(
+                    djinn_workspace::ReadSourceMaterializer::destination_for(
                         &request.owner_root,
                         &request.target_project_id
                     ),
@@ -1655,9 +1638,9 @@ mod tests {
     async fn prepare_defers_before_secret_or_job_post_for_uncertain_and_unsafe_sources() {
         let cases = [
             ("database unavailable", true),
-            ("active legacy workspace is using a read source", false),
-            ("ambiguous read-source state", false),
-            ("failed migration requires reconciliation", false),
+            ("cache unavailable", false),
+            ("cache invalid", false),
+            ("invalid disposable cache", false),
         ];
         for (error, lookup_failure) in cases {
             let mut preparation = successful_preparation(&["target-a"]);
@@ -1666,7 +1649,7 @@ mod tests {
                     .coords
                     .insert("target-a".into(), Err(error.into()));
             } else {
-                preparation.migration_error = Some(error.into());
+                preparation.materialization_error = Some(error.into());
             }
             let preparation = Arc::new(preparation);
             let result = prepare_through_runtime(
@@ -1699,9 +1682,9 @@ mod tests {
             vec![
                 "lookup:owner-project-id",
                 "lookup:target-a",
-                "migrate:owner-project-id:target-a",
+                "materialize:owner-project-id:target-a",
                 "lookup:target-b",
-                "migrate:owner-project-id:target-b",
+                "materialize:owner-project-id:target-b",
                 "POST:Secret",
                 "POST:Job",
             ]
