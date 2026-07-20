@@ -190,11 +190,12 @@ make check-retirement-manifest
 The guard validates the durable ledger against source-revision blobs and the DB
 guidance fixture, including uniqueness, hashes, identities, statuses,
 classifications, dispositions, rationales, approvals, count, and exact source
-set. It separately classifies current NUL-delimited `git ls-files -z` output and
-fails for every tracked project-local knowledge path, including paths never
-present in the old ledger. The remaining operational file `.djinn/.gitignore`
-must remain present and byte-identical to the source revision. The retired
-operational files `.djinn/settings.json` and `.djinn/skills.json` must not be
+set. It separately classifies all NUL-delimited tracked paths and scans each exact
+staged index blob for path-shaped filesystem, constructor, join, and generated
+configuration surfaces; ordinary historical prose remains allowed. It fails for every
+tracked project-local knowledge path, including paths never
+present in the old ledger. The retired operational files `.djinn/.gitignore`,
+`.djinn/settings.json`, and `.djinn/skills.json` must not be
 reintroduced. Settings are imported once into project-scoped Postgres before
 normal coordinator dispatch begins.
 
