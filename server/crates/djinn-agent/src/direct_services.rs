@@ -3453,7 +3453,13 @@ mod dispatch_identity_rpc_persistence_tests {
             crate::test_helpers::agent_context_from_db(db.clone(), CancellationToken::new()),
             CancellationToken::new(),
         ));
-        let dir = crate::test_helpers::test_tempdir("dispatch-identity-rpc-");
+        // Unix-domain socket paths are limited to roughly 108 bytes. The
+        // standard test temp root is nested beneath Cargo's target directory,
+        // which exceeds that limit on CI checkout paths.
+        let dir = tempfile::Builder::new()
+            .prefix("dj-rpc-")
+            .tempdir_in("/var/tmp")
+            .unwrap();
         let socket = dir.path().join("supervisor.sock");
         let server = serve_on_unix_socket(&socket, host).await.unwrap();
         let cancel = CancellationToken::new();
