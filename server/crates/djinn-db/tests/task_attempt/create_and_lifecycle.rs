@@ -32,6 +32,95 @@ async fn create_or_get_pending_creates_row_and_returns_record() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn create_and_lookup_round_trip_dispatch_identity() {
+    let db = test_db();
+    let (_pid, task_id) = create_task(&db).await;
+    let repo = TaskAttemptRepository::new(db);
+    let owner_id = uuid::Uuid::now_v7().to_string();
+    let group_id = uuid::Uuid::now_v7().to_string();
+    let id = new_attempt_id();
+
+    let created = repo
+        .create_or_get_pending(CreateTaskAttemptParams {
+            id: &id,
+            task_id: &task_id,
+            role: "worker",
+            dispatch_key: "dk-dispatch-identity",
+            session_id: None,
+            attempt_seq: None,
+            dispatch_owner_incarnation_id: Some(&owner_id),
+            dispatch_group_id: Some(&group_id),
+        })
+        .await
+        .unwrap();
+
+    for attempt in [
+        created,
+        repo.get(&id).await.unwrap().unwrap(),
+        repo.get_by_dispatch_key("dk-dispatch-identity")
+            .await
+            .unwrap()
+            .unwrap(),
+        repo.list_for_task(&task_id).await.unwrap().pop().unwrap(),
+        repo.latest_pending_or_submitted(&task_id, Some("worker"))
+            .await
+            .unwrap()
+            .unwrap(),
+        repo.latest_pending(&task_id, None).await.unwrap().unwrap(),
+    ] {
+        assert_eq!(
+            attempt.dispatch_owner_incarnation_id.as_deref(),
+            Some(owner_id.as_str())
+        );
+        assert_eq!(
+            attempt.dispatch_group_id.as_deref(),
+            Some(group_id.as_str())
+        );
+    }
+
+    let submitted = repo
+        .advance_to_submitted(SubmitTaskAttemptParams {
+            id: &id,
+            submit_ref: None,
+            checkpoint_ref: None,
+            mirror_head_sha: None,
+            github_head_sha: None,
+            summary: None,
+            summary_json: None,
+            log_tail: None,
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        submitted.dispatch_owner_incarnation_id.as_deref(),
+        Some(owner_id.as_str())
+    );
+    assert_eq!(
+        submitted.dispatch_group_id.as_deref(),
+        Some(group_id.as_str())
+    );
+    for attempt in [
+        repo.latest_pending_or_submitted(&task_id, None)
+            .await
+            .unwrap()
+            .unwrap(),
+        repo.latest_submitted(&task_id, Some("worker"))
+            .await
+            .unwrap()
+            .unwrap(),
+    ] {
+        assert_eq!(
+            attempt.dispatch_owner_incarnation_id.as_deref(),
+            Some(owner_id.as_str())
+        );
+        assert_eq!(
+            attempt.dispatch_group_id.as_deref(),
+            Some(group_id.as_str())
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn create_or_get_pending_is_idempotent_on_dispatch_key() {
     let db = test_db();
     let (_pid, task_id) = create_task(&db).await;

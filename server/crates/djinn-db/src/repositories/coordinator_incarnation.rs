@@ -14,8 +14,8 @@
 use uuid::Uuid;
 
 use crate::Result;
-use crate::error::DbError;
 use crate::database::Database;
+use crate::error::DbError;
 
 /// Durable lease row for one coordinator incarnation (migration 131).
 ///
@@ -48,7 +48,8 @@ impl CoordinatorIncarnationRepository {
     /// immutable and cannot be re-registered.
     pub async fn register(&self, incarnation_id: &str) -> Result<CoordinatorIncarnation> {
         self.db.ensure_initialized().await?;
-        Uuid::parse_str(incarnation_id).map_err(|_| DbError::InvalidData("incarnation_id must be a UUID".to_owned()))?;
+        Uuid::parse_str(incarnation_id)
+            .map_err(|_| DbError::InvalidData("incarnation_id must be a UUID".to_owned()))?;
 
         // INSERT … ON CONFLICT DO NOTHING: a re-registration of the same
         // immutable UUID is a no-op that returns the existing row.
@@ -78,7 +79,8 @@ impl CoordinatorIncarnationRepository {
     /// this `id` exists (the incarnation was never registered or was deleted).
     pub async fn renew(&self, incarnation_id: &str) -> Result<bool> {
         self.db.ensure_initialized().await?;
-        Uuid::parse_str(incarnation_id).map_err(|_| DbError::InvalidData("incarnation_id must be a UUID".to_owned()))?;
+        Uuid::parse_str(incarnation_id)
+            .map_err(|_| DbError::InvalidData("incarnation_id must be a UUID".to_owned()))?;
 
         let result = sqlx::query(
             r#"UPDATE coordinator_incarnations
@@ -95,7 +97,8 @@ impl CoordinatorIncarnationRepository {
     /// Fetch the lease row for an incarnation, if it exists.
     pub async fn get(&self, incarnation_id: &str) -> Result<Option<CoordinatorIncarnation>> {
         self.db.ensure_initialized().await?;
-        Uuid::parse_str(incarnation_id).map_err(|_| DbError::InvalidData("incarnation_id must be a UUID".to_owned()))?;
+        Uuid::parse_str(incarnation_id)
+            .map_err(|_| DbError::InvalidData("incarnation_id must be a UUID".to_owned()))?;
         Ok(sqlx::query_as::<_, CoordinatorIncarnation>(
             r#"SELECT id, registered_at, last_renewed_at
                FROM coordinator_incarnations
@@ -122,7 +125,8 @@ impl CoordinatorIncarnationRepository {
         orphan_threshold_iso: &str,
     ) -> Result<Option<bool>> {
         self.db.ensure_initialized().await?;
-        Uuid::parse_str(incarnation_id).map_err(|_| DbError::InvalidData("incarnation_id must be a UUID".to_owned()))?;
+        Uuid::parse_str(incarnation_id)
+            .map_err(|_| DbError::InvalidData("incarnation_id must be a UUID".to_owned()))?;
         let row: Option<(bool,)> = sqlx::query_as(
             r#"SELECT (last_renewed_at >= $2)
                FROM coordinator_incarnations

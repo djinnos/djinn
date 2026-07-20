@@ -31,7 +31,8 @@ impl TaskRunRepository {
 
         let status = params.status.unwrap_or("running");
         if let Some(group_id) = params.dispatch_group_id {
-            Uuid::parse_str(group_id).map_err(|_| DbError::InvalidData("dispatch_group_id must be a UUID".to_owned()))?;
+            Uuid::parse_str(group_id)
+                .map_err(|_| DbError::InvalidData("dispatch_group_id must be a UUID".to_owned()))?;
         }
         sqlx::query!(
             "INSERT INTO task_runs
@@ -421,6 +422,53 @@ mod tests {
         );
         assert_eq!(run.workspace_path.as_deref(), Some("/tmp/djinn-workspace"));
         assert_eq!(run.mirror_ref.as_deref(), Some("refs/djinn/runs/abc"));
+        assert!(run.dispatch_group_id.is_none());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn create_and_read_round_trip_dispatch_group_id() {
+        let db = test_db();
+        let (project_id, task_id) = create_task(&db, EventBus::noop()).await;
+        let repo = TaskRunRepository::new(db);
+        let id = new_run_id();
+        let group_id = uuid::Uuid::now_v7().to_string();
+
+        let created = repo
+            .create(CreateTaskRunParams {
+                id: &id,
+                project_id: &project_id,
+                task_id: &task_id,
+                trigger_type: TaskRunTrigger::NewTask.as_str(),
+                status: None,
+                workspace_path: None,
+                mirror_ref: None,
+                dispatch_group_id: Some(&group_id),
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            created.dispatch_group_id.as_deref(),
+            Some(group_id.as_str())
+        );
+        assert_eq!(
+            repo.get(&id)
+                .await
+                .unwrap()
+                .unwrap()
+                .dispatch_group_id
+                .as_deref(),
+            Some(group_id.as_str())
+        );
+        assert_eq!(
+            repo.list_for_task(&task_id)
+                .await
+                .unwrap()
+                .pop()
+                .unwrap()
+                .dispatch_group_id
+                .as_deref(),
+            Some(group_id.as_str())
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

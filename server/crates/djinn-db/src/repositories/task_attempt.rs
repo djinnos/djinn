@@ -194,7 +194,8 @@ impl TaskAttemptRepository {
 
     fn validate_optional_uuid(name: &str, value: Option<&str>) -> Result<()> {
         if let Some(value) = value {
-            Uuid::parse_str(value).map_err(|_| DbError::InvalidData(format!("{name} must be a UUID")))?;
+            Uuid::parse_str(value)
+                .map_err(|_| DbError::InvalidData(format!("{name} must be a UUID")))?;
         }
         Ok(())
     }
@@ -246,7 +247,10 @@ impl TaskAttemptRepository {
     ) -> Result<TaskAttempt> {
         self.db.ensure_initialized().await?;
         Self::validate_dispatch_key(params.dispatch_key)?;
-        Self::validate_optional_uuid("dispatch_owner_incarnation_id", params.dispatch_owner_incarnation_id)?;
+        Self::validate_optional_uuid(
+            "dispatch_owner_incarnation_id",
+            params.dispatch_owner_incarnation_id,
+        )?;
         Self::validate_optional_uuid("dispatch_group_id", params.dispatch_group_id)?;
         if let Some(seq) = params.attempt_seq
             && seq <= 0
@@ -838,6 +842,7 @@ impl TaskAttemptRepository {
                 r#"SELECT id, task_id, role, attempt_seq, dispatch_key, session_id,
                     outcome AS "outcome!", guard_decision, guard_reason, summary, summary_json::text,
                     log_tail, checkpoint_ref, submit_ref, pr_url, mirror_head_sha, github_head_sha, github_publication_error,
+                    dispatch_owner_incarnation_id, dispatch_group_id,
                     created_at AS "created_at!", updated_at AS "updated_at!", submitted_at, terminal_at
                  FROM task_attempts
                  WHERE task_id = $1 AND role = $2 AND outcome IN ('pending', 'submitted')
@@ -854,6 +859,7 @@ impl TaskAttemptRepository {
                 r#"SELECT id, task_id, role, attempt_seq, dispatch_key, session_id,
                     outcome AS "outcome!", guard_decision, guard_reason, summary, summary_json::text,
                     log_tail, checkpoint_ref, submit_ref, pr_url, mirror_head_sha, github_head_sha, github_publication_error,
+                    dispatch_owner_incarnation_id, dispatch_group_id,
                     created_at AS "created_at!", updated_at AS "updated_at!", submitted_at, terminal_at
                  FROM task_attempts
                  WHERE task_id = $1 AND outcome IN ('pending', 'submitted')
@@ -1030,6 +1036,7 @@ impl TaskAttemptRepository {
                 r#"SELECT id, task_id, role, attempt_seq, dispatch_key, session_id,
                     outcome AS "outcome!", guard_decision, guard_reason, summary, summary_json::text,
                     log_tail, checkpoint_ref, submit_ref, pr_url, mirror_head_sha, github_head_sha, github_publication_error,
+                    dispatch_owner_incarnation_id, dispatch_group_id,
                     created_at AS "created_at!", updated_at AS "updated_at!", submitted_at, terminal_at
                  FROM task_attempts
                  WHERE task_id = $1 AND role = $2 AND outcome = 'submitted'
@@ -1046,6 +1053,7 @@ impl TaskAttemptRepository {
                 r#"SELECT id, task_id, role, attempt_seq, dispatch_key, session_id,
                     outcome AS "outcome!", guard_decision, guard_reason, summary, summary_json::text,
                     log_tail, checkpoint_ref, submit_ref, pr_url, mirror_head_sha, github_head_sha, github_publication_error,
+                    dispatch_owner_incarnation_id, dispatch_group_id,
                     created_at AS "created_at!", updated_at AS "updated_at!", submitted_at, terminal_at
                  FROM task_attempts
                  WHERE task_id = $1 AND outcome = 'submitted'
@@ -1072,6 +1080,7 @@ impl TaskAttemptRepository {
                 r#"SELECT id, task_id, role, attempt_seq, dispatch_key, session_id,
                     outcome AS "outcome!", guard_decision, guard_reason, summary, summary_json::text,
                     log_tail, checkpoint_ref, submit_ref, pr_url, mirror_head_sha, github_head_sha, github_publication_error,
+                    dispatch_owner_incarnation_id, dispatch_group_id,
                     created_at AS "created_at!", updated_at AS "updated_at!", submitted_at, terminal_at
                  FROM task_attempts
                  WHERE task_id = $1 AND role = $2 AND outcome = 'pending'
@@ -1088,6 +1097,7 @@ impl TaskAttemptRepository {
                 r#"SELECT id, task_id, role, attempt_seq, dispatch_key, session_id,
                     outcome AS "outcome!", guard_decision, guard_reason, summary, summary_json::text,
                     log_tail, checkpoint_ref, submit_ref, pr_url, mirror_head_sha, github_head_sha, github_publication_error,
+                    dispatch_owner_incarnation_id, dispatch_group_id,
                     created_at AS "created_at!", updated_at AS "updated_at!", submitted_at, terminal_at
                  FROM task_attempts
                  WHERE task_id = $1 AND outcome = 'pending'
