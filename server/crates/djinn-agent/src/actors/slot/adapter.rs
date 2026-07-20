@@ -191,6 +191,30 @@ pub(crate) struct AgentHostCallbacks {
     agent: AgentContext,
     services: Option<&'static dyn SupervisorServices>,
     dispatch_mode: bool,
+    /// Test-private observation probe. `None` in every production constructor
+    /// and in existing tests preserves all current behavior. When `Some`, it
+    /// disables the deterministic `final_verification_outcome_for_test`
+    /// short-circuit so a coordinator regression reaches the real
+    /// repository-backed resolver, and it counts traversal of the production
+    /// resolve/lease/evidence boundaries. See the NULL-workspace coordinator
+    /// regression `configured_null_pod_workspace_fails_closed_through_coordinator_and_production_resolver`.
+    #[cfg(test)]
+    probe: Option<Arc<FinalVerificationProbe>>,
+}
+
+/// Test-only counters proving a configured NULL-workspace task run fails closed
+/// before consultation, lease acquisition, canonical execution, and persistence.
+/// All members stay `#[cfg(test)]` and private to this module; production builds
+/// never construct it.
+#[cfg(test)]
+#[derive(Default)]
+struct FinalVerificationProbe {
+    terminal_outcome_shortcuts: std::sync::atomic::AtomicUsize,
+    resolver_calls: std::sync::atomic::AtomicUsize,
+    consultation_outcomes: std::sync::Mutex<Vec<(&'static str, &'static str)>>,
+    lease_requests: std::sync::atomic::AtomicUsize,
+    lease_acquisitions: std::sync::atomic::AtomicUsize,
+    canonical_execution_requests: std::sync::atomic::AtomicUsize,
 }
 
 impl AgentHostCallbacks {
@@ -199,6 +223,8 @@ impl AgentHostCallbacks {
             agent: agent.clone(),
             services: None,
             dispatch_mode: true,
+            #[cfg(test)]
+            probe: None,
         }
     }
     pub(crate) fn reply_loop(
@@ -209,6 +235,8 @@ impl AgentHostCallbacks {
             agent: agent.clone(),
             services: Some(services),
             dispatch_mode: true,
+            #[cfg(test)]
+            probe: None,
         }
     }
     pub(crate) fn extraction(agent: &AgentContext) -> Self {
@@ -216,7 +244,32 @@ impl AgentHostCallbacks {
             agent: agent.clone(),
             services: None,
             dispatch_mode: false,
+            #[cfg(test)]
+            probe: None,
         }
+    }
+}
+
+impl AgentHostCallbacks {
+    /// Test-private constructor that returns a dispatch-shaped callback with the
+    /// terminal-outcome short-circuit disabled and a shared observation probe.
+    /// The probe lets a coordinator regression prove the production resolver is
+    /// traversed exactly once and no consultation/lease/execution/persistence
+    /// boundary is reached. Production code never calls this.
+    #[cfg(test)]
+    fn dispatch_with_final_verification_probe(
+        agent: &AgentContext,
+    ) -> (Self, Arc<FinalVerificationProbe>) {
+        let probe = Arc::new(FinalVerificationProbe::default());
+        (
+            Self {
+                agent: agent.clone(),
+                services: None,
+                dispatch_mode: true,
+                probe: Some(probe.clone()),
+            },
+            probe,
+        )
     }
 }
 
@@ -364,7 +417,17 @@ impl djinn_slot::host::SlotHostCallbacks for AgentHostCallbacks {
     > {
         let db = self.agent.db.clone();
         let id = task_run_id.to_owned();
-        Box::pin(async move { resolve_final_verification_for_task_run(&db, &id).await })
+        #[cfg(test)]
+        let probe = self.probe.clone();
+        Box::pin(async move {
+            #[cfg(test)]
+            if let Some(probe) = &probe {
+                probe
+                    .resolver_calls
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+            resolve_final_verification_for_task_run(&db, &id).await
+        })
     }
     fn acquire_final_verification_lease<'a>(
         &'a self,
@@ -385,7 +448,24 @@ impl djinn_slot::host::SlotHostCallbacks for AgentHostCallbacks {
     > {
         let db = ctx.db.clone();
         let attempt = attempt.to_owned();
-        Box::pin(async move { HostFinalVerificationLease::acquire(&db, &attempt).await })
+        #[cfg(test)]
+        let probe = self.probe.clone();
+        Box::pin(async move {
+            #[cfg(test)]
+            if let Some(probe) = &probe {
+                probe
+                    .lease_requests
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+            let lease = HostFinalVerificationLease::acquire(&db, &attempt).await?;
+            #[cfg(test)]
+            if let Some(probe) = &probe {
+                probe
+                    .lease_acquisitions
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+            Ok(lease)
+        })
     }
     fn interrupt_paused_worker_session<'a>(
         &'a self,
@@ -539,6 +619,14 @@ impl djinn_slot::host::SlotHostCallbacks for AgentHostCallbacks {
         &self,
         _request: &djinn_slot::final_verification::FinalVerificationCoordinatorRequest,
     ) -> Option<djinn_slot::final_verification::FinalVerificationRecordingOutcome> {
+        // When the observation probe is present, decline the terminal test
+        // shortcut so the coordinator reaches the real repository-backed
+        // resolver. The shortcut counter stays at its default 0 because this
+        // early return never enters the synthetic branch, so `0` is an explicit
+        // assertion that the shortcut did not decide the coordinator regression.
+        if self.probe.is_some() {
+            return None;
+        }
         Some(
             djinn_slot::final_verification::FinalVerificationRecordingOutcome::Stored {
                 verification_attempt_id: uuid::Uuid::now_v7().to_string(),
@@ -557,6 +645,37 @@ impl djinn_slot::host::SlotHostCallbacks for AgentHostCallbacks {
                 ),
             },
         )
+    }
+    #[cfg(test)]
+    fn record_final_verification_consultation_outcome_for_test(
+        &self,
+        outcome: &'static str,
+        reason: &'static str,
+    ) {
+        if let Some(probe) = &self.probe {
+            probe
+                .consultation_outcomes
+                .lock()
+                .expect("consultation probe mutex not poisoned")
+                .push((outcome, reason));
+        }
+    }
+    #[cfg(test)]
+    fn final_verification_evidence_for_test(
+        &self,
+        _request: &djinn_slot::final_verification::FinalVerificationCoordinatorRequest,
+    ) -> Option<djinn_sandbox::final_verification_execution::FinalVerificationExecutionEvidence>
+    {
+        if let Some(probe) = &self.probe {
+            // The expected resolver error makes the coordinator return before the
+            // canonical execution checkpoint, so this must never be reached.
+            // Incrementing here converts any unexpected traversal into a
+            // countable assertion failure rather than injecting passing evidence.
+            probe
+                .canonical_execution_requests
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+        None
     }
 }
 
@@ -702,5 +821,143 @@ mod resolve_final_verification_tests {
             PathBuf::from("/workspace/run-clone")
         );
         assert_eq!(material.required_checks, vec!["lint"]);
+    }
+
+    /// Production-incident regression (proposal czd9 rev 10): a k8s-shaped
+    /// task run created exactly as dispatch does — `workspace_path = NULL` at
+    /// insert — with a configured non-empty final-verification plan fails
+    /// closed through the real `coordinate_final_verification` coordinator and
+    /// repository-backed `resolve_final_verification_for_task_run`. The resolver
+    /// error terminates coordination before consultation, invocation-lease
+    /// request/acquisition, canonical execution, persistence, or any derivable
+    /// success evidence/finalize payload.
+    #[tokio::test]
+    async fn configured_null_pod_workspace_fails_closed_through_coordinator_and_production_resolver()
+     {
+        use djinn_db::repositories::verify_run::VerifyRunRepository;
+        use djinn_slot::final_verification::{
+            FinalVerificationCoordinatorRequest, FinalVerificationRecordingOutcome,
+            coordinate_final_verification,
+        };
+        use std::sync::atomic::Ordering;
+
+        // Exactly like k8s dispatch: NULL workspace_path at insert.
+        let fx = fixture(None).await;
+        configure_final_verification_plan(&fx).await;
+
+        // Confirm the configured row is NULL before coordination.
+        let run_before = TaskRunRepository::new(fx.agent.db.clone())
+            .get(&fx.task_run_id)
+            .await
+            .expect("task run exists")
+            .expect("task run row present");
+        assert!(
+            run_before.workspace_path.is_none(),
+            "fixture must insert workspace_path = NULL exactly as k8s dispatch does"
+        );
+
+        // Production callbacks with the test-only probe: it disables the
+        // terminal `final_verification_outcome_for_test` short-circuit and counts
+        // traversal of the production resolve/lease/evidence boundaries. No
+        // resolution logic is duplicated — the callback delegates unchanged to
+        // `resolve_final_verification_for_task_run`.
+        let (callbacks, probe) =
+            AgentHostCallbacks::dispatch_with_final_verification_probe(&fx.agent);
+        let ctx = build_slot_context(&fx.agent, Arc::new(callbacks), None);
+
+        let outcome = coordinate_final_verification(
+            FinalVerificationCoordinatorRequest {
+                task_id: fx.task_id.clone(),
+                task_run_id: fx.task_run_id.clone(),
+                cancellation: CancellationToken::new(),
+            },
+            &ctx,
+        )
+        .await;
+
+        // 1. Match only the typed resolver error outcome. The diagnostic text is
+        //    asserted for explanation only; production control flow must not
+        //    string-match it.
+        let detail = match &outcome {
+            FinalVerificationRecordingOutcome::Error { detail, .. } => detail.clone(),
+            other => panic!(
+                "configured NULL-workspace run must fail closed with a resolver error, got {other:?}"
+            ),
+        };
+        assert!(
+            detail.contains("task run has no worktree"),
+            "resolver diagnostic should explain the missing worktree, got {detail}"
+        );
+
+        // 2. No reusable/stored success evidence or finalize payload is derivable.
+        let evidence = match &outcome {
+            FinalVerificationRecordingOutcome::Stored { evidence, .. }
+            | FinalVerificationRecordingOutcome::Reused { evidence, .. } => Some(&**evidence),
+            _ => None,
+        };
+        assert!(
+            evidence.is_none(),
+            "no success evidence or finalize payload may be derivable from the failed resolution"
+        );
+
+        // 3. The terminal test shortcut did not decide the coordinator, and the
+        //    real host resolver was traversed exactly once.
+        assert_eq!(
+            probe.terminal_outcome_shortcuts.load(Ordering::Relaxed),
+            0,
+            "final_verification_outcome_for_test must not short-circuit this case"
+        );
+        assert_eq!(
+            probe.resolver_calls.load(Ordering::Relaxed),
+            1,
+            "the production resolver must be traversed exactly once"
+        );
+
+        // 4. Zero consultation outcomes: there is no lookup hit or other
+        //    synthesized reuse outcome.
+        assert!(
+            probe.consultation_outcomes.lock().unwrap().is_empty(),
+            "no consultation outcome may be emitted before the resolver error"
+        );
+
+        // 5. Zero canonical execution requests.
+        assert_eq!(
+            probe.canonical_execution_requests.load(Ordering::Relaxed),
+            0,
+            "no canonical execution request may occur after the resolver error"
+        );
+
+        // 6. Zero invocation-lease requests and zero acquisitions.
+        assert_eq!(
+            probe.lease_requests.load(Ordering::Relaxed),
+            0,
+            "no invocation-lease request may occur after the resolver error"
+        );
+        assert_eq!(
+            probe.lease_acquisitions.load(Ordering::Relaxed),
+            0,
+            "no invocation-lease acquisition may occur after the resolver error"
+        );
+
+        // 7. Durable proof: no stored/success verify-run row survived.
+        let stored = VerifyRunRepository::new(fx.agent.db.clone())
+            .list_for_task_run(&fx.task_run_id)
+            .await
+            .expect("verify run list query succeeds");
+        assert!(
+            stored.is_empty(),
+            "VerifyRunRepository::list_for_task_run must remain empty after the failed resolution"
+        );
+
+        // 8. The fixture did not accidentally repair the row.
+        let run_after = TaskRunRepository::new(fx.agent.db.clone())
+            .get(&fx.task_run_id)
+            .await
+            .expect("task run exists")
+            .expect("task run row present");
+        assert!(
+            run_after.workspace_path.is_none(),
+            "the persisted task-run workspace must remain NULL throughout the failed resolution"
+        );
     }
 }
