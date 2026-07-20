@@ -17,6 +17,7 @@ expression: names
   "code_graph",
   "pr_review_context",
   "ci_job_log",
+  "ci_artifact",
   "github_search",
   "output_view",
   "output_grep",

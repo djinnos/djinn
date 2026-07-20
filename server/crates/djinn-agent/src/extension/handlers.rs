@@ -42,9 +42,9 @@ use super::helpers::*;
 use super::sandbox;
 use super::types::*;
 
-mod ci;
+pub(crate) mod ci;
 #[allow(dead_code)]
-mod ci_artifact;
+pub(crate) mod ci_artifact;
 mod code_intel;
 mod gate_guard;
 mod jit_pitfalls;
@@ -69,6 +69,7 @@ pub(crate) use jit_pitfalls::force_trace_candidate_serialization_failure_for_tes
 // because they need concrete `AgentContext` / workspace / MCP-registry
 // internals that `djinn-mcp-extension` does not own.
 pub(crate) use ci::call_ci_job_log;
+pub(crate) use ci_artifact::call_ci_artifact;
 pub(crate) use code_intel::{call_code_graph, call_github_fetch_file, call_github_search};
 #[cfg(test)]
 pub(super) use code_intel::{call_code_graph_inner, call_lsp, should_pre_resolve_chat_key};
