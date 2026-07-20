@@ -156,18 +156,6 @@ impl TaskRepository {
         Ok(())
     }
 
-    /// Test-support helper for fixtures that exercise unavailable creator
-    /// provenance against nullable expand-phase task rows.
-    #[cfg(any(test, feature = "test-support"))]
-    pub async fn clear_created_by_user_id(&self, id: &str) -> Result<()> {
-        self.db.ensure_initialized().await?;
-        sqlx::query("UPDATE tasks SET created_by_user_id = NULL WHERE id = $1")
-            .bind(id)
-            .execute(self.db.pool())
-            .await?;
-        Ok(())
-    }
-
     /// Test-only convenience: create a task under an epic with no explicit
     /// provenance. Production code must use [`Self::create_in_project_with_provenance`].
     #[cfg(any(test, feature = "test-support"))]

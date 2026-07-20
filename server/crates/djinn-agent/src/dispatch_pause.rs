@@ -63,7 +63,10 @@ pub(crate) fn matching_task_dispatch_pause<'a>(
         return Some(("project", Some(task.project_id.clone()), pause));
     }
 
-    let creator = task.created_by_user_id.as_deref()?;
+    let creator = task.created_by_user_id.as_str();
+    if creator.is_empty() {
+        return None;
+    }
     pause_state
         .users
         .get(creator)
@@ -107,7 +110,7 @@ mod tests {
             owner: String::new(),
             labels: "[]".to_owned(),
             memory_refs: "[]".to_owned(),
-            created_by_user_id: created_by_user_id.map(str::to_owned),
+            created_by_user_id: created_by_user_id.unwrap_or_default().to_owned(),
             reopen_count: 0,
             continuation_count: 0,
             total_reopen_count: 0,

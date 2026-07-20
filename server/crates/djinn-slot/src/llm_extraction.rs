@@ -1692,7 +1692,7 @@ async fn run_llm_extraction_inner(
             &app_state,
             &session_id,
             &task_id,
-            task.created_by_user_id.clone(),
+            Some(task.created_by_user_id.clone()),
             &session.model_id,
         )
         .await
@@ -1917,7 +1917,7 @@ async fn run_llm_extraction_inner(
         provenance: &provenance,
         // Test providers are injected locally; production merge spend requires
         // the task creator attribution used by provider resolution.
-        caller_attributed: provider_override_present || task.created_by_user_id.is_some(),
+        caller_attributed: provider_override_present || !task.created_by_user_id.is_empty(),
         session_scope_paths: &session_scope_paths,
         created_note_ids: Mutex::new(HashSet::new()),
         #[cfg(any(test, feature = "test-support"))]

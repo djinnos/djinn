@@ -266,7 +266,7 @@ async fn checked_in_replays_enter_the_production_assemble_prompt_context_boundar
         let events = EventBus::noop();
         let mut task = create_project_epic_task(&db, &events, "Replay epic", "Replay task").await;
         task.description = "Network-free deterministic replay validation".into();
-        task.created_by_user_id = Some("replay-creator".into());
+        task.created_by_user_id = "replay-creator".into();
 
         let note_repo = NoteRepository::new(db.clone(), events);
         let scope = note_repo
@@ -311,7 +311,7 @@ async fn checked_in_replays_enter_the_production_assemble_prompt_context_boundar
                     host: &host,
                     session_id: "replay-session",
                     task_run_id: "replay-run",
-                    creator_id: task.created_by_user_id.as_deref(),
+                    creator_id: Some(task.created_by_user_id.as_str()),
                     acceptance_criteria: vec!["Planner output remains scope-first".into()],
                     resume_compaction_summary: case.resume_compaction_summary.as_deref(),
                     planned_note_search: Some(&search),

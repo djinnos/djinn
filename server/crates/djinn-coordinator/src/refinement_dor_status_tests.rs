@@ -162,7 +162,7 @@ async fn refinement_task_owner_is_attributed_user_login_not_system() {
     );
     // Authoritative ownership field is still stamped with the user id.
     assert_eq!(
-        task.created_by_user_id.as_deref(),
+        Some(task.created_by_user_id.as_str()),
         Some(fixture.user_id.as_str()),
         "created_by_user_id must remain the authoritative ownership field"
     );

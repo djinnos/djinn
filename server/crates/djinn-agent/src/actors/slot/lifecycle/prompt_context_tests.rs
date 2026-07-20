@@ -2047,7 +2047,7 @@ async fn planner_production_boundary_enabled_assembly_injects_and_attributes_tra
     let events = EventBus::noop();
     let mut task = create_project_epic_task(&db, &events, "Planner epic", "Planner title").await;
     task.description = "real planner description".into();
-    task.created_by_user_id = Some("creator-real".into());
+    task.created_by_user_id = "creator-real".into();
 
     // Seed a global note so that `query_by_scope_overlap_trace_candidates` returns
     // candidates and `persist_knowledge_trace` actually writes a trace row.
@@ -2087,7 +2087,7 @@ async fn planner_production_boundary_enabled_assembly_injects_and_attributes_tra
             host: &host,
             session_id: "session-real",
             task_run_id: "task-run-real",
-            creator_id: task.created_by_user_id.as_deref(),
+            creator_id: Some(task.created_by_user_id.as_str()),
             acceptance_criteria: vec!["parsed criterion".into()],
             resume_compaction_summary: Some(&raw_resume),
             planned_note_search: Some(&search),
@@ -2166,7 +2166,7 @@ async fn planner_production_boundary_disabled_is_byte_identical_and_does_no_host
     let db = Database::ephemeral().await.expect("ephemeral db");
     let events = EventBus::noop();
     let mut task = create_project_epic_task(&db, &events, "Planner epic", "Planner task").await;
-    task.created_by_user_id = Some("creator-real".into());
+    task.created_by_user_id = "creator-real".into();
     let app_state = agent_context_from_db(db, CancellationToken::new());
     let host = RecordingPlannerHost::with_content(valid_planner_payload());
     let search = RecordingPlannedNoteSearch {
@@ -2190,7 +2190,7 @@ async fn planner_production_boundary_disabled_is_byte_identical_and_does_no_host
             host: &host,
             session_id: "session-real",
             task_run_id: "task-run-real",
-            creator_id: task.created_by_user_id.as_deref(),
+            creator_id: Some(task.created_by_user_id.as_str()),
             acceptance_criteria: vec![],
             resume_compaction_summary: Some("raw but unused"),
             planned_note_search: Some(&search)
@@ -2209,7 +2209,7 @@ async fn planner_production_boundary_empty_host_payload_is_scope_only_without_se
     let db = Database::ephemeral().await.expect("ephemeral db");
     let events = EventBus::noop();
     let mut task = create_project_epic_task(&db, &events, "Planner epic", "Planner task").await;
-    task.created_by_user_id = Some("creator-real".into());
+    task.created_by_user_id = "creator-real".into();
     let app_state = agent_context_from_db(db, CancellationToken::new());
     let host = RecordingPlannerHost::default();
     let search = RecordingPlannedNoteSearch::default();
@@ -2233,7 +2233,7 @@ async fn planner_production_boundary_empty_host_payload_is_scope_only_without_se
             host: &host,
             session_id: "session-real",
             task_run_id: "task-run-real",
-            creator_id: task.created_by_user_id.as_deref(),
+            creator_id: Some(task.created_by_user_id.as_str()),
             acceptance_criteria: vec![],
             resume_compaction_summary: None,
             planned_note_search: Some(&search)
@@ -2252,7 +2252,7 @@ async fn planner_production_boundary_scope_budget_runs_planner_without_injection
     let db = Database::ephemeral().await.expect("ephemeral db");
     let events = EventBus::noop();
     let mut task = create_project_epic_task(&db, &events, "Planner epic", "Planner task").await;
-    task.created_by_user_id = Some("creator-real".into());
+    task.created_by_user_id = "creator-real".into();
     let note_repo = NoteRepository::new(db.clone(), EventBus::noop());
     for index in 0..10 {
         let note = note_repo
@@ -2298,7 +2298,7 @@ async fn planner_production_boundary_scope_budget_runs_planner_without_injection
             host: &host,
             session_id: "session-budget",
             task_run_id: "task-run-budget",
-            creator_id: task.created_by_user_id.as_deref(),
+            creator_id: Some(task.created_by_user_id.as_str()),
             acceptance_criteria: vec![],
             resume_compaction_summary: None,
             planned_note_search: Some(&search),
@@ -2324,7 +2324,7 @@ async fn planner_production_boundary_scope_first_dedup_caps_and_order_are_determ
     let db = Database::ephemeral().await.expect("ephemeral db");
     let events = EventBus::noop();
     let mut task = create_project_epic_task(&db, &events, "Planner epic", "Planner task").await;
-    task.created_by_user_id = Some("creator-real".into());
+    task.created_by_user_id = "creator-real".into();
     let note_repo = NoteRepository::new(db.clone(), EventBus::noop());
     let scope_note = note_repo
         .create(
@@ -2427,7 +2427,7 @@ async fn planner_production_boundary_scope_first_dedup_caps_and_order_are_determ
                 host: &host,
                 session_id: "session-order",
                 task_run_id: "task-run-order",
-                creator_id: task.created_by_user_id.as_deref(),
+                creator_id: Some(task.created_by_user_id.as_str()),
                 acceptance_criteria: vec![],
                 resume_compaction_summary: None,
                 planned_note_search: Some(&search),

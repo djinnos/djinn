@@ -1531,9 +1531,10 @@ impl CoordinatorActor {
     /// is exercised by the live MCP/session path, not these unit fixtures.
     #[cfg(not(test))]
     async fn task_is_ownerless(&self, task: &djinn_core::models::Task) -> bool {
-        let Some(uid) = task.created_by_user_id.as_deref() else {
+        let uid = task.created_by_user_id.as_str();
+        if uid.is_empty() {
             return true;
-        };
+        }
         let creator_lookup = djinn_db::UserRepository::new(self.db.clone())
             .get_by_id(uid)
             .await
@@ -1541,7 +1542,7 @@ impl CoordinatorActor {
 
         task_ownerless_from_creator_lookup(
             &task.short_id,
-            task.created_by_user_id.as_deref(),
+            Some(task.created_by_user_id.as_str()),
             creator_lookup,
         )
     }
@@ -2337,7 +2338,7 @@ impl CoordinatorActor {
             if exhausted_roles.contains(role) {
                 continue;
             }
-            let creator = task.created_by_user_id.clone();
+            let creator = Some(task.created_by_user_id.clone());
 
             // Base per-role eligibility, scoped to THIS task's creator's
             // credentials (own + org-shared) — the same set the worker resolves
@@ -3061,7 +3062,7 @@ mod inflight_ledger_tests {
             merge_conflict_metadata: None,
             memory_refs: "[]".to_owned(),
             agent_type: None,
-            created_by_user_id: creator.map(str::to_owned),
+            created_by_user_id: creator.unwrap_or_default().to_owned(),
             ci_status: "unknown".to_owned(),
             ci_head_sha: None,
             ci_pr_number: None,
@@ -4052,7 +4053,7 @@ mod inflight_ledger_tests {
         assert!(fixture_ready.iter().all(|task| {
             task.status == "open"
                 && task.issue_type == "task"
-                && task.created_by_user_id.as_deref() == Some(fixture.created_by_user_id.as_str())
+                && task.created_by_user_id == fixture.created_by_user_id
                 && crate::roles::RoleRegistry::new()
                     .role_for_task(task, &crate::roles::DispatchContext)
                     == Some("worker")
@@ -5811,7 +5812,7 @@ mod failover_chain_tests {
             merge_conflict_metadata: None,
             memory_refs: "[]".to_owned(),
             agent_type: None,
-            created_by_user_id: None,
+            created_by_user_id: "test-creator".into(),
             ci_status: "unknown".to_owned(),
             ci_head_sha: None,
             ci_pr_number: None,
@@ -6005,7 +6006,7 @@ mod failover_chain_tests {
             merge_conflict_metadata: None,
             memory_refs: "[]".to_owned(),
             agent_type: None,
-            created_by_user_id: None,
+            created_by_user_id: "test-creator".into(),
             ci_status: "unknown".to_owned(),
             ci_head_sha: None,
             ci_pr_number: None,
@@ -6263,7 +6264,7 @@ mod failover_chain_tests {
                 &task.short_id,
                 "worker",
                 0,
-                Some(task.created_by_user_id.as_deref().unwrap_or("user-x")),
+                Some(task.created_by_user_id.as_str()),
                 &["provider/model-a".to_owned(), "provider/model-b".to_owned()],
                 |pool, model_id| {
                     let pool = pool.clone();
@@ -6401,7 +6402,7 @@ mod failover_chain_tests {
         // post-fix the breaker check is deferred to
         // `apply_chain_exhaustion_side_effects` and that path was never
         // invoked because the chain was rescued.
-        let scope = Some(task.created_by_user_id.as_deref().unwrap_or("user-x"));
+        let scope = Some(task.created_by_user_id.as_str());
         let model_a_health = actor.health.model_health(scope, "provider/model-a");
         assert!(
             !model_a_health.auto_disabled,
@@ -6567,7 +6568,7 @@ mod failover_chain_tests {
             merge_conflict_metadata: None,
             memory_refs: "[]".to_owned(),
             agent_type: None,
-            created_by_user_id: None,
+            created_by_user_id: "test-creator".into(),
             ci_status: "unknown".to_owned(),
             ci_head_sha: None,
             ci_pr_number: None,
@@ -6976,7 +6977,7 @@ mod failover_chain_tests {
                 &task.short_id,
                 "worker",
                 0,
-                Some(task.created_by_user_id.as_deref().unwrap_or("user-x")),
+                Some(task.created_by_user_id.as_str()),
                 &["provider/model-a".to_owned(), "provider/model-b".to_owned()],
                 |pool, model_id| {
                     let pool = pool.clone();

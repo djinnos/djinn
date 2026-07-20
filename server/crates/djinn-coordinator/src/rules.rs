@@ -2340,7 +2340,7 @@ mod tests {
         assert_eq!(task.priority, PRIORITY_CRITICAL);
         assert_eq!(task.owner, "planner");
         assert_eq!(
-            task.created_by_user_id.as_deref(),
+            Some(task.created_by_user_id.as_str()),
             Some(build_owner.id.as_str())
         );
         assert!(task.design.contains("Single-flight / coalesce first"));

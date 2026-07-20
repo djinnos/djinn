@@ -560,9 +560,7 @@ impl DirectServices {
 
         // Load the source task for naming the escalation task.
         let source_task = task_repo.get(source_task_id).await.ok().flatten();
-        let source_creator = source_task
-            .as_ref()
-            .and_then(|t| t.created_by_user_id.clone());
+        let source_creator = source_task.as_ref().map(|t| t.created_by_user_id.clone());
 
         // Idempotency: if the source already has an unresolved blocker
         // (from a prior park), skip creating a duplicate escalation.

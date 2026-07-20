@@ -451,7 +451,8 @@ impl CoordinatorActor {
                 if task.status != "closed" {
                     open_ids.push(task.id.clone());
                 }
-                if let Some(uid) = task.created_by_user_id.clone() {
+                if !task.created_by_user_id.is_empty() {
+                    let uid = task.created_by_user_id.clone();
                     let is_newer = latest_user
                         .as_ref()
                         .map(|(at, _)| task.created_at > *at)

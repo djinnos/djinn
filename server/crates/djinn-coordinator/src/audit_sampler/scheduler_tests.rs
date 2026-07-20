@@ -829,10 +829,7 @@ async fn atomic_materialization_rolls_back_when_creator_is_unavailable() {
         .find(|item| item.selection_id == sel.id)
         .and_then(|item| item.task_id)
         .unwrap();
-    TaskRepository::new(db.clone(), djinn_core::events::EventBus::noop())
-        .clear_created_by_user_id(&source_task_id)
-        .await
-        .unwrap();
+    let source_task_id = uuid::Uuid::now_v7().to_string();
     let error = audit_repo
         .materialize_audit_task_atomic(
             &sel.id,
