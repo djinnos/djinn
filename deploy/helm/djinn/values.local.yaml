@@ -29,6 +29,11 @@ image:
 cacheCleanup:
   mode: dry_run
 
+# Tilt owns this stable local-development identity and creates the referenced
+# Secret alongside the rendered chart. Production callers supply their own.
+migration:
+  designatedOperatorSecret: djinn-local-migration-operator
+
 # Kind uses rancher.io/local-path as the default storage class, which
 # dynamically provisions hostPath-backed PVs under the kind node. Since
 # kind is single-node, ReadWriteOnce PVCs can be shared across the server

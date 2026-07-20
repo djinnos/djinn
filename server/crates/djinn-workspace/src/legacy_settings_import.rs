@@ -18,6 +18,8 @@ pub enum LegacySettingsFileImportError {
     Read(#[from] std::io::Error),
     #[error(transparent)]
     Import(#[from] LegacySettingsImportError),
+    #[error(transparent)]
+    Residue(#[from] crate::project_residue::ProjectResidueError),
 }
 
 /// Import a single checkout's legacy settings and delete exactly that source
@@ -32,13 +34,33 @@ pub async fn import_legacy_settings_file(
     let source_path = checkout.join(LEGACY_SETTINGS_RELATIVE_PATH);
     let source = match tokio::fs::read(&source_path).await {
         Ok(source) => source,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            let report = crate::project_residue::cleanup_project_local_djinn(checkout)?;
+            if !report.is_clean() {
+                tracing::warn!(checkout = %checkout.display(), residue = ?report, "project-local .djinn cleanup blocked; retained residue");
+            }
+            return Ok(None);
+        }
         Err(error) => return Err(error.into()),
     };
-    let result = LegacySettingsImport::new(db)
+    let result = match LegacySettingsImport::new(db)
         .import(project_id, &source)
-        .await?;
+        .await
+    {
+        Ok(result) => result,
+        Err(error) => {
+            // Keep malformed input in place, but make its local cleanup gate
+            // observable before startup proceeds to the next project.
+            let report = crate::project_residue::cleanup_project_local_djinn(checkout)?;
+            tracing::warn!(checkout = %checkout.display(), residue = ?report, "project-local .djinn cleanup blocked; retained residue");
+            return Err(error.into());
+        }
+    };
     tokio::fs::remove_file(source_path).await?;
+    let report = crate::project_residue::cleanup_project_local_djinn(checkout)?;
+    if !report.is_clean() {
+        tracing::warn!(checkout = %checkout.display(), residue = ?report, "project-local .djinn cleanup blocked; retained residue");
+    }
     Ok(Some(result))
 }
 

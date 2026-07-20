@@ -726,6 +726,31 @@ pub fn render() -> Result<String, String> {
     handle().map(|handle| prioritize_dispatch_attempts(handle.render()))
 }
 
+/// Test support: run `f` against a private recorder and render only what `f`
+/// itself emitted.
+///
+/// The recorder installed by [`init`] is process-global, and cargo runs every
+/// test in a binary as a thread of one process. A test that asserts an
+/// *absolute* value for a metric series is therefore asserting on the whole
+/// binary's cumulative total, which any concurrently running test can move.
+/// Reading a delta around the emission narrows but does not close that window,
+/// because a concurrent writer can still land between the two renders. Scoping
+/// a recorder to the calling thread instead gives the test a registry no other
+/// test can reach, so exact assertions become deterministic without
+/// serializing anything.
+///
+/// Only sound for synchronous bodies. The scope is thread-local, so anything
+/// `f` moves to another thread — `tokio::spawn`, a multi-thread runtime — will
+/// record to the global recorder and go unseen here.
+pub fn render_isolated<T>(f: impl FnOnce() -> T) -> (T, String) {
+    let recorder = PrometheusBuilder::new().build_recorder();
+    let value = metrics::with_local_recorder(&recorder, f);
+    (
+        value,
+        prioritize_dispatch_attempts(recorder.handle().render()),
+    )
+}
+
 fn prioritize_dispatch_attempts(rendered: String) -> String {
     const DISPATCH_HELP: &str = "# HELP djinn_dispatch_attempts_total";
     if rendered.starts_with(DISPATCH_HELP) {

@@ -9,9 +9,8 @@ use std::sync::{Arc, OnceLock};
 
 use djinn_db::repositories::repo_graph_generation::ReservedPublicationFailureStage;
 use djinn_db::{
-    CurrentGalaxyArtifact, Database, DatabaseConnectConfig, PostgresDatabaseConfig,
-    RepoGraphCacheRepository, RepoGraphGenerationRepository, ReservedGalaxyArtifactChunk,
-    ReservedGalaxyArtifactManifest, ReservedGraphPublication,
+    CurrentGalaxyArtifact, Database, RepoGraphCacheRepository, RepoGraphGenerationRepository,
+    ReservedGalaxyArtifactChunk, ReservedGalaxyArtifactManifest, ReservedGraphPublication,
 };
 use protobuf::{EnumOrUnknown, Message};
 use scip::types::{Document, Index, Occurrence, SymbolInformation, symbol_information};
@@ -36,17 +35,14 @@ fn sha256(bytes: &[u8]) -> String {
 }
 
 async fn fresh() -> Option<(Database, RepoGraphGenerationRepository)> {
-    let url = std::env::var("DJINN_TEST_DATABASE_URL")
+    std::env::var("DJINN_TEST_DATABASE_URL")
         .or_else(|_| std::env::var("DATABASE_URL"))
         .or_else(|_| std::env::var("TEST_POSTGRES_URL"))
         .ok()?;
-    let db = Database::open_with_config(DatabaseConnectConfig::Postgres(PostgresDatabaseConfig {
-        url,
-    }))
-    .expect("open live Postgres database");
+    let db = Database::open_in_memory().expect("open isolated Postgres test database");
     db.ensure_initialized()
         .await
-        .expect("migrate live database");
+        .expect("initialize isolated Postgres test database");
     let repo = RepoGraphGenerationRepository::new(db.clone());
     repo.prepare_publication_test_project(PROJECT)
         .await
