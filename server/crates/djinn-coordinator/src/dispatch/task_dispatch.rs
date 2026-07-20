@@ -3552,12 +3552,20 @@ mod inflight_ledger_tests {
 
     fn assert_wnd1_observed_cap(
         cap: u32,
+        creator_user_id: &str,
+        model: &str,
         observations: &mut Vec<DispatchCapObservation>,
         phase: &str,
     ) {
         observations.extend(take_dispatch_cap_observations());
         let max_observed = observations
             .iter()
+            // The observation buffer is a process-global sink shared by every
+            // dispatch test in this binary, so a concurrently running test's
+            // passes land in it too. The cap this harness asserts is scoped to
+            // one (creator, model) bucket, and a foreign bucket's count says
+            // nothing about it — filter to this fixture's own bucket.
+            .filter(|obs| obs.creator_user_id == creator_user_id && obs.model == model)
             // LedgerOverlay and CapConsidered may conservatively count both a
             // newly visible session row and its reservation for one pass. The
             // admission invariant is the count after a successful increment.
@@ -3875,6 +3883,8 @@ mod inflight_ledger_tests {
                                 .expect("wnd1 observations mutex poisoned");
                             assert_wnd1_observed_cap(
                                 cap,
+                                &creator_user_id,
+                                &model_id,
                                 &mut observations,
                                 "concurrent repeated dispatch passes",
                             );
@@ -3927,7 +3937,13 @@ mod inflight_ledger_tests {
                 let mut observations = observations
                     .lock()
                     .expect("wnd1 observations mutex poisoned");
-                assert_wnd1_observed_cap(cap, &mut observations, "quiescence reconciliation");
+                assert_wnd1_observed_cap(
+                    cap,
+                    &fixture.created_by_user_id,
+                    &fixture.model_id,
+                    &mut observations,
+                    "quiescence reconciliation",
+                );
             }
 
             {
@@ -4085,20 +4101,34 @@ mod inflight_ledger_tests {
         );
     }
 
+    /// Drain the process-global observation sink down to one bucket.
+    ///
+    /// The sink is shared by every dispatch test in this binary, so a
+    /// concurrently running test's observations land in it too and a whole-sink
+    /// assertion reads them as its own. Each caller below uses a creator id
+    /// unique to itself, which keeps these assertions exact without
+    /// serializing the module. Clearing the sink first would be the other
+    /// option, but it would silently discard a peer test's observations.
+    fn observations_for(creator_user_id: &str, model: &str) -> Vec<DispatchCapObservation> {
+        take_dispatch_cap_observations()
+            .into_iter()
+            .filter(|obs| obs.creator_user_id == creator_user_id && obs.model == model)
+            .collect()
+    }
+
     /// The overshoot fix: a dispatch whose `running` session row hasn't landed
     /// yet still counts against the per-user cap. The DB seed shows 0 running,
     /// but four in-flight dispatches must raise the count to 4 so the next pass
     /// defers instead of dispatching four more.
     #[test]
     fn ledger_overlay_counts_inflight_dispatches_when_db_seed_is_cold() {
-        clear_dispatch_cap_observations();
         let mut running: HashMap<(String, String), u32> = HashMap::new(); // cold DB seed
         let mut inflight: HashMap<String, InflightDispatch> = HashMap::new();
         for i in 0..4 {
             inflight.insert(
                 format!("task-{i}"),
                 inflight_entry(
-                    Some("user-a"),
+                    Some("cold-seed-user"),
                     "openai/gpt-5.5",
                     djinn_core::models::ModelLane::Implement,
                 ),
@@ -4108,14 +4138,16 @@ mod inflight_ledger_tests {
         overlay_inflight_ledger(&mut running, &inflight);
 
         assert_eq!(
-            running.get(&key("user-a", "openai/gpt-5.5")).copied(),
+            running
+                .get(&key("cold-seed-user", "openai/gpt-5.5"))
+                .copied(),
             Some(4),
             "four in-flight dispatches must count against the cap even with a cold DB seed"
         );
         assert_eq!(
-            take_dispatch_cap_observations(),
+            observations_for("cold-seed-user", "openai/gpt-5.5"),
             vec![DispatchCapObservation {
-                creator_user_id: "user-a".to_owned(),
+                creator_user_id: "cold-seed-user".to_owned(),
                 model: "openai/gpt-5.5".to_owned(),
                 effective_count: 4,
                 stage: DispatchCapObservationStage::LedgerOverlay,
@@ -4129,12 +4161,11 @@ mod inflight_ledger_tests {
     /// as two. This is the case `max(DB, ledger)` previously undercounted.
     #[test]
     fn ledger_overlay_adds_disjoint_booting_reservations() {
-        clear_dispatch_cap_observations();
-        let mut running = HashMap::from([(key("user-a", "m"), 1)]);
+        let mut running = HashMap::from([(key("disjoint-booting-user", "m"), 1)]);
         let inflight = HashMap::from([(
             "booting-task".to_owned(),
             inflight_entry(
-                Some("user-a"),
+                Some("disjoint-booting-user"),
                 "m",
                 djinn_core::models::ModelLane::Implement,
             ),
@@ -4142,11 +4173,14 @@ mod inflight_ledger_tests {
 
         overlay_inflight_ledger(&mut running, &inflight);
 
-        assert_eq!(running.get(&key("user-a", "m")).copied(), Some(2));
         assert_eq!(
-            take_dispatch_cap_observations(),
+            running.get(&key("disjoint-booting-user", "m")).copied(),
+            Some(2)
+        );
+        assert_eq!(
+            observations_for("disjoint-booting-user", "m"),
             vec![DispatchCapObservation {
-                creator_user_id: "user-a".to_owned(),
+                creator_user_id: "disjoint-booting-user".to_owned(),
                 model: "m".to_owned(),
                 effective_count: 2,
                 stage: DispatchCapObservationStage::LedgerOverlay,
@@ -4284,19 +4318,17 @@ mod inflight_ledger_tests {
 
     #[test]
     fn dispatch_cap_observer_records_new_inflight_increments() {
-        clear_dispatch_cap_observations();
-
         observe_dispatch_cap_count(
             DispatchCapObservationStage::InflightIncremented,
-            "user-a",
+            "inflight-observer-user",
             "m",
             2,
         );
 
         assert_eq!(
-            take_dispatch_cap_observations(),
+            observations_for("inflight-observer-user", "m"),
             vec![DispatchCapObservation {
-                creator_user_id: "user-a".to_owned(),
+                creator_user_id: "inflight-observer-user".to_owned(),
                 model: "m".to_owned(),
                 effective_count: 2,
                 stage: DispatchCapObservationStage::InflightIncremented,
@@ -4415,16 +4447,24 @@ mod inflight_ledger_tests {
     /// so they must not contribute to any count.
     #[test]
     fn ledger_overlay_ignores_creatorless_entries() {
-        clear_dispatch_cap_observations();
         let mut running: HashMap<(String, String), u32> = HashMap::new();
         let mut inflight: HashMap<String, InflightDispatch> = HashMap::new();
         inflight.insert(
             "sys".into(),
-            inflight_entry(None, "m", djinn_core::models::ModelLane::Plan),
+            inflight_entry(None, "creatorless-m", djinn_core::models::ModelLane::Plan),
         );
         overlay_inflight_ledger(&mut running, &inflight);
         assert!(running.is_empty());
-        assert!(take_dispatch_cap_observations().is_empty());
+        // Scoped by model rather than creator: the assertion is that a
+        // creator-less entry produces no observation at all, so there is no
+        // creator id to match on. The model name is unique to this test, which
+        // keeps a peer test's observations out of the check.
+        assert!(
+            take_dispatch_cap_observations()
+                .iter()
+                .all(|obs| obs.model != "creatorless-m"),
+            "a creator-less dispatch is ungated and must not be observed"
+        );
     }
 
     /// With cap N for a model and N running mixed-role sessions for the same

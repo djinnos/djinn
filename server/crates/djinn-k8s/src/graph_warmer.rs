@@ -16,6 +16,9 @@ use tokio::sync::{Mutex, Notify};
 use tracing::{debug, info, warn};
 
 use crate::config::KubernetesConfig;
+use crate::graph_warmer_identity::{
+    deterministic_warm_job_name, stamp_admission_identity, warm_work_id,
+};
 use crate::warm_job::{LABEL_PROJECT_ID, LABEL_WARM, build_warm_job};
 
 /// Warm Job manifest accepted by [`WarmJobDispatcher`].
@@ -395,7 +398,11 @@ impl WarmDispatch {
         let revision = discover_mirror_main_tip(project_id)
             .await
             .unwrap_or_else(|| "unknown".to_string());
-        let work_id = format!("graph-warm:{project_id}:{revision}");
+        let work_id = warm_work_id(project_id, &revision);
+        debug_assert!(
+            crate::label_value::is_valid_label_value(&work_id),
+            "warm work_id must be label-safe: {work_id}"
+        );
         WarmAdmissionRequest {
             domain: "graph-warm".to_string(),
             object_name: deterministic_warm_job_name(project_id, &work_id),
@@ -614,20 +621,7 @@ impl WarmDispatch {
             &image_tag,
             cargo_cache_policy.as_ref(),
         );
-        job.metadata.name = Some(admission_request.object_name.clone());
-        let labels = job.metadata.labels.get_or_insert_default();
-        labels.insert(
-            crate::workload_inventory::LABEL_ADMISSION_DOMAIN.into(),
-            "warm_build".into(),
-        );
-        labels.insert(
-            crate::workload_inventory::LABEL_ADMISSION_WORK_ID.into(),
-            admission_request.work_id.clone(),
-        );
-        labels.insert(
-            crate::workload_inventory::LABEL_ADMISSION_GENERATION.into(),
-            admission_request.generation.to_string(),
-        );
+        stamp_admission_identity(&mut job, &admission_request);
         let namespace = self.config.namespace.clone();
         let permit = match self.admission.as_ref() {
             Some(admission) => match admission.admit(admission_request).await {
@@ -793,26 +787,6 @@ fn dispatcher_error_is_definitive(error: &str) -> bool {
     ]
     .iter()
     .any(|marker| error.contains(marker))
-}
-
-fn deterministic_warm_job_name(project_id: &str, work_id: &str) -> String {
-    let project: String = project_id
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || c == '-' {
-                c.to_ascii_lowercase()
-            } else {
-                '-'
-            }
-        })
-        .take(36)
-        .collect();
-    let mut hash = 0xcbf29ce484222325_u64;
-    for byte in work_id.bytes() {
-        hash ^= u64::from(byte);
-        hash = hash.wrapping_mul(0x100000001b3);
-    }
-    format!("djinn-warm-{project}-g1-{hash:016x}")
 }
 
 /// Kubernetes-backed canonical-graph warmer.

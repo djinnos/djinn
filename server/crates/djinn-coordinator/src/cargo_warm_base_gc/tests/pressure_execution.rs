@@ -1,4 +1,6 @@
 // djinn:allow-oversize — pressure executor regressions share fixtures and race helpers.
+#![allow(clippy::await_holding_lock)]
+
 use super::*;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -14,6 +16,26 @@ struct EventRecordingLayer {
 
 const PRESSURE_METRICS_FIXTURE: &str =
     include_str!("../../../../djinn-telemetry/tests/fixtures/cache_cleanup/expected_metrics.json");
+
+/// Serializes every test that consumes a pressure plan.
+///
+/// Executing a plan increments the process-global `djinn_cache_pressure_*`
+/// counters, and cargo runs this file's tests as threads of one process, so a
+/// second executor running concurrently lands its increments inside another
+/// test's measurement window. Reading a delta is not enough on its own — the
+/// delta only cancels history that predates the window, not a writer that
+/// arrives during it. Every plan-consuming test therefore takes this guard so
+/// exactly one of them is emitting at a time; the work under it is tempdir I/O
+/// measured in milliseconds, so serializing costs effectively nothing.
+///
+/// Poisoning is recovered rather than propagated: one failing test should
+/// report its own assertion, not convert its peers into unwrap panics.
+fn pressure_metrics_guard() -> std::sync::MutexGuard<'static, ()> {
+    static PRESSURE_METRICS_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    PRESSURE_METRICS_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
 
 fn rendered_counter(rendered: &str, metric: &str, labels: &[(&str, &str)]) -> u64 {
     rendered
@@ -258,6 +280,7 @@ fn three_rung_clock() -> TestClock {
 
 #[tokio::test]
 async fn three_rung_executor_retains_terminal_precheck_suffix() {
+    let _pressure_metrics = pressure_metrics_guard();
     let temp = tempfile::tempdir().unwrap();
     let first = old_base(&temp, "018f8b9a-0d70-7f0a-8000-000000000020");
     let second = old_base(&temp, "018f8b9a-0d70-7f0a-8000-000000000021");
@@ -289,6 +312,7 @@ async fn three_rung_executor_retains_terminal_precheck_suffix() {
 
 #[tokio::test]
 async fn three_rung_executor_keeps_success_and_retains_postcheck_suffix() {
+    let _pressure_metrics = pressure_metrics_guard();
     let temp = tempfile::tempdir().unwrap();
     let first = old_base(&temp, "018f8b9a-0d70-7f0a-8000-000000000022");
     let second = old_base(&temp, "018f8b9a-0d70-7f0a-8000-000000000023");
@@ -326,6 +350,7 @@ async fn three_rung_executor_keeps_success_and_retains_postcheck_suffix() {
 
 #[tokio::test]
 async fn three_rung_executor_absent_unit_blocks_same_base_escalation() {
+    let _pressure_metrics = pressure_metrics_guard();
     let temp = tempfile::tempdir().unwrap();
     let base = old_base(&temp, "018f8b9a-0d70-7f0a-8000-000000000024");
     let absent = eligible_three_rung_unit(
@@ -637,6 +662,7 @@ impl FilesystemCapacity for RemovingCapacity {
 
 #[tokio::test]
 async fn three_rung_executor_external_reclamation_before_first_retains_suffix() {
+    let _pressure_metrics = pressure_metrics_guard();
     let temp = tempfile::tempdir().unwrap();
     let first = old_base(&temp, "018f8b9a-0d70-7f0a-8000-000000000030");
     let second = old_base(&temp, "018f8b9a-0d70-7f0a-8000-000000000031");
@@ -676,6 +702,7 @@ async fn three_rung_executor_external_reclamation_before_first_retains_suffix() 
 
 #[tokio::test]
 async fn three_rung_executor_external_reclamation_between_attempts_stops_before_next_remove() {
+    let _pressure_metrics = pressure_metrics_guard();
     let temp = tempfile::tempdir().unwrap();
     let first = old_base(&temp, "018f8b9a-0d70-7f0a-8000-000000000032");
     let second = old_base(&temp, "018f8b9a-0d70-7f0a-8000-000000000033");
@@ -747,6 +774,7 @@ impl FilesystemCapacity for LockAssertingCapacity {
 
 #[tokio::test]
 async fn three_rung_executor_measures_immediately_under_held_lock() {
+    let _pressure_metrics = pressure_metrics_guard();
     let temp = tempfile::tempdir().unwrap();
     let base = old_base(&temp, "018f8b9a-0d70-7f0a-8000-000000000034");
     let unit = eligible_three_rung_unit(&base, &base, PressureRung::WholeBase);
@@ -772,6 +800,7 @@ async fn three_rung_executor_measures_immediately_under_held_lock() {
 
 #[tokio::test]
 async fn three_rung_executor_absent_during_removal_blocks_same_base_escalation() {
+    let _pressure_metrics = pressure_metrics_guard();
     let temp = tempfile::tempdir().unwrap();
     let base = old_base(&temp, "018f8b9a-0d70-7f0a-8000-000000000035");
     let target = base.join("debug").join("incremental");
@@ -812,6 +841,7 @@ async fn three_rung_executor_absent_during_removal_blocks_same_base_escalation()
 
 #[tokio::test]
 async fn three_rung_executor_removal_failure_blocks_same_base_escalation() {
+    let _pressure_metrics = pressure_metrics_guard();
     let temp = tempfile::tempdir().unwrap();
     let base = old_base(&temp, "018f8b9a-0d70-7f0a-8000-000000000036");
     let target = base.join("debug").join("incremental");
@@ -881,6 +911,7 @@ impl ActivityGuard for SwappingActivity {
 #[cfg(unix)]
 #[tokio::test]
 async fn three_rung_executor_path_swap_to_symlink_is_retained_without_mutation() {
+    let _pressure_metrics = pressure_metrics_guard();
     let temp = tempfile::tempdir().unwrap();
     let base = old_base(&temp, "018f8b9a-0d70-7f0a-8000-000000000037");
     let target = base.join("debug").join("incremental");
@@ -915,6 +946,7 @@ async fn three_rung_executor_path_swap_to_symlink_is_retained_without_mutation()
 
 #[tokio::test]
 async fn pressure_metrics_match_the_bounded_fixture_for_execution_boundaries() {
+    let _pressure_metrics = pressure_metrics_guard();
     let fixture: serde_json::Value = serde_json::from_str(PRESSURE_METRICS_FIXTURE).unwrap();
     let case = |name: &str| &fixture["cases"][name];
     let value = |case: &serde_json::Value, field: &str| case[field].as_u64().unwrap();
@@ -1272,6 +1304,7 @@ fn assert_fixture_result(
 
 #[tokio::test]
 async fn frozen_race_cases_execute_post_plan_guards_and_removal_seam() {
+    let _pressure_metrics = pressure_metrics_guard();
     let fixture = frozen_coordinator_fixture();
     let temp = tempfile::tempdir().unwrap();
     for (index, case) in fixture["race_cases"].as_array().unwrap().iter().enumerate() {
@@ -1361,6 +1394,7 @@ async fn frozen_race_cases_execute_post_plan_guards_and_removal_seam() {
 
 #[tokio::test]
 async fn frozen_capacity_cases_execute_external_reclamation_and_probe_failures() {
+    let _pressure_metrics = pressure_metrics_guard();
     let fixture = frozen_coordinator_fixture();
     let temp = tempfile::tempdir().unwrap();
     for (index, case) in fixture["capacity_cases"]
@@ -1517,6 +1551,7 @@ fn frozen_coordinator_fixture_records_exact_three_rung_cases() {
 
 #[tokio::test]
 async fn frozen_cold_rebuild_cases_execute_and_preserve_required_siblings() {
+    let _pressure_metrics = pressure_metrics_guard();
     let fixture = frozen_coordinator_fixture();
     let temp = tempfile::tempdir().unwrap();
     for (index, case) in fixture["cold_rebuild_cases"]
@@ -1812,6 +1847,7 @@ impl PressureOperationObserver for RecordingObserver {
 #[cfg(unix)]
 #[tokio::test]
 async fn frozen_two_actor_schedule_serializes_warm_work_and_pressure_retry() {
+    let _pressure_metrics = pressure_metrics_guard();
     use std::process::{Command, Stdio};
 
     // ---------- Child entry: run the landed warm path ----------
