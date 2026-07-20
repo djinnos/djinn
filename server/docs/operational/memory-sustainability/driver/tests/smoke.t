@@ -11,6 +11,8 @@ is($r[0]{defaults}{t0_seconds},1800,'production T0 default remains encoded');
 is($r[0]{defaults}{burst_seconds},7200,'production burst default remains encoded');
 my @requests=grep {$_->{kind} eq 'galaxy_request'} @r;
 is_deeply([map {$_->{status}} @requests],[200,304,200,304,200,304],'requests alternate 200/304');
+ok(!(grep { !defined $_->{rss_before_bytes} || !defined $_->{rss_after_bytes} } @requests),
+   'every route request retains its collected before/after RSS evidence');
 ok(scalar(grep {$_->{kind} eq 'preflight' && $_->{fixture_observed}{seed} eq 'ste6-smoke-v1'} @r),'preflight observes fixture identity before install');
 ok(scalar(grep {$_->{kind} eq 'oom_delta'} @r),'OOM baseline and delta are preserved');
 ok(scalar(grep {$_->{kind} eq 'peak' && $_->{warm_peak_bytes}} @r),'warm and server peaks are recorded');

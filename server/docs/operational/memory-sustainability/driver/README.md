@@ -32,6 +32,10 @@ Before mutation it verifies commands, observed fixture identity, cgroup signals,
 metrics, a 40-page board pass, and 200/304 galaxy responses. It rejects malformed
 `memory.current`/`memory.events`, OOM/restart deltas, generation replacement, and
 a missing resident slot; JSONL includes observed fixture identity and warm/server peaks.
+For every burst route request it also samples `djinn_process_rss_bytes` immediately
+before and after the landed galaxy request and records those two values in the
+`galaxy_request` evidence. The final server peak includes those route-boundary
+samples as well as the phase samples and graph-install peak.
 
 Evidence is append-only `memory-sustainability-raw/v1` JSONL. The final filename
 is created atomically only after every phase completes. Failures and SIGINT/SIGTERM

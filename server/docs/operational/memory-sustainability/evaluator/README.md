@@ -4,7 +4,7 @@ This subtree defines the versioned release-gate input (`raw-schema.json`), drive
 
 ## Input and command
 
-The wrapper has a required `candidate` run and optional `pre_change_diagnostic` run. A run is an append-only `samples` stream plus append-only route and board evidence. Each sample carries a stable ID/timestamp, cgroup current usage and OOM events, process/anonymous RSS, the landed `djinn_jemalloc_{allocated,resident,retained}_bytes` values, and canonical graph-slot presence/size/node/edge measurements. Routes retain status, ETag and latency; board evidence retains page count and duration. Optional fixture-manifest and immutable evidence references preserve provenance.
+The wrapper has a required `candidate` run and optional `pre_change_diagnostic` run. A run is an append-only `samples` stream plus append-only route and board evidence. Each sample carries a stable ID/timestamp, cgroup current usage and OOM events, process/anonymous RSS, the landed `djinn_jemalloc_{allocated,resident,retained}_bytes` values, and canonical graph-slot presence/size/node/edge measurements. Routes retain status, ETag, latency, and the driver-collected RSS immediately before and after that route request; board evidence retains page count and duration. Optional fixture-manifest and immutable evidence references preserve provenance.
 
 ```sh
 perl server/docs/operational/memory-sustainability/evaluator/adapt_driver_jsonl.pl \
@@ -14,7 +14,7 @@ perl server/docs/operational/memory-sustainability/evaluator/evaluate.pl --input
   --json-out evaluation.json --report-out evaluation.md
 ```
 
-The adapter is the required non-hand-editing bridge from driver JSONL to the evaluator wrapper. It validates a finalized successful collection, carries the driver run ID and supplied immutable image digest into every derived record, and records SHA-256 references to the raw JSONL and fixture manifest. Add the three `--diagnostic-*` arguments together to retain an optional pre-change diagnostic run.
+The adapter is the required non-hand-editing bridge from driver JSONL to the evaluator wrapper. It validates a finalized successful collection, carries the driver run ID and supplied immutable image digest into every derived record, preserves the graph-install and final server peaks, requires the per-request route RSS measurements, parses collected timestamps (including the driver’s UTC format), and records SHA-256 references to the raw JSONL and fixture manifest. Add the three `--diagnostic-*` arguments together to retain an optional pre-change diagnostic run.
 
 All values are JSON integers, never byte strings or display units. The evaluator rejects forward/unsupported schema versions, malformed wrapper roots and values, mixed identities, missing signals/phases, ambiguous T0/graph-install/T1/T2 anchors, and generation drift. It derives peaks from **every** sample in the stream and retains the supplied raw run in the stable, canonically-keyed JSON result. Evidence pointers use actual array indices.
 

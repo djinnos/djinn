@@ -41,10 +41,21 @@ sub sha_ref {
     return { id => $id, path => $path, sha256 => sha256_hex( bytes($path) ) };
 }
 sub timestamp_ms {
-    my ( $value, $fallback ) = @_;
-    return $fallback unless defined $value
-      && $value =~ /^([0-9]{4})-([0-9]{2})-([0-9]{2})\s+([0-9]{2}):([0-9]{2}):([0-9]{2})Z$/;
-    return timegm( $6, $5, $4, $3, $2 - 1, $1 ) * 1000;
+    my ( $event, $what ) = @_;
+    if ( exists $event->{timestamp_unix_ms} ) {
+        return integer( $event->{timestamp_unix_ms}, "$what.timestamp_unix_ms" );
+    }
+    my $value = $event->{timestamp};
+    die "$what omits a collection timestamp\n" unless defined $value && !ref $value;
+    if ( $value =~ /^([0-9]{4})-([0-9]{2})-([0-9]{2})[ T]([0-9]{2}):([0-9]{2}):([0-9]{2})Z$/ ) {
+        return timegm( $6, $5, $4, $3, $2 - 1, $1 ) * 1000;
+    }
+    my %month = ( Jan => 0, Feb => 1, Mar => 2, Apr => 3, May => 4, Jun => 5,
+                  Jul => 6, Aug => 7, Sep => 8, Oct => 9, Nov => 10, Dec => 11 );
+    if ( $value =~ /^(Sun|Mon|Tue|Wed|Thu|Fri|Sat)\s+(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+(\d{1,2})\s+(\d{2}):(\d{2}):(\d{2})\s+(\d{4})Z$/ ) {
+        return timegm( $6, $5, $4, $3, $month{$2}, $7 ) * 1000;
+    }
+    die "$what has an unsupported collection timestamp '$value'\n";
 }
 sub integer {
     my ( $value, $what ) = @_;
@@ -77,8 +88,9 @@ sub make_run {
     my ($metadata) = grep { $_->{kind} eq 'run_metadata' } @events;
     my ($preflight) = grep { $_->{kind} eq 'preflight' } @events;
     my ($install_peak) = grep { $_->{kind} eq 'peak' && $_->{phase} eq 'graph_install' } @events;
-    die "$raw_path omits run metadata, preflight, or graph-install peak\n"
-      unless $metadata && $preflight && $install_peak;
+    my ($run_peak) = grep { $_->{kind} eq 'peak' && $_->{phase} eq 'run' } @events;
+    die "$raw_path omits run metadata, preflight, graph-install peak, or run peak\n"
+      unless $metadata && $preflight && $install_peak && $run_peak;
     my $run_id = $metadata->{run_id};
     die "$raw_path run metadata omits run_id\n" unless defined $run_id && length $run_id;
     my $limit = integer( $preflight->{cgroup_limit}, 'preflight.cgroup_limit' );
@@ -86,12 +98,21 @@ sub make_run {
     my %phase = ( T0 => 'T0', graph_install_peak => 'graph_install', T1 => 'T1', burst_end => 'burst', T2 => 'T2' );
     my ( @samples, @route_samples, @board_passes );
     my $sample_id = 0;
-    my $last_rss = metric( $preflight, 'djinn_process_rss_bytes' );
+    my $install_server_peak = integer( $install_peak->{server_peak_bytes}, 'graph-install.server_peak_bytes' );
+    my $run_server_peak = integer( $run_peak->{server_peak_bytes}, 'run.server_peak_bytes' );
+    die "$raw_path run server peak is below graph-install server peak\n"
+      if $run_server_peak < $install_server_peak;
     for my $event (@events) {
         if ( $event->{kind} eq 'sample' && exists $phase{ $event->{label} // '' } ) {
-            my $timestamp = timestamp_ms( $event->{timestamp}, ++$sample_id );
+            ++$sample_id;
+            my $timestamp = timestamp_ms( $event, "sample $event->{label}" );
             my $rss = metric( $event, 'djinn_process_rss_bytes' );
-            $last_rss = $rss;
+            # Preserve the command-measured install peak rather than replacing it
+            # with the later post-install sampler value.
+            $rss = $install_server_peak if $event->{label} eq 'graph_install_peak';
+            # The final driver peak is derived from raw samples and the install
+            # peak. Retain that observed maximum in the burst phase for gating.
+            $rss = $run_server_peak if $event->{label} eq 'burst_end' && $run_server_peak > $rss;
             push @samples, {
                 id => "sample-$sample_id", run_id => $run_id, image_id => $image,
                 phase => $phase{ $event->{label} }, timestamp_unix_ms => $timestamp,
@@ -114,18 +135,18 @@ sub make_run {
             my $ordinal = integer( $event->{ordinal}, 'galaxy_request.ordinal' );
             push @route_samples, {
                 id => "route-$ordinal", run_id => $run_id, image_id => $image,
-                timestamp_unix_ms => timestamp_ms( $event->{timestamp}, 1_000_000 + $ordinal ),
+                timestamp_unix_ms => timestamp_ms( $event, "galaxy request $ordinal" ),
                 http_status => integer( $event->{status}, 'galaxy_request.status' ),
                 etag => $event->{etag}, latency_ms => integer( $event->{latency_ms}, 'galaxy_request.latency_ms' ),
-                # The driver records samples around the request sequence, not per-request RSS.
-                # Use the latest recorded RSS on both sides; the raw JSONL remains the authority.
-                rss_before_bytes => $last_rss, rss_after_bytes => $last_rss,
+                # The driver collects these immediately around this landed route request.
+                rss_before_bytes => integer( $event->{rss_before_bytes}, 'galaxy_request.rss_before_bytes' ),
+                rss_after_bytes => integer( $event->{rss_after_bytes}, 'galaxy_request.rss_after_bytes' ),
             };
         } elsif ( $event->{kind} eq 'board_pass' ) {
             my $ordinal = scalar(@board_passes) + 1;
             push @board_passes, {
                 id => "board-$ordinal", run_id => $run_id, image_id => $image,
-                timestamp_unix_ms => timestamp_ms( $event->{timestamp}, 2_000_000 + $ordinal ),
+                timestamp_unix_ms => timestamp_ms( $event, "board pass $ordinal" ),
                 page_count => integer( $event->{pages}, 'board_pass.pages' ),
                 duration_ms => integer( $event->{duration_ms}, 'board_pass.duration_ms' ),
             };
@@ -135,7 +156,7 @@ sub make_run {
     # still a raw, 40-page invocation of the same landed board interface.
     if ( !@board_passes ) {
         push @board_passes, { id => 'board-preflight', run_id => $run_id, image_id => $image,
-            timestamp_unix_ms => timestamp_ms( $preflight->{timestamp}, 2_000_000 ),
+            timestamp_unix_ms => timestamp_ms( $preflight, 'preflight board pass' ),
             page_count => 40, duration_ms => integer( $preflight->{board_duration_ms}, 'preflight.board_duration_ms' ) };
     }
     die "$raw_path did not produce all evaluator sample phases\n" unless @samples == 5;
