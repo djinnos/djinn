@@ -3,6 +3,8 @@
 //! This crate intentionally has no dependency on the control plane or database.
 
 mod catalog;
+mod document;
+mod lint;
 mod parser;
 mod types;
 
@@ -11,6 +13,10 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 pub use catalog::{proposal_block_tags, registered_block_types};
+pub use document::{
+    DocumentAnalysis, DocumentError, RegisteredBlockOccurrence, analyze_mdx_document,
+};
+pub use lint::lint;
 pub use parser::{
     extract_custom_block_tags, parse_mdx_blocks, validate_block_content, validate_block_ids,
     validate_mdx_blocks, validate_question_form_placement,
