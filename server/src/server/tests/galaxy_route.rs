@@ -604,15 +604,34 @@ async fn pinned_route_stream_survives_retention_then_prunes_after_final_frame() 
         "selected response must own G's shared stream pin"
     );
 
+    // Begin the selected response before moving the pointer. This makes the
+    // later assertions specifically about G's *remaining* frames.
+    let mut body = response.into_body();
+    let first = tokio::time::timeout(Duration::from_secs(2), body.frame())
+        .await
+        .expect("G's first frame must be ready")
+        .expect("G must have a first frame")
+        .expect("pinned G first frame must remain readable")
+        .into_data()
+        .expect("galaxy route emits data frames");
+    assert_eq!(first.as_ref(), g_chunks[0].as_slice());
+    let mut delivered = vec![first];
+
     // G comes first in publish order, so the sweep sees its active pin before
     // continuing to these candidates and filling all 25 batch slots.
-    for candidate in 0..MAX_RETENTION_BATCH {
-        let commit = format!("retention-candidate-{candidate}");
+    let mut blocked_candidate_id = None;
+    for candidate_index in 0..MAX_RETENTION_BATCH {
+        let commit = format!("retention-candidate-{candidate_index}");
+        let candidate = publication(p, &commit, &[b"candidate"]);
+        if candidate_index == 0 {
+            blocked_candidate_id = Some(candidate.generation_id.clone());
+        }
         generations
-            .publish_reserved_generation(publication(p, &commit, &[b"candidate"]))
+            .publish_reserved_generation(candidate)
             .await
             .unwrap();
     }
+    let blocked_candidate_id = blocked_candidate_id.expect("first candidate identity");
     let history = publication(p, "retained-history", &[b"history"]);
     let history_id = history.generation_id.clone();
     generations
@@ -623,9 +642,24 @@ async fn pinned_route_stream_survives_retention_then_prunes_after_final_frame() 
     let g2id = g2.generation_id.clone();
     generations.publish_reserved_generation(g2).await.unwrap();
 
-    // Start the production sweep at a deterministic barrier and bound its
-    // completion: its matching exclusive pin must be nonblocking, not wait for
-    // G's route reader. History N=2 preserves current G2 and the history row.
+    // Hold the first unpinned candidate's row lock. Because G is older, a live
+    // production sweep can reach this lock only after probing and skipping G's
+    // shared pin. This keeps the sweep in flight while the route consumes G's
+    // remaining frames, without sleeps or a parallel route fixture.
+    let row_locked = Arc::new(Barrier::new(2));
+    let release_row_lock = Arc::new(Barrier::new(2));
+    let lock_generations = generations.clone();
+    let lock_ready = row_locked.clone();
+    let lock_release = release_row_lock.clone();
+    let row_locker = tokio::spawn(async move {
+        lock_generations
+            .hold_generation_row_lock_for_test(&blocked_candidate_id, lock_ready, lock_release)
+            .await
+    });
+    row_locked.wait().await;
+
+    // Start the production sweep at a deterministic barrier. History N=2
+    // preserves current G2 and the history row.
     let start = Arc::new(Barrier::new(2));
     let sweep_start = start.clone();
     let sweep_db = db.clone();
@@ -640,19 +674,16 @@ async fn pinned_route_stream_survives_retention_then_prunes_after_final_frame() 
             .await
     });
     start.wait().await;
-    let first_sweep = tokio::time::timeout(Duration::from_secs(2), sweep)
-        .await
-        .expect("retention must not wait for G's route pin")
-        .expect("retention task must not panic")
-        .expect("production retention sweep must succeed");
-    assert_eq!(first_sweep.skipped_active_pin, 1);
-    assert_eq!(first_sweep.candidates, MAX_RETENTION_BATCH);
-    assert_eq!(first_sweep.deleted, MAX_RETENTION_BATCH);
 
-    // Retention is complete but every selected G chunk remains ordered and
-    // byte-identical through the final frame.
-    let mut body = response.into_body();
-    let mut delivered = Vec::new();
+    // Bounded waiting proves the sweep is blocked after its nonblocking G pin
+    // probe, rather than waiting for the reader. Consume every remaining frame
+    // while that production sweep is still live.
+    assert!(
+        tokio::time::timeout(Duration::from_millis(250), &mut sweep)
+            .await
+            .is_err(),
+        "retention must remain live at the deliberately locked unpinned candidate"
+    );
     while let Some(frame) = body.frame().await {
         let bytes = frame
             .expect("pinned G frame must remain readable")
@@ -663,6 +694,24 @@ async fn pinned_route_stream_survives_retention_then_prunes_after_final_frame() 
         delivered.push(bytes);
     }
     assert_eq!(delivered.len(), g_chunks.len());
+
+    // Let the live sweep fill its batch and complete only after all of G has
+    // been delivered and its reader pin has been released.
+    release_row_lock.wait().await;
+    tokio::time::timeout(Duration::from_secs(2), row_locker)
+        .await
+        .expect("candidate row lock must release")
+        .expect("candidate row lock task must not panic")
+        .expect("candidate row lock transaction must roll back");
+    let first_sweep = tokio::time::timeout(Duration::from_secs(2), sweep)
+        .await
+        .expect("retention must finish after candidate row unlock")
+        .expect("retention task must not panic")
+        .expect("production retention sweep must succeed");
+    assert_eq!(first_sweep.skipped_active_pin, 1);
+    assert_eq!(first_sweep.candidates, MAX_RETENTION_BATCH);
+    assert_eq!(first_sweep.deleted, MAX_RETENTION_BATCH);
+
     assert!(
         generations
             .try_generation_stream_pin_exclusive_for_test(&gid)
