@@ -1691,3 +1691,67 @@ async fn pod_configured_plan_with_no_workspace_remains_fail_closed() {
         "no verify-run row for a resolution failure"
     );
 }
+
+// Reuse is default-off; a later rollback must bypass a reusable row while the
+// independent authoritative writer continues to persist eligible passes.
+#[tokio::test]
+async fn reuse_flag_rollback_bypasses_reuse_and_keeps_writers_running() {
+    let tree = init_verifiable_repo("reuse-flag-rollback-").await;
+    let material = crate::reply_loop_completion_intent_tests::reuse_material(tree.path().into());
+    let fingerprint = match compute_verification_input_fingerprint_with_config(
+        tree.path(),
+        &material.execution_request.fingerprint_config,
+    )
+    .await
+    .unwrap()
+    {
+        VerificationInputFingerprint::Available(digest) => digest.fingerprint,
+        VerificationInputFingerprint::Unavailable(reason) => panic!("fingerprint unavailable: {reason}"),
+    };
+    let identity = EnvironmentIdentityV1::derive(
+        (material.execution_request.resolve_environment_identity)().unwrap(),
+    )
+    .unwrap();
+    let evidence = crate::reply_loop_completion_intent_tests::fallback_evidence(
+        &material,
+        fingerprint,
+        identity,
+    );
+    let rig = build_rig_with_material(material, |probe| probe.inject_evidence(evidence)).await;
+    let project = rig.ctx.load_task(&rig.request.task_id).await.unwrap().project_id;
+    let settings = SettingsRepository::new(rig.ctx.db.clone(), rig.ctx.event_bus.clone());
+    let setting = format!("project.{project}.verify_run_reuse_enabled");
+
+    // Default-off still records a writer pass, and has no C0/C1 resolve.
+    assert!(matches!(
+        coordinate_final_verification(rig.request.clone(), &rig.ctx).await,
+        FinalVerificationRecordingOutcome::Stored { .. }
+    ));
+    assert_eq!(rig.probe.events(), vec!["resolve", "lease-acquire", "evidence", "lease-release"]);
+    assert_eq!(*rig.probe.lease_requests.lock().unwrap(), 1);
+    assert_eq!(*rig.probe.canonical_executions.lock().unwrap(), 1);
+    assert_eq!(recorded_rows(&rig.ctx, &rig.request.task_run_id).await.len(), 1);
+
+    // Enabled reuse consumes that complete row before any lease is requested.
+    settings.set(&setting, "true").await.unwrap();
+    assert!(matches!(
+        coordinate_final_verification(rig.request.clone(), &rig.ctx).await,
+        FinalVerificationRecordingOutcome::Reused { .. }
+    ));
+    assert_eq!(*rig.probe.lease_requests.lock().unwrap(), 1);
+    assert_eq!(*rig.probe.lease_acquisitions.lock().unwrap(), 1);
+    assert_eq!(*rig.probe.canonical_executions.lock().unwrap(), 1);
+    assert_eq!(recorded_rows(&rig.ctx, &rig.request.task_run_id).await.len(), 1);
+
+    // Rollback bypasses the still-compatible row: canonical verification and a
+    // second durable writer row prove recording is independent of the flag.
+    settings.set(&setting, "false").await.unwrap();
+    assert!(matches!(
+        coordinate_final_verification(rig.request.clone(), &rig.ctx).await,
+        FinalVerificationRecordingOutcome::Stored { .. }
+    ));
+    assert_eq!(*rig.probe.lease_requests.lock().unwrap(), 2);
+    assert_eq!(*rig.probe.lease_acquisitions.lock().unwrap(), 2);
+    assert_eq!(*rig.probe.canonical_executions.lock().unwrap(), 2);
+    assert_eq!(recorded_rows(&rig.ctx, &rig.request.task_run_id).await.len(), 2);
+}
