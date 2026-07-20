@@ -22,9 +22,9 @@ checksum.
 
 The deterministic `ste6-production-v1` profile creates:
 
-- a 71,303,168-byte canonical graph fixture blob (68 MiB), whose header records
-  65,220 graph nodes and 277,200 edges; this falls within the required 65–70
-  MiB range;
+- a 71,303,168-byte canonical `RepoGraphArtifact` bincode blob (68 MiB),
+  containing 65,220 deserializable nodes and 277,200 deserializable edges; this
+  falls within the required 65–70 MiB range;
 - 10,000 `BoardHealthMismatchCandidate` projection rows. Each is an open task
   with three reopens and `requires task_create`, so the landed role-signal
   logic expects `planner` while task dispatch selects `worker`;
@@ -33,11 +33,12 @@ The deterministic `ste6-production-v1` profile creates:
   and a SHA-256 over their exact concatenation.
 
 The graph fixture intentionally does not implement a second
-`RepoGraphGenerationRepository` or a second graph serializer. Its header names
-the existing canonical `RepoGraphArtifact` publication seam and the opaque
-suffix supplies the deterministic persisted-blob memory pressure. Production
-serialization remains owned by `djinn-graph`; the fixture contract supplies the
-count and byte-size workload to the driver.
+`RepoGraphGenerationRepository` or a second graph serializer. The fixture
+producer imports the existing canonical `RepoGraphArtifact` schema, serializes
+with bincode, and validates through `deserialize_repo_graph_artifact_bincode`.
+The artifact transport is one valid gzip member over a landed
+`GalaxySnapshotPayload`; its manifest includes the semantic `graph_content_hash`
+in addition to ordered chunk and transport hashes.
 
 ## Reproducibility
 
