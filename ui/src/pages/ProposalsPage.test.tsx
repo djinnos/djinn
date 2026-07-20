@@ -304,6 +304,11 @@ describe("ProposalsPage", () => {
       within(reviewSection!).getByText("Review MCP retries"),
     ).toBeInTheDocument();
     expect(within(reviewSection!).getByText("revw")).toBeInTheDocument();
+    const unresolvedFeedback = within(reviewSection!).getByTitle(
+      "2 unresolved comments",
+    );
+    expect(unresolvedFeedback).toBeVisible();
+    expect(unresolvedFeedback).toHaveTextContent("2");
     expect(screen.queryByText("Archived legacy idea")).not.toBeInTheDocument();
     // List query sends no verbosity flags.
     expect(callMcpTool).toHaveBeenCalledWith("proposal_list", {
@@ -688,7 +693,16 @@ describe("ProposalsPage", () => {
 
     expect(doneHeader).toHaveAttribute("aria-expanded", "true");
     expect(within(doneHeader).getByText("1")).toBeInTheDocument();
-    expect(screen.getByText("Completed proposal")).toBeInTheDocument();
+    const terminalRow = screen.getByText("Completed proposal").closest("button");
+    expect(terminalRow).not.toBeNull();
+    expect(
+      within(terminalRow!).queryByTitle(
+        /^(Tribunal|Parked on a needs-evidence spike)/,
+      ),
+    ).not.toBeInTheDocument();
+    expect(
+      within(terminalRow!).queryByTitle(/^(Gate |Definition of Ready)/),
+    ).not.toBeInTheDocument();
   });
 
   it("keeps archived and superseded proposal groups hidden until Show archived is enabled", async () => {
