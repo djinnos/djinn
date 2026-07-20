@@ -69,3 +69,36 @@ if [ -n "$offenders" ]; then
 fi
 
 echo "OK: no existing migrations were modified, renamed, or deleted."
+
+# Two migrations claiming the same version number. This is invisible on the
+# branch itself and only appears on the PR merge ref, when two PRs each add
+# the next number independently — so it lands on whoever merges second and is
+# guaranteed to recur whenever two migration PRs are open at once.
+#
+# Without this guard the failure surfaces from Postgres as
+#   duplicate key value violates unique constraint "_sqlx_migrations_pkey"
+# during migration application, which names neither the version nor the files
+# (observed on PR #2353, where main's 134_compaction_boundary_telemetry and
+# the branch's 134_note_lifecycle_changed_at collided).
+migrations_dir="$MIGRATIONS_GLOB"
+duplicates=$(
+    ls "$migrations_dir" 2>/dev/null \
+        | grep -E '^[0-9]+_.*\.sql$' \
+        | cut -d_ -f1 \
+        | sort -n \
+        | uniq -d
+)
+
+if [ -n "$duplicates" ]; then
+    echo "::error::Two or more migrations claim the same version number. sqlx keys _sqlx_migrations by version, so applying them fails with a duplicate-key error. Renumber the newer file to the next free version." >&2
+    printf '%s\n' "$duplicates" | while IFS= read -r v; do
+        [ -z "$v" ] && continue
+        echo "  version $v is claimed by:" >&2
+        ls "$migrations_dir" | grep -E "^${v}_" | while IFS= read -r f; do
+            echo "    - $f" >&2
+        done
+    done
+    exit 1
+fi
+
+echo "OK: no duplicate migration version numbers."
