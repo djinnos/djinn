@@ -1,4 +1,8 @@
 //! Deterministic inventory/adoption and conservative proof-rule tests.
+// The telemetry test lock is deliberately a std mutex held across awaits: it
+// serializes whole test bodies, and libtest threads (not tasks) contend for it.
+#![allow(clippy::await_holding_lock)]
+
 use std::{collections::HashMap, sync::Arc};
 
 use async_trait::async_trait;
@@ -336,6 +340,11 @@ async fn authoritative_uid_not_found_releases_and_emits_wakeup() {
 
 #[tokio::test]
 async fn journal_snapshot_failure_degrades_and_keeps_enforce_closed() {
+    // Reads the process-global health gauge, so it shares the crate's
+    // telemetry lock with the build_admission telemetry tests: that series is
+    // keyed only by mode and cap, and those tests publish the same
+    // enforce-mode bucket.
+    let _telemetry = crate::build_admission::telemetry_guard();
     djinn_telemetry::init().unwrap();
     let db = Database::open_in_memory().unwrap();
     db.ensure_initialized().await.unwrap();
@@ -345,6 +354,7 @@ async fn journal_snapshot_failure_degrades_and_keeps_enforce_closed() {
         1,
         "failed-reconcile",
     ));
+    controller.enable_process_metrics_for_test();
     controller.mark_ready();
     db.pool().close().await;
     let report =

@@ -2983,6 +2983,11 @@ pub(super) async fn reap_orphaned_pending_attempts_with_threshold(
 
 #[cfg(test)]
 mod cache_cleanup_cross_path_tests {
+    // `engine_calls_guard` is deliberately a std mutex held across awaits: it
+    // serializes whole test bodies, and libtest threads (not tasks) contend
+    // for it.
+    #![allow(clippy::await_holding_lock)]
+
     use super::*;
     use crate::context::{CacheCleanupConfig, CacheCleanupMode};
 
@@ -3016,6 +3021,22 @@ mod cache_cleanup_cross_path_tests {
     const RUN_A: &str = "019f5df4-06f6-7d71-b9c7-aa50090e4e18";
     const RUN_B: &str = "019f5df4-06f6-7d71-b9c7-aa50090e4e19";
     static ENGINE_CALLS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+    /// Serializes the tests that drive [`counting_engine`].
+    ///
+    /// `ENGINE_CALLS` is one process-wide counter, and cargo runs these tests
+    /// as threads of one process. `each_protected_id_lookup_failure_aborts_before_mutation`
+    /// resets it and then asserts it is still zero — a real invariant (the
+    /// lookup failure must abort before the engine runs), but one that a peer
+    /// test invoking the engine concurrently would falsify. Taking this guard
+    /// makes the reset-and-observe window exclusive without weakening the
+    /// assertion.
+    fn engine_calls_guard() -> std::sync::MutexGuard<'static, ()> {
+        static ENGINE_CALLS_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        ENGINE_CALLS_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
 
     fn lookup_none(
         _db: djinn_db::Database,
@@ -3114,6 +3135,7 @@ mod cache_cleanup_cross_path_tests {
 
     #[tokio::test]
     async fn active_task_run_and_running_session_are_joint_cap_protected() {
+        let _engine_calls = engine_calls_guard();
         let db = crate::test_helpers::create_test_db();
         let root = create_run_root(&[RUN_A, RUN_B]);
         let stats = sweep_orphaned_cargo_target_run_dirs_under_with_caps_and_seams(
@@ -3144,6 +3166,7 @@ mod cache_cleanup_cross_path_tests {
 
     #[tokio::test]
     async fn each_protected_id_lookup_failure_aborts_before_mutation() {
+        let _engine_calls = engine_calls_guard();
         for (task_run_ids, session_task_run_ids) in [
             (
                 lookup_failure as ProtectedIdLookup,
@@ -3207,6 +3230,7 @@ mod cache_cleanup_cross_path_tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn real_joint_cap_engine_propagates_all_five_bounded_outcomes() {
+        let _engine_calls = engine_calls_guard();
         use djinn_core::cargo_target_runs::CargoTargetRunsCaps;
 
         let within = create_run_root(&[]);
