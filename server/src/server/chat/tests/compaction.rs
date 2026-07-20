@@ -100,6 +100,8 @@ async fn repeated_load_conversation_reuses_projected_boundary() {
         .record_compaction_started(BeginCompactionParams {
             session_id: &session_id,
             schema_version: 1,
+            trigger: None,
+            current_context_tokens_before: None,
             first_message_id: Some(&ids[1]),
             last_compacted_message_id: Some(&ids[2]),
             first_retained_message_id: Some(first_retained_id),
@@ -112,6 +114,7 @@ async fn repeated_load_conversation_reuses_projected_boundary() {
         .complete_compaction_boundary(CompleteCompactionParams {
             boundary_id: &started.id,
             schema_version: 1,
+            current_context_tokens_after: None,
             first_message_id: Some(&ids[1]),
             last_compacted_message_id: Some(&ids[2]),
             first_retained_message_id: Some(first_retained_id),
@@ -195,6 +198,8 @@ async fn boundary_reuse_preserves_marker_metadata() {
         .record_compaction_started(BeginCompactionParams {
             session_id: &session_id,
             schema_version: 1,
+            trigger: None,
+            current_context_tokens_before: None,
             first_message_id: Some(&ids[0]),
             last_compacted_message_id: Some(&ids[1]),
             first_retained_message_id: Some(&ids[2]),
@@ -207,6 +212,7 @@ async fn boundary_reuse_preserves_marker_metadata() {
         .complete_compaction_boundary(CompleteCompactionParams {
             boundary_id: &started.id,
             schema_version: 1,
+            current_context_tokens_after: None,
             first_message_id: Some(&ids[0]),
             last_compacted_message_id: Some(&ids[1]),
             first_retained_message_id: Some(&ids[2]),
@@ -265,6 +271,8 @@ async fn tail_hash_mismatch_falls_back_to_raw_history() {
         .record_compaction_started(BeginCompactionParams {
             session_id: &session_id,
             schema_version: 1,
+            trigger: None,
+            current_context_tokens_before: None,
             first_message_id: Some(&ids[1]),
             last_compacted_message_id: Some(&ids[2]),
             first_retained_message_id: Some(&ids[3]),
@@ -277,6 +285,7 @@ async fn tail_hash_mismatch_falls_back_to_raw_history() {
         .complete_compaction_boundary(CompleteCompactionParams {
             boundary_id: &started.id,
             schema_version: 1,
+            current_context_tokens_after: None,
             first_message_id: Some(&ids[1]),
             last_compacted_message_id: Some(&ids[2]),
             first_retained_message_id: Some(&ids[3]),
@@ -323,6 +332,8 @@ async fn nonexistent_retained_message_id_falls_back_to_raw() {
         .record_compaction_started(BeginCompactionParams {
             session_id: &session_id,
             schema_version: 1,
+            trigger: None,
+            current_context_tokens_before: None,
             first_message_id: None,
             last_compacted_message_id: None,
             first_retained_message_id: Some("nonexistent-message-id-42"),
@@ -335,6 +346,7 @@ async fn nonexistent_retained_message_id_falls_back_to_raw() {
         .complete_compaction_boundary(CompleteCompactionParams {
             boundary_id: &started.id,
             schema_version: 1,
+            current_context_tokens_after: None,
             first_message_id: None,
             last_compacted_message_id: None,
             first_retained_message_id: Some("nonexistent-message-id-42"),
@@ -384,6 +396,8 @@ async fn newer_boundary_with_stale_tail_hash_falls_back() {
         .record_compaction_started(BeginCompactionParams {
             session_id: &session_id,
             schema_version: 1,
+            trigger: None,
+            current_context_tokens_before: None,
             first_message_id: Some(&ids[0]),
             last_compacted_message_id: Some(&ids[1]),
             first_retained_message_id: Some(&ids[2]),
@@ -396,6 +410,7 @@ async fn newer_boundary_with_stale_tail_hash_falls_back() {
         .complete_compaction_boundary(CompleteCompactionParams {
             boundary_id: &first.id,
             schema_version: 1,
+            current_context_tokens_after: None,
             first_message_id: Some(&ids[0]),
             last_compacted_message_id: Some(&ids[1]),
             first_retained_message_id: Some(&ids[2]),
@@ -412,6 +427,8 @@ async fn newer_boundary_with_stale_tail_hash_falls_back() {
         .record_compaction_started(BeginCompactionParams {
             session_id: &session_id,
             schema_version: 1,
+            trigger: None,
+            current_context_tokens_before: None,
             first_message_id: Some(&ids[2]),
             last_compacted_message_id: Some(&ids[3]),
             first_retained_message_id: Some(&ids[3]),
@@ -424,6 +441,7 @@ async fn newer_boundary_with_stale_tail_hash_falls_back() {
         .complete_compaction_boundary(CompleteCompactionParams {
             boundary_id: &second.id,
             schema_version: 1,
+            current_context_tokens_after: None,
             first_message_id: Some(&ids[2]),
             last_compacted_message_id: Some(&ids[3]),
             first_retained_message_id: Some(&ids[3]),
@@ -653,6 +671,8 @@ async fn boundary_projection_replaces_raw_marker_pair() {
         .record_compaction_started(BeginCompactionParams {
             session_id: &session_id,
             schema_version: 1,
+            trigger: None,
+            current_context_tokens_before: None,
             first_message_id: Some(&ids[1]),
             last_compacted_message_id: Some(&ids[2]),
             first_retained_message_id: Some(&ids[3]),
@@ -667,6 +687,7 @@ async fn boundary_projection_replaces_raw_marker_pair() {
         .complete_compaction_boundary(CompleteCompactionParams {
             boundary_id: &started.id,
             schema_version: 1,
+            current_context_tokens_after: None,
             first_message_id: Some(&ids[1]),
             last_compacted_message_id: Some(&ids[2]),
             first_retained_message_id: Some(&ids[3]),
@@ -727,6 +748,8 @@ async fn load_raw_conversation_unaffected_by_boundary() {
         .record_compaction_started(BeginCompactionParams {
             session_id: &session_id,
             schema_version: 1,
+            trigger: None,
+            current_context_tokens_before: None,
             first_message_id: Some(&ids[0]),
             last_compacted_message_id: Some(&ids[1]),
             first_retained_message_id: Some(&ids[2]),
@@ -739,6 +762,7 @@ async fn load_raw_conversation_unaffected_by_boundary() {
         .complete_compaction_boundary(CompleteCompactionParams {
             boundary_id: &started.id,
             schema_version: 1,
+            current_context_tokens_after: None,
             first_message_id: Some(&ids[0]),
             last_compacted_message_id: Some(&ids[1]),
             first_retained_message_id: Some(&ids[2]),
