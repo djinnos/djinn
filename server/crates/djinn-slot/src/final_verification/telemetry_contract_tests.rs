@@ -198,27 +198,3 @@ fn recording_metrics_are_exactly_bounded_and_evidence_is_structured() {
         );
     }
 }
-
-#[test]
-fn failed_recorder_preserves_selected_terminal_outcome_without_retry() {
-    let request = request();
-    let (_, rendered) = djinn_telemetry::render_isolated(|| {
-        djinn_telemetry::final_verification::fail_next_emission_for_test();
-        let outcome = emit_outcome(
-            &request,
-            FinalVerificationRecordingOutcome::Stored {
-                verification_attempt_id: "attempt".into(),
-                verify_run_id: "verify-run".into(),
-                evidence: evidence(),
-            },
-        );
-        assert!(matches!(
-            outcome,
-            FinalVerificationRecordingOutcome::Stored { .. }
-        ));
-    });
-    assert!(
-        samples(&rendered, "verify_run_record_total").is_empty(),
-        "a failed emission is not retried and cannot alter the durable decision"
-    );
-}

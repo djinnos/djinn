@@ -300,6 +300,8 @@ pub mod final_verification {
 
     /// Increment the one terminal outcome for a cache consultation.
     pub fn increment_lookup(outcome: &'static str) -> Result<(), ()> {
+        #[cfg(feature = "test-support")]
+        LOOKUP_EMISSION_ATTEMPTS.with(|attempts| attempts.set(attempts.get() + 1));
         if injected_failure() {
             return Err(());
         }
@@ -309,6 +311,8 @@ pub mod final_verification {
 
     /// Increment the one terminal outcome for a writer attempt.
     pub fn increment_record(outcome: &'static str) -> Result<(), ()> {
+        #[cfg(feature = "test-support")]
+        RECORD_EMISSION_ATTEMPTS.with(|attempts| attempts.set(attempts.get() + 1));
         if injected_failure() {
             return Err(());
         }
@@ -319,12 +323,26 @@ pub mod final_verification {
     #[cfg(feature = "test-support")]
     thread_local! {
         static FAIL_NEXT_EMISSION: Cell<bool> = const { Cell::new(false) };
+        static LOOKUP_EMISSION_ATTEMPTS: Cell<usize> = const { Cell::new(0) };
+        static RECORD_EMISSION_ATTEMPTS: Cell<usize> = const { Cell::new(0) };
     }
 
     /// Cause one emission to fail in deterministic coordinator tests.
     #[cfg(feature = "test-support")]
     pub fn fail_next_emission_for_test() {
         FAIL_NEXT_EMISSION.with(|failure| failure.set(true));
+        LOOKUP_EMISSION_ATTEMPTS.with(|attempts| attempts.set(0));
+        RECORD_EMISSION_ATTEMPTS.with(|attempts| attempts.set(0));
+    }
+
+    /// Return lookup/record attempts since the failure seam was armed.
+    /// Attempts include the injected failure, exposing retries and duplicates.
+    #[cfg(feature = "test-support")]
+    pub fn emission_attempts_for_test() -> (usize, usize) {
+        (
+            LOOKUP_EMISSION_ATTEMPTS.with(Cell::get),
+            RECORD_EMISSION_ATTEMPTS.with(Cell::get),
+        )
     }
 
     fn injected_failure() -> bool {

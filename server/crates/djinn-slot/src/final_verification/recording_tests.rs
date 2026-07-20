@@ -24,8 +24,12 @@ use djinn_core::{
     models::VerifySource,
 };
 use djinn_db::repositories::{
+    settings::SettingsRepository,
     task_run::{CreateTaskRunParams, TaskRunRepository},
-    verify_run::VerifyRunRepository,
+    verify_run::{
+        RecordEligibleFinalVerificationPassParams, RequiredFinalVerificationCommand,
+        VerifyRunRepository,
+    },
 };
 use djinn_git::{
     VerificationInputDigestV1, VerificationInputFingerprint, VerificationInputFingerprintConfig,
@@ -358,6 +362,22 @@ struct Rig {
 /// Build a task/task-run fixture whose host callbacks drive the real
 /// coordinator boundary with the injected material/evidence from `configure`.
 async fn build_rig(required_checks: &[&str], configure: impl FnOnce(&mut CoordinatorProbe)) -> Rig {
+    build_rig_with_material(
+        material(
+            required_checks
+                .iter()
+                .map(|check| check.to_string())
+                .collect(),
+        ),
+        configure,
+    )
+    .await
+}
+
+async fn build_rig_with_material(
+    material: FinalVerificationResolvedMaterial,
+    configure: impl FnOnce(&mut CoordinatorProbe),
+) -> Rig {
     let db = crate::test_helpers::create_test_db();
     let project = crate::test_helpers::create_test_project(&db).await;
     let epic = crate::test_helpers::create_test_epic(&db, &project.id).await;
@@ -376,12 +396,7 @@ async fn build_rig(required_checks: &[&str], configure: impl FnOnce(&mut Coordin
         })
         .await
         .unwrap();
-    let mut probe = CoordinatorProbe::new(material(
-        required_checks
-            .iter()
-            .map(|check| check.to_string())
-            .collect(),
-    ));
+    let mut probe = CoordinatorProbe::new(material);
     configure(&mut probe);
     let probe = Arc::new(probe);
     let ctx = crate::test_helpers::agent_context_from_db_with_callbacks(db, probe.clone());
@@ -880,6 +895,143 @@ async fn cancellation_precedes_injected_stored_outcome() {
     assert!(
         recorded_rows(&ctx, &request.task_run_id).await.is_empty(),
         "cancellation must record no passing row"
+    );
+}
+
+#[tokio::test]
+async fn recorder_failure_does_not_change_repository_backed_reuse_hit() {
+    let tree = init_verifiable_repo("recorder-failure-hit-").await;
+    let material = crate::reply_loop_completion_intent_tests::reuse_material(tree.path().into());
+    let fingerprint =
+        match compute_verification_input_fingerprint(&material.execution_request.worktree)
+            .await
+            .unwrap()
+        {
+            VerificationInputFingerprint::Available(digest) => digest.fingerprint,
+            VerificationInputFingerprint::Unavailable(reason) => {
+                panic!("fingerprint unavailable: {reason}")
+            }
+        };
+    let identity = EnvironmentIdentityV1::derive(
+        (material.execution_request.resolve_environment_identity)().unwrap(),
+    )
+    .unwrap();
+    let rig = build_rig_with_material(material.clone(), |_| {}).await;
+    let task = rig.ctx.load_task(&rig.request.task_id).await.unwrap();
+    SettingsRepository::new(rig.ctx.db.clone(), rig.ctx.event_bus.clone())
+        .set(
+            &format!("project.{}.verify_run_reuse_enabled", task.project_id),
+            "true",
+        )
+        .await
+        .unwrap();
+    let required_commands = [
+        RequiredFinalVerificationCommand {
+            descriptor_id: "format",
+        },
+        RequiredFinalVerificationCommand {
+            descriptor_id: "slot-clippy",
+        },
+    ];
+    let ordered_commands = serde_json::json!([
+        {"descriptor_id":"format","result":"pass","passed":true},
+        {"descriptor_id":"slot-clippy","result":"pass","passed":true}
+    ]);
+    let covered_checks = serde_json::json!(["format", "slot-clippy"]);
+    let identity_json = serde_json::from_str(&identity.canonical_json).unwrap();
+    VerifyRunRepository::new(rig.ctx.db.clone())
+        .record_eligible_final_verification_pass(RecordEligibleFinalVerificationPassParams {
+            id: "recorder-failure-reusable-row",
+            task_run_id: &rig.request.task_run_id,
+            verify_source: "worker",
+            verify_run_id: "seeded-run",
+            verification_attempt_id: "seeded-attempt",
+            required_commands: &required_commands,
+            ordered_commands: &ordered_commands,
+            covered_checks: &covered_checks,
+            required_checks: &material.required_checks,
+            verification_input_fingerprint: &fingerprint,
+            manifest_version: "manifest-v1",
+            environment_identity_json: &identity_json,
+            environment_identity_digest: &identity.digest,
+            environment_identity_version: "identity-v1",
+            completed_at: "2099-02-02T03:04:05Z",
+            diff_fingerprint: &material.diff_fingerprint,
+        })
+        .await
+        .unwrap();
+
+    djinn_telemetry::final_verification::fail_next_emission_for_test();
+    let outcome = coordinate_final_verification(rig.request.clone(), &rig.ctx).await;
+    let FinalVerificationRecordingOutcome::Reused { evidence, .. } = outcome else {
+        panic!("recorder failure must preserve reuse, got {outcome:?}");
+    };
+    assert_eq!(evidence.persisted_run_id, "recorder-failure-reusable-row");
+    assert_eq!(rig.probe.events(), vec!["resolve", "resolve"]);
+    assert_eq!(*rig.probe.lease_requests.lock().unwrap(), 0);
+    assert_eq!(*rig.probe.lease_acquisitions.lock().unwrap(), 0);
+    assert_eq!(*rig.probe.canonical_executions.lock().unwrap(), 0);
+    assert_eq!(
+        djinn_telemetry::final_verification::emission_attempts_for_test(),
+        (1, 0),
+        "the failed hit emission is attempted once and never retried"
+    );
+    let rows = recorded_rows(&rig.ctx, &rig.request.task_run_id).await;
+    assert_eq!(rows.len(), 1, "reuse must not write a second VerifyRun");
+    assert_eq!(rows[0].id, "recorder-failure-reusable-row");
+}
+
+#[tokio::test]
+async fn recorder_failure_does_not_change_non_hit_execution_or_persistence() {
+    let tree = init_verifiable_repo("recorder-failure-miss-").await;
+    let material = crate::reply_loop_completion_intent_tests::reuse_material(tree.path().into());
+    let mut fallback_evidence = passing("recorder-failure-fallback");
+    fallback_evidence.commands[0].descriptor.check_id = "format".into();
+    fallback_evidence.commands[1].descriptor.check_id = "slot-clippy".into();
+    let rig = build_rig_with_material(material, |probe| {
+        probe.inject_evidence(fallback_evidence);
+    })
+    .await;
+    let task = rig.ctx.load_task(&rig.request.task_id).await.unwrap();
+    SettingsRepository::new(rig.ctx.db.clone(), rig.ctx.event_bus.clone())
+        .set(
+            &format!("project.{}.verify_run_reuse_enabled", task.project_id),
+            "true",
+        )
+        .await
+        .unwrap();
+    assert!(
+        recorded_rows(&rig.ctx, &rig.request.task_run_id)
+            .await
+            .is_empty(),
+        "the enabled consultation must begin with no compatible row"
+    );
+    djinn_telemetry::final_verification::fail_next_emission_for_test();
+
+    let outcome = coordinate_final_verification(rig.request.clone(), &rig.ctx).await;
+    let FinalVerificationRecordingOutcome::Stored { evidence, .. } = outcome else {
+        panic!("recorder failure must preserve the stored outcome, got {outcome:?}");
+    };
+    assert_eq!(
+        rig.probe.events(),
+        vec!["resolve", "lease-acquire", "evidence", "lease-release"]
+    );
+    assert_eq!(*rig.probe.lease_requests.lock().unwrap(), 1);
+    assert_eq!(*rig.probe.lease_acquisitions.lock().unwrap(), 1);
+    assert_eq!(*rig.probe.canonical_executions.lock().unwrap(), 1);
+    assert_eq!(
+        djinn_telemetry::final_verification::emission_attempts_for_test(),
+        (1, 1),
+        "the failed non-hit lookup is not retried and recording emits once"
+    );
+    let rows = recorded_rows(&rig.ctx, &rig.request.task_run_id).await;
+    assert_eq!(rows.len(), 1, "eligible fallback must persist exactly once");
+    assert_eq!(rows[0].id, evidence.persisted_run_id);
+    assert_eq!(rows[0].result, "pass");
+    assert_eq!(rows[0].source_phase.as_deref(), Some("final_verification"));
+    assert_eq!(
+        rows[0].verification_input_fingerprint.as_deref(),
+        Some("recorder-failure-fallback")
     );
 }
 
