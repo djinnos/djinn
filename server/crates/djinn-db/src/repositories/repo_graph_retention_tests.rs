@@ -600,13 +600,12 @@ async fn normal_lock_order_completes_without_deadlock() {
     );
 }
 
-/// Demonstrates the required lock order: candidate row lock (FOR UPDATE) is
-/// taken **before** the generation stream pin. If the sweep attempted the
-/// stream pin before the row lock, it would acquire and release the pin, then
-/// block on the row lock — leaving a window for a reader to grab the pin. This
-/// test proves the sweep blocks at the candidate row lock (not the pin) by
-/// holding a FOR UPDATE from a separate transaction and verifying the sweep
-/// cannot proceed until that lock is released.
+/// Demonstrates the required lock order: candidate row lock (`FOR UPDATE`) is
+/// taken **before** the generation stream pin. A reader holds the oldest
+/// candidate's shared stream pin while another transaction holds its row lock.
+/// If retention tried the pin first, `pg_try_advisory_lock` would immediately
+/// fail and it would skip this row instead of blocking. It must instead block
+/// at the row lock and only try the pin after that lock is released.
 #[tokio::test]
 async fn lock_order_takes_candidate_row_before_stream_pin() {
     let (db, _, repo) = fresh().await;
@@ -623,9 +622,21 @@ async fn lock_order_takes_candidate_row_before_stream_pin() {
             .await
             .expect("oldest gen");
 
+    // A reader already holds the shared stream pin. This makes a pre-row-lock
+    // exclusive probe observably wrong: it would skip the row rather than
+    // block on the FOR UPDATE lock below.
+    let oldest_key = crate::repositories::repo_graph_generation::generation_stream_pin_key(&oldest)
+        .expect("oldest pin key");
+    let mut pin_holder = db.pool().acquire().await.expect("pin holder conn");
+    crate::repositories::repo_graph_generation::acquire_generation_stream_pin_shared(
+        &mut pin_holder,
+        oldest_key,
+    )
+    .await
+    .expect("acquire shared pin");
+
     // Hold a FOR UPDATE lock on the oldest candidate from a separate
-    // transaction. The retention sweep must block here when it tries to take
-    // the candidate row lock — proving the row lock is acquired before the
+    // transaction. The retention sweep must block here before it tries the
     // stream pin.
     let mut blocker = db.pool().acquire().await.expect("blocker conn");
     let mut blocker_tx = blocker.begin().await.expect("blocker tx");
@@ -637,8 +648,6 @@ async fn lock_order_takes_candidate_row_before_stream_pin() {
     .await
     .expect("lock candidate row");
 
-    // Start the sweep. It should block on the FOR UPDATE row lock held by
-    // blocker_tx.
     let mut sweep_handle = tokio::spawn(async move {
         repo.sweep(RetentionSweepRequest {
             project_id: "p-lockorder",
@@ -648,26 +657,34 @@ async fn lock_order_takes_candidate_row_before_stream_pin() {
         .await
     });
 
-    // The sweep should not complete within 300ms because it is blocked on
-    // the candidate row lock.
+    // A pre-row pin attempt would fail immediately because pin_holder owns the
+    // shared lock. Blocking here therefore proves the candidate row comes
+    // before the stream pin in the sweep's normal path.
     let blocked =
         tokio::time::timeout(std::time::Duration::from_millis(300), &mut sweep_handle).await;
     assert!(blocked.is_err(), "sweep must block on candidate row lock");
 
-    // Release the row lock. The sweep can now proceed.
     blocker_tx.rollback().await.expect("rollback blocker");
     drop(blocker);
 
-    // The sweep should complete now.
     let outcome = sweep_handle
         .await
         .expect("sweep task panicked")
         .expect("sweep completes after blocker released");
 
-    // history_n=1: newest 1 survives. 3 non-survivors deleted.
-    assert_eq!(outcome.deleted, 3);
+    // The shared-pinned oldest generation remains; the other two
+    // non-survivors are deleted and the newest generation survives.
+    assert_eq!(outcome.deleted, 2);
+    assert_eq!(outcome.skipped_active_pin, 1);
     assert_eq!(outcome.retries, 0);
-    assert_eq!(generation_count(&db, "p-lockorder").await, 1);
+    assert_eq!(generation_count(&db, "p-lockorder").await, 2);
+
+    crate::repositories::repo_graph_generation::release_generation_stream_pin_shared(
+        &mut pin_holder,
+        oldest_key,
+    )
+    .await
+    .expect("release shared pin");
 }
 
 /// Proves the scan continues past actively-pinned rows to fill a batch up to
@@ -679,40 +696,42 @@ async fn scan_continues_past_active_pins_to_fill_batch() {
     let (db, _, repo) = fresh().await;
     insert_project(&db, "p-pastpins").await;
 
-    // Create 30 generations, history_n=2 → 2 survivors, 28 non-survivors.
-    for i in 0..30 {
+    // Put every row from the former fixed 512-row scan page behind active
+    // pins. history_n=2 leaves 538 non-survivors: 512 pinned followed by 26
+    // available candidates.
+    for i in 0..540 {
         legacy_publish(&db, "p-pastpins", &format!("c{i}"), b"blob").await;
     }
-    assert_eq!(generation_count(&db, "p-pastpins").await, 30);
+    assert_eq!(generation_count(&db, "p-pastpins").await, 540);
 
-    // Pin the oldest 2 non-survivors with shared reader pins. The sweep must
-    // scan past both to find the remaining 26 unpinned non-survivors. Using 2
-    // holders (the pool size is 4) leaves enough connections for the sweep.
+    // A single reader session may hold many distinct advisory keys. Holding all
+    // 512 pins on one connection avoids a pool-sized fixture and proves the
+    // sweep must keyset-page past the old fixed page boundary.
     let pinned_ids: Vec<String> = sqlx::query_scalar(
         "SELECT generation_id::text FROM repo_graph_generation \
-         WHERE project_id = $1 ORDER BY publish_seq ASC LIMIT 2",
+         WHERE project_id = $1 ORDER BY publish_seq ASC LIMIT 512",
     )
     .bind("p-pastpins")
     .fetch_all(db.pool())
     .await
     .expect("pinned ids");
 
-    let mut holders = Vec::new();
+    let mut holder = db.pool().acquire().await.expect("holder conn");
+    let mut pinned_keys = Vec::with_capacity(pinned_ids.len());
     for id in &pinned_ids {
         let key = crate::repositories::repo_graph_generation::generation_stream_pin_key(id)
             .expect("pin key");
-        let mut holder = db.pool().acquire().await.expect("holder conn");
         crate::repositories::repo_graph_generation::acquire_generation_stream_pin_shared(
             &mut holder,
             key,
         )
         .await
         .expect("acquire shared pin");
-        holders.push((holder, key));
+        pinned_keys.push(key);
     }
 
-    // Delete sweep: 28 non-survivors, 2 pinned → skip 2, delete up to 25
-    // of the remaining 26. Bounded to 25.
+    // The 512 oldest candidates are active, so retention must scan into a
+    // second page and delete the bounded 25 from the 26 available candidates.
     let outcome = repo
         .sweep(RetentionSweepRequest {
             project_id: "p-pastpins",
@@ -724,23 +743,18 @@ async fn scan_continues_past_active_pins_to_fill_batch() {
 
     assert_eq!(
         outcome.deleted, 25,
-        "25 unpinned non-survivors deleted after scanning past 2 active pins"
+        "25 unpinned non-survivors deleted after scanning past 512 active pins"
     );
     assert_eq!(
-        outcome.skipped_active_pin, 2,
-        "2 pinned non-survivors skipped"
+        outcome.skipped_active_pin, 512,
+        "512 pinned non-survivors skipped"
     );
     assert_eq!(outcome.candidates, 25);
 
-    // The 2 pinned generations still exist.
-    let survivors_remaining: i64 = generation_count(&db, "p-pastpins").await;
-    assert_eq!(
-        survivors_remaining, 5,
-        "2 newest survivors + 2 pinned + 1 undeleted = 5 remain"
-    );
+    // Two newest survivors, 512 pinned rows, and one unselected candidate.
+    assert_eq!(generation_count(&db, "p-pastpins").await, 515);
 
-    // Release all shared pins.
-    for (mut holder, key) in holders.drain(..) {
+    for key in pinned_keys {
         crate::repositories::repo_graph_generation::release_generation_stream_pin_shared(
             &mut holder,
             key,
@@ -748,9 +762,8 @@ async fn scan_continues_past_active_pins_to_fill_batch() {
         .await
         .expect("release shared pin");
     }
-    drop(holders);
 
-    // A subsequent sweep deletes the remaining 3 (now unpinned).
+    // The next sweep is independently bounded too.
     let outcome2 = repo
         .sweep(RetentionSweepRequest {
             project_id: "p-pastpins",
@@ -759,8 +772,9 @@ async fn scan_continues_past_active_pins_to_fill_batch() {
         })
         .await
         .expect("second sweep");
-    assert_eq!(outcome2.deleted, 3);
-    assert_eq!(generation_count(&db, "p-pastpins").await, 2);
+    assert_eq!(outcome2.deleted, 25);
+    assert_eq!(generation_count(&db, "p-pastpins").await, 490);
+
 }
 
 /// Proves no session advisory locks are leaked after a dry-run sweep. The
