@@ -34,7 +34,13 @@ const OLD_LATEST: &str = "SELECT project_id, commit_sha, graph_blob, built_at, g
                           FROM repo_graph_cache WHERE project_id = $1 ORDER BY built_at DESC LIMIT 1";
 
 async fn fresh() -> (Database, RepoGraphRetentionRepository) {
-    let base = std::env::var("TEST_POSTGRES_URL").expect("live PostgreSQL URL");
+    // Dedicated live-test URLs remain authoritative. Server-test shards expose
+    // only DATABASE_URL, so accept it as the final fallback rather than turning
+    // this required live-Postgres regression into an environment panic.
+    let base = std::env::var("TEST_POSTGRES_URL")
+        .or_else(|_| std::env::var("DJINN_TEST_DATABASE_URL"))
+        .or_else(|_| std::env::var("DATABASE_URL"))
+        .expect("live PostgreSQL URL");
     let prefix = base.rsplit_once('/').expect("database URL").0;
     let name = format!("djinn_retention_{}", uuid::Uuid::now_v7().simple());
     let mut admin = PgConnection::connect(&format!("{prefix}/postgres"))
@@ -531,25 +537,49 @@ async fn retention_removes_real_direct_orphan_compatibility_row() {
         .execute(db.pool())
         .await
         .expect("restore compatibility triggers");
-    let before: i64 = sqlx::query_scalar("SELECT count(*) FROM repo_graph_cache WHERE generation_id=$1::uuid")
-        .bind(&orphan).fetch_one(db.pool()).await.expect("count orphan");
+    let before: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM repo_graph_cache WHERE generation_id=$1::uuid")
+            .bind(&orphan)
+            .fetch_one(db.pool())
+            .await
+            .expect("count orphan");
     assert_eq!(before, 1, "fixture is a real cache-only orphan");
     sweep(&retention, RetentionMode::Delete, 1).await;
-    let after: i64 = sqlx::query_scalar("SELECT count(*) FROM repo_graph_cache WHERE generation_id=$1::uuid")
-        .bind(&orphan).fetch_one(db.pool()).await.expect("count cleaned orphan");
+    let after: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM repo_graph_cache WHERE generation_id=$1::uuid")
+            .bind(&orphan)
+            .fetch_one(db.pool())
+            .await
+            .expect("count cleaned orphan");
     assert_eq!(after, 0, "production retention removes the orphan");
 }
 
 #[tokio::test]
 async fn injected_retention_failure_rolls_back_partial_candidate_deletes() {
     let (db, retention) = fresh().await;
-    for i in 0..5 { legacy_publish(&db, &format!("rollback-{i}"), b"blob").await; }
+    for i in 0..5 {
+        legacy_publish(&db, &format!("rollback-{i}"), b"blob").await;
+    }
     let cache_before = count(&db, "repo_graph_cache").await;
     let generations_before = count(&db, "repo_graph_generation").await;
     retention.fail_after_deleted_candidates_for_test(1);
-    let error = retention.sweep(RetentionSweepRequest { project_id: PROJECT, mode: RetentionMode::Delete, history_n: 1 }).await
+    let error = retention
+        .sweep(RetentionSweepRequest {
+            project_id: PROJECT,
+            mode: RetentionMode::Delete,
+            history_n: 1,
+        })
+        .await
         .expect_err("injected failure after first actual delete");
     assert!(error.to_string().contains("injected retention failure"));
-    assert_eq!(count(&db, "repo_graph_cache").await, cache_before, "partial compatibility deletes roll back");
-    assert_eq!(count(&db, "repo_graph_generation").await, generations_before, "partial immutable deletes roll back");
+    assert_eq!(
+        count(&db, "repo_graph_cache").await,
+        cache_before,
+        "partial compatibility deletes roll back"
+    );
+    assert_eq!(
+        count(&db, "repo_graph_generation").await,
+        generations_before,
+        "partial immutable deletes roll back"
+    );
 }

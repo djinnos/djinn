@@ -139,7 +139,8 @@ impl RepoGraphRetentionRepository {
     /// deletes, before the transaction commits.
     #[cfg(any(test, feature = "test-support"))]
     pub fn fail_after_deleted_candidates_for_test(&self, deleted: usize) {
-        self.fail_after_deleted_candidates.store(deleted, Ordering::SeqCst);
+        self.fail_after_deleted_candidates
+            .store(deleted, Ordering::SeqCst);
     }
 
     /// Run one bounded retention sweep for a project.
