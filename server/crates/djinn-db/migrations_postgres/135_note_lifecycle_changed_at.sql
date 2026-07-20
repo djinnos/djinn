@@ -1,0 +1,1 @@
+ALTER TABLE notes ADD COLUMN IF NOT EXISTS lifecycle_changed_at TEXT NULL;

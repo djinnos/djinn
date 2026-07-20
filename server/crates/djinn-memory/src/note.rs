@@ -101,6 +101,10 @@ pub struct Note {
     pub retrieval_anchor: Option<String>,
     pub created_at: String,
     pub updated_at: String,
+    /// Exact time of the most recent lifecycle status transition. Legacy rows
+    /// intentionally retain `None` until they next transition.
+    #[serde(default)]
+    pub lifecycle_changed_at: Option<String>,
     pub last_accessed: String,
     pub access_count: i64,
     pub confidence: f64,
@@ -139,6 +143,7 @@ impl Note {
             "retrieval_anchor": self.retrieval_anchor,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
+            "lifecycle_changed_at": self.lifecycle_changed_at,
             "last_accessed": self.last_accessed,
             "access_count": self.access_count,
             "confidence": self.confidence,
@@ -590,6 +595,7 @@ mod tests {
             retrieval_anchor,
             created_at: "2026-01-01T00:00:00.000Z".to_string(),
             updated_at: "2026-01-01T00:00:00.000Z".to_string(),
+            lifecycle_changed_at: None,
             last_accessed: "2026-01-01T00:00:00.000Z".to_string(),
             access_count: 0,
             confidence: 1.0,
@@ -623,6 +629,7 @@ mod tests {
         let note = sample_note(None);
 
         assert!(note.to_value()["retrieval_anchor"].is_null());
+        assert!(note.to_value()["lifecycle_changed_at"].is_null());
     }
 
     #[test]
