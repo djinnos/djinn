@@ -47,18 +47,26 @@ pub(crate) fn lint_duplicate_sections(body: &str, tree: &Node) -> Vec<Violation>
 
     let mut violations = Vec::new();
     for later in 0..sections.len() {
+        let (later_heading, later_end, later_shingles) = &sections[later];
+        let mut has_matching_heading = false;
+        let mut has_duplicate_content = false;
         for earlier in 0..later {
             let (first_heading, _, first_shingles) = &sections[earlier];
-            let (later_heading, later_end, later_shingles) = &sections[later];
             if first_heading.depth != later_heading.depth
                 || first_heading.normalized_text != later_heading.normalized_text
             {
                 continue;
             }
+            has_matching_heading = true;
             let intersection = first_shingles.intersection(later_shingles).count();
             let union = first_shingles.union(later_shingles).count();
-            let duplicate = union == 0 || intersection * 100 >= union * 60;
-            let (code, severity, span) = if duplicate {
+            if union == 0 || intersection * 100 >= union * 60 {
+                has_duplicate_content = true;
+                break;
+            }
+        }
+        if has_matching_heading {
+            let (code, severity, span) = if has_duplicate_content {
                 (
                     "DUPLICATE_SECTION_CONTENT",
                     Severity::Error,
@@ -86,7 +94,6 @@ pub(crate) fn lint_duplicate_sections(body: &str, tree: &Node) -> Vec<Violation>
                 )
                 .expect("section spans address the original source"),
             );
-            break;
         }
     }
     violations
@@ -299,6 +306,32 @@ mod tests {
             warning[0].span.start,
             warning_body.match_indices("# Same").nth(1).unwrap().0
         );
+    }
+
+    #[test]
+    fn duplicate_content_against_any_prior_matching_heading_dominates() {
+        let body = concat!(
+            "# Same\n",
+            "a b c d e\n",
+            "# Same\n",
+            "x y z q r\n",
+            "# Same\n",
+            "x y z q r\n",
+        );
+        let found = violations(body);
+        assert_eq!(found.len(), 2);
+
+        let second_start = body.match_indices("# Same").nth(1).unwrap().0;
+        assert_eq!(found[0].code, "REPEATED_SECTION_HEADING");
+        assert_eq!(found[0].severity, Severity::Warning);
+        assert_eq!(found[0].span.start, second_start);
+        assert_eq!(found[0].span.end, second_start + "# Same".len());
+
+        let third_start = body.match_indices("# Same").nth(2).unwrap().0;
+        assert_eq!(found[1].code, "DUPLICATE_SECTION_CONTENT");
+        assert_eq!(found[1].severity, Severity::Error);
+        assert_eq!(found[1].span.start, third_start);
+        assert_eq!(found[1].span.end, body.len());
     }
 
     #[test]
