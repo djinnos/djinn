@@ -1468,6 +1468,14 @@ mod tests {
                     assert_eq!(params.task_id, "t1");
                     assert_eq!(params.trigger_type, "new_task");
                     assert_eq!(params.status.as_deref(), Some("running"));
+                    assert_eq!(
+                        params.dispatch_owner_incarnation_id.as_deref(),
+                        Some("00000000-0000-7000-8000-000000000001")
+                    );
+                    assert_eq!(
+                        params.dispatch_group_id.as_deref(),
+                        Some("00000000-0000-7000-8000-000000000002")
+                    );
                     let reply = Frame {
                         correlation_id: frame.correlation_id,
                         payload: FramePayload::RpcReply(ServiceRpcResponse::CreateTaskRun(Ok(()))),
@@ -1489,6 +1497,8 @@ mod tests {
             status: Some("running".into()),
             workspace_path: None,
             mirror_ref: None,
+            dispatch_owner_incarnation_id: Some("00000000-0000-7000-8000-000000000001".into()),
+            dispatch_group_id: Some("00000000-0000-7000-8000-000000000002".into()),
         };
         services
             .create_task_run(params)

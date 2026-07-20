@@ -115,6 +115,10 @@ pub struct SerializableCreateTaskRunParams {
     pub status: Option<String>,
     pub workspace_path: Option<String>,
     pub mirror_ref: Option<String>,
+    /// Exact coordinator process identity for this dispatch. Optional during mixed-version rollout.
+    pub dispatch_owner_incarnation_id: Option<String>,
+    /// One coordinator-minted correlation group for this whole dispatch.
+    pub dispatch_group_id: Option<String>,
 }
 
 /// Serde-friendly twin of [`djinn_core::events::DjinnEventEnvelope`].
@@ -888,6 +892,8 @@ mod tests {
             status: Some("running".into()),
             workspace_path: Some("/workspace".into()),
             mirror_ref: Some("refs/mirror/p1".into()),
+            dispatch_owner_incarnation_id: Some("00000000-0000-7000-8000-000000000001".into()),
+            dispatch_group_id: Some("00000000-0000-7000-8000-000000000002".into()),
         };
         let f = Frame {
             correlation_id: 11,
