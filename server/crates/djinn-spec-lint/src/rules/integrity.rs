@@ -281,10 +281,16 @@ fn opening_tag_span(body: &str, start: usize) -> Option<SourceRange> {
     while index < bytes.len() {
         let byte = bytes[index];
         if let Some(delimiter) = quote {
-            if byte == delimiter {
+            if byte == b'\\' {
+                // Quoted JSX values and JavaScript template literals may
+                // escape their delimiter. Skip the escaped byte so it cannot
+                // terminate the value or be mistaken for tag syntax.
+                index += 2;
+                continue;
+            } else if byte == delimiter {
                 quote = None;
             }
-        } else if matches!(byte, b'\'' | b'"') {
+        } else if matches!(byte, b'\'' | b'"' | b'`') {
             quote = Some(byte);
         } else if byte == b'{' {
             braces += 1;
@@ -351,14 +357,16 @@ fn lint_text(body: &str, range: SourceRange, violations: &mut Vec<Violation>) {
             index += 1;
             continue;
         }
+        // CommonMark backslash escaping applies to one punctuation byte, not
+        // to the whole adjacent run. Consume only the escaped backtick, then
+        // regroup any backticks that remain.
+        if is_backslash_escaped(body.as_bytes(), range.start + index) {
+            index += 1;
+            continue;
+        }
         let start = index;
         while index < bytes.len() && bytes[index] == b'`' {
             index += 1;
-        }
-        // An odd run of immediately preceding backslashes escapes this
-        // delimiter; an even run represents escaped backslashes instead.
-        if is_backslash_escaped(bytes, start) {
-            continue;
         }
         violations.push(violation(
             body,
@@ -566,6 +574,30 @@ mod tests {
                 .iter()
                 .all(|(code, _)| code != "UNBALANCED_CODE_FENCE")
         );
+    }
+
+    #[test]
+    fn escaping_one_backtick_does_not_consume_the_adjacent_delimiter() {
+        let body = "\\``";
+        let tree = markdown::to_mdast(body, &proposal_parse_options()).unwrap();
+        let found = lint_integrity(body, &tree, &[], &[]);
+
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].code, "UNBALANCED_INLINE_BACKTICK");
+        assert_eq!(found[0].span, Utf8ByteSpan { start: 2, end: 3 });
+        assert_eq!(&body[found[0].span.start..found[0].span.end], "`");
+    }
+
+    #[test]
+    fn jsx_template_tag_syntax_does_not_expose_an_inner_fence() {
+        let body = "<Widget template={`}>\n~~~\nvalue\n`} />";
+        let excluded = [opening_tag_span(body, 0).expect("complete JSX opening tag")];
+        let mut found = Vec::new();
+
+        lint_fences(body, &excluded, &mut found);
+
+        assert!(found.is_empty());
+        assert_eq!(excluded[0].end, body.len());
     }
 
     #[test]
