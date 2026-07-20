@@ -28,6 +28,7 @@ pub(crate) mod session_extraction; // THIN SHIM: extraction backfill adapter
 mod supervisor_runner; // HOST-ONLY: host-side dispatch logic
 
 pub use actor::*;
+pub use adapter::resolve_final_verification_for_task_run;
 pub use commands::{SlotCommand, SlotError};
 pub use helpers::*;
 pub use pool::*;
