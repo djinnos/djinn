@@ -982,6 +982,8 @@ mod tests {
                     environment_identity_digest: String::new(),
                 },
             ),
+            final_verification_disposition:
+                crate::output_parser::FinalVerificationDisposition::Pending,
         };
         let ok = crate::finalize_handlers::process_completion_intent_with_outcome(
             &intent,

@@ -210,9 +210,8 @@ impl SlotHostCallbacks for ReviewerReuseCallbacks {
         >,
     > {
         self.events.lock().unwrap().push(match verify_run_id {
-            "reuse-c0" => "consult-reuse-c0",
             "reuse-c1" => "consult-reuse-c1",
-            _ => "writer-resolution",
+            _ => "plan-resolution",
         });
         let material = self.material.clone();
         Box::pin(async move { Ok(Some(material)) })
@@ -599,7 +598,7 @@ async fn reviewer_reuses_post_authoring_worker_pass_with_zero_commands_and_zero_
         events,
         vec![
             "reviewer-coordinator-entered",
-            "consult-reuse-c0",
+            "plan-resolution",
             "consult-reuse-c1"
         ],
         "the reviewer must consult the same cache and never enter the writer path"

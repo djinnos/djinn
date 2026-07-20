@@ -1305,6 +1305,7 @@ pub async fn run_reply_loop(
                                 finalize_payload: payload,
                                 tool_use_id,
                                 final_verification_evidence: None,
+                                final_verification_disposition: crate::output_parser::FinalVerificationDisposition::Pending,
                             };
                             match verify_completion_intent(&mut intent, task_id, None, cancel.clone(), slot_ctx, "submit_work").await {
                                 Ok(_) => {
@@ -1342,6 +1343,7 @@ pub async fn run_reply_loop(
                         finalize_payload: payload.clone(),
                         tool_use_id: tool_use_id.clone(),
                         final_verification_evidence: None,
+                                final_verification_disposition: crate::output_parser::FinalVerificationDisposition::Pending,
                     };
                     // The reviewer's authoritative final-verification boundary.
                     // On a hit this suppresses canonical commands and lease
