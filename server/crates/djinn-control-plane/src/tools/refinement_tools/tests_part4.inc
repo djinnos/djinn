@@ -36,14 +36,24 @@
 
     /// Helper: insert a task row and return its id.
     async fn insert_task(db: &Database, project_id: &str, epic_id: &str, short_id: &str) -> String {
+        const CREATOR_ID: &str = "structured-claim-test-creator";
+        sqlx::query(
+            "INSERT INTO users (id, github_id, github_login) VALUES ($1, 91001, 'structured-claim-test-creator') ON CONFLICT (id) DO NOTHING",
+        )
+        .bind(CREATOR_ID)
+        .execute(db.pool())
+        .await
+        .unwrap();
+
         let id = uuid::Uuid::now_v7().to_string();
         sqlx::query(
-            "INSERT INTO tasks (id, project_id, short_id, epic_id, title, description, design, issue_type, priority, owner, status, continuation_count, labels, acceptance_criteria, memory_refs) VALUES ($1, $2, $3, $4, 'T', '', '', 'task', 0, '', 'open', 0, '[]'::jsonb, '[]'::jsonb, '[]'::jsonb)",
+            "INSERT INTO tasks (id, project_id, short_id, epic_id, title, description, design, issue_type, priority, owner, status, continuation_count, labels, acceptance_criteria, memory_refs, created_by_user_id) VALUES ($1, $2, $3, $4, 'T', '', '', 'task', 0, '', 'open', 0, '[]'::jsonb, '[]'::jsonb, '[]'::jsonb, $5)",
         )
         .bind(&id)
         .bind(project_id)
         .bind(short_id)
         .bind(epic_id)
+        .bind(CREATOR_ID)
         .execute(db.pool())
         .await
         .unwrap();
