@@ -13,7 +13,9 @@
 //! reach a cluster.
 
 use super::*;
+use crate::config::KubernetesConfig;
 use crate::label_value::{LABEL_VALUE_MAX_BYTES, is_valid_label_value};
+use crate::warm_job::build_warm_job;
 
 /// A realistic production project id — a full 36-char UUIDv7, which is what
 /// overran every budget in the original failure.
