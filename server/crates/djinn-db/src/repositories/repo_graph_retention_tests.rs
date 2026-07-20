@@ -774,7 +774,6 @@ async fn scan_continues_past_active_pins_to_fill_batch() {
         .expect("second sweep");
     assert_eq!(outcome2.deleted, 25);
     assert_eq!(generation_count(&db, "p-pastpins").await, 490);
-
 }
 
 /// Proves no session advisory locks are leaked after a dry-run sweep. The
