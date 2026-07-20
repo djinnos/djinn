@@ -12,7 +12,8 @@ written to JSONL), and supply commands that emit JSON:
 
 ```sh
 export DJINN_METRICS_URL=https://server.example/metrics
-export DJINN_GALAXY_URL=https://server.example/api/galaxy/artifact
+export PROJECT_ID='<approved-project-id>'
+export DJINN_GALAXY_URL="https://server.example/api/projects/$PROJECT_ID/code-graph/galaxy"
 export DJINN_GALAXY_TOKEN=... # never pass this as a flag
 export DJINN_GRAPH_INSTALL_COMMAND='operator-installed graph loader command'
 export DJINN_BOARD_SCAN_COMMAND='operator command invoking the landed board scanner; emits {"pages":40}'

@@ -12,6 +12,7 @@ Examples never assume a cluster, namespace, release, or service name. Set these 
 export CLUSTER='<approved-cluster>'
 export NAMESPACE='<approved-namespace>'
 export RELEASE='<helm-release>'
+export PROJECT_ID='<approved-project-id>'
 export SERVER_SELECTOR='app.kubernetes.io/component=server'
 export CANDIDATE_IMAGE='registry.example/djinn-server@sha256:<candidate-digest>'
 export PRECHANGE_IMAGE='registry.example/djinn-server@sha256:<pre-change-digest>'
@@ -43,12 +44,13 @@ The production fixture is `ste6-production-v1`: 65,220 nodes, 277,200 edges, a 6
 
 Deploy or select the approved pre-change image in an isolated production-equivalent staging target. Use the same 4 GiB cgroup and fixture profile. Record the resolved digest before running. The driver requires operator commands that call the **landed** graph install, board scan, generation inspection, restart inspection, and fixture inspection interfaces; their JSON shapes are shown in `driver/README.md`.
 
-```sh
+```bash
+set -o pipefail
 export IMAGE_ID="$PRECHANGE_IMAGE"
 export RUN_DIR="$DIAGNOSTIC_RUN"
 # Populate these commands with target-specific wrappers; do not put credentials in flags.
 export DJINN_METRICS_URL='https://<metrics-host>/metrics'
-export DJINN_GALAXY_URL='https://<server-host>/api/galaxy/artifact'
+export DJINN_GALAXY_URL="https://<server-host>/api/projects/$PROJECT_ID/code-graph/galaxy"
 export DJINN_GALAXY_TOKEN="$(cat /secure/path/galaxy-token)"
 export DJINN_GRAPH_INSTALL_COMMAND='<landed graph install command using $FIXTURE_DIR>'
 export DJINN_BOARD_SCAN_COMMAND='<landed persisted board scan command emitting {"pages":40}>'
@@ -67,7 +69,8 @@ Keep diagnostic raw output separately. It is rendered for comparison but cannot 
 
 First deploy/select exactly `$CANDIDATE_IMAGE` using the normal release mechanism, then capture immutable identity and preflight facts. The driver itself verifies an exact 4 GiB cgroup, cgroup event readability, no resident graph at T0, fixture identity/checksums, required allocator/graph metrics, a 40-page board pass, and initial 200 then 304 responses.
 
-```sh
+```bash
+set -o pipefail
 export IMAGE_ID="$CANDIDATE_IMAGE"
 export RUN_DIR="$CANDIDATE_RUN"
 printf '%s\n' "$IMAGE_ID" > "$RUN_DIR/image-digest.txt"
@@ -87,20 +90,28 @@ sha256sum "$RUN_DIR/driver-raw.jsonl" "$RUN_DIR/driver.log" \
 
 The unmodified driver defaults are the required protocol: **T0** after 30 minutes idle with no graph; graph install and its warm/server peak; **T1** after 15 minutes quiescent with the same graph resident; a two-hour burst with five-minute board ticks and 100 sequential alternating 200/304 requests; **T2** five minutes after the final request. Do not use duration or request overrides for staging evidence.
 
-If a wrapper is needed to form the evaluator wrapper from append-only driver JSONL, retain both the source JSONL and the resulting `memory-sustainability-raw/v1` document. It must preserve the run/image identity, all samples, route samples, board passes, fixture-manifest checksum, raw-file evidence references, and cgroup/OOM/restart values defined by `evaluator/raw-schema.json`.
+Use the checked-in `evaluator/adapt_driver_jsonl.pl` adapter; do not hand-edit a wrapper. It validates finalized successful JSONL, preserves the driver run ID and supplied image digest in every derived record, and records SHA-256 references to the source JSONL and fixture manifest.
 
 ## 5. Evaluate and retain machine-readable evidence
 
 Create `$EVIDENCE_ROOT/evaluator-input.json` with mandatory `candidate` and optional `pre_change_diagnostic` runs that conform to `evaluator/raw-schema.json`. Do not hand-edit measurements after collection.
 
-```sh
+```bash
+set -o pipefail
+perl server/docs/operational/memory-sustainability/evaluator/adapt_driver_jsonl.pl \
+  --candidate-raw "$CANDIDATE_RUN/driver-raw.jsonl" --candidate-image "$CANDIDATE_IMAGE" \
+  --candidate-fixture-manifest "$CANDIDATE_RUN/fixture-manifest.json" \
+  --diagnostic-raw "$DIAGNOSTIC_RUN/driver-raw.jsonl" --diagnostic-image "$PRECHANGE_IMAGE" \
+  --diagnostic-fixture-manifest "$CANDIDATE_RUN/fixture-manifest.json" \
+  --output "$EVIDENCE_ROOT/evaluator-input.json" \
+  2>&1 | tee "$EVIDENCE_ROOT/adapter.log"
 perl server/docs/operational/memory-sustainability/evaluator/evaluate.pl \
   --input "$EVIDENCE_ROOT/evaluator-input.json" \
   --json-out "$EVIDENCE_ROOT/evaluation.json" \
   --report-out "$EVIDENCE_ROOT/evaluation.md" \
   2>&1 | tee "$EVIDENCE_ROOT/evaluator.log"
 sha256sum "$EVIDENCE_ROOT/evaluator-input.json" "$EVIDENCE_ROOT/evaluation.json" \
-  "$EVIDENCE_ROOT/evaluation.md" "$EVIDENCE_ROOT/evaluator.log" \
+  "$EVIDENCE_ROOT/evaluation.md" "$EVIDENCE_ROOT/adapter.log" "$EVIDENCE_ROOT/evaluator.log" \
   | tee "$EVIDENCE_ROOT/evaluation-checksums.sha256"
 ```
 
