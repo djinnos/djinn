@@ -7,6 +7,11 @@ edition = "2024"
 [lib]
 doctest = false
 
+[features]
+# Narrow lifecycle reset seam used by downstream Linux test binaries. It never
+# starts another waiter; it only reopens an already-idle singleton registry.
+test-support = []
+
 [dependencies]
 djinn-core = { path = "../djinn-core" }
 djinn-db = { path = "../djinn-db", features = ["test-support"] }

@@ -202,6 +202,20 @@ impl ChildReaper {
         registry.admission_open = false;
         self.inner.changed.notify_all();
     }
+    /// Reopen an empty registry for the next case in a serialized test binary.
+    /// This never starts another waiter; callers must have drained all records.
+    #[cfg(feature = "test-support")]
+    pub fn reopen_after_idle_for_test(&self) {
+        let mut registry = self.inner.registry.lock().expect("child registry poisoned");
+        assert!(
+            registry.supervisors.is_empty()
+                && registry.pending_admissions == 0
+                && registry.adopted.is_empty(),
+            "test lifecycle reaper must be drained before reopening admission"
+        );
+        registry.admission_open = true;
+        self.inner.changed.notify_all();
+    }
 
     /// Whether shutdown has closed command admission.
     #[must_use]

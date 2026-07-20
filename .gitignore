@@ -1,5 +1,5 @@
 # Djinn task management
-.task-runtime/worktrees/
+.task-runtime/
 .djinn/.obsidian/
 .planning/
 .claude/

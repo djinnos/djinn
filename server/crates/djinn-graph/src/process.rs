@@ -67,7 +67,7 @@ use std::time::Instant;
 /// Keep this separate from the production registry so regression fixtures can
 /// prove the latter ownership has ended.
 #[cfg(all(test, target_os = "linux"))]
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 /// Clock abstraction for deterministic timing inside the supervisor.
 #[cfg(target_os = "linux")]
@@ -428,6 +428,11 @@ const PHASE_TIMEOUT: Duration = Duration::from_secs(2);
 /// delivery time.
 #[cfg(all(test, target_os = "linux"))]
 static ACTIVE_LINUX_SUPERVISORS: AtomicUsize = AtomicUsize::new(0);
+
+/// Test-only fault injection for the public cleanup diagnostic path. A real
+/// SIGKILL-resistant process cannot be made deterministic in unprivileged CI.
+#[cfg(all(test, target_os = "linux"))]
+static FORCE_CLEANUP_EXHAUSTION_FOR_TEST: AtomicBool = AtomicBool::new(false);
 
 #[cfg(all(test, target_os = "linux"))]
 struct ActiveLinuxSupervisor;
@@ -856,10 +861,19 @@ fn force_cleanup(
         {
             status = Some(s);
         }
-        if let Some(ref s) = status
-            && pgid_is_gone(pgid)
-        {
-            return Ok(*s);
+        if let Some(ref s) = status {
+            #[cfg(test)]
+            if FORCE_CLEANUP_EXHAUSTION_FOR_TEST.load(Ordering::SeqCst) {
+                // Inject while TERM-ignoring group members are still alive, so
+                // the public diagnostic snapshots meaningful surviving PIDs.
+                return Err(CleanupFailure {
+                    phase: CleanupPhase::Kill,
+                    direct_status: Some(*s),
+                });
+            }
+            if pgid_is_gone(pgid) {
+                return Ok(*s);
+            }
         }
         if clock.now_instant() >= deadline {
             break;
@@ -877,10 +891,19 @@ fn force_cleanup(
         {
             status = Some(s);
         }
-        if let Some(ref s) = status
-            && pgid_is_gone(pgid)
-        {
-            return Ok(*s);
+        if let Some(ref s) = status {
+            #[cfg(test)]
+            if FORCE_CLEANUP_EXHAUSTION_FOR_TEST.load(Ordering::SeqCst) {
+                // Inject while TERM-ignoring group members are still alive, so
+                // the public diagnostic snapshots meaningful surviving PIDs.
+                return Err(CleanupFailure {
+                    phase: CleanupPhase::Kill,
+                    direct_status: Some(*s),
+                });
+            }
+            if pgid_is_gone(pgid) {
+                return Ok(*s);
+            }
         }
         if clock.now_instant() >= deadline {
             break;
@@ -1066,49 +1089,14 @@ pub async fn output_with_kill(mut cmd: Command, _timeout: Duration) -> io::Resul
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+    #[cfg(not(target_os = "linux"))]
     use djinn_core::clock::{Clock, SystemClock};
 
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn cleanup_exhaustion_preserves_all_diagnostic_fields_and_source_chain() {
-        let direct_status = TerminalStatus {
-            pid: 41,
-            raw_status: 9,
-        };
-        let original = io::Error::new(io::ErrorKind::TimedOut, "process timed out");
-        let err = io::Error::new(
-            io::ErrorKind::TimedOut,
-            CleanupExhaustionError::new(
-                "command-42".to_owned(),
-                42,
-                Some(direct_status),
-                CleanupPhase::Kill,
-                vec![41, 43],
-                original,
-            ),
-        );
-
-        assert_eq!(err.kind(), io::ErrorKind::TimedOut);
-        let diagnostic = err
-            .get_ref()
-            .and_then(|source| source.downcast_ref::<CleanupExhaustionError>())
-            .expect("io error must retain typed cleanup diagnostic");
-        assert_eq!(diagnostic.command_id, "command-42");
-        assert_eq!(diagnostic.pgid, 42);
-        assert_eq!(diagnostic.direct_status, Some(direct_status));
-        assert_eq!(diagnostic.phase, CleanupPhase::Kill);
-        assert_eq!(diagnostic.surviving_pids, vec![41, 43]);
-
-        let typed_source = diagnostic.source().expect("original error source");
-        let timeout = typed_source
-            .downcast_ref::<io::Error>()
-            .expect("original timeout error must remain in source chain");
-        assert_eq!(timeout.kind(), io::ErrorKind::TimedOut);
-        assert!(timeout.source().is_none());
-    }
-
     /// A hung child (`sleep 30`) must be terminated within the grace window and
-    /// the call must return promptly rather than hanging.
+    /// the call must return promptly rather than hanging. Linux has a stronger
+    /// fixture in `process_linux_supervisor_tests` which records its PID and
+    /// asserts the six-second lifecycle contract.
+    #[cfg(not(target_os = "linux"))]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn timeout_kills_hung_child_promptly() {
         let mut cmd = Command::new("sh");
