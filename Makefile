@@ -31,16 +31,12 @@ test-db-migrate: ## Bootstrap and migrate test Postgres; requires TEST_DB_MIGRAT
 	@until docker exec djinn-postgres-test pg_isready -U postgres >/dev/null 2>&1; do sleep 1; done
 	@# djinn-db's own migrator, not the full server binary: same embedded
 	@# migrations through the same owned runner, ~200 fewer packages to build.
-	@cd $(SERVER_DIR) && SQLX_OFFLINE=true cargo run -p djinn-db --bin djinn-migrate -- \
-		--database-url postgres://postgres:postgres@127.0.0.1:5433/djinn \
-		--bootstrap-designated-operator-only \
-		--migration-designated-operator-user-id "$(TEST_DB_MIGRATION_USER_ID)" \
-		--bootstrap-designated-operator-github-id "$(TEST_DB_MIGRATION_GITHUB_ID)" \
-		--bootstrap-designated-operator-github-login "$(TEST_DB_MIGRATION_GITHUB_LOGIN)" >/dev/null
-	@cd $(SERVER_DIR) && SQLX_OFFLINE=true cargo run -p djinn-db --bin djinn-migrate -- \
-		--database-url postgres://postgres:postgres@127.0.0.1:5433/djinn \
-		--migrate-only \
-		--migration-designated-operator-user-id "$(TEST_DB_MIGRATION_USER_ID)" >/dev/null
+	@cd $(SERVER_DIR) && SQLX_OFFLINE=true \
+		DJINN_MIGRATE_DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5433/djinn \
+		DJINN_MIGRATE_OPERATOR_USER_ID="$(TEST_DB_MIGRATION_USER_ID)" \
+		DJINN_MIGRATE_OPERATOR_GITHUB_ID="$(TEST_DB_MIGRATION_GITHUB_ID)" \
+		DJINN_MIGRATE_OPERATOR_LOGIN="$(TEST_DB_MIGRATION_GITHUB_LOGIN)" \
+		cargo test -p djinn-db --test apply_migrations -- --ignored >/dev/null
 
 test-db-postgres-template: ## Build the djinn_test_template DB Postgres clones from
 	@until docker exec djinn-postgres-test pg_isready -U postgres >/dev/null 2>&1; do echo "waiting for postgres-test..."; sleep 1; done

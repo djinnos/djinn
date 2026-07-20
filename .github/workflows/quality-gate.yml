@@ -852,17 +852,27 @@ jobs:
         env:
           DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5433/djinn
         run: |
-          # djinn-db's own migrator, NOT `cargo run -p djinn-server`. The
+          # djinn-db's own migrator, NOT `cargo run -p djinn-server`: the
           # server binary drags in ~200 packages it never executes here
           # (kube, tree-sitter grammars, candle, coordinator/agent), which
-          # no warm cache serves: `server-quality` is clippy-warmed so it
-          # holds rmeta only, and this invocation's package/feature
-          # selection differs from `server-test`'s. That cost ~8 min in
-          # each of six jobs. djinn-migrate applies the identical embedded
-          # migrations through the same owned runner in djinn_db::migrations,
-          # so the designated-operator contract is unchanged.
-          SQLX_OFFLINE=true cargo run -p djinn-db --bin djinn-migrate -- --database-url postgres://postgres:postgres@127.0.0.1:5433/djinn --bootstrap-designated-operator-only --migration-designated-operator-user-id 00000000-0000-7000-8000-000000000002 --bootstrap-designated-operator-github-id 9000000002 --bootstrap-designated-operator-github-login djinn-ci-migration-operator
-          SQLX_OFFLINE=true cargo run -p djinn-db --bin djinn-migrate -- --database-url postgres://postgres:postgres@127.0.0.1:5433/djinn --migrate-only --migration-designated-operator-user-id 00000000-0000-7000-8000-000000000002
+          # cost ~8 min in each of six jobs.
+          #
+          # It is a `cargo test --ignored` target and NOT a `[[bin]]`, for a
+          # measured reason: `server-test` is warmed by `nextest run
+          # --all-targets --no-run`, so it holds TEST-profile artifacts. A
+          # `cargo run --bin` needs the dev-profile path the warmer never
+          # produces — measured at 329 crates / 3m49s, against 27s for the
+          # identical package via `cargo test` on the same cache.
+          #
+          # It applies the same embedded migrations through the same owned
+          # runner in djinn_db::migrations, so the designated-operator
+          # contract is unchanged. See tests/apply_migrations.rs.
+          SQLX_OFFLINE=true \
+            DJINN_MIGRATE_DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5433/djinn \
+            DJINN_MIGRATE_OPERATOR_USER_ID=00000000-0000-7000-8000-000000000002 \
+            DJINN_MIGRATE_OPERATOR_GITHUB_ID=9000000002 \
+            DJINN_MIGRATE_OPERATOR_LOGIN=djinn-ci-migration-operator \
+            cargo test -p djinn-db --test apply_migrations -- --ignored --nocapture
       - name: Build Postgres test template
         env:
           PGPASSWORD: postgres
@@ -1181,7 +1191,7 @@ jobs:
         with:
           workspaces: server
           # server-test, not server-quality: this job needs codegen
-          # artifacts (it builds and runs djinn-migrate), and the quality
+          # artifacts (it builds the djinn-db migration test), and the quality
           # family is clippy-warmed so it carries rmeta only. server-test is
           # warmed by `nextest run --workspace --no-run`, a real build, and
           # its rmeta still serves the `cargo check` in sqlx-verify.
@@ -1201,17 +1211,27 @@ jobs:
       - name: Apply djinn-db migrations
         working-directory: server/crates/djinn-db
         run: |
-          # djinn-db's own migrator, NOT `cargo run -p djinn-server`. The
+          # djinn-db's own migrator, NOT `cargo run -p djinn-server`: the
           # server binary drags in ~200 packages it never executes here
           # (kube, tree-sitter grammars, candle, coordinator/agent), which
-          # no warm cache serves: `server-quality` is clippy-warmed so it
-          # holds rmeta only, and this invocation's package/feature
-          # selection differs from `server-test`'s. That cost ~8 min in
-          # each of six jobs. djinn-migrate applies the identical embedded
-          # migrations through the same owned runner in djinn_db::migrations,
-          # so the designated-operator contract is unchanged.
-          SQLX_OFFLINE=true cargo run -p djinn-db --bin djinn-migrate -- --database-url postgres://postgres:postgres@127.0.0.1:5433/djinn --bootstrap-designated-operator-only --migration-designated-operator-user-id 00000000-0000-7000-8000-000000000002 --bootstrap-designated-operator-github-id 9000000002 --bootstrap-designated-operator-github-login djinn-ci-migration-operator
-          SQLX_OFFLINE=true cargo run -p djinn-db --bin djinn-migrate -- --database-url postgres://postgres:postgres@127.0.0.1:5433/djinn --migrate-only --migration-designated-operator-user-id 00000000-0000-7000-8000-000000000002
+          # cost ~8 min in each of six jobs.
+          #
+          # It is a `cargo test --ignored` target and NOT a `[[bin]]`, for a
+          # measured reason: `server-test` is warmed by `nextest run
+          # --all-targets --no-run`, so it holds TEST-profile artifacts. A
+          # `cargo run --bin` needs the dev-profile path the warmer never
+          # produces — measured at 329 crates / 3m49s, against 27s for the
+          # identical package via `cargo test` on the same cache.
+          #
+          # It applies the same embedded migrations through the same owned
+          # runner in djinn_db::migrations, so the designated-operator
+          # contract is unchanged. See tests/apply_migrations.rs.
+          SQLX_OFFLINE=true \
+            DJINN_MIGRATE_DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5433/djinn \
+            DJINN_MIGRATE_OPERATOR_USER_ID=00000000-0000-7000-8000-000000000002 \
+            DJINN_MIGRATE_OPERATOR_GITHUB_ID=9000000002 \
+            DJINN_MIGRATE_OPERATOR_LOGIN=djinn-ci-migration-operator \
+            cargo test -p djinn-db --test apply_migrations -- --ignored --nocapture
       - name: Verify .sqlx offline cache is up to date
         working-directory: .
         run: make sqlx-verify
@@ -1243,7 +1263,7 @@ jobs:
         with:
           workspaces: server
           # server-test, not server-quality: this job builds and runs
-          # djinn-migrate and djinn-memory-eval, and needs codegen artifacts
+          # the djinn-db migration test and djinn-memory-eval, needing codegen
           # the clippy-warmed quality family does not carry. djinn-memory-eval
           # is also outside that family's package closure entirely (the
           # warmer builds `-p djinn-server`, not `--workspace`).
@@ -1265,17 +1285,27 @@ jobs:
         env:
           DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5433/djinn
         run: |
-          # djinn-db's own migrator, NOT `cargo run -p djinn-server`. The
+          # djinn-db's own migrator, NOT `cargo run -p djinn-server`: the
           # server binary drags in ~200 packages it never executes here
           # (kube, tree-sitter grammars, candle, coordinator/agent), which
-          # no warm cache serves: `server-quality` is clippy-warmed so it
-          # holds rmeta only, and this invocation's package/feature
-          # selection differs from `server-test`'s. That cost ~8 min in
-          # each of six jobs. djinn-migrate applies the identical embedded
-          # migrations through the same owned runner in djinn_db::migrations,
-          # so the designated-operator contract is unchanged.
-          SQLX_OFFLINE=true cargo run -p djinn-db --bin djinn-migrate -- --database-url postgres://postgres:postgres@127.0.0.1:5433/djinn --bootstrap-designated-operator-only --migration-designated-operator-user-id 00000000-0000-7000-8000-000000000002 --bootstrap-designated-operator-github-id 9000000002 --bootstrap-designated-operator-github-login djinn-ci-migration-operator
-          SQLX_OFFLINE=true cargo run -p djinn-db --bin djinn-migrate -- --database-url postgres://postgres:postgres@127.0.0.1:5433/djinn --migrate-only --migration-designated-operator-user-id 00000000-0000-7000-8000-000000000002
+          # cost ~8 min in each of six jobs.
+          #
+          # It is a `cargo test --ignored` target and NOT a `[[bin]]`, for a
+          # measured reason: `server-test` is warmed by `nextest run
+          # --all-targets --no-run`, so it holds TEST-profile artifacts. A
+          # `cargo run --bin` needs the dev-profile path the warmer never
+          # produces — measured at 329 crates / 3m49s, against 27s for the
+          # identical package via `cargo test` on the same cache.
+          #
+          # It applies the same embedded migrations through the same owned
+          # runner in djinn_db::migrations, so the designated-operator
+          # contract is unchanged. See tests/apply_migrations.rs.
+          SQLX_OFFLINE=true \
+            DJINN_MIGRATE_DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5433/djinn \
+            DJINN_MIGRATE_OPERATOR_USER_ID=00000000-0000-7000-8000-000000000002 \
+            DJINN_MIGRATE_OPERATOR_GITHUB_ID=9000000002 \
+            DJINN_MIGRATE_OPERATOR_LOGIN=djinn-ci-migration-operator \
+            cargo test -p djinn-db --test apply_migrations -- --ignored --nocapture
       - name: Build Postgres test template
         env:
           PGPASSWORD: postgres

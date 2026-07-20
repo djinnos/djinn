@@ -82,7 +82,7 @@ jobs:
           # cannot see from here.
           save-if: false
           # server-test (codegen), not server-quality (clippy/rmeta only):
-          # this job builds and runs djinn-migrate and djinn-memory-eval.
+          # this job builds the djinn-db migration test and djinn-memory-eval.
           shared-key: server-test
           cache-on-failure: true
           cache-all-crates: true
@@ -93,8 +93,12 @@ jobs:
           DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5433/djinn
         run: |
           # djinn-db's own migrator — see the same step in quality-gate.yml.
-          SQLX_OFFLINE=true cargo run -p djinn-db --bin djinn-migrate -- --database-url postgres://postgres:postgres@127.0.0.1:5433/djinn --bootstrap-designated-operator-only --migration-designated-operator-user-id 00000000-0000-7000-8000-000000000002 --bootstrap-designated-operator-github-id 9000000002 --bootstrap-designated-operator-github-login djinn-ci-migration-operator
-          SQLX_OFFLINE=true cargo run -p djinn-db --bin djinn-migrate -- --database-url postgres://postgres:postgres@127.0.0.1:5433/djinn --migrate-only --migration-designated-operator-user-id 00000000-0000-7000-8000-000000000002
+          SQLX_OFFLINE=true \
+            DJINN_MIGRATE_DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5433/djinn \
+            DJINN_MIGRATE_OPERATOR_USER_ID=00000000-0000-7000-8000-000000000002 \
+            DJINN_MIGRATE_OPERATOR_GITHUB_ID=9000000002 \
+            DJINN_MIGRATE_OPERATOR_LOGIN=djinn-ci-migration-operator \
+            cargo test -p djinn-db --test apply_migrations -- --ignored --nocapture
 
       - name: Build Postgres test template
         env:
