@@ -94,6 +94,32 @@ async fn terminal_write_is_atomic_and_legacy_writes_are_null_taxonomy() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn successful_terminal_without_injections_has_empty_outcome() {
+    let db = test_db();
+    let project_id = "019f4900-0000-7000-8000-000000000138";
+    seed_project(&db, project_id).await;
+    let repo = RetrievalTraceRepository::new(db);
+    let candidates = json!([]);
+    let durations = json!({});
+    let mut params = terminal_params(project_id, &candidates, &durations);
+    params.trace.estimated_injected_tokens = 0;
+    params.candidate_count = Some(0);
+    params.injected_count = Some(0);
+    params.dispositions = Some(KnowledgeTraceDispositionCounts {
+        confidence_filtered: 0,
+        not_top_k: 0,
+        oversized_skipped: 0,
+        injected: 0,
+        budget_pruned: 0,
+    });
+
+    let row = repo.insert_terminal(params).await.unwrap();
+
+    assert_eq!(row.terminal_state.as_deref(), Some("success"));
+    assert_eq!(row.outcome, RetrievalTraceOutcome::Empty);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn error_and_cancelled_terminals_do_not_fabricate_dispositions() {
     let db = test_db();
     let project_id = "019f4900-0000-7000-8000-000000000137";
