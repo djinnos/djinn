@@ -1,41 +1,12 @@
 {
-  "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "memory-sustainability-raw/v1",
-  "title": "Memory sustainability offline evaluator input",
-  "type": "object",
-  "required": ["candidate"],
-  "properties": {
-    "candidate": {"$ref": "#/$defs/run"},
-    "pre_change_diagnostic": {"$ref": "#/$defs/run"}
-  },
-  "additionalProperties": false,
-  "$defs": {
-    "run": {
-      "type": "object",
-      "required": ["schema", "run_id", "candidate_image_id", "cgroup_limit_bytes", "samples", "route_samples", "board_passes"],
-      "properties": {
-        "schema": {"const": "memory-sustainability-raw/v1"},
-        "run_id": {"type": "string", "minLength": 1},
-        "candidate_image_id": {"type": "string", "minLength": 1},
-        "cgroup_limit_bytes": {"const": 4294967296},
-        "samples": {"type": "array", "minItems": 5, "items": {"$ref": "#/$defs/sample"}},
-        "route_samples": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/route"}},
-        "board_passes": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/board"}}
-      },
-      "additionalProperties": false
-    },
-    "sample": {
-      "type": "object",
-      "required": ["run_id", "image_id", "phase", "server_rss_bytes", "warm_job_rss_bytes", "jemalloc_retained_bytes", "graph_generation_id", "oom_kill_count", "restart_count"],
-      "properties": {
-        "run_id": {"type": "string"}, "image_id": {"type": "string"},
-        "phase": {"enum": ["T0", "graph_install", "T1", "burst", "T2"]},
-        "server_rss_bytes": {"type": "integer", "minimum": 0}, "warm_job_rss_bytes": {"type": "integer", "minimum": 0},
-        "jemalloc_retained_bytes": {"type": "integer", "minimum": 0}, "graph_generation_id": {"type": "string", "minLength": 1},
-        "oom_kill_count": {"type": "integer", "minimum": 0}, "restart_count": {"type": "integer", "minimum": 0}
-      }, "additionalProperties": false
-    },
-    "route": {"type": "object", "required": ["run_id", "image_id", "http_status", "rss_before_bytes", "rss_after_bytes"], "properties": {"run_id": {"type": "string"}, "image_id": {"type": "string"}, "http_status": {"enum": [200, 304]}, "rss_before_bytes": {"type": "integer", "minimum": 0}, "rss_after_bytes": {"type": "integer", "minimum": 0}}, "additionalProperties": false},
-    "board": {"type": "object", "required": ["run_id", "image_id", "duration_ms"], "properties": {"run_id": {"type": "string"}, "image_id": {"type": "string"}, "duration_ms": {"type": "integer", "minimum": 0}}, "additionalProperties": false}
+  "$schema":"https://json-schema.org/draft/2020-12/schema",
+  "$id":"memory-sustainability-raw/v1","title":"Memory sustainability append-only evidence input","type":"object","required":["candidate"],
+  "properties":{"candidate":{"$ref":"#/$defs/run"},"pre_change_diagnostic":{"$ref":"#/$defs/run"}},"additionalProperties":false,
+  "$defs":{
+    "uint":{"type":"integer","minimum":0},
+    "run":{"type":"object","required":["schema","run_id","candidate_image_id","cgroup_limit_bytes","samples","route_samples","board_passes"],"properties":{"schema":{"const":"memory-sustainability-raw/v1"},"run_id":{"type":"string","minLength":1},"candidate_image_id":{"type":"string","minLength":1},"cgroup_limit_bytes":{"const":4294967296},"fixture_manifest":{"type":"object","required":["schema","profile","sha256"],"properties":{"schema":{"const":"memory-sustainability-fixtures/v1"},"profile":{"type":"string","minLength":1},"sha256":{"type":"string","pattern":"^[0-9a-f]{64}$"}},"additionalProperties":false},"evidence_references":{"type":"array","items":{"type":"object","required":["id","path","sha256"],"properties":{"id":{"type":"string","minLength":1},"path":{"type":"string","minLength":1},"sha256":{"type":"string","pattern":"^[0-9a-f]{64}$"}},"additionalProperties":false}},"samples":{"type":"array","minItems":1,"items":{"$ref":"#/$defs/sample"}},"route_samples":{"type":"array","minItems":1,"items":{"$ref":"#/$defs/route"}},"board_passes":{"type":"array","minItems":1,"items":{"$ref":"#/$defs/board"}}},"additionalProperties":false},
+    "sample":{"type":"object","required":["id","run_id","image_id","phase","timestamp_unix_ms","server_rss_bytes","warm_job_rss_bytes","process_anon_rss_bytes","cgroup_current_bytes","cgroup_oom_kill_count","jemalloc_allocated_bytes","jemalloc_resident_bytes","jemalloc_retained_bytes","graph_generation_id","graph_slot_present","graph_slot_approx_serialized_bytes","graph_slot_node_count","graph_slot_edge_count","restart_count"],"properties":{"id":{"type":"string","minLength":1},"run_id":{"type":"string","minLength":1},"image_id":{"type":"string","minLength":1},"phase":{"enum":["T0","graph_install","T1","burst","T2"]},"timestamp_unix_ms":{"$ref":"#/$defs/uint"},"server_rss_bytes":{"$ref":"#/$defs/uint"},"warm_job_rss_bytes":{"$ref":"#/$defs/uint"},"process_anon_rss_bytes":{"$ref":"#/$defs/uint"},"cgroup_current_bytes":{"$ref":"#/$defs/uint"},"cgroup_oom_kill_count":{"$ref":"#/$defs/uint"},"jemalloc_allocated_bytes":{"$ref":"#/$defs/uint"},"jemalloc_resident_bytes":{"$ref":"#/$defs/uint"},"jemalloc_retained_bytes":{"$ref":"#/$defs/uint"},"graph_generation_id":{"type":["string","null"]},"graph_slot_present":{"type":"boolean"},"graph_slot_approx_serialized_bytes":{"$ref":"#/$defs/uint"},"graph_slot_node_count":{"$ref":"#/$defs/uint"},"graph_slot_edge_count":{"$ref":"#/$defs/uint"},"restart_count":{"$ref":"#/$defs/uint"}},"additionalProperties":false},
+    "route":{"type":"object","required":["id","run_id","image_id","timestamp_unix_ms","http_status","etag","latency_ms","rss_before_bytes","rss_after_bytes"],"properties":{"id":{"type":"string","minLength":1},"run_id":{"type":"string","minLength":1},"image_id":{"type":"string","minLength":1},"timestamp_unix_ms":{"$ref":"#/$defs/uint"},"http_status":{"enum":[200,304]},"etag":{"type":"string","minLength":1},"latency_ms":{"$ref":"#/$defs/uint"},"rss_before_bytes":{"$ref":"#/$defs/uint"},"rss_after_bytes":{"$ref":"#/$defs/uint"}},"additionalProperties":false},
+    "board":{"type":"object","required":["id","run_id","image_id","timestamp_unix_ms","page_count","duration_ms"],"properties":{"id":{"type":"string","minLength":1},"run_id":{"type":"string","minLength":1},"image_id":{"type":"string","minLength":1},"timestamp_unix_ms":{"$ref":"#/$defs/uint"},"page_count":{"$ref":"#/$defs/uint"},"duration_ms":{"$ref":"#/$defs/uint"}},"additionalProperties":false}
   }
 }

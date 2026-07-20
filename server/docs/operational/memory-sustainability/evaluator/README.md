@@ -1,31 +1,21 @@
 # Memory-sustainability offline evaluator
 
-This subtree defines the release-gate input (`raw-schema.json`), deterministic evaluator (`evaluate.pl`), and synthetic unit tests. It consumes the versioned fixture manifest at `../fixtures/manifest.json`; it does not generate server telemetry or contact infrastructure.
+This subtree defines the versioned release-gate input (`raw-schema.json`), deterministic evaluator (`evaluate.pl`), and synthetic tests. It consumes the fixture contract at `../fixtures/manifest.json`; it neither collects nor adds server telemetry.
 
 ## Input and command
 
-The input wrapper has a required `candidate` raw run and an optional `pre_change_diagnostic` raw run. Both use `memory-sustainability-raw/v1` and must carry the same identity in every evidence record: root `run_id` / `candidate_image_id`, then record `run_id` / `image_id`. Values are **integral bytes** (never strings, MiB, or floating point) except board `duration_ms`. Required sample phases are `T0`, `graph_install`, `T1`, `burst`, and `T2`.
+The wrapper has a required `candidate` run and optional `pre_change_diagnostic` run. A run is an append-only `samples` stream plus append-only route and board evidence. Each sample carries a stable ID/timestamp, cgroup current usage and OOM events, process/anonymous RSS, the landed `djinn_jemalloc_{allocated,resident,retained}_bytes` values, and canonical graph-slot presence/size/node/edge measurements. Routes retain status, ETag and latency; board evidence retains page count and duration. Optional fixture-manifest and immutable evidence references preserve provenance.
 
 ```sh
 perl server/docs/operational/memory-sustainability/evaluator/evaluate.pl --input raw.json \
   --json-out evaluation.json --report-out evaluation.md
 ```
 
-The JSON output has stable sorted keys, retains the original raw run beneath each result, includes its canonical SHA-256, and gives every gate observed value, threshold, units, JSON-pointer evidence, and `pass`/`fail`/`error` status. The Markdown rendering is generated from that same result.
+All values are JSON integers, never byte strings or display units. The evaluator rejects forward/unsupported schema versions, malformed wrapper roots and values, mixed identities, missing signals/phases, ambiguous T0/graph-install/T1/T2 anchors, and generation drift. It derives peaks from **every** sample in the stream and retains the supplied raw run in the stable, canonically-keyed JSON result. Evidence pointers use actual array indices.
 
-A candidate can pass only when the input is valid and all gates pass:
+T0 is required to prove no graph (`graph_generation_id: null`, graph slot absent). The installed graph generation must be nonempty and unchanged from graph-install through T2. Candidate gates are server/warm peaks `<= 3.5 GiB` in exactly 4 GiB, route RSS delta `<= 32 MiB`, every board duration `<= 120000 ms`, zero monotonic OOM/restart delta, T2 RSS delta `<= max(128 MiB, floor(10% of T1))`, and T2 retained delta `<= 256 MiB`.
 
-- server and warm-job observed peaks are each `<= 3.5 GiB` in the required `4 GiB` cgroup;
-- maximum request RSS delta is `<= 32 MiB`;
-- every board pass is `<= 120000 ms`;
-- OOM-kill and restart counters are monotonic and have zero T0-to-T2 delta;
-- all required samples retain exactly one nonempty graph generation;
-- T2 RSS delta is `<= max(128 MiB, floor(10% of T1 RSS))`;
-- T2 jemalloc retained delta is `<= 256 MiB`.
-
-Unsupported versions, malformed units, missing/duplicate phases, missing signals, mixed run/image identities, generation drift, and counter regressions are errors, never a success. The optional pre-change raw run is rendered as a **non-release-gating diagnostic**. Its result is intentionally separate and cannot replace or mask a candidate failure.
-
-Run only the local test module:
+The pre-change image is always rendered as a separately labeled diagnostic table with the same observed/threshold/unit/evidence details. It cannot affect the candidate release status.
 
 ```sh
 perl server/docs/operational/memory-sustainability/evaluator/tests/test_evaluate.pl
