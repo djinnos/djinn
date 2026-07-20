@@ -992,6 +992,8 @@ mod body_excerpt_tests {
         let repo = ProposalRepository::new(db.clone(), EventBus::noop());
         const MAX_ENVELOPE_BYTES: usize = 32_768;
         const BODY_LEN: usize = 4_096;
+        const SERIALIZED_ID_BYTES: usize = 38; // 36 characters plus JSON quotes
+        const SERIALIZED_TIMESTAMP_BYTES: usize = 26; // 24 characters plus JSON quotes
         // Mix of legacy strings and objects, including met-true, met-false,
         // and bare criterion objects. Criteria are omitted by default but the
         // count fields prove they were counted from the stored data.
@@ -1005,24 +1007,15 @@ mod body_excerpt_tests {
         let large_body = "B".repeat(BODY_LEN);
         for i in 0..50 {
             let title = format!("Proposal {i:02} summary row budget fixture");
-            let proposal = repo
-                .create(ProposalCreateInput {
-                    title: &title,
-                    body: &large_body,
-                    acceptance_criteria: Some(CRITERIA_JSON),
-                    status: None,
-                    body_format: None,
-                })
-                .await
-                .unwrap();
-            // Normalize timestamps to a fixed production-length constant so the
-            // measurement is deterministic regardless of test wall-clock.
-            sqlx::query("UPDATE proposals SET created_at = $1, updated_at = $1 WHERE id = $2")
-                .bind("2026-01-15T12:34:56.789Z")
-                .bind(&proposal.id)
-                .execute(db.pool())
-                .await
-                .unwrap();
+            repo.create(ProposalCreateInput {
+                title: &title,
+                body: &large_body,
+                acceptance_criteria: Some(CRITERIA_JSON),
+                status: None,
+                body_format: None,
+            })
+            .await
+            .unwrap();
         }
 
         let response = server
@@ -1045,6 +1038,15 @@ mod body_excerpt_tests {
             assert!(row.get("body_excerpt").is_none(), "row {i}: body_excerpt must be absent");
             assert!(row.get("body_truncated").is_none(), "row {i}: body_truncated must be absent");
             assert!(row.get("acceptance_criteria").is_none(), "row {i}: criteria must be absent");
+            // Values vary, but JSON widths are fixed for repository UUIDs and timestamps.
+            assert_eq!(serde_json::to_vec(&row["id"]).unwrap().len(), SERIALIZED_ID_BYTES);
+            for field in ["created_at", "updated_at"] {
+                assert_eq!(
+                    serde_json::to_vec(&row[field]).unwrap().len(),
+                    SERIALIZED_TIMESTAMP_BYTES,
+                    "row {i}: serialized {field} width"
+                );
+            }
             // Always-present integer counts from the mixed criteria fixture.
             assert_eq!(row["ac_total"].as_i64(), Some(4), "row {i}: ac_total");
             assert_eq!(row["ac_met"].as_i64(), Some(1), "row {i}: ac_met (only met:true counts)");
