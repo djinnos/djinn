@@ -2,6 +2,8 @@
 
 use std::collections::HashSet;
 
+use crate::parser::proposal_parse_options;
+use crate::rules::duplicate_sections::lint_duplicate_sections;
 use crate::{
     BodyFormat, Severity, SpecLintResultV1, Violation, analyze_mdx_document, validate_mdx_blocks,
 };
@@ -17,18 +19,16 @@ pub fn lint(
     checked_at: impl Into<String>,
 ) -> SpecLintResultV1 {
     let mut result = SpecLintResultV1::new(body, body_format, checked_at);
-    if body_format == BodyFormat::Markdown {
-        result.sort_violations();
-        return result;
-    }
 
     // Keep the established registry parser and safety/round-trip behavior as
     // the source of truth. Lint has one stable structural failure code rather
     // than exposing parser implementation error variants to clients.
-    if let Err(error) = validate_mdx_blocks(body) {
-        push_parse_error(&mut result, body, error.to_string());
-        result.sort_violations();
-        return result;
+    if body_format == BodyFormat::Mdx {
+        if let Err(error) = validate_mdx_blocks(body) {
+            push_parse_error(&mut result, body, error.to_string());
+            result.sort_violations();
+            return result;
+        }
     }
 
     let document = match analyze_mdx_document(body) {
@@ -58,6 +58,20 @@ pub fn lint(
                 )
                 .expect("document analysis returns UTF-8 source spans"),
             );
+        }
+    }
+    let tree = match markdown::to_mdast(body, &proposal_parse_options()) {
+        Ok(tree) => tree,
+        Err(error) => {
+            push_parse_error(&mut result, body, error.reason);
+            result.sort_violations();
+            return result;
+        }
+    };
+    for violation in lint_duplicate_sections(body, &tree) {
+        match violation.severity {
+            Severity::Error => result.errors.push(violation),
+            Severity::Warning => result.warnings.push(violation),
         }
     }
     result.sort_violations();
