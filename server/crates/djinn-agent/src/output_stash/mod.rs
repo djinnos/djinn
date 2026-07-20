@@ -48,6 +48,7 @@ pub const MAX_TOOL_RESULT_CHARS: usize = 30_000;
 ///
 /// `v1\t<tool_name>\t<content_hash>\t<session_id>\t<created_at_unix_secs>`
 const DURABLE_POINTER_VERSION: &str = "v1";
+const DURABLE_POINTER_VERSION_V2: &str = "v2";
 
 struct StashedOutput {
     tool_use_id: String,
@@ -65,6 +66,7 @@ pub(crate) fn durable_root_for_gc() -> Option<PathBuf> {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum DurablePointerKind {
+    Version2,
     Version1,
     /// Pre-metadata pointer (`tool_name\tcontent_hash`). Owner and timestamp are
     /// intentionally unknown so future GC can classify it safely instead of
@@ -79,29 +81,77 @@ pub(crate) struct DurablePointerRecord {
     pub(crate) content_hash: String,
     pub(crate) session_id: Option<String>,
     pub(crate) created_at_unix_secs: Option<u64>,
+    pub(crate) tool_use_id: Option<String>,
+    pub(crate) turn: Option<u64>,
+    pub(crate) result_kind: Option<String>,
+    pub(crate) original_chars: Option<usize>,
+    pub(crate) stored_chars: Option<usize>,
+    pub(crate) completeness: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DurableOutputMetadata {
+    pub owner_session_id: String,
+    pub tool_use_id: String,
+    pub turn: u64,
+    pub result_kind: String,
+    pub original_chars: usize,
+    pub stored_chars: usize,
+    pub completeness: String,
+    pub content_hash: String,
+    pub tool_name: String,
+    pub created_at_unix_secs: u64,
 }
 
 impl DurablePointerRecord {
-    fn new_v1(
-        tool_name: &str,
-        content_hash: &str,
-        session_id: Option<&str>,
-        created_at_unix_secs: u64,
-    ) -> Self {
+    fn new_v1(tool_name: &str, content_hash: &str, session_id: Option<&str>, created: u64) -> Self {
         Self {
             kind: DurablePointerKind::Version1,
-            tool_name: tool_name.to_string(),
-            content_hash: content_hash.to_string(),
+            tool_name: tool_name.into(),
+            content_hash: content_hash.into(),
             session_id: session_id.map(str::to_string),
-            created_at_unix_secs: Some(created_at_unix_secs),
+            created_at_unix_secs: Some(created),
+            tool_use_id: None,
+            turn: None,
+            result_kind: None,
+            original_chars: None,
+            stored_chars: None,
+            completeness: None,
         }
     }
-
+    fn new_v2(tool_name: &str, content_hash: &str, owner: &str, id: &str, text: &str) -> Self {
+        let chars = text.chars().count();
+        Self {
+            kind: DurablePointerKind::Version2,
+            tool_name: tool_name.into(),
+            content_hash: content_hash.into(),
+            session_id: Some(owner.into()),
+            created_at_unix_secs: Some(unix_time_secs()),
+            tool_use_id: Some(id.into()),
+            turn: Some(0),
+            result_kind: Some("tool_result".into()),
+            original_chars: Some(chars),
+            stored_chars: Some(chars),
+            completeness: Some("complete".into()),
+        }
+    }
     fn serialize(&self) -> String {
         match self.kind {
+            DurablePointerKind::Version2 => format!(
+                "v2\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+                self.tool_name,
+                self.content_hash,
+                self.session_id.as_deref().unwrap_or(""),
+                self.tool_use_id.as_deref().unwrap_or(""),
+                self.turn.unwrap_or(0),
+                self.result_kind.as_deref().unwrap_or("tool_result"),
+                self.original_chars.unwrap_or(0),
+                self.stored_chars.unwrap_or(0),
+                self.completeness.as_deref().unwrap_or("complete"),
+                self.created_at_unix_secs.unwrap_or(0)
+            ),
             DurablePointerKind::Version1 => format!(
-                "{}\t{}\t{}\t{}\t{}",
-                DURABLE_POINTER_VERSION,
+                "v1\t{}\t{}\t{}\t{}",
                 self.tool_name,
                 self.content_hash,
                 self.session_id.as_deref().unwrap_or(""),
@@ -111,45 +161,85 @@ impl DurablePointerRecord {
         }
     }
 }
-
 pub(crate) fn parse_durable_pointer(raw: &str) -> Result<DurablePointerRecord, String> {
-    let line = raw.trim_end();
-    let fields: Vec<&str> = line.split('\t').collect();
-    match fields.as_slice() {
+    let f: Vec<&str> = raw.trim_end().split('\t').collect();
+    match f.as_slice() {
         [
-            "v1",
-            tool_name,
-            content_hash,
-            session_id,
-            created_at_unix_secs,
+            "v2",
+            tool,
+            hash,
+            owner,
+            id,
+            turn,
+            kind,
+            original,
+            stored,
+            completeness,
+            created,
         ] => {
-            if tool_name.is_empty() || content_hash.is_empty() {
-                return Err("corrupt durable stash pointer".to_string());
+            if tool.is_empty()
+                || hash.len() != 64
+                || owner.is_empty()
+                || id.is_empty()
+                || kind.is_empty()
+                || !matches!(*completeness, "complete" | "truncated" | "partial-spill")
+            {
+                return Err("corrupt durable stash pointer".into());
             }
-            let created_at_unix_secs = created_at_unix_secs
-                .parse::<u64>()
-                .map_err(|_| "corrupt durable stash pointer timestamp".to_string())?;
+            let parse = |v: &str| {
+                v.parse()
+                    .map_err(|_| "corrupt durable stash pointer metadata".to_string())
+            };
             Ok(DurablePointerRecord {
-                kind: DurablePointerKind::Version1,
-                tool_name: (*tool_name).to_string(),
-                content_hash: (*content_hash).to_string(),
-                session_id: (!session_id.is_empty()).then(|| (*session_id).to_string()),
-                created_at_unix_secs: Some(created_at_unix_secs),
+                kind: DurablePointerKind::Version2,
+                tool_name: (*tool).into(),
+                content_hash: (*hash).into(),
+                session_id: Some((*owner).into()),
+                tool_use_id: Some((*id).into()),
+                turn: Some(parse(turn)?),
+                result_kind: Some((*kind).into()),
+                original_chars: Some(
+                    original
+                        .parse::<usize>()
+                        .map_err(|_| "corrupt durable stash pointer metadata".to_string())?,
+                ),
+                stored_chars: Some(
+                    stored
+                        .parse::<usize>()
+                        .map_err(|_| "corrupt durable stash pointer metadata".to_string())?,
+                ),
+                completeness: Some((*completeness).into()),
+                created_at_unix_secs: Some(parse(created)?),
             })
         }
-        [tool_name, content_hash] if *tool_name != DURABLE_POINTER_VERSION => {
-            if tool_name.is_empty() || content_hash.is_empty() {
-                return Err("corrupt durable stash pointer".to_string());
-            }
+        ["v1", tool, hash, session, created] if !tool.is_empty() && !hash.is_empty() => {
+            Ok(DurablePointerRecord::new_v1(
+                tool,
+                hash,
+                (!session.is_empty()).then_some(*session),
+                created
+                    .parse()
+                    .map_err(|_| "corrupt durable stash pointer timestamp".to_string())?,
+            ))
+        }
+        [tool, hash]
+            if *tool != DURABLE_POINTER_VERSION && !tool.is_empty() && !hash.is_empty() =>
+        {
             Ok(DurablePointerRecord {
                 kind: DurablePointerKind::Legacy,
-                tool_name: (*tool_name).to_string(),
-                content_hash: (*content_hash).to_string(),
+                tool_name: (*tool).into(),
+                content_hash: (*hash).into(),
                 session_id: None,
                 created_at_unix_secs: None,
+                tool_use_id: None,
+                turn: None,
+                result_kind: None,
+                original_chars: None,
+                stored_chars: None,
+                completeness: None,
             })
         }
-        _ => Err("corrupt durable stash pointer".to_string()),
+        _ => Err("corrupt durable stash pointer".into()),
     }
 }
 
@@ -515,49 +605,50 @@ fn process_blob_entry(
     }
 }
 
-/// Persist a stashed blob durably. Best-effort: any IO error is swallowed so a
-/// disk problem never breaks the in-memory fast path. Writes are atomic
-/// (temp-file + rename) to avoid torn reads.
 fn durable_write(
     tool_use_id: &str,
     tool_name: &str,
-    owner_session_id: Option<&str>,
+    owner: &str,
     full_text: &str,
-) {
-    let Some(root) = durable_root() else {
-        return;
-    };
-    durable_write_at(&root, tool_use_id, tool_name, owner_session_id, full_text);
+) -> Result<(), String> {
+    let root = durable_root().ok_or("durable stash unavailable (no cache dir)")?;
+    durable_write_at(&root, tool_use_id, tool_name, owner, full_text)
 }
 
 fn durable_write_at(
     root: &Path,
     tool_use_id: &str,
     tool_name: &str,
-    owner_session_id: Option<&str>,
+    owner: &str,
     full_text: &str,
-) {
-    let content_hash = sha256_hex(full_text.as_bytes());
-
-    let blobs_dir = root.join("blobs");
-    let ids_dir = root.join("ids");
-    if std::fs::create_dir_all(&blobs_dir).is_err() || std::fs::create_dir_all(&ids_dir).is_err() {
-        return;
-    }
-
-    // Content-addressed blob: write once (skip if it already exists — identical
-    // content hashes to the same name).
-    let blob = blob_path(root, &content_hash);
-    if !blob.exists() {
-        let _ = atomic_write(&blobs_dir, &blob, full_text.as_bytes());
-    }
-
-    // Id pointer: versioned metadata + content hash.
+) -> Result<(), String> {
+    let hash = sha256_hex(full_text.as_bytes());
+    let blobs = root.join("blobs");
+    let ids = root.join("ids");
+    std::fs::create_dir_all(&blobs).map_err(|e| format!("create durable blobs: {e}"))?;
+    std::fs::create_dir_all(&ids).map_err(|e| format!("create durable ids: {e}"))?;
     let pointer = id_pointer_path(root, tool_use_id);
-    let record =
-        DurablePointerRecord::new_v1(tool_name, &content_hash, owner_session_id, unix_time_secs());
-    let line = record.serialize();
-    let _ = atomic_write(&ids_dir, &pointer, line.as_bytes());
+    if pointer.exists() {
+        let existing = parse_durable_pointer(
+            &std::fs::read_to_string(&pointer).map_err(|e| format!("read durable pointer: {e}"))?,
+        )?;
+        if existing.kind == DurablePointerKind::Version2
+            && existing.session_id.as_deref() == Some(owner)
+            && existing.content_hash == hash
+            && existing.tool_name == tool_name
+        {
+            return Ok(());
+        }
+        return Err("conflicting durable output for owner session and tool_use_id".into());
+    }
+    let blob = blob_path(root, &hash);
+    if !blob.exists() {
+        atomic_write(&blobs, &blob, full_text.as_bytes())
+            .map_err(|e| format!("write durable blob: {e}"))?;
+    }
+    let record = DurablePointerRecord::new_v2(tool_name, &hash, owner, tool_use_id, full_text);
+    atomic_write(&ids, &pointer, record.serialize().as_bytes())
+        .map_err(|e| format!("write durable pointer: {e}"))
 }
 
 /// Write `bytes` to `dest` atomically via a uniquely-named temp file in the same
@@ -596,14 +687,15 @@ fn atomic_write(
 /// human-readable message — never a panic.
 fn durable_read(tool_use_id: &str) -> Result<(String, String), String> {
     let root = durable_root().ok_or("durable stash unavailable (no cache dir)")?;
-    durable_read_at(&root, tool_use_id)
+    durable_read_at(&root, tool_use_id, None)
 }
 
-fn durable_read_at(root: &Path, tool_use_id: &str) -> Result<(String, String), String> {
+fn durable_read_at(root: &Path, tool_use_id: &str, owner: Option<&str>) -> Result<(String, String), String> {
     let pointer = id_pointer_path(root, tool_use_id);
     let raw = std::fs::read_to_string(&pointer)
         .map_err(|_| format!("no durable stash for tool_use_id \"{tool_use_id}\""))?;
     let record = parse_durable_pointer(&raw)?;
+    if let Some(owner) = owner { if record.kind != DurablePointerKind::Version2 || record.session_id.as_deref() != Some(owner) { return Err("durable output belongs to another session".into()); } }
     let blob = blob_path(root, &record.content_hash);
     let full_text = std::fs::read_to_string(&blob)
         .map_err(|_| "durable stash blob missing or unreadable".to_string())?;
@@ -655,32 +747,18 @@ impl OutputStash {
     /// Stash full tool output. Evicts oldest entries if count or byte limits are
     /// exceeded. The blob is also persisted durably (content-addressed) so the
     /// navigation tools survive an in-memory eviction, `clear`, or restart.
-    pub fn insert(&mut self, tool_use_id: String, tool_name: String, full_text: String) {
-        #[cfg(test)]
-        if let Some(root) = self.durable_root_override.as_deref() {
-            durable_write_at(
-                root,
-                &tool_use_id,
-                &tool_name,
-                self.owner_session_id.as_deref(),
-                &full_text,
-            );
-        } else {
-            durable_write(
-                &tool_use_id,
-                &tool_name,
-                self.owner_session_id.as_deref(),
-                &full_text,
-            );
+    pub fn insert(
+        &mut self,
+        tool_use_id: String,
+        tool_name: String,
+        full_text: String,
+    ) -> Result<(), String> {
+        if let Some(owner) = self.owner_session_id.as_deref() {
+            #[cfg(test)]
+            if let Some(root) = self.durable_root_override.as_deref() { durable_write_at(root, &tool_use_id, &tool_name, owner, &full_text)?; } else { durable_write(&tool_use_id, &tool_name, owner, &full_text)?; }
+            #[cfg(not(test))]
+            durable_write(&tool_use_id, &tool_name, owner, &full_text)?;
         }
-
-        #[cfg(not(test))]
-        durable_write(
-            &tool_use_id,
-            &tool_name,
-            self.owner_session_id.as_deref(),
-            &full_text,
-        );
 
         let new_bytes = full_text.len();
 
@@ -699,6 +777,7 @@ impl OutputStash {
             tool_name,
             full_text,
         });
+        Ok(())
     }
 
     /// Resolve the `(tool_name, full_text)` for a `tool_use_id`, preferring the
@@ -712,12 +791,12 @@ impl OutputStash {
         // not-found message if disk has nothing either.
         #[cfg(test)]
         let durable = if let Some(root) = self.durable_root_override.as_deref() {
-            durable_read_at(root, tool_use_id)
+            durable_read_at(root, tool_use_id, self.owner_session_id.as_deref())
         } else {
             durable_read(tool_use_id)
         };
         #[cfg(not(test))]
-        let durable = durable_read(tool_use_id);
+        let durable = durable_read_at(&durable_root().ok_or("durable stash unavailable")?, tool_use_id, self.owner_session_id.as_deref());
 
         durable.map_err(|_| {
             format!(
@@ -967,10 +1046,14 @@ pub fn render_tool_result(
     };
     if text.len() > MAX_TOOL_RESULT_CHARS {
         let stash_text = extract_stash_content(tool_name, value).unwrap_or_else(|| text.clone());
-        stash
+        if stash
             .lock()
             .unwrap()
-            .insert(tool_use_id.to_string(), tool_name.to_string(), stash_text);
+            .insert(tool_use_id.to_string(), tool_name.to_string(), stash_text)
+            .is_err()
+        {
+            return text;
+        }
         let full_bytes = text.len();
         let full_chars = text.chars().count();
         // Generate the synopsis from the full text (before truncation) so
@@ -1064,11 +1147,7 @@ pub fn externalize_rendered_tool_result(
     }
 
     // Preserve the full rendered text for output_view / output_grep recovery.
-    stash.lock().unwrap().insert(
-        tool_use_id.to_string(),
-        tool_name.to_string(),
-        rendered.to_string(),
-    );
+    if stash.lock().unwrap().insert(tool_use_id.to_string(), tool_name.to_string(), rendered.to_string()).is_err() { return rendered.to_string(); }
 
     stub
 }
