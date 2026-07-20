@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT\n                id, session_id, phase, schema_version,\n                first_message_id, last_compacted_message_id,\n                first_retained_message_id, retained_tail_hash,\n                summary_text,\n                marker_metadata,\n                created_at, completed_at\n             FROM session_compaction_boundaries\n             WHERE id = $1",
+  "query": "SELECT\n                id, session_id, phase, schema_version,\n                first_message_id, last_compacted_message_id,\n                first_retained_message_id, retained_tail_hash,\n                summary_text, marker_metadata, trigger, current_context_tokens_before,\n                current_context_tokens_after,\n                created_at, completed_at\n             FROM session_compaction_boundaries\n             WHERE session_id = $1 AND phase = 'ended'\n             ORDER BY completed_at DESC, id DESC\n             LIMIT 1",
   "describe": {
     "columns": [
       {
@@ -55,11 +55,26 @@
       },
       {
         "ordinal": 10,
-        "name": "created_at",
+        "name": "trigger",
         "type_info": "Varchar"
       },
       {
         "ordinal": 11,
+        "name": "current_context_tokens_before",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 12,
+        "name": "current_context_tokens_after",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 13,
+        "name": "created_at",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 14,
         "name": "completed_at",
         "type_info": "Varchar"
       }
@@ -80,9 +95,12 @@
       true,
       true,
       true,
+      true,
+      true,
+      true,
       false,
       true
     ]
   },
-  "hash": "8dc28d53069fbd828bd38c935a3cafad5157387ba50a46943705ad98419fa43f"
+  "hash": "cdb5a29addb690795ba03d6b3dc7e6ca702c24a24e0b43c4d882165f7a39feef"
 }
