@@ -22,6 +22,14 @@ my $bad="$dir/malformed.jsonl";
 ok(-e "$bad.partial",'malformed preflight preserves partial raw evidence');
 open $fh,'<',"$bad.partial" or die $!; my @bad=map {decode_json($_)} <$fh>; close $fh;
 ok($bad[-1]{kind} eq 'run_finalized' && !$bad[-1]{success},'failed partial evidence is finalized as unsuccessful');
+my $restarted="$dir/restarted.jsonl";
+{ local $ENV{DJINN_FAKE_RESTARTS}='0,1';
+  isnt(system('perl',$driver,'--fake','--profile','smoke','--output',$restarted,'--t0-seconds','0','--t1-seconds','0','--burst-seconds','0','--t2-seconds','0','--request-count','1'),0,'changed restart counter fails the run');
+}
+ok(-e "$restarted.partial",'restart failure preserves partial evidence');
+open $fh,'<',"$restarted.partial" or die $!; my @restarted=map {decode_json($_)} <$fh>; close $fh;
+my ($restart_delta)=grep {$_->{kind} eq 'restart_delta'} @restarted;
+ok($restart_delta && $restart_delta->{baseline}==0 && $restart_delta->{current}==1 && $restart_delta->{delta}==1,'restart delta is recorded before failure');
 my $interrupted="$dir/interrupted.jsonl";
 my $pid=fork(); die "fork: $!" unless defined $pid;
 if(!$pid){ exec 'perl',$driver,'--fake','--profile','smoke','--output',$interrupted,'--t0-seconds','5','--t1-seconds','0','--burst-seconds','0','--t2-seconds','0','--request-count','1'; die "exec: $!"; }
