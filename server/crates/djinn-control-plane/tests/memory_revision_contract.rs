@@ -7,6 +7,7 @@
 use djinn_control_plane::test_support::McpTestHarness;
 use djinn_core::auth_context::SESSION_USER_ID;
 use djinn_core::events::EventBus;
+use djinn_db::test_support::seed_user_with_id;
 use djinn_db::{ProjectRepository, UserRepository};
 use serde_json::Value;
 use sqlx::{Postgres, QueryBuilder};
@@ -141,13 +142,13 @@ async fn seed_reader_contract(harness: &McpTestHarness, fixture: &Value) {
     let session_id = context["session_id"].as_str().expect("fixed session id");
     let task_run_id = context["task_run_id"].as_str().expect("fixed task run id");
     let creator_id = "00000000-0000-4000-8000-000000000031";
-    sqlx::query("INSERT INTO users (id, github_id, github_login) VALUES ($1, $2, $3)")
-        .bind(creator_id)
-        .bind(8_420_030_i64)
-        .bind("revision-contract-creator")
-        .execute(harness.db().pool())
-        .await
-        .expect("seed fixed task creator");
+    seed_user_with_id(
+        harness.db(),
+        creator_id,
+        8_420_030_i64,
+        "revision-contract-creator",
+    )
+    .await;
     let mut task_insert = QueryBuilder::<Postgres>::new(
         "INSERT INTO tasks (id, project_id, short_id, title, description, design, labels, acceptance_criteria, memory_refs, created_by_user_id) VALUES (",
     );

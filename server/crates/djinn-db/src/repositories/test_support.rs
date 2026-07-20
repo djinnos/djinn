@@ -190,6 +190,19 @@ pub async fn seed_project(db: &Database, project_id: &str, name: &str) {
     .expect("failed to seed project");
 }
 
+/// Seed a user with a caller-supplied identity for deterministic integration
+/// fixtures that need a stable foreign-key target.
+pub async fn seed_user_with_id(db: &Database, user_id: &str, github_id: i64, github_login: &str) {
+    db.ensure_initialized().await.unwrap();
+    sqlx::query("INSERT INTO users (id, github_id, github_login) VALUES ($1, $2, $3)")
+        .bind(user_id)
+        .bind(github_id)
+        .bind(github_login)
+        .execute(db.pool())
+        .await
+        .expect("failed to seed user with fixed identity");
+}
+
 /// Overwrite a debate-trail entry's `body_metadata`, bypassing the
 /// evidence-findings validation enforced by `add_debate_trail_entry`.
 /// Recovery tests use this to fabricate legacy/corrupt rows that can no
