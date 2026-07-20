@@ -202,8 +202,25 @@ pub async fn output_with_timeout(cmd: Command, timeout: Duration) -> io::Result<
         }
         Ok(out)
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(all(unix, not(target_os = "linux")))]
     {
+        let (out, deadline_fired) = output_with_kill_inner(cmd, timeout).await?;
+        if deadline_fired {
+            return Err(io::Error::new(io::ErrorKind::TimedOut, "process timed out"));
+        }
+        // The legacy local waiter owns the child status on non-Linux Unix, but
+        // retains the same classification contract as the Linux supervisor:
+        // a signal we did not send before the deadline is not a timeout.
+        if let Some(sig) = killed_by_signal(&out.status) {
+            return Err(io::Error::other(format!(
+                "process killed by signal {sig} before its deadline"
+            )));
+        }
+        Ok(out)
+    }
+    #[cfg(not(unix))]
+    {
+        // Non-Unix historically has no process-group timeout implementation.
         output_with_kill(cmd, timeout).await
     }
 }
@@ -1108,6 +1125,27 @@ mod tests {
         assert!(
             elapsed < Duration::from_secs(8),
             "call should return promptly after kill, took {elapsed:?}"
+        );
+    }
+
+    /// Keep the macOS/other-Unix local waiter deadline-bound. This is separate
+    /// from the Linux supervisor test because a regression to `cmd.output()`
+    /// would otherwise only be caught when this module is exercised off Linux.
+    #[cfg(not(target_os = "linux"))]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn non_linux_unix_timeout_argument_is_enforced() {
+        let mut cmd = Command::new("sh");
+        cmd.arg("-c").arg("sleep 30");
+
+        let start = SystemClock::new().now_instant();
+        let err = output_with_timeout(cmd, Duration::from_millis(100))
+            .await
+            .expect_err("sleep must be terminated at the supplied deadline");
+
+        assert_eq!(err.kind(), io::ErrorKind::TimedOut);
+        assert!(
+            start.elapsed() < Duration::from_secs(3),
+            "non-Linux Unix must not fall back to unbounded Command::output()"
         );
     }
 
