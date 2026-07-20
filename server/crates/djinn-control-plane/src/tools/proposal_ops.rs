@@ -103,27 +103,17 @@ pub struct ProposalModel {
     pub short_id: String,
     pub title: String,
     pub body: String,
-    /// Body encoding: `markdown` (legacy default) or `mdx` (block-aware).
-    pub body_format: String,
     /// Structured acceptance criteria (`{criterion, met}` or plain string),
-    /// same shape as tasks. `met` means "agreed during scoping".
-    pub acceptance_criteria: Vec<AcceptanceCriterionItem>,
+    /// included only when requested.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub acceptance_criteria: Option<Vec<AcceptanceCriterionItem>>,
     /// Lifecycle: draft | in_review | approved | building | done | rejected |
     /// archived | superseded.
     pub status: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub author_user_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub superseded_by: Option<String>,
     pub created_at: String,
     pub updated_at: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub closed_at: Option<String>,
-    /// Head revision number (sign-offs anchored earlier are stale).
-    pub latest_revision_seq: i32,
-    /// Last proposal revision that the in-flight build has reconciled against.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub last_reconciled_revision_seq: Option<i32>,
     /// True when the in-flight build is behind the latest proposal revision.
     pub pending_reconcile: bool,
     /// Build owner once graduated.
@@ -133,12 +123,6 @@ pub struct ProposalModel {
     /// proposals list. Only populated on `proposal_list`; `0` on show paths.
     #[serde(default)]
     pub unresolved_feedback_count: i64,
-    /// When parked for needs-evidence: the linked spike task id.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub linked_spike_task_id: Option<String>,
-    /// When parked for needs-evidence: the named feasibility claim.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub needs_evidence_claim: Option<String>,
     /// Compact tribunal/readiness summary — populated only on `proposal_list`
     /// (batched across the page) for non-terminal proposals, so list rows can
     /// render tribunal/gate chips without opening each proposal. `None` on show
@@ -206,21 +190,15 @@ impl ProposalModel {
             short_id: p.short_id.clone(),
             title: p.title.clone(),
             body: p.body.clone(),
-            body_format: p.body_format.clone(),
-            acceptance_criteria: parse_acceptance_criteria(&p.acceptance_criteria),
+            acceptance_criteria: include_acceptance_criteria
+                .then(|| parse_acceptance_criteria(&p.acceptance_criteria)),
             status: p.status.clone(),
             author_user_id: p.author_user_id.clone(),
-            superseded_by: p.superseded_by.clone(),
             created_at: p.created_at.clone(),
             updated_at: p.updated_at.clone(),
-            closed_at: p.closed_at.clone(),
-            latest_revision_seq: p.latest_revision_seq,
-            last_reconciled_revision_seq: p.last_reconciled_revision_seq,
             pending_reconcile: p.pending_reconcile,
             build_owner_user_id: p.build_owner_user_id.clone(),
             unresolved_feedback_count,
-            linked_spike_task_id: p.linked_spike_task_id.clone(),
-            needs_evidence_claim: p.needs_evidence_claim.clone(),
             list_summary: None,
         }
     }
@@ -926,11 +904,8 @@ pub fn apply_revision_body_mode(revisions: &mut [ProposalRevisionModel], mode: &
 
 /// List-specific proposal row model.
 ///
-/// By default (`include_bodies = false`) the full `body` field is omitted
-/// from serialization; callers receive only `body_excerpt` and
-/// `body_truncated`.  When `include_bodies = true`, the full `body` is
-/// included alongside the excerpt metadata so callers that need the
-/// complete text can still get it in a single list call.
+/// The default wire shape is a bounded summary. Body data and criteria are
+/// opt-in; callers needing complete proposal detail use `proposal_show`.
 #[derive(Serialize, Deserialize, Clone, schemars::JsonSchema)]
 pub struct ProposalListRow {
     pub id: String,
@@ -944,27 +919,17 @@ pub struct ProposalListRow {
     /// Full proposal body — **only serialized when `include_bodies = true`**.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub body: Option<String>,
-    /// Body encoding: `markdown` (legacy default) or `mdx` (block-aware).
-    pub body_format: String,
     /// Structured acceptance criteria (`{criterion, met}` or plain string),
-    /// same shape as tasks. `met` means "agreed during scoping".
-    pub acceptance_criteria: Vec<AcceptanceCriterionItem>,
+    /// included only when requested.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub acceptance_criteria: Option<Vec<AcceptanceCriterionItem>>,
     /// Lifecycle: draft | in_review | approved | building | done | rejected |
     /// archived | superseded.
     pub status: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub author_user_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub superseded_by: Option<String>,
     pub created_at: String,
     pub updated_at: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub closed_at: Option<String>,
-    /// Head revision number (sign-offs anchored earlier are stale).
-    pub latest_revision_seq: i32,
-    /// Last proposal revision that the in-flight build has reconciled against.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub last_reconciled_revision_seq: Option<i32>,
     /// True when the in-flight build is behind the latest proposal revision.
     pub pending_reconcile: bool,
     /// Build owner once graduated.
@@ -974,12 +939,6 @@ pub struct ProposalListRow {
     /// proposals list.
     #[serde(default)]
     pub unresolved_feedback_count: i64,
-    /// When parked for needs-evidence: the linked spike task id.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub linked_spike_task_id: Option<String>,
-    /// When parked for needs-evidence: the named feasibility claim.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub needs_evidence_claim: Option<String>,
     /// Total criteria, including legacy strings.
     pub ac_total: i64,
     /// Criteria explicitly marked `{ met: true }`.
@@ -993,8 +952,7 @@ pub struct ProposalListRow {
 impl ProposalListRow {
     /// Build a list row from a proposal and an unresolved-feedback count.
     ///
-    /// `include_bodies` controls whether the full `body` is set.
-    /// `body_excerpt` and `body_truncated` are always populated.
+    /// `include_bodies` implies excerpt metadata for compatibility.
     pub fn from_proposal(
         p: &Proposal,
         unresolved_feedback_count: i64,
@@ -1017,21 +975,15 @@ impl ProposalListRow {
             body_excerpt,
             body_truncated,
             body: include_bodies.then(|| p.body.clone()),
-            body_format: p.body_format.clone(),
-            acceptance_criteria: parse_acceptance_criteria(&p.acceptance_criteria),
+            acceptance_criteria: include_acceptance_criteria
+                .then(|| parse_acceptance_criteria(&p.acceptance_criteria)),
             status: p.status.clone(),
             author_user_id: p.author_user_id.clone(),
-            superseded_by: p.superseded_by.clone(),
             created_at: p.created_at.clone(),
             updated_at: p.updated_at.clone(),
-            closed_at: p.closed_at.clone(),
-            latest_revision_seq: p.latest_revision_seq,
-            last_reconciled_revision_seq: p.last_reconciled_revision_seq,
             pending_reconcile: p.pending_reconcile,
             build_owner_user_id: p.build_owner_user_id.clone(),
             unresolved_feedback_count,
-            linked_spike_task_id: p.linked_spike_task_id.clone(),
-            needs_evidence_claim: p.needs_evidence_claim.clone(),
             ac_total,
             ac_met,
             list_summary: None,

@@ -5,7 +5,7 @@
  * which is stamped client-side.
  */
 
-import type { TaskListOutputSchema, TaskShowOutputSchema, EpicListOutputSchema, ProposalShowOutputSchema } from "./generated/mcp-tools.gen";
+import type { TaskListOutputSchema, TaskShowOutputSchema, EpicListOutputSchema, ProposalListOutputSchema, ProposalShowOutputSchema } from "./generated/mcp-tools.gen";
 
 export type AcceptanceCriterion = TaskListOutputSchema.AcceptanceCriterionStatus;
 
@@ -72,22 +72,19 @@ export type Epic = Omit<EpicListOutputSchema.EpicModel, "owner"> & {
   proposal_build_owner_user_id?: string | null;
 };
 
-// Global proposals layer (project-independent). `acceptance_criteria` arrives
-// as a parsed array from the MCP tools; SSE sends it as a JSON string which the
-// SSE handler normalizes to an array before storing.
+// Complete detail returned solely by `proposal_show`.
 export type Proposal = ProposalShowOutputSchema.ProposalModel & {
-  /** Body format: 'markdown' (legacy default) or 'mdx' (block-aware). */
   body_format?: "markdown" | "mdx" | string | null;
-  /** Summary-list acceptance counts; detail callers continue to use criteria. */
-  ac_total?: number;
-  ac_met?: number;
 };
+
+/** Bounded summary row returned by `proposal_list`. */
+export type ProposalListRow = ProposalListOutputSchema.ProposalListRow;
 /**
  * Compact tribunal/readiness summary for a proposal list row. Present only on
  * `proposal_list` (batched across the page) for non-terminal proposals; drives
  * the list-row tribunal/gate chips.
  */
-export type ProposalListSummary = ProposalShowOutputSchema.ProposalListSummary;
+export type ProposalListSummary = ProposalListOutputSchema.ProposalListSummary;
 export type ProposalFeedback = ProposalShowOutputSchema.ProposalFeedbackModel;
 export type ProposalTarget = ProposalShowOutputSchema.ProposalTargetModel;
 export type ProposalRevision = ProposalShowOutputSchema.ProposalRevisionModel;

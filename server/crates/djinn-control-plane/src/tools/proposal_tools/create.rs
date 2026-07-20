@@ -762,7 +762,7 @@ impl DjinnMcpServer {
 
     /// List proposals (global) with optional filters and pagination.
     #[tool(
-        description = "List proposals globally (not scoped to a project) with optional filters: status, author, target_project (UUID or owner/repo slug), text. Offset-based pagination. Rows carry body_excerpt (first 512 chars) and body_truncated by default; pass include_bodies=true for full body strings. Returns {proposals[], total_count, limit, offset, has_more}."
+        description = "List proposal summaries globally with optional filters and offset pagination. Default rows contain identity, time, workflow summary, and acceptance counts only. Pass include_excerpts=true for body_excerpt/body_truncated, include_acceptance_criteria=true for criteria, or include_bodies=true for body plus excerpt metadata. For complete proposal detail, use proposal_show (the sole deep dive). Returns {proposals[], total_count, limit, offset, has_more}."
     )]
     pub async fn proposal_list(
         &self,
