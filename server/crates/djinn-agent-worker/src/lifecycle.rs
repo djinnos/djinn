@@ -49,7 +49,7 @@ use djinn_stack::environment::{
 };
 use regex::Regex;
 use serde::{Deserialize, Serialize};
-use tokio::process::Command;
+use std::process::Command;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
@@ -860,7 +860,7 @@ async fn run_pre_task_command(
     let timeout = Duration::from_secs(cmd.timeout_seconds);
 
     // Spawn the child in its own process group for clean group-kill.
-    let mut child = match Command::new("/bin/sh")
+    let mut child = match tokio::process::Command::new("/bin/sh")
         .arg("-c")
         .arg(&cmd.command)
         .current_dir(project_root)
@@ -1376,16 +1376,30 @@ fn run_command<'a>(
     })
 }
 
+async fn warm_hook_status(command: Command) -> std::io::Result<std::process::ExitStatus> {
+    #[cfg(target_os = "linux")]
+    {
+        djinn_graph::process::output_with_timeout(command, Duration::from_secs(30 * 60))
+            .await
+            .map(|output| output.status)
+    }
+    #[cfg(not(target_os = "linux"))]
+    tokio::task::spawn_blocking(move || command.status())
+        .await
+        .map_err(std::io::Error::other)?
+}
+
 async fn run_shell(phase: &str, raw: &str, ctx: &CommandContext) -> Result<()> {
     let expanded = ctx.substitute(raw);
     info!(phase, command = %expanded, "shell form");
-    let status = Command::new("/bin/sh")
+    let mut command = Command::new("/bin/sh");
+    command
         .arg("-c")
         .arg(&expanded)
         .current_dir(&ctx.workspace_folder)
         .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
-        .status()
+        .stderr(Stdio::inherit());
+    let status = warm_hook_status(command)
         .await
         .with_context(|| format!("spawn /bin/sh for {phase}"))?;
     if !status.success() {
@@ -1404,12 +1418,13 @@ async fn run_exec(phase: &str, parts: &[String], ctx: &CommandContext) -> Result
     }
     let expanded: Vec<String> = parts.iter().map(|p| ctx.substitute(p)).collect();
     info!(phase, argv = ?expanded, "exec form");
-    let status = Command::new(&expanded[0])
+    let mut command = Command::new(&expanded[0]);
+    command
         .args(&expanded[1..])
         .current_dir(&ctx.workspace_folder)
         .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
-        .status()
+        .stderr(Stdio::inherit());
+    let status = warm_hook_status(command)
         .await
         .with_context(|| format!("spawn {} for {phase}", expanded[0]))?;
     if !status.success() {
