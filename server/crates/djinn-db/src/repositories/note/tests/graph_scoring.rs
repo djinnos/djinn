@@ -153,10 +153,19 @@ async fn task_affinity_scores_include_repo_map_neighbors_for_task_memory_refs() 
         .unwrap();
 
     let task_id = uuid::Uuid::now_v7().to_string();
+    let creator_uuid = uuid::Uuid::now_v7();
+    let creator_id = creator_uuid.to_string();
+    crate::repositories::test_support::seed_user_with_id(
+        &db,
+        &creator_id,
+        (creator_uuid.as_u128() & i64::MAX as u128) as i64,
+        &format!("repo-map-affinity-fixture-{creator_id}"),
+    )
+    .await;
     sqlx::query(
         "INSERT INTO tasks (id, project_id, short_id, epic_id, title, description, design,
-                            issue_type, priority, owner, status, continuation_count, memory_refs)
-         VALUES ($1, $2, $3, NULL, $4, $5, $6, $7, $8, $9, $10, $11, $12::jsonb)",
+                            issue_type, priority, owner, status, continuation_count, memory_refs, created_by_user_id)
+         VALUES ($1, $2, $3, NULL, $4, $5, $6, $7, $8, $9, $10, $11, $12::jsonb, $13)",
     )
     .bind(&task_id)
     .bind(&project.id)
@@ -170,6 +179,7 @@ async fn task_affinity_scores_include_repo_map_neighbors_for_task_memory_refs() 
     .bind("open")
     .bind(0_i64)
     .bind(serde_json::json!([adr.permalink.clone()]).to_string())
+    .bind(&creator_id)
     .execute(db.pool())
     .await
     .unwrap();

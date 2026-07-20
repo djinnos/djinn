@@ -346,11 +346,20 @@ mod tests {
 
     async fn seed_task(db: &Database, task_id: &str, project_id: &str) {
         db.ensure_initialized().await.unwrap();
+        let creator_uuid = uuid::Uuid::now_v7();
+        let creator_id = creator_uuid.to_string();
+        crate::repositories::test_support::seed_user_with_id(
+            db,
+            &creator_id,
+            (creator_uuid.as_u128() & i64::MAX as u128) as i64,
+            &format!("llm-call-attempt-fixture-{creator_id}"),
+        )
+        .await;
         sqlx::query(
             "INSERT INTO tasks (id, project_id, short_id, title, description, design, \
-             issue_type, status, priority, acceptance_criteria, created_at, updated_at) \
+             issue_type, status, priority, acceptance_criteria, created_at, updated_at, created_by_user_id) \
              VALUES ($1, $2, $3, 'test', 'test', '', 'task', 'open', 0, '[]', \
-             '2025-01-01T00:00:00Z', '2025-01-01T00:00:00Z') \
+             '2025-01-01T00:00:00Z', '2025-01-01T00:00:00Z', $4) \
              ON CONFLICT (id) DO NOTHING",
         )
         .bind(task_id)
@@ -358,6 +367,7 @@ mod tests {
         // `tasks.short_id` is VARCHAR(32); the UUID task id is intentionally
         // stored only in `id`, not interpolated into this fixture value.
         .bind("test-task")
+        .bind(&creator_id)
         .execute(db.pool())
         .await
         .unwrap();
