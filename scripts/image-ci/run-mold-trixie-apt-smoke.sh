@@ -48,12 +48,26 @@ trap cleanup EXIT
 # This intentionally starts from the moving current-release base rather than
 # building the full runtime image. The snapshot remains an additional source;
 # checksums prove no pre-existing .list/.sources file was replaced.
+image="debian:trixie-slim"
+for attempt in 1 2 3; do
+    if docker pull "$image"; then
+        break
+    fi
+    if [[ "$attempt" -eq 3 ]]; then
+        echo "could not pull $image after $attempt attempts" >&2
+        exit 1
+    fi
+    echo "retrying pull of $image after transient registry failure" >&2
+    sleep "$attempt"
+done
+
 docker run --rm \
+    --pull=never \
     -e DEBIAN_SNAPSHOT_URL="$snapshot" \
     -e MOLD_VERSION="$version" \
     -v "$REPO_ROOT:/repo:ro" \
     -v "$EVIDENCE_DIR:/evidence" \
-    debian:trixie-slim \
+    "$image" \
     bash -ceu '
         source_files() {
             find /etc/apt -type f \( -name "*.list" -o -name "*.sources" \) \
