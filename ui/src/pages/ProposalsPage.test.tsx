@@ -304,10 +304,18 @@ describe("ProposalsPage", () => {
       within(reviewSection!).getByText("Review MCP retries"),
     ).toBeInTheDocument();
     expect(within(reviewSection!).getByText("revw")).toBeInTheDocument();
-    const unresolvedFeedback = within(reviewSection!).getByTitle(
+    const reviewRow = within(reviewSection!)
+      .getByText("Review MCP retries")
+      .closest("button");
+    expect(reviewRow).not.toBeNull();
+    const unresolvedFeedback = within(reviewRow!).getByTitle(
       "2 unresolved comments",
     );
     expect(unresolvedFeedback).toBeVisible();
+    expect(unresolvedFeedback).toHaveAttribute(
+      "title",
+      "2 unresolved comments",
+    );
     expect(unresolvedFeedback).toHaveTextContent("2");
     expect(screen.queryByText("Archived legacy idea")).not.toBeInTheDocument();
     // List query sends no verbosity flags.
@@ -554,33 +562,6 @@ describe("ProposalsPage", () => {
     ]);
   });
 
-  it("renders no chips for a row without a list summary", async () => {
-    const proposals = [
-      makeListRow({
-        id: "p-nosummary",
-        short_id: "nos1",
-        title: "No summary proposal",
-        status: "in_review",
-      }),
-    ];
-
-    vi.mocked(callMcpTool).mockImplementation(async (toolName) => {
-      if (toolName === "proposal_list") {
-        return { proposals } as never;
-      }
-      return {} as never;
-    });
-
-    renderProposalsRoute("/proposals");
-
-    expect(await screen.findByText("No summary proposal")).toBeInTheDocument();
-    expect(screen.queryByTitle("Gate ready")).not.toBeInTheDocument();
-    expect(
-      screen.queryByTitle("Definition of Ready not yet met"),
-    ).not.toBeInTheDocument();
-    expect(screen.queryByText("DoR ✗")).not.toBeInTheDocument();
-  });
-
   it("renders acceptance progress from ac_met/ac_total and hides badge when total is zero", async () => {
     const proposals = [
       makeListRow({
@@ -663,7 +644,7 @@ describe("ProposalsPage", () => {
     expect(screen.queryByText("Rejected proposal")).not.toBeInTheDocument();
   });
 
-  it("toggles a collapsed proposal status group while keeping its count visible", async () => {
+  it("expands a terminal row without a list summary and renders no tribunal chip or gate dot", async () => {
     const proposals = [
       makeListRow({
         id: "proposal-done",
