@@ -246,7 +246,9 @@ fn stash_insert_writes_durable_blob_to_disk() {
     isolated_durable_root();
     let mut stash = OutputStash::with_session_id("session-durable-write-1");
     let body = "durable line a\ndurable line b\n";
-    stash.insert("durable-write-1".into(), "shell".into(), body.into());
+    stash
+        .insert("durable-write-1".into(), "shell".into(), body.into())
+        .unwrap();
 
     let root = durable_root().expect("override sets a root");
     // The id-pointer exists and names the content-addressed blob plus
@@ -254,7 +256,10 @@ fn stash_insert_writes_durable_blob_to_disk() {
     let pointer = id_pointer_path(&root, "durable-write-1");
     let raw = std::fs::read_to_string(&pointer).expect("id pointer written");
     let record = parse_durable_pointer(&raw).expect("versioned pointer parses");
-    assert_eq!(record.kind, DurablePointerKind::Version1);
+    assert_eq!(record.kind, DurablePointerKind::Version2);
+    assert_eq!(record.tool_use_id.as_deref(), Some("durable-write-1"));
+    assert_eq!(record.turn, Some(0));
+    assert_eq!(record.completeness.as_deref(), Some("complete"));
     assert_eq!(record.tool_name, "shell");
     assert_eq!(record.content_hash, sha256_hex(body.as_bytes()));
     assert_eq!(
@@ -1202,4 +1207,75 @@ fn render_synopsis_does_not_appear_for_small_json() {
         "small passthrough should not have synopsis: {text}"
     );
     assert!(!text.contains("Full output stashed"));
+}
+
+#[test]
+fn durable_metadata_listing_retry_and_session_isolation() {
+    let root = gc_root("metadata-listing-contract");
+    let details = DurableOutputDetails {
+        turn: 7,
+        result_kind: "shell_stdout".into(),
+        original_chars: 40,
+        stored_chars: 4,
+        completeness: "partial-spill".into(),
+    };
+    let mut owner = OutputStash::with_session_id_and_durable_root("owner-a", root.clone());
+    owner
+        .insert_with_metadata(
+            "tool-a".into(),
+            "shell".into(),
+            "éééé".into(),
+            details.clone(),
+        )
+        .unwrap();
+    // A usable identical retry is idempotent.
+    owner
+        .insert_with_metadata(
+            "tool-a".into(),
+            "shell".into(),
+            "éééé".into(),
+            details.clone(),
+        )
+        .unwrap();
+    assert!(
+        owner
+            .insert_with_metadata(
+                "tool-a".into(),
+                "shell".into(),
+                "éééé".into(),
+                DurableOutputDetails {
+                    turn: 8,
+                    ..details.clone()
+                },
+            )
+            .is_err()
+    );
+
+    // Process-style reopen has no in-memory entry but lists and resolves it.
+    drop(owner);
+    let mut reopened = OutputStash::with_session_id_and_durable_root("owner-a", root.clone());
+    let listed = reopened.list_durable_outputs().unwrap();
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].tool_use_id, "tool-a");
+    assert_eq!(listed[0].turn, 7);
+    assert_eq!(listed[0].stored_chars, 4);
+    assert_eq!(listed[0].completeness, "partial-spill");
+    assert!(reopened.view("tool-a", 0, 10).unwrap().contains("éééé"));
+
+    let mut foreign = OutputStash::with_session_id_and_durable_root("owner-b", root.clone());
+    foreign
+        .insert("tool-b".into(), "shell".into(), "foreign".into())
+        .unwrap();
+    assert_eq!(foreign.list_durable_outputs().unwrap().len(), 1);
+    assert!(foreign.view("tool-a", 0, 10).is_err());
+
+    let pointer =
+        parse_durable_pointer(&std::fs::read_to_string(id_pointer_path(&root, "tool-a")).unwrap())
+            .unwrap();
+    std::fs::remove_file(blob_path(&root, &pointer.content_hash)).unwrap();
+    assert!(
+        reopened
+            .insert_with_metadata("tool-a".into(), "shell".into(), "éééé".into(), details)
+            .is_err()
+    );
 }
