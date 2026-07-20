@@ -60,6 +60,14 @@ use crate::child_reaper::{DirectChild, TerminalStatus, worker_child_reaper};
 #[cfg(target_os = "linux")]
 use std::time::Instant;
 
+/// Unit-only lifecycle acknowledgement for the Linux supervisor. The child
+/// reaper removes a direct-PID route as soon as it receives terminal status,
+/// which is intentionally earlier than closing the supervisor-owned pipes.
+/// Keep this separate from the production registry so regression fixtures can
+/// prove the latter ownership has ended.
+#[cfg(all(test, target_os = "linux"))]
+use std::sync::atomic::{AtomicUsize, Ordering};
+
 /// Clock abstraction for deterministic timing inside the supervisor.
 #[cfg(target_os = "linux")]
 use djinn_core::clock::{Clock, SystemClock};
@@ -313,6 +321,39 @@ const PGID_POLL_INTERVAL: Duration = Duration::from_millis(25);
 #[cfg(target_os = "linux")]
 const PHASE_TIMEOUT: Duration = Duration::from_secs(2);
 
+/// Number of Linux supervisors which have not returned from
+/// [`run_linux_supervisor`]. This is deliberately test-only: it acknowledges
+/// completion after `LinuxDrains::finish` has synchronously closed pipe FDs,
+/// unlike the child-reaper registry whose direct route is removed at status
+/// delivery time.
+#[cfg(all(test, target_os = "linux"))]
+static ACTIVE_LINUX_SUPERVISORS: AtomicUsize = AtomicUsize::new(0);
+
+#[cfg(all(test, target_os = "linux"))]
+struct ActiveLinuxSupervisor;
+
+#[cfg(all(test, target_os = "linux"))]
+impl ActiveLinuxSupervisor {
+    fn enter() -> Self {
+        ACTIVE_LINUX_SUPERVISORS.fetch_add(1, Ordering::SeqCst);
+        Self
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+impl Drop for ActiveLinuxSupervisor {
+    fn drop(&mut self) {
+        ACTIVE_LINUX_SUPERVISORS.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+/// Test-only acknowledgement that all Linux supervisors, including their
+/// synchronous pipe-drain closure, have returned.
+#[cfg(all(test, target_os = "linux"))]
+fn active_linux_supervisor_count_for_test() -> usize {
+    ACTIVE_LINUX_SUPERVISORS.load(Ordering::SeqCst)
+}
+
 /// The outcome of the status-wait phase.
 #[cfg(target_os = "linux")]
 enum StatusOutcome {
@@ -337,6 +378,11 @@ fn run_linux_supervisor(
     timeout: Duration,
     cancel_rx: std::sync::mpsc::Receiver<()>,
 ) -> io::Result<(Output, bool)> {
+    // Declare this before every other local so it drops last, after `drains`
+    // and all pipe handles. This is an end-of-supervisor acknowledgement, not
+    // merely an indication that the reaper delivered direct-child status.
+    #[cfg(test)]
+    let _active_supervisor = ActiveLinuxSupervisor::enter();
     let reaper = worker_child_reaper();
     let command_id = uuid::Uuid::now_v7().to_string();
 
@@ -1063,6 +1109,20 @@ mod linux_supervisor_tests {
         }
     }
 
+    fn wait_for_linux_supervisors_idle(timeout: Duration) -> bool {
+        let clock = SystemClock::new();
+        let deadline = clock.now_instant() + timeout;
+        loop {
+            if active_linux_supervisor_count_for_test() == 0 {
+                return true;
+            }
+            if clock.now_instant() >= deadline {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
     struct EscapedPid(i32);
 
     impl Drop for EscapedPid {
@@ -1188,6 +1248,10 @@ mod linux_supervisor_tests {
         assert!(
             worker_child_reaper().wait_for_supervisors_idle(Duration::from_secs(4)),
             "independent supervisor did not empty its registry after caller cancellation"
+        );
+        assert!(
+            wait_for_linux_supervisors_idle(Duration::from_secs(4)),
+            "Linux supervisor retained drain ownership after its registry route emptied"
         );
         let elapsed = start.elapsed();
         assert_pgid_is_gone(pgid);
