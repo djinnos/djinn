@@ -6,6 +6,7 @@ pub mod db;
 pub mod error;
 pub mod events;
 pub mod git_maintenance;
+pub mod graph_retention;
 pub mod leadership;
 pub mod logging;
 mod mcp_bridge;

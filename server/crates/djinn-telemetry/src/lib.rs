@@ -213,6 +213,13 @@ const REASONING_KILL_TOTAL: &str = "djinn_reasoning_kill_total";
 const REPLY_LOOP_INLINE_CHAR_BUDGET_TRIPS_TOTAL: &str =
     "djinn_reply_loop_inline_char_budget_trips_total";
 
+// ─── Graph retention observability (epic z8ch) ──────────────────────────
+const GRAPH_RETENTION_TOTAL: &str = "djinn_graph_retention_total";
+const GRAPH_RETENTION_MODES: [&str; 3] = ["off", "dry_run", "delete"];
+const GRAPH_RETENTION_OUTCOMES: [&str; 5] = ["candidate", "delete", "skip", "retry", "error"];
+const GRAPH_RETENTION_REASONS: [&str; 4] =
+    ["none", "active_pin", "now_survivor", "removed_concurrently"];
+
 static HANDLE: OnceLock<Result<PrometheusHandle, String>> = OnceLock::new();
 
 /// Install the process-global Prometheus recorder.
@@ -1368,6 +1375,25 @@ fn register_metrics() {
             .absolute(0);
         }
     }
+
+    // ─── Graph retention observability (epic z8ch) ──────────────────
+    metrics::describe_counter!(
+        GRAPH_RETENTION_TOTAL,
+        "Graph retention sweep observations partitioned by fixed mode, outcome, and reason labels only."
+    );
+    for mode in GRAPH_RETENTION_MODES {
+        for outcome in GRAPH_RETENTION_OUTCOMES {
+            for reason in GRAPH_RETENTION_REASONS {
+                metrics::counter!(
+                    GRAPH_RETENTION_TOTAL,
+                    "mode" => mode,
+                    "outcome" => outcome,
+                    "reason" => reason,
+                )
+                .absolute(0);
+            }
+        }
+    }
 }
 
 pub mod dispatch {
@@ -2492,8 +2518,77 @@ pub mod psi {
     }
 }
 
+// ─── Graph retention observability (epic z8ch) ──────────────────────────
+//
+// Fixed-label counters for the leader-only graph retention loop. Labels are
+// intentionally bounded to keep Prometheus cardinality under control:
+//
+// - `mode` — one of `off`, `dry_run`, or `delete`.
+// - `outcome` — one of `candidate`, `delete`, `skip`, `retry`, or `error`.
+// - `reason` — one of `none`, `active_pin`, `now_survivor`, or
+//   `removed_concurrently`.
+//
+// High-cardinality dimensions (project id, generation id, commit sha,
+// artifact etag, content hash) MUST NOT appear as labels; they belong in
+// structured tracing fields emitted at the sweep call site.
+pub mod graph_retention {
+    /// Stable mode labels.
+    pub const MODE_OFF: &str = "off";
+    pub const MODE_DRY_RUN: &str = "dry_run";
+    pub const MODE_DELETE: &str = "delete";
+
+    /// Stable outcome labels.
+    pub const OUTCOME_CANDIDATE: &str = "candidate";
+    pub const OUTCOME_DELETE: &str = "delete";
+    pub const OUTCOME_SKIP: &str = "skip";
+    pub const OUTCOME_RETRY: &str = "retry";
+    pub const OUTCOME_ERROR: &str = "error";
+
+    /// Stable reason labels for skip/error outcomes.
+    pub const REASON_NONE: &str = "none";
+    pub const REASON_ACTIVE_PIN: &str = "active_pin";
+    pub const REASON_NOW_SURVIVOR: &str = "now_survivor";
+    pub const REASON_REMOVED_CONCURRENTLY: &str = "removed_concurrently";
+
+    /// All bounded mode labels — used for registration seeding and tests.
+    pub const ALL_MODES: [&str; 3] = [MODE_OFF, MODE_DRY_RUN, MODE_DELETE];
+    /// All bounded outcome labels — used for registration seeding and tests.
+    pub const ALL_OUTCOMES: [&str; 5] = [
+        OUTCOME_CANDIDATE,
+        OUTCOME_DELETE,
+        OUTCOME_SKIP,
+        OUTCOME_RETRY,
+        OUTCOME_ERROR,
+    ];
+    /// All bounded reason labels — used for registration seeding and tests.
+    pub const ALL_REASONS: [&str; 4] = [
+        REASON_NONE,
+        REASON_ACTIVE_PIN,
+        REASON_NOW_SURVIVOR,
+        REASON_REMOVED_CONCURRENTLY,
+    ];
+
+    /// Increment the graph retention counter for a `(mode, outcome, reason)`
+    /// bucket by `count`.
+    ///
+    /// `mode`, `outcome`, and `reason` MUST be one of the corresponding
+    /// `MODE_*`, `OUTCOME_*`, or `REASON_*` constants above. This is
+    /// intentionally synchronous and non-async so retention sweep paths never
+    /// need to hold any application lock across an await to emit telemetry.
+    pub fn increment(mode: &'static str, outcome: &'static str, reason: &'static str, count: u64) {
+        metrics::counter!(
+            super::GRAPH_RETENTION_TOTAL,
+            "mode" => mode,
+            "outcome" => outcome,
+            "reason" => reason,
+        )
+        .increment(count);
+    }
+}
+
 #[cfg(test)]
 mod tests {
+
     use super::*;
     use std::sync::{Mutex, MutexGuard};
 

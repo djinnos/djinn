@@ -2226,6 +2226,16 @@ impl AppState {
         // dispatch.
         crate::git_maintenance::spawn(self.clone());
 
+        // Periodic graph-generation retention (epic z8ch). Bounds the number
+        // of stored canonical graph generations by deleting non-survivors
+        // (current generation union newest N publish_seq generations). Uses
+        // the publication-safe DB retention API from `djinn-db`; this loop is
+        // just the leader-gated ticker, mirroring git_maintenance. Default
+        // mode is `off`; operators enable `dry_run` then `delete` via env.
+        // Standby HTTP-only pods never start this — it lives exclusively in
+        // `become_leader`.
+        crate::graph_retention::spawn(self.clone());
+
         // Periodic Codex OAuth keep-alive. ChatGPT/Codex refresh tokens rotate
         // single-use on a sliding window, so a connected-but-idle plan silently
         // dies once OpenAI expires its unused refresh token. This leader-only
