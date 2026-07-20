@@ -39,6 +39,7 @@ import {
   existsSync,
   mkdirSync,
   readFileSync,
+  readSync,
   writeFileSync,
 } from 'node:fs';
 import { resolve } from 'node:path';
@@ -156,9 +157,9 @@ export function isStructurallyAllowedSurfaceCandidate(candidate) {
   // read-source location, not a runtime producer or consumer.
   if (origin === 'server/crates/djinn-db/src/repositories/project_live_state_migration.rs' &&
       surface === '.djinn/read-sources/target-a') return true;
-  return origin === 'docs/DEVELOPMENT.md' || origin === 'scripts/README.md' ||
-    origin === 'scripts/ci-changed-scope.test.mjs' ||
-    origin === 'scripts/djinn-retirement-manifest.mjs' ||
+  // The ledger and its generated fixtures are immutable deletion evidence.
+  // Test sources are allowed only through the structural test-range rule below.
+  return origin === 'scripts/djinn-retirement-manifest.mjs' ||
     origin === 'scripts/test-djinn-retirement-manifest.mjs' ||
     origin.startsWith('scripts/fixtures/djinn-retirement/');
 }
@@ -175,19 +176,65 @@ export function discoverProjectLocalDjinnSurfaces(trackedPaths, opts = {}) {
   // namespace before the shared structural policy evaluates it.
   const joinedPath = /(?<receiver>\b(?:[A-Za-z_][A-Za-z0-9_]*|(?:(?:std\s*::\s*path\s*::\s*)?(?:PathBuf|Path))\s*::\s*from\s*\([^\r\n)]*\)))\s*\.\s*join\(\s*(?<quote>["'])(?<path>\.djinn(?:\/[^"'\r\n\s]*)?)\k<quote>/g;
   const pathConstructor = /\b(?:(?:std\s*::\s*path\s*::\s*)?(?:PathBuf|Path))\s*::\s*(?:from|new)\(\s*(["'])(\.djinn(?:\/[^"'\r\n\s]*)?)\1/g;
+  const directFilesystemOperation = /\b(?:(?:std\s*::\s*fs|fs|node:fs|tokio\s*::\s*fs)\s*::\s*|(?:fs\s*\.\s*)?)(?:read(?:_to_string|_dir)?|write|create(?:_dir(?:_all)?|_new)?|open|metadata|remove_(?:file|dir|dir_all)|rename|copy)\s*\(\s*(["'])(\.djinn(?:\/[^"'\r\n\s]*)?)\1/g;
   // Constants are intentional path declarations; this covers the one-time
   // cleanup handoff without classifying prose or arbitrary string literals.
   const declaredPath = /\b(?:const|let|static)\s+[A-Za-z_][A-Za-z0-9_]*[^=\r\n]*=\s*(["'])(\.djinn(?:\/[^"'\r\n\s]*)?)\1/g;
   const configuredPath = /(?:[:=]\s*)(?:(["'])(\.djinn(?:\/[^\s,}\]]*)?)\1|(\.djinn(?:\/[^\s,}\]]*)?))/g;
+  const indexBlobs = new Map();
+  if (!opts.readIndexBlob) {
+    const ordinaryPaths = trackedPaths.filter((path) => !path.includes('\n'));
+    if (ordinaryPaths.length > 0) {
+      try {
+        const batch = execFileSync(opts.git || 'git', ['cat-file', '--batch'], {
+          cwd,
+          input: Buffer.from(ordinaryPaths.map((path) => `:${path}\n`).join('')),
+          maxBuffer: 64 * 1024 * 1024,
+        });
+        let offset = 0;
+        for (const path of ordinaryPaths) {
+          const newline = batch.indexOf(10, offset);
+          if (newline < 0) break;
+          const header = batch.subarray(offset, newline).toString('utf8');
+          offset = newline + 1;
+          const match = /^[0-9a-f]+ blob (\d+)$/.exec(header);
+          if (!match) continue;
+          const size = Number(match[1]);
+          indexBlobs.set(path, batch.subarray(offset, offset + size));
+          offset += size + 1;
+        }
+      } catch {
+        // Fall back to individual index reads below when batch lookup fails.
+      }
+    }
+  }
   for (const repositoryPath of trackedPaths) {
-    const absolutePath = resolve(cwd, repositoryPath);
-    if (!existsSync(absolutePath)) continue;
-    const bytes = readFileSync(absolutePath);
+    let bytes;
+    try {
+      // The policy input is the staged blob, not a potentially divergent
+      // worktree file. Tests may inject an equivalent blob reader.
+      bytes = opts.readIndexBlob
+        ? opts.readIndexBlob(repositoryPath)
+        : indexBlobs.get(repositoryPath) || execFileSync(opts.git || 'git', ['show', `:${repositoryPath}`], { cwd, maxBuffer: 64 * 1024 * 1024 });
+    } catch {
+      continue;
+    }
     if (bytes.includes(0)) continue;
     const text = bytes.toString('utf8');
-    // Inline Rust regression modules are explicit negative-test locations.
-    // This is derived from source structure, rather than a caller-provided kind.
-    const isNegativeTestLocation = (offset) => text.lastIndexOf('#[cfg(test)]', offset) >= 0;
+    // An exemption is bounded to a cfg(test) module's braces, so production
+    // code after a test module cannot inherit the exemption.
+    const testRanges = [];
+    for (const marker of text.matchAll(/#\s*\[\s*cfg\s*\(\s*test\s*\)\s*\]\s*(?:pub\s+)?mod\s+[A-Za-z_][A-Za-z0-9_]*\s*\{/g)) {
+      let depth = 1;
+      let index = marker.index + marker[0].length;
+      for (; index < text.length && depth > 0; index += 1) {
+        if (text[index] === '{') depth += 1;
+        if (text[index] === '}') depth -= 1;
+      }
+      if (depth === 0) testRanges.push([marker.index, index]);
+    }
+    const isTestSource = /(^|\/)(?:test-[^/]+|[^/]+\.test\.[^/]+)$/.test(repositoryPath);
+    const isNegativeTestLocation = (offset) => isTestSource || testRanges.some(([start, end]) => offset >= start && offset < end);
     for (const match of text.matchAll(joinedPath)) {
       if (isNegativeTestLocation(match.index)) continue;
       const receiver = match.groups.receiver.replace(/\s/g, '');
@@ -196,6 +243,9 @@ export function discoverProjectLocalDjinnSurfaces(trackedPaths, opts = {}) {
       candidates.push({ path: surface, repository_path: repositoryPath });
     }
     for (const match of text.matchAll(pathConstructor)) {
+      if (!isNegativeTestLocation(match.index)) candidates.push({ path: match[2], repository_path: repositoryPath });
+    }
+    for (const match of text.matchAll(directFilesystemOperation)) {
       if (!isNegativeTestLocation(match.index)) candidates.push({ path: match[2], repository_path: repositoryPath });
     }
     for (const match of text.matchAll(declaredPath)) {
@@ -1099,7 +1149,7 @@ export function validateRetirementCutover(currentPathBytes, ledger, guidanceFixt
     }
   }
   assertNoProjectLocalDjinnSurface(currentPaths.map((path) => ({ path })));
-  if (opts.scanCurrentTree) assertNoProjectLocalDjinnSurface(discoverProjectLocalDjinnSurfaces(currentPaths, opts));
+  assertNoProjectLocalDjinnSurface(discoverProjectLocalDjinnSurfaces(currentPaths, opts));
   const currentKnowledge = currentPaths
     .filter(isKnowledgePath)
     .filter((path) => !RETIRED_OPERATIONAL_PATHS.has(path));
@@ -1196,7 +1246,6 @@ function parseCliArgs(argv) {
       'deletion-ledger': { type: 'string' },
       'output-dir': { type: 'string', short: 'o' },
       'paths-file': { type: 'string' },
-      'scan-current-tree': { type: 'boolean' },
       help: { type: 'boolean', short: 'h' },
     },
     allowNegative: true,
@@ -1222,7 +1271,6 @@ function main(argv) {
         '      --deletion-ledger <path> validate durable ledger and post-cutover state',
         '  -o, --output-dir <dir>      output directory (default target/djinn-retirement)',
         '      --paths-file <path>     read NUL-delimited paths from a file instead of stdin',
-        '      --scan-current-tree     inspect tracked source and generated text for live surfaces',
         '  -h, --help                  show this help',
         '',
       ].join('\n'),
@@ -1234,7 +1282,25 @@ function main(argv) {
   if (values['paths-file']) {
     pathBytes = readFileSync(values['paths-file']);
   } else {
-    pathBytes = readFileSync(process.stdin.fd);
+    // Pipes can return EAGAIN with Node's one-shot readFileSync. Read raw
+    // NUL-delimited stdin incrementally so the shell guard is reliable.
+    const chunks = [];
+    // stdin is nonblocking under the Node test runner and some CI shells.
+    if (process.stdin._handle?.setBlocking) process.stdin._handle.setBlocking(true);
+    const buffer = Buffer.alloc(64 * 1024);
+    while (true) {
+      let count;
+      try {
+        count = readSync(process.stdin.fd, buffer, 0, buffer.length, null);
+      } catch (err) {
+        if (err.code === 'EAGAIN') continue;
+        if (err.code === 'EOF') break;
+        throw err;
+      }
+      if (count === 0) break;
+      chunks.push(Buffer.from(buffer.subarray(0, count)));
+    }
+    pathBytes = Buffer.concat(chunks);
   }
 
   if (values['deletion-ledger']) {
@@ -1247,9 +1313,7 @@ function main(argv) {
       });
     }
     const guidance = loadDbGuidanceFixture(values['db-guidance']);
-    const result = validateRetirementCutover(pathBytes, ledger, guidance, {
-      scanCurrentTree: values['scan-current-tree'],
-    });
+    const result = validateRetirementCutover(pathBytes, ledger, guidance);
     process.stderr.write(
       `validated ${result.ledger.knowledge_count} durable deletion entries and ` +
         `${result.guidanceManifest.record_count} guidance entries; tracked knowledge set is empty\n`,

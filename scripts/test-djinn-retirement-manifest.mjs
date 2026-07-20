@@ -204,7 +204,6 @@ test('surface policy preserves allowed evidence and rejects classification spoof
     { path: '~/.djinn/cache' },
     { path: '$DJINN_HOME/.djinn/cache' },
     { path: '.djinn/brief.md', repository_path: 'scripts/fixtures/djinn-retirement/deletion-ledger.json' },
-    { path: '.djinn/settings.json', repository_path: 'scripts/test-djinn-retirement-manifest.mjs' },
     {
       path: '.djinn/settings.json',
       repository_path: 'server/crates/djinn-workspace/src/legacy_settings_import.rs',
@@ -267,6 +266,16 @@ test('repository-wired guard rejects staged scaffolding and generated schema sur
     execFileSync('git', ['-C', dir, 'add', 'src/runtime.rs']);
     assert.equal(runGuard().status, 1, 'staged directory recreation fails');
     execFileSync('git', ['-C', dir, 'rm', '--cached', '-q', 'src/runtime.rs']);
+    writeFileSync(join(dir, 'src', 'direct.rs'), 'std::fs::write(".djinn/settings.json", bytes)?;\n');
+    execFileSync('git', ['-C', dir, 'add', 'src/direct.rs']);
+    assert.equal(runGuard().status, 1, 'staged direct std::fs write fails');
+    writeFileSync(join(dir, 'src', 'direct.rs'), 'Historical .djinn settings prose in the worktree.\n');
+    assert.equal(runGuard().status, 1, 'the guard reads the forbidden staged blob, not divergent worktree bytes');
+    execFileSync('git', ['-C', dir, 'rm', '--cached', '-q', 'src/direct.rs']);
+    writeFileSync(join(dir, 'src', 'after-test.rs'), '#[cfg(test)]\nmod tests { fn negative() { std::fs::write(".djinn/settings.json", b"x"); } }\nstd::fs::write(".djinn/settings.json", b"x");\n');
+    execFileSync('git', ['-C', dir, 'add', 'src/after-test.rs']);
+    assert.equal(runGuard().status, 1, 'production literal after a test module fails');
+    execFileSync('git', ['-C', dir, 'rm', '--cached', '-q', 'src/after-test.rs']);
     mkdirSync(join(dir, 'generated'), { recursive: true });
     writeFileSync(join(dir, 'generated', 'schema.json'), '{"legacy_path":".djinn/graph_warm_status.json"}\n');
     execFileSync('git', ['-C', dir, 'add', 'generated/schema.json']);
