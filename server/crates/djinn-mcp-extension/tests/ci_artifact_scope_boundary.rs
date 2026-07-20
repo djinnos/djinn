@@ -29,15 +29,6 @@ fn deserialize_fails(args: serde_json::Value) {
     );
 }
 
-fn validate_fails(args: serde_json::Value) {
-    let params: CiArtifactParams =
-        deserialize(args).expect("deserialization should succeed for known fields");
-    assert!(
-        params.validate().is_err(),
-        "validate() should reject this shape"
-    );
-}
-
 /// Collect the `(name, safety)` pairs from a tool-schema array so we can
 /// check which tools are present and whether they carry the read-only
 /// annotation.
@@ -128,20 +119,20 @@ fn schema_rejects_out_of_scope_inputs_and_operations() {
     assert!(deserialize(json!({"action":"download"})).is_err());
 
     // ── Zero selectors (non-positive) ───────────────────────────────
-    validate_fails(json!({"action":"list","run_id":0}));
-    validate_fails(json!({"action":"list","pr_number":0}));
+    deserialize_fails(json!({"action":"list","run_id":0}));
+    deserialize_fails(json!({"action":"list","pr_number":0}));
 
     // ── Both selectors (mutual exclusion) ───────────────────────────
-    validate_fails(json!({"action":"list","run_id":1,"pr_number":2}));
-    validate_fails(json!({"action":"fetch","run_id":1,"pr_number":2,"artifact":"x"}));
+    deserialize_fails(json!({"action":"list","run_id":1,"pr_number":2}));
+    deserialize_fails(json!({"action":"fetch","run_id":1,"pr_number":2,"artifact":"x"}));
 
     // ── artifact forbidden for list ─────────────────────────────────
-    validate_fails(json!({"action":"list","artifact":"x"}));
+    deserialize_fails(json!({"action":"list","artifact":"x"}));
 
     // ── artifact required and non-empty for fetch ───────────────────
-    validate_fails(json!({"action":"fetch"}));
-    validate_fails(json!({"action":"fetch","run_id":1}));
-    validate_fails(json!({"action":"fetch","artifact":""}));
+    deserialize_fails(json!({"action":"fetch"}));
+    deserialize_fails(json!({"action":"fetch","run_id":1}));
+    deserialize_fails(json!({"action":"fetch","artifact":""}));
 
     // ── Enum parity check (internal type) ──────────────────────────
     let params: CiArtifactParams =

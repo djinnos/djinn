@@ -4,13 +4,14 @@
 //! and agent reply-loop produce.  They are plain `Deserialize` structs —
 //! no domain logic, no database access.
 
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer};
 
-/// Public schema for the `ci_artifact` tool. Enforces the four legal shapes
-/// via [`CiArtifactParams::validate`], which must be called after
-/// deserialization and before service dispatch.
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
+/// Public schema for the `ci_artifact` tool.
+///
+/// Deserialization admits only the four legal list/fetch shapes. This keeps
+/// callers from constructing an invalid public-tool request by forgetting an
+/// opt-in validation step.
+#[derive(Debug)]
 pub struct CiArtifactParams {
     pub action: CiArtifactAction,
     pub run_id: Option<u64>,
@@ -18,14 +19,40 @@ pub struct CiArtifactParams {
     pub artifact: Option<String>,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawCiArtifactParams {
+    action: CiArtifactAction,
+    run_id: Option<u64>,
+    pr_number: Option<u64>,
+    artifact: Option<String>,
+}
+
+impl<'de> Deserialize<'de> for CiArtifactParams {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let raw = RawCiArtifactParams::deserialize(deserializer)?;
+        let params = Self {
+            action: raw.action,
+            run_id: raw.run_id,
+            pr_number: raw.pr_number,
+            artifact: raw.artifact,
+        };
+        params.validate().map_err(serde::de::Error::custom)?;
+        Ok(params)
+    }
+}
+
 impl CiArtifactParams {
     /// Validate the four legal shapes:
     /// - `run_id` / `pr_number` are optional, positive, and mutually exclusive.
     /// - `artifact` is required (non-empty) for `fetch` and forbidden for `list`.
     ///
-    /// Unknown fields are already denied by `#[serde(deny_unknown_fields)]`,
-    /// so `job_id`, `step`, repository, lane, format, mutation, deletion, and
-    /// retention inputs all fail at deserialization time.
+    /// Unknown fields and all known-field shape violations fail during
+    /// deserialization. This method remains available for callers that build
+    /// the public type internally.
     pub fn validate(&self) -> Result<(), String> {
         if self.run_id == Some(0) || self.pr_number == Some(0) {
             return Err("ci_artifact selectors must be positive".to_string());
