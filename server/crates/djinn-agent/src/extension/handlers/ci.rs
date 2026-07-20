@@ -1,5 +1,9 @@
 use super::*;
 use djinn_provider::github_api::{ActionsJob, WorkflowRun};
+use std::{
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 
 /// How many workflow runs to request when scanning a PR head for the failing
 /// run. The relevant run is always the newest one, so a small page is plenty;
@@ -10,6 +14,8 @@ const RUN_SCAN_PER_PAGE: u32 = 20;
 /// the run for *this* PR may be several entries back. Mirrors the PR poller's
 /// dequeue-enrichment page size (`pr_commands.rs`).
 const MERGE_GROUP_SCAN_PER_PAGE: u32 = 50;
+/// Artifact discovery is deliberately subordinate to a successful log fetch.
+const ARTIFACT_HINT_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Fetch the failing GitHub Actions CI log for a task's PR.
 ///
@@ -89,10 +95,19 @@ pub(crate) async fn call_ci_job_log(
             .get_job_logs(&owner, &repo, job_id)
             .await
             .map_err(|e| format!("failed to fetch job log for job_id={job_id}: {e}"))?;
-        return Ok(serde_json::Value::String(render_log(
-            &raw_log,
-            p.step.as_deref(),
-        )));
+        let output = render_log(&raw_log, p.step.as_deref());
+        return Ok(serde_json::Value::String(
+            append_artifact_hint(
+                &gh_client,
+                &owner,
+                &repo,
+                task_id,
+                Some(job_id),
+                None,
+                output,
+            )
+            .await,
+        ));
     }
 
     // ── Discovery mode ─────────────────────────────────────────────────────
@@ -142,7 +157,19 @@ pub(crate) async fn call_ci_job_log(
             .get_job_logs(&owner, &repo, job.id)
             .await
             .map_err(|e| format!("failed to fetch job log for job_id={}: {e}", job.id))?;
-        return Ok(serde_json::Value::String(render_log(&raw_log, Some(step))));
+        let output = render_log(&raw_log, Some(step));
+        return Ok(serde_json::Value::String(
+            append_artifact_hint(
+                &gh_client,
+                &owner,
+                &repo,
+                task_id,
+                Some(job.id),
+                Some(resolved.run_id),
+                output,
+            )
+            .await,
+        ));
     }
 
     // Fetch the FIRST failing job's log. When several jobs failed, prepend a
@@ -164,7 +191,167 @@ pub(crate) async fn call_ci_job_log(
         body
     };
 
-    Ok(serde_json::Value::String(output))
+    Ok(serde_json::Value::String(
+        append_artifact_hint(
+            &gh_client,
+            &owner,
+            &repo,
+            task_id,
+            Some(first.id),
+            Some(resolved.run_id),
+            output,
+        )
+        .await,
+    ))
+}
+
+/// A suppressed hint failure retains the concrete run once direct-job lookup
+/// has resolved it, so operational telemetry remains actionable.
+struct ArtifactHintFailure {
+    run_id: Option<u64>,
+    error: String,
+}
+
+/// Carries a direct-job run ID out of the timed hint future. The outer timeout
+/// cancels that future while the artifact list request is pending, so a shared
+/// context is necessary to retain a run ID obtained before that request.
+#[derive(Clone)]
+struct ArtifactHintRunContext(Arc<Mutex<Option<u64>>>);
+
+impl ArtifactHintRunContext {
+    fn new(run_id: Option<u64>) -> Self {
+        Self(Arc::new(Mutex::new(run_id)))
+    }
+
+    fn run_id(&self) -> Option<u64> {
+        *self
+            .0
+            .lock()
+            .expect("artifact hint run context lock poisoned")
+    }
+
+    fn set_run_id(&self, run_id: u64) {
+        *self
+            .0
+            .lock()
+            .expect("artifact hint run context lock poisoned") = Some(run_id);
+    }
+}
+
+/// Append a bounded, read-only artifact hint without changing successful log
+/// semantics. Discovery already owns a verified run ID; direct-job mode obtains
+/// it from GitHub's repository-scoped job detail endpoint.
+async fn append_artifact_hint(
+    client: &GitHubApiClient,
+    owner: &str,
+    repo: &str,
+    task_id: &str,
+    job_id: Option<u64>,
+    known_run_id: Option<u64>,
+    output: String,
+) -> String {
+    let run_context = ArtifactHintRunContext::new(known_run_id);
+    match tokio::time::timeout(
+        ARTIFACT_HINT_TIMEOUT,
+        artifact_hint(
+            client,
+            owner,
+            repo,
+            job_id,
+            known_run_id,
+            run_context.clone(),
+        ),
+    )
+    .await
+    {
+        Ok(Ok(Some(hint))) => format!("{output}\n\n{hint}"),
+        Ok(Ok(None)) => output,
+        Ok(Err(failure)) => {
+            tracing::warn!(
+                operation = "ci_job_log_artifact_hint",
+                outcome = "suppressed_provider_error",
+                task_id,
+                job_id = ?job_id,
+                run_id = ?failure.run_id.or(run_context.run_id()),
+                error = %failure.error,
+                "ci_job_log artifact hint lookup failed; returning successful log unchanged"
+            );
+            output
+        }
+        Err(_) => {
+            tracing::warn!(
+                operation = "ci_job_log_artifact_hint",
+                outcome = "suppressed_timeout",
+                task_id,
+                job_id = ?job_id,
+                run_id = ?run_context.run_id(),
+                timeout_ms = ARTIFACT_HINT_TIMEOUT.as_millis(),
+                "ci_job_log artifact hint lookup timed out; returning successful log unchanged"
+            );
+            output
+        }
+    }
+}
+
+/// Make at most one bounded list request. This intentionally never downloads
+/// an artifact: the public `ci_artifact` tool remains responsible for fetches.
+async fn artifact_hint(
+    client: &GitHubApiClient,
+    owner: &str,
+    repo: &str,
+    job_id: Option<u64>,
+    known_run_id: Option<u64>,
+    run_context: ArtifactHintRunContext,
+) -> Result<Option<String>, ArtifactHintFailure> {
+    let run_id = match known_run_id {
+        Some(run_id) => run_id,
+        None => {
+            let job_id = job_id.ok_or_else(|| ArtifactHintFailure {
+                run_id: None,
+                error: "no job or workflow run was available for artifact hint".to_string(),
+            })?;
+            client
+                .get_job(owner, repo, job_id)
+                .await
+                .map_err(|error| ArtifactHintFailure {
+                    run_id: None,
+                    error: format!("failed to fetch job detail for job_id={job_id}: {error}"),
+                })?
+                .run_id
+                .ok_or_else(|| ArtifactHintFailure {
+                    run_id: None,
+                    error: format!(
+                        "job detail for job_id={job_id} did not include a workflow run ID"
+                    ),
+                })?
+        }
+    };
+    // Preserve the resolved direct-job run before the list await. If the outer
+    // hint deadline cancels this future while listing, telemetry still has it.
+    run_context.set_run_id(run_id);
+    let artifacts = client
+        .list_run_artifacts(owner, repo, run_id)
+        .await
+        .map_err(|error| ArtifactHintFailure {
+            run_id: Some(run_id),
+            error: format!("failed to list artifacts for run {run_id}: {error}"),
+        })?;
+    if artifacts.artifacts.is_empty() {
+        return Ok(None);
+    }
+
+    // Provider order is GitHub's order. Keep it intact so the user can copy an
+    // exact name into the concrete fetch example below.
+    let names = artifacts
+        .artifacts
+        .iter()
+        .map(|artifact| format!("`{}`", artifact.name))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let first_name = &artifacts.artifacts[0].name;
+    Ok(Some(format!(
+        "Workflow run {run_id} has artifacts: {names}. List them with `ci_artifact(action=\"list\", run_id={run_id})`. Fetch an exact artifact name with `ci_artifact(action=\"fetch\", run_id={run_id}, artifact=\"{first_name}\")`."
+    )))
 }
 
 /// An implicitly discovered run must itself have completed with a failing
@@ -432,422 +619,8 @@ fn extract_step_log(cleaned_log: &str, step_name: &str) -> Option<String> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use djinn_provider::github_api::{ActionsJob, ActionsJobStep, WorkflowRun};
-    use wiremock::matchers::{method, path, query_param};
-    use wiremock::{Mock, MockServer, ResponseTemplate};
-
-    const OWNER: &str = "named-owner";
-    const REPO: &str = "named-repository";
-
-    fn mock_client(server: &MockServer) -> GitHubApiClient {
-        GitHubApiClient::for_user_token_with_base_url("test-token".into(), server.uri())
-    }
-
-    fn run_json(id: u64, conclusion: Option<&str>, branch: Option<&str>) -> serde_json::Value {
-        serde_json::json!({
-            "id": id, "head_sha": format!("sha-{id}"), "head_branch": branch,
-            "status": if conclusion.is_some() { "completed" } else { "in_progress" },
-            "conclusion": conclusion
-        })
-    }
-
-    fn jobs_json(conclusion: &str) -> serde_json::Value {
-        serde_json::json!({"jobs": [{
-            "id": 900, "name": "tests", "status": "completed",
-            "conclusion": conclusion, "html_url": "https://example.test/jobs/900", "steps": []
-        }]})
-    }
-
-    fn run(id: u64, conclusion: Option<&str>, head_branch: Option<&str>) -> WorkflowRun {
-        WorkflowRun {
-            id,
-            workflow_id: None,
-            name: None,
-            path: None,
-            head_branch: head_branch.map(str::to_string),
-            head_sha: format!("sha-{id}"),
-            status: Some("completed".to_string()),
-            conclusion: conclusion.map(str::to_string),
-        }
-    }
-
-    fn job(id: u64, name: &str, conclusion: Option<&str>) -> ActionsJob {
-        ActionsJob {
-            id,
-            run_id: Some(1),
-            name: name.to_string(),
-            status: "completed".to_string(),
-            conclusion: conclusion.map(str::to_string),
-            html_url: format!("https://example.test/job/{id}"),
-            workflow_name: None,
-            steps: Vec::new(),
-        }
-    }
-
-    fn step(name: &str, conclusion: Option<&str>) -> ActionsJobStep {
-        ActionsJobStep {
-            name: name.to_string(),
-            status: "completed".to_string(),
-            conclusion: conclusion.map(str::to_string),
-            number: 1,
-        }
-    }
-
-    // ── select_failing_run ────────────────────────────────────────────────
-    #[test]
-    fn select_failing_run_returns_newest_failure() {
-        // Newest-first: a passing run in front must not shadow the failing one.
-        let runs = vec![
-            run(30, Some("success"), None),
-            run(20, Some("failure"), None),
-            run(10, Some("failure"), None),
-        ];
-        assert_eq!(select_failing_run(&runs).map(|r| r.id), Some(20));
-    }
-
-    #[test]
-    fn select_failing_run_none_when_all_pass() {
-        let runs = vec![run(2, Some("success"), None), run(1, None, None)];
-        assert!(select_failing_run(&runs).is_none());
-    }
-
-    #[test]
-    fn select_failing_run_includes_timed_out_and_cancelled() {
-        assert_eq!(
-            select_failing_run(&[run(5, Some("timed_out"), None)]).map(|r| r.id),
-            Some(5)
-        );
-        assert_eq!(
-            select_failing_run(&[run(6, Some("cancelled"), None)]).map(|r| r.id),
-            Some(6)
-        );
-    }
-
-    #[test]
-    fn implicit_run_requires_a_failing_workflow_conclusion() {
-        // A recorded merge-queue run can have a failed completed job while the
-        // enclosing workflow is still running. It must not be selected until
-        // GitHub reports a failure-flavor workflow conclusion.
-        assert!(!is_implicit_failing_run(&run(1, None, None)));
-        assert!(!is_implicit_failing_run(&run(2, Some("success"), None)));
-        assert!(is_implicit_failing_run(&run(3, Some("failure"), None)));
-        assert!(is_implicit_failing_run(&run(4, Some("timed_out"), None)));
-        assert!(is_implicit_failing_run(&run(5, Some("cancelled"), None)));
-    }
-
-    // ── select_merge_group_run ────────────────────────────────────────────
-    #[test]
-    fn select_merge_group_run_matches_pr_marker() {
-        let runs = vec![
-            run(3, Some("failure"), Some("gh-readonly-queue/main/pr-99-abc")),
-            run(2, Some("failure"), Some("gh-readonly-queue/main/pr-42-def")),
-            run(1, Some("failure"), Some("gh-readonly-queue/main/pr-7-xyz")),
-        ];
-        assert_eq!(select_merge_group_run(&runs, 42).map(|r| r.id), Some(2));
-    }
-
-    #[test]
-    fn select_merge_group_run_ignores_passing_and_foreign_prs() {
-        let runs = vec![
-            run(3, Some("success"), Some("gh-readonly-queue/main/pr-42-abc")),
-            run(
-                2,
-                Some("failure"),
-                Some("gh-readonly-queue/main/pr-100-def"),
-            ),
-        ];
-        assert!(select_merge_group_run(&runs, 42).is_none());
-    }
-
-    #[test]
-    fn select_merge_group_run_does_not_confuse_pr_prefixes() {
-        // `pr-4-` must not match PR 42's `pr-42-` branch.
-        let runs = vec![run(
-            1,
-            Some("failure"),
-            Some("gh-readonly-queue/main/pr-42-abc"),
-        )];
-        assert!(select_merge_group_run(&runs, 4).is_none());
-    }
-
-    // ── select_failing_jobs ───────────────────────────────────────────────
-    #[test]
-    fn select_failing_jobs_filters_and_preserves_order() {
-        let jobs = vec![
-            job(1, "clippy", Some("success")),
-            job(2, "tests", Some("failure")),
-            job(3, "sqlx", Some("timed_out")),
-            job(4, "fmt", Some("cancelled")),
-            job(5, "docs", None),
-        ];
-        let selected = select_failing_jobs(&jobs);
-        assert_eq!(
-            selected.iter().map(|j| j.id).collect::<Vec<_>>(),
-            vec![2, 3, 4]
-        );
-    }
-
-    #[test]
-    fn select_failing_jobs_empty_when_all_green() {
-        let jobs = vec![job(1, "a", Some("success")), job(2, "b", None)];
-        assert!(select_failing_jobs(&jobs).is_empty());
-    }
-
-    // ── select_job_for_step ───────────────────────────────────────────────
-    #[test]
-    fn select_job_for_step_unique_match() {
-        let mut a = job(1, "quality", Some("failure"));
-        a.steps = vec![
-            step("Clippy", Some("success")),
-            step("Run tests", Some("failure")),
-        ];
-        let mut b = job(2, "build", Some("failure"));
-        b.steps = vec![step("compile", Some("failure"))];
-        let jobs = vec![a, b];
-        assert_eq!(select_job_for_step(&jobs, "tests").map(|j| j.id), Some(1));
-    }
-
-    #[test]
-    fn select_job_for_step_ambiguous_returns_none() {
-        let mut a = job(1, "a", Some("failure"));
-        a.steps = vec![step("Run tests", Some("failure"))];
-        let mut b = job(2, "b", Some("failure"));
-        b.steps = vec![step("More tests", Some("failure"))];
-        let jobs = vec![a, b];
-        assert!(select_job_for_step(&jobs, "tests").is_none());
-    }
-
-    #[test]
-    fn select_job_for_step_ignores_passing_steps() {
-        let mut a = job(1, "a", Some("failure"));
-        a.steps = vec![step("Tests", Some("success"))];
-        let jobs = vec![a];
-        assert!(select_job_for_step(&jobs, "tests").is_none());
-    }
-
-    // ── format_failing_jobs_header ─────────────────────────────────────────
-    #[test]
-    fn format_failing_jobs_header_lists_all_jobs() {
-        let jobs = vec![
-            job(11, "Server Clippy", Some("failure")),
-            job(22, "Server Tests", Some("timed_out")),
-        ];
-        let header = format_failing_jobs_header(&jobs, DiscoveryLane::MergeQueue);
-        assert!(header.contains("2 failing jobs"));
-        assert!(header.contains("merge-queue"));
-        assert!(header.contains("**Server Clippy**, job_id=11"));
-        assert!(header.contains("- Server Clippy (job_id=11) — failure"));
-        assert!(header.contains("- Server Tests (job_id=22) — timed_out"));
-    }
-
-    // ── clean_actions_log ─────────────────────────────────────────────────
-    #[test]
-    fn clean_actions_log_strips_timestamps_and_group_markers() {
-        let raw = "2026-03-24T17:10:50.0448487Z ##[group]Run cargo test\n\
-                   2026-03-24T17:10:51.0000000Z ##[error]boom\n\
-                   2026-03-24T17:10:52.0000000Z ##[endgroup]\n\
-                   2026-03-24T17:10:53.0000000Z plain line";
-        let cleaned = clean_actions_log(raw);
-        assert_eq!(cleaned, "Run cargo test\nboom\nplain line");
-    }
-
-    #[test]
-    fn clean_actions_log_preserves_non_timestamped_lines() {
-        let raw = "no timestamp here\n##[warning]watch out";
-        assert_eq!(clean_actions_log(raw), "no timestamp here\nwatch out");
-    }
-
-    // ── extract_step_log ──────────────────────────────────────────────────
-    #[test]
-    fn extract_step_log_returns_section_until_boundary() {
-        let cleaned = "Run cargo build\nbuilding...\nRun cargo test\ntest output\nFAILED\nPost Run actions/checkout\ncleanup";
-        let section = extract_step_log(cleaned, "cargo test").expect("step found");
-        assert!(section.contains("Run cargo test"));
-        assert!(section.contains("test output"));
-        assert!(section.contains("FAILED"));
-        assert!(!section.contains("cleanup"));
-        assert!(!section.contains("building..."));
-    }
-
-    #[test]
-    fn extract_step_log_none_when_step_absent() {
-        let cleaned = "Run cargo build\nbuilding...";
-        assert!(extract_step_log(cleaned, "nonexistent step").is_none());
-    }
-
-    #[test]
-    fn extract_step_log_runs_to_end_without_boundary() {
-        let cleaned = "Run cargo test\nline1\nline2";
-        let section = extract_step_log(cleaned, "cargo test").expect("found");
-        assert_eq!(section, "Run cargo test\nline1\nline2");
-    }
-
-    // ── render_log ────────────────────────────────────────────────────────
-    #[test]
-    fn render_log_without_step_returns_full_clean() {
-        let raw = "2026-03-24T17:10:50.0448487Z hello";
-        assert_eq!(render_log(raw, None), "hello");
-    }
-
-    #[test]
-    fn render_log_missing_step_falls_back_to_full_log() {
-        let raw = "Run a\nout";
-        let out = render_log(raw, Some("no such step"));
-        assert!(out.contains("not found in the job log"));
-        assert!(out.contains("Run a"));
-    }
-
-    // ── param deserialization ─────────────────────────────────────────────
-    #[test]
-    fn ci_job_log_params_all_optional() {
-        let empty: CiJobLogParams = serde_json::from_value(serde_json::json!({})).unwrap();
-        assert!(empty.job_id.is_none());
-        assert!(empty.pr_number.is_none());
-        assert!(empty.step.is_none());
-    }
-
-    #[test]
-    fn ci_job_log_params_parses_all_fields() {
-        let p: CiJobLogParams = serde_json::from_value(serde_json::json!({
-            "job_id": 12345,
-            "pr_number": 42,
-            "step": "Tests"
-        }))
-        .unwrap();
-        assert_eq!(p.job_id, Some(12345));
-        assert_eq!(p.pr_number, Some(42));
-        assert_eq!(p.step.as_deref(), Some("Tests"));
-    }
-
-    async fn mount_runs(server: &MockServer, query: (&str, &str), runs: serde_json::Value) {
-        Mock::given(method("GET"))
-            .and(path(format!("/repos/{OWNER}/{REPO}/actions/runs")))
-            .and(query_param(query.0, query.1))
-            .respond_with(
-                ResponseTemplate::new(200)
-                    .set_body_json(serde_json::json!({"workflow_runs": runs})),
-            )
-            .mount(server)
-            .await;
-    }
-
-    #[tokio::test]
-    async fn resolver_pr_head_failure_precedes_recorded_and_live_merge_queue() {
-        let server = MockServer::start().await;
-        mount_runs(
-            &server,
-            ("head_sha", "recorded-sha"),
-            serde_json::json!([run_json(101, Some("failure"), Some("feature"))]),
-        )
-        .await;
-        Mock::given(method("GET"))
-            .and(path(format!("/repos/{OWNER}/{REPO}/actions/runs/101/jobs")))
-            .respond_with(ResponseTemplate::new(200).set_body_json(jobs_json("failure")))
-            .mount(&server)
-            .await;
-        let resolved = resolve_workflow_run(
-            &mock_client(&server),
-            OWNER,
-            REPO,
-            WorkflowRunResolutionRequest {
-                pr_number: Some(42),
-                recorded_head_sha: Some("recorded-sha".into()),
-                recorded_merge_queue_run_id: Some(202),
-                ..Default::default()
-            },
-        )
-        .await
-        .unwrap();
-        assert_eq!(resolved.run_id, 101);
-        assert_eq!(resolved.lane, WorkflowRunLane::PrHead);
-        let requests = server.received_requests().await.unwrap();
-        assert_eq!(
-            requests.len(),
-            2,
-            "recorded/live merge queue must not be queried"
-        );
-        assert!(requests[0].url.path().ends_with("/actions/runs"));
-        assert!(requests[1].url.path().ends_with("/actions/runs/101/jobs"));
-    }
-
-    #[tokio::test]
-    async fn resolver_live_merge_group_requires_failing_job_verification() {
-        let server = MockServer::start().await;
-        mount_runs(&server, ("head_sha", "head"), serde_json::json!([])).await;
-        mount_runs(
-            &server,
-            ("event", "merge_group"),
-            serde_json::json!([run_json(
-                303,
-                Some("failure"),
-                Some("gh-readonly-queue/main/pr-42-deadbeef")
-            )]),
-        )
-        .await;
-        Mock::given(method("GET"))
-            .and(path(format!("/repos/{OWNER}/{REPO}/actions/runs/303/jobs")))
-            .respond_with(ResponseTemplate::new(200).set_body_json(jobs_json("failure")))
-            .mount(&server)
-            .await;
-        let resolved = resolve_workflow_run(
-            &mock_client(&server),
-            OWNER,
-            REPO,
-            WorkflowRunResolutionRequest {
-                pr_number: Some(42),
-                recorded_head_sha: Some("head".into()),
-                ..Default::default()
-            },
-        )
-        .await
-        .unwrap();
-        assert_eq!(resolved.lane, WorkflowRunLane::LiveMergeGroup);
-        let paths = server
-            .received_requests()
-            .await
-            .unwrap()
-            .into_iter()
-            .map(|r| r.url.path().to_owned())
-            .collect::<Vec<_>>();
-        assert!(paths[2].ends_with("/actions/runs/303/jobs"));
-    }
-
-    #[tokio::test]
-    async fn resolver_nonfailing_candidates_return_final_no_failure_error() {
-        let server = MockServer::start().await;
-        mount_runs(
-            &server,
-            ("head_sha", "head"),
-            serde_json::json!([run_json(1, Some("success"), None), run_json(2, None, None)]),
-        )
-        .await;
-        mount_runs(
-            &server,
-            ("event", "merge_group"),
-            serde_json::json!([
-                run_json(3, Some("success"), Some("gh-readonly-queue/main/pr-42-x")),
-                run_json(4, None, Some("gh-readonly-queue/main/pr-42-y"))
-            ]),
-        )
-        .await;
-        let error = resolve_workflow_run(
-            &mock_client(&server),
-            OWNER,
-            REPO,
-            WorkflowRunResolutionRequest {
-                pr_number: Some(42),
-                recorded_head_sha: Some("head".into()),
-                ..Default::default()
-            },
-        )
-        .await
-        .unwrap_err();
-        assert!(error.contains("no failing workflow run"));
-        assert_eq!(server.received_requests().await.unwrap().len(), 2);
-    }
-}
+#[path = "ci_tests.rs"]
+mod tests;
 
 /// Inputs captured from a task before resolving an artifact or CI-log run.
 #[derive(Debug, Clone, Default)]
