@@ -1217,6 +1217,8 @@ mod tests {
                     "extra": {}
                 },
                 "resume": {
+                    "dispatch_owner_incarnation_id": null,
+                    "dispatch_group_id": null,
                     "considered": true,
                     "checkpoint_id": "ckpt-1",
                     "commit_sha": "abc123",
