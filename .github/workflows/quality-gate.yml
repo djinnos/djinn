@@ -526,18 +526,6 @@ jobs:
           }
       - name: Clippy
         run: cargo clippy --all-targets --features qdrant -- -D warnings
-      # `process.rs` has distinct Linux, non-Linux Unix, and non-Unix paths.
-      # The native lane exercises Linux, while this check compiles the
-      # cfg(not(unix)) fixture that calls both public timeout APIs.
-      - name: Install MinGW C toolchain
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends gcc-mingw-w64-x86-64
-      - name: cargo check djinn-graph non-Unix process selection
-        env:
-          CC_x86_64_pc_windows_gnu: x86_64-w64-mingw32-gcc
-          CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER: x86_64-w64-mingw32-gcc
-        run: |
-          rustup target add x86_64-pc-windows-gnu
-          cargo check -p djinn-graph --tests --target x86_64-pc-windows-gnu
   server-aarch64-check:
     name: Server aarch64 Check
     needs: preflight

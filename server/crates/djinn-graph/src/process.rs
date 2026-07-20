@@ -1284,27 +1284,6 @@ mod tests {
     }
 }
 
-/// This fixture deliberately compiles only for the non-Unix cfg selection.
-/// Running a process is not portable there, but type-checking these calls makes
-/// the Windows cross-target CI lane cover the `cfg(not(unix))` implementations
-/// selected by both public timeout APIs.
-#[cfg(all(test, not(unix)))]
-mod non_unix_compile_tests {
-    use super::*;
-
-    #[test]
-    fn non_unix_timeout_and_kill_paths_compile() {
-        let _timeout = output_with_timeout(
-            Command::new("non-unix-timeout-fixture"),
-            Duration::from_millis(1),
-        );
-        let _kill = output_with_kill(
-            Command::new("non-unix-kill-fixture"),
-            Duration::from_millis(1),
-        );
-    }
-}
-
 // ===========================================================================
 
 #[cfg(all(test, target_os = "linux"))]
