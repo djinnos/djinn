@@ -818,14 +818,6 @@ async fn atomic_materialization_rolls_back_when_creator_is_unavailable() {
     )
     .await;
     let audit_repo = AuditSamplerRepository::new(db.clone());
-    let source_task_id = audit_repo
-        .list_unmaterialized_selections()
-        .await
-        .unwrap()
-        .into_iter()
-        .find(|item| item.selection_id == sel.id)
-        .and_then(|item| item.task_id)
-        .unwrap();
     let source_task_id = uuid::Uuid::now_v7().to_string();
     let error = audit_repo
         .materialize_audit_task_atomic(
