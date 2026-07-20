@@ -745,6 +745,10 @@ mod tests {
             commit_author_name: None,
             commit_author_email: None,
             resume_lifecycle_metadata: Some(ResumeLifecycleMetadata {
+                dispatch_owner_incarnation_id: Some(
+                    "00000000-0000-7000-8000-000000000001".to_string(),
+                ),
+                dispatch_group_id: Some("00000000-0000-7000-8000-000000000002".to_string()),
                 considered: true,
                 checkpoint_id: Some("ckpt-1".to_string()),
                 commit_sha: Some("deadbeef".to_string()),

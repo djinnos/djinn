@@ -2448,4 +2448,19 @@ mod tests {
         assert_eq!(actor.active_refinements.len(), 2);
         assert_eq!(actor.active_refinements["p-b"].current_revision_seq, 2);
     }
+
+    #[tokio::test]
+    async fn coordinator_runtime_instances_mint_distinct_immutable_incarnation_owners() {
+        let first = minimal_test_actor();
+        let second = minimal_test_actor();
+
+        assert_ne!(
+            first.coordinator_incarnation_id, second.coordinator_incarnation_id,
+            "each coordinator process runtime must receive its own immutable owner"
+        );
+        uuid::Uuid::parse_str(&first.coordinator_incarnation_id)
+            .expect("first coordinator owner must be a UUID");
+        uuid::Uuid::parse_str(&second.coordinator_incarnation_id)
+            .expect("second coordinator owner must be a UUID");
+    }
 }

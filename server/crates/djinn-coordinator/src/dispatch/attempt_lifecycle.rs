@@ -474,7 +474,10 @@ pub fn make_dispatch_key(task_id: &str, role: &str) -> String {
 mod tests {
     use super::*;
     use djinn_core::events::EventBus;
-    use djinn_db::{Database, EpicRepository, TaskAttemptRepository, TaskRepository};
+    use djinn_db::{
+        CreateTaskRunParams, Database, EpicRepository, TaskAttemptRepository, TaskRepository,
+        repositories::task_run_outcome::TaskRunOutcomeRepository,
+    };
 
     fn test_db() -> Database {
         Database::open_in_memory().unwrap()
@@ -592,6 +595,79 @@ mod tests {
         let repo = TaskAttemptRepository::new(db);
         let all = repo.list_for_task(&task.id).await.unwrap();
         assert_eq!(all.len(), 2);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn one_dispatch_identity_persists_unchanged_across_attempts_and_task_run() {
+        let db = test_db();
+        let task = create_task(&db).await;
+        let owner = uuid::Uuid::now_v7().to_string();
+        let group = uuid::Uuid::now_v7().to_string();
+
+        let coordinator_attempt_id = record_dispatch_start_with_identity(
+            &db,
+            &task.id,
+            "lead",
+            None,
+            &make_dispatch_key(&task.id, "lead"),
+            &owner,
+            &group,
+        )
+        .await
+        .expect("coordinator dispatch attempt");
+        let supervisor_attempt_id = TaskAttemptRepository::new(db.clone())
+            .create_or_get_pending(CreateTaskAttemptParams {
+                id: &uuid::Uuid::now_v7().to_string(),
+                task_id: &task.id,
+                role: "worker",
+                dispatch_key: "task-run:identity-persistence",
+                session_id: None,
+                attempt_seq: None,
+                dispatch_owner_incarnation_id: Some(&owner),
+                dispatch_group_id: Some(&group),
+            })
+            .await
+            .expect("supervisor exact attempt")
+            .id;
+        let run = TaskRunOutcomeRepository::new(db.clone())
+            .create_run_for_attempt(
+                CreateTaskRunParams {
+                    id: &uuid::Uuid::now_v7().to_string(),
+                    project_id: &task.project_id,
+                    task_id: &task.id,
+                    trigger_type: "new_task",
+                    status: None,
+                    workspace_path: None,
+                    mirror_ref: None,
+                    dispatch_group_id: Some(&group),
+                },
+                &supervisor_attempt_id,
+            )
+            .await
+            .expect("task run for supervisor exact attempt");
+
+        let attempts = TaskAttemptRepository::new(db)
+            .list_for_task(&task.id)
+            .await
+            .unwrap();
+        let coordinator = attempts
+            .iter()
+            .find(|attempt| attempt.id == coordinator_attempt_id)
+            .unwrap();
+        let supervisor = attempts
+            .iter()
+            .find(|attempt| attempt.id == supervisor_attempt_id)
+            .unwrap();
+        assert_eq!(coordinator.role, "lead");
+        assert_eq!(supervisor.role, "worker");
+        for attempt in [coordinator, supervisor] {
+            assert_eq!(
+                attempt.dispatch_owner_incarnation_id.as_deref(),
+                Some(owner.as_str())
+            );
+            assert_eq!(attempt.dispatch_group_id.as_deref(), Some(group.as_str()));
+        }
+        assert_eq!(run.dispatch_group_id.as_deref(), Some(group.as_str()));
     }
 
     // ─── advance_to_submitted tests ─────────────────────────────────────

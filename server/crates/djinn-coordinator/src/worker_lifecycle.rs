@@ -1149,6 +1149,8 @@ mod tests {
                 extra: serde_json::Map::new(),
             }),
             resume: Some(ResumeLifecycleMetadata {
+                dispatch_owner_incarnation_id: None,
+                dispatch_group_id: None,
                 considered: true,
                 checkpoint_id: Some("ckpt-1".to_string()),
                 commit_sha: Some("abc123".to_string()),
