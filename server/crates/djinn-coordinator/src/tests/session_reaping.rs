@@ -6298,11 +6298,10 @@ async fn failed_session_exit_terminalizes_pending_attempt_and_unblocks_respawn_g
 
     // ── Dispatch-start: pending attempt row (as task_dispatch records it) ──
     let dk = crate::dispatch::attempt_lifecycle::make_dispatch_key(&task.id, "worker");
-    let attempt_id = crate::dispatch::attempt_lifecycle::record_dispatch_start(
-        &db, &task.id, "worker", None, &dk,
-    )
-    .await
-    .expect("dispatch-start must create a pending attempt");
+    let attempt_id =
+        crate::dispatch::attempt_lifecycle::record_legacy_start(&db, &task.id, "worker", None, &dk)
+            .await
+            .expect("dispatch-start must create a pending attempt");
 
     // ── A run + session that self-finalizes as failed (provider error) ──
     let run_id = "run-failed-exit-terminalize";
@@ -6421,7 +6420,7 @@ async fn orphaned_pending_attempt_reaper_finalizes_stale_rows_only() {
         let db = db.clone();
         async move {
             let dk = crate::dispatch::attempt_lifecycle::make_dispatch_key(&task_id, "worker");
-            crate::dispatch::attempt_lifecycle::record_dispatch_start(
+            crate::dispatch::attempt_lifecycle::record_legacy_start(
                 &db, &task_id, "worker", None, &dk,
             )
             .await
@@ -6547,7 +6546,7 @@ async fn orphaned_submitted_no_pr_reaper_finalizes_stale_rows_only() {
         let db = db.clone();
         async move {
             let dk = crate::dispatch::attempt_lifecycle::make_dispatch_key(&task_id, "worker");
-            let id = crate::dispatch::attempt_lifecycle::record_dispatch_start(
+            let id = crate::dispatch::attempt_lifecycle::record_legacy_start(
                 &db, &task_id, "worker", None, &dk,
             )
             .await
@@ -6659,7 +6658,7 @@ async fn orphaned_submitted_no_pr_reaper_finalizes_stale_rows_only() {
 async fn seed_submitted_worker_attempt(db: &Database, task_id: &str) -> String {
     let dk = crate::dispatch::attempt_lifecycle::make_dispatch_key(task_id, "worker");
     let id =
-        crate::dispatch::attempt_lifecycle::record_dispatch_start(db, task_id, "worker", None, &dk)
+        crate::dispatch::attempt_lifecycle::record_legacy_start(db, task_id, "worker", None, &dk)
             .await
             .expect("pending attempt must insert");
     TaskAttemptRepository::new(db.clone())

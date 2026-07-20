@@ -934,6 +934,11 @@ impl SupervisorServices for DirectServices {
             .task_attempt_id
             .as_deref()
             .ok_or_else(|| "task-run creation requires an exact task attempt ID".to_owned())?;
+        validate_optional_dispatch_uuid(
+            params.dispatch_owner_incarnation_id.as_deref(),
+            "dispatch_owner_incarnation_id",
+        )?;
+        validate_optional_dispatch_uuid(params.dispatch_group_id.as_deref(), "dispatch_group_id")?;
         TaskRunOutcomeRepository::new(self.callbacks.agent_context.db.clone())
             .create_run_for_attempt(
                 CreateTaskRunParams {
@@ -944,7 +949,7 @@ impl SupervisorServices for DirectServices {
                     status: params.status.as_deref(),
                     workspace_path: params.workspace_path.as_deref(),
                     mirror_ref: params.mirror_ref.as_deref(),
-                    dispatch_group_id: None,
+                    dispatch_group_id: params.dispatch_group_id.as_deref(),
                 },
                 attempt_id,
             )
@@ -3226,5 +3231,32 @@ mod tests {
         assert!(r.content.is_none());
         assert_eq!(l.created.lock().unwrap().len(), 1);
         assert!(l.finalized.lock().unwrap().is_empty());
+    }
+}
+
+/// Preserve omitted mixed-version identity as NULL, but reject malformed
+/// identity before durable dispatch correlation data is written.
+fn validate_optional_dispatch_uuid(value: Option<&str>, field: &str) -> Result<(), String> {
+    if let Some(value) = value {
+        uuid::Uuid::parse_str(value).map_err(|_| format!("{field} must be a UUID when present"))?;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod dispatch_identity_validation_tests {
+    use super::validate_optional_dispatch_uuid;
+
+    #[test]
+    fn optional_dispatch_identity_is_null_when_omitted_and_rejects_malformed_values() {
+        assert!(validate_optional_dispatch_uuid(None, "dispatch_group_id").is_ok());
+        assert!(
+            validate_optional_dispatch_uuid(
+                Some("00000000-0000-7000-8000-000000000002"),
+                "dispatch_group_id"
+            )
+            .is_ok()
+        );
+        assert!(validate_optional_dispatch_uuid(Some("not-a-uuid"), "dispatch_group_id").is_err());
     }
 }
