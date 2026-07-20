@@ -30,6 +30,9 @@ use crate::repositories::repo_graph_generation::{
 use crate::retry::{DEFAULT_MAX_TX_RETRIES, retry_on_serialization_failure};
 use sqlx::{Acquire, Postgres, Transaction};
 
+#[cfg(any(test, feature = "test-support"))]
+use std::sync::atomic::{AtomicUsize, Ordering};
+
 /// Maximum number of non-survivor generations a single sweep transaction may
 /// delete. A sweep may scan past actively-pinned rows to fill a batch up to
 /// this many actual candidates.
@@ -118,11 +121,25 @@ impl RetentionSweepOutcome {
 /// The production graph-retention repository.
 pub struct RepoGraphRetentionRepository {
     db: Database,
+    /// Narrow test-only seam for proving a partial production sweep rolls back.
+    #[cfg(any(test, feature = "test-support"))]
+    fail_after_deleted_candidates: AtomicUsize,
 }
 
 impl RepoGraphRetentionRepository {
     pub fn new(db: Database) -> Self {
-        Self { db }
+        Self {
+            db,
+            #[cfg(any(test, feature = "test-support"))]
+            fail_after_deleted_candidates: AtomicUsize::new(usize::MAX),
+        }
+    }
+
+    /// Cause a test-support sweep to fail after this many actual candidate
+    /// deletes, before the transaction commits.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn fail_after_deleted_candidates_for_test(&self, deleted: usize) {
+        self.fail_after_deleted_candidates.store(deleted, Ordering::SeqCst);
     }
 
     /// Run one bounded retention sweep for a project.
@@ -192,6 +209,13 @@ impl RepoGraphRetentionRepository {
         // Lock and re-read the current pointer under the project advisory lock.
         let current_generation_id = lock_and_read_current_generation(&mut tx, project_id).await?;
 
+        if mode == RetentionMode::Delete {
+            sqlx::query("DELETE FROM repo_graph_cache c WHERE c.project_id = $1 AND NOT EXISTS (SELECT 1 FROM repo_graph_generation g WHERE g.project_id = c.project_id AND g.generation_id = c.generation_id)")
+                .bind(project_id)
+                .execute(&mut *tx)
+                .await?;
+        }
+
         // Recompute the survivor set: current generation union newest N.
         let survivor_ids = recompute_survivor_set(
             &mut tx,
@@ -206,7 +230,15 @@ impl RepoGraphRetentionRepository {
         // order (project advisory → current → candidate row → stream pin),
         // pages past actively-pinned rows, and fills a batch of up to
         // MAX_RETENTION_BATCH actual candidates.
-        let result = process_candidates(&mut tx, project_id, &survivor_ids, mode).await;
+        let result = process_candidates(
+            &mut tx,
+            project_id,
+            &survivor_ids,
+            mode,
+            #[cfg(any(test, feature = "test-support"))]
+            &self.fail_after_deleted_candidates,
+        )
+        .await;
 
         match result {
             Ok(processing) => {
@@ -386,6 +418,7 @@ async fn process_candidates(
     project_id: &str,
     survivor_ids: &[String],
     mode: RetentionMode,
+    #[cfg(any(test, feature = "test-support"))] fail_after_deleted_candidates: &AtomicUsize,
 ) -> DbResult<CandidateProcessingResult> {
     let survivor_set: std::collections::HashSet<&String> = survivor_ids.iter().collect();
     let mut result = CandidateProcessingResult::default();
@@ -526,6 +559,13 @@ async fn process_candidates(
                     .execute(&mut **tx)
                     .await?;
                 result.deleted += 1;
+
+                #[cfg(any(test, feature = "test-support"))]
+                if result.deleted == fail_after_deleted_candidates.load(Ordering::SeqCst) {
+                    return Err(DbError::InvalidData(
+                        "injected retention failure after candidate deletion".to_owned(),
+                    ));
+                }
             }
         }
     }

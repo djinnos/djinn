@@ -207,9 +207,17 @@ async fn retention_matrix_uses_production_api_and_actual_legacy_sql() {
     let (db, retention) = fresh().await;
 
     // Equal, stale, and future source timestamps are intentionally ignored by
-    // the trigger clock. The old reader must still agree after each publication.
+    // the trigger clock. Bind the actual preceding stored value for equality.
+    legacy_publish(&db, "timestamp-seed", b"seed").await;
+    let preceding_built_at: String = sqlx::query_scalar(
+        "SELECT built_at FROM repo_graph_cache WHERE project_id = $1 ORDER BY built_at DESC LIMIT 1",
+    )
+    .bind(PROJECT)
+    .fetch_one(db.pool())
+    .await
+    .expect("preceding stored built_at");
     for (commit, source) in [
-        ("equal", ""),
+        ("equal", preceding_built_at.as_str()),
         ("stale", ""),
         ("future", "9999-12-31T00:00:00Z"),
     ] {
@@ -482,4 +490,48 @@ async fn paused_actual_same_key_legacy_upsert_blocks_retention_then_recomputes()
     );
     assert_old_reader_agrees_with_current(&db).await;
     assert_bounded_full_blobs(&db, 1).await;
+}
+
+#[tokio::test]
+async fn retention_removes_real_direct_orphan_compatibility_row() {
+    let (db, retention) = fresh().await;
+    legacy_publish(&db, "current", b"current").await;
+    let orphan = uuid::Uuid::now_v7().to_string();
+    // This bypasses publication and FK triggers: it is a cache-only row whose
+    // generation ID does not exist in repo_graph_generation.
+    sqlx::query("ALTER TABLE repo_graph_cache DISABLE TRIGGER ALL")
+        .execute(db.pool())
+        .await
+        .expect("disable compatibility triggers");
+    sqlx::query("INSERT INTO repo_graph_cache (project_id, commit_sha, graph_blob, built_at, generation_id) VALUES ($1, 'direct-orphan', decode('ff', 'hex'), '0000', $2::uuid)")
+        .bind(PROJECT)
+        .bind(&orphan)
+        .execute(db.pool())
+        .await
+        .expect("insert direct orphan cache row");
+    sqlx::query("ALTER TABLE repo_graph_cache ENABLE TRIGGER ALL")
+        .execute(db.pool())
+        .await
+        .expect("restore compatibility triggers");
+    let before: i64 = sqlx::query_scalar("SELECT count(*) FROM repo_graph_cache WHERE generation_id=$1::uuid")
+        .bind(&orphan).fetch_one(db.pool()).await.expect("count orphan");
+    assert_eq!(before, 1, "fixture is a real cache-only orphan");
+    sweep(&retention, RetentionMode::Delete, 1).await;
+    let after: i64 = sqlx::query_scalar("SELECT count(*) FROM repo_graph_cache WHERE generation_id=$1::uuid")
+        .bind(&orphan).fetch_one(db.pool()).await.expect("count cleaned orphan");
+    assert_eq!(after, 0, "production retention removes the orphan");
+}
+
+#[tokio::test]
+async fn injected_retention_failure_rolls_back_partial_candidate_deletes() {
+    let (db, retention) = fresh().await;
+    for i in 0..5 { legacy_publish(&db, &format!("rollback-{i}"), b"blob").await; }
+    let cache_before = count(&db, "repo_graph_cache").await;
+    let generations_before = count(&db, "repo_graph_generation").await;
+    retention.fail_after_deleted_candidates_for_test(1);
+    let error = retention.sweep(RetentionSweepRequest { project_id: PROJECT, mode: RetentionMode::Delete, history_n: 1 }).await
+        .expect_err("injected failure after first actual delete");
+    assert!(error.to_string().contains("injected retention failure"));
+    assert_eq!(count(&db, "repo_graph_cache").await, cache_before, "partial compatibility deletes roll back");
+    assert_eq!(count(&db, "repo_graph_generation").await, generations_before, "partial immutable deletes roll back");
 }
