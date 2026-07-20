@@ -145,6 +145,45 @@ pub async fn run_load_knowledge_context_for_test(
     .await
 }
 
+/// Render a CI artifact ZIP wholly in memory using the production
+/// implementation. Exposed under `test-support` so integration tests
+/// can exercise the bounded renderer without duplicating the logic.
+pub fn render_ci_artifact_zip_for_test(bytes: &[u8]) -> Result<String, String> {
+    crate::extension::handlers::ci_artifact::render_ci_artifact_zip(bytes)
+}
+
+/// List artifacts for a resolved run using the production implementation.
+/// Takes an explicit `run_id` to avoid exposing internal resolution types.
+pub async fn list_artifacts_for_test(
+    client: &djinn_provider::github_api::GitHubApiClient,
+    owner: &str,
+    repo: &str,
+    run_id: u64,
+) -> Result<crate::extension::handlers::ci_artifact::ArtifactListReport, String> {
+    let request = crate::extension::handlers::ci::WorkflowRunResolutionRequest {
+        explicit_run_id: Some(run_id),
+        ..Default::default()
+    };
+    crate::extension::handlers::ci_artifact::list_artifacts(client, owner, repo, request).await
+}
+
+/// Fetch and render one artifact using the production implementation.
+/// Takes an explicit `run_id` to avoid exposing internal resolution types.
+pub async fn fetch_artifact_for_test(
+    client: &djinn_provider::github_api::GitHubApiClient,
+    owner: &str,
+    repo: &str,
+    run_id: u64,
+    name: &str,
+) -> Result<String, String> {
+    let request = crate::extension::handlers::ci::WorkflowRunResolutionRequest {
+        explicit_run_id: Some(run_id),
+        ..Default::default()
+    };
+    crate::extension::handlers::ci_artifact::fetch_artifact(client, owner, repo, request, name)
+        .await
+}
+
 /// Cheap `SupervisorServices` stub for tests that exercise `call_tool`
 /// against the non-host-bound tool subset (lsp, memory, code_graph, …).
 /// Panics if the test ends up invoking any trait method; the three

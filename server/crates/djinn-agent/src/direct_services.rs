@@ -1427,6 +1427,19 @@ impl SupervisorServices for DirectServices {
         .await
     }
 
+    async fn tool_ci_artifact(
+        &self,
+        session_task_id: Option<String>,
+        arguments: serde_json::Map<String, serde_json::Value>,
+    ) -> Result<serde_json::Value, String> {
+        crate::extension::handlers::call_ci_artifact(
+            &self.callbacks.agent_context,
+            &Some(arguments),
+            session_task_id.as_deref(),
+        )
+        .await
+    }
+
     async fn touch_activity(&self, task_id: String) -> Result<(), String> {
         self.callbacks.agent_context.touch_activity(&task_id);
         Ok(())

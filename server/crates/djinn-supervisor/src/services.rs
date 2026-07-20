@@ -253,6 +253,14 @@ pub trait SupervisorServices: Send + Sync + 'static {
         arguments: serde_json::Map<String, serde_json::Value>,
     ) -> Result<serde_json::Value, String>;
 
+    async fn tool_ci_artifact(
+        &self,
+        _session_task_id: Option<String>,
+        _arguments: serde_json::Map<String, serde_json::Value>,
+    ) -> Result<serde_json::Value, String> {
+        Err("ci_artifact is not implemented by this SupervisorServices instance".to_string())
+    }
+
     /// Forward a worker-emitted [`SerializableDjinnEvent`] to the host's
     /// broadcast bus so SSE subscribers (web UI live-feed) see it in real
     /// time.

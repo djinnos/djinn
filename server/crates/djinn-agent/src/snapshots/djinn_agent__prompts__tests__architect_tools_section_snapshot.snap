@@ -16,6 +16,7 @@ expression: section
 - `code_graph(operation, project, changed_ranges?, confidence?, context_filter?, current_head?, direction?, edge_filters?, edge_kind?, end_line?, file?, file_filter?, file_glob?, from?, from_glob?, group_by?, key?, kind_filter?, limit?, max_depth?, max_seeds?, min_confidence?, min_size?, mode?, module_glob?, query?, rules?, seed_entries?, seed_sinks?, sort_by?, start_line?, symbols?, target?, tests?, to?, to_glob?, token_budget?, visibility?, window_days?, workspace?)`
 - `pr_review_context(changed_ranges, project, boundary_rules?, caps?, hotspots_window_days?, seed_entries?, seed_sinks?)`
 - `ci_job_log(job_id?, pr_number?, step?)`
+- `ci_artifact(action, artifact?, pr_number?, run_id?)`
 - `github_search(query, language?, path?, repo?)`
 - `output_view(tool_use_id, limit?, offset?)`
 - `output_grep(pattern, tool_use_id, context_lines?)`

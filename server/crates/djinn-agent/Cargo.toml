@@ -77,6 +77,7 @@ djinn-slot = { path = "../djinn-slot", features = ["test-support"] }
 # Self dev-dependency so integration tests under tests/ can use the
 # cfg-gated `djinn_agent::test_helpers` module.
 djinn-agent = { path = ".", features = ["test-support"] }
+djinn-db = { path = "../djinn-db", features = ["test-support"] }
 
 [lints]
 workspace = true

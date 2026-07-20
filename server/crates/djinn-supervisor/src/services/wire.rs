@@ -526,6 +526,13 @@ pub enum ServiceRpcRequest {
     /// Dedicated host-side planner LLM call with durable attribution.
     /// Appended at the enum tail for bincode stability.
     PlanMemoryIntents { request: AttributedPlannerRequest },
+    /// [`crate::SupervisorServices::tool_ci_artifact`]. `arguments` is opaque
+    /// JSON (the JSON-encoded `serde_json::Map<String, serde_json::Value>`);
+    /// see `ToolGithubSearch`. Appended at the enum tail for bincode stability.
+    ToolCiArtifact {
+        session_task_id: Option<String>,
+        arguments: String,
+    },
 }
 
 /// Typed response variants — one per [`ServiceRpcRequest`] variant.
@@ -618,6 +625,10 @@ pub enum ServiceRpcResponse {
     /// Dedicated host-side planner LLM call result.  Appended at the enum
     /// tail for bincode stability.
     PlanMemoryIntents(Result<PlannerAttemptResult, String>),
+    /// Phase 7-followup gap-3 — host-side `ci_artifact` tool result.
+    /// `Ok` carries opaque JSON; see `ToolGithubSearch`.
+    /// Appended at the enum tail for bincode stability.
+    ToolCiArtifact(Result<String, String>),
 }
 
 #[cfg(test)]
@@ -1928,6 +1939,48 @@ mod tests {
                 assert!(!result.success);
                 assert_eq!(result.error_class.as_deref(), Some("push_rejected"));
                 assert_eq!(result.error_message.as_deref(), Some("force-push rejected"));
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn ci_artifact_request_roundtrip() {
+        let req = ServiceRpcRequest::ToolCiArtifact {
+            session_task_id: Some("t1".into()),
+            arguments: r#"{"action":"list"}"#.into(),
+        };
+        let f = Frame {
+            correlation_id: 99,
+            payload: FramePayload::Rpc(req),
+        };
+        let bytes = bincode::serialize(&f).unwrap();
+        let back: Frame = bincode::deserialize(&bytes).unwrap();
+        match back.payload {
+            FramePayload::Rpc(ServiceRpcRequest::ToolCiArtifact {
+                session_task_id,
+                arguments,
+            }) => {
+                assert_eq!(session_task_id.as_deref(), Some("t1"));
+                assert_eq!(arguments, r#"{"action":"list"}"#);
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn ci_artifact_response_roundtrip() {
+        let resp =
+            ServiceRpcResponse::ToolCiArtifact(Ok(r#"{"run_id":42,"lane":"explicit"}"#.into()));
+        let f = Frame {
+            correlation_id: 100,
+            payload: FramePayload::RpcReply(resp),
+        };
+        let bytes = bincode::serialize(&f).unwrap();
+        let back: Frame = bincode::deserialize(&bytes).unwrap();
+        match back.payload {
+            FramePayload::RpcReply(ServiceRpcResponse::ToolCiArtifact(Ok(payload))) => {
+                assert!(payload.contains("run_id"));
             }
             other => panic!("unexpected: {other:?}"),
         }

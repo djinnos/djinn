@@ -252,6 +252,10 @@ pub fn tool_ci_job_log() -> RmcpTool {
     )
 }
 
+pub fn tool_ci_artifact() -> RmcpTool {
+    RmcpTool::new("ci_artifact".to_string(), "Read a bounded GitHub Actions artifact. `list` lists artifacts and `fetch` renders one exact artifact. Select optional positive `run_id` or `pr_number`, never both; fetch requires non-empty `artifact`.".to_string(), object!({"type":"object","additionalProperties":false,"required":["action"],"properties":{"action":{"type":"string","enum":["list","fetch"]},"run_id":{"type":"integer","minimum":1},"pr_number":{"type":"integer","minimum":1},"artifact":{"type":"string","minLength":1}},"allOf":[{"not":{"required":["run_id","pr_number"]}},{"if":{"properties":{"action":{"const":"fetch"}}},"then":{"required":["artifact"]},"else":{"not":{"required":["artifact"]}}}]}))
+}
+
 pub fn tool_output_view() -> RmcpTool {
     RmcpTool::new(
         "output_view".to_string(),
@@ -424,6 +428,7 @@ fn base_tool_schemas() -> Vec<serde_json::Value> {
     // and the Chat surface (interactive form). Worker, reviewer, planner, and lead do not
     // see it. The architect's role-specific schema function appends it directly.
     tool_values.push(serialize_tool(tool_ci_job_log(), read_only()));
+    tool_values.push(serialize_tool(tool_ci_artifact(), read_only()));
     tool_values.push(serialize_tool(tool_github_search(), open_world_read_only()));
     tool_values.push(serialize_tool(tool_output_view(), read_only()));
     tool_values.push(serialize_tool(tool_output_grep(), read_only()));
@@ -910,7 +915,7 @@ pub fn tool_schemas_judge() -> Vec<serde_json::Value> {
 /// tool surface.
 ///
 /// **Allowed:**
-/// - Base read-only tools (read, code_search, lsp, ci_job_log, github_search,
+/// - Base read-only tools (read, code_search, lsp, ci_job_log, ci_artifact, github_search,
 ///   output_view, output_grep, skill_read — but NOT shell).
 /// - Task/epic/memory read-only inspection tools (task_show, task_list,
 ///   task_activity_list, memory_read, memory_search, memory_list,
@@ -949,6 +954,7 @@ pub fn tool_schemas_evidence_spike() -> Vec<serde_json::Value> {
     tool_values.push(serialize_tool(tool_skill_read(), read_only()));
     tool_values.push(serialize_tool(tool_lsp(), read_only()));
     tool_values.push(serialize_tool(tool_ci_job_log(), read_only()));
+    tool_values.push(serialize_tool(tool_ci_artifact(), read_only()));
     tool_values.push(serialize_tool(tool_github_search(), open_world_read_only()));
     tool_values.push(serialize_tool(tool_output_view(), read_only()));
     tool_values.push(serialize_tool(tool_output_grep(), read_only()));

@@ -453,6 +453,24 @@ async fn dispatch_supervisor_tools(
                 )
                 .await,
         ),
+        "ci_artifact" => {
+            // Validate the public contract before forwarding to the service.
+            // This enforces the four legal shapes (deny-unknown-fields +
+            // positive selectors + mutual exclusion + fetch-only artifact)
+            // at the MCP dispatch boundary, before the service is reached.
+            let raw = args.clone().unwrap_or_default();
+            let params: CiArtifactParams =
+                match serde_json::from_value(serde_json::Value::Object(raw)) {
+                    Ok(p) => p,
+                    Err(e) => return Some(Err(format!("invalid ci_artifact arguments: {e}"))),
+                };
+            let arguments = params.into_arguments();
+            Some(
+                services
+                    .tool_ci_artifact(session_task_id.map(str::to_string), arguments)
+                    .await,
+            )
+        }
         "github_search" => Some(
             services
                 .tool_github_search(
