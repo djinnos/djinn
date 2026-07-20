@@ -66,6 +66,10 @@ async fn creator_precedence_and_retained_user_lifecycle_are_schema_valid() {
             ("malformed-prose".into(), EPIC.into()),
             ("preserved".into(), DISABLED.into()),
             ("proposal-author".into(), AUTHOR.into()),
+            // The all-tasks query also audits these extant fixture helpers.
+            ("source-a".into(), DISABLED.into()),
+            ("source-b".into(), DISABLED.into()),
+            ("source-gone-user".into(), OP.into()),
             ("typed-source".into(), DISABLED.into()),
         ]
     );
