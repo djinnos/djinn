@@ -153,6 +153,15 @@ impl RepoGraphRetentionRepository {
         &self,
         request: RetentionSweepRequest<'_>,
     ) -> DbResult<RetentionSweepOutcome> {
+        self.sweep_with_retry(request, DEFAULT_MAX_TX_RETRIES).await
+    }
+
+    /// Run a sweep with the caller's already-validated bounded retry budget.
+    pub async fn sweep_with_retry(
+        &self,
+        request: RetentionSweepRequest<'_>,
+        max_retries: usize,
+    ) -> DbResult<RetentionSweepOutcome> {
         let history_n = request.history_n.max(MIN_RETENTION_HISTORY_N);
         if request.mode == RetentionMode::Off {
             return Ok(RetentionSweepOutcome {
@@ -173,7 +182,7 @@ impl RepoGraphRetentionRepository {
         // atomic is safe because each attempt is awaited to completion before
         // the next one starts (the retry helper is sequential).
         let attempt = std::sync::atomic::AtomicUsize::new(0);
-        let outcome = retry_on_serialization_failure(DEFAULT_MAX_TX_RETRIES, || {
+        let outcome = retry_on_serialization_failure(max_retries, || {
             let project_id = project_id.clone();
             let current_attempt = attempt.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             async move {
