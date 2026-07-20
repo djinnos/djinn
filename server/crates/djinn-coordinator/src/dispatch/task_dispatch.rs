@@ -3236,6 +3236,7 @@ mod inflight_ledger_tests {
         started_tx: tokio::sync::mpsc::UnboundedSender<String>,
         releases:
             std::sync::Arc<std::sync::Mutex<HashMap<String, tokio::sync::oneshot::Sender<()>>>>,
+        resume_metadata: std::sync::Arc<std::sync::Mutex<HashMap<String, serde_json::Value>>>,
     }
 
     impl Wnd1ControlledRuntime {
@@ -3250,6 +3251,14 @@ mod inflight_ledger_tests {
             )
         }
 
+        fn resume_metadata(&self, task_id: &str) -> Option<serde_json::Value> {
+            self.resume_metadata
+                .lock()
+                .expect("wnd1 resume metadata mutex")
+                .get(task_id)
+                .cloned()
+        }
+
         fn spawn_pool(
             &self,
             db: &djinn_db::Database,
@@ -3258,6 +3267,7 @@ mod inflight_ledger_tests {
         ) -> djinn_slot::SlotPoolHandle {
             let started_tx = self.started_tx.clone();
             let releases = self.releases.clone();
+            let resume_metadata = self.resume_metadata.clone();
             djinn_slot::SlotPoolHandle::spawn_with_factory(
                 crate::test_helpers::agent_context_from_db(db.clone(), cancel.clone()),
                 cancel,
@@ -3272,6 +3282,7 @@ mod inflight_ledger_tests {
                 std::sync::Arc::new(move |slot_id, model_id, event_tx, app_state, cancel| {
                     let started_tx = started_tx.clone();
                     let releases = releases.clone();
+                    let resume_metadata = resume_metadata.clone();
                     let runner: djinn_slot::TestLifecycleRunner = std::sync::Arc::new(
                         move |task_id,
                               _project_path,
@@ -3281,6 +3292,12 @@ mod inflight_ledger_tests {
                               _pause,
                               _resume_lifecycle_metadata| {
                             let started_tx = started_tx.clone();
+                            if let Some(metadata) = resume_lifecycle_metadata {
+                                resume_metadata
+                                    .lock()
+                                    .expect("wnd1 resume metadata mutex")
+                                    .insert(task_id.clone(), metadata);
+                            }
                             let releases = releases.clone();
                             Box::pin(async move {
                                 let (release_tx, release_rx) = tokio::sync::oneshot::channel();
@@ -8061,6 +8078,33 @@ mod build_admission_route_tests {
             .await
             .expect("pool runner must fire for the resumed task");
         assert_eq!(dispatched_id, task_id);
+        let metadata = runtime
+            .resume_metadata(&task_id)
+            .expect("live coordinator dispatch must forward resume metadata to the slot");
+        let owner = metadata["dispatch_owner_incarnation_id"]
+            .as_str()
+            .expect("dispatch owner UUID");
+        let group = metadata["dispatch_group_id"]
+            .as_str()
+            .expect("dispatch group UUID");
+        uuid::Uuid::parse_str(owner).expect("owner must be an exact UUID");
+        uuid::Uuid::parse_str(group).expect("group must be an exact UUID");
+        let attempts = djinn_db::TaskAttemptRepository::new(db.clone())
+            .list_for_task(&task_id)
+            .await
+            .expect("read coordinator attempt");
+        let coordinator_attempt = attempts
+            .iter()
+            .find(|attempt| attempt.role == "worker")
+            .expect("coordinator dispatch attempt");
+        assert_eq!(
+            coordinator_attempt.dispatch_owner_incarnation_id.as_deref(),
+            Some(owner)
+        );
+        assert_eq!(
+            coordinator_attempt.dispatch_group_id.as_deref(),
+            Some(group)
+        );
 
         let snapshot = runtime.snapshot(&task_id);
         assert!(
