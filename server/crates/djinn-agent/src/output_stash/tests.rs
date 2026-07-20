@@ -11,11 +11,13 @@ fn isolated_durable_root() {
 #[test]
 fn insert_and_view_round_trip() {
     let mut stash = OutputStash::new();
-    stash.insert(
-        "t1".into(),
-        "shell".into(),
-        "line one\nline two\nline three\n".into(),
-    );
+    stash
+        .insert(
+            "t1".into(),
+            "shell".into(),
+            "line one\nline two\nline three\n".into(),
+        )
+        .unwrap();
     let result = stash.view("t1", 0, 200).unwrap();
     assert!(result.contains("line one"));
     assert!(result.contains("line three"));
@@ -26,7 +28,7 @@ fn insert_and_view_round_trip() {
 fn pagination() {
     let mut stash = OutputStash::new();
     let text: String = (0..100).map(|i| format!("line {i}\n")).collect();
-    stash.insert("t1".into(), "shell".into(), text);
+    stash.insert("t1".into(), "shell".into(), text).unwrap();
 
     let page1 = stash.view("t1", 0, 10).unwrap();
     assert!(page1.contains("line 0"));
@@ -42,7 +44,9 @@ fn pagination() {
 #[test]
 fn view_offset_past_end() {
     let mut stash = OutputStash::new();
-    stash.insert("t1".into(), "shell".into(), "one\ntwo\n".into());
+    stash
+        .insert("t1".into(), "shell".into(), "one\ntwo\n".into())
+        .unwrap();
     let result = stash.view("t1", 999, 10).unwrap();
     assert!(result.contains("past end"));
 }
@@ -51,7 +55,9 @@ fn view_offset_past_end() {
 fn grep_with_context() {
     let mut stash = OutputStash::new();
     let text = "aaa\nbbb\nccc\nERROR: bad\nddd\neee\nfff\n";
-    stash.insert("t1".into(), "shell".into(), text.into());
+    stash
+        .insert("t1".into(), "shell".into(), text.into())
+        .unwrap();
 
     let result = stash.grep("t1", "ERROR", 1).unwrap();
     assert!(result.contains(">"));
@@ -64,7 +70,9 @@ fn grep_with_context() {
 #[test]
 fn grep_no_matches() {
     let mut stash = OutputStash::new();
-    stash.insert("t1".into(), "shell".into(), "hello\nworld\n".into());
+    stash
+        .insert("t1".into(), "shell".into(), "hello\nworld\n".into())
+        .unwrap();
     let result = stash.grep("t1", "NONEXISTENT", 2).unwrap();
     assert!(result.contains("No matches"));
 }
@@ -72,7 +80,9 @@ fn grep_no_matches() {
 #[test]
 fn grep_invalid_regex() {
     let mut stash = OutputStash::new();
-    stash.insert("t1".into(), "shell".into(), "hello\n".into());
+    stash
+        .insert("t1".into(), "shell".into(), "hello\n".into())
+        .unwrap();
     let result = stash.grep("t1", "[invalid", 0);
     assert!(result.is_err());
     assert!(result.unwrap_err().contains("invalid regex"));
@@ -82,7 +92,9 @@ fn grep_invalid_regex() {
 fn eviction_by_count() {
     let mut stash = OutputStash::new();
     for i in 0..12 {
-        stash.insert(format!("t{i}"), "shell".into(), format!("output {i}"));
+        stash
+            .insert(format!("t{i}"), "shell".into(), format!("output {i}"))
+            .unwrap();
     }
     // Oldest should be evicted; only last 10 remain.
     assert!(stash.find("t0").is_err());
@@ -98,7 +110,9 @@ fn eviction_by_bytes() {
     // Each entry is ~1MB. After 5, inserting a 6th should evict.
     let big = "x".repeat(1_024 * 1_024);
     for i in 0..6 {
-        stash.insert(format!("t{i}"), "shell".into(), big.clone());
+        stash
+            .insert(format!("t{i}"), "shell".into(), big.clone())
+            .unwrap();
     }
     assert!(stash.total_bytes <= MAX_TOTAL_BYTES);
     // At least the first one should be evicted.
@@ -109,7 +123,9 @@ fn eviction_by_bytes() {
 #[test]
 fn clear_empties_everything() {
     let mut stash = OutputStash::new();
-    stash.insert("t1".into(), "shell".into(), "data".into());
+    stash
+        .insert("t1".into(), "shell".into(), "data".into())
+        .unwrap();
     stash.clear();
     assert!(stash.find("t1").is_err());
     assert_eq!(stash.total_bytes, 0);
@@ -128,7 +144,7 @@ fn grep_output_capping() {
     let mut stash = OutputStash::new();
     // Create output where every line matches — should cap at 30KB.
     let text: String = (0..10_000).map(|i| format!("MATCH line {i}\n")).collect();
-    stash.insert("t1".into(), "shell".into(), text);
+    stash.insert("t1".into(), "shell".into(), text).unwrap();
 
     let result = stash.grep("t1", "MATCH", 0).unwrap();
     assert!(result.len() <= 31_000); // small slack for footer
@@ -317,7 +333,9 @@ fn output_view_fast_path_then_durable_path_after_eviction() {
     isolated_durable_root();
     let mut stash = OutputStash::with_session_id("view-durable-session");
     let text: String = (0..20).map(|i| format!("view-line {i}\n")).collect();
-    stash.insert("view-durable-1".into(), "shell".into(), text);
+    stash
+        .insert("view-durable-1".into(), "shell".into(), text)
+        .unwrap();
 
     // Fast path: in-memory entry present.
     let fast = stash.view("view-durable-1", 0, 5).unwrap();
@@ -339,7 +357,9 @@ fn output_grep_fast_path_then_durable_path_after_eviction() {
     isolated_durable_root();
     let mut stash = OutputStash::with_session_id("grep-durable-session");
     let text = "alpha\nbeta\nERROR: durable boom\ngamma\n";
-    stash.insert("grep-durable-1".into(), "shell".into(), text.into());
+    stash
+        .insert("grep-durable-1".into(), "shell".into(), text.into())
+        .unwrap();
 
     // Fast path.
     let fast = stash.grep("grep-durable-1", "ERROR", 1).unwrap();
@@ -398,7 +418,9 @@ fn missing_durable_blob_degrades_gracefully() {
 fn corrupt_durable_blob_degrades_gracefully() {
     isolated_durable_root();
     let mut stash = OutputStash::with_session_id("corrupt-durable-session");
-    stash.insert("corrupt-1".into(), "shell".into(), "real content\n".into());
+    stash
+        .insert("corrupt-1".into(), "shell".into(), "real content\n".into())
+        .unwrap();
     stash.clear();
 
     // Corrupt the durable store: delete the content blob, leaving the pointer.
@@ -682,11 +704,13 @@ fn output_view_and_grep_read_through_survives_gc_for_active_session() {
         root.clone(),
     );
     let body = "alpha before gc\nneedle stays searchable\nomega after gc\n";
-    stash.insert(
-        "gc-active-read-through-tool".into(),
-        "shell".into(),
-        body.into(),
-    );
+    stash
+        .insert(
+            "gc-active-read-through-tool".into(),
+            "shell".into(),
+            body.into(),
+        )
+        .unwrap();
 
     let pointer_path = owner_id_pointer_path(
         &root,
@@ -738,20 +762,24 @@ fn gc_retains_recent_terminal_output_but_prunes_expired_terminal_read_through() 
 
     let mut recent_stash =
         OutputStash::with_session_id_and_durable_root("gc-recent-terminal-session", root.clone());
-    recent_stash.insert(
-        "gc-recent-terminal-tool".into(),
-        "shell".into(),
-        "recent terminal output\nretained by retention window\n".into(),
-    );
+    recent_stash
+        .insert(
+            "gc-recent-terminal-tool".into(),
+            "shell".into(),
+            "recent terminal output\nretained by retention window\n".into(),
+        )
+        .unwrap();
     recent_stash.clear();
 
     let mut expired_stash =
         OutputStash::with_session_id_and_durable_root("gc-expired-terminal-session", root.clone());
-    expired_stash.insert(
-        "gc-expired-terminal-tool".into(),
-        "shell".into(),
-        "expired terminal output\nshould be pruned\n".into(),
-    );
+    expired_stash
+        .insert(
+            "gc-expired-terminal-tool".into(),
+            "shell".into(),
+            "expired terminal output\nshould be pruned\n".into(),
+        )
+        .unwrap();
     expired_stash.clear();
 
     let recent_pointer = owner_id_pointer_path(
@@ -832,11 +860,13 @@ fn in_memory_output_still_wins_when_durable_pointer_is_stale() {
     let root = gc_root("in-memory-first-regression");
     let mut stash =
         OutputStash::with_session_id_and_durable_root("gc-memory-first-session", root.clone());
-    stash.insert(
-        "gc-memory-first-tool".into(),
-        "shell".into(),
-        "fresh in-memory output\n".into(),
-    );
+    stash
+        .insert(
+            "gc-memory-first-tool".into(),
+            "shell".into(),
+            "fresh in-memory output\n".into(),
+        )
+        .unwrap();
 
     let stale_hash = write_gc_blob(&root, "stale durable output\n");
     let pointer_path =
