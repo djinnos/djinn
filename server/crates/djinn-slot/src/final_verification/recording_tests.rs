@@ -1706,7 +1706,9 @@ async fn reuse_flag_rollback_bypasses_reuse_and_keeps_writers_running() {
     .unwrap()
     {
         VerificationInputFingerprint::Available(digest) => digest.fingerprint,
-        VerificationInputFingerprint::Unavailable(reason) => panic!("fingerprint unavailable: {reason}"),
+        VerificationInputFingerprint::Unavailable(reason) => {
+            panic!("fingerprint unavailable: {reason}")
+        }
     };
     let identity = EnvironmentIdentityV1::derive(
         (material.execution_request.resolve_environment_identity)().unwrap(),
@@ -1718,7 +1720,12 @@ async fn reuse_flag_rollback_bypasses_reuse_and_keeps_writers_running() {
         identity,
     );
     let rig = build_rig_with_material(material, |probe| probe.inject_evidence(evidence)).await;
-    let project = rig.ctx.load_task(&rig.request.task_id).await.unwrap().project_id;
+    let project = rig
+        .ctx
+        .load_task(&rig.request.task_id)
+        .await
+        .unwrap()
+        .project_id;
     let settings = SettingsRepository::new(rig.ctx.db.clone(), rig.ctx.event_bus.clone());
     let setting = format!("project.{project}.verify_run_reuse_enabled");
 
@@ -1727,10 +1734,23 @@ async fn reuse_flag_rollback_bypasses_reuse_and_keeps_writers_running() {
         coordinate_final_verification(rig.request.clone(), &rig.ctx).await,
         FinalVerificationRecordingOutcome::Stored { .. }
     ));
-    assert_eq!(rig.probe.events(), vec!["resolve", "lease-acquire", "evidence", "lease-release"]);
+    assert_eq!(
+        rig.probe.events(),
+        vec!["resolve", "lease-acquire", "evidence", "lease-release"]
+    );
     assert_eq!(*rig.probe.lease_requests.lock().unwrap(), 1);
     assert_eq!(*rig.probe.canonical_executions.lock().unwrap(), 1);
-    assert_eq!(recorded_rows(&rig.ctx, &rig.request.task_run_id).await.len(), 1);
+    assert_eq!(
+        recorded_rows(&rig.ctx, &rig.request.task_run_id)
+            .await
+            .len(),
+        1
+    );
+    assert_eq!(
+        rig.probe.consultation_outcomes(),
+        vec![("disabled", "default_off")],
+        "default-off consultation emits exactly one disabled outcome"
+    );
 
     // Enabled reuse consumes that complete row before any lease is requested.
     settings.set(&setting, "true").await.unwrap();
@@ -1741,7 +1761,17 @@ async fn reuse_flag_rollback_bypasses_reuse_and_keeps_writers_running() {
     assert_eq!(*rig.probe.lease_requests.lock().unwrap(), 1);
     assert_eq!(*rig.probe.lease_acquisitions.lock().unwrap(), 1);
     assert_eq!(*rig.probe.canonical_executions.lock().unwrap(), 1);
-    assert_eq!(recorded_rows(&rig.ctx, &rig.request.task_run_id).await.len(), 1);
+    assert_eq!(
+        recorded_rows(&rig.ctx, &rig.request.task_run_id)
+            .await
+            .len(),
+        1
+    );
+    assert_eq!(
+        rig.probe.consultation_outcomes(),
+        vec![("disabled", "default_off"), ("hit", "verified_c1")],
+        "enabled consultation adds one reuse hit after the default-off outcome"
+    );
 
     // Rollback bypasses the still-compatible row: canonical verification and a
     // second durable writer row prove recording is independent of the flag.
@@ -1753,5 +1783,19 @@ async fn reuse_flag_rollback_bypasses_reuse_and_keeps_writers_running() {
     assert_eq!(*rig.probe.lease_requests.lock().unwrap(), 2);
     assert_eq!(*rig.probe.lease_acquisitions.lock().unwrap(), 2);
     assert_eq!(*rig.probe.canonical_executions.lock().unwrap(), 2);
-    assert_eq!(recorded_rows(&rig.ctx, &rig.request.task_run_id).await.len(), 2);
+    assert_eq!(
+        recorded_rows(&rig.ctx, &rig.request.task_run_id)
+            .await
+            .len(),
+        2
+    );
+    assert_eq!(
+        rig.probe.consultation_outcomes(),
+        vec![
+            ("disabled", "default_off"),
+            ("hit", "verified_c1"),
+            ("disabled", "default_off"),
+        ],
+        "rollback emits exactly one additional disabled outcome while preserving the enabled hit"
+    );
 }
