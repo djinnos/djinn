@@ -20,11 +20,18 @@ struct Metadata {
     minimum_completed_task_runs_per_cohort: usize,
     minimum_distinct_fingerprints_per_cohort: usize,
     cohorts: Vec<Cohort>,
+    declared_infrastructure_wide_outages: Vec<OutageInterval>,
 }
 
 #[derive(Debug, Deserialize)]
 struct Cohort {
     name: String,
+    start_inclusive: String,
+    end_exclusive: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct OutageInterval {
     start_inclusive: String,
     end_exclusive: String,
 }
@@ -75,14 +82,24 @@ struct Report {
     exclusions: BTreeMap<&'static str, usize>,
 }
 
-fn exclusion(event: &Event) -> Option<&'static str> {
+fn is_declared_outage(metadata: &Metadata, timestamp: &str) -> bool {
+    metadata
+        .declared_infrastructure_wide_outages
+        .iter()
+        .any(|outage| {
+            timestamp >= outage.start_inclusive.as_str()
+                && timestamp < outage.end_exclusive.as_str()
+        })
+}
+
+fn exclusion(metadata: &Metadata, event: &Event) -> Option<&'static str> {
     if event.project_ci {
         Some("project_ci")
     } else if event.merge_queue_ci {
         Some("merge_queue_ci")
     } else if event.cancelled_before_first_command {
         Some("cancelled_before_first_command")
-    } else if event.infrastructure_wide_outage {
+    } else if is_declared_outage(metadata, &event.timestamp) {
         Some("infrastructure_wide_outage")
     } else if event.verification_input_fingerprint.is_none() {
         Some("missing_fingerprint")
@@ -139,7 +156,7 @@ fn calculate_report(metadata: &Metadata, events: &[Event]) -> Result<Report, Str
         let Some(cohort) = cohort_for(metadata, &event.timestamp) else {
             continue;
         };
-        if let Some(reason) = exclusion(event) {
+        if let Some(reason) = exclusion(metadata, event) {
             *exclusions.get_mut(reason).expect("known exclusion") += 1;
             continue;
         }
@@ -230,7 +247,37 @@ fn fixture_report_publishes_qualified_cohorts_exclusions_and_exact_arithmetic() 
         "pre and post windows must not overlap"
     );
     assert!(QUERY.contains("verify_dedup_report_v1"));
-    assert!(QUERY.contains("COUNT(DISTINCT (project_id, task_id, verification_input_fingerprint))"));
+    assert!(
+        QUERY.contains("COUNT(DISTINCT (project_id, task_id, verification_input_fingerprint))")
+    );
+    assert!(QUERY.contains("declared_infrastructure_wide_outages"));
+    assert!(QUERY.contains("event_timestamp >= outage.start_inclusive"));
+    assert!(QUERY.contains("event_timestamp < outage.end_exclusive"));
+
+    let outage_event = fixture
+        .events
+        .iter()
+        .find(|event| event.id == "excluded-outage-inside-declared-interval")
+        .expect("fixture event inside declared outage");
+    let outage_control = fixture
+        .events
+        .iter()
+        .find(|event| event.id == "outage-control-outside-declared-interval")
+        .expect("fixture control event outside declared outage");
+    assert!(
+        !outage_event.infrastructure_wide_outage,
+        "outage classification must come from metadata, not an event-local flag"
+    );
+    assert!(is_declared_outage(&metadata, &outage_event.timestamp));
+    assert_eq!(
+        exclusion(&metadata, outage_event),
+        Some("infrastructure_wide_outage")
+    );
+    assert!(
+        !is_declared_outage(&metadata, &outage_control.timestamp),
+        "control outside the half-open interval must remain eligible"
+    );
+    assert_eq!(exclusion(&metadata, outage_control), None);
 
     let report =
         calculate_report(&metadata, &fixture.events).expect("below-boundary fixture passes");
@@ -261,13 +308,15 @@ fn ratio_exactly_one_point_five_is_rejected_and_below_is_accepted() {
     let exact_ratio = exact.canonical_build_executions as f64 / exact.distinct_fingerprints as f64;
     let below_ratio = below.canonical_build_executions as f64 / below.distinct_fingerprints as f64;
     assert_eq!(exact_ratio, 1.5);
-    assert!(validate_ratio(
-        exact.canonical_build_executions,
-        exact.distinct_fingerprints,
-        metadata.ratio_must_be_less_than,
-    )
-    .expect_err("ratio exactly 1.5 must fail")
-    .contains("must be below"));
+    assert!(
+        validate_ratio(
+            exact.canonical_build_executions,
+            exact.distinct_fingerprints,
+            metadata.ratio_must_be_less_than,
+        )
+        .expect_err("ratio exactly 1.5 must fail")
+        .contains("must be below")
+    );
     assert_eq!(
         validate_ratio(
             below.canonical_build_executions,

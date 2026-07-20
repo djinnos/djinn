@@ -3,6 +3,12 @@
   "ratio_must_be_less_than": 1.5,
   "minimum_completed_task_runs_per_cohort": 50,
   "minimum_distinct_fingerprints_per_cohort": 30,
+  "declared_infrastructure_wide_outages": [
+    {
+      "start_inclusive": "2025-01-04T12:15:00Z",
+      "end_exclusive": "2025-01-04T12:45:00Z"
+    }
+  ],
   "cohorts": [
     {
       "name": "pre",
