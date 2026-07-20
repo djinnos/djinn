@@ -34,14 +34,20 @@ async fn note_status_archives_filters_and_restores_without_delete() {
     let db = Database::open_in_memory().unwrap();
     let (tx, _rx) = broadcast::channel(256);
     let project = make_project(&db, tmp.path()).await;
-    let repo = NoteRepository::new(db, event_bus_for(&tx));
+    let repo = NoteRepository::new(db.clone(), event_bus_for(&tx));
 
     let active = repo
         .create(&project.id, "Active Note", "body", "reference", "[]")
         .await
         .unwrap();
     let archived = repo
-        .create(&project.id, "Archived Note", "body", "reference", "[]")
+        .create(
+            &project.id,
+            "Archived Note",
+            "original body",
+            "reference",
+            r#"["original-tag"]"#,
+        )
         .await
         .unwrap();
 
@@ -65,11 +71,32 @@ async fn note_status_archives_filters_and_restores_without_delete() {
     assert_eq!(created_archived.status, djinn_memory::note_status::ARCHIVED);
     assert_eq!(created_archived.lifecycle_changed_at, None);
 
+    // Seed a known legacy timestamp so the same-status call can prove exact
+    // preservation without relying on clock resolution or a sleep.
+    let seeded_active_timestamp = "2000-01-01T00:00:00.000Z";
+    sqlx::query("UPDATE notes SET lifecycle_changed_at = $1 WHERE id = $2")
+        .bind(seeded_active_timestamp)
+        .bind(&archived.id)
+        .execute(db.pool())
+        .await
+        .unwrap();
+
+    let same_status = repo.update_status(&archived.id, " ACTIVE ").await.unwrap();
+    assert_eq!(same_status.status, djinn_memory::note_status::ACTIVE);
+    assert_eq!(
+        same_status.lifecycle_changed_at.as_deref(),
+        Some(seeded_active_timestamp)
+    );
+
     let archived = repo
         .update_status(&archived.id, djinn_memory::note_status::ARCHIVED)
         .await
         .unwrap();
     assert_eq!(archived.status, djinn_memory::note_status::ARCHIVED);
+    assert_ne!(
+        archived.lifecycle_changed_at.as_deref(),
+        Some(seeded_active_timestamp)
+    );
     assert!(repo.get(&archived.id).await.unwrap().is_some());
 
     let default_list = repo.list(&project.id, None).await.unwrap();
@@ -84,11 +111,42 @@ async fn note_status_archives_filters_and_restores_without_delete() {
     assert!(archived_list.iter().any(|n| n.id == archived.id));
     assert!(archived_list.iter().any(|n| n.id == created_archived.id));
 
+    let archived_timestamp = archived.lifecycle_changed_at.clone();
+    let updated = repo
+        .update(
+            &archived.id,
+            "Restored Note",
+            "updated body",
+            r#"["updated-tag"]"#,
+        )
+        .await
+        .unwrap();
+    assert_eq!(updated.lifecycle_changed_at, archived_timestamp);
+
+    // Use another fixed predecessor timestamp to make the restoration
+    // transition comparison deterministic even on coarse database clocks.
+    let seeded_archived_timestamp = "2000-01-02T00:00:00.000Z";
+    sqlx::query("UPDATE notes SET lifecycle_changed_at = $1 WHERE id = $2")
+        .bind(seeded_archived_timestamp)
+        .bind(&archived.id)
+        .execute(db.pool())
+        .await
+        .unwrap();
+
     let restored = repo
         .update_status(&archived.id, djinn_memory::note_status::ACTIVE)
         .await
         .unwrap();
     assert_eq!(restored.status, djinn_memory::note_status::ACTIVE);
+    assert_ne!(
+        restored.lifecycle_changed_at.as_deref(),
+        Some(seeded_archived_timestamp)
+    );
+    assert_eq!(restored.id, archived.id);
+    assert_eq!(restored.permalink, archived.permalink);
+    assert_eq!(restored.title, "Restored Note");
+    assert_eq!(restored.content, "updated body");
+    assert_eq!(restored.tags, r#"["updated-tag"]"#);
     let restored_list = repo.list(&project.id, None).await.unwrap();
     assert!(restored_list.iter().any(|note| note.id == archived.id));
 }
