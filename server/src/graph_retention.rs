@@ -26,7 +26,7 @@ use std::future::Future;
 use std::time::Duration;
 
 use djinn_db::{
-    DEFAULT_RETENTION_HISTORY_N, MAX_RETENTION_BATCH, MIN_RETENTION_HISTORY_N, ProjectRepository,
+    DEFAULT_RETENTION_HISTORY_N, MIN_RETENTION_HISTORY_N, ProjectRepository,
     RepoGraphRetentionRepository, RetentionMode, RetentionSkipClass,
 };
 use tokio::time::MissedTickBehavior;
@@ -769,7 +769,7 @@ mod tests {
     #[test]
     fn max_retention_batch_constant_matches_db() {
         // The loop does not override the DB engine's batch cap.
-        assert_eq!(MAX_RETENTION_BATCH, 25);
+        assert_eq!(djinn_db::MAX_RETENTION_BATCH, 25);
     }
 
     #[test]
