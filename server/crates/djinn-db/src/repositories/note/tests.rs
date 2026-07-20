@@ -20,6 +20,7 @@ mod embeddings;
 mod entity_association;
 mod entity_search;
 mod graph_health;
+mod lifecycle_graph;
 mod graph_proposals;
 mod graph_scoring;
 mod guidance;

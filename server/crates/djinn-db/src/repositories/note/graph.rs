@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use djinn_memory::{
     ExtractedNoteAuditAttribution, ExtractedNoteAuditCategory, ExtractedNoteAuditFinding,
-    LifecycleHealth, RecentSweepMetrics,
+    GraphOptions, LifecycleGraphSummary, LifecycleHealth, RecentSweepMetrics,
 };
 use sqlx::Row;
 
@@ -204,16 +204,18 @@ impl NoteRepository {
         .fetch_all(self.db.pool())
         .await?;
 
-        for row in mea_rows {
-            typed_edges.push(TypedEdge {
-                source_id: row.get("source_id"),
-                target_id: row.get("target_id"),
+        typed_edges.extend(mea_rows.into_iter().filter_map(|row| {
+            let source_id: String = row.get("source_id");
+            let target_id: String = row.get("target_id");
+            (returned_node_ids.contains(&source_id) && returned_node_ids.contains(&target_id)).then(|| TypedEdge {
+                source_id,
+                target_id,
                 kind: row.get("kind"),
                 weight: row.get("weight"),
                 source_entity_type: row.get("source_entity_type"),
                 target_entity_type: row.get("target_entity_type"),
-            });
-        }
+            })
+        }));
 
         Ok(GraphResponse {
             nodes,
@@ -285,12 +287,69 @@ impl NoteRepository {
         let inactive_returned = (graph.nodes.iter().filter(|node| {
             node.entity_type == "note" && node.status != "active"
         }).count()) as i64;
+        // The compatibility graph has active-only edges. Reload all layers
+        // after final lifecycle selection, keeping included inactive edges and
+        // rejecting every endpoint omitted by the cap.
+        let (edges, typed_edges) = self.graph_edges_for_nodes(project_id, &graph.nodes).await?;
+        graph.edges = edges;
+        graph.typed_edges = typed_edges;
         graph.lifecycle_summary = Some(LifecycleGraphSummary {
             inactive_total,
             inactive_returned,
             inactive_omitted: inactive_total - inactive_returned,
         });
         Ok(graph)
+    }
+
+    async fn graph_edges_for_nodes(
+        &self,
+        project_id: &str,
+        nodes: &[GraphNode],
+    ) -> Result<(Vec<GraphEdge>, Vec<TypedEdge>)> {
+        let ids: HashSet<String> = nodes.iter().map(|node| node.id.clone()).collect();
+        let wikilinks = sqlx::query(
+            r#"SELECT l.source_id, l.target_id, l.target_raw FROM note_links l
+               JOIN notes src ON src.id = l.source_id AND src.project_id = $1
+               WHERE l.target_id IS NOT NULL"#,
+        ).bind(project_id).fetch_all(self.db.pool()).await?.into_iter().filter_map(|row| {
+            let source_id: String = row.get("source_id");
+            let target_id: String = row.get("target_id");
+            (ids.contains(&source_id) && ids.contains(&target_id)).then(|| GraphEdge {
+                source_id, target_id, raw_text: row.get("target_raw"),
+            })
+        }).collect();
+        let note_rows = sqlx::query(
+            r#"SELECT na.note_a_id AS source_id, na.note_b_id AS target_id, na.kind, na.weight
+               FROM note_associations na
+               JOIN notes a ON a.id = na.note_a_id AND a.project_id = $1
+               JOIN notes b ON b.id = na.note_b_id AND b.project_id = $1
+               WHERE na.kind <> 'co_access'"#,
+        ).bind(project_id).fetch_all(self.db.pool()).await?;
+        let mut typed_edges = note_rows.into_iter().filter_map(|row| {
+            let source_id: String = row.get("source_id");
+            let target_id: String = row.get("target_id");
+            (ids.contains(&source_id) && ids.contains(&target_id)).then(|| TypedEdge {
+                source_id, target_id, kind: row.get("kind"), weight: row.get("weight"),
+                source_entity_type: "note".into(), target_entity_type: "note".into(),
+            })
+        }).collect::<Vec<_>>();
+        let entity_rows = sqlx::query(
+            r#"SELECT mea.source_entity_type, mea.source_id, mea.target_entity_type, mea.target_id, mea.kind, mea.weight
+               FROM memory_entity_associations mea
+               WHERE ((mea.source_entity_type = 'note' AND EXISTS (SELECT 1 FROM notes n WHERE n.id = mea.source_id AND n.project_id = $1))
+                   OR (mea.source_entity_type = 'proposal' AND EXISTS (SELECT 1 FROM proposal_targets pt WHERE pt.proposal_id = mea.source_id AND pt.project_id = $1)))
+                 AND ((mea.target_entity_type = 'note' AND EXISTS (SELECT 1 FROM notes n WHERE n.id = mea.target_id AND n.project_id = $1))
+                   OR (mea.target_entity_type = 'proposal' AND EXISTS (SELECT 1 FROM proposal_targets pt WHERE pt.proposal_id = mea.target_id AND pt.project_id = $1)))"#,
+        ).bind(project_id).fetch_all(self.db.pool()).await?;
+        typed_edges.extend(entity_rows.into_iter().filter_map(|row| {
+            let source_id: String = row.get("source_id");
+            let target_id: String = row.get("target_id");
+            (ids.contains(&source_id) && ids.contains(&target_id)).then(|| TypedEdge {
+                source_id, target_id, kind: row.get("kind"), weight: row.get("weight"),
+                source_entity_type: row.get("source_entity_type"), target_entity_type: row.get("target_entity_type"),
+            })
+        }));
+        Ok((wikilinks, typed_edges))
     }
 
     /// All wikilinks in a project whose target note does not exist.
