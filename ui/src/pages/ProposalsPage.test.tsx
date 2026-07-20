@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { Route, Routes } from "react-router-dom";
 import { callMcpTool } from "@/api/mcpClient";
 import { fetchUsers, type OrgUser } from "@/api/users";
-import type { Proposal, ProposalEpic } from "@/api/types";
+import type { Proposal, ProposalEpic, ProposalListRow } from "@/api/types";
 import { render, screen, userEvent, waitFor, within } from "@/test/test-utils";
 import { ProposalsPage } from "./ProposalsPage";
 
@@ -85,6 +85,29 @@ function makeProposal(
     acceptance_criteria: [],
     latest_revision_seq: 1,
     pending_reconcile: false,
+    created_at: "2026-06-01T00:00:00Z",
+    updated_at: "2026-06-02T00:00:00Z",
+    ...overrides,
+  };
+}
+
+/**
+ * Build a lean `ProposalListRow` fixture — the bounded summary shape returned
+ * by `proposal_list` (no body, criteria, or detail bookkeeping). List test
+ * fixtures use this; detail tests keep `makeProposal` for `proposal_show`.
+ */
+function makeListRow(
+  overrides: Partial<ProposalListRow> &
+    Pick<ProposalListRow, "id" | "short_id" | "title" | "status">,
+): ProposalListRow {
+  return {
+    id: overrides.id,
+    short_id: overrides.short_id,
+    title: overrides.title,
+    status: overrides.status,
+    pending_reconcile: false,
+    ac_total: 0,
+    ac_met: 0,
     created_at: "2026-06-01T00:00:00Z",
     updated_at: "2026-06-02T00:00:00Z",
     ...overrides,
@@ -230,18 +253,17 @@ describe("ProposalsPage", () => {
 
   it("renders proposals grouped by visible lifecycle status", async () => {
     const proposals = [
-      makeProposal({
+      makeListRow({
         id: "proposal-approved",
         short_id: "aprv",
         title: "Approve safer rollout",
         status: "approved",
-        acceptance_criteria: [
-          { criterion: "Rollout plan documented", met: true },
-        ],
+        ac_total: 1,
+        ac_met: 1,
         author_user_id: "user-1",
         updated_at: "2026-06-03T00:00:00Z",
       }),
-      makeProposal({
+      makeListRow({
         id: "proposal-review",
         short_id: "revw",
         title: "Review MCP retries",
@@ -250,7 +272,7 @@ describe("ProposalsPage", () => {
         author_user_id: "user-2",
         updated_at: "2026-06-04T00:00:00Z",
       }),
-      makeProposal({
+      makeListRow({
         id: "proposal-archived",
         short_id: "arch",
         title: "Archived legacy idea",
@@ -282,7 +304,21 @@ describe("ProposalsPage", () => {
       within(reviewSection!).getByText("Review MCP retries"),
     ).toBeInTheDocument();
     expect(within(reviewSection!).getByText("revw")).toBeInTheDocument();
+    const reviewRow = within(reviewSection!)
+      .getByText("Review MCP retries")
+      .closest("button");
+    expect(reviewRow).not.toBeNull();
+    const unresolvedFeedback = within(reviewRow!).getByTitle(
+      "2 unresolved comments",
+    );
+    expect(unresolvedFeedback).toBeVisible();
+    expect(unresolvedFeedback).toHaveAttribute(
+      "title",
+      "2 unresolved comments",
+    );
+    expect(unresolvedFeedback).toHaveTextContent("2");
     expect(screen.queryByText("Archived legacy idea")).not.toBeInTheDocument();
+    // List query sends no verbosity flags.
     expect(callMcpTool).toHaveBeenCalledWith("proposal_list", {
       status: undefined,
       text: undefined,
@@ -294,7 +330,7 @@ describe("ProposalsPage", () => {
 
   it("renders one unified tribunal chip and a gate dot from each row's list summary", async () => {
     const proposals = [
-      makeProposal({
+      makeListRow({
         id: "p-review",
         short_id: "rvw1",
         title: "Awaiting review proposal",
@@ -309,7 +345,7 @@ describe("ProposalsPage", () => {
           unresolved_blocking_count: 0,
         },
       }),
-      makeProposal({
+      makeListRow({
         id: "p-running",
         short_id: "rvw2",
         title: "Refinement running proposal",
@@ -324,7 +360,7 @@ describe("ProposalsPage", () => {
           unresolved_blocking_count: 0,
         },
       }),
-      makeProposal({
+      makeListRow({
         id: "p-evidence",
         short_id: "rvw3",
         title: "Evidence parked proposal",
@@ -339,7 +375,7 @@ describe("ProposalsPage", () => {
           unresolved_blocking_count: 0,
         },
       }),
-      makeProposal({
+      makeListRow({
         id: "p-blocked",
         short_id: "rvw4",
         title: "Blocked by objections proposal",
@@ -394,7 +430,7 @@ describe("ProposalsPage", () => {
 
   it("shows a neutral (not red) gate for a fresh draft failing Definition of Ready", async () => {
     const proposals = [
-      makeProposal({
+      makeListRow({
         id: "p-fresh-draft",
         short_id: "frsh",
         title: "Fresh draft proposal",
@@ -432,7 +468,7 @@ describe("ProposalsPage", () => {
 
   it("shows a red gate only once a tribunal has engaged and the gate is stuck", async () => {
     const proposals = [
-      makeProposal({
+      makeListRow({
         id: "p-engaged-blocked",
         short_id: "engb",
         title: "Engaged and blocked proposal",
@@ -466,7 +502,7 @@ describe("ProposalsPage", () => {
 
   it("sorts awaiting-review rows first and summarizes them in the group header", async () => {
     const proposals = [
-      makeProposal({
+      makeListRow({
         id: "p-recent-plain",
         short_id: "rp01",
         title: "Recently updated plain row",
@@ -482,7 +518,7 @@ describe("ProposalsPage", () => {
           unresolved_blocking_count: 0,
         },
       }),
-      makeProposal({
+      makeListRow({
         id: "p-older-awaiting",
         short_id: "oa01",
         title: "Older awaiting review row",
@@ -526,13 +562,23 @@ describe("ProposalsPage", () => {
     ]);
   });
 
-  it("renders no chips for a row without a list summary", async () => {
+  it("renders acceptance progress from ac_met/ac_total and hides badge when total is zero", async () => {
     const proposals = [
-      makeProposal({
-        id: "p-nosummary",
-        short_id: "nos1",
-        title: "No summary proposal",
+      makeListRow({
+        id: "p-progress",
+        short_id: "prog",
+        title: "Progress proposal",
         status: "in_review",
+        ac_total: 3,
+        ac_met: 2,
+      }),
+      makeListRow({
+        id: "p-zero",
+        short_id: "zero",
+        title: "Zero criteria proposal",
+        status: "in_review",
+        ac_total: 0,
+        ac_met: 0,
       }),
     ];
 
@@ -545,29 +591,31 @@ describe("ProposalsPage", () => {
 
     renderProposalsRoute("/proposals");
 
-    expect(await screen.findByText("No summary proposal")).toBeInTheDocument();
-    expect(screen.queryByTitle("Gate ready")).not.toBeInTheDocument();
-    expect(
-      screen.queryByTitle("Definition of Ready not yet met"),
-    ).not.toBeInTheDocument();
-    expect(screen.queryByText("DoR ✗")).not.toBeInTheDocument();
+    // The progress badge renders 2/3 for the proposal with criteria.
+    const reviewSection = (await screen.findByText("In Review")).closest(
+      "section",
+    );
+    expect(reviewSection).not.toBeNull();
+    expect(within(reviewSection!).getByText("2/3")).toBeInTheDocument();
+    // No badge text like 0/0 should appear for the zero-criteria row.
+    expect(within(reviewSection!).queryByText("0/0")).not.toBeInTheDocument();
   });
 
   it("defaults terminal proposal groups collapsed and active groups expanded with counts visible", async () => {
     const proposals = [
-      makeProposal({
+      makeListRow({
         id: "proposal-done",
         short_id: "done",
         title: "Completed proposal",
         status: "done",
       }),
-      makeProposal({
+      makeListRow({
         id: "proposal-building",
         short_id: "bldg",
         title: "Building proposal",
         status: "building",
       }),
-      makeProposal({
+      makeListRow({
         id: "proposal-rejected",
         short_id: "rjct",
         title: "Rejected proposal",
@@ -596,9 +644,9 @@ describe("ProposalsPage", () => {
     expect(screen.queryByText("Rejected proposal")).not.toBeInTheDocument();
   });
 
-  it("toggles a collapsed proposal status group while keeping its count visible", async () => {
+  it("expands a terminal row without a list summary and renders no tribunal chip or gate dot", async () => {
     const proposals = [
-      makeProposal({
+      makeListRow({
         id: "proposal-done",
         short_id: "done",
         title: "Completed proposal",
@@ -626,18 +674,27 @@ describe("ProposalsPage", () => {
 
     expect(doneHeader).toHaveAttribute("aria-expanded", "true");
     expect(within(doneHeader).getByText("1")).toBeInTheDocument();
-    expect(screen.getByText("Completed proposal")).toBeInTheDocument();
+    const terminalRow = screen.getByText("Completed proposal").closest("button");
+    expect(terminalRow).not.toBeNull();
+    expect(
+      within(terminalRow!).queryByTitle(
+        /^(Tribunal|Parked on a needs-evidence spike)/,
+      ),
+    ).not.toBeInTheDocument();
+    expect(
+      within(terminalRow!).queryByTitle(/^(Gate |Definition of Ready)/),
+    ).not.toBeInTheDocument();
   });
 
   it("keeps archived and superseded proposal groups hidden until Show archived is enabled", async () => {
     const proposals = [
-      makeProposal({
+      makeListRow({
         id: "proposal-superseded",
         short_id: "supr",
         title: "Superseded proposal",
         status: "superseded",
       }),
-      makeProposal({
+      makeListRow({
         id: "proposal-archived",
         short_id: "arch",
         title: "Archived proposal",

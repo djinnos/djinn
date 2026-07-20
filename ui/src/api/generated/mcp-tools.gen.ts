@@ -8078,11 +8078,18 @@ export namespace ProposalListInputSchema {
    */
   author?: string
   /**
-   * When `true`, include the full `body` string on each list row.
-   * Default `false` — rows omit the full body and carry only
-   * `body_excerpt` (first 512 Unicode scalars) and `body_truncated`.
+   * When `true`, include structured criteria. Omitted and `false` are equivalent.
+   */
+  include_acceptance_criteria?: boolean
+  /**
+   * When `true`, include the full body. Omitted and `false` are equivalent;
+   * bodies imply excerpt metadata.
    */
   include_bodies?: boolean
+  /**
+   * When `true`, include excerpt metadata. Omitted and `false` are equivalent.
+   */
+  include_excerpts?: boolean
   limit?: number
   offset?: number
   /**
@@ -8118,64 +8125,44 @@ export namespace ProposalListOutputSchema {
   /**
    * List-specific proposal row model.
    * 
-   * By default (`include_bodies = false`) the full `body` field is omitted
-   * from serialization; callers receive only `body_excerpt` and
-   * `body_truncated`.  When `include_bodies = true`, the full `body` is
-   * included alongside the excerpt metadata so callers that need the
-   * complete text can still get it in a single list call.
+   * The default wire shape is a bounded summary. Body data and criteria are
+   * opt-in; callers needing complete proposal detail use `proposal_show`.
    */
   export interface ProposalListRow {
   /**
-   * Structured acceptance criteria (`{criterion, met}` or plain string),
-   * same shape as tasks. `met` means "agreed during scoping".
+   * Criteria explicitly marked `{ met: true }`.
    */
-  acceptance_criteria: AcceptanceCriterionItem[]
+  ac_met: number
+  /**
+   * Total criteria, including legacy strings.
+   */
+  ac_total: number
+  /**
+   * Structured acceptance criteria (`{criterion, met}` or plain string),
+   * included only when requested.
+   */
+  acceptance_criteria?: AcceptanceCriterionItem[]
   author_user_id?: string
   /**
    * Full proposal body — **only serialized when `include_bodies = true`**.
    */
   body?: string
-  /**
-   * First 512 Unicode scalar values of the proposal body.  Always
-   * present regardless of `include_bodies`.
-   */
-  body_excerpt: string
-  /**
-   * Body encoding: `markdown` (legacy default) or `mdx` (block-aware).
-   */
-  body_format: string
+  body_excerpt?: string
   /**
    * `true` when the original body exceeded the 512-scalar cap.
    */
-  body_truncated: boolean
+  body_truncated?: boolean
   /**
    * Build owner once graduated.
    */
   build_owner_user_id?: string
-  closed_at?: string
   created_at: string
   id: string
-  /**
-   * Last proposal revision that the in-flight build has reconciled against.
-   */
-  last_reconciled_revision_seq?: number
-  /**
-   * Head revision number (sign-offs anchored earlier are stale).
-   */
-  latest_revision_seq: number
-  /**
-   * When parked for needs-evidence: the linked spike task id.
-   */
-  linked_spike_task_id?: string
   /**
    * Compact tribunal/readiness summary — populated only on `proposal_list`
    * (batched across the page) for non-terminal proposals.
    */
   list_summary?: (ProposalListSummary | null)
-  /**
-   * When parked for needs-evidence: the named feasibility claim.
-   */
-  needs_evidence_claim?: string
   /**
    * True when the in-flight build is behind the latest proposal revision.
    */
@@ -8186,7 +8173,6 @@ export namespace ProposalListOutputSchema {
    * archived | superseded.
    */
   status: string
-  superseded_by?: string
   title: string
   /**
    * Count of unresolved feedback entries — drives the per-row badge in the

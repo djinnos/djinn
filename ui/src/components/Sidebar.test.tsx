@@ -84,8 +84,8 @@ describe('Sidebar component', () => {
       if (toolName === 'proposal_list') {
         return {
           proposals: [
-            { id: 'p-1', short_id: 'aaaa', title: 'Draft 1', status: 'draft', acceptance_criteria: [], body: '', created_at: '', updated_at: '' },
-            { id: 'p-2', short_id: 'bbbb', title: 'In Review 2', status: 'in_review', acceptance_criteria: [], body: '', created_at: '', updated_at: '' },
+            { id: 'p-1', short_id: 'aaaa', title: 'Draft 1', status: 'draft', ac_total: 0, ac_met: 0, pending_reconcile: false, unresolved_feedback_count: 0, created_at: '', updated_at: '' },
+            { id: 'p-2', short_id: 'bbbb', title: 'In Review 2', status: 'in_review', ac_total: 0, ac_met: 0, pending_reconcile: false, unresolved_feedback_count: 0, created_at: '', updated_at: '' },
           ],
         } as never;
       }
@@ -110,16 +110,16 @@ describe('Sidebar component', () => {
         return {
           proposals: [
             // Active — counted
-            { id: 'p-triage', short_id: 'tria', title: 'Triage 1', status: 'triage', acceptance_criteria: [], body: '', created_at: '', updated_at: '' },
-            { id: 'p-draft', short_id: 'draf', title: 'Draft 1', status: 'draft', acceptance_criteria: [], body: '', created_at: '', updated_at: '' },
-            { id: 'p-review', short_id: 'revw', title: 'Review 1', status: 'in_review', acceptance_criteria: [], body: '', created_at: '', updated_at: '' },
-            { id: 'p-approved', short_id: 'aprv', title: 'Approved 1', status: 'approved', acceptance_criteria: [], body: '', created_at: '', updated_at: '' },
-            { id: 'p-building', short_id: 'bldg', title: 'Building 1', status: 'building', acceptance_criteria: [], body: '', created_at: '', updated_at: '' },
+            { id: 'p-triage', short_id: 'tria', title: 'Triage 1', status: 'triage', ac_total: 0, ac_met: 0, pending_reconcile: false, unresolved_feedback_count: 0, created_at: '', updated_at: '' },
+            { id: 'p-draft', short_id: 'draf', title: 'Draft 1', status: 'draft', ac_total: 0, ac_met: 0, pending_reconcile: false, unresolved_feedback_count: 0, created_at: '', updated_at: '' },
+            { id: 'p-review', short_id: 'revw', title: 'Review 1', status: 'in_review', ac_total: 0, ac_met: 0, pending_reconcile: false, unresolved_feedback_count: 0, created_at: '', updated_at: '' },
+            { id: 'p-approved', short_id: 'aprv', title: 'Approved 1', status: 'approved', ac_total: 0, ac_met: 0, pending_reconcile: false, unresolved_feedback_count: 0, created_at: '', updated_at: '' },
+            { id: 'p-building', short_id: 'bldg', title: 'Building 1', status: 'building', ac_total: 0, ac_met: 0, pending_reconcile: false, unresolved_feedback_count: 0, created_at: '', updated_at: '' },
             // Terminal — NOT counted
-            { id: 'p-done', short_id: 'done', title: 'Done 1', status: 'done', acceptance_criteria: [], body: '', created_at: '', updated_at: '' },
-            { id: 'p-rejected', short_id: 'rjct', title: 'Rejected 1', status: 'rejected', acceptance_criteria: [], body: '', created_at: '', updated_at: '' },
-            { id: 'p-archived', short_id: 'arch', title: 'Archived 1', status: 'archived', acceptance_criteria: [], body: '', created_at: '', updated_at: '' },
-            { id: 'p-superseded', short_id: 'supr', title: 'Superseded 1', status: 'superseded', acceptance_criteria: [], body: '', created_at: '', updated_at: '' },
+            { id: 'p-done', short_id: 'done', title: 'Done 1', status: 'done', ac_total: 0, ac_met: 0, pending_reconcile: false, unresolved_feedback_count: 0, created_at: '', updated_at: '' },
+            { id: 'p-rejected', short_id: 'rjct', title: 'Rejected 1', status: 'rejected', ac_total: 0, ac_met: 0, pending_reconcile: false, unresolved_feedback_count: 0, created_at: '', updated_at: '' },
+            { id: 'p-archived', short_id: 'arch', title: 'Archived 1', status: 'archived', ac_total: 0, ac_met: 0, pending_reconcile: false, unresolved_feedback_count: 0, created_at: '', updated_at: '' },
+            { id: 'p-superseded', short_id: 'supr', title: 'Superseded 1', status: 'superseded', ac_total: 0, ac_met: 0, pending_reconcile: false, unresolved_feedback_count: 0, created_at: '', updated_at: '' },
           ],
         } as never;
       }
