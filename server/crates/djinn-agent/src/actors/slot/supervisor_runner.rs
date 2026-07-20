@@ -2675,6 +2675,21 @@ mod tests {
                  periodic orphan sweep"
             );
             assert!(after.terminal_at.is_some(), "{label} row must be terminal");
+            let evidence: serde_json::Value = serde_json::from_str(
+                after
+                    .summary_json
+                    .as_deref()
+                    .expect("dispatch failure must retain recovery evidence"),
+            )
+            .expect("dispatch failure evidence must be JSON");
+            assert_eq!(
+                evidence["recovery_classifier"], "dispatch_failure_orphan",
+                "{label} must retain the ordinary dispatch-failure classifier"
+            );
+            assert_ne!(
+                evidence["recovery_classifier"], "environmental_owner_expired",
+                "{label} ordinary dispatch failure must not be reclassified as environmental"
+            );
         }
         let after_submitted = attempt_repo
             .get(&submitted_row.id)
