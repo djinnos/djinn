@@ -988,6 +988,7 @@ pub async fn seed_eval_task_with_memory_refs(
     db: &Database,
     project_id: &str,
     epic_id: &str,
+    created_by_user_id: &str,
     fixture_task_id: &str,
     memory_refs_json: &str,
 ) -> String {
@@ -1001,8 +1002,9 @@ pub async fn seed_eval_task_with_memory_refs(
     sqlx::query(
         r#"INSERT INTO tasks
             (id, project_id, short_id, epic_id, title, description, design,
-             issue_type, priority, owner, status, continuation_count, memory_refs)
-         VALUES ($1, $2, $3, $4, $5, '', '', 'task', 0, '', 'open', 0, $6::jsonb)"#,
+             issue_type, priority, owner, status, continuation_count, memory_refs,
+             created_by_user_id)
+         VALUES ($1, $2, $3, $4, $5, '', '', 'task', 0, '', 'open', 0, $6::jsonb, $7)"#,
     )
     .bind(&task_id)
     .bind(project_id)
@@ -1010,6 +1012,7 @@ pub async fn seed_eval_task_with_memory_refs(
     .bind(epic_id)
     .bind(format!("Eval task {}", fixture_task_id))
     .bind(memory_refs_json)
+    .bind(created_by_user_id)
     .execute(db.pool())
     .await
     .unwrap_or_else(|e| {
