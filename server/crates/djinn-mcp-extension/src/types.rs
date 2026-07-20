@@ -5,12 +5,62 @@
 //! no domain logic, no database access.
 
 use serde::Deserialize;
-#[derive(Deserialize)]
+
+/// Public schema for the `ci_artifact` tool. Enforces the four legal shapes
+/// via [`CiArtifactParams::validate`], which must be called after
+/// deserialization and before service dispatch.
+#[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct CiArtifactParams { pub action: CiArtifactAction, pub run_id: Option<u64>, pub pr_number: Option<u64>, pub artifact: Option<String> }
-#[derive(Deserialize, PartialEq, Eq)]
+pub struct CiArtifactParams {
+    pub action: CiArtifactAction,
+    pub run_id: Option<u64>,
+    pub pr_number: Option<u64>,
+    pub artifact: Option<String>,
+}
+
+impl CiArtifactParams {
+    /// Validate the four legal shapes:
+    /// - `run_id` / `pr_number` are optional, positive, and mutually exclusive.
+    /// - `artifact` is required (non-empty) for `fetch` and forbidden for `list`.
+    ///
+    /// Unknown fields are already denied by `#[serde(deny_unknown_fields)]`,
+    /// so `job_id`, `step`, repository, lane, format, mutation, deletion, and
+    /// retention inputs all fail at deserialization time.
+    pub fn validate(&self) -> Result<(), String> {
+        if self.run_id == Some(0) || self.pr_number == Some(0) {
+            return Err("ci_artifact selectors must be positive".to_string());
+        }
+        if self.run_id.is_some() && self.pr_number.is_some() {
+            return Err("ci_artifact run_id and pr_number are mutually exclusive".to_string());
+        }
+        match self.action {
+            CiArtifactAction::List => {
+                if self.artifact.is_some() {
+                    return Err(
+                        "ci_artifact artifact must not be provided for list action".to_string()
+                    );
+                }
+            }
+            CiArtifactAction::Fetch => match &self.artifact {
+                None => return Err("ci_artifact artifact is required for fetch action".to_string()),
+                Some(a) if a.is_empty() => {
+                    return Err(
+                        "ci_artifact artifact must be non-empty for fetch action".to_string()
+                    );
+                }
+                Some(_) => {}
+            },
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
-pub enum CiArtifactAction { List, Fetch }
+pub enum CiArtifactAction {
+    List,
+    Fetch,
+}
 
 #[derive(Deserialize)]
 pub struct MemoryRetrievalOutcomesReportParams {

@@ -847,6 +847,74 @@ expression: tool_schemas_architect()
     "concurrent_safe": true
   },
   {
+    "name": "ci_artifact",
+    "description": "Read a bounded GitHub Actions artifact. `list` lists artifacts and `fetch` renders one exact artifact. Select optional positive `run_id` or `pr_number`, never both; fetch requires non-empty `artifact`.",
+    "inputSchema": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "action"
+      ],
+      "properties": {
+        "action": {
+          "type": "string",
+          "enum": [
+            "list",
+            "fetch"
+          ]
+        },
+        "run_id": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "pr_number": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "artifact": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "allOf": [
+        {
+          "not": {
+            "required": [
+              "run_id",
+              "pr_number"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "action": {
+                "const": "fetch"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "artifact"
+            ]
+          },
+          "else": {
+            "not": {
+              "required": [
+                "artifact"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "readOnly": true,
+    "destructive": false,
+    "idempotent": true,
+    "openWorld": false,
+    "concurrent_safe": true
+  },
+  {
     "name": "github_search",
     "description": "Search GitHub code across public repositories using the GitHub Code Search API. Returns compact, navigable matches with snippets, file paths, URLs, and metadata. Each result has a result_id for reference. Use github_fetch_file to inspect the full file of a promising result.",
     "inputSchema": {

@@ -73,6 +73,7 @@ fn expected_safety_tuple(name: &str) -> Option<(bool, bool, bool, bool)> {
         | "skill_read"
         | "lsp"
         | "ci_job_log"
+        | "ci_artifact"
         | "output_view"
         | "output_grep"
         | "memory_build_context"
@@ -992,6 +993,10 @@ fn evidence_spike_has_read_only_investigation_tools() {
     assert!(
         names.contains("ci_job_log"),
         "evidence spike must have `ci_job_log`"
+    );
+    assert!(
+        names.contains("ci_artifact"),
+        "evidence spike must have `ci_artifact`"
     );
     assert!(
         names.contains("github_search"),
