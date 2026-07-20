@@ -280,6 +280,10 @@ test('repository-wired guard rejects staged scaffolding and generated schema sur
     execFileSync('git', ['-C', dir, 'add', 'src/comment-brace-after-test.rs']);
     assert.equal(runGuard().status, 1, 'a comment brace cannot extend a test-module exemption into production code');
     execFileSync('git', ['-C', dir, 'rm', '--cached', '-q', 'src/comment-brace-after-test.rs']);
+    writeFileSync(join(dir, 'src', 'comment-marker.rs'), 'mod outer { // #[cfg(test)] mod tests {\n fn save() { std::fs::write(".djinn/settings.json", b"x").unwrap(); }\n}\n');
+    execFileSync('git', ['-C', dir, 'add', 'src/comment-marker.rs']);
+    assert.equal(runGuard().status, 1, 'a cfg(test) marker in a comment cannot create an exemption');
+    execFileSync('git', ['-C', dir, 'rm', '--cached', '-q', 'src/comment-marker.rs']);
     mkdirSync(join(dir, 'generated'), { recursive: true });
     writeFileSync(join(dir, 'generated', 'schema.json'), '{"legacy_path":".djinn/graph_warm_status.json"}\n');
     execFileSync('git', ['-C', dir, 'add', 'generated/schema.json']);
