@@ -6,8 +6,8 @@ use std::path::{Path, PathBuf};
 use sqlx::postgres::{PgConnection, PgPoolOptions};
 use sqlx::{Connection, Executor};
 
-const MIGRATION_VERSION: u64 = 134;
-const MIGRATION_FILE: &str = "134_note_lifecycle_changed_at.sql";
+const MIGRATION_VERSION: u64 = 135;
+const MIGRATION_FILE: &str = "135_note_lifecycle_changed_at.sql";
 
 fn base_database_url() -> String {
     std::env::var("DJINN_TEST_DATABASE_URL")
@@ -94,11 +94,11 @@ async fn existing_inactive_note_retains_null_lifecycle_transition_time() {
         .await
         .expect("seed archived note before migration");
     let migration =
-        std::fs::read_to_string(migrations_dir().join(MIGRATION_FILE)).expect("read migration 134");
+        std::fs::read_to_string(migrations_dir().join(MIGRATION_FILE)).expect("read migration 135");
     connection
         .execute(migration.as_str())
         .await
-        .expect("apply migration 134");
+        .expect("apply migration 135");
     let pool = PgPoolOptions::new()
         .max_connections(1)
         .connect(&database_url)
