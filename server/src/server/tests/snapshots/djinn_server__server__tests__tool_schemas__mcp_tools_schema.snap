@@ -11144,7 +11144,7 @@ expression: signatures
               "type": "string"
             },
             "score": {
-              "default": 0,
+              "default": 0.0,
               "description": "RRF fusion score (higher = more relevant). Defaults to 0.0 for backward compat.",
               "format": "double",
               "type": "number"
