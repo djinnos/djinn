@@ -37,10 +37,7 @@ async fn fresh() -> (Database, RepoGraphRetentionRepository) {
     // Dedicated live-test URLs remain authoritative. Server-test shards expose
     // only DATABASE_URL, so accept it as the final fallback rather than turning
     // this required live-Postgres regression into an environment panic.
-    let base = std::env::var("TEST_POSTGRES_URL")
-        .or_else(|_| std::env::var("DJINN_TEST_DATABASE_URL"))
-        .or_else(|_| std::env::var("DATABASE_URL"))
-        .expect("live PostgreSQL URL");
+    let base = djinn_db::test_database_base_url();
     let prefix = base.rsplit_once('/').expect("database URL").0;
     let name = format!("djinn_retention_{}", uuid::Uuid::now_v7().simple());
     let mut admin = PgConnection::connect(&format!("{prefix}/postgres"))
