@@ -1469,6 +1469,20 @@
   },
   {
     "concurrent_safe": true,
+    "description": "List durable metadata for truncated outputs owned by the current trusted session.",
+    "destructive": false,
+    "idempotent": true,
+    "inputSchema": {
+      "properties": {},
+      "required": [],
+      "type": "object"
+    },
+    "name": "output_list",
+    "openWorld": false,
+    "readOnly": true
+  },
+  {
+    "concurrent_safe": true,
     "description": "Paginated view of a truncated tool output. When a tool result was truncated, the full output is stashed and can be browsed here by tool_use_id.",
     "destructive": false,
     "idempotent": true,

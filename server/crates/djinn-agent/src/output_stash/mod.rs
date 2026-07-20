@@ -94,7 +94,7 @@ pub(crate) struct DurablePointerRecord {
     pub(crate) completeness: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct DurableOutputMetadata {
     pub owner_session_id: String,
     pub tool_use_id: String,
@@ -1101,10 +1101,10 @@ pub fn externalize_rendered_tool_result(
     stub
 }
 
-/// `true` for the two stash-navigation tools handled in-process against the
+/// `true` for the stash-navigation tools handled in-process against the
 /// [`OutputStash`] rather than dispatched to a real handler.
 pub fn is_stash_tool(name: &str) -> bool {
-    name == "output_view" || name == "output_grep"
+    matches!(name, "output_view" | "output_grep" | "output_list")
 }
 
 /// Service an `output_view` / `output_grep` call against the stash.
@@ -1118,12 +1118,14 @@ pub fn handle_stash_tool(
     args: Option<&serde_json::Map<String, serde_json::Value>>,
 ) -> Result<String, String> {
     let guard = stash.lock().unwrap();
-    let tid = args
-        .and_then(|m| m.get("tool_use_id"))
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
     match name {
+        "output_list" => serde_json::to_string_pretty(&guard.list_durable_outputs()?)
+            .map_err(|e| format!("serialize durable output list: {e}")),
         "output_view" => {
+            let tid = args
+                .and_then(|m| m.get("tool_use_id"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
             let offset = args
                 .and_then(|m| m.get("offset"))
                 .and_then(|v| v.as_u64())
@@ -1135,6 +1137,10 @@ pub fn handle_stash_tool(
             guard.view(tid, offset, limit)
         }
         "output_grep" => {
+            let tid = args
+                .and_then(|m| m.get("tool_use_id"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
             let pattern = args
                 .and_then(|m| m.get("pattern"))
                 .and_then(|v| v.as_str())

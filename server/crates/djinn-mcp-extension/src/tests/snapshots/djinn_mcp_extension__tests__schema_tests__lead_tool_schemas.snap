@@ -564,6 +564,20 @@ expression: tool_schemas_lead()
     "concurrent_safe": true
   },
   {
+    "name": "output_list",
+    "description": "List durable metadata for truncated outputs owned by the current trusted session.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {},
+      "required": []
+    },
+    "readOnly": true,
+    "destructive": false,
+    "idempotent": true,
+    "openWorld": false,
+    "concurrent_safe": true
+  },
+  {
     "name": "task_create",
     "description": "Create a new task under an epic. Agents should use this only when explicitly allowed by their role and task design.",
     "inputSchema": {
