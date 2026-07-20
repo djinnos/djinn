@@ -175,6 +175,7 @@ fn architect_regression_has_expected_read_only_tools() {
         "code_graph",
         "pr_review_context",
         "ci_job_log",
+        "ci_artifact",
         "github_search",
         "output_view",
         "output_grep",
@@ -233,6 +234,7 @@ fn evidence_spike_gate_accepts_allowed_read_tools() {
         "output_grep",
         "skill_read",
         "ci_job_log",
+        "ci_artifact",
         "submit_work",
     ];
 
@@ -473,6 +475,7 @@ fn evidence_spike_profile_matches_demand_evidence_contract_requirements() {
         "output_grep",
         "github_search",
         "ci_job_log",
+        "ci_artifact",
     ];
     for name in &required_read {
         assert!(

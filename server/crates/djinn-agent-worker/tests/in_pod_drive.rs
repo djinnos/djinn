@@ -416,6 +416,9 @@ async fn handle_rpc(
         ServiceRpcRequest::ToolCiJobLog { .. } => {
             ServiceRpcResponse::ToolCiJobLog(Err("fake server: tool_ci_job_log not wired".into()))
         }
+        ServiceRpcRequest::ToolCiArtifact { .. } => ServiceRpcResponse::ToolCiArtifact(Err(
+            "fake server: tool_ci_artifact not wired".into(),
+        )),
         ServiceRpcRequest::TouchActivity { task_id } => {
             audit.lock().await.touch_activity += 1;
             let _ = task_id;

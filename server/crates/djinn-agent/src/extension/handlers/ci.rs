@@ -516,7 +516,7 @@ fn render_log(raw_log: &str, step: Option<&str>) -> String {
 ///      same repo carries one).
 ///
 /// Returns `None` if neither path yields an installation.
-async fn resolve_installation_client_for_task(
+pub(crate) async fn resolve_installation_client_for_task(
     project_repo: &djinn_db::ProjectRepository,
     project_id: &str,
     owner: &str,

@@ -796,6 +796,30 @@ impl SupervisorServices for RpcServices {
         }
     }
 
+    async fn tool_ci_artifact(
+        &self,
+        session_task_id: Option<String>,
+        arguments: serde_json::Map<String, serde_json::Value>,
+    ) -> Result<serde_json::Value, String> {
+        let arguments = serde_json::to_string(&arguments).unwrap_or("{}".to_string());
+        match self
+            .roundtrip(ServiceRpcRequest::ToolCiArtifact {
+                session_task_id,
+                arguments,
+            })
+            .await
+        {
+            Ok(ServiceRpcResponse::ToolCiArtifact(Ok(payload))) => {
+                serde_json::from_str::<serde_json::Value>(&payload)
+                    .map_err(|e| format!("rpc decode tool_ci_artifact reply: {e}"))
+            }
+            Ok(ServiceRpcResponse::ToolCiArtifact(Err(e))) => Err(e),
+            Ok(ServiceRpcResponse::Err(e)) => Err(format!("rpc transport: {e}")),
+            Ok(other) => Err(format!("rpc protocol: unexpected reply {other:?}")),
+            Err(e) => Err(e),
+        }
+    }
+
     async fn touch_activity(&self, task_id: String) -> Result<(), String> {
         // Fire-and-forget shape: we still round-trip (so the host can
         // ack reception), but a transport flake is swallowed by the
