@@ -3232,15 +3232,14 @@ mod inflight_ledger_tests {
     }
 
     #[derive(Clone)]
-    struct Wnd1ControlledRuntime {
+    pub(super) struct Wnd1ControlledRuntime {
         started_tx: tokio::sync::mpsc::UnboundedSender<String>,
         releases:
             std::sync::Arc<std::sync::Mutex<HashMap<String, tokio::sync::oneshot::Sender<()>>>>,
-        resume_metadata: std::sync::Arc<std::sync::Mutex<HashMap<String, serde_json::Value>>>,
     }
 
     impl Wnd1ControlledRuntime {
-        fn new() -> (Self, tokio::sync::mpsc::UnboundedReceiver<String>) {
+        pub(super) fn new() -> (Self, tokio::sync::mpsc::UnboundedReceiver<String>) {
             let (started_tx, started_rx) = tokio::sync::mpsc::unbounded_channel();
             (
                 Self {
@@ -3251,14 +3250,6 @@ mod inflight_ledger_tests {
             )
         }
 
-        fn resume_metadata(&self, task_id: &str) -> Option<serde_json::Value> {
-            self.resume_metadata
-                .lock()
-                .expect("wnd1 resume metadata mutex")
-                .get(task_id)
-                .cloned()
-        }
-
         fn spawn_pool(
             &self,
             db: &djinn_db::Database,
@@ -3267,7 +3258,6 @@ mod inflight_ledger_tests {
         ) -> djinn_slot::SlotPoolHandle {
             let started_tx = self.started_tx.clone();
             let releases = self.releases.clone();
-            let resume_metadata = self.resume_metadata.clone();
             djinn_slot::SlotPoolHandle::spawn_with_factory(
                 crate::test_helpers::agent_context_from_db(db.clone(), cancel.clone()),
                 cancel,
@@ -3286,7 +3276,6 @@ mod inflight_ledger_tests {
                 std::sync::Arc::new(move |slot_id, model_id, event_tx, app_state, cancel| {
                     let started_tx = started_tx.clone();
                     let releases = releases.clone();
-                    let resume_metadata = resume_metadata.clone();
                     let runner: djinn_slot::TestLifecycleRunner = std::sync::Arc::new(
                         move |task_id,
                               _project_path,
@@ -3296,12 +3285,6 @@ mod inflight_ledger_tests {
                               _pause,
                               _resume_lifecycle_metadata| {
                             let started_tx = started_tx.clone();
-                            if let Some(metadata) = resume_lifecycle_metadata {
-                                resume_metadata
-                                    .lock()
-                                    .expect("wnd1 resume metadata mutex")
-                                    .insert(task_id.clone(), metadata);
-                            }
                             let releases = releases.clone();
                             Box::pin(async move {
                                 let (release_tx, release_rx) = tokio::sync::oneshot::channel();
@@ -3323,6 +3306,42 @@ mod inflight_ledger_tests {
                         slot_id, model_id, event_tx, app_state, cancel, runner,
                     )
                 }),
+            )
+        }
+
+        /// Factory for the identity-correlation regression. Unlike
+        /// `spawn_pool`, this installs the canonical agent slot and therefore
+        /// invokes the host's production supervisor-runner persistence path.
+        pub(super) fn spawn_production_supervisor_pool(
+            agent: djinn_agent::context::AgentContext,
+            cancel: tokio_util::sync::CancellationToken,
+            max_slots: u32,
+        ) -> djinn_slot::SlotPoolHandle {
+            djinn_slot::SlotPoolHandle::spawn_with_factory(
+                crate::test_helpers::agent_context_from_db(agent.db.clone(), cancel.clone()),
+                cancel,
+                djinn_slot::SlotPoolConfig {
+                    models: vec![djinn_slot::ModelSlotConfig {
+                        model_id: WND1_STABLE_MODEL_ID.to_owned(),
+                        max_slots,
+                        roles: ["lead".to_owned(), "worker".to_owned()]
+                            .into_iter()
+                            .collect(),
+                    }],
+                    role_priorities: HashMap::new(),
+                },
+                std::sync::Arc::new(
+                    move |slot_id, model_id, event_tx, _app_state, slot_cancel| {
+                        djinn_agent::actors::slot::SlotHandle::spawn(
+                            slot_id,
+                            model_id,
+                            event_tx,
+                            agent.clone(),
+                            slot_cancel,
+                        )
+                        .into_djinn_slot()
+                    },
+                ),
             )
         }
 
@@ -3407,7 +3426,7 @@ mod inflight_ledger_tests {
         }
     }
 
-    fn wnd1_actor_for_tests(
+    pub(super) fn wnd1_actor_for_tests(
         db: &djinn_db::Database,
         events_tx: &tokio::sync::broadcast::Sender<djinn_core::events::DjinnEventEnvelope>,
         controlled_runtime: &Wnd1ControlledRuntime,
@@ -4922,6 +4941,7 @@ mod failover_chain_tests {
         );
 
         cancel.cancel();
+        unsafe { std::env::remove_var("DJINN_RUNTIME") };
     }
 
     /// AC1 (breaker path): When the first candidate's breaker is open,
@@ -8028,6 +8048,185 @@ mod build_admission_route_tests {
     }
 
     // ─── AC1: Controlled resume route ─────────────────────────────────────
+    /// Regression: the coordinator can select `lead` while the production
+    /// supervisor persists its first exact attempt as `worker`.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn live_lead_dispatch_correlates_worker_supervisor_attempt_and_run() {
+        fn force_lead(
+            _task: &djinn_core::models::Task,
+            _ctx: &crate::roles::DispatchContext,
+        ) -> bool {
+            true
+        }
+
+        let db = crate::test_helpers::create_test_db();
+        let (events_tx, _events_rx) = tokio::sync::broadcast::channel(256);
+        let fixture = seed_wnd1_ready_worker_tasks(&db, WND1_READY_TASK_COUNT).await;
+        configure_wnd1_user_max_sessions(&db, &fixture.created_by_user_id, &fixture.model_id, 1)
+            .await;
+        let task_id = fixture.task_ids[0].clone();
+        close_all_except(&db, &fixture, &task_id).await;
+        let task_repo = TaskRepository::new(db.clone(), djinn_core::events::EventBus::noop());
+        task_repo
+            .set_status(&task_id, "needs_task_review")
+            .await
+            .expect("seed worker-first supervisor flow");
+
+        let project = std::path::Path::new(&fixture.project_path);
+        for args in [
+            vec!["init", "--initial-branch=main"],
+            vec!["config", "user.email", "test@example.com"],
+            vec!["config", "user.name", "Test"],
+        ] {
+            assert!(
+                std::process::Command::new("git")
+                    .args(args)
+                    .current_dir(project)
+                    .status()
+                    .expect("run fixture git command")
+                    .success()
+            );
+        }
+        std::fs::write(project.join("README.md"), "identity fixture")
+            .expect("write fixture repository");
+        for args in [vec!["add", "."], vec!["commit", "-m", "fixture"]] {
+            assert!(
+                std::process::Command::new("git")
+                    .args(args)
+                    .current_dir(project)
+                    .status()
+                    .expect("commit fixture repository")
+                    .success()
+            );
+        }
+        let mirror_root = tempfile::tempdir().expect("create mirror root");
+        let mirror = std::sync::Arc::new(djinn_workspace::MirrorManager::new(mirror_root.path()));
+        mirror
+            .ensure_mirror(&fixture.project_id, &fixture.project_path)
+            .await
+            .expect("seed fixture mirror");
+        djinn_provider::repos::CredentialRepository::new(
+            db.clone(),
+            djinn_core::events::EventBus::noop(),
+        )
+        .set_with_owner(
+            "test",
+            "TEST_API_KEY",
+            "test-key",
+            Some(&fixture.created_by_user_id),
+        )
+        .await
+        .expect("seed test credential");
+
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let mut agent =
+            djinn_agent::test_helpers::agent_context_from_db(db.clone(), cancel.clone());
+        agent.mirror = Some(mirror);
+        let controlled = super::inflight_ledger_tests::Wnd1ControlledRuntime::new().0;
+        let mut actor =
+            super::inflight_ledger_tests::wnd1_actor_for_tests(&db, &events_tx, &controlled, 1);
+        actor.pool =
+            super::inflight_ledger_tests::Wnd1ControlledRuntime::spawn_production_supervisor_pool(
+                agent,
+                cancel.clone(),
+                1,
+            );
+        actor.role_registry = std::sync::Arc::new(crate::roles::RoleRegistry {
+            roles: HashMap::from([("lead", djinn_roles::AgentType::Lead)]),
+            dispatch_rules: vec![crate::roles::DispatchRule {
+                role_name: "lead",
+                claims: force_lead,
+            }],
+        });
+        unsafe { std::env::set_var("DJINN_RUNTIME", "test") };
+        actor.dispatch_ready_tasks(Some(&fixture.project_id)).await;
+
+        let attempt_repo = djinn_db::TaskAttemptRepository::new(db.clone());
+        let run_repo = djinn_db::TaskRunRepository::new(db.clone());
+        let (attempts, runs) = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let attempts = attempt_repo
+                    .list_for_task(&task_id)
+                    .await
+                    .expect("read attempts");
+                let runs = run_repo
+                    .list_for_task(&task_id)
+                    .await
+                    .expect("read task runs");
+                if attempts.iter().any(|attempt| attempt.role == "lead")
+                    && attempts.iter().any(|attempt| {
+                        attempt.role == "worker" && attempt.dispatch_key.starts_with("task-run:")
+                    })
+                    && !runs.is_empty()
+                {
+                    break (attempts, runs);
+                }
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        })
+        .await
+        .expect("production supervisor persistence must settle");
+        cancel.cancel();
+        unsafe { std::env::remove_var("DJINN_RUNTIME") };
+
+        let coordinator = attempts
+            .iter()
+            .find(|attempt| attempt.role == "lead")
+            .expect("lead coordinator attempt");
+        let supervisor = attempts
+            .iter()
+            .find(|attempt| {
+                attempt.role == "worker" && attempt.dispatch_key.starts_with("task-run:")
+            })
+            .expect("exact worker supervisor attempt");
+        let run = runs.first().expect("supervisor task run");
+        let owner = uuid::Uuid::parse_str(
+            coordinator
+                .dispatch_owner_incarnation_id
+                .as_deref()
+                .expect("coordinator owner UUID"),
+        )
+        .expect("parse coordinator owner UUID");
+        let supervisor_owner = uuid::Uuid::parse_str(
+            supervisor
+                .dispatch_owner_incarnation_id
+                .as_deref()
+                .expect("supervisor owner UUID"),
+        )
+        .expect("parse supervisor owner UUID");
+        let group = uuid::Uuid::parse_str(
+            coordinator
+                .dispatch_group_id
+                .as_deref()
+                .expect("coordinator group UUID"),
+        )
+        .expect("parse coordinator group UUID");
+        let supervisor_group = uuid::Uuid::parse_str(
+            supervisor
+                .dispatch_group_id
+                .as_deref()
+                .expect("supervisor group UUID"),
+        )
+        .expect("parse supervisor group UUID");
+        let run_group = uuid::Uuid::parse_str(
+            run.dispatch_group_id
+                .as_deref()
+                .expect("task-run group UUID"),
+        )
+        .expect("parse task-run group UUID");
+        assert_eq!(
+            owner, supervisor_owner,
+            "lead coordinator and worker supervisor owners must match"
+        );
+        assert_eq!(
+            group, supervisor_group,
+            "lead coordinator and worker supervisor groups must match"
+        );
+        assert_eq!(
+            group, run_group,
+            "task run must retain the exact dispatch group"
+        );
+    }
 
     /// Prove a controlled-resume dispatch (worker with resume metadata) still
     /// records an admission row before the pool create.
@@ -8082,33 +8281,6 @@ mod build_admission_route_tests {
             .await
             .expect("pool runner must fire for the resumed task");
         assert_eq!(dispatched_id, task_id);
-        let metadata = runtime
-            .resume_metadata(&task_id)
-            .expect("live coordinator dispatch must forward resume metadata to the slot");
-        let owner = metadata["dispatch_owner_incarnation_id"]
-            .as_str()
-            .expect("dispatch owner UUID");
-        let group = metadata["dispatch_group_id"]
-            .as_str()
-            .expect("dispatch group UUID");
-        uuid::Uuid::parse_str(owner).expect("owner must be an exact UUID");
-        uuid::Uuid::parse_str(group).expect("group must be an exact UUID");
-        let attempts = djinn_db::TaskAttemptRepository::new(db.clone())
-            .list_for_task(&task_id)
-            .await
-            .expect("read coordinator attempt");
-        let coordinator_attempt = attempts
-            .iter()
-            .find(|attempt| attempt.role == "worker")
-            .expect("coordinator dispatch attempt");
-        assert_eq!(
-            coordinator_attempt.dispatch_owner_incarnation_id.as_deref(),
-            Some(owner)
-        );
-        assert_eq!(
-            coordinator_attempt.dispatch_group_id.as_deref(),
-            Some(group)
-        );
 
         let snapshot = runtime.snapshot(&task_id);
         assert!(
