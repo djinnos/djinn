@@ -136,12 +136,12 @@ async fn creator_contract_owned_runner_rolls_back_then_is_idempotent() {
         contract_snapshot(&mut conn).await,
         expected_snapshot(&[("rollback-target", None)], "YES", false, false, 0)
     );
-    // `NOT VALID` retains the known NULL fixture row while the production
-    // predicate still permits its UPDATE to OP. The migration therefore gets
-    // past its UPDATE and deterministically fails only when it tries to add
-    // the same temporary constraint name.
+    // This fully valid test-only predicate admits both the known pre-update
+    // NULL and migration 134's exact OP backfill. The migration therefore
+    // gets past its UPDATE and deterministically fails only when it tries to
+    // add the same temporary constraint name.
     sqlx::query(
-        "ALTER TABLE tasks ADD CONSTRAINT tasks_created_by_user_id_not_null CHECK (created_by_user_id IS NOT NULL) NOT VALID",
+        "ALTER TABLE tasks ADD CONSTRAINT tasks_created_by_user_id_not_null CHECK (created_by_user_id IS NULL OR created_by_user_id = '00000000-0000-7000-8000-000000000133')",
     )
     .execute(&mut conn)
     .await
