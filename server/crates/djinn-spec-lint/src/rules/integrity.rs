@@ -26,13 +26,44 @@ pub(crate) fn lint_integrity(
     let mut anchors = HashSet::new();
     let mut text_nodes = Vec::new();
     let mut links = Vec::new();
-    collect(tree, &mut anchors, &mut text_nodes, &mut links);
+    let mut references = Vec::new();
+    let mut definitions = Vec::new();
+    let mut excluded = registered_block_spans
+        .iter()
+        .map(|span| SourceRange {
+            start: span.start,
+            end: span.end,
+        })
+        .collect();
+    collect(
+        body,
+        tree,
+        &mut anchors,
+        &mut text_nodes,
+        &mut links,
+        &mut references,
+        &mut definitions,
+        &mut excluded,
+    );
     anchors.extend(registered_block_ids.iter().map(|id| normalize_anchor(id)));
 
     for text in text_nodes {
         lint_text(body, text, &mut violations);
     }
-    lint_fences(body, registered_block_spans, &mut violations);
+    lint_fences(body, &excluded, &mut violations);
+
+    for reference in references {
+        if let Some(definition) = definitions.iter().find(|definition| {
+            definition
+                .identifier
+                .eq_ignore_ascii_case(&reference.identifier)
+        }) {
+            links.push(LinkOccurrence {
+                url: definition.url.clone(),
+                span: definition.span,
+            });
+        }
+    }
 
     for link in links {
         if !link.url.starts_with('#') {
@@ -61,11 +92,27 @@ struct LinkOccurrence {
     span: SourceRange,
 }
 
+#[derive(Debug)]
+struct ReferenceOccurrence {
+    identifier: String,
+}
+
+#[derive(Debug)]
+struct DefinitionOccurrence {
+    identifier: String,
+    url: String,
+    span: SourceRange,
+}
+
 fn collect(
+    body: &str,
     node: &Node,
     anchors: &mut HashSet<String>,
     text_nodes: &mut Vec<SourceRange>,
     links: &mut Vec<LinkOccurrence>,
+    references: &mut Vec<ReferenceOccurrence>,
+    definitions: &mut Vec<DefinitionOccurrence>,
+    excluded: &mut Vec<SourceRange>,
 ) {
     match node {
         Node::Heading(heading) => {
@@ -73,55 +120,110 @@ fn collect(
             node_texts(&heading.children, &mut text);
             anchors.insert(normalize_anchor(&text));
             for child in &heading.children {
-                collect(child, anchors, text_nodes, links);
+                collect(
+                    body,
+                    child,
+                    anchors,
+                    text_nodes,
+                    links,
+                    references,
+                    definitions,
+                    excluded,
+                );
             }
         }
         Node::Text(text) => {
             if let Some(position) = &text.position {
-                text_nodes.push(SourceRange {
-                    start: position.start.offset,
-                    end: position.end.offset,
-                });
+                text_nodes.push(position_range(position));
             }
         }
         Node::Link(link) => {
             if let Some(position) = &link.position {
                 links.push(LinkOccurrence {
                     url: link.url.clone(),
-                    span: SourceRange {
-                        start: position.start.offset,
-                        end: position.end.offset,
-                    },
+                    span: position_range(position),
                 });
             }
-            // Labels are prose, destinations are represented only by `url`.
             for child in &link.children {
-                collect(child, anchors, text_nodes, links);
+                collect(
+                    body,
+                    child,
+                    anchors,
+                    text_nodes,
+                    links,
+                    references,
+                    definitions,
+                    excluded,
+                );
+            }
+        }
+        Node::LinkReference(link) => {
+            references.push(ReferenceOccurrence {
+                identifier: link.identifier.clone(),
+            });
+            for child in &link.children {
+                collect(
+                    body,
+                    child,
+                    anchors,
+                    text_nodes,
+                    links,
+                    references,
+                    definitions,
+                    excluded,
+                );
+            }
+        }
+        Node::Definition(definition) => {
+            if let Some(position) = &definition.position {
+                definitions.push(DefinitionOccurrence {
+                    identifier: definition.identifier.clone(),
+                    url: definition.url.clone(),
+                    span: position_range(position),
+                });
             }
         }
         Node::MdxJsxFlowElement(element) => collect_element(
+            body,
             element.name.as_deref(),
             &element.children,
+            element.position.as_ref().map(position_range),
             anchors,
             text_nodes,
             links,
+            references,
+            definitions,
+            excluded,
         ),
         Node::MdxJsxTextElement(element) => collect_element(
+            body,
             element.name.as_deref(),
             &element.children,
+            element.position.as_ref().map(position_range),
             anchors,
             text_nodes,
             links,
+            references,
+            definitions,
+            excluded,
         ),
-        Node::Code(_)
-        | Node::InlineCode(_)
-        | Node::Html(_)
-        | Node::Image(_)
-        | Node::ImageReference(_) => {}
+        Node::MdxTextExpression(expression) => add_position(&expression.position, excluded),
+        Node::MdxFlowExpression(expression) => add_position(&expression.position, excluded),
+        Node::Html(html) => add_position(&html.position, excluded),
+        Node::Code(_) | Node::InlineCode(_) | Node::Image(_) | Node::ImageReference(_) => {}
         _ => {
             if let Some(children) = node.children() {
                 for child in children {
-                    collect(child, anchors, text_nodes, links);
+                    collect(
+                        body,
+                        child,
+                        anchors,
+                        text_nodes,
+                        links,
+                        references,
+                        definitions,
+                        excluded,
+                    );
                 }
             }
         }
@@ -129,21 +231,74 @@ fn collect(
 }
 
 fn collect_element(
+    body: &str,
     name: Option<&str>,
     children: &[Node],
+    position: Option<SourceRange>,
     anchors: &mut HashSet<String>,
     text_nodes: &mut Vec<SourceRange>,
     links: &mut Vec<LinkOccurrence>,
+    references: &mut Vec<ReferenceOccurrence>,
+    definitions: &mut Vec<DefinitionOccurrence>,
+    excluded: &mut Vec<SourceRange>,
 ) {
-    // A registered block's contents are raw component payload, not document prose.
     if name.is_some_and(|tag| proposal_block_definition_for_tag(tag).is_some()) {
         return;
     }
-    // JSX attributes are deliberately not traversed: they are properties/code,
-    // rather than rendered Markdown text. Children of ordinary JSX remain prose.
-    for child in children {
-        collect(child, anchors, text_nodes, links);
+    if let Some(range) = position.and_then(|range| opening_tag_span(body, range.start)) {
+        excluded.push(range);
     }
+    for child in children {
+        collect(
+            body,
+            child,
+            anchors,
+            text_nodes,
+            links,
+            references,
+            definitions,
+            excluded,
+        );
+    }
+}
+
+fn position_range(position: &markdown::unist::Position) -> SourceRange {
+    SourceRange {
+        start: position.start.offset,
+        end: position.end.offset,
+    }
+}
+
+fn add_position(position: &Option<markdown::unist::Position>, excluded: &mut Vec<SourceRange>) {
+    if let Some(position) = position {
+        excluded.push(position_range(position));
+    }
+}
+
+fn opening_tag_span(body: &str, start: usize) -> Option<SourceRange> {
+    let bytes = body.as_bytes();
+    let (mut index, mut quote, mut braces) = (start, None, 0usize);
+    while index < bytes.len() {
+        let byte = bytes[index];
+        if let Some(delimiter) = quote {
+            if byte == delimiter {
+                quote = None;
+            }
+        } else if matches!(byte, b'\'' | b'"') {
+            quote = Some(byte);
+        } else if byte == b'{' {
+            braces += 1;
+        } else if byte == b'}' {
+            braces = braces.saturating_sub(1);
+        } else if byte == b'>' && braces == 0 {
+            return Some(SourceRange {
+                start,
+                end: index + 1,
+            });
+        }
+        index += 1;
+    }
+    None
 }
 
 fn node_texts(nodes: &[Node], output: &mut String) {
@@ -215,14 +370,17 @@ fn url_or_path_token(text: &str, offset: usize) -> bool {
     let start = text[..offset]
         .rfind(|c: char| c.is_whitespace())
         .map_or(0, |index| index + 1);
-    let token = &text[start..];
+    let end = text[offset..]
+        .find(|c: char| c.is_whitespace())
+        .map_or(text.len(), |index| offset + index);
+    let token = &text[start..end];
     token.starts_with("http://")
         || token.starts_with("https://")
         || token.starts_with("www.")
         || token.contains('/')
 }
 
-fn lint_fences(body: &str, excluded: &[Utf8ByteSpan], violations: &mut Vec<Violation>) {
+fn lint_fences(body: &str, excluded: &[SourceRange], violations: &mut Vec<Violation>) {
     let mut opening: Option<(u8, usize, usize)> = None;
     let mut line_start = 0;
     for line in body.split_inclusive('\n') {
@@ -284,13 +442,16 @@ fn fence_run(line: &str, absolute_start: usize) -> Option<(u8, usize, usize, boo
 
 fn link_destination_span(body: &str, span: SourceRange, url: &str) -> Option<SourceRange> {
     let source = &body[span.start..span.end];
-    let open = source.rfind('(')? + 1;
-    let close = source[open..].find(')')? + open;
-    let destination = &source[open..close];
-    let start = destination.find(url)?;
+    let start = if let Some(open) = source.rfind('(') {
+        let open = open + 1;
+        let close = source[open..].find(')')? + open;
+        source[open..close].find(url).map(|start| open + start)
+    } else {
+        source.find(url)
+    }?;
     Some(SourceRange {
-        start: span.start + open + start,
-        end: span.start + open + start + url.len(),
+        start: span.start + start,
+        end: span.start + start + url.len(),
     })
 }
 
@@ -348,6 +509,32 @@ mod tests {
         assert_eq!(
             codes("é\n~~~\nraw"),
             vec![("UNBALANCED_CODE_FENCE".into(), "~~~".into())]
+        );
+    }
+
+    #[test]
+    fn splice_candidates_stop_at_the_next_whitespace_token_boundary() {
+        assert_eq!(
+            codes("Broken.Thing /docs"),
+            vec![("GLUED_TERMINAL_TOKEN".into(), ".".into())]
+        );
+    }
+
+    #[test]
+    fn multiline_html_and_jsx_properties_are_not_fences() {
+        for body in [
+            "<div data-template=\"\n~~~\nvalue\n\"></div>",
+            "<Widget template={`\n~~~\nvalue\n`} />",
+        ] {
+            assert!(codes(body).is_empty(), "{body:?}");
+        }
+    }
+
+    #[test]
+    fn reference_links_resolve_definition_destinations() {
+        assert_eq!(
+            codes("[jump][target]\n\n[target]: #missing"),
+            vec![("UNRESOLVED_LOCAL_REFERENCE".into(), "#missing".into())]
         );
     }
 
