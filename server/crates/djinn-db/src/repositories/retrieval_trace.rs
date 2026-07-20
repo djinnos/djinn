@@ -53,6 +53,10 @@ fn format_retrieval_trace_utc_timestamp(timestamp: DateTime<Utc>) -> String {
 /// Current schema version for newly inserted trace rows.
 pub const RETRIEVAL_TRACE_SCHEMA_VERSION: i32 = 1;
 
+/// Taxonomy version written by the additive terminal API. Legacy writers leave
+/// this NULL so old candidate JSON is never inferred to be taxonomy-v1 data.
+pub const KNOWLEDGE_TRACE_TAXONOMY_VERSION_V1: i32 = 1;
+
 /// Default candidate cap applied before persistence.
 ///
 /// The proposal suggests 50 unless benchmarks justify a lower value
@@ -178,6 +182,105 @@ pub struct CreateRetrievalTraceWithSemanticsParams<'a> {
     /// Persisted verbatim (for example `cohort:canary`).
     pub rollout_label: &'a str,
     pub outcome: RetrievalTraceOutcome,
+}
+
+/// Terminal result for a taxonomy-v1 retrieval attempt.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum KnowledgeTraceTerminalState {
+    Success,
+    Error,
+    Cancelled,
+}
+impl KnowledgeTraceTerminalState {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Success => "success",
+            Self::Error => "error",
+            Self::Cancelled => "cancelled",
+        }
+    }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KnowledgeTraceDispositionCounts {
+    pub confidence_filtered: i32,
+    pub not_top_k: i32,
+    pub oversized_skipped: i32,
+    pub injected: i32,
+    pub budget_pruned: i32,
+}
+pub struct CreateRetrievalTraceTerminalParams<'a> {
+    pub trace: CreateRetrievalTraceParams<'a>,
+    pub terminal_state: KnowledgeTraceTerminalState,
+    pub terminal_at: &'a str,
+    pub candidate_count: Option<i32>,
+    pub injected_count: Option<i32>,
+    pub dispositions: Option<KnowledgeTraceDispositionCounts>,
+}
+fn validate_terminal_trace(params: &CreateRetrievalTraceTerminalParams<'_>) -> Result<()> {
+    parse_retrieval_trace_utc_timestamp(params.terminal_at, "terminal_at")?;
+    match params.terminal_state {
+        KnowledgeTraceTerminalState::Success => {
+            let candidate_count = params.candidate_count.ok_or_else(|| {
+                DbError::InvalidData(
+                    "successful taxonomy-v1 trace requires candidate_count".to_owned(),
+                )
+            })?;
+            let injected_count = params.injected_count.ok_or_else(|| {
+                DbError::InvalidData(
+                    "successful taxonomy-v1 trace requires injected_count".to_owned(),
+                )
+            })?;
+            let counts = params.dispositions.ok_or_else(|| {
+                DbError::InvalidData(
+                    "successful taxonomy-v1 trace requires all disposition counts".to_owned(),
+                )
+            })?;
+            if [
+                candidate_count,
+                injected_count,
+                counts.confidence_filtered,
+                counts.not_top_k,
+                counts.oversized_skipped,
+                counts.injected,
+                counts.budget_pruned,
+            ]
+            .iter()
+            .any(|n| *n < 0)
+            {
+                return Err(DbError::InvalidData(
+                    "taxonomy-v1 candidate and disposition counts must be nonnegative".to_owned(),
+                ));
+            }
+            if injected_count != counts.injected {
+                return Err(DbError::InvalidData(
+                    "taxonomy-v1 injected_count must equal injected disposition count".to_owned(),
+                ));
+            }
+            let total = counts.confidence_filtered as i64
+                + counts.not_top_k as i64
+                + counts.oversized_skipped as i64
+                + counts.injected as i64
+                + counts.budget_pruned as i64;
+            if total != candidate_count as i64 {
+                return Err(DbError::InvalidData(
+                    "taxonomy-v1 disposition counts must sum exactly to candidate_count".to_owned(),
+                ));
+            }
+        }
+        KnowledgeTraceTerminalState::Error | KnowledgeTraceTerminalState::Cancelled
+            if params.candidate_count.is_some()
+                || params.injected_count.is_some()
+                || params.dispositions.is_some() =>
+        {
+            return Err(DbError::InvalidData(
+                "error and cancelled taxonomy-v1 terminals must not include candidate dispositions"
+                    .to_owned(),
+            ));
+        }
+        KnowledgeTraceTerminalState::Error | KnowledgeTraceTerminalState::Cancelled => {}
+    }
+    Ok(())
 }
 
 impl RetrievalTraceEntryPoint {
@@ -553,6 +656,15 @@ pub struct RetrievalTraceRow {
     pub rollout_label: String,
     /// Typed trace-level result, distinct from per-candidate outcomes.
     pub outcome: RetrievalTraceOutcome,
+    pub knowledge_trace_taxonomy_version: Option<i32>,
+    pub terminal_state: Option<String>,
+    pub terminal_at: Option<String>,
+    pub candidate_count: Option<i32>,
+    pub injected_count: Option<i32>,
+    pub confidence_filtered_count: Option<i32>,
+    pub not_top_k_count: Option<i32>,
+    pub oversized_skipped_count: Option<i32>,
+    pub budget_pruned_count: Option<i32>,
     /// Opaque trigger context.
     pub trigger: Option<serde_json::Value>,
     /// JSONB array of [`TraceCandidate`] DTOs.
@@ -690,7 +802,7 @@ impl RetrievalTraceRepository {
         self.db.ensure_initialized().await?;
         let rows: Vec<RetrievalTraceRow> = sqlx::query_as(
             r#"SELECT id, schema_version, project_id, session_id, task_run_id, task_id,
-                entry_point, rollout_label, outcome, trigger, candidates,
+                entry_point, rollout_label, outcome, knowledge_trace_taxonomy_version, terminal_state, terminal_at, candidate_count, injected_count, confidence_filtered_count, not_top_k_count, oversized_skipped_count, budget_pruned_count, trigger, candidates,
                 candidate_cap, candidate_cap_exceeded, sampling_metadata,
                 durations_ms, estimated_injected_tokens, created_at
             FROM retrieval_traces
@@ -742,6 +854,18 @@ impl RetrievalTraceRepository {
         )?;
         self.insert_with_values(params.trace, params.rollout_label, params.outcome)
             .await
+    }
+
+    pub async fn insert_terminal(
+        &self,
+        params: CreateRetrievalTraceTerminalParams<'_>,
+    ) -> Result<RetrievalTraceRow> {
+        validate_terminal_trace(&params)?;
+        self.db.ensure_initialized().await?;
+        let id = uuid::Uuid::now_v7().to_string();
+        let counts = params.dispositions;
+        sqlx::query_as::<_, RetrievalTraceRow>(r#"INSERT INTO retrieval_traces (id,schema_version,project_id,session_id,task_run_id,task_id,entry_point,trigger,candidates,candidate_cap,candidate_cap_exceeded,sampling_metadata,durations_ms,estimated_injected_tokens,rollout_label,outcome,knowledge_trace_taxonomy_version,terminal_state,terminal_at,candidate_count,injected_count,confidence_filtered_count,not_top_k_count,oversized_skipped_count,budget_pruned_count) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,'enabled',$15,$16,$17,$18,$19,$20,$21,$22,$23,$24) RETURNING id,schema_version,project_id,session_id,task_run_id,task_id,entry_point,rollout_label,outcome,knowledge_trace_taxonomy_version,terminal_state,terminal_at,candidate_count,injected_count,confidence_filtered_count,not_top_k_count,oversized_skipped_count,budget_pruned_count,trigger,candidates,candidate_cap,candidate_cap_exceeded,sampling_metadata,durations_ms,estimated_injected_tokens,created_at"#)
+        .bind(&id).bind(RETRIEVAL_TRACE_SCHEMA_VERSION).bind(params.trace.project_id).bind(params.trace.session_id).bind(params.trace.task_run_id).bind(params.trace.task_id).bind(params.trace.entry_point.as_str()).bind(params.trace.trigger).bind(params.trace.candidates).bind(params.trace.candidate_cap).bind(params.trace.candidate_cap_exceeded).bind(params.trace.sampling_metadata).bind(params.trace.durations_ms).bind(params.trace.estimated_injected_tokens).bind(if params.terminal_state==KnowledgeTraceTerminalState::Success { RetrievalTraceOutcome::Injected.as_str() } else { RetrievalTraceOutcome::Error.as_str() }).bind(KNOWLEDGE_TRACE_TAXONOMY_VERSION_V1).bind(params.terminal_state.as_str()).bind(params.terminal_at).bind(params.candidate_count).bind(params.injected_count).bind(counts.map(|v|v.confidence_filtered)).bind(counts.map(|v|v.not_top_k)).bind(counts.map(|v|v.oversized_skipped)).bind(counts.map(|v|v.budget_pruned)).fetch_one(self.db.pool()).await.map_err(Into::into)
     }
 
     async fn insert_with_values(
@@ -859,7 +983,7 @@ impl RetrievalTraceRepository {
         let sql = format!(
             r#"SELECT
                 id, schema_version, project_id, session_id, task_run_id, task_id,
-                entry_point, rollout_label, outcome, trigger, candidates,
+                entry_point, rollout_label, outcome, knowledge_trace_taxonomy_version, terminal_state, terminal_at, candidate_count, injected_count, confidence_filtered_count, not_top_k_count, oversized_skipped_count, budget_pruned_count, trigger, candidates,
                 candidate_cap, candidate_cap_exceeded, sampling_metadata,
                 durations_ms, estimated_injected_tokens, created_at
             FROM retrieval_traces
@@ -1082,7 +1206,7 @@ impl RetrievalTraceRepository {
 const RETRIEVAL_TRACE_SELECT_BY_ID: &str = r#"
     SELECT
         id, schema_version, project_id, session_id, task_run_id, task_id,
-        entry_point, rollout_label, outcome, trigger, candidates,
+        entry_point, rollout_label, outcome, knowledge_trace_taxonomy_version, terminal_state, terminal_at, candidate_count, injected_count, confidence_filtered_count, not_top_k_count, oversized_skipped_count, budget_pruned_count, trigger, candidates,
         candidate_cap, candidate_cap_exceeded, sampling_metadata,
         durations_ms, estimated_injected_tokens, created_at
     FROM retrieval_traces
