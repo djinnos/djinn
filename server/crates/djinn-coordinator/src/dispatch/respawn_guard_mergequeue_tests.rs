@@ -81,9 +81,9 @@ async fn mergequeue_reopen_after_completed_worker_re_asserts_rework_not_adopt() 
     // A rework worker dispatches and finishes: a NEWER non-reopened terminal
     // attempt than the marker (the masking row).
     let dk = super::super::attempt_lifecycle::make_dispatch_key(&task.id, "worker");
-    super::super::attempt_lifecycle::record_dispatch_start(&db, &task.id, "worker", None, &dk)
+    super::super::attempt_lifecycle::record_legacy_start(&db, &task.id, "worker", None, &dk)
         .await
-        .expect("record_dispatch_start should succeed");
+        .expect("record_legacy_start should succeed");
     super::super::attempt_lifecycle::advance_latest_to_terminal(
         &db,
         super::super::attempt_lifecycle::TerminalAdvancementParams {
@@ -160,9 +160,9 @@ async fn adopt_then_handoff_then_mergequeue_loop_bypasses_adoption() {
 
     // A rework worker runs and completes (masking row lands).
     let dk = super::super::attempt_lifecycle::make_dispatch_key(&task.id, "worker");
-    super::super::attempt_lifecycle::record_dispatch_start(&db, &task.id, "worker", None, &dk)
+    super::super::attempt_lifecycle::record_legacy_start(&db, &task.id, "worker", None, &dk)
         .await
-        .expect("record_dispatch_start should succeed");
+        .expect("record_legacy_start should succeed");
     super::super::attempt_lifecycle::advance_latest_to_terminal(
         &db,
         super::super::attempt_lifecycle::TerminalAdvancementParams {
@@ -200,9 +200,9 @@ async fn healthy_adopted_pr_with_completed_attempt_still_adopts() {
     let task = create_task(&db).await;
 
     let dk = super::super::attempt_lifecycle::make_dispatch_key(&task.id, "worker");
-    super::super::attempt_lifecycle::record_dispatch_start(&db, &task.id, "worker", None, &dk)
+    super::super::attempt_lifecycle::record_legacy_start(&db, &task.id, "worker", None, &dk)
         .await
-        .expect("record_dispatch_start should succeed");
+        .expect("record_legacy_start should succeed");
     super::super::attempt_lifecycle::advance_latest_to_terminal(
         &db,
         super::super::attempt_lifecycle::TerminalAdvancementParams {

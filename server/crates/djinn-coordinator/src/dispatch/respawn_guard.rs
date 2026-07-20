@@ -48,7 +48,7 @@
 //!
 //! Call [`run_respawn_guard`] before the spawn/admission path in
 //! `dispatch_ready_tasks`.  Only when it returns [`RespawnGuardDecision::Allow`]
-//! should the existing `try_dispatch_to_pool` + `record_dispatch_start` path
+//! should the existing `try_dispatch_to_pool` + `record_dispatch_start_with_identity` path
 //! proceed.
 
 use djinn_core::models::CiStatus;
@@ -269,7 +269,7 @@ pub async fn run_respawn_guard(
 /// skipped: prior guard ticks must not mask the rework signal.
 ///
 /// The bypass window is self-closing (no permanent adoption bypass): the
-/// moment a rework worker dispatches, `record_dispatch_start` inserts a
+/// moment a rework worker dispatches, `record_dispatch_start_with_identity` inserts a
 /// newer `pending` row, which becomes the latest attempt and step 2 defers
 /// any further dispatch; on submit/merge it advances to
 /// `submitted`/`completed`, restoring adoption for the then-healthy PR.

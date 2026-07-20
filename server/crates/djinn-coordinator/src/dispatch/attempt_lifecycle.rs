@@ -11,17 +11,10 @@ use djinn_db::{
     TaskAttemptRepository, TerminalTaskAttemptParams,
 };
 
-/// Record the start of a dispatch attempt.
-///
-/// Creates or idempotently returns the pending `task_attempts` row for the
-/// given `dispatch_key`. Returns the attempt id on success.
-///
-/// `session_id` is passed when the session identity is known at dispatch time
-/// (e.g. a resume or continuation); `None` when the session has not been
-/// created yet (the common case for fresh dispatches).
-///
-/// Best-effort: errors are logged and return `None` rather than propagating.
-pub async fn record_dispatch_start(
+/// Create a legacy pending attempt without dispatch identity for tests that
+/// exercise mixed-version compatibility and unrelated lifecycle behavior.
+#[cfg(test)]
+pub(crate) async fn record_legacy_start(
     db: &djinn_db::Database,
     task_id: &str,
     role: &str,
@@ -519,7 +512,7 @@ mod tests {
         assert!(key.len() <= djinn_core::models::task_attempt::TASK_ATTEMPT_DISPATCH_KEY_MAX_LEN);
     }
 
-    // ─── record_dispatch_start tests ────────────────────────────────────
+    // ─── record_legacy_start tests ────────────────────────────────────
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn dispatch_start_creates_pending_row() {
@@ -527,7 +520,7 @@ mod tests {
         let task = create_task(&db).await;
         let dk = make_dispatch_key(&task.id, "worker");
 
-        let attempt_id = record_dispatch_start(&db, &task.id, "worker", None, &dk)
+        let attempt_id = record_legacy_start(&db, &task.id, "worker", None, &dk)
             .await
             .expect("should return attempt id");
 
@@ -546,7 +539,7 @@ mod tests {
         let task = create_task(&db).await;
         let dk = make_dispatch_key(&task.id, "planner");
 
-        let attempt_id = record_dispatch_start(&db, &task.id, "planner", None, &dk)
+        let attempt_id = record_legacy_start(&db, &task.id, "planner", None, &dk)
             .await
             .unwrap();
 
@@ -564,10 +557,10 @@ mod tests {
         let task = create_task(&db).await;
         let dk = make_dispatch_key(&task.id, "worker");
 
-        let id1 = record_dispatch_start(&db, &task.id, "worker", None, &dk)
+        let id1 = record_legacy_start(&db, &task.id, "worker", None, &dk)
             .await
             .unwrap();
-        let id2 = record_dispatch_start(&db, &task.id, "worker", None, &dk)
+        let id2 = record_legacy_start(&db, &task.id, "worker", None, &dk)
             .await
             .unwrap();
 
@@ -584,10 +577,10 @@ mod tests {
 
         let dk_w = make_dispatch_key(&task.id, "worker");
         let dk_r = make_dispatch_key(&task.id, "reviewer");
-        let id_w = record_dispatch_start(&db, &task.id, "worker", None, &dk_w)
+        let id_w = record_legacy_start(&db, &task.id, "worker", None, &dk_w)
             .await
             .unwrap();
-        let id_r = record_dispatch_start(&db, &task.id, "reviewer", None, &dk_r)
+        let id_r = record_legacy_start(&db, &task.id, "reviewer", None, &dk_r)
             .await
             .unwrap();
 
@@ -677,7 +670,7 @@ mod tests {
         let db = test_db();
         let task = create_task(&db).await;
         let dk = make_dispatch_key(&task.id, "worker");
-        let attempt_id = record_dispatch_start(&db, &task.id, "worker", None, &dk)
+        let attempt_id = record_legacy_start(&db, &task.id, "worker", None, &dk)
             .await
             .unwrap();
 
@@ -709,7 +702,7 @@ mod tests {
         let db = test_db();
         let task = create_task(&db).await;
         let dk = make_dispatch_key(&task.id, "worker");
-        let attempt_id = record_dispatch_start(&db, &task.id, "worker", None, &dk)
+        let attempt_id = record_legacy_start(&db, &task.id, "worker", None, &dk)
             .await
             .unwrap();
 
@@ -763,7 +756,7 @@ mod tests {
         let db = test_db();
         let task = create_task(&db).await;
         let dk = make_dispatch_key(&task.id, "worker");
-        let attempt_id = record_dispatch_start(&db, &task.id, "worker", None, &dk)
+        let attempt_id = record_legacy_start(&db, &task.id, "worker", None, &dk)
             .await
             .unwrap();
 
@@ -830,7 +823,7 @@ mod tests {
         let db = test_db();
         let task = create_task(&db).await;
         let dk = make_dispatch_key(&task.id, "worker");
-        let attempt_id = record_dispatch_start(&db, &task.id, "worker", None, &dk)
+        let attempt_id = record_legacy_start(&db, &task.id, "worker", None, &dk)
             .await
             .unwrap();
 
@@ -880,7 +873,7 @@ mod tests {
         let db = test_db();
         let task = create_task(&db).await;
         let dk = make_dispatch_key(&task.id, "worker");
-        let attempt_id = record_dispatch_start(&db, &task.id, "worker", None, &dk)
+        let attempt_id = record_legacy_start(&db, &task.id, "worker", None, &dk)
             .await
             .unwrap();
 
@@ -926,7 +919,7 @@ mod tests {
         let db = test_db();
         let task = create_task(&db).await;
         let dk = make_dispatch_key(&task.id, "worker");
-        let attempt_id = record_dispatch_start(&db, &task.id, "worker", None, &dk)
+        let attempt_id = record_legacy_start(&db, &task.id, "worker", None, &dk)
             .await
             .unwrap();
 

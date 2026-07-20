@@ -305,7 +305,7 @@ impl TaskAttemptRepository {
     /// Allocate the next monotonic `attempt_seq` for a task.
     ///
     /// `MAX + 1` is read outside the INSERT's snapshot, so two concurrent
-    /// allocators for the same task (the coordinator's `record_dispatch_start`
+    /// allocators for the same task (the coordinator's `record_dispatch_start_with_identity`
     /// and the slot supervisor's exact-attempt allocation race on every
     /// dispatch) can compute the same value and one loses on
     /// `task_attempts_task_id_attempt_seq_unique`.  Every auto-allocating

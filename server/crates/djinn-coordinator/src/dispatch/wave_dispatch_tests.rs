@@ -14,7 +14,7 @@
 //!    `WaveDispatchAttemptOutcome` → `build_wave_dispatch_terminal_params` →
 //!    `advance_latest_to_terminal` → persisted `task_attempts` row.
 
-use super::attempt_lifecycle::{make_dispatch_key, record_dispatch_start};
+use super::attempt_lifecycle::{make_dispatch_key, record_legacy_start};
 use super::wave_dispatch::{
     WaveDispatchAttemptOutcome, build_wave_dispatch_terminal_params,
     is_oversized_blob_push_rejection, terminalize_wave_dispatch_attempt_on_db,
@@ -55,7 +55,7 @@ async fn lifecycle_create_task(db: &Database) -> Task {
 async fn setup_pending_attempt(db: &Database) -> (Task, String) {
     let task = lifecycle_create_task(db).await;
     let dk = make_dispatch_key(&task.id, "worker");
-    let attempt_id = record_dispatch_start(db, &task.id, "worker", None, &dk)
+    let attempt_id = record_legacy_start(db, &task.id, "worker", None, &dk)
         .await
         .unwrap();
     (task, attempt_id)
