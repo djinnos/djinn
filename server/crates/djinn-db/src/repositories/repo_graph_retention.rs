@@ -14,11 +14,11 @@
 //!
 //! Lock order preserved by this module:
 //! project advisory lock → compatibility row when publication is the actor →
-//! current pointer → candidate → generation stream pin.
+//! current pointer → candidate row → generation stream pin.
 //!
 //! Bounded deadlock/serialization retry ([`retry_on_serialization_failure`])
-//! is applied as defense in depth; correctness does not depend on choosing a
-//! deadlock victim because the lock order is consistent and the stream pin is
+//! is applied as defense in depth; correctness does not depend on choosing
+//! a deadlock victim because the lock order is consistent and the stream pin is
 //! nonblocking.
 
 use crate::database::Database;
@@ -42,10 +42,12 @@ pub const DEFAULT_RETENTION_HISTORY_N: usize = 3;
 /// Minimum valid `history_n` value.
 pub const MIN_RETENTION_HISTORY_N: usize = 1;
 
-/// Bounded scan limit: examine at most this many non-survivor rows while
-/// filling a batch, so a huge backlog cannot cause an unbounded read even
-/// though only [`MAX_RETENTION_BATCH`] rows are ever deleted.
-const RETENTION_SCAN_LIMIT: usize = 512;
+/// Keyset page size for the non-survivor scan. The scan pages through
+/// generations oldest-`publish_seq`-first, continuing past actively-pinned
+/// rows until [`MAX_RETENTION_BATCH`] actual candidates are collected or the
+/// non-survivor set is exhausted. This is a *page* size, not a total cap —
+/// the scan keeps fetching the next page until it has enough candidates.
+const RETENTION_SCAN_PAGE_SIZE: i64 = 512;
 
 /// Retention operating mode. The leader runner selects `off`/`dry_run`/`delete`
 /// from validated configuration.
@@ -198,43 +200,25 @@ impl RepoGraphRetentionRepository {
             current_generation_id.as_deref(),
         )
         .await?;
-
-        // Enumerate non-survivors deterministically, scanning past actively
-        // pinned rows, up to MAX_RETENTION_BATCH actual candidates.
-        let scan = enumerate_non_survivors(&mut tx, project_id, &survivor_ids).await?;
-        let candidates = scan.candidates;
         let total_survivors = survivor_ids.len();
 
-        if mode == RetentionMode::DryRun {
-            // Dry-run uses the same selection/recheck logic but performs no
-            // deletes.
-            tx.rollback().await?;
-            return Ok(RetentionSweepOutcome {
-                mode,
-                candidates,
-                deleted: 0,
-                survivors: total_survivors,
-                skipped_active_pin: scan.skipped_active_pin,
-                skipped_now_survivor: scan.skipped_now_survivor,
-                skipped_removed_concurrently: scan.skipped_removed_concurrently,
-                retries: 0,
-            });
-        }
+        // Process candidates in a single unified pass that preserves the lock
+        // order (project advisory → current → candidate row → stream pin),
+        // pages past actively-pinned rows, and fills a batch of up to
+        // MAX_RETENTION_BATCH actual candidates.
+        let result = process_candidates(&mut tx, project_id, &survivor_ids, mode).await;
 
-        // Delete mode: for each candidate, recheck candidacy under row lock,
-        // take the nonblocking exclusive session pin, delete compatibility row
-        // before the immutable generation, and let FK cascades remove the rest.
-        let delete_result = delete_candidates(&mut tx, &scan.candidate_ids, &survivor_ids).await;
-
-        match delete_result {
-            Ok((deleted, pinned_keys)) => {
-                // Release all session pins before commit. If any unlock returns
-                // false or errors, discard the connection to avoid leaking
-                // session advisory locks into the pool.
-                for key in &pinned_keys {
+        match result {
+            Ok(processing) => {
+                // Release all session pins still held (delete mode) before
+                // commit. Dry-run releases each pin inline during processing.
+                for key in &processing.pinned_keys {
                     match release_generation_stream_pin_exclusive(&mut tx, *key).await {
                         Ok(true) => { /* released cleanly */ }
                         Ok(false) => {
+                            // The session did not hold this exclusive lock.
+                            // Discard the connection: rollback does not release
+                            // session advisory locks.
                             drop(tx);
                             conn.close_on_drop();
                             return Err(DbError::InvalidData(format!(
@@ -244,30 +228,40 @@ impl RepoGraphRetentionRepository {
                             )));
                         }
                         Err(error) => {
+                            // The unlock query itself failed (e.g. cancellation
+                            // or timeout). The session may still hold the lock.
                             drop(tx);
                             conn.close_on_drop();
                             return Err(DbError::Sqlx(error));
                         }
                     }
                 }
-                tx.commit().await?;
+
+                if mode == RetentionMode::DryRun {
+                    tx.rollback().await?;
+                } else {
+                    tx.commit().await?;
+                }
+
                 Ok(RetentionSweepOutcome {
                     mode,
-                    candidates,
-                    deleted,
+                    candidates: processing.candidates,
+                    deleted: processing.deleted,
                     survivors: total_survivors,
-                    skipped_active_pin: scan.skipped_active_pin,
-                    skipped_now_survivor: scan.skipped_now_survivor,
-                    skipped_removed_concurrently: scan.skipped_removed_concurrently,
+                    skipped_active_pin: processing.skipped_active_pin,
+                    skipped_now_survivor: processing.skipped_now_survivor,
+                    skipped_removed_concurrently: processing.skipped_removed_concurrently,
                     retries: 0,
                 })
             }
             Err(error) => {
-                // Error after potentially acquiring some session pins: rollback
-                // the transaction and discard the connection so PostgreSQL
+                // Any error during candidate processing (including dry-run pin
+                // release failures): discard the connection so PostgreSQL
                 // releases all session advisory locks when the backend closes.
-                // Correctness does not depend on a deadlock victim because the
-                // nonblocking pin never waits.
+                // Transaction rollback does not release session advisory locks,
+                // so discarding is the only safe path. Correctness does not
+                // depend on a deadlock victim because the nonblocking pin never
+                // waits.
                 drop(tx);
                 conn.close_on_drop();
                 Err(error)
@@ -347,167 +341,196 @@ async fn recompute_survivor_set(
     Ok(survivors)
 }
 
-/// Deterministically enumerated non-survivor scan result. Candidates are the
-/// actual deletion targets (bounded to [`MAX_RETENTION_BATCH`]); the skip
-/// counters reflect rows scanned past while filling the batch.
+/// Bounded result of processing non-survivor candidates in one sweep.
 #[derive(Clone, Debug, Default)]
-struct NonSurvivorScan {
-    /// Deterministic, oldest-publish_seq-first candidate ids.
-    candidate_ids: Vec<String>,
+struct CandidateProcessingResult {
+    /// How many non-survivor generations were confirmed as actual candidates
+    /// (bounded by [`MAX_RETENTION_BATCH`]).
     candidates: usize,
+    /// How many generations were actually deleted (0 in dry-run).
+    deleted: usize,
+    /// Bounded skip counters by fixed class.
     skipped_active_pin: usize,
     skipped_now_survivor: usize,
     skipped_removed_concurrently: usize,
+    /// Session-scoped exclusive pins still held (delete mode only). The caller
+    /// must release each before commit, or discard the connection on error.
+    pinned_keys: Vec<GenerationStreamPinKey>,
 }
 
-/// Enumerate non-survivors in deterministic order (oldest `publish_seq` first),
-/// continuing past rows whose stream pin is actively held so a batch can fill
-/// up to [`MAX_RETENTION_BATCH`] actual candidates.
+/// Unified candidate processing: pages through non-survivor generations in
+/// deterministic oldest-`publish_seq`-first order, and for each one:
 ///
-/// The pinned check is nonblocking: [`try_acquire_generation_stream_pin_exclusive`]
-/// uses `pg_try_advisory_lock`, which returns immediately. If it succeeds, no
-/// reader holds the shared pin; we release it immediately so the delete loop
-/// can re-acquire under the row lock. If it fails, the row is skipped (counted)
-/// and the scan continues to the next candidate.
-async fn enumerate_non_survivors(
+/// 1. **Lock the candidate row** (`FOR UPDATE`) — this is the candidate-row
+///    lock in the required order.
+/// 2. **Recheck candidacy** against the recomputed survivor set (defense in
+///    depth; the project advisory lock already prevents concurrent
+///    publication from advancing current).
+/// 3. **Take the canonical nonblocking exclusive session pin** without waiting
+///    — this is acquired *after* the row lock, preserving
+///    `candidate row → generation stream pin`.
+/// 4. In `dry_run`: release the pin immediately (no delete). In `delete`:
+///    delete the compatibility row before the immutable generation and rely on
+///    FK cascades; hold the pin until the caller releases it before commit.
+///
+/// The scan **continues past actively-pinned rows** via keyset pagination
+/// until [`MAX_RETENTION_BATCH`] actual candidates are found or the
+/// non-survivor set is exhausted. This guarantees a batch fills from available
+/// (unpinned) candidates even when older non-survivors are pinned.
+///
+/// **Error safety:** if any post-acquisition error or unlock-integrity failure
+/// occurs, the function returns `Err`. The caller discards the connection so
+/// PostgreSQL releases all session advisory locks when the backend closes.
+async fn process_candidates(
     tx: &mut Transaction<'_, Postgres>,
     project_id: &str,
     survivor_ids: &[String],
-) -> DbResult<NonSurvivorScan> {
-    // Select non-survivor generation ids in deterministic oldest-first order.
-    // Fetch up to RETENTION_SCAN_LIMIT rows so the scan is bounded.
-    let rows: Vec<(String,)> = sqlx::query_as(
-        "SELECT generation_id::text FROM repo_graph_generation \
-         WHERE project_id = $1 \
-         ORDER BY publish_seq ASC \
-         LIMIT $2",
-    )
-    .bind(project_id)
-    .bind(RETENTION_SCAN_LIMIT as i64)
-    .fetch_all(&mut **tx)
-    .await?;
-
+    mode: RetentionMode,
+) -> DbResult<CandidateProcessingResult> {
     let survivor_set: std::collections::HashSet<&String> = survivor_ids.iter().collect();
-    let mut scan = NonSurvivorScan::default();
+    let mut result = CandidateProcessingResult::default();
+    // Keyset cursor: start before the first possible publish_seq.
+    let mut last_publish_seq: i64 = 0;
 
-    for (generation_id,) in rows {
-        if scan.candidate_ids.len() >= MAX_RETENTION_BATCH {
+    loop {
+        if result.candidates >= MAX_RETENTION_BATCH {
             break;
         }
-        // Survivor rows are never candidates.
-        if survivor_set.contains(&generation_id) {
-            continue;
+
+        // Keyset page: fetch the next batch of generation IDs older than the
+        // cursor, in deterministic publish_seq ASC order. We fetch all
+        // generations (including survivors) and filter in Rust because the
+        // survivor set is computed in application code.
+        let page: Vec<(String, i64)> = sqlx::query_as(
+            "SELECT generation_id::text, publish_seq FROM repo_graph_generation \
+             WHERE project_id = $1 AND publish_seq > $2 \
+             ORDER BY publish_seq ASC \
+             LIMIT $3",
+        )
+        .bind(project_id)
+        .bind(last_publish_seq)
+        .bind(RETENTION_SCAN_PAGE_SIZE)
+        .fetch_all(&mut **tx)
+        .await?;
+
+        if page.is_empty() {
+            break; // all generations exhausted
         }
 
-        // Nonblocking probe of the stream pin using the canonical key. If a
-        // reader holds the shared pin, `pg_try_advisory_lock` returns false.
-        let key = match repo_graph_generation::generation_stream_pin_key(&generation_id) {
-            Ok(key) => key,
-            Err(_) => {
-                // A malformed id should not exist in the immutable table;
-                // skip rather than abort the whole sweep.
-                scan.skipped_now_survivor += 1;
+        for (generation_id, publish_seq) in page {
+            if result.candidates >= MAX_RETENTION_BATCH {
+                break;
+            }
+            last_publish_seq = publish_seq;
+
+            // Skip survivors — they are never candidates.
+            if survivor_set.contains(&generation_id) {
                 continue;
             }
-        };
-        let acquired = try_acquire_generation_stream_pin_exclusive(&mut *tx, key).await?;
-        if acquired {
-            // No active reader: release immediately; the delete loop will
-            // re-acquire under the row lock.
-            if !release_generation_stream_pin_exclusive(&mut *tx, key).await? {
-                return Err(DbError::InvalidData(
-                    "retention scan stream pin was not held on release".to_owned(),
-                ));
+
+            // ── Lock the candidate row (FOR UPDATE) ──
+            // This is the candidate-row lock in the required order:
+            // project advisory → current → candidate row → stream pin.
+            let still_exists: Option<(String,)> = sqlx::query_as(
+                "SELECT generation_id::text FROM repo_graph_generation \
+                 WHERE generation_id = $1::uuid \
+                 FOR UPDATE",
+            )
+            .bind(&generation_id)
+            .fetch_optional(&mut **tx)
+            .await?;
+            if still_exists.is_none() {
+                // Removed by a concurrent sweep before we could lock it.
+                result.skipped_removed_concurrently += 1;
+                continue;
             }
-            scan.candidate_ids.push(generation_id);
-            scan.candidates += 1;
-        } else {
-            // Actively pinned by a reader: skip without waiting, keep filling.
-            scan.skipped_active_pin += 1;
+
+            // ── Recheck candidacy under the row lock ──
+            // The project advisory lock prevents a concurrent publication from
+            // advancing current, but this recheck is defense in depth.
+            let is_current: bool = sqlx::query_scalar(
+                "SELECT EXISTS(SELECT 1 FROM repo_graph_current WHERE generation_id = $1::uuid)",
+            )
+            .bind(&generation_id)
+            .fetch_one(&mut **tx)
+            .await?;
+            if is_current || survivor_set.contains(&generation_id) {
+                result.skipped_now_survivor += 1;
+                continue;
+            }
+
+            // ── Take the canonical nonblocking exclusive session pin ──
+            // Acquired AFTER the row lock, preserving lock order. Uses
+            // pg_try_advisory_lock so actively-pinned rows are skipped without
+            // waiting — correctness never depends on a deadlock victim.
+            let key = match repo_graph_generation::generation_stream_pin_key(&generation_id) {
+                Ok(key) => key,
+                Err(_) => {
+                    // A malformed id should not exist in the immutable table;
+                    // skip rather than abort the whole sweep.
+                    result.skipped_now_survivor += 1;
+                    continue;
+                }
+            };
+            let acquired = try_acquire_generation_stream_pin_exclusive(&mut *tx, key).await?;
+            if !acquired {
+                // A reader holds the shared pin: skip without waiting and
+                // continue scanning for the next available candidate.
+                result.skipped_active_pin += 1;
+                continue;
+            }
+
+            // ── Actual candidate confirmed ──
+            result.candidates += 1;
+
+            if mode == RetentionMode::DryRun {
+                // Dry-run: release the pin immediately (no delete). If the
+                // release fails, return Err so the caller discards the
+                // connection — it may still hold the session advisory lock
+                // because transaction rollback does not release session locks.
+                match release_generation_stream_pin_exclusive(&mut *tx, key).await {
+                    Ok(true) => { /* released cleanly */ }
+                    Ok(false) => {
+                        return Err(DbError::InvalidData(format!(
+                            "retention dry-run exclusive stream pin class={} object={} \
+                             was not held on release",
+                            key.class_id, key.object_id
+                        )));
+                    }
+                    Err(error) => {
+                        return Err(DbError::Sqlx(error));
+                    }
+                }
+            } else {
+                // Delete mode: hold the pin until the caller releases it
+                // before commit.
+                result.pinned_keys.push(key);
+
+                // Delete the compatibility row before the immutable generation.
+                // The FK repo_graph_cache -> repo_graph_generation is DEFERRABLE
+                // INITIALLY DEFERRED; deleting the cache row first avoids
+                // relying on the cascade for it and preserves the
+                // compatibility-row-before-generation ordering required by the
+                // lock order contract.
+                sqlx::query("DELETE FROM repo_graph_cache WHERE generation_id = $1::uuid")
+                    .bind(&generation_id)
+                    .execute(&mut **tx)
+                    .await?;
+
+                // Delete the immutable generation; FK cascades remove
+                // repo_graph_galaxy_artifact, repo_graph_galaxy_chunk, and
+                // repo_graph_current (if it pointed here — but we just
+                // rechecked that it does not).
+                sqlx::query("DELETE FROM repo_graph_generation WHERE generation_id = $1::uuid")
+                    .bind(&generation_id)
+                    .execute(&mut **tx)
+                    .await?;
+                result.deleted += 1;
+            }
         }
     }
 
-    Ok(scan)
-}
-
-/// Delete each candidate: lock + recheck candidacy under the row lock, take the
-/// canonical nonblocking exclusive session pin (without waiting), delete the
-/// compatibility row before the immutable generation, and let FK cascades
-/// remove artifact/chunks. Returns the count actually deleted plus all pinned
-/// keys (session-scoped, must be released by the caller).
-async fn delete_candidates(
-    tx: &mut Transaction<'_, Postgres>,
-    candidate_ids: &[String],
-    survivor_ids: &[String],
-) -> DbResult<(usize, Vec<GenerationStreamPinKey>)> {
-    let survivor_set: std::collections::HashSet<&String> = survivor_ids.iter().collect();
-    let mut deleted = 0usize;
-    let mut pinned_keys: Vec<GenerationStreamPinKey> = Vec::new();
-
-    for generation_id in candidate_ids {
-        if deleted >= MAX_RETENTION_BATCH {
-            break;
-        }
-        // Lock the immutable generation row (`FOR UPDATE`) and recheck that it
-        // still exists. If removed by a concurrent sweep, skip it.
-        let still_exists: Option<(String,)> = sqlx::query_as(
-            "SELECT generation_id::text FROM repo_graph_generation \
-             WHERE generation_id = $1::uuid \
-             FOR UPDATE",
-        )
-        .bind(generation_id)
-        .fetch_optional(&mut **tx)
-        .await?;
-        if still_exists.is_none() {
-            continue;
-        }
-
-        // Recheck candidacy: is this generation now the current pointer or in
-        // the recomputed survivor set? The project advisory lock prevents a
-        // concurrent publication from advancing current, but this recheck is
-        // defense in depth.
-        let is_current: bool = sqlx::query_scalar(
-            "SELECT EXISTS(SELECT 1 FROM repo_graph_current WHERE generation_id = $1::uuid)",
-        )
-        .bind(generation_id)
-        .fetch_one(&mut **tx)
-        .await?;
-        if is_current || survivor_set.contains(generation_id) {
-            continue;
-        }
-
-        // Take the canonical nonblocking exclusive session pin without waiting.
-        let key = repo_graph_generation::generation_stream_pin_key(generation_id)?;
-        let acquired = try_acquire_generation_stream_pin_exclusive(&mut *tx, key).await?;
-        if !acquired {
-            // A reader pinned this generation between scan and lock.
-            // Skip without waiting; correctness never depends on a victim.
-            continue;
-        }
-        pinned_keys.push(key);
-
-        // Delete the compatibility row before the immutable generation. The FK
-        // repo_graph_cache -> repo_graph_generation is DEFERRABLE INITIALLY
-        // DEFERRED; deleting the cache row first avoids relying on the cascade
-        // for it and preserves the compatibility-row-before-generation ordering
-        // required by the lock order contract.
-        sqlx::query("DELETE FROM repo_graph_cache WHERE generation_id = $1::uuid")
-            .bind(generation_id)
-            .execute(&mut **tx)
-            .await?;
-
-        // Delete the immutable generation; FK cascades remove
-        // repo_graph_galaxy_artifact, repo_graph_galaxy_chunk, and
-        // repo_graph_current (if it pointed here — but we just rechecked that
-        // it does not).
-        sqlx::query("DELETE FROM repo_graph_generation WHERE generation_id = $1::uuid")
-            .bind(generation_id)
-            .execute(&mut **tx)
-            .await?;
-        deleted += 1;
-    }
-
-    Ok((deleted, pinned_keys))
+    Ok(result)
 }
 
 #[cfg(test)]

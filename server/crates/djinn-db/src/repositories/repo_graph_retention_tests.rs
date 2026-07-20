@@ -567,7 +567,7 @@ async fn normal_lock_order_completes_without_deadlock() {
     }
 
     // A normal delete sweep must complete without requiring a deadlock victim.
-    // The lock order (project advisory -> current -> candidate -> stream pin)
+    // The lock order (project advisory -> current -> candidate row -> stream pin)
     // and nonblocking pin guarantee no wait-for cycle.
     let outcome = repo
         .sweep(RetentionSweepRequest {
@@ -581,6 +581,225 @@ async fn normal_lock_order_completes_without_deadlock() {
     assert_eq!(outcome.deleted, 4);
     assert_eq!(outcome.retries, 0, "no retries needed in normal path");
     assert_eq!(generation_count(&db, "p-order").await, 2);
+
+    // Verify no session advisory locks leaked from the sweep's connection back
+    // into the pool. After a successful sweep, all exclusive stream pins must
+    // have been released before commit.
+    let leaked_locks: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM pg_locks \
+         WHERE locktype = 'advisory' \
+           AND classid = $1",
+    )
+    .bind(crate::repositories::repo_graph_generation::GENERATION_STREAM_PIN_LOCK_CLASS)
+    .fetch_one(db.pool())
+    .await
+    .expect("check leaked locks");
+    assert_eq!(
+        leaked_locks, 0,
+        "no leaked generation stream pins after sweep"
+    );
+}
+
+/// Demonstrates the required lock order: candidate row lock (FOR UPDATE) is
+/// taken **before** the generation stream pin. If the sweep attempted the
+/// stream pin before the row lock, it would acquire and release the pin, then
+/// block on the row lock — leaving a window for a reader to grab the pin. This
+/// test proves the sweep blocks at the candidate row lock (not the pin) by
+/// holding a FOR UPDATE from a separate transaction and verifying the sweep
+/// cannot proceed until that lock is released.
+#[tokio::test]
+async fn lock_order_takes_candidate_row_before_stream_pin() {
+    let (db, _, repo) = fresh().await;
+    insert_project(&db, "p-lockorder").await;
+    for i in 0..4 {
+        legacy_publish(&db, "p-lockorder", &format!("c{i}"), b"blob").await;
+    }
+
+    // The oldest non-survivor candidate (history_n=1 keeps newest 1).
+    let oldest: String =
+        sqlx::query_scalar("SELECT generation_id::text FROM repo_graph_generation WHERE project_id = $1 ORDER BY publish_seq ASC LIMIT 1")
+            .bind("p-lockorder")
+            .fetch_one(db.pool())
+            .await
+            .expect("oldest gen");
+
+    // Hold a FOR UPDATE lock on the oldest candidate from a separate
+    // transaction. The retention sweep must block here when it tries to take
+    // the candidate row lock — proving the row lock is acquired before the
+    // stream pin.
+    let mut blocker = db.pool().acquire().await.expect("blocker conn");
+    let mut blocker_tx = blocker.begin().await.expect("blocker tx");
+    sqlx::query(
+        "SELECT generation_id FROM repo_graph_generation WHERE generation_id = $1::uuid FOR UPDATE",
+    )
+    .bind(&oldest)
+    .fetch_optional(&mut *blocker_tx)
+    .await
+    .expect("lock candidate row");
+
+    // Start the sweep. It should block on the FOR UPDATE row lock held by
+    // blocker_tx.
+    let mut sweep_handle = tokio::spawn(async move {
+        repo.sweep(RetentionSweepRequest {
+            project_id: "p-lockorder",
+            mode: RetentionMode::Delete,
+            history_n: 1,
+        })
+        .await
+    });
+
+    // The sweep should not complete within 300ms because it is blocked on
+    // the candidate row lock.
+    let blocked =
+        tokio::time::timeout(std::time::Duration::from_millis(300), &mut sweep_handle).await;
+    assert!(blocked.is_err(), "sweep must block on candidate row lock");
+
+    // Release the row lock. The sweep can now proceed.
+    blocker_tx.rollback().await.expect("rollback blocker");
+    drop(blocker);
+
+    // The sweep should complete now.
+    let outcome = sweep_handle
+        .await
+        .expect("sweep task panicked")
+        .expect("sweep completes after blocker released");
+
+    // history_n=1: newest 1 survives. 3 non-survivors deleted.
+    assert_eq!(outcome.deleted, 3);
+    assert_eq!(outcome.retries, 0);
+    assert_eq!(generation_count(&db, "p-lockorder").await, 1);
+}
+
+/// Proves the scan continues past actively-pinned rows to fill a batch up to
+/// MAX_RETENTION_BATCH actual candidates. With the old code that fetched only
+/// a fixed number of rows and stopped, pinned rows would prevent the batch
+/// from filling. The new keyset pagination scans past pinned rows.
+#[tokio::test]
+async fn scan_continues_past_active_pins_to_fill_batch() {
+    let (db, _, repo) = fresh().await;
+    insert_project(&db, "p-pastpins").await;
+
+    // Create 30 generations, history_n=2 → 2 survivors, 28 non-survivors.
+    for i in 0..30 {
+        legacy_publish(&db, "p-pastpins", &format!("c{i}"), b"blob").await;
+    }
+    assert_eq!(generation_count(&db, "p-pastpins").await, 30);
+
+    // Pin the oldest 2 non-survivors with shared reader pins. The sweep must
+    // scan past both to find the remaining 26 unpinned non-survivors. Using 2
+    // holders (the pool size is 4) leaves enough connections for the sweep.
+    let pinned_ids: Vec<String> = sqlx::query_scalar(
+        "SELECT generation_id::text FROM repo_graph_generation \
+         WHERE project_id = $1 ORDER BY publish_seq ASC LIMIT 2",
+    )
+    .bind("p-pastpins")
+    .fetch_all(db.pool())
+    .await
+    .expect("pinned ids");
+
+    let mut holders = Vec::new();
+    for id in &pinned_ids {
+        let key = crate::repositories::repo_graph_generation::generation_stream_pin_key(id)
+            .expect("pin key");
+        let mut holder = db.pool().acquire().await.expect("holder conn");
+        crate::repositories::repo_graph_generation::acquire_generation_stream_pin_shared(
+            &mut holder,
+            key,
+        )
+        .await
+        .expect("acquire shared pin");
+        holders.push((holder, key));
+    }
+
+    // Delete sweep: 28 non-survivors, 2 pinned → skip 2, delete up to 25
+    // of the remaining 26. Bounded to 25.
+    let outcome = repo
+        .sweep(RetentionSweepRequest {
+            project_id: "p-pastpins",
+            mode: RetentionMode::Delete,
+            history_n: 2,
+        })
+        .await
+        .expect("delete sweep past pins");
+
+    assert_eq!(
+        outcome.deleted, 25,
+        "25 unpinned non-survivors deleted after scanning past 2 active pins"
+    );
+    assert_eq!(
+        outcome.skipped_active_pin, 2,
+        "2 pinned non-survivors skipped"
+    );
+    assert_eq!(outcome.candidates, 25);
+
+    // The 2 pinned generations still exist.
+    let survivors_remaining: i64 = generation_count(&db, "p-pastpins").await;
+    assert_eq!(
+        survivors_remaining, 5,
+        "2 newest survivors + 2 pinned + 1 undeleted = 5 remain"
+    );
+
+    // Release all shared pins.
+    for (mut holder, key) in holders.drain(..) {
+        crate::repositories::repo_graph_generation::release_generation_stream_pin_shared(
+            &mut holder,
+            key,
+        )
+        .await
+        .expect("release shared pin");
+    }
+    drop(holders);
+
+    // A subsequent sweep deletes the remaining 3 (now unpinned).
+    let outcome2 = repo
+        .sweep(RetentionSweepRequest {
+            project_id: "p-pastpins",
+            mode: RetentionMode::Delete,
+            history_n: 2,
+        })
+        .await
+        .expect("second sweep");
+    assert_eq!(outcome2.deleted, 3);
+    assert_eq!(generation_count(&db, "p-pastpins").await, 2);
+}
+
+/// Proves no session advisory locks are leaked after a dry-run sweep. The
+/// dry-run path acquires exclusive pins and must release each one inline. If
+/// any pin leaked, the pooled connection would carry it.
+#[tokio::test]
+async fn dry_run_releases_all_session_pins() {
+    let (db, _, repo) = fresh().await;
+    insert_project(&db, "p-dryrun-pins").await;
+    for i in 0..6 {
+        legacy_publish(&db, "p-dryrun-pins", &format!("c{i}"), b"blob").await;
+    }
+
+    let outcome = repo
+        .sweep(RetentionSweepRequest {
+            project_id: "p-dryrun-pins",
+            mode: RetentionMode::DryRun,
+            history_n: 2,
+        })
+        .await
+        .expect("dry run");
+
+    assert_eq!(outcome.candidates, 4);
+    assert_eq!(outcome.deleted, 0);
+    assert_eq!(generation_count(&db, "p-dryrun-pins").await, 6);
+
+    // Verify that no session advisory locks remain on any pooled connection
+    // for the generation stream pin class. After the sweep, all exclusive
+    // pins should have been released.
+    let pin_class = crate::repositories::repo_graph_generation::GENERATION_STREAM_PIN_LOCK_CLASS;
+    let leaked: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM pg_locks \
+         WHERE locktype = 'advisory' AND classid = $1",
+    )
+    .bind(pin_class)
+    .fetch_one(db.pool())
+    .await
+    .expect("check leaked exclusive pins");
+    assert_eq!(leaked, 0, "no leaked generation stream pins after dry run");
 }
 
 #[tokio::test]
