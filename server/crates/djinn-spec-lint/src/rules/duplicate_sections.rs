@@ -195,10 +195,13 @@ fn collect_element(
 }
 
 /// NFKC followed by Unicode default case folding, then maximal letter-or-number
-/// token extraction. The special mappings below are full-default-fold mappings
-/// that differ from Unicode lowercase; `to_lowercase` supplies the remainder.
+/// token extraction. `stringprep` ships the Unicode CaseFolding B.2 table,
+/// rather than approximating it with lowercase plus selected exceptions.
 fn normalize_tokens(text: &str) -> Vec<String> {
-    let folded = text.nfkc().flat_map(default_case_fold).collect::<String>();
+    let folded = text
+        .nfkc()
+        .flat_map(stringprep::tables::case_fold_for_nfkc)
+        .collect::<String>();
     let mut tokens = Vec::new();
     let mut token = String::new();
     for character in folded.chars() {
@@ -212,15 +215,6 @@ fn normalize_tokens(text: &str) -> Vec<String> {
         tokens.push(token);
     }
     tokens
-}
-
-fn default_case_fold(character: char) -> Box<dyn Iterator<Item = char>> {
-    match character {
-        'ß' | 'ẞ' => Box::new("ss".chars()),
-        'ς' => Box::new(std::iter::once('σ')),
-        'İ' => Box::new("i\u{307}".chars()),
-        _ => Box::new(character.to_lowercase()),
-    }
 }
 
 fn shingles(tokens: &[String]) -> BTreeSet<Vec<String>> {
@@ -262,29 +256,50 @@ mod tests {
     #[test]
     fn normalization_and_shingles_follow_the_specified_order() {
         assert_eq!(
-            normalize_tokens("ＦＯＯ, Straße! Σς"),
-            ["foo", "strasse", "σσ"]
+            normalize_tokens("ＦＯＯ, Straße! Σς ᾳ"),
+            ["foo", "strasse", "σσ", "αι"]
         );
         let tokens = normalize_tokens("one two three four five six");
         assert_eq!(shingles(&tokens).len(), 2);
         assert!(shingles(&tokens).contains(&normalize_tokens("one two three four five")));
+        let mdx_values = violations(
+            "# ᾳ\n<Widget title=\"ＦＯＯ Straße Σς\" />\n# αι\n<Widget title=\"foo strasse σσ\" />\n",
+        );
+        assert_eq!(mdx_values[0].code, "DUPLICATE_SECTION_CONTENT");
     }
 
     #[test]
     fn exact_boundary_is_error_and_lower_similarity_is_warning() {
-        let error = violations("# Same\na b c d e f g h\n# Same\na b c d e f g x\n");
+        let error_body = "# Same\na b c d e f g h\n# Same\na b c d e f g x\n";
+        let error = violations(error_body);
         assert_eq!(error[0].code, "DUPLICATE_SECTION_CONTENT");
-        let first = (0..84)
+        assert_eq!(error[0].severity, Severity::Error);
+        assert_eq!(
+            error[0].span.start,
+            error_body.match_indices("# Same").nth(1).unwrap().0
+        );
+        assert_eq!(error[0].span.end, error_body.len());
+        let first = (0..63)
             .map(|number| format!("a{number}"))
             .collect::<Vec<_>>()
             .join(" ");
-        let second = (0..59)
+        let second = (0..63)
             .map(|number| format!("a{number}"))
             .chain((0..41).map(|number| format!("b{number}")))
             .collect::<Vec<_>>()
             .join(" ");
-        let warning = violations(&format!("# Same\n{first}\n# Same\n{second}\n"));
+        let first_shingles = shingles(&normalize_tokens(&first));
+        let second_shingles = shingles(&normalize_tokens(&second));
+        assert_eq!(first_shingles.intersection(&second_shingles).count(), 59);
+        assert_eq!(first_shingles.union(&second_shingles).count(), 100);
+        let warning_body = format!("# Same\n{first}\n# Same\n{second}\n");
+        let warning = violations(&warning_body);
         assert_eq!(warning[0].code, "REPEATED_SECTION_HEADING");
+        assert_eq!(warning[0].severity, Severity::Warning);
+        assert_eq!(
+            warning[0].span.start,
+            warning_body.match_indices("# Same").nth(1).unwrap().0
+        );
     }
 
     #[test]
@@ -294,11 +309,22 @@ mod tests {
         let empty = violations("# Same\n# Same\n");
         assert_eq!(empty[0].code, "DUPLICATE_SECTION_CONTENT");
         assert!(violations("# Same\na b c d e\n## Same\na b c d e\n").is_empty());
-        let excluded = violations(
-            "# Same\n`a b c d e` [label](a b c d e)\n# Same\n```\na b c d e\n```\n<Callout id=\"x\">a b c d e</Callout>\n",
-        );
-        // Link label prose remains eligible, but destinations, code, and raw
-        // block payloads do not provide matching shingles.
-        assert_eq!(excluded[0].code, "REPEATED_SECTION_HEADING");
+        for excluded_source in [
+            "`a b c d e`",
+            "```text\na b c d e\n```",
+            "[different](https://a-b-c-d-e.example)",
+            "<Callout id=\"x\">a b c d e</Callout>",
+            "<Widget template=\"a b c d e\" />",
+            "<Widget code=\"a b c d e\" />",
+        ] {
+            let body = format!("# Same\na b c d e\n# Same\n{excluded_source}\n");
+            let excluded = violations(&body);
+            assert_eq!(excluded[0].code, "REPEATED_SECTION_HEADING");
+            assert_eq!(excluded[0].severity, Severity::Warning);
+            assert_eq!(
+                excluded[0].span.start,
+                body.match_indices("# Same").nth(1).unwrap().0
+            );
+        }
     }
 }

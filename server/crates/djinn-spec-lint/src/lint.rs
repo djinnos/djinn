@@ -2,6 +2,8 @@
 
 use std::collections::HashSet;
 
+use markdown::ParseOptions;
+
 use crate::parser::proposal_parse_options;
 use crate::rules::duplicate_sections::lint_duplicate_sections;
 use crate::{
@@ -31,36 +33,42 @@ pub fn lint(
         }
     }
 
-    let document = match analyze_mdx_document(body) {
-        Ok(document) => document,
-        Err(error) => {
-            push_parse_error(&mut result, body, error.to_string());
-            result.sort_violations();
-            return result;
-        }
-    };
+    if body_format == BodyFormat::Mdx {
+        let document = match analyze_mdx_document(body) {
+            Ok(document) => document,
+            Err(error) => {
+                push_parse_error(&mut result, body, error.to_string());
+                result.sort_violations();
+                return result;
+            }
+        };
 
-    let mut seen_ids = HashSet::new();
-    for block in document.registered_blocks {
-        if !block.id.is_empty() && !seen_ids.insert(block.id.clone()) {
-            // An id comes from a parsed JSX attribute, so the anchored source
-            // lexer must have found it. Falling back to the AST element span is
-            // defensive and still preserves a valid source range.
-            let span = block.id_value_span.unwrap_or(block.element_span);
-            result.errors.push(
-                Violation::new(
-                    body,
-                    "DUPLICATE_BLOCK_ID",
-                    Severity::Error,
-                    format!("duplicate registered block id: `{}`", block.id),
-                    span.start,
-                    span.end,
-                )
-                .expect("document analysis returns UTF-8 source spans"),
-            );
+        let mut seen_ids = HashSet::new();
+        for block in document.registered_blocks {
+            if !block.id.is_empty() && !seen_ids.insert(block.id.clone()) {
+                // An id comes from a parsed JSX attribute, so the anchored source
+                // lexer must have found it. Falling back to the AST element span is
+                // defensive and still preserves a valid source range.
+                let span = block.id_value_span.unwrap_or(block.element_span);
+                result.errors.push(
+                    Violation::new(
+                        body,
+                        "DUPLICATE_BLOCK_ID",
+                        Severity::Error,
+                        format!("duplicate registered block id: `{}`", block.id),
+                        span.start,
+                        span.end,
+                    )
+                    .expect("document analysis returns UTF-8 source spans"),
+                );
+            }
         }
     }
-    let tree = match markdown::to_mdast(body, &proposal_parse_options()) {
+    let parse_options = match body_format {
+        BodyFormat::Markdown => ParseOptions::gfm(),
+        BodyFormat::Mdx => proposal_parse_options(),
+    };
+    let tree = match markdown::to_mdast(body, &parse_options) {
         Ok(tree) => tree,
         Err(error) => {
             push_parse_error(&mut result, body, error.reason);
