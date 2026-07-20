@@ -127,49 +127,36 @@ fn fixture_task(task_id: &str, project_id: &str) -> Task {
 }
 
 async fn run_git(cmd: &[&str], cwd: &Path) {
-    let output = Command::new(cmd[0])
-        .args(&cmd[1..])
-        .current_dir(cwd)
-        .output()
-        .await
-        .expect("git");
-    assert!(
-        output.status.success(),
-        "cmd {cmd:?} failed: stderr={}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    djinn_git::run_git_command(
+        cwd.to_path_buf(),
+        cmd.iter().map(|arg| (*arg).to_owned()).collect(),
+    )
+    .await
+    .expect("git");
 }
 
 async fn git_stdout(args: &[&str], cwd: &Path) -> String {
-    let output = Command::new("git")
-        .args(args)
-        .current_dir(cwd)
-        .output()
-        .await
-        .expect("git");
-    assert!(
-        output.status.success(),
-        "git {args:?} failed: stderr={}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    String::from_utf8(output.stdout)
-        .expect("git stdout must be UTF-8")
-        .trim()
-        .to_owned()
+    let output = djinn_git::run_git_command(
+        cwd.to_path_buf(),
+        args.iter().map(|arg| (*arg).to_owned()).collect(),
+    )
+    .await
+    .expect("git");
+    output.stdout.trim().to_owned()
 }
 
 /// Initialise a tiny source repo + a single commit on `main`. The
 /// `MirrorManager` clones from this as `file://...` to materialise the
 /// bare mirror the worker will then `clone_ephemeral` from.
 async fn make_source_repo(path: &Path) {
-    run_git(&["git", "init", "-b", "main"], path).await;
-    run_git(&["git", "config", "user.email", "test@example.com"], path).await;
-    run_git(&["git", "config", "user.name", "Test"], path).await;
+    run_git(&["init", "-b", "main"], path).await;
+    run_git(&["config", "user.email", "test@example.com"], path).await;
+    run_git(&["config", "user.name", "Test"], path).await;
     tokio::fs::write(path.join("README.md"), "hello")
         .await
         .unwrap();
-    run_git(&["git", "add", "."], path).await;
-    run_git(&["git", "commit", "-m", "init"], path).await;
+    run_git(&["add", "."], path).await;
+    run_git(&["commit", "-m", "init"], path).await;
 }
 
 /// In-memory record of every RPC method the worker invoked. Used at the
@@ -705,7 +692,7 @@ async fn worker_drives_real_supervisor_in_pod() {
                         expected_mirror,
                         "persisted workspace must be the supervisor's ephemeral clone of the fixture mirror"
                     );
-                    run_git(&["git", "rev-parse", "--is-inside-work-tree"], &path).await;
+                    run_git(&["rev-parse", "--is-inside-work-tree"], &path).await;
                     break path;
                 }
             }
