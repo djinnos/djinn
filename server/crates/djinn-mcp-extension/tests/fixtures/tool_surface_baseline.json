@@ -81,6 +81,74 @@
   },
   {
     "concurrent_safe": true,
+    "description": "Read a bounded GitHub Actions artifact. `list` lists artifacts and `fetch` renders one exact artifact. Select optional positive `run_id` or `pr_number`, never both; fetch requires non-empty `artifact`.",
+    "destructive": false,
+    "idempotent": true,
+    "inputSchema": {
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "not": {
+            "required": [
+              "run_id",
+              "pr_number"
+            ]
+          }
+        },
+        {
+          "else": {
+            "not": {
+              "required": [
+                "artifact"
+              ]
+            }
+          },
+          "if": {
+            "properties": {
+              "action": {
+                "const": "fetch"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "artifact"
+            ]
+          }
+        }
+      ],
+      "properties": {
+        "action": {
+          "enum": [
+            "list",
+            "fetch"
+          ],
+          "type": "string"
+        },
+        "artifact": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "pr_number": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "run_id": {
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "action"
+      ],
+      "type": "object"
+    },
+    "name": "ci_artifact",
+    "openWorld": false,
+    "readOnly": true
+  },
+  {
+    "concurrent_safe": true,
     "description": "Fetch the failing GitHub Actions CI log for this task's PR. Call with NO arguments to auto-discover the currently-failing jobs from the task's recorded CI state — it checks the PR-head lane first, then falls back to the merge-queue (merge_group) lane, so it stays accurate even after a new push makes old job ids stale. When several jobs fail it returns the first job's log with a header listing the others (name + job_id); pass `job_id` to fetch a specific one, and `step` to narrow to a single failed step. `pr_number` targets another PR in the same project's repo (e.g. planner escalation tasks whose description names the source PR). If the output is large, use output_view or output_grep to navigate it.",
     "destructive": false,
     "idempotent": true,

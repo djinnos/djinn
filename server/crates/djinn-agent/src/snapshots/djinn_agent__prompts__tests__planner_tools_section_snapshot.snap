@@ -14,6 +14,7 @@ expression: section
 - `skill_read(name)`
 - `lsp(file_path, operation, character?, depth?, kind?, line?, name_filter?, symbol?)`
 - `ci_job_log(job_id?, pr_number?, step?)`
+- `ci_artifact(action, artifact?, pr_number?, run_id?)`
 - `github_search(query, language?, path?, repo?)`
 - `output_view(tool_use_id, limit?, offset?)`
 - `output_grep(pattern, tool_use_id, context_lines?)`

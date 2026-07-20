@@ -1233,6 +1233,17 @@ async fn dispatch(
                 .map(|v| serde_json::to_string(&v).unwrap_or("null".to_string()));
             ServiceRpcResponse::ToolCiJobLog(result)
         }
+        ServiceRpcRequest::ToolCiArtifact {
+            session_task_id,
+            arguments,
+        } => {
+            let arguments = parse_opaque_map(&arguments);
+            let result = services
+                .tool_ci_artifact(session_task_id, arguments)
+                .await
+                .map(|v| serde_json::to_string(&v).unwrap_or("null".to_string()));
+            ServiceRpcResponse::ToolCiArtifact(result)
+        }
         ServiceRpcRequest::TouchActivity { task_id } => {
             let result = services.touch_activity(task_id).await;
             ServiceRpcResponse::TouchActivity(result)
