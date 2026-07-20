@@ -6,6 +6,7 @@ use markdown::ParseOptions;
 
 use crate::parser::proposal_parse_options;
 use crate::rules::duplicate_sections::lint_duplicate_sections;
+use crate::rules::integrity::lint_integrity;
 use crate::{
     BodyFormat, Severity, SpecLintResultV1, Violation, analyze_mdx_document, validate_mdx_blocks,
 };
@@ -21,6 +22,8 @@ pub fn lint(
     checked_at: impl Into<String>,
 ) -> SpecLintResultV1 {
     let mut result = SpecLintResultV1::new(body, body_format, checked_at);
+    let mut registered_block_spans = Vec::new();
+    let mut registered_block_ids = Vec::new();
 
     // Keep the established registry parser and safety/round-trip behavior as
     // the source of truth. Lint has one stable structural failure code rather
@@ -32,7 +35,6 @@ pub fn lint(
             return result;
         }
     }
-
     if body_format == BodyFormat::Mdx {
         let document = match analyze_mdx_document(body) {
             Ok(document) => document,
@@ -45,6 +47,10 @@ pub fn lint(
 
         let mut seen_ids = HashSet::new();
         for block in document.registered_blocks {
+            registered_block_spans.push(block.element_span);
+            if !block.id.is_empty() {
+                registered_block_ids.push(block.id.clone());
+            }
             if !block.id.is_empty() && !seen_ids.insert(block.id.clone()) {
                 // An id comes from a parsed JSX attribute, so the anchored source
                 // lexer must have found it. Falling back to the AST element span is
@@ -77,6 +83,12 @@ pub fn lint(
         }
     };
     for violation in lint_duplicate_sections(body, &tree) {
+        match violation.severity {
+            Severity::Error => result.errors.push(violation),
+            Severity::Warning => result.warnings.push(violation),
+        }
+    }
+    for violation in lint_integrity(body, &tree, &registered_block_spans, &registered_block_ids) {
         match violation.severity {
             Severity::Error => result.errors.push(violation),
             Severity::Warning => result.warnings.push(violation),
@@ -164,6 +176,37 @@ mod tests {
         assert_eq!(&body[violation.span.start..violation.span.end], "same");
         let second = body.match_indices("id=\"same\"").nth(1).unwrap().0 + 4;
         assert_eq!(violation.span.start, second);
+        result.validate_for_body(body).unwrap();
+    }
+
+    #[test]
+    fn integrity_rules_keep_utf8_spans_ordered_and_resolve_local_targets() {
+        let body = concat!(
+            "é.Merged\n",
+            "[heading](#target) [block](#block-id) [missing](#gone)\n",
+            "# Target\n",
+            "<Callout id=\"block-id\">payload.Thing `</Callout>\n",
+            "~~~\nunclosed\n"
+        );
+        let result = lint(body, BodyFormat::Mdx, "fixed");
+        assert_eq!(
+            result
+                .errors
+                .iter()
+                .map(|violation| violation.code.as_str())
+                .collect::<Vec<_>>(),
+            ["GLUED_TERMINAL_TOKEN", "UNBALANCED_CODE_FENCE"]
+        );
+        assert_eq!(
+            &body[result.errors[0].span.start..result.errors[0].span.end],
+            "."
+        );
+        assert_eq!(result.warnings.len(), 1);
+        assert_eq!(result.warnings[0].code, "UNRESOLVED_LOCAL_REFERENCE");
+        assert_eq!(
+            &body[result.warnings[0].span.start..result.warnings[0].span.end],
+            "#gone"
+        );
         result.validate_for_body(body).unwrap();
     }
 }
