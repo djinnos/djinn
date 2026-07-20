@@ -679,6 +679,11 @@ async fn worker_drives_real_supervisor_in_pod() {
             {
                 let path = PathBuf::from(path);
                 if path.join(".git").is_dir() {
+                    assert!(
+                        path.starts_with(workspace_dir.path()),
+                        "persisted workspace must be the ephemeral clone created under DJINN_WORKSPACE_PATH: {}",
+                        path.display()
+                    );
                     run_git(&["git", "rev-parse", "--is-inside-work-tree"], &path).await;
                     break path;
                 }
