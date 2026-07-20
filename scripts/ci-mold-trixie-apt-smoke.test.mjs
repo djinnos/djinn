@@ -10,8 +10,15 @@ const runtimeDockerfile = readFileSync(resolve('server/docker/djinn-agent-runtim
 
 function preflightBlock(source) {
   const start = source.indexOf('\n  preflight:\n');
-  const end = source.indexOf('\n  ', start + 15);
-  assert.ok(start >= 0 && end > start, 'Quality Gate must retain an always-run preflight job');
+  assert.ok(start >= 0, 'Quality Gate must retain an always-run preflight job');
+  // Match the next top-level job key: a newline followed by exactly two
+  // spaces and a non-whitespace character. This avoids matching the
+  // four-/six-space indented lines inside the preflight job body, which
+  // a bare '\n  ' substring search would incorrectly latch onto.
+  const rest = source.slice(start + 15);
+  const nextRel = rest.search(/\n  \S/);
+  assert.ok(nextRel >= 0, 'Quality Gate must retain a job following preflight');
+  const end = start + 15 + nextRel;
   return source.slice(start, end);
 }
 
