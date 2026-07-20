@@ -60,6 +60,12 @@ const JIT_PITFALL_OUTCOMES: [&str; 7] = [
     "empty",
     "error",
 ];
+// Final-verification reuse has exactly these fixed outcome label values.
+// Correlation identifiers and detailed causes remain structured tracing fields.
+const VERIFY_CACHE_LOOKUP_TOTAL: &str = "verify_cache_lookup_total";
+const VERIFY_CACHE_LOOKUP_OUTCOMES: [&str; 5] = ["hit", "miss", "stale", "error", "disabled"];
+const VERIFY_RUN_RECORD_TOTAL: &str = "verify_run_record_total";
+const VERIFY_RUN_RECORD_OUTCOMES: [&str; 3] = ["stored", "ineligible", "error"];
 const INLINE_PR_CLOSED_TOTAL: &str = "djinn_inline_pr_closed_total";
 const INLINE_BRANCH_DELETED_TOTAL: &str = "djinn_inline_branch_deleted_total";
 const INLINE_CLEANUP_SKIPPED_TOTAL: &str = "djinn_inline_cleanup_skipped_total";
@@ -270,6 +276,33 @@ pub mod jit_pitfalls {
     /// fields emitted next to this counter.
     pub fn increment_outcome(outcome: &'static str) {
         metrics::counter!(super::JIT_PITFALL_HINTS_TOTAL, "outcome" => outcome).increment(1);
+    }
+}
+
+/// Bounded final-verification reuse counters.
+///
+/// These helpers accept only fixed static outcome values. Task/run/candidate
+/// identifiers, commands, fingerprints, manifest versions, identity digests,
+/// and detailed causes stay in structured tracing fields at the coordinator.
+pub mod final_verification {
+    pub const LOOKUP_HIT: &str = "hit";
+    pub const LOOKUP_MISS: &str = "miss";
+    pub const LOOKUP_STALE: &str = "stale";
+    pub const LOOKUP_ERROR: &str = "error";
+    pub const LOOKUP_DISABLED: &str = "disabled";
+
+    pub const RECORD_STORED: &str = "stored";
+    pub const RECORD_INELIGIBLE: &str = "ineligible";
+    pub const RECORD_ERROR: &str = "error";
+
+    /// Increment the one terminal outcome for a cache consultation.
+    pub fn increment_lookup(outcome: &'static str) {
+        metrics::counter!(super::VERIFY_CACHE_LOOKUP_TOTAL, "outcome" => outcome).increment(1);
+    }
+
+    /// Increment the one terminal outcome for a writer attempt.
+    pub fn increment_record(outcome: &'static str) {
+        metrics::counter!(super::VERIFY_RUN_RECORD_TOTAL, "outcome" => outcome).increment(1);
     }
 }
 
@@ -940,6 +973,20 @@ fn register_metrics() {
     );
     for outcome in DISPATCH_OUTCOMES {
         metrics::counter!(DISPATCH_ATTEMPTS_TOTAL, "outcome" => outcome).absolute(0);
+    }
+    metrics::describe_counter!(
+        VERIFY_CACHE_LOOKUP_TOTAL,
+        "Final-verification cache consultations partitioned by bounded terminal outcome."
+    );
+    for outcome in VERIFY_CACHE_LOOKUP_OUTCOMES {
+        metrics::counter!(VERIFY_CACHE_LOOKUP_TOTAL, "outcome" => outcome).absolute(0);
+    }
+    metrics::describe_counter!(
+        VERIFY_RUN_RECORD_TOTAL,
+        "Final-verification writer attempts partitioned by bounded terminal outcome."
+    );
+    for outcome in VERIFY_RUN_RECORD_OUTCOMES {
+        metrics::counter!(VERIFY_RUN_RECORD_TOTAL, "outcome" => outcome).absolute(0);
     }
     metrics::describe_gauge!(
         DISPATCH_LAST_SUCCESS_TIMESTAMP,
@@ -2675,6 +2722,20 @@ mod tests {
                     "djinn_jit_pitfall_hints_total{{outcome=\"{outcome}\"}}"
                 )),
                 "missing JIT pitfall outcome label {outcome} in:\n{rendered}"
+            );
+        }
+        for outcome in VERIFY_CACHE_LOOKUP_OUTCOMES {
+            assert!(
+                rendered.contains(&format!(
+                    "verify_cache_lookup_total{{outcome=\"{outcome}\"}}"
+                )),
+                "missing verification lookup outcome label {outcome} in:\n{rendered}"
+            );
+        }
+        for outcome in VERIFY_RUN_RECORD_OUTCOMES {
+            assert!(
+                rendered.contains(&format!("verify_run_record_total{{outcome=\"{outcome}\"}}")),
+                "missing verification recording outcome label {outcome} in:\n{rendered}"
             );
         }
     }
