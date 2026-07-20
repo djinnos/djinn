@@ -857,12 +857,21 @@ jobs:
           # (kube, tree-sitter grammars, candle, coordinator/agent), which
           # cost ~8 min in each of six jobs.
           #
-          # It is a `cargo test --ignored` target and NOT a `[[bin]]`, for a
-          # measured reason: `server-test` is warmed by `nextest run
-          # --all-targets --no-run`, so it holds TEST-profile artifacts. A
-          # `cargo run --bin` needs the dev-profile path the warmer never
-          # produces — measured at 329 crates / 3m49s, against 27s for the
-          # identical package via `cargo test` on the same cache.
+          # Two things here are load-bearing and were each measured after
+          # getting them wrong:
+          #
+          # 1. `cargo test --ignored`, NOT a `[[bin]]`. `server-test` is
+          #    warmed by `nextest run --all-targets --no-run`, so it holds
+          #    TEST-profile artifacts; `cargo run --bin` needs the dev-profile
+          #    path the warmer never produces. Measured: 329 crates / 3m49s.
+          #
+          # 2. NO `--features qdrant`, even though the warmer uses it. The
+          #    warmer's flag is djinn-SERVER's feature under `--workspace`;
+          #    passing it here selects djinn-DB's own qdrant feature under
+          #    `-p`, and resolver-2 unification over a different package set
+          #    gives shared deps different feature sets and different metadata
+          #    hashes. Measured: 352 crates / 5m32s with the flag, against 27s
+          #    for the same package without it (see qa-smoke, same cache).
           #
           # It applies the same embedded migrations through the same owned
           # runner in djinn_db::migrations, so the designated-operator
@@ -872,7 +881,7 @@ jobs:
             DJINN_MIGRATE_OPERATOR_USER_ID=00000000-0000-7000-8000-000000000002 \
             DJINN_MIGRATE_OPERATOR_GITHUB_ID=9000000002 \
             DJINN_MIGRATE_OPERATOR_LOGIN=djinn-ci-migration-operator \
-            cargo test -p djinn-db --features qdrant --test apply_migrations -- --ignored --nocapture
+            cargo test -p djinn-db --test apply_migrations -- --ignored --nocapture
       - name: Build Postgres test template
         env:
           PGPASSWORD: postgres
@@ -1216,12 +1225,21 @@ jobs:
           # (kube, tree-sitter grammars, candle, coordinator/agent), which
           # cost ~8 min in each of six jobs.
           #
-          # It is a `cargo test --ignored` target and NOT a `[[bin]]`, for a
-          # measured reason: `server-test` is warmed by `nextest run
-          # --all-targets --no-run`, so it holds TEST-profile artifacts. A
-          # `cargo run --bin` needs the dev-profile path the warmer never
-          # produces — measured at 329 crates / 3m49s, against 27s for the
-          # identical package via `cargo test` on the same cache.
+          # Two things here are load-bearing and were each measured after
+          # getting them wrong:
+          #
+          # 1. `cargo test --ignored`, NOT a `[[bin]]`. `server-test` is
+          #    warmed by `nextest run --all-targets --no-run`, so it holds
+          #    TEST-profile artifacts; `cargo run --bin` needs the dev-profile
+          #    path the warmer never produces. Measured: 329 crates / 3m49s.
+          #
+          # 2. NO `--features qdrant`, even though the warmer uses it. The
+          #    warmer's flag is djinn-SERVER's feature under `--workspace`;
+          #    passing it here selects djinn-DB's own qdrant feature under
+          #    `-p`, and resolver-2 unification over a different package set
+          #    gives shared deps different feature sets and different metadata
+          #    hashes. Measured: 352 crates / 5m32s with the flag, against 27s
+          #    for the same package without it (see qa-smoke, same cache).
           #
           # It applies the same embedded migrations through the same owned
           # runner in djinn_db::migrations, so the designated-operator
@@ -1231,7 +1249,7 @@ jobs:
             DJINN_MIGRATE_OPERATOR_USER_ID=00000000-0000-7000-8000-000000000002 \
             DJINN_MIGRATE_OPERATOR_GITHUB_ID=9000000002 \
             DJINN_MIGRATE_OPERATOR_LOGIN=djinn-ci-migration-operator \
-            cargo test -p djinn-db --features qdrant --test apply_migrations -- --ignored --nocapture
+            cargo test -p djinn-db --test apply_migrations -- --ignored --nocapture
       - name: Verify .sqlx offline cache is up to date
         working-directory: .
         run: make sqlx-verify
@@ -1290,12 +1308,21 @@ jobs:
           # (kube, tree-sitter grammars, candle, coordinator/agent), which
           # cost ~8 min in each of six jobs.
           #
-          # It is a `cargo test --ignored` target and NOT a `[[bin]]`, for a
-          # measured reason: `server-test` is warmed by `nextest run
-          # --all-targets --no-run`, so it holds TEST-profile artifacts. A
-          # `cargo run --bin` needs the dev-profile path the warmer never
-          # produces — measured at 329 crates / 3m49s, against 27s for the
-          # identical package via `cargo test` on the same cache.
+          # Two things here are load-bearing and were each measured after
+          # getting them wrong:
+          #
+          # 1. `cargo test --ignored`, NOT a `[[bin]]`. `server-test` is
+          #    warmed by `nextest run --all-targets --no-run`, so it holds
+          #    TEST-profile artifacts; `cargo run --bin` needs the dev-profile
+          #    path the warmer never produces. Measured: 329 crates / 3m49s.
+          #
+          # 2. NO `--features qdrant`, even though the warmer uses it. The
+          #    warmer's flag is djinn-SERVER's feature under `--workspace`;
+          #    passing it here selects djinn-DB's own qdrant feature under
+          #    `-p`, and resolver-2 unification over a different package set
+          #    gives shared deps different feature sets and different metadata
+          #    hashes. Measured: 352 crates / 5m32s with the flag, against 27s
+          #    for the same package without it (see qa-smoke, same cache).
           #
           # It applies the same embedded migrations through the same owned
           # runner in djinn_db::migrations, so the designated-operator
@@ -1305,7 +1332,7 @@ jobs:
             DJINN_MIGRATE_OPERATOR_USER_ID=00000000-0000-7000-8000-000000000002 \
             DJINN_MIGRATE_OPERATOR_GITHUB_ID=9000000002 \
             DJINN_MIGRATE_OPERATOR_LOGIN=djinn-ci-migration-operator \
-            cargo test -p djinn-db --features qdrant --test apply_migrations -- --ignored --nocapture
+            cargo test -p djinn-db --test apply_migrations -- --ignored --nocapture
       - name: Build Postgres test template
         env:
           PGPASSWORD: postgres
