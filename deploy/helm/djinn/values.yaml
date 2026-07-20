@@ -27,6 +27,16 @@ cacheCleanup:
   mode: delete
 
 # -----------------------------------------------------------------------------
+# Graph generation retention
+# -----------------------------------------------------------------------------
+# Begin in dry-run mode to observe candidates and retention metrics before an
+# operator explicitly enables delete. `historyN` retains the newest N published
+# generations in addition to the current generation.
+graphRetention:
+  mode: dry_run
+  historyN: 3
+
+# -----------------------------------------------------------------------------
 # Build admission
 # -----------------------------------------------------------------------------
 # Admission controls the combined task-run and warm-build concurrency cap. The
