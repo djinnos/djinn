@@ -7,6 +7,9 @@ edition = "2024"
 [lib]
 doctest = false
 
+[features]
+test-support = []
+
 [dependencies]
 chrono = "0.4"
 metrics = "=0.24.6"

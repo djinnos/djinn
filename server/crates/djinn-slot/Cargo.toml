@@ -14,7 +14,7 @@ required-features = ["test-support"]
 
 [features]
 # Exposes cluster-free slot-pool factory hooks for downstream integration tests.
-test-support = []
+test-support = ["djinn-telemetry/test-support"]
 
 [dependencies]
 djinn-core = { path = "../djinn-core" }
