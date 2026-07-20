@@ -663,7 +663,7 @@ async fn pinned_route_stream_survives_retention_then_prunes_after_final_frame() 
     let start = Arc::new(Barrier::new(2));
     let sweep_start = start.clone();
     let sweep_db = db.clone();
-    let sweep = tokio::spawn(async move {
+    let mut sweep = tokio::spawn(async move {
         sweep_start.wait().await;
         RepoGraphRetentionRepository::new(sweep_db)
             .sweep(RetentionSweepRequest {
