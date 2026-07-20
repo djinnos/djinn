@@ -729,6 +729,8 @@ mod tests {
             .record_compaction_started(BeginCompactionParams {
                 session_id: &session_id,
                 schema_version: 1,
+                trigger: None,
+                current_context_tokens_before: None,
                 first_message_id: None,
                 last_compacted_message_id: None,
                 first_retained_message_id: None,
@@ -783,6 +785,8 @@ mod tests {
             .record_compaction_started(BeginCompactionParams {
                 session_id: &session_id,
                 schema_version: 1,
+                trigger: None,
+                current_context_tokens_before: None,
                 first_message_id: Some(&raw_messages[1].id),
                 last_compacted_message_id: Some(&raw_messages[2].id),
                 first_retained_message_id: Some(&first_retained_id),
@@ -799,6 +803,7 @@ mod tests {
             .complete_compaction_boundary(CompleteCompactionParams {
                 boundary_id: &started.id,
                 schema_version: 1,
+                current_context_tokens_after: None,
                 first_message_id: Some(&raw_messages[1].id),
                 last_compacted_message_id: Some(&raw_messages[2].id),
                 first_retained_message_id: Some(&first_retained_id),
@@ -873,6 +878,8 @@ mod tests {
             .record_compaction_started(BeginCompactionParams {
                 session_id: &session_id,
                 schema_version: 1,
+                trigger: None,
+                current_context_tokens_before: None,
                 first_message_id: Some(&raw_messages[1].id),
                 last_compacted_message_id: Some(&raw_messages[2].id),
                 first_retained_message_id: Some(&raw_messages[3].id),
@@ -885,6 +892,7 @@ mod tests {
             .complete_compaction_boundary(CompleteCompactionParams {
                 boundary_id: &first.id,
                 schema_version: 1,
+                current_context_tokens_after: None,
                 first_message_id: Some(&raw_messages[1].id),
                 last_compacted_message_id: Some(&raw_messages[2].id),
                 first_retained_message_id: Some(&raw_messages[3].id),
@@ -901,6 +909,8 @@ mod tests {
             .record_compaction_started(BeginCompactionParams {
                 session_id: &session_id,
                 schema_version: 1,
+                trigger: None,
+                current_context_tokens_before: None,
                 first_message_id: Some(&raw_messages[3].id),
                 last_compacted_message_id: Some(&raw_messages[3].id),
                 first_retained_message_id: Some(&raw_messages[4].id),
@@ -944,6 +954,8 @@ mod tests {
             .record_compaction_started(BeginCompactionParams {
                 session_id: &session_id,
                 schema_version: 1,
+                trigger: None,
+                current_context_tokens_before: None,
                 first_message_id: None,
                 last_compacted_message_id: None,
                 first_retained_message_id: Some("nonexistent-message-id"),
@@ -956,6 +968,7 @@ mod tests {
             .complete_compaction_boundary(CompleteCompactionParams {
                 boundary_id: &started.id,
                 schema_version: 1,
+                current_context_tokens_after: None,
                 first_message_id: None,
                 last_compacted_message_id: None,
                 first_retained_message_id: Some("nonexistent-message-id"),
@@ -1015,6 +1028,8 @@ mod tests {
             .record_compaction_started(BeginCompactionParams {
                 session_id: &session_id,
                 schema_version: 1,
+                trigger: None,
+                current_context_tokens_before: None,
                 first_message_id: None,
                 last_compacted_message_id: None,
                 first_retained_message_id: None,
