@@ -412,6 +412,32 @@ mod tests {
         assert!(fs::symlink_metadata(root.join("settings.json")).is_ok());
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn special_file_in_disposable_tree_blocks_cleanup_and_remains_untouched() {
+        use std::os::unix::fs::FileTypeExt;
+
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join(".djinn");
+        let fifo = root.join("worktrees/operator.pipe");
+        fs::create_dir_all(fifo.parent().unwrap()).unwrap();
+        let status = std::process::Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .expect("mkfifo available on unix");
+        assert!(status.success(), "mkfifo should succeed");
+
+        let report = cleanup_project_local_djinn(temp.path()).unwrap();
+
+        assert!(!report.is_clean());
+        assert!(report.blocked.iter().any(|entry| {
+            entry.kind == ResidueKind::UnsafeLegacyEntry
+                && entry.path == root.join("worktrees")
+                && entry.detail.contains("special entry")
+        }));
+        assert!(fs::symlink_metadata(&fifo).unwrap().file_type().is_fifo());
+    }
+
     #[test]
     fn blocked_checkout_does_not_stop_an_independent_clean_checkout() {
         let blocked = tempfile::tempdir().unwrap();
