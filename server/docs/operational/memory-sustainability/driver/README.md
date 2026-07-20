@@ -26,8 +26,11 @@ perl server/docs/operational/memory-sustainability/driver/memory_workload.pl \
 ```
 
 Defaults are the release protocol: T0 1800 seconds with no graph, graph-install
-peak, T1 900 seconds with the same graph, a 7200-second burst with 300-second
-board ticks and 100 sequential 200/304 requests, then T2 after 300 seconds.
+peak, T1 900 seconds with the same graph, then a 7200-second burst. The 100
+sequential alternating 200/304 requests are scheduled on monotonic targets
+spanning the burst (the first at burst start and the final at burst end), while
+300-second board ticks are scheduled independently. T2 is sampled no sooner
+than 300 seconds after the actual final galaxy response completes.
 Before mutation it verifies commands, observed fixture identity, cgroup signals,
 metrics, a 40-page board pass, and 200/304 galaxy responses. It rejects malformed
 `memory.current`/`memory.events`, OOM/restart deltas, generation replacement, and

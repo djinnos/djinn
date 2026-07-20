@@ -88,7 +88,7 @@ sha256sum "$RUN_DIR/driver-raw.jsonl" "$RUN_DIR/driver.log" \
   | tee "$RUN_DIR/raw-checksums.sha256"
 ```
 
-The unmodified driver defaults are the required protocol: **T0** after 30 minutes idle with no graph; graph install and its warm/server peak; **T1** after 15 minutes quiescent with the same graph resident; a two-hour burst with five-minute board ticks and 100 sequential alternating 200/304 requests; **T2** five minutes after the final request. Do not use duration or request overrides for staging evidence.
+The unmodified driver defaults are the required protocol: **T0** after 30 minutes idle with no graph; graph install and its warm/server peak; **T1** after 15 minutes quiescent with the same graph resident; then a two-hour burst with 100 sequential alternating 200/304 requests scheduled across the full interval, including the final request at burst end. Board scans remain independently scheduled every five minutes during that interval. **T2** is collected no sooner than five minutes after the actual final galaxy response completes; the raw `galaxy_request` and `t2_timing` records provide high-resolution completion/delay evidence. Do not use duration or request overrides for staging evidence.
 
 Use the checked-in `evaluator/adapt_driver_jsonl.pl` adapter; do not hand-edit a wrapper. It validates finalized successful JSONL, preserves the driver run ID and supplied image digest in every derived record, and records SHA-256 references to the source JSONL and fixture manifest.
 
