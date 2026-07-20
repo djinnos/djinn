@@ -68,6 +68,40 @@ pub async fn record_dispatch_start(
     }
 }
 
+/// Record a dispatch-start attempt with the coordinator's immutable owner and
+/// the one dispatch group minted at the outer dispatch boundary.
+pub async fn record_dispatch_start_with_identity(
+    db: &djinn_db::Database,
+    task_id: &str,
+    role: &str,
+    session_id: Option<&str>,
+    dispatch_key: &str,
+    owner_id: &str,
+    group_id: &str,
+) -> Option<String> {
+    let attempt_id = uuid::Uuid::now_v7().to_string();
+    match TaskAttemptRepository::new(db.clone())
+        .create_or_get_pending(CreateTaskAttemptParams {
+            id: &attempt_id,
+            task_id,
+            role,
+            dispatch_key,
+            session_id,
+            attempt_seq: None,
+            dispatch_owner_incarnation_id: Some(owner_id),
+            dispatch_group_id: Some(group_id),
+        })
+        .await
+    {
+        Ok(attempt) => Some(attempt.id),
+        Err(error) => {
+            tracing::warn!(task_id, role, dispatch_key, owner_id, group_id, %error,
+                "attempt_lifecycle: failed to record identified dispatch-start (best-effort)");
+            None
+        }
+    }
+}
+
 /// Parameters for the coordinator-side submission advancement helper.
 #[allow(dead_code)]
 pub struct SubmitAdvancementParams<'a> {

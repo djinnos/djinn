@@ -2759,9 +2759,13 @@ impl CoordinatorActor {
             // returned `None`, fall back to the legacy `dispatch` call so
             // existing default/off dispatch behavior is byte-for-byte
             // preserved.
-            let resume_metadata = self
+            let dispatch_group_id = uuid::Uuid::now_v7().to_string();
+            let mut resume_metadata = self
                 .select_resume_lifecycle_metadata_for_dispatch(&task)
                 .await;
+            let metadata = resume_metadata.get_or_insert_with(Default::default);
+            metadata.dispatch_owner_incarnation_id = Some(self.coordinator_incarnation_id.clone());
+            metadata.dispatch_group_id = Some(dispatch_group_id.clone());
             let resume_metadata_json = resume_metadata
                 .as_ref()
                 .map(serde_json::to_value)
@@ -2856,12 +2860,14 @@ impl CoordinatorActor {
                     // pending task_attempt row. Best-effort — never fails the
                     // dispatch path.
                     let dispatch_key = super::attempt_lifecycle::make_dispatch_key(&task.id, role);
-                    super::attempt_lifecycle::record_dispatch_start(
+                    super::attempt_lifecycle::record_dispatch_start_with_identity(
                         &self.db,
                         &task.id,
                         role,
                         None,
                         &dispatch_key,
+                        &self.coordinator_incarnation_id,
+                        &dispatch_group_id,
                     )
                     .await;
                     // Bump the per-user running count for the model actually

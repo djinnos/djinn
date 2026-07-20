@@ -42,6 +42,23 @@ const STARTUP_TASK_RUN_THRESHOLD_SECS: i64 = 10;
 /// while staying safely clear of any real starting attempt.
 const ORPHANED_PENDING_ATTEMPT_THRESHOLD_SECS: i64 = 5 * 60;
 
+pub(super) async fn renew_coordinator_incarnation(db: &djinn_db::Database, incarnation_id: &str) {
+    match djinn_db::CoordinatorIncarnationRepository::new(db.clone())
+        .renew(incarnation_id)
+        .await
+    {
+        Ok(true) => {
+            tracing::debug!(%incarnation_id, "CoordinatorActor: renewed coordinator incarnation lease")
+        }
+        Ok(false) => {
+            tracing::error!(%incarnation_id, "CoordinatorActor: coordinator incarnation lease missing; renewal fenced")
+        }
+        Err(error) => {
+            tracing::error!(%incarnation_id, %error, "CoordinatorActor: coordinator incarnation lease renewal failed")
+        }
+    }
+}
+
 const CARGO_TARGET_RUNS_ROOT: &str = djinn_supervisor::CARGO_TARGET_RUNS_ROOT;
 
 /// Default durable output-stash retention window for coordinator maintenance.

@@ -314,6 +314,12 @@ pub struct TaskRunSpec {
 /// presence of `selection_reason` is the "a selection was made" signal.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct ResumeLifecycleMetadata {
+    /// Additive exact identity supplied by the coordinator. Mixed-version
+    /// launchers omit either/both values, which deliberately remains NULL.
+    #[serde(default)]
+    pub dispatch_owner_incarnation_id: Option<String>,
+    #[serde(default)]
+    pub dispatch_group_id: Option<String>,
     /// Whether resume selection was considered for this dispatch/session.
     #[serde(default)]
     pub considered: bool,

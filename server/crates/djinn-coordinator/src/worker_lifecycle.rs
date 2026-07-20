@@ -631,6 +631,10 @@ pub fn evaluate_no_progress_controlled_exit(
 /// without an `EOF` on bincode decode.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct ResumeLifecycleMetadata {
+    #[serde(default)]
+    pub dispatch_owner_incarnation_id: Option<String>,
+    #[serde(default)]
+    pub dispatch_group_id: Option<String>,
     /// Whether resume selection was considered for this dispatch/session.
     #[serde(default)]
     pub considered: bool,

@@ -67,6 +67,7 @@ pub(super) struct CoordinatorActor {
     pub(super) tick: Interval,
     // Dependencies
     pub(super) db: Database,
+    pub(super) coordinator_incarnation_id: String,
     pub(super) events_tx: broadcast::Sender<DjinnEventEnvelope>,
     pub(super) pool: SlotPoolHandle,
     /// Durable build admission shared by every task-run dispatch route.
@@ -541,6 +542,7 @@ impl CoordinatorActor {
             cancel,
             tick,
             db: db.clone(),
+            coordinator_incarnation_id: uuid::Uuid::now_v7().to_string(),
             events_tx: events_tx.clone(),
             pool,
             build_admission,
@@ -845,6 +847,12 @@ impl CoordinatorActor {
 
     pub(super) async fn run(mut self) {
         tracing::info!("CoordinatorActor started");
+        if let Err(error) = djinn_db::CoordinatorIncarnationRepository::new(self.db.clone())
+            .register(&self.coordinator_incarnation_id)
+            .await
+        {
+            tracing::error!(incarnation_id = %self.coordinator_incarnation_id, %error, "CoordinatorActor: failed to register coordinator incarnation lease");
+        }
 
         let _startup_imports_complete = match ProjectRepository::new(
             self.db.clone(),
@@ -1074,6 +1082,7 @@ impl CoordinatorActor {
         if self.last_stale_sweep.elapsed() >= STALE_SWEEP_INTERVAL {
             let app_state = self.maintenance_context();
             health::sweep_stale_resources(&self.db, &app_state).await;
+            health::renew_coordinator_incarnation(&self.db, &self.coordinator_incarnation_id).await;
             self.last_stale_sweep = SystemClock::new().now_instant();
         }
         if self.last_auto_dispatch_sweep.elapsed() >= AUTO_DISPATCH_SWEEP_INTERVAL {
