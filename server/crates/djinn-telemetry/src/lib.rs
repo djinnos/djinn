@@ -298,23 +298,27 @@ pub mod final_verification {
     pub const RECORD_INELIGIBLE: &str = "ineligible";
     pub const RECORD_ERROR: &str = "error";
 
+    /// An injected recorder failure used to prove telemetry is best-effort.
+    #[derive(Debug)]
+    pub struct EmissionError;
+
     /// Increment the one terminal outcome for a cache consultation.
-    pub fn increment_lookup(outcome: &'static str) -> Result<(), ()> {
+    pub fn increment_lookup(outcome: &'static str) -> Result<(), EmissionError> {
         #[cfg(feature = "test-support")]
         LOOKUP_EMISSION_ATTEMPTS.with(|attempts| attempts.set(attempts.get() + 1));
         if injected_failure() {
-            return Err(());
+            return Err(EmissionError);
         }
         metrics::counter!(super::VERIFY_CACHE_LOOKUP_TOTAL, "outcome" => outcome).increment(1);
         Ok(())
     }
 
     /// Increment the one terminal outcome for a writer attempt.
-    pub fn increment_record(outcome: &'static str) -> Result<(), ()> {
+    pub fn increment_record(outcome: &'static str) -> Result<(), EmissionError> {
         #[cfg(feature = "test-support")]
         RECORD_EMISSION_ATTEMPTS.with(|attempts| attempts.set(attempts.get() + 1));
         if injected_failure() {
-            return Err(());
+            return Err(EmissionError);
         }
         metrics::counter!(super::VERIFY_RUN_RECORD_TOTAL, "outcome" => outcome).increment(1);
         Ok(())
@@ -348,7 +352,7 @@ pub mod final_verification {
     fn injected_failure() -> bool {
         #[cfg(feature = "test-support")]
         {
-            return FAIL_NEXT_EMISSION.with(|failure| failure.replace(false));
+            FAIL_NEXT_EMISSION.with(|failure| failure.replace(false))
         }
         #[cfg(not(feature = "test-support"))]
         false
