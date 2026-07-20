@@ -509,6 +509,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "caseless"
+version = "0.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8b6fd507454086c8edfd769ca6ada439193cdb209c7681712ef6275cccbfe5d8"
+dependencies = [
+ "unicode-normalization",
+]
+
+[[package]]
 name = "castaway"
 version = "0.2.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1822,13 +1831,13 @@ dependencies = [
 name = "djinn-spec-lint"
 version = "0.1.0"
 dependencies = [
+ "caseless",
  "markdown",
  "regex",
  "schemars 1.2.1",
  "serde",
  "serde_json",
  "sha2 0.10.9",
- "stringprep",
  "unicode-normalization",
 ]
 

@@ -2,6 +2,7 @@
 
 use std::collections::BTreeSet;
 
+use caseless::default_case_fold_str;
 use markdown::mdast::{AttributeContent, AttributeValue, Node};
 use unicode_normalization::UnicodeNormalization;
 
@@ -195,13 +196,10 @@ fn collect_element(
 }
 
 /// NFKC followed by Unicode default case folding, then maximal letter-or-number
-/// token extraction. `stringprep` ships the Unicode CaseFolding B.2 table,
-/// rather than approximating it with lowercase plus selected exceptions.
+/// token extraction.
 fn normalize_tokens(text: &str) -> Vec<String> {
-    let folded = text
-        .nfkc()
-        .flat_map(stringprep::tables::case_fold_for_nfkc)
-        .collect::<String>();
+    let normalized = text.nfkc().collect::<String>();
+    let folded = default_case_fold_str(&normalized);
     let mut tokens = Vec::new();
     let mut token = String::new();
     for character in folded.chars() {
@@ -256,16 +254,17 @@ mod tests {
     #[test]
     fn normalization_and_shingles_follow_the_specified_order() {
         assert_eq!(
-            normalize_tokens("ＦＯＯ, Straße! Σς ᾳ"),
-            ["foo", "strasse", "σσ", "αι"]
+            normalize_tokens("ＦＯＯ, Straße! Σς ᾳ ẞ"),
+            ["foo", "strasse", "σσ", "αι", "ss"]
         );
         let tokens = normalize_tokens("one two three four five six");
         assert_eq!(shingles(&tokens).len(), 2);
         assert!(shingles(&tokens).contains(&normalize_tokens("one two three four five")));
         let mdx_values = violations(
-            "# ᾳ\n<Widget title=\"ＦＯＯ Straße Σς\" />\n# αι\n<Widget title=\"foo strasse σσ\" />\n",
+            "# ẞ\n<Widget title=\"ＦＯＯ Straße Σς ᾳ\" />\n# ss\n<Widget title=\"foo strasse σσ αι\" />\n",
         );
         assert_eq!(mdx_values[0].code, "DUPLICATE_SECTION_CONTENT");
+        assert_eq!(mdx_values[0].severity, Severity::Error);
     }
 
     #[test]
@@ -312,7 +311,6 @@ mod tests {
         for excluded_source in [
             "`a b c d e`",
             "```text\na b c d e\n```",
-            "[different](https://a-b-c-d-e.example)",
             "<Callout id=\"x\">a b c d e</Callout>",
             "<Widget template=\"a b c d e\" />",
             "<Widget code=\"a b c d e\" />",
@@ -326,5 +324,22 @@ mod tests {
                 body.match_indices("# Same").nth(1).unwrap().0
             );
         }
+
+        // The label is eligible prose. Including the valid link destination
+        // would make these section token streams identical, so this warning
+        // proves that the destination itself remains excluded.
+        let link_body = concat!(
+            "# Same\n",
+            "different https a b c d e example\n",
+            "# Same\n",
+            "[different](https://a-b-c-d-e.example)\n",
+        );
+        let link = violations(link_body);
+        assert_eq!(link[0].code, "REPEATED_SECTION_HEADING");
+        assert_eq!(link[0].severity, Severity::Warning);
+        assert_eq!(
+            link[0].span.start,
+            link_body.match_indices("# Same").nth(1).unwrap().0
+        );
     }
 }
