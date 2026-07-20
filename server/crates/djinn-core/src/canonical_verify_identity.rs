@@ -666,6 +666,53 @@ mod tests {
         }
     }
 
+    #[test]
+    fn ordered_descriptor_add_remove_reorder_and_argv_changes_never_share_identity() {
+        let baseline = EnvironmentIdentityV1::derive(input()).expect("baseline identity");
+        let additional = CanonicalCommandDescriptorV1 {
+            check_id: "lint".into(),
+            executable: "cargo".into(),
+            argv: vec!["clippy".into(), "--all-targets".into()],
+            working_directory: ".".into(),
+            environment_names: Vec::new(),
+            timeout_seconds: 60,
+            descriptor_revision: 1,
+        };
+
+        let mut added = input();
+        added.plan.commands.push(additional);
+        added.plan.required_checks.push("lint".into());
+        let added_identity = EnvironmentIdentityV1::derive(added.clone()).expect("added identity");
+        assert_ne!(
+            baseline.digest, added_identity.digest,
+            "adding a descriptor"
+        );
+
+        added.plan.commands.reverse();
+        let reordered_identity = EnvironmentIdentityV1::derive(added).expect("reordered identity");
+        assert_ne!(
+            added_identity.digest, reordered_identity.digest,
+            "descriptor order is semantic"
+        );
+
+        let mut argv_changed = input();
+        argv_changed.plan.commands[0].argv.push("--locked".into());
+        assert_ne!(
+            baseline.digest,
+            EnvironmentIdentityV1::derive(argv_changed)
+                .expect("argv changed identity")
+                .digest,
+            "argv is semantic"
+        );
+
+        let removed_identity = EnvironmentIdentityV1::derive(input()).expect("removed identity");
+        assert_ne!(
+            added_identity.digest, removed_identity.digest,
+            "removing a descriptor"
+        );
+        assert_eq!(baseline.digest, removed_identity.digest);
+    }
+
     fn alternate_digest(hex: char) -> String {
         format!("sha256:{}", hex.to_string().repeat(64))
     }
