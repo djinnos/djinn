@@ -212,6 +212,7 @@ mod tests {
 
     use super::*;
     use crate::repositories::epic::EpicRepository;
+    use crate::repositories::test_support::seed_user_with_id;
 
     fn test_db() -> Database {
         Database::open_in_memory().unwrap()
@@ -227,15 +228,26 @@ mod tests {
 
         let task_id = uuid::Uuid::now_v7().to_string();
         let short_id = format!("t{}{}", &task_id[..6], &task_id[task_id.len() - 6..]);
-        sqlx::query!(
-            "INSERT INTO tasks (id, project_id, short_id, epic_id, title, description, design,
-                                issue_type, priority, owner, status, continuation_count, labels, acceptance_criteria, memory_refs)
-             VALUES ($1, $2, $3, $4, 'Task', '', '', 'task', 0, '', 'open', 0, '[]'::jsonb, '[]'::jsonb, '[]'::jsonb)",
-            task_id,
-            epic.project_id,
-            short_id,
-            epic.id
+        let creator_uuid = uuid::Uuid::now_v7();
+        let creator_id = creator_uuid.to_string();
+        seed_user_with_id(
+            db,
+            &creator_id,
+            (creator_uuid.as_u128() & i64::MAX as u128) as i64,
+            &format!("dispatch-state-fixture-{creator_id}"),
         )
+        .await;
+        sqlx::query(
+            "INSERT INTO tasks (id, project_id, short_id, epic_id, title, description, design,
+                                issue_type, priority, owner, status, continuation_count, labels, acceptance_criteria, memory_refs,
+                                created_by_user_id)
+             VALUES ($1, $2, $3, $4, 'Task', '', '', 'task', 0, '', 'open', 0, '[]'::jsonb, '[]'::jsonb, '[]'::jsonb, $5)",
+        )
+        .bind(&task_id)
+        .bind(&epic.project_id)
+        .bind(&short_id)
+        .bind(&epic.id)
+        .bind(&creator_id)
         .execute(db.pool())
         .await
         .unwrap();

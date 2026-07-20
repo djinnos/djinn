@@ -1164,6 +1164,7 @@ mod tests {
     use djinn_core::models::Epic;
 
     use super::*;
+    use crate::repositories::test_support::seed_user_with_id;
 
     fn test_db() -> Database {
         Database::open_in_memory().unwrap()
@@ -1194,11 +1195,21 @@ mod tests {
     async fn insert_epic_child(db: &Database, epic: &Epic, short_id: &str, status: &str) -> String {
         let id = uuid::Uuid::now_v7().to_string();
         let title = format!("Child {short_id}");
+        let creator_uuid = uuid::Uuid::now_v7();
+        let creator_id = creator_uuid.to_string();
+        seed_user_with_id(
+            db,
+            &creator_id,
+            (creator_uuid.as_u128() & i64::MAX as u128) as i64,
+            &format!("epic-child-fixture-{creator_id}"),
+        )
+        .await;
         sqlx::query(
             r#"INSERT INTO tasks (id, project_id, short_id, epic_id, title, description, design,
-                    issue_type, priority, owner, status, labels, acceptance_criteria, memory_refs)
+                    issue_type, priority, owner, status, labels, acceptance_criteria, memory_refs,
+                    created_by_user_id)
                VALUES ($1, $2, $3, $4, $5, '', '', 'task', 1, '', $6,
-                       '[]'::jsonb, '[]'::jsonb, '[]'::jsonb)"#,
+                       '[]'::jsonb, '[]'::jsonb, '[]'::jsonb, $7)"#,
         )
         .bind(&id)
         .bind(&epic.project_id)
@@ -1206,6 +1217,7 @@ mod tests {
         .bind(&epic.id)
         .bind(&title)
         .bind(status)
+        .bind(&creator_id)
         .execute(db.pool())
         .await
         .unwrap();
