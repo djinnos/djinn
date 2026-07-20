@@ -125,4 +125,23 @@ mod tests {
         assert!(result.errors[0].span.start > "λ before\n".len());
         result.validate_for_body(body).unwrap();
     }
+
+    #[test]
+    fn duplicate_id_inside_mdx_fragment_is_detected() {
+        let body = concat!(
+            "<Callout id=\"same\">first</Callout>\n\n",
+            "<>\n",
+            "<Callout id=\"same\">second</Callout>\n",
+            "</>"
+        );
+        let result = lint(body, BodyFormat::Mdx, "fixed");
+
+        assert_eq!(result.errors.len(), 1);
+        let violation = &result.errors[0];
+        assert_eq!(violation.code, "DUPLICATE_BLOCK_ID");
+        assert_eq!(&body[violation.span.start..violation.span.end], "same");
+        let second = body.match_indices("id=\"same\"").nth(1).unwrap().0 + 4;
+        assert_eq!(violation.span.start, second);
+        result.validate_for_body(body).unwrap();
+    }
 }

@@ -94,6 +94,12 @@ fn collect_element(
     occurrences: &mut Vec<RegisteredBlockOccurrence>,
 ) {
     let Some(tag) = name.as_deref() else {
+        // `name: None` represents an MDX fragment (`<>...</>`). Fragments do
+        // not themselves have registered-block metadata, but their descendants
+        // remain part of the document-wide traversal.
+        for child in children {
+            collect_registered_blocks(body, child, occurrences);
+        }
         return;
     };
     if let (Some(definition), Some(position)) = (proposal_block_definition_for_tag(tag), position) {
