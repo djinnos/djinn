@@ -490,10 +490,10 @@ impl EmbeddingRuntime for CandleEmbeddingRuntime {
 }
 
 pub fn default_embedding_cache_dir() -> PathBuf {
-    if let Some(home) = dirs::home_dir() {
-        return home.join(".djinn").join("models");
-    }
-    PathBuf::from(".djinn/models")
+    // Model downloads are server cache state, never project-checkout state.
+    // `cache_root` resolves to `$DJINN_HOME/cache` or an immediately rooted
+    // server-home cache and remains valid even when no home directory exists.
+    djinn_core::paths::cache_root().join("models")
 }
 
 #[cfg(test)]

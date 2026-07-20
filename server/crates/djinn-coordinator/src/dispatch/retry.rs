@@ -131,23 +131,6 @@ impl CoordinatorActor {
                 .is_some_and(|count| count > 0)
     }
 
-    fn activity_entry_mentions_djinn_path(entry: &djinn_core::models::ActivityEntry) -> bool {
-        if !entry.payload.contains(".djinn/") {
-            return false;
-        }
-
-        serde_json::from_str::<serde_json::Value>(&entry.payload)
-            .ok()
-            .and_then(|payload| {
-                payload
-                    .get("body")
-                    .and_then(|v| v.as_str())
-                    .map(str::to_owned)
-            })
-            .unwrap_or_else(|| entry.payload.clone())
-            .contains(".djinn/")
-    }
-
     /// Probe a session worktree on disk for uncommitted changes (modified,
     /// staged, or untracked files).  This is the ground-truth signal: it
     /// catches files written via `call_shell`, file moves, and anything the
@@ -195,21 +178,6 @@ impl CoordinatorActor {
             tracing::info!(
                 task_id = %task_id,
                 "simple-lifecycle artifact detected: non-zero files_changed/notes_written in taxonomy"
-            );
-            return true;
-        }
-
-        // Signal 3: task comments referencing .djinn/ paths.
-        let repo = self.task_repo();
-        if let Ok(entries) = repo.list_activity(task_id).await
-            && entries
-                .iter()
-                .filter(|entry| entry.event_type == "comment")
-                .any(Self::activity_entry_mentions_djinn_path)
-        {
-            tracing::info!(
-                task_id = %task_id,
-                "simple-lifecycle artifact detected: task comment references .djinn/ path"
             );
             return true;
         }
