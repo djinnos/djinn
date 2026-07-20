@@ -76,6 +76,7 @@ fn expected_safety_tuple(name: &str) -> Option<(bool, bool, bool, bool)> {
         | "ci_artifact"
         | "output_view"
         | "output_grep"
+        | "output_list"
         | "memory_build_context"
         | "memory_health"
         | "memory_extracted_audit"
@@ -1021,6 +1022,10 @@ fn evidence_spike_has_read_only_investigation_tools() {
     assert!(
         names.contains("output_grep"),
         "evidence spike must have `output_grep`"
+    );
+    assert!(
+        names.contains("output_list"),
+        "evidence spike must have `output_list`"
     );
 
     // Task/epic/memory read-only inspection (from shared_base + shared_lead).
