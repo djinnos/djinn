@@ -470,30 +470,49 @@ impl NoteRepository {
             .into_iter()
             .find(|note| note.id == old_id)
             .expect("old note locked");
-        sqlx::query("UPDATE notes SET status = 'deprecated', updated_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') WHERE id = $1 AND project_id = $2")
-            .bind(old_id).bind(&command.project_id).execute(&mut **tx).await?;
+        // A genuine active→deprecated transition stamps both `status` and a
+        // fresh exact `lifecycle_changed_at` in the same atomic statement so
+        // the lifecycle graph can order the transition by a trustworthy
+        // timestamp. Repeating an already-applied deprecation must not refresh
+        // the prior lifecycle timestamp: the guarded `WHERE status <> 'deprecated'`
+        // predicate leaves the row (and its lifecycle stamp) untouched on a
+        // retry/no-op, mirroring the same-status preservation contract of
+        // `NoteRepository::update_status` and ordinary content edits.
+        let transitioned: u64 = sqlx::query("UPDATE notes SET status = 'deprecated', lifecycle_changed_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"'), updated_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') WHERE id = $1 AND project_id = $2 AND status <> 'deprecated'")
+            .bind(old_id).bind(&command.project_id).execute(&mut **tx).await?.rows_affected();
         let association = self
             .record_supersedes_in_transaction(tx, superseding_note_id, old_id, *association_weight)
             .await?;
         let note = locked_note(tx, old_id, &command.project_id).await?;
         let seq = next_sequence(tx, &command.project_id, old_id).await?;
-        let revision_id = self
-            .insert_revision(
-                tx,
-                command,
-                Some(old_id),
-                Some(seq),
-                Some(&before.content),
-                Some(&note.content),
-                Some(before.confidence),
-                Some(note.confidence),
-            )
-            .await?;
+        let (changed, revision_id) = if transitioned == 0 {
+            // Already deprecated: align with the established no-op contract of
+            // the validated mutation boundary (`update_with_revision`). The
+            // supersedes association remains idempotent (max-weight merge) and
+            // the persisted note is returned with its preserved lifecycle
+            // timestamp, but no fabricated revision event is appended and
+            // `changed` is false so no embedding/event fan-out is emitted.
+            (false, None)
+        } else {
+            let revision_id = self
+                .insert_revision(
+                    tx,
+                    command,
+                    Some(old_id),
+                    Some(seq),
+                    Some(&before.content),
+                    Some(&note.content),
+                    Some(before.confidence),
+                    Some(note.confidence),
+                )
+                .await?;
+            (true, Some(revision_id))
+        };
         Ok(NoteRevisionMutationResult {
-            changed: true,
+            changed,
             note: Some(note),
-            note_seq: Some(seq),
-            revision_id: Some(revision_id),
+            note_seq: if changed { Some(seq) } else { None },
+            revision_id,
             deprecated_note_id: Some(old_id.to_owned()),
             superseding_note_id: Some(superseding_note_id.clone()),
             supersedes_association: Some(association),
