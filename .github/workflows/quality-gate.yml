@@ -53,6 +53,10 @@ jobs:
         run: |
           ./scripts/test-mold-debian-snapshot-contract.sh
           ./scripts/test-mold-debian-snapshot-contract-regressions.sh
+      - name: Exercise pinned mold apt stanza on current trixie
+        run: ./scripts/image-ci/run-mold-trixie-apt-smoke.sh
+      - name: Verify trixie mold apt smoke contract
+        run: node --test scripts/ci-mold-trixie-apt-smoke.test.mjs
       - name: Verify routed-scope contract
         run: node --test scripts/ci-changed-scope.test.mjs
       - name: Verify cache ownership policy
