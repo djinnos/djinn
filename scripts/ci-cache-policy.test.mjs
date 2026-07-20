@@ -1,19 +1,36 @@
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { readdirSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import test from 'node:test';
 
-const WORKFLOW = resolve('.github/workflows/quality-gate.yml');
+const WORKFLOW_DIR = resolve('.github/workflows');
+const WORKFLOW = resolve(WORKFLOW_DIR, 'quality-gate.yml');
+
+/**
+ * Every workflow that touches a Rust cache, not just quality-gate.yml.
+ * Scoping this file to a single workflow left a hole: memory-qa-nightly.yml
+ * restored `server-quality` while omitting `save-if`, and rust-cache DEFAULTS
+ * TO SAVING. Because that workflow runs on `schedule` it executes on the
+ * default branch, so it was silently a second writer to a family this policy
+ * declares single-owner — and no assertion here could see it.
+ */
+function cacheWorkflows() {
+  return readdirSync(WORKFLOW_DIR)
+    .filter((name) => /\.ya?ml$/.test(name))
+    .map((name) => resolve(WORKFLOW_DIR, name))
+    .filter((path) => /Swatinem\/rust-cache@|actions\/cache(?:@|\/)/i.test(readFileSync(path, 'utf8')));
+}
 
 // Each family has exactly one job permitted to save it. Adding a family requires
 // adding its owner here before it can be used in the quality-gate workflow.
+// `server-quality` and `release-bins` were retired. GitHub caps a repo at
+// 10 GB and evicts LRU, and four families sat at ~8.94 GB — so every family
+// was competing with the one CI actually reads on every run. server-quality
+// served a single job after #2342; release-bins served ~1.9 releases a day
+// against ~298 CI runs. Their ~4 GB funds cache-workspace-crates on
+// server-test. Adding a family back means finding budget for it first.
 const CACHE_OWNERS = new Map([
-  ['server-quality', 'cache-warm-x86_64-quality'],
   ['server-test', 'cache-warm-x86_64-test'],
-  // Saved on main so tag-triggered release runs can restore it: caches
-  // saved on a tag ref are invisible to every other ref, so release.yml
-  // itself must stay a restore-only consumer of this family.
-  ['release-bins', 'cache-warm-x86_64-release'],
   ['server-aarch64-check', 'cache-warm-aarch64'],
 ]);
 
@@ -252,6 +269,37 @@ test('quality-gate has one saving owner and restore-only consumers per cache fam
   }
 
   assertMainAndDispatchReachable(parsed, parsed.jobs.get('cache-warm-aarch64'));
+});
+
+test('every workflow outside quality-gate is a restore-only cache consumer', () => {
+  const checked = [];
+  for (const path of cacheWorkflows()) {
+    if (path === WORKFLOW) continue;
+    checked.push(path);
+    const parsed = parseJobs(readFileSync(path, 'utf8'));
+    for (const job of parsed.jobs.values()) {
+      for (const step of cacheSteps(job)) {
+        const action = step.uses.toLowerCase();
+        const rustCache = action.startsWith('swatinem/rust-cache@');
+        const family = rustCache ? field(step, 'shared-key') : field(step, 'key');
+        assert.ok(family,
+          `${path}:${step.lines[0].number} cache action lacks a declared cache family`);
+        assert.ok(CACHE_OWNERS.has(family),
+          `${path}:${step.lines[0].number} uses undeclared cache family ${family}`);
+
+        // All owners live in quality-gate.yml, so any other workflow saving
+        // into a declared family is by definition a second writer.
+        const savesCache = rustCache
+          ? !isFalse(field(step, 'save-if'))
+          : !action.startsWith('actions/cache/restore@');
+        assert.equal(savesCache, false,
+          `${path}:${step.lines[0].number} (${job.id}) writes cache family ${family}, `
+          + `whose only permitted owner is ${CACHE_OWNERS.get(family)} in quality-gate.yml. `
+          + 'rust-cache saves unless save-if is explicitly false.');
+      }
+    }
+  }
+  assert.ok(checked.length > 0, 'expected at least one non-quality-gate workflow using a cache');
 });
 
 test('cache-warm-aarch64 rejects a main-unreachable owner condition', () => {
