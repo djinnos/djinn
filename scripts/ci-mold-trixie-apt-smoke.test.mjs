@@ -23,8 +23,14 @@ function preflightBlock(source) {
 }
 
 function assertSmokeContract(source) {
-  assert.match(source, /docker run --rm[\s\\]+(?:.|\n)*debian:trixie-slim/s,
-    'smoke must execute Docker from current debian:trixie-slim');
+  assert.match(source, /image="debian:trixie-slim"/,
+    'smoke must name the current trixie image once for retryable pulling');
+  assert.match(source, /for attempt in 1 2 3; do[\s\S]*docker pull "\$image"[\s\S]*sleep "\$attempt"/,
+    'smoke must retry transient registry failures before running the probe');
+  assert.match(source, /docker run --rm[\s\\]+--pull=never/,
+    'smoke must run the image it successfully pulled rather than issuing a second pull');
+  assert.match(source, /docker run --rm[\s\\]+(?:.|\n)*"\$image"/s,
+    'smoke must execute Docker from the current trixie image');
   assert.match(source, /source_files\(\)/,
     'smoke must retain and compare the base-distribution apt sources');
   assert.match(source, /! -path \/etc\/apt\/sources\.list\.d\/mold-snapshot\.list/,

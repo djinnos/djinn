@@ -95,7 +95,7 @@ impl NoteRepository {
             patterns.push(format!("%{claim}%"));
         }
         let sql = format!(
-            "SELECT n.id, n.project_id, n.permalink, n.title, n.file_path, n.storage, n.note_type, n.folder, n.status, n.tags::text AS tags, n.content, n.retrieval_anchor, n.created_at, n.updated_at, n.last_accessed, n.access_count, n.confidence, n.abstract as abstract_, n.overview, n.scope_paths::text AS scope_paths FROM notes n WHERE n.project_id = $1 AND ({}) ORDER BY n.permalink, n.id",
+            "SELECT n.id, n.project_id, n.permalink, n.title, n.file_path, n.storage, n.note_type, n.folder, n.status, n.tags::text AS tags, n.content, n.retrieval_anchor, n.created_at, n.updated_at, n.lifecycle_changed_at, n.last_accessed, n.access_count, n.confidence, n.abstract as abstract_, n.overview, n.scope_paths::text AS scope_paths FROM notes n WHERE n.project_id = $1 AND ({}) ORDER BY n.permalink, n.id",
             predicates.join(" OR ")
         );
         let mut query = sqlx::query_as::<_, Note>(&sql)
