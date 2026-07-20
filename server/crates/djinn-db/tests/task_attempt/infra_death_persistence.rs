@@ -33,6 +33,8 @@ async fn duplicate_terminal_preserves_first_log_tail() {
             dispatch_key: "dk-dup-term-1",
             session_id: None,
             attempt_seq: None,
+            dispatch_owner_incarnation_id: None,
+            dispatch_group_id: None,
         })
         .await
         .unwrap();
@@ -99,6 +101,8 @@ async fn fill_nullable_preserves_first_log_tail_across_repeated_calls() {
             dispatch_key: "dk-fill-log-1",
             session_id: None,
             attempt_seq: None,
+            dispatch_owner_incarnation_id: None,
+            dispatch_group_id: None,
         })
         .await
         .unwrap();
@@ -183,6 +187,8 @@ async fn infra_death_fill_does_not_create_duplicate_rows() {
             dispatch_key: "dk-no-dup-fill",
             session_id: None,
             attempt_seq: None,
+            dispatch_owner_incarnation_id: None,
+            dispatch_group_id: None,
         })
         .await
         .unwrap();
@@ -248,6 +254,8 @@ async fn real_terminal_report_wins_over_infra_death_outcome() {
             dispatch_key: "dk-report-wins",
             session_id: None,
             attempt_seq: None,
+            dispatch_owner_incarnation_id: None,
+            dispatch_group_id: None,
         })
         .await
         .unwrap();
@@ -369,6 +377,8 @@ async fn infra_death_then_real_terminal_preserves_first_log_tail() {
             dispatch_key: "dk-infra-then-real",
             session_id: None,
             attempt_seq: None,
+            dispatch_owner_incarnation_id: None,
+            dispatch_group_id: None,
         })
         .await
         .unwrap();
@@ -449,6 +459,8 @@ async fn different_terminal_outcome_is_full_noop() {
             dispatch_key: "dk-diff-term-noop",
             session_id: None,
             attempt_seq: None,
+            dispatch_owner_incarnation_id: None,
+            dispatch_group_id: None,
         })
         .await
         .unwrap();
@@ -561,6 +573,8 @@ async fn fill_nullable_on_terminal_row_captures_infra_death_data() {
             dispatch_key: "dk-fill-on-terminal",
             session_id: None,
             attempt_seq: None,
+            dispatch_owner_incarnation_id: None,
+            dispatch_group_id: None,
         })
         .await
         .unwrap();
@@ -636,6 +650,8 @@ async fn idempotent_same_outcome_terminal_is_noop() {
             dispatch_key: "dk-idem-same",
             session_id: None,
             attempt_seq: None,
+            dispatch_owner_incarnation_id: None,
+            dispatch_group_id: None,
         })
         .await
         .unwrap();
@@ -713,6 +729,8 @@ async fn persist_infra_death_preserves_first_log_tail() {
             dispatch_key: "dk-persist-lt-1",
             session_id: None,
             attempt_seq: None,
+            dispatch_owner_incarnation_id: None,
+            dispatch_group_id: None,
         })
         .await
         .unwrap();
@@ -761,6 +779,8 @@ async fn persist_infra_death_null_then_nonnull_log_tail() {
             dispatch_key: "dk-persist-null-lt",
             session_id: None,
             attempt_seq: None,
+            dispatch_owner_incarnation_id: None,
+            dispatch_group_id: None,
         })
         .await
         .unwrap();
@@ -804,6 +824,8 @@ async fn persist_infra_death_merges_fetch_metadata_on_first_call() {
             dispatch_key: "dk-persist-meta-1",
             session_id: None,
             attempt_seq: None,
+            dispatch_owner_incarnation_id: None,
+            dispatch_group_id: None,
         })
         .await
         .unwrap();
@@ -844,6 +866,8 @@ async fn persist_infra_death_merges_into_existing_summary_json() {
             dispatch_key: "dk-persist-merge",
             session_id: None,
             attempt_seq: None,
+            dispatch_owner_incarnation_id: None,
+            dispatch_group_id: None,
         })
         .await
         .unwrap();
@@ -892,6 +916,8 @@ async fn persist_infra_death_no_overwrite_existing_metadata() {
             dispatch_key: "dk-persist-no-ow",
             session_id: None,
             attempt_seq: None,
+            dispatch_owner_incarnation_id: None,
+            dispatch_group_id: None,
         })
         .await
         .unwrap();
@@ -938,6 +964,8 @@ async fn persist_infra_death_no_duplicate_rows() {
             dispatch_key: "dk-persist-no-dup",
             session_id: None,
             attempt_seq: None,
+            dispatch_owner_incarnation_id: None,
+            dispatch_group_id: None,
         })
         .await
         .unwrap();
@@ -992,6 +1020,8 @@ async fn persist_infra_death_does_not_change_outcome_on_terminal_row() {
             dispatch_key: "dk-persist-term",
             session_id: None,
             attempt_seq: None,
+            dispatch_owner_incarnation_id: None,
+            dispatch_group_id: None,
         })
         .await
         .unwrap();
@@ -1065,6 +1095,8 @@ async fn persist_infra_death_on_pending_row_then_terminal_wins() {
             dispatch_key: "dk-persist-then-term",
             session_id: None,
             attempt_seq: None,
+            dispatch_owner_incarnation_id: None,
+            dispatch_group_id: None,
         })
         .await
         .unwrap();

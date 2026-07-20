@@ -32,6 +32,8 @@ async fn seed_terminal_attempt(
         dispatch_key: &dispatch_key,
         session_id: None,
         attempt_seq: None,
+        dispatch_owner_incarnation_id: None,
+        dispatch_group_id: None,
     })
     .await
     .unwrap();

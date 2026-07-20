@@ -50,6 +50,7 @@ async fn make_context() -> (
             status: Some("running"),
             workspace_path: Some("/tmp"),
             mirror_ref: None,
+            dispatch_group_id: None,
         })
         .await
         .expect("create active task run");

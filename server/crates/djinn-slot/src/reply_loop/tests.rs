@@ -245,6 +245,7 @@ async fn make_context_with_task() -> (
             status: Some("running"),
             workspace_path: Some("/tmp"),
             mirror_ref: None,
+            dispatch_group_id: None,
         })
         .await
         .expect("create active task run");
@@ -960,6 +961,7 @@ async fn run_scripted_reply_loop_with_dispatcher(
             status: Some("running"),
             workspace_path: Some("/tmp"),
             mirror_ref: None,
+            dispatch_group_id: None,
         })
         .await
         .expect("create active task run");

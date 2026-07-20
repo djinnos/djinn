@@ -52,6 +52,7 @@ async fn create_run(db: &Database, project_id: &str, task_id: &str) -> String {
             status: None,
             workspace_path: None,
             mirror_ref: None,
+            dispatch_group_id: None,
         })
         .await
         .unwrap();

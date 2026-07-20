@@ -16,6 +16,34 @@ An operator can make the same non-destructive override with
 This Helm contract does not change direct-binary behavior: an unset or invalid
 `DJINN_CACHE_CLEANUP_MODE` remains fail-safe `dry_run` there.
 
+## Graph generation retention rollout
+
+`graphRetention` controls the literal `DJINN_GRAPH_RETENTION_MODE` and
+`DJINN_GRAPH_RETENTION_HISTORY_N` environment variables on `djinn-server`.
+The production chart defaults to `mode: dry_run` and `historyN: 3`. This starts
+the leader-only sweep in observation mode: it reports candidate generations but
+does not delete them.
+
+Use the rollout sequence below; no live Kubernetes cluster is required to
+validate the chart because `tests/graph-retention-render.sh` renders and checks
+each setting locally.
+
+1. Leave `graphRetention.mode=dry_run` in place and observe candidate/skip/retry
+   retention metrics and logs for the intended history window.
+2. After that observation is acceptable, explicitly enable destructive cleanup
+   with `--set-string graphRetention.mode=delete` (and, if needed,
+   `--set graphRetention.historyN=<N>`).
+3. Roll back immediately to the explicit escape hatch
+   `--set-string graphRetention.mode=off` to stop subsequent sweeps. Returning
+   to `dry_run` resumes observation without deletion.
+
+The schema accepts only `off`, `dry_run`, and `delete`; `historyN` must be an
+integer from 1 through 64. The server keeps the current generation plus the
+newest N published generations. Compatibility storage bounds are independent:
+each table is bounded to at most N+1 full blobs, while the two compatibility
+tables together are bounded to at most 2(N+1) full blobs. Do not treat the
+combined bound as a per-table allowance.
+
 ## Build admission mode
 
 `buildAdmission.mode` selects the literal `DJINN_BUILD_ADMISSION_MODE` emitted

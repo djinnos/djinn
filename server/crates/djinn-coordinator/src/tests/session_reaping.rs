@@ -157,6 +157,7 @@ async fn zombie_zero_token_session_is_reaped_on_db_truth() {
             status: Some("running"),
             workspace_path: None,
             mirror_ref: None,
+            dispatch_group_id: None,
         })
         .await
         .unwrap();
@@ -305,6 +306,7 @@ async fn connected_worker_past_hard_cap_is_not_reaped() {
             status: Some("running"),
             workspace_path: None,
             mirror_ref: None,
+            dispatch_group_id: None,
         })
         .await
         .unwrap();
@@ -403,6 +405,7 @@ async fn stall_timeout_tears_down_taskrun_job_through_slot_pool_kill_path() {
             status: Some("running"),
             workspace_path: None,
             mirror_ref: None,
+            dispatch_group_id: None,
         })
         .await
         .unwrap();
@@ -549,6 +552,7 @@ async fn reap_zombie_session_with_no_slot_mapping_still_tears_down_taskrun_job()
             status: Some("running"),
             workspace_path: None,
             mirror_ref: None,
+            dispatch_group_id: None,
         })
         .await
         .unwrap();
@@ -625,6 +629,7 @@ async fn reap_zombie_session_continues_recovery_when_teardown_fails() {
             status: Some("running"),
             workspace_path: None,
             mirror_ref: None,
+            dispatch_group_id: None,
         })
         .await
         .unwrap();
@@ -778,6 +783,7 @@ async fn seed_task_run(db: &Database, task: &djinn_core::models::Task, id: &str,
                 status: Some("running"),
                 workspace_path: None,
                 mirror_ref: None,
+                dispatch_group_id: None,
             })
             .await
             .unwrap();
@@ -791,6 +797,7 @@ async fn seed_task_run(db: &Database, task: &djinn_core::models::Task, id: &str,
                 status: Some(status),
                 workspace_path: None,
                 mirror_ref: None,
+                dispatch_group_id: None,
             })
             .await
             .unwrap();
@@ -1087,6 +1094,7 @@ async fn taskrun_job_backstop_deletes_absent_and_finalized_rows_only() {
             status: Some("completed"),
             workspace_path: None,
             mirror_ref: None,
+            dispatch_group_id: None,
         })
         .await
         .unwrap();
@@ -1101,6 +1109,7 @@ async fn taskrun_job_backstop_deletes_absent_and_finalized_rows_only() {
             status: Some("running"),
             workspace_path: None,
             mirror_ref: None,
+            dispatch_group_id: None,
         })
         .await
         .unwrap();
@@ -1156,6 +1165,7 @@ async fn taskrun_job_backstop_deletes_absent_and_finalized_rows_only() {
             status: Some("running"),
             workspace_path: None,
             mirror_ref: None,
+            dispatch_group_id: None,
         })
         .await
         .unwrap();
@@ -1232,6 +1242,7 @@ async fn stale_resource_sweep_runs_taskrun_job_backstop() {
             status: Some("completed"),
             workspace_path: None,
             mirror_ref: None,
+            dispatch_group_id: None,
         })
         .await
         .unwrap();
@@ -1267,6 +1278,7 @@ async fn startup_reconcile_runs_taskrun_job_backstop() {
             status: Some("completed"),
             workspace_path: None,
             mirror_ref: None,
+            dispatch_group_id: None,
         })
         .await
         .unwrap();
@@ -1457,6 +1469,7 @@ async fn token_bearing_terminal_orphan_is_reaped() {
             status: Some("running"),
             workspace_path: None,
             mirror_ref: None,
+            dispatch_group_id: None,
         })
         .await
         .unwrap();
@@ -1525,6 +1538,7 @@ async fn token_bearing_open_reset_orphan_is_reaped() {
             status: Some("running"),
             workspace_path: None,
             mirror_ref: None,
+            dispatch_group_id: None,
         })
         .await
         .unwrap();
@@ -1901,6 +1915,7 @@ async fn preservation_gate_called_during_zombie_reap() {
             status: Some("running"),
             workspace_path: None,
             mirror_ref: None,
+            dispatch_group_id: None,
         })
         .await
         .unwrap();
@@ -1976,6 +1991,7 @@ async fn preservation_gate_called_during_terminal_task_failure() {
             status: Some("running"),
             workspace_path: None,
             mirror_ref: None,
+            dispatch_group_id: None,
         })
         .await
         .unwrap();
@@ -2396,6 +2412,7 @@ async fn stall_kill_still_fires_without_db_progress() {
             status: Some("running"),
             workspace_path: None,
             mirror_ref: None,
+            dispatch_group_id: None,
         })
         .await
         .unwrap();
@@ -2522,6 +2539,7 @@ async fn dispatch_stalled_worker_session(
             status: Some("running"),
             workspace_path: None,
             mirror_ref: None,
+            dispatch_group_id: None,
         })
         .await
         .unwrap();
@@ -2703,6 +2721,7 @@ async fn zombie_reap_persists_dead_reclaimed_evidence() {
             status: Some("running"),
             workspace_path: None,
             mirror_ref: None,
+            dispatch_group_id: None,
         })
         .await
         .unwrap();
@@ -2863,6 +2882,7 @@ async fn zombie_reap_terminal_task_race_records_kill_noop() {
             status: Some("running"),
             workspace_path: None,
             mirror_ref: None,
+            dispatch_group_id: None,
         })
         .await
         .unwrap();
@@ -2969,6 +2989,7 @@ async fn long_tool_run_heartbeat_classified_slow_spares_zombie() {
             status: Some("running"),
             workspace_path: None,
             mirror_ref: None,
+            dispatch_group_id: None,
         })
         .await
         .unwrap();
@@ -3105,6 +3126,7 @@ async fn slow_extension_granted_with_evidence_and_claim_extension() {
             status: Some("running"),
             workspace_path: None,
             mirror_ref: None,
+            dispatch_group_id: None,
         })
         .await
         .unwrap();
@@ -3320,6 +3342,7 @@ async fn hard_runtime_cap_zombie_reap_forces_dead_timeout() {
             status: Some("running"),
             workspace_path: None,
             mirror_ref: None,
+            dispatch_group_id: None,
         })
         .await
         .unwrap();
@@ -3427,6 +3450,7 @@ async fn zombie_stranded_zero_token_reclaimed_with_dead_evidence_chain() {
             status: Some("running"),
             workspace_path: None,
             mirror_ref: None,
+            dispatch_group_id: None,
         })
         .await
         .unwrap();
@@ -3526,6 +3550,7 @@ async fn protocol_violation_clean_exit_classified_as_failed_attempt() {
             status: Some("running"),
             workspace_path: None,
             mirror_ref: None,
+            dispatch_group_id: None,
         })
         .await
         .unwrap();
@@ -3618,6 +3643,7 @@ async fn nonzero_exit_is_crash_outcome_distinct_from_clean_violation() {
             status: Some("running"),
             workspace_path: None,
             mirror_ref: None,
+            dispatch_group_id: None,
         })
         .await
         .unwrap();
@@ -3696,6 +3722,7 @@ async fn already_terminal_task_exit_preserves_kill_noop() {
             status: Some("running"),
             workspace_path: None,
             mirror_ref: None,
+            dispatch_group_id: None,
         })
         .await
         .unwrap();
@@ -3784,6 +3811,7 @@ async fn explicit_kill_cleanup_full_evidence_chain_for_terminal_task() {
             status: Some("running"),
             workspace_path: None,
             mirror_ref: None,
+            dispatch_group_id: None,
         })
         .await
         .unwrap();
@@ -3887,6 +3915,7 @@ async fn interrupted_session_nonterminal_is_crash_protocol_violation() {
             status: Some("running"),
             workspace_path: None,
             mirror_ref: None,
+            dispatch_group_id: None,
         })
         .await
         .unwrap();
@@ -4234,6 +4263,7 @@ async fn zero_token_running_session_classified_slow_not_dead() {
             status: Some("running"),
             workspace_path: None,
             mirror_ref: None,
+            dispatch_group_id: None,
         })
         .await
         .unwrap();
@@ -4387,6 +4417,7 @@ async fn kill_noop_cleanup_records_terminal_verdict_on_session() {
             status: Some("running"),
             workspace_path: None,
             mirror_ref: None,
+            dispatch_group_id: None,
         })
         .await
         .unwrap();
@@ -4613,6 +4644,8 @@ async fn seed_pending_attempt(db: &Database, task_id: &str, role: &str) -> Strin
         dispatch_key: &dispatch_key,
         session_id: None,
         attempt_seq: None,
+        dispatch_owner_incarnation_id: None,
+        dispatch_group_id: None,
     })
     .await
     .unwrap();
@@ -4870,6 +4903,7 @@ async fn interrupted_session_terminalizes_attempt_as_environmental_interrupt() {
             status: Some("running"),
             workspace_path: None,
             mirror_ref: None,
+            dispatch_group_id: None,
         })
         .await
         .unwrap();
@@ -4952,6 +4986,7 @@ async fn failed_session_terminalizes_attempt_as_crashed_not_interrupted() {
             status: Some("running"),
             workspace_path: None,
             mirror_ref: None,
+            dispatch_group_id: None,
         })
         .await
         .unwrap();
@@ -5015,6 +5050,7 @@ async fn interrupted_event_does_not_reclassify_already_terminal_failure() {
             status: Some("running"),
             workspace_path: None,
             mirror_ref: None,
+            dispatch_group_id: None,
         })
         .await
         .unwrap();
@@ -5208,6 +5244,7 @@ async fn zombie_reap_terminalizes_attempt_as_crashed_with_failure_class() {
             status: Some("running"),
             workspace_path: None,
             mirror_ref: None,
+            dispatch_group_id: None,
         })
         .await
         .unwrap();
@@ -5295,6 +5332,7 @@ async fn recovery_terminalization_does_not_move_terminal_attempt_backward() {
             status: Some("running"),
             workspace_path: None,
             mirror_ref: None,
+            dispatch_group_id: None,
         })
         .await
         .unwrap();
@@ -5402,6 +5440,7 @@ async fn slow_verdict_with_concurrent_terminal_transition_does_not_grant_extensi
             status: Some("running"),
             workspace_path: None,
             mirror_ref: None,
+            dispatch_group_id: None,
         })
         .await
         .unwrap();
@@ -5603,6 +5642,7 @@ async fn dead_verdict_with_fresh_db_activity_suppresses_reap() {
             status: Some("running"),
             workspace_path: None,
             mirror_ref: None,
+            dispatch_group_id: None,
         })
         .await
         .unwrap();
@@ -5907,6 +5947,7 @@ async fn classify_session_exit_clean_nonterminal_vs_terminal_are_distinct_and_id
             status: Some("running"),
             workspace_path: None,
             mirror_ref: None,
+            dispatch_group_id: None,
         })
         .await
         .unwrap();
@@ -6075,6 +6116,7 @@ async fn repeated_recovery_ticks_do_not_duplicate_terminalization_or_release() {
             status: Some("running"),
             workspace_path: None,
             mirror_ref: None,
+            dispatch_group_id: None,
         })
         .await
         .unwrap();
@@ -6274,6 +6316,7 @@ async fn failed_session_exit_terminalizes_pending_attempt_and_unblocks_respawn_g
             status: Some("running"),
             workspace_path: None,
             mirror_ref: None,
+            dispatch_group_id: None,
         })
         .await
         .unwrap();
@@ -6399,6 +6442,7 @@ async fn orphaned_pending_attempt_reaper_finalizes_stale_rows_only() {
             status: Some("failed"),
             workspace_path: None,
             mirror_ref: None,
+            dispatch_group_id: None,
         })
         .await
         .unwrap();
@@ -6420,6 +6464,7 @@ async fn orphaned_pending_attempt_reaper_finalizes_stale_rows_only() {
             status: Some("failed"),
             workspace_path: None,
             mirror_ref: None,
+            dispatch_group_id: None,
         })
         .await
         .unwrap();
@@ -6437,6 +6482,7 @@ async fn orphaned_pending_attempt_reaper_finalizes_stale_rows_only() {
             status: Some("running"),
             workspace_path: None,
             mirror_ref: None,
+            dispatch_group_id: None,
         })
         .await
         .unwrap();

@@ -1062,6 +1062,34 @@ impl RepoGraphGenerationRepository {
         Ok(acquired)
     }
 
+    /// Hold the immutable generation row lock until the test releases it.
+    ///
+    /// This narrow route-fixture seam lets an integration test keep a production
+    /// retention sweep live after it has scanned an earlier stream-pinned row.
+    /// Server tests deliberately use this instead of issuing raw SQL directly.
+    #[cfg(any(test, feature = "test-support"))]
+    pub async fn hold_generation_row_lock_for_test(
+        &self,
+        generation_id: &str,
+        locked: std::sync::Arc<tokio::sync::Barrier>,
+        release: std::sync::Arc<tokio::sync::Barrier>,
+    ) -> Result<()> {
+        self.db.ensure_initialized().await?;
+        let mut conn = self.db.pool().acquire().await?;
+        let mut tx = conn.begin().await?;
+        sqlx::query(
+            "SELECT generation_id FROM repo_graph_generation \
+             WHERE generation_id = $1::uuid FOR UPDATE",
+        )
+        .bind(generation_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        locked.wait().await;
+        release.wait().await;
+        tx.rollback().await?;
+        Ok(())
+    }
+
     /// Execute the exact unmarked SQL shipped by the legacy warmer.
     #[cfg(any(test, feature = "test-support"))]
     pub async fn legacy_upsert_for_publication_test(

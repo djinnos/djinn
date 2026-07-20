@@ -72,6 +72,8 @@ async fn create_worker_attempt(repo: &TaskAttemptRepository, task_id: &str, key:
         dispatch_key: key,
         session_id: None,
         attempt_seq: None,
+        dispatch_owner_incarnation_id: None,
+        dispatch_group_id: None,
     })
     .await
     .unwrap()

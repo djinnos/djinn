@@ -11,6 +11,15 @@
         "mode": { "type": "string", "enum": ["delete", "dry_run"] }
       }
     },
+    "graphRetention": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mode", "historyN"],
+      "properties": {
+        "mode": { "type": "string", "enum": ["off", "dry_run", "delete"] },
+        "historyN": { "type": "integer", "minimum": 1, "maximum": 64 }
+      }
+    },
     "buildAdmission": {
       "type": "object",
       "additionalProperties": false,

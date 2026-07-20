@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT id, task_id, role, attempt_seq, dispatch_key, session_id,\n                    outcome AS \"outcome!\", guard_decision, guard_reason, summary, summary_json::text,\n                    log_tail, checkpoint_ref, submit_ref, pr_url, mirror_head_sha, github_head_sha, github_publication_error,\n                    created_at AS \"created_at!\", updated_at AS \"updated_at!\", submitted_at, terminal_at\n                 FROM task_attempts\n                 WHERE task_id = $1 AND role = $2 AND outcome IN ('pending', 'submitted')\n                 ORDER BY created_at DESC\n                 LIMIT 1",
+  "query": "SELECT id, task_id, role, attempt_seq, dispatch_key, session_id,\n                    outcome AS \"outcome!\", guard_decision, guard_reason, summary, summary_json::text,\n                    log_tail, checkpoint_ref, submit_ref, pr_url, mirror_head_sha, github_head_sha, github_publication_error,\n                    dispatch_owner_incarnation_id, dispatch_group_id,\n                    created_at AS \"created_at!\", updated_at AS \"updated_at!\", submitted_at, terminal_at\n                 FROM task_attempts\n                 WHERE task_id = $1 AND role = $2 AND outcome = 'pending'\n                 ORDER BY created_at DESC\n                 LIMIT 1",
   "describe": {
     "columns": [
       {
@@ -95,21 +95,31 @@
       },
       {
         "ordinal": 18,
-        "name": "created_at!",
+        "name": "dispatch_owner_incarnation_id",
         "type_info": "Varchar"
       },
       {
         "ordinal": 19,
-        "name": "updated_at!",
+        "name": "dispatch_group_id",
         "type_info": "Varchar"
       },
       {
         "ordinal": 20,
-        "name": "submitted_at",
+        "name": "created_at!",
         "type_info": "Varchar"
       },
       {
         "ordinal": 21,
+        "name": "updated_at!",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 22,
+        "name": "submitted_at",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 23,
         "name": "terminal_at",
         "type_info": "Varchar"
       }
@@ -139,11 +149,13 @@
       true,
       true,
       true,
+      true,
+      true,
       false,
       false,
       true,
       true
     ]
   },
-  "hash": "bc65f549e3a4c59c7e2e1ad6c6bfc45b99113ead8c35fdb09747a54c94705d9d"
+  "hash": "03d75ed6444990e1a805fea8872e2ce95a77000b128920fb34f977f666011b14"
 }
