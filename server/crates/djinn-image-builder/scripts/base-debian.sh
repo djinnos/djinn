@@ -2,10 +2,11 @@
 # Base layer for Debian-derived images. Installs the essentials every
 # downstream script assumes are available: bash, curl, git, tini,
 # ca-certificates, gnupg (for third-party repo keys). It also bakes in the
-# common native build deps (libpq-dev, cmake, pkg-config) so project
-# build/test commands can link the ubiquitous `-sys` crates by default —
-# see the second install pass below. apt-cache is left dirty on purpose —
-# install-system.sh cleans up after its own pass.
+# common native build deps (libpq-dev, cmake, make, pkg-config) so project
+# build/test commands can link the ubiquitous `-sys` crates by default, plus
+# the baseline agent tooling (ripgrep, jq, python3) that coding agents assume
+# is present — see the second and third install passes below. apt-cache is
+# left dirty on purpose — install-system.sh cleans up after its own pass.
 set -euo pipefail
 
 export DEBIAN_FRONTEND=noninteractive
@@ -34,10 +35,35 @@ apt-get install -y --no-install-recommends \
 #                   which fails its cc fallback without it.
 #   - pkg-config  : how openssl-sys / libpq-sys / many `-sys` crates locate
 #                   their system libs at build time.
+#   - make        : required by three separate paths that were silently broken
+#                   without it: (1) cmake's default Unix generator emits
+#                   Makefiles and then shells out to `make`, so the `cmake`
+#                   above was non-functional on its own; (2) vendored OpenSSL
+#                   (`openssl-src`) drives its build through `make` — `perl`
+#                   ships in the base but `make` did not, so the vendored
+#                   feature failed at the make invocation; (3) repos that keep
+#                   a Makefile (djinn itself has `make sqlx-verify`) could not
+#                   run their own verification targets inside a task Pod.
+#                   Note gcc/g++ are deliberately still absent: `cc` resolves
+#                   to clang via install-rust.sh, which covers the `-sys`
+#                   crates in practice.
 apt-get install -y --no-install-recommends \
     cmake \
     libpq-dev \
+    make \
     pkg-config
+# Agent tooling. The generated image *is* the environment coding agents run in,
+# so the tools they reach for by reflex have to exist here. `ripgrep` is the
+# important one and the reason this block exists: a missing `rg` does not fail
+# loudly. Agents overwhelmingly call it in a pipeline (`rg pat | wc -l`), where
+# the shell reports the exit status of the *last* stage, so the call yields
+# "0" on stdout and exit 0. The agent reads that as "no matches found" and
+# reports the absence of a symbol as verified fact. A missing search tool that
+# silently answers "nothing there" is worse than one that errors.
+apt-get install -y --no-install-recommends \
+    jq \
+    python3 \
+    ripgrep
 apt-get clean
 rm -rf /var/lib/apt/lists/*
 

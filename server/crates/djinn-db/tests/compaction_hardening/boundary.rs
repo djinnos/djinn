@@ -20,10 +20,10 @@ const SESSION_ID: &str = "13400000-0000-0000-0000-000000000003";
 const HISTORIC_BOUNDARY_ID: &str = "13400000-0000-0000-0000-000000000004";
 
 fn base_database_url() -> String {
-    std::env::var("DJINN_TEST_DATABASE_URL")
-        .or_else(|_| std::env::var("TEST_POSTGRES_URL"))
-        .or_else(|_| std::env::var("DATABASE_URL"))
-        .expect("live PostgreSQL URL for compaction migration fixture")
+    // `DATABASE_URL` is deliberately not consulted: it is a generic name that
+    // can point at a real deployment. Task-run Pods set it to the same
+    // sidecar value as `TEST_POSTGRES_URL`, so nothing is lost by ignoring it.
+    djinn_db::test_database_base_url()
 }
 
 async fn apply_migration(conn: &mut PgConnection, target: u64) {

@@ -10,6 +10,7 @@ import { queryOptions } from "@tanstack/react-query";
 import { callMcpTool } from "@/api/mcpClient";
 import type {
   Proposal,
+  ProposalListRow,
   ProposalDebateTrailRow,
   ProposalEpic,
   ProposalFeedback,
@@ -48,7 +49,7 @@ export function proposalListQueryOptions(filters: ProposalListFilters = {}) {
         sort: "created_desc",
         limit: 200,
       });
-      return (res.proposals ?? []) as Proposal[];
+      return (res.proposals ?? []) as ProposalListRow[];
     },
     staleTime: 30_000,
   });
