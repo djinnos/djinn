@@ -140,6 +140,24 @@ async fn run_git(cmd: &[&str], cwd: &Path) {
     );
 }
 
+async fn git_stdout(args: &[&str], cwd: &Path) -> String {
+    let output = Command::new("git")
+        .args(args)
+        .current_dir(cwd)
+        .output()
+        .await
+        .expect("git");
+    assert!(
+        output.status.success(),
+        "git {args:?} failed: stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout)
+        .expect("git stdout must be UTF-8")
+        .trim()
+        .to_owned()
+}
+
 /// Initialise a tiny source repo + a single commit on `main`. The
 /// `MirrorManager` clones from this as `file://...` to materialise the
 /// bare mirror the worker will then `clone_ephemeral` from.
@@ -487,6 +505,8 @@ async fn worker_drives_real_supervisor_in_pod() {
         .ensure_mirror(project_id, &source_url)
         .await
         .expect("ensure_mirror");
+    let expected_mirror =
+        std::fs::canonicalize(mirror.mirror_path(project_id)).expect("canonicalize fixture mirror");
 
     // 2. Provision a migrated per-test Postgres database for the worker.
     // The in-Pod bootstrap verifies migrations but intentionally does not run
@@ -679,10 +699,11 @@ async fn worker_drives_real_supervisor_in_pod() {
             {
                 let path = PathBuf::from(path);
                 if path.join(".git").is_dir() {
-                    assert!(
-                        path.starts_with(workspace_dir.path()),
-                        "persisted workspace must be the ephemeral clone created under DJINN_WORKSPACE_PATH: {}",
-                        path.display()
+                    let origin = git_stdout(&["remote", "get-url", "origin"], &path).await;
+                    assert_eq!(
+                        std::fs::canonicalize(origin).expect("canonicalize workspace origin"),
+                        expected_mirror,
+                        "persisted workspace must be the supervisor's ephemeral clone of the fixture mirror"
                     );
                     run_git(&["git", "rev-parse", "--is-inside-work-tree"], &path).await;
                     break path;
