@@ -1150,13 +1150,9 @@ async fn run_cargo_sweep_step_with_cargo(
 ) -> bool {
     let sweep_command = format!("cargo sweep {}", args.join(" "));
     let workspace_dir_display = workspace_dir.display().to_string();
-    match tokio::process::Command::new(cargo_bin.as_ref())
-        .arg("sweep")
-        .args(args)
-        .current_dir(workspace_dir)
-        .status()
-        .await
-    {
+    let mut command = std::process::Command::new(cargo_bin.as_ref());
+    command.arg("sweep").args(args).current_dir(workspace_dir);
+    match warm_command_status(command).await {
         Ok(status) if status.success() => {
             info!(
                 project_id,
@@ -1209,12 +1205,9 @@ async fn run_cargo_warm_step_with_cargo(
     let workspace_dir_display = workspace_dir.display().to_string();
 
     if !cargo_instrumented {
-        return match tokio::process::Command::new(cargo_bin.as_ref())
-            .args(&plan.args)
-            .current_dir(workspace_dir)
-            .status()
-            .await
-        {
+        let mut command = std::process::Command::new(cargo_bin.as_ref());
+        command.args(&plan.args).current_dir(workspace_dir);
+        return match warm_command_status(command).await {
             Ok(status) if status.success() => {
                 info!(
                     project_id,
@@ -1268,12 +1261,9 @@ async fn run_cargo_warm_step_with_cargo(
         };
     }
 
-    match tokio::process::Command::new(cargo_bin.as_ref())
-        .args(&plan.args)
-        .current_dir(workspace_dir)
-        .output()
-        .await
-    {
+    let mut command = std::process::Command::new(cargo_bin.as_ref());
+    command.args(&plan.args).current_dir(workspace_dir);
+    match warm_command_output(command).await {
         Ok(output) => {
             if cargo_instrumented {
                 let (stdout_fresh_count, stdout_compiling_count) =
@@ -1361,6 +1351,283 @@ async fn run_cargo_warm_step_with_cargo(
 enum CargoWarmOutputMode {
     InheritStatusOnly,
     CaptureForInstrumentation,
+}
+
+#[cfg(target_os = "linux")]
+const WARM_COMMAND_TIMEOUT: Duration = Duration::from_secs(30 * 60);
+
+async fn warm_command_status(
+    command: std::process::Command,
+) -> std::io::Result<std::process::ExitStatus> {
+    #[cfg(target_os = "linux")]
+    {
+        djinn_graph::process::output_with_timeout(command, WARM_COMMAND_TIMEOUT)
+            .await
+            .map(|output| output.status)
+    }
+    #[cfg(not(target_os = "linux"))]
+    tokio::task::spawn_blocking(move || command.status())
+        .await
+        .map_err(std::io::Error::other)?
+}
+
+async fn warm_command_output(
+    command: std::process::Command,
+) -> std::io::Result<std::process::Output> {
+    #[cfg(target_os = "linux")]
+    {
+        djinn_graph::process::output_with_timeout(command, WARM_COMMAND_TIMEOUT).await
+    }
+    #[cfg(not(target_os = "linux"))]
+    tokio::task::spawn_blocking(move || command.output())
+        .await
+        .map_err(std::io::Error::other)?
+}
+
+#[cfg(target_os = "linux")]
+const WARM_GRAPH_SHUTDOWN_BOUND: Duration = Duration::from_secs(4);
+#[cfg(target_os = "linux")]
+const WARM_GRAPH_TERM_GRACE: Duration = Duration::from_secs(2);
+
+#[cfg(target_os = "linux")]
+#[derive(Clone, Copy)]
+struct WarmGraphShutdownConfig {
+    bound: Duration,
+    term_grace: Duration,
+}
+
+#[cfg(target_os = "linux")]
+const WARM_GRAPH_SHUTDOWN_CONFIG: WarmGraphShutdownConfig = WarmGraphShutdownConfig {
+    bound: WARM_GRAPH_SHUTDOWN_BOUND,
+    term_grace: WARM_GRAPH_TERM_GRACE,
+};
+
+/// Shutdown diagnostics remain typed beneath the public `anyhow::Result` so a
+/// failed cleanup produces a non-zero warm-worker exit with survivor details.
+#[cfg(target_os = "linux")]
+#[derive(Debug, thiserror::Error)]
+#[error(
+    "warm-graph child cleanup exhausted (surviving PIDs: {surviving_pids:?}; surviving groups: {surviving_groups:?})"
+)]
+struct WarmGraphShutdownError {
+    surviving_pids: Vec<u32>,
+    surviving_groups: Vec<i32>,
+    #[source]
+    source: Option<anyhow::Error>,
+}
+
+#[cfg(target_os = "linux")]
+impl WarmGraphShutdownError {
+    fn with_source(mut self, source: anyhow::Error) -> Self {
+        self.source = Some(source);
+        self
+    }
+}
+
+/// Enable subreaper semantics before constructing the one worker-wide waiter.
+#[cfg(target_os = "linux")]
+fn initialize_linux_warm_lifecycle() -> Result<&'static djinn_graph::child_reaper::ChildReaper> {
+    // SAFETY: PR_SET_CHILD_SUBREAPER changes this process's reparenting policy.
+    if unsafe { libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 1) } != 0 {
+        return Err(std::io::Error::last_os_error()).context("enable PR_SET_CHILD_SUBREAPER");
+    }
+    Ok(djinn_graph::child_reaper::worker_child_reaper())
+}
+
+#[cfg(target_os = "linux")]
+async fn run_linux_warm_graph(project_id: &str) -> Result<()> {
+    run_linux_warm_graph_with_initializer(project_id, initialize_linux_warm_lifecycle, || {
+        run_warm_graph_body(project_id)
+    })
+    .await
+}
+
+/// Lifecycle orchestration seam. Initialization is deliberately part of this
+/// seam so no caller can bypass the pre-spawn ordering by providing an already
+/// started reaper.
+#[cfg(target_os = "linux")]
+async fn run_linux_warm_graph_with_initializer<I, F, Fut>(
+    project_id: &str,
+    initialize: I,
+    body_fn: F,
+) -> Result<()>
+where
+    I: FnOnce() -> Result<&'static djinn_graph::child_reaper::ChildReaper>,
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = Result<()>>,
+{
+    // This must happen before admission, body construction, or its first poll:
+    // the body can execute lifecycle hooks, cargo warming, and graph commands.
+    let reaper = initialize()?;
+    // This holds admission across hooks, cargo warming, and graph-command
+    // admission, so every normal/error body exit has one cleanup funnel.
+    let admission = reaper
+        .admit(format!("warm-graph:{project_id}"))
+        .context("admit warm-graph lifecycle")?;
+    let body = body_fn().await;
+    admission.release();
+    let cleanup = shutdown_linux_warm_lifecycle(reaper).await;
+
+    match (body, cleanup) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(body), Ok(())) => Err(body),
+        (Ok(()), Err(cleanup)) => Err(anyhow::Error::new(cleanup)),
+        (Err(body), Err(cleanup)) => Err(anyhow::Error::new(cleanup.with_source(body))),
+    }
+}
+
+#[cfg(target_os = "linux")]
+async fn shutdown_linux_warm_lifecycle(
+    reaper: &'static djinn_graph::child_reaper::ChildReaper,
+) -> std::result::Result<(), WarmGraphShutdownError> {
+    shutdown_linux_warm_lifecycle_with_config(reaper, WARM_GRAPH_SHUTDOWN_CONFIG).await
+}
+
+#[cfg(target_os = "linux")]
+async fn shutdown_linux_warm_lifecycle_with_config(
+    reaper: &'static djinn_graph::child_reaper::ChildReaper,
+    config: WarmGraphShutdownConfig,
+) -> std::result::Result<(), WarmGraphShutdownError> {
+    use djinn_core::clock::{Clock, SystemClock};
+
+    reaper.close_admission();
+    let clock = SystemClock::new();
+    let deadline = clock.now_instant() + config.bound;
+    let groups = registered_groups(reaper);
+    let mut adopted = worker_children_outside_groups(&groups);
+    signal_shutdown_targets(&groups, &adopted, libc::SIGTERM).await;
+
+    let term_deadline = (clock.now_instant() + config.term_grace).min(deadline);
+    if wait_for_lifecycle_idle(reaper, &mut adopted, term_deadline).await {
+        return Ok(());
+    }
+
+    // A parent can exit and leave a setsid/process-group escape adopted after
+    // TERM, so take a fresh /proc snapshot before concurrently issuing KILL.
+    let groups = registered_groups(reaper);
+    merge_shutdown_targets(&mut adopted, worker_children_outside_groups(&groups));
+    signal_shutdown_targets(&groups, &adopted, libc::SIGKILL).await;
+    if wait_for_lifecycle_idle(reaper, &mut adopted, deadline).await {
+        return Ok(());
+    }
+
+    let mut surviving_pids = adopted;
+    merge_shutdown_targets(
+        &mut surviving_pids,
+        worker_children_outside_groups(&registered_groups(reaper)),
+    );
+    surviving_pids.extend(reaper.supervisors().into_iter().map(|record| record.pid));
+    surviving_pids.sort_unstable();
+    surviving_pids.dedup();
+    Err(WarmGraphShutdownError {
+        surviving_pids,
+        surviving_groups: registered_groups(reaper),
+        source: None,
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn registered_groups(reaper: &djinn_graph::child_reaper::ChildReaper) -> Vec<i32> {
+    let mut groups = reaper
+        .supervisors()
+        .into_iter()
+        .map(|record| record.pgid)
+        .collect::<Vec<_>>();
+    groups.sort_unstable();
+    groups.dedup();
+    groups
+}
+
+/// Missing /proc entries are benign disappearance races. Only direct children
+/// outside a registered supervisor PGID are separately signalled.
+#[cfg(target_os = "linux")]
+fn worker_children_outside_groups(groups: &[i32]) -> Vec<u32> {
+    let parent = std::process::id();
+    let Ok(entries) = std::fs::read_dir("/proc") else {
+        return Vec::new();
+    };
+    let mut children = entries
+        .flatten()
+        .filter_map(|entry| entry.file_name().to_string_lossy().parse::<u32>().ok())
+        .filter_map(|pid| proc_parent_and_group(pid).map(|(ppid, pgid)| (pid, ppid, pgid)))
+        .filter(|(_, ppid, pgid)| *ppid == parent && !groups.contains(pgid))
+        .map(|(pid, _, _)| pid)
+        .collect::<Vec<_>>();
+    children.sort_unstable();
+    children
+}
+
+#[cfg(target_os = "linux")]
+fn proc_parent_and_group(pid: u32) -> Option<(u32, i32)> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let (_, fields) = stat.rsplit_once(") ")?;
+    let mut fields = fields.split_whitespace();
+    let _state = fields.next()?;
+    let parent = fields.next()?.parse().ok()?;
+    let group = fields.next()?.parse().ok()?;
+    Some((parent, group))
+}
+
+#[cfg(target_os = "linux")]
+async fn signal_shutdown_targets(groups: &[i32], pids: &[u32], signal: i32) {
+    let mut tasks = tokio::task::JoinSet::new();
+    for &pgid in groups {
+        tasks.spawn_blocking(move || signal_process(-pgid, signal));
+    }
+    for &pid in pids {
+        tasks.spawn_blocking(move || signal_process(pid as i32, signal));
+    }
+    while tasks.join_next().await.is_some() {}
+}
+
+#[cfg(target_os = "linux")]
+fn signal_process(target: i32, signal: i32) {
+    // SAFETY: target is a PID or negative PGID obtained from /proc/the registry.
+    // ESRCH means it disappeared between snapshot and signal and is success.
+    if unsafe { libc::kill(target, signal) } != 0
+        && std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
+    {
+        warn!(target, signal, error = %std::io::Error::last_os_error(), "warm shutdown signal failed");
+    }
+}
+
+#[cfg(target_os = "linux")]
+async fn wait_for_lifecycle_idle(
+    reaper: &djinn_graph::child_reaper::ChildReaper,
+    adopted_targets: &mut Vec<u32>,
+    deadline: std::time::Instant,
+) -> bool {
+    use djinn_core::clock::{Clock, SystemClock};
+    let clock = SystemClock::new();
+    loop {
+        // This only acknowledges centrally reaped statuses; it never consumes
+        // waitpid itself, including for children exiting during shutdown.
+        let _ = reaper.drain();
+        let groups = registered_groups(reaper);
+        merge_shutdown_targets(adopted_targets, worker_children_outside_groups(&groups));
+        adopted_targets.retain(|&pid| proc_child_is_live(pid));
+        if adopted_targets.is_empty()
+            && reaper.wait_for_supervisors_idle(Duration::ZERO)
+            && reaper.wait_for_adopted_idle(Duration::ZERO)
+        {
+            return true;
+        }
+        if clock.now_instant() >= deadline {
+            return false;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn merge_shutdown_targets(targets: &mut Vec<u32>, discovered: Vec<u32>) {
+    targets.extend(discovered);
+    targets.sort_unstable();
+    targets.dedup();
+}
+#[cfg(target_os = "linux")]
+fn proc_child_is_live(pid: u32) -> bool {
+    proc_parent_and_group(pid).is_some_and(|(parent, _)| parent == std::process::id())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2394,6 +2661,19 @@ fn worker_bridge_ignores_pair(entity_type: &str, action: &str) -> bool {
 /// exit.  The heavy pipeline's progress lands in shared DB caches that
 /// the server process reads on subsequent graph queries.
 async fn run_warm_graph(project_id: &str) -> Result<()> {
+    #[cfg(target_os = "linux")]
+    {
+        return run_linux_warm_graph(project_id).await;
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    run_warm_graph_body(project_id).await
+}
+
+/// The actual warm pipeline. Linux wraps this in the worker lifecycle owner;
+/// keeping the body separate makes every return flow through that cleanup while
+/// preserving the historical non-Linux path exactly.
+async fn run_warm_graph_body(project_id: &str) -> Result<()> {
     let db = bootstrap_warm_database().await?;
     let ctx = WorkerWarmContext {
         db,
@@ -4222,5 +4502,126 @@ warning: something
                 Kind::TargetMismatch | Kind::InvalidProjectId | Kind::Symlink
             ));
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    static WARM_LIFECYCLE_TEST_MUTEX: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    #[cfg(target_os = "linux")]
+    fn test_warm_reaper() -> &'static djinn_graph::child_reaper::ChildReaper {
+        Box::leak(Box::new(djinn_graph::child_reaper::ChildReaper::new()))
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn warm_lifecycle_initializes_before_admission_and_first_body_poll() {
+        let _serial = WARM_LIFECYCLE_TEST_MUTEX.lock().await;
+        let stages = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let reaper_slot = Arc::new(std::sync::Mutex::new(None));
+        let initializer_stages = Arc::clone(&stages);
+        let initializer_slot = Arc::clone(&reaper_slot);
+        let body_stages = Arc::clone(&stages);
+        let body_slot = Arc::clone(&reaper_slot);
+
+        let result = run_linux_warm_graph_with_initializer(
+            "success",
+            move || {
+                initializer_stages
+                    .lock()
+                    .expect("stages mutex")
+                    .push("initialize");
+                let reaper = test_warm_reaper();
+                *initializer_slot.lock().expect("reaper slot mutex") = Some(reaper);
+                Ok(reaper)
+            },
+            move || async move {
+                let reaper = (*body_slot.lock().expect("reaper slot mutex"))
+                    .expect("initializer runs before the body is polled");
+                assert!(
+                    reaper.admission_open(),
+                    "admission must precede first body poll"
+                );
+                assert_eq!(reaper.pending_admissions(), 1);
+                body_stages.lock().expect("stages mutex").push("body poll");
+                Ok(())
+            },
+        )
+        .await;
+
+        assert!(result.is_ok());
+        assert_eq!(
+            *stages.lock().expect("stages mutex"),
+            ["initialize", "body poll"],
+            "the body is first polled only after initialization and observed admission"
+        );
+        let reaper = (*reaper_slot.lock().expect("reaper slot mutex")).expect("initialized reaper");
+        assert!(!reaper.admission_open(), "cleanup must close admission");
+        assert!(reaper.wait_for_supervisors_idle(Duration::ZERO));
+        assert!(reaper.wait_for_adopted_idle(Duration::ZERO));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn warm_lifecycle_cleans_up_after_failed_body() {
+        let _serial = WARM_LIFECYCLE_TEST_MUTEX.lock().await;
+        let reaper = test_warm_reaper();
+        let result = run_linux_warm_graph_with_initializer(
+            "failure",
+            || Ok(reaper),
+            || async {
+                assert!(
+                    reaper.admission_open(),
+                    "admission must precede failed body"
+                );
+                Err(anyhow::anyhow!("warm body failed"))
+            },
+        )
+        .await;
+
+        assert!(
+            result
+                .expect_err("body failure must propagate")
+                .to_string()
+                .contains("warm body failed")
+        );
+        assert!(
+            !reaper.admission_open(),
+            "cleanup must run after body error"
+        );
+        assert!(reaper.wait_for_supervisors_idle(Duration::ZERO));
+        assert!(reaper.wait_for_adopted_idle(Duration::ZERO));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn warm_lifecycle_kills_term_ignoring_adopted_child_before_idle() {
+        let _serial = WARM_LIFECYCLE_TEST_MUTEX.lock().await;
+        let reaper = test_warm_reaper();
+        let child = Command::new("sh")
+            .args(["-c", "trap \"\" TERM; exec sleep 30"])
+            .spawn()
+            .expect("spawn TERM-ignoring adopted child");
+        let pid = child.id();
+        drop(child); // The central reaper, never Child::wait, owns terminal status.
+
+        let cleanup = shutdown_linux_warm_lifecycle_with_config(
+            reaper,
+            WarmGraphShutdownConfig {
+                bound: Duration::from_secs(1),
+                term_grace: Duration::from_millis(100),
+            },
+        )
+        .await;
+
+        assert!(
+            cleanup.is_ok(),
+            "TERM-ignoring child must be escalated: {cleanup:?}"
+        );
+        assert!(
+            !std::path::Path::new(&format!("/proc/{pid}")).exists(),
+            "SIGKILL escalation must remove adopted PID {pid}"
+        );
+        assert!(reaper.wait_for_supervisors_idle(Duration::ZERO));
+        assert!(reaper.wait_for_adopted_idle(Duration::ZERO));
     }
 }
