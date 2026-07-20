@@ -3275,7 +3275,11 @@ mod inflight_ledger_tests {
                     models: vec![djinn_slot::ModelSlotConfig {
                         model_id: WND1_STABLE_MODEL_ID.to_owned(),
                         max_slots,
-                        roles: ["worker".to_owned()].into_iter().collect(),
+                        // The pool accepts the coordinator-selected role and
+                        // the worker-first supervisor flow independently.
+                        roles: ["lead".to_owned(), "worker".to_owned()]
+                            .into_iter()
+                            .collect(),
                     }],
                     role_priorities: HashMap::new(),
                 },
