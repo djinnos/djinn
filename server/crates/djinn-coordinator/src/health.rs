@@ -42,6 +42,32 @@ const STARTUP_TASK_RUN_THRESHOLD_SECS: i64 = 10;
 /// while staying safely clear of any real starting attempt.
 const ORPHANED_PENDING_ATTEMPT_THRESHOLD_SECS: i64 = 5 * 60;
 
+pub(super) async fn renew_coordinator_incarnation(db: &djinn_db::Database, incarnation_id: &str) {
+    let repository = djinn_db::CoordinatorIncarnationRepository::new(db.clone());
+    match repository.renew(incarnation_id).await {
+        Ok(true) => {
+            tracing::debug!(%incarnation_id, "CoordinatorActor: renewed coordinator incarnation lease")
+        }
+        Ok(false) => {
+            // Startup registration can encounter a transient database outage.
+            // Recover only this immutable owner on the maintenance cadence;
+            // never discover, substitute, or renew another process's owner.
+            tracing::error!(%incarnation_id, "CoordinatorActor: coordinator incarnation lease missing; renewal fenced; retrying exact-owner registration");
+            match repository.register(incarnation_id).await {
+                Ok(_) => {
+                    tracing::info!(%incarnation_id, "CoordinatorActor: registered missing exact-owner coordinator incarnation lease")
+                }
+                Err(error) => {
+                    tracing::error!(%incarnation_id, %error, "CoordinatorActor: exact-owner coordinator incarnation registration retry failed")
+                }
+            }
+        }
+        Err(error) => {
+            tracing::error!(%incarnation_id, %error, "CoordinatorActor: coordinator incarnation lease renewal failed")
+        }
+    }
+}
+
 const CARGO_TARGET_RUNS_ROOT: &str = djinn_supervisor::CARGO_TARGET_RUNS_ROOT;
 
 /// Default durable output-stash retention window for coordinator maintenance.

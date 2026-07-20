@@ -11,17 +11,10 @@ use djinn_db::{
     TaskAttemptRepository, TerminalTaskAttemptParams,
 };
 
-/// Record the start of a dispatch attempt.
-///
-/// Creates or idempotently returns the pending `task_attempts` row for the
-/// given `dispatch_key`. Returns the attempt id on success.
-///
-/// `session_id` is passed when the session identity is known at dispatch time
-/// (e.g. a resume or continuation); `None` when the session has not been
-/// created yet (the common case for fresh dispatches).
-///
-/// Best-effort: errors are logged and return `None` rather than propagating.
-pub async fn record_dispatch_start(
+/// Create a legacy pending attempt without dispatch identity for tests that
+/// exercise mixed-version compatibility and unrelated lifecycle behavior.
+#[cfg(test)]
+pub(crate) async fn record_legacy_start(
     db: &djinn_db::Database,
     task_id: &str,
     role: &str,
@@ -63,6 +56,40 @@ pub async fn record_dispatch_start(
                 error = %e,
                 "attempt_lifecycle: failed to record dispatch-start (best-effort)"
             );
+            None
+        }
+    }
+}
+
+/// Record a dispatch-start attempt with the coordinator's immutable owner and
+/// the one dispatch group minted at the outer dispatch boundary.
+pub async fn record_dispatch_start_with_identity(
+    db: &djinn_db::Database,
+    task_id: &str,
+    role: &str,
+    session_id: Option<&str>,
+    dispatch_key: &str,
+    owner_id: &str,
+    group_id: &str,
+) -> Option<String> {
+    let attempt_id = uuid::Uuid::now_v7().to_string();
+    match TaskAttemptRepository::new(db.clone())
+        .create_or_get_pending(CreateTaskAttemptParams {
+            id: &attempt_id,
+            task_id,
+            role,
+            dispatch_key,
+            session_id,
+            attempt_seq: None,
+            dispatch_owner_incarnation_id: Some(owner_id),
+            dispatch_group_id: Some(group_id),
+        })
+        .await
+    {
+        Ok(attempt) => Some(attempt.id),
+        Err(error) => {
+            tracing::warn!(task_id, role, dispatch_key, owner_id, group_id, %error,
+                "attempt_lifecycle: failed to record identified dispatch-start (best-effort)");
             None
         }
     }
@@ -440,7 +467,10 @@ pub fn make_dispatch_key(task_id: &str, role: &str) -> String {
 mod tests {
     use super::*;
     use djinn_core::events::EventBus;
-    use djinn_db::{Database, EpicRepository, TaskAttemptRepository, TaskRepository};
+    use djinn_db::{
+        CreateTaskRunParams, Database, EpicRepository, TaskAttemptRepository, TaskRepository,
+        repositories::task_run_outcome::TaskRunOutcomeRepository,
+    };
 
     fn test_db() -> Database {
         Database::open_in_memory().unwrap()
@@ -482,7 +512,7 @@ mod tests {
         assert!(key.len() <= djinn_core::models::task_attempt::TASK_ATTEMPT_DISPATCH_KEY_MAX_LEN);
     }
 
-    // ─── record_dispatch_start tests ────────────────────────────────────
+    // ─── record_legacy_start tests ────────────────────────────────────
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn dispatch_start_creates_pending_row() {
@@ -490,7 +520,7 @@ mod tests {
         let task = create_task(&db).await;
         let dk = make_dispatch_key(&task.id, "worker");
 
-        let attempt_id = record_dispatch_start(&db, &task.id, "worker", None, &dk)
+        let attempt_id = record_legacy_start(&db, &task.id, "worker", None, &dk)
             .await
             .expect("should return attempt id");
 
@@ -509,7 +539,7 @@ mod tests {
         let task = create_task(&db).await;
         let dk = make_dispatch_key(&task.id, "planner");
 
-        let attempt_id = record_dispatch_start(&db, &task.id, "planner", None, &dk)
+        let attempt_id = record_legacy_start(&db, &task.id, "planner", None, &dk)
             .await
             .unwrap();
 
@@ -527,10 +557,10 @@ mod tests {
         let task = create_task(&db).await;
         let dk = make_dispatch_key(&task.id, "worker");
 
-        let id1 = record_dispatch_start(&db, &task.id, "worker", None, &dk)
+        let id1 = record_legacy_start(&db, &task.id, "worker", None, &dk)
             .await
             .unwrap();
-        let id2 = record_dispatch_start(&db, &task.id, "worker", None, &dk)
+        let id2 = record_legacy_start(&db, &task.id, "worker", None, &dk)
             .await
             .unwrap();
 
@@ -547,10 +577,10 @@ mod tests {
 
         let dk_w = make_dispatch_key(&task.id, "worker");
         let dk_r = make_dispatch_key(&task.id, "reviewer");
-        let id_w = record_dispatch_start(&db, &task.id, "worker", None, &dk_w)
+        let id_w = record_legacy_start(&db, &task.id, "worker", None, &dk_w)
             .await
             .unwrap();
-        let id_r = record_dispatch_start(&db, &task.id, "reviewer", None, &dk_r)
+        let id_r = record_legacy_start(&db, &task.id, "reviewer", None, &dk_r)
             .await
             .unwrap();
 
@@ -560,6 +590,79 @@ mod tests {
         assert_eq!(all.len(), 2);
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn one_dispatch_identity_persists_unchanged_across_attempts_and_task_run() {
+        let db = test_db();
+        let task = create_task(&db).await;
+        let owner = uuid::Uuid::now_v7().to_string();
+        let group = uuid::Uuid::now_v7().to_string();
+
+        let coordinator_attempt_id = record_dispatch_start_with_identity(
+            &db,
+            &task.id,
+            "lead",
+            None,
+            &make_dispatch_key(&task.id, "lead"),
+            &owner,
+            &group,
+        )
+        .await
+        .expect("coordinator dispatch attempt");
+        let supervisor_attempt_id = TaskAttemptRepository::new(db.clone())
+            .create_or_get_pending(CreateTaskAttemptParams {
+                id: &uuid::Uuid::now_v7().to_string(),
+                task_id: &task.id,
+                role: "worker",
+                dispatch_key: "task-run:identity-persistence",
+                session_id: None,
+                attempt_seq: None,
+                dispatch_owner_incarnation_id: Some(&owner),
+                dispatch_group_id: Some(&group),
+            })
+            .await
+            .expect("supervisor exact attempt")
+            .id;
+        let run = TaskRunOutcomeRepository::new(db.clone())
+            .create_run_for_attempt(
+                CreateTaskRunParams {
+                    id: &uuid::Uuid::now_v7().to_string(),
+                    project_id: &task.project_id,
+                    task_id: &task.id,
+                    trigger_type: "new_task",
+                    status: None,
+                    workspace_path: None,
+                    mirror_ref: None,
+                    dispatch_group_id: Some(&group),
+                },
+                &supervisor_attempt_id,
+            )
+            .await
+            .expect("task run for supervisor exact attempt");
+
+        let attempts = TaskAttemptRepository::new(db)
+            .list_for_task(&task.id)
+            .await
+            .unwrap();
+        let coordinator = attempts
+            .iter()
+            .find(|attempt| attempt.id == coordinator_attempt_id)
+            .unwrap();
+        let supervisor = attempts
+            .iter()
+            .find(|attempt| attempt.id == supervisor_attempt_id)
+            .unwrap();
+        assert_eq!(coordinator.role, "lead");
+        assert_eq!(supervisor.role, "worker");
+        for attempt in [coordinator, supervisor] {
+            assert_eq!(
+                attempt.dispatch_owner_incarnation_id.as_deref(),
+                Some(owner.as_str())
+            );
+            assert_eq!(attempt.dispatch_group_id.as_deref(), Some(group.as_str()));
+        }
+        assert_eq!(run.dispatch_group_id.as_deref(), Some(group.as_str()));
+    }
+
     // ─── advance_to_submitted tests ─────────────────────────────────────
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -567,7 +670,7 @@ mod tests {
         let db = test_db();
         let task = create_task(&db).await;
         let dk = make_dispatch_key(&task.id, "worker");
-        let attempt_id = record_dispatch_start(&db, &task.id, "worker", None, &dk)
+        let attempt_id = record_legacy_start(&db, &task.id, "worker", None, &dk)
             .await
             .unwrap();
 
@@ -599,7 +702,7 @@ mod tests {
         let db = test_db();
         let task = create_task(&db).await;
         let dk = make_dispatch_key(&task.id, "worker");
-        let attempt_id = record_dispatch_start(&db, &task.id, "worker", None, &dk)
+        let attempt_id = record_legacy_start(&db, &task.id, "worker", None, &dk)
             .await
             .unwrap();
 
@@ -653,7 +756,7 @@ mod tests {
         let db = test_db();
         let task = create_task(&db).await;
         let dk = make_dispatch_key(&task.id, "worker");
-        let attempt_id = record_dispatch_start(&db, &task.id, "worker", None, &dk)
+        let attempt_id = record_legacy_start(&db, &task.id, "worker", None, &dk)
             .await
             .unwrap();
 
@@ -720,7 +823,7 @@ mod tests {
         let db = test_db();
         let task = create_task(&db).await;
         let dk = make_dispatch_key(&task.id, "worker");
-        let attempt_id = record_dispatch_start(&db, &task.id, "worker", None, &dk)
+        let attempt_id = record_legacy_start(&db, &task.id, "worker", None, &dk)
             .await
             .unwrap();
 
@@ -770,7 +873,7 @@ mod tests {
         let db = test_db();
         let task = create_task(&db).await;
         let dk = make_dispatch_key(&task.id, "worker");
-        let attempt_id = record_dispatch_start(&db, &task.id, "worker", None, &dk)
+        let attempt_id = record_legacy_start(&db, &task.id, "worker", None, &dk)
             .await
             .unwrap();
 
@@ -816,7 +919,7 @@ mod tests {
         let db = test_db();
         let task = create_task(&db).await;
         let dk = make_dispatch_key(&task.id, "worker");
-        let attempt_id = record_dispatch_start(&db, &task.id, "worker", None, &dk)
+        let attempt_id = record_legacy_start(&db, &task.id, "worker", None, &dk)
             .await
             .unwrap();
 

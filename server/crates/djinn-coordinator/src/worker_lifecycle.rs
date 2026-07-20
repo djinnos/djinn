@@ -631,6 +631,10 @@ pub fn evaluate_no_progress_controlled_exit(
 /// without an `EOF` on bincode decode.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct ResumeLifecycleMetadata {
+    #[serde(default)]
+    pub dispatch_owner_incarnation_id: Option<String>,
+    #[serde(default)]
+    pub dispatch_group_id: Option<String>,
     /// Whether resume selection was considered for this dispatch/session.
     #[serde(default)]
     pub considered: bool,
@@ -1145,6 +1149,8 @@ mod tests {
                 extra: serde_json::Map::new(),
             }),
             resume: Some(ResumeLifecycleMetadata {
+                dispatch_owner_incarnation_id: None,
+                dispatch_group_id: None,
                 considered: true,
                 checkpoint_id: Some("ckpt-1".to_string()),
                 commit_sha: Some("abc123".to_string()),
@@ -1211,6 +1217,8 @@ mod tests {
                     "extra": {}
                 },
                 "resume": {
+                    "dispatch_owner_incarnation_id": null,
+                    "dispatch_group_id": null,
                     "considered": true,
                     "checkpoint_id": "ckpt-1",
                     "commit_sha": "abc123",

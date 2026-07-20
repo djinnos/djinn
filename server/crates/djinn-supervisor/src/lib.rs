@@ -1158,6 +1158,14 @@ impl TaskRunSupervisor {
                 ),
                 workspace_path: None,
                 mirror_ref: None,
+                dispatch_owner_incarnation_id: spec
+                    .resume_lifecycle_metadata
+                    .as_ref()
+                    .and_then(|metadata| metadata.dispatch_owner_incarnation_id.clone()),
+                dispatch_group_id: spec
+                    .resume_lifecycle_metadata
+                    .as_ref()
+                    .and_then(|metadata| metadata.dispatch_group_id.clone()),
             })
             .await
         {

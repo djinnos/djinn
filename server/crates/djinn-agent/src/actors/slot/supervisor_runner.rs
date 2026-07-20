@@ -1098,6 +1098,8 @@ impl TaskRunSpecInputs {
             resolve_commit_author(app_state, created_by_user_id.as_deref()).await;
         let resume_lifecycle_metadata =
             decode_resume_lifecycle_metadata(resume_lifecycle_metadata, &task.id);
+        let (dispatch_owner_incarnation_id, dispatch_group_id) =
+            validated_dispatch_identity(resume_lifecycle_metadata.as_ref())?;
         let task_run_id = uuid::Uuid::now_v7().to_string();
         let attempt_id = uuid::Uuid::now_v7().to_string();
         // A run must never be created without the identity of the attempt that
@@ -1115,8 +1117,8 @@ impl TaskRunSpecInputs {
                 dispatch_key: &format!("task-run:{task_run_id}"),
                 session_id: None,
                 attempt_seq: None,
-                dispatch_owner_incarnation_id: None,
-                dispatch_group_id: None,
+                dispatch_owner_incarnation_id: dispatch_owner_incarnation_id.as_deref(),
+                dispatch_group_id: dispatch_group_id.as_deref(),
             })
             .await
             .map(|attempt| attempt.id)
@@ -1218,6 +1220,25 @@ fn decode_resume_lifecycle_metadata(
         },
         None => None,
     }
+}
+
+/// Identity is coordinator-minted and remains opaque downstream. Omitted
+/// mixed-version values are NULL; malformed present values fail before persistence.
+fn validated_dispatch_identity(
+    metadata: Option<&ResumeLifecycleMetadata>,
+) -> anyhow::Result<(Option<String>, Option<String>)> {
+    let owner = metadata.and_then(|metadata| metadata.dispatch_owner_incarnation_id.clone());
+    let group = metadata.and_then(|metadata| metadata.dispatch_group_id.clone());
+    for (field, value) in [
+        ("dispatch_owner_incarnation_id", owner.as_deref()),
+        ("dispatch_group_id", group.as_deref()),
+    ] {
+        if let Some(value) = value {
+            uuid::Uuid::parse_str(value)
+                .map_err(|_| anyhow::anyhow!("{field} must be a UUID when present"))?;
+        }
+    }
+    Ok((owner, group))
 }
 
 fn announce_dispatch(app_state: &AgentContext, spec: &TaskRunSpec, model_id: &str) {

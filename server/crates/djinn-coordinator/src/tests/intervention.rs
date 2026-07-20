@@ -4578,11 +4578,10 @@ async fn force_close_terminalizes_attempt_as_force_closed() {
     let dk = crate::dispatch::attempt_lifecycle::make_dispatch_key(&task.id, "worker");
 
     // Seed a pending attempt.
-    let attempt_id = crate::dispatch::attempt_lifecycle::record_dispatch_start(
-        &db, &task.id, "worker", None, &dk,
-    )
-    .await
-    .expect("dispatch-start should succeed");
+    let attempt_id =
+        crate::dispatch::attempt_lifecycle::record_legacy_start(&db, &task.id, "worker", None, &dk)
+            .await
+            .expect("dispatch-start should succeed");
 
     let attempt = attempt_repo.get(&attempt_id).await.unwrap().unwrap();
     assert_eq!(attempt.outcome, "pending");
@@ -5049,11 +5048,10 @@ async fn force_close_duplicate_terminalization_is_idempotent() {
     let attempt_repo = TaskAttemptRepository::new(db.clone());
     let dk = crate::dispatch::attempt_lifecycle::make_dispatch_key(&task.id, "worker");
 
-    let attempt_id = crate::dispatch::attempt_lifecycle::record_dispatch_start(
-        &db, &task.id, "worker", None, &dk,
-    )
-    .await
-    .unwrap();
+    let attempt_id =
+        crate::dispatch::attempt_lifecycle::record_legacy_start(&db, &task.id, "worker", None, &dk)
+            .await
+            .unwrap();
 
     // ForceClose the task.
     let repo = TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx));
@@ -5103,11 +5101,10 @@ async fn force_close_preserves_pre_existing_higher_rank_terminal() {
     let attempt_repo = TaskAttemptRepository::new(db.clone());
     let dk = crate::dispatch::attempt_lifecycle::make_dispatch_key(&task.id, "worker");
 
-    let attempt_id = crate::dispatch::attempt_lifecycle::record_dispatch_start(
-        &db, &task.id, "worker", None, &dk,
-    )
-    .await
-    .unwrap();
+    let attempt_id =
+        crate::dispatch::attempt_lifecycle::record_legacy_start(&db, &task.id, "worker", None, &dk)
+            .await
+            .unwrap();
 
     // Advance to submitted WITHOUT a summary (leave it NULL), then terminalize
     // as completed (higher rank) so the terminalization summary is the first
@@ -5187,11 +5184,10 @@ async fn user_override_close_terminalizes_as_force_closed() {
     let attempt_repo = TaskAttemptRepository::new(db.clone());
     let dk = crate::dispatch::attempt_lifecycle::make_dispatch_key(&task.id, "worker");
 
-    let attempt_id = crate::dispatch::attempt_lifecycle::record_dispatch_start(
-        &db, &task.id, "worker", None, &dk,
-    )
-    .await
-    .unwrap();
+    let attempt_id =
+        crate::dispatch::attempt_lifecycle::record_legacy_start(&db, &task.id, "worker", None, &dk)
+            .await
+            .unwrap();
 
     // UserOverride to closed.
     let repo = TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx));
@@ -5234,11 +5230,10 @@ async fn completed_close_reason_is_not_force_close_terminalized() {
     let attempt_repo = TaskAttemptRepository::new(db.clone());
     let dk = crate::dispatch::attempt_lifecycle::make_dispatch_key(&task.id, "worker");
 
-    let attempt_id = crate::dispatch::attempt_lifecycle::record_dispatch_start(
-        &db, &task.id, "worker", None, &dk,
-    )
-    .await
-    .unwrap();
+    let attempt_id =
+        crate::dispatch::attempt_lifecycle::record_legacy_start(&db, &task.id, "worker", None, &dk)
+            .await
+            .unwrap();
 
     // Simulate a naturally closed task (close_reason = "completed").
     // We set the status directly since the Close transition requires merge_commit_sha.
