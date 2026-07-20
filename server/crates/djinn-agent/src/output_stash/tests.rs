@@ -11,11 +11,13 @@ fn isolated_durable_root() {
 #[test]
 fn insert_and_view_round_trip() {
     let mut stash = OutputStash::new();
-    stash.insert(
-        "t1".into(),
-        "shell".into(),
-        "line one\nline two\nline three\n".into(),
-    );
+    stash
+        .insert(
+            "t1".into(),
+            "shell".into(),
+            "line one\nline two\nline three\n".into(),
+        )
+        .unwrap();
     let result = stash.view("t1", 0, 200).unwrap();
     assert!(result.contains("line one"));
     assert!(result.contains("line three"));
@@ -26,7 +28,7 @@ fn insert_and_view_round_trip() {
 fn pagination() {
     let mut stash = OutputStash::new();
     let text: String = (0..100).map(|i| format!("line {i}\n")).collect();
-    stash.insert("t1".into(), "shell".into(), text);
+    stash.insert("t1".into(), "shell".into(), text).unwrap();
 
     let page1 = stash.view("t1", 0, 10).unwrap();
     assert!(page1.contains("line 0"));
@@ -42,7 +44,9 @@ fn pagination() {
 #[test]
 fn view_offset_past_end() {
     let mut stash = OutputStash::new();
-    stash.insert("t1".into(), "shell".into(), "one\ntwo\n".into());
+    stash
+        .insert("t1".into(), "shell".into(), "one\ntwo\n".into())
+        .unwrap();
     let result = stash.view("t1", 999, 10).unwrap();
     assert!(result.contains("past end"));
 }
@@ -51,7 +55,9 @@ fn view_offset_past_end() {
 fn grep_with_context() {
     let mut stash = OutputStash::new();
     let text = "aaa\nbbb\nccc\nERROR: bad\nddd\neee\nfff\n";
-    stash.insert("t1".into(), "shell".into(), text.into());
+    stash
+        .insert("t1".into(), "shell".into(), text.into())
+        .unwrap();
 
     let result = stash.grep("t1", "ERROR", 1).unwrap();
     assert!(result.contains(">"));
@@ -64,7 +70,9 @@ fn grep_with_context() {
 #[test]
 fn grep_no_matches() {
     let mut stash = OutputStash::new();
-    stash.insert("t1".into(), "shell".into(), "hello\nworld\n".into());
+    stash
+        .insert("t1".into(), "shell".into(), "hello\nworld\n".into())
+        .unwrap();
     let result = stash.grep("t1", "NONEXISTENT", 2).unwrap();
     assert!(result.contains("No matches"));
 }
@@ -72,7 +80,9 @@ fn grep_no_matches() {
 #[test]
 fn grep_invalid_regex() {
     let mut stash = OutputStash::new();
-    stash.insert("t1".into(), "shell".into(), "hello\n".into());
+    stash
+        .insert("t1".into(), "shell".into(), "hello\n".into())
+        .unwrap();
     let result = stash.grep("t1", "[invalid", 0);
     assert!(result.is_err());
     assert!(result.unwrap_err().contains("invalid regex"));
@@ -82,7 +92,9 @@ fn grep_invalid_regex() {
 fn eviction_by_count() {
     let mut stash = OutputStash::new();
     for i in 0..12 {
-        stash.insert(format!("t{i}"), "shell".into(), format!("output {i}"));
+        stash
+            .insert(format!("t{i}"), "shell".into(), format!("output {i}"))
+            .unwrap();
     }
     // Oldest should be evicted; only last 10 remain.
     assert!(stash.find("t0").is_err());
@@ -98,7 +110,9 @@ fn eviction_by_bytes() {
     // Each entry is ~1MB. After 5, inserting a 6th should evict.
     let big = "x".repeat(1_024 * 1_024);
     for i in 0..6 {
-        stash.insert(format!("t{i}"), "shell".into(), big.clone());
+        stash
+            .insert(format!("t{i}"), "shell".into(), big.clone())
+            .unwrap();
     }
     assert!(stash.total_bytes <= MAX_TOTAL_BYTES);
     // At least the first one should be evicted.
@@ -109,7 +123,9 @@ fn eviction_by_bytes() {
 #[test]
 fn clear_empties_everything() {
     let mut stash = OutputStash::new();
-    stash.insert("t1".into(), "shell".into(), "data".into());
+    stash
+        .insert("t1".into(), "shell".into(), "data".into())
+        .unwrap();
     stash.clear();
     assert!(stash.find("t1").is_err());
     assert_eq!(stash.total_bytes, 0);
@@ -128,7 +144,7 @@ fn grep_output_capping() {
     let mut stash = OutputStash::new();
     // Create output where every line matches — should cap at 30KB.
     let text: String = (0..10_000).map(|i| format!("MATCH line {i}\n")).collect();
-    stash.insert("t1".into(), "shell".into(), text);
+    stash.insert("t1".into(), "shell".into(), text).unwrap();
 
     let result = stash.grep("t1", "MATCH", 0).unwrap();
     assert!(result.len() <= 31_000); // small slack for footer
@@ -246,15 +262,20 @@ fn stash_insert_writes_durable_blob_to_disk() {
     isolated_durable_root();
     let mut stash = OutputStash::with_session_id("session-durable-write-1");
     let body = "durable line a\ndurable line b\n";
-    stash.insert("durable-write-1".into(), "shell".into(), body.into());
+    stash
+        .insert("durable-write-1".into(), "shell".into(), body.into())
+        .unwrap();
 
     let root = durable_root().expect("override sets a root");
     // The id-pointer exists and names the content-addressed blob plus
     // ownership/age metadata for retention GC.
-    let pointer = id_pointer_path(&root, "durable-write-1");
+    let pointer = owner_id_pointer_path(&root, "session-durable-write-1", "durable-write-1");
     let raw = std::fs::read_to_string(&pointer).expect("id pointer written");
     let record = parse_durable_pointer(&raw).expect("versioned pointer parses");
-    assert_eq!(record.kind, DurablePointerKind::Version1);
+    assert_eq!(record.kind, DurablePointerKind::Version2);
+    assert_eq!(record.tool_use_id.as_deref(), Some("durable-write-1"));
+    assert_eq!(record.turn, Some(0));
+    assert_eq!(record.completeness.as_deref(), Some("complete"));
     assert_eq!(record.tool_name, "shell");
     assert_eq!(record.content_hash, sha256_hex(body.as_bytes()));
     assert_eq!(
@@ -310,9 +331,11 @@ fn durable_read_resolves_legacy_pointer() {
 #[test]
 fn output_view_fast_path_then_durable_path_after_eviction() {
     isolated_durable_root();
-    let mut stash = OutputStash::new();
+    let mut stash = OutputStash::with_session_id("view-durable-session");
     let text: String = (0..20).map(|i| format!("view-line {i}\n")).collect();
-    stash.insert("view-durable-1".into(), "shell".into(), text);
+    stash
+        .insert("view-durable-1".into(), "shell".into(), text)
+        .unwrap();
 
     // Fast path: in-memory entry present.
     let fast = stash.view("view-durable-1", 0, 5).unwrap();
@@ -332,9 +355,11 @@ fn output_view_fast_path_then_durable_path_after_eviction() {
 #[test]
 fn output_grep_fast_path_then_durable_path_after_eviction() {
     isolated_durable_root();
-    let mut stash = OutputStash::new();
+    let mut stash = OutputStash::with_session_id("grep-durable-session");
     let text = "alpha\nbeta\nERROR: durable boom\ngamma\n";
-    stash.insert("grep-durable-1".into(), "shell".into(), text.into());
+    stash
+        .insert("grep-durable-1".into(), "shell".into(), text.into())
+        .unwrap();
 
     // Fast path.
     let fast = stash.grep("grep-durable-1", "ERROR", 1).unwrap();
@@ -354,7 +379,7 @@ fn output_grep_fast_path_then_durable_path_after_eviction() {
 #[test]
 fn durable_path_survives_via_handle_stash_tool() {
     isolated_durable_root();
-    let stash = Mutex::new(OutputStash::new());
+    let stash = Mutex::new(OutputStash::with_session_id("render-durable-session"));
     let big = "y".repeat(MAX_TOOL_RESULT_CHARS * 2);
     render_tool_result(
         &stash,
@@ -392,13 +417,20 @@ fn missing_durable_blob_degrades_gracefully() {
 #[test]
 fn corrupt_durable_blob_degrades_gracefully() {
     isolated_durable_root();
-    let mut stash = OutputStash::new();
-    stash.insert("corrupt-1".into(), "shell".into(), "real content\n".into());
+    let mut stash = OutputStash::with_session_id("corrupt-durable-session");
+    stash
+        .insert("corrupt-1".into(), "shell".into(), "real content\n".into())
+        .unwrap();
     stash.clear();
 
     // Corrupt the durable store: delete the content blob, leaving the pointer.
     let root = durable_root().unwrap();
-    let pointer = std::fs::read_to_string(id_pointer_path(&root, "corrupt-1")).unwrap();
+    let pointer = std::fs::read_to_string(owner_id_pointer_path(
+        &root,
+        "corrupt-durable-session",
+        "corrupt-1",
+    ))
+    .unwrap();
     let record = parse_durable_pointer(&pointer).unwrap();
     std::fs::remove_file(blob_path(&root, &record.content_hash)).unwrap();
 
@@ -407,7 +439,7 @@ fn corrupt_durable_blob_degrades_gracefully() {
     assert!(err.contains("No stashed output"));
     // And the low-level reader reports the missing blob distinctly.
     assert!(
-        durable_read("corrupt-1")
+        durable_read_at(&root, "corrupt-1", Some("corrupt-durable-session"))
             .unwrap_err()
             .contains("blob missing")
     );
@@ -672,13 +704,19 @@ fn output_view_and_grep_read_through_survives_gc_for_active_session() {
         root.clone(),
     );
     let body = "alpha before gc\nneedle stays searchable\nomega after gc\n";
-    stash.insert(
-        "gc-active-read-through-tool".into(),
-        "shell".into(),
-        body.into(),
-    );
+    stash
+        .insert(
+            "gc-active-read-through-tool".into(),
+            "shell".into(),
+            body.into(),
+        )
+        .unwrap();
 
-    let pointer_path = id_pointer_path(&root, "gc-active-read-through-tool");
+    let pointer_path = owner_id_pointer_path(
+        &root,
+        "gc-active-read-through-session",
+        "gc-active-read-through-tool",
+    );
     let record = parse_durable_pointer(
         &std::fs::read_to_string(&pointer_path).expect("durable pointer written"),
     )
@@ -724,29 +762,41 @@ fn gc_retains_recent_terminal_output_but_prunes_expired_terminal_read_through() 
 
     let mut recent_stash =
         OutputStash::with_session_id_and_durable_root("gc-recent-terminal-session", root.clone());
-    recent_stash.insert(
-        "gc-recent-terminal-tool".into(),
-        "shell".into(),
-        "recent terminal output\nretained by retention window\n".into(),
-    );
+    recent_stash
+        .insert(
+            "gc-recent-terminal-tool".into(),
+            "shell".into(),
+            "recent terminal output\nretained by retention window\n".into(),
+        )
+        .unwrap();
     recent_stash.clear();
 
     let mut expired_stash =
         OutputStash::with_session_id_and_durable_root("gc-expired-terminal-session", root.clone());
-    expired_stash.insert(
-        "gc-expired-terminal-tool".into(),
-        "shell".into(),
-        "expired terminal output\nshould be pruned\n".into(),
-    );
+    expired_stash
+        .insert(
+            "gc-expired-terminal-tool".into(),
+            "shell".into(),
+            "expired terminal output\nshould be pruned\n".into(),
+        )
+        .unwrap();
     expired_stash.clear();
 
-    let recent_pointer = id_pointer_path(&root, "gc-recent-terminal-tool");
+    let recent_pointer = owner_id_pointer_path(
+        &root,
+        "gc-recent-terminal-session",
+        "gc-recent-terminal-tool",
+    );
     let recent_record = parse_durable_pointer(
         &std::fs::read_to_string(&recent_pointer).expect("recent pointer written"),
     )
     .expect("recent pointer parses");
     let recent_blob = blob_path(&root, &recent_record.content_hash);
-    let expired_pointer = id_pointer_path(&root, "gc-expired-terminal-tool");
+    let expired_pointer = owner_id_pointer_path(
+        &root,
+        "gc-expired-terminal-session",
+        "gc-expired-terminal-tool",
+    );
     let expired_record = parse_durable_pointer(
         &std::fs::read_to_string(&expired_pointer).expect("expired pointer written"),
     )
@@ -810,14 +860,17 @@ fn in_memory_output_still_wins_when_durable_pointer_is_stale() {
     let root = gc_root("in-memory-first-regression");
     let mut stash =
         OutputStash::with_session_id_and_durable_root("gc-memory-first-session", root.clone());
-    stash.insert(
-        "gc-memory-first-tool".into(),
-        "shell".into(),
-        "fresh in-memory output\n".into(),
-    );
+    stash
+        .insert(
+            "gc-memory-first-tool".into(),
+            "shell".into(),
+            "fresh in-memory output\n".into(),
+        )
+        .unwrap();
 
     let stale_hash = write_gc_blob(&root, "stale durable output\n");
-    let pointer_path = id_pointer_path(&root, "gc-memory-first-tool");
+    let pointer_path =
+        owner_id_pointer_path(&root, "gc-memory-first-session", "gc-memory-first-tool");
     atomic_write(
         &root.join("ids"),
         &pointer_path,
@@ -1202,4 +1255,128 @@ fn render_synopsis_does_not_appear_for_small_json() {
         "small passthrough should not have synopsis: {text}"
     );
     assert!(!text.contains("Full output stashed"));
+}
+
+#[test]
+fn durable_metadata_listing_retry_and_session_isolation() {
+    let root = gc_root("metadata-listing-contract");
+    let details = DurableOutputDetails {
+        turn: 7,
+        result_kind: "shell_stdout".into(),
+        original_chars: 40,
+        stored_chars: 4,
+        completeness: "partial-spill".into(),
+    };
+    let mut owner = OutputStash::with_session_id_and_durable_root("owner-a", root.clone());
+    owner
+        .insert_with_metadata(
+            "tool-a".into(),
+            "shell".into(),
+            "éééé".into(),
+            details.clone(),
+        )
+        .unwrap();
+    // A usable identical retry is idempotent.
+    owner
+        .insert_with_metadata(
+            "tool-a".into(),
+            "shell".into(),
+            "éééé".into(),
+            details.clone(),
+        )
+        .unwrap();
+    assert!(
+        owner
+            .insert_with_metadata(
+                "tool-a".into(),
+                "shell".into(),
+                "éééé".into(),
+                DurableOutputDetails {
+                    turn: 8,
+                    ..details.clone()
+                },
+            )
+            .is_err()
+    );
+
+    // Process-style reopen has no in-memory entry but lists and resolves it.
+    drop(owner);
+    let mut reopened = OutputStash::with_session_id_and_durable_root("owner-a", root.clone());
+    let listed = reopened.list_durable_outputs().unwrap();
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].tool_use_id, "tool-a");
+    assert_eq!(listed[0].turn, 7);
+    assert_eq!(listed[0].stored_chars, 4);
+    assert_eq!(listed[0].completeness, "partial-spill");
+    assert!(reopened.view("tool-a", 0, 10).unwrap().contains("éééé"));
+
+    let mut foreign = OutputStash::with_session_id_and_durable_root("owner-b", root.clone());
+    foreign
+        .insert("tool-b".into(), "shell".into(), "foreign".into())
+        .unwrap();
+    assert_eq!(foreign.list_durable_outputs().unwrap().len(), 1);
+    assert!(foreign.view("tool-a", 0, 10).is_err());
+
+    let pointer = parse_durable_pointer(
+        &std::fs::read_to_string(owner_id_pointer_path(&root, "owner-a", "tool-a")).unwrap(),
+    )
+    .unwrap();
+    std::fs::remove_file(blob_path(&root, &pointer.content_hash)).unwrap();
+    assert!(
+        reopened
+            .insert_with_metadata("tool-a".into(), "shell".into(), "éééé".into(), details)
+            .is_err()
+    );
+}
+
+#[test]
+fn owner_qualified_durable_identity_allows_same_tool_use_id() {
+    let root = gc_root("owner-qualified-tool-use-id");
+    let mut session_a = OutputStash::with_session_id_and_durable_root("session-a", root.clone());
+    let mut session_b = OutputStash::with_session_id_and_durable_root("session-b", root.clone());
+
+    session_a
+        .insert(
+            "call-1".into(),
+            "shell".into(),
+            "output from session A\n".into(),
+        )
+        .unwrap();
+    session_b
+        .insert(
+            "call-1".into(),
+            "shell".into(),
+            "output from session B\n".into(),
+        )
+        .unwrap();
+
+    assert_eq!(session_a.list_durable_outputs().unwrap().len(), 1);
+    assert_eq!(session_b.list_durable_outputs().unwrap().len(), 1);
+    assert_eq!(
+        session_a.list_durable_outputs().unwrap()[0].tool_use_id,
+        "call-1"
+    );
+    assert_eq!(
+        session_b.list_durable_outputs().unwrap()[0].tool_use_id,
+        "call-1"
+    );
+
+    // Reopen with no in-memory entries: each trusted owner resolves only its
+    // own owner-qualified record despite the shared tool-use ID.
+    drop(session_a);
+    drop(session_b);
+    let reopened_a = OutputStash::with_session_id_and_durable_root("session-a", root.clone());
+    let reopened_b = OutputStash::with_session_id_and_durable_root("session-b", root);
+    assert!(
+        reopened_a
+            .view("call-1", 0, 10)
+            .unwrap()
+            .contains("session A")
+    );
+    assert!(
+        reopened_b
+            .view("call-1", 0, 10)
+            .unwrap()
+            .contains("session B")
+    );
 }
