@@ -34,8 +34,7 @@ pub use project_residue::{
     cleanup_project_local_djinn,
 };
 pub use read_source::{
-    LegacyKind, LegacyReadSource, MigrationFailurePoint, ReadSourceMigrationError,
-    ReadSourceMigrationRequest, ReadSourceMigrationResult, ReadSourceMigrator, ReadSourcePathState,
+    ReadSourceError, ReadSourceMaterializer, ReadSourceRequest, ReadSourceResult,
 };
 pub use workspace::{
     CommitOutcome, EphemeralWorkspaceError, GitIdentity, MergeOutcome, MergeParentOutcome,

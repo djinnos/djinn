@@ -1158,7 +1158,6 @@ impl TaskRunSupervisor {
                 ),
                 workspace_path: None,
                 mirror_ref: None,
-                dispatch_group_id: None,
             })
             .await
         {

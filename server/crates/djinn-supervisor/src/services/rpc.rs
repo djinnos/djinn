@@ -1489,7 +1489,6 @@ mod tests {
             status: Some("running".into()),
             workspace_path: None,
             mirror_ref: None,
-            dispatch_group_id: None,
         };
         services
             .create_task_run(params)
