@@ -108,9 +108,11 @@ impl NoteRepository {
         let result = sqlx::query(
             r#"UPDATE notes
                SET status = $1,
+                   lifecycle_changed_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
                    updated_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
                WHERE id = $2
-                 AND status = $3"#,
+                 AND status = $3
+                 AND status <> $1"#,
         )
         .bind(next_status.as_str())
         .bind(note_id)
