@@ -87,15 +87,26 @@ pub async fn seed_task_row(db: &Database, seed: UsageTestTaskSeed<'_>) -> String
 /// integration tests. Raw fixture SQL stays behind the `djinn-db` boundary.
 pub async fn seed_board_health_mismatch_candidate(db: &Database, project_id: &str, task_id: &str) {
     db.ensure_initialized().await.unwrap();
+    let creator_uuid = uuid::Uuid::now_v7();
+    let creator_id = creator_uuid.to_string();
+    let creator_github_id = (creator_uuid.as_u128() & i64::MAX as u128) as i64;
+    sqlx::query("INSERT INTO users (id, github_id, github_login) VALUES ($1, $2, $3)")
+        .bind(&creator_id)
+        .bind(creator_github_id)
+        .bind(format!("board-health-fixture-{creator_id}"))
+        .execute(db.pool())
+        .await
+        .expect("failed to seed board-health mismatch creator");
     sqlx::query(
         "INSERT INTO tasks \
          (id, project_id, short_id, title, description, design, issue_type, status, \
-          labels, acceptance_criteria, memory_refs, total_reopen_count) \
+          labels, acceptance_criteria, memory_refs, total_reopen_count, created_by_user_id) \
          VALUES ($1, $2, 'mismatch-storm', 'mismatch storm', 'requires task_create', \
-                 '', 'task', 'open', '[]'::jsonb, '[]'::jsonb, '[]'::jsonb, 3)",
+                 '', 'task', 'open', '[]'::jsonb, '[]'::jsonb, '[]'::jsonb, 3, $3)",
     )
     .bind(task_id)
     .bind(project_id)
+    .bind(&creator_id)
     .execute(db.pool())
     .await
     .expect("failed to seed board-health mismatch candidate");

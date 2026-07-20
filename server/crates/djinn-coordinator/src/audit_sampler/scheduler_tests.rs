@@ -821,18 +821,15 @@ async fn atomic_materialization_rolls_back_when_creator_is_unavailable() {
     )
     .await;
     let audit_repo = AuditSamplerRepository::new(db.clone());
-    let source_task_id = audit_repo
-        .list_unmaterialized_selections()
-        .await
-        .unwrap()
-        .into_iter()
-        .find(|item| item.selection_id == sel.id)
-        .and_then(|item| item.task_id)
-        .unwrap();
-    TaskRepository::new(db.clone(), djinn_core::events::EventBus::noop())
-        .clear_created_by_user_id(&source_task_id)
-        .await
-        .unwrap();
+    let source_task_id = uuid::Uuid::now_v7().to_string();
+    assert!(
+        TaskRepository::new(db.clone(), djinn_core::events::EventBus::noop())
+            .get(&source_task_id)
+            .await
+            .unwrap()
+            .is_none(),
+        "fixture source-task identity must be dangling"
+    );
     let error = audit_repo
         .materialize_audit_task_atomic(
             &sel.id,
