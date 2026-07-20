@@ -13,7 +13,7 @@ perl server/docs/operational/memory-sustainability/evaluator/evaluate.pl --input
 
 All values are JSON integers, never byte strings or display units. The evaluator rejects forward/unsupported schema versions, malformed wrapper roots and values, mixed identities, missing signals/phases, ambiguous T0/graph-install/T1/T2 anchors, and generation drift. It derives peaks from **every** sample in the stream and retains the supplied raw run in the stable, canonically-keyed JSON result. Evidence pointers use actual array indices.
 
-T0 is required to prove no graph (`graph_generation_id: null`, graph slot absent). The installed graph generation must be nonempty and unchanged from graph-install through T2. Candidate gates are server/warm peaks `<= 3.5 GiB` in exactly 4 GiB, route RSS delta `<= 32 MiB`, every board duration `<= 120000 ms`, zero monotonic OOM/restart delta, T2 RSS delta `<= max(128 MiB, floor(10% of T1))`, and T2 retained delta `<= 256 MiB`.
+T0 is required to prove no graph (`graph_generation_id: null`, `graph_slot_present: false`). Both fields are strictly validated: `graph_slot_present` must be a JSON boolean (not null, string, or number) and exactly `false` at T0. The installed graph generation must be nonempty and unchanged from graph-install through T2. Candidate gates are server/warm peaks `<= 3.5 GiB` in exactly 4 GiB, route RSS delta `<= 32 MiB`, every board duration `<= 120000 ms`, zero monotonic OOM/restart delta, T2 RSS delta `<= max(128 MiB, floor(10% of T1))`, and T2 retained delta `<= 256 MiB`.
 
 The pre-change image is always rendered as a separately labeled diagnostic table with the same observed/threshold/unit/evidence details. It cannot affect the candidate release status.
 
