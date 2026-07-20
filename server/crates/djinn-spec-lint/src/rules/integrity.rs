@@ -355,6 +355,11 @@ fn lint_text(body: &str, range: SourceRange, violations: &mut Vec<Violation>) {
         while index < bytes.len() && bytes[index] == b'`' {
             index += 1;
         }
+        // An odd run of immediately preceding backslashes escapes this
+        // delimiter; an even run represents escaped backslashes instead.
+        if is_backslash_escaped(bytes, start) {
+            continue;
+        }
         violations.push(violation(
             body,
             "UNBALANCED_INLINE_BACKTICK",
@@ -364,6 +369,16 @@ fn lint_text(body: &str, range: SourceRange, violations: &mut Vec<Violation>) {
             range.start + index,
         ));
     }
+}
+
+fn is_backslash_escaped(bytes: &[u8], delimiter_start: usize) -> bool {
+    bytes[..delimiter_start]
+        .iter()
+        .rev()
+        .take_while(|byte| **byte == b'\\')
+        .count()
+        % 2
+        == 1
 }
 
 fn url_or_path_token(text: &str, offset: usize) -> bool {
@@ -430,6 +445,11 @@ fn fence_run(line: &str, absolute_start: usize) -> Option<(u8, usize, usize, boo
         .iter()
         .take_while(|byte| **byte == character)
         .count();
+    // A backtick fence cannot have a backtick in its info string. Such a line
+    // is ordinary prose and must not become an unmatched opening delimiter.
+    if character == b'`' && bytes[indent + length..].contains(&b'`') {
+        return None;
+    }
     (length >= 3).then_some((
         character,
         absolute_start + indent,
@@ -535,6 +555,16 @@ mod tests {
         assert_eq!(
             codes("[jump][target]\n\n[target]: #missing"),
             vec![("UNRESOLVED_LOCAL_REFERENCE".into(), "#missing".into())]
+        );
+    }
+
+    #[test]
+    fn escaped_backticks_are_literal_and_invalid_openers_are_not_fences() {
+        assert!(codes("escaped \\` tick").is_empty());
+        assert!(
+            codes("``` lang`")
+                .iter()
+                .all(|(code, _)| code != "UNBALANCED_CODE_FENCE")
         );
     }
 
