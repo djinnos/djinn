@@ -829,12 +829,20 @@ impl DjinnMcpServer {
         };
 
         let include_bodies = p.include_bodies.unwrap_or(false);
+        let include_excerpts = p.include_excerpts.unwrap_or(false);
+        let include_acceptance_criteria = p.include_acceptance_criteria.unwrap_or(false);
 
         let rows: Vec<ProposalListRow> = result
             .proposals
             .iter()
             .map(|(p, count)| {
-                let model = ProposalListRow::from_proposal(p, *count, include_bodies);
+                let model = ProposalListRow::from_proposal(
+                    p,
+                    *count,
+                    include_bodies,
+                    include_excerpts,
+                    include_acceptance_criteria,
+                );
                 match summaries.get(&p.id) {
                     Some(raw) => model.with_list_summary(build_list_summary(p, raw)),
                     None => model,

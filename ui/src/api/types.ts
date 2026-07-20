@@ -78,6 +78,9 @@ export type Epic = Omit<EpicListOutputSchema.EpicModel, "owner"> & {
 export type Proposal = ProposalShowOutputSchema.ProposalModel & {
   /** Body format: 'markdown' (legacy default) or 'mdx' (block-aware). */
   body_format?: "markdown" | "mdx" | string | null;
+  /** Summary-list acceptance counts; detail callers continue to use criteria. */
+  ac_total?: number;
+  ac_met?: number;
 };
 /**
  * Compact tribunal/readiness summary for a proposal list row. Present only on

@@ -936,11 +936,11 @@ pub struct ProposalListRow {
     pub id: String,
     pub short_id: String,
     pub title: String,
-    /// First 512 Unicode scalar values of the proposal body.  Always
-    /// present regardless of `include_bodies`.
-    pub body_excerpt: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub body_excerpt: Option<String>,
     /// `true` when the original body exceeded the 512-scalar cap.
-    pub body_truncated: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub body_truncated: Option<bool>,
     /// Full proposal body — **only serialized when `include_bodies = true`**.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub body: Option<String>,
@@ -980,6 +980,10 @@ pub struct ProposalListRow {
     /// When parked for needs-evidence: the named feasibility claim.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub needs_evidence_claim: Option<String>,
+    /// Total criteria, including legacy strings.
+    pub ac_total: i64,
+    /// Criteria explicitly marked `{ met: true }`.
+    pub ac_met: i64,
     /// Compact tribunal/readiness summary — populated only on `proposal_list`
     /// (batched across the page) for non-terminal proposals.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -995,19 +999,24 @@ impl ProposalListRow {
         p: &Proposal,
         unresolved_feedback_count: i64,
         include_bodies: bool,
+        include_excerpts: bool,
+        include_acceptance_criteria: bool,
     ) -> Self {
-        let (excerpt, truncated) = body_excerpt(&p.body);
+        let include_excerpt_metadata = include_bodies || include_excerpts;
+        let (body_excerpt, body_truncated) = if include_excerpt_metadata {
+            let (excerpt, truncated) = body_excerpt(&p.body);
+            (Some(excerpt), Some(truncated))
+        } else {
+            (None, None)
+        };
+        let (ac_total, ac_met) = acceptance_criteria_counts(&p.acceptance_criteria);
         Self {
             id: p.id.clone(),
             short_id: p.short_id.clone(),
             title: p.title.clone(),
-            body_excerpt: excerpt,
-            body_truncated: truncated,
-            body: if include_bodies {
-                Some(p.body.clone())
-            } else {
-                None
-            },
+            body_excerpt,
+            body_truncated,
+            body: include_bodies.then(|| p.body.clone()),
             body_format: p.body_format.clone(),
             acceptance_criteria: parse_acceptance_criteria(&p.acceptance_criteria),
             status: p.status.clone(),
@@ -1023,6 +1032,8 @@ impl ProposalListRow {
             unresolved_feedback_count,
             linked_spike_task_id: p.linked_spike_task_id.clone(),
             needs_evidence_claim: p.needs_evidence_claim.clone(),
+            ac_total,
+            ac_met,
             list_summary: None,
         }
     }
@@ -1039,6 +1050,18 @@ impl ProposalListRow {
 /// tolerance as the task layer).
 fn parse_acceptance_criteria(raw: &str) -> Vec<AcceptanceCriterionItem> {
     parse_acceptance_criteria_array(raw)
+}
+
+fn acceptance_criteria_counts(raw: &str) -> (i64, i64) {
+    let Ok(serde_json::Value::Array(items)) = serde_json::from_str::<serde_json::Value>(raw) else {
+        return (0, 0);
+    };
+    let total = items.len() as i64;
+    let met = items
+        .iter()
+        .filter(|item| item.get("met").and_then(serde_json::Value::as_bool) == Some(true))
+        .count() as i64;
+    (total, met)
 }
 
 // ── Human authority control responses ──────────────────────────────────────
