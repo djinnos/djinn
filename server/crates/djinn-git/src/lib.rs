@@ -1,3 +1,6 @@
+// `pre_exec` is a Unix-only extension trait. Keep the import alongside its
+// Unix-only callers so dependents can type-check their cfg(not(unix)) paths.
+#[cfg(unix)]
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 
