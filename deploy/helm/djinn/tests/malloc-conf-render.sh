@@ -27,6 +27,7 @@ render() {
     local output=$1
     shift
     helm template malloc-conf-test "$CHART_DIR" \
+        --is-upgrade \
         --show-only templates/deployment-server.yaml "$@" > "$output"
 }
 

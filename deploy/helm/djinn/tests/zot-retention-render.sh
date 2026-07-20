@@ -29,6 +29,7 @@ render_manifests() {
     shift
 
     helm template test-release "$CHART_DIR" \
+        --is-upgrade \
         --show-only templates/zot-configmap.yaml \
         --show-only templates/deployment-server.yaml \
         --set imagePipeline.enabled=true \

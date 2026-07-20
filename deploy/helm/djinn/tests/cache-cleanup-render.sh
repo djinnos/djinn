@@ -20,7 +20,9 @@ trap 'rm -rf "$TMPDIR_RENDER"' EXIT
 render_contract() {
     local output=$1
     shift
-    helm template cache-cleanup-test "$CHART_DIR" "$@" > "$TMPDIR_RENDER/manifest.yaml"
+    helm template cache-cleanup-test "$CHART_DIR" \
+        --set-string migration.designatedOperatorSecret=cache-cleanup-test-operator \
+        "$@" > "$TMPDIR_RENDER/manifest.yaml"
     python3 - "$TMPDIR_RENDER/manifest.yaml" > "$output" <<'PY'
 import re
 import sys

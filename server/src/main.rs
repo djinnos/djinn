@@ -12,6 +12,7 @@ use tracing_subscriber::util::SubscriberInitExt;
 use djinn_agent::runtime_bridge::{RuntimeKind, runtime_kind};
 use djinn_core::clock::{Clock, SystemClock as SystemClockTrait};
 use djinn_core::doctor::RetrievalHealthConfig;
+use djinn_db::migrations::{DesignatedOperatorBootstrap, MigrationContext};
 use djinn_server::db::runtime::{DatabaseRuntimeConfig, DatabaseRuntimeManager};
 use djinn_server::logging;
 use djinn_server::server::{self, AppState};
@@ -55,6 +56,22 @@ struct Cli {
     /// useful standalone for debugging: `djinn-server --migrate-only`.
     #[arg(long, env = "DJINN_MIGRATE_ONLY", default_value_t = false)]
     migrate_only: bool,
+
+    /// Stable user id passed only to the migration connection.
+    #[arg(long, env = "DJINN_MIGRATION_DESIGNATED_OPERATOR_USER_ID")]
+    migration_designated_operator_user_id: Option<String>,
+
+    /// One-shot fresh-install provisioning before the creator-contract migration.
+    #[arg(long, default_value_t = false)]
+    bootstrap_designated_operator_only: bool,
+    #[arg(long, env = "DJINN_BOOTSTRAP_DESIGNATED_OPERATOR_GITHUB_ID")]
+    bootstrap_designated_operator_github_id: Option<i64>,
+    #[arg(long, env = "DJINN_BOOTSTRAP_DESIGNATED_OPERATOR_GITHUB_LOGIN")]
+    bootstrap_designated_operator_github_login: Option<String>,
+    #[arg(long, env = "DJINN_BOOTSTRAP_DESIGNATED_OPERATOR_GITHUB_NAME")]
+    bootstrap_designated_operator_github_name: Option<String>,
+    #[arg(long, env = "DJINN_BOOTSTRAP_DESIGNATED_OPERATOR_GITHUB_AVATAR_URL")]
+    bootstrap_designated_operator_github_avatar_url: Option<String>,
 
     /// Validate MALLOC_CONF and report the effective managed jemalloc settings.
     ///
@@ -123,6 +140,31 @@ async fn async_main(cli: Cli) {
         tracing::warn!(error = %e, "failed to initialize Prometheus telemetry");
     }
 
+    let has_bootstrap_identity = cli.bootstrap_designated_operator_github_id.is_some()
+        || cli.bootstrap_designated_operator_github_login.is_some()
+        || cli.bootstrap_designated_operator_github_name.is_some()
+        || cli
+            .bootstrap_designated_operator_github_avatar_url
+            .is_some();
+    // Bootstrap is its own one-shot migration mode, not normal application
+    // startup. Do not make it unreachable by treating its required inputs as
+    // normal-mode migration inputs.
+    if !cli.migrate_only
+        && !cli.bootstrap_designated_operator_only
+        && (cli.migration_designated_operator_user_id.is_some() || has_bootstrap_identity)
+    {
+        tracing::error!(
+            "migration and bootstrap designated operator input requires a migration mode"
+        );
+        std::process::exit(2);
+    }
+    if cli.migrate_only && (cli.bootstrap_designated_operator_only || has_bootstrap_identity) {
+        tracing::error!(
+            "--migrate-only and --bootstrap-designated-operator-only are mutually exclusive"
+        );
+        std::process::exit(2);
+    }
+
     let cancel = CancellationToken::new();
 
     let shutdown_cancel = cancel.clone();
@@ -162,6 +204,34 @@ async fn async_main(cli: Cli) {
         std::process::exit(1);
     });
 
+    if cli.bootstrap_designated_operator_only {
+        let (Some(user_id), Some(github_id), Some(github_login)) = (
+            cli.migration_designated_operator_user_id.clone(),
+            cli.bootstrap_designated_operator_github_id,
+            cli.bootstrap_designated_operator_github_login.clone(),
+        ) else {
+            tracing::error!("bootstrap requires operator id, GitHub id, and GitHub login");
+            db.pool().close().await;
+            std::process::exit(2);
+        };
+        if let Err(e) = db
+            .bootstrap_designated_operator(DesignatedOperatorBootstrap {
+                user_id,
+                github_id,
+                github_login,
+                github_name: cli.bootstrap_designated_operator_github_name.clone(),
+                github_avatar_url: cli.bootstrap_designated_operator_github_avatar_url.clone(),
+            })
+            .await
+        {
+            tracing::error!(error = %e, "fresh-install designated operator bootstrap failed");
+            db.pool().close().await;
+            std::process::exit(1);
+        }
+        db.pool().close().await;
+        return;
+    }
+
     // ── Migrate-only short-circuit ────────────────────────────────────
     // The Helm `pre-upgrade` Job invokes us with this flag: apply every
     // pending migration, then exit. No HTTP listener, no actors, no
@@ -170,7 +240,12 @@ async fn async_main(cli: Cli) {
     // racing the app pod's connections.
     if cli.migrate_only {
         tracing::info!("migrate-only mode: applying pending migrations");
-        if let Err(e) = db.ensure_initialized().await {
+        if let Err(e) = db
+            .migrate(MigrationContext {
+                designated_operator_user_id: cli.migration_designated_operator_user_id.clone(),
+            })
+            .await
+        {
             tracing::error!(
                 error = %e,
                 "migrate-only: schema migration failed",
