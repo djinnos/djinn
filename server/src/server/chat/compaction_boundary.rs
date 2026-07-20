@@ -127,6 +127,8 @@ pub(crate) async fn record_chat_compaction_started(
         .record_compaction_started(BeginCompactionParams {
             session_id,
             schema_version: 1,
+            trigger: None,
+            current_context_tokens_before: None,
             first_message_id: first_message_id.as_deref(),
             last_compacted_message_id: last_compacted_message_id.as_deref(),
             first_retained_message_id: first_retained_message_id.as_deref(),
@@ -181,6 +183,7 @@ pub(crate) async fn complete_chat_compaction_boundary(
         .complete_compaction_boundary(CompleteCompactionParams {
             boundary_id,
             schema_version: 1,
+            current_context_tokens_after: None,
             first_message_id: first_message_id.as_deref(),
             last_compacted_message_id: last_compacted_message_id.as_deref(),
             first_retained_message_id: first_retained_message_id.as_deref(),

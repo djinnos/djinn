@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE session_compaction_boundaries\n               SET phase = 'ended',\n                   schema_version = $2,\n                   first_message_id = $3,\n                   last_compacted_message_id = $4,\n                   first_retained_message_id = $5,\n                   retained_tail_hash = $6,\n                   summary_text = $7,\n                   marker_metadata = $8,\n                   current_context_tokens_after = $9,\n                   completed_at = to_char(now() AT TIME ZONE 'utc', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"')\n               WHERE id = $1 AND phase = 'started'",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Int4",
+        "Varchar",
+        "Varchar",
+        "Varchar",
+        "Text",
+        "Text",
+        "Jsonb",
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "0e57e32d348cfd959ce2403d892ec2c4671edf8bffd88297a4952c8c06466363"
+}

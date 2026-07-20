@@ -207,8 +207,8 @@ pub use repositories::{
     },
     session_auth::{CreateUserAuthSession, SessionAuthRepository, UserAuthSessionRecord},
     session_compaction_boundary::{
-        BeginCompactionParams, CompactionBoundary, CompactionPhase, CompleteCompactionParams,
-        SessionCompactionBoundaryRepository,
+        BeginCompactionParams, CompactionBoundary, CompactionPhase, CompactionTrigger,
+        CompleteCompactionParams, SessionCompactionBoundaryRepository,
     },
     session_message::SessionMessageRepository,
     settings::SettingsRepository,
