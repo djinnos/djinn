@@ -355,12 +355,19 @@ fn blob_path(root: &std::path::Path, content_hash: &str) -> PathBuf {
     root.join("blobs").join(content_hash)
 }
 
-/// Id-pointer path: `<root>/ids/<sha256(tool_use_id)>`. The pointer file holds a
-/// versioned metadata record (or, for old files, legacy `tool_name\tcontent_hash`)
-/// so a bare `tool_use_id` resolves to its blob + tool name after the in-memory
-/// entry is gone.
+/// Historic id-pointer path: `<root>/ids/<sha256(tool_use_id)>`. Legacy and v1
+/// records used this unqualified name and remain readable through the explicit
+/// compatibility path below.
 fn id_pointer_path(root: &std::path::Path, tool_use_id: &str) -> PathBuf {
     root.join("ids").join(sha256_hex(tool_use_id.as_bytes()))
+}
+
+/// V2 identity is the trusted owner plus the tool-use ID. Hash a length-delimited
+/// representation so distinct `(owner, tool_use_id)` pairs cannot collide merely
+/// by concatenating their strings.
+fn owner_id_pointer_path(root: &std::path::Path, owner: &str, tool_use_id: &str) -> PathBuf {
+    let identity = format!("{}:{owner}:{tool_use_id}", owner.len());
+    root.join("ids").join(sha256_hex(identity.as_bytes()))
 }
 
 /// Session state needed by durable output-stash GC.
@@ -675,7 +682,7 @@ fn durable_write_at(
     let ids = root.join("ids");
     std::fs::create_dir_all(&blobs).map_err(|e| format!("create durable blobs: {e}"))?;
     std::fs::create_dir_all(&ids).map_err(|e| format!("create durable ids: {e}"))?;
-    let pointer = id_pointer_path(root, tool_use_id);
+    let pointer = owner_id_pointer_path(root, owner, tool_use_id);
     if pointer.exists() {
         let existing = parse_durable_pointer(
             &std::fs::read_to_string(&pointer).map_err(|e| format!("read durable pointer: {e}"))?,
@@ -758,15 +765,27 @@ fn durable_read_at(
     tool_use_id: &str,
     owner: Option<&str>,
 ) -> Result<(String, String), String> {
-    let pointer = id_pointer_path(root, tool_use_id);
+    // Prefer the owner-qualified v2 address. A matching historic v1 record can
+    // be read from its old address, but only when its recorded owner is the
+    // trusted owner; unknown-owner legacy data never crosses that boundary.
+    let owner_pointer = owner.map(|owner| owner_id_pointer_path(root, owner, tool_use_id));
+    let pointer = match owner_pointer.as_ref() {
+        Some(pointer) if pointer.is_file() => pointer.clone(),
+        Some(_) => id_pointer_path(root, tool_use_id),
+        None => id_pointer_path(root, tool_use_id),
+    };
     let raw = std::fs::read_to_string(&pointer)
         .map_err(|_| format!("no durable stash for tool_use_id \"{tool_use_id}\""))?;
     let record = parse_durable_pointer(&raw)?;
     match owner {
         Some(owner)
             if record.kind == DurablePointerKind::Version2
+                && owner_pointer.as_ref() == Some(&pointer)
                 && record.session_id.as_deref() == Some(owner)
                 && record.tool_use_id.as_deref() == Some(tool_use_id) => {}
+        Some(owner)
+            if record.kind == DurablePointerKind::Version1
+                && record.session_id.as_deref() == Some(owner) => {}
         Some(_) => return Err("durable output belongs to another session".into()),
         // Unowned stashes retain only the historic unknown-owner compatibility
         // path; they must not become a way to cross a trusted v2 boundary.
@@ -828,7 +847,7 @@ fn list_durable_at(root: &Path, owner: &str) -> Result<Vec<DurableOutputMetadata
             continue;
         };
         if metadata.owner_session_id != owner
-            || path != id_pointer_path(root, &metadata.tool_use_id)
+            || path != owner_id_pointer_path(root, owner, &metadata.tool_use_id)
             || metadata.stored_chars > metadata.original_chars
             || (metadata.completeness == "complete"
                 && metadata.stored_chars != metadata.original_chars)
@@ -985,7 +1004,11 @@ impl OutputStash {
         let durable = if let Some(root) = self.durable_root_override.as_deref() {
             durable_read_at(root, tool_use_id, self.owner_session_id.as_deref())
         } else {
-            durable_read(tool_use_id)
+            durable_read_at(
+                &durable_root().ok_or("durable stash unavailable")?,
+                tool_use_id,
+                self.owner_session_id.as_deref(),
+            )
         };
         #[cfg(not(test))]
         let durable = durable_read_at(
