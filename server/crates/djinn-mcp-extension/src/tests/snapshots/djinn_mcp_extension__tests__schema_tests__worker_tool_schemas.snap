@@ -564,6 +564,20 @@ expression: tool_schemas_worker()
     "concurrent_safe": true
   },
   {
+    "name": "output_list",
+    "description": "List durable metadata for truncated outputs owned by the current trusted session.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {},
+      "required": []
+    },
+    "readOnly": true,
+    "destructive": false,
+    "idempotent": true,
+    "openWorld": false,
+    "concurrent_safe": true
+  },
+  {
     "name": "write",
     "description": "Write content to a file, creating it or overwriting if it exists. Path must be within the task worktree.",
     "inputSchema": {

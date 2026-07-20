@@ -21,6 +21,7 @@ expression: names
   "github_search",
   "output_view",
   "output_grep",
+  "output_list",
   "task_create",
   "task_update",
   "task_blocked_list",

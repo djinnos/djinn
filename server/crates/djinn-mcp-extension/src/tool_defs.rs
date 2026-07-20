@@ -292,6 +292,15 @@ pub fn tool_output_grep() -> RmcpTool {
     )
 }
 
+pub fn tool_output_list() -> RmcpTool {
+    RmcpTool::new(
+        "output_list".to_string(),
+        "List durable metadata for truncated outputs owned by the current trusted session."
+            .to_string(),
+        object!({"type": "object", "properties": {}, "required": []}),
+    )
+}
+
 pub fn tool_apply_patch() -> RmcpTool {
     RmcpTool::new(
         "apply_patch".to_string(),
@@ -432,6 +441,7 @@ fn base_tool_schemas() -> Vec<serde_json::Value> {
     tool_values.push(serialize_tool(tool_github_search(), open_world_read_only()));
     tool_values.push(serialize_tool(tool_output_view(), read_only()));
     tool_values.push(serialize_tool(tool_output_grep(), read_only()));
+    tool_values.push(serialize_tool(tool_output_list(), read_only()));
     tool_values
 }
 
@@ -958,6 +968,7 @@ pub fn tool_schemas_evidence_spike() -> Vec<serde_json::Value> {
     tool_values.push(serialize_tool(tool_github_search(), open_world_read_only()));
     tool_values.push(serialize_tool(tool_output_view(), read_only()));
     tool_values.push(serialize_tool(tool_output_grep(), read_only()));
+    tool_values.push(serialize_tool(tool_output_list(), read_only()));
 
     // ── Architect-only read tools ─────────────────────────────────────
     tool_values.push(serialize_tool(tool_code_graph(), open_world_read_only()));

@@ -18,6 +18,7 @@ expression: names
   "github_search",
   "output_view",
   "output_grep",
+  "output_list",
   "code_graph",
   "pr_review_context",
   "task_blocked_list",
