@@ -29,7 +29,7 @@ use super::types::{BlockError, ParsedProposalBlock};
 /// captures `{...}` JSX *attribute* values as RAW (brace-balanced) text, which
 /// is precisely the behavior we want (store the raw expression string, e.g. for
 /// a forward-compat `tabs={[...]}` attribute) and never evaluates JS.
-fn proposal_parse_options() -> ParseOptions {
+pub(crate) fn proposal_parse_options() -> ParseOptions {
     let constructs = Constructs {
         mdx_expression_flow: false,
         mdx_expression_text: false,
