@@ -1,6 +1,143 @@
 use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
+use thiserror::Error;
+
+/// Immutable process configuration for bounded knowledge injection and retrieval health.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct KnowledgeInjectionConfig {
+    pub knowledge_injection_budget_bytes: u32,
+    pub knowledge_injection_line_cap_bytes: u32,
+    pub knowledge_injection_limit: u32,
+    pub injection_starvation_threshold_percent: u32,
+    pub injection_starvation_query_floor: u32,
+    pub retrieval_health_window_minutes: u32,
+}
+
+#[derive(Clone, Debug, Error, PartialEq, Eq)]
+#[error("invalid {field} value `{value}`: {reason}")]
+pub struct KnowledgeInjectionConfigError {
+    pub field: &'static str,
+    pub value: String,
+    pub reason: String,
+}
+
+impl KnowledgeInjectionConfig {
+    pub const DEFAULT_KNOWLEDGE_INJECTION_BUDGET_BYTES: u32 = 8192;
+    pub const DEFAULT_KNOWLEDGE_INJECTION_LINE_CAP_BYTES: u32 = 1024;
+    pub const DEFAULT_KNOWLEDGE_INJECTION_LIMIT: u32 = 10;
+    pub const DEFAULT_INJECTION_STARVATION_THRESHOLD_PERCENT: u32 = 50;
+    pub const DEFAULT_INJECTION_STARVATION_QUERY_FLOOR: u32 = 20;
+    pub const DEFAULT_RETRIEVAL_HEALTH_WINDOW_MINUTES: u32 = 1440;
+    pub fn from_settings_and_env(s: &DjinnSettings) -> Result<Self, KnowledgeInjectionConfigError> {
+        let budget = resolve(
+            "knowledge_injection_budget_bytes",
+            "DJINN_KNOWLEDGE_INJECTION_BUDGET_BYTES",
+            s.knowledge_injection_budget_bytes,
+            8192,
+            256,
+            32768,
+        )?;
+        let line_cap = resolve(
+            "knowledge_injection_line_cap_bytes",
+            "DJINN_KNOWLEDGE_INJECTION_LINE_CAP_BYTES",
+            s.knowledge_injection_line_cap_bytes,
+            1024,
+            128,
+            4096,
+        )?;
+        let limit = resolve(
+            "knowledge_injection_limit",
+            "DJINN_KNOWLEDGE_INJECTION_LIMIT",
+            s.knowledge_injection_limit,
+            10,
+            1,
+            50,
+        )?;
+        let threshold = resolve(
+            "injection_starvation_threshold_percent",
+            "DJINN_INJECTION_STARVATION_THRESHOLD_PERCENT",
+            s.injection_starvation_threshold_percent,
+            50,
+            1,
+            100,
+        )?;
+        let floor = resolve(
+            "injection_starvation_query_floor",
+            "DJINN_INJECTION_STARVATION_QUERY_FLOOR",
+            s.injection_starvation_query_floor,
+            20,
+            1,
+            10000,
+        )?;
+        let window = resolve(
+            "retrieval_health_window_minutes",
+            "DJINN_RETRIEVAL_HEALTH_WINDOW_MINUTES",
+            s.retrieval_health_window_minutes,
+            1440,
+            5,
+            10080,
+        )?;
+        if line_cap > budget {
+            return Err(KnowledgeInjectionConfigError {
+                field: "knowledge_injection_line_cap_bytes",
+                value: format!("{line_cap} (knowledge_injection_budget_bytes={budget})"),
+                reason: "must be less than or equal to knowledge_injection_budget_bytes".into(),
+            });
+        }
+        Ok(Self {
+            knowledge_injection_budget_bytes: budget,
+            knowledge_injection_line_cap_bytes: line_cap,
+            knowledge_injection_limit: limit,
+            injection_starvation_threshold_percent: threshold,
+            injection_starvation_query_floor: floor,
+            retrieval_health_window_minutes: window,
+        })
+    }
+}
+impl Default for KnowledgeInjectionConfig {
+    fn default() -> Self {
+        Self::from_settings_and_env(&DjinnSettings::default()).expect("valid defaults")
+    }
+}
+fn resolve(
+    field: &'static str,
+    env_var: &str,
+    file: Option<u32>,
+    default: u32,
+    min: u32,
+    max: u32,
+) -> Result<u32, KnowledgeInjectionConfigError> {
+    let (value, rendered) = match std::env::var(env_var) {
+        Ok(raw) => (
+            raw.parse().map_err(|_| KnowledgeInjectionConfigError {
+                field,
+                value: raw.clone(),
+                reason: format!("{env_var} must be an integer"),
+            })?,
+            raw,
+        ),
+        Err(std::env::VarError::NotPresent) => {
+            let value = file.unwrap_or(default);
+            (value, value.to_string())
+        }
+        Err(std::env::VarError::NotUnicode(raw)) => {
+            return Err(KnowledgeInjectionConfigError {
+                field,
+                value: raw.to_string_lossy().into_owned(),
+                reason: format!("{env_var} is not valid Unicode"),
+            });
+        }
+    };
+    if !(min..=max).contains(&value) {
+        return Err(KnowledgeInjectionConfigError {
+            field,
+            value: rendered,
+            reason: format!("must be in [{min}, {max}]"),
+        });
+    }
+    Ok(value)
+}
 
 /// Metadata recorded when dispatch is paused for a scope.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
@@ -90,6 +227,18 @@ pub struct DjinnSettings {
     /// Global emergency stop for task dispatch. Missing in older settings rows means unpaused.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dispatch_pause: Option<DispatchPause>,
+    /// Maximum total UTF-8 bytes injected from retrieved knowledge (default 8192 bytes).
+    pub knowledge_injection_budget_bytes: Option<u32>,
+    /// Maximum UTF-8 bytes used for one injected knowledge summary (default 1024 bytes).
+    pub knowledge_injection_line_cap_bytes: Option<u32>,
+    /// Maximum retrieved knowledge candidates considered for injection (default 10).
+    pub knowledge_injection_limit: Option<u32>,
+    /// Injection-starvation alert threshold in percent (default 50 percent).
+    pub injection_starvation_threshold_percent: Option<u32>,
+    /// Minimum query count for injection-starvation evaluation (default 20 queries).
+    pub injection_starvation_query_floor: Option<u32>,
+    /// Retrieval-health aggregation window in minutes (default 1440 minutes).
+    pub retrieval_health_window_minutes: Option<u32>,
 }
 
 impl DjinnSettings {
@@ -164,6 +313,12 @@ impl DjinnSettings {
             models,
             max_sessions,
             dispatch_pause: None,
+            knowledge_injection_budget_bytes: None,
+            knowledge_injection_line_cap_bytes: None,
+            knowledge_injection_limit: None,
+            injection_starvation_threshold_percent: None,
+            injection_starvation_query_floor: None,
+            retrieval_health_window_minutes: None,
         }
     }
 
