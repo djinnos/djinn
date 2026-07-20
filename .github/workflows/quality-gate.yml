@@ -30,6 +30,7 @@ jobs:
   preflight:
     name: Preflight routing
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     outputs:
       cargoDeny: ${{ steps.router.outputs.cargoDeny }}
       clippy: ${{ steps.router.outputs.clippy }}
@@ -143,6 +144,7 @@ jobs:
     needs: preflight
     if: needs.preflight.outputs.tiltContracts == 'true' && github.event_name != 'push'
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - uses: azure/setup-helm@v4
@@ -193,6 +195,7 @@ jobs:
     needs: preflight
     if: github.event_name == 'push'
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - run: sleep 90
   cache-warm-x86_64-quality:
@@ -202,6 +205,7 @@ jobs:
       - main-admission
     if: github.event_name == 'push' && needs.preflight.outputs.clippy == 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     defaults:
       run:
         working-directory: server
@@ -249,6 +253,7 @@ jobs:
       - preflight
     if: (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && needs.preflight.outputs.serverTest == 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     defaults:
       run:
         working-directory: server
@@ -300,6 +305,7 @@ jobs:
       - preflight
     if: (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && needs.preflight.outputs.serverTest == 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     defaults:
       run:
         working-directory: server
@@ -353,6 +359,7 @@ jobs:
       - preflight
     if: (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && needs.preflight.outputs.aarch64 == 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     defaults:
       run:
         working-directory: server
@@ -406,6 +413,7 @@ jobs:
         || needs.preflight.outputs.boundaries == 'true'
       )
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     env:
       BASE_SHA: |-
         ${{ github.event.pull_request.base.sha
@@ -492,6 +500,7 @@ jobs:
     needs: preflight
     if: needs.preflight.outputs.clippy == 'true' && github.event_name != 'push'
     runs-on: ubuntu-latest
+    timeout-minutes: 25
     defaults:
       run:
         working-directory: server
@@ -535,6 +544,7 @@ jobs:
     needs: preflight
     if: needs.preflight.outputs.aarch64 == 'true' && github.event_name != 'push'
     runs-on: ubuntu-latest
+    timeout-minutes: 25
     defaults:
       run:
         working-directory: server
@@ -573,6 +583,7 @@ jobs:
     needs: preflight
     if: needs.preflight.outputs.serverTest == 'true' && github.event_name != 'push'
     runs-on: ubuntu-latest
+    timeout-minutes: 25
     outputs:
       matrix: ${{ steps.plan.outputs.matrix }}
       coldStart: ${{ steps.plan.outputs.coldStart }}
@@ -746,6 +757,7 @@ jobs:
       - preflight
     if: needs.preflight.outputs.serverTest == 'true' && github.event_name != 'push'
     runs-on: ubuntu-latest
+    timeout-minutes: 40
     strategy:
       fail-fast: false
       matrix:
@@ -772,11 +784,18 @@ jobs:
         options: --health-cmd="pg_isready -U postgres" --health-interval=5s --health-timeout=3s --health-retries=20
     steps:
       - uses: actions/checkout@v4
-      - name: Reclaim runner disk for server test artifacts
+      - name: Reclaim runner disk for server test artifacts (background)
         run: |
           # The all-targets test build can exhaust the hosted runner after the
           # Rust cache is restored. These preinstalled SDKs are unused here.
-          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc
+          # Backgrounded because the rm costs ~1 min serially at the head of
+          # every shard; the checkout/toolchain/cache steps that follow do not
+          # need the space, and the build waits on the marker below.
+          nohup bash -c '
+            sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc
+            touch "$RUNNER_TEMP/disk-reclaim.done"
+          ' > "$RUNNER_TEMP/disk-reclaim.log" 2>&1 &
+          echo "disk reclaim started"
       - name: Install PostgreSQL client tools
         run: |
           # The x64 hosted runner images preinstall postgresql-client; the
@@ -832,16 +851,51 @@ jobs:
           echo "cache-hit=${{ steps.rust-cache.outputs.cache-hit }}"
           echo "::notice::cache-family=server-test shared-key=server-test cache-hit=${{ steps.rust-cache.outputs.cache-hit }}"
       - uses: taiki-e/install-action@nextest
-      - uses: taiki-e/install-action@v2
-        with:
-          tool: sqlx-cli
       - name: Apply djinn-db migrations
-        working-directory: server/crates/djinn-db
+        # NO `working-directory: server/crates/djinn-db` here. The workflow
+        # sets `CARGO_BUILD_BUILD_DIR: target` (env, line ~26), and cargo
+        # resolves a RELATIVE build-dir against the process CWD — so running
+        # from the crate directory sends every intermediate rlib/rmeta to
+        # server/crates/djinn-db/target (1.2 GB, reproduced locally) while the
+        # restored cache sits in server/target. That is why this step rebuilt
+        # 352 crates from proc-macro2 on a "full match: true" restore, and why
+        # qa-smoke's near-identical `cargo test -p djinn-db` — which runs from
+        # server/ — finished in 20s off the same cache. Note build-dir is NOT
+        # target-dir: final artifacts still land in server/target, which is
+        # what makes this misread as working.
         env:
           DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5433/djinn
         run: |
-          SQLX_OFFLINE=true DJINN_DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5433/djinn cargo run -p djinn-server --bin djinn-server -- --bootstrap-designated-operator-only --migration-designated-operator-user-id 00000000-0000-7000-8000-000000000002 --bootstrap-designated-operator-github-id 9000000002 --bootstrap-designated-operator-github-login djinn-ci-migration-operator
-          SQLX_OFFLINE=true DJINN_DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5433/djinn cargo run -p djinn-server --bin djinn-server -- --migrate-only --migration-designated-operator-user-id 00000000-0000-7000-8000-000000000002
+          # djinn-db's own migrator, NOT `cargo run -p djinn-server`: the
+          # server binary drags in ~200 packages it never executes here
+          # (kube, tree-sitter grammars, candle, coordinator/agent), which
+          # cost ~8 min in each of six jobs.
+          #
+          # Two things here are load-bearing and were each measured after
+          # getting them wrong:
+          #
+          # 1. `cargo test --ignored`, NOT a `[[bin]]`. `server-test` is
+          #    warmed by `nextest run --all-targets --no-run`, so it holds
+          #    TEST-profile artifacts; `cargo run --bin` needs the dev-profile
+          #    path the warmer never produces. Measured: 329 crates / 3m49s.
+          #
+          # 2. NO `--features qdrant`, even though the warmer uses it. The
+          #    warmer's flag is djinn-SERVER's feature under `--workspace`;
+          #    passing it here selects djinn-DB's own qdrant feature under
+          #    `-p`, and resolver-2 unification over a different package set
+          #    gives shared deps different feature sets and different metadata
+          #    hashes. Measured: 352 crates / 5m32s with the flag, against 27s
+          #    for the same package without it (see qa-smoke, same cache).
+          #
+          # It applies the same embedded migrations through the same owned
+          # runner in djinn_db::migrations, so the designated-operator
+          # contract is unchanged. See tests/apply_migrations.rs.
+          SQLX_OFFLINE=true \
+            DJINN_MIGRATE_DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5433/djinn \
+            DJINN_MIGRATE_OPERATOR_USER_ID=00000000-0000-7000-8000-000000000002 \
+            DJINN_MIGRATE_OPERATOR_GITHUB_ID=9000000002 \
+            DJINN_MIGRATE_OPERATOR_LOGIN=djinn-ci-migration-operator \
+            cargo test -p djinn-db --test apply_migrations -- --ignored --nocapture
       - name: Build Postgres test template
         env:
           PGPASSWORD: postgres
@@ -865,6 +919,17 @@ jobs:
       # offline cache. The build overlaps the planner's discovery compile
       # of the same crates — that concurrency is the whole point of the
       # shards not depending on nextest-plan.
+      - name: Wait for background disk reclaim
+        run: |
+          for _ in $(seq 1 180); do
+            if [ -f "$RUNNER_TEMP/disk-reclaim.done" ]; then
+              df -h / | tail -1
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "::warning::disk reclaim did not finish within 180s; continuing"
+          cat "$RUNNER_TEMP/disk-reclaim.log" || true
       - name: Build test binaries (concurrent with planner discovery)
         run: cargo nextest run --workspace --all-targets --features qdrant --no-run
       - name: Wait for and download full shard plan
@@ -1005,6 +1070,7 @@ jobs:
       - server-test
     if: needs.preflight.outputs.serverTest == 'true' && github.event_name != 'push' && needs.nextest-plan.result == 'success' && needs.server-test.result == 'success'
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - name: Download current plan and exact-once proof
         uses: actions/download-artifact@v4
@@ -1125,6 +1191,7 @@ jobs:
     needs: preflight
     if: needs.preflight.outputs.sqlxFreshness == 'true' && (github.event_name == 'pull_request' || github.event_name == 'merge_group' || github.event_name == 'workflow_dispatch')
     runs-on: ubuntu-latest
+    timeout-minutes: 25
     defaults:
       run:
         working-directory: server
@@ -1146,27 +1213,67 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: server
-          shared-key: server-quality
+          # server-test, not server-quality: this job needs codegen
+          # artifacts (it builds the djinn-db migration test), and the quality
+          # family is clippy-warmed so it carries rmeta only. server-test is
+          # warmed by `nextest run --workspace --no-run`, a real build, and
+          # its rmeta still serves the `cargo check` in sqlx-verify.
+          shared-key: server-test
           cache-on-failure: true
           cache-all-crates: true
           save-if: false
         id: rust-cache
       - name: Log cache family and restore status
         run: |-
-          echo "cache-family=server-quality"
-          echo "shared-key=server-quality"
+          echo "cache-family=server-test"
+          echo "shared-key=server-test"
           echo "runner-os=${{ runner.os }}"
           echo "rustc=$(rustc --version || echo 'unknown')"
           echo "cache-hit=${{ steps.rust-cache.outputs.cache-hit }}"
-          echo "::notice::cache-family=server-quality shared-key=server-quality cache-hit=${{ steps.rust-cache.outputs.cache-hit }}"
-      - uses: taiki-e/install-action@v2
-        with:
-          tool: sqlx-cli
+          echo "::notice::cache-family=server-test shared-key=server-test cache-hit=${{ steps.rust-cache.outputs.cache-hit }}"
       - name: Apply djinn-db migrations
-        working-directory: server/crates/djinn-db
+        # NO `working-directory: server/crates/djinn-db` here. The workflow
+        # sets `CARGO_BUILD_BUILD_DIR: target` (env, line ~26), and cargo
+        # resolves a RELATIVE build-dir against the process CWD — so running
+        # from the crate directory sends every intermediate rlib/rmeta to
+        # server/crates/djinn-db/target (1.2 GB, reproduced locally) while the
+        # restored cache sits in server/target. That is why this step rebuilt
+        # 352 crates from proc-macro2 on a "full match: true" restore, and why
+        # qa-smoke's near-identical `cargo test -p djinn-db` — which runs from
+        # server/ — finished in 20s off the same cache. Note build-dir is NOT
+        # target-dir: final artifacts still land in server/target, which is
+        # what makes this misread as working.
         run: |
-          SQLX_OFFLINE=true DJINN_DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5433/djinn cargo run -p djinn-server --bin djinn-server -- --bootstrap-designated-operator-only --migration-designated-operator-user-id 00000000-0000-7000-8000-000000000002 --bootstrap-designated-operator-github-id 9000000002 --bootstrap-designated-operator-github-login djinn-ci-migration-operator
-          SQLX_OFFLINE=true DJINN_DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5433/djinn cargo run -p djinn-server --bin djinn-server -- --migrate-only --migration-designated-operator-user-id 00000000-0000-7000-8000-000000000002
+          # djinn-db's own migrator, NOT `cargo run -p djinn-server`: the
+          # server binary drags in ~200 packages it never executes here
+          # (kube, tree-sitter grammars, candle, coordinator/agent), which
+          # cost ~8 min in each of six jobs.
+          #
+          # Two things here are load-bearing and were each measured after
+          # getting them wrong:
+          #
+          # 1. `cargo test --ignored`, NOT a `[[bin]]`. `server-test` is
+          #    warmed by `nextest run --all-targets --no-run`, so it holds
+          #    TEST-profile artifacts; `cargo run --bin` needs the dev-profile
+          #    path the warmer never produces. Measured: 329 crates / 3m49s.
+          #
+          # 2. NO `--features qdrant`, even though the warmer uses it. The
+          #    warmer's flag is djinn-SERVER's feature under `--workspace`;
+          #    passing it here selects djinn-DB's own qdrant feature under
+          #    `-p`, and resolver-2 unification over a different package set
+          #    gives shared deps different feature sets and different metadata
+          #    hashes. Measured: 352 crates / 5m32s with the flag, against 27s
+          #    for the same package without it (see qa-smoke, same cache).
+          #
+          # It applies the same embedded migrations through the same owned
+          # runner in djinn_db::migrations, so the designated-operator
+          # contract is unchanged. See tests/apply_migrations.rs.
+          SQLX_OFFLINE=true \
+            DJINN_MIGRATE_DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5433/djinn \
+            DJINN_MIGRATE_OPERATOR_USER_ID=00000000-0000-7000-8000-000000000002 \
+            DJINN_MIGRATE_OPERATOR_GITHUB_ID=9000000002 \
+            DJINN_MIGRATE_OPERATOR_LOGIN=djinn-ci-migration-operator \
+            cargo test -p djinn-db --test apply_migrations -- --ignored --nocapture
       - name: Verify .sqlx offline cache is up to date
         working-directory: .
         run: make sqlx-verify
@@ -1175,6 +1282,7 @@ jobs:
     needs: preflight
     if: needs.preflight.outputs.memoryEval == 'true' && (github.event_name == 'pull_request' || github.event_name == 'merge_group' || github.event_name == 'workflow_dispatch')
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     defaults:
       run:
         working-directory: server
@@ -1196,29 +1304,69 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: server
-          shared-key: server-quality
+          # server-test, not server-quality: this job builds and runs
+          # the djinn-db migration test and djinn-memory-eval, needing codegen
+          # the clippy-warmed quality family does not carry. djinn-memory-eval
+          # is also outside that family's package closure entirely (the
+          # warmer builds `-p djinn-server`, not `--workspace`).
+          shared-key: server-test
           cache-on-failure: true
           cache-all-crates: true
           save-if: false
         id: rust-cache
       - name: Log cache family and restore status
         run: |-
-          echo "cache-family=server-quality"
-          echo "shared-key=server-quality"
+          echo "cache-family=server-test"
+          echo "shared-key=server-test"
           echo "runner-os=${{ runner.os }}"
           echo "rustc=$(rustc --version || echo 'unknown')"
           echo "cache-hit=${{ steps.rust-cache.outputs.cache-hit }}"
-          echo "::notice::cache-family=server-quality shared-key=server-quality cache-hit=${{ steps.rust-cache.outputs.cache-hit }}"
-      - uses: taiki-e/install-action@v2
-        with:
-          tool: sqlx-cli
+          echo "::notice::cache-family=server-test shared-key=server-test cache-hit=${{ steps.rust-cache.outputs.cache-hit }}"
       - name: Apply djinn-db migrations
-        working-directory: server/crates/djinn-db
+        # NO `working-directory: server/crates/djinn-db` here. The workflow
+        # sets `CARGO_BUILD_BUILD_DIR: target` (env, line ~26), and cargo
+        # resolves a RELATIVE build-dir against the process CWD — so running
+        # from the crate directory sends every intermediate rlib/rmeta to
+        # server/crates/djinn-db/target (1.2 GB, reproduced locally) while the
+        # restored cache sits in server/target. That is why this step rebuilt
+        # 352 crates from proc-macro2 on a "full match: true" restore, and why
+        # qa-smoke's near-identical `cargo test -p djinn-db` — which runs from
+        # server/ — finished in 20s off the same cache. Note build-dir is NOT
+        # target-dir: final artifacts still land in server/target, which is
+        # what makes this misread as working.
         env:
           DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5433/djinn
         run: |
-          SQLX_OFFLINE=true DJINN_DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5433/djinn cargo run -p djinn-server --bin djinn-server -- --bootstrap-designated-operator-only --migration-designated-operator-user-id 00000000-0000-7000-8000-000000000002 --bootstrap-designated-operator-github-id 9000000002 --bootstrap-designated-operator-github-login djinn-ci-migration-operator
-          SQLX_OFFLINE=true DJINN_DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5433/djinn cargo run -p djinn-server --bin djinn-server -- --migrate-only --migration-designated-operator-user-id 00000000-0000-7000-8000-000000000002
+          # djinn-db's own migrator, NOT `cargo run -p djinn-server`: the
+          # server binary drags in ~200 packages it never executes here
+          # (kube, tree-sitter grammars, candle, coordinator/agent), which
+          # cost ~8 min in each of six jobs.
+          #
+          # Two things here are load-bearing and were each measured after
+          # getting them wrong:
+          #
+          # 1. `cargo test --ignored`, NOT a `[[bin]]`. `server-test` is
+          #    warmed by `nextest run --all-targets --no-run`, so it holds
+          #    TEST-profile artifacts; `cargo run --bin` needs the dev-profile
+          #    path the warmer never produces. Measured: 329 crates / 3m49s.
+          #
+          # 2. NO `--features qdrant`, even though the warmer uses it. The
+          #    warmer's flag is djinn-SERVER's feature under `--workspace`;
+          #    passing it here selects djinn-DB's own qdrant feature under
+          #    `-p`, and resolver-2 unification over a different package set
+          #    gives shared deps different feature sets and different metadata
+          #    hashes. Measured: 352 crates / 5m32s with the flag, against 27s
+          #    for the same package without it (see qa-smoke, same cache).
+          #
+          # It applies the same embedded migrations through the same owned
+          # runner in djinn_db::migrations, so the designated-operator
+          # contract is unchanged. See tests/apply_migrations.rs.
+          SQLX_OFFLINE=true \
+            DJINN_MIGRATE_DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5433/djinn \
+            DJINN_MIGRATE_OPERATOR_USER_ID=00000000-0000-7000-8000-000000000002 \
+            DJINN_MIGRATE_OPERATOR_GITHUB_ID=9000000002 \
+            DJINN_MIGRATE_OPERATOR_LOGIN=djinn-ci-migration-operator \
+            cargo test -p djinn-db --test apply_migrations -- --ignored --nocapture
       - name: Build Postgres test template
         env:
           PGPASSWORD: postgres
@@ -1265,6 +1413,7 @@ jobs:
     needs: preflight
     if: needs.preflight.outputs.qaSmoke == 'true' && (github.event_name == 'pull_request' || github.event_name == 'merge_group' || github.event_name == 'workflow_dispatch')
     runs-on: ubuntu-latest
+    timeout-minutes: 25
     defaults:
       run:
         working-directory: server
@@ -1309,9 +1458,6 @@ jobs:
           echo "rustc=$(rustc --version || echo 'unknown')"
           echo "cache-hit=${{ steps.rust-cache.outputs.cache-hit }}"
           echo "::notice::cache-family=server-test shared-key=server-test cache-hit=${{ steps.rust-cache.outputs.cache-hit }}"
-      - uses: taiki-e/install-action@v2
-        with:
-          tool: sqlx-cli
       - name: Build migrated Postgres template
         env:
           PGPASSWORD: postgres
@@ -1355,6 +1501,7 @@ jobs:
     needs: preflight
     if: needs.preflight.outputs.ui == 'true' && github.event_name != 'push'
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     defaults:
       run:
         working-directory: ui
@@ -1383,6 +1530,7 @@ jobs:
   quality-gate:
     name: Quality Gate
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     if: always() && github.event_name != 'push'
     needs:
       - preflight
