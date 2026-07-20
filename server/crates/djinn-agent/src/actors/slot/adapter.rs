@@ -578,9 +578,10 @@ mod resolve_final_verification_tests {
         task_run_id: String,
     }
 
-    /// Seed a project/epic/task and a task_run row shaped like a K8s pod run
-    /// (coordinator-inserted, `workspace_path` as given).
-    async fn fixture(workspace_path: Option<&str>) -> Fixture {
+    /// Seed a project/epic/task and a task_run row exactly as K8s dispatch does:
+    /// the coordinator inserts no workspace path. Tests that need a worktree
+    /// must exercise the durable first-stage update separately.
+    async fn fixture() -> Fixture {
         let db = create_test_db();
         let project = create_test_project(&db).await;
         let epic = create_test_epic(&db, &project.id).await;
@@ -593,7 +594,7 @@ mod resolve_final_verification_tests {
                 task_id: &task.id,
                 trigger_type: "dispatch",
                 status: Some("running"),
-                workspace_path,
+                workspace_path: None,
                 mirror_ref: None,
             })
             .await
@@ -604,6 +605,23 @@ mod resolve_final_verification_tests {
             task_id: task.id,
             task_run_id,
         }
+    }
+
+    async fn persist_stage_workspace(fx: &Fixture, workspace_path: &str) {
+        let repository = TaskRunRepository::new(fx.agent.db.clone());
+        let before_stage = repository
+            .get(&fx.task_run_id)
+            .await
+            .unwrap()
+            .expect("k8s-created task run must exist");
+        assert_eq!(
+            before_stage.workspace_path, None,
+            "the task run must be inserted in the same NULL-workspace shape as k8s dispatch"
+        );
+        repository
+            .set_workspace_path(&fx.task_run_id, workspace_path)
+            .await
+            .expect("first stage must durably persist its clone path");
     }
 
     async fn configure_final_verification_plan(fx: &Fixture) {
@@ -636,7 +654,7 @@ mod resolve_final_verification_tests {
     /// NULL — instead of erroring and blocking every submission.
     #[tokio::test]
     async fn unconfigured_plan_resolves_typed_skip_even_without_worktree() {
-        let fx = fixture(None).await;
+        let fx = fixture().await;
         let resolved = resolve(&fx).await;
         assert!(
             matches!(resolved, Ok(None)),
@@ -649,7 +667,7 @@ mod resolve_final_verification_tests {
     /// without a workspace_path is a hard resolution error, never a skip.
     #[tokio::test]
     async fn configured_plan_with_missing_worktree_fails_closed() {
-        let fx = fixture(None).await;
+        let fx = fixture().await;
         configure_final_verification_plan(&fx).await;
         let resolved = resolve(&fx).await;
         match resolved {
@@ -667,8 +685,9 @@ mod resolve_final_verification_tests {
     /// A configured plan with a recorded worktree resolves full material.
     #[tokio::test]
     async fn configured_plan_with_worktree_resolves_material() {
-        let fx = fixture(Some("/workspace/run-clone")).await;
+        let fx = fixture().await;
         configure_final_verification_plan(&fx).await;
+        persist_stage_workspace(&fx, "/workspace/run-clone").await;
         let material = resolve(&fx)
             .await
             .expect("configured plan with worktree must resolve")
