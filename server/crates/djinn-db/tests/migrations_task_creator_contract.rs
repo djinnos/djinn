@@ -136,8 +136,12 @@ async fn creator_contract_owned_runner_rolls_back_then_is_idempotent() {
         contract_snapshot(&mut conn).await,
         expected_snapshot(&[("rollback-target", None)], "YES", false, false, 0)
     );
+    // `NOT VALID` retains the known NULL fixture row while the production
+    // predicate still permits its UPDATE to OP. The migration therefore gets
+    // past its UPDATE and deterministically fails only when it tries to add
+    // the same temporary constraint name.
     sqlx::query(
-        "ALTER TABLE tasks ADD CONSTRAINT tasks_created_by_user_id_not_null CHECK (created_by_user_id IS NULL)",
+        "ALTER TABLE tasks ADD CONSTRAINT tasks_created_by_user_id_not_null CHECK (created_by_user_id IS NOT NULL) NOT VALID",
     )
     .execute(&mut conn)
     .await
@@ -151,10 +155,10 @@ async fn creator_contract_owned_runner_rolls_back_then_is_idempotent() {
     )
     .await
     .expect_err("temporary constraint must fail after migration UPDATE");
+    let failure = failure.to_string();
     assert!(
-        failure
-            .to_string()
-            .contains("tasks_created_by_user_id_not_null")
+        failure.contains("tasks_created_by_user_id_not_null") && failure.contains("already exists"),
+        "the migration must fail adding the duplicate constraint after its UPDATE, not by violating the pre-existing check: {failure}"
     );
     assert_eq!(
         contract_snapshot(&mut conn).await,
