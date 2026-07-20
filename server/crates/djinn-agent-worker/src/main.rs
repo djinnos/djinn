@@ -4509,7 +4509,20 @@ warning: something
 
     #[cfg(target_os = "linux")]
     fn test_warm_reaper() -> &'static djinn_graph::child_reaper::ChildReaper {
-        Box::leak(Box::new(djinn_graph::child_reaper::ChildReaper::new()))
+        use std::sync::OnceLock;
+
+        // Every lifecycle case shares this one permanent waiter. Constructing
+        // one reaper per test leaves old waitpid(-1) threads alive, allowing an
+        // earlier test to steal status from a later test's registry.
+        static REAPER: OnceLock<djinn_graph::child_reaper::ChildReaper> = OnceLock::new();
+        let reaper = REAPER.get_or_init(djinn_graph::child_reaper::ChildReaper::new);
+        // Test bodies are serialized; drain retained adopted statuses and prove
+        // the old registry empty before reopening admission for the next case.
+        let _ = reaper.drain();
+        assert!(reaper.wait_for_supervisors_idle(Duration::ZERO));
+        assert!(reaper.wait_for_adopted_idle(Duration::ZERO));
+        reaper.reopen_after_idle_for_test();
+        reaper
     }
 
     #[cfg(target_os = "linux")]
@@ -4621,6 +4634,118 @@ warning: something
             !std::path::Path::new(&format!("/proc/{pid}")).exists(),
             "SIGKILL escalation must remove adopted PID {pid}"
         );
+        assert!(reaper.wait_for_supervisors_idle(Duration::ZERO));
+        assert!(reaper.wait_for_adopted_idle(Duration::ZERO));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn warm_shutdown_drains_two_registered_groups_and_setsid_adoptee() {
+        let _serial = WARM_LIFECYCLE_TEST_MUTEX.lock().await;
+        let reaper = test_warm_reaper();
+        let mut recorded = Vec::new();
+        // Keep registrations alive through shutdown. This fixture specifically
+        // exercises shutdown's concurrent snapshot of two live supervisor routes.
+        let mut direct_children = Vec::new();
+        for command_id in ["registered-one", "registered-two"] {
+            // `setsid` makes each direct child its own group/session without a
+            // privileged container. The direct PID remains the group ID.
+            let child = Command::new("setsid")
+                .args(["sh", "-c", "trap \"\" TERM; exec sleep 30"])
+                .spawn()
+                .expect("spawn registered TERM-ignoring group");
+            let pid = child.id();
+            drop(child); // central reaper is the sole wait consumer
+            let admission = reaper.admit(command_id).expect("admit registered group");
+            let direct = admission
+                .register_direct(pid, pid as i32)
+                .expect("register direct group owner");
+            recorded.push(pid);
+            direct_children.push(direct);
+        }
+        // This direct worker child is not registered and is outside both groups.
+        let adopted = Command::new("setsid")
+            .args(["sh", "-c", "trap \"\" TERM; exec sleep 30"])
+            .spawn()
+            .expect("spawn adopted escaped child");
+        let adopted_pid = adopted.id();
+        drop(adopted);
+        recorded.push(adopted_pid);
+
+        let supervisors = reaper.supervisors();
+        assert_eq!(
+            supervisors.len(),
+            2,
+            "shutdown must start with exactly two active registered supervisor records"
+        );
+        let mut registered_pids = supervisors
+            .iter()
+            .map(|record| record.pid)
+            .collect::<Vec<_>>();
+        registered_pids.sort_unstable();
+        assert_eq!(registered_pids, recorded[..2]);
+        let mut registered_pgids = supervisors
+            .iter()
+            .map(|record| record.pgid)
+            .collect::<Vec<_>>();
+        registered_pgids.sort_unstable();
+        assert_eq!(registered_pgids.len(), 2);
+        assert_ne!(registered_pgids[0], registered_pgids[1]);
+        assert!(
+            supervisors
+                .iter()
+                .all(|record| record.pid as i32 == record.pgid),
+            "each registered direct child must own its setsid process group"
+        );
+        assert_eq!(
+            direct_children
+                .iter()
+                .map(|direct| direct.record().pid)
+                .collect::<Vec<_>>(),
+            recorded[..2],
+            "both DirectChild handles must remain alive until shutdown completes"
+        );
+        let adopted_pgid = unsafe { libc::getpgid(adopted_pid as i32) };
+        assert_ne!(
+            adopted_pgid, -1,
+            "setsid adoptee must be alive before shutdown"
+        );
+        assert_ne!(adopted_pid, recorded[0]);
+        assert_ne!(adopted_pid, recorded[1]);
+        assert!(
+            !registered_pgids.contains(&adopted_pgid),
+            "setsid adoptee must remain outside both registered process groups"
+        );
+
+        let start = std::time::Instant::now();
+        let cleanup = shutdown_linux_warm_lifecycle_with_config(
+            reaper,
+            WarmGraphShutdownConfig {
+                bound: Duration::from_secs(3),
+                term_grace: Duration::from_millis(75),
+            },
+        )
+        .await;
+        assert_eq!(
+            direct_children.len(),
+            2,
+            "both DirectChild handles must outlive shutdown completion"
+        );
+        assert!(
+            cleanup.is_ok(),
+            "all shutdown targets must drain: {cleanup:?}"
+        );
+        assert!(start.elapsed() < Duration::from_secs(4));
+        for pid in recorded {
+            let stat = format!("/proc/{pid}/stat");
+            if let Ok(contents) = std::fs::read_to_string(&stat) {
+                let state = contents
+                    .rsplit_once(") ")
+                    .and_then(|(_, fields)| fields.chars().next());
+                assert_ne!(state, Some('Z'), "shutdown PID {pid} remained a zombie");
+                panic!("shutdown PID {pid} still has {stat}");
+            }
+        }
         assert!(reaper.wait_for_supervisors_idle(Duration::ZERO));
         assert!(reaper.wait_for_adopted_idle(Duration::ZERO));
     }
