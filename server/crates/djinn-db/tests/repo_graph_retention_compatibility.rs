@@ -231,6 +231,24 @@ async fn retention_matrix_uses_production_api_and_actual_legacy_sql() {
         .execute(db.pool())
         .await
         .expect("direct legacy compatibility row");
+
+        // Prove the variant is current before retention; the trigger clock,
+        // rather than the supplied source value, orders publication.
+        let current_commit: String = sqlx::query_scalar(
+            "SELECT g.commit_sha FROM repo_graph_current c JOIN repo_graph_generation g \
+             ON (g.project_id, g.generation_id) = (c.project_id, c.generation_id) \
+             WHERE c.project_id = $1",
+        )
+        .bind(PROJECT)
+        .fetch_one(db.pool())
+        .await
+        .expect("timestamp variant current before retention");
+        assert_eq!(current_commit, commit);
+
+        // Sweep while this timestamp variant is current, then run the exact
+        // old reader. This covers equal, stale, and future source values after
+        // production retention rather than only immediately after publication.
+        sweep(&retention, RetentionMode::Delete, 1).await;
         assert_old_reader_agrees_with_current(&db).await;
     }
 
