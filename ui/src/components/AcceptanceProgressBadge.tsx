@@ -25,17 +25,24 @@ function acProgressIcon(met: number, total: number) {
  * objects or bare strings — strings count toward the total but never as met).
  */
 type AcceptanceProgressBadgeProps =
-  | { criteria: ReadonlyArray<AcceptanceCriterion | string> | null | undefined; met?: never; total?: never; className?: string }
-  | { criteria?: never; met: number; total: number; className?: string };
+  | { criteria: ReadonlyArray<AcceptanceCriterion | string> | null | undefined; className?: string }
+  | { met: number; total: number; className?: string };
 
 export function AcceptanceProgressBadge(props: AcceptanceProgressBadgeProps) {
   const { className } = props;
-  const items = "criteria" in props ? props.criteria ?? [] : [];
-  const total = "total" in props ? props.total : items.length;
+  let total: number;
+  let met: number;
+
+  if ("criteria" in props) {
+    const items = props.criteria ?? [];
+    total = items.length;
+    met = items.filter((c) => typeof c === "object" && c !== null && c.met).length;
+  } else {
+    total = props.total;
+    met = props.met;
+  }
+
   if (total === 0) return null;
-  const met = props.met !== undefined
-    ? props.met
-    : items.filter((c) => typeof c === "object" && c !== null && c.met).length;
 
   return (
     <span
