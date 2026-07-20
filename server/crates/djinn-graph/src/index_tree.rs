@@ -25,19 +25,13 @@
 //! spawning, but `IndexTree` itself only governs git state.
 
 use std::collections::HashMap;
-use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow};
 use djinn_core::clock::{Clock, SystemClock};
-use djinn_core::live_state_migration::{ProjectLiveStateMigrationLock, atomic_rename};
-use djinn_db::{
-    BeginProjectLiveStateMigration, Database, MigrationKey, ProjectLiveStateMigrationRepository,
-};
 use djinn_git::CommandOutput;
-use serde_json::json;
 
 /// Reserved file-name prefix for server-managed entries under
 /// `.task-runtime/worktrees/`.  Task-worktree enumeration paths must skip any entry
@@ -88,67 +82,6 @@ fn resolve_indexer_target_dir_override(
         None
     } else {
         Some(isolated_target_dir.to_path_buf())
-    }
-}
-
-async fn migrate_legacy_index_tree(
-    project_id: &str,
-    project_root: &Path,
-    db: &Database,
-    destination_parent: &Path,
-) -> Result<()> {
-    if std::env::var("DJINN_PROJECT_ROOT").is_ok() {
-        return Ok(());
-    }
-    let source = project_root.join(".djinn/worktrees/_index");
-    let destination = destination_parent.join(INDEX_TREE_DIR_NAME);
-    let source_state = classify_worktree_path(&source)?;
-    let destination_state = classify_worktree_path(&destination)?;
-    let repository = ProjectLiveStateMigrationRepository::new(db.clone());
-    let destination_text = destination.display().to_string();
-    let inventory = json!({"sources": [{"kind":"legacy_index_worktree", "path":source.display().to_string(), "state":source_state}], "destination":destination_text});
-    let key = MigrationKey {
-        project_id,
-        family: "worktree:index",
-        release: "N",
-    };
-    repository.begin(BeginProjectLiveStateMigration { project_id, family: "worktree:index", release: "N", source_inventory: &inventory, destination: &destination_text, pre_hash: None, rollback_instruction: "During the Release N rollback window, atomically rename .task-runtime/worktrees/_index back to .djinn/worktrees/_index under the project migration lock." }).await?;
-    let outcome = match (source_state.as_str(), destination_state.as_str()) {
-        ("missing", "missing") | ("missing", "directory") => Ok(()),
-        ("directory", "missing") => {
-            fs::create_dir_all(destination_parent)?;
-            let _lock = ProjectLiveStateMigrationLock::try_acquire(destination_parent, project_id)?;
-            atomic_rename(&source, &destination).map_err(anyhow::Error::from)
-        }
-        ("directory", "directory") => Err(anyhow!(
-            "legacy and destination index worktrees both exist; preserving both"
-        )),
-        _ => Err(anyhow!(
-            "refusing index-worktree migration for source={} destination={}",
-            source_state,
-            destination_state
-        )),
-    };
-    match outcome {
-        Ok(()) => repository
-            .finalize(key, None, Some("destination published or already present"))
-            .await
-            .map_err(anyhow::Error::from),
-        Err(error) => {
-            let _ = repository.fail(key, &error.to_string()).await;
-            Err(error)
-        }
-    }
-}
-
-fn classify_worktree_path(path: &Path) -> Result<String> {
-    match fs::symlink_metadata(path) {
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok("missing".to_owned()),
-        Err(error) => Err(error.into()),
-        Ok(metadata) if metadata.file_type().is_symlink() => Ok("symlink".to_owned()),
-        Ok(metadata) if metadata.is_dir() => Ok("directory".to_owned()),
-        Ok(metadata) if metadata.is_file() => Ok("file".to_owned()),
-        Ok(_) => Ok("special".to_owned()),
     }
 }
 
@@ -301,18 +234,6 @@ impl IndexTree {
         Self::ensure_inner(project_id, project_root).await
     }
 
-    pub async fn ensure_with_migration(
-        project_id: &str,
-        project_root: &Path,
-        db: &Database,
-    ) -> Result<IndexTreeHandle> {
-        let worktrees_dir = djinn_core::index_tree::worktrees_path(project_root);
-        let lock = ensure_lock_for(project_id).await;
-        let _permit = lock.lock().await;
-        migrate_legacy_index_tree(project_id, project_root, db, &worktrees_dir).await?;
-        Self::ensure_locked(project_id, project_root, worktrees_dir).await
-    }
-
     async fn ensure_inner(project_id: &str, project_root: &Path) -> Result<IndexTreeHandle> {
         let worktrees_dir = djinn_core::index_tree::worktrees_path(project_root);
         let lock = ensure_lock_for(project_id).await;
@@ -432,8 +353,6 @@ pub fn reset_last_fetch_for_tests() {
 mod tests {
     use super::*;
     use crate::test_helpers::workspace_tempdir;
-    use djinn_core::events::EventBus;
-    use djinn_db::{ProjectLiveStateMigration, ProjectRepository, RESULT_FAILED, RESULT_SUCCEEDED};
 
     #[test]
     fn indexer_target_dir_override_in_process_mode_isolates() {
@@ -508,228 +427,27 @@ mod tests {
         project_root
     }
 
-    async fn migration_db(project_ids: &[&str]) -> Database {
-        let db = Database::open_in_memory().expect("in-memory migration database");
-        let projects = ProjectRepository::new(db.clone(), EventBus::noop());
-        for project_id in project_ids {
-            projects
-                .create_with_id(project_id, project_id, "test", project_id)
-                .await
-                .expect("seed migration project");
-        }
-        db
-    }
-
-    async fn migration_record(db: &Database, project_id: &str) -> ProjectLiveStateMigration {
-        ProjectLiveStateMigrationRepository::new(db.clone())
-            .get(MigrationKey {
-                project_id,
-                family: "worktree:index",
-                release: "N",
-            })
-            .await
-            .expect("read migration record")
-            .expect("migration record exists")
-    }
-
-    async fn create_legacy_index_tree(project_root: &Path, sentinel: &str) -> PathBuf {
-        let legacy = project_root.join(".djinn/worktrees/_index");
-        tokio::fs::create_dir_all(legacy.parent().unwrap())
-            .await
-            .unwrap();
-        run_git(
-            project_root,
-            &[
-                "worktree",
-                "add",
-                "--detach",
-                legacy.to_string_lossy().as_ref(),
-                "HEAD",
-            ],
-        )
-        .await
-        .expect("create usable legacy index worktree");
-        tokio::fs::write(legacy.join("migration-sentinel.txt"), sentinel)
-            .await
-            .unwrap();
-        legacy
-    }
-
     #[tokio::test]
-    async fn ensure_with_migration_moves_legacy_tree_and_records_rollback_state() {
-        let tmp = workspace_tempdir("index-tree-migration-");
+    async fn ensure_regenerates_canonical_checkout_from_git() {
+        let tmp = workspace_tempdir("index-tree-regeneration-");
         let project_root = make_repo(tmp.path()).await;
-        let legacy = create_legacy_index_tree(&project_root, "legacy-content").await;
-        let destination = project_root.join(".task-runtime/worktrees/_index");
-        let db = migration_db(&["migration-project"]).await;
-
-        let handle = IndexTree::ensure_with_migration("migration-project", &project_root, &db)
-            .await
-            .expect("migrate legacy index tree");
-
-        assert_eq!(handle.path(), destination);
-        assert!(
-            !legacy.exists(),
-            "atomic rename must remove the legacy name"
-        );
-        assert_eq!(
-            tokio::fs::read_to_string(destination.join("migration-sentinel.txt"))
-                .await
-                .unwrap(),
-            "legacy-content"
-        );
-        assert!(
-            destination.join(".git").exists(),
-            "moved checkout remains usable"
-        );
-
-        let record = migration_record(&db, "migration-project").await;
-        assert_eq!(record.result, RESULT_SUCCEEDED);
-        assert_eq!(record.destination, destination.display().to_string());
-        assert_eq!(
-            record.source_inventory["sources"][0]["path"],
-            legacy.display().to_string()
-        );
-        assert_eq!(record.source_inventory["sources"][0]["state"], "directory");
-        assert!(record.finalized_at.is_some());
-        assert!(record.rollback_instruction.contains("atomically rename"));
-        assert!(
-            record
-                .rollback_instruction
-                .contains(".djinn/worktrees/_index")
-        );
-    }
-
-    #[tokio::test]
-    async fn ensure_with_migration_reconciles_pending_restart_without_moving_again() {
-        let tmp = workspace_tempdir("index-tree-migration-restart-");
-        let project_root = make_repo(tmp.path()).await;
-        let legacy = create_legacy_index_tree(&project_root, "survives-restart").await;
-        let db = migration_db(&["restart-project"]).await;
-
-        let first = IndexTree::ensure_with_migration("restart-project", &project_root, &db)
-            .await
-            .unwrap();
-        let destination = first.path().to_path_buf();
-        let repository = ProjectLiveStateMigrationRepository::new(db.clone());
-        repository
-            .mark_pending(
-                MigrationKey {
-                    project_id: "restart-project",
-                    family: "worktree:index",
-                    release: "N",
-                },
-                Some("simulate restart after destination publication"),
-            )
+        let expected = read_head_sha(&project_root).await.unwrap();
+        let handle = IndexTree::ensure("regeneration-project", &project_root)
             .await
             .unwrap();
 
-        let second = IndexTree::ensure_with_migration("restart-project", &project_root, &db)
-            .await
-            .expect("reconcile pending migration");
-
-        assert_eq!(second.path(), destination);
-        assert!(!legacy.exists());
         assert_eq!(
-            tokio::fs::read_to_string(destination.join("migration-sentinel.txt"))
+            handle.path(),
+            project_root.join(".task-runtime/worktrees/_index")
+        );
+        assert_eq!(handle.commit_sha(), expected);
+        assert_eq!(
+            tokio::fs::read_to_string(handle.path().join("a.txt"))
                 .await
                 .unwrap(),
-            "survives-restart"
+            "hi"
         );
-        assert_eq!(
-            migration_record(&db, "restart-project").await.result,
-            RESULT_SUCCEEDED
-        );
-        assert!(
-            repository
-                .pending_for_project("restart-project")
-                .await
-                .unwrap()
-                .is_empty()
-        );
-    }
-
-    #[tokio::test]
-    async fn ensure_with_migration_preserves_conflicting_trees() {
-        let tmp = workspace_tempdir("index-tree-migration-conflict-");
-        let project_root = make_repo(tmp.path()).await;
-        let legacy = project_root.join(".djinn/worktrees/_index");
-        let destination = project_root.join(".task-runtime/worktrees/_index");
-        tokio::fs::create_dir_all(&legacy).await.unwrap();
-        tokio::fs::create_dir_all(&destination).await.unwrap();
-        tokio::fs::write(legacy.join("legacy.txt"), "legacy")
-            .await
-            .unwrap();
-        tokio::fs::write(destination.join("destination.txt"), "destination")
-            .await
-            .unwrap();
-        let db = migration_db(&["conflict-project"]).await;
-
-        let error = IndexTree::ensure_with_migration("conflict-project", &project_root, &db)
-            .await
-            .expect_err("dual trees must be rejected");
-
-        assert!(error.to_string().contains("preserving both"));
-        assert_eq!(
-            tokio::fs::read_to_string(legacy.join("legacy.txt"))
-                .await
-                .unwrap(),
-            "legacy"
-        );
-        assert_eq!(
-            tokio::fs::read_to_string(destination.join("destination.txt"))
-                .await
-                .unwrap(),
-            "destination"
-        );
-        assert_eq!(
-            migration_record(&db, "conflict-project").await.result,
-            RESULT_FAILED
-        );
-    }
-
-    #[tokio::test]
-    async fn ensure_with_migration_keeps_projects_and_records_isolated() {
-        let first_tmp = workspace_tempdir("index-tree-project-one-");
-        let second_tmp = workspace_tempdir("index-tree-project-two-");
-        let first_root = make_repo(first_tmp.path()).await;
-        let second_root = make_repo(second_tmp.path()).await;
-        let first_legacy = create_legacy_index_tree(&first_root, "one").await;
-        let second_legacy = create_legacy_index_tree(&second_root, "two").await;
-        let db = migration_db(&["project-one", "project-two"]).await;
-
-        let first = IndexTree::ensure_with_migration("project-one", &first_root, &db)
-            .await
-            .unwrap();
-        let second = IndexTree::ensure_with_migration("project-two", &second_root, &db)
-            .await
-            .unwrap();
-
-        assert!(!first_legacy.exists());
-        assert!(!second_legacy.exists());
-        assert_ne!(first.path(), second.path());
-        assert_eq!(
-            tokio::fs::read_to_string(first.path().join("migration-sentinel.txt"))
-                .await
-                .unwrap(),
-            "one"
-        );
-        assert_eq!(
-            tokio::fs::read_to_string(second.path().join("migration-sentinel.txt"))
-                .await
-                .unwrap(),
-            "two"
-        );
-        let first_record = migration_record(&db, "project-one").await;
-        let second_record = migration_record(&db, "project-two").await;
-        assert_eq!(first_record.result, RESULT_SUCCEEDED);
-        assert_eq!(second_record.result, RESULT_SUCCEEDED);
-        assert_eq!(first_record.destination, first.path().display().to_string());
-        assert_eq!(
-            second_record.destination,
-            second.path().display().to_string()
-        );
-        assert_ne!(first_record.destination, second_record.destination);
+        assert!(!project_root.join(".djinn").exists());
     }
 
     #[tokio::test]

@@ -115,8 +115,7 @@ pub static SANDBOX: LazyLock<Box<dyn Sandbox>> = LazyLock::new(detect_backend);
 /// Landlock (< 5.13, WSL1) or non-Linux/macOS platforms.
 ///
 /// Validates that `worktree_path` is inside a Release N task-worktree subtree
-/// (`.task-runtime/worktrees/`, or `.djinn/worktrees/` for an active legacy
-/// worktree) or a well-known temp directory. Does not apply OS-level access
+/// (`.task-runtime/worktrees/`) or a well-known temp directory. Does not apply OS-level access
 /// controls.
 pub struct FallbackSandbox;
 
@@ -187,7 +186,7 @@ fn is_worktree_path(path: &Path) -> bool {
         .collect();
     parts
         .windows(2)
-        .any(|w| (w[0] == ".task-runtime" || w[0] == ".djinn") && w[1] == "worktrees")
+        .any(|w| w[0] == ".task-runtime" && w[1] == "worktrees")
 }
 
 // ─── Git worktree metadata resolution ─────────────────────────────────────────
@@ -365,11 +364,11 @@ mod tests {
     }
 
     #[test]
-    fn worktree_path_accepts_destination_and_active_legacy_paths() {
+    fn worktree_path_rejects_retired_legacy_paths() {
         assert!(is_worktree_path(Path::new(
             "/projects/acme/repo/.task-runtime/worktrees/task-1"
         )));
-        assert!(is_worktree_path(Path::new(
+        assert!(!is_worktree_path(Path::new(
             "/projects/acme/repo/.djinn/worktrees/task-1"
         )));
         assert!(!is_worktree_path(Path::new(
