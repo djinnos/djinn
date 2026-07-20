@@ -1,6 +1,7 @@
 use futures::future::join_all;
 
 use super::*;
+use djinn_memory::GraphOptions;
 
 fn create_command(project_id: &str, note_id: String) -> NoteRevisionMutation {
     NoteRevisionMutation {
@@ -953,8 +954,18 @@ async fn deprecate_with_supersedes_preserves_note_owned_data_and_recorded_associ
         deprecated.lifecycle_changed_at
     );
 
-    // The wikilink edge survives the deprecation.
-    let graph_after = repo.graph(&project.id).await.unwrap();
+    // The wikilink edge survives the deprecation. The compatibility graph is
+    // active-only, so explicitly include the deprecated source endpoint.
+    let graph_after = repo
+        .graph_with_options(
+            &project.id,
+            GraphOptions {
+                statuses: Some(vec!["active".into(), "deprecated".into()]),
+                lifecycle_limit: None,
+            },
+        )
+        .await
+        .unwrap();
     assert!(
         graph_after
             .edges
