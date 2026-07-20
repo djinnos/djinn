@@ -4,9 +4,7 @@ use sqlx::postgres::{PgConnection, PgPoolOptions};
 use sqlx::{Connection, Executor};
 
 fn database_url() -> String {
-    std::env::var("DJINN_TEST_DATABASE_URL")
-        .or_else(|_| std::env::var("TEST_POSTGRES_URL"))
-        .expect("Postgres URL is required for migration tests")
+    djinn_db::test_database_base_url()
 }
 
 async fn with_database(f: impl AsyncFnOnce(sqlx::PgPool)) {

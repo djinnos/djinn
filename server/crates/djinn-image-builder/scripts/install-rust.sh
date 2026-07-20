@@ -26,8 +26,9 @@ export PATH="${CARGO_HOME}/bin:${PATH}"
 
 # Rust build toolchain beyond rustc/cargo: a real linker + the sccache wrapper
 # that repos routinely pin in .cargo/config.toml (e.g. `linker = "clang"`,
-# `-fuse-ld=mold`, `rustc-wrapper = "sccache"`). Without these the image only
-# has gcc from build-essential, so `cargo check`/`clippy`/`build` fail at link
+# `-fuse-ld=mold`, `rustc-wrapper = "sccache"`). base-debian.sh installs no C
+# compiler at all (it does NOT install build-essential), so clang here is the
+# image's only `cc`; without it `cargo check`/`clippy`/`build` fail at link
 # time (or on the missing wrapper) and the worker can't compile or debug Rust
 # at all. clang/lld/mold are required (the linker); sccache is best-effort so a
 # distro without the package never fails the image build.

@@ -10,9 +10,7 @@ const MIGRATION_VERSION: u64 = 135;
 const MIGRATION_FILE: &str = "135_note_lifecycle_changed_at.sql";
 
 fn base_database_url() -> String {
-    std::env::var("DJINN_TEST_DATABASE_URL")
-        .or_else(|_| std::env::var("TEST_POSTGRES_URL"))
-        .expect("Postgres URL is required for migration tests")
+    djinn_db::test_database_base_url()
 }
 
 fn server_prefix(base: &str) -> String {
