@@ -1,0 +1,18 @@
+use strict; use warnings; use Test::More;
+use File::Temp qw(tempdir); use File::Spec; use JSON::PP;
+my $root = File::Spec->rel2abs(File::Spec->catdir(File::Spec->curdir));
+$root =~ s{/server/docs/operational/memory-sustainability/driver/tests\z}{};
+my $driver = "$root/server/docs/operational/memory-sustainability/driver/memory_workload.pl";
+my $dir=tempdir(CLEANUP=>1); my $out="$dir/smoke.jsonl";
+my @cmd=('perl',$driver,'--fake','--profile','smoke','--output',$out,'--t0-seconds','0','--t1-seconds','0','--burst-seconds','0','--t2-seconds','0','--request-count','6');
+is(system(@cmd),0,'fixture-backed fake state machine succeeds');
+open my $fh,'<',$out or die $!; my @r=map {decode_json($_)} <$fh>; close $fh;
+is($r[0]{defaults}{t0_seconds},1800,'production T0 default remains encoded');
+is($r[0]{defaults}{burst_seconds},7200,'production burst default remains encoded');
+my @requests=grep {$_->{kind} eq 'galaxy_request'} @r;
+is_deeply([map {$_->{status}} @requests],[200,304,200,304,200,304],'requests alternate 200/304');
+is(scalar(grep {$_->{kind} eq 'board_pass' && $_->{pages}==40} @r),1,'40-page board pass recorded');
+ok(!-e "$out.partial",'successful evidence finalized atomically');
+my $bad="$dir/bad.jsonl";
+isnt(system('perl',$driver,'--fake','--profile','smoke','--output',$bad,'--t0-seconds','0','--t1-seconds','0','--burst-seconds','0','--t2-seconds','0','--request-count','0'),0,'invalid override fails before workload');
+done_testing;
