@@ -1,0 +1,55 @@
+{
+  "schema": "memory-sustainability-fixtures/v1",
+  "manifest_version": 1,
+  "generator": "generate.pl",
+  "generation_commands": {
+    "production": "perl server/docs/operational/memory-sustainability/fixtures/generate.pl --profile production --output-dir /var/tmp/memory-sustainability-production --validate",
+    "smoke": "perl server/docs/operational/memory-sustainability/fixtures/generate.pl --profile smoke --output-dir /var/tmp/memory-sustainability-smoke --validate",
+    "validate": "perl server/docs/operational/memory-sustainability/fixtures/generate.pl --profile smoke --output-dir /var/tmp/memory-sustainability-smoke --validate-only"
+  },
+  "profiles": {
+    "production": {
+      "seed": "ste6-production-v1",
+      "graph": {
+        "contract": "RepoGraphArtifact counts as persisted by canonical_graph bincode publication",
+        "requested_nodes": 65220,
+        "requested_edges": 277200,
+        "requested_blob_bytes": 71303168,
+        "required_blob_range_bytes": [68157440, 73400320]
+      },
+      "board_health": {
+        "contract": "BoardHealthMismatchCandidate projection and evaluate_board_health_mismatch_candidate eligibility",
+        "requested_eligible_tasks": 10000,
+        "page_size": 250,
+        "eligibility": { "issue_type": "task", "status": "open", "total_reopen_count_min": 3, "description_signal": "requires task_create", "expected_role": "planner", "dispatched_role": "worker" }
+      },
+      "galaxy_artifact": {
+        "contract": "GalaxyArtifactSpool and ReservedGalaxyArtifactChunk ordered transport",
+        "requested_chunks": 600,
+        "requested_chunk_bytes": 262144,
+        "requested_total_bytes": 157286400,
+        "chunk_indices": "zero-based contiguous [0, 599]",
+        "encoding": "gzip"
+      },
+      "checksums": {
+        "canonical_graph_sha256": "a8b3e871a8a5fec47ab3e554883dde0f9573ae7c3c67c2c279cda461e2830e46",
+        "board_tasks_sha256": "98d70976bc555fc4b14bc3868d1c0dceaf498a3f9274350401368a7081a6d603",
+        "artifact_transport_sha256": "a5b3d5b442b861b7cf72913a4afc656bb6a71565e71d6d9236b590a3bb3a8f51",
+        "artifact_manifest_sha256": "a6d2d9146158161eeebd4482841a8f8ea796c7309bf2bbc8d946476d06bb2a6b"
+      }
+    },
+    "smoke": {
+      "seed": "ste6-smoke-v1",
+      "graph": { "requested_nodes": 256, "requested_edges": 1024, "requested_blob_bytes": 1048576 },
+      "board_health": { "requested_eligible_tasks": 40 },
+      "galaxy_artifact": { "requested_chunks": 6, "requested_chunk_bytes": 262144, "requested_total_bytes": 1572864 },
+      "checksums": {
+        "canonical_graph_sha256": "b0006e981205d7ea3e2a6448cf7e8cbc9cc962273c57be47f05cf297ca72196b",
+        "board_tasks_sha256": "140b49b06cba42d13e4a16794aa1ed319d5ecf0bf4c2016f012b9612e23af467",
+        "artifact_transport_sha256": "b8f55a6ba48ef6abd5e35ae089a262c362cdcbfc7e7ba1ac3c9c8aea3bc0feb1",
+        "artifact_manifest_sha256": "91d097fc6c06ab80c10639e1c2aab9aa459ede1684f468a122ea8d67f4a403cf"
+      }
+    }
+  },
+  "hashes": "Generated fixture-report.json records SHA-256 checksums for canonical graph bytes, board JSONL bytes, artifact transport, and artifact manifest. Validation recomputes every checksum and exits nonzero on drift. No generated payload is checked in."
+}
