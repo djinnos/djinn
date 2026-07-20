@@ -69,10 +69,13 @@ pub struct ProposalListParams {
     pub sort: Option<String>,
     pub limit: Option<i64>,
     pub offset: Option<i64>,
-    /// When `true`, include the full `body` string on each list row.
-    /// Default `false` — rows omit the full body and carry only
-    /// `body_excerpt` (first 512 Unicode scalars) and `body_truncated`.
+    /// When `true`, include the full body. Omitted and `false` are equivalent;
+    /// bodies imply excerpt metadata.
     pub include_bodies: Option<bool>,
+    /// When `true`, include excerpt metadata. Omitted and `false` are equivalent.
+    pub include_excerpts: Option<bool>,
+    /// When `true`, include structured criteria. Omitted and `false` are equivalent.
+    pub include_acceptance_criteria: Option<bool>,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
