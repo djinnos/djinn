@@ -785,10 +785,7 @@ async fn atomic_materialization_creates_task_and_links_in_one_tx() {
     let task = task_repo.get(&task_id).await.unwrap().unwrap();
     assert_eq!(task.issue_type, "task");
     assert_eq!(task.description, "test description");
-    assert_eq!(
-        task.created_by_user_id.as_deref(),
-        Some(source_creator_id.as_str())
-    );
+    assert_eq!(task.created_by_user_id, source_creator_id);
 
     // Verify the selection is linked.
     let updated = audit_repo

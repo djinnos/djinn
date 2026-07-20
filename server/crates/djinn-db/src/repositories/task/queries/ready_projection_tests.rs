@@ -1,11 +1,8 @@
-//! Regression: `list_ready` (and `claim`) must project the
-//! `#[sqlx(default)]` columns the coordinator relies on — chiefly
-//! `created_by_user_id`. Because that column is `#[sqlx(default)]` on
-//! `Task`, omitting it from the SELECT does NOT error; it silently yields
-//! `None`. That made the dispatcher treat every ready task as creator-less,
-//! collapsing per-user model + credential resolution to the org-shared
-//! fallback and emitting "no eligible model for task owner" for tasks whose
-//! owner had a perfectly good per-user model/provider configured.
+//! Regression: `list_ready` (and `claim`) must project the required
+//! `created_by_user_id` column. Omitting it from a `Task` projection must fail
+//! decoding rather than silently creating a task without its creator. These
+//! regressions ensure the dispatcher receives the persisted creator for
+//! per-user model and credential resolution.
 use super::*;
 use crate::database::Database;
 use crate::repositories::user::UserRepository;
@@ -72,9 +69,8 @@ async fn list_ready_projects_created_by_user_id() {
         .find(|t| t.id == task_id)
         .expect("a freshly-created open task must appear in list_ready");
     assert_eq!(
-        got.created_by_user_id.as_deref(),
-        Some(user_id.as_str()),
-        "list_ready must SELECT created_by_user_id, not default it to None"
+        got.created_by_user_id, user_id,
+        "list_ready must SELECT the required created_by_user_id"
     );
 }
 
@@ -264,8 +260,7 @@ async fn list_by_status_filtered_projects_created_by_user_id() {
         .find(|t| t.id == task_id)
         .expect("the needs_task_review task must appear in list_by_status_filtered");
     assert_eq!(
-        got.created_by_user_id.as_deref(),
-        Some(user_id.as_str()),
-        "list_by_status_filtered must SELECT created_by_user_id, not default it to None"
+        got.created_by_user_id, user_id,
+        "list_by_status_filtered must SELECT the required created_by_user_id"
     );
 }
