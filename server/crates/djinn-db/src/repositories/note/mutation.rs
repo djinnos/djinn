@@ -459,7 +459,7 @@ impl NoteRepository {
         } else {
             (superseding_note_id.as_str(), old_id)
         };
-        let locked: Vec<Note> = sqlx::query_as("SELECT id, project_id, permalink, title, file_path, storage, note_type, folder, status, tags::text AS tags, content, retrieval_anchor, created_at, updated_at, last_accessed, access_count, confidence, abstract as abstract_, overview, scope_paths::text AS scope_paths FROM notes WHERE project_id = $1 AND id IN ($2, $3) ORDER BY id FOR UPDATE")
+        let locked: Vec<Note> = sqlx::query_as("SELECT id, project_id, permalink, title, file_path, storage, note_type, folder, status, tags::text AS tags, content, retrieval_anchor, created_at, updated_at, lifecycle_changed_at, last_accessed, access_count, confidence, abstract as abstract_, overview, scope_paths::text AS scope_paths FROM notes WHERE project_id = $1 AND id IN ($2, $3) ORDER BY id FOR UPDATE")
             .bind(&command.project_id).bind(first).bind(second).fetch_all(&mut **tx).await?;
         if locked.len() != 2 {
             return Err(Error::InvalidData(
@@ -943,7 +943,7 @@ async fn locked_note(
     note_id: &str,
     project_id: &str,
 ) -> Result<Note> {
-    sqlx::query_as::<_, Note>("SELECT id, project_id, permalink, title, file_path, storage, note_type, folder, status, tags::text AS tags, content, retrieval_anchor, created_at, updated_at, last_accessed, access_count, confidence, abstract as abstract_, overview, scope_paths::text AS scope_paths FROM notes WHERE id = $1 AND project_id = $2 FOR UPDATE")
+    sqlx::query_as::<_, Note>("SELECT id, project_id, permalink, title, file_path, storage, note_type, folder, status, tags::text AS tags, content, retrieval_anchor, created_at, updated_at, lifecycle_changed_at, last_accessed, access_count, confidence, abstract as abstract_, overview, scope_paths::text AS scope_paths FROM notes WHERE id = $1 AND project_id = $2 FOR UPDATE")
         .bind(note_id).bind(project_id).fetch_optional(&mut **tx).await?
         .ok_or_else(|| Error::InvalidData(format!("note not found: {note_id}")))
 }
