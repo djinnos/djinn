@@ -17,9 +17,8 @@ fn deserialize(args: serde_json::Value) -> Result<CiArtifactParams, serde_json::
     serde_json::from_value(args)
 }
 
-fn validate_ok(args: serde_json::Value) {
-    let params: CiArtifactParams = deserialize(args).expect("should deserialize");
-    params.validate().expect("should validate");
+fn deserialize_ok(args: serde_json::Value) {
+    deserialize(args).expect("should deserialize");
 }
 
 fn deserialize_fails(args: serde_json::Value) {
@@ -87,15 +86,20 @@ fn assert_both_ci_tools_read_only(schemas: &[serde_json::Value]) {
 /// mutation, deletion, retention).
 #[test]
 fn schema_rejects_out_of_scope_inputs_and_operations() {
-    // ── Four legal shapes succeed ───────────────────────────────────
-    // 1. list with no selector
-    validate_ok(json!({"action":"list"}));
-    // 2. list with run_id
-    validate_ok(json!({"action":"list","run_id":42}));
-    // 3. fetch with pr_number and artifact
-    validate_ok(json!({"action":"fetch","pr_number":7,"artifact":"logs.txt"}));
-    // 4. fetch with run_id and artifact
-    validate_ok(json!({"action":"fetch","run_id":99,"artifact":"report.zip"}));
+    // ── Every legal action/selector shape succeeds ─────────────────
+    deserialize_ok(json!({"action":"list"}));
+    deserialize_ok(json!({"action":"list","run_id":42}));
+    deserialize_ok(json!({"action":"list","pr_number":7}));
+    deserialize_ok(json!({"action":"fetch","artifact":"logs.txt"}));
+    deserialize_ok(json!({"action":"fetch","pr_number":7,"artifact":"logs.txt"}));
+    deserialize_ok(json!({"action":"fetch","run_id":99,"artifact":"report.zip"}));
+
+    // Present optional properties must have their declared type. Explicit
+    // null is not equivalent to omission.
+    deserialize_fails(json!({"action":"list","run_id":null}));
+    deserialize_fails(json!({"action":"list","pr_number":null}));
+    deserialize_fails(json!({"action":"list","artifact":null}));
+    deserialize_fails(json!({"action":"fetch","artifact":null}));
 
     // ── Unknown / out-of-scope fields rejected at deserialization ───
     deserialize_fails(json!({"action":"list","job_id":1}));
@@ -137,9 +141,12 @@ fn schema_rejects_out_of_scope_inputs_and_operations() {
     // ── Enum parity check (internal type) ──────────────────────────
     let params: CiArtifactParams =
         deserialize(json!({"action":"fetch","run_id":1,"artifact":"x"})).unwrap();
-    assert_eq!(params.action, CiArtifactAction::Fetch);
+    assert_eq!(params.action(), &CiArtifactAction::Fetch);
+    assert_eq!(params.run_id(), Some(1));
+    assert_eq!(params.pr_number(), None);
+    assert_eq!(params.artifact(), Some("x"));
     let params: CiArtifactParams = deserialize(json!({"action":"list"})).unwrap();
-    assert_eq!(params.action, CiArtifactAction::List);
+    assert_eq!(params.action(), &CiArtifactAction::List);
 }
 
 /// Every role surface that includes `ci_job_log` must also include

@@ -966,6 +966,18 @@ fn snapshot_judge_tool_schemas() {
 
 // ── Evidence-spike profile tests ─────────────────────────────────────────
 
+#[test]
+fn snapshot_evidence_spike_tool_names() {
+    let schemas = tool_schemas_evidence_spike();
+    let names = tool_names(&schemas);
+    insta::assert_json_snapshot!("evidence_spike_tool_names", names);
+}
+
+#[test]
+fn snapshot_evidence_spike_tool_schemas() {
+    insta::assert_json_snapshot!("evidence_spike_tool_schemas", tool_schemas_evidence_spike());
+}
+
 /// Helper: collect tool names from a schema list.
 pub(super) fn ev_schema_names(schemas: &[serde_json::Value]) -> BTreeSet<String> {
     schemas

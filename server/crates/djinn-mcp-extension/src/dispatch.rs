@@ -460,16 +460,14 @@ async fn dispatch_supervisor_tools(
             // at the MCP dispatch boundary, before the service is reached.
             let raw = args.clone().unwrap_or_default();
             let params: CiArtifactParams =
-                match serde_json::from_value(serde_json::Value::Object(raw.clone())) {
+                match serde_json::from_value(serde_json::Value::Object(raw)) {
                     Ok(p) => p,
                     Err(e) => return Some(Err(format!("invalid ci_artifact arguments: {e}"))),
                 };
-            if let Err(e) = params.validate() {
-                return Some(Err(e));
-            }
+            let arguments = params.into_arguments();
             Some(
                 services
-                    .tool_ci_artifact(session_task_id.map(str::to_string), raw)
+                    .tool_ci_artifact(session_task_id.map(str::to_string), arguments)
                     .await,
             )
         }

@@ -4,28 +4,50 @@
 //! and agent reply-loop produce.  They are plain `Deserialize` structs —
 //! no domain logic, no database access.
 
-use serde::{Deserialize, Deserializer};
+use serde::{Deserialize, Deserializer, Serialize};
 
 /// Public schema for the `ci_artifact` tool.
 ///
-/// Deserialization admits only the four legal list/fetch shapes. This keeps
-/// callers from constructing an invalid public-tool request by forgetting an
-/// opt-in validation step.
+/// Deserialization admits only legal list/fetch shapes. Private fields prevent
+/// callers from bypassing that invariant with direct struct construction.
 #[derive(Debug)]
 pub struct CiArtifactParams {
-    pub action: CiArtifactAction,
-    pub run_id: Option<u64>,
-    pub pr_number: Option<u64>,
-    pub artifact: Option<String>,
+    action: CiArtifactAction,
+    run_id: Option<u64>,
+    pr_number: Option<u64>,
+    artifact: Option<String>,
+}
+
+/// An omitted field is accepted, while a present field must deserialize as
+/// `T`. Unlike `Option<T>`, this does not collapse explicit JSON `null` into
+/// the omitted state.
+struct OmittedOr<T>(Option<T>);
+
+impl<T> Default for OmittedOr<T> {
+    fn default() -> Self {
+        Self(None)
+    }
+}
+
+impl<'de, T: Deserialize<'de>> Deserialize<'de> for OmittedOr<T> {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        T::deserialize(deserializer).map(|value| Self(Some(value)))
+    }
 }
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawCiArtifactParams {
     action: CiArtifactAction,
-    run_id: Option<u64>,
-    pr_number: Option<u64>,
-    artifact: Option<String>,
+    #[serde(default)]
+    run_id: OmittedOr<u64>,
+    #[serde(default)]
+    pr_number: OmittedOr<u64>,
+    #[serde(default)]
+    artifact: OmittedOr<String>,
 }
 
 impl<'de> Deserialize<'de> for CiArtifactParams {
@@ -36,9 +58,9 @@ impl<'de> Deserialize<'de> for CiArtifactParams {
         let raw = RawCiArtifactParams::deserialize(deserializer)?;
         let params = Self {
             action: raw.action,
-            run_id: raw.run_id,
-            pr_number: raw.pr_number,
-            artifact: raw.artifact,
+            run_id: raw.run_id.0,
+            pr_number: raw.pr_number.0,
+            artifact: raw.artifact.0,
         };
         params.validate().map_err(serde::de::Error::custom)?;
         Ok(params)
@@ -46,14 +68,49 @@ impl<'de> Deserialize<'de> for CiArtifactParams {
 }
 
 impl CiArtifactParams {
-    /// Validate the four legal shapes:
+    pub fn action(&self) -> &CiArtifactAction {
+        &self.action
+    }
+
+    pub fn run_id(&self) -> Option<u64> {
+        self.run_id
+    }
+
+    pub fn pr_number(&self) -> Option<u64> {
+        self.pr_number
+    }
+
+    pub fn artifact(&self) -> Option<&str> {
+        self.artifact.as_deref()
+    }
+
+    /// Convert the validated representation into service arguments. Dispatch
+    /// uses this instead of forwarding the raw, pre-validation input map.
+    pub fn into_arguments(self) -> serde_json::Map<String, serde_json::Value> {
+        let mut arguments = serde_json::Map::new();
+        arguments.insert(
+            "action".to_string(),
+            serde_json::to_value(self.action).expect("ci_artifact action is serializable"),
+        );
+        if let Some(run_id) = self.run_id {
+            arguments.insert("run_id".to_string(), run_id.into());
+        }
+        if let Some(pr_number) = self.pr_number {
+            arguments.insert("pr_number".to_string(), pr_number.into());
+        }
+        if let Some(artifact) = self.artifact {
+            arguments.insert("artifact".to_string(), artifact.into());
+        }
+        arguments
+    }
+
+    /// Validate the legal shapes:
     /// - `run_id` / `pr_number` are optional, positive, and mutually exclusive.
     /// - `artifact` is required (non-empty) for `fetch` and forbidden for `list`.
     ///
     /// Unknown fields and all known-field shape violations fail during
-    /// deserialization. This method remains available for callers that build
-    /// the public type internally.
-    pub fn validate(&self) -> Result<(), String> {
+    /// deserialization.
+    fn validate(&self) -> Result<(), String> {
         if self.run_id == Some(0) || self.pr_number == Some(0) {
             return Err("ci_artifact selectors must be positive".to_string());
         }
@@ -82,7 +139,7 @@ impl CiArtifactParams {
     }
 }
 
-#[derive(Debug, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum CiArtifactAction {
     List,
