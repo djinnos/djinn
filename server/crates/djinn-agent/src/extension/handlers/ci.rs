@@ -1,6 +1,9 @@
 use super::*;
 use djinn_provider::github_api::{ActionsJob, WorkflowRun};
-use std::time::Duration;
+use std::{
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 
 /// How many workflow runs to request when scanning a PR head for the failing
 /// run. The relevant run is always the newest one, so a small page is plenty;
@@ -209,6 +212,32 @@ struct ArtifactHintFailure {
     error: String,
 }
 
+/// Carries a direct-job run ID out of the timed hint future. The outer timeout
+/// cancels that future while the artifact list request is pending, so a shared
+/// context is necessary to retain a run ID obtained before that request.
+#[derive(Clone)]
+struct ArtifactHintRunContext(Arc<Mutex<Option<u64>>>);
+
+impl ArtifactHintRunContext {
+    fn new(run_id: Option<u64>) -> Self {
+        Self(Arc::new(Mutex::new(run_id)))
+    }
+
+    fn run_id(&self) -> Option<u64> {
+        *self
+            .0
+            .lock()
+            .expect("artifact hint run context lock poisoned")
+    }
+
+    fn set_run_id(&self, run_id: u64) {
+        *self
+            .0
+            .lock()
+            .expect("artifact hint run context lock poisoned") = Some(run_id);
+    }
+}
+
 /// Append a bounded, read-only artifact hint without changing successful log
 /// semantics. Discovery already owns a verified run ID; direct-job mode obtains
 /// it from GitHub's repository-scoped job detail endpoint.
@@ -221,9 +250,17 @@ async fn append_artifact_hint(
     known_run_id: Option<u64>,
     output: String,
 ) -> String {
+    let run_context = ArtifactHintRunContext::new(known_run_id);
     match tokio::time::timeout(
         ARTIFACT_HINT_TIMEOUT,
-        artifact_hint(client, owner, repo, job_id, known_run_id),
+        artifact_hint(
+            client,
+            owner,
+            repo,
+            job_id,
+            known_run_id,
+            run_context.clone(),
+        ),
     )
     .await
     {
@@ -235,7 +272,7 @@ async fn append_artifact_hint(
                 outcome = "suppressed_provider_error",
                 task_id,
                 job_id = ?job_id,
-                run_id = ?failure.run_id.or(known_run_id),
+                run_id = ?failure.run_id.or(run_context.run_id()),
                 error = %failure.error,
                 "ci_job_log artifact hint lookup failed; returning successful log unchanged"
             );
@@ -247,7 +284,7 @@ async fn append_artifact_hint(
                 outcome = "suppressed_timeout",
                 task_id,
                 job_id = ?job_id,
-                run_id = ?known_run_id,
+                run_id = ?run_context.run_id(),
                 timeout_ms = ARTIFACT_HINT_TIMEOUT.as_millis(),
                 "ci_job_log artifact hint lookup timed out; returning successful log unchanged"
             );
@@ -264,6 +301,7 @@ async fn artifact_hint(
     repo: &str,
     job_id: Option<u64>,
     known_run_id: Option<u64>,
+    run_context: ArtifactHintRunContext,
 ) -> Result<Option<String>, ArtifactHintFailure> {
     let run_id = match known_run_id {
         Some(run_id) => run_id,
@@ -288,6 +326,9 @@ async fn artifact_hint(
                 })?
         }
     };
+    // Preserve the resolved direct-job run before the list await. If the outer
+    // hint deadline cancels this future while listing, telemetry still has it.
+    run_context.set_run_id(run_id);
     let artifacts = client
         .list_run_artifacts(owner, repo, run_id)
         .await
@@ -1068,6 +1109,51 @@ mod tests {
         assert_eq!(
             warning.get("outcome").map(String::as_str),
             Some("suppressed_provider_error")
+        );
+        assert_eq!(warning.get("job_id").map(String::as_str), Some("Some(900)"));
+        assert_eq!(warning.get("run_id").map(String::as_str), Some("Some(123)"));
+    }
+
+    #[tokio::test]
+    async fn direct_job_hint_timeout_telemetry_retains_resolved_run_id() {
+        let server = MockServer::start().await;
+        mount_direct_job_detail(&server).await;
+        Mock::given(method("GET"))
+            .and(path(format!(
+                "/repos/{OWNER}/{REPO}/actions/runs/123/artifacts"
+            )))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_delay(ARTIFACT_HINT_TIMEOUT + Duration::from_millis(100)),
+            )
+            .mount(&server)
+            .await;
+        let telemetry = WarningCapture::default();
+        let subscriber = tracing_subscriber::registry().with(telemetry.clone());
+        let _subscriber_guard = tracing::subscriber::set_default(subscriber);
+
+        let output = append_artifact_hint(
+            &mock_client(&server),
+            OWNER,
+            REPO,
+            "task-timeout-telemetry",
+            Some(900),
+            None,
+            "direct job log".to_string(),
+        )
+        .await;
+
+        assert_eq!(output, "direct job log");
+        let events = telemetry.0.lock().unwrap();
+        let warning = events
+            .iter()
+            .find(|fields| {
+                fields.get("operation").map(String::as_str) == Some("ci_job_log_artifact_hint")
+            })
+            .expect("suppressed artifact-list timeout emits telemetry");
+        assert_eq!(
+            warning.get("outcome").map(String::as_str),
+            Some("suppressed_timeout")
         );
         assert_eq!(warning.get("job_id").map(String::as_str), Some("Some(900)"));
         assert_eq!(warning.get("run_id").map(String::as_str), Some("Some(123)"));
