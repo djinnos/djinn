@@ -10,6 +10,7 @@ pub mod env_config;
 pub mod graph_warmer;
 pub mod infra_death_log_tail;
 pub mod job;
+pub mod label_value;
 pub mod runtime;
 pub mod secret;
 pub mod sidecar;
@@ -27,7 +28,7 @@ pub use graph_warmer::{
     K8sGraphWarmer, KubeClientDispatcher, KubeClientJobWatcher, KubeClientWarmJobLister,
     NoopJobWatcher, NoopWarmJobLister, WarmAdmission, WarmAdmissionError, WarmAdmissionPermit,
     WarmAdmissionRequest, WarmAdmissionTransition, WarmCompletionSink, WarmJobDispatcher,
-    WarmJobLister, WarmJobManifest, WarmJobWatcher, WarmTerminalOutcome,
+    WarmJobLister, WarmJobManifest, WarmJobWatcher, WarmTerminalOutcome, warm_work_id,
 };
 pub use runtime::KubernetesRuntime;
 pub use token_review::TokenReviewer;

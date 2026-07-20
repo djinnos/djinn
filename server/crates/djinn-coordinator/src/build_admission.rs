@@ -1363,7 +1363,7 @@ mod tests {
             "epoch",
         ));
         let project_id = seed_project_with_ready_image(&db, "shared-cap").await;
-        let work_id = format!("graph-warm:{project_id}:unknown");
+        let work_id = djinn_k8s::warm_work_id(&project_id, "unknown");
         let posts = Arc::new(AtomicUsize::new(0));
         let posted = Arc::new(Notify::new());
         let warmer = K8sGraphWarmer::with_dispatcher(
@@ -1453,7 +1453,7 @@ mod tests {
             "epoch",
         ));
         let project_id = seed_project_with_ready_image(&db, "create-started-failure").await;
-        let work_id = format!("graph-warm:{project_id}:unknown");
+        let work_id = djinn_k8s::warm_work_id(&project_id, "unknown");
         let posts = Arc::new(AtomicUsize::new(0));
         let posted = Arc::new(Notify::new());
         let warmer = K8sGraphWarmer::with_dispatcher(
