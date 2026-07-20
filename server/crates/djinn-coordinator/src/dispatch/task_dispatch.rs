@@ -8078,26 +8078,16 @@ mod build_admission_route_tests {
             vec!["config", "user.email", "test@example.com"],
             vec!["config", "user.name", "Test"],
         ] {
-            assert!(
-                std::process::Command::new("git")
-                    .args(args)
-                    .current_dir(project)
-                    .status()
-                    .expect("run fixture git command")
-                    .success()
-            );
+            djinn_git::run_git_command_in(project, args.into_iter().map(str::to_owned).collect())
+                .await
+                .expect("run fixture git command");
         }
         std::fs::write(project.join("README.md"), "identity fixture")
             .expect("write fixture repository");
         for args in [vec!["add", "."], vec!["commit", "-m", "fixture"]] {
-            assert!(
-                std::process::Command::new("git")
-                    .args(args)
-                    .current_dir(project)
-                    .status()
-                    .expect("commit fixture repository")
-                    .success()
-            );
+            djinn_git::run_git_command_in(project, args.into_iter().map(str::to_owned).collect())
+                .await
+                .expect("commit fixture repository");
         }
         let mirror_root = tempfile::tempdir().expect("create mirror root");
         let mirror = std::sync::Arc::new(djinn_workspace::MirrorManager::new(mirror_root.path()));
