@@ -242,6 +242,54 @@ pub struct DjinnSettings {
 }
 
 impl DjinnSettings {
+    /// Deserialize persisted settings while refusing to silently migrate a
+    /// malformed canonical knowledge-injection field. Older, unrelated
+    /// settings formats retain the historical best-effort migration path.
+    pub fn from_db_value_validated(raw: &str) -> Result<Self, KnowledgeInjectionConfigError> {
+        let cleaned = Self::strip_removed_fields(raw);
+        let input = cleaned.as_deref().unwrap_or(raw);
+        match serde_json::from_str::<Self>(input) {
+            Ok(settings) => {
+                KnowledgeInjectionConfig::from_settings_and_env(&settings)?;
+                Ok(settings)
+            }
+            Err(_) => {
+                if let Some((field, value)) = Self::canonical_config_value(raw) {
+                    return Err(KnowledgeInjectionConfigError {
+                        field,
+                        value,
+                        reason: "must be an integer".into(),
+                    });
+                }
+                Ok(Self::from_db_value(raw))
+            }
+        }
+    }
+
+    fn canonical_config_value(raw: &str) -> Option<(&'static str, String)> {
+        const FIELDS: &[&str] = &[
+            "knowledge_injection_budget_bytes",
+            "knowledge_injection_line_cap_bytes",
+            "knowledge_injection_limit",
+            "injection_starvation_threshold_percent",
+            "injection_starvation_query_floor",
+            "retrieval_health_window_minutes",
+        ];
+        let value: serde_json::Value = serde_json::from_str(raw).ok()?;
+        let object = value.as_object()?;
+        FIELDS.iter().find_map(|field| {
+            object.get(*field).map(|value| {
+                (
+                    *field,
+                    value
+                        .as_str()
+                        .map(str::to_owned)
+                        .unwrap_or_else(|| value.to_string()),
+                )
+            })
+        })
+    }
+
     /// Deserialize from a raw DB value string, tolerating old/invalid formats
     /// by falling back to defaults with a warning.
     pub fn from_db_value(raw: &str) -> Self {
@@ -401,6 +449,176 @@ impl DjinnSettings {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+    const CONFIG_ENV: &[&str] = &[
+        "DJINN_KNOWLEDGE_INJECTION_BUDGET_BYTES",
+        "DJINN_KNOWLEDGE_INJECTION_LINE_CAP_BYTES",
+        "DJINN_KNOWLEDGE_INJECTION_LIMIT",
+        "DJINN_INJECTION_STARVATION_THRESHOLD_PERCENT",
+        "DJINN_INJECTION_STARVATION_QUERY_FLOOR",
+        "DJINN_RETRIEVAL_HEALTH_WINDOW_MINUTES",
+    ];
+
+    fn without_config_env(test: impl FnOnce()) {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        let saved: Vec<_> = CONFIG_ENV
+            .iter()
+            .map(|key| (*key, std::env::var(key).ok()))
+            .collect();
+        for key in CONFIG_ENV {
+            unsafe { std::env::remove_var(key) };
+        }
+        test();
+        for (key, value) in saved {
+            match value {
+                Some(value) => unsafe { std::env::set_var(key, value) },
+                None => unsafe { std::env::remove_var(key) },
+            }
+        }
+    }
+
+    #[test]
+    fn knowledge_injection_config_defaults_file_and_environment_precedence() {
+        without_config_env(|| {
+            let defaults =
+                KnowledgeInjectionConfig::from_settings_and_env(&DjinnSettings::default()).unwrap();
+            assert_eq!(
+                (
+                    defaults.knowledge_injection_budget_bytes,
+                    defaults.knowledge_injection_line_cap_bytes,
+                    defaults.knowledge_injection_limit,
+                    defaults.injection_starvation_threshold_percent,
+                    defaults.injection_starvation_query_floor,
+                    defaults.retrieval_health_window_minutes
+                ),
+                (8192, 1024, 10, 50, 20, 1440)
+            );
+            let settings: DjinnSettings = serde_json::from_str(r#"{"knowledge_injection_budget_bytes":9000,"knowledge_injection_line_cap_bytes":1000,"knowledge_injection_limit":11,"injection_starvation_threshold_percent":51,"injection_starvation_query_floor":21,"retrieval_health_window_minutes":60}"#).unwrap();
+            let config = KnowledgeInjectionConfig::from_settings_and_env(&settings).unwrap();
+            assert_eq!(
+                (
+                    config.knowledge_injection_budget_bytes,
+                    config.knowledge_injection_line_cap_bytes,
+                    config.knowledge_injection_limit,
+                    config.injection_starvation_threshold_percent,
+                    config.injection_starvation_query_floor,
+                    config.retrieval_health_window_minutes
+                ),
+                (9000, 1000, 11, 51, 21, 60)
+            );
+            unsafe { std::env::set_var("DJINN_KNOWLEDGE_INJECTION_BUDGET_BYTES", "10000") };
+            assert_eq!(
+                KnowledgeInjectionConfig::from_settings_and_env(&settings)
+                    .unwrap()
+                    .knowledge_injection_budget_bytes,
+                10000
+            );
+        });
+    }
+
+    #[test]
+    fn knowledge_injection_config_accepts_all_inclusive_bounds() {
+        without_config_env(|| {
+            for (field, min, max) in [
+                ("knowledge_injection_budget_bytes", 256, 32768),
+                ("knowledge_injection_line_cap_bytes", 128, 4096),
+                ("knowledge_injection_limit", 1, 50),
+                ("injection_starvation_threshold_percent", 1, 100),
+                ("injection_starvation_query_floor", 1, 10000),
+                ("retrieval_health_window_minutes", 5, 10080),
+            ] {
+                for value in [min, max] {
+                    let mut settings = DjinnSettings {
+                        knowledge_injection_budget_bytes: Some(
+                            if field == "knowledge_injection_budget_bytes" && value == 256 {
+                                256
+                            } else {
+                                8192
+                            },
+                        ),
+                        knowledge_injection_line_cap_bytes: Some(
+                            if field == "knowledge_injection_budget_bytes" && value == 256 {
+                                256
+                            } else {
+                                1024
+                            },
+                        ),
+                        ..Default::default()
+                    };
+                    match field {
+                        "knowledge_injection_budget_bytes" => {
+                            settings.knowledge_injection_budget_bytes = Some(value)
+                        }
+                        "knowledge_injection_line_cap_bytes" => {
+                            settings.knowledge_injection_line_cap_bytes = Some(value)
+                        }
+                        "knowledge_injection_limit" => {
+                            settings.knowledge_injection_limit = Some(value)
+                        }
+                        "injection_starvation_threshold_percent" => {
+                            settings.injection_starvation_threshold_percent = Some(value)
+                        }
+                        "injection_starvation_query_floor" => {
+                            settings.injection_starvation_query_floor = Some(value)
+                        }
+                        "retrieval_health_window_minutes" => {
+                            settings.retrieval_health_window_minutes = Some(value)
+                        }
+                        _ => unreachable!(),
+                    }
+                    assert!(
+                        KnowledgeInjectionConfig::from_settings_and_env(&settings).is_ok(),
+                        "{field}={value}"
+                    );
+                }
+            }
+        });
+    }
+
+    #[test]
+    fn knowledge_injection_config_rejects_invalid_and_cross_field_values() {
+        without_config_env(|| {
+            unsafe { std::env::set_var("DJINN_KNOWLEDGE_INJECTION_LIMIT", "nope") };
+            let error = KnowledgeInjectionConfig::from_settings_and_env(&DjinnSettings::default())
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains("knowledge_injection_limit") && error.contains("nope"));
+            unsafe { std::env::remove_var("DJINN_KNOWLEDGE_INJECTION_LIMIT") };
+            let invalid = DjinnSettings {
+                knowledge_injection_budget_bytes: Some(256),
+                knowledge_injection_line_cap_bytes: Some(257),
+                ..Default::default()
+            };
+            let error = KnowledgeInjectionConfig::from_settings_and_env(&invalid)
+                .unwrap_err()
+                .to_string();
+            assert!(
+                error.contains("knowledge_injection_line_cap_bytes")
+                    && error.contains("257")
+                    && error.contains("knowledge_injection_budget_bytes")
+                    && error.contains("256")
+            );
+            let equal = DjinnSettings {
+                knowledge_injection_line_cap_bytes: Some(256),
+                ..invalid
+            };
+            assert!(KnowledgeInjectionConfig::from_settings_and_env(&equal).is_ok());
+            let error = DjinnSettings::from_db_value_validated(
+                r#"{"knowledge_injection_budget_bytes":"bad"}"#,
+            )
+            .unwrap_err()
+            .to_string();
+            assert!(error.contains("knowledge_injection_budget_bytes") && error.contains("bad"));
+            let error = DjinnSettings::from_db_value_validated(
+                r#"{"knowledge_injection_budget_bytes":255}"#,
+            )
+            .unwrap_err()
+            .to_string();
+            assert!(error.contains("knowledge_injection_budget_bytes") && error.contains("255"));
+        });
+    }
 
     #[test]
     fn from_db_value_parses_typed_format() {
