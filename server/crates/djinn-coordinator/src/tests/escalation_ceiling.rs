@@ -8,6 +8,8 @@
 
 use super::*;
 use djinn_core::models::{CiStatus, TaskPrCiSnapshotInput};
+use djinn_db::{CreateTaskAttemptParams, FillTaskAttemptParams, TaskAttemptRepository};
+use djinn_provider::github_api::{PrRef, PrState, PullRequest};
 
 /// Seed a durable failing required-CI snapshot for `task` and return the
 /// reloaded task with the CI projection fields (`ci_status`,
@@ -35,6 +37,48 @@ async fn seed_failing_ci_snapshot(
     .await
     .unwrap();
     repo.get(&task.id).await.unwrap().unwrap()
+}
+
+/// Seed the latest attempt's GitHub-head observation. These fields are
+/// deliberately separate from `TaskPrCiSnapshotInput`: the CI snapshot owns
+/// `ci_head_sha`, while task-attempt evidence projects to
+/// `ci_github_head_sha` and `ci_head_observation_error`.
+async fn seed_attempt_head_observation(
+    db: &djinn_db::Database,
+    task_id: &str,
+    mirror_head_sha: Option<&str>,
+    github_head_sha: Option<&str>,
+    github_publication_error: Option<&str>,
+) {
+    let attempts = TaskAttemptRepository::new(db.clone());
+    let attempt = attempts
+        .create_or_get_pending(CreateTaskAttemptParams {
+            id: &uuid::Uuid::now_v7().to_string(),
+            task_id,
+            role: "worker",
+            dispatch_key: &format!("head-observation-{}", uuid::Uuid::now_v7()),
+            session_id: None,
+            attempt_seq: None,
+            dispatch_owner_incarnation_id: None,
+            dispatch_group_id: None,
+        })
+        .await
+        .unwrap();
+    attempts
+        .fill_nullable_fields(FillTaskAttemptParams {
+            id: &attempt.id,
+            checkpoint_ref: None,
+            submit_ref: None,
+            pr_url: None,
+            mirror_head_sha,
+            github_head_sha,
+            github_publication_error,
+            summary: None,
+            summary_json: None,
+            log_tail: None,
+        })
+        .await
+        .unwrap();
 }
 
 /// The pure dead-end predicate fires only for a worker dispatch of a failing
@@ -282,17 +326,91 @@ async fn ceiling_pr_handoff_is_invariant_across_pr_snapshot_observations() {
     struct SnapshotCase {
         name: &'static str,
         status: CiStatus,
-        head: &'static str,
+        snapshot_head: &'static str,
         baseline: Option<&'static str>,
+        // These are values from the PR-poller GitHub observation. They are
+        // intentionally not terminal-close authority.
+        mergeable: Option<bool>,
+        mergeable_state: Option<&'static str>,
+        // Latest task-attempt evidence projected on the reloaded Task.
+        github_head: Option<&'static str>,
+        mirror_head: Option<&'static str>,
+        observation_error: Option<&'static str>,
     }
 
     let cases = [
-        SnapshotCase { name: "current-head-passing-mergeable", status: CiStatus::Passing, head: "green-head", baseline: Some("green-head") },
-        SnapshotCase { name: "head-mismatch-push-race", status: CiStatus::Passing, head: "pushed-head", baseline: Some("old-head") },
-        SnapshotCase { name: "pending-checks", status: CiStatus::Pending, head: "pending-head", baseline: Some("pending-head") },
-        SnapshotCase { name: "unknown-checks", status: CiStatus::Unknown, head: "unknown-head", baseline: Some("unknown-head") },
-        SnapshotCase { name: "unknown-mergeability", status: CiStatus::Passing, head: "mergeability-unknown", baseline: None },
-        SnapshotCase { name: "github-observation-unavailable", status: CiStatus::Unknown, head: "unavailable-head", baseline: None },
+        SnapshotCase {
+            name: "current-head-passing-mergeable",
+            status: CiStatus::Passing,
+            snapshot_head: "green-head",
+            baseline: Some("green-head"),
+            mergeable: Some(true),
+            mergeable_state: Some("clean"),
+            github_head: Some("green-head"),
+            mirror_head: Some("green-head"),
+            observation_error: None,
+        },
+        // CI was recorded on old-head, but a current-head observation saw a
+        // push race advance the GitHub PR branch to pushed-head.
+        SnapshotCase {
+            name: "head-mismatch-push-race",
+            status: CiStatus::Passing,
+            snapshot_head: "old-head",
+            baseline: Some("old-head"),
+            mergeable: Some(true),
+            mergeable_state: Some("clean"),
+            github_head: Some("pushed-head"),
+            mirror_head: Some("pushed-head"),
+            observation_error: None,
+        },
+        SnapshotCase {
+            name: "pending-checks",
+            status: CiStatus::Pending,
+            snapshot_head: "pending-head",
+            baseline: Some("pending-head"),
+            mergeable: Some(true),
+            mergeable_state: Some("clean"),
+            github_head: Some("pending-head"),
+            mirror_head: Some("pending-head"),
+            observation_error: None,
+        },
+        SnapshotCase {
+            name: "unknown-checks",
+            status: CiStatus::Unknown,
+            snapshot_head: "unknown-head",
+            baseline: Some("unknown-head"),
+            mergeable: Some(true),
+            mergeable_state: Some("clean"),
+            github_head: Some("unknown-head"),
+            mirror_head: Some("unknown-head"),
+            observation_error: None,
+        },
+        // GitHub has not computed mergeability even though the current-head
+        // snapshot has passing checks.
+        SnapshotCase {
+            name: "unknown-mergeability",
+            status: CiStatus::Passing,
+            snapshot_head: "mergeability-unknown",
+            baseline: None,
+            mergeable: None,
+            mergeable_state: Some("unknown"),
+            github_head: Some("mergeability-unknown"),
+            mirror_head: Some("mergeability-unknown"),
+            observation_error: None,
+        },
+        // A rate-limit/API failure leaves current GitHub head evidence absent
+        // and records the durable attempt observation error.
+        SnapshotCase {
+            name: "github-observation-unavailable",
+            status: CiStatus::Unknown,
+            snapshot_head: "last-known-head",
+            baseline: None,
+            mergeable: None,
+            mergeable_state: None,
+            github_head: None,
+            mirror_head: Some("local-unpublished-head"),
+            observation_error: Some("GitHub API unavailable: rate limited"),
+        },
     ];
 
     let db = test_helpers::create_test_db();
@@ -308,15 +426,91 @@ async fn ceiling_pr_handoff_is_invariant_across_pr_snapshot_observations() {
         )
         .await
         .unwrap();
-        let observed = seed_failing_ci_snapshot(
+        seed_failing_ci_snapshot(
             &repo,
             &task,
-            case.head,
+            case.snapshot_head,
             case.baseline,
             0,
             case.status.clone(),
         )
         .await;
+        seed_attempt_head_observation(
+            &db,
+            &task.id,
+            case.mirror_head,
+            case.github_head,
+            case.observation_error,
+        )
+        .await;
+        // Model the PR-poller API observation separately from the durable
+        // snapshot. An unavailable observation has no PullRequest response;
+        // its durable task-attempt error is asserted below instead.
+        let poller_observation = case.github_head.map(|head| PullRequest {
+            number: 9000 + index as u64,
+            title: case.name.to_owned(),
+            state: PrState::Open,
+            user: None,
+            merged: Some(false),
+            merge_commit_sha: None,
+            html_url: format!("https://github.example/acme/repo/pull/{}", 9000 + index),
+            head: PrRef {
+                ref_name: "task-branch".to_owned(),
+                sha: head.to_owned(),
+            },
+            base: PrRef {
+                ref_name: "main".to_owned(),
+                sha: "base-head".to_owned(),
+            },
+            auto_merge: None,
+            node_id: format!("PR_{}", 9000 + index),
+            mergeable: case.mergeable,
+            mergeable_state: case.mergeable_state.map(str::to_owned),
+            draft: Some(false),
+        });
+        let observed = repo.get(&task.id).await.unwrap().unwrap();
+        // Assert the reloaded, independently-derived fields before entering
+        // exhaustion. The push-race row specifically proves snapshot
+        // old-head and current GitHub pushed-head are distinct evidence.
+        assert_eq!(
+            observed.ci_head_sha.as_deref(),
+            Some(case.snapshot_head),
+            "{}",
+            case.name
+        );
+        assert_eq!(
+            observed.ci_github_head_sha.as_deref(),
+            case.github_head,
+            "{}",
+            case.name
+        );
+        assert_eq!(
+            observed.ci_head_observation_error.as_deref(),
+            case.observation_error,
+            "{}",
+            case.name
+        );
+        assert_eq!(observed.ci_status, case.status.as_str(), "{}", case.name);
+        assert_eq!(
+            poller_observation.as_ref().map(|pr| pr.head.sha.as_str()),
+            case.github_head,
+            "{} must model the poller-observed current head",
+            case.name
+        );
+        assert_eq!(
+            poller_observation.as_ref().and_then(|pr| pr.mergeable),
+            case.mergeable,
+            "{} must model explicit GitHub mergeability availability",
+            case.name
+        );
+        assert_eq!(
+            poller_observation
+                .as_ref()
+                .and_then(|pr| pr.mergeable_state.as_deref()),
+            case.mergeable_state,
+            "{} must model the explicit GitHub mergeability state",
+            case.name
+        );
         for n in 0..(MAX_AUTONOMOUS_ESCALATIONS as usize) {
             seed_prior_escalation(&db, &repo, &observed, n).await;
         }
@@ -334,13 +528,17 @@ async fn ceiling_pr_handoff_is_invariant_across_pr_snapshot_observations() {
         assert_eq!(
             repo.list_blockers(&task.id).await.unwrap().len(),
             MAX_AUTONOMOUS_ESCALATIONS as usize,
-            "{} must not create a fresh remediation blocker", case.name
+            "{} must not create a fresh remediation blocker",
+            case.name
         );
         assert!(
-            repo.list_activity(&task.id).await.unwrap().iter().any(|entry| {
-                entry.payload.contains("terminal_close_deferred_pr_handoff")
-            }),
-            "{} must record the identical durable PR handoff", case.name
+            repo.list_activity(&task.id)
+                .await
+                .unwrap()
+                .iter()
+                .any(|entry| { entry.payload.contains("terminal_close_deferred_pr_handoff") }),
+            "{} must record the identical durable PR handoff",
+            case.name
         );
     }
 
@@ -350,7 +548,11 @@ async fn ceiling_pr_handoff_is_invariant_across_pr_snapshot_observations() {
     for n in 0..(MAX_AUTONOMOUS_ESCALATIONS as usize) {
         seed_prior_escalation(&db, &repo, &no_pr, n).await;
     }
-    assert!(!actor.escalate_to_planner_or_terminally_fail(&no_pr, "no-pr-control").await);
+    assert!(
+        !actor
+            .escalate_to_planner_or_terminally_fail(&no_pr, "no-pr-control")
+            .await
+    );
     let no_pr_after = repo.get(&no_pr.id).await.unwrap().unwrap();
     assert_eq!(no_pr_after.status, "closed");
     assert!(no_pr_after.close_reason.is_some());
