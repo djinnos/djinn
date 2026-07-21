@@ -125,9 +125,10 @@
       "enabled" : true,
       "expected_accounting_finalized" : true,
       "expected_available_usage" : 17,
-      "expected_context" : "- **[Pattern] Scope Only**: scope baseline (permalink: patterns/scope-only)\n- **[Note] q1-r1**: q1-r1 (permalink: pattern/q1-r1)\n- **[Note] q1-r2**: q1-r2 (permalink: pattern/q1-r2)\n- **[Note] q2-r1**: q2-r1 (permalink: pattern/q2-r1)\n- **[Note] q2-r2**: q2-r2 (permalink: pattern/q2-r2)\n- **[Note] q3-r1**: q3-r1 (permalink: pattern/q3-r1)\n- **[Note] q3-r2**: q3-r2 (permalink: pattern/q3-r2)\n- **[Note] q4-r1**: q4-r1 (permalink: pattern/q4-r1)\n- **[Note] q4-r2**: q4-r2 (permalink: pattern/q4-r2)",
+      "expected_context" : "- **[Pattern] Scope Only**: scope baseline (permalink: patterns/scope-only)\n- **[Note] q1-r1**: q1-r1 (permalink: pattern/q1-r1)\n- **[Note] q1-r2**: q1-r2 (permalink: pattern/q1-r2)\n- **[Note] q2-r1**: q2-r1 (permalink: pattern/q2-r1)\n- **[Note] q2-r2**: q2-r2 (permalink: pattern/q2-r2)\n- **[Note] q3-r1**: q3-r1 (permalink: pattern/q3-r1)\n- **[Note] q3-r2**: q3-r2 (permalink: pattern/q3-r2)",
       "expected_ledger_outcome" : "success",
       "expected_outcome" : "success",
+      "knowledge_injection_limit" : 6,
       "name" : "cap_limits",
       "payload" : "{\"queries\":[{\"type\":\"pitfall\",\"query\":\"Replay cap query 1\"},{\"query\":\"Replay cap query 2\",\"type\":\"pitfall\"},{\"query\":\"Replay cap query 3\",\"type\":\"pitfall\"},{\"query\":\"Replay cap query 4\",\"type\":\"pitfall\"}]}",
       "provider" : "success"

@@ -3714,8 +3714,8 @@ mod build_admission_config_tests {
         )
     }
 
-    #[test]
-    fn agent_context_preserves_startup_resolved_knowledge_injection_config() {
+    #[tokio::test]
+    async fn agent_context_preserves_startup_resolved_knowledge_injection_config() {
         let resolved = KnowledgeInjectionConfig {
             knowledge_injection_budget_bytes: 4_096,
             knowledge_injection_line_cap_bytes: 256,
