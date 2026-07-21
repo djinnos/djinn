@@ -14,7 +14,7 @@ use crate::repositories::note::{LexicalSearchBackend, sanitize_postgres_tsquery}
 use crate::{Error, Result};
 
 use djinn_memory::ProposalSearchResult;
-use sqlx::Row;
+use sqlx::{Postgres, Row, Transaction};
 
 // Global proposals layer (Phase 0). A `proposal` is project-independent; it
 // targets projects via `proposal_targets` (editable M:N) and carries unified
@@ -670,6 +670,7 @@ impl ProposalRepository {
         // Author is the authenticated MCP caller, mirroring how epics stamp
         // `created_by_user_id`. `None` when no user context is in scope.
         let author_user_id = djinn_core::auth_context::current_user_id();
+        let mut tx = self.db.pool().begin().await?;
         sqlx::query!(
             "INSERT INTO proposals (id, short_id, title, body, body_format, acceptance_criteria, status, author_user_id, latest_revision_seq)
              VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 1)",
@@ -682,13 +683,13 @@ impl ProposalRepository {
             status,
             author_user_id
         )
-        .execute(self.db.pool())
+        .execute(&mut *tx)
         .await?;
         // Seed revision 1 with the initial spec so every proposal has a head to
         // diff against. The seed carries no authoring metadata — the proposal
         // is brand-new, so the block-patch / native-skill attribution contract
         // does not apply.
-        self.insert_revision(ProposalRevisionSnapshot {
+        self.insert_revision_checked(&mut tx, ProposalRevisionSnapshot {
             proposal_id: &id,
             seq: 1,
             title: input.title,
@@ -699,6 +700,7 @@ impl ProposalRepository {
             event_metadata: None,
         })
         .await?;
+        tx.commit().await?;
         let proposal = self.get_required(&id).await?;
         self.events
             .send(DjinnEventEnvelope::proposal_created(&proposal));
@@ -749,6 +751,7 @@ impl ProposalRepository {
         let record_done_status_event =
             !content_changed && status_changed && effective_status == "done";
 
+        let mut tx = self.db.pool().begin().await?;
         sqlx::query!(
             r#"UPDATE proposals SET title = $1, body = $2, body_format = $10, acceptance_criteria = $3, status = $4,
                     superseded_by = $5, latest_revision_seq = $8,
@@ -769,12 +772,12 @@ impl ProposalRepository {
             building_amend,
             body_format,
         )
-        .execute(self.db.pool())
+        .execute(&mut *tx)
         .await?;
 
         if content_changed {
             let editor = djinn_core::auth_context::current_user_id();
-            self.insert_revision(ProposalRevisionSnapshot {
+            self.insert_revision_checked(&mut tx, ProposalRevisionSnapshot {
                 proposal_id: id,
                 seq: next_seq,
                 title: input.title,
@@ -813,6 +816,7 @@ impl ProposalRepository {
         if current.status != "building" {
             self.reconcile_approval(id).await?;
         }
+        tx.commit().await?;
         let proposal = self.get_required(id).await?;
         self.events
             .send(DjinnEventEnvelope::proposal_updated(&proposal));
@@ -1427,36 +1431,19 @@ impl ProposalRepository {
         })
     }
 
-    // ── Revisions + sign-offs ────────────────────────────────────────────────
-
-    #[allow(clippy::too_many_arguments)]
-    async fn insert_revision(&self, revision: ProposalRevisionSnapshot<'_>) -> Result<()> {
+    /// The sole checked spec-snapshot insertion path for create and material updates.
+    async fn insert_revision_checked(&self, tx: &mut Transaction<'_, Postgres>, revision: ProposalRevisionSnapshot<'_>) -> Result<()> {
+        let format = match revision.body_format { "markdown" => djinn_spec_lint::BodyFormat::Markdown, "mdx" => djinn_spec_lint::BodyFormat::Mdx, other => return Err(Error::InvalidData(format!("invalid proposal body_format for spec lint: {other}"))) };
+        let result = djinn_spec_lint::lint(revision.body, format, chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true));
+        result.validate_for_body(revision.body).map_err(|e| Error::Internal(format!("invalid spec lint result: {e}")))?;
+        let json = serde_json::to_value(&result)?;
+        if !result.errors.is_empty() { return Err(Error::SpecLintRejected(crate::SpecLintRejected { code: "SPEC_LINT_REJECTED".into(), violations: result.errors.iter().map(|v| crate::SpecLintViolation { code: v.code.clone(), message: v.message.clone(), span_start: v.span.start, span_end: v.span.end }).collect() })); }
         let id = uuid::Uuid::now_v7().to_string();
-        // When the caller passes no event_metadata (the common case for ordinary
-        // `proposal_update` writes), bind SQL NULL so the column stays empty —
-        // preserving the historical shape. A non-None payload is stored as JSONB
-        // for downstream attribution (targeted block-patch selection, native-skill
-        // version, etc.). We persist `serde_json::Value` directly: `sqlx`'s Pg
-        // encoder maps `Value::Null` to a SQL NULL, while any object/array is
-        // sent as the underlying JSON literal.
-        let metadata: Option<serde_json::Value> = revision.event_metadata.cloned();
-        sqlx::query(
-            r#"INSERT INTO proposal_revisions
-                (id, proposal_id, seq, title, body, body_format, acceptance_criteria, edited_by_user_id, event_kind, event_metadata)
-               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'spec_revision', $9)"#,
-        )
-        .bind(id)
-        .bind(revision.proposal_id)
-        .bind(revision.seq)
-        .bind(revision.title)
-        .bind(revision.body)
-        .bind(revision.body_format)
-        .bind(revision.acceptance_criteria)
-        .bind(revision.edited_by)
-        .bind(metadata)
-        .execute(self.db.pool())
-        .await?;
+        sqlx::query("INSERT INTO proposal_revisions (id, proposal_id, seq, title, body, body_format, acceptance_criteria, edited_by_user_id, event_kind, event_metadata) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'spec_revision', $9)").bind(&id).bind(revision.proposal_id).bind(revision.seq).bind(revision.title).bind(revision.body).bind(revision.body_format).bind(revision.acceptance_criteria).bind(revision.edited_by).bind(revision.event_metadata.cloned()).execute(&mut **tx).await?;
+        sqlx::query("INSERT INTO proposal_revision_lint_results (proposal_id, revision_id, linter_version, body_sha256, result, checked_at) VALUES ($1, $2, $3, $4, $5, $6)").bind(revision.proposal_id).bind(&id).bind(&result.linter_version).bind(&result.body_sha256).bind(json).bind(&result.checked_at).execute(&mut **tx).await?;
         Ok(())
+    }
+
     }
 
     async fn insert_status_event(&self, event: ProposalStatusEvent<'_>) -> Result<()> {
@@ -3132,7 +3119,8 @@ impl ProposalRepository {
             "reason": reason,
             "amendments": amendments_json,
         });
-        self.insert_revision(ProposalRevisionSnapshot {
+        let mut tx = self.db.pool().begin().await?;
+        self.insert_revision_checked(&mut tx, ProposalRevisionSnapshot {
             proposal_id,
             seq: next_revision_seq,
             title: &current.title,
@@ -3143,6 +3131,7 @@ impl ProposalRepository {
             event_metadata: Some(&event_metadata),
         })
         .await?;
+        tx.commit().await?;
 
         let proposal = self.get_required(proposal_id).await?;
         self.events

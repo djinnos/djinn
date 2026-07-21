@@ -34,7 +34,7 @@ pub use database::{
     DatabaseConnectConfig, NoteSearchBackend, NoteVectorBackend, PostgresDatabaseConfig,
     SqliteVecStatus, default_db_path, test_database_base_url,
 };
-pub use error::{DbError as Error, DbResult as Result};
+pub use error::{DbError as Error, DbResult as Result, SpecLintRejected, SpecLintViolation};
 #[cfg(any(test, feature = "test-support"))]
 pub use repositories::repo_graph_generation::ReservedPublicationFailureStage;
 pub use repositories::tool_call_evaluator::{

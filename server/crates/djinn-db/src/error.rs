@@ -2,6 +2,20 @@ use std::fmt;
 
 pub type DbResult<T> = Result<T, DbError>;
 
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct SpecLintViolation {
+    pub code: String,
+    pub message: String,
+    pub span_start: usize,
+    pub span_end: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct SpecLintRejected {
+    pub code: String,
+    pub violations: Vec<SpecLintViolation>,
+}
+
 #[derive(Debug)]
 pub enum DbError {
     Sqlx(sqlx::Error),
@@ -9,6 +23,7 @@ pub enum DbError {
     InvalidData(String),
     Internal(String),
     InvalidTransition(String),
+    SpecLintRejected(SpecLintRejected),
 }
 
 impl fmt::Display for DbError {
@@ -19,6 +34,7 @@ impl fmt::Display for DbError {
             Self::InvalidData(msg) => write!(f, "invalid data: {msg}"),
             Self::Internal(msg) => write!(f, "{msg}"),
             Self::InvalidTransition(msg) => write!(f, "invalid transition: {msg}"),
+            Self::SpecLintRejected(rejection) => write!(f, "{}", rejection.code),
         }
     }
 }
@@ -28,7 +44,7 @@ impl std::error::Error for DbError {
         match self {
             Self::Sqlx(err) => Some(err),
             Self::Json(err) => Some(err),
-            Self::InvalidData(_) | Self::Internal(_) | Self::InvalidTransition(_) => None,
+            Self::InvalidData(_) | Self::Internal(_) | Self::InvalidTransition(_) | Self::SpecLintRejected(_) => None,
         }
     }
 }
@@ -43,9 +59,7 @@ impl From<sqlx::Error> for DbError {
 }
 
 impl From<serde_json::Error> for DbError {
-    fn from(value: serde_json::Error) -> Self {
-        Self::Json(value)
-    }
+    fn from(value: serde_json::Error) -> Self { Self::Json(value) }
 }
 
 impl From<djinn_core::error::Error> for DbError {
