@@ -7,8 +7,8 @@ use djinn_provider::message::Conversation;
 use crate::context::AgentContext;
 use crate::output_parser::ParsedAgentOutput;
 use crate::output_stash::{
-    OutputStash, externalize_rendered_tool_result, handle_stash_tool, is_stash_tool,
-    render_tool_result,
+    DurableOutputDetails, OutputStash, externalize_rendered_tool_result, handle_stash_tool,
+    is_stash_tool, render_tool_result,
 };
 
 pub(crate) mod error_handling {
@@ -184,6 +184,55 @@ impl djinn_slot::host::SlotToolDispatcher for AgentToolDispatcher {
             rendered,
             preview_chars,
         )
+    }
+    fn persist_tool_results_before_compaction(
+        &self,
+        results: &[djinn_slot::host::PreCompactionToolResult],
+    ) -> Result<Vec<djinn_compaction::ToolOutputPointer>, String> {
+        let mut stash = self
+            .output_stash
+            .lock()
+            .map_err(|_| "output stash mutex poisoned")?;
+        let existing = stash.list_durable_outputs()?;
+        for result in results {
+            if existing
+                .iter()
+                .any(|metadata| metadata.tool_use_id == result.tool_use_id)
+            {
+                continue;
+            }
+            let chars = result.content.chars().count();
+            stash.insert_with_metadata(
+                result.tool_use_id.clone(),
+                result.tool_name.clone(),
+                result.content.clone(),
+                DurableOutputDetails {
+                    turn: result.turn,
+                    result_kind: "tool_result".into(),
+                    original_chars: chars,
+                    stored_chars: chars,
+                    completeness: "complete".into(),
+                },
+            )?;
+        }
+        let durable = stash.list_durable_outputs()?;
+        results
+            .iter()
+            .map(|result| {
+                let metadata = durable
+                    .iter()
+                    .find(|metadata| metadata.tool_use_id == result.tool_use_id)
+                    .ok_or_else(|| {
+                        format!("durable output missing after write: {}", result.tool_use_id)
+                    })?;
+                Ok(djinn_compaction::ToolOutputPointer {
+                    tool_use_id: metadata.tool_use_id.clone(),
+                    turn: metadata.turn,
+                    original_chars: metadata.original_chars,
+                    result_kind: metadata.result_kind.clone(),
+                })
+            })
+            .collect()
     }
     fn dispatch_extension_tool<'a>(
         &'a self,
