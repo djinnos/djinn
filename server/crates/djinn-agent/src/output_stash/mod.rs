@@ -316,10 +316,10 @@ fn sha256_hex(bytes: &[u8]) -> String {
 /// an isolated tempdir instead of the real `$HOME/.cache`. Initialized lazily on
 /// first use to a unique per-run directory so no test ever touches the user's
 /// real cache, and so durable state is shared across a single binary's tests.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 static DURABLE_ROOT_OVERRIDE: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 fn test_durable_root() -> PathBuf {
     DURABLE_ROOT_OVERRIDE
         .get_or_init(|| crate::test_helpers::test_persistent_dir("djinn-output-stash-"))
@@ -332,12 +332,12 @@ fn test_durable_root() -> PathBuf {
 ///
 /// Mirrors [`crate::sandbox::djinn_cache_dir`] — the sandbox backends already
 /// permit writes beneath the djinn cache dir, so blobs land in an allowed path.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 fn durable_root() -> Option<PathBuf> {
     Some(test_durable_root())
 }
 
-#[cfg(not(test))]
+#[cfg(not(any(test, feature = "test-support")))]
 fn durable_root() -> Option<PathBuf> {
     if let Ok(xdg) = std::env::var("XDG_CACHE_HOME")
         && !xdg.is_empty()
@@ -473,6 +473,10 @@ fn atomic_write(
 /// Resolve a `tool_use_id` from the durable store. Returns `(tool_name, full_text)`
 /// on success. Errors (no root, missing/corrupt pointer or blob) propagate as a
 /// human-readable message — never a panic.
+///
+/// This convenience wrapper is used only by this module's unit tests. The
+/// test-support integration path supplies an explicit durable root through
+/// `OutputStash` and therefore calls `durable_read_at` instead.
 #[cfg(test)]
 fn durable_read(tool_use_id: &str) -> Result<(String, String), String> {
     let root = durable_root().ok_or("durable stash unavailable (no cache dir)")?;
@@ -596,9 +600,9 @@ pub struct OutputStash {
     entries: VecDeque<StashedOutput>,
     total_bytes: usize,
     owner_session_id: Option<String>,
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     durable_root_override: Option<PathBuf>,
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     fail_durable_writes_for_test: bool,
 }
 
@@ -608,9 +612,9 @@ impl OutputStash {
             entries: VecDeque::new(),
             total_bytes: 0,
             owner_session_id: None,
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             durable_root_override: None,
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             fail_durable_writes_for_test: false,
         }
     }
@@ -620,15 +624,15 @@ impl OutputStash {
             entries: VecDeque::new(),
             total_bytes: 0,
             owner_session_id: Some(session_id.into()),
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             durable_root_override: None,
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             fail_durable_writes_for_test: false,
         }
     }
 
-    #[cfg(test)]
-    pub(crate) fn with_session_id_and_durable_root(
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn with_session_id_and_durable_root(
         session_id: impl Into<String>,
         durable_root: PathBuf,
     ) -> Self {
@@ -641,8 +645,8 @@ impl OutputStash {
         }
     }
 
-    #[cfg(test)]
-    pub(crate) fn set_fail_durable_writes_for_test(&mut self, fail: bool) {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn set_fail_durable_writes_for_test(&mut self, fail: bool) {
         self.fail_durable_writes_for_test = fail;
     }
 
@@ -668,12 +672,12 @@ impl OutputStash {
         full_text: String,
         details: DurableOutputDetails,
     ) -> Result<(), String> {
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         if self.fail_durable_writes_for_test {
             return Err("injected durable output write failure".into());
         }
         if let Some(owner) = self.owner_session_id.as_deref() {
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             if let Some(root) = self.durable_root_override.as_deref() {
                 durable_write_at(root, &tool_use_id, &tool_name, owner, &full_text, &details)?;
             } else {
@@ -718,7 +722,7 @@ impl OutputStash {
             .owner_session_id
             .as_deref()
             .ok_or("durable output listing requires a trusted session")?;
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         if let Some(root) = self.durable_root_override.as_deref() {
             return list_durable_at(root, owner);
         }
@@ -735,7 +739,7 @@ impl OutputStash {
         }
         // In-memory miss: try the durable store, but surface the familiar
         // not-found message if disk has nothing either.
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         let durable = if let Some(root) = self.durable_root_override.as_deref() {
             durable_read_at(root, tool_use_id, self.owner_session_id.as_deref())
         } else {
@@ -745,7 +749,7 @@ impl OutputStash {
                 self.owner_session_id.as_deref(),
             )
         };
-        #[cfg(not(test))]
+        #[cfg(not(any(test, feature = "test-support")))]
         let durable = durable_read_at(
             &durable_root().ok_or("durable stash unavailable")?,
             tool_use_id,

@@ -296,7 +296,7 @@ async fn async_main(cli: Cli) {
             tracing::error!(%error, "invalid knowledge injection configuration");
             std::process::exit(1);
         });
-    let _knowledge_injection_config = KnowledgeInjectionConfig::from_settings_and_env(&settings)
+    let knowledge_injection_config = KnowledgeInjectionConfig::from_settings_and_env(&settings)
         .unwrap_or_else(|error| {
             tracing::error!(%error, "invalid knowledge injection configuration");
             std::process::exit(1);
@@ -316,6 +316,7 @@ async fn async_main(cli: Cli) {
         cancel.clone(),
         retrieval_config,
         retrieval_metrics,
+        knowledge_injection_config,
     )
     .unwrap_or_else(|e| {
         tracing::error!(error = %e, "invalid build admission configuration");
