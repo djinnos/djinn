@@ -489,13 +489,14 @@ pub async fn make_coordinator_incarnation_error_after_first_read(
         .execute(db.pool())
         .await
         .unwrap();
-    // Guard function: raises on every call after the first.
+    // Guard function: admits the first SELECT and raises on every later one.
     sqlx::query(
-        r#"CREATE OR REPLACE FUNCTION ci_error_guard() RETURNS void AS $$
+        r#"CREATE OR REPLACE FUNCTION ci_error_guard() RETURNS boolean AS $$
            BEGIN
              IF nextval('ci_access_count') >= 2 THEN
                RAISE EXCEPTION 'simulated coordinator_incarnations lookup error';
              END IF;
+             RETURN true;
            END;
            $$ LANGUAGE plpgsql"#,
     )
@@ -507,7 +508,7 @@ pub async fn make_coordinator_incarnation_error_after_first_read(
            SELECT '{incarnation_id}'::varchar AS id,
                   '{registered_at}'::varchar AS registered_at,
                   '{last_renewed_at}'::varchar AS last_renewed_at
-           WHERE (ci_error_guard() IS NULL)"#
+           WHERE ci_error_guard()"#
     );
     sqlx::query(&sql).execute(db.pool()).await.unwrap();
 }
