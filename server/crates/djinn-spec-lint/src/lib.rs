@@ -15,7 +15,8 @@ use sha2::{Digest, Sha256};
 
 pub use catalog::{proposal_block_tags, registered_block_types};
 pub use document::{
-    DocumentAnalysis, DocumentError, RegisteredBlockOccurrence, analyze_mdx_document,
+    DocumentAnalysis, DocumentError, RegisteredBlockOccurrence,
+    TopLevelNodeOccurrence, analyze_mdx_document,
 };
 pub use lint::lint;
 pub use parser::{

@@ -22,10 +22,18 @@ pub struct RegisteredBlockOccurrence {
     pub id_value_span: Option<Utf8ByteSpan>,
 }
 
+/// A source-positioned direct child of the parsed document root.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TopLevelNodeOccurrence {
+    pub span: Utf8ByteSpan,
+    pub heading_level: Option<u8>,
+}
+
 /// The reusable source-positioned view of a successfully parsed MDX body.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct DocumentAnalysis {
     pub registered_blocks: Vec<RegisteredBlockOccurrence>,
+    pub top_level_nodes: Vec<TopLevelNodeOccurrence>,
 }
 
 /// A markdown-rs MDX parse failure.
@@ -46,7 +54,23 @@ pub fn analyze_mdx_document(body: &str) -> Result<DocumentAnalysis, DocumentErro
         .map_err(|error| DocumentError(error.reason))?;
     let mut registered_blocks = Vec::new();
     collect_registered_blocks(body, &tree, &mut registered_blocks);
-    Ok(DocumentAnalysis { registered_blocks })
+    let mut top_level_nodes = Vec::new();
+    if let Node::Root(root) = &tree {
+        for child in &root.children {
+            if let Some(position) = child.position() {
+                let span = Utf8ByteSpan::new(body, position.start.offset, position.end.offset)
+                    .expect("markdown-rs node positions address the original source");
+                top_level_nodes.push(TopLevelNodeOccurrence {
+                    span,
+                    heading_level: match child {
+                        Node::Heading(heading) => Some(heading.depth),
+                        _ => None,
+                    },
+                });
+            }
+        }
+    }
+    Ok(DocumentAnalysis { registered_blocks, top_level_nodes })
 }
 
 fn collect_registered_blocks(

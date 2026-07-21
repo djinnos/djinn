@@ -20,6 +20,7 @@
 use rmcp::schemars;
 use serde::Deserialize;
 use serde_json::Value as JsonValue;
+use djinn_spec_lint::analyze_mdx_document;
 
 use crate::tools::validation::{
     resolve_body_format_and_validate, validate_ac_count, validate_design,
@@ -208,18 +209,18 @@ fn resolve_heading_selector(body: &str, heading_text: &str) -> Result<ResolvedRa
         return Err("heading_text must not be empty".into());
     }
 
-    // First pass: find all headings matching the needle using line-based scan.
-    let mut matches: Vec<(usize, usize)> = Vec::new(); // (line_byte_start, heading_level)
-    let mut offset = 0usize;
-    for line in body.lines() {
-        if let Some(stripped) = line.strip_prefix('#') {
-            let hashes = 1 + stripped.len() - stripped.trim_start_matches('#').len();
-            let text = line[hashes..].trim();
-            if text == needle {
-                matches.push((offset, hashes));
-            }
+    let document = analyze_mdx_document(body)
+        .map_err(|error| format!("could not parse document: {error}"))?;
+    let mut matches = Vec::new();
+    for (index, node) in document.top_level_nodes.iter().enumerate() {
+        let Some(level) = node.heading_level else { continue };
+        let text = body[node.span.start..node.span.end]
+            .trim_start_matches('#')
+            .trim_end_matches('#')
+            .trim();
+        if text == needle {
+            matches.push((index, level));
         }
-        offset += line.len() + 1; // +1 for '\n'
     }
 
     if matches.is_empty() {
@@ -232,21 +233,13 @@ fn resolve_heading_selector(body: &str, heading_text: &str) -> Result<ResolvedRa
         ));
     }
 
-    let (heading_start, heading_level) = matches[0];
-
-    // Find the end of this section: next heading at same or higher level, or
-    // end of body.
+    let (heading_index, heading_level) = matches[0];
+    let heading_start = document.top_level_nodes[heading_index].span.start;
     let mut section_end = body.len();
-    let mut pos = heading_start;
-    for line in body[heading_start..].lines().skip(1) {
-        pos += line.len() + 1;
-        if let Some(stripped) = line.strip_prefix('#') {
-            let hashes = 1 + stripped.len() - stripped.trim_start_matches('#').len();
-            if hashes <= heading_level {
-                // Trim back to just before this heading line's start.
-                section_end = pos - line.len() - 1;
-                break;
-            }
+    for node in document.top_level_nodes.iter().skip(heading_index + 1) {
+        if node.heading_level.is_some_and(|level| level <= heading_level) {
+            section_end = node.span.start;
+            break;
         }
     }
 
@@ -279,9 +272,11 @@ fn resolve_exact_text_selector(body: &str, text: &str) -> Result<ResolvedRange, 
         ));
     }
     let start = matches[0];
+    let end = start + needle.len();
+    ensure_node_aligned(body, start, end)?;
     Ok(ResolvedRange {
         start,
-        end: start + needle.len(),
+        end,
         selector_description: format!("exact_text ({} bytes)", needle.len()),
     })
 }
@@ -316,6 +311,9 @@ fn resolve_byte_range_selector(
     if start >= end {
         return Err("byte_range start must be less than end".into());
     }
+    if !body.is_char_boundary(start) || !body.is_char_boundary(end) {
+        return Err("byte_range start and end must be UTF-8 character boundaries".into());
+    }
     if let Some(ref expected) = br.expected_text {
         let actual = &body[start..end];
         if actual != expected {
@@ -325,11 +323,26 @@ fn resolve_byte_range_selector(
             ));
         }
     }
+    ensure_node_aligned(body, start, end)?;
     Ok(ResolvedRange {
         start,
         end,
         selector_description: format!("byte_range[{}..{}]", start, end),
     })
+}
+
+const PATCH_RANGE_NOT_NODE_ALIGNED: &str = "PATCH_RANGE_NOT_NODE_ALIGNED";
+
+fn ensure_node_aligned(body: &str, start: usize, end: usize) -> Result<(), String> {
+    let document = analyze_mdx_document(body)
+        .map_err(|error| format!("could not parse document: {error}"))?;
+    let aligned = document.top_level_nodes.iter().any(|node| node.span.start == start)
+        && document.top_level_nodes.iter().any(|node| node.span.end == end);
+    if aligned {
+        Ok(())
+    } else {
+        Err(format!("{PATCH_RANGE_NOT_NODE_ALIGNED}: exact_text and byte_range selectors must cover complete top-level AST nodes"))
+    }
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -1185,9 +1198,9 @@ mod block_patch_tests {
                     "id": proposal.id,
                     "selector": {
                         "byte_range": {
-                            "start": 4,
-                            "end": 7,
-                            "expected_text": "bbb"
+                            "start": 0,
+                            "end": 11,
+                            "expected_text": "aaa bbb ccc"
                         }
                     },
                     "operation": "replace",
@@ -1203,7 +1216,7 @@ mod block_patch_tests {
             response.get("error")
         );
         let stored = repo.get(&proposal.id).await.unwrap().unwrap();
-        assert_eq!(stored.body, "aaa DDD ccc");
+        assert_eq!(stored.body, "DDD");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1228,8 +1241,8 @@ mod block_patch_tests {
                     "id": proposal.id,
                     "selector": {
                         "byte_range": {
-                            "start": 4,
-                            "end": 7,
+                            "start": 0,
+                            "end": 11,
                             "expected_text": "XXX"
                         }
                     },
