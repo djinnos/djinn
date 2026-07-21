@@ -15,6 +15,80 @@ use djinn_db::repositories::task_arbitration::{
 };
 use djinn_db::repositories::task_attempt::TaskAttemptRepository;
 
+#[derive(Clone, Copy)]
+pub(crate) struct DispatchStrikeDecision {
+    pub exempted: bool,
+    pub decision: &'static str,
+    pub source: &'static str,
+}
+
+impl CoordinatorActor {
+    pub(crate) async fn latest_attempt_strike_decision(
+        &self,
+        task_id: &str,
+        role: &str,
+    ) -> Option<DispatchStrikeDecision> {
+        let attempts = TaskAttemptRepository::new(self.db.clone())
+            .list_for_task(task_id)
+            .await
+            .ok()?;
+        let attempt = attempts
+            .iter()
+            .filter(|attempt| attempt.role == role)
+            .find(|attempt| {
+                attempt.outcome != TaskAttemptOutcome::Deferred.as_str()
+                    && attempt.outcome != TaskAttemptOutcome::AdoptedPr.as_str()
+            })?;
+        let source = match attempt.outcome.as_str() {
+            "spawn_failed" => djinn_telemetry::dispatch::STRIKE_SOURCE_SPAWN_FAILED,
+            "crashed" => djinn_telemetry::dispatch::STRIKE_SOURCE_CRASHED,
+            _ => djinn_telemetry::dispatch::STRIKE_SOURCE_OTHER_TERMINAL,
+        };
+        let exempted = attempt.outcome == "interrupted"
+            && attempt
+                .dispatch_owner_incarnation_id
+                .as_deref()
+                .is_some_and(|owner| {
+                    attempt
+                        .summary_json
+                        .as_deref()
+                        .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+                        .is_some_and(|evidence| {
+                            evidence["failure_class"] == "environmental_owner_expired"
+                                && evidence["owner_incarnation_id"] == owner
+                                && evidence["owner_classification"] == "expired"
+                                && evidence["owner_lease_last_renewed_at"].is_string()
+                        })
+                });
+        Some(DispatchStrikeDecision {
+            exempted,
+            decision: if exempted {
+                djinn_telemetry::dispatch::STRIKE_DECISION_EXEMPTED
+            } else {
+                djinn_telemetry::dispatch::STRIKE_DECISION_COUNTED
+            },
+            source: if exempted {
+                djinn_telemetry::dispatch::STRIKE_SOURCE_ENVIRONMENTAL_OWNER_EXPIRED
+            } else {
+                source
+            },
+        })
+    }
+}
+
+impl CoordinatorActor {
+    #[allow(dead_code)]
+    pub(crate) async fn latest_attempt_was_environmental_interrupt(
+        &self,
+        task_id: &str,
+        role: &str,
+    ) -> bool {
+        self.latest_attempt_strike_decision(task_id, role)
+            .await
+            .is_some_and(|decision| decision.exempted)
+    }
+}
+
 /// uv3p Part B: what the fleet actually did after the current intervention (or
 /// after a human released a prior hold), derived from `task_attempts` rows.
 /// Drives the attempted-remediation park gate, the forced model rotation at
@@ -546,51 +620,6 @@ impl CoordinatorActor {
 
         self.route_loop_guard_planner_intervention(&task.id, role, &intervention_reason)
             .await
-    }
-
-    /// True when the newest non-guard attempt for `(task, role)` terminalized as
-    /// an ENVIRONMENTAL interruption (`TaskAttemptOutcome::Interrupted`) — i.e.
-    /// the prior session was killed by infrastructure (a deploy/rollout, a k8s
-    /// pod eviction, or a startup reap of a run that deploy orphaned) rather than
-    /// by any liveness/quality decision.
-    ///
-    /// The dispatch reappearance path uses this to spare an innocent in-flight
-    /// task from a same-role dispatch-failure streak + escalating cooldown after
-    /// a deploy: an environmental interruption is treated "as if the attempt
-    /// never ran". Guard-only rows (`deferred`/`adopted_pr`) are skipped so the
-    /// check reflects the newest REAL attempt. Fail-safe: any lookup error
-    /// returns `false`, preserving the existing failure-counting behavior (never
-    /// silently suppress a genuine failure on a transient DB blip).
-    pub(crate) async fn latest_attempt_was_environmental_interrupt(
-        &self,
-        task_id: &str,
-        role: &str,
-    ) -> bool {
-        let repo = TaskAttemptRepository::new(self.db.clone());
-        let attempts = match repo.list_for_task(task_id).await {
-            Ok(attempts) => attempts,
-            Err(e) => {
-                tracing::warn!(
-                    task_id = %task_id,
-                    role,
-                    error = %e,
-                    "CoordinatorActor: environmental-interrupt attempt lookup failed; \
-                     treating reappearance as a normal failure (fail-safe)"
-                );
-                return false;
-            }
-        };
-        // `list_for_task` is ordered created_at DESC, so the first non-guard row
-        // for this role is the newest real attempt.
-        attempts
-            .iter()
-            .filter(|a| a.role == role)
-            .find(|a| {
-                a.outcome != TaskAttemptOutcome::Deferred.as_str()
-                    && a.outcome != TaskAttemptOutcome::AdoptedPr.as_str()
-            })
-            .and_then(|a| a.outcome_enum().ok())
-            .is_some_and(|o| o.is_environmental_interrupt())
     }
 
     /// Trigger C: a worker/reviewer run completed degenerate because the
