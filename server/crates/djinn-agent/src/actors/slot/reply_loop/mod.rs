@@ -151,6 +151,31 @@ impl AgentToolDispatcher {
     }
 }
 
+/// Persist compaction candidates under the dispatcher's trusted stash session.
+/// Factoring this out lets focused tests cover write-before-pointer ordering.
+fn persist_tool_results_before_compaction(
+    stash: &mut OutputStash,
+    results: &[djinn_slot::host::PreCompactionToolResult],
+) -> Result<Vec<djinn_compaction::ToolOutputPointer>, String> {
+    let existing = stash.list_durable_outputs()?;
+    for result in results {
+        if existing.iter().any(|metadata| metadata.tool_use_id == result.tool_use_id) {
+            continue;
+        }
+        let chars = result.content.chars().count();
+        stash.insert_with_metadata(
+            result.tool_use_id.clone(), result.tool_name.clone(), result.content.clone(),
+            DurableOutputDetails { turn: result.turn, result_kind: "tool_result".into(), original_chars: chars, stored_chars: chars, completeness: "complete".into() },
+        )?;
+    }
+    let durable = stash.list_durable_outputs()?;
+    results.iter().map(|result| {
+        let metadata = durable.iter().find(|metadata| metadata.tool_use_id == result.tool_use_id)
+            .ok_or_else(|| format!("durable output missing after write: {}", result.tool_use_id))?;
+        Ok(djinn_compaction::ToolOutputPointer { tool_use_id: metadata.tool_use_id.clone(), turn: metadata.turn, original_chars: metadata.original_chars, result_kind: metadata.result_kind.clone() })
+    }).collect()
+}
+
 impl djinn_slot::host::SlotToolDispatcher for AgentToolDispatcher {
     fn is_stash_tool(&self, tool_name: &str) -> bool {
         is_stash_tool(tool_name)
@@ -193,46 +218,7 @@ impl djinn_slot::host::SlotToolDispatcher for AgentToolDispatcher {
             .output_stash
             .lock()
             .map_err(|_| "output stash mutex poisoned")?;
-        let existing = stash.list_durable_outputs()?;
-        for result in results {
-            if existing
-                .iter()
-                .any(|metadata| metadata.tool_use_id == result.tool_use_id)
-            {
-                continue;
-            }
-            let chars = result.content.chars().count();
-            stash.insert_with_metadata(
-                result.tool_use_id.clone(),
-                result.tool_name.clone(),
-                result.content.clone(),
-                DurableOutputDetails {
-                    turn: result.turn,
-                    result_kind: "tool_result".into(),
-                    original_chars: chars,
-                    stored_chars: chars,
-                    completeness: "complete".into(),
-                },
-            )?;
-        }
-        let durable = stash.list_durable_outputs()?;
-        results
-            .iter()
-            .map(|result| {
-                let metadata = durable
-                    .iter()
-                    .find(|metadata| metadata.tool_use_id == result.tool_use_id)
-                    .ok_or_else(|| {
-                        format!("durable output missing after write: {}", result.tool_use_id)
-                    })?;
-                Ok(djinn_compaction::ToolOutputPointer {
-                    tool_use_id: metadata.tool_use_id.clone(),
-                    turn: metadata.turn,
-                    original_chars: metadata.original_chars,
-                    result_kind: metadata.result_kind.clone(),
-                })
-            })
-            .collect()
+        persist_tool_results_before_compaction(&mut stash, results)
     }
     fn dispatch_extension_tool<'a>(
         &'a self,
@@ -441,3 +427,52 @@ pub(crate) async fn run_reply_loop(
 // `server/crates/djinn-slot/src/reply_loop/tests.rs` and
 // `server/crates/djinn-slot/src/reply_loop_tests.rs`; compatibility is compile-
 // checked through this adapter and `supervisor_impl::stage`.
+
+#[cfg(test)]
+mod compaction_persistence_tests {
+    use super::*;
+    use crate::output_stash::DurableOutputDetails;
+    use djinn_slot::host::PreCompactionToolResult;
+
+    fn stash(name: &str) -> OutputStash {
+        let root = std::path::PathBuf::from("/var/tmp/djinn-compaction-persistence-tests").join(name);
+        let _ = std::fs::remove_dir_all(&root);
+        OutputStash::with_session_id_and_durable_root("trusted-session", root)
+    }
+
+    fn result(id: &str, content: &str, turn: u64) -> PreCompactionToolResult {
+        PreCompactionToolResult { tool_use_id: id.into(), tool_name: "shell".into(), content: content.into(), turn }
+    }
+
+    #[test]
+    fn persistence_reuses_existing_metadata_and_is_idempotent() {
+        let mut stash = stash("reuse");
+        stash.insert_with_metadata("large".into(), "shell".into(), "prefix".into(), DurableOutputDetails {
+            turn: 9, result_kind: "shell_stdout".into(), original_chars: 99, stored_chars: 6, completeness: "partial-spill".into(),
+        }).unwrap();
+        let results = vec![result("large", "inline replacement must not overwrite", 1), result("small", "small inline output", 2)];
+        let pointers = persist_tool_results_before_compaction(&mut stash, &results).unwrap();
+        assert_eq!(pointers[0].turn, 9);
+        assert_eq!(pointers[0].original_chars, 99);
+        assert_eq!(pointers[0].result_kind, "shell_stdout");
+        assert_eq!(pointers[1].turn, 2);
+        assert_eq!(stash.list_durable_outputs().unwrap().len(), 2);
+        persist_tool_results_before_compaction(&mut stash, &results).unwrap();
+        let listed = stash.list_durable_outputs().unwrap();
+        assert_eq!(listed.len(), 2);
+        assert_eq!(listed.iter().find(|item| item.tool_use_id == "large").unwrap().completeness, "partial-spill");
+        stash.clear();
+        assert!(stash.view("small", 0, 10).unwrap().contains("small inline output"));
+    }
+
+    #[test]
+    fn injected_write_failure_emits_no_pointer_or_in_memory_entry() {
+        let mut stash = stash("failure");
+        stash.set_fail_durable_writes_for_test(true);
+        let results = vec![result("missing", "must remain inline", 4)];
+        let error = persist_tool_results_before_compaction(&mut stash, &results).unwrap_err();
+        assert!(error.contains("injected durable output write failure"));
+        assert!(stash.list_durable_outputs().unwrap().is_empty());
+        assert!(stash.view("missing", 0, 10).is_err());
+    }
+}

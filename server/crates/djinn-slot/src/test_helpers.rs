@@ -132,6 +132,7 @@ pub struct ConfigurableToolDispatcher {
     /// Map from tool name → handler that returns the dispatch result.
     /// Extension tools not in this map get a generic error.
     handlers: HashMap<String, ToolHandlerFn>,
+    compaction_persistence: Option<Result<Vec<djinn_compaction::ToolOutputPointer>, String>>,
 }
 
 impl ConfigurableToolDispatcher {
@@ -140,7 +141,13 @@ impl ConfigurableToolDispatcher {
             mcp_tools,
             resource_results: HashMap::new(),
             handlers,
+            compaction_persistence: None,
         }
+    }
+
+    pub fn with_compaction_persistence(mut self, result: Result<Vec<djinn_compaction::ToolOutputPointer>, String>) -> Self {
+        self.compaction_persistence = Some(result);
+        self
     }
 
     /// Configure successful native MCP resource results for dispatch tests.
@@ -179,6 +186,12 @@ impl SlotToolDispatcher for ConfigurableToolDispatcher {
         preview_chars: usize,
     ) -> String {
         mock_externalize_rendered_result(tool_use_id, tool_name, rendered, preview_chars)
+    }
+    fn persist_tool_results_before_compaction(
+        &self,
+        _results: &[crate::host::PreCompactionToolResult],
+    ) -> Result<Vec<djinn_compaction::ToolOutputPointer>, String> {
+        self.compaction_persistence.clone().unwrap_or_default()
     }
     fn dispatch_extension_tool<'a>(
         &'a self,
