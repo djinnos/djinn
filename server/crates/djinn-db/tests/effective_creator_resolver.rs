@@ -223,35 +223,21 @@ async fn source_task_creator_is_used_when_no_explicit() {
     );
 }
 
-/// Tier 2 — when the source task has a NULL creator, resolution advances.
+/// Tier 2 — a missing source task advances to the epic creator.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn source_task_with_null_creator_advances_to_next_tier() {
+async fn missing_source_task_advances_to_next_tier() {
     let db = open_db().await;
     let project_id = seed_project(&db).await;
     let epic_creator = seed_user(&db, 3001, "epic-creator").await;
     let epic_id = seed_epic(&db, &project_id, "ep01", Some(epic_creator.as_str()), None).await;
-
-    // Seed a source task with NULL creator via the test helper.
-    let source_task_id = uuid::Uuid::now_v7().to_string();
-    sqlx::query(
-        "INSERT INTO tasks (id, project_id, short_id, title, description, design, issue_type, priority, owner, status, continuation_count, memory_refs)
-         VALUES ($1, $2, 'st01', 'Source', '', '', 'task', 0, '', 'open', 0, '[]'::jsonb)",
-    )
-    .bind(&source_task_id)
-    .bind(&project_id)
-    .execute(db.pool())
-    .await
-    .expect("seed null-creator source task");
-
-    // The child references the null-creator source task but falls under an
-    // epic whose creator exists → must inherit the epic creator.
+    let missing_source_id = uuid::Uuid::now_v7().to_string();
     let child_id = create(
         &db,
         &project_id,
         Some(&epic_id),
         EffectiveCreatorProvenance {
             explicit_user_id: None,
-            source_task_id: Some(&source_task_id),
+            source_task_id: Some(&missing_source_id),
             proposal_id: None,
         },
     )
@@ -259,8 +245,7 @@ async fn source_task_with_null_creator_advances_to_next_tier() {
     .expect("create child task");
     assert_eq!(
         created_by(&db, &child_id).await.as_deref(),
-        Some(epic_creator.as_str()),
-        "NULL source-task creator must advance to parent-epic tier"
+        Some(epic_creator.as_str())
     );
 }
 
