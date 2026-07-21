@@ -437,14 +437,23 @@ const HANDOFF_ACTOR_ROLE: &str = "respawn_guard";
 /// incident. A genuinely-still-draft adopted PR degrades to a normal merge-gate
 /// hold in the review poller rather than the adoption-spam wedge.
 ///
-/// Idempotent: when the task is already in a poller-owned status
-/// (`pr_draft`/`pr_review`) this is a no-op — the handoff already happened.
-/// Only `open` tasks are handed off; any other status is unexpected for an
-/// adopted worker task and is left untouched with a warning rather than forced
-/// into a status the state machine would reject.
+/// `pr_review` is the only no-op: the task is already at the poller-owned
+/// handoff target. A `pr_draft` row is NOT a no-op — it must be advanced to
+/// `pr_review` so the review poller (not the draft poller) owns it. The
+/// `AdoptionHandoff` transition is legal from every non-closed status, so any
+/// other non-closed status (e.g. `open`, `in_progress`, `pr_draft`) is
+/// transitioned to `pr_review`.
 ///
-/// Best-effort: transition errors are logged and never propagated. Returns
-/// `true` when the task was moved to `pr_review`, `false` on no-op/error.
+/// Idempotent for the already-`pr_review` case: the no-op still durably
+/// records the handoff reason via a standalone activity entry so callers
+/// (e.g. the terminal gate) can prove the task was preserved rather than
+/// force-closed. The `TaskRepository::transition` path inserts an activity row
+/// automatically (status.rs:156-172); this no-op path does not, so it records
+/// one itself.
+///
+/// Returns `true` when the task was moved to `pr_review` or was already there,
+/// and an `Err` only when a repository transition/handoff fails (so the
+/// terminal gate can fail safe).
 pub async fn handoff_pr_to_poller(
     task_repo: &TaskRepository,
     task_id: &str,
@@ -452,11 +461,31 @@ pub async fn handoff_pr_to_poller(
     pr_url: &str,
     reason: &str,
 ) -> std::result::Result<bool, String> {
-    if current_status == TaskStatus::PrDraft.as_str()
-        || current_status == TaskStatus::PrReview.as_str()
-    {
-        tracing::debug!(task_id = %task_id, current_status = %current_status, "respawn_guard: task already poller-owned — handoff is a no-op");
-        return Ok(false);
+    if current_status == TaskStatus::PrReview.as_str() {
+        tracing::debug!(task_id = %task_id, current_status = %current_status, "respawn_guard: task already in pr_review — handoff is an idempotent no-op");
+        // No transition runs, so we record a standalone activity entry to make
+        // the handoff reason durable and auditable.
+        let payload = serde_json::json!({
+            "from_status": current_status,
+            "to_status": TaskStatus::PrReview.as_str(),
+            "reason": reason,
+            "pr_url": pr_url,
+            "idempotent": true,
+        })
+        .to_string();
+        if let Err(e) = task_repo
+            .log_activity(
+                Some(task_id),
+                HANDOFF_ACTOR_ID,
+                HANDOFF_ACTOR_ROLE,
+                "adoption_handoff",
+                &payload,
+            )
+            .await
+        {
+            tracing::warn!(task_id = %task_id, pr_url = %pr_url, error = %e, "respawn_guard: failed to record idempotent handoff activity (best-effort)");
+        }
+        return Ok(true);
     }
     match task_repo
         .transition(

@@ -2075,7 +2075,7 @@ async fn preservation_gate_called_during_terminal_task_failure() {
         .await
         .unwrap();
 
-    let actor = coordinator_actor_for_tests(&db, &tx);
+    let mut actor = coordinator_actor_for_tests(&db, &tx);
     let closed = actor
         .terminally_fail_task(&task, "coordinator", "max retries exceeded")
         .await;

@@ -1478,7 +1478,9 @@ mod tests {
             (TransitionAction::ArbiterSupersede, TaskStatus::InLeadIntervention) => {
                 Some(TaskStatus::Closed)
             }
-            (TransitionAction::AdoptionHandoff, TaskStatus::Open) => Some(TaskStatus::PrReview),
+            (TransitionAction::AdoptionHandoff, s) if *s != TaskStatus::Closed => {
+                Some(TaskStatus::PrReview)
+            }
             (TransitionAction::SubmitForMerge, TaskStatus::InProgress) => {
                 Some(TaskStatus::Approved)
             }
@@ -1550,11 +1552,13 @@ mod tests {
     }
 
     #[test]
-    fn adoption_handoff_invalid_outside_open() {
-        // The handoff is only legal from `open` — the adoption path only fires
-        // for dispatchable `open` worker tasks, and a task already in a
-        // poller-owned status must not be re-handed (the caller no-ops first).
+    fn adoption_handoff_valid_from_every_non_closed_status() {
+        // The handoff is legal from every non-terminal status so the
+        // coordinator terminal gate can preserve a PR discovered while handling
+        // exhaustion from any exhaustion-reachable status. It is only rejected
+        // from `closed`.
         for from in [
+            TaskStatus::Open,
             TaskStatus::InProgress,
             TaskStatus::NeedsTaskReview,
             TaskStatus::InTaskReview,
@@ -1563,13 +1567,25 @@ mod tests {
             TaskStatus::PrReview,
             TaskStatus::NeedsLeadIntervention,
             TaskStatus::InLeadIntervention,
-            TaskStatus::Closed,
         ] {
-            assert!(
-                compute_transition(&TransitionAction::AdoptionHandoff, &from, None).is_err(),
-                "adoption_handoff must be invalid from {from:?}"
+            let apply = compute_transition(&TransitionAction::AdoptionHandoff, &from, None)
+                .unwrap_or_else(|_| panic!("adoption_handoff must be valid from {from:?}"));
+            assert_eq!(
+                apply.to_status,
+                Some(TaskStatus::PrReview),
+                "adoption_handoff from {from:?} must target pr_review"
             );
         }
+        // Only `closed` is rejected.
+        assert!(
+            compute_transition(
+                &TransitionAction::AdoptionHandoff,
+                &TaskStatus::Closed,
+                None
+            )
+            .is_err(),
+            "adoption_handoff must be invalid from closed"
+        );
     }
 
     #[test]
