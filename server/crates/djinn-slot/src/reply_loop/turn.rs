@@ -828,8 +828,7 @@ pub async fn run_reply_loop(
                     .await
                     .map_err(anyhow::Error::msg)?;
                     if compacted {
-                        total_tokens_in = 0;
-                        total_tokens_out = 0;
+                        // Lifetime spend persists across reactive compaction.
                         current_context_tokens = 0;
                         compaction_attempts += 1;
                         tool_dispatcher.clear_stash();
@@ -1000,8 +999,7 @@ pub async fn run_reply_loop(
                 .await
                 .map_err(anyhow::Error::msg)?;
                 if compacted {
-                    total_tokens_in = 0;
-                    total_tokens_out = 0;
+                    // Lifetime spend persists across reactive compaction.
                     current_context_tokens = 0;
                     compaction_attempts += 1;
                     tool_dispatcher.clear_stash();
@@ -1217,8 +1215,7 @@ pub async fn run_reply_loop(
                 .await
                 .map_err(anyhow::Error::msg)?;
                 if compacted {
-                    total_tokens_in = 0;
-                    total_tokens_out = 0;
+                    // Lifetime spend persists across proactive compaction.
                     current_context_tokens = 0;
                     tool_dispatcher.clear_stash();
                     if should_retry_after_tool_call_compaction(compacted, !turn_tool_calls.is_empty()) {

@@ -10,9 +10,67 @@ use std::collections::HashMap;
 use std::env;
 use std::fmt;
 
+use djinn_provider::provider::TokenUsage;
+
 const DEFAULT_FALLBACK_CONTEXT_WINDOW_TOKENS: u32 = 64_000;
 const DEFAULT_SOFT_THRESHOLD_RATIO: f64 = 0.75;
 const DEFAULT_HARD_THRESHOLD_RATIO: f64 = 0.92;
+
+/// Apply one provider usage report to reply-loop lifetime spend and occupancy.
+///
+/// Provider adapters normalize `TokenUsage::input`: OpenAI/Google input already
+/// includes cache tokens while Anthropic-format adapters report cache fields
+/// separately. Cache fields are therefore intentionally not added to billed
+/// lifetime input here. They remain in the normalized cache-inclusive
+/// `context_total` occupancy snapshot used for compaction pressure.
+pub(crate) fn record_provider_usage(
+    lifetime_tokens_in: &mut u32,
+    lifetime_tokens_out: &mut u32,
+    lifetime_cache_read: &mut u32,
+    lifetime_cache_write: &mut u32,
+    lifetime_reasoning_out: &mut u32,
+    current_context_tokens: &mut u32,
+    usage: &TokenUsage,
+) {
+    *lifetime_tokens_in = lifetime_tokens_in.saturating_add(usage.input);
+    *lifetime_tokens_out = lifetime_tokens_out.saturating_add(usage.output);
+    *lifetime_cache_read = lifetime_cache_read.saturating_add(usage.cache_read);
+    *lifetime_cache_write = lifetime_cache_write.saturating_add(usage.cache_write);
+    *lifetime_reasoning_out = lifetime_reasoning_out.saturating_add(usage.reasoning_output);
+    *current_context_tokens = usage.context_total();
+}
+
+/// Stable test-support seam for the production usage-accounting operation.
+#[cfg(any(test, feature = "test-support"))]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct UsageAccountingForTest {
+    pub lifetime_tokens_in: u32,
+    pub lifetime_tokens_out: u32,
+    pub lifetime_cache_read: u32,
+    pub lifetime_cache_write: u32,
+    pub lifetime_reasoning_out: u32,
+    pub current_context_tokens: u32,
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl UsageAccountingForTest {
+    pub fn record(&mut self, usage: &TokenUsage) {
+        record_provider_usage(
+            &mut self.lifetime_tokens_in,
+            &mut self.lifetime_tokens_out,
+            &mut self.lifetime_cache_read,
+            &mut self.lifetime_cache_write,
+            &mut self.lifetime_reasoning_out,
+            &mut self.current_context_tokens,
+            usage,
+        );
+    }
+
+    /// Compaction clears only the old request's occupancy snapshot.
+    pub fn clear_occupancy_after_compaction(&mut self) {
+        self.current_context_tokens = 0;
+    }
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct SessionBudgetPolicy {

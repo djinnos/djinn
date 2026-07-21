@@ -7398,12 +7398,14 @@ async fn periodic_reap_mixed_exact_groups_classifies_owners_and_preserves_young_
         expired_evidence[0], expired_evidence[1],
         "all pending peers in an exact group must be terminalized once with one evidence tuple"
     );
-    assert_eq!(expired_evidence[0]["failure_class"], "environmental_owner_expired");
+    assert_eq!(
+        expired_evidence[0]["failure_class"],
+        "environmental_owner_expired"
+    );
     assert_eq!(expired_evidence[0]["owner_classification"], "expired");
     assert_eq!(expired_evidence[0]["owner_incarnation_id"], expired_owner);
     assert_eq!(
-        expired_evidence[0]["owner_lease_last_renewed_at"],
-        expired_lease.last_renewed_at,
+        expired_evidence[0]["owner_lease_last_renewed_at"], expired_lease.last_renewed_at,
         "expired group evidence must name and timestamp its own durable owner lease"
     );
 
