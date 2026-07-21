@@ -4,7 +4,7 @@ import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/re
 import {
   buildMemoryGraphDisk, desaturate, ghostNodeRenderSemantics, GHOST_INTERACTION_OPACITY, GHOST_LINK_OPACITY,
   GHOST_OPACITY, isRecentLifecycleTransition, LIFECYCLE_FADE_MS, lifecycleGhostOpacity, memoryGraphCameraFitRadius,
-  memoryGraphHitSlop, MemoryGraphCanvas, shouldStartLifecycleFade, visualLinkDirection, visualLinkStyle,
+  memoryGraphHitSlop, memoryGraphHoverPillMeta, MemoryGraphCanvas, shouldStartLifecycleFade, visualLinkDirection, visualLinkStyle,
 } from "./MemoryGraphCanvas";
 import type { MemoryGraphOutput } from "@/api/generated/mcp-tools.gen";
 import { validLifecycleResponse } from "@/lib/__fixtures__/memoryGraphLifecycle";
@@ -62,19 +62,29 @@ describe("lifecycle ghost semantics", () => {
     });
     expect(memoryGraphHitSlop(1)).toBe(10);
     expect(memoryGraphHitSlop(3)).toBe(6);
+    expect(memoryGraphHoverPillMeta({ isGhost: true, isOrphan: false, lifecycle: "archived", noteType: "reference", ts: null })).toBe("reference · archived");
+    // Active pills retain the pre-lifecycle metadata format.
+    expect(memoryGraphHoverPillMeta({ isGhost: false, isOrphan: false, lifecycle: "active", noteType: "adr", ts: null })).toBe("adr");
   });
 
   it("keeps quiet ordinary links bright while ghost-connected links are separate and subdued", () => {
     const disk = buildMemoryGraphDisk({
       nodes: [layoutNode("active-a", "2024-01-01T00:00:00Z", "active"), layoutNode("active-b", "2024-01-02T00:00:00Z", "active"), layoutNode("ghost", "2024-01-03T00:00:00Z", "archived")],
       edges: [{ raw_text: "ordinary", source_id: "active-a", target_id: "active-b" }, { raw_text: "ghost", source_id: "active-a", target_id: "ghost" }],
-      typed_edges: [],
+      typed_edges: [
+        { source_id: "active-a", target_id: "active-b", kind: "contradicts", weight: 1 },
+        { source_id: "active-a", target_id: "ghost", kind: "contradicts", weight: 1 },
+      ],
     });
     const styles = disk.links.map((link) => visualLinkStyle(link, disk.nodes));
     expect(styles).toEqual(expect.arrayContaining([
       expect.objectContaining({ batchKey: "wikilink:ordinary", ghostConnected: false, opacity: 0.14 }),
       expect.objectContaining({ batchKey: "wikilink:ghost", ghostConnected: true, opacity: GHOST_LINK_OPACITY }),
+      expect.objectContaining({ batchKey: "contradicts:ordinary", dashed: true, ghostConnected: false, opacity: 0.3 }),
+      expect.objectContaining({ batchKey: "contradicts:ghost", dashed: true, ghostConnected: true, opacity: GHOST_LINK_OPACITY }),
     ]));
+    // Ghost and active-only siblings never share a quiet canvas batch.
+    expect(new Set(styles.map((style) => style.batchKey)).size).toBe(4);
   });
 
   it("directs either canonical mixed supersedes order active-to-ghost and leaves same-class supersedes undirected", () => {

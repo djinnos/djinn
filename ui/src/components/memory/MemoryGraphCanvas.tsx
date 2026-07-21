@@ -234,6 +234,11 @@ export function memoryGraphHitSlop(cameraScale: number): number {
   return Math.max(10 / cameraScale, 6);
 }
 
+/** Keep the visible pointer/focus pill aligned with the ghost control's name. */
+export function memoryGraphHoverPillMeta(node: Pick<DiskNode, "isGhost" | "isOrphan" | "lifecycle" | "noteType" | "ts">): string {
+  return `${node.noteType}${node.ts ? ` · ${formatDay(node.ts)}` : ""}${node.isOrphan ? " · orphan" : ""}${node.isGhost ? ` · ${node.lifecycle}` : ""}`;
+}
+
 interface DiskRing {
   r: number;
   label: string | null;
@@ -1126,7 +1131,7 @@ export function MemoryGraphCanvas({ projectSlug, reloadKey, onSelectNote }: Memo
         const n = disk.nodes[hover];
         const sx = n.x * cam.k + cam.x;
         const sy = n.y * cam.k + cam.y;
-        const meta = `${n.noteType}${n.ts ? ` · ${formatDay(n.ts)}` : ""}${n.isOrphan ? " · orphan" : ""}${n.isGhost ? ` · ${n.lifecycle}` : ""}`;
+        const meta = memoryGraphHoverPillMeta(n);
         ctx.font = "11px JetBrains Mono, ui-monospace, monospace";
         const w = Math.max(ctx.measureText(n.title).width, ctx.measureText(meta).width) + 16;
         const bx = clamp(sx + 12, 4, size.w - w - 4);
