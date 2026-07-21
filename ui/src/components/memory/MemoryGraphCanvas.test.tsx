@@ -1,7 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 
-import { MemoryGraphCanvas } from "./MemoryGraphCanvas";
+import { buildMemoryGraphDisk, MemoryGraphCanvas, memoryGraphCameraFitRadius } from "./MemoryGraphCanvas";
+import type { MemoryGraphOutput } from "@/api/generated/mcp-tools.gen";
 import { validLifecycleResponse } from "@/lib/__fixtures__/memoryGraphLifecycle";
 
 const { callMcpToolMock } = vi.hoisted(() => ({
@@ -110,5 +111,92 @@ describe("MemoryGraphCanvas lifecycle ghost preference", () => {
       expect(screen.queryByText("pitfall")).not.toBeInTheDocument();
       expect(screen.getByText("adr")).toBeInTheDocument();
     });
+  });
+});
+
+const layoutNode = (
+  id: string,
+  created_at: string,
+  status?: "active" | "archived" | "deprecated",
+  connection_count = 0,
+): MemoryGraphOutput["nodes"][number] => ({
+  connection_count,
+  created_at,
+  folder: "notes",
+  id,
+  note_type: "adr",
+  permalink: `notes/${id}`,
+  ...(status ? { status } : {}),
+  title: id,
+});
+
+const activeLayoutPayload = (): MemoryGraphOutput => ({
+  nodes: [
+    layoutNode("active-old", "2024-01-01T00:00:00Z", "active", 1),
+    layoutNode("active-middle", "2024-02-01T00:00:00Z", "active", 4),
+    layoutNode("proposal-new", "2024-03-01T00:00:00Z", "active", 2),
+  ],
+  edges: [
+    { raw_text: "middle", source_id: "active-old", target_id: "active-middle" },
+    { raw_text: "proposal", source_id: "active-middle", target_id: "proposal-new" },
+  ],
+  typed_edges: [],
+});
+
+const activeFields = (payload: MemoryGraphOutput) => {
+  const disk = buildMemoryGraphDisk(payload);
+  return {
+    cameraFitRadius: memoryGraphCameraFitRadius(disk),
+    nodes: disk.nodes.filter((node) => !node.isGhost).map(({ id, igniteAt, r, rec, ring, tr, x, y }) =>
+      ({ id, igniteAt, r, rec, ring, tr, x, y })).sort((a, b) => a.id.localeCompare(b.id)),
+  };
+};
+
+describe("buildMemoryGraphDisk lifecycle placement", () => {
+  it("keeps active coordinates, radii, recency, rings, reveal, and camera fit byte-for-byte", () => {
+    const active = activeLayoutPayload();
+    const inclusive: MemoryGraphOutput = {
+      ...active,
+      nodes: [
+        ...active.nodes,
+        layoutNode("archived-neighbor", "2024-02-15T00:00:00Z", "archived", 99),
+        layoutNode("deprecated-fallback", "2024-01-15T00:00:00Z", "deprecated", 88),
+      ],
+      edges: [...active.edges, { raw_text: "ghost", source_id: "active-middle", target_id: "archived-neighbor" }],
+    };
+    expect(activeFields(inclusive)).toStrictEqual(activeFields(active));
+  });
+
+  it("anchors a linked ghost after active relaxation and repeats its coordinates", () => {
+    const active = activeLayoutPayload();
+    const payload: MemoryGraphOutput = {
+      ...active,
+      nodes: [...active.nodes, layoutNode("archived-neighbor", "2024-02-15T00:00:00Z", "archived", 3)],
+      edges: [...active.edges, { raw_text: "ghost", source_id: "archived-neighbor", target_id: "active-middle" }],
+    };
+    const first = buildMemoryGraphDisk(payload);
+    const ghost = first.nodes.find((node) => node.id === "archived-neighbor")!;
+    const anchor = first.nodes.find((node) => node.id === "active-middle")!;
+    const repeated = buildMemoryGraphDisk(payload).nodes.find((node) => node.id === ghost.id!);
+    expect(ghost).toMatchObject({ isGhost: true, ring: anchor.ring });
+    expect(Math.hypot(ghost.x - anchor.x, ghost.y - anchor.y)).toBeCloseTo(anchor.r + ghost.r + 14, 12);
+    expect({ x: repeated!.x, y: repeated!.y }).toStrictEqual({ x: ghost.x, y: ghost.y });
+  });
+
+  it("uses the creation-time ring for an unlinked ghost", () => {
+    const active = activeLayoutPayload();
+    const disk = buildMemoryGraphDisk({
+      ...active,
+      nodes: [...active.nodes, layoutNode("archived-fallback", "2024-01-15T00:00:00Z", "archived")],
+    });
+    const ghost = disk.nodes.find((node) => node.id === "archived-fallback")!;
+    expect(ghost).toMatchObject({ isGhost: true, ring: disk.nodes.find((node) => node.id === "active-old")!.ring });
+  });
+
+  it("treats omitted status as active and inactive-only payloads as ghosts", () => {
+    const legacy: MemoryGraphOutput = { nodes: [layoutNode("legacy", "2024-01-01T00:00:00Z")], edges: [], typed_edges: [] };
+    const inactiveOnly: MemoryGraphOutput = { nodes: [layoutNode("archived-only", "2024-01-01T00:00:00Z", "archived")], edges: [], typed_edges: [] };
+    expect(buildMemoryGraphDisk(legacy).nodes[0]).toMatchObject({ isGhost: false, lifecycle: "active" });
+    expect(buildMemoryGraphDisk(inactiveOnly).nodes[0]).toMatchObject({ isGhost: true, lifecycle: "archived" });
   });
 });
