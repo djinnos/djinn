@@ -822,6 +822,30 @@ impl NoteRepository {
         Ok(query.fetch_all(self.db.pool()).await?)
     }
 
+    /// Query the complete ranked scope-overlap universe used by bounded prompt
+    /// packing. This retains note bodies and L0 summaries so packing decisions
+    /// and rendered output are made from the same candidates.
+    ///
+    /// The production query remains available to callers that need its legacy
+    /// confidence/top-K boundary. This helper keeps identical eligibility,
+    /// scope matching, and ordering while removing only those two gates.
+    pub async fn query_by_scope_overlap_trace_notes(
+        &self,
+        project_id: &str,
+        task_paths: &[String],
+        note_types: &[&str],
+        trace_candidate_cap: usize,
+    ) -> Result<Vec<Note>> {
+        self.query_by_scope_overlap(
+            project_id,
+            task_paths,
+            note_types,
+            f64::NEG_INFINITY,
+            trace_candidate_cap,
+        )
+        .await
+    }
+
     /// Query unfiltered scope-overlap candidates for retrieval tracing.
     ///
     /// Uses the same eligibility and ordering as [`Self::query_by_scope_overlap`]
