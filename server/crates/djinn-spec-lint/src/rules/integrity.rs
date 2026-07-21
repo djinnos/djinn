@@ -104,6 +104,7 @@ struct DefinitionOccurrence {
     span: SourceRange,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn collect(
     body: &str,
     node: &Node,
@@ -230,6 +231,7 @@ fn collect(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn collect_element(
     body: &str,
     name: Option<&str>,

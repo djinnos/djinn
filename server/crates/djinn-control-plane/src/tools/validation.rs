@@ -3,10 +3,12 @@
 // Each function returns `Result<T, String>` where `Err` is a human-readable
 // message suitable for returning as a JSON `{ "error": ... }` response.
 
-use crate::tools::proposal_blocks::{
-    extract_custom_block_tags, parse_mdx_blocks, proposal_block_tags, validate_block_content,
-    validate_mdx_blocks,
+use djinn_spec_lint::{
+    BlockError as LeafBlockError, ParsedProposalBlock, extract_custom_block_tags, parse_mdx_blocks,
+    proposal_block_tags, validate_block_content, validate_mdx_blocks,
 };
+
+use crate::tools::proposal_blocks::proposal_block_definition_for_tag;
 
 /// Decode the handful of HTML entities that LLM-authored plain text routinely
 /// over-escapes (e.g. a title arriving as `A &amp; B`). `&amp;` is decoded last
@@ -188,7 +190,13 @@ pub fn validate_mdx_body(body: &str, body_format: Option<&str>) -> Result<(), St
             return Err(format!("Unknown MDX block tag: '{tag}'"));
         }
     }
-    validate_html_block_safety(body)?;
+    // Parse through the canonical leaf implementation before checking the local
+    // wireframe-only HTML-safety backstop. Structural parse failures are
+    // intentionally left for the full validation stack below, preserving the
+    // established error ordering and human-readable parse errors.
+    if let Ok(blocks) = parse_mdx_blocks(body) {
+        validate_html_block_safety(&blocks)?;
+    }
     Ok(())
 }
 
@@ -228,13 +236,44 @@ pub fn resolve_body_format_and_validate(
         // Unknown-tag rejection + wireframe active-markup backstop.
         validate_mdx_body(body, Some("mdx"))?;
         // Unknown-tag walk (descends nested blocks) + empty-diagram guard.
-        validate_mdx_blocks(body).map_err(|e| e.to_string())?;
+        validate_mdx_blocks(body).map_err(adapt_leaf_block_error)?;
         // Structural parse, then reject empty children-based blocks.
-        let blocks = parse_mdx_blocks(body).map_err(|e| e.to_string())?;
-        validate_block_content(&blocks)?;
+        let blocks = parse_mdx_blocks(body).map_err(adapt_leaf_block_error)?;
+        validate_block_content(&blocks)
+            .map_err(|error| adapt_leaf_content_error(error, &blocks))?;
     }
 
     Ok(effective)
+}
+
+/// Preserve the established control-plane wording where the leaf contract has
+/// deliberately kept only the portable validation detail.
+fn adapt_leaf_block_error(error: LeafBlockError) -> String {
+    match error {
+        LeafBlockError::EmptyDiagram(id) => format!(
+            "Diagram block `{id}` has no source — provide a non-empty `source` \
+             (e.g. `source={{`flowchart LR; A-->B`}}`) or block content"
+        ),
+        other => other.to_string(),
+    }
+}
+
+/// The compatibility catalog owns verbose authoring grammar. The leaf has
+/// already identified the invalid block; this only restores that established
+/// control-plane context without re-running its duplicate validator.
+fn adapt_leaf_content_error(error: String, blocks: &[ParsedProposalBlock]) -> String {
+    let Some(block) = blocks
+        .iter()
+        .find(|block| error.starts_with(&format!("{} block ", block.tag)))
+    else {
+        return error;
+    };
+    let Some(description) =
+        proposal_block_definition_for_tag(&block.tag).and_then(|definition| definition.description)
+    else {
+        return error;
+    };
+    format!("{error}Expected grammar — {description}")
 }
 
 /// Server-side backstop for the sandboxed `html` and `wireframe` blocks (defense
@@ -248,13 +287,7 @@ pub fn resolve_body_format_and_validate(
 /// attributes, and `javascript:` / `data:text/html` URIs are rejected, so benign
 /// formatted HTML (and inline SVG) still passes. `wireframe` is the remaining
 /// sandboxed-HTML surface, so its raw markup is gated here.
-fn validate_html_block_safety(body: &str) -> Result<(), String> {
-    let blocks = match parse_mdx_blocks(body) {
-        Ok(blocks) => blocks,
-        // Structural parse errors are surfaced by other validators; don't
-        // double-report here.
-        Err(_) => return Ok(()),
-    };
+fn validate_html_block_safety(blocks: &[ParsedProposalBlock]) -> Result<(), String> {
     for block in blocks {
         if block.block_type != "wireframe" {
             continue;
@@ -893,6 +926,34 @@ Bind it with `el.onclick = fn` in the handler.
         let err = resolve_body_format_and_validate(body, Some("markdown")).unwrap_err();
         assert!(err.contains("Decisions block"), "error was: {err}");
         assert!(err.contains("###"), "error was: {err}");
+    }
+
+    #[test]
+    fn resolve_preserves_leaf_validation_errors_and_wireframe_backstop() {
+        let malformed =
+            resolve_body_format_and_validate("<Diagram id=\"flow\">", Some("mdx")).unwrap_err();
+        assert_eq!(
+            malformed,
+            "unclosed <Diagram> block (no closing </Diagram> found)"
+        );
+
+        let empty_diagram =
+            resolve_body_format_and_validate(r#"<Diagram id="flow" source="" />"#, Some("mdx"))
+                .unwrap_err();
+        assert_eq!(
+            empty_diagram,
+            "Diagram block `flow` has no source — provide a non-empty `source` (e.g. `source={`flowchart LR; A-->B`}`) or block content"
+        );
+
+        let unsafe_wireframe = resolve_body_format_and_validate(
+            r#"<Wireframe id="bad"><script>alert(1)</script></Wireframe>"#,
+            Some("mdx"),
+        )
+        .unwrap_err();
+        assert_eq!(
+            unsafe_wireframe,
+            "Wireframe block 'bad' contains disallowed active markup (a <script> tag); the wireframe block renders sandboxed/sanitized static markup and is not a scripting surface"
+        );
     }
 
     #[test]

@@ -28,12 +28,12 @@ pub fn lint(
     // Keep the established registry parser and safety/round-trip behavior as
     // the source of truth. Lint has one stable structural failure code rather
     // than exposing parser implementation error variants to clients.
-    if body_format == BodyFormat::Mdx {
-        if let Err(error) = validate_mdx_blocks(body) {
-            push_parse_error(&mut result, body, error.to_string());
-            result.sort_violations();
-            return result;
-        }
+    if body_format == BodyFormat::Mdx
+        && let Err(error) = validate_mdx_blocks(body)
+    {
+        push_parse_error(&mut result, body, error.to_string());
+        result.sort_violations();
+        return result;
     }
     if body_format == BodyFormat::Mdx {
         let document = match analyze_mdx_document(body) {
