@@ -89,18 +89,22 @@ pub(super) async fn merge_planned_knowledge(
         // suppress the next unique, ranked row.
         let mut rendered_for_query = 0;
         for row in bucket.expect("checked") {
-            if rendered_for_query == 2 {
+            if rendered_for_query == knowledge_injection.knowledge_injection_limit as usize {
                 break;
             }
-            if count == 6 || ids.contains(&row.id) || links.contains(&row.permalink) {
+            if count == knowledge_injection.knowledge_injection_limit as usize
+                || ids.contains(&row.id)
+                || links.contains(&row.permalink)
+            {
                 continue;
             }
             let line = format!(
                 "- **[Note] {}**: {} (permalink: {})",
                 row.title, row.snippet, row.permalink
             );
-            if output.len() + usize::from(!output.is_empty()) + line.len()
-                > knowledge_injection.knowledge_injection_budget_bytes as usize
+            if line.len() > knowledge_injection.knowledge_injection_line_cap_bytes as usize
+                || output.len() + usize::from(!output.is_empty()) + line.len()
+                    > knowledge_injection.knowledge_injection_budget_bytes as usize
             {
                 return (!output.is_empty()).then_some(output);
             }

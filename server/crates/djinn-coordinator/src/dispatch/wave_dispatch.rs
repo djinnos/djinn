@@ -199,6 +199,7 @@ impl CoordinatorActor {
                 model_id_per_role: std::collections::HashMap::new(),
                 // PR-open-only flow: no workspace reads, so no read sources.
                 read_source_project_ids: Vec::new(),
+                knowledge_injection: djinn_core::models::KnowledgeInjectionConfig::default(),
                 github_owner: None,
                 github_install_token: None,
                 // PR-open-only flow creates no commits, so no author identity.

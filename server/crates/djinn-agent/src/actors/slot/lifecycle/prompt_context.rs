@@ -9,9 +9,9 @@ use djinn_core::models::Task;
 
 use crate::actors::slot::MergeConflictMetadata;
 use crate::actors::slot::helpers::{
-    COMBINED_BRIEF_TOTAL_CHARS, NotePackDisposition, build_reviewer_diff_context,
-    build_role_code_graph_context, derive_task_scope_paths, extract_worker_context,
-    format_attempt_history, pack_knowledge_notes, recent_feedback,
+    COMBINED_BRIEF_TOTAL_CHARS, KnowledgePackConfig, NotePackDisposition,
+    build_reviewer_diff_context, build_role_code_graph_context, derive_task_scope_paths,
+    extract_worker_context, format_attempt_history, pack_ranked_knowledge_notes, recent_feedback,
 };
 use crate::actors::slot::lifecycle::attempt_context;
 use crate::context::AgentContext;
@@ -571,11 +571,18 @@ async fn load_knowledge_context_with_planner(
             "Lifecycle: failed to query knowledge trace candidates"
         );
         let pack_start = tokio::time::Instant::now();
-        let packed = pack_knowledge_notes(
+        let packed = pack_ranked_knowledge_notes(
             &notes,
-            app_state
-                .knowledge_injection
-                .knowledge_injection_budget_bytes as usize,
+            KnowledgePackConfig {
+                minimum_confidence: f64::NEG_INFINITY,
+                top_k: app_state.knowledge_injection.knowledge_injection_limit as usize,
+                total_byte_budget: app_state
+                    .knowledge_injection
+                    .knowledge_injection_budget_bytes as usize,
+                line_byte_cap: app_state
+                    .knowledge_injection
+                    .knowledge_injection_line_cap_bytes as usize,
+            },
         );
         let pack_ms = pack_start.elapsed().as_millis() as i64;
         let rendered = if notes.is_empty() {
@@ -629,11 +636,18 @@ async fn load_knowledge_context_with_planner(
 
     // Render the prompt using the packed API (byte-identical to format_knowledge_notes).
     let pack_start = tokio::time::Instant::now();
-    let packed = pack_knowledge_notes(
+    let packed = pack_ranked_knowledge_notes(
         &notes,
-        app_state
-            .knowledge_injection
-            .knowledge_injection_budget_bytes as usize,
+        KnowledgePackConfig {
+            minimum_confidence: f64::NEG_INFINITY,
+            top_k: app_state.knowledge_injection.knowledge_injection_limit as usize,
+            total_byte_budget: app_state
+                .knowledge_injection
+                .knowledge_injection_budget_bytes as usize,
+            line_byte_cap: app_state
+                .knowledge_injection
+                .knowledge_injection_line_cap_bytes as usize,
+        },
     );
     let pack_ms = pack_start.elapsed().as_millis() as i64;
 

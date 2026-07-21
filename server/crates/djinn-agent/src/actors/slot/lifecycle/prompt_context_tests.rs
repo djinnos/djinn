@@ -2271,7 +2271,15 @@ async fn planner_production_boundary_scope_budget_runs_planner_without_injection
             .expect("raise scope confidence");
     }
 
-    let app_state = agent_context_from_db(db, CancellationToken::new());
+    let mut app_state = agent_context_from_db(db, CancellationToken::new());
+    app_state.knowledge_injection = djinn_core::models::KnowledgeInjectionConfig {
+        knowledge_injection_budget_bytes: 4_096,
+        knowledge_injection_line_cap_bytes: 128,
+        knowledge_injection_limit: 1,
+        injection_starvation_threshold_percent: 50,
+        injection_starvation_query_floor: 20,
+        retrieval_health_window_minutes: 1_440,
+    };
     let host = RecordingPlannerHost::with_content(valid_planner_payload());
     let search = RecordingPlannedNoteSearch {
         rows: vec![planned_note_row(
@@ -2308,10 +2316,6 @@ async fn planner_production_boundary_scope_budget_runs_planner_without_injection
 
     let knowledge = context.knowledge_context.expect("scope context");
     assert!(knowledge.contains("Scope budget note"));
-    assert!(
-        knowledge.len() > 1_500,
-        "scope content must consume the shared budget"
-    );
     assert!(!knowledge.contains("Oversized planned note"));
     assert!(
         knowledge.len()

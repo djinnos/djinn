@@ -88,7 +88,7 @@ use djinn_agent::file_time::FileTime;
 use djinn_agent::lsp::LspManager;
 use djinn_agent::roles::RoleRegistry;
 use djinn_core::events::EventBus;
-use djinn_core::models::{DjinnSettings, KnowledgeInjectionConfig};
+use djinn_core::models::KnowledgeInjectionConfig;
 use djinn_db::{Database, DatabaseConnectConfig, PostgresDatabaseConfig};
 use djinn_graph::graph_parity::{GraphArtifactBlobParityError, assert_graph_artifact_blob_parity};
 use djinn_provider::catalog::{CatalogService, HealthTracker};
@@ -1988,6 +1988,7 @@ async fn run_task_run(args: WorkerDefaultArgs) -> Result<()> {
         rpc.clone(),
         spec.project_id.clone(),
         spec.read_source_project_ids.clone(),
+        spec.knowledge_injection,
     );
     let worker_services: Arc<dyn SupervisorServices> = Arc::new(WorkerSupervisorServices::new(
         rpc.clone(),
@@ -2581,6 +2582,7 @@ fn build_worker_agent_context(
     rpc: Arc<RpcServices>,
     project_id: String,
     read_source_project_ids: Vec<String>,
+    knowledge_injection: KnowledgeInjectionConfig,
 ) -> AgentContext {
     use djinn_core::events::DjinnEventEnvelope;
     use djinn_supervisor::services::SerializableDjinnEvent;
@@ -2636,10 +2638,7 @@ fn build_worker_agent_context(
         ),
         reconciliation_sweep: ReconciliationSweepConfig::default(),
         memory_intent_planner: djinn_agent::context::MemoryIntentPlannerConfig::from_env(),
-        knowledge_injection: KnowledgeInjectionConfig::from_settings_and_env(
-            &DjinnSettings::default(),
-        )
-        .expect("knowledge injection defaults are valid"),
+        knowledge_injection,
         compaction_cs: djinn_slot::reply_loop::CompactionCriticalSection::default(),
     }
 }
@@ -2983,11 +2982,25 @@ mod tests {
                 rpc,
                 "immutable-owner".into(),
                 targets.clone(),
+                KnowledgeInjectionConfig {
+                    knowledge_injection_budget_bytes: 4_096,
+                    knowledge_injection_line_cap_bytes: 256,
+                    knowledge_injection_limit: 3,
+                    injection_starvation_threshold_percent: 50,
+                    injection_starvation_query_floor: 20,
+                    retrieval_health_window_minutes: 1_440,
+                },
             );
             assert_eq!(
                 context.knowledge_injection,
-                KnowledgeInjectionConfig::from_settings_and_env(&DjinnSettings::default())
-                    .expect("valid worker knowledge injection configuration")
+                KnowledgeInjectionConfig {
+                    knowledge_injection_budget_bytes: 4_096,
+                    knowledge_injection_line_cap_bytes: 256,
+                    knowledge_injection_limit: 3,
+                    injection_starvation_threshold_percent: 50,
+                    injection_starvation_query_floor: 20,
+                    retrieval_health_window_minutes: 1_440,
+                }
             );
             let authorization = context.read_source_authorization;
             cancel.cancel();
