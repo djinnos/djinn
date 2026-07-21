@@ -1302,15 +1302,14 @@ impl TaskRunSupervisor {
         if let (Some(name), Some(email)) = (
             spec.commit_author_name.as_deref(),
             spec.commit_author_email.as_deref(),
-        ) {
-            if let Err(e) = workspace.set_identity(GitIdentity { name, email }).await {
-                tracing::warn!(
-                    task_run_id = %run_id,
-                    task_id = %spec.task_id,
-                    error = %e,
-                    "supervisor: failed to seed workspace git identity (raw shell commits may fall back to the pod default)"
-                );
-            }
+        ) && let Err(e) = workspace.set_identity(GitIdentity { name, email }).await
+        {
+            tracing::warn!(
+                task_run_id = %run_id,
+                task_id = %spec.task_id,
+                error = %e,
+                "supervisor: failed to seed workspace git identity (raw shell commits may fall back to the pod default)"
+            );
         }
 
         // Reset tracked-file mtimes to their last-touched commit time so cargo's
