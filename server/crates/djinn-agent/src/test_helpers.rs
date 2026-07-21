@@ -69,6 +69,13 @@ pub fn test_persistent_dir(prefix: &str) -> std::path::PathBuf {
 pub fn test_path(prefix: &str) -> std::path::PathBuf {
     test_persistent_dir(prefix)
 }
+/// Invoke the agent dispatcher production pre-compaction durability boundary.
+pub fn persist_tool_results_before_compaction_for_test(
+    stash: &mut crate::output_stash::OutputStash,
+    results: &[djinn_slot::host::PreCompactionToolResult],
+) -> Result<Vec<djinn_compaction::ToolOutputPointer>, String> {
+    crate::actors::slot::reply_loop::persist_tool_results_before_compaction_for_test(stash, results)
+}
 
 pub fn create_test_db() -> Database {
     Database::open_in_memory().expect("failed to create test database")
@@ -118,6 +125,7 @@ pub fn agent_context_from_db(db: Database, _cancel: CancellationToken) -> AgentC
         default_project_id: None,
         read_source_authorization: crate::context::ReadSourceAuthorization::default(),
         memory_intent_planner: crate::context::MemoryIntentPlannerConfig::default(),
+        knowledge_injection: djinn_core::models::KnowledgeInjectionConfig::default(),
         reconciliation_sweep: crate::context::ReconciliationSweepConfig::default(),
         compaction_cs: djinn_slot::reply_loop::CompactionCriticalSection::default(),
     }
