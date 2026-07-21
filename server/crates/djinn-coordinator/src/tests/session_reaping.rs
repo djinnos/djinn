@@ -5164,71 +5164,118 @@ async fn startup_orphan_reap_stamps_interrupted_periodic_stamps_crashed() {
     }
 }
 
-/// The reappearance helper detects only an environmental `interrupted` latest
-/// attempt — genuine `crashed`/`timed_out` latest attempts are NOT environmental,
-/// guard-only rows are skipped, and no attempt is NOT environmental.
+/// Strike accounting only exempts the complete durable owner-expiry tuple. A
+/// bare interruption, obsolete startup-reap class, malformed JSON, or mismatched
+/// owner evidence must all fail closed to a counted strike.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn latest_attempt_environmental_interrupt_helper_detection() {
+async fn latest_attempt_strike_decision_requires_complete_owner_expiry_tuple() {
     use djinn_core::models::task_attempt::TaskAttemptOutcome;
     use djinn_db::{TaskAttemptRepository, TerminalTaskAttemptParams};
 
     let db = test_helpers::create_test_db();
     let (tx, _rx) = broadcast::channel(256);
     let actor = coordinator_actor_for_tests(&db, &tx);
+    let terminalize =
+        |attempt_id: String, outcome: TaskAttemptOutcome, summary_json: Option<String>| {
+            let db = db.clone();
+            async move {
+                TaskAttemptRepository::new(db)
+                    .advance_to_terminal(TerminalTaskAttemptParams {
+                        id: &attempt_id,
+                        outcome,
+                        pr_url: None,
+                        submit_ref: None,
+                        checkpoint_ref: None,
+                        mirror_head_sha: None,
+                        github_head_sha: None,
+                        summary: None,
+                        summary_json: summary_json.as_deref(),
+                        log_tail: None,
+                    })
+                    .await
+                    .unwrap();
+            }
+        };
 
-    let terminalize = |attempt_id: String, outcome: TaskAttemptOutcome| {
-        let db = db.clone();
-        async move {
-            let repo = TaskAttemptRepository::new(db.clone());
-            repo.advance_to_terminal(TerminalTaskAttemptParams {
-                id: &attempt_id,
-                outcome,
-                pr_url: None,
-                submit_ref: None,
-                checkpoint_ref: None,
-                mirror_head_sha: None,
-                github_head_sha: None,
-                summary: None,
-                summary_json: None,
-                log_tail: None,
-            })
+    let owner = uuid::Uuid::now_v7().to_string();
+    let valid_evidence = format!(
+        r#"{{"failure_class":"environmental_owner_expired","owner_incarnation_id":"{owner}","owner_classification":"expired","owner_lease_last_renewed_at":"2026-07-20T00:00:00Z"}}"#
+    );
+    let (t_env, _n) = create_task_with_note(&db, &tx, "helper-env").await;
+    let a =
+        seed_pending_attempt_with_identity(&db, &t_env.id, "reviewer", Some(&owner), None).await;
+    terminalize(a, TaskAttemptOutcome::Interrupted, Some(valid_evidence)).await;
+    let decision = actor
+        .latest_attempt_strike_decision(&t_env.id, "reviewer")
+        .await
+        .unwrap();
+    assert!(decision.exempted);
+    assert_eq!(
+        decision.decision,
+        djinn_telemetry::dispatch::STRIKE_DECISION_EXEMPTED
+    );
+    assert_eq!(
+        decision.source,
+        djinn_telemetry::dispatch::STRIKE_SOURCE_ENVIRONMENTAL_OWNER_EXPIRED
+    );
+
+    // Generic interrupted and obsolete startup-reap evidence must not bypass accounting.
+    for (name, evidence) in [
+        ("helper-bare-interrupted", None),
+        (
+            "helper-obsolete-startup",
+            Some(r#"{"failure_class":"startup_reap"}"#.to_string()),
+        ),
+        ("helper-malformed", Some("not-json".to_string())),
+        (
+            "helper-owner-mismatch",
+            Some(format!(
+                r#"{{"failure_class":"environmental_owner_expired","owner_incarnation_id":"{}","owner_classification":"expired","owner_lease_last_renewed_at":"2026-07-20T00:00:00Z"}}"#,
+                uuid::Uuid::now_v7()
+            )),
+        ),
+    ] {
+        let (task, _n) = create_task_with_note(&db, &tx, name).await;
+        let a =
+            seed_pending_attempt_with_identity(&db, &task.id, "reviewer", Some(&owner), None).await;
+        terminalize(a, TaskAttemptOutcome::Interrupted, evidence).await;
+        let decision = actor
+            .latest_attempt_strike_decision(&task.id, "reviewer")
             .await
             .unwrap();
-        }
-    };
+        assert!(!decision.exempted, "{name} must fail closed");
+        assert_eq!(
+            decision.decision,
+            djinn_telemetry::dispatch::STRIKE_DECISION_COUNTED
+        );
+        assert_eq!(
+            decision.source,
+            djinn_telemetry::dispatch::STRIKE_SOURCE_OTHER_TERMINAL
+        );
+    }
 
-    // Interrupted latest → environmental.
-    let (t_env, _n) = create_task_with_note(&db, &tx, "helper-env").await;
-    let a = seed_pending_attempt(&db, &t_env.id, "reviewer").await;
-    terminalize(a, TaskAttemptOutcome::Interrupted).await;
-    assert!(
-        actor
-            .latest_attempt_was_environmental_interrupt(&t_env.id, "reviewer")
-            .await
-    );
-    // Wrong role → not environmental for that role.
-    assert!(
-        !actor
-            .latest_attempt_was_environmental_interrupt(&t_env.id, "worker")
-            .await
-    );
-
-    // Crashed latest → NOT environmental (genuine failure still counts).
+    // The remaining terminal outcomes use only the documented bounded sources.
     let (t_crash, _n) = create_task_with_note(&db, &tx, "helper-crash").await;
     let a = seed_pending_attempt(&db, &t_crash.id, "reviewer").await;
-    terminalize(a, TaskAttemptOutcome::Crashed).await;
-    assert!(
-        !actor
-            .latest_attempt_was_environmental_interrupt(&t_crash.id, "reviewer")
+    terminalize(a, TaskAttemptOutcome::Crashed, None).await;
+    assert_eq!(
+        actor
+            .latest_attempt_strike_decision(&t_crash.id, "reviewer")
             .await
+            .unwrap()
+            .source,
+        djinn_telemetry::dispatch::STRIKE_SOURCE_CRASHED
     );
-
-    // No attempt at all → NOT environmental.
-    let (t_none, _n) = create_task_with_note(&db, &tx, "helper-none").await;
-    assert!(
-        !actor
-            .latest_attempt_was_environmental_interrupt(&t_none.id, "reviewer")
+    let (t_spawn, _n) = create_task_with_note(&db, &tx, "helper-spawn").await;
+    let a = seed_pending_attempt(&db, &t_spawn.id, "reviewer").await;
+    terminalize(a, TaskAttemptOutcome::SpawnFailed, None).await;
+    assert_eq!(
+        actor
+            .latest_attempt_strike_decision(&t_spawn.id, "reviewer")
             .await
+            .unwrap()
+            .source,
+        djinn_telemetry::dispatch::STRIKE_SOURCE_SPAWN_FAILED
     );
 }
 
