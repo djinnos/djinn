@@ -1670,20 +1670,27 @@ async fn compact_conversation_in_critical_section(
     slot_ctx: &SlotContext,
 ) -> Result<bool, String> {
     let _guard = compaction_cs.guard();
-    let results = inline_tool_results(conversation);
-    let pointers = slot_ctx
-        .tool_dispatcher
-        .as_deref()
-        .map(|dispatcher| dispatcher.persist_tool_results_before_compaction(&results))
-        .transpose()?
-        .unwrap_or_default();
+    let dispatcher = slot_ctx.tool_dispatcher.as_deref();
 
     let boundary_repo = SessionCompactionBoundaryRepository::new(slot_ctx.db.clone());
     let boundary_id = record_compaction_started(&boundary_repo, session_id, conversation).await;
-    let compacted = compact_conversation_with_pointers(
-        provider, conversation, session_id, task_id,
-        CompactionContext::MidSession(role_name.to_string()), context_window, &pointers,
-    ).await;
+    // Production and the hardening fixture share this boundary: a failed durable
+    // write returns before compaction can replace any inline tool result.
+    let compacted = compact_conversation_after_persist(
+        provider,
+        conversation,
+        session_id,
+        task_id,
+        role_name,
+        context_window,
+        |results| {
+            dispatcher
+                .map(|dispatcher| dispatcher.persist_tool_results_before_compaction(results))
+                .transpose()
+                .map(|pointers| pointers.unwrap_or_default())
+        },
+    )
+    .await?;
 
     if compacted {
         let summary = conversation
@@ -1708,32 +1715,56 @@ async fn compact_conversation_in_critical_section(
 
 /// The write-before-replacement portion of the reply-loop compaction path.
 async fn compact_conversation_after_persist<F>(
-    provider: &dyn LlmProvider, conversation: &mut Conversation, session_id: &str,
-    task_id: &str, role_name: &str, context_window: i64, persist: F,
+    provider: &dyn LlmProvider,
+    conversation: &mut Conversation,
+    session_id: &str,
+    task_id: &str,
+    role_name: &str,
+    context_window: i64,
+    persist: F,
 ) -> Result<bool, String>
 where
-    F: FnOnce(&[PreCompactionToolResult]) -> Result<Vec<djinn_compaction::ToolOutputPointer>, String>,
+    F: FnOnce(
+        &[PreCompactionToolResult],
+    ) -> Result<Vec<djinn_compaction::ToolOutputPointer>, String>,
 {
     let results = inline_tool_results(conversation);
     let pointers = persist(&results)?;
     Ok(compact_conversation_with_pointers(
-        provider, conversation, session_id, task_id,
-        CompactionContext::MidSession(role_name.to_string()), context_window, &pointers,
-    ).await)
+        provider,
+        conversation,
+        session_id,
+        task_id,
+        CompactionContext::MidSession(role_name.to_string()),
+        context_window,
+        &pointers,
+    )
+    .await)
 }
 
 /// Test-support gateway for the production write-before-replacement sequence.
 #[cfg(any(test, feature = "test-support"))]
 pub async fn compact_conversation_after_persist_for_test<F>(
-    provider: &dyn LlmProvider, conversation: &mut Conversation, context_window: i64, persist: F,
+    provider: &dyn LlmProvider,
+    conversation: &mut Conversation,
+    context_window: i64,
+    persist: F,
 ) -> Result<bool, String>
 where
-    F: FnOnce(&[PreCompactionToolResult]) -> Result<Vec<djinn_compaction::ToolOutputPointer>, String>,
+    F: FnOnce(
+        &[PreCompactionToolResult],
+    ) -> Result<Vec<djinn_compaction::ToolOutputPointer>, String>,
 {
     compact_conversation_after_persist(
-        provider, conversation, "compaction-hardening-session", "compaction-hardening-task",
-        "worker", context_window, persist,
-    ).await
+        provider,
+        conversation,
+        "compaction-hardening-session",
+        "compaction-hardening-task",
+        "worker",
+        context_window,
+        persist,
+    )
+    .await
 }
 
 fn inline_tool_results(conversation: &Conversation) -> Vec<PreCompactionToolResult> {
