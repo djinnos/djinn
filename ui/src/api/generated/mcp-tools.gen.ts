@@ -10840,6 +10840,26 @@ export namespace SettingsGetOutputSchema {
    */
   dispatch_pause?: (DispatchPause | null)
   /**
+   * Minimum query count for injection-starvation evaluation (default 20 queries).
+   */
+  injection_starvation_query_floor?: number
+  /**
+   * Injection-starvation alert threshold in percent (default 50 percent).
+   */
+  injection_starvation_threshold_percent?: number
+  /**
+   * Maximum total UTF-8 bytes injected from retrieved knowledge (default 8192 bytes).
+   */
+  knowledge_injection_budget_bytes?: number
+  /**
+   * Maximum retrieved knowledge candidates considered for injection (default 10).
+   */
+  knowledge_injection_limit?: number
+  /**
+   * Maximum UTF-8 bytes used for one injected knowledge summary (default 1024 bytes).
+   */
+  knowledge_injection_line_cap_bytes?: number
+  /**
    * LEGACY/ignored. Per-model concurrency caps are now **per-user**
    * (`user_settings.max_sessions`) and the slot pool is elastic, so this
    * global field is no longer written or read. Retained only so existing
@@ -10852,6 +10872,10 @@ export namespace SettingsGetOutputSchema {
    * Ordered list of models available to agents, e.g. `["openai/gpt-4o"]`.
    */
   models?: string[]
+  /**
+   * Retrieval-health aggregation window in minutes (default 1440 minutes).
+   */
+  retrieval_health_window_minutes?: number
   }
   /**
    * Metadata recorded when dispatch is paused for a scope.
@@ -10889,12 +10913,36 @@ export namespace SettingsSetInputSchema {
    */
   dispatch_limit?: number
   /**
+   * Minimum retrieval queries for starvation evaluation (1 through 10000).
+   */
+  injection_starvation_query_floor?: number
+  /**
+   * Injection-starvation threshold in percent (1 through 100).
+   */
+  injection_starvation_threshold_percent?: number
+  /**
+   * Maximum total injected knowledge size in UTF-8 bytes (256 through 32768).
+   */
+  knowledge_injection_budget_bytes?: number
+  /**
+   * Maximum retrieved knowledge candidates considered for injection (1 through 50).
+   */
+  knowledge_injection_limit?: number
+  /**
+   * Maximum injected knowledge summary size in UTF-8 bytes (128 through 4096).
+   */
+  knowledge_injection_line_cap_bytes?: number
+  /**
    * Ordered list of models available to all agents (e.g. ["openai/gpt-4o"]). Omit to keep current value.
    * This is the deployment FALLBACK list (used for tasks with no creator and
    * users with no per-user selection); per-user model selection + concurrency
    * caps live in `user_settings_*`.
    */
   models?: string[]
+  /**
+   * Retrieval-health aggregation window in minutes (5 through 10080).
+   */
+  retrieval_health_window_minutes?: number
   [k: string]: any
   }
 
