@@ -24,6 +24,9 @@ use crate::fixtures::{
     MinedMemoryRefRow, Phase1Fixtures,
 };
 
+const EVAL_CREATOR_USER_ID: &str = "00000000-0000-7000-8000-00000000e001";
+const EVAL_CREATOR_GITHUB_ID: i64 = 9_000_000_101;
+
 // ── Loaded database state ─────────────────────────────────────────────────
 
 /// The state of the loaded fixture database: the project, note IDs keyed by
@@ -331,6 +334,10 @@ pub async fn load_fixtures(db: &Database, fixtures: &Phase1Fixtures) -> Result<L
     let epic_id = create_epic(db, &project.id, "memory-eval-epic").await;
     info!(epic_id = %epic_id, "created eval epic");
 
+    // Task creators are a contracted FK, so seed a fixture-owned identity
+    // rather than depending on whichever users a migrated database contains.
+    ensure_eval_creator(db).await?;
+
     // ── Phase 1: Insert notes ─────────────────────────────────────────────
     let repo = NoteRepository::new(db.clone(), djinn_core::events::EventBus::noop());
 
@@ -498,10 +505,16 @@ pub async fn load_fixtures(db: &Database, fixtures: &Phase1Fixtures) -> Result<L
             task_memory_ref_note_ids(fixtures, fixture_task_id, &note_id_by_permalink);
 
         // Create the task with memory_refs pointing to note IDs
-        let db_task_id =
-            create_task_with_memory_refs(db, &project.id, &epic_id, fixture_task_id, &memory_refs)
-                .await
-                .with_context(|| format!("creating task '{}'", fixture_task_id))?;
+        let db_task_id = create_task_with_memory_refs(
+            db,
+            &project.id,
+            &epic_id,
+            EVAL_CREATOR_USER_ID,
+            fixture_task_id,
+            &memory_refs,
+        )
+        .await
+        .with_context(|| format!("creating task '{}'", fixture_task_id))?;
 
         task_id_map.insert(fixture_task_id.clone(), db_task_id);
     }
@@ -516,6 +529,16 @@ pub async fn load_fixtures(db: &Database, fixtures: &Phase1Fixtures) -> Result<L
 }
 
 // ── Internal helpers ──────────────────────────────────────────────────────
+
+async fn ensure_eval_creator(db: &Database) -> Result<()> {
+    djinn_db::repositories::test_support::seed_eval_creator_user(
+        db,
+        EVAL_CREATOR_USER_ID,
+        EVAL_CREATOR_GITHUB_ID,
+    )
+    .await;
+    Ok(())
+}
 
 /// Insert a corpus note row using the djinn-db test_support seed helper,
 /// which provides full control over timestamps, status, and confidence
@@ -593,6 +616,7 @@ async fn create_task_with_memory_refs(
     db: &Database,
     project_id: &str,
     epic_id: &str,
+    created_by_user_id: &str,
     fixture_task_id: &str,
     memory_refs_note_ids: &[String],
 ) -> Result<String> {
@@ -601,6 +625,7 @@ async fn create_task_with_memory_refs(
         db,
         project_id,
         epic_id,
+        created_by_user_id,
         fixture_task_id,
         &memory_refs_json,
     )
