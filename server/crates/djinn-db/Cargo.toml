@@ -18,6 +18,7 @@ base64 = "0.22"
 djinn-core = { path = "../djinn-core", features = ["sqlx"] }
 djinn-stack = { path = "../djinn-stack" }
 djinn-memory = { path = "../djinn-memory", features = ["sqlx"] }
+djinn-spec-lint = { path = "../djinn-spec-lint" }
 dirs = "6"
 globset = "0.4"
 ring = "0.17"

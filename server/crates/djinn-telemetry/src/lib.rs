@@ -1549,16 +1549,16 @@ pub mod dispatch {
     pub const OUTCOME_COOLDOWN: &str = "cooldown";
     pub const OUTCOME_CAP: &str = "cap";
     pub const OUTCOME_BREAKER: &str = "breaker";
-    pub const OUTCOME_ERROR: &str = "error";
-
-    /// Increment the dispatch-attempt counter for one of the stable outcome labels.
-    ///
-    /// This is intentionally synchronous and non-async so dispatch hot paths never
     /// Record one evaluated dispatch strike decision using only bounded labels.
     pub fn increment_strike_decision(decision: &'static str, source: &'static str) {
         metrics::counter!(super::DISPATCH_STRIKE_DECISIONS_TOTAL, "decision" => decision, "source" => source).increment(1);
     }
 
+    pub const OUTCOME_ERROR: &str = "error";
+
+    /// Increment the dispatch-attempt counter for one of the stable outcome labels.
+    ///
+    /// This is intentionally synchronous and non-async so dispatch hot paths never
     /// need to hold any application lock across an await to emit telemetry.
     pub fn increment_attempt(outcome: &'static str) {
         metrics::counter!(super::DISPATCH_ATTEMPTS_TOTAL, "outcome" => outcome).increment(1);
@@ -2797,6 +2797,16 @@ mod tests {
                 "missing dispatch outcome label {outcome} in:\n{rendered}"
             );
         }
+        for decision in DISPATCH_STRIKE_DECISIONS {
+            for source in DISPATCH_STRIKE_SOURCES {
+                assert!(
+                    rendered.contains(&format!(
+                        "djinn_dispatch_strike_decisions_total{{decision=\"{decision}\",source=\"{source}\"}}"
+                    )),
+                    "missing dispatch strike decision/source tuple {decision}/{source} in:\n{rendered}"
+                );
+            }
+        }
         for outcome in JIT_PITFALL_OUTCOMES {
             assert!(
                 rendered.contains(&format!(
@@ -2829,6 +2839,48 @@ mod tests {
 
         let rendered = render().unwrap();
         assert!(rendered.contains("djinn_dispatch_attempts_total{outcome=\"ok\"}"));
+    }
+
+    #[test]
+    fn dispatch_strike_decisions_increment_exactly_one_bounded_series_each() {
+        let (_, rendered) = render_isolated(|| {
+            dispatch::increment_strike_decision(
+                dispatch::STRIKE_DECISION_EXEMPTED,
+                dispatch::STRIKE_SOURCE_ENVIRONMENTAL_OWNER_EXPIRED,
+            );
+            dispatch::increment_strike_decision(
+                dispatch::STRIKE_DECISION_COUNTED,
+                dispatch::STRIKE_SOURCE_CRASHED,
+            );
+        });
+
+        assert_eq!(
+            labeled_sample_value(
+                &rendered,
+                DISPATCH_STRIKE_DECISIONS_TOTAL,
+                &[
+                    ("decision", "exempted"),
+                    ("source", "environmental_owner_expired")
+                ],
+            ),
+            1.0
+        );
+        assert_eq!(
+            labeled_sample_value(
+                &rendered,
+                DISPATCH_STRIKE_DECISIONS_TOTAL,
+                &[("decision", "counted"), ("source", "crashed")],
+            ),
+            1.0
+        );
+        assert_eq!(
+            rendered
+                .lines()
+                .filter(|line| line.starts_with("djinn_dispatch_strike_decisions_total{"))
+                .count(),
+            2,
+            "the two evaluations must create exactly one bounded sample each"
+        );
     }
 
     #[test]

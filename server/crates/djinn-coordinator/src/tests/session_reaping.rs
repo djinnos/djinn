@@ -5164,71 +5164,123 @@ async fn startup_orphan_reap_stamps_interrupted_periodic_stamps_crashed() {
     }
 }
 
-/// The reappearance helper detects only an environmental `interrupted` latest
-/// attempt — genuine `crashed`/`timed_out` latest attempts are NOT environmental,
-/// guard-only rows are skipped, and no attempt is NOT environmental.
+/// Strike accounting only exempts the complete durable owner-expiry tuple. A
+/// bare interruption, obsolete startup-reap class, malformed JSON, or mismatched
+/// owner evidence must all fail closed to a counted strike.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn latest_attempt_environmental_interrupt_helper_detection() {
+async fn latest_attempt_strike_decision_requires_complete_owner_expiry_tuple() {
     use djinn_core::models::task_attempt::TaskAttemptOutcome;
     use djinn_db::{TaskAttemptRepository, TerminalTaskAttemptParams};
 
     let db = test_helpers::create_test_db();
     let (tx, _rx) = broadcast::channel(256);
     let actor = coordinator_actor_for_tests(&db, &tx);
+    let terminalize =
+        |attempt_id: String, outcome: TaskAttemptOutcome, summary_json: Option<String>| {
+            let db = db.clone();
+            async move {
+                TaskAttemptRepository::new(db)
+                    .advance_to_terminal(TerminalTaskAttemptParams {
+                        id: &attempt_id,
+                        outcome,
+                        pr_url: None,
+                        submit_ref: None,
+                        checkpoint_ref: None,
+                        mirror_head_sha: None,
+                        github_head_sha: None,
+                        summary: None,
+                        summary_json: summary_json.as_deref(),
+                        log_tail: None,
+                    })
+                    .await
+                    .unwrap();
+            }
+        };
 
-    let terminalize = |attempt_id: String, outcome: TaskAttemptOutcome| {
-        let db = db.clone();
-        async move {
-            let repo = TaskAttemptRepository::new(db.clone());
-            repo.advance_to_terminal(TerminalTaskAttemptParams {
-                id: &attempt_id,
-                outcome,
-                pr_url: None,
-                submit_ref: None,
-                checkpoint_ref: None,
-                mirror_head_sha: None,
-                github_head_sha: None,
-                summary: None,
-                summary_json: None,
-                log_tail: None,
-            })
+    let owner = uuid::Uuid::now_v7().to_string();
+    let valid_evidence = format!(
+        r#"{{"failure_class":"environmental_owner_expired","owner_incarnation_id":"{owner}","owner_classification":"expired","owner_lease_last_renewed_at":"2026-07-20T00:00:00Z"}}"#
+    );
+    let (t_env, _n) = create_task_with_note(&db, &tx, "helper-env").await;
+    let a =
+        seed_pending_attempt_with_identity(&db, &t_env.id, "reviewer", Some(&owner), None).await;
+    terminalize(a, TaskAttemptOutcome::Interrupted, Some(valid_evidence)).await;
+    let decision = actor
+        .latest_attempt_strike_decision(&t_env.id, "reviewer")
+        .await
+        .unwrap();
+    assert!(decision.exempted);
+    assert_eq!(
+        decision.decision,
+        djinn_telemetry::dispatch::STRIKE_DECISION_EXEMPTED
+    );
+    assert_eq!(
+        decision.source,
+        djinn_telemetry::dispatch::STRIKE_SOURCE_ENVIRONMENTAL_OWNER_EXPIRED
+    );
+
+    // Generic interrupted and obsolete startup-reap evidence must not bypass accounting.
+    for (name, evidence) in [
+        ("helper-bare-interrupted", None),
+        (
+            "helper-obsolete-startup",
+            Some(r#"{"failure_class":"startup_reap"}"#.to_string()),
+        ),
+        // The persistence boundary requires a JSON object, so exercise malformed
+        // evidence with a required field of the wrong type.
+        (
+            "helper-malformed-type",
+            Some(r#"{"failure_class":17}"#.to_string()),
+        ),
+        (
+            "helper-owner-mismatch",
+            Some(format!(
+                r#"{{"failure_class":"environmental_owner_expired","owner_incarnation_id":"{}","owner_classification":"expired","owner_lease_last_renewed_at":"2026-07-20T00:00:00Z"}}"#,
+                uuid::Uuid::now_v7()
+            )),
+        ),
+    ] {
+        let (task, _n) = create_task_with_note(&db, &tx, name).await;
+        let a =
+            seed_pending_attempt_with_identity(&db, &task.id, "reviewer", Some(&owner), None).await;
+        terminalize(a, TaskAttemptOutcome::Interrupted, evidence).await;
+        let decision = actor
+            .latest_attempt_strike_decision(&task.id, "reviewer")
             .await
             .unwrap();
-        }
-    };
+        assert!(!decision.exempted, "{name} must fail closed");
+        assert_eq!(
+            decision.decision,
+            djinn_telemetry::dispatch::STRIKE_DECISION_COUNTED
+        );
+        assert_eq!(
+            decision.source,
+            djinn_telemetry::dispatch::STRIKE_SOURCE_OTHER_TERMINAL
+        );
+    }
 
-    // Interrupted latest → environmental.
-    let (t_env, _n) = create_task_with_note(&db, &tx, "helper-env").await;
-    let a = seed_pending_attempt(&db, &t_env.id, "reviewer").await;
-    terminalize(a, TaskAttemptOutcome::Interrupted).await;
-    assert!(
-        actor
-            .latest_attempt_was_environmental_interrupt(&t_env.id, "reviewer")
-            .await
-    );
-    // Wrong role → not environmental for that role.
-    assert!(
-        !actor
-            .latest_attempt_was_environmental_interrupt(&t_env.id, "worker")
-            .await
-    );
-
-    // Crashed latest → NOT environmental (genuine failure still counts).
+    // The remaining terminal outcomes use only the documented bounded sources.
     let (t_crash, _n) = create_task_with_note(&db, &tx, "helper-crash").await;
     let a = seed_pending_attempt(&db, &t_crash.id, "reviewer").await;
-    terminalize(a, TaskAttemptOutcome::Crashed).await;
-    assert!(
-        !actor
-            .latest_attempt_was_environmental_interrupt(&t_crash.id, "reviewer")
+    terminalize(a, TaskAttemptOutcome::Crashed, None).await;
+    assert_eq!(
+        actor
+            .latest_attempt_strike_decision(&t_crash.id, "reviewer")
             .await
+            .unwrap()
+            .source,
+        djinn_telemetry::dispatch::STRIKE_SOURCE_CRASHED
     );
-
-    // No attempt at all → NOT environmental.
-    let (t_none, _n) = create_task_with_note(&db, &tx, "helper-none").await;
-    assert!(
-        !actor
-            .latest_attempt_was_environmental_interrupt(&t_none.id, "reviewer")
+    let (t_spawn, _n) = create_task_with_note(&db, &tx, "helper-spawn").await;
+    let a = seed_pending_attempt(&db, &t_spawn.id, "reviewer").await;
+    terminalize(a, TaskAttemptOutcome::SpawnFailed, None).await;
+    assert_eq!(
+        actor
+            .latest_attempt_strike_decision(&t_spawn.id, "reviewer")
             .await
+            .unwrap()
+            .source,
+        djinn_telemetry::dispatch::STRIKE_SOURCE_SPAWN_FAILED
     );
 }
 
@@ -7303,127 +7355,118 @@ async fn evidence_reap_overlap_live_old_dead_new_classifies_each_from_own_lease(
     assert_eq!(new_sj["owner_classification"], "expired");
 }
 
-/// Full retry accounting must fail closed: a `spawn_failed` orphan is a real
-/// same-role dispatch failure, so repeated attempts consume the existing cap
-/// and use the normal no-PR terminal-close handling.
+/// Repeated `spawn_failed` dispatch-start rows are evaluated by the actual
+/// same-role reappearance path. Lead avoids the worker/reviewer cycling
+/// intervention so this isolates the existing terminal retry cap.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn spawn_failed_dispatch_orphan_reaches_no_pr_terminal_cap() {
+async fn spawn_failed_dispatch_orphan_reaches_no_pr_terminal_cap_live() {
     use djinn_core::models::task_attempt::TaskAttemptOutcome;
     use djinn_db::{TaskAttemptRepository, TerminalTaskAttemptParams};
 
     let db = test_helpers::create_test_db();
     let (tx, _rx) = broadcast::channel(256);
     let (task, _note) = create_task_with_note(&db, &tx, "spawn-failed-retry-cap").await;
+    let task = TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx))
+        .set_status(&task.id, "needs_lead_intervention")
+        .await
+        .unwrap();
     let attempts = TaskAttemptRepository::new(db.clone());
     let mut actor = coordinator_actor_for_tests(&db, &tx);
 
     for strike in 1..=MAX_DISPATCH_FAILURES {
-        let attempt_id = seed_pending_attempt(&db, &task.id, "worker").await;
-        attempts
-            .advance_to_terminal(TerminalTaskAttemptParams {
-                id: &attempt_id,
-                outcome: TaskAttemptOutcome::SpawnFailed,
-                pr_url: None,
-                submit_ref: None,
-                checkpoint_ref: None,
-                mirror_head_sha: None,
-                github_head_sha: None,
-                summary: Some("dispatch setup failed"),
-                summary_json: Some(r#"{"failure_class":"dispatch_failure_orphan"}"#),
-                log_tail: None,
-            })
-            .await
-            .unwrap();
+        let attempt_id = seed_pending_attempt(&db, &task.id, "lead").await;
+        attempts.advance_to_terminal(TerminalTaskAttemptParams {
+            id: &attempt_id,
+            outcome: TaskAttemptOutcome::SpawnFailed,
+            pr_url: None,
+            submit_ref: None,
+            checkpoint_ref: None,
+            mirror_head_sha: None,
+            github_head_sha: None,
+            summary: Some("dispatch setup failed"),
+            summary_json: Some(r#"{"failure_class":"dispatch_failure_orphan"}"#),
+            log_tail: None,
+        }).await.unwrap();
+        actor.last_dispatched.insert(task.id.clone(), DispatchMarker {
+            instant: StdInstant::now(), role: "lead".to_owned(),
+        });
 
-        let decision = actor
-            .latest_attempt_strike_decision(&task.id, "worker")
-            .await
-            .expect("persisted spawn failure is evaluated");
-        assert!(!decision.exempted);
-        assert_eq!(decision.source, "spawn_failed");
-        actor
-            .apply_chain_exhaustion_side_effects(&task, "worker", &[])
-            .await;
-
+        actor.dispatch_ready_tasks(Some(&task.project_id)).await;
         if strike < MAX_DISPATCH_FAILURES {
             assert_eq!(actor.dispatch_failure_streak.get(&task.id), Some(&strike));
+            assert!(actor.dispatch_cooldowns.contains_key(&task.id));
+            // Model the next periodic retry after the persisted cooldown expires.
+            actor.dispatch_cooldowns.remove(&task.id);
         }
     }
 
     let closed = TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx))
-        .get(&task.id)
-        .await
-        .unwrap()
-        .unwrap();
+        .get(&task.id).await.unwrap().unwrap();
     assert!(closed.pr_url.is_none(), "fixture is intentionally PR-less");
     assert_eq!(closed.status, "closed");
 }
 
-/// Persisted coordinator/supervisor peers with distinct roles share one exact
-/// dispatch group.  After the owner's lease expires, periodic reaping records
-/// durable environmental evidence, exempts the retry decision, and leaves both
-/// the task and an unrelated fresh group available for redispatch.
+/// A live coordinator dispatch and its worker supervisor run retain one owner
+/// and exact group. After that exact owner's lease expires, periodic reaping
+/// reconciles only that group; the live retry path exempts it and dispatches.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn expired_owner_group_reap_is_exempt_and_isolates_unrelated_group() {
-    use djinn_db::TaskAttemptRepository;
+async fn expired_owner_group_reap_redispatches_without_touching_peer_group() {
+    use crate::dispatch::attempt_lifecycle::record_dispatch_start_with_identity;
+    use djinn_core::models::TaskRunStatus;
+    use djinn_db::{CreateTaskRunParams, TaskAttemptRepository, TaskRunRepository};
 
     let db = test_helpers::create_test_db();
     let (tx, _rx) = broadcast::channel(256);
     let (task, _note) = create_task_with_note(&db, &tx, "lre2-expired-owner-restart").await;
-    let attempts = TaskAttemptRepository::new(db.clone());
-    let owner = register_incarnation(&db, true).await;
+    let owner = register_incarnation(&db, false).await;
     let group = uuid::Uuid::now_v7().to_string();
     let unrelated_group = uuid::Uuid::now_v7().to_string();
 
-    let coordinator_attempt =
-        seed_pending_attempt_with_identity(&db, &task.id, "planner", Some(&owner), Some(&group))
-            .await;
-    let supervisor_attempt =
-        seed_pending_attempt_with_identity(&db, &task.id, "worker", Some(&owner), Some(&group))
-            .await;
-    let unrelated = seed_pending_attempt_with_identity(
-        &db,
-        &task.id,
-        "worker",
-        Some(&owner),
-        Some(&unrelated_group),
-    )
-    .await;
-    backdate_attempt(&db, &coordinator_attempt).await;
-    backdate_attempt(&db, &supervisor_attempt).await;
+    let coordinator_attempt = record_dispatch_start_with_identity(
+        &db, &task.id, "lead", None, "coordinator-dispatch-start", &owner, &group,
+    ).await.expect("persist coordinator dispatch-start");
+    let supervisor_attempt = record_dispatch_start_with_identity(
+        &db, &task.id, "worker", None, "task-run:supervisor-run", &owner, &group,
+    ).await.expect("persist correlated supervisor attempt");
+    let run_repo = TaskRunRepository::new(db.clone());
+    run_repo.create(CreateTaskRunParams {
+        id: "supervisor-run", project_id: &task.project_id, task_id: &task.id,
+        trigger_type: "new_task", status: Some("running"), workspace_path: None,
+        mirror_ref: None, dispatch_group_id: Some(&group),
+    }).await.expect("persist live supervisor run");
+    let unrelated = record_dispatch_start_with_identity(
+        &db, &task.id, "planner", None, "unrelated-dispatch-start", &owner, &unrelated_group,
+    ).await.expect("persist unrelated pending group");
+
+    // The restart ends the live supervisor run; only then does the exact owner
+    // expire. Every pending row is equally old enough to be a reap candidate.
+    run_repo.update_status("supervisor-run", TaskRunStatus::Interrupted).await.unwrap();
+    for attempt in [&coordinator_attempt, &supervisor_attempt, &unrelated] {
+        backdate_attempt(&db, attempt).await;
+    }
+    djinn_db::test_support::backdate_coordinator_incarnation_lease(&db, &owner, "1 hour").await;
 
     crate::health::reap_orphaned_pending_attempts_with_threshold(&db, 15 * 60, "periodic").await;
-
-    for id in [&coordinator_attempt, &supervisor_attempt] {
-        let row = attempts.get(id).await.unwrap().unwrap();
+    let attempts = TaskAttemptRepository::new(db.clone());
+    for attempt in [&coordinator_attempt, &supervisor_attempt] {
+        let row = attempts.get(attempt).await.unwrap().unwrap();
+        let evidence: serde_json::Value = serde_json::from_str(row.summary_json.as_deref().unwrap()).unwrap();
         assert_eq!(row.outcome, "interrupted");
-        let evidence: serde_json::Value =
-            serde_json::from_str(row.summary_json.as_deref().unwrap()).unwrap();
         assert_eq!(evidence["failure_class"], "environmental_owner_expired");
         assert_eq!(evidence["owner_incarnation_id"], owner);
         assert!(evidence["owner_lease_last_renewed_at"].is_string());
     }
-    assert_eq!(
-        attempts.get(&unrelated).await.unwrap().unwrap().outcome,
-        "pending"
-    );
+    assert_eq!(attempts.get(&unrelated).await.unwrap().unwrap().outcome, "pending");
 
-    let actor = coordinator_actor_for_tests(&db, &tx);
-    let decision = actor
-        .latest_attempt_strike_decision(&task.id, "worker")
-        .await
-        .expect("reaped supervisor attempt is evaluated");
-    assert!(decision.exempted);
-    assert_eq!(decision.decision, "exempted");
-    assert_eq!(decision.source, "environmental_owner_expired");
+    let mut actor = coordinator_actor_for_tests(&db, &tx);
+    actor.last_dispatched.insert(task.id.clone(), DispatchMarker {
+        instant: StdInstant::now(), role: "worker".to_owned(),
+    });
+    actor.dispatch_ready_tasks(Some(&task.project_id)).await;
+    assert_eq!(actor.dispatched, 1, "evidenced interruption must redispatch");
     assert!(!actor.dispatch_failure_streak.contains_key(&task.id));
     assert!(!actor.dispatch_cooldowns.contains_key(&task.id));
-
     let refreshed = TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx))
-        .get(&task.id)
-        .await
-        .unwrap()
-        .unwrap();
+        .get(&task.id).await.unwrap().unwrap();
     assert_eq!(refreshed.status, "open");
-    assert!(refreshed.pr_url.is_none());
 }

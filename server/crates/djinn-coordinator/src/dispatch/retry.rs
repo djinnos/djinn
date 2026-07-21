@@ -32,34 +32,30 @@ impl CoordinatorActor {
             .list_for_task(task_id)
             .await
             .ok()?;
-        let attempt = attempts
-            .iter()
-            .filter(|attempt| attempt.role == role)
-            .find(|attempt| {
-                attempt.outcome != TaskAttemptOutcome::Deferred.as_str()
-                    && attempt.outcome != TaskAttemptOutcome::AdoptedPr.as_str()
-            })?;
+        // A newer pending dispatch in another group is in-flight, not evidence
+        // for the same-role retry decision. Evaluate only terminal attempts.
+        let attempt = attempts.iter().filter(|attempt| attempt.role == role).find(|attempt| {
+            !matches!(
+                attempt.outcome.as_str(),
+                "pending" | "submitted" | "deferred" | "adopted_pr"
+            )
+        })?;
         let source = match attempt.outcome.as_str() {
             "spawn_failed" => djinn_telemetry::dispatch::STRIKE_SOURCE_SPAWN_FAILED,
             "crashed" => djinn_telemetry::dispatch::STRIKE_SOURCE_CRASHED,
             _ => djinn_telemetry::dispatch::STRIKE_SOURCE_OTHER_TERMINAL,
         };
         let exempted = attempt.outcome == "interrupted"
-            && attempt
-                .dispatch_owner_incarnation_id
-                .as_deref()
-                .is_some_and(|owner| {
-                    attempt
-                        .summary_json
-                        .as_deref()
-                        .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
-                        .is_some_and(|evidence| {
-                            evidence["failure_class"] == "environmental_owner_expired"
-                                && evidence["owner_incarnation_id"] == owner
-                                && evidence["owner_classification"] == "expired"
-                                && evidence["owner_lease_last_renewed_at"].is_string()
-                        })
-                });
+            && attempt.dispatch_owner_incarnation_id.as_deref().is_some_and(|owner| {
+                attempt.summary_json.as_deref()
+                    .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+                    .is_some_and(|evidence| {
+                        evidence["failure_class"] == "environmental_owner_expired"
+                            && evidence["owner_incarnation_id"] == owner
+                            && evidence["owner_classification"] == "expired"
+                            && evidence["owner_lease_last_renewed_at"].is_string()
+                    })
+            });
         Some(DispatchStrikeDecision {
             exempted,
             decision: if exempted {
@@ -73,19 +69,6 @@ impl CoordinatorActor {
                 source
             },
         })
-    }
-}
-
-impl CoordinatorActor {
-    #[allow(dead_code)]
-    pub(crate) async fn latest_attempt_was_environmental_interrupt(
-        &self,
-        task_id: &str,
-        role: &str,
-    ) -> bool {
-        self.latest_attempt_strike_decision(task_id, role)
-            .await
-            .is_some_and(|decision| decision.exempted)
     }
 }
 
