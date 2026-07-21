@@ -42,6 +42,12 @@ pub struct OrphanedPendingAttempt {
     pub role: String,
     pub dispatch_key: String,
     pub created_at: String,
+    /// Immutable coordinator-incarnation UUID that owns this dispatch (NULL for
+    /// legacy rows). The reaper uses this to resolve the durable owner lease.
+    pub dispatch_owner_incarnation_id: Option<String>,
+    /// Exact dispatch-group UUID correlating this attempt with its peers (NULL
+    /// for legacy rows). The reaper batch-terminalizes non-NULL groups.
+    pub dispatch_group_id: Option<String>,
 }
 
 /// Parameters for creating or idempotently returning a pending attempt row.
@@ -920,7 +926,9 @@ impl TaskAttemptRepository {
         Ok(sqlx::query_as!(
             OrphanedPendingAttempt,
             r#"SELECT ta.id AS "id!", ta.task_id AS "task_id!", ta.role AS "role!",
-                ta.dispatch_key AS "dispatch_key!", ta.created_at AS "created_at!"
+                ta.dispatch_key AS "dispatch_key!", ta.created_at AS "created_at!",
+                ta.dispatch_owner_incarnation_id,
+                ta.dispatch_group_id
              FROM task_attempts ta
              WHERE ta.outcome = 'pending'
                AND ta.created_at < $1
@@ -979,7 +987,8 @@ impl TaskAttemptRepository {
         // Runtime-checked query: avoids sqlx compile-time cache dependency for
         // this new query (mirrors `insert_rework_marker`/`ledger_for_task_since`).
         let rows = sqlx::query(
-            r#"SELECT ta.id, ta.task_id, ta.role, ta.dispatch_key, ta.created_at
+            r#"SELECT ta.id, ta.task_id, ta.role, ta.dispatch_key, ta.created_at,
+                ta.dispatch_owner_incarnation_id, ta.dispatch_group_id
              FROM task_attempts ta
              JOIN tasks t ON t.id = ta.task_id
              WHERE ta.outcome = 'submitted'
@@ -1019,6 +1028,8 @@ impl TaskAttemptRepository {
                 role: r.get("role"),
                 dispatch_key: r.get("dispatch_key"),
                 created_at: r.get("created_at"),
+                dispatch_owner_incarnation_id: r.get("dispatch_owner_incarnation_id"),
+                dispatch_group_id: r.get("dispatch_group_id"),
             })
             .collect())
     }
