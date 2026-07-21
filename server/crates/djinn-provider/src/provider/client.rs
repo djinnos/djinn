@@ -447,7 +447,18 @@ impl ApiClient {
                             yield Ok(data.to_string());
                         }
                     }
-                    Ok(Ok(None)) => break, // end of stream
+                    Ok(Ok(None)) => {
+                        if !first_event_received {
+                            yield Err(exhausted_transport_error(
+                                true,
+                                None,
+                                TransportClassificationInput::Eligible(super::transport::ExhaustedTransportCategory::UnexpectedEof),
+                                estimated_payload_chars,
+                                "SSE stream ended before the first data event".to_string(),
+                            ));
+                        }
+                        break;
+                    }
                     Ok(Err(e)) => {
                         let input = if first_event_received {
                             TransportClassificationInput::PostFirstEvent
@@ -640,7 +651,18 @@ impl ApiClient {
                             yield Ok(frame);
                         }
                     }
-                    Ok(Ok(None)) => break,
+                    Ok(Ok(None)) => {
+                        if !first_event_received {
+                            yield Err(exhausted_transport_error(
+                                true,
+                                None,
+                                TransportClassificationInput::Eligible(super::transport::ExhaustedTransportCategory::UnexpectedEof),
+                                estimated_payload_chars,
+                                "SSE stream ended before the first data event".to_string(),
+                            ));
+                        }
+                        break;
+                    }
                     Ok(Err(e)) => {
                         let input = if first_event_received {
                             TransportClassificationInput::PostFirstEvent
@@ -877,6 +899,78 @@ impl Default for ApiClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    async fn serve_one_sse_response(payload: &'static str) -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = [0; 4096];
+            let _ = socket.read(&mut request).await.unwrap();
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                payload.len(),
+                payload
+            );
+            socket.write_all(response.as_bytes()).await.unwrap();
+            socket.shutdown().await.unwrap();
+        });
+        format!("http://{address}")
+    }
+
+    fn assert_unexpected_eof(error: &anyhow::Error, expected_request_bytes: usize) {
+        match error.downcast_ref::<ProviderError>() {
+            Some(ProviderError::ExhaustedTransport(diagnostic)) => {
+                assert_eq!(
+                    diagnostic.category,
+                    super::super::transport::ExhaustedTransportCategory::UnexpectedEof
+                );
+                assert_eq!(diagnostic.estimated_payload_chars, expected_request_bytes);
+            }
+            other => panic!("expected exhausted UnexpectedEof transport error, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn stream_sse_empty_body_reports_unexpected_eof_with_exact_request_bytes() {
+        let url = serve_one_sse_response("").await;
+        let body = serde_json::json!({"model": "fixture", "message": "é"});
+        let expected_request_bytes = serde_json::to_vec(&body).unwrap().len();
+        let mut stream =
+            ApiClient::new().stream_sse(&url, body, &AuthMethod::NoAuth, HeaderMap::new());
+
+        let error = stream.next().await.unwrap().unwrap_err();
+        assert_unexpected_eof(&error, expected_request_bytes);
+        assert!(stream.next().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn stream_sse_frames_empty_body_reports_unexpected_eof_with_exact_request_bytes() {
+        let url = serve_one_sse_response("").await;
+        let body = serde_json::json!({"model": "fixture", "message": "éé"});
+        let expected_request_bytes = serde_json::to_vec(&body).unwrap().len();
+        let mut stream =
+            ApiClient::new().stream_sse_frames(&url, body, &AuthMethod::NoAuth, HeaderMap::new());
+
+        let error = stream.next().await.unwrap().unwrap_err();
+        assert_unexpected_eof(&error, expected_request_bytes);
+        assert!(stream.next().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn stream_sse_eof_after_data_remains_an_ordinary_end_of_stream() {
+        let url = serve_one_sse_response("data: {\"ok\":true}\n\n").await;
+        let body = serde_json::json!({"model": "fixture"});
+        let mut stream =
+            ApiClient::new().stream_sse(&url, body, &AuthMethod::NoAuth, HeaderMap::new());
+
+        assert_eq!(
+            stream.next().await.unwrap().unwrap(),
+            "{\"ok\":true}".to_string()
+        );
+        assert!(stream.next().await.is_none());
+    }
 
     #[test]
     fn request_timeout_is_10_minutes() {
