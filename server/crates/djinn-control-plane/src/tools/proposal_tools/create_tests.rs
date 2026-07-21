@@ -323,17 +323,33 @@ mod body_excerpt_tests {
             .dispatch_tool("proposal_list", serde_json::json!({ "limit": 10 }))
             .await
             .unwrap();
-        assert!(list.get("error").is_none(), "list failed: {:?}", list.get("error"));
+        assert!(
+            list.get("error").is_none(),
+            "list failed: {:?}",
+            list.get("error")
+        );
 
         let rows = list["proposals"].as_array().expect("proposals array");
         assert!(!rows.is_empty());
         let row = &rows[0];
 
         // Default rows omit body, excerpt metadata, and criteria.
-        assert!(row.get("body").is_none(), "body must be absent on default rows");
-        assert!(row.get("body_excerpt").is_none(), "body_excerpt must be absent");
-        assert!(row.get("body_truncated").is_none(), "body_truncated must be absent");
-        assert!(row.get("acceptance_criteria").is_none(), "criteria must be absent");
+        assert!(
+            row.get("body").is_none(),
+            "body must be absent on default rows"
+        );
+        assert!(
+            row.get("body_excerpt").is_none(),
+            "body_excerpt must be absent"
+        );
+        assert!(
+            row.get("body_truncated").is_none(),
+            "body_truncated must be absent"
+        );
+        assert!(
+            row.get("acceptance_criteria").is_none(),
+            "criteria must be absent"
+        );
         // Always-present integer counts.
         assert_eq!(row["ac_total"].as_i64(), Some(2));
         assert_eq!(row["ac_met"].as_i64(), Some(1));
@@ -356,10 +372,17 @@ mod body_excerpt_tests {
         .unwrap();
 
         let list = server
-            .dispatch_tool("proposal_list", serde_json::json!({ "limit": 10, "include_bodies": true }))
+            .dispatch_tool(
+                "proposal_list",
+                serde_json::json!({ "limit": 10, "include_bodies": true }),
+            )
             .await
             .unwrap();
-        assert!(list.get("error").is_none(), "list failed: {:?}", list.get("error"));
+        assert!(
+            list.get("error").is_none(),
+            "list failed: {:?}",
+            list.get("error")
+        );
 
         let rows = list["proposals"].as_array().expect("proposals array");
         let row = &rows[0];
@@ -387,7 +410,10 @@ mod body_excerpt_tests {
         .unwrap();
 
         let list = server
-            .dispatch_tool("proposal_list", serde_json::json!({ "limit": 10, "include_bodies": false }))
+            .dispatch_tool(
+                "proposal_list",
+                serde_json::json!({ "limit": 10, "include_bodies": false }),
+            )
             .await
             .unwrap();
         assert!(list.get("error").is_none());
@@ -431,7 +457,10 @@ mod body_excerpt_tests {
 
         // With include_excerpts: true — excerpt present, truncated, no full body.
         let list = server
-            .dispatch_tool("proposal_list", serde_json::json!({ "limit": 10, "include_excerpts": true }))
+            .dispatch_tool(
+                "proposal_list",
+                serde_json::json!({ "limit": 10, "include_excerpts": true }),
+            )
             .await
             .unwrap();
         let row = &list["proposals"].as_array().unwrap()[0];
@@ -441,7 +470,10 @@ mod body_excerpt_tests {
 
         // With include_bodies: true — full body available, excerpt still truncated.
         let list = server
-            .dispatch_tool("proposal_list", serde_json::json!({ "limit": 10, "include_bodies": true }))
+            .dispatch_tool(
+                "proposal_list",
+                serde_json::json!({ "limit": 10, "include_bodies": true }),
+            )
             .await
             .unwrap();
         let row = &list["proposals"].as_array().unwrap()[0];
@@ -471,7 +503,10 @@ mod body_excerpt_tests {
         // Pagination works. Metadata fields are serialized at the top level
         // (not nested under a "meta" key) per `serialize_named_list_response`.
         let list = server
-            .dispatch_tool("proposal_list", serde_json::json!({ "limit": 2, "offset": 0 }))
+            .dispatch_tool(
+                "proposal_list",
+                serde_json::json!({ "limit": 2, "offset": 0 }),
+            )
             .await
             .unwrap();
         assert_eq!(list["limit"].as_i64().unwrap(), 2);
@@ -495,8 +530,7 @@ mod body_excerpt_tests {
         let (server, db) = test_server().await;
         let repo = ProposalRepository::new(db.clone(), EventBus::noop());
         // Two criteria: one met-true object, one legacy string.
-        const CRITERIA: &str =
-            r#"[{"criterion":"met one","met":true},"legacy string"]"#;
+        const CRITERIA: &str = r#"[{"criterion":"met one","met":true},"legacy string"]"#;
         let body = "truth table body content for testing";
         repo.create(ProposalCreateInput {
             title: "Flag Table",
@@ -524,16 +558,24 @@ mod body_excerpt_tests {
                 "include_excerpts": excerpts,
                 "include_acceptance_criteria": criteria,
             });
-            let list = server
-                .dispatch_tool("proposal_list", req)
-                .await
-                .unwrap();
-            assert!(list.get("error").is_none(), "flags b={bodies} e={excerpts} c={criteria} failed");
+            let list = server.dispatch_tool("proposal_list", req).await.unwrap();
+            assert!(
+                list.get("error").is_none(),
+                "flags b={bodies} e={excerpts} c={criteria} failed"
+            );
             let row = &list["proposals"].as_array().unwrap()[0];
 
             // Counts are always present.
-            assert_eq!(row["ac_total"].as_i64(), Some(2), "b={bodies} e={excerpts} c={criteria}");
-            assert_eq!(row["ac_met"].as_i64(), Some(1), "b={bodies} e={excerpts} c={criteria}");
+            assert_eq!(
+                row["ac_total"].as_i64(),
+                Some(2),
+                "b={bodies} e={excerpts} c={criteria}"
+            );
+            assert_eq!(
+                row["ac_met"].as_i64(),
+                Some(1),
+                "b={bodies} e={excerpts} c={criteria}"
+            );
 
             // Body appears only when include_bodies is true.
             let expect_body = bodies;
@@ -588,12 +630,15 @@ mod body_excerpt_tests {
             .await
             .unwrap();
         let explicit_false = server
-            .dispatch_tool("proposal_list", serde_json::json!({
-                "limit": 10,
-                "include_bodies": false,
-                "include_excerpts": false,
-                "include_acceptance_criteria": false,
-            }))
+            .dispatch_tool(
+                "proposal_list",
+                serde_json::json!({
+                    "limit": 10,
+                    "include_bodies": false,
+                    "include_excerpts": false,
+                    "include_acceptance_criteria": false,
+                }),
+            )
             .await
             .unwrap();
 
@@ -601,7 +646,12 @@ mod body_excerpt_tests {
         let r2 = &explicit_false["proposals"].as_array().unwrap()[0];
 
         // Both omit the same optional fields.
-        for field in ["body", "body_excerpt", "body_truncated", "acceptance_criteria"] {
+        for field in [
+            "body",
+            "body_excerpt",
+            "body_truncated",
+            "acceptance_criteria",
+        ] {
             assert_eq!(
                 r1.get(field).is_none(),
                 r2.get(field).is_none(),
@@ -631,10 +681,13 @@ mod body_excerpt_tests {
 
         // Criteria only — no excerpt, no body.
         let list = server
-            .dispatch_tool("proposal_list", serde_json::json!({
-                "limit": 10,
-                "include_acceptance_criteria": true,
-            }))
+            .dispatch_tool(
+                "proposal_list",
+                serde_json::json!({
+                    "limit": 10,
+                    "include_acceptance_criteria": true,
+                }),
+            )
             .await
             .unwrap();
         let row = &list["proposals"].as_array().unwrap()[0];
@@ -644,10 +697,13 @@ mod body_excerpt_tests {
 
         // Excerpts only — no criteria, no body.
         let list = server
-            .dispatch_tool("proposal_list", serde_json::json!({
-                "limit": 10,
-                "include_excerpts": true,
-            }))
+            .dispatch_tool(
+                "proposal_list",
+                serde_json::json!({
+                    "limit": 10,
+                    "include_excerpts": true,
+                }),
+            )
             .await
             .unwrap();
         let row = &list["proposals"].as_array().unwrap()[0];
@@ -658,10 +714,13 @@ mod body_excerpt_tests {
 
         // Bodies — implies excerpt metadata but not criteria.
         let list = server
-            .dispatch_tool("proposal_list", serde_json::json!({
-                "limit": 10,
-                "include_bodies": true,
-            }))
+            .dispatch_tool(
+                "proposal_list",
+                serde_json::json!({
+                    "limit": 10,
+                    "include_bodies": true,
+                }),
+            )
             .await
             .unwrap();
         let row = &list["proposals"].as_array().unwrap()[0];
@@ -808,11 +867,18 @@ mod body_excerpt_tests {
             )
             .await
             .unwrap();
-        assert!(show.get("error").is_none(), "show failed: {:?}", show.get("error"));
+        assert!(
+            show.get("error").is_none(),
+            "show failed: {:?}",
+            show.get("error")
+        );
         let revs = show["revisions"].as_array().expect("revisions present");
         assert!(!revs.is_empty());
         let rev = &revs[0];
-        assert!(rev.get("body").is_none(), "default revision body should be omitted");
+        assert!(
+            rev.get("body").is_none(),
+            "default revision body should be omitted"
+        );
         assert!(rev["body_excerpt"].is_string());
         assert!(rev["body_truncated"].as_bool().unwrap());
         assert_eq!(rev["body_excerpt"].as_str().unwrap().chars().count(), 512);
@@ -913,8 +979,13 @@ mod body_excerpt_tests {
             )
             .await
             .unwrap();
-        let err = resp["error"].as_str().expect("response should contain error field");
-        assert!(err.contains("invalid field: \"unknown_field\""), "err: {err}");
+        let err = resp["error"]
+            .as_str()
+            .expect("response should contain error field");
+        assert!(
+            err.contains("invalid field: \"unknown_field\""),
+            "err: {err}"
+        );
         assert!(err.contains("accepted: proposal, targets, feedback, signoffs, revisions, debate, epics, gate_status"), "err: {err}");
     }
 
@@ -945,8 +1016,13 @@ mod body_excerpt_tests {
             )
             .await
             .unwrap();
-        let err = resp["error"].as_str().expect("response should contain error field");
-        assert!(err.contains("invalid revision_bodies: \"compressed\""), "err: {err}");
+        let err = resp["error"]
+            .as_str()
+            .expect("response should contain error field");
+        assert!(
+            err.contains("invalid revision_bodies: \"compressed\""),
+            "err: {err}"
+        );
         assert!(err.contains("accepted: excerpt, full, omit"), "err: {err}");
     }
 
@@ -977,8 +1053,15 @@ mod body_excerpt_tests {
             )
             .await
             .unwrap();
-        assert!(show.get("error").is_none(), "show failed: {:?}", show.get("error"));
-        assert!(show.get("revisions").is_none(), "revisions should not be present");
+        assert!(
+            show.get("error").is_none(),
+            "show failed: {:?}",
+            show.get("error")
+        );
+        assert!(
+            show.get("revisions").is_none(),
+            "revisions should not be present"
+        );
     }
 
     // ── Payload budget tests ─────────────────────────────────────────────────
@@ -1019,7 +1102,10 @@ mod body_excerpt_tests {
         }
 
         let response = server
-            .dispatch_tool("proposal_list", serde_json::json!({ "limit": 50, "offset": 0 }))
+            .dispatch_tool(
+                "proposal_list",
+                serde_json::json!({ "limit": 50, "offset": 0 }),
+            )
             .await
             .unwrap();
 
@@ -1035,11 +1121,23 @@ mod body_excerpt_tests {
         // Every default row omits body, excerpt metadata, and criteria.
         for (i, row) in rows.iter().enumerate() {
             assert!(row.get("body").is_none(), "row {i}: body must be absent");
-            assert!(row.get("body_excerpt").is_none(), "row {i}: body_excerpt must be absent");
-            assert!(row.get("body_truncated").is_none(), "row {i}: body_truncated must be absent");
-            assert!(row.get("acceptance_criteria").is_none(), "row {i}: criteria must be absent");
+            assert!(
+                row.get("body_excerpt").is_none(),
+                "row {i}: body_excerpt must be absent"
+            );
+            assert!(
+                row.get("body_truncated").is_none(),
+                "row {i}: body_truncated must be absent"
+            );
+            assert!(
+                row.get("acceptance_criteria").is_none(),
+                "row {i}: criteria must be absent"
+            );
             // Values vary, but JSON widths are fixed for repository UUIDs and timestamps.
-            assert_eq!(serde_json::to_vec(&row["id"]).unwrap().len(), SERIALIZED_ID_BYTES);
+            assert_eq!(
+                serde_json::to_vec(&row["id"]).unwrap().len(),
+                SERIALIZED_ID_BYTES
+            );
             for field in ["created_at", "updated_at"] {
                 assert_eq!(
                     serde_json::to_vec(&row[field]).unwrap().len(),
@@ -1049,7 +1147,11 @@ mod body_excerpt_tests {
             }
             // Always-present integer counts from the mixed criteria fixture.
             assert_eq!(row["ac_total"].as_i64(), Some(4), "row {i}: ac_total");
-            assert_eq!(row["ac_met"].as_i64(), Some(1), "row {i}: ac_met (only met:true counts)");
+            assert_eq!(
+                row["ac_met"].as_i64(),
+                Some(1),
+                "row {i}: ac_met (only met:true counts)"
+            );
         }
 
         let envelope = serde_json::to_vec(&response).expect("response serializes");
@@ -1134,7 +1236,10 @@ mod body_excerpt_tests {
         let revs = full["revisions"].as_array().expect("revisions present");
         assert_eq!(revs.len(), 25);
         assert!(
-            revs.iter().all(|r| r["body"].as_str().map(|b| b.len() >= BODY_LEN).unwrap_or(false)),
+            revs.iter().all(|r| r["body"]
+                .as_str()
+                .map(|b| b.len() >= BODY_LEN)
+                .unwrap_or(false)),
             "full revision bodies should be available"
         );
     }
@@ -1291,217 +1396,12 @@ mod schema_lean_tests {
     }
 }
 
-// ── MDX auto-upgrade + block validation on the create/update write paths ─────
-//
-// A proposal body can carry MDX block tags while its declared/omitted
-// body_format is "markdown"; before the cutover that skipped ALL block
-// validation and stored the tags as raw markdown (rendered as literal text in
-// the UI). These tests pin the cutover: any full-body write with block tags is
-// upgraded to "mdx" and validated identically to a declared-mdx body.
-
 #[cfg(test)]
 mod mdx_upgrade_and_validation_tests {
     include!("create_mdx_tests.rs");
 }
 
-// ── Repository lint result mutation contract ───────────────────────────────
-// These tool-level integrations pin the lint-cache response and rollback
-// contract for every server authoring surface.
 #[cfg(test)]
 mod lint_mutation_contract_tests {
-    use crate::server::DjinnMcpServer;
-    use crate::state::stubs::test_mcp_state;
-    use djinn_core::events::EventBus;
-    use djinn_db::{Database, ProposalRepository};
-    use serde_json::Value;
-
-    async fn test_server() -> (DjinnMcpServer, Database) {
-        let db = Database::open_in_memory().unwrap();
-        db.ensure_initialized().await.unwrap();
-        (DjinnMcpServer::new(test_mcp_state(db.clone())), db)
-    }
-
-    async fn lint_row_count(db: &Database, proposal_id: Option<&str>) -> i64 {
-        let mut query = "SELECT COUNT(*) FROM proposal_revision_lint_results".to_string();
-        if proposal_id.is_some() {
-            query.push_str(" WHERE proposal_id = $1");
-        }
-        let mut statement = sqlx::query_scalar::<_, i64>(&query);
-        if let Some(proposal_id) = proposal_id {
-            statement = statement.bind(proposal_id);
-        }
-        statement.fetch_one(db.pool()).await.unwrap()
-    }
-
-    async fn revision_row_count(db: &Database) -> i64 {
-        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM proposal_revisions")
-            .fetch_one(db.pool())
-            .await
-            .unwrap()
-    }
-
-    async fn assert_response_has_exact_head_lint(
-        repo: &ProposalRepository,
-        response: &Value,
-        expected_body: &str,
-    ) -> String {
-        assert!(response.get("error").is_none(), "mutation failed: {response:?}");
-        let id = response["id"].as_str().expect("proposal id").to_string();
-        let seq = response["latest_revision_seq"]
-            .as_i64()
-            .expect("head sequence") as i32;
-        let revisions = repo.revisions(&id).await.unwrap();
-        let revision = revisions
-            .iter()
-            .find(|revision| revision.seq == seq)
-            .expect("response head is a stored revision");
-        assert_eq!(revision.body, expected_body, "committed head body");
-        let expected_lint = serde_json::to_value(repo.lint_for_revision(revision).await.unwrap()).unwrap();
-        assert_eq!(response["latest_lint"], expected_lint, "response must publish exact cached lint");
-        assert_eq!(response["latest_lint"]["body_sha256"], djinn_spec_lint::body_sha256(expected_body));
-        assert!(
-            response["latest_lint"]["warnings"].as_array().is_some_and(|warnings| !warnings.is_empty()),
-            "warning-only write must commit and return its warning result"
-        );
-        id
-    }
-
-    const WARNING_BODY: &str = "A [dangling local reference](#missing-anchor).";
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn warning_only_authoring_mutations_commit_and_return_exact_head_lint() {
-        let (server, db) = test_server().await;
-        let repo = ProposalRepository::new(db, EventBus::noop());
-
-        let created = server
-            .dispatch_tool("proposal_create", serde_json::json!({
-                "title": "Warning create", "body": WARNING_BODY,
-            }))
-            .await
-            .unwrap();
-        let create_id = assert_response_has_exact_head_lint(&repo, &created, WARNING_BODY).await;
-
-        let updated_body = "Updated [dangling local reference](#still-missing).";
-        let updated = server
-            .dispatch_tool("proposal_update", serde_json::json!({
-                "id": create_id, "body": updated_body,
-            }))
-            .await
-            .unwrap();
-        let update_id = assert_response_has_exact_head_lint(&repo, &updated, updated_body).await;
-
-        let imported_body = "Imported [dangling local reference](#absent).";
-        let imported = server
-            .dispatch_tool("proposal_import", serde_json::json!({
-                "mdx": format!("---\ntitle: Warning import\nbody_format: markdown\n---\n{imported_body}"),
-            }))
-            .await
-            .unwrap();
-        let import_id = assert_response_has_exact_head_lint(&repo, &imported, imported_body).await;
-
-        let imported_update_body = "Imported update [dangling local reference](#gone).";
-        let imported_update = server
-            .dispatch_tool("proposal_import", serde_json::json!({
-                "mdx": format!("---\nid: {import_id}\ntitle: Warning import updated\nbody_format: markdown\n---\n{imported_update_body}"),
-            }))
-            .await
-            .unwrap();
-        assert_response_has_exact_head_lint(&repo, &imported_update, imported_update_body).await;
-
-        let patch_source = "Patch this paragraph.";
-        let patch_seed = server
-            .dispatch_tool("proposal_create", serde_json::json!({
-                "title": "Warning patch", "body": patch_source,
-            }))
-            .await
-            .unwrap();
-        let patch_id = patch_seed["id"].as_str().unwrap();
-        let patched_body = "Patched [dangling local reference](#missing-after-patch).";
-        let patched = server
-            .dispatch_tool("proposal_block_patch", serde_json::json!({
-                "id": patch_id,
-                "selector": { "exact_text": patch_source },
-                "operation": "replace",
-                "block_mdx": patched_body,
-            }))
-            .await
-            .unwrap();
-        assert_response_has_exact_head_lint(&repo, &patched, patched_body).await;
-
-        // Ensure the update result stayed on its original proposal rather than
-        // accidentally taking the import-create branch.
-        assert_eq!(updated["id"], update_id);
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn lint_errors_are_structured_and_rollback_every_update_family_write() {
-        let (server, db) = test_server().await;
-        let repo = ProposalRepository::new(db.clone(), EventBus::noop());
-        let rejected_body = concat!(
-            "<Callout id=\"duplicate\">one</Callout>\n",
-            "<Callout id=\"duplicate\">two</Callout>\n",
-            "<Callout id=\"duplicate\">three</Callout>"
-        );
-
-        let before_create_revisions = revision_row_count(&db).await;
-        let before_create_lints = lint_row_count(&db, None).await;
-        let rejected_create = server
-            .dispatch_tool("proposal_create", serde_json::json!({
-                "title": "Rejected create", "body": rejected_body, "body_format": "mdx",
-            }))
-            .await
-            .unwrap();
-        assert_eq!(rejected_create["error"], "SPEC_LINT_REJECTED");
-        assert_eq!(rejected_create["code"], "SPEC_LINT_REJECTED");
-        let violations = rejected_create["violations"].as_array().expect("structured violations");
-        assert_eq!(violations.len(), 2);
-        for violation in violations {
-            assert_eq!(violation["code"], "DUPLICATE_BLOCK_ID");
-            assert_eq!(violation["severity"], "error");
-            assert!(violation["message"].is_string());
-            assert!(violation["span"]["start_byte"].is_u64());
-            assert!(violation["span"]["end_byte"].is_u64());
-        }
-        assert!(violations.windows(2).all(|pair| {
-            (pair[0]["span"]["start_byte"].as_u64(), pair[0]["span"]["end_byte"].as_u64())
-                <= (pair[1]["span"]["start_byte"].as_u64(), pair[1]["span"]["end_byte"].as_u64())
-        }));
-        assert_eq!(
-            revision_row_count(&db).await,
-            before_create_revisions,
-            "rejected create leaves no revision"
-        );
-        assert_eq!(lint_row_count(&db, None).await, before_create_lints, "rejected create leaves no lint row");
-
-        let seed = server
-            .dispatch_tool("proposal_create", serde_json::json!({
-                "title": "Rollback seed", "body": "Original paragraph.",
-            }))
-            .await
-            .unwrap();
-        let id = seed["id"].as_str().unwrap().to_string();
-        let before = repo.get(&id).await.unwrap().unwrap();
-        let before_lints = lint_row_count(&db, Some(&id)).await;
-
-        for response in [
-            server.dispatch_tool("proposal_update", serde_json::json!({
-                "id": id, "body": rejected_body, "body_format": "mdx",
-            })).await.unwrap(),
-            server.dispatch_tool("proposal_import", serde_json::json!({
-                "mdx": format!("---\nid: {id}\ntitle: Rollback seed\nbody_format: mdx\n---\n{rejected_body}"),
-            })).await.unwrap(),
-            server.dispatch_tool("proposal_block_patch", serde_json::json!({
-                "id": id,
-                "selector": { "exact_text": "Original paragraph." },
-                "operation": "replace",
-                "block_mdx": rejected_body,
-            })).await.unwrap(),
-        ] {
-            assert_eq!(response["error"], "SPEC_LINT_REJECTED", "{response:?}");
-            assert_eq!(response["code"], "SPEC_LINT_REJECTED", "{response:?}");
-            let after = repo.get(&id).await.unwrap().unwrap();
-            assert_eq!(after.latest_revision_seq, before.latest_revision_seq, "rejected mutation increments no sequence");
-            assert_eq!(lint_row_count(&db, Some(&id)).await, before_lints, "rejected mutation leaves no lint row");
-        }
-    }
+    include!("create_lint_tests.rs");
 }
