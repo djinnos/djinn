@@ -513,26 +513,31 @@ async fn partial_compact(
     let (preserved_start, preserved_end) =
         preserved_tail_range(messages, pivot_idx, PARTIAL_COMPACTION_PRESERVED_TURNS)
             .unwrap_or((messages.len(), messages.len()));
-    let middle = &messages[pivot_idx..preserved_start];
+    // `preserved_end` can fall before the conversation end when a trailing
+    // ToolUse has not received its result. Include that non-retained suffix in
+    // the summary input so every message is represented exactly once by either
+    // the prefix, summary, or verbatim closed tail.
+    let mut compacted_messages = messages[pivot_idx..preserved_start].to_vec();
+    compacted_messages.extend_from_slice(&messages[preserved_end..]);
     let preserved_tail = &messages[preserved_start..preserved_end];
 
     tracing::info!(
         pivot_idx,
         prefix_messages = prefix.len(),
-        middle_messages = middle.len(),
+        compacted_messages = compacted_messages.len(),
         preserved_tail_messages = preserved_tail.len(),
         tail_tokens,
         total_tokens,
         "partial_compact: attempting partial compaction"
     );
 
-    let summary = do_partial_compact(provider, middle).await?;
+    let summary = do_partial_compact(provider, &compacted_messages).await?;
     // C4: cap the summary length before it is re-inserted, so a verbose model
     // cannot blow the context window with its own summary.
     let summary = cap_summary(summary, context_window);
     conversation.messages = rebuild_partial_compaction_messages(
         prefix,
-        middle.len(),
+        compacted_messages.len(),
         preserved_tail,
         summary,
         ctx,

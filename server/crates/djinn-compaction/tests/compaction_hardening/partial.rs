@@ -1,11 +1,15 @@
 use std::pin::Pin;
+use std::sync::{Arc, Mutex};
 
 use djinn_compaction::{CompactionContext, PARTIAL_COMPACTION_CONTINUATION, compact_conversation};
 use djinn_provider::message::{ContentBlock, Conversation, Message, Role};
 use djinn_provider::provider::{LlmProvider, StreamEvent, ToolChoice};
 use serde_json::Value;
 
-struct SummaryProvider;
+#[derive(Default)]
+struct SummaryProvider {
+    requests: Arc<Mutex<Vec<String>>>,
+}
 
 impl LlmProvider for SummaryProvider {
     fn name(&self) -> &str {
@@ -14,7 +18,7 @@ impl LlmProvider for SummaryProvider {
 
     fn stream<'a>(
         &'a self,
-        _: &'a Conversation,
+        conversation: &'a Conversation,
         _: &'a [Value],
         _: Option<ToolChoice>,
     ) -> Pin<
@@ -27,6 +31,14 @@ impl LlmProvider for SummaryProvider {
                 + 'a,
         >,
     > {
+        self.requests.lock().unwrap().push(
+            conversation
+                .messages
+                .iter()
+                .map(Message::text_content)
+                .collect::<Vec<_>>()
+                .join("\n"),
+        );
         Box::pin(async {
             Ok(Box::pin(futures::stream::iter([
                 Ok(StreamEvent::Delta(ContentBlock::text("fixture summary"))),
@@ -53,7 +65,7 @@ fn tool_use(id: &str) -> Message {
         content: vec![ContentBlock::ToolUse {
             id: id.into(),
             name: "read".into(),
-            input: serde_json::json!({"path": "fixture"}),
+            input: serde_json::json!({"path": id}),
         }],
         metadata: None,
     }
@@ -71,8 +83,8 @@ fn tool_result(id: &str) -> Message {
     }
 }
 
-async fn compact(messages: Vec<Message>) -> Vec<Message> {
-    let provider = SummaryProvider;
+async fn compact(messages: Vec<Message>) -> (Vec<Message>, Vec<String>) {
+    let provider = SummaryProvider::default();
     let mut conversation = Conversation { messages };
     assert!(
         compact_conversation(
@@ -85,7 +97,8 @@ async fn compact(messages: Vec<Message>) -> Vec<Message> {
         )
         .await
     );
-    conversation.messages
+    let requests = provider.requests.lock().unwrap().clone();
+    (conversation.messages, requests)
 }
 
 fn continuation_index(messages: &[Message]) -> usize {
@@ -122,7 +135,7 @@ async fn preserves_two_closed_turns() {
     ];
     let normal_prefix = normal[..3].to_vec();
     let normal_tail = normal[5..].to_vec();
-    let compacted = compact(normal.clone()).await;
+    let (compacted, _) = compact(normal.clone()).await;
     assert_no_input_message_is_duplicated(&normal, &compacted);
     let marker = continuation_index(&compacted);
     assert_eq!(&compacted[..3], normal_prefix.as_slice());
@@ -138,7 +151,7 @@ async fn preserves_two_closed_turns() {
     ];
     let short_prefix = short[..1].to_vec();
     let short_tail = short[2..].to_vec();
-    let compacted = compact(short.clone()).await;
+    let (compacted, _) = compact(short.clone()).await;
     assert_no_input_message_is_duplicated(&short, &compacted);
     let marker = continuation_index(&compacted);
     assert_eq!(&compacted[..1], short_prefix.as_slice());
@@ -156,7 +169,7 @@ async fn preserves_two_closed_turns() {
         tool_use("unanswered"),
     ];
     let closed_tail = unresolved[3..6].to_vec();
-    let compacted = compact(unresolved.clone()).await;
+    let (compacted, summary_requests) = compact(unresolved.clone()).await;
     assert_no_input_message_is_duplicated(&unresolved, &compacted);
     let marker = continuation_index(&compacted);
     assert_eq!(&compacted[marker + 1..], closed_tail.as_slice());
@@ -166,4 +179,8 @@ async fn preserves_two_closed_turns() {
             .iter()
             .any(|block| matches!(block, ContentBlock::ToolUse { id, .. } if id == "unanswered"))
     }));
+    assert!(
+        summary_requests.iter().any(|request| request.contains("\"path\":\"unanswered\"")),
+        "the trailing unanswered tool call must be included in the summary request"
+    );
 }
