@@ -836,14 +836,71 @@ impl NoteRepository {
         note_types: &[&str],
         trace_candidate_cap: usize,
     ) -> Result<Vec<Note>> {
-        self.query_by_scope_overlap(
-            project_id,
-            task_paths,
-            note_types,
-            f64::NEG_INFINITY,
-            trace_candidate_cap,
-        )
-        .await
+        self.db.ensure_initialized().await?;
+
+        // Build the note_type IN clause — these are controlled strings, safe to interpolate.
+        let types_in = note_types
+            .iter()
+            .map(|t| format!("'{t}'"))
+            .collect::<Vec<_>>()
+            .join(", ");
+
+        // Postgres positional binds. Fixed param: $1 = project_id. Per-task-path
+        // EXISTS binds start at $2 and each path consumes three placeholders
+        // (LIKE/LIKE/=). Unlike the production query, this intentionally has no
+        // confidence bind: NULL confidence rows must reach `Note` mapping so a
+        // malformed trace universe remains a trace-search error.
+        let mut path_binds: Vec<String> = Vec::new();
+        let mut next = 2;
+
+        let scope_clause = if task_paths.is_empty() {
+            "jsonb_array_length(n.scope_paths) = 0".to_string()
+        } else {
+            let mut exists_parts = Vec::new();
+            for task_path in task_paths {
+                let p_like_task = next;
+                let p_like_scope = next + 1;
+                let p_eq = next + 2;
+                next += 3;
+                path_binds.push(task_path.clone());
+                path_binds.push(task_path.clone());
+                path_binds.push(task_path.clone());
+                exists_parts.push(format!(
+                    "EXISTS (SELECT 1 FROM jsonb_array_elements_text(n.scope_paths) AS sp(value) \
+                     WHERE ${p_like_task} LIKE sp.value || '/%' \
+                        OR sp.value LIKE ${p_like_scope} || '/%' \
+                        OR sp.value = ${p_eq})"
+                ));
+            }
+            let exists_or = exists_parts.join(" OR ");
+            format!("(jsonb_array_length(n.scope_paths) = 0 OR {exists_or})")
+        };
+
+        // This is deliberately separate from `query_by_scope_overlap`: using
+        // `confidence >= -infinity` would still filter SQL NULL confidence and
+        // silently change the established trace-query failure semantics.
+        let sql = format!(
+            "SELECT n.id, n.project_id, n.permalink, n.title, n.file_path,
+                    n.storage, n.note_type, n.folder, n.status, n.tags::text AS tags, n.content,
+                    n.retrieval_anchor, n.created_at, n.updated_at, n.lifecycle_changed_at, n.last_accessed,
+                    n.access_count, n.confidence, n.abstract AS abstract_, n.overview,
+                    n.scope_paths::text AS scope_paths
+             FROM notes n
+             WHERE n.project_id = $1
+               AND n.status = 'active'
+               AND n.note_type IN ({types_in})
+               AND {scope_clause}
+             ORDER BY n.confidence DESC, n.updated_at DESC
+             LIMIT {trace_candidate_cap}"
+        );
+
+        let mut query = sqlx::query_as::<_, Note>(&sql);
+        query = query.bind(project_id);
+        for val in &path_binds {
+            query = query.bind(val);
+        }
+
+        Ok(query.fetch_all(self.db.pool()).await?)
     }
 
     /// Query unfiltered scope-overlap candidates for retrieval tracing.
