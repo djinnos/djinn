@@ -108,14 +108,13 @@ const NOTE_LIFECYCLE_STATUSES = new Set(["active", "archived", "deprecated"]);
  * calendar dates (including a non-leap-year Feb 29), we reconstruct the
  * instant from the explicit captured components via `Date.UTC`, then
  * round-trip it back through a `Date` and confirm the year/month/day/
- * hour/minute/second survived unchanged. The trailing timezone offset only
- * shifts the absolute instant, not the validity of the components, so it is
- * ignored on the round-trip.
+ * hour/minute/second survived unchanged. A numeric trailing timezone offset
+ * must also have valid hour/minute components before it can be retained.
  */
 function isIsoTimestamp(value: unknown): value is string {
   if (typeof value !== "string") return false;
   const m =
-    /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/.exec(value);
+    /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d+)?(Z|[+-]\d{2}:\d{2})$/.exec(value);
   if (m === null) return false;
   const year = Number(m[1]);
   const month = Number(m[2]);
@@ -123,6 +122,12 @@ function isIsoTimestamp(value: unknown): value is string {
   const hour = Number(m[4]);
   const minute = Number(m[5]);
   const second = Number(m[6]);
+  const timezone = m[7];
+  if (timezone !== "Z") {
+    const offsetHour = Number(timezone.slice(1, 3));
+    const offsetMinute = Number(timezone.slice(4, 6));
+    if (offsetHour > 23 || offsetMinute > 59) return false;
+  }
   const epoch = Date.UTC(year, month - 1, day, hour, minute, second);
   if (!Number.isFinite(epoch)) return false;
   const d = new Date(epoch);

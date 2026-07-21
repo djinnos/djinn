@@ -273,6 +273,15 @@ describe("parseMemoryGraphResponse", () => {
     expect("lifecycle_changed_at" in parsed!.nodes[0]).toBe(false);
   });
 
+  it("rejects timestamps with invalid timezone offsets and safely omits them", () => {
+    const parsed = parseMemoryGraphResponse({
+      nodes: [{ id: "bad-offset", status: "archived", lifecycle_changed_at: "2024-01-01T00:00:00+99:99" }],
+    });
+    expect(parsed).not.toBeNull();
+    expect(parsed!.nodes[0]).toMatchObject({ id: "bad-offset", status: "archived" });
+    expect("lifecycle_changed_at" in parsed!.nodes[0]).toBe(false);
+  });
+
   it("accepts a leap-year Feb 29 timestamp and rejects a non-leap-year Feb 29", () => {
     const parsed = parseMemoryGraphResponse({
       nodes: [
