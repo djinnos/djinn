@@ -141,12 +141,9 @@ async fn lifecycle_graph_caps_after_selecting_nodes_and_closes_every_edge_layer(
         .graph_with_options(
             &project.id,
             GraphOptions {
-                statuses: Some(vec![
-                    "active".into(),
-                    "archived".into(),
-                    "deprecated".into(),
-                ]),
-                lifecycle_limit: Some(0),
+                statuses: vec!["active".into(), "archived".into(), "deprecated".into()],
+                lifecycle_limit: 0,
+                include_lifecycle_summary: true,
             },
         )
         .await
@@ -164,12 +161,9 @@ async fn lifecycle_graph_caps_after_selecting_nodes_and_closes_every_edge_layer(
         .graph_with_options(
             &project.id,
             GraphOptions {
-                statuses: Some(vec![
-                    "active".into(),
-                    "archived".into(),
-                    "deprecated".into(),
-                ]),
-                lifecycle_limit: Some(3),
+                statuses: vec!["active".into(), "archived".into(), "deprecated".into()],
+                lifecycle_limit: 3,
+                include_lifecycle_summary: true,
             },
         )
         .await
@@ -228,12 +222,9 @@ async fn lifecycle_graph_caps_after_selecting_nodes_and_closes_every_edge_layer(
         .graph_with_options(
             &project.id,
             GraphOptions {
-                statuses: Some(vec![
-                    "active".into(),
-                    "archived".into(),
-                    "deprecated".into(),
-                ]),
-                lifecycle_limit: Some(1000),
+                statuses: vec!["active".into(), "archived".into(), "deprecated".into()],
+                lifecycle_limit: 1000,
+                include_lifecycle_summary: true,
             },
         )
         .await

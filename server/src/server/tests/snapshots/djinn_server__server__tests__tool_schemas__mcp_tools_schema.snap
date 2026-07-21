@@ -8772,8 +8772,26 @@ expression: signatures
     "input_schema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
+        "lifecycle_limit": {
+          "description": "Maximum archived/deprecated nodes when inactive statuses are requested.",
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
         "project": {
           "type": "string"
+        },
+        "statuses": {
+          "description": "Optional lifecycle statuses for visualization. Omission retains the\nactive-only graph compatibility contract.",
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
         }
       },
       "required": [
@@ -8800,6 +8818,28 @@ expression: signatures
             "source_id",
             "target_id",
             "raw_text"
+          ],
+          "type": "object"
+        },
+        "GraphLifecycleSummary": {
+          "properties": {
+            "inactive_omitted": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "inactive_returned": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "inactive_total": {
+              "format": "int64",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "inactive_total",
+            "inactive_returned",
+            "inactive_omitted"
           ],
           "type": "object"
         },
@@ -8840,10 +8880,20 @@ expression: signatures
               "default": false,
               "type": "boolean"
             },
+            "lifecycle_changed_at": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "note_type": {
               "type": "string"
             },
             "permalink": {
+              "type": "string"
+            },
+            "status": {
+              "default": "active",
               "type": "string"
             },
             "title": {
@@ -8908,6 +8958,16 @@ expression: signatures
           "type": [
             "string",
             "null"
+          ]
+        },
+        "lifecycle_summary": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/GraphLifecycleSummary"
+            },
+            {
+              "type": "null"
+            }
           ]
         },
         "nodes": {
@@ -23127,6 +23187,46 @@ expression: signatures
               ],
               "description": "Global emergency stop for task dispatch. Missing in older settings rows means unpaused."
             },
+            "injection_starvation_query_floor": {
+              "description": "Minimum query count for injection-starvation evaluation (default 20 queries).",
+              "format": "int64",
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "injection_starvation_threshold_percent": {
+              "description": "Injection-starvation alert threshold in percent (default 50 percent).",
+              "format": "int64",
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "knowledge_injection_budget_bytes": {
+              "description": "Maximum total UTF-8 bytes injected from retrieved knowledge (default 8192 bytes).",
+              "format": "int64",
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "knowledge_injection_limit": {
+              "description": "Maximum retrieved knowledge candidates considered for injection (default 10).",
+              "format": "int64",
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "knowledge_injection_line_cap_bytes": {
+              "description": "Maximum UTF-8 bytes used for one injected knowledge summary (default 1024 bytes).",
+              "format": "int64",
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
             "max_sessions": {
               "additionalProperties": {
                 "format": "int64",
@@ -23145,6 +23245,14 @@ expression: signatures
               },
               "type": [
                 "array",
+                "null"
+              ]
+            },
+            "retrieval_health_window_minutes": {
+              "description": "Retrieval-health aggregation window in minutes (default 1440 minutes).",
+              "format": "int64",
+              "type": [
+                "integer",
                 "null"
               ]
             }
@@ -23236,6 +23344,46 @@ expression: signatures
             "null"
           ]
         },
+        "injection_starvation_query_floor": {
+          "description": "Minimum retrieval queries for starvation evaluation (1 through 10000).",
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "injection_starvation_threshold_percent": {
+          "description": "Injection-starvation threshold in percent (1 through 100).",
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "knowledge_injection_budget_bytes": {
+          "description": "Maximum total injected knowledge size in UTF-8 bytes (256 through 32768).",
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "knowledge_injection_limit": {
+          "description": "Maximum retrieved knowledge candidates considered for injection (1 through 50).",
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "knowledge_injection_line_cap_bytes": {
+          "description": "Maximum injected knowledge summary size in UTF-8 bytes (128 through 4096).",
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
         "models": {
           "description": "Ordered list of models available to all agents (e.g. [\"openai/gpt-4o\"]). Omit to keep current value.\nThis is the deployment FALLBACK list (used for tasks with no creator and\nusers with no per-user selection); per-user model selection + concurrency\ncaps live in `user_settings_*`.",
           "items": {
@@ -23243,6 +23391,14 @@ expression: signatures
           },
           "type": [
             "array",
+            "null"
+          ]
+        },
+        "retrieval_health_window_minutes": {
+          "description": "Retrieval-health aggregation window in minutes (5 through 10080).",
+          "format": "int64",
+          "type": [
+            "integer",
             "null"
           ]
         }

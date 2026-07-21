@@ -1447,8 +1447,9 @@ mod tests {
             .graph_with_options(
                 &project_id,
                 GraphOptions {
-                    statuses: Some(vec!["active".into(), "archived".into()]),
-                    lifecycle_limit: Some(500),
+                    statuses: vec!["active".into(), "archived".into()],
+                    lifecycle_limit: 500,
+                    include_lifecycle_summary: true,
                 },
             )
             .await

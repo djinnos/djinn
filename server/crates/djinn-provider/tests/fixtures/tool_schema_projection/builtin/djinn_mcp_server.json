@@ -8826,7 +8826,7 @@
   },
   {
     "name": "memory_graph",
-    "description": "Returns the full knowledge graph for visualization — all notes with connection counts, all resolved wikilink edges, and typed semantic edges (builds_on, contradicts, supersedes, exemplifies, derived_from) in a single query.",
+    "description": "Returns the lifecycle-aware knowledge graph for visualization. Omit statuses for active notes only; explicitly pass one or more of active, archived, deprecated to include those note lifecycles. lifecycle_limit caps inactive notes (default 500, maximum 1000). All returned edges have both endpoints in the returned node set.",
     "inputSchema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "required": [
@@ -8836,6 +8836,24 @@
       "properties": {
         "project": {
           "type": "string"
+        },
+        "statuses": {
+          "description": "Optional lifecycle statuses for visualization. Omission retains the\nactive-only graph compatibility contract.",
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          }
+        },
+        "lifecycle_limit": {
+          "description": "Maximum archived/deprecated nodes when inactive statuses are requested.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int64"
         }
       }
     },
@@ -8860,6 +8878,16 @@
             },
             "folder": {
               "type": "string"
+            },
+            "status": {
+              "type": "string",
+              "default": "active"
+            },
+            "lifecycle_changed_at": {
+              "type": [
+                "string",
+                "null"
+              ]
             },
             "connection_count": {
               "description": "Total resolved edges incident to this node (inbound + outbound).",
@@ -8953,6 +8981,28 @@
             "kind",
             "weight"
           ]
+        },
+        "GraphLifecycleSummary": {
+          "type": "object",
+          "properties": {
+            "inactive_total": {
+              "type": "integer",
+              "format": "int64"
+            },
+            "inactive_returned": {
+              "type": "integer",
+              "format": "int64"
+            },
+            "inactive_omitted": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          "required": [
+            "inactive_total",
+            "inactive_returned",
+            "inactive_omitted"
+          ]
         }
       },
       "type": "object",
@@ -8976,6 +9026,16 @@
             "$ref": "#/$defs/TypedEdge"
           },
           "default": []
+        },
+        "lifecycle_summary": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/GraphLifecycleSummary"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "error": {
           "type": [
@@ -23266,6 +23326,54 @@
                   "type": "null"
                 }
               ]
+            },
+            "knowledge_injection_budget_bytes": {
+              "description": "Maximum total UTF-8 bytes injected from retrieved knowledge (default 8192 bytes).",
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "int64"
+            },
+            "knowledge_injection_line_cap_bytes": {
+              "description": "Maximum UTF-8 bytes used for one injected knowledge summary (default 1024 bytes).",
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "int64"
+            },
+            "knowledge_injection_limit": {
+              "description": "Maximum retrieved knowledge candidates considered for injection (default 10).",
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "int64"
+            },
+            "injection_starvation_threshold_percent": {
+              "description": "Injection-starvation alert threshold in percent (default 50 percent).",
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "int64"
+            },
+            "injection_starvation_query_floor": {
+              "description": "Minimum query count for injection-starvation evaluation (default 20 queries).",
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "int64"
+            },
+            "retrieval_health_window_minutes": {
+              "description": "Retrieval-health aggregation window in minutes (default 1440 minutes).",
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "int64"
             }
           },
           "additionalProperties": false
@@ -23392,6 +23500,54 @@
           "items": {
             "type": "string"
           }
+        },
+        "knowledge_injection_budget_bytes": {
+          "description": "Maximum total injected knowledge size in UTF-8 bytes (256 through 32768).",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int64"
+        },
+        "knowledge_injection_line_cap_bytes": {
+          "description": "Maximum injected knowledge summary size in UTF-8 bytes (128 through 4096).",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int64"
+        },
+        "knowledge_injection_limit": {
+          "description": "Maximum retrieved knowledge candidates considered for injection (1 through 50).",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int64"
+        },
+        "injection_starvation_threshold_percent": {
+          "description": "Injection-starvation threshold in percent (1 through 100).",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int64"
+        },
+        "injection_starvation_query_floor": {
+          "description": "Minimum retrieval queries for starvation evaluation (1 through 10000).",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int64"
+        },
+        "retrieval_health_window_minutes": {
+          "description": "Retrieval-health aggregation window in minutes (5 through 10080).",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int64"
         }
       },
       "type": "object"

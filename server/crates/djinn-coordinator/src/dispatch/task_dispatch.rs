@@ -2120,13 +2120,21 @@ impl CoordinatorActor {
                 // dispatch immediately, contributing NO streak and NO cooldown.
                 // Genuine `crashed`/`timed_out` attempts are NOT environmental and
                 // still fall through to the ordinary failure accounting below.
-                if matches!(
+                let strike_decision = if matches!(
                     reappearing,
                     Some(ReappearingDispatch::SameRoleFailure { .. })
-                ) && self
-                    .latest_attempt_was_environmental_interrupt(&task.id, role)
-                    .await
-                {
+                ) {
+                    self.latest_attempt_strike_decision(&task.id, role).await
+                } else {
+                    None
+                };
+                if let Some(decision) = strike_decision {
+                    djinn_telemetry::dispatch::increment_strike_decision(
+                        decision.decision,
+                        decision.source,
+                    );
+                }
+                if strike_decision.is_some_and(|decision| decision.exempted) {
                     self.dispatch_failure_streak.remove(&task.id);
                     self.provider_failure_streak.remove(&task.id);
                     self.dispatch_cooldowns.remove(&task.id);

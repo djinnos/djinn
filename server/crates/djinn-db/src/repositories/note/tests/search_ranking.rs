@@ -838,12 +838,9 @@ async fn lifecycle_graph_read_does_not_leak_into_unified_lexical_search() {
         .graph_with_options(
             &project.id,
             GraphOptions {
-                statuses: Some(vec![
-                    "active".into(),
-                    "archived".into(),
-                    "deprecated".into(),
-                ]),
-                lifecycle_limit: Some(500),
+                statuses: vec!["active".into(), "archived".into(), "deprecated".into()],
+                lifecycle_limit: 500,
+                include_lifecycle_summary: true,
             },
         )
         .await

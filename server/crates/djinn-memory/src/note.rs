@@ -480,11 +480,9 @@ pub struct GraphNode {
     pub title: String,
     pub note_type: String,
     pub folder: String,
-    /// Lifecycle status for note nodes. Proposal nodes are semantic context and
-    /// are consequently always represented as `active`.
+    #[serde(default = "default_active_status")]
     pub status: String,
-    /// Exact time a note last changed lifecycle state. Historical inactive
-    /// notes, and proposal nodes, legitimately have no transition timestamp.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lifecycle_changed_at: Option<String>,
     /// Total resolved edges incident to this node (inbound + outbound).
     pub connection_count: i64,
@@ -507,20 +505,8 @@ fn default_note_entity_type() -> String {
     "note".to_string()
 }
 
-/// Repository-level graph selection. Omitting statuses deliberately preserves
-/// the legacy active-only graph behavior.
-#[derive(Clone, Debug, Default, Serialize, Deserialize, JsonSchema)]
-pub struct GraphOptions {
-    pub statuses: Option<Vec<String>>,
-    pub lifecycle_limit: Option<i64>,
-}
-
-/// Counts for the requested inactive population after bounded graph selection.
-#[derive(Clone, Debug, Default, Serialize, Deserialize, JsonSchema)]
-pub struct LifecycleGraphSummary {
-    pub inactive_total: i64,
-    pub inactive_returned: i64,
-    pub inactive_omitted: i64,
+fn default_active_status() -> String {
+    "active".to_string()
 }
 
 /// A resolved wikilink edge between two notes.
@@ -566,9 +552,32 @@ pub struct GraphResponse {
     /// derived_from) sourced from `note_associations` where `kind <> 'co_access'`.
     #[serde(default)]
     pub typed_edges: Vec<TypedEdge>,
-    /// Omitted for the backward-compatible active-only graph request.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub lifecycle_summary: Option<LifecycleGraphSummary>,
+    pub lifecycle_summary: Option<GraphLifecycleSummary>,
+}
+
+#[derive(Clone, Debug)]
+pub struct GraphOptions {
+    pub statuses: Vec<String>,
+    pub lifecycle_limit: usize,
+    pub include_lifecycle_summary: bool,
+}
+
+impl Default for GraphOptions {
+    fn default() -> Self {
+        Self {
+            statuses: vec!["active".to_string()],
+            lifecycle_limit: 500,
+            include_lifecycle_summary: false,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, JsonSchema)]
+pub struct GraphLifecycleSummary {
+    pub inactive_total: i64,
+    pub inactive_returned: i64,
+    pub inactive_omitted: i64,
 }
 
 /// A wikilink pointing to a note that does not exist.
