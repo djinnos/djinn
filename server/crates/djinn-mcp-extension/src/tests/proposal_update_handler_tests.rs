@@ -227,11 +227,19 @@ async fn advocate_correction_and_targeted_patch_preserve_lint_contract() {
 
     let corrected = call_proposal_update(
         &ctx,
-        &args(serde_json::json!({ "id": existing.id, "body": "# Proposal\n\n## Target\n\nOld paragraph." })),
+        &args(serde_json::json!({
+            "id": existing.id,
+            "body": "# Proposal\n\n## Target\n\nOld paragraph.\n\nCorrection details.",
+        })),
     )
     .await
     .expect("valid correction commits");
     let after_update = repo.get(&existing.id).await.unwrap().unwrap();
+    assert_eq!(
+        after_update.latest_revision_seq,
+        existing.latest_revision_seq + 1,
+        "a distinct valid correction must append a revision"
+    );
     let update_revision = repo
         .revisions(&existing.id)
         .await
