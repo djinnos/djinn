@@ -2044,18 +2044,23 @@ impl CoordinatorActor {
             .await
             {
                 Ok(_) => {
+                    if let Err(e) = self
+                        .try_clear_durable_dispatch_backoff_state(
+                            &latest.id,
+                            Some(&latest.short_id),
+                            HANDOFF_REASON,
+                        )
+                        .await
+                    {
+                        tracing::warn!(task_id = %latest.short_id, role, pr_disposition = "pr_handoff", error = %e, "djinn.terminal_gate: durable dispatch-state clear failed after poller handoff; refusing ForceClose");
+                        return false;
+                    }
                     tracing::warn!(task_id = %latest.short_id, role, pr_disposition = "pr_handoff", snapshot_head_sha = ?latest.ci_head_sha, "djinn.terminal_gate: PR-bearing task handed to poller");
                     self.dispatch_failure_streak.remove(&latest.id);
                     self.provider_failure_streak.remove(&latest.id);
                     self.dispatch_cooldowns.remove(&latest.id);
                     self.last_dispatched.remove(&latest.id);
                     self.inflight_dispatches.remove(&latest.id);
-                    self.clear_durable_dispatch_backoff_state(
-                        &latest.id,
-                        Some(&latest.short_id),
-                        HANDOFF_REASON,
-                    )
-                    .await;
                     return true;
                 }
                 Err(e) => {

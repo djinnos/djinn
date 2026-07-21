@@ -1051,6 +1051,51 @@ impl CoordinatorActor {
         .await;
     }
 
+    /// Clear dispatch state and surface persistence failures to callers that
+    /// cannot safely claim completion without a durable clear.
+    pub(crate) async fn try_clear_durable_dispatch_backoff_state(
+        &self,
+        task_id: &str,
+        task_short_id: Option<&str>,
+        reason: &str,
+    ) -> std::result::Result<(), String> {
+        let repo = DispatchStateRepository::new(self.db.clone());
+        let escalation_count = match repo.get(task_id).await {
+            Ok(existing) => existing.map(|state| state.escalation_count).unwrap_or(0),
+            Err(e) => {
+                tracing::warn!(
+                    task_id = task_short_id.unwrap_or(task_id),
+                    task_uuid = %task_id,
+                    reason,
+                    error = %e,
+                    "CoordinatorActor: failed to load durable dispatch state before terminal handoff clear"
+                );
+                return Err(e.to_string());
+            }
+        };
+        repo.upsert(DispatchStateUpsert {
+            task_id,
+            failure_streak: 0,
+            cooldown_until: None,
+            escalation_count,
+            last_dispatched_at: None,
+            last_dispatched_role: None,
+            inflight_creator_user_id: None,
+            inflight_model_id: None,
+        })
+        .await
+        .map_err(|e| {
+            tracing::warn!(
+                task_id = task_short_id.unwrap_or(task_id),
+                task_uuid = %task_id,
+                reason,
+                error = %e,
+                "CoordinatorActor: failed to persist durable dispatch state terminal handoff clear"
+            );
+            e.to_string()
+        })
+    }
+
     pub(crate) async fn clear_planned_dispatch_completion(&mut self, task_id: &str, reason: &str) {
         // Planned lifecycle completions (including budget parks and ignored
         // wind-down parks) are successful settlements, not same-role dispatch

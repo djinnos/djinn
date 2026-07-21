@@ -473,7 +473,7 @@ pub async fn handoff_pr_to_poller(
             "idempotent": true,
         })
         .to_string();
-        if let Err(e) = task_repo
+        task_repo
             .log_activity(
                 Some(task_id),
                 HANDOFF_ACTOR_ID,
@@ -482,9 +482,10 @@ pub async fn handoff_pr_to_poller(
                 &payload,
             )
             .await
-        {
-            tracing::warn!(task_id = %task_id, pr_url = %pr_url, error = %e, "respawn_guard: failed to record idempotent handoff activity (best-effort)");
-        }
+            .map_err(|e| {
+                tracing::warn!(task_id = %task_id, pr_url = %pr_url, error = %e, "respawn_guard: failed to record idempotent handoff activity");
+                e.to_string()
+            })?;
         return Ok(true);
     }
     match task_repo
