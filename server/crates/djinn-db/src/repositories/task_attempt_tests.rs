@@ -6,7 +6,7 @@ use crate::repositories::epic::EpicRepository;
 use crate::repositories::task_attempt::{
     CreateTaskAttemptParams, TaskAttemptRepository, TerminalTaskAttemptParams,
 };
-use crate::repositories::test_support::{add_blocker_edge, close_task_at};
+use crate::repositories::test_support::{add_blocker_edge, close_task_at, seed_test_user};
 
 fn test_db() -> Database {
     Database::open_in_memory().unwrap()
@@ -21,14 +21,16 @@ async fn create_task(db: &Database) -> (String, String) {
 
     let task_id = uuid::Uuid::now_v7().to_string();
     let short_id = format!("t{}{}", &task_id[..6], &task_id[task_id.len() - 6..]);
+    let creator = seed_test_user(db).await;
     sqlx::query!(
         "INSERT INTO tasks (id, project_id, short_id, epic_id, title, description, design,
-                            issue_type, priority, owner, status, continuation_count, labels, acceptance_criteria, memory_refs)
-         VALUES ($1, $2, $3, $4, 'Task', '', '', 'task', 0, '', 'open', 0, '[]'::jsonb, '[]'::jsonb, '[]'::jsonb)",
+                            issue_type, priority, owner, status, continuation_count, labels, acceptance_criteria, memory_refs, created_by_user_id)
+         VALUES ($1, $2, $3, $4, 'Task', '', '', 'task', 0, '', 'open', 0, '[]'::jsonb, '[]'::jsonb, '[]'::jsonb, $5)",
         task_id,
         epic.project_id,
         short_id,
-        epic.id
+        epic.id,
+        creator
     )
     .execute(db.pool())
     .await

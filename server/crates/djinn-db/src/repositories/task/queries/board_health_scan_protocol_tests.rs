@@ -188,12 +188,14 @@ async fn failed_evaluation_keeps_cursor_and_repeats_the_exact_page_after_restart
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn ten_thousand_candidates_finish_in_forty_bounded_pages_under_two_minutes() {
     let (db, repo, project) = setup_repo().await;
+    let creator = crate::repositories::test_support::seed_test_user(&db).await;
     sqlx::query(
-        "INSERT INTO tasks (id, project_id, short_id, title, description, design, issue_type, status, labels, acceptance_criteria, memory_refs, total_reopen_count) \
-         SELECT '00000000-0000-0000-0000-' || lpad(n::text, 12, '0'), $1, 'bulk-' || n, 'bulk candidate', 'requires task_create', '', 'task', 'open', '[]'::jsonb, '[]'::jsonb, '[]'::jsonb, 3 \
+        "INSERT INTO tasks (id, project_id, short_id, title, description, design, issue_type, status, labels, acceptance_criteria, memory_refs, total_reopen_count, created_by_user_id) \
+         SELECT '00000000-0000-0000-0000-' || lpad(n::text, 12, '0'), $1, 'bulk-' || n, 'bulk candidate', 'requires task_create', '', 'task', 'open', '[]'::jsonb, '[]'::jsonb, '[]'::jsonb, 3, $2 \
          FROM generate_series(1, 10000) AS n",
     )
     .bind(&project)
+    .bind(&creator)
     .execute(db.pool())
     .await
     .unwrap();
