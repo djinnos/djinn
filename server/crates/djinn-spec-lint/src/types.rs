@@ -26,7 +26,8 @@ impl std::fmt::Display for BlockError {
             Self::ParseError(message) => write!(f, "block parser error: {message}"),
             Self::EmptyDiagram(id) => write!(
                 f,
-                "Diagram block `{id}` has no source — provide a non-empty `source` or block content"
+                "Diagram block `{id}` has no source — provide a non-empty `source` \
+                 (e.g. `source={{`flowchart LR; A-->B`}}`) or block content"
             ),
         }
     }
