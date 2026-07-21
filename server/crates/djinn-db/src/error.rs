@@ -44,7 +44,10 @@ impl std::error::Error for DbError {
         match self {
             Self::Sqlx(err) => Some(err),
             Self::Json(err) => Some(err),
-            Self::InvalidData(_) | Self::Internal(_) | Self::InvalidTransition(_) | Self::SpecLintRejected(_) => None,
+            Self::InvalidData(_)
+            | Self::Internal(_)
+            | Self::InvalidTransition(_)
+            | Self::SpecLintRejected(_) => None,
         }
     }
 }
@@ -59,7 +62,9 @@ impl From<sqlx::Error> for DbError {
 }
 
 impl From<serde_json::Error> for DbError {
-    fn from(value: serde_json::Error) -> Self { Self::Json(value) }
+    fn from(value: serde_json::Error) -> Self {
+        Self::Json(value)
+    }
 }
 
 impl From<djinn_core::error::Error> for DbError {

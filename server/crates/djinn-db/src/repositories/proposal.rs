@@ -689,16 +689,19 @@ impl ProposalRepository {
         // diff against. The seed carries no authoring metadata — the proposal
         // is brand-new, so the block-patch / native-skill attribution contract
         // does not apply.
-        self.insert_revision_checked(&mut tx, ProposalRevisionSnapshot {
-            proposal_id: &id,
-            seq: 1,
-            title: input.title,
-            body: input.body,
-            body_format,
-            acceptance_criteria: &acceptance_criteria,
-            edited_by: author_user_id.as_deref(),
-            event_metadata: None,
-        })
+        self.insert_revision_checked(
+            &mut tx,
+            ProposalRevisionSnapshot {
+                proposal_id: &id,
+                seq: 1,
+                title: input.title,
+                body: input.body,
+                body_format,
+                acceptance_criteria: &acceptance_criteria,
+                edited_by: author_user_id.as_deref(),
+                event_metadata: None,
+            },
+        )
         .await?;
         tx.commit().await?;
         let proposal = self.get_required(&id).await?;
@@ -777,16 +780,19 @@ impl ProposalRepository {
 
         if content_changed {
             let editor = djinn_core::auth_context::current_user_id();
-            self.insert_revision_checked(&mut tx, ProposalRevisionSnapshot {
-                proposal_id: id,
-                seq: next_seq,
-                title: input.title,
-                body: input.body,
-                body_format,
-                acceptance_criteria: &acceptance_criteria,
-                edited_by: editor.as_deref(),
-                event_metadata: input.event_metadata,
-            })
+            self.insert_revision_checked(
+                &mut tx,
+                ProposalRevisionSnapshot {
+                    proposal_id: id,
+                    seq: next_seq,
+                    title: input.title,
+                    body: input.body,
+                    body_format,
+                    acceptance_criteria: &acceptance_criteria,
+                    edited_by: editor.as_deref(),
+                    event_metadata: input.event_metadata,
+                },
+            )
             .await?;
         } else if record_done_status_event {
             let editor = djinn_core::auth_context::current_user_id();
@@ -805,7 +811,7 @@ impl ProposalRepository {
         }
         if demote {
             sqlx::query!("DELETE FROM proposal_signoffs WHERE proposal_id = $1", id)
-                .execute(self.db.pool())
+                .execute(&mut *tx)
                 .await?;
         }
 
@@ -814,7 +820,7 @@ impl ProposalRepository {
         // while in draft, or promoted via the status dropdown); add_signoff only
         // reconciles at sign-off time, so without this the gate would never fire.
         if current.status != "building" {
-            self.reconcile_approval(id).await?;
+            self.reconcile_approval_in_tx(&mut tx, id).await?;
         }
         tx.commit().await?;
         let proposal = self.get_required(id).await?;
@@ -1432,18 +1438,65 @@ impl ProposalRepository {
     }
 
     /// The sole checked spec-snapshot insertion path for create and material updates.
-    async fn insert_revision_checked(&self, tx: &mut Transaction<'_, Postgres>, revision: ProposalRevisionSnapshot<'_>) -> Result<()> {
-        let format = match revision.body_format { "markdown" => djinn_spec_lint::BodyFormat::Markdown, "mdx" => djinn_spec_lint::BodyFormat::Mdx, other => return Err(Error::InvalidData(format!("invalid proposal body_format for spec lint: {other}"))) };
-        let result = djinn_spec_lint::lint(revision.body, format, chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true));
-        result.validate_for_body(revision.body).map_err(|e| Error::Internal(format!("invalid spec lint result: {e}")))?;
-        let json = serde_json::to_value(&result)?;
-        if !result.errors.is_empty() { return Err(Error::SpecLintRejected(crate::SpecLintRejected { code: "SPEC_LINT_REJECTED".into(), violations: result.errors.iter().map(|v| crate::SpecLintViolation { code: v.code.clone(), message: v.message.clone(), span_start: v.span.start, span_end: v.span.end }).collect() })); }
+    async fn insert_revision_checked(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        revision: ProposalRevisionSnapshot<'_>,
+    ) -> Result<()> {
+        let format = match revision.body_format {
+            "markdown" => djinn_spec_lint::BodyFormat::Markdown,
+            "mdx" => djinn_spec_lint::BodyFormat::Mdx,
+            other => {
+                return Err(Error::InvalidData(format!(
+                    "invalid proposal body_format for spec lint: {other}"
+                )));
+            }
+        };
+        let checked_at = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        let mut result = djinn_spec_lint::lint(revision.body, format, checked_at);
+        result.sort_violations();
+        result
+            .validate_for_body(revision.body)
+            .map_err(|e| Error::Internal(format!("invalid spec lint result: {e}")))?;
+        if !result.errors.is_empty() {
+            return Err(Error::SpecLintRejected(crate::SpecLintRejected {
+                code: "SPEC_LINT_REJECTED".into(),
+                violations: result
+                    .errors
+                    .iter()
+                    .map(|violation| crate::SpecLintViolation {
+                        code: violation.code.clone(),
+                        message: violation.message.clone(),
+                        span_start: violation.span.start,
+                        span_end: violation.span.end,
+                    })
+                    .collect(),
+            }));
+        }
+        let result_json = serde_json::to_value(&result)?;
         let id = uuid::Uuid::now_v7().to_string();
-        sqlx::query("INSERT INTO proposal_revisions (id, proposal_id, seq, title, body, body_format, acceptance_criteria, edited_by_user_id, event_kind, event_metadata) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'spec_revision', $9)").bind(&id).bind(revision.proposal_id).bind(revision.seq).bind(revision.title).bind(revision.body).bind(revision.body_format).bind(revision.acceptance_criteria).bind(revision.edited_by).bind(revision.event_metadata.cloned()).execute(&mut **tx).await?;
-        sqlx::query("INSERT INTO proposal_revision_lint_results (proposal_id, revision_id, linter_version, body_sha256, result, checked_at) VALUES ($1, $2, $3, $4, $5, $6)").bind(revision.proposal_id).bind(&id).bind(&result.linter_version).bind(&result.body_sha256).bind(json).bind(&result.checked_at).execute(&mut **tx).await?;
+        sqlx::query("INSERT INTO proposal_revisions (id, proposal_id, seq, title, body, body_format, acceptance_criteria, edited_by_user_id, event_kind, event_metadata) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'spec_revision', $9)")
+            .bind(&id)
+            .bind(revision.proposal_id)
+            .bind(revision.seq)
+            .bind(revision.title)
+            .bind(revision.body)
+            .bind(revision.body_format)
+            .bind(revision.acceptance_criteria)
+            .bind(revision.edited_by)
+            .bind(revision.event_metadata.cloned())
+            .execute(&mut **tx)
+            .await?;
+        sqlx::query("INSERT INTO proposal_revision_lint_results (proposal_id, revision_seq, linter_version, revision_id, body_sha256, result_json) VALUES ($1, $2, $3, $4, $5, $6)")
+            .bind(revision.proposal_id)
+            .bind(revision.seq)
+            .bind(&result.linter_version)
+            .bind(&id)
+            .bind(&result.body_sha256)
+            .bind(result_json)
+            .execute(&mut **tx)
+            .await?;
         Ok(())
-    }
-
     }
 
     async fn insert_status_event(&self, event: ProposalStatusEvent<'_>) -> Result<()> {
@@ -2006,21 +2059,41 @@ impl ProposalRepository {
     /// and a technical sign-off are fresh at the head revision. An `approved`
     /// proposal auto-demotes back to `in_review` when that's no longer true.
     async fn reconcile_approval(&self, proposal_id: &str) -> Result<()> {
-        let proposal = match self.get(proposal_id).await? {
-            Some(p) => p,
+        let mut tx = self.db.pool().begin().await?;
+        self.reconcile_approval_in_tx(&mut tx, proposal_id).await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    /// Reconcile sign-off-derived status using the caller's transaction. This
+    /// keeps material edits, sign-off invalidation, and their status effects
+    /// indivisible.
+    async fn reconcile_approval_in_tx(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        proposal_id: &str,
+    ) -> Result<()> {
+        let proposal = match sqlx::query_as::<_, (String, i32)>(
+            "SELECT status, latest_revision_seq FROM proposals WHERE id = $1",
+        )
+        .bind(proposal_id)
+        .fetch_optional(&mut **tx)
+        .await?
+        {
+            Some(proposal) => proposal,
             None => return Ok(()),
         };
         let fresh: i64 = sqlx::query_scalar!(
             r#"SELECT COUNT(DISTINCT kind) AS "n!: i64" FROM proposal_signoffs
              WHERE proposal_id = $1 AND revision_seq = $2 AND kind IN ('scoped', 'technical')"#,
             proposal_id,
-            proposal.latest_revision_seq
+            proposal.1
         )
-        .fetch_one(self.db.pool())
+        .fetch_one(&mut **tx)
         .await?;
         let both = fresh == 2;
         let any = fresh >= 1;
-        let new_status = match proposal.status.as_str() {
+        let new_status = match proposal.0.as_str() {
             "draft" if both => Some("approved"),
             "draft" if any => Some("in_review"),
             "in_review" if both => Some("approved"),
@@ -2036,7 +2109,7 @@ impl ProposalRepository {
                 status,
                 proposal_id
             )
-            .execute(self.db.pool())
+            .execute(&mut **tx)
             .await?;
         }
         Ok(())
@@ -3120,16 +3193,19 @@ impl ProposalRepository {
             "amendments": amendments_json,
         });
         let mut tx = self.db.pool().begin().await?;
-        self.insert_revision_checked(&mut tx, ProposalRevisionSnapshot {
-            proposal_id,
-            seq: next_revision_seq,
-            title: &current.title,
-            body: &current.body,
-            body_format: &current.body_format,
-            acceptance_criteria: &acceptance_criteria,
-            edited_by: editor.as_deref(),
-            event_metadata: Some(&event_metadata),
-        })
+        self.insert_revision_checked(
+            &mut tx,
+            ProposalRevisionSnapshot {
+                proposal_id,
+                seq: next_revision_seq,
+                title: &current.title,
+                body: &current.body,
+                body_format: &current.body_format,
+                acceptance_criteria: &acceptance_criteria,
+                edited_by: editor.as_deref(),
+                event_metadata: Some(&event_metadata),
+            },
+        )
         .await?;
         tx.commit().await?;
 
