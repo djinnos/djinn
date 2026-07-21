@@ -734,3 +734,196 @@ async fn load_knowledge_context_rendered_matches_pack_knowledge_notes() {
     assert!(rendered.contains("High Confidence Note"));
     assert!(rendered.contains("Low Confidence Note"));
 }
+
+#[tokio::test]
+async fn successful_trace_replays_oversized_rank_one_with_taxonomy_v1_histogram() {
+    let mut env = knowledge_context_test_env_guard();
+    env.clear();
+    let db = djinn_db::Database::ephemeral().await.expect("ephemeral db");
+    let events = EventBus::noop();
+    let task =
+        create_project_epic_task(&db, &events, "Oversized replay epic", "Oversized replay").await;
+    let project_id = task.project_id.clone();
+    let repo = NoteRepository::new(db.clone(), EventBus::noop());
+    let oversized = repo
+        .create(
+            &project_id,
+            &"O".repeat(100),
+            "metadata overflow",
+            "pattern",
+            "[]",
+        )
+        .await
+        .unwrap();
+    let injected = repo
+        .create(
+            &project_id,
+            "Rank two fitting",
+            &"a".repeat(400),
+            "pattern",
+            "[]",
+        )
+        .await
+        .unwrap();
+    let pruned = repo
+        .create(
+            &project_id,
+            "Rank three budget miss",
+            &"b".repeat(400),
+            "pattern",
+            "[]",
+        )
+        .await
+        .unwrap();
+    let not_top_k = repo
+        .create(
+            &project_id,
+            "Rank four not top k",
+            "eligible",
+            "pattern",
+            "[]",
+        )
+        .await
+        .unwrap();
+    let low = repo
+        .create(
+            &project_id,
+            "Below confidence threshold",
+            "low",
+            "pattern",
+            "[]",
+        )
+        .await
+        .unwrap();
+    for (note, confidence) in [
+        (&oversized, 0.975),
+        (&injected, 0.97),
+        (&pruned, 0.96),
+        (&not_top_k, 0.95),
+        (&low, 0.1),
+    ] {
+        set_note_confidence(&db, &note.id, confidence).await;
+    }
+    let mut app_state = agent_context_from_db(db.clone(), CancellationToken::new());
+    app_state.knowledge_injection = djinn_core::models::KnowledgeInjectionConfig {
+        knowledge_injection_budget_bytes: 256,
+        knowledge_injection_line_cap_bytes: 128,
+        knowledge_injection_limit: 3,
+        ..Default::default()
+    };
+    let rendered = load_knowledge_context(&task, None, &app_state)
+        .await
+        .expect("fitting candidate survives");
+    assert_eq!(rendered.len(), 128);
+    assert!(rendered.contains("Rank two fitting"));
+    let trace = latest_trace(&db, &project_id)
+        .await
+        .expect("terminal trace");
+    assert_eq!(trace.knowledge_trace_taxonomy_version, Some(1));
+    assert_eq!(trace.terminal_state.as_deref(), Some("success"));
+    assert_eq!(trace.candidate_count, Some(5));
+    assert_eq!(trace.injected_count, Some(1));
+    assert_eq!(
+        (
+            trace.confidence_filtered_count,
+            trace.not_top_k_count,
+            trace.oversized_skipped_count,
+            trace.budget_pruned_count
+        ),
+        (Some(1), Some(1), Some(1), Some(1))
+    );
+    let candidates = trace.candidates_typed();
+    assert_eq!(
+        candidates
+            .iter()
+            .map(|candidate| candidate.note_id.as_str())
+            .collect::<Vec<_>>(),
+        vec![
+            oversized.id.as_str(),
+            injected.id.as_str(),
+            pruned.id.as_str(),
+            not_top_k.id.as_str(),
+            low.id.as_str()
+        ]
+    );
+    assert_eq!(
+        candidates
+            .iter()
+            .map(|candidate| candidate.rank)
+            .collect::<Vec<_>>(),
+        vec![Some(1), Some(2), Some(3), Some(4), Some(5)]
+    );
+    assert_eq!(
+        candidates
+            .iter()
+            .filter(|candidate| candidate.outcome == CandidateOutcome::Injected)
+            .count(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn successful_trace_charges_newline_and_persists_exact_budget_equality() {
+    let mut env = knowledge_context_test_env_guard();
+    env.clear();
+    let db = djinn_db::Database::ephemeral().await.expect("ephemeral db");
+    let events = EventBus::noop();
+    let task =
+        create_project_epic_task(&db, &events, "Exact budget epic", "Exact budget task").await;
+    let project_id = task.project_id.clone();
+    let repo = NoteRepository::new(db.clone(), EventBus::noop());
+    let first = repo
+        .create(
+            &project_id,
+            "First exact line",
+            &"x".repeat(400),
+            "pattern",
+            "[]",
+        )
+        .await
+        .unwrap();
+    let second = repo
+        .create(
+            &project_id,
+            "Second exact line",
+            &"y".repeat(400),
+            "pattern",
+            "[]",
+        )
+        .await
+        .unwrap();
+    set_note_confidence(&db, &first.id, 0.99).await;
+    set_note_confidence(&db, &second.id, 0.98).await;
+    let mut app_state = agent_context_from_db(db.clone(), CancellationToken::new());
+    app_state.knowledge_injection = djinn_core::models::KnowledgeInjectionConfig {
+        knowledge_injection_budget_bytes: 257,
+        knowledge_injection_line_cap_bytes: 128,
+        knowledge_injection_limit: 2,
+        ..Default::default()
+    };
+    let rendered = load_knowledge_context(&task, None, &app_state)
+        .await
+        .expect("two exact-budget lines");
+    assert_eq!(rendered.len(), 257, "budget includes the separator byte");
+    assert_eq!(
+        rendered.split('\n').map(str::len).collect::<Vec<_>>(),
+        vec![128, 128]
+    );
+    assert_eq!(rendered.as_bytes()[128], b'\n');
+    let trace = latest_trace(&db, &project_id)
+        .await
+        .expect("terminal trace");
+    assert_eq!(trace.knowledge_trace_taxonomy_version, Some(1));
+    assert_eq!(trace.terminal_state.as_deref(), Some("success"));
+    assert_eq!(trace.candidate_count, Some(2));
+    assert_eq!(trace.injected_count, Some(2));
+    assert_eq!(
+        (
+            trace.confidence_filtered_count,
+            trace.not_top_k_count,
+            trace.oversized_skipped_count,
+            trace.budget_pruned_count
+        ),
+        (Some(0), Some(0), Some(0), Some(0))
+    );
+}
