@@ -174,3 +174,55 @@
         let err = bad.get("error").and_then(|v| v.as_str()).expect("error");
         assert!(err.contains("TotallyUnknown"), "error was: {err}");
     }
+
+    /// A QuestionForm that is not the last block is rejected on the create
+    /// path with the established user-facing error string.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn create_rejects_question_form_not_last() {
+        let (server, _db) = test_server().await;
+        let body = "# P\n\n<QuestionForm id=\"q\" title=\"Q\">\nAny concerns?\n</QuestionForm>\n\n<Callout id=\"note\" tone=\"info\">\nTrailing content after the question form.\n</Callout>\n";
+        let resp = server
+            .dispatch_tool(
+                "proposal_create",
+                serde_json::json!({ "title": "QF not last", "body": body }),
+            )
+            .await
+            .unwrap();
+        let err = resp.get("error").and_then(|v| v.as_str()).expect("error");
+        assert!(
+            err.contains("question-form block must be the last block"),
+            "error was: {err}"
+        );
+    }
+
+    /// A QuestionForm that is not the last block is rejected on the update
+    /// path as well.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn update_rejects_question_form_not_last() {
+        let (server, db) = test_server().await;
+        let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+        let existing = repo
+            .create(ProposalCreateInput {
+                title: "Plain",
+                body: "plain markdown",
+                acceptance_criteria: Some("[]"),
+                status: None,
+                body_format: Some("markdown"),
+            })
+            .await
+            .unwrap();
+
+        let body = "# P\n\n<QuestionForm id=\"q\" title=\"Q\">\nAny concerns?\n</QuestionForm>\n\n<Callout id=\"note\" tone=\"info\">\nTrailing content after the question form.\n</Callout>\n";
+        let resp = server
+            .dispatch_tool(
+                "proposal_update",
+                serde_json::json!({ "id": existing.id, "body": body }),
+            )
+            .await
+            .unwrap();
+        let err = resp.get("error").and_then(|v| v.as_str()).expect("error");
+        assert!(
+            err.contains("question-form block must be the last block"),
+            "error was: {err}"
+        );
+    }
