@@ -189,6 +189,76 @@ async fn task_affinity_scores_include_repo_map_neighbors_for_task_memory_refs() 
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn graph_proximity_excludes_inactive_neighbors_with_strong_associations() {
+    let tmp = crate::database::test_tempdir().unwrap();
+    let db = Database::open_in_memory().unwrap();
+    let (tx, _rx) = broadcast::channel(256);
+    let project = make_project(&db, tmp.path()).await;
+    let repo = NoteRepository::new(db.clone(), event_bus_for(&tx));
+    let active = repo
+        .create(
+            &project.id,
+            "Active scoring seed",
+            "body",
+            "reference",
+            "[]",
+        )
+        .await
+        .unwrap();
+    let archived = repo
+        .create(
+            &project.id,
+            "Archived strong neighbor",
+            "body",
+            "reference",
+            "[]",
+        )
+        .await
+        .unwrap();
+    let deprecated = repo
+        .create(
+            &project.id,
+            "Deprecated strong neighbor",
+            "body",
+            "reference",
+            "[]",
+        )
+        .await
+        .unwrap();
+    let active_neighbor = repo
+        .create(
+            &project.id,
+            "Active strong neighbor",
+            "body",
+            "reference",
+            "[]",
+        )
+        .await
+        .unwrap();
+    for (id, status) in [(&archived.id, "archived"), (&deprecated.id, "deprecated")] {
+        sqlx::query("UPDATE notes SET status = $1 WHERE id = $2")
+            .bind(status)
+            .bind(id)
+            .execute(db.pool())
+            .await
+            .unwrap();
+    }
+    for neighbor in [&archived, &deprecated, &active_neighbor] {
+        repo.upsert_typed_association(&active.id, &neighbor.id, NoteAssociationKind::BuildsOn, 1.0)
+            .await
+            .unwrap();
+    }
+    let scores = repo
+        .graph_proximity_scores(std::slice::from_ref(&active.id), 1)
+        .await
+        .unwrap();
+    let score_map: std::collections::HashMap<_, _> = scores.into_iter().collect();
+    assert!(score_map.contains_key(&active_neighbor.id));
+    assert!(!score_map.contains_key(&archived.id));
+    assert!(!score_map.contains_key(&deprecated.id));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn unrelated_search_query_does_not_return_repo_map_notes() {
     let tmp = crate::database::test_tempdir().unwrap();
     let db = Database::open_in_memory().unwrap();
