@@ -31,7 +31,10 @@ pub use proposal::{
 pub use provider::{CustomProvider, Model, Pricing, Provider, SeedModel};
 pub use session::{CostBasis, SessionRecord, SessionStatus};
 pub use session_message::SessionMessage;
-pub use settings::{DispatchPause, DispatchPauseScope, DispatchPauseState, DjinnSettings, Setting};
+pub use settings::{
+    DispatchPause, DispatchPauseScope, DispatchPauseState, DjinnSettings, KnowledgeInjectionConfig,
+    KnowledgeInjectionConfigError, Setting,
+};
 pub use task::{
     ActivityEntry, CiStatus, IssueType, MergeQueueLane, PRIORITY_CRITICAL, ReopenClass,
     ReopenLedgerEntry, Task, TaskPrCiSnapshot, TaskPrCiSnapshotInput, TaskPrCiSnapshotMqLaneInput,

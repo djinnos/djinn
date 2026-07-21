@@ -12,6 +12,9 @@ use tracing_subscriber::util::SubscriberInitExt;
 use djinn_agent::runtime_bridge::{RuntimeKind, runtime_kind};
 use djinn_core::clock::{Clock, SystemClock as SystemClockTrait};
 use djinn_core::doctor::RetrievalHealthConfig;
+use djinn_core::events::EventBus;
+use djinn_core::models::{DjinnSettings, KnowledgeInjectionConfig};
+use djinn_db::SettingsRepository;
 use djinn_db::migrations::{DesignatedOperatorBootstrap, MigrationContext};
 use djinn_server::db::runtime::{DatabaseRuntimeConfig, DatabaseRuntimeManager};
 use djinn_server::logging;
@@ -276,6 +279,28 @@ async fn async_main(cli: Cli) {
         db.pool().close().await;
         std::process::exit(1);
     }
+
+    // Resolve canonical settings before application composition. Present malformed
+    // persisted values, invalid environment overrides, and invalid field pairs
+    // reject startup rather than falling back to defaults.
+    let settings = SettingsRepository::new(db.clone(), EventBus::noop())
+        .get("settings.raw")
+        .await
+        .map_err(|error| format!("read settings.raw: {error}"))
+        .and_then(|setting| match setting {
+            Some(setting) => DjinnSettings::from_db_value_validated(&setting.value)
+                .map_err(|error| error.to_string()),
+            None => Ok(DjinnSettings::default()),
+        })
+        .unwrap_or_else(|error| {
+            tracing::error!(%error, "invalid knowledge injection configuration");
+            std::process::exit(1);
+        });
+    let _knowledge_injection_config = KnowledgeInjectionConfig::from_settings_and_env(&settings)
+        .unwrap_or_else(|error| {
+            tracing::error!(%error, "invalid knowledge injection configuration");
+            std::process::exit(1);
+        });
 
     // ── Retrieval health config ───────────────────────────────────────
     // Parse once at process startup; invalid values prevent serving.

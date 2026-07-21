@@ -35,6 +35,24 @@ pub struct SettingsSetParams {
     /// users with no per-user selection); per-user model selection + concurrency
     /// caps live in `user_settings_*`.
     pub models: Option<Vec<String>>,
+    /// Maximum total injected knowledge size in UTF-8 bytes (256 through 32768).
+    #[schemars(with = "Option<i64>")]
+    pub knowledge_injection_budget_bytes: Option<u32>,
+    /// Maximum injected knowledge summary size in UTF-8 bytes (128 through 4096).
+    #[schemars(with = "Option<i64>")]
+    pub knowledge_injection_line_cap_bytes: Option<u32>,
+    /// Maximum retrieved knowledge candidates considered for injection (1 through 50).
+    #[schemars(with = "Option<i64>")]
+    pub knowledge_injection_limit: Option<u32>,
+    /// Injection-starvation threshold in percent (1 through 100).
+    #[schemars(with = "Option<i64>")]
+    pub injection_starvation_threshold_percent: Option<u32>,
+    /// Minimum retrieval queries for starvation evaluation (1 through 10000).
+    #[schemars(with = "Option<i64>")]
+    pub injection_starvation_query_floor: Option<u32>,
+    /// Retrieval-health aggregation window in minutes (5 through 10080).
+    #[schemars(with = "Option<i64>")]
+    pub retrieval_health_window_minutes: Option<u32>,
 }
 
 #[derive(Serialize, schemars::JsonSchema)]
@@ -129,6 +147,33 @@ impl DjinnMcpServer {
         }
         if let Some(v) = p.models {
             settings.models = Some(v);
+        }
+        if let Some(v) = p.knowledge_injection_budget_bytes {
+            settings.knowledge_injection_budget_bytes = Some(v);
+        }
+        if let Some(v) = p.knowledge_injection_line_cap_bytes {
+            settings.knowledge_injection_line_cap_bytes = Some(v);
+        }
+        if let Some(v) = p.knowledge_injection_limit {
+            settings.knowledge_injection_limit = Some(v);
+        }
+        if let Some(v) = p.injection_starvation_threshold_percent {
+            settings.injection_starvation_threshold_percent = Some(v);
+        }
+        if let Some(v) = p.injection_starvation_query_floor {
+            settings.injection_starvation_query_floor = Some(v);
+        }
+        if let Some(v) = p.retrieval_health_window_minutes {
+            settings.retrieval_health_window_minutes = Some(v);
+        }
+        if let Err(e) =
+            djinn_core::models::KnowledgeInjectionConfig::from_settings_and_env(&settings)
+        {
+            return Json(SettingsSetResponse {
+                ok: false,
+                applied: false,
+                error: Some(e.to_string()),
+            });
         }
 
         match self.state.apply_settings(&settings).await {
