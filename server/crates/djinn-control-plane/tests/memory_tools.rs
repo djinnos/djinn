@@ -594,9 +594,9 @@ async fn mcp_memory_graph_dispatches_default_and_clamped_lifecycle_limits() {
         values.push_bind("reference");
         values.push_bind("references");
         values.push_bind("archived");
-        values.push_bind("[]");
+        values.push_bind(sqlx::types::Json(json!([])));
         values.push_bind("archived fixture");
-        values.push_bind("[]");
+        values.push_bind(sqlx::types::Json(json!([])));
         values.push_bind(1.0_f64);
         values.push_bind("2026-01-01T00:00:00.000Z");
     });
