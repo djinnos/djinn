@@ -67,6 +67,18 @@
       "enclosing_symbol": "materialize_audit_task_atomic",
       "boundary_method": "resolve_effective_creator",
       "provenance_kind": "source_task_parent_epic"
+    },
+    {
+      "path": "server/crates/djinn-db/src/repositories/task/reads.rs",
+      "enclosing_symbol": "upsert_peer",
+      "boundary_method": "incoming_task_creator",
+      "provenance_kind": "explicit_source_creator"
+    },
+    {
+      "path": "server/crates/djinn-db/src/repositories/task/reads.rs",
+      "enclosing_symbol": "upsert_peer_in_tx",
+      "boundary_method": "incoming_task_creator",
+      "provenance_kind": "explicit_source_creator"
     }
   ]
 }

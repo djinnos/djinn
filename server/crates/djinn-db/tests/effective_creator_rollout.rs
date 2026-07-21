@@ -336,8 +336,10 @@ fn production_sources(dir: &Path, root: &Path, result: &mut Vec<PathBuf>) {
 fn production_writers_in_source(path: &str, source: &str) -> BTreeSet<String> {
     let mut discovered = BTreeSet::new();
     let is_db_repository = path.contains("djinn-db/src/repositories/");
-    let is_shared_task_boundary = path.ends_with("repositories/task/writes.rs")
-        || path.ends_with("repositories/task/reads.rs");
+    // Only the boundary implementation file itself is exempt from direct-insert
+    // discovery; the peer-sync writers in `task/reads.rs` are inventoried
+    // producers and must be discovered like any other production writer.
+    let is_shared_task_boundary = path.ends_with("repositories/task/writes.rs");
     let inline_test_modules = inline_test_ranges(source);
     let direct_constants = direct_task_insert_constants(source);
     for (symbol, offset) in function_symbols(source) {
