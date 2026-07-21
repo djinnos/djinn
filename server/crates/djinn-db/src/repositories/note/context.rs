@@ -843,10 +843,11 @@ fn days_from_civil(year: i32, month: u32, day: u32) -> i64 {
 #[cfg(test)]
 mod tests {
     use super::DEFAULT_MIN_CONFIDENCE;
-    use crate::repositories::note::NoteAssociationKind;
     use crate::repositories::note::scoring::STALE_CITATION;
+    use crate::repositories::note::{MemoryEntityKind, MemoryEntityRef, NoteAssociationKind};
     use crate::{Database, NoteRepository, ProjectRepository};
     use djinn_core::events::EventBus;
+    use djinn_memory::GraphOptions;
     use tokio::sync::broadcast;
 
     async fn setup_repo() -> (tempfile::TempDir, NoteRepository, String) {
@@ -1395,5 +1396,169 @@ mod tests {
             overview.score.is_some(),
             "proposal overview should carry a score"
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn graph_reads_do_not_mutate_enrichment_rows() {
+        let (_tmp, repo, project_id) = setup_repo().await;
+        let entity = repo
+            .create(&project_id, "Entity", "body", "entity", "[]")
+            .await
+            .unwrap();
+        let claim = repo
+            .create(&project_id, "Claim", "body", "claim", "[]")
+            .await
+            .unwrap();
+        repo.upsert_typed_entity_association(
+            MemoryEntityRef::note(&entity.id),
+            MemoryEntityRef::note(&claim.id),
+            MemoryEntityKind::DerivedFrom,
+            1.0,
+        )
+        .await
+        .unwrap();
+        sqlx::query("UPDATE notes SET status = 'archived' WHERE id = $1")
+            .bind(&claim.id)
+            .execute(repo.db.pool())
+            .await
+            .unwrap();
+        let before: (i64, i64, i64) = (
+            sqlx::query_scalar(
+                "SELECT COUNT(*) FROM notes WHERE project_id = $1 AND note_type = 'entity'",
+            )
+            .bind(&project_id)
+            .fetch_one(repo.db.pool())
+            .await
+            .unwrap(),
+            sqlx::query_scalar(
+                "SELECT COUNT(*) FROM notes WHERE project_id = $1 AND note_type = 'claim'",
+            )
+            .bind(&project_id)
+            .fetch_one(repo.db.pool())
+            .await
+            .unwrap(),
+            sqlx::query_scalar("SELECT COUNT(*) FROM memory_entity_associations")
+                .fetch_one(repo.db.pool())
+                .await
+                .unwrap(),
+        );
+        let _default_graph = repo.graph(&project_id).await.unwrap();
+        let lifecycle_graph = repo
+            .graph_with_options(
+                &project_id,
+                GraphOptions {
+                    statuses: vec!["active".into(), "archived".into()],
+                    lifecycle_limit: 500,
+                    include_lifecycle_summary: true,
+                },
+            )
+            .await
+            .unwrap();
+        assert!(lifecycle_graph.nodes.iter().any(|node| node.id == claim.id));
+        let after: (i64, i64, i64) = (
+            sqlx::query_scalar(
+                "SELECT COUNT(*) FROM notes WHERE project_id = $1 AND note_type = 'entity'",
+            )
+            .bind(&project_id)
+            .fetch_one(repo.db.pool())
+            .await
+            .unwrap(),
+            sqlx::query_scalar(
+                "SELECT COUNT(*) FROM notes WHERE project_id = $1 AND note_type = 'claim'",
+            )
+            .bind(&project_id)
+            .fetch_one(repo.db.pool())
+            .await
+            .unwrap(),
+            sqlx::query_scalar("SELECT COUNT(*) FROM memory_entity_associations")
+                .fetch_one(repo.db.pool())
+                .await
+                .unwrap(),
+        );
+        assert_eq!(after, before);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn build_context_excludes_inactive_strong_association_neighbors() {
+        let (_tmp, repo, project_id) = setup_repo().await;
+        let seed = repo
+            .create(
+                &project_id,
+                "Context seed",
+                "context lifecycle marker",
+                "adr",
+                "[]",
+            )
+            .await
+            .unwrap();
+        let active = repo
+            .create(
+                &project_id,
+                "Active neighbor",
+                "context lifecycle marker",
+                "reference",
+                "[]",
+            )
+            .await
+            .unwrap();
+        let archived = repo
+            .create(
+                &project_id,
+                "Archived neighbor",
+                "context lifecycle marker",
+                "reference",
+                "[]",
+            )
+            .await
+            .unwrap();
+        let deprecated = repo
+            .create(
+                &project_id,
+                "Deprecated neighbor",
+                "context lifecycle marker",
+                "reference",
+                "[]",
+            )
+            .await
+            .unwrap();
+        for (id, status) in [(&archived.id, "archived"), (&deprecated.id, "deprecated")] {
+            sqlx::query("UPDATE notes SET status = $1 WHERE id = $2")
+                .bind(status)
+                .bind(id)
+                .execute(repo.db.pool())
+                .await
+                .unwrap();
+        }
+        for neighbor in [&active, &archived, &deprecated] {
+            repo.upsert_typed_association(
+                &seed.id,
+                &neighbor.id,
+                NoteAssociationKind::BuildsOn,
+                1.0,
+            )
+            .await
+            .unwrap();
+        }
+        let context = repo
+            .build_context(
+                &project_id,
+                &seed.permalink,
+                Some(8192),
+                None,
+                20,
+                Some(0.0),
+                None,
+            )
+            .await
+            .unwrap();
+        let ids: std::collections::HashSet<_> = context
+            .related_l1
+            .iter()
+            .map(|note| note.id.as_str())
+            .chain(context.related_l0.iter().map(|note| note.id.as_str()))
+            .collect();
+        assert!(ids.contains(active.id.as_str()));
+        assert!(!ids.contains(archived.id.as_str()));
+        assert!(!ids.contains(deprecated.id.as_str()));
     }
 }

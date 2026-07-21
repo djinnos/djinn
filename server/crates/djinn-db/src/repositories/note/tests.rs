@@ -25,6 +25,7 @@ mod graph_scoring;
 mod guidance;
 mod lifecycle_archive;
 mod lifecycle_decay;
+mod lifecycle_graph;
 mod memory_revision_repository;
 mod mutation;
 mod revision_readers;
