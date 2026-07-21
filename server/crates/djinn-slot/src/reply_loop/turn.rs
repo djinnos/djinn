@@ -1837,15 +1837,11 @@ mod tests {
     async fn helper_releases_guard_when_compaction_is_a_noop() {
         let section = CompactionCriticalSection::new();
         // Empty summaries across every removal-percentage attempt: a benign
-        // no-op, not an error. Extra scripted turns are harmless if unused.
-        let provider = FakeProvider::script(vec![
-            vec![StreamEvent::Done],
-            vec![StreamEvent::Done],
-            vec![StreamEvent::Done],
-            vec![StreamEvent::Done],
-            vec![StreamEvent::Done],
-            vec![StreamEvent::Done],
-        ]);
+        // no-op, not an error. Full compaction makes five attempts, then its
+        // context-overflow recovery retries that set three times before the
+        // aggressive pass makes the final five (25 calls total).
+        let provider =
+            FakeProvider::script((0..25).map(|_| vec![StreamEvent::Done]).collect::<Vec<_>>());
         let mut conversation = tiny_conversation();
         let slot_ctx = guard_test_slot_ctx();
 
