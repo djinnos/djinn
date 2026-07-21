@@ -263,6 +263,8 @@ impl ApiClient {
         auth: &AuthMethod,
         extra_headers: HeaderMap,
     ) -> Pin<Box<dyn Stream<Item = anyhow::Result<String>> + Send>> {
+        let request_body = serde_json::to_vec(&body).expect("serde_json::Value serializes");
+        let _estimated_payload_chars = request_body.len();
         let client = self.inner.clone();
         let url = url.to_string();
         let auth = auth.clone();
@@ -277,7 +279,7 @@ impl ApiClient {
             let response = 'retry: {
                 let mut attempt = 0u32;
                 loop {
-                    let mut req = client.post(&url).json(&body);
+                    let mut req = client.post(&url).header(reqwest::header::CONTENT_TYPE, "application/json").body(request_body.clone());
 
                     // Apply authentication
                     req = match &auth {
@@ -444,6 +446,8 @@ impl ApiClient {
         auth: &AuthMethod,
         extra_headers: HeaderMap,
     ) -> Pin<Box<dyn Stream<Item = anyhow::Result<SseFrame>> + Send>> {
+        let request_body = serde_json::to_vec(&body).expect("serde_json::Value serializes");
+        let _estimated_payload_chars = request_body.len();
         let client = self.inner.clone();
         let url = url.to_string();
         let auth = auth.clone();
@@ -456,7 +460,7 @@ impl ApiClient {
             let response = 'retry: {
                 let mut attempt = 0u32;
                 loop {
-                    let mut req = client.post(&url).json(&body);
+                    let mut req = client.post(&url).header(reqwest::header::CONTENT_TYPE, "application/json").body(request_body.clone());
 
                     req = match &auth {
                         AuthMethod::BearerToken(token) => {
@@ -598,13 +602,18 @@ impl ApiClient {
         auth: &AuthMethod,
         extra_headers: HeaderMap,
     ) -> anyhow::Result<String> {
+        let request_body = serde_json::to_vec(&body).expect("serde_json::Value serializes");
         let secrets = auth_secrets(auth);
         let secret_refs: Vec<&str> = secrets.iter().map(String::as_str).collect();
         // Env-gated capture of the literal outbound request (default OFF).
         log_outbound_request("POST", url, &body, auth, &extra_headers);
         let mut attempt = 0u32;
         loop {
-            let mut req = self.inner.post(url).json(&body);
+            let mut req = self
+                .inner
+                .post(url)
+                .header(reqwest::header::CONTENT_TYPE, "application/json")
+                .body(request_body.clone());
 
             req = match auth {
                 AuthMethod::BearerToken(token) => {
