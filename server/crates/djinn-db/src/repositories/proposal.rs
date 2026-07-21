@@ -196,18 +196,6 @@ struct ProposalAcceptanceCriteriaAuditEntry {
     new_criterion: serde_json::Value,
 }
 
-struct ProposalStatusEvent<'a> {
-    proposal_id: &'a str,
-    seq: i32,
-    title: &'a str,
-    body: &'a str,
-    body_format: &'a str,
-    acceptance_criteria: &'a serde_json::Value,
-    edited_by: Option<&'a str>,
-    status_from: &'a str,
-    status_to: &'a str,
-}
-
 struct ProposalRevisionSnapshot<'a> {
     proposal_id: &'a str,
     seq: i32,
@@ -222,6 +210,11 @@ struct ProposalRevisionSnapshot<'a> {
     /// need to attribute the revision to a specific source (e.g. a planner
     /// targeted block-patch attached to the active native-skill version).
     event_metadata: Option<&'a serde_json::Value>,
+    // Retained-body status history is a checked snapshot too, but has a
+    // distinct event annotation from a material spec edit.
+    event_kind: &'a str,
+    status_from: Option<&'a str>,
+    status_to: Option<&'a str>,
 }
 
 /// Linkage payload attached to a `needs_evidence` debate-trail entry's
@@ -700,6 +693,9 @@ impl ProposalRepository {
                 acceptance_criteria: &acceptance_criteria,
                 edited_by: author_user_id.as_deref(),
                 event_metadata: None,
+                event_kind: "spec_revision",
+                status_from: None,
+                status_to: None,
             },
         )
         .await?;
@@ -791,22 +787,30 @@ impl ProposalRepository {
                     acceptance_criteria: &acceptance_criteria,
                     edited_by: editor.as_deref(),
                     event_metadata: input.event_metadata,
+                    event_kind: "spec_revision",
+                    status_from: None,
+                    status_to: None,
                 },
             )
             .await?;
         } else if record_done_status_event {
             let editor = djinn_core::auth_context::current_user_id();
-            self.insert_status_event(ProposalStatusEvent {
-                proposal_id: id,
-                seq: next_seq,
-                title: input.title,
-                body: input.body,
-                body_format,
-                acceptance_criteria: &acceptance_criteria,
-                edited_by: editor.as_deref(),
-                status_from: &current.status,
-                status_to: effective_status,
-            })
+            self.insert_revision_checked(
+                &mut tx,
+                ProposalRevisionSnapshot {
+                    proposal_id: id,
+                    seq: next_seq,
+                    title: input.title,
+                    body: input.body,
+                    body_format,
+                    acceptance_criteria: &acceptance_criteria,
+                    edited_by: editor.as_deref(),
+                    event_metadata: None,
+                    event_kind: "status_change",
+                    status_from: Some(&current.status),
+                    status_to: Some(effective_status),
+                },
+            )
             .await?;
         }
         if demote {
@@ -1437,7 +1441,7 @@ impl ProposalRepository {
         })
     }
 
-    /// The sole checked spec-snapshot insertion path for create and material updates.
+    /// The sole checked retained-body revision-snapshot insertion path.
     async fn insert_revision_checked(
         &self,
         tx: &mut Transaction<'_, Postgres>,
@@ -1475,7 +1479,7 @@ impl ProposalRepository {
         }
         let result_json = serde_json::to_value(&result)?;
         let id = uuid::Uuid::now_v7().to_string();
-        sqlx::query("INSERT INTO proposal_revisions (id, proposal_id, seq, title, body, body_format, acceptance_criteria, edited_by_user_id, event_kind, event_metadata) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'spec_revision', $9)")
+        sqlx::query("INSERT INTO proposal_revisions (id, proposal_id, seq, title, body, body_format, acceptance_criteria, edited_by_user_id, event_kind, event_metadata, status_from, status_to) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)")
             .bind(&id)
             .bind(revision.proposal_id)
             .bind(revision.seq)
@@ -1484,10 +1488,17 @@ impl ProposalRepository {
             .bind(revision.body_format)
             .bind(revision.acceptance_criteria)
             .bind(revision.edited_by)
+            .bind(revision.event_kind)
             .bind(revision.event_metadata.cloned())
+            .bind(revision.status_from)
+            .bind(revision.status_to)
             .execute(&mut **tx)
             .await?;
-        sqlx::query("INSERT INTO proposal_revision_lint_results (proposal_id, revision_seq, linter_version, revision_id, body_sha256, result_json) VALUES ($1, $2, $3, $4, $5, $6)")
+        // Status snapshots retain the current head's sequence. They must still
+        // be linted above, but that head already owns this cache key from its
+        // material revision. Keep that valid result rather than conflicting on
+        // the per-(proposal, sequence, linter) cache primary key.
+        sqlx::query("INSERT INTO proposal_revision_lint_results (proposal_id, revision_seq, linter_version, revision_id, body_sha256, result_json) VALUES ($1, $2, $3, $4, $5, $6) ON CONFLICT (proposal_id, revision_seq, linter_version) DO NOTHING")
             .bind(revision.proposal_id)
             .bind(revision.seq)
             .bind(&result.linter_version)
@@ -1499,25 +1510,29 @@ impl ProposalRepository {
         Ok(())
     }
 
-    async fn insert_status_event(&self, event: ProposalStatusEvent<'_>) -> Result<()> {
-        let id = uuid::Uuid::now_v7().to_string();
+    /// Insert an empty-body history row for refinement/evidence lifecycle only.
+    /// This deliberately bypasses revision linting because it is not a retained
+    /// proposal body snapshot. Callers hold the mutation transaction so durable
+    /// lifecycle state commits with its associated proposal mutation.
+    async fn insert_lightweight_lifecycle_event_in_tx(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        proposal_id: &str,
+        seq: i32,
+        event_kind: &str,
+        event_metadata: Option<&serde_json::Value>,
+    ) -> Result<()> {
         sqlx::query(
-            "INSERT INTO proposal_revisions
-                (id, proposal_id, seq, title, body, body_format, acceptance_criteria, edited_by_user_id,
-                 event_kind, status_from, status_to)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'status_change', $9, $10)",
+            r#"INSERT INTO proposal_revisions
+                (id, proposal_id, seq, title, body, body_format, acceptance_criteria, edited_by_user_id, event_kind, event_metadata)
+               VALUES ($1, $2, $3, '', '', 'markdown', '[]', NULL, $4, $5)"#,
         )
-        .bind(id)
-        .bind(event.proposal_id)
-        .bind(event.seq)
-        .bind(event.title)
-        .bind(event.body)
-        .bind(event.body_format)
-        .bind(event.acceptance_criteria)
-        .bind(event.edited_by)
-        .bind(event.status_from)
-        .bind(event.status_to)
-        .execute(self.db.pool())
+        .bind(uuid::Uuid::now_v7().to_string())
+        .bind(proposal_id)
+        .bind(seq)
+        .bind(event_kind)
+        .bind(event_metadata)
+        .execute(&mut **tx)
         .await?;
         Ok(())
     }
@@ -1574,19 +1589,16 @@ impl ProposalRepository {
             .get(proposal_id)
             .await?
             .ok_or_else(|| Error::InvalidData(format!("proposal not found: {proposal_id}")))?;
-        let id = uuid::Uuid::now_v7().to_string();
-        sqlx::query(
-            r#"INSERT INTO proposal_revisions
-                (id, proposal_id, seq, title, body, body_format, acceptance_criteria, edited_by_user_id, event_kind, event_metadata)
-               VALUES ($1, $2, $3, '', '', 'markdown', '[]', NULL, $4, $5)"#,
+        let mut tx = self.db.pool().begin().await?;
+        self.insert_lightweight_lifecycle_event_in_tx(
+            &mut tx,
+            proposal_id,
+            proposal.latest_revision_seq,
+            event_kind,
+            event_metadata,
         )
-        .bind(id)
-        .bind(proposal_id)
-        .bind(proposal.latest_revision_seq)
-        .bind(event_kind)
-        .bind(event_metadata)
-        .execute(self.db.pool())
         .await?;
+        tx.commit().await?;
         Ok(())
     }
 
@@ -1610,16 +1622,14 @@ impl ProposalRepository {
             .bind(owner_user_id)
             .execute(&mut *tx)
             .await?;
-        sqlx::query(
-            r#"INSERT INTO proposal_revisions
-                (id, proposal_id, seq, title, body, body_format, acceptance_criteria, edited_by_user_id, event_kind, event_metadata)
-               VALUES ($1, $2, $3, '', '', 'markdown', '[]', NULL, 'refinement_start', $4)"#,
+        let event_metadata = serde_json::json!({ "refinement_owner_user_id": owner_user_id });
+        self.insert_lightweight_lifecycle_event_in_tx(
+            &mut tx,
+            proposal_id,
+            revision_seq,
+            "refinement_start",
+            Some(&event_metadata),
         )
-        .bind(uuid::Uuid::now_v7().to_string())
-        .bind(proposal_id)
-        .bind(revision_seq)
-        .bind(serde_json::json!({ "refinement_owner_user_id": owner_user_id }))
-        .execute(&mut *tx)
         .await?;
         tx.commit().await?;
         Ok(())
@@ -2959,28 +2969,39 @@ impl ProposalRepository {
         if proposal.status != "draft" {
             return Ok(false);
         }
-        sqlx::query(
+        let acceptance_criteria: serde_json::Value =
+            serde_json::from_str(&proposal.acceptance_criteria).unwrap_or(serde_json::json!([]));
+        let mut tx = self.db.pool().begin().await?;
+        let changed = sqlx::query(
             r#"UPDATE proposals SET status = 'in_review',
                     updated_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
              WHERE id = $1 AND status = 'draft'"#,
         )
         .bind(proposal_id)
-        .execute(self.db.pool())
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+        if changed == 0 {
+            return Ok(false);
+        }
+        self.insert_revision_checked(
+            &mut tx,
+            ProposalRevisionSnapshot {
+                proposal_id,
+                seq: proposal.latest_revision_seq,
+                title: &proposal.title,
+                body: &proposal.body,
+                body_format: &proposal.body_format,
+                acceptance_criteria: &acceptance_criteria,
+                edited_by: None,
+                event_metadata: None,
+                event_kind: "status_change",
+                status_from: Some("draft"),
+                status_to: Some("in_review"),
+            },
+        )
         .await?;
-        let acceptance_criteria: serde_json::Value =
-            serde_json::from_str(&proposal.acceptance_criteria).unwrap_or(serde_json::json!([]));
-        self.insert_status_event(ProposalStatusEvent {
-            proposal_id,
-            seq: proposal.latest_revision_seq,
-            title: &proposal.title,
-            body: &proposal.body,
-            body_format: &proposal.body_format,
-            acceptance_criteria: &acceptance_criteria,
-            edited_by: None,
-            status_from: "draft",
-            status_to: "in_review",
-        })
-        .await?;
+        tx.commit().await?;
         let updated = self.get_required(proposal_id).await?;
         self.events
             .send(DjinnEventEnvelope::proposal_updated(&updated));
@@ -3169,6 +3190,7 @@ impl ProposalRepository {
         }
 
         let acceptance_criteria = serde_json::Value::Array(criteria);
+        let mut tx = self.db.pool().begin().await?;
         sqlx::query(
             r#"UPDATE proposals SET acceptance_criteria = $1, latest_revision_seq = $2,
                     updated_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
@@ -3177,7 +3199,7 @@ impl ProposalRepository {
         .bind(&acceptance_criteria)
         .bind(next_revision_seq)
         .bind(proposal_id)
-        .execute(self.db.pool())
+        .execute(&mut *tx)
         .await?;
         let editor = djinn_core::auth_context::current_user_id();
         // The structured change list rides on the spec revision itself, under
@@ -3192,7 +3214,7 @@ impl ProposalRepository {
             "reason": reason,
             "amendments": amendments_json,
         });
-        let mut tx = self.db.pool().begin().await?;
+
         self.insert_revision_checked(
             &mut tx,
             ProposalRevisionSnapshot {
@@ -3204,6 +3226,9 @@ impl ProposalRepository {
                 acceptance_criteria: &acceptance_criteria,
                 edited_by: editor.as_deref(),
                 event_metadata: Some(&event_metadata),
+                event_kind: "spec_revision",
+                status_from: None,
+                status_to: None,
             },
         )
         .await?;
