@@ -4920,6 +4920,9 @@ mod tests {
     }
 
     /// Helper: insert an open `task` row under an epic and return its id.
+    // Keep the test-only boundary explicit for source inventories that inspect
+    // production-named repository files without evaluating enclosing cfgs.
+    #[cfg(test)]
     async fn insert_task(db: &Database, project_id: &str, epic_id: &str, short_id: &str) -> String {
         let id = uuid::Uuid::now_v7().to_string();
         sqlx::query!(
