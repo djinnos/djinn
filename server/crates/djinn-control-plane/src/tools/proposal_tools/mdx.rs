@@ -873,6 +873,10 @@ mod block_patch_tests {
     use djinn_core::events::EventBus;
     use djinn_db::{Database, ProposalCreateInput, ProposalRepository};
 
+    const HISTORICAL_SPLICE_BODY: &str = include_str!(
+        "../../../../djinn-spec-lint/tests/fixtures/v1/synthetic/delimiter_failures/body.md"
+    );
+
     async fn test_server() -> (DjinnMcpServer, Database) {
         let db = Database::open_in_memory().unwrap();
         db.ensure_initialized().await.unwrap();
@@ -992,7 +996,9 @@ mod block_patch_tests {
                 "proposal_block_patch",
                 serde_json::json!({
                     "id": proposal.id,
-                    "selector": { "exact_text": "Content here." },
+                    // Deliberately missing: the stale guard must run before
+                    // selector resolution can report this error.
+                    "selector": { "exact_text": "not present" },
                     "operation": "replace",
                     "block_mdx": "<Diagram id=\"d1\" />\n",
                     "expected_latest_revision_seq": 99,
@@ -1307,6 +1313,59 @@ mod block_patch_tests {
         assert_eq!(repo.revisions(&proposal.id).await.unwrap().len(), 1);
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn block_patch_rejected_candidate_keeps_revision_and_lint_rows() {
+        let (server, db) = test_server().await;
+        let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+        let proposal = repo
+            .create(ProposalCreateInput {
+                title: "Historical splice reproduction",
+                body: "Stable intro.\n\nReplace me.",
+                acceptance_criteria: Some("[]"),
+                status: None,
+                body_format: Some("markdown"),
+            })
+            .await
+            .unwrap();
+        let lint_rows_before: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM proposal_revision_lint_results WHERE proposal_id = $1",
+        )
+        .bind(&proposal.id)
+        .fetch_one(db.pool())
+        .await
+        .unwrap();
+
+        // This redacted g6cc fixture reproduces the historical unclosed
+        // delimiter splice. The shared transformation accepts the selected
+        // AST node, then the repository must lint the complete candidate.
+        let response = server
+            .dispatch_tool(
+                "proposal_block_patch",
+                serde_json::json!({
+                    "id": proposal.id,
+                    "selector": { "exact_text": "Replace me." },
+                    "operation": "replace",
+                    "block_mdx": HISTORICAL_SPLICE_BODY,
+                }),
+            )
+            .await
+            .unwrap();
+        let error = response.get("error").and_then(|v| v.as_str()).unwrap();
+        assert!(error.contains("SPEC_LINT_REJECTED"), "error was: {error}");
+
+        let unchanged = repo.get(&proposal.id).await.unwrap().unwrap();
+        assert_eq!(unchanged.latest_revision_seq, 1);
+        assert_eq!(unchanged.body, "Stable intro.\n\nReplace me.");
+        let lint_rows_after: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM proposal_revision_lint_results WHERE proposal_id = $1",
+        )
+        .bind(&proposal.id)
+        .fetch_one(db.pool())
+        .await
+        .unwrap();
+        assert_eq!(lint_rows_after, lint_rows_before);
+    }
+
     #[test]
     fn selectors_use_ast_boundaries_and_parsed_heading_outline() {
         let body = "# Root\r\n\r\n## Nested\r\n\r\né paragraph\r\n\r\n# C#\r\nEOF";
@@ -1369,6 +1428,38 @@ mod block_patch_tests {
             )
             .unwrap_err()
             .contains(PATCH_RANGE_NOT_NODE_ALIGNED)
+        );
+        let template_body = "<RichText id=\"r\" template={`Hello {{name}}`} />";
+        let template_start = template_body.find("Hello {{name}}").unwrap();
+        let template_end = template_start + "Hello {{name}}".len();
+        assert!(
+            resolve_byte_range_selector(
+                template_body,
+                &ByteRangeSelector {
+                    start: template_start as i64,
+                    end: template_end as i64,
+                    expected_text: Some("Hello {{name}}".into()),
+                },
+            )
+            .is_ok(),
+            "canonical template property must be patchable"
+        );
+
+        let cross_node_body = "first paragraph.\n\nsecond paragraph.";
+        let cross_start = cross_node_body.find("paragraph.").unwrap() + 1;
+        let cross_end = cross_node_body.rfind("paragraph.").unwrap() + "paragraph".len();
+        assert!(
+            resolve_byte_range_selector(
+                cross_node_body,
+                &ByteRangeSelector {
+                    start: cross_start as i64,
+                    end: cross_end as i64,
+                    expected_text: None,
+                },
+            )
+            .unwrap_err()
+            .contains(PATCH_RANGE_NOT_NODE_ALIGNED),
+            "a range partially spanning two top-level paragraphs must be rejected"
         );
     }
 }
