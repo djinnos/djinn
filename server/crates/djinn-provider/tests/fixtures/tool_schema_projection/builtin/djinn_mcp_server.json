@@ -8861,6 +8861,17 @@
             "folder": {
               "type": "string"
             },
+            "status": {
+              "description": "Lifecycle status for note nodes. Proposal nodes are semantic context and\nare consequently always represented as `active`.",
+              "type": "string"
+            },
+            "lifecycle_changed_at": {
+              "description": "Exact time a note last changed lifecycle state. Historical inactive\nnotes, and proposal nodes, legitimately have no transition timestamp.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "connection_count": {
               "description": "Total resolved edges incident to this node (inbound + outbound).",
               "type": "integer",
@@ -8896,6 +8907,7 @@
             "title",
             "note_type",
             "folder",
+            "status",
             "connection_count"
           ]
         },
