@@ -176,6 +176,22 @@ fn placeholder_count(conversation: &Conversation) -> usize {
         .count()
 }
 
+fn tool_result_text<'a>(conversation: &'a Conversation, tool_use_id: &str) -> &'a str {
+    conversation
+        .messages
+        .iter()
+        .flat_map(|message| &message.content)
+        .find_map(|block| match block {
+            ContentBlock::ToolResult {
+                tool_use_id: id,
+                content,
+                ..
+            } if id == tool_use_id => content.first().and_then(ContentBlock::as_text),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("missing tool result {tool_use_id}"))
+}
+
 #[derive(Debug, PartialEq, Eq)]
 struct ExpectedOutput {
     turn: u64,
@@ -272,6 +288,11 @@ async fn preclear_stash_is_atomic() {
         placeholder_count(&conversation) > 0,
         "micro replacement must create durable pointers"
     );
+    assert_eq!(
+        tool_result_text(&conversation, "atomic-1"),
+        output_bytes("atomic", 1),
+        "the ordinary age-six micro pass must leave this recent result inline"
+    );
 
     let records = stash.list_durable_outputs().unwrap();
     for (id, turn, completeness, bytes) in [
@@ -314,19 +335,22 @@ async fn preclear_stash_is_atomic() {
         reused
     );
 
-    // A tight window forces summary compaction; the provider's context-limit
-    // error must then select the overflow microcompaction replacement.
+    // A non-positive budget prevents the ordinary micro pass from returning early
+    // and prevents fallback truncation from hiding the aggressive retry's result.
     let mut overflow = tool_conversation(12, "overflow");
-    let overflow_before = conversation_bytes(&overflow);
     assert!(
-        compact(&OverflowProvider, &mut overflow, &mut stash, 100)
+        compact(&OverflowProvider, &mut overflow, &mut stash, 0)
             .await
             .is_ok()
     );
-    assert_ne!(
-        conversation_bytes(&overflow),
-        overflow_before,
-        "overflow fixture must run replacement"
+    let aggressive_only = tool_result_text(&overflow, "overflow-1");
+    assert!(
+        aggressive_only.starts_with("[Cleared")
+            && aggressive_only.contains("output_view")
+            && aggressive_only.contains("overflow-1"),
+        "the age-three overflow-1 result, left inline by the ordinary age-six pass, \
+         must be replaced with its durable pointer by the aggressive age-two retry: \
+         {aggressive_only}"
     );
     assert_eq!(
         stash
@@ -370,12 +394,11 @@ async fn survives_modes_reload_and_enforces_session() {
         expected.extend(expected_outputs(mode, turns));
         let mut conversation = tool_conversation(turns, mode);
         let before = conversation_bytes(&conversation);
+        let message_count_before = conversation.messages.len();
         let compacted = compact(provider, &mut conversation, &mut original, window)
             .await
             .unwrap();
-        if mode != "fallback" {
-            assert!(compacted, "{mode} fixture must compact");
-        }
+        assert!(compacted, "{mode} fixture must compact");
         assert_ne!(
             conversation_bytes(&conversation),
             before,
@@ -394,14 +417,16 @@ async fn survives_modes_reload_and_enforces_session() {
                 assert!(transcript.contains("fixture summary"));
                 assert!(!transcript.contains("[Partial compaction:"));
             }
-            "fallback" => assert!(
-                original
-                    .list_durable_outputs()
-                    .unwrap()
-                    .iter()
-                    .any(|record| record.tool_use_id == "fallback-0"),
-                "overflow retry fixture must reach persisted replacement targets"
-            ),
+            "fallback" => {
+                assert!(
+                    conversation.messages.len() < message_count_before,
+                    "deterministic fallback must reduce the message set"
+                );
+                assert!(
+                    transcript.contains("[Context compacted:"),
+                    "fallback must insert the deterministic compaction notice: {transcript}"
+                );
+            }
             _ => unreachable!(),
         }
     }
