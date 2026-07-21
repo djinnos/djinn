@@ -564,6 +564,20 @@ expression: tool_schemas_adversary()
     "concurrent_safe": true
   },
   {
+    "name": "output_list",
+    "description": "List durable metadata for truncated outputs owned by the current trusted session.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {},
+      "required": []
+    },
+    "readOnly": true,
+    "destructive": false,
+    "idempotent": true,
+    "openWorld": false,
+    "concurrent_safe": true
+  },
+  {
     "name": "memory_build_context",
     "description": "Build a curated memory context pack for a task or query by combining note retrieval and ranking. Relevant proposals are surfaced alongside notes so a planner/worker sees the motivating proposal.",
     "inputSchema": {
