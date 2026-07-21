@@ -2877,12 +2877,18 @@ pub(super) async fn reap_orphaned_pending_attempts_with_threshold(
     // group is skipped (the batch op already handled all pending members).
     let mut terminalized_groups: std::collections::HashSet<String> =
         std::collections::HashSet::new();
+    // Keep a separate dispatch group on the same task pending for a later sweep.
+    let mut reconciled_group_tasks: std::collections::HashSet<String> =
+        std::collections::HashSet::new();
 
     for orphan in &orphans {
         // Skip if this row's non-NULL group was already batch-terminalized.
         if let Some(gid) = &orphan.dispatch_group_id
             && terminalized_groups.contains(gid)
         {
+            continue;
+        }
+        if reconciled_group_tasks.contains(&orphan.task_id) {
             continue;
         }
 
@@ -2917,6 +2923,7 @@ pub(super) async fn reap_orphaned_pending_attempts_with_threshold(
             {
                 Ok(term) => {
                     terminalized_groups.insert(group_id.clone());
+                    reconciled_group_tasks.insert(orphan.task_id.clone());
                     tracing::warn!(
                         attempt_ids = ?term.updated_attempt_ids,
                         task_id = %orphan.task_id,
