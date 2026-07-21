@@ -36,16 +36,22 @@ pub struct SettingsSetParams {
     /// caps live in `user_settings_*`.
     pub models: Option<Vec<String>>,
     /// Maximum total injected knowledge size in UTF-8 bytes (256 through 32768).
+    #[schemars(with = "Option<i64>")]
     pub knowledge_injection_budget_bytes: Option<u32>,
     /// Maximum injected knowledge summary size in UTF-8 bytes (128 through 4096).
+    #[schemars(with = "Option<i64>")]
     pub knowledge_injection_line_cap_bytes: Option<u32>,
     /// Maximum retrieved knowledge candidates considered for injection (1 through 50).
+    #[schemars(with = "Option<i64>")]
     pub knowledge_injection_limit: Option<u32>,
     /// Injection-starvation threshold in percent (1 through 100).
+    #[schemars(with = "Option<i64>")]
     pub injection_starvation_threshold_percent: Option<u32>,
     /// Minimum retrieval queries for starvation evaluation (1 through 10000).
+    #[schemars(with = "Option<i64>")]
     pub injection_starvation_query_floor: Option<u32>,
     /// Retrieval-health aggregation window in minutes (5 through 10080).
+    #[schemars(with = "Option<i64>")]
     pub retrieval_health_window_minutes: Option<u32>,
 }
 

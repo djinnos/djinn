@@ -23273,8 +23273,7 @@
                 "integer",
                 "null"
               ],
-              "format": "uint32",
-              "minimum": 0
+              "format": "int64"
             },
             "knowledge_injection_line_cap_bytes": {
               "description": "Maximum UTF-8 bytes used for one injected knowledge summary (default 1024 bytes).",
@@ -23282,8 +23281,7 @@
                 "integer",
                 "null"
               ],
-              "format": "uint32",
-              "minimum": 0
+              "format": "int64"
             },
             "knowledge_injection_limit": {
               "description": "Maximum retrieved knowledge candidates considered for injection (default 10).",
@@ -23291,8 +23289,7 @@
                 "integer",
                 "null"
               ],
-              "format": "uint32",
-              "minimum": 0
+              "format": "int64"
             },
             "injection_starvation_threshold_percent": {
               "description": "Injection-starvation alert threshold in percent (default 50 percent).",
@@ -23300,8 +23297,7 @@
                 "integer",
                 "null"
               ],
-              "format": "uint32",
-              "minimum": 0
+              "format": "int64"
             },
             "injection_starvation_query_floor": {
               "description": "Minimum query count for injection-starvation evaluation (default 20 queries).",
@@ -23309,8 +23305,7 @@
                 "integer",
                 "null"
               ],
-              "format": "uint32",
-              "minimum": 0
+              "format": "int64"
             },
             "retrieval_health_window_minutes": {
               "description": "Retrieval-health aggregation window in minutes (default 1440 minutes).",
@@ -23318,8 +23313,7 @@
                 "integer",
                 "null"
               ],
-              "format": "uint32",
-              "minimum": 0
+              "format": "int64"
             }
           },
           "additionalProperties": false
@@ -23453,8 +23447,7 @@
             "integer",
             "null"
           ],
-          "format": "uint32",
-          "minimum": 0
+          "format": "int64"
         },
         "knowledge_injection_line_cap_bytes": {
           "description": "Maximum injected knowledge summary size in UTF-8 bytes (128 through 4096).",
@@ -23462,8 +23455,7 @@
             "integer",
             "null"
           ],
-          "format": "uint32",
-          "minimum": 0
+          "format": "int64"
         },
         "knowledge_injection_limit": {
           "description": "Maximum retrieved knowledge candidates considered for injection (1 through 50).",
@@ -23471,8 +23463,7 @@
             "integer",
             "null"
           ],
-          "format": "uint32",
-          "minimum": 0
+          "format": "int64"
         },
         "injection_starvation_threshold_percent": {
           "description": "Injection-starvation threshold in percent (1 through 100).",
@@ -23480,8 +23471,7 @@
             "integer",
             "null"
           ],
-          "format": "uint32",
-          "minimum": 0
+          "format": "int64"
         },
         "injection_starvation_query_floor": {
           "description": "Minimum retrieval queries for starvation evaluation (1 through 10000).",
@@ -23489,8 +23479,7 @@
             "integer",
             "null"
           ],
-          "format": "uint32",
-          "minimum": 0
+          "format": "int64"
         },
         "retrieval_health_window_minutes": {
           "description": "Retrieval-health aggregation window in minutes (5 through 10080).",
@@ -23498,8 +23487,7 @@
             "integer",
             "null"
           ],
-          "format": "uint32",
-          "minimum": 0
+          "format": "int64"
         }
       },
       "type": "object"

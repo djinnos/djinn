@@ -317,16 +317,22 @@ pub struct DjinnSettings {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dispatch_pause: Option<DispatchPause>,
     /// Maximum total UTF-8 bytes injected from retrieved knowledge (default 8192 bytes).
+    #[schemars(with = "Option<i64>")]
     pub knowledge_injection_budget_bytes: Option<u32>,
     /// Maximum UTF-8 bytes used for one injected knowledge summary (default 1024 bytes).
+    #[schemars(with = "Option<i64>")]
     pub knowledge_injection_line_cap_bytes: Option<u32>,
     /// Maximum retrieved knowledge candidates considered for injection (default 10).
+    #[schemars(with = "Option<i64>")]
     pub knowledge_injection_limit: Option<u32>,
     /// Injection-starvation alert threshold in percent (default 50 percent).
+    #[schemars(with = "Option<i64>")]
     pub injection_starvation_threshold_percent: Option<u32>,
     /// Minimum query count for injection-starvation evaluation (default 20 queries).
+    #[schemars(with = "Option<i64>")]
     pub injection_starvation_query_floor: Option<u32>,
     /// Retrieval-health aggregation window in minutes (default 1440 minutes).
+    #[schemars(with = "Option<i64>")]
     pub retrieval_health_window_minutes: Option<u32>,
 }
 

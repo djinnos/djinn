@@ -11144,7 +11144,7 @@ expression: signatures
               "type": "string"
             },
             "score": {
-              "default": 0.0,
+              "default": 0,
               "description": "RRF fusion score (higher = more relevant). Defaults to 0.0 for backward compat.",
               "format": "double",
               "type": "number"
@@ -23129,8 +23129,7 @@ expression: signatures
             },
             "injection_starvation_query_floor": {
               "description": "Minimum query count for injection-starvation evaluation (default 20 queries).",
-              "format": "uint32",
-              "minimum": 0,
+              "format": "int64",
               "type": [
                 "integer",
                 "null"
@@ -23138,8 +23137,7 @@ expression: signatures
             },
             "injection_starvation_threshold_percent": {
               "description": "Injection-starvation alert threshold in percent (default 50 percent).",
-              "format": "uint32",
-              "minimum": 0,
+              "format": "int64",
               "type": [
                 "integer",
                 "null"
@@ -23147,8 +23145,7 @@ expression: signatures
             },
             "knowledge_injection_budget_bytes": {
               "description": "Maximum total UTF-8 bytes injected from retrieved knowledge (default 8192 bytes).",
-              "format": "uint32",
-              "minimum": 0,
+              "format": "int64",
               "type": [
                 "integer",
                 "null"
@@ -23156,8 +23153,7 @@ expression: signatures
             },
             "knowledge_injection_limit": {
               "description": "Maximum retrieved knowledge candidates considered for injection (default 10).",
-              "format": "uint32",
-              "minimum": 0,
+              "format": "int64",
               "type": [
                 "integer",
                 "null"
@@ -23165,8 +23161,7 @@ expression: signatures
             },
             "knowledge_injection_line_cap_bytes": {
               "description": "Maximum UTF-8 bytes used for one injected knowledge summary (default 1024 bytes).",
-              "format": "uint32",
-              "minimum": 0,
+              "format": "int64",
               "type": [
                 "integer",
                 "null"
@@ -23195,8 +23190,7 @@ expression: signatures
             },
             "retrieval_health_window_minutes": {
               "description": "Retrieval-health aggregation window in minutes (default 1440 minutes).",
-              "format": "uint32",
-              "minimum": 0,
+              "format": "int64",
               "type": [
                 "integer",
                 "null"
@@ -23292,8 +23286,7 @@ expression: signatures
         },
         "injection_starvation_query_floor": {
           "description": "Minimum retrieval queries for starvation evaluation (1 through 10000).",
-          "format": "uint32",
-          "minimum": 0,
+          "format": "int64",
           "type": [
             "integer",
             "null"
@@ -23301,8 +23294,7 @@ expression: signatures
         },
         "injection_starvation_threshold_percent": {
           "description": "Injection-starvation threshold in percent (1 through 100).",
-          "format": "uint32",
-          "minimum": 0,
+          "format": "int64",
           "type": [
             "integer",
             "null"
@@ -23310,8 +23302,7 @@ expression: signatures
         },
         "knowledge_injection_budget_bytes": {
           "description": "Maximum total injected knowledge size in UTF-8 bytes (256 through 32768).",
-          "format": "uint32",
-          "minimum": 0,
+          "format": "int64",
           "type": [
             "integer",
             "null"
@@ -23319,8 +23310,7 @@ expression: signatures
         },
         "knowledge_injection_limit": {
           "description": "Maximum retrieved knowledge candidates considered for injection (1 through 50).",
-          "format": "uint32",
-          "minimum": 0,
+          "format": "int64",
           "type": [
             "integer",
             "null"
@@ -23328,8 +23318,7 @@ expression: signatures
         },
         "knowledge_injection_line_cap_bytes": {
           "description": "Maximum injected knowledge summary size in UTF-8 bytes (128 through 4096).",
-          "format": "uint32",
-          "minimum": 0,
+          "format": "int64",
           "type": [
             "integer",
             "null"
@@ -23347,8 +23336,7 @@ expression: signatures
         },
         "retrieval_health_window_minutes": {
           "description": "Retrieval-health aggregation window in minutes (5 through 10080).",
-          "format": "uint32",
-          "minimum": 0,
+          "format": "int64",
           "type": [
             "integer",
             "null"
