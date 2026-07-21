@@ -870,3 +870,133 @@ fn block_content_ignores_non_content_required_blocks() {
     let blocks = parse_mdx_blocks(body).unwrap();
     assert!(validate_block_content(&blocks).is_ok());
 }
+
+// ── retained-facade / canonical-linter compatibility ───────────────────────
+//
+// The control-plane module remains a public compatibility facade while authoring
+// and validation consumers use `djinn-spec-lint` canonically. Keep these tests
+// focused on the shared parser contract rather than duplicating the leaf crate's
+// complete fixture corpus or control-plane-only schema/MCP response types.
+
+fn assert_parse_results_match(body: &str) {
+    match (parse_mdx_blocks(body), djinn_spec_lint::parse_mdx_blocks(body)) {
+        (Ok(retained), Ok(canonical)) => {
+            assert_eq!(retained.len(), canonical.len(), "body: {body}");
+            for (retained, canonical) in retained.iter().zip(&canonical) {
+                assert_eq!(retained.tag, canonical.tag, "body: {body}");
+                assert_eq!(retained.block_type, canonical.block_type, "body: {body}");
+                assert_eq!(retained.id, canonical.id, "body: {body}");
+                assert_eq!(retained.raw_content, canonical.raw_content, "body: {body}");
+                assert_eq!(retained.attributes, canonical.attributes, "body: {body}");
+            }
+        }
+        (Err(retained), Err(canonical)) => assert_eq!(retained.to_string(), canonical.to_string()),
+        (retained, canonical) => panic!(
+            "retained and canonical parse outcomes differ for {body:?}: retained={retained:?}, canonical={canonical:?}"
+        ),
+    }
+}
+
+fn assert_validation_outcomes_match(
+    retained: Result<(), impl std::fmt::Display + std::fmt::Debug>,
+    canonical: Result<(), impl std::fmt::Display + std::fmt::Debug>,
+) {
+    match (retained, canonical) {
+        (Ok(()), Ok(())) => {}
+        (Err(retained), Err(canonical)) => assert_eq!(retained.to_string(), canonical.to_string()),
+        (retained, canonical) => panic!(
+            "retained and canonical validation outcomes differ: retained={retained:?}, canonical={canonical:?}"
+        ),
+    }
+}
+
+#[test]
+fn retained_facade_matches_canonical_registered_vocabulary_and_parse_fields() {
+    let retained_tags: std::collections::HashSet<String> = proposal_block_tags()
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
+    let canonical_tags: std::collections::HashSet<String> = djinn_spec_lint::proposal_block_tags()
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
+    assert_eq!(retained_tags, canonical_tags);
+
+    // This outer block deliberately holds a nested registered block. The parser
+    // returns only top-level blocks, so its raw content must preserve the nested
+    // markup verbatim along with string, expression, and boolean attributes.
+    let nested = r#"<Callout id="outer" tone="warning" enabled config={{ "kind": true }}>
+before
+<Callout id="inner">nested</Callout>
+after
+</Callout>"#;
+    assert_parse_results_match(nested);
+    let retained = parse_mdx_blocks(nested).unwrap();
+    assert_eq!(retained[0].attributes["tone"], "warning");
+    assert_eq!(retained[0].attributes["enabled"], "true");
+    assert_eq!(retained[0].attributes["config"], r#"{ "kind": true }"#);
+    assert_eq!(
+        retained[0].raw_content,
+        "\nbefore\n<Callout id=\"inner\">nested</Callout>\nafter\n"
+    );
+
+    // Bare JSON is raw block content, not an MDX expression.
+    assert_parse_results_match("<JsonExplorer id=\"json\">\n{\n  \"active\": true\n}\n</JsonExplorer>");
+}
+
+#[test]
+fn retained_facade_matches_canonical_validation_and_question_form_outcomes() {
+    let unknown = "<RichText id=\"known\"><GhostBlock /></RichText>";
+    assert_validation_outcomes_match(
+        validate_mdx_blocks(unknown),
+        djinn_spec_lint::validate_mdx_blocks(unknown),
+    );
+
+    let unclosed = "<Diagram id=\"diagram\">";
+    assert_parse_results_match(unclosed);
+
+    let empty_content = "<RichText id=\"empty\" />";
+    let retained = parse_mdx_blocks(empty_content).unwrap();
+    let canonical = djinn_spec_lint::parse_mdx_blocks(empty_content).unwrap();
+    assert_validation_outcomes_match(
+        validate_block_content(&retained),
+        djinn_spec_lint::validate_block_content(&canonical),
+    );
+
+    let empty_diagram = r#"<Diagram id="diagram" source="" />"#;
+    assert_validation_outcomes_match(
+        validate_mdx_blocks(empty_diagram),
+        djinn_spec_lint::validate_mdx_blocks(empty_diagram),
+    );
+
+    for body in [
+        "<Callout>content</Callout>",
+        "<Callout id=\"same\">one</Callout>\n<Diagram id=\"same\">flowchart LR; A-->B</Diagram>",
+    ] {
+        let retained = parse_mdx_blocks(body).unwrap();
+        let canonical = djinn_spec_lint::parse_mdx_blocks(body).unwrap();
+        assert_validation_outcomes_match(
+            validate_block_ids(&retained),
+            djinn_spec_lint::validate_block_ids(&canonical),
+        );
+    }
+
+    let valid_question_form =
+        "<Callout id=\"intro\">context</Callout>\n<QuestionForm id=\"questions\" />";
+    let invalid_question_form =
+        "<QuestionForm id=\"questions\" />\n<Callout id=\"after\">context</Callout>";
+    for body in [valid_question_form, invalid_question_form] {
+        assert_validation_outcomes_match(
+            validate_question_form_placement(body),
+            djinn_spec_lint::validate_question_form_placement(body),
+        );
+        assert_validation_outcomes_match(
+            validate_question_form_placement_for_format(body, "mdx"),
+            djinn_spec_lint::validate_question_form_placement_for_format(body, "mdx"),
+        );
+    }
+    assert_validation_outcomes_match(
+        validate_question_form_placement_for_format(invalid_question_form, "markdown"),
+        djinn_spec_lint::validate_question_form_placement_for_format(invalid_question_form, "markdown"),
+    );
+}
