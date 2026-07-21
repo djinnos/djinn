@@ -19,12 +19,21 @@ impl NoteRepository {
     /// Full knowledge graph for a project: all notes as nodes and all resolved
     /// wikilink edges. `connection_count` = inbound + outbound resolved edges.
     pub async fn graph(&self, project_id: &str) -> Result<GraphResponse> {
+        self.graph_with_options(project_id, GraphOptions::default())
+            .await
+    }
+
+    pub async fn graph_with_options(
+        &self,
+        project_id: &str,
+        options: GraphOptions,
+    ) -> Result<GraphResponse> {
         self.db.ensure_initialized().await?;
 
         let node_rows = sqlx::query!(
             r#"SELECT n.id AS "id!", n.permalink AS "permalink!",
                     n.title AS "title!", n.note_type AS "note_type!",
-                    n.folder AS "folder!", n.created_at AS "created_at!",
+                    n.folder AS "folder!", n.status AS "status!", n.lifecycle_changed_at AS "lifecycle_changed_at?", n.created_at AS "created_at!",
                     (SELECT COUNT(*) FROM note_links WHERE source_id = n.id
                        AND target_id IS NOT NULL)
                     + (SELECT COUNT(*) FROM note_links WHERE target_id = n.id)
@@ -71,11 +80,40 @@ impl NoteRepository {
                 title: row.title,
                 note_type: row.note_type,
                 folder: row.folder,
+                status: row.status,
+                lifecycle_changed_at: row.lifecycle_changed_at,
                 connection_count: row.connection_count,
                 entity_type: "note".to_string(),
                 created_at: Some(row.created_at),
             })
             .collect();
+
+        let all_nodes = std::mem::take(&mut nodes);
+        let mut inactive: Vec<GraphNode> = all_nodes
+            .iter()
+            .filter(|node| {
+                node.status != "active"
+                    && options.statuses.iter().any(|status| status == &node.status)
+            })
+            .cloned()
+            .collect();
+        let inactive_total = inactive.len() as i64;
+        inactive.sort_by(|left, right| {
+            right
+                .lifecycle_changed_at
+                .cmp(&left.lifecycle_changed_at)
+                .then_with(|| left.id.cmp(&right.id))
+        });
+        inactive.truncate(options.lifecycle_limit);
+        let inactive_returned = inactive.len() as i64;
+        nodes = all_nodes
+            .into_iter()
+            .filter(|node| {
+                node.status == "active"
+                    && options.statuses.iter().any(|status| status == &node.status)
+            })
+            .collect();
+        nodes.extend(inactive);
 
         // ── Proposal nodes ──────────────────────────────────────────────────────
         // Fetch proposals linked to this project via proposal_targets.
@@ -110,6 +148,8 @@ impl NoteRepository {
                 title,
                 note_type: "proposal".to_string(),
                 folder: "".to_string(),
+                status: "active".to_string(),
+                lifecycle_changed_at: None,
                 connection_count,
                 is_orphan: false,
                 broken_targets: Vec::new(),
@@ -118,8 +158,12 @@ impl NoteRepository {
             });
         }
 
+        let included_ids: HashSet<String> = nodes.iter().map(|node| node.id.clone()).collect();
         let edges = edge_rows
             .into_iter()
+            .filter(|row| {
+                included_ids.contains(&row.source_id) && included_ids.contains(&row.target_id)
+            })
             .map(|row| GraphEdge {
                 source_id: row.source_id,
                 target_id: row.target_id,
@@ -151,6 +195,10 @@ impl NoteRepository {
 
         let mut typed_edges: Vec<TypedEdge> = typed_edge_rows
             .into_iter()
+            .filter(|row| {
+                included_ids.contains(&row.get::<String, _>("source_id"))
+                    && included_ids.contains(&row.get::<String, _>("target_id"))
+            })
             .map(|row| TypedEdge {
                 source_id: row.get("source_id"),
                 target_id: row.get("target_id"),
@@ -191,6 +239,11 @@ impl NoteRepository {
         .await?;
 
         for row in mea_rows {
+            let source_id: String = row.get("source_id");
+            let target_id: String = row.get("target_id");
+            if !included_ids.contains(&source_id) || !included_ids.contains(&target_id) {
+                continue;
+            }
             typed_edges.push(TypedEdge {
                 source_id: row.get("source_id"),
                 target_id: row.get("target_id"),
@@ -205,6 +258,13 @@ impl NoteRepository {
             nodes,
             edges,
             typed_edges,
+            lifecycle_summary: options
+                .include_lifecycle_summary
+                .then_some(GraphLifecycleSummary {
+                    inactive_total,
+                    inactive_returned,
+                    inactive_omitted: inactive_total - inactive_returned,
+                }),
         })
     }
 

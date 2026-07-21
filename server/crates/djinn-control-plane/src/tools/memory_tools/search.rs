@@ -22,30 +22,52 @@ impl DjinnMcpServer {
     /// (builds_on, contradicts, supersedes, exemplifies, derived_from) in a
     /// single query.
     #[tool(
-        description = "Returns the full knowledge graph for visualization — all notes with connection counts, all resolved wikilink edges, and typed semantic edges (builds_on, contradicts, supersedes, exemplifies, derived_from) in a single query."
+        description = "Returns the lifecycle-aware knowledge graph for visualization. Omit statuses for active notes only; explicitly pass one or more of active, archived, deprecated to include those note lifecycles. lifecycle_limit caps inactive notes (default 500, maximum 1000). All returned edges have both endpoints in the returned node set."
     )]
     pub async fn memory_graph(
         &self,
         Parameters(params): Parameters<GraphParams>,
     ) -> Json<MemoryGraphResponse> {
+        let options = match params.graph_options() {
+            Ok(options) => options,
+            Err(error) => {
+                return Json(MemoryGraphResponse {
+                    nodes: vec![],
+                    edges: vec![],
+                    typed_edges: vec![],
+                    lifecycle_summary: None,
+                    error: Some(error),
+                });
+            }
+        };
         let Some(project_id) = self.project_id_for_path(&params.project).await else {
             return Json(MemoryGraphResponse {
                 nodes: vec![],
                 edges: vec![],
                 typed_edges: vec![],
+                lifecycle_summary: None,
                 error: Some(format!("project not found: {}", params.project)),
             });
         };
         let repo = NoteRepository::new(self.state.db().clone(), self.state.event_bus())
             .with_embedding_provider(self.state.embedding_provider())
             .with_vector_store(self.state.vector_store());
-        let graph = repo.graph(&project_id).await.unwrap_or_default();
-        Json(MemoryGraphResponse {
-            nodes: graph.nodes,
-            edges: graph.edges,
-            typed_edges: graph.typed_edges,
-            error: None,
-        })
+        match repo.graph_with_options(&project_id, options).await {
+            Ok(graph) => Json(MemoryGraphResponse {
+                nodes: graph.nodes,
+                edges: graph.edges,
+                typed_edges: graph.typed_edges,
+                lifecycle_summary: graph.lifecycle_summary,
+                error: None,
+            }),
+            Err(error) => Json(MemoryGraphResponse {
+                nodes: vec![],
+                edges: vec![],
+                typed_edges: vec![],
+                lifecycle_summary: None,
+                error: Some(error.to_string()),
+            }),
+        }
     }
 
     /// Build context from a seed note with progressive disclosure and token budget

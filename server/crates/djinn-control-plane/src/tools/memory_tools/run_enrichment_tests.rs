@@ -165,6 +165,8 @@ async fn memory_graph_concurrent_with_enrichment_does_not_block() {
         GRAPH_BUDGET,
         server.memory_graph(Parameters(GraphParams {
             project: project_id.clone(),
+            statuses: None,
+            lifecycle_limit: None,
         })),
     )
     .await;
