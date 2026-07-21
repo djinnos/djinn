@@ -121,9 +121,12 @@ resources:
       # CPU requests are the CFS weight under contention. At 250m-500m the
       # server lost enough CPU during compile storms (a full worker fleet
       # linking at once) to fail its readiness probe — transient 521s observed
-      # in production. Pin the request to 1 full core so the long-lived
-      # controller keeps a guaranteed share while task-run pods burst.
-      cpu: "1"
+      # in production. 1 core was still not enough: with five task-run pods
+      # bursting past their requests the server missed 1s-deadline health
+      # probes for minutes at a stretch and was liveness-killed ~10×/day,
+      # orphaning every running session. 2 cores keeps the control plane
+      # responsive through full-fleet link storms.
+      cpu: "2"
       memory: "512Mi"
     limits:
       cpu: "2"

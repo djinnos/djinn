@@ -1358,10 +1358,11 @@ mod tests {
         let id = uuid::Uuid::now_v7().to_string();
         let project_id = epic_project(db, epic_id).await;
         let title = format!("Task {short_id}");
+        let creator = crate::repositories::test_support::seed_test_user(db).await;
         sqlx::query(
             r#"INSERT INTO tasks (id, project_id, short_id, epic_id, title, description, design,
-                    issue_type, status, priority, owner, labels, acceptance_criteria, memory_refs)
-               VALUES ($1, $2, $3, $4, $5, '', '', 'task', $6, 1, '', '[]'::jsonb, '[]'::jsonb, '[]'::jsonb)"#,
+                    issue_type, status, priority, owner, labels, acceptance_criteria, memory_refs, created_by_user_id)
+               VALUES ($1, $2, $3, $4, $5, '', '', 'task', $6, 1, '', '[]'::jsonb, '[]'::jsonb, '[]'::jsonb, $7)"#,
         )
         .bind(&id)
         .bind(&project_id)
@@ -1369,6 +1370,7 @@ mod tests {
         .bind(epic_id)
         .bind(&title)
         .bind(status)
+        .bind(&creator)
         .execute(db.pool())
         .await
         .unwrap();

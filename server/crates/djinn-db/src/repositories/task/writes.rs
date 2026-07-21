@@ -142,6 +142,29 @@ pub(crate) async fn resolve_effective_creator(
     Err(Error::InvalidData(EFFECTIVE_CREATOR_UNAVAILABLE.to_owned()))
 }
 
+/// Transactional provenance boundary for peer-sync task writers
+/// (`explicit_source_creator`): the incoming peer row's own creator is the
+/// only admissible attribution fact — peer sync replicates attribution, it
+/// never resolves a local fallback identity. The candidate is checked against
+/// the local `users` table inside the caller's open transaction; a creator
+/// unknown to this instance degrades to `NULL`, mirroring the schema's
+/// `ON DELETE SET NULL` attribution policy, so one unreplicated user cannot
+/// fail the whole row sync with a non-retriable FK violation.
+pub(crate) async fn incoming_task_creator(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    incoming: Option<&str>,
+) -> Result<Option<String>> {
+    let Some(candidate) = incoming else {
+        return Ok(None);
+    };
+    Ok(
+        sqlx::query_scalar::<_, String>("SELECT id FROM users WHERE id = $1")
+            .bind(candidate)
+            .fetch_optional(&mut **tx)
+            .await?,
+    )
+}
+
 impl TaskRepository {
     /// Test-support helper for fixtures that need to establish source-task
     /// provenance without using a production post-insert attribution path.

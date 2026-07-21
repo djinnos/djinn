@@ -759,10 +759,11 @@ mod tests {
             .fetch_one(db.pool())
             .await
             .unwrap();
+        let creator = crate::repositories::test_support::seed_test_user(db).await;
         sqlx::query(
             r#"INSERT INTO tasks (id, project_id, short_id, epic_id, title, description, design,
-                    issue_type, status, priority, owner, labels, acceptance_criteria, memory_refs)
-               VALUES ($1, $2, $3, $4, $5, '', '', 'task', $6, 1, '', '[]'::jsonb, '[]'::jsonb, '[]'::jsonb)"#,
+                    issue_type, status, priority, owner, labels, acceptance_criteria, memory_refs, created_by_user_id)
+               VALUES ($1, $2, $3, $4, $5, '', '', 'task', $6, 1, '', '[]'::jsonb, '[]'::jsonb, '[]'::jsonb, $7)"#,
         )
         .bind(&id)
         .bind(project_id.0)
@@ -770,6 +771,7 @@ mod tests {
         .bind(epic_id)
         .bind("Task")
         .bind(status)
+        .bind(&creator)
         .execute(db.pool())
         .await
         .unwrap();
@@ -777,7 +779,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn attribution_section_reports_null_creator_without_age_threshold() {
+    async fn attribution_section_excludes_latest_schema_task_with_creator() {
         let db = Database::open_in_memory().unwrap();
         let project = project(&db).await;
         let epic = epic(&db, &project, "open").await;
@@ -788,20 +790,11 @@ mod tests {
             .as_array()
             .unwrap()
             .iter()
-            .find(|finding| finding["id"] == task_id)
-            .expect("fresh nullable-era task must be reported");
-        assert_eq!(finding["reason"], "legacy_null_creator");
-        assert_eq!(finding["gate_verdict"], "blocked");
-        assert_eq!(finding["dispatchable"], false);
-        assert_eq!(
-            finding["creation_provenance"]["source"],
-            "tasks.created_by_user_id"
+            .find(|finding| finding["id"] == task_id);
+        assert!(
+            finding.is_none(),
+            "latest-schema task with a valid creator must not be reported as legacy"
         );
-        assert_eq!(
-            finding["creation_provenance"]["creator_user_id"],
-            serde_json::Value::Null
-        );
-        assert_eq!(finding["creation_provenance"]["creator_resolved"], false);
     }
 
     async fn proposal(db: &Database, status: &str) -> String {

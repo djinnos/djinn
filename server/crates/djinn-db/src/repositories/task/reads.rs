@@ -458,6 +458,13 @@ impl TaskRepository {
             }
         }
 
+        // Peer attribution flows through the transactional provenance
+        // boundary: bind the incoming row's creator only when it is known to
+        // this instance, so an unreplicated user degrades attribution instead
+        // of failing the sync on the users FK.
+        let created_by_user_id =
+            incoming_task_creator(&mut tx, task.created_by_user_id.as_deref()).await?;
+
         // Clone task for mutation if we need to extend short_id
         let mut task = task.clone();
         let mut retry_count = 0;
@@ -474,10 +481,10 @@ impl TaskRepository {
                     total_reopen_count,
                     intervention_count, last_intervention_at,
                     created_at, updated_at, closed_at,
-                    close_reason, merge_commit_sha, pr_url, merge_conflict_metadata, memory_refs
+                    close_reason, merge_commit_sha, pr_url, merge_conflict_metadata, memory_refs, created_by_user_id
                  ) VALUES (
                     $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::jsonb,
-                    $13::jsonb, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26::jsonb
+                    $13::jsonb, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26::jsonb, $27
                  )
                  ON CONFLICT (id) DO UPDATE SET
                     project_id          = EXCLUDED.project_id,
@@ -501,6 +508,7 @@ impl TaskRepository {
                     pr_url              = CASE WHEN EXCLUDED.updated_at > tasks.updated_at AND NOT (tasks.status = 'closed' AND EXCLUDED.status != 'closed') THEN EXCLUDED.pr_url ELSE tasks.pr_url END,
                     merge_conflict_metadata = CASE WHEN EXCLUDED.updated_at > tasks.updated_at AND NOT (tasks.status = 'closed' AND EXCLUDED.status != 'closed') THEN EXCLUDED.merge_conflict_metadata ELSE tasks.merge_conflict_metadata END,
                     memory_refs         = CASE WHEN EXCLUDED.updated_at > tasks.updated_at AND NOT (tasks.status = 'closed' AND EXCLUDED.status != 'closed') THEN EXCLUDED.memory_refs ELSE tasks.memory_refs END,
+                    created_by_user_id  = CASE WHEN EXCLUDED.updated_at > tasks.updated_at AND NOT (tasks.status = 'closed' AND EXCLUDED.status != 'closed') THEN EXCLUDED.created_by_user_id ELSE tasks.created_by_user_id END,
                     updated_at          = CASE WHEN EXCLUDED.updated_at > tasks.updated_at AND NOT (tasks.status = 'closed' AND EXCLUDED.status != 'closed') THEN EXCLUDED.updated_at ELSE tasks.updated_at END"#,
             )
             .bind(&task.id)
@@ -529,6 +537,7 @@ impl TaskRepository {
             .bind(&task.pr_url)
             .bind(&task.merge_conflict_metadata)
             .bind(&task.memory_refs)
+            .bind(&created_by_user_id)
             .execute(&mut *tx)
             .await;
 
@@ -639,6 +648,11 @@ impl TaskRepository {
             }
         }
 
+        // Same transactional provenance boundary as `upsert_peer`: only a
+        // locally-known incoming creator is bound.
+        let created_by_user_id =
+            incoming_task_creator(tx, task.created_by_user_id.as_deref()).await?;
+
         // Clone task for mutation if we need to extend short_id
         let mut task = task.clone();
         let mut retry_count = 0;
@@ -653,10 +667,10 @@ impl TaskRepository {
                     total_reopen_count,
                     intervention_count, last_intervention_at,
                     created_at, updated_at, closed_at,
-                    close_reason, merge_commit_sha, pr_url, merge_conflict_metadata, memory_refs
+                    close_reason, merge_commit_sha, pr_url, merge_conflict_metadata, memory_refs, created_by_user_id
                  ) VALUES (
                     $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::jsonb,
-                    $13::jsonb, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26::jsonb
+                    $13::jsonb, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26::jsonb, $27
                  )
                  ON CONFLICT (id) DO UPDATE SET
                     project_id          = EXCLUDED.project_id,
@@ -678,6 +692,7 @@ impl TaskRepository {
                     close_reason        = CASE WHEN EXCLUDED.updated_at > tasks.updated_at AND NOT (tasks.status = 'closed' AND EXCLUDED.status != 'closed') THEN EXCLUDED.close_reason ELSE tasks.close_reason END,
                     merge_commit_sha    = CASE WHEN EXCLUDED.updated_at > tasks.updated_at AND NOT (tasks.status = 'closed' AND EXCLUDED.status != 'closed') THEN EXCLUDED.merge_commit_sha ELSE tasks.merge_commit_sha END,
                     pr_url              = CASE WHEN EXCLUDED.updated_at > tasks.updated_at AND NOT (tasks.status = 'closed' AND EXCLUDED.status != 'closed') THEN EXCLUDED.pr_url ELSE tasks.pr_url END,
+                    created_by_user_id  = CASE WHEN EXCLUDED.updated_at > tasks.updated_at AND NOT (tasks.status = 'closed' AND EXCLUDED.status != 'closed') THEN EXCLUDED.created_by_user_id ELSE tasks.created_by_user_id END,
                     merge_conflict_metadata = CASE WHEN EXCLUDED.updated_at > tasks.updated_at AND NOT (tasks.status = 'closed' AND EXCLUDED.status != 'closed') THEN EXCLUDED.merge_conflict_metadata ELSE tasks.merge_conflict_metadata END,
                     memory_refs         = CASE WHEN EXCLUDED.updated_at > tasks.updated_at AND NOT (tasks.status = 'closed' AND EXCLUDED.status != 'closed') THEN EXCLUDED.memory_refs ELSE tasks.memory_refs END,
                     updated_at          = CASE WHEN EXCLUDED.updated_at > tasks.updated_at AND NOT (tasks.status = 'closed' AND EXCLUDED.status != 'closed') THEN EXCLUDED.updated_at ELSE tasks.updated_at END"#,
@@ -708,6 +723,7 @@ impl TaskRepository {
             .bind(&task.pr_url)
             .bind(&task.merge_conflict_metadata)
             .bind(&task.memory_refs)
+            .bind(&created_by_user_id)
             .execute(&mut **tx)
             .await;
 
