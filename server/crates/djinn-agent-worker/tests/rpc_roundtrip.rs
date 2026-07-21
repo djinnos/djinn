@@ -68,7 +68,7 @@ fn fixture_task(id: &str) -> Task {
         merge_conflict_metadata: None,
         memory_refs: "[]".into(),
         agent_type: None,
-        created_by_user_id: None,
+        created_by_user_id: "test-creator".into(),
         ci_status: "unknown".into(),
         ci_head_sha: None,
         ci_pr_number: None,

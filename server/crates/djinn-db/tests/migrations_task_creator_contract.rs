@@ -222,7 +222,7 @@ async fn unset_zero_task_and_forced_post_update_failure_are_atomic() {
         1
     );
     assert_eq!(
-        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM _sqlx_migrations WHERE version = 136")
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM _sqlx_migrations WHERE version = 137")
             .fetch_one(&mut conn)
             .await
             .unwrap(),
