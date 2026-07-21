@@ -2001,6 +2001,48 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn durable_pointers_are_supplied_before_microcompaction_replaces_results() {
+        use std::collections::HashMap;
+        use std::sync::Arc;
+
+        let section = CompactionCriticalSection::new();
+        let provider = FailingProvider::new("summarizer must not run");
+        let mut conversation = micro_compactable_conversation(12);
+        let pointers = (0..12)
+            .map(|index| djinn_compaction::ToolOutputPointer {
+                tool_use_id: format!("call_{index}"),
+                turn: index,
+                original_chars: 900,
+                result_kind: "tool_result".into(),
+            })
+            .collect();
+        let dispatcher =
+            crate::test_helpers::ConfigurableToolDispatcher::new(vec![], HashMap::new())
+                .with_compaction_persistence(Ok(pointers));
+        let mut slot_ctx = guard_test_slot_ctx();
+        slot_ctx.tool_dispatcher = Some(Arc::new(dispatcher));
+
+        assert!(
+            compact_conversation_in_critical_section(
+                &provider,
+                &mut conversation,
+                "s-persist-order",
+                "t-persist-order",
+                "worker",
+                1_000_000,
+                &section,
+                &slot_ctx,
+            )
+            .await
+            .unwrap()
+        );
+        assert!(conversation.messages.iter().flat_map(|message| &message.content).any(|block| {
+            matches!(block, ContentBlock::ToolResult { content, .. } if content.iter().filter_map(ContentBlock::as_text).any(|text| text.contains("output_view(tool_use_id=")))
+        }));
+        assert!(!section.is_compacting());
+    }
+
+    #[tokio::test]
     async fn persistence_failure_aborts_before_microcompaction_mutates_conversation() {
         use std::collections::HashMap;
         use std::sync::Arc;
@@ -2008,11 +2050,23 @@ mod tests {
         let provider = FailingProvider::new("summarizer must not run");
         let mut conversation = micro_compactable_conversation(12);
         let before = serde_json::to_vec(&conversation).unwrap();
-        let dispatcher = crate::test_helpers::ConfigurableToolDispatcher::new(vec![], HashMap::new())
-            .with_compaction_persistence(Err("injected durable write failure".into()));
+        let dispatcher =
+            crate::test_helpers::ConfigurableToolDispatcher::new(vec![], HashMap::new())
+                .with_compaction_persistence(Err("injected durable write failure".into()));
         let mut slot_ctx = guard_test_slot_ctx();
         slot_ctx.tool_dispatcher = Some(Arc::new(dispatcher));
-        let error = compact_conversation_in_critical_section(&provider, &mut conversation, "s-persist-fail", "t-persist-fail", "worker", 1_000_000, &section, &slot_ctx).await.unwrap_err();
+        let error = compact_conversation_in_critical_section(
+            &provider,
+            &mut conversation,
+            "s-persist-fail",
+            "t-persist-fail",
+            "worker",
+            1_000_000,
+            &section,
+            &slot_ctx,
+        )
+        .await
+        .unwrap_err();
         assert!(error.contains("injected durable write failure"));
         assert_eq!(serde_json::to_vec(&conversation).unwrap(), before);
         assert!(!section.is_compacting());

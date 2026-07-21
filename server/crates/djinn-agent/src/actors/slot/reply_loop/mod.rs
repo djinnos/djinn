@@ -159,21 +159,44 @@ fn persist_tool_results_before_compaction(
 ) -> Result<Vec<djinn_compaction::ToolOutputPointer>, String> {
     let existing = stash.list_durable_outputs()?;
     for result in results {
-        if existing.iter().any(|metadata| metadata.tool_use_id == result.tool_use_id) {
+        if existing
+            .iter()
+            .any(|metadata| metadata.tool_use_id == result.tool_use_id)
+        {
             continue;
         }
         let chars = result.content.chars().count();
         stash.insert_with_metadata(
-            result.tool_use_id.clone(), result.tool_name.clone(), result.content.clone(),
-            DurableOutputDetails { turn: result.turn, result_kind: "tool_result".into(), original_chars: chars, stored_chars: chars, completeness: "complete".into() },
+            result.tool_use_id.clone(),
+            result.tool_name.clone(),
+            result.content.clone(),
+            DurableOutputDetails {
+                turn: result.turn,
+                result_kind: "tool_result".into(),
+                original_chars: chars,
+                stored_chars: chars,
+                completeness: "complete".into(),
+            },
         )?;
     }
     let durable = stash.list_durable_outputs()?;
-    results.iter().map(|result| {
-        let metadata = durable.iter().find(|metadata| metadata.tool_use_id == result.tool_use_id)
-            .ok_or_else(|| format!("durable output missing after write: {}", result.tool_use_id))?;
-        Ok(djinn_compaction::ToolOutputPointer { tool_use_id: metadata.tool_use_id.clone(), turn: metadata.turn, original_chars: metadata.original_chars, result_kind: metadata.result_kind.clone() })
-    }).collect()
+    results
+        .iter()
+        .map(|result| {
+            let metadata = durable
+                .iter()
+                .find(|metadata| metadata.tool_use_id == result.tool_use_id)
+                .ok_or_else(|| {
+                    format!("durable output missing after write: {}", result.tool_use_id)
+                })?;
+            Ok(djinn_compaction::ToolOutputPointer {
+                tool_use_id: metadata.tool_use_id.clone(),
+                turn: metadata.turn,
+                original_chars: metadata.original_chars,
+                result_kind: metadata.result_kind.clone(),
+            })
+        })
+        .collect()
 }
 
 impl djinn_slot::host::SlotToolDispatcher for AgentToolDispatcher {
@@ -435,22 +458,42 @@ mod compaction_persistence_tests {
     use djinn_slot::host::PreCompactionToolResult;
 
     fn stash(name: &str) -> OutputStash {
-        let root = std::path::PathBuf::from("/var/tmp/djinn-compaction-persistence-tests").join(name);
+        let root =
+            std::path::PathBuf::from("/var/tmp/djinn-compaction-persistence-tests").join(name);
         let _ = std::fs::remove_dir_all(&root);
         OutputStash::with_session_id_and_durable_root("trusted-session", root)
     }
 
     fn result(id: &str, content: &str, turn: u64) -> PreCompactionToolResult {
-        PreCompactionToolResult { tool_use_id: id.into(), tool_name: "shell".into(), content: content.into(), turn }
+        PreCompactionToolResult {
+            tool_use_id: id.into(),
+            tool_name: "shell".into(),
+            content: content.into(),
+            turn,
+        }
     }
 
     #[test]
     fn persistence_reuses_existing_metadata_and_is_idempotent() {
         let mut stash = stash("reuse");
-        stash.insert_with_metadata("large".into(), "shell".into(), "prefix".into(), DurableOutputDetails {
-            turn: 9, result_kind: "shell_stdout".into(), original_chars: 99, stored_chars: 6, completeness: "partial-spill".into(),
-        }).unwrap();
-        let results = vec![result("large", "inline replacement must not overwrite", 1), result("small", "small inline output", 2)];
+        stash
+            .insert_with_metadata(
+                "large".into(),
+                "shell".into(),
+                "prefix".into(),
+                DurableOutputDetails {
+                    turn: 9,
+                    result_kind: "shell_stdout".into(),
+                    original_chars: 99,
+                    stored_chars: 6,
+                    completeness: "partial-spill".into(),
+                },
+            )
+            .unwrap();
+        let results = vec![
+            result("large", "inline replacement must not overwrite", 1),
+            result("small", "small inline output", 2),
+        ];
         let pointers = persist_tool_results_before_compaction(&mut stash, &results).unwrap();
         assert_eq!(pointers[0].turn, 9);
         assert_eq!(pointers[0].original_chars, 99);
@@ -460,9 +503,127 @@ mod compaction_persistence_tests {
         persist_tool_results_before_compaction(&mut stash, &results).unwrap();
         let listed = stash.list_durable_outputs().unwrap();
         assert_eq!(listed.len(), 2);
-        assert_eq!(listed.iter().find(|item| item.tool_use_id == "large").unwrap().completeness, "partial-spill");
+        assert_eq!(
+            listed
+                .iter()
+                .find(|item| item.tool_use_id == "large")
+                .unwrap()
+                .completeness,
+            "partial-spill"
+        );
         stash.clear();
-        assert!(stash.view("small", 0, 10).unwrap().contains("small inline output"));
+        assert!(
+            stash
+                .view("small", 0, 10)
+                .unwrap()
+                .contains("small inline output")
+        );
+    }
+
+    #[test]
+    fn persistence_preserves_complete_truncated_partial_and_overflow_metadata() {
+        let mut stash = stash("metadata");
+        let records = [
+            (
+                "complete",
+                "complete",
+                DurableOutputDetails {
+                    turn: 1,
+                    result_kind: "tool_result".into(),
+                    original_chars: 8,
+                    stored_chars: 8,
+                    completeness: "complete".into(),
+                },
+            ),
+            (
+                "truncated",
+                "cut",
+                DurableOutputDetails {
+                    turn: 2,
+                    result_kind: "shell_stdout".into(),
+                    original_chars: 90,
+                    stored_chars: 3,
+                    completeness: "truncated".into(),
+                },
+            ),
+            (
+                "spill",
+                "part",
+                DurableOutputDetails {
+                    turn: 3,
+                    result_kind: "shell_stdout".into(),
+                    original_chars: 80,
+                    stored_chars: 4,
+                    completeness: "partial-spill".into(),
+                },
+            ),
+        ];
+        for (id, text, details) in &records {
+            stash
+                .insert_with_metadata(
+                    (*id).into(),
+                    "shell".into(),
+                    (*text).into(),
+                    details.clone(),
+                )
+                .unwrap();
+        }
+        let results = vec![
+            result("complete", "inline complete", 11),
+            result("truncated", "inline truncation stub", 12),
+            result("spill", "inline spill stub", 13),
+            result("overflow-micro", &"x".repeat(800), 14),
+        ];
+        let pointers = persist_tool_results_before_compaction(&mut stash, &results).unwrap();
+        assert_eq!(pointers.len(), results.len());
+        let listed = stash.list_durable_outputs().unwrap();
+        for (id, _, details) in &records {
+            let metadata = listed
+                .iter()
+                .find(|entry| entry.tool_use_id == *id)
+                .unwrap();
+            assert_eq!(metadata.turn, details.turn);
+            assert_eq!(metadata.result_kind, details.result_kind);
+            assert_eq!(metadata.original_chars, details.original_chars);
+            assert_eq!(metadata.stored_chars, details.stored_chars);
+            assert_eq!(metadata.completeness, details.completeness);
+        }
+        let overflow = listed
+            .iter()
+            .find(|entry| entry.tool_use_id == "overflow-micro")
+            .unwrap();
+        assert_eq!(overflow.completeness, "complete");
+        assert_eq!(overflow.original_chars, 800);
+        stash.clear();
+        for id in ["complete", "truncated", "spill", "overflow-micro"] {
+            assert!(
+                stash.view(id, 0, 10).is_ok(),
+                "{id} must remain durable after clear"
+            );
+        }
+    }
+
+    #[test]
+    fn injected_write_failure_preserves_existing_stash_and_emits_no_missing_pointer() {
+        let mut stash = stash("failure-preserves-existing");
+        stash
+            .insert("already".into(), "shell".into(), "already durable".into())
+            .unwrap();
+        stash.set_fail_durable_writes_for_test(true);
+        let results = vec![
+            result("already", "inline old", 1),
+            result("missing", "must remain inline", 2),
+        ];
+        let error = persist_tool_results_before_compaction(&mut stash, &results).unwrap_err();
+        assert!(error.contains("injected durable output write failure"));
+        assert!(
+            stash
+                .view("already", 0, 10)
+                .unwrap()
+                .contains("already durable")
+        );
+        assert_eq!(stash.list_durable_outputs().unwrap().len(), 1);
+        assert!(stash.view("missing", 0, 10).is_err());
     }
 
     #[test]

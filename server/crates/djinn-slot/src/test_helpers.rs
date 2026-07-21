@@ -145,7 +145,10 @@ impl ConfigurableToolDispatcher {
         }
     }
 
-    pub fn with_compaction_persistence(mut self, result: Result<Vec<djinn_compaction::ToolOutputPointer>, String>) -> Self {
+    pub fn with_compaction_persistence(
+        mut self,
+        result: Result<Vec<djinn_compaction::ToolOutputPointer>, String>,
+    ) -> Self {
         self.compaction_persistence = Some(result);
         self
     }
@@ -191,7 +194,9 @@ impl SlotToolDispatcher for ConfigurableToolDispatcher {
         &self,
         _results: &[crate::host::PreCompactionToolResult],
     ) -> Result<Vec<djinn_compaction::ToolOutputPointer>, String> {
-        self.compaction_persistence.clone().unwrap_or_default()
+        self.compaction_persistence
+            .clone()
+            .unwrap_or_else(|| Ok(Vec::new()))
     }
     fn dispatch_extension_tool<'a>(
         &'a self,
