@@ -2317,7 +2317,11 @@ async fn planner_production_boundary_scope_budget_runs_planner_without_injection
     let knowledge = context.knowledge_context.expect("scope context");
     assert!(knowledge.contains("Scope budget note"));
     assert!(!knowledge.contains("Oversized planned note"));
-    assert_eq!(knowledge.lines().count(), 1, "configured top-K limits scope retrieval");
+    assert_eq!(
+        knowledge.lines().count(),
+        1,
+        "configured top-K limits scope retrieval"
+    );
     assert!(
         knowledge.lines().all(|line| line.len() <= 128),
         "configured line cap truncates the scope summary rather than using the total budget"
@@ -2330,6 +2334,214 @@ async fn planner_production_boundary_scope_budget_runs_planner_without_injection
     );
     assert_eq!(host.requests.lock().expect("host work").len(), 1);
     assert_eq!(search.requests.lock().expect("search work").len(), 2);
+}
+
+#[tokio::test]
+async fn scope_prompt_packing_non_default_budget_differs_from_default_budget() {
+    let _knowledge_context_env = knowledge_context_test_env_guard();
+    let db = Database::ephemeral().await.expect("ephemeral db");
+    let events = EventBus::noop();
+    let task = create_project_epic_task(&db, &events, "Packing epic", "Packing task").await;
+    let note_repo = NoteRepository::new(db.clone(), EventBus::noop());
+    for index in 0..8 {
+        let note = note_repo
+            .create(
+                &task.project_id,
+                &format!("Budget discriminating scope note {index:02}"),
+                &format!("scope-note-{index:02} {}", "x".repeat(700)),
+                "pattern",
+                "[]",
+            )
+            .await
+            .expect("seed scope note");
+        note_repo
+            .set_confidence(&note.id, 0.95)
+            .await
+            .expect("raise scope confidence");
+    }
+
+    let mut constrained_state = agent_context_from_db(db.clone(), CancellationToken::new());
+    constrained_state.knowledge_injection = djinn_core::models::KnowledgeInjectionConfig {
+        knowledge_injection_budget_bytes: 4_096,
+        knowledge_injection_line_cap_bytes: 1_024,
+        knowledge_injection_limit: 10,
+        ..Default::default()
+    };
+    let default_state = agent_context_from_db(db, CancellationToken::new());
+    let role = LeadRole;
+    let worktree = test_tempdir("scope-packing-budget-");
+
+    let constrained = assemble_prompt_context(planner_assembly_inputs!(
+        &task,
+        &role,
+        worktree,
+        &constrained_state,
+        None
+    ))
+    .await
+    .knowledge_context
+    .expect("constrained scope context");
+    let default = assemble_prompt_context(planner_assembly_inputs!(
+        &task,
+        &role,
+        worktree,
+        &default_state,
+        None
+    ))
+    .await
+    .knowledge_context
+    .expect("default scope context");
+
+    assert_ne!(constrained, default);
+    assert!(constrained.len() <= 4_096);
+    assert!(default.len() > 4_096);
+    assert!(
+        constrained
+            .matches("Budget discriminating scope note")
+            .count()
+            < default.matches("Budget discriminating scope note").count(),
+        "the configured byte budget must prune an otherwise injectable scope note"
+    );
+}
+
+#[tokio::test]
+async fn planner_enrichment_non_default_top_k_and_budget_are_discriminating() {
+    let db = Database::ephemeral().await.expect("ephemeral db");
+    let events = EventBus::noop();
+    let mut task =
+        create_project_epic_task(&db, &events, "Planner config epic", "Planner config task").await;
+    task.created_by_user_id = Some("creator-real".into());
+    let note_repo = NoteRepository::new(db, EventBus::noop());
+    let planner_config = crate::context::MemoryIntentPlannerConfig {
+        enabled: true,
+        ..Default::default()
+    };
+
+    let top_k_host = RecordingPlannerHost::with_content(valid_planner_payload());
+    let top_k_search = RecordingPlannedNoteSearch {
+        rows: vec![
+            planned_note_row(
+                "top-k-a",
+                "Top K first",
+                "patterns/top-k-a",
+                "first fitting row",
+            ),
+            planned_note_row(
+                "top-k-b",
+                "Top K second",
+                "patterns/top-k-b",
+                "second fitting row",
+            ),
+            planned_note_row(
+                "top-k-c",
+                "Top K excluded",
+                "patterns/top-k-c",
+                "third fitting row",
+            ),
+        ],
+        ..Default::default()
+    };
+    let top_k_invocation = MemoryIntentPlannerInvocation {
+        config: &planner_config,
+        host: &top_k_host,
+        session_id: "session-top-k",
+        task_run_id: "run-top-k",
+        creator_id: task.created_by_user_id.as_deref(),
+        acceptance_criteria: vec![],
+        resume_compaction_summary: None,
+        planned_note_search: Some(&top_k_search),
+    };
+    let configured_top_k = merge_planned_knowledge(
+        None,
+        &[],
+        &note_repo,
+        &task,
+        Some(&top_k_invocation),
+        djinn_core::models::KnowledgeInjectionConfig {
+            knowledge_injection_limit: 2,
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("configured top-K planner context");
+    let default_top_k = merge_planned_knowledge(
+        None,
+        &[],
+        &note_repo,
+        &task,
+        Some(&top_k_invocation),
+        Default::default(),
+    )
+    .await
+    .expect("default top-K planner context");
+
+    assert_contains_all(&configured_top_k, &["Top K first", "Top K second"]);
+    assert!(!configured_top_k.contains("Top K excluded"));
+    assert_contains_all(
+        &default_top_k,
+        &["Top K first", "Top K second", "Top K excluded"],
+    );
+    assert_eq!(configured_top_k.matches("**[Note]").count(), 2);
+    assert_eq!(default_top_k.matches("**[Note]").count(), 3);
+
+    let budget_host = RecordingPlannerHost::with_content(valid_planner_payload());
+    let budget_search = RecordingPlannedNoteSearch {
+        rows: (0..6)
+            .map(|index| {
+                planned_note_row(
+                    &format!("budget-{index}"),
+                    &format!("Planner budget row {index}"),
+                    &format!("patterns/planner-budget-{index}"),
+                    &format!("budget-{index} {}", "y".repeat(760)),
+                )
+            })
+            .collect(),
+        ..Default::default()
+    };
+    let budget_invocation = MemoryIntentPlannerInvocation {
+        config: &planner_config,
+        host: &budget_host,
+        session_id: "session-budget",
+        task_run_id: "run-budget",
+        creator_id: task.created_by_user_id.as_deref(),
+        acceptance_criteria: vec![],
+        resume_compaction_summary: None,
+        planned_note_search: Some(&budget_search),
+    };
+    let constrained_budget = merge_planned_knowledge(
+        None,
+        &[],
+        &note_repo,
+        &task,
+        Some(&budget_invocation),
+        djinn_core::models::KnowledgeInjectionConfig {
+            knowledge_injection_budget_bytes: 4_096,
+            knowledge_injection_line_cap_bytes: 1_024,
+            knowledge_injection_limit: 10,
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("configured-budget planner context");
+    let default_budget = merge_planned_knowledge(
+        None,
+        &[],
+        &note_repo,
+        &task,
+        Some(&budget_invocation),
+        Default::default(),
+    )
+    .await
+    .expect("default-budget planner context");
+
+    assert_ne!(constrained_budget, default_budget);
+    assert!(constrained_budget.len() <= 4_096);
+    assert!(default_budget.len() > 4_096);
+    assert!(
+        constrained_budget.matches("Planner budget row").count()
+            < default_budget.matches("Planner budget row").count(),
+        "the non-default planner budget must exclude a row included by the default control"
+    );
 }
 
 #[tokio::test]
