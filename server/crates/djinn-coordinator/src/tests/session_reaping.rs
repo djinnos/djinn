@@ -5226,7 +5226,12 @@ async fn latest_attempt_strike_decision_requires_complete_owner_expiry_tuple() {
             "helper-obsolete-startup",
             Some(r#"{"failure_class":"startup_reap"}"#.to_string()),
         ),
-        ("helper-malformed", Some("not-json".to_string())),
+        // The persistence boundary requires a JSON object, so exercise malformed
+        // evidence with a required field of the wrong type.
+        (
+            "helper-malformed-type",
+            Some(r#"{"failure_class":17}"#.to_string()),
+        ),
         (
             "helper-owner-mismatch",
             Some(format!(
