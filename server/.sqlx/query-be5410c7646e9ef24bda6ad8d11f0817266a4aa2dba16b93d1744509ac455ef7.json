@@ -1,0 +1,70 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT n.id AS \"id!\", n.permalink AS \"permalink!\",\n                    n.title AS \"title!\", n.note_type AS \"note_type!\",\n                    n.folder AS \"folder!\", n.status AS \"status!\", n.lifecycle_changed_at AS \"lifecycle_changed_at?\", n.created_at AS \"created_at!\",\n                    (SELECT COUNT(*) FROM note_links WHERE source_id = n.id\n                       AND target_id IS NOT NULL)\n                    + (SELECT COUNT(*) FROM note_links WHERE target_id = n.id)\n                      AS \"connection_count!: i64\"\n             FROM notes n\n             WHERE n.project_id = $1\n             ORDER BY n.folder, n.title",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id!",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 1,
+        "name": "permalink!",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 2,
+        "name": "title!",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 3,
+        "name": "note_type!",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 4,
+        "name": "folder!",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 5,
+        "name": "status!",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 6,
+        "name": "lifecycle_changed_at?",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 7,
+        "name": "created_at!",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 8,
+        "name": "connection_count!: i64",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      false,
+      null
+    ]
+  },
+  "hash": "be5410c7646e9ef24bda6ad8d11f0817266a4aa2dba16b93d1744509ac455ef7"
+}
