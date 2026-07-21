@@ -12,6 +12,7 @@ pub mod memory_retrieval;
 pub const PROMETHEUS_TEXT_CONTENT_TYPE: &str = "text/plain; version=0.0.4";
 
 const DISPATCH_ATTEMPTS_TOTAL: &str = "djinn_dispatch_attempts_total";
+const DISPATCH_STRIKE_DECISIONS_TOTAL: &str = "djinn_dispatch_strike_decisions_total";
 const DISPATCH_LAST_SUCCESS_TIMESTAMP: &str = "djinn_dispatch_last_success_timestamp";
 const DISPATCH_COOLDOWNS_ACTIVE: &str = "djinn_dispatch_cooldowns_active";
 const CROSS_MODEL_REVIEW_TOTAL: &str = "djinn_cross_model_review_total";
@@ -19,6 +20,13 @@ const INFLIGHT_LEDGER_SIZE: &str = "djinn_inflight_ledger_size";
 const USER_CAP_UTILIZATION: &str = "djinn_user_cap_utilization";
 const SLOT_POOL: &str = "djinn_slot_pool";
 const DISPATCH_OUTCOMES: [&str; 5] = ["ok", "cooldown", "cap", "breaker", "error"];
+const DISPATCH_STRIKE_DECISIONS: [&str; 2] = ["counted", "exempted"];
+const DISPATCH_STRIKE_SOURCES: [&str; 4] = [
+    "environmental_owner_expired",
+    "spawn_failed",
+    "crashed",
+    "other_terminal",
+];
 const BREAKER_TRIPS_TOTAL: &str = "djinn_breaker_trips_total";
 const BREAKER_STATE: &str = "djinn_breaker_state";
 const ZOMBIE_REAPS_TOTAL: &str = "djinn_zombie_reaps_total";
@@ -1028,6 +1036,15 @@ fn register_metrics() {
         metrics::counter!(DISPATCH_ATTEMPTS_TOTAL, "outcome" => outcome).absolute(0);
     }
     metrics::describe_counter!(
+        DISPATCH_STRIKE_DECISIONS_TOTAL,
+        "Dispatch strike-accounting decisions partitioned by bounded decision and source."
+    );
+    for decision in DISPATCH_STRIKE_DECISIONS {
+        for source in DISPATCH_STRIKE_SOURCES {
+            metrics::counter!(DISPATCH_STRIKE_DECISIONS_TOTAL, "decision" => decision, "source" => source).absolute(0);
+        }
+    }
+    metrics::describe_counter!(
         VERIFY_CACHE_LOOKUP_TOTAL,
         "Final-verification cache consultations partitioned by bounded terminal outcome."
     );
@@ -1523,9 +1540,20 @@ fn register_metrics() {
 
 pub mod dispatch {
     pub const OUTCOME_OK: &str = "ok";
+    pub const STRIKE_DECISION_COUNTED: &str = "counted";
+    pub const STRIKE_DECISION_EXEMPTED: &str = "exempted";
+    pub const STRIKE_SOURCE_ENVIRONMENTAL_OWNER_EXPIRED: &str = "environmental_owner_expired";
+    pub const STRIKE_SOURCE_SPAWN_FAILED: &str = "spawn_failed";
+    pub const STRIKE_SOURCE_CRASHED: &str = "crashed";
+    pub const STRIKE_SOURCE_OTHER_TERMINAL: &str = "other_terminal";
     pub const OUTCOME_COOLDOWN: &str = "cooldown";
     pub const OUTCOME_CAP: &str = "cap";
     pub const OUTCOME_BREAKER: &str = "breaker";
+    /// Record one evaluated dispatch strike decision using only bounded labels.
+    pub fn increment_strike_decision(decision: &'static str, source: &'static str) {
+        metrics::counter!(super::DISPATCH_STRIKE_DECISIONS_TOTAL, "decision" => decision, "source" => source).increment(1);
+    }
+
     pub const OUTCOME_ERROR: &str = "error";
 
     /// Increment the dispatch-attempt counter for one of the stable outcome labels.
@@ -2769,6 +2797,16 @@ mod tests {
                 "missing dispatch outcome label {outcome} in:\n{rendered}"
             );
         }
+        for decision in DISPATCH_STRIKE_DECISIONS {
+            for source in DISPATCH_STRIKE_SOURCES {
+                assert!(
+                    rendered.contains(&format!(
+                        "djinn_dispatch_strike_decisions_total{{decision=\"{decision}\",source=\"{source}\"}}"
+                    )),
+                    "missing dispatch strike decision/source tuple {decision}/{source} in:\n{rendered}"
+                );
+            }
+        }
         for outcome in JIT_PITFALL_OUTCOMES {
             assert!(
                 rendered.contains(&format!(
@@ -2801,6 +2839,48 @@ mod tests {
 
         let rendered = render().unwrap();
         assert!(rendered.contains("djinn_dispatch_attempts_total{outcome=\"ok\"}"));
+    }
+
+    #[test]
+    fn dispatch_strike_decisions_increment_exactly_one_bounded_series_each() {
+        let (_, rendered) = render_isolated(|| {
+            dispatch::increment_strike_decision(
+                dispatch::STRIKE_DECISION_EXEMPTED,
+                dispatch::STRIKE_SOURCE_ENVIRONMENTAL_OWNER_EXPIRED,
+            );
+            dispatch::increment_strike_decision(
+                dispatch::STRIKE_DECISION_COUNTED,
+                dispatch::STRIKE_SOURCE_CRASHED,
+            );
+        });
+
+        assert_eq!(
+            labeled_sample_value(
+                &rendered,
+                DISPATCH_STRIKE_DECISIONS_TOTAL,
+                &[
+                    ("decision", "exempted"),
+                    ("source", "environmental_owner_expired")
+                ],
+            ),
+            1.0
+        );
+        assert_eq!(
+            labeled_sample_value(
+                &rendered,
+                DISPATCH_STRIKE_DECISIONS_TOTAL,
+                &[("decision", "counted"), ("source", "crashed")],
+            ),
+            1.0
+        );
+        assert_eq!(
+            rendered
+                .lines()
+                .filter(|line| line.starts_with("djinn_dispatch_strike_decisions_total{"))
+                .count(),
+            2,
+            "the two evaluations must create exactly one bounded sample each"
+        );
     }
 
     #[test]
