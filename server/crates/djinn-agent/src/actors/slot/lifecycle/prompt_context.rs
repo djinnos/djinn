@@ -401,12 +401,6 @@ async fn load_epic_context(
 /// Production confidence threshold for knowledge-note injection.
 const KNOWLEDGE_MIN_CONFIDENCE: f64 = 0.3;
 
-/// Production injection limit (top-K) for knowledge notes.
-const KNOWLEDGE_INJECTION_LIMIT: usize = 10;
-
-/// Character budget for the rendered knowledge-notes prompt section.
-const KNOWLEDGE_BUDGET_CHARS: usize = 2000;
-
 /// Note types queried for knowledge-context injection.
 const KNOWLEDGE_NOTE_TYPES: &[&str] = &["pattern", "pitfall", "case"];
 
@@ -504,7 +498,7 @@ async fn load_knowledge_context_with_planner(
             &task_paths,
             KNOWLEDGE_NOTE_TYPES,
             KNOWLEDGE_MIN_CONFIDENCE,
-            KNOWLEDGE_INJECTION_LIMIT,
+            app_state.knowledge_injection.knowledge_injection_limit as usize,
         ),
         note_repo.query_by_scope_overlap_trace_candidates(
             &task.project_id,
@@ -577,14 +571,27 @@ async fn load_knowledge_context_with_planner(
             "Lifecycle: failed to query knowledge trace candidates"
         );
         let pack_start = tokio::time::Instant::now();
-        let packed = pack_knowledge_notes(&notes, KNOWLEDGE_BUDGET_CHARS);
+        let packed = pack_knowledge_notes(
+            &notes,
+            app_state
+                .knowledge_injection
+                .knowledge_injection_budget_bytes as usize,
+        );
         let pack_ms = pack_start.elapsed().as_millis() as i64;
         let rendered = if notes.is_empty() {
             None
         } else {
             Some(packed.rendered)
         };
-        let rendered = merge_planned_knowledge(rendered, &notes, &note_repo, task, planner).await;
+        let rendered = merge_planned_knowledge(
+            rendered,
+            &notes,
+            &note_repo,
+            task,
+            planner,
+            app_state.knowledge_injection,
+        )
+        .await;
         persist_knowledge_trace(
             task,
             &task_paths,
@@ -622,7 +629,12 @@ async fn load_knowledge_context_with_planner(
 
     // Render the prompt using the packed API (byte-identical to format_knowledge_notes).
     let pack_start = tokio::time::Instant::now();
-    let packed = pack_knowledge_notes(&notes, KNOWLEDGE_BUDGET_CHARS);
+    let packed = pack_knowledge_notes(
+        &notes,
+        app_state
+            .knowledge_injection
+            .knowledge_injection_budget_bytes as usize,
+    );
     let pack_ms = pack_start.elapsed().as_millis() as i64;
 
     // Apply budget-pruned classification from packing outcomes.
@@ -634,7 +646,15 @@ async fn load_knowledge_context_with_planner(
     } else {
         Some(packed.rendered)
     };
-    let rendered = merge_planned_knowledge(rendered, &notes, &note_repo, task, planner).await;
+    let rendered = merge_planned_knowledge(
+        rendered,
+        &notes,
+        &note_repo,
+        task,
+        planner,
+        app_state.knowledge_injection,
+    )
+    .await;
 
     // Persist the trace (fail-open). Measure the persist phase separately.
     let persist_start = tokio::time::Instant::now();

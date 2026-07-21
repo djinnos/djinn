@@ -88,6 +88,7 @@ use djinn_agent::file_time::FileTime;
 use djinn_agent::lsp::LspManager;
 use djinn_agent::roles::RoleRegistry;
 use djinn_core::events::EventBus;
+use djinn_core::models::{DjinnSettings, KnowledgeInjectionConfig};
 use djinn_db::{Database, DatabaseConnectConfig, PostgresDatabaseConfig};
 use djinn_graph::graph_parity::{GraphArtifactBlobParityError, assert_graph_artifact_blob_parity};
 use djinn_provider::catalog::{CatalogService, HealthTracker};
@@ -2635,6 +2636,10 @@ fn build_worker_agent_context(
         ),
         reconciliation_sweep: ReconciliationSweepConfig::default(),
         memory_intent_planner: djinn_agent::context::MemoryIntentPlannerConfig::from_env(),
+        knowledge_injection: KnowledgeInjectionConfig::from_settings_and_env(
+            &DjinnSettings::default(),
+        )
+        .expect("knowledge injection defaults are valid"),
         compaction_cs: djinn_slot::reply_loop::CompactionCriticalSection::default(),
     }
 }
@@ -2978,6 +2983,11 @@ mod tests {
                 rpc,
                 "immutable-owner".into(),
                 targets.clone(),
+            );
+            assert_eq!(
+                context.knowledge_injection,
+                KnowledgeInjectionConfig::from_settings_and_env(&DjinnSettings::default())
+                    .expect("valid worker knowledge injection configuration")
             );
             let authorization = context.read_source_authorization;
             cancel.cancel();

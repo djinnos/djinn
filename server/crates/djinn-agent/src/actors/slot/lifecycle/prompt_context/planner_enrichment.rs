@@ -3,7 +3,7 @@
 use std::collections::HashSet;
 
 use djinn_core::message::{Conversation, Message};
-use djinn_core::models::Task;
+use djinn_core::models::{KnowledgeInjectionConfig, Task};
 use djinn_db::NoteRepository;
 
 use crate::actors::slot::lifecycle::memory_intent_planner::{
@@ -11,7 +11,6 @@ use crate::actors::slot::lifecycle::memory_intent_planner::{
     prepare_planner_request,
 };
 
-use super::KNOWLEDGE_BUDGET_CHARS;
 use super::types::{MemoryIntentPlannerInvocation, PlannedNoteSearch};
 
 /// Gated attributed planner enrichment for the real prompt-assembly path.
@@ -21,6 +20,7 @@ pub(super) async fn merge_planned_knowledge(
     note_repo: &NoteRepository,
     task: &Task,
     planner: Option<&MemoryIntentPlannerInvocation<'_>>,
+    knowledge_injection: KnowledgeInjectionConfig,
 ) -> Option<String> {
     let Some(invocation) = planner.filter(|p| p.config.is_enabled()) else {
         return scope;
@@ -99,7 +99,8 @@ pub(super) async fn merge_planned_knowledge(
                 "- **[Note] {}**: {} (permalink: {})",
                 row.title, row.snippet, row.permalink
             );
-            if output.len() + usize::from(!output.is_empty()) + line.len() > KNOWLEDGE_BUDGET_CHARS
+            if output.len() + usize::from(!output.is_empty()) + line.len()
+                > knowledge_injection.knowledge_injection_budget_bytes as usize
             {
                 return (!output.is_empty()).then_some(output);
             }

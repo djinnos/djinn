@@ -2313,7 +2313,12 @@ async fn planner_production_boundary_scope_budget_runs_planner_without_injection
         "scope content must consume the shared budget"
     );
     assert!(!knowledge.contains("Oversized planned note"));
-    assert!(knowledge.len() <= KNOWLEDGE_BUDGET_CHARS);
+    assert!(
+        knowledge.len()
+            <= app_state
+                .knowledge_injection
+                .knowledge_injection_budget_bytes as usize
+    );
     assert_eq!(host.requests.lock().expect("host work").len(), 1);
     assert_eq!(search.requests.lock().expect("search work").len(), 2);
 }
@@ -2440,7 +2445,12 @@ async fn planner_production_boundary_scope_first_dedup_caps_and_order_are_determ
     let knowledge = first_run.knowledge_context.as_deref().expect("knowledge");
     assert_eq!(first_run.knowledge_context, second_run.knowledge_context);
     assert_eq!(first_run.system_prompt, second_run.system_prompt);
-    assert!(knowledge.len() <= KNOWLEDGE_BUDGET_CHARS);
+    assert!(
+        knowledge.len()
+            <= app_state
+                .knowledge_injection
+                .knowledge_injection_budget_bytes as usize
+    );
     assert_eq!(knowledge.matches("**[Note]").count(), 6);
     assert_ordered(
         knowledge,
