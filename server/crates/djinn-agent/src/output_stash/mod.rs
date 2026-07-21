@@ -598,6 +598,8 @@ pub struct OutputStash {
     owner_session_id: Option<String>,
     #[cfg(test)]
     durable_root_override: Option<PathBuf>,
+    #[cfg(test)]
+    fail_durable_writes_for_test: bool,
 }
 
 impl OutputStash {
@@ -608,6 +610,8 @@ impl OutputStash {
             owner_session_id: None,
             #[cfg(test)]
             durable_root_override: None,
+            #[cfg(test)]
+            fail_durable_writes_for_test: false,
         }
     }
 
@@ -618,11 +622,13 @@ impl OutputStash {
             owner_session_id: Some(session_id.into()),
             #[cfg(test)]
             durable_root_override: None,
+            #[cfg(test)]
+            fail_durable_writes_for_test: false,
         }
     }
 
     #[cfg(test)]
-    fn with_session_id_and_durable_root(
+    pub(crate) fn with_session_id_and_durable_root(
         session_id: impl Into<String>,
         durable_root: PathBuf,
     ) -> Self {
@@ -631,7 +637,13 @@ impl OutputStash {
             total_bytes: 0,
             owner_session_id: Some(session_id.into()),
             durable_root_override: Some(durable_root),
+            fail_durable_writes_for_test: false,
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_fail_durable_writes_for_test(&mut self, fail: bool) {
+        self.fail_durable_writes_for_test = fail;
     }
 
     /// Stash full tool output with the compatibility metadata used by existing
@@ -656,6 +668,10 @@ impl OutputStash {
         full_text: String,
         details: DurableOutputDetails,
     ) -> Result<(), String> {
+        #[cfg(test)]
+        if self.fail_durable_writes_for_test {
+            return Err("injected durable output write failure".into());
+        }
         if let Some(owner) = self.owner_session_id.as_deref() {
             #[cfg(test)]
             if let Some(root) = self.durable_root_override.as_deref() {

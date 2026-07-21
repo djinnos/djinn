@@ -8,11 +8,11 @@ use std::sync::atomic::Ordering;
 use crate::final_verification::verify_completion_intent;
 use crate::finalize_types::SubmitWork;
 use crate::helpers::{runtime_env_diagnostics, runtime_fs_diagnostics};
-use crate::host::SlotContext;
+use crate::host::{PreCompactionToolResult, SlotContext};
 use crate::output_parser::{CompletionIntent, ParsedAgentOutput};
 use djinn_compaction::{
-    COMPACTION_SUMMARY_END_MARKER, CompactionContext, compact_conversation, needs_compaction,
-    strip_compaction_markers,
+    COMPACTION_SUMMARY_END_MARKER, CompactionContext, compact_conversation_with_pointers,
+    needs_compaction, strip_compaction_markers,
 };
 use djinn_core::events::DjinnEventEnvelope;
 use djinn_db::SessionMessageRepository;
@@ -825,7 +825,8 @@ pub async fn run_reply_loop(
                         compaction_cs,
                         slot_ctx,
                     )
-                    .await;
+                    .await
+                    .map_err(anyhow::Error::msg)?;
                     if compacted {
                         total_tokens_in = 0;
                         total_tokens_out = 0;
@@ -996,7 +997,8 @@ pub async fn run_reply_loop(
                     compaction_cs,
                     slot_ctx,
                 )
-                .await;
+                .await
+                .map_err(anyhow::Error::msg)?;
                 if compacted {
                     total_tokens_in = 0;
                     total_tokens_out = 0;
@@ -1212,7 +1214,8 @@ pub async fn run_reply_loop(
                     compaction_cs,
                     slot_ctx,
                 )
-                .await;
+                .await
+                .map_err(anyhow::Error::msg)?;
                 if compacted {
                     total_tokens_in = 0;
                     total_tokens_out = 0;
@@ -1665,21 +1668,27 @@ async fn compact_conversation_in_critical_section(
     context_window: i64,
     compaction_cs: &CompactionCriticalSection,
     slot_ctx: &SlotContext,
-) -> bool {
-    // Held for the whole record -> compact -> complete sequence; `Drop` releases
-    // the section on any exit path below.
+) -> Result<bool, String> {
     let _guard = compaction_cs.guard();
+    let results = inline_tool_results(conversation);
+    let pointers = slot_ctx
+        .tool_dispatcher
+        .as_deref()
+        .map(|dispatcher| dispatcher.persist_tool_results_before_compaction(&results))
+        .transpose()?
+        .unwrap_or_default();
 
     let boundary_repo = SessionCompactionBoundaryRepository::new(slot_ctx.db.clone());
     let boundary_id = record_compaction_started(&boundary_repo, session_id, conversation).await;
 
-    let compacted = compact_conversation(
+    let compacted = compact_conversation_with_pointers(
         provider,
         conversation,
         session_id,
         task_id,
         CompactionContext::MidSession(role_name.to_string()),
         context_window,
+        &pointers,
     )
     .await;
 
@@ -1701,7 +1710,60 @@ async fn compact_conversation_in_critical_section(
         .await;
     }
 
-    compacted
+    Ok(compacted)
+}
+
+fn inline_tool_results(conversation: &Conversation) -> Vec<PreCompactionToolResult> {
+    use std::collections::HashMap;
+    let mut names = HashMap::new();
+    for message in &conversation.messages {
+        for block in &message.content {
+            if let ContentBlock::ToolUse { id, name, .. } = block {
+                names.insert(id.as_str(), name.as_str());
+            }
+        }
+    }
+    let mut turns = vec![0_u64; conversation.messages.len()];
+    let mut turn = 0_u64;
+    for index in (0..conversation.messages.len()).rev() {
+        turns[index] = turn;
+        if conversation.messages[index].role == Role::Assistant {
+            turn += 1;
+        }
+    }
+    let mut outputs = Vec::new();
+    for (index, message) in conversation.messages.iter().enumerate() {
+        for block in &message.content {
+            if let ContentBlock::ToolResult {
+                tool_use_id,
+                content,
+                ..
+            } = block
+            {
+                let content = content
+                    .iter()
+                    .map(|block| {
+                        block
+                            .as_text()
+                            .map(str::to_owned)
+                            .unwrap_or_else(|| serde_json::to_string(block).unwrap_or_default())
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                outputs.push(PreCompactionToolResult {
+                    tool_use_id: tool_use_id.clone(),
+                    tool_name: names
+                        .get(tool_use_id.as_str())
+                        .copied()
+                        .unwrap_or("unknown")
+                        .to_owned(),
+                    content,
+                    turn: turns[index],
+                });
+            }
+        }
+    }
+    outputs
 }
 
 #[cfg(test)]
@@ -1817,7 +1879,8 @@ mod tests {
             &section,
             &slot_ctx,
         )
-        .await;
+        .await
+        .expect("persistence should succeed");
 
         assert!(
             compacted,
@@ -1855,7 +1918,8 @@ mod tests {
             &section,
             &slot_ctx,
         )
-        .await;
+        .await
+        .expect("persistence should succeed");
 
         assert!(!compacted, "an empty-summary no-op yields no compaction");
         assert!(
@@ -1884,7 +1948,8 @@ mod tests {
             &section,
             &slot_ctx,
         )
-        .await;
+        .await
+        .expect("persistence should succeed");
 
         assert!(!compacted, "a summarizer error yields no compaction");
         assert!(
@@ -1933,6 +1998,78 @@ mod tests {
             !section.is_compacting(),
             "guard must release on a panic / early-exit unwinding through the helper"
         );
+    }
+
+    #[tokio::test]
+    async fn durable_pointers_are_supplied_before_microcompaction_replaces_results() {
+        use std::collections::HashMap;
+        use std::sync::Arc;
+
+        let section = CompactionCriticalSection::new();
+        let provider = FailingProvider::new("summarizer must not run");
+        let mut conversation = micro_compactable_conversation(12);
+        let pointers = (0..12)
+            .map(|index| djinn_compaction::ToolOutputPointer {
+                tool_use_id: format!("call_{index}"),
+                turn: index,
+                original_chars: 900,
+                result_kind: "tool_result".into(),
+            })
+            .collect();
+        let dispatcher =
+            crate::test_helpers::ConfigurableToolDispatcher::new(vec![], HashMap::new())
+                .with_compaction_persistence(Ok(pointers));
+        let mut slot_ctx = guard_test_slot_ctx();
+        slot_ctx.tool_dispatcher = Some(Arc::new(dispatcher));
+
+        assert!(
+            compact_conversation_in_critical_section(
+                &provider,
+                &mut conversation,
+                "s-persist-order",
+                "t-persist-order",
+                "worker",
+                1_000_000,
+                &section,
+                &slot_ctx,
+            )
+            .await
+            .unwrap()
+        );
+        assert!(conversation.messages.iter().flat_map(|message| &message.content).any(|block| {
+            matches!(block, ContentBlock::ToolResult { content, .. } if content.iter().filter_map(ContentBlock::as_text).any(|text| text.contains("output_view(tool_use_id=")))
+        }));
+        assert!(!section.is_compacting());
+    }
+
+    #[tokio::test]
+    async fn persistence_failure_aborts_before_microcompaction_mutates_conversation() {
+        use std::collections::HashMap;
+        use std::sync::Arc;
+        let section = CompactionCriticalSection::new();
+        let provider = FailingProvider::new("summarizer must not run");
+        let mut conversation = micro_compactable_conversation(12);
+        let before = serde_json::to_vec(&conversation).unwrap();
+        let dispatcher =
+            crate::test_helpers::ConfigurableToolDispatcher::new(vec![], HashMap::new())
+                .with_compaction_persistence(Err("injected durable write failure".into()));
+        let mut slot_ctx = guard_test_slot_ctx();
+        slot_ctx.tool_dispatcher = Some(Arc::new(dispatcher));
+        let error = compact_conversation_in_critical_section(
+            &provider,
+            &mut conversation,
+            "s-persist-fail",
+            "t-persist-fail",
+            "worker",
+            1_000_000,
+            &section,
+            &slot_ctx,
+        )
+        .await
+        .unwrap_err();
+        assert!(error.contains("injected durable write failure"));
+        assert_eq!(serde_json::to_vec(&conversation).unwrap(), before);
+        assert!(!section.is_compacting());
     }
 
     // ---- idempotent in-flight turn flush (djxg) --------------------------
