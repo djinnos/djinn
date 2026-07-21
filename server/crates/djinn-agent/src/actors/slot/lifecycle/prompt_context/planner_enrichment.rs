@@ -13,6 +13,8 @@ use crate::actors::slot::lifecycle::memory_intent_planner::{
 
 use super::types::{MemoryIntentPlannerInvocation, PlannedNoteSearch};
 
+const PLANNED_NOTES_PER_QUERY_LIMIT: usize = 2;
+
 /// Gated attributed planner enrichment for the real prompt-assembly path.
 pub(super) async fn merge_planned_knowledge(
     scope: Option<String>,
@@ -89,7 +91,7 @@ pub(super) async fn merge_planned_knowledge(
         // suppress the next unique, ranked row.
         let mut rendered_for_query = 0;
         for row in bucket.expect("checked") {
-            if rendered_for_query == knowledge_injection.knowledge_injection_limit as usize {
+            if rendered_for_query == PLANNED_NOTES_PER_QUERY_LIMIT {
                 break;
             }
             if count == knowledge_injection.knowledge_injection_limit as usize

@@ -3004,10 +3004,9 @@ mod tests {
                 resume_lifecycle_metadata: None,
                 is_evidence_spike: false,
             };
-            let spec: TaskRunSpec = bincode::deserialize(
-                &bincode::serialize(&spec).expect("serialize worker spec"),
-            )
-            .expect("deserialize worker spec");
+            let spec: TaskRunSpec =
+                bincode::deserialize(&bincode::serialize(&spec).expect("serialize worker spec"))
+                    .expect("deserialize worker spec");
             let context = build_worker_agent_context(
                 Database::open_in_memory().expect("in-memory worker database"),
                 rpc,
