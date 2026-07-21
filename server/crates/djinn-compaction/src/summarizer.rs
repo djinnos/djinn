@@ -113,7 +113,7 @@ pub(super) async fn do_compact(
     }
 
     Err(anyhow::anyhow!(
-        "compaction: failed to summarise even with 100% tool-response removal"
+        "compaction: context limit persisted after 100% tool-response removal"
     ))
 }
 
