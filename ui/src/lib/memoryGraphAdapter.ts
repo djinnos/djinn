@@ -99,13 +99,41 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 const NOTE_LIFECYCLE_STATUSES = new Set(["active", "archived", "deprecated"]);
 
-/** A wire timestamp must be a real ISO-8601 date-time, not merely any string. */
+/**
+ * A wire timestamp must be a real ISO-8601 date-time, not merely any string.
+ *
+ * `Date.parse` and the `Date` constructor silently normalize overflowed
+ * calendar components rather than rejecting them — e.g. `2024-02-30T00:00:00Z`
+ * is accepted as March 1 by most ECMAScript engines. To reject impossible
+ * calendar dates (including a non-leap-year Feb 29), we reconstruct the
+ * instant from the explicit captured components via `Date.UTC`, then
+ * round-trip it back through a `Date` and confirm the year/month/day/
+ * hour/minute/second survived unchanged. The trailing timezone offset only
+ * shifts the absolute instant, not the validity of the components, so it is
+ * ignored on the round-trip.
+ */
 function isIsoTimestamp(value: unknown): value is string {
   if (typeof value !== "string") return false;
-  if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/.test(value)) {
-    return false;
-  }
-  return Number.isFinite(Date.parse(value));
+  const m =
+    /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/.exec(value);
+  if (m === null) return false;
+  const year = Number(m[1]);
+  const month = Number(m[2]);
+  const day = Number(m[3]);
+  const hour = Number(m[4]);
+  const minute = Number(m[5]);
+  const second = Number(m[6]);
+  const epoch = Date.UTC(year, month - 1, day, hour, minute, second);
+  if (!Number.isFinite(epoch)) return false;
+  const d = new Date(epoch);
+  return (
+    d.getUTCFullYear() === year &&
+    d.getUTCMonth() === month - 1 &&
+    d.getUTCDate() === day &&
+    d.getUTCHours() === hour &&
+    d.getUTCMinutes() === minute &&
+    d.getUTCSeconds() === second
+  );
 }
 
 function isNonNegativeInteger(value: unknown): value is number {

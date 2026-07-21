@@ -223,4 +223,91 @@ describe("parseMemoryGraphResponse", () => {
     expect(parsed!.nodes[0].entity_type).toBe("proposal");
     expect("entity_type" in parsed!.nodes[1]).toBe(false);
   });
+
+  // ── lifecycle fields ────────────────────────────────────────────────────────
+
+  it("retains valid active, archived, and deprecated statuses with transition times", () => {
+    const parsed = parseMemoryGraphResponse({
+      nodes: [
+        { id: "active", status: "active" },
+        { id: "archived", status: "archived", lifecycle_changed_at: "2026-07-19T08:00:00Z" },
+        { id: "deprecated", status: "deprecated", lifecycle_changed_at: "2026-07-20T12:34:56.789Z" },
+      ],
+    });
+    expect(parsed!.nodes[0]).toMatchObject({ id: "active", status: "active" });
+    expect("lifecycle_changed_at" in parsed!.nodes[0]).toBe(false);
+    expect(parsed!.nodes[1]).toMatchObject({
+      id: "archived",
+      status: "archived",
+      lifecycle_changed_at: "2026-07-19T08:00:00Z",
+    });
+    expect(parsed!.nodes[2]).toMatchObject({
+      id: "deprecated",
+      status: "deprecated",
+      lifecycle_changed_at: "2026-07-20T12:34:56.789Z",
+    });
+  });
+
+  it("omits lifecycle_changed_at for explicit null and missing values without inventing a timestamp", () => {
+    const parsed = parseMemoryGraphResponse({
+      nodes: [
+        { id: "null-time", status: "archived", lifecycle_changed_at: null },
+        { id: "missing-time", status: "deprecated" },
+      ],
+    });
+    expect(parsed!.nodes[0]).toMatchObject({ id: "null-time", status: "archived" });
+    expect(parsed!.nodes[1]).toMatchObject({ id: "missing-time", status: "deprecated" });
+    for (const node of parsed!.nodes) {
+      expect("lifecycle_changed_at" in node).toBe(false);
+    }
+  });
+
+  it("rejects an impossible-calendar-date timestamp (2024-02-30) and safely omits it", () => {
+    // Date.parse silently normalizes 2024-02-30 into March 1; the adapter must
+    // reject such malformed present lifecycle fields rather than preserve them.
+    const parsed = parseMemoryGraphResponse({
+      nodes: [{ id: "bad-cal", status: "archived", lifecycle_changed_at: "2024-02-30T00:00:00Z" }],
+    });
+    expect(parsed).not.toBeNull();
+    expect(parsed!.nodes[0]).toMatchObject({ id: "bad-cal", status: "archived" });
+    expect("lifecycle_changed_at" in parsed!.nodes[0]).toBe(false);
+  });
+
+  it("accepts a leap-year Feb 29 timestamp and rejects a non-leap-year Feb 29", () => {
+    const parsed = parseMemoryGraphResponse({
+      nodes: [
+        { id: "leap", status: "archived", lifecycle_changed_at: "2024-02-29T00:00:00Z" },
+        { id: "nonleap", status: "archived", lifecycle_changed_at: "2023-02-29T00:00:00Z" },
+      ],
+    });
+    expect(parsed!.nodes[0].lifecycle_changed_at).toBe("2024-02-29T00:00:00Z");
+    expect("lifecycle_changed_at" in parsed!.nodes[1]).toBe(false);
+  });
+
+  it("drops a status outside the active|archived|deprecated vocabulary", () => {
+    const parsed = parseMemoryGraphResponse({
+      nodes: [{ id: "bad-status", status: "retired-forever", lifecycle_changed_at: "2026-07-19T08:00:00Z" }],
+    });
+    expect("status" in parsed!.nodes[0]).toBe(false);
+    // An unrelated valid timestamp is still retained.
+    expect(parsed!.nodes[0].lifecycle_changed_at).toBe("2026-07-19T08:00:00Z");
+  });
+
+  it("returns a lifecycle summary only when all three counts are finite non-negative integers", () => {
+    const good = parseMemoryGraphResponse({
+      nodes: [],
+      lifecycle_summary: { inactive_total: 5, inactive_returned: 2, inactive_omitted: 3 },
+    });
+    expect(good!.lifecycle_summary).toEqual({
+      inactive_total: 5,
+      inactive_returned: 2,
+      inactive_omitted: 3,
+    });
+
+    const bad = parseMemoryGraphResponse({
+      nodes: [],
+      lifecycle_summary: { inactive_total: "two", inactive_returned: -1, inactive_omitted: Number.NaN },
+    });
+    expect("lifecycle_summary" in bad!).toBe(false);
+  });
 });
