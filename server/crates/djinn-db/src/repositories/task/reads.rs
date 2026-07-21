@@ -458,6 +458,13 @@ impl TaskRepository {
             }
         }
 
+        // Peer attribution flows through the transactional provenance
+        // boundary: bind the incoming row's creator only when it is known to
+        // this instance, so an unreplicated user degrades attribution instead
+        // of failing the sync on the users FK.
+        let created_by_user_id =
+            incoming_task_creator(&mut tx, task.created_by_user_id.as_deref()).await?;
+
         // Clone task for mutation if we need to extend short_id
         let mut task = task.clone();
         let mut retry_count = 0;
@@ -530,7 +537,7 @@ impl TaskRepository {
             .bind(&task.pr_url)
             .bind(&task.merge_conflict_metadata)
             .bind(&task.memory_refs)
-            .bind(&task.created_by_user_id)
+            .bind(&created_by_user_id)
             .execute(&mut *tx)
             .await;
 
@@ -641,6 +648,11 @@ impl TaskRepository {
             }
         }
 
+        // Same transactional provenance boundary as `upsert_peer`: only a
+        // locally-known incoming creator is bound.
+        let created_by_user_id =
+            incoming_task_creator(tx, task.created_by_user_id.as_deref()).await?;
+
         // Clone task for mutation if we need to extend short_id
         let mut task = task.clone();
         let mut retry_count = 0;
@@ -711,7 +723,7 @@ impl TaskRepository {
             .bind(&task.pr_url)
             .bind(&task.merge_conflict_metadata)
             .bind(&task.memory_refs)
-            .bind(&task.created_by_user_id)
+            .bind(&created_by_user_id)
             .execute(&mut **tx)
             .await;
 
