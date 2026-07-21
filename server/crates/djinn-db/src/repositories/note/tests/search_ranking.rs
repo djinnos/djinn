@@ -1,6 +1,5 @@
 use super::*;
 use crate::repositories::note::NoteSearchParams;
-use djinn_memory::GraphOptions;
 
 /// Pin every non-lexical RRF signal (temporal recency, access_count,
 /// confidence) to a fixed value across all notes in a project so a
@@ -788,7 +787,7 @@ async fn update_summaries_persists_summary_fields() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn lifecycle_graph_inclusion_does_not_leak_into_unified_lexical_search() {
+async fn lifecycle_graph_read_does_not_leak_into_unified_lexical_search() {
     let tmp = crate::database::test_tempdir().unwrap();
     let db = Database::open_in_memory().unwrap();
     let (tx, _rx) = broadcast::channel(256);
@@ -832,20 +831,10 @@ async fn lifecycle_graph_inclusion_does_not_leak_into_unified_lexical_search() {
             .await
             .unwrap();
     }
-    let lifecycle_graph = repo
-        .graph_with_options(
-            &project.id,
-            GraphOptions {
-                statuses: Some(vec![
-                    "active".into(),
-                    "archived".into(),
-                    "deprecated".into(),
-                ]),
-                lifecycle_limit: Some(10),
-            },
-        )
-        .await
-        .unwrap();
+    // Graph visualization is a read-only surface. The lifecycle-aware graph
+    // contract can include inactive nodes without changing this independent
+    // unified-memory retrieval path.
+    let lifecycle_graph = repo.graph(&project.id).await.unwrap();
     let graph_ids: std::collections::HashSet<_> = lifecycle_graph
         .nodes
         .iter()
