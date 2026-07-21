@@ -424,6 +424,35 @@ pub struct TaskRefsParams {
 #[derive(Deserialize, schemars::JsonSchema)]
 pub struct GraphParams {
     pub project: String,
+    /// Optional lifecycle statuses for visualization. Omission retains the
+    /// active-only graph compatibility contract.
+    pub statuses: Option<Vec<String>>,
+    /// Maximum archived/deprecated nodes when inactive statuses are requested.
+    pub lifecycle_limit: Option<i64>,
+}
+
+impl GraphParams {
+    pub(crate) fn graph_options(&self) -> Result<djinn_memory::GraphOptions, String> {
+        let Some(statuses) = &self.statuses else {
+            return Ok(djinn_memory::GraphOptions::default());
+        };
+        if statuses.is_empty() {
+            return Err("invalid parameters: field: statuses, message: must contain at least one of active, archived, deprecated".to_string());
+        }
+        if let Some(unknown) = statuses
+            .iter()
+            .find(|status| !matches!(status.as_str(), "active" | "archived" | "deprecated"))
+        {
+            return Err(format!(
+                "invalid parameters: field: statuses, message: unknown lifecycle status {unknown:?}; expected active, archived, or deprecated"
+            ));
+        }
+        Ok(djinn_memory::GraphOptions {
+            statuses: statuses.clone(),
+            lifecycle_limit: self.lifecycle_limit.unwrap_or(500).clamp(0, 1000) as usize,
+            include_lifecycle_summary: true,
+        })
+    }
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -845,6 +874,8 @@ pub struct MemoryGraphResponse {
     /// derived_from) from `note_associations` where `kind <> 'co_access'`.
     #[serde(default)]
     pub typed_edges: Vec<djinn_memory::TypedEdge>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lifecycle_summary: Option<djinn_memory::GraphLifecycleSummary>,
     pub error: Option<String>,
 }
 

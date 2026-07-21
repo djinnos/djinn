@@ -953,8 +953,18 @@ async fn deprecate_with_supersedes_preserves_note_owned_data_and_recorded_associ
         deprecated.lifecycle_changed_at
     );
 
-    // The wikilink edge survives the deprecation.
-    let graph_after = repo.graph(&project.id).await.unwrap();
+    // The wikilink edge survives the deprecation. Request deprecated nodes
+    // explicitly because the default graph view is active-only.
+    let graph_after = repo
+        .graph_with_options(
+            &project.id,
+            GraphOptions {
+                statuses: vec!["active".to_string(), "deprecated".to_string()],
+                ..GraphOptions::default()
+            },
+        )
+        .await
+        .unwrap();
     assert!(
         graph_after
             .edges

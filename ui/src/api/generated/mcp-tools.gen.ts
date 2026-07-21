@@ -4082,7 +4082,16 @@ export namespace MemoryExtractedAuditOutputSchema {
 export type MemoryExtractedAuditOutput = MemoryExtractedAuditOutputSchema.MemoryExtractedAuditOutput;
 export namespace MemoryGraphInputSchema {
   export interface MemoryGraphInput {
+  /**
+   * Maximum archived/deprecated nodes when inactive statuses are requested.
+   */
+  lifecycle_limit?: number
   project: string
+  /**
+   * Optional lifecycle statuses for visualization. Omission retains the
+   * active-only graph compatibility contract.
+   */
+  statuses?: string[]
   [k: string]: any
   }
 
@@ -4092,6 +4101,7 @@ export namespace MemoryGraphOutputSchema {
   export interface MemoryGraphOutput {
   edges: GraphEdge[]
   error?: string
+  lifecycle_summary?: (GraphLifecycleSummary | null)
   nodes: GraphNode[]
   /**
    * Typed semantic edges (builds_on, contradicts, supersedes, exemplifies,
@@ -4107,6 +4117,12 @@ export namespace MemoryGraphOutputSchema {
   raw_text: string
   source_id: string
   target_id: string
+  [k: string]: any
+  }
+  export interface GraphLifecycleSummary {
+  inactive_omitted: number
+  inactive_returned: number
+  inactive_total: number
   [k: string]: any
   }
   /**
@@ -4132,8 +4148,10 @@ export namespace MemoryGraphOutputSchema {
   folder: string
   id: string
   is_orphan?: boolean
+  lifecycle_changed_at?: string
   note_type: string
   permalink: string
+  status?: string
   title: string
   [k: string]: any
   }
