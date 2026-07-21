@@ -17,10 +17,10 @@
 //! revisions), so they remain here rather than in a separate native-skill
 //! module.
 
+use djinn_spec_lint::analyze_mdx_document;
 use rmcp::schemars;
 use serde::Deserialize;
 use serde_json::Value as JsonValue;
-use djinn_spec_lint::analyze_mdx_document;
 
 use crate::tools::validation::{
     resolve_body_format_and_validate, validate_ac_count, validate_design,
@@ -161,6 +161,7 @@ pub struct ByteRangeSelector {
 }
 
 /// Resolved byte range in the proposal body.
+#[derive(Debug)]
 pub(crate) struct ResolvedRange {
     start: usize,
     end: usize,
@@ -209,15 +210,14 @@ fn resolve_heading_selector(body: &str, heading_text: &str) -> Result<ResolvedRa
         return Err("heading_text must not be empty".into());
     }
 
-    let document = analyze_mdx_document(body)
-        .map_err(|error| format!("could not parse document: {error}"))?;
+    let document =
+        analyze_mdx_document(body).map_err(|error| format!("could not parse document: {error}"))?;
     let mut matches = Vec::new();
     for (index, node) in document.top_level_nodes.iter().enumerate() {
-        let Some(level) = node.heading_level else { continue };
-        let text = body[node.span.start..node.span.end]
-            .trim_start_matches('#')
-            .trim_end_matches('#')
-            .trim();
+        let Some(level) = node.heading_level else {
+            continue;
+        };
+        let text = atx_heading_text(&body[node.span.start..node.span.end], level);
         if text == needle {
             matches.push((index, level));
         }
@@ -237,7 +237,10 @@ fn resolve_heading_selector(body: &str, heading_text: &str) -> Result<ResolvedRa
     let heading_start = document.top_level_nodes[heading_index].span.start;
     let mut section_end = body.len();
     for node in document.top_level_nodes.iter().skip(heading_index + 1) {
-        if node.heading_level.is_some_and(|level| level <= heading_level) {
+        if node
+            .heading_level
+            .is_some_and(|level| level <= heading_level)
+        {
             section_end = node.span.start;
             break;
         }
@@ -248,6 +251,28 @@ fn resolve_heading_selector(body: &str, heading_text: &str) -> Result<ResolvedRa
         end: section_end,
         selector_description: format!("heading: {needle}"),
     })
+}
+
+/// Return visible text from an AST-confirmed ATX heading. A trailing `#` only
+/// closes a heading when it is separated from its text by whitespace, so
+/// `# C#` correctly selects the literal heading text `C#`.
+fn atx_heading_text(source: &str, level: u8) -> &str {
+    let after_prefix = source
+        .get(level as usize..)
+        .unwrap_or(source)
+        .trim_start_matches([' ', '\t']);
+    let text = after_prefix.trim_end_matches(['\r', '\n']);
+    let closing_start = text.trim_end_matches('#').len();
+    if closing_start < text.len()
+        && text[..closing_start]
+            .as_bytes()
+            .last()
+            .is_some_and(u8::is_ascii_whitespace)
+    {
+        text[..closing_start].trim_end()
+    } else {
+        text.trim()
+    }
 }
 
 /// Match an exact text substring. Must occur exactly once.
@@ -334,14 +359,28 @@ fn resolve_byte_range_selector(
 const PATCH_RANGE_NOT_NODE_ALIGNED: &str = "PATCH_RANGE_NOT_NODE_ALIGNED";
 
 fn ensure_node_aligned(body: &str, start: usize, end: usize) -> Result<(), String> {
-    let document = analyze_mdx_document(body)
-        .map_err(|error| format!("could not parse document: {error}"))?;
-    let aligned = document.top_level_nodes.iter().any(|node| node.span.start == start)
-        && document.top_level_nodes.iter().any(|node| node.span.end == end);
-    if aligned {
+    let document =
+        analyze_mdx_document(body).map_err(|error| format!("could not parse document: {error}"))?;
+    let aligned = document
+        .top_level_nodes
+        .iter()
+        .any(|node| node.span.start == start)
+        && document
+            .top_level_nodes
+            .iter()
+            .any(|node| node.span.end == end);
+    let patchable_property = document.registered_blocks.iter().any(|block| {
+        block
+            .patchable_property_spans
+            .iter()
+            .any(|span| span.start <= start && end <= span.end)
+    });
+    if aligned || patchable_property {
         Ok(())
     } else {
-        Err(format!("{PATCH_RANGE_NOT_NODE_ALIGNED}: exact_text and byte_range selectors must cover complete top-level AST nodes"))
+        Err(format!(
+            "{PATCH_RANGE_NOT_NODE_ALIGNED}: exact_text and byte_range selectors must cover complete top-level AST nodes or one canonical code/template property"
+        ))
     }
 }
 
@@ -825,6 +864,10 @@ Should we use Redis or Memcached?
 
 #[cfg(test)]
 mod block_patch_tests {
+    use super::{
+        ByteRangeSelector, PATCH_RANGE_NOT_NODE_ALIGNED, resolve_byte_range_selector,
+        resolve_exact_text_selector, resolve_heading_selector,
+    };
     use crate::server::DjinnMcpServer;
     use crate::state::stubs::test_mcp_state;
     use djinn_core::events::EventBus;
@@ -1226,7 +1269,7 @@ mod block_patch_tests {
         let proposal = repo
             .create(ProposalCreateInput {
                 title: "Stale Range",
-                body: "aaa bbb ccc",
+                body: "paragraph one.\n\nparagraph two.",
                 acceptance_criteria: Some("[]"),
                 status: None,
                 body_format: None,
@@ -1241,8 +1284,8 @@ mod block_patch_tests {
                     "id": proposal.id,
                     "selector": {
                         "byte_range": {
-                            "start": 0,
-                            "end": 11,
+                            "start": 1,
+                            "end": 5,
                             "expected_text": "XXX"
                         }
                     },
@@ -1255,6 +1298,78 @@ mod block_patch_tests {
 
         let error = response.get("error").and_then(|v| v.as_str()).unwrap();
         assert!(error.contains("text mismatch"), "error was: {error}");
+        assert!(
+            !error.contains(PATCH_RANGE_NOT_NODE_ALIGNED),
+            "expected-text guard must precede alignment: {error}"
+        );
+        let unchanged = repo.get(&proposal.id).await.unwrap().unwrap();
+        assert_eq!(unchanged.latest_revision_seq, 1);
+        assert_eq!(repo.revisions(&proposal.id).await.unwrap().len(), 1);
+    }
+
+    #[test]
+    fn selectors_use_ast_boundaries_and_parsed_heading_outline() {
+        let body = "# Root\r\n\r\n## Nested\r\n\r\né paragraph\r\n\r\n# C#\r\nEOF";
+        let nested = resolve_heading_selector(body, "Nested").unwrap();
+        assert_eq!(
+            &body[nested.start..nested.end],
+            "## Nested\r\n\r\né paragraph\r\n\r\n"
+        );
+        let eof = resolve_heading_selector(body, "C#").unwrap();
+        assert_eq!(&body[eof.start..eof.end], "# C#\r\nEOF");
+        assert!(
+            resolve_heading_selector("# Same\n\n# Same", "Same")
+                .unwrap_err()
+                .contains("ambiguous")
+        );
+        assert!(
+            resolve_exact_text_selector("first paragraph.\n\nsecond paragraph.", "first")
+                .unwrap_err()
+                .contains(PATCH_RANGE_NOT_NODE_ALIGNED)
+        );
+        assert!(
+            resolve_byte_range_selector(
+                "first paragraph.\n\nsecond paragraph.",
+                &ByteRangeSelector {
+                    start: 1,
+                    end: 5,
+                    expected_text: None
+                },
+            )
+            .unwrap_err()
+            .contains(PATCH_RANGE_NOT_NODE_ALIGNED)
+        );
+    }
+
+    #[test]
+    fn code_property_is_the_only_property_alignment_exception() {
+        let body = "<AnnotatedCode id=\"a\" code={`let x = 1;`} />";
+        let start = body.find("let x = 1;").unwrap();
+        let end = start + "let x = 1;".len();
+        assert!(
+            resolve_byte_range_selector(
+                body,
+                &ByteRangeSelector {
+                    start: start as i64,
+                    end: end as i64,
+                    expected_text: Some("let x = 1;".into()),
+                }
+            )
+            .is_ok()
+        );
+        let id_start = body.find("\"a\"").unwrap() + 1;
+        assert!(
+            resolve_byte_range_selector(
+                body,
+                &ByteRangeSelector {
+                    start: id_start as i64,
+                    end: id_start as i64 + 1,
+                    expected_text: None,
+                }
+            )
+            .unwrap_err()
+            .contains(PATCH_RANGE_NOT_NODE_ALIGNED)
+        );
     }
 }
 

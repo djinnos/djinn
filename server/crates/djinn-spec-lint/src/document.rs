@@ -20,6 +20,9 @@ pub struct RegisteredBlockOccurrence {
     /// The source range of the `id` value, excluding its surrounding quotes or
     /// expression braces. `None` means the block has no `id` attribute.
     pub id_value_span: Option<Utf8ByteSpan>,
+    /// Ranges for explicitly patchable code/template property values. The
+    /// opening-tag lexer is anchored by this parsed MDX element's span.
+    pub patchable_property_spans: Vec<Utf8ByteSpan>,
 }
 
 /// A source-positioned direct child of the parsed document root.
@@ -70,7 +73,10 @@ pub fn analyze_mdx_document(body: &str) -> Result<DocumentAnalysis, DocumentErro
             }
         }
     }
-    Ok(DocumentAnalysis { registered_blocks, top_level_nodes })
+    Ok(DocumentAnalysis {
+        registered_blocks,
+        top_level_nodes,
+    })
 }
 
 fn collect_registered_blocks(
@@ -136,6 +142,10 @@ fn collect_element(
             id,
             element_span,
             id_value_span: id_value_span(body, position.start.offset),
+            patchable_property_spans: ["code", "template"]
+                .into_iter()
+                .filter_map(|name| property_value_span(body, position.start.offset, name))
+                .collect(),
         });
     }
     for child in children {
@@ -163,6 +173,12 @@ fn attribute_value(attributes: &[AttributeContent], wanted: &str) -> Option<Stri
 /// element start. Quoted, braced, and bare values are handled without applying
 /// a document-wide regular expression.
 fn id_value_span(body: &str, element_start: usize) -> Option<Utf8ByteSpan> {
+    property_value_span(body, element_start, "id")
+}
+
+/// Locate a property value in an opening tag anchored by an AST element start.
+/// This is intentionally not a document-wide selector grammar.
+fn property_value_span(body: &str, element_start: usize, wanted: &str) -> Option<Utf8ByteSpan> {
     let bytes = body.as_bytes();
     let mut index = element_start + 1;
     while index < bytes.len() && !bytes[index].is_ascii_whitespace() && bytes[index] != b'>' {
@@ -188,7 +204,7 @@ fn id_value_span(body: &str, element_start: usize) -> Option<Utf8ByteSpan> {
         let name = &body[name_start..index];
         skip_whitespace(bytes, &mut index);
         if bytes.get(index) != Some(&b'=') {
-            if name == "id" {
+            if name == wanted {
                 return Utf8ByteSpan::new(body, name_start, index).ok();
             }
             continue;
@@ -196,7 +212,7 @@ fn id_value_span(body: &str, element_start: usize) -> Option<Utf8ByteSpan> {
         index += 1;
         skip_whitespace(bytes, &mut index);
         let (start, end) = value_bounds(bytes, &mut index)?;
-        if name == "id" {
+        if name == wanted {
             return Utf8ByteSpan::new(body, start, end).ok();
         }
     }
