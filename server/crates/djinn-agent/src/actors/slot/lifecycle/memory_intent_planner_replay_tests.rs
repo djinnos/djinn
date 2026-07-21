@@ -408,11 +408,13 @@ async fn checked_in_replays_enter_the_production_assemble_prompt_context_boundar
                 .knowledge_context
                 .as_deref()
                 .expect("knowledge context");
-            assert_eq!(rendered.matches("**[Note]").count(), 6);
-            for kept in ["q1-r1", "q1-r2", "q2-r1", "q2-r2", "q3-r1", "q3-r2"] {
+            assert_eq!(rendered.matches("**[Note]").count(), 8);
+            for kept in [
+                "q1-r1", "q1-r2", "q2-r1", "q2-r2", "q3-r1", "q3-r2", "q4-r1", "q4-r2",
+            ] {
                 assert!(rendered.contains(kept), "missing {kept}");
             }
-            for omitted in ["q1-r3", "q2-r3", "q3-r3", "q4-r1"] {
+            for omitted in ["q1-r3", "q2-r3", "q3-r3", "q4-r3"] {
                 assert!(!rendered.contains(omitted), "unexpected {omitted}");
             }
         }
