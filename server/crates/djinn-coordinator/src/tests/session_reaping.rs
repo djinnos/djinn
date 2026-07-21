@@ -7312,6 +7312,122 @@ async fn evidence_reap_nonnull_group_terminalizes_all_peers_with_one_evidence() 
     assert_ne!(sj_b["owner_incarnation_id"], owner_id);
 }
 
+/// One periodic sweep must keep exact groups independent even when they belong
+/// to one task and have mixed owner evidence and ages. In particular, a stale
+/// expired-owner group may be environmentally interrupted without allowing a
+/// stale live-owner group to inherit that exemption, and neither eligible group
+/// may pull a young exact group into its batch terminalization.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn periodic_reap_mixed_exact_groups_classifies_owners_and_preserves_young_group() {
+    use djinn_db::TaskAttemptRepository;
+
+    let db = test_helpers::create_test_db();
+    let (tx, _rx) = broadcast::channel(256);
+    let repo = TaskAttemptRepository::new(db.clone());
+
+    // Use persisted leases, not synthetic owner IDs: one is past the orphan
+    // threshold and one remains live at the same periodic sweep.
+    let expired_owner = register_incarnation(&db, true).await;
+    let live_owner = register_incarnation(&db, false).await;
+    let lease_repo = djinn_db::CoordinatorIncarnationRepository::new(db.clone());
+    let expired_lease = lease_repo.get(&expired_owner).await.unwrap().unwrap();
+
+    let expired_group = uuid::Uuid::now_v7().to_string();
+    let live_group = uuid::Uuid::now_v7().to_string();
+    let young_group = uuid::Uuid::now_v7().to_string();
+    let (task, _n) = create_task_with_note(&db, &tx, "mixed-exact-group-periodic-reap").await;
+
+    // Multiple stale peers exercise one exact-group batch terminalization and
+    // the sweep's per-group deduplication together.
+    let expired_peer_a = seed_pending_attempt_with_identity(
+        &db,
+        &task.id,
+        "worker",
+        Some(&expired_owner),
+        Some(&expired_group),
+    )
+    .await;
+    let expired_peer_b = seed_pending_attempt_with_identity(
+        &db,
+        &task.id,
+        "reviewer",
+        Some(&expired_owner),
+        Some(&expired_group),
+    )
+    .await;
+    let live_attempt = seed_pending_attempt_with_identity(
+        &db,
+        &task.id,
+        "lead",
+        Some(&live_owner),
+        Some(&live_group),
+    )
+    .await;
+    // Keep this group below the threshold. Its expired owner is intentional:
+    // age eligibility, rather than a neighboring group's outcome or owner,
+    // must control whether it is considered by this sweep.
+    let young_attempt = seed_pending_attempt_with_identity(
+        &db,
+        &task.id,
+        "planner",
+        Some(&expired_owner),
+        Some(&young_group),
+    )
+    .await;
+
+    for attempt_id in [&expired_peer_a, &expired_peer_b, &live_attempt] {
+        backdate_attempt(&db, attempt_id).await;
+    }
+
+    crate::health::reap_orphaned_pending_attempts_with_threshold(&db, 15 * 60, "periodic").await;
+
+    // Both expired-owner peers must receive precisely the same durable evidence
+    // from one batch terminalization, with evidence for their own owner.
+    let expired_rows = [
+        repo.get(&expired_peer_a).await.unwrap().unwrap(),
+        repo.get(&expired_peer_b).await.unwrap().unwrap(),
+    ];
+    let expired_evidence: Vec<serde_json::Value> = expired_rows
+        .iter()
+        .map(|row| {
+            assert_eq!(row.outcome, "interrupted");
+            serde_json::from_str(row.summary_json.as_deref().unwrap()).unwrap()
+        })
+        .collect();
+    assert_eq!(
+        expired_evidence[0], expired_evidence[1],
+        "all pending peers in an exact group must be terminalized once with one evidence tuple"
+    );
+    assert_eq!(expired_evidence[0]["failure_class"], "environmental_owner_expired");
+    assert_eq!(expired_evidence[0]["owner_classification"], "expired");
+    assert_eq!(expired_evidence[0]["owner_incarnation_id"], expired_owner);
+    assert_eq!(
+        expired_evidence[0]["owner_lease_last_renewed_at"],
+        expired_lease.last_renewed_at,
+        "expired group evidence must name and timestamp its own durable owner lease"
+    );
+
+    // A separately eligible live-owner group on the same task is never
+    // exempted by the expired group.
+    let live_row = repo.get(&live_attempt).await.unwrap().unwrap();
+    assert_eq!(live_row.outcome, "crashed");
+    let live_evidence: serde_json::Value =
+        serde_json::from_str(live_row.summary_json.as_deref().unwrap()).unwrap();
+    assert_eq!(live_evidence["failure_class"], "orphaned_pending_attempt");
+    assert_eq!(live_evidence["owner_classification"], "live");
+    assert_eq!(live_evidence["owner_incarnation_id"], live_owner);
+
+    let young_row = repo.get(&young_attempt).await.unwrap().unwrap();
+    assert_eq!(
+        young_row.outcome, "pending",
+        "a below-threshold exact group must remain pending despite eligible peers on its task"
+    );
+    assert!(
+        young_row.summary_json.is_none(),
+        "the young group must not receive another group's terminal evidence"
+    );
+}
+
 /// A legacy NULL-group row is reaped singly: only that one row is terminalized,
 /// and it gets the `unproven` classification because it has no owner.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
