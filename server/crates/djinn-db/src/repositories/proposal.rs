@@ -8706,4 +8706,325 @@ mod tests {
         assert_eq!(json["cap_exceeded"], true);
         assert_eq!(json["no_refinement_run"], false);
     }
+
+    const CORRUPT_SPEC_FIXTURE: &str = include_str!(
+        "../../../djinn-spec-lint/tests/fixtures/v1/synthetic/delimiter_failures/body.md"
+    );
+    const WARNING_SPEC_FIXTURE: &str = include_str!(
+        "../../../djinn-spec-lint/tests/fixtures/v1/synthetic/unresolved_reference/body.md"
+    );
+
+    fn expected_spec_lint_rejection() -> Vec<crate::SpecLintViolation> {
+        let mut result = djinn_spec_lint::lint(
+            CORRUPT_SPEC_FIXTURE,
+            djinn_spec_lint::BodyFormat::Markdown,
+            "1970-01-01T00:00:00.000Z",
+        );
+        result.sort_violations();
+        result
+            .errors
+            .into_iter()
+            .map(|violation| crate::SpecLintViolation {
+                code: violation.code,
+                message: violation.message,
+                span_start: violation.span.start,
+                span_end: violation.span.end,
+            })
+            .collect()
+    }
+
+    fn runtime_revision_insert_bypasses(source: &str) -> Vec<usize> {
+        // Deliberately exclude this test module (and migration files): this
+        // invariant is solely about production repository runtime SQL.
+        let source = source.split("#[cfg(test)]\nmod tests {").next().unwrap();
+        let ranges = [
+            "async fn insert_revision_checked",
+            "async fn insert_lightweight_lifecycle_event_in_tx",
+        ]
+        .into_iter()
+        .map(|name| {
+            let start = source.find(name).expect("named insertion primitive");
+            let open = start + source[start..].find('{').unwrap();
+            let mut nesting = 0;
+            let end = source[open..]
+                .char_indices()
+                .find_map(|(offset, character)| match character {
+                    '{' => {
+                        nesting += 1;
+                        None
+                    }
+                    '}' => {
+                        nesting -= 1;
+                        (nesting == 0).then_some(open + offset + 1)
+                    }
+                    _ => None,
+                })
+                .expect("closed insertion primitive");
+            start..end
+        })
+        .collect::<Vec<_>>();
+        source
+            .match_indices("INSERT INTO proposal_revisions")
+            .filter_map(|(offset, _)| {
+                (!ranges.iter().any(|range| range.contains(&offset))).then_some(offset)
+            })
+            .collect()
+    }
+
+    async fn seed_corrupt_legacy_head(
+        db: &Database,
+        repo: &ProposalRepository,
+        title: &str,
+    ) -> Proposal {
+        let proposal = repo
+            .create(create_input_with_ac(title, "", "[\"original\"]"))
+            .await
+            .unwrap();
+        // Direct SQL is test-only legacy setup, not a repository write path.
+        for statement in [
+            "UPDATE proposals SET body = $1 WHERE id = $2",
+            "UPDATE proposal_revisions SET body = $1 WHERE proposal_id = $2 AND seq = 1",
+        ] {
+            sqlx::query(statement)
+                .bind(CORRUPT_SPEC_FIXTURE)
+                .bind(&proposal.id)
+                .execute(db.pool())
+                .await
+                .unwrap();
+        }
+        repo.get(&proposal.id).await.unwrap().unwrap()
+    }
+
+    async fn rejected_snapshot(
+        db: &Database,
+        repo: &ProposalRepository,
+        id: &str,
+    ) -> (String, usize, i64, usize) {
+        let proposal = repo.get(id).await.unwrap().unwrap();
+        let lint_rows = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM proposal_revision_lint_results WHERE proposal_id = $1",
+        )
+        .bind(id)
+        .fetch_one(db.pool())
+        .await
+        .unwrap();
+        (
+            format!("{proposal:?}"),
+            repo.revisions(id).await.unwrap().len(),
+            lint_rows,
+            repo.signoffs(id).await.unwrap().len(),
+        )
+    }
+
+    fn assert_rejected(error: Error) {
+        match error {
+            Error::SpecLintRejected(rejection) => {
+                assert_eq!(rejection.code, "SPEC_LINT_REJECTED");
+                assert_eq!(rejection.violations, expected_spec_lint_rejection());
+            }
+            other => panic!("expected SPEC_LINT_REJECTED, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn runtime_revision_inserts_are_confined_to_checked_or_lightweight_primitives() {
+        let source = include_str!("proposal.rs");
+        assert!(runtime_revision_insert_bypasses(source).is_empty());
+        let injected = source.replacen(
+            "#[cfg(test)]\nmod tests {",
+            "async fn bypass() { sqlx::query(\"INSERT INTO proposal_revisions\"); }\n#[cfg(test)]\nmod tests {",
+            1,
+        );
+        assert_eq!(runtime_revision_insert_bypasses(&injected).len(), 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn corrupt_fixture_rejects_create_without_persistence_or_notification() {
+        let db = test_db();
+        let (bus, events) = capturing_bus();
+        let repo = ProposalRepository::new(db.clone(), bus);
+        let before: (i64, i64, i64) = (
+            sqlx::query_scalar("SELECT COUNT(*) FROM proposals")
+                .fetch_one(db.pool())
+                .await
+                .unwrap(),
+            sqlx::query_scalar("SELECT COUNT(*) FROM proposal_revisions")
+                .fetch_one(db.pool())
+                .await
+                .unwrap(),
+            sqlx::query_scalar("SELECT COUNT(*) FROM proposal_revision_lint_results")
+                .fetch_one(db.pool())
+                .await
+                .unwrap(),
+        );
+        assert_rejected(
+            repo.create(ProposalCreateInput {
+                title: "bad",
+                body: CORRUPT_SPEC_FIXTURE,
+                acceptance_criteria: None,
+                status: None,
+                body_format: Some("markdown"),
+            })
+            .await
+            .unwrap_err(),
+        );
+        let after: (i64, i64, i64) = (
+            sqlx::query_scalar("SELECT COUNT(*) FROM proposals")
+                .fetch_one(db.pool())
+                .await
+                .unwrap(),
+            sqlx::query_scalar("SELECT COUNT(*) FROM proposal_revisions")
+                .fetch_one(db.pool())
+                .await
+                .unwrap(),
+            sqlx::query_scalar("SELECT COUNT(*) FROM proposal_revision_lint_results")
+                .fetch_one(db.pool())
+                .await
+                .unwrap(),
+        );
+        assert_eq!(after, before);
+        assert!(events.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn corrupt_legacy_head_rejects_all_checked_paths_and_clean_repair_advances() {
+        for operation in ["material", "rewrite", "drop", "waive", "done", "review"] {
+            let db = test_db();
+            let (bus, events) = capturing_bus();
+            let repo = ProposalRepository::new(db.clone(), bus);
+            let proposal = seed_corrupt_legacy_head(&db, &repo, operation).await;
+            events.lock().unwrap().clear();
+            let before = rejected_snapshot(&db, &repo, &proposal.id).await;
+            let result: Result<()> = match operation {
+                "material" => repo
+                    .update(
+                        &proposal.id,
+                        ProposalUpdateInput {
+                            title: "changed",
+                            body: CORRUPT_SPEC_FIXTURE,
+                            acceptance_criteria: "[\"original\"]",
+                            status: "draft",
+                            superseded_by: None,
+                            body_format: Some("markdown"),
+                            event_metadata: None,
+                        },
+                    )
+                    .await
+                    .map(|_| ()),
+                "rewrite" => repo
+                    .amend_acceptance_criteria(
+                        &proposal.id,
+                        &[ProposalAcceptanceCriteriaAmendment::Rewrite {
+                            index: 0,
+                            criterion: "changed",
+                        }],
+                        "test",
+                    )
+                    .await
+                    .map(|_| ()),
+                "drop" => repo
+                    .amend_acceptance_criteria(
+                        &proposal.id,
+                        &[ProposalAcceptanceCriteriaAmendment::Drop { index: 0 }],
+                        "test",
+                    )
+                    .await
+                    .map(|_| ()),
+                "waive" => repo
+                    .amend_acceptance_criteria(
+                        &proposal.id,
+                        &[ProposalAcceptanceCriteriaAmendment::Waive { index: 0 }],
+                        "test",
+                    )
+                    .await
+                    .map(|_| ()),
+                "done" => repo
+                    .update(
+                        &proposal.id,
+                        ProposalUpdateInput {
+                            title: &proposal.title,
+                            body: &proposal.body,
+                            acceptance_criteria: &proposal.acceptance_criteria,
+                            status: "done",
+                            superseded_by: None,
+                            body_format: Some(&proposal.body_format),
+                            event_metadata: None,
+                        },
+                    )
+                    .await
+                    .map(|_| ()),
+                "review" => repo
+                    .advance_draft_to_in_review(&proposal.id)
+                    .await
+                    .map(|_| ()),
+                _ => unreachable!(),
+            };
+            assert_rejected(result.unwrap_err());
+            assert_eq!(
+                rejected_snapshot(&db, &repo, &proposal.id).await,
+                before,
+                "{operation} rollback"
+            );
+            assert!(
+                events.lock().unwrap().is_empty(),
+                "{operation} notification residue"
+            );
+        }
+
+        let db = test_db();
+        let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+        let legacy = seed_corrupt_legacy_head(&db, &repo, "repair").await;
+        let repaired = repo
+            .update(
+                &legacy.id,
+                ProposalUpdateInput {
+                    title: "repair",
+                    body: "clean body",
+                    acceptance_criteria: "[\"original\"]",
+                    status: "draft",
+                    superseded_by: None,
+                    body_format: Some("markdown"),
+                    event_metadata: None,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(repaired.latest_revision_seq, 2);
+        assert_eq!(repo.revisions(&legacy.id).await.unwrap().len(), 2);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn warning_fixture_persists_ordered_result_and_markdown_skipped_tier() {
+        let db = test_db();
+        let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+        let proposal = repo
+            .create(ProposalCreateInput {
+                title: "warning",
+                body: WARNING_SPEC_FIXTURE,
+                acceptance_criteria: None,
+                status: None,
+                body_format: Some("markdown"),
+            })
+            .await
+            .unwrap();
+        let revision = repo.revisions(&proposal.id).await.unwrap().remove(0);
+        let lint = repo.lint_for_revision(&revision).await.unwrap();
+        assert_eq!(
+            lint.warnings
+                .iter()
+                .map(|warning| warning.code.as_str())
+                .collect::<Vec<_>>(),
+            ["UNRESOLVED_LOCAL_REFERENCE"]
+        );
+        assert_eq!(lint.skipped_tiers[0].tier, "mdx_structure");
+        assert_eq!(lint.skipped_tiers[0].reason, "BODY_FORMAT_MARKDOWN");
+        let rows: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM proposal_revision_lint_results WHERE proposal_id = $1",
+        )
+        .bind(&proposal.id)
+        .fetch_one(db.pool())
+        .await
+        .unwrap();
+        assert_eq!(rows, 1);
+    }
 }
