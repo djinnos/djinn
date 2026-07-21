@@ -201,6 +201,83 @@ impl NoteRepository {
         })
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn build_context_does_not_promote_inactive_neighbors() {
+        let (_tmp, repo, project_id) = setup_repo().await;
+        let seed = repo
+            .create(
+                &project_id,
+                "Active context seed",
+                "context lifecycle promotion marker",
+                "adr",
+                "[]",
+            )
+            .await
+            .unwrap();
+        let active_neighbor = repo
+            .create(
+                &project_id,
+                "Active context neighbor",
+                "context lifecycle promotion marker [[Active context seed]]",
+                "reference",
+                "[]",
+            )
+            .await
+            .unwrap();
+        let archived_neighbor = repo
+            .create(
+                &project_id,
+                "Archived context neighbor",
+                "context lifecycle promotion marker [[Active context seed]]",
+                "reference",
+                "[]",
+            )
+            .await
+            .unwrap();
+        let deprecated_neighbor = repo
+            .create(
+                &project_id,
+                "Deprecated context neighbor",
+                "context lifecycle promotion marker [[Active context seed]]",
+                "reference",
+                "[]",
+            )
+            .await
+            .unwrap();
+        for (id, status) in [
+            (&archived_neighbor.id, "archived"),
+            (&deprecated_neighbor.id, "deprecated"),
+        ] {
+            sqlx::query("UPDATE notes SET status = $1 WHERE id = $2")
+                .bind(status)
+                .bind(id)
+                .execute(repo.db.pool())
+                .await
+                .unwrap();
+        }
+        let context = repo
+            .build_context(
+                &project_id,
+                &seed.permalink,
+                Some(8192),
+                None,
+                20,
+                Some(0.0),
+                None,
+            )
+            .await
+            .unwrap();
+        let related_ids: std::collections::HashSet<_> = context
+            .related_l1
+            .iter()
+            .map(|note| note.id.as_str())
+            .chain(context.related_l0.iter().map(|note| note.id.as_str()))
+            .collect();
+        assert!(related_ids.contains(active_neighbor.id.as_str()));
+        assert!(!related_ids.contains(archived_neighbor.id.as_str()));
+        assert!(!related_ids.contains(deprecated_neighbor.id.as_str()));
+    }
+
     /// Find proposals relevant to a seed note for `build_context`.
     ///
     /// Two complementary paths, deduplicated by `proposal_id` with the higher

@@ -1,5 +1,6 @@
 use super::*;
 use crate::repositories::note::NoteSearchParams;
+use djinn_memory::GraphOptions;
 
 /// Pin every non-lexical RRF signal (temporal recency, access_count,
 /// confidence) to a fixed value across all notes in a project so a
@@ -784,4 +785,92 @@ async fn update_summaries_persists_summary_fields() {
     let envelope = rx.recv().await.unwrap();
     assert_eq!(envelope.entity_type, "note");
     assert_eq!(envelope.action, "updated");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn lifecycle_graph_inclusion_does_not_leak_into_unified_lexical_search() {
+    let tmp = crate::database::test_tempdir().unwrap();
+    let db = Database::open_in_memory().unwrap();
+    let (tx, _rx) = broadcast::channel(256);
+    let project = make_project(&db, tmp.path()).await;
+    let repo = NoteRepository::new(db.clone(), event_bus_for(&tx));
+    let active = repo
+        .create(
+            &project.id,
+            "Active lifecycle isolation marker",
+            "lifecycle isolation marker",
+            "reference",
+            "[]",
+        )
+        .await
+        .unwrap();
+    let archived = repo
+        .create(
+            &project.id,
+            "Archived lifecycle isolation marker",
+            "lifecycle isolation marker",
+            "reference",
+            "[]",
+        )
+        .await
+        .unwrap();
+    let deprecated = repo
+        .create(
+            &project.id,
+            "Deprecated lifecycle isolation marker",
+            "lifecycle isolation marker",
+            "reference",
+            "[]",
+        )
+        .await
+        .unwrap();
+    for (id, status) in [(&archived.id, "archived"), (&deprecated.id, "deprecated")] {
+        sqlx::query("UPDATE notes SET status = $1 WHERE id = $2")
+            .bind(status)
+            .bind(id)
+            .execute(db.pool())
+            .await
+            .unwrap();
+    }
+    let lifecycle_graph = repo
+        .graph_with_options(
+            &project.id,
+            GraphOptions {
+                statuses: Some(vec![
+                    "active".into(),
+                    "archived".into(),
+                    "deprecated".into(),
+                ]),
+                lifecycle_limit: Some(10),
+            },
+        )
+        .await
+        .unwrap();
+    let graph_ids: std::collections::HashSet<_> = lifecycle_graph
+        .nodes
+        .iter()
+        .map(|node| node.id.as_str())
+        .collect();
+    assert!(graph_ids.contains(archived.id.as_str()));
+    assert!(graph_ids.contains(deprecated.id.as_str()));
+    // `search` is the repository path behind normal unified memory_search.
+    let results = repo
+        .search(NoteSearchParams {
+            project_id: &project.id,
+            query: "lifecycle isolation marker",
+            task_id: None,
+            folder: None,
+            note_type: None,
+            limit: 10,
+            semantic_scores: None,
+            edge_kinds: None,
+            entity_types: None,
+        })
+        .await
+        .unwrap();
+    let result_ids: std::collections::HashSet<_> =
+        results.iter().map(|result| result.id.as_str()).collect();
+    assert!(result_ids.contains(active.id.as_str()));
+    assert!(!result_ids.contains(archived.id.as_str()));
+    assert!(!result_ids.contains(deprecated.id.as_str()));
 }
