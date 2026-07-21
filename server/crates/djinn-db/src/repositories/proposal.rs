@@ -14,7 +14,7 @@ use crate::repositories::note::{LexicalSearchBackend, sanitize_postgres_tsquery}
 use crate::{Error, Result};
 
 use djinn_memory::ProposalSearchResult;
-use sqlx::Row;
+use sqlx::{Postgres, Row, Transaction};
 
 // Global proposals layer (Phase 0). A `proposal` is project-independent; it
 // targets projects via `proposal_targets` (editable M:N) and carries unified
@@ -670,6 +670,7 @@ impl ProposalRepository {
         // Author is the authenticated MCP caller, mirroring how epics stamp
         // `created_by_user_id`. `None` when no user context is in scope.
         let author_user_id = djinn_core::auth_context::current_user_id();
+        let mut tx = self.db.pool().begin().await?;
         sqlx::query!(
             "INSERT INTO proposals (id, short_id, title, body, body_format, acceptance_criteria, status, author_user_id, latest_revision_seq)
              VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 1)",
@@ -682,23 +683,27 @@ impl ProposalRepository {
             status,
             author_user_id
         )
-        .execute(self.db.pool())
+        .execute(&mut *tx)
         .await?;
         // Seed revision 1 with the initial spec so every proposal has a head to
         // diff against. The seed carries no authoring metadata — the proposal
         // is brand-new, so the block-patch / native-skill attribution contract
         // does not apply.
-        self.insert_revision(ProposalRevisionSnapshot {
-            proposal_id: &id,
-            seq: 1,
-            title: input.title,
-            body: input.body,
-            body_format,
-            acceptance_criteria: &acceptance_criteria,
-            edited_by: author_user_id.as_deref(),
-            event_metadata: None,
-        })
+        self.insert_revision_checked(
+            &mut tx,
+            ProposalRevisionSnapshot {
+                proposal_id: &id,
+                seq: 1,
+                title: input.title,
+                body: input.body,
+                body_format,
+                acceptance_criteria: &acceptance_criteria,
+                edited_by: author_user_id.as_deref(),
+                event_metadata: None,
+            },
+        )
         .await?;
+        tx.commit().await?;
         let proposal = self.get_required(&id).await?;
         self.events
             .send(DjinnEventEnvelope::proposal_created(&proposal));
@@ -749,6 +754,7 @@ impl ProposalRepository {
         let record_done_status_event =
             !content_changed && status_changed && effective_status == "done";
 
+        let mut tx = self.db.pool().begin().await?;
         sqlx::query!(
             r#"UPDATE proposals SET title = $1, body = $2, body_format = $10, acceptance_criteria = $3, status = $4,
                     superseded_by = $5, latest_revision_seq = $8,
@@ -769,21 +775,24 @@ impl ProposalRepository {
             building_amend,
             body_format,
         )
-        .execute(self.db.pool())
+        .execute(&mut *tx)
         .await?;
 
         if content_changed {
             let editor = djinn_core::auth_context::current_user_id();
-            self.insert_revision(ProposalRevisionSnapshot {
-                proposal_id: id,
-                seq: next_seq,
-                title: input.title,
-                body: input.body,
-                body_format,
-                acceptance_criteria: &acceptance_criteria,
-                edited_by: editor.as_deref(),
-                event_metadata: input.event_metadata,
-            })
+            self.insert_revision_checked(
+                &mut tx,
+                ProposalRevisionSnapshot {
+                    proposal_id: id,
+                    seq: next_seq,
+                    title: input.title,
+                    body: input.body,
+                    body_format,
+                    acceptance_criteria: &acceptance_criteria,
+                    edited_by: editor.as_deref(),
+                    event_metadata: input.event_metadata,
+                },
+            )
             .await?;
         } else if record_done_status_event {
             let editor = djinn_core::auth_context::current_user_id();
@@ -802,7 +811,7 @@ impl ProposalRepository {
         }
         if demote {
             sqlx::query!("DELETE FROM proposal_signoffs WHERE proposal_id = $1", id)
-                .execute(self.db.pool())
+                .execute(&mut *tx)
                 .await?;
         }
 
@@ -811,8 +820,9 @@ impl ProposalRepository {
         // while in draft, or promoted via the status dropdown); add_signoff only
         // reconciles at sign-off time, so without this the gate would never fire.
         if current.status != "building" {
-            self.reconcile_approval(id).await?;
+            self.reconcile_approval_in_tx(&mut tx, id).await?;
         }
+        tx.commit().await?;
         let proposal = self.get_required(id).await?;
         self.events
             .send(DjinnEventEnvelope::proposal_updated(&proposal));
@@ -1427,35 +1437,65 @@ impl ProposalRepository {
         })
     }
 
-    // ── Revisions + sign-offs ────────────────────────────────────────────────
-
-    #[allow(clippy::too_many_arguments)]
-    async fn insert_revision(&self, revision: ProposalRevisionSnapshot<'_>) -> Result<()> {
+    /// The sole checked spec-snapshot insertion path for create and material updates.
+    async fn insert_revision_checked(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        revision: ProposalRevisionSnapshot<'_>,
+    ) -> Result<()> {
+        let format = match revision.body_format {
+            "markdown" => djinn_spec_lint::BodyFormat::Markdown,
+            "mdx" => djinn_spec_lint::BodyFormat::Mdx,
+            other => {
+                return Err(Error::InvalidData(format!(
+                    "invalid proposal body_format for spec lint: {other}"
+                )));
+            }
+        };
+        let checked_at = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        let mut result = djinn_spec_lint::lint(revision.body, format, checked_at);
+        result.sort_violations();
+        result
+            .validate_for_body(revision.body)
+            .map_err(|e| Error::Internal(format!("invalid spec lint result: {e}")))?;
+        if !result.errors.is_empty() {
+            return Err(Error::SpecLintRejected(crate::SpecLintRejected {
+                code: "SPEC_LINT_REJECTED".into(),
+                violations: result
+                    .errors
+                    .iter()
+                    .map(|violation| crate::SpecLintViolation {
+                        code: violation.code.clone(),
+                        message: violation.message.clone(),
+                        span_start: violation.span.start,
+                        span_end: violation.span.end,
+                    })
+                    .collect(),
+            }));
+        }
+        let result_json = serde_json::to_value(&result)?;
         let id = uuid::Uuid::now_v7().to_string();
-        // When the caller passes no event_metadata (the common case for ordinary
-        // `proposal_update` writes), bind SQL NULL so the column stays empty —
-        // preserving the historical shape. A non-None payload is stored as JSONB
-        // for downstream attribution (targeted block-patch selection, native-skill
-        // version, etc.). We persist `serde_json::Value` directly: `sqlx`'s Pg
-        // encoder maps `Value::Null` to a SQL NULL, while any object/array is
-        // sent as the underlying JSON literal.
-        let metadata: Option<serde_json::Value> = revision.event_metadata.cloned();
-        sqlx::query(
-            r#"INSERT INTO proposal_revisions
-                (id, proposal_id, seq, title, body, body_format, acceptance_criteria, edited_by_user_id, event_kind, event_metadata)
-               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'spec_revision', $9)"#,
-        )
-        .bind(id)
-        .bind(revision.proposal_id)
-        .bind(revision.seq)
-        .bind(revision.title)
-        .bind(revision.body)
-        .bind(revision.body_format)
-        .bind(revision.acceptance_criteria)
-        .bind(revision.edited_by)
-        .bind(metadata)
-        .execute(self.db.pool())
-        .await?;
+        sqlx::query("INSERT INTO proposal_revisions (id, proposal_id, seq, title, body, body_format, acceptance_criteria, edited_by_user_id, event_kind, event_metadata) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'spec_revision', $9)")
+            .bind(&id)
+            .bind(revision.proposal_id)
+            .bind(revision.seq)
+            .bind(revision.title)
+            .bind(revision.body)
+            .bind(revision.body_format)
+            .bind(revision.acceptance_criteria)
+            .bind(revision.edited_by)
+            .bind(revision.event_metadata.cloned())
+            .execute(&mut **tx)
+            .await?;
+        sqlx::query("INSERT INTO proposal_revision_lint_results (proposal_id, revision_seq, linter_version, revision_id, body_sha256, result_json) VALUES ($1, $2, $3, $4, $5, $6)")
+            .bind(revision.proposal_id)
+            .bind(revision.seq)
+            .bind(&result.linter_version)
+            .bind(&id)
+            .bind(&result.body_sha256)
+            .bind(result_json)
+            .execute(&mut **tx)
+            .await?;
         Ok(())
     }
 
@@ -2019,21 +2059,41 @@ impl ProposalRepository {
     /// and a technical sign-off are fresh at the head revision. An `approved`
     /// proposal auto-demotes back to `in_review` when that's no longer true.
     async fn reconcile_approval(&self, proposal_id: &str) -> Result<()> {
-        let proposal = match self.get(proposal_id).await? {
-            Some(p) => p,
+        let mut tx = self.db.pool().begin().await?;
+        self.reconcile_approval_in_tx(&mut tx, proposal_id).await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    /// Reconcile sign-off-derived status using the caller's transaction. This
+    /// keeps material edits, sign-off invalidation, and their status effects
+    /// indivisible.
+    async fn reconcile_approval_in_tx(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        proposal_id: &str,
+    ) -> Result<()> {
+        let proposal = match sqlx::query_as::<_, (String, i32)>(
+            "SELECT status, latest_revision_seq FROM proposals WHERE id = $1",
+        )
+        .bind(proposal_id)
+        .fetch_optional(&mut **tx)
+        .await?
+        {
+            Some(proposal) => proposal,
             None => return Ok(()),
         };
         let fresh: i64 = sqlx::query_scalar!(
             r#"SELECT COUNT(DISTINCT kind) AS "n!: i64" FROM proposal_signoffs
              WHERE proposal_id = $1 AND revision_seq = $2 AND kind IN ('scoped', 'technical')"#,
             proposal_id,
-            proposal.latest_revision_seq
+            proposal.1
         )
-        .fetch_one(self.db.pool())
+        .fetch_one(&mut **tx)
         .await?;
         let both = fresh == 2;
         let any = fresh >= 1;
-        let new_status = match proposal.status.as_str() {
+        let new_status = match proposal.0.as_str() {
             "draft" if both => Some("approved"),
             "draft" if any => Some("in_review"),
             "in_review" if both => Some("approved"),
@@ -2049,7 +2109,7 @@ impl ProposalRepository {
                 status,
                 proposal_id
             )
-            .execute(self.db.pool())
+            .execute(&mut **tx)
             .await?;
         }
         Ok(())
@@ -3132,17 +3192,22 @@ impl ProposalRepository {
             "reason": reason,
             "amendments": amendments_json,
         });
-        self.insert_revision(ProposalRevisionSnapshot {
-            proposal_id,
-            seq: next_revision_seq,
-            title: &current.title,
-            body: &current.body,
-            body_format: &current.body_format,
-            acceptance_criteria: &acceptance_criteria,
-            edited_by: editor.as_deref(),
-            event_metadata: Some(&event_metadata),
-        })
+        let mut tx = self.db.pool().begin().await?;
+        self.insert_revision_checked(
+            &mut tx,
+            ProposalRevisionSnapshot {
+                proposal_id,
+                seq: next_revision_seq,
+                title: &current.title,
+                body: &current.body,
+                body_format: &current.body_format,
+                acceptance_criteria: &acceptance_criteria,
+                edited_by: editor.as_deref(),
+                event_metadata: Some(&event_metadata),
+            },
+        )
         .await?;
+        tx.commit().await?;
 
         let proposal = self.get_required(proposal_id).await?;
         self.events
