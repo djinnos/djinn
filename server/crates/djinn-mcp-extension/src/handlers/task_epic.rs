@@ -487,6 +487,61 @@ pub(crate) async fn call_epic_close(
 
 // ── Proposal tools ──────────────────────────────────────────────────────────
 
+/// Return lint data from the immutable revision that was actually committed.
+/// The repository validates its cache against that exact stored snapshot.
+async fn committed_latest_lint(
+    proposal_repo: &ProposalRepository,
+    proposal: &djinn_core::models::proposal::Proposal,
+) -> Result<serde_json::Value, String> {
+    let revision = proposal_repo
+        .revisions(&proposal.id)
+        .await
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .rev()
+        .find(|revision| {
+            revision.seq == proposal.latest_revision_seq
+                && revision.body == proposal.body
+                && revision.body_format == proposal.body_format
+        })
+        .ok_or_else(|| {
+            format!(
+                "committed revision not found for proposal {}/{}",
+                proposal.id, proposal.latest_revision_seq
+            )
+        })?;
+    serde_json::to_value(
+        proposal_repo
+            .lint_for_revision(&revision)
+            .await
+            .map_err(|e| e.to_string())?,
+    )
+    .map_err(|e| e.to_string())
+}
+
+/// Preserve structured repository lint rejections for correction loops.
+/// `SpecLintRejected` contains only error violations, and its established
+/// source-span ordering is deliberately retained in the JSON response.
+fn proposal_authoring_error(error: djinn_db::Error) -> Result<serde_json::Value, String> {
+    match error {
+        djinn_db::Error::SpecLintRejected(rejection) => {
+            let readable_error = rejection.code.clone();
+            Ok(serde_json::json!({
+                "ok": false,
+                "error": readable_error,
+                "code": rejection.code,
+                "violations": rejection.violations.into_iter().map(|violation| serde_json::json!({
+                    "code": violation.code,
+                    "message": violation.message,
+                    "severity": "error",
+                    "span": { "start": violation.span_start, "end": violation.span_end },
+                })).collect::<Vec<_>>(),
+            }))
+        }
+        other => Err(other.to_string()),
+    }
+}
+
 pub(crate) async fn call_proposal_show(
     ctx: &dyn ExtensionContext,
     arguments: &Option<serde_json::Map<String, serde_json::Value>>,
@@ -816,7 +871,7 @@ pub(crate) async fn call_proposal_update(
         existing.superseded_by.clone()
     };
 
-    let updated = proposal_repo
+    let updated = match proposal_repo
         .update(
             &existing.id,
             djinn_db::ProposalUpdateInput {
@@ -830,7 +885,11 @@ pub(crate) async fn call_proposal_update(
             },
         )
         .await
-        .map_err(|e| e.to_string())?;
+    {
+        Ok(updated) => updated,
+        Err(error) => return proposal_authoring_error(error),
+    };
+    let latest_lint = committed_latest_lint(&proposal_repo, &updated).await?;
 
     Ok(serde_json::json!({
         "ok": true,
@@ -838,6 +897,7 @@ pub(crate) async fn call_proposal_update(
         "short_id": updated.short_id,
         "status": updated.status,
         "latest_revision_seq": updated.latest_revision_seq,
+        "latest_lint": latest_lint,
     }))
 }
 
@@ -869,7 +929,7 @@ pub(crate) async fn call_proposal_block_patch(
 
     let outcome = apply_block_patch(&existing.body, &existing.body_format, &p)?;
 
-    let updated = proposal_repo
+    let updated = match proposal_repo
         .update(
             &existing.id,
             djinn_db::ProposalUpdateInput {
@@ -883,13 +943,18 @@ pub(crate) async fn call_proposal_block_patch(
             },
         )
         .await
-        .map_err(|e| e.to_string())?;
+    {
+        Ok(updated) => updated,
+        Err(error) => return proposal_authoring_error(error),
+    };
+    let latest_lint = committed_latest_lint(&proposal_repo, &updated).await?;
 
     Ok(serde_json::json!({
         "ok": true,
         "id": updated.id,
         "short_id": updated.short_id,
         "latest_revision_seq": updated.latest_revision_seq,
+        "latest_lint": latest_lint,
     }))
 }
 

@@ -17,7 +17,7 @@ use djinn_core::events::EventBus;
 use djinn_db::{Database, ProposalCreateInput, ProposalRepository};
 
 use crate::context::ExtensionContext;
-use crate::handlers::task_epic::call_proposal_update;
+use crate::handlers::task_epic::{call_proposal_block_patch, call_proposal_update};
 
 /// Minimal [`ExtensionContext`] stub over an in-memory database. Only `db()`
 /// and `event_bus()` are exercised by the proposal handlers; the remaining
@@ -125,6 +125,55 @@ async fn update_unknown_block_tag_rejected() {
     let stored = repo.get(&existing.id).await.unwrap().unwrap();
     assert_eq!(stored.body, "plain markdown body");
     assert_eq!(stored.body_format, "markdown");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn advocate_correction_and_targeted_patch_preserve_lint_contract() {
+    let ctx = test_ctx().await;
+    let existing = seed_markdown_proposal(&ctx).await;
+    let repo = ProposalRepository::new(ctx.db(), ctx.event_bus());
+    let corrupt = include_str!(
+        "../../../djinn-spec-lint/tests/fixtures/v1/synthetic/delimiter_failures/body.md"
+    );
+    let rejected = call_proposal_update(
+        &ctx,
+        &args(serde_json::json!({ "id": existing.id, "body": corrupt })),
+    )
+    .await
+    .expect("repository lint rejection is a structured tool result");
+    assert_eq!(rejected["error"], "SPEC_LINT_REJECTED");
+    assert_eq!(rejected["code"], "SPEC_LINT_REJECTED");
+    assert_eq!(rejected["violations"][0]["severity"], "error");
+    assert_eq!(
+        repo.get(&existing.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .latest_revision_seq,
+        existing.latest_revision_seq
+    );
+
+    let corrected = call_proposal_update(
+        &ctx,
+        &args(serde_json::json!({ "id": existing.id, "body": "# Proposal\n\n## Target\n\nOld paragraph." })),
+    )
+    .await
+    .expect("valid correction commits");
+    assert!(corrected["latest_lint"].is_object());
+    let after_update = repo.get(&existing.id).await.unwrap().unwrap();
+    let patched = call_proposal_block_patch(
+        &ctx,
+        &args(serde_json::json!({
+            "id": existing.id,
+            "selector": { "exact_text": "Old paragraph." },
+            "operation": "replace",
+            "block_mdx": "Corrected paragraph.",
+            "expected_latest_revision_seq": after_update.latest_revision_seq,
+        })),
+    )
+    .await
+    .expect("targeted patch commits");
+    assert!(patched["latest_lint"].is_object());
 }
 
 /// The exact production failure: a children-based block written in the
