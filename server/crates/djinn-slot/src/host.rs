@@ -299,6 +299,18 @@ pub trait SlotToolDispatcher: Send + Sync + 'static {
         rendered: &str,
         preview_chars: usize,
     ) -> String;
+    /// Durably preserve inline results before compaction mutates them.
+    ///
+    /// This additive seam defaults to a no-op so existing host dispatchers stay
+    /// source-compatible. Implementations return pointers only after trusted
+    /// session durable records are readable; an error aborts compaction before
+    /// slot changes the conversation.
+    fn persist_tool_results_before_compaction(
+        &self,
+        _results: &[PreCompactionToolResult],
+    ) -> Result<Vec<djinn_compaction::ToolOutputPointer>, String> {
+        Ok(Vec::new())
+    }
     /// Dispatch a tool call through the host's extension layer (non-stash,
     /// non-MCP tools).  The host resolves the tool, runs it, and returns
     /// the raw JSON result.
@@ -335,6 +347,17 @@ pub trait SlotToolDispatcher: Send + Sync + 'static {
     ) -> Pin<Box<dyn Future<Output = Result<String, String>> + Send + 'a>>;
     /// Clear the session's stash (used during compaction resets).
     fn clear_stash(&self);
+}
+
+/// Original inline tool-result facts supplied to the host before compaction.
+/// The dispatcher selects the trusted durable session; it is never supplied by
+/// the conversation or model.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreCompactionToolResult {
+    pub tool_use_id: String,
+    pub tool_name: String,
+    pub content: String,
+    pub turn: u64,
 }
 
 /// Concrete host context for slot operations.

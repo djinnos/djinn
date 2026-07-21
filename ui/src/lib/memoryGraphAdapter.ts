@@ -97,6 +97,73 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+const NOTE_LIFECYCLE_STATUSES = new Set(["active", "archived", "deprecated"]);
+
+/**
+ * A wire timestamp must be a real ISO-8601 date-time, not merely any string.
+ *
+ * `Date.parse` and the `Date` constructor silently normalize overflowed
+ * calendar components rather than rejecting them — e.g. `2024-02-30T00:00:00Z`
+ * is accepted as March 1 by most ECMAScript engines. To reject impossible
+ * calendar dates (including a non-leap-year Feb 29), we reconstruct the
+ * instant from the explicit captured components via `Date.UTC`, then
+ * round-trip it back through a `Date` and confirm the year/month/day/
+ * hour/minute/second survived unchanged. A numeric trailing timezone offset
+ * must also have valid hour/minute components before it can be retained.
+ */
+function isIsoTimestamp(value: unknown): value is string {
+  if (typeof value !== "string") return false;
+  const m =
+    /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d+)?(Z|[+-]\d{2}:\d{2})$/.exec(value);
+  if (m === null) return false;
+  const year = Number(m[1]);
+  const month = Number(m[2]);
+  const day = Number(m[3]);
+  const hour = Number(m[4]);
+  const minute = Number(m[5]);
+  const second = Number(m[6]);
+  const timezone = m[7];
+  if (timezone !== "Z") {
+    const offsetHour = Number(timezone.slice(1, 3));
+    const offsetMinute = Number(timezone.slice(4, 6));
+    if (offsetHour > 23 || offsetMinute > 59) return false;
+  }
+  const epoch = Date.UTC(year, month - 1, day, hour, minute, second);
+  if (!Number.isFinite(epoch)) return false;
+  const d = new Date(epoch);
+  return (
+    d.getUTCFullYear() === year &&
+    d.getUTCMonth() === month - 1 &&
+    d.getUTCDate() === day &&
+    d.getUTCHours() === hour &&
+    d.getUTCMinutes() === minute &&
+    d.getUTCSeconds() === second
+  );
+}
+
+function isNonNegativeInteger(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value) && Number.isInteger(value) && value >= 0;
+}
+
+/**
+ * Parse the bounded inactive-node counters only as a complete, trustworthy
+ * unit. An absent or malformed summary remains absent at the UI boundary.
+ */
+function parseLifecycleSummary(
+  value: unknown,
+): NonNullable<MemoryGraphOutput["lifecycle_summary"]> | undefined {
+  if (!isRecord(value)) return undefined;
+  const { inactive_omitted, inactive_returned, inactive_total } = value;
+  if (
+    !isNonNegativeInteger(inactive_omitted) ||
+    !isNonNegativeInteger(inactive_returned) ||
+    !isNonNegativeInteger(inactive_total)
+  ) {
+    return undefined;
+  }
+  return { inactive_omitted, inactive_returned, inactive_total };
+}
+
 /**
  * Parse a raw `memory_graph` MCP response into a typed `MemoryGraphOutput`,
  * or return `null` when the response is malformed / errored.
@@ -142,6 +209,15 @@ export function parseMemoryGraphResponse(raw: unknown): MemoryGraphOutput | null
           : typeof n.created_at === "number" && Number.isFinite(n.created_at)
             ? { created_at: new Date(n.created_at * 1000).toISOString() }
             : {}),
+        // Lifecycle fields are optional for the legacy active-only response.
+        // Never synthesize transition times: explicit null and omission stay
+        // omitted, while only the server's exact status vocabulary is kept.
+        ...(typeof n.status === "string" && NOTE_LIFECYCLE_STATUSES.has(n.status)
+          ? { status: n.status }
+          : {}),
+        ...(isIsoTimestamp(n.lifecycle_changed_at)
+          ? { lifecycle_changed_at: n.lifecycle_changed_at }
+          : {}),
       };
     })
     .filter((n) => n.id.length > 0);
@@ -166,5 +242,12 @@ export function parseMemoryGraphResponse(raw: unknown): MemoryGraphOutput | null
     }))
     .filter((e) => e.source_id.length > 0 && e.target_id.length > 0 && e.kind.length > 0);
 
-  return { nodes: parsedNodes, edges: parsedEdges, typed_edges: parsedTypedEdges };
+  const lifecycleSummary = parseLifecycleSummary(raw.lifecycle_summary);
+
+  return {
+    nodes: parsedNodes,
+    edges: parsedEdges,
+    typed_edges: parsedTypedEdges,
+    ...(lifecycleSummary !== undefined ? { lifecycle_summary: lifecycleSummary } : {}),
+  };
 }
