@@ -4,7 +4,9 @@ import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/re
 import { MemoryGraphCanvas } from "./MemoryGraphCanvas";
 import { validLifecycleResponse } from "@/lib/__fixtures__/memoryGraphLifecycle";
 
-const callMcpToolMock = vi.fn();
+const { callMcpToolMock } = vi.hoisted(() => ({
+  callMcpToolMock: vi.fn(),
+}));
 
 vi.mock("@/api/mcpClient", () => ({
   callMcpTool: (...args: unknown[]) => callMcpToolMock(...args),
@@ -95,8 +97,18 @@ describe("MemoryGraphCanvas lifecycle ghost preference", () => {
     render(<MemoryGraphCanvas projectSlug="owner/cap" />);
 
     expect(await screen.findByText("500 shown · 3 older hidden")).toBeInTheDocument();
+    expect(screen.getByText("reference")).toBeInTheDocument();
+    expect(screen.getByText("pitfall")).toBeInTheDocument();
     fireEvent.click(screen.getByLabelText("Show lifecycle ghosts"));
-    await waitFor(() => expect(screen.queryByText("500 shown · 3 older hidden")).not.toBeInTheDocument());
-    expect(callMcpToolMock).toHaveBeenLastCalledWith("memory_graph", { project: "owner/cap" });
+    await waitFor(() => {
+      expect(callMcpToolMock).toHaveBeenLastCalledWith("memory_graph", { project: "owner/cap" });
+      expect(screen.queryByText("500 shown · 3 older hidden")).not.toBeInTheDocument();
+      // These lifecycle-only legend entries derive from the current disk. Their
+      // disappearance proves the active-only response replaced, rather than
+      // merely hid, the prior lifecycle-inclusive disk and its hit targets.
+      expect(screen.queryByText("reference")).not.toBeInTheDocument();
+      expect(screen.queryByText("pitfall")).not.toBeInTheDocument();
+      expect(screen.getByText("adr")).toBeInTheDocument();
+    });
   });
 });
