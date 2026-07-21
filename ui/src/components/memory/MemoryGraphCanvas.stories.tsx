@@ -19,6 +19,7 @@ import type { Meta, StoryObj } from "@storybook/react-vite";
 
 import { MemoryGraphCanvas } from "./MemoryGraphCanvas";
 import { createSeededRandom } from "@/lib/memoryGraphAdapter";
+import { validLifecycleResponse } from "@/lib/__fixtures__/memoryGraphLifecycle";
 import { setMcpToolResponder } from "@/storybook-mocks/mcpClient";
 
 // ── Seeded memory_graph payloads ─────────────────────────────────────────────
@@ -200,6 +201,72 @@ function densePayload(count = 6500) {
   return { nodes, edges, typed_edges: [] };
 }
 
+/**
+ * The lifecycle fixture is deliberately small enough that the visual states
+ * below remain easy to inspect. Add stable creation times so its disk has the
+ * same calendar geometry every time Storybook opens it.
+ */
+const lifecyclePayload = {
+  ...validLifecycleResponse,
+  nodes: validLifecycleResponse.nodes.map((node, index) => ({
+    ...node,
+    created_at: ts(`2026-07-${String(12 + index).padStart(2, "0")}T12:00:00Z`),
+  })),
+};
+
+const lifecycleActiveOnlyPayload = {
+  ...lifecyclePayload,
+  nodes: lifecyclePayload.nodes.filter((node) => node.status === "active"),
+  edges: [],
+  typed_edges: [],
+};
+
+const lifecycleCapPayload = {
+  ...lifecyclePayload,
+  lifecycle_summary: { inactive_total: 503, inactive_returned: 500, inactive_omitted: 3 },
+};
+
+const mixedLifecycleSupersedesPayload = {
+  ...lifecyclePayload,
+  typed_edges: [{ source_id: "archived-note", target_id: "active-note", kind: "supersedes", weight: 1 }],
+};
+
+const ghostConnectedContradictsPayload = {
+  ...lifecyclePayload,
+  typed_edges: [{ source_id: "deprecated-note", target_id: "active-note", kind: "contradicts", weight: 1 }],
+};
+
+// Fixed transition data keeps this visual state repeatable and explicitly
+// documents the seven-day recent-transition case.
+const recentTransitionFadePayload = {
+  ...lifecyclePayload,
+  nodes: lifecyclePayload.nodes.map((node) =>
+    node.id === "archived-note" ? { ...node, lifecycle_changed_at: "2026-07-20T12:00:00Z" } : node,
+  ),
+};
+
+function setGhostPreference(enabled: boolean) {
+  window.localStorage.setItem("djinn:memory-graph:lifecycle-ghosts:djinnos/djinn", enabled ? "1" : "0");
+}
+
+function useReducedMotion() {
+  const original = window.matchMedia;
+  Object.defineProperty(window, "matchMedia", {
+    configurable: true,
+    value: (query: string) => ({
+      matches: query === "(prefers-reduced-motion: reduce)",
+      media: query,
+      onchange: null,
+      addEventListener: () => undefined,
+      removeEventListener: () => undefined,
+      addListener: () => undefined,
+      removeListener: () => undefined,
+      dispatchEvent: () => false,
+    }),
+  });
+  return () => Object.defineProperty(window, "matchMedia", { configurable: true, value: original });
+}
+
 /** Same notes with `created_at` stripped — drives the ordinal-fallback path. */
 const undatedPayload = {
   ...smallPayload,
@@ -266,6 +333,71 @@ export const DenseGraph: Story = {
 export const Undated: Story = {
   beforeEach: () => {
     setMcpToolResponder(graphResponder(undatedPayload));
+  },
+};
+
+/** Lifecycle preference off: responder returns an active-only replacement graph. */
+export const LifecycleGhostsOff: Story = {
+  beforeEach: () => {
+    setGhostPreference(false);
+    setMcpToolResponder(graphResponder(lifecycleActiveOnlyPayload));
+  },
+};
+
+/** Default lifecycle preference on: archived and deprecated notes render as ghosts. */
+export const LifecycleGhostsOn: Story = {
+  beforeEach: () => {
+    setGhostPreference(true);
+    setMcpToolResponder(graphResponder(lifecyclePayload));
+  },
+};
+
+/** Bounded lifecycle response exposes the inactive-node cap badge. */
+export const LifecycleGhostCapBadge: Story = {
+  beforeEach: () => {
+    setGhostPreference(true);
+    setMcpToolResponder(graphResponder(lifecycleCapPayload));
+  },
+};
+
+/** Ghost titles and lifecycle status are available only through hover/focus interaction. */
+export const GhostHoverAndFocusLabels: Story = {
+  beforeEach: () => {
+    setGhostPreference(true);
+    setMcpToolResponder(graphResponder(lifecyclePayload));
+  },
+};
+
+/** A mixed active/archived supersedes edge is drawn active-to-ghost. */
+export const MixedLifecycleSupersedes: Story = {
+  beforeEach: () => {
+    setGhostPreference(true);
+    setMcpToolResponder(graphResponder(mixedLifecycleSupersedesPayload));
+  },
+};
+
+/** A ghost-connected contradicts edge remains dashed and non-directional. */
+export const GhostConnectedContradicts: Story = {
+  beforeEach: () => {
+    setGhostPreference(true);
+    setMcpToolResponder(graphResponder(ghostConnectedContradictsPayload));
+  },
+};
+
+/** A recently archived note performs its one-shot 60% → 22% transition fade. */
+export const RecentLifecycleTransitionFade: Story = {
+  beforeEach: () => {
+    setGhostPreference(true);
+    setMcpToolResponder(graphResponder(recentTransitionFadePayload));
+  },
+};
+
+/** Reduced motion renders the recent lifecycle ghost immediately at steady opacity. */
+export const ReducedMotionLifecycleGhost: Story = {
+  beforeEach: () => {
+    setGhostPreference(true);
+    setMcpToolResponder(graphResponder(recentTransitionFadePayload));
+    return useReducedMotion();
   },
 };
 
