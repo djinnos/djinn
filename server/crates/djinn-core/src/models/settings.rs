@@ -30,6 +30,9 @@ impl KnowledgeInjectionConfig {
     pub const DEFAULT_INJECTION_STARVATION_QUERY_FLOOR: u32 = 20;
     pub const DEFAULT_RETRIEVAL_HEALTH_WINDOW_MINUTES: u32 = 1440;
     pub fn from_settings_and_env(s: &DjinnSettings) -> Result<Self, KnowledgeInjectionConfigError> {
+        // An environment override selects the effective value, but must not
+        // conceal an invalid value that is already present in settings.raw.
+        Self::from_settings(s)?;
         let budget = resolve(
             "knowledge_injection_budget_bytes",
             "DJINN_KNOWLEDGE_INJECTION_BUDGET_BYTES",
@@ -94,6 +97,63 @@ impl KnowledgeInjectionConfig {
             retrieval_health_window_minutes: window,
         })
     }
+
+    /// Resolve persisted settings without consulting environment overrides.
+    /// Startup uses this before precedence so every present file value is
+    /// independently validated.
+    pub fn from_settings(s: &DjinnSettings) -> Result<Self, KnowledgeInjectionConfigError> {
+        let budget = resolve_file(
+            "knowledge_injection_budget_bytes",
+            s.knowledge_injection_budget_bytes,
+            8192,
+            256,
+            32768,
+        )?;
+        let line_cap = resolve_file(
+            "knowledge_injection_line_cap_bytes",
+            s.knowledge_injection_line_cap_bytes,
+            1024,
+            128,
+            4096,
+        )?;
+        let limit = resolve_file(
+            "knowledge_injection_limit",
+            s.knowledge_injection_limit,
+            10,
+            1,
+            50,
+        )?;
+        let threshold = resolve_file(
+            "injection_starvation_threshold_percent",
+            s.injection_starvation_threshold_percent,
+            50,
+            1,
+            100,
+        )?;
+        let floor = resolve_file(
+            "injection_starvation_query_floor",
+            s.injection_starvation_query_floor,
+            20,
+            1,
+            10000,
+        )?;
+        let window = resolve_file(
+            "retrieval_health_window_minutes",
+            s.retrieval_health_window_minutes,
+            1440,
+            5,
+            10080,
+        )?;
+        validate_line_cap(line_cap, budget)?;
+        Ok(Self {
+            knowledge_injection_budget_bytes: budget,
+            knowledge_injection_line_cap_bytes: line_cap,
+            knowledge_injection_limit: limit,
+            injection_starvation_threshold_percent: threshold,
+            injection_starvation_query_floor: floor,
+            retrieval_health_window_minutes: window,
+        })
+    }
 }
 impl Default for KnowledgeInjectionConfig {
     fn default() -> Self {
@@ -137,6 +197,35 @@ fn resolve(
         });
     }
     Ok(value)
+}
+
+fn resolve_file(
+    field: &'static str,
+    value: Option<u32>,
+    default: u32,
+    min: u32,
+    max: u32,
+) -> Result<u32, KnowledgeInjectionConfigError> {
+    let value = value.unwrap_or(default);
+    if !(min..=max).contains(&value) {
+        return Err(KnowledgeInjectionConfigError {
+            field,
+            value: value.to_string(),
+            reason: format!("must be in [{min}, {max}]"),
+        });
+    }
+    Ok(value)
+}
+
+fn validate_line_cap(line_cap: u32, budget: u32) -> Result<(), KnowledgeInjectionConfigError> {
+    if line_cap > budget {
+        return Err(KnowledgeInjectionConfigError {
+            field: "knowledge_injection_line_cap_bytes",
+            value: format!("{line_cap} (knowledge_injection_budget_bytes={budget})"),
+            reason: "must be less than or equal to knowledge_injection_budget_bytes".into(),
+        });
+    }
+    Ok(())
 }
 
 /// Metadata recorded when dispatch is paused for a scope.
@@ -250,11 +339,11 @@ impl DjinnSettings {
         let input = cleaned.as_deref().unwrap_or(raw);
         match serde_json::from_str::<Self>(input) {
             Ok(settings) => {
-                KnowledgeInjectionConfig::from_settings_and_env(&settings)?;
+                KnowledgeInjectionConfig::from_settings(&settings)?;
                 Ok(settings)
             }
             Err(_) => {
-                if let Some((field, value)) = Self::canonical_config_value(raw) {
+                if let Some((field, value)) = Self::invalid_canonical_config_value(raw) {
                     return Err(KnowledgeInjectionConfigError {
                         field,
                         value,
@@ -266,7 +355,7 @@ impl DjinnSettings {
         }
     }
 
-    fn canonical_config_value(raw: &str) -> Option<(&'static str, String)> {
+    fn invalid_canonical_config_value(raw: &str) -> Option<(&'static str, String)> {
         const FIELDS: &[&str] = &[
             "knowledge_injection_budget_bytes",
             "knowledge_injection_line_cap_bytes",
@@ -278,15 +367,18 @@ impl DjinnSettings {
         let value: serde_json::Value = serde_json::from_str(raw).ok()?;
         let object = value.as_object()?;
         FIELDS.iter().find_map(|field| {
-            object.get(*field).map(|value| {
-                (
-                    *field,
-                    value
-                        .as_str()
-                        .map(str::to_owned)
-                        .unwrap_or_else(|| value.to_string()),
-                )
-            })
+            object
+                .get(*field)
+                .filter(|value| value.as_u64().is_none_or(|value| value > u32::MAX as u64))
+                .map(|value| {
+                    (
+                        *field,
+                        value
+                            .as_str()
+                            .map(str::to_owned)
+                            .unwrap_or_else(|| value.to_string()),
+                    )
+                })
         })
     }
 
@@ -605,6 +697,21 @@ mod tests {
                 ..invalid
             };
             assert!(KnowledgeInjectionConfig::from_settings_and_env(&equal).is_ok());
+            unsafe {
+                std::env::set_var("DJINN_KNOWLEDGE_INJECTION_BUDGET_BYTES", "8192");
+                std::env::set_var("DJINN_KNOWLEDGE_INJECTION_LINE_CAP_BYTES", "1024");
+            }
+            let error = DjinnSettings::from_db_value_validated(
+                r#"{"knowledge_injection_budget_bytes":256,"knowledge_injection_line_cap_bytes":257}"#,
+            )
+            .unwrap_err()
+            .to_string();
+            assert!(
+                error.contains("knowledge_injection_line_cap_bytes")
+                    && error.contains("257")
+                    && error.contains("knowledge_injection_budget_bytes")
+                    && error.contains("256")
+            );
             let error = DjinnSettings::from_db_value_validated(
                 r#"{"knowledge_injection_budget_bytes":"bad"}"#,
             )
