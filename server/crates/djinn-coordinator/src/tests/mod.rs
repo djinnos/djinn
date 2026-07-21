@@ -1426,6 +1426,9 @@ mod operator_explanation_tests;
 mod raw_signal_bypass_guard;
 
 #[cfg(test)]
+mod terminal_gate_boundary;
+
+#[cfg(test)]
 mod tripwire_planner_escalation;
 
 #[cfg(test)]
