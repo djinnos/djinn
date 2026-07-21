@@ -73,10 +73,17 @@ fn coordinator_exhaustion_force_close_has_one_terminal_gate() {
 
 #[test]
 fn wave_dispatch_exception_is_explicitly_lifecycle_specific() {
+    let approved_task_processing = function_source(WAVE_DISPATCH_SRC, "process_approved_tasks")
+        .expect("wave_dispatch.rs must retain the approved-task lifecycle policy");
+
     assert!(
-        WAVE_DISPATCH_SRC.contains("TransitionAction::ForceClose")
-            && WAVE_DISPATCH_SRC.contains(WAVE_DISPATCH_LIFECYCLE_POLICY),
-        "the sole excluded dispatch ForceClose must remain the named oversized-blob post-push policy"
+        count_occurrences(WAVE_DISPATCH_SRC, "TransitionAction::ForceClose") == 1,
+        "wave_dispatch.rs may contain exactly one ForceClose: the named oversized-blob lifecycle policy"
+    );
+    assert!(
+        approved_task_processing.contains("TransitionAction::ForceClose")
+            && approved_task_processing.contains(WAVE_DISPATCH_LIFECYCLE_POLICY),
+        "wave_dispatch.rs's sole ForceClose must remain bound to the named oversized-blob post-push policy"
     );
 }
 
@@ -84,7 +91,11 @@ fn wave_dispatch_exception_is_explicitly_lifecycle_specific() {
 fn terminal_gate_uses_bounded_dispositions_without_high_cardinality_metric_labels() {
     let terminal_gate = function_source(SESSION_RECOVERY_SRC, "terminally_fail_task")
         .expect("session_recovery.rs must expose terminally_fail_task");
-    let dispositions = quoted_field_values(terminal_gate, "pr_disposition");
+    let dispositions = literal_field_values(terminal_gate, "pr_disposition").unwrap_or_else(|error| {
+        panic!(
+            "every terminal-gate pr_disposition field must be a direct bounded string literal: {error}"
+        )
+    });
 
     assert!(
         dispositions.contains(&"force_closed_no_pr"),
@@ -178,12 +189,24 @@ fn function_source<'a>(source: &'a str, function_name: &str) -> Option<&'a str> 
     None
 }
 
-fn quoted_field_values<'a>(source: &'a str, field: &str) -> Vec<&'a str> {
-    let marker = [field, r#" = ""#].concat();
+fn literal_field_values<'a>(source: &'a str, field: &str) -> Result<Vec<&'a str>, String> {
     source
-        .split(&marker)
-        .skip(1)
-        .filter_map(|tail| tail.split('"').next())
+        .match_indices(field)
+        .map(|(offset, _)| {
+            let assignment = source[offset + field.len()..].trim_start();
+            let literal = assignment.strip_prefix("= \"").ok_or_else(|| {
+                format!("{field} occurrence at byte {offset} is not assigned a string literal")
+            })?;
+            let (value, remainder) = literal.split_once('"').ok_or_else(|| {
+                format!("{field} occurrence at byte {offset} has an unterminated string literal")
+            })?;
+            if !remainder.trim_start().starts_with(',') {
+                return Err(format!(
+                    "{field} occurrence at byte {offset} is not a direct string-literal field"
+                ));
+            }
+            Ok(value)
+        })
         .collect()
 }
 
