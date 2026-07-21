@@ -1076,7 +1076,7 @@ mod created_by_tests {
         .unwrap();
         assert_eq!(
             stamped.as_deref(),
-            user_id.as_str(),
+            Some(user_id.as_str()),
             "created_by_user_id must match the SESSION_USER_ID task-local"
         );
 
