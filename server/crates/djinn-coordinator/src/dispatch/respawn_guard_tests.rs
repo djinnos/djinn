@@ -1247,18 +1247,20 @@ async fn handoff_is_one_shot_and_idempotent() {
     let s1 = repo.get(&task.id).await.unwrap().unwrap().status;
     assert_eq!(s1, "pr_review");
 
-    // Second call with the now-current (poller-owned) status is a no-op — the
-    // task already left `open`, so adoption cannot re-fire and re-hand it off.
+    // Second call with the now-current pr_review status is an idempotent no-op:
+    // the task stays in pr_review, no transition runs, but an activity entry is
+    // still recorded so the handoff reason is durable.
     assert!(
-        !handoff_adopted_pr_to_poller(&repo, &task.id, &s1, pr).await,
-        "handoff must be one-shot: no re-handoff once the task is poller-owned"
+        handoff_adopted_pr_to_poller(&repo, &task.id, &s1, pr).await,
+        "handoff is idempotent for already-pr_review: returns true, no transition"
     );
     assert_eq!(
         repo.get(&task.id).await.unwrap().unwrap().status,
         "pr_review"
     );
 
-    // Exactly one handoff activity entry exists (the 470x/night spam is gone).
+    // Two handoff activity entries: one from the transition, one from the
+    // idempotent no-op.
     let count = repo
         .list_activity(&task.id)
         .await
@@ -1267,8 +1269,8 @@ async fn handoff_is_one_shot_and_idempotent() {
         .filter(|e| e.event_type == "adoption_handoff")
         .count();
     assert_eq!(
-        count, 1,
-        "exactly one handoff activity entry — no repeated adoption spam"
+        count, 2,
+        "transition + idempotent no-op each record an activity entry"
     );
 }
 
@@ -1304,50 +1306,69 @@ async fn reopened_task_with_retained_pr_url_is_handed_to_poller_not_wedged() {
         "reopened-with-pr_url task must be handed to the poller, not left wedged in open"
     );
 
-    // A subsequent ready pass no longer sees it in `open`, so the handoff is a
-    // no-op and adoption cannot re-fire.
+    // A subsequent ready pass no longer sees it in `open`. The handoff on the
+    // now-pr_review task is an idempotent no-op that returns true (no
+    // transition, but activity is still recorded).
     assert!(
-        !handoff_adopted_pr_to_poller(&test_task_repo(&db), &updated.id, &updated.status, pr).await
+        handoff_adopted_pr_to_poller(&test_task_repo(&db), &updated.id, &updated.status, pr).await
     );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn handoff_is_noop_for_already_poller_owned_status() {
-    // Idempotency: a task already in a poller-owned status must be left alone
-    // (no illegal transition, no duplicate activity).
+async fn handoff_advances_pr_draft_and_idempotent_for_pr_review() {
+    // `pr_draft` must be advanced to `pr_review` (not a no-op): the draft
+    // poller's undraft would error on an already-ready PR, so the review
+    // poller must own it. `pr_review` is an idempotent no-op that returns true
+    // and records a standalone activity entry.
     let db = test_db();
     let task = create_task(&db).await;
     let repo = test_task_repo(&db);
-    for status in ["pr_draft", "pr_review"] {
-        assert!(
-            !handoff_adopted_pr_to_poller(&repo, &task.id, status, "https://x/pull/1").await,
-            "handoff must no-op for already-poller-owned status {status}"
-        );
-    }
-    // The task itself was never transitioned (still open).
-    assert_eq!(repo.get(&task.id).await.unwrap().unwrap().status, "open");
+
+    // pr_draft → pr_review (transition).
+    repo.set_status(&task.id, "pr_draft")
+        .await
+        .expect("set_status moves the task to pr_draft");
+    assert!(
+        handoff_adopted_pr_to_poller(&repo, &task.id, "pr_draft", "https://x/pull/1").await,
+        "pr_draft must be advanced to pr_review, not treated as a no-op"
+    );
+    assert_eq!(
+        repo.get(&task.id).await.unwrap().unwrap().status,
+        "pr_review",
+        "pr_draft task must land in pr_review"
+    );
+
+    // pr_review → pr_review (idempotent no-op, returns true).
+    assert!(
+        handoff_adopted_pr_to_poller(&repo, &task.id, "pr_review", "https://x/pull/1").await,
+        "pr_review handoff must be an idempotent no-op returning true"
+    );
+    assert_eq!(
+        repo.get(&task.id).await.unwrap().unwrap().status,
+        "pr_review"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn handoff_is_noop_for_unexpected_non_open_status() {
-    // Defensive: an adopted task observed in a non-open, non-poller status must
-    // not be forced into pr_review (the state machine only permits open →
-    // pr_review); the handoff returns false and leaves the task untouched.
+async fn handoff_transitions_non_open_status_to_pr_review() {
+    // The AdoptionHandoff transition is now legal from every non-closed
+    // status. An in_progress task (reachable through autonomous-remediation
+    // exhaustion from PR-poller paths) must be advanced to pr_review, not left
+    // untouched.
     let db = test_db();
     let task = create_task(&db).await;
     let repo = test_task_repo(&db);
-    // Move to an unexpected status directly (bypass the state machine's Start
-    // AC/blocker gate, which is irrelevant to this handoff no-op assertion).
     repo.set_status(&task.id, "in_progress")
         .await
         .expect("set_status moves the task to in_progress");
 
     assert!(
-        !handoff_adopted_pr_to_poller(&repo, &task.id, "in_progress", "https://x/pull/1").await
+        handoff_adopted_pr_to_poller(&repo, &task.id, "in_progress", "https://x/pull/1").await,
+        "in_progress task must be advanced to pr_review"
     );
     assert_eq!(
         repo.get(&task.id).await.unwrap().unwrap().status,
-        "in_progress",
-        "unexpected-status task must be left untouched"
+        "pr_review",
+        "in_progress task must land in pr_review"
     );
 }

@@ -2003,7 +2003,7 @@ impl CoordinatorActor {
     /// forever is worse than a clear terminal state, so closing it self-cleans
     /// that guard.
     pub(crate) async fn terminally_fail_task(
-        &self,
+        &mut self,
         task: &djinn_core::models::Task,
         role: &str,
         reason: &str,
@@ -2016,6 +2016,60 @@ impl CoordinatorActor {
             "CoordinatorActor: failing task terminally (undispatchable / max retries)"
         );
         let repo = self.task_repo();
+        let latest = match repo.get(&task.id).await {
+            Ok(Some(latest)) => latest,
+            Ok(None) => {
+                tracing::warn!(task_id = %task.short_id, role, pr_disposition = "pr_handoff", "djinn.terminal_gate: task disappeared while reloading; refusing ForceClose");
+                return false;
+            }
+            Err(e) => {
+                tracing::warn!(task_id = %task.short_id, role, pr_disposition = "pr_handoff", error = %e, "djinn.terminal_gate: latest-row reload failed; refusing ForceClose");
+                return false;
+            }
+        };
+        if let Some(pr_url) = latest
+            .pr_url
+            .as_deref()
+            .map(str::trim)
+            .filter(|url| !url.is_empty())
+        {
+            const HANDOFF_REASON: &str = "terminal_close_deferred_pr_handoff";
+            match super::respawn_guard::handoff_pr_to_poller(
+                &repo,
+                &latest.id,
+                &latest.status,
+                pr_url,
+                HANDOFF_REASON,
+            )
+            .await
+            {
+                Ok(_) => {
+                    if let Err(e) = self
+                        .try_clear_durable_dispatch_backoff_state(
+                            &latest.id,
+                            Some(&latest.short_id),
+                            HANDOFF_REASON,
+                        )
+                        .await
+                    {
+                        tracing::warn!(task_id = %latest.short_id, role, pr_disposition = "pr_handoff", error = %e, "djinn.terminal_gate: durable dispatch-state clear failed after poller handoff; refusing ForceClose");
+                        return false;
+                    }
+                    tracing::warn!(task_id = %latest.short_id, role, pr_disposition = "pr_handoff", snapshot_head_sha = ?latest.ci_head_sha, "djinn.terminal_gate: PR-bearing task handed to poller");
+                    self.dispatch_failure_streak.remove(&latest.id);
+                    self.provider_failure_streak.remove(&latest.id);
+                    self.dispatch_cooldowns.remove(&latest.id);
+                    self.last_dispatched.remove(&latest.id);
+                    self.inflight_dispatches.remove(&latest.id);
+                    return true;
+                }
+                Err(e) => {
+                    tracing::warn!(task_id = %latest.short_id, role, pr_disposition = "pr_handoff", error = %e, "djinn.terminal_gate: poller handoff failed; refusing ForceClose");
+                    return false;
+                }
+            }
+        }
+        tracing::warn!(task_id = %latest.short_id, role, status = %latest.status, pr_disposition = "force_closed_no_pr", reason, "djinn.terminal_gate: closing latest task row without a PR");
         match repo
             .transition(
                 &task.id,
@@ -2116,7 +2170,7 @@ impl CoordinatorActor {
                 );
             }
         }
-        self.cleanup_pr_and_branch_on_close(task, CloseKind::NonMerge)
+        self.cleanup_pr_and_branch_on_close(&latest, CloseKind::NonMerge)
             .await;
         true
     }
