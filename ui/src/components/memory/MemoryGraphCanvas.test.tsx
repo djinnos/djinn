@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 
-import { buildMemoryGraphDisk, MemoryGraphCanvas, memoryGraphCameraFitRadius } from "./MemoryGraphCanvas";
+import { buildMemoryGraphDisk, GHOST_INTERACTION_OPACITY, GHOST_OPACITY, isRecentLifecycleTransition, lifecycleGhostOpacity, MemoryGraphCanvas, memoryGraphCameraFitRadius, visualLinkDirection } from "./MemoryGraphCanvas";
 import type { MemoryGraphOutput } from "@/api/generated/mcp-tools.gen";
 import { validLifecycleResponse } from "@/lib/__fixtures__/memoryGraphLifecycle";
 
@@ -25,6 +25,33 @@ beforeEach(() => {
   callMcpToolMock.mockReset();
   callMcpToolMock.mockResolvedValue(validLifecycleResponse);
   vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockReturnValue(null);
+});
+
+describe("lifecycle ghost semantics", () => {
+  it("exposes and activates a labelled keyboard ghost control", async () => {
+    const onSelectNote = vi.fn();
+    render(<MemoryGraphCanvas projectSlug="owner/a11y" onSelectNote={onSelectNote} />);
+    const ghost = await screen.findByRole("button", { name: "Archived note — archived" });
+    fireEvent.focus(ghost);
+    fireEvent.click(ghost);
+    expect(onSelectNote).toHaveBeenCalledWith("notes/archived-note");
+  });
+
+  it("uses bounded one-shot fade timing and reduced motion opacity", () => {
+    const now = 1_000_000;
+    expect(isRecentLifecycleTransition(now - 7 * 86_400, now)).toBe(true);
+    expect(isRecentLifecycleTransition(now - 7 * 86_400 - 1, now)).toBe(false);
+    expect(isRecentLifecycleTransition(null, now)).toBe(false);
+    expect(lifecycleGhostOpacity(true, 10, 10, false)).toBe(GHOST_INTERACTION_OPACITY);
+    expect(lifecycleGhostOpacity(true, 10, 610, false)).toBe(GHOST_OPACITY);
+    expect(lifecycleGhostOpacity(true, 10, 10, true)).toBe(GHOST_OPACITY);
+  });
+
+  it("directs canonical reversed mixed supersedes from active to ghost", () => {
+    const disk = buildMemoryGraphDisk({ nodes: [layoutNode("active", "2024-01-01T00:00:00Z", "active"), layoutNode("ghost", "2024-01-02T00:00:00Z", "archived")], edges: [], typed_edges: [{ source_id: "ghost", target_id: "active", kind: "supersedes", weight: 1 }] });
+    const direction = visualLinkDirection(disk.links[0], disk.nodes);
+    expect([disk.nodes[direction.from].id, disk.nodes[direction.to].id, direction.directed]).toStrictEqual(["active", "ghost", true]);
+  });
 });
 
 afterEach(() => {
