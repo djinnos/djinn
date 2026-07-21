@@ -3,8 +3,9 @@ use std::time::Duration;
 
 use djinn_core::events::EventBus;
 use djinn_memory::{
-    BrokenLink, ExtractedNoteAuditReport, GraphEdge, GraphLifecycleSummary, GraphNode, GraphOptions, GraphResponse, HealthReport, Note,
-    NoteCompact, NoteSearchResult, OrphanNote, StaleFolder, TypedEdge,
+    BrokenLink, ExtractedNoteAuditReport, GraphEdge, GraphLifecycleSummary, GraphNode,
+    GraphOptions, GraphResponse, HealthReport, Note, NoteCompact, NoteSearchResult, OrphanNote,
+    StaleFolder, TypedEdge,
 };
 use std::sync::Arc;
 

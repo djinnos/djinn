@@ -565,7 +565,11 @@ pub struct GraphOptions {
 
 impl Default for GraphOptions {
     fn default() -> Self {
-        Self { statuses: vec!["active".to_string()], lifecycle_limit: 500, include_lifecycle_summary: false }
+        Self {
+            statuses: vec!["active".to_string()],
+            lifecycle_limit: 500,
+            include_lifecycle_summary: false,
+        }
     }
 }
 

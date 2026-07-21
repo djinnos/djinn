@@ -439,8 +439,13 @@ impl GraphParams {
         if statuses.is_empty() {
             return Err("invalid parameters: field: statuses, message: must contain at least one of active, archived, deprecated".to_string());
         }
-        if let Some(unknown) = statuses.iter().find(|status| !matches!(status.as_str(), "active" | "archived" | "deprecated")) {
-            return Err(format!("invalid parameters: field: statuses, message: unknown lifecycle status {unknown:?}; expected active, archived, or deprecated"));
+        if let Some(unknown) = statuses
+            .iter()
+            .find(|status| !matches!(status.as_str(), "active" | "archived" | "deprecated"))
+        {
+            return Err(format!(
+                "invalid parameters: field: statuses, message: unknown lifecycle status {unknown:?}; expected active, archived, or deprecated"
+            ));
         }
         Ok(djinn_memory::GraphOptions {
             statuses: statuses.clone(),

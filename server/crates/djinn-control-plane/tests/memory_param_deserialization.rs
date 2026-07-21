@@ -185,14 +185,25 @@ fn graph_params_deserialize_lifecycle_filters_and_limit() {
         "lifecycle_limit": 17
     }))
     .unwrap();
-    assert_eq!(p.statuses.as_deref(), Some(&["active".to_string(), "archived".to_string(), "deprecated".to_string()][..]));
+    assert_eq!(
+        p.statuses.as_deref(),
+        Some(
+            &[
+                "active".to_string(),
+                "archived".to_string(),
+                "deprecated".to_string()
+            ][..]
+        )
+    );
     assert_eq!(p.lifecycle_limit, Some(17));
 }
 
 #[test]
 fn graph_params_preserve_empty_unknown_and_boundary_values_for_handler_validation() {
     for value in [serde_json::json!([]), serde_json::json!(["unknown"])] {
-        let p: GraphParams = serde_json::from_value(serde_json::json!({"project":"/tmp/p", "statuses": value})).unwrap();
+        let p: GraphParams =
+            serde_json::from_value(serde_json::json!({"project":"/tmp/p", "statuses": value}))
+                .unwrap();
         assert!(p.statuses.is_some());
     }
     for limit in [-1, 0, 1001] {

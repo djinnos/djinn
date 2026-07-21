@@ -20,6 +20,7 @@ use djinn_core::{
 };
 use djinn_db::{NoteRepository, ProjectRepository};
 use serde_json::{Value, json};
+use sqlx::{Postgres, QueryBuilder};
 
 async fn dispatch_as_authenticated_human(
     caller: &TrustedRevisionCallerContext,
@@ -463,63 +464,174 @@ async fn mcp_memory_list_all_and_filters_by_folder_and_type() {
 }
 
 #[tokio::test]
-async fn mcp_memory_graph_returns_wikilink_edges() {
+async fn mcp_memory_graph_filters_lifecycles_and_rejects_invalid_statuses() {
     let caller = TrustedRevisionCallerContext::authenticated_human("memory-tools-test-user")
         .expect("test revision caller must be non-blank");
     let harness = McpTestHarness::new().await;
     let (proj, _dir) = common::create_test_project_with_dir(harness.db()).await;
     let project = proj.slug();
 
-    let node_b = dispatch_as_authenticated_human(&caller, &harness, "memory_write",
-            json!({"project": project, "title": "Node B", "content": "b", "reason": "create fixture note for memory tool coverage", "type": "reference"}),
-        )
-        .await
-        .expect("seed node B should dispatch");
+    let node_b = dispatch_as_authenticated_human(&caller, &harness, "memory_write", json!({"project": project, "title": "Node B", "content": "b", "reason": "create fixture note for memory tool coverage", "type": "reference"})).await.expect("seed node B should dispatch");
     assert_tool_success(&node_b, "seed node B mutation");
-    let node_a = dispatch_as_authenticated_human(&caller, &harness, "memory_write",
-            json!({"project": project, "title": "Node A", "content": "links [[Node B]] [[Node C]]", "reason": "create fixture note for memory tool coverage", "type": "reference"}),
-        )
-        .await
-        .expect("seed node A should dispatch");
+    let node_a = dispatch_as_authenticated_human(&caller, &harness, "memory_write", json!({"project": project, "title": "Node A", "content": "links [[Node B]]", "reason": "create fixture note for memory tool coverage", "type": "reference"})).await.expect("seed node A should dispatch");
     assert_tool_success(&node_a, "seed node A mutation");
-    let node_c = dispatch_as_authenticated_human(&caller, &harness, "memory_write",
-            json!({"project": project, "title": "Node C", "content": "links [[Node B]] [[NonExistent]]", "reason": "create fixture note for memory tool coverage", "type": "reference"}),
-        )
-        .await
-        .expect("seed node C should dispatch");
+    let node_c = dispatch_as_authenticated_human(&caller, &harness, "memory_write", json!({"project": project, "title": "Node C", "content": "deprecated", "reason": "create fixture note for memory tool coverage", "type": "reference"})).await.expect("seed node C should dispatch");
     assert_tool_success(&node_c, "seed node C mutation");
-    let node_d = dispatch_as_authenticated_human(&caller, &harness, "memory_write",
-            json!({"project": project, "title": "Node D", "content": "isolated", "reason": "create fixture note for memory tool coverage", "type": "reference"}),
+
+    let note_repo = NoteRepository::new(harness.db().clone(), EventBus::noop());
+    note_repo
+        .update_status(
+            &required_response_string(&node_b, "id", "node B"),
+            "archived",
         )
         .await
-        .expect("seed node D should dispatch");
-    assert_tool_success(&node_d, "seed node D mutation");
+        .expect("archive node B");
+    note_repo
+        .update_status(
+            &required_response_string(&node_c, "id", "node C"),
+            "deprecated",
+        )
+        .await
+        .expect("deprecate node C");
 
-    let graph = harness
+    let proposal = harness.call_tool("proposal_create", json!({"title": "Graph lifecycle proposal", "body": "fixture", "target_projects": [project]})).await.expect("proposal_create should dispatch");
+    assert_tool_success(&proposal, "seed graph proposal");
+    let proposal_id = required_response_string(&proposal, "id", "graph proposal");
+
+    let active_only = harness
         .call_tool("memory_graph", json!({"project": project}))
         .await
         .expect("memory_graph should dispatch");
-    assert!(!graph["edges"].as_array().unwrap().is_empty());
+    assert_tool_success(&active_only, "active-only graph");
+    assert!(active_only.get("lifecycle_summary").is_none());
+    let active_nodes = active_only["nodes"].as_array().expect("active graph nodes");
+    assert!(active_nodes.iter().any(|node| node["id"] == proposal_id));
+    assert!(
+        active_nodes
+            .iter()
+            .filter(|node| node["entity_type"] == "note")
+            .all(|node| node["status"] == "active")
+    );
+    let active_ids: std::collections::HashSet<&str> = active_nodes
+        .iter()
+        .filter_map(|node| node["id"].as_str())
+        .collect();
+    assert!(active_only["edges"].as_array().unwrap().iter().all(|edge| {
+        active_ids.contains(edge["source_id"].as_str().unwrap())
+            && active_ids.contains(edge["target_id"].as_str().unwrap())
+    }));
+    assert!(
+        active_only["edges"].as_array().unwrap().is_empty(),
+        "active-to-archived edge must be excluded"
+    );
 
-    let nodes = graph["nodes"].as_array().unwrap();
+    let all_statuses = harness
+        .call_tool(
+            "memory_graph",
+            json!({"project": project, "statuses": ["active", "archived", "deprecated"]}),
+        )
+        .await
+        .expect("all-status graph should dispatch");
+    assert_tool_success(&all_statuses, "all-status graph");
+    assert_eq!(
+        all_statuses["lifecycle_summary"],
+        json!({"inactive_total": 2, "inactive_returned": 2, "inactive_omitted": 0})
+    );
+    let nodes = all_statuses["nodes"].as_array().unwrap();
+    let node_b = nodes
+        .iter()
+        .find(|node| node["title"] == "Node B")
+        .expect("archived node should be present");
+    assert_eq!(node_b["status"], "archived");
+    assert!(node_b["lifecycle_changed_at"].is_string());
     let node_c = nodes
         .iter()
         .find(|node| node["title"] == "Node C")
-        .expect("Node C should be present in graph");
-    assert_eq!(node_c["is_orphan"], false);
-    assert!(
-        node_c["broken_targets"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|target| target == "NonExistent")
+        .expect("deprecated node should be present");
+    assert_eq!(node_c["status"], "deprecated");
+    assert!(node_c["lifecycle_changed_at"].is_string());
+    assert_eq!(
+        nodes.iter().find(|node| node["id"] == proposal_id).unwrap()["lifecycle_changed_at"],
+        Value::Null
     );
 
-    let node_d = nodes
-        .iter()
-        .find(|node| node["title"] == "Node D")
-        .expect("Node D should be present in graph");
-    assert_eq!(node_d["is_orphan"], true);
+    for statuses in [json!([]), json!(["unknown"])] {
+        let invalid = harness
+            .call_tool(
+                "memory_graph",
+                json!({"project": project, "statuses": statuses}),
+            )
+            .await
+            .expect("invalid graph request should dispatch structured response");
+        assert!(
+            invalid["error"].is_string(),
+            "invalid request must return structured error: {invalid}"
+        );
+        assert!(
+            invalid["nodes"].as_array().unwrap().is_empty(),
+            "invalid request must not widen graph query: {invalid}"
+        );
+        assert!(invalid["edges"].as_array().unwrap().is_empty());
+        assert!(invalid.get("lifecycle_summary").is_none());
+    }
+}
+
+#[tokio::test]
+async fn mcp_memory_graph_dispatches_default_and_clamped_lifecycle_limits() {
+    let harness = McpTestHarness::new().await;
+    let (project, _dir) = common::create_test_project_with_dir(harness.db()).await;
+    let project_slug = project.slug();
+    let mut insert = QueryBuilder::<Postgres>::new(
+        "INSERT INTO notes (id, project_id, permalink, title, file_path, storage, note_type, folder, status, tags, content, scope_paths, confidence, lifecycle_changed_at) ",
+    );
+    insert.push_values(0..1001, |mut values, index| {
+        values.push_bind(uuid::Uuid::now_v7().to_string());
+        values.push_bind(&project.id);
+        values.push_bind(format!("archived-{index}"));
+        values.push_bind(format!("Archived {index}"));
+        values.push_bind("");
+        values.push_bind("db");
+        values.push_bind("reference");
+        values.push_bind("references");
+        values.push_bind("archived");
+        values.push_bind("[]");
+        values.push_bind("archived fixture");
+        values.push_bind("[]");
+        values.push_bind(1.0_f64);
+        values.push_bind("2026-01-01T00:00:00.000Z");
+    });
+    insert
+        .build()
+        .execute(harness.db().pool())
+        .await
+        .expect("seed archived lifecycle fixtures");
+
+    for (limit, expected_returned) in [(json!(-1), 0), (json!(0), 0), (json!(1001), 1000)] {
+        let graph = harness.call_tool("memory_graph", json!({"project": project_slug, "statuses": ["archived"], "lifecycle_limit": limit})).await.expect("bounded graph should dispatch");
+        assert_tool_success(&graph, "bounded lifecycle graph");
+        assert_eq!(graph["lifecycle_summary"]["inactive_total"], 1001);
+        assert_eq!(
+            graph["lifecycle_summary"]["inactive_returned"],
+            expected_returned
+        );
+        assert_eq!(
+            graph["lifecycle_summary"]["inactive_omitted"],
+            1001 - expected_returned
+        );
+    }
+
+    let default_limit = harness
+        .call_tool(
+            "memory_graph",
+            json!({"project": project_slug, "statuses": ["archived"]}),
+        )
+        .await
+        .expect("default limit graph should dispatch");
+    assert_tool_success(&default_limit, "default lifecycle limit graph");
+    assert_eq!(
+        default_limit["lifecycle_summary"],
+        json!({"inactive_total": 1001, "inactive_returned": 500, "inactive_omitted": 501})
+    );
 }
 
 #[tokio::test]

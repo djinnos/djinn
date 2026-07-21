@@ -30,7 +30,15 @@ impl DjinnMcpServer {
     ) -> Json<MemoryGraphResponse> {
         let options = match params.graph_options() {
             Ok(options) => options,
-            Err(error) => return Json(MemoryGraphResponse { nodes: vec![], edges: vec![], typed_edges: vec![], lifecycle_summary: None, error: Some(error) }),
+            Err(error) => {
+                return Json(MemoryGraphResponse {
+                    nodes: vec![],
+                    edges: vec![],
+                    typed_edges: vec![],
+                    lifecycle_summary: None,
+                    error: Some(error),
+                });
+            }
         };
         let Some(project_id) = self.project_id_for_path(&params.project).await else {
             return Json(MemoryGraphResponse {
@@ -46,11 +54,17 @@ impl DjinnMcpServer {
             .with_vector_store(self.state.vector_store());
         match repo.graph_with_options(&project_id, options).await {
             Ok(graph) => Json(MemoryGraphResponse {
-                nodes: graph.nodes, edges: graph.edges, typed_edges: graph.typed_edges,
-                lifecycle_summary: graph.lifecycle_summary, error: None,
+                nodes: graph.nodes,
+                edges: graph.edges,
+                typed_edges: graph.typed_edges,
+                lifecycle_summary: graph.lifecycle_summary,
+                error: None,
             }),
             Err(error) => Json(MemoryGraphResponse {
-                nodes: vec![], edges: vec![], typed_edges: vec![], lifecycle_summary: None,
+                nodes: vec![],
+                edges: vec![],
+                typed_edges: vec![],
+                lifecycle_summary: None,
                 error: Some(error.to_string()),
             }),
         }
