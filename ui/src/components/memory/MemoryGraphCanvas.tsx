@@ -102,13 +102,15 @@ function rgba(hex: string, alpha: number): string {
 
 // ── Disk model ───────────────────────────────────────────────────────────────
 
-interface DiskNode {
+export interface DiskNode {
   id: string;
   title: string;
   permalink: string;
   noteType: string;
   isProposal: boolean;
   isOrphan: boolean;
+  isGhost: boolean;
+  lifecycle: "active" | "archived" | "deprecated";
   connectionCount: number;
   color: string;
   ts: number | null;
@@ -118,6 +120,7 @@ interface DiskNode {
   igniteAt: number;
   /** Time-anchored target radius (inside its ring's band). */
   tr: number;
+  ring: number;
   /** Draw radius. */
   r: number;
   x: number;
@@ -139,7 +142,7 @@ interface DiskRing {
   ratio: number;
 }
 
-interface DiskModel {
+export interface DiskModel {
   nodes: DiskNode[];
   links: DiskLink[];
   rings: DiskRing[];
@@ -233,8 +236,16 @@ function placeRadius(ringIndex: number, id: string): number {
   return outer - (0.15 + 0.7 * h) * (outer - inner);
 }
 
-function buildDisk(payload: MemoryGraphOutput): DiskModel {
-  const rawNodes = payload.nodes;
+export function buildMemoryGraphDisk(payload: MemoryGraphOutput): DiskModel {
+  // Missing status is the legacy active-only wire contract.
+  const activeRawNodes = payload.nodes.filter((n) => n.status !== "archived" && n.status !== "deprecated");
+  const ghostRawNodes = payload.nodes.filter((n) => n.status === "archived" || n.status === "deprecated");
+  // With no active nodes there is no active model to preserve; retain a stable
+  // fallback disk for the returned ghosts. They remain lifecycle ghosts rather
+  // than silently becoming active nodes in this degenerate case.
+  const usesGhostFallback = activeRawNodes.length === 0;
+  const rawNodes = usesGhostFallback ? ghostRawNodes : activeRawNodes;
+  const ghostsToAppend = activeRawNodes.length ? ghostRawNodes : [];
   const stamps = rawNodes.map((n) => nodeTs(n)).filter((v): v is number => v !== null);
   const minTs = stamps.length ? Math.min(...stamps) : null;
   const maxTs = stamps.length ? Math.max(...stamps) : null;
@@ -274,7 +285,18 @@ function buildDisk(payload: MemoryGraphOutput): DiskModel {
     }));
     ringIndexOf = (n) => {
       const ts = nodeTs(n);
-      return ts !== null ? (indexOfStart.get(bucketStart(ts, unit)) ?? starts.length - 1) : starts.length - 1;
+      if (ts === null) return starts.length - 1;
+      const start = bucketStart(ts, unit);
+      const exact = indexOfStart.get(start);
+      if (exact !== undefined) return exact;
+      // A ghost's creation bucket need not be populated by an active node.
+      // Choose the nearest frozen calendar ring without changing the active
+      // ring selection or introducing a new ring into the disk.
+      let nearest = 0;
+      for (let i = 1; i < starts.length; i += 1) {
+        if (Math.abs(starts[i] - start) < Math.abs(starts[nearest] - start)) nearest = i;
+      }
+      return nearest;
     };
   } else {
     // Undated fallback: scale the ring count with node count so a large
@@ -327,7 +349,8 @@ function buildDisk(payload: MemoryGraphOutput): DiskModel {
 
   const nodes: DiskNode[] = rawNodes.map((n) => {
     const rec = recOf(n);
-    const tr = placeRadius(ringIndexOf(n), n.id);
+    const ring = ringIndexOf(n);
+    const tr = placeRadius(ring, n.id);
     const angle = (orderIndex.get(n.id) ?? 0) * GOLDEN_ANGLE + ((hash(n.id) % 100) / 100 - 0.5) * 0.5;
     const connectionCount = Number(n.connection_count) || 0;
     return {
@@ -337,12 +360,15 @@ function buildDisk(payload: MemoryGraphOutput): DiskModel {
       noteType: n.note_type,
       isProposal: n.entity_type === "proposal",
       isOrphan: Boolean(n.is_orphan),
+      isGhost: usesGhostFallback,
+      lifecycle: n.status === "deprecated" ? "deprecated" : n.status === "archived" ? "archived" : "active",
       connectionCount,
       color: colorForNote(n.note_type, Boolean(n.is_orphan)),
       ts: nodeTs(n),
       rec,
-      igniteAt: igniteByNode.get(n.id) ?? rec,
+      igniteAt: usesGhostFallback ? 0 : (igniteByNode.get(n.id) ?? rec),
       tr,
+      ring,
       r: Math.max(1.1, (3 + Math.sqrt(connectionCount) * 0.9 + (n.entity_type === "proposal" ? 0.6 : 0)) * sizeScale),
       x: Math.cos(angle) * tr,
       y: Math.sin(angle) * tr,
@@ -364,8 +390,44 @@ function buildDisk(payload: MemoryGraphOutput): DiskModel {
     if (a !== undefined && b !== undefined && a !== b) links.push({ a, b, kind: e.kind });
   }
 
+  // Freeze the complete active/proposal layout before placing lifecycle ghosts.
   relax(nodes, links);
-  return { links, maxTs, minTs, nodes, rings, timed };
+  const activeById = new Map(nodes.map((n) => [n.id, n]));
+  const edgeEndpoints = [...payload.edges, ...(payload.typed_edges ?? [])];
+  for (const raw of ghostsToAppend) {
+    const neighbors = edgeEndpoints
+      .filter((edge) => edge.source_id === raw.id || edge.target_id === raw.id)
+      .map((edge) => activeById.get(edge.source_id === raw.id ? edge.target_id : edge.source_id))
+      .filter((node): node is DiskNode => node !== undefined)
+      .sort((a, b) => hash(`${raw.id}|${a.id}`) - hash(`${raw.id}|${b.id}`) || a.id.localeCompare(b.id));
+    const connectionCount = Number(raw.connection_count) || 0;
+    const lifecycle = raw.status === "deprecated" ? "deprecated" : "archived";
+    const r = Math.max(1.1, (3 + Math.sqrt(connectionCount) * 0.9) * sizeScale);
+    const anchor = neighbors[0];
+    const ring = anchor?.ring ?? ringIndexOf(raw);
+    const tr = placeRadius(ring, raw.id);
+    const angle = (hash(raw.id) / 0xffffffff) * Math.PI * 2;
+    const distance = anchor ? anchor.r + r + 14 : tr;
+    nodes.push({
+      id: raw.id, title: raw.title, permalink: raw.permalink, noteType: raw.note_type,
+      isProposal: raw.entity_type === "proposal", isOrphan: Boolean(raw.is_orphan), isGhost: true, lifecycle,
+      connectionCount, color: colorForNote(raw.note_type, Boolean(raw.is_orphan)), ts: nodeTs(raw),
+      rec: recOf(raw), igniteAt: 0, tr, ring, r,
+      x: (anchor?.x ?? 0) + Math.cos(angle) * distance,
+      y: (anchor?.y ?? 0) + Math.sin(angle) * distance, vx: 0, vy: 0,
+    });
+  }
+  const allIndexById = new Map(nodes.map((n, i) => [n.id, i]));
+  const allLinks: DiskLink[] = [];
+  for (const edge of payload.edges) {
+    const a = allIndexById.get(edge.source_id); const b = allIndexById.get(edge.target_id);
+    if (a !== undefined && b !== undefined && a !== b) allLinks.push({ a, b, kind: "wikilink" });
+  }
+  for (const edge of payload.typed_edges ?? []) {
+    const a = allIndexById.get(edge.source_id); const b = allIndexById.get(edge.target_id);
+    if (a !== undefined && b !== undefined && a !== b) allLinks.push({ a, b, kind: edge.kind });
+  }
+  return { links: allLinks, maxTs, minTs, nodes, rings, timed };
 }
 
 /** Short-range repulsion cutoff (world units, squared). */
@@ -575,6 +637,11 @@ function fitCamera(w: number, h: number, outer: number, fullOuter: number): Came
   return { k, x: w / 2, y: h / 2 + h * 0.04 };
 }
 
+/** The frozen active disk extent used by camera fitting (exposed for layout invariants). */
+export function memoryGraphCameraFitRadius(disk: DiskModel): number {
+  return disk.rings[disk.rings.length - 1]?.r ?? RING_OUTER;
+}
+
 const lifecycleGhostPreferenceKey = (projectSlug: string) =>
   `djinn:memory-graph:lifecycle-ghosts:${projectSlug}`;
 
@@ -637,7 +704,7 @@ export function MemoryGraphCanvas({ projectSlug, reloadKey, onSelectNote }: Memo
           setState({ status: "empty" });
           return;
         }
-        const disk = buildDisk(payload);
+        const disk = buildMemoryGraphDisk(payload);
         if (cancelled) return;
         appearRef.current = new Float32Array(disk.nodes.length);
         ringGrowRef.current = new Float32Array(disk.rings.length);
@@ -674,7 +741,11 @@ export function MemoryGraphCanvas({ projectSlug, reloadKey, onSelectNote }: Memo
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
 
-    const fullOuter = disk.rings[disk.rings.length - 1]?.r ?? RING_OUTER;
+    const fullOuter = memoryGraphCameraFitRadius(disk);
+    // Ghosts render independently of playback. Keeping this set separate is
+    // important: lifecycle payloads must not advance the active reveal count
+    // or frontier-relative ink calculation.
+    const activeNodes = disk.nodes.filter((node) => !node.isGhost);
     let raf = 0;
     let last = performance.now();
     let size = { h: container.clientHeight, w: container.clientWidth };
@@ -733,8 +804,8 @@ export function MemoryGraphCanvas({ projectSlug, reloadKey, onSelectNote }: Memo
             year: "numeric",
           });
         } else {
-          const visible = disk.nodes.filter((n) => n.igniteAt <= reveal + 1e-3).length;
-          dateRef.current.textContent = `${visible} / ${disk.nodes.length} notes`;
+          const visible = activeNodes.filter((n) => n.igniteAt <= reveal + 1e-3).length;
+          dateRef.current.textContent = `${visible} / ${activeNodes.length} notes`;
         }
       }
 
@@ -770,7 +841,7 @@ export function MemoryGraphCanvas({ projectSlug, reloadKey, onSelectNote }: Memo
       // Frontier-relative recency: a lone frontier note still reads as fresh
       // even when the playhead has left empty space behind it.
       let frontier = LEAD_IN;
-      for (const n of disk.nodes) if (n.igniteAt <= reveal + 1e-3) frontier = Math.max(frontier, n.rec);
+      for (const n of activeNodes) if (n.igniteAt <= reveal + 1e-3) frontier = Math.max(frontier, n.rec);
       const styleInk = (rec: number) => recencyInk(clamp(rec / Math.max(frontier, LEAD_IN), 0, 1));
 
       // Rings: a ring is laid one band ahead of the playhead and grows out
