@@ -2875,8 +2875,8 @@ impl CoordinatorActor {
                     // pass respect the cap before the session row is visible.
                     let c = creator.as_str();
                     if let Some(used) = model_ids
-                            .iter()
-                            .find(|m| self.health.is_available(Some(c), m))
+                        .iter()
+                        .find(|m| self.health.is_available(Some(c), m))
                     {
                         *running_by_user_model
                             .entry((c.to_string(), used.clone()))
@@ -2932,9 +2932,9 @@ impl CoordinatorActor {
                 DispatchOutcome::Failed {
                     exhausted_observations,
                 } => {
-                    let breaker_open_for_all_candidates = model_ids
-                        .iter()
-                        .all(|model_id| !self.health.is_available(Some(creator.as_str()), model_id));
+                    let breaker_open_for_all_candidates = model_ids.iter().all(|model_id| {
+                        !self.health.is_available(Some(creator.as_str()), model_id)
+                    });
                     if breaker_open_for_all_candidates {
                         record_dispatch_outcome(djinn_telemetry::dispatch::OUTCOME_BREAKER);
                         tracing::debug!(outcome = "breaker", task_id = %task.short_id, role);

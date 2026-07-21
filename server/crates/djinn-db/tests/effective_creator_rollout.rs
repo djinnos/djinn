@@ -389,6 +389,111 @@ fn manifest_section<'a>(manifest: &'a str, heading: &str) -> &'a str {
     section.find("\n[").map_or(section, |next| &section[..next])
 }
 
+/// Classify nullable-era idioms applied to a `Task.created_by_user_id` field.
+///
+/// Whitespace is intentionally ignored so this can classify formatted and
+/// multiline source. Requiring a field-access dot before `created_by_user_id`
+/// keeps optional standalone locals with that name outside this contract.
+fn nullable_task_creator_idioms(source: &str) -> BTreeSet<&'static str> {
+    let compact: String = source
+        .chars()
+        .filter(|character| !character.is_whitespace())
+        .collect();
+    let mut violations = BTreeSet::new();
+
+    if compact.contains(".created_by_user_id.as_deref(") {
+        violations.insert("Task creator field uses as_deref");
+    }
+    if compact.contains(".created_by_user_id.is_some(") {
+        violations.insert("Task creator field uses is_some");
+    }
+
+    // Rust's common regex implementation has no backreferences, so parse the
+    // closure identifier explicitly to ensure both sides use the same name.
+    const AND_THEN_OPEN: &str = ".and_then(|";
+    for (offset, _) in compact.match_indices(AND_THEN_OPEN) {
+        let closure = &compact[offset + AND_THEN_OPEN.len()..];
+        let identifier_len = closure
+            .chars()
+            .take_while(|character| character.is_ascii_alphanumeric() || *character == '_')
+            .map(char::len_utf8)
+            .sum::<usize>();
+        if identifier_len == 0 || closure.as_bytes().get(identifier_len) != Some(&b'|') {
+            continue;
+        }
+        let identifier = &closure[..identifier_len];
+        let body = &closure[identifier_len + 1..];
+        if body.starts_with(&format!("{identifier}.created_by_user_id")) {
+            violations.insert("Option<Task> creator extraction uses and_then");
+        }
+    }
+
+    // `if let Some` also contains the `letSome(` marker after whitespace is
+    // removed. Bound the right-hand side to its statement/body delimiter so a
+    // later, unrelated concrete field access does not taint the destructure.
+    const LET_SOME: &str = "letSome(";
+    for (offset, _) in compact.match_indices(LET_SOME) {
+        let after_marker = &compact[offset + LET_SOME.len()..];
+        let Some((_, right_hand_side)) = after_marker.split_once('=') else {
+            continue;
+        };
+        let end = right_hand_side
+            .find([';', '{'])
+            .unwrap_or(right_hand_side.len());
+        if right_hand_side[..end].contains(".created_by_user_id") {
+            violations.insert("concrete Task creator is destructured as Option");
+        }
+    }
+
+    violations
+}
+
+#[test]
+fn nullable_task_creator_classifier_is_receiver_and_whitespace_independent() {
+    let cases = [
+        (
+            "maybe_task.and_then(|task| task.created_by_user_id.clone())",
+            true,
+        ),
+        (
+            "maybe_task\n    .and_then( | recovered |\n        recovered\n            .created_by_user_id\n            .clone()\n    )",
+            true,
+        ),
+        (
+            "if let Some(uid) = review_task.created_by_user_id.clone() { use_id(uid); }",
+            true,
+        ),
+        (
+            "let Some(uid) =\n    recovered_task\n        .created_by_user_id\n        .clone()\nelse { return; };",
+            true,
+        ),
+        ("task.created_by_user_id.as_deref()", true),
+        ("review_task.created_by_user_id.is_some()", true),
+        ("created_by_user_id.as_deref()", false),
+        ("created_by_user_id.is_some()", false),
+        (
+            "if let Some(uid) = created_by_user_id.clone() { use_id(uid); }",
+            false,
+        ),
+        (
+            "maybe_task.map(|task| task.created_by_user_id.clone())",
+            false,
+        ),
+        (
+            "maybe_user.and_then(|user| task.created_by_user_id.clone())",
+            false,
+        ),
+    ];
+
+    for (source, is_violation) in cases {
+        assert_eq!(
+            !nullable_task_creator_idioms(source).is_empty(),
+            is_violation,
+            "unexpected classification for: {source}"
+        );
+    }
+}
+
 #[test]
 fn coordinator_enables_db_test_support_only_on_its_dev_edge() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../");
@@ -425,41 +530,13 @@ fn task_creator_consumers_do_not_restore_nullable_idioms() {
         );
     }
 
-    // Require a field-access dot before the creator name so legitimately
-    // optional local variables (for example a repository lookup result named
-    // `created_by_user_id`) are not classified as Task-field consumers.
-    let nullable_deref = [".", "created_by_user_id", ".as_deref("].concat();
-    let nullable_presence = [".", "created_by_user_id", ".is_some("].concat();
-    let optional_task_extract = [".and_then(|t|t.", "created_by_user_id"].concat();
     let mut violations = Vec::new();
     for file in files {
         let source = std::fs::read_to_string(&file).expect("release source readable");
-        let compact: String = source
-            .chars()
-            .filter(|character| !character.is_whitespace())
-            .collect();
-        for (line_number, line) in source.lines().enumerate() {
-            if line.contains(&nullable_deref) || line.contains(&nullable_presence) {
-                violations.push(format!(
-                    "{}:{}: {}",
-                    file.strip_prefix(&root).unwrap().display(),
-                    line_number + 1,
-                    line.trim()
-                ));
-            }
-        }
-        if compact.contains(&optional_task_extract) {
+        for violation in nullable_task_creator_idioms(&source) {
             violations.push(format!(
-                "{}: Option<Task> creator extraction must use map",
-                file.strip_prefix(&root).unwrap().display()
-            ));
-        }
-        if compact.split(';').any(|statement| {
-            statement.contains("letSome(") && statement.contains("=task.created_by_user_id")
-        }) {
-            violations.push(format!(
-                "{}: concrete Task creator must not be destructured as Option",
-                file.strip_prefix(&root).unwrap().display()
+                "{}: {violation}",
+                file.strip_prefix(&root).unwrap().display(),
             ));
         }
     }

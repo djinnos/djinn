@@ -2497,9 +2497,7 @@ impl CoordinatorActor {
         // and attribution, and its short_id/title give the review task a name
         // with real line-of-sight into WHAT is being escalated.
         let source_task = task_repo.get(source_task_id).await.ok().flatten();
-        let source_creator = source_task
-            .as_ref()
-            .map(|t| t.created_by_user_id.clone());
+        let source_creator = source_task.as_ref().map(|t| t.created_by_user_id.clone());
 
         // A held remediation (human-review OR planner-park escalation) is
         // idempotent: if the source is already held by an unresolved blocker, a
