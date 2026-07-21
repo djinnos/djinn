@@ -764,6 +764,25 @@ impl ApiClient {
 
                     let retry_after_ms = retry_after_ms(resp.headers());
                     let body_text = resp.text().await.unwrap_or_default();
+                    // Preserve an eligible request transport failure observed
+                    // before this provider body once the ordinary initial
+                    // request retry budget has been exhausted. This mirrors
+                    // the streaming paths: the later HTTP status must not
+                    // erase a concrete pre-body connection failure.
+                    if let Some(diagnostic) = classify_exhausted_transport(
+                        attempt >= MAX_RETRIES,
+                        observed_transport_category,
+                        TransportClassificationInput::ProviderBody,
+                        estimated_payload_chars,
+                    ) {
+                        return Err(anyhow::Error::new(ProviderError::ExhaustedTransport(
+                            diagnostic,
+                        ))
+                        .context(format!(
+                            "provider API error {status}: {}",
+                            redact_secrets(&body_text, &secret_refs)
+                        )));
+                    }
                     return Err(provider_status_error(
                         status,
                         &body_text,
