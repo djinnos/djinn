@@ -235,6 +235,9 @@ pub struct TaskRunSpec {
     /// skew during a rolling deploy) deserializable.
     #[serde(default)]
     pub read_source_project_ids: Vec<String>,
+    /// Immutable knowledge-packing configuration resolved by the host at startup.
+    #[serde(default)]
+    pub knowledge_injection: djinn_core::models::KnowledgeInjectionConfig,
     /// The project's GitHub owner (org/user), used to scope private-dependency
     /// fetching in the worker Pod: `GOPRIVATE=github.com/<owner>/*` plus a git
     /// `url.insteadOf` rewrite so `go mod download` / cargo git deps / pnpm git
@@ -689,6 +692,14 @@ mod tests {
             flow: SupervisorFlow::NewTask,
             model_id_per_role: per_role,
             read_source_project_ids: vec!["proj-read-1".to_string()],
+            knowledge_injection: djinn_core::models::KnowledgeInjectionConfig {
+                knowledge_injection_budget_bytes: 4_096,
+                knowledge_injection_line_cap_bytes: 256,
+                knowledge_injection_limit: 3,
+                injection_starvation_threshold_percent: 50,
+                injection_starvation_query_floor: 20,
+                retrieval_health_window_minutes: 1_440,
+            },
             github_owner: None,
             github_install_token: None,
             commit_author_name: Some("Ada Lovelace".to_string()),
@@ -709,6 +720,7 @@ mod tests {
         assert_eq!(back.read_source_project_ids, spec.read_source_project_ids);
         assert_eq!(back.flow, spec.flow);
         assert_eq!(back.model_id_per_role, spec.model_id_per_role);
+        assert_eq!(back.knowledge_injection, spec.knowledge_injection);
         assert_eq!(back.commit_author_name, spec.commit_author_name);
         assert_eq!(back.commit_author_email, spec.commit_author_email);
     }
@@ -740,6 +752,7 @@ mod tests {
             flow: SupervisorFlow::NewTask,
             model_id_per_role: per_role,
             read_source_project_ids: vec![],
+            knowledge_injection: djinn_core::models::KnowledgeInjectionConfig::default(),
             github_owner: None,
             github_install_token: None,
             commit_author_name: None,
@@ -854,6 +867,7 @@ mod tests {
             flow: SupervisorFlow::NewTask,
             model_id_per_role: HashMap::new(),
             read_source_project_ids: vec![],
+            knowledge_injection: djinn_core::models::KnowledgeInjectionConfig::default(),
             github_owner: None,
             github_install_token: None,
             commit_author_name: None,
@@ -884,6 +898,7 @@ mod tests {
             flow: SupervisorFlow::Spike,
             model_id_per_role: HashMap::new(),
             read_source_project_ids: vec![],
+            knowledge_injection: djinn_core::models::KnowledgeInjectionConfig::default(),
             github_owner: None,
             github_install_token: None,
             commit_author_name: None,
@@ -927,6 +942,7 @@ mod tests {
             flow: SupervisorFlow::Spike,
             model_id_per_role: HashMap::new(),
             read_source_project_ids: vec![],
+            knowledge_injection: djinn_core::models::KnowledgeInjectionConfig::default(),
             github_owner: None,
             github_install_token: None,
             commit_author_name: None,

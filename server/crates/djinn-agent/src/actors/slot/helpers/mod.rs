@@ -8,8 +8,9 @@ pub mod provider_resolution;
 
 #[allow(unused_imports)]
 pub(crate) use djinn_slot::helpers::{
-    NotePackDisposition, NotePackOutcome, PackedKnowledgeNotes, derive_task_scope_paths,
-    format_knowledge_notes, is_role_auto_code_context_enabled, pack_knowledge_notes,
+    KnowledgePackConfig, NotePackDisposition, NotePackOutcome, PackedKnowledgeNotes,
+    derive_task_scope_paths, format_knowledge_notes, is_role_auto_code_context_enabled,
+    pack_knowledge_notes, pack_ranked_knowledge_notes,
 };
 #[allow(unused_imports)]
 pub(crate) use feedback::{

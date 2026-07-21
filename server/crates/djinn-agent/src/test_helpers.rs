@@ -125,6 +125,7 @@ pub fn agent_context_from_db(db: Database, _cancel: CancellationToken) -> AgentC
         default_project_id: None,
         read_source_authorization: crate::context::ReadSourceAuthorization::default(),
         memory_intent_planner: crate::context::MemoryIntentPlannerConfig::default(),
+        knowledge_injection: djinn_core::models::KnowledgeInjectionConfig::default(),
         reconciliation_sweep: crate::context::ReconciliationSweepConfig::default(),
         compaction_cs: djinn_slot::reply_loop::CompactionCriticalSection::default(),
     }
