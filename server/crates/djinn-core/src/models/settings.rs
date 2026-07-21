@@ -731,18 +731,37 @@ mod tests {
     fn knowledge_injection_config_rejects_each_present_invalid_source_value() {
         without_config_env(|| {
             for (field, environment) in [
-                ("knowledge_injection_budget_bytes", "DJINN_KNOWLEDGE_INJECTION_BUDGET_BYTES"),
-                ("knowledge_injection_line_cap_bytes", "DJINN_KNOWLEDGE_INJECTION_LINE_CAP_BYTES"),
-                ("knowledge_injection_limit", "DJINN_KNOWLEDGE_INJECTION_LIMIT"),
-                ("injection_starvation_threshold_percent", "DJINN_INJECTION_STARVATION_THRESHOLD_PERCENT"),
-                ("injection_starvation_query_floor", "DJINN_INJECTION_STARVATION_QUERY_FLOOR"),
-                ("retrieval_health_window_minutes", "DJINN_RETRIEVAL_HEALTH_WINDOW_MINUTES"),
+                (
+                    "knowledge_injection_budget_bytes",
+                    "DJINN_KNOWLEDGE_INJECTION_BUDGET_BYTES",
+                ),
+                (
+                    "knowledge_injection_line_cap_bytes",
+                    "DJINN_KNOWLEDGE_INJECTION_LINE_CAP_BYTES",
+                ),
+                (
+                    "knowledge_injection_limit",
+                    "DJINN_KNOWLEDGE_INJECTION_LIMIT",
+                ),
+                (
+                    "injection_starvation_threshold_percent",
+                    "DJINN_INJECTION_STARVATION_THRESHOLD_PERCENT",
+                ),
+                (
+                    "injection_starvation_query_floor",
+                    "DJINN_INJECTION_STARVATION_QUERY_FLOOR",
+                ),
+                (
+                    "retrieval_health_window_minutes",
+                    "DJINN_RETRIEVAL_HEALTH_WINDOW_MINUTES",
+                ),
             ] {
                 for rejected in ["not-a-number", "0"] {
                     unsafe { std::env::set_var(environment, rejected) };
-                    let error = KnowledgeInjectionConfig::from_settings_and_env(&DjinnSettings::default())
-                        .unwrap_err()
-                        .to_string();
+                    let error =
+                        KnowledgeInjectionConfig::from_settings_and_env(&DjinnSettings::default())
+                            .unwrap_err()
+                            .to_string();
                     assert!(
                         error.contains(field) && error.contains(rejected),
                         "environment {environment}={rejected}: {error}"
