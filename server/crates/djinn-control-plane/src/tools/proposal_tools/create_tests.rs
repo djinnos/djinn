@@ -1333,6 +1333,13 @@ mod lint_mutation_contract_tests {
         statement.fetch_one(db.pool()).await.unwrap()
     }
 
+    async fn revision_row_count(db: &Database) -> i64 {
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM proposal_revisions")
+            .fetch_one(db.pool())
+            .await
+            .unwrap()
+    }
+
     async fn assert_response_has_exact_head_lint(
         repo: &ProposalRepository,
         response: &Value,
@@ -1436,6 +1443,7 @@ mod lint_mutation_contract_tests {
             "<Callout id=\"duplicate\">three</Callout>"
         );
 
+        let before_create_revisions = revision_row_count(&db).await;
         let before_create_lints = lint_row_count(&db, None).await;
         let rejected_create = server
             .dispatch_tool("proposal_create", serde_json::json!({
@@ -1458,6 +1466,11 @@ mod lint_mutation_contract_tests {
             (pair[0]["span"]["start_byte"].as_u64(), pair[0]["span"]["end_byte"].as_u64())
                 <= (pair[1]["span"]["start_byte"].as_u64(), pair[1]["span"]["end_byte"].as_u64())
         }));
+        assert_eq!(
+            revision_row_count(&db).await,
+            before_create_revisions,
+            "rejected create leaves no revision"
+        );
         assert_eq!(lint_row_count(&db, None).await, before_create_lints, "rejected create leaves no lint row");
 
         let seed = server
