@@ -1,0 +1,1 @@
+{"body_format":"mdx","body_sha256":"330f29f6a65ecb5971b9fba8282ddea4430e2ee405891a27c59753eb68186d27","checked_at":"2026-07-20T00:00:00Z","errors":[{"code":"DUPLICATE_BLOCK_ID","message":"duplicate registered block id: `same`","severity":"error","span":{"end":52,"start":48}}],"linter_version":"v1","skipped_tiers":[],"warnings":[]}

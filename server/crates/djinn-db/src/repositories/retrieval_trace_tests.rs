@@ -23,6 +23,10 @@ mod retrieval_trace_semantics_tests;
 #[path = "retrieval_trace_retention_tests.rs"]
 mod retrieval_trace_retention_tests;
 
+#[cfg(test)]
+#[path = "retrieval_trace_terminal_tests.rs"]
+mod retrieval_trace_terminal_tests;
+
 fn test_db() -> Database {
     Database::open_in_memory().unwrap()
 }
