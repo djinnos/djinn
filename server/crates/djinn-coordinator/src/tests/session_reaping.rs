@@ -6996,6 +6996,121 @@ async fn evidence_reap_missing_owner_counts_as_crashed_unproven() {
     assert_eq!(sj["owner_classification"], "missing_owner");
 }
 
+/// An owner whose lease lookup fails (the `coordinator_incarnations` table is
+/// unavailable) is counted `crashed/orphaned_pending_attempt_unproven` — the
+/// reaper cannot positively prove expiry, so it fails closed.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn evidence_reap_owner_lookup_error_counts_as_crashed_unproven() {
+    use djinn_db::TaskAttemptRepository;
+
+    let db = test_helpers::create_test_db();
+    let (tx, _rx) = broadcast::channel(256);
+    let repo = TaskAttemptRepository::new(db.clone());
+
+    // Register an incarnation so the attempt has a valid, well-formed owner.
+    let owner_id = register_incarnation(&db, true).await;
+
+    let (task, _n) = create_task_with_note(&db, &tx, "evidence-lookup-error").await;
+    let attempt =
+        seed_pending_attempt_with_identity(&db, &task.id, "worker", Some(&owner_id), None).await;
+    backdate_attempt(&db, &attempt).await;
+
+    // Drop the coordinator_incarnations table to force a lookup error in
+    // `incarnation_repo.get()`. The `list_orphaned_pending` query does not
+    // reference this table, so the orphan is still discovered.
+    djinn_db::test_support::drop_table_for_test(&db, "coordinator_incarnations").await;
+
+    crate::health::reap_orphaned_pending_attempts_with_threshold(&db, 15 * 60, "startup").await;
+
+    let row = repo.get(&attempt).await.unwrap().unwrap();
+    assert_eq!(row.outcome, "crashed");
+    let sj: serde_json::Value = serde_json::from_str(row.summary_json.as_deref().unwrap()).unwrap();
+    assert_eq!(sj["failure_class"], "orphaned_pending_attempt_unproven");
+    assert_eq!(sj["owner_classification"], "lookup_error");
+}
+
+/// An owner whose lease resolves on `get()` but returns `None` from `is_live()`
+/// (the row vanished between the two calls) is counted
+/// `crashed/orphaned_pending_attempt_unproven` — the ambiguity fails closed.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn evidence_reap_ambiguous_is_live_counts_as_crashed_unproven() {
+    use djinn_db::TaskAttemptRepository;
+
+    let db = test_helpers::create_test_db();
+    let (tx, _rx) = broadcast::channel(256);
+    let repo = TaskAttemptRepository::new(db.clone());
+
+    // Register an incarnation and capture its lease timestamps.
+    let owner_id = register_incarnation(&db, true).await;
+    let inc_repo = djinn_db::CoordinatorIncarnationRepository::new(db.clone());
+    let inc = inc_repo.get(&owner_id).await.unwrap().unwrap();
+
+    let (task, _n) = create_task_with_note(&db, &tx, "evidence-ambiguous-is-live").await;
+    let attempt =
+        seed_pending_attempt_with_identity(&db, &task.id, "worker", Some(&owner_id), None).await;
+    backdate_attempt(&db, &attempt).await;
+
+    // Replace the table with a view that returns the row on the first query
+    // (the `get()` call) but returns nothing on the second (the `is_live()`
+    // call). This forces the `Ok(None)` ambiguous branch.
+    djinn_db::test_support::make_coordinator_incarnation_vanish_after_first_read(
+        &db,
+        &owner_id,
+        &inc.registered_at,
+        &inc.last_renewed_at,
+    )
+    .await;
+
+    crate::health::reap_orphaned_pending_attempts_with_threshold(&db, 15 * 60, "periodic").await;
+
+    let row = repo.get(&attempt).await.unwrap().unwrap();
+    assert_eq!(row.outcome, "crashed");
+    let sj: serde_json::Value = serde_json::from_str(row.summary_json.as_deref().unwrap()).unwrap();
+    assert_eq!(sj["failure_class"], "orphaned_pending_attempt_unproven");
+    assert_eq!(sj["owner_classification"], "ambiguous");
+}
+
+/// An owner whose lease resolves on `get()` but errors on `is_live()` (the
+/// table becomes unavailable between the two calls) is counted
+/// `crashed/orphaned_pending_attempt_unproven` — the lookup error fails closed.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn evidence_reap_is_live_lookup_error_counts_as_crashed_unproven() {
+    use djinn_db::TaskAttemptRepository;
+
+    let db = test_helpers::create_test_db();
+    let (tx, _rx) = broadcast::channel(256);
+    let repo = TaskAttemptRepository::new(db.clone());
+
+    // Register an incarnation and capture its lease timestamps.
+    let owner_id = register_incarnation(&db, true).await;
+    let inc_repo = djinn_db::CoordinatorIncarnationRepository::new(db.clone());
+    let inc = inc_repo.get(&owner_id).await.unwrap().unwrap();
+
+    let (task, _n) = create_task_with_note(&db, &tx, "evidence-is-live-error").await;
+    let attempt =
+        seed_pending_attempt_with_identity(&db, &task.id, "worker", Some(&owner_id), None).await;
+    backdate_attempt(&db, &attempt).await;
+
+    // Replace the table with a view that returns the row on the first query
+    // (the `get()` call) but raises an error on the second (the `is_live()`
+    // call). This forces the `Err(_)` is_live lookup-error branch.
+    djinn_db::test_support::make_coordinator_incarnation_error_after_first_read(
+        &db,
+        &owner_id,
+        &inc.registered_at,
+        &inc.last_renewed_at,
+    )
+    .await;
+
+    crate::health::reap_orphaned_pending_attempts_with_threshold(&db, 15 * 60, "startup").await;
+
+    let row = repo.get(&attempt).await.unwrap().unwrap();
+    assert_eq!(row.outcome, "crashed");
+    let sj: serde_json::Value = serde_json::from_str(row.summary_json.as_deref().unwrap()).unwrap();
+    assert_eq!(sj["failure_class"], "orphaned_pending_attempt_unproven");
+    assert_eq!(sj["owner_classification"], "lookup_error");
+}
+
 /// A non-NULL dispatch group is terminalized through the exact-group repository
 /// operation: all pending peers in the same group receive one outcome/evidence
 /// tuple, while unrelated groups for the same task remain untouched.
