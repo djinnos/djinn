@@ -1,20 +1,27 @@
 use super::*;
 
-/// Approximate tokens-per-character ratio used for simple token estimation
-/// when no shared estimator is available. 4 chars ≈ 1 token is the standard
-/// heuristic for English-like prompt text.
-const APPROX_CHARS_PER_TOKEN: f64 = 4.0;
+/// Approximate tokens-per-byte ratio used for telemetry only. It never gates
+/// packing, which is governed solely by exact UTF-8 byte limits.
+const APPROX_BYTES_PER_TOKEN: usize = 4;
 
 /// Outcome classification for a single note candidate during prompt packing.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum NotePackDisposition {
-    /// The note was rendered into the prompt text within the character budget.
+    ConfidenceFiltered,
+    NotTopK,
+    OversizedSkipped,
     Injected,
-    /// The note was dropped because adding its rendered line would exceed the
-    /// remaining character budget. Once a note is budget-pruned, all subsequent
-    /// notes (which have equal or lower confidence) are also pruned.
     BudgetPruned,
+}
+
+/// Inputs to deterministic packing of the complete ranked candidate universe.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct KnowledgePackConfig {
+    pub minimum_confidence: f64,
+    pub top_k: usize,
+    pub total_byte_budget: usize,
+    pub line_byte_cap: usize,
 }
 
 /// Per-note packing outcome for trace instrumentation.
@@ -30,14 +37,11 @@ pub struct NotePackOutcome {
     pub title: String,
     /// How this note was dispositioned during packing.
     pub disposition: NotePackDisposition,
-    /// Estimated rendered character count for this note's line (including the
-    /// permalink suffix). `None` for budget-pruned notes where the line was
-    /// never rendered.
+    /// Exact rendered UTF-8 byte count for this line. The legacy field name is
+    /// retained for downstream compatibility.
     pub estimated_rendered_chars: Option<usize>,
     /// Simple token estimate for this note's rendered line, computed as
-    /// `ceil(estimated_rendered_chars / 4.0)`. `None` for budget-pruned notes.
-    /// This is a rough heuristic; swap in a shared estimator if one becomes
-    /// available.
+    /// `ceil(estimated_rendered_chars / 4)`, used only as telemetry.
     pub estimated_rendered_tokens: Option<usize>,
 }
 
@@ -45,136 +49,153 @@ pub struct NotePackOutcome {
 ///
 /// The `rendered` text is byte-identical to what [`format_knowledge_notes`]
 /// would produce for the same inputs. The `outcomes` vector contains one
-/// entry per input note, in input order, classifying each as injected or
-/// budget-pruned with associated metadata for trace persistence.
+/// entry per input note, in input order, with one terminal disposition.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct PackedKnowledgeNotes {
     /// The rendered prompt text, byte-identical to `format_knowledge_notes` output.
     pub rendered: String,
     /// Per-note packing outcomes, one per input note in input order.
     pub outcomes: Vec<NotePackOutcome>,
-    /// Total estimated characters consumed by all injected notes (including
-    /// inter-note newlines).
+    /// Total exact UTF-8 bytes consumed by injected notes, including only
+    /// newlines actually placed between lines. Legacy field name retained.
     pub total_injected_chars: usize,
     /// Simple token estimate for all injected content, computed as
-    /// `ceil(total_injected_chars / 4.0)`.
+    /// `ceil(total_injected_chars / 4)`.
     pub total_injected_tokens: usize,
 }
 
-/// Compute a simple token estimate from a character count.
-///
-/// Uses the standard heuristic of ~4 characters per token, rounding up so
-/// callers get a conservative budget estimate.
-fn token_estimate(chars: usize) -> usize {
-    ((chars as f64) / APPROX_CHARS_PER_TOKEN).ceil() as usize
+fn token_estimate(bytes: usize) -> usize {
+    bytes.div_ceil(APPROX_BYTES_PER_TOKEN)
 }
 
-/// Pack knowledge notes into a budget-capped prompt string and return
-/// per-note packing outcomes for trace instrumentation.
-///
-/// This is the core implementation that [`format_knowledge_notes`] delegates
-/// to.  It uses the exact same line-rendering and budget accounting as the
-/// original formatter, but additionally classifies every input note as
-/// injected or budget-pruned and returns metadata suitable for retrieval
-/// trace persistence.
-///
-/// Notes are processed in input order (which the caller controls; typically
-/// highest-confidence first).  The first note that would overflow the budget
-/// triggers pruning of that note and **all** remaining notes.
-///
-/// Once the budget is exhausted, subsequent notes are classified as
-/// `BudgetPruned` **without** computing their label, summary, or rendered
-/// line content.  This preserves the original formatter's break semantics:
-/// the old `format_knowledge_notes` loop broke on the first overflow and
-/// never inspected later notes, so any content slicing (e.g. fallback
-/// summary at a non-UTF-8 boundary) was unreachable.  Skipping content
-/// computation for exhausted-budget notes maintains that invariant and
-/// avoids panics on notes whose `content[..min(100)]` would land on a
-/// non-byte-boundary.
-pub fn pack_knowledge_notes(
+fn note_label(note: &djinn_memory::Note) -> &'static str {
+    match note.note_type.as_str() {
+        "pitfall" => "Pitfall",
+        "pattern" => "Pattern",
+        "case" => "Case",
+        _ => "Note",
+    }
+}
+
+/// Returns an L0 summary, never consulting the L1 `overview` field.
+fn l0_summary(note: &djinn_memory::Note) -> &str {
+    note.abstract_
+        .as_deref()
+        .map(str::trim)
+        .filter(|summary| !summary.is_empty())
+        .or_else(|| {
+            let content = note.content.trim();
+            (!content.is_empty()).then_some(content)
+        })
+        .unwrap_or("(no abstract)")
+}
+
+/// Truncate only summary text at a valid UTF-8 boundary. An ellipsis is added
+/// only when all three of its bytes fit.
+fn truncate_summary(summary: &str, max_bytes: usize) -> String {
+    if summary.len() <= max_bytes {
+        return summary.to_owned();
+    }
+    let (content_limit, ellipsis) = if max_bytes >= '…'.len_utf8() {
+        (max_bytes - '…'.len_utf8(), "…")
+    } else {
+        (max_bytes, "")
+    };
+    let boundary = summary
+        .char_indices()
+        .map(|(index, _)| index)
+        .take_while(|&index| index <= content_limit)
+        .last()
+        .unwrap_or(0);
+    format!("{}{}", &summary[..boundary], ellipsis)
+}
+
+fn rendered_line(note: &djinn_memory::Note, line_byte_cap: usize) -> Option<String> {
+    let prefix = format!("- **[{}] {}**: ", note_label(note), note.title);
+    let suffix = format!(" (permalink: {})", note.permalink);
+    let minimum_summary = "(no abstract)";
+    let metadata_bytes = prefix.len() + suffix.len();
+    if metadata_bytes + minimum_summary.len() > line_byte_cap {
+        return None;
+    }
+    Some(format!(
+        "{prefix}{}{suffix}",
+        truncate_summary(l0_summary(note), line_byte_cap - metadata_bytes)
+    ))
+}
+
+/// Pack the complete ranked universe under the deterministic five-way byte
+/// contract. Candidates are inspected in rank order even after oversized and
+/// total-budget misses.
+pub fn pack_ranked_knowledge_notes(
     notes: &[djinn_memory::Note],
-    budget_chars: usize,
+    config: KnowledgePackConfig,
 ) -> PackedKnowledgeNotes {
     let mut lines = Vec::new();
     let mut outcomes = Vec::with_capacity(notes.len());
-    let mut used: usize = 0;
-    let mut budget_exhausted = false;
+    let mut used_bytes = 0usize;
+    let mut confidence_eligible = 0usize;
 
     for note in notes {
-        // Once the budget is exhausted, push a budget-pruned outcome
-        // immediately without computing label/summary/line content.
-        // This preserves the original formatter's break semantics: the old
-        // loop broke on the first overflow and never inspected later notes,
-        // so any content slicing (e.g. fallback summary at a non-UTF-8
-        // boundary) was unreachable.
-        if budget_exhausted {
-            outcomes.push(NotePackOutcome {
-                permalink: note.permalink.clone(),
-                title: note.title.clone(),
-                disposition: NotePackDisposition::BudgetPruned,
-                estimated_rendered_chars: None,
-                estimated_rendered_tokens: None,
-            });
-            continue;
-        }
-
-        let label = match note.note_type.as_str() {
-            "pitfall" => "Pitfall",
-            "pattern" => "Pattern",
-            "case" => "Case",
-            _ => "Note",
-        };
-        let summary = if note.confidence > 0.8 {
-            // High confidence: use overview (L1) if available
-            note.overview
-                .as_deref()
-                .or(note.abstract_.as_deref())
-                .unwrap_or_else(|| &note.content[..note.content.len().min(200)])
+        let disposition = if note.confidence < config.minimum_confidence {
+            NotePackDisposition::ConfidenceFiltered
         } else {
-            // Lower confidence: use abstract (L0) if available
-            note.abstract_
-                .as_deref()
-                .unwrap_or_else(|| &note.content[..note.content.len().min(100)])
+            let eligible_rank = confidence_eligible;
+            confidence_eligible += 1;
+            if eligible_rank >= config.top_k {
+                NotePackDisposition::NotTopK
+            } else if let Some(line) = rendered_line(note, config.line_byte_cap) {
+                let separator_bytes = usize::from(!lines.is_empty());
+                if used_bytes + separator_bytes + line.len() <= config.total_byte_budget {
+                    used_bytes += separator_bytes + line.len();
+                    outcomes.push(NotePackOutcome {
+                        permalink: note.permalink.clone(),
+                        title: note.title.clone(),
+                        disposition: NotePackDisposition::Injected,
+                        estimated_rendered_chars: Some(line.len()),
+                        estimated_rendered_tokens: Some(token_estimate(line.len())),
+                    });
+                    lines.push(line);
+                    continue;
+                }
+                NotePackDisposition::BudgetPruned
+            } else {
+                NotePackDisposition::OversizedSkipped
+            }
         };
-        // Append the permalink on the same rendered line so callers can
-        // resolve the note via `memory_read(identifier=<permalink>)`.
-        // The permalink suffix length is counted against `budget_chars` below,
-        // so the truncation logic is identical to a non-permalink line of
-        // the same total length.
-        let line = format!(
-            "- **[{}] {}**: {} (permalink: {})",
-            label, note.title, summary, note.permalink
-        );
-
-        if used + line.len() > budget_chars {
-            budget_exhausted = true;
-            outcomes.push(NotePackOutcome {
-                permalink: note.permalink.clone(),
-                title: note.title.clone(),
-                disposition: NotePackDisposition::BudgetPruned,
-                estimated_rendered_chars: None,
-                estimated_rendered_tokens: None,
-            });
-        } else {
-            let line_chars = line.len();
-            used += line_chars + 1; // +1 for newline
-            lines.push(line);
-            outcomes.push(NotePackOutcome {
-                permalink: note.permalink.clone(),
-                title: note.title.clone(),
-                disposition: NotePackDisposition::Injected,
-                estimated_rendered_chars: Some(line_chars),
-                estimated_rendered_tokens: Some(token_estimate(line_chars)),
-            });
-        }
+        outcomes.push(NotePackOutcome {
+            permalink: note.permalink.clone(),
+            title: note.title.clone(),
+            disposition,
+            estimated_rendered_chars: None,
+            estimated_rendered_tokens: None,
+        });
     }
 
     PackedKnowledgeNotes {
         rendered: lines.join("\n"),
         outcomes,
-        total_injected_chars: used,
-        total_injected_tokens: token_estimate(used),
+        total_injected_chars: used_bytes,
+        total_injected_tokens: token_estimate(used_bytes),
     }
+}
+
+/// Compatibility entry point for existing callers that already filter and
+/// limit candidates. Full-universe callers should use
+/// [`pack_ranked_knowledge_notes`].
+pub fn pack_knowledge_notes(
+    notes: &[djinn_memory::Note],
+    budget_chars: usize,
+) -> PackedKnowledgeNotes {
+    pack_ranked_knowledge_notes(
+        notes,
+        KnowledgePackConfig {
+            minimum_confidence: f64::NEG_INFINITY,
+            top_k: notes.len(),
+            total_byte_budget: budget_chars,
+            line_byte_cap: budget_chars,
+        },
+    )
 }
 
 /// Format knowledge notes for injection into the system prompt.
@@ -185,8 +206,9 @@ pub fn pack_knowledge_notes(
 /// `memory_read(identifier=<permalink>)` with an exact identifier instead of
 /// relying on title matching.
 ///
-/// Uses L0 (abstract) for most notes, L1 (overview) for high-confidence ones.
-/// Budget-capped at `budget_chars`, dropping lowest-confidence notes first;
+/// Uses only L0: trimmed nonblank `abstract_`, then trimmed nonblank content,
+/// then `(no abstract)`. It never reads L1 `overview`. Budget-capped at exact UTF-8
+/// bytes, with later candidates still considered after a miss;
 /// the appended `permalink` is included in that budget accounting rather than
 /// being layered on after truncation.
 ///
