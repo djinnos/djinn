@@ -37,6 +37,8 @@ struct ReplayCase {
     #[serde(default)]
     full_scope_budget: bool,
     #[serde(default)]
+    knowledge_injection_limit: Option<u32>,
+    #[serde(default)]
     bucket_mode: String,
     #[serde(default)]
     resume_compaction_summary: Option<String>,
@@ -290,7 +292,10 @@ async fn checked_in_replays_enter_the_production_assemble_prompt_context_boundar
             .await
             .expect("scope confidence");
 
-        let state = agent_context_from_db(db, CancellationToken::new());
+        let mut state = agent_context_from_db(db, CancellationToken::new());
+        if let Some(limit) = case.knowledge_injection_limit {
+            state.knowledge_injection.knowledge_injection_limit = limit;
+        }
         let worktree = test_tempdir("memory-planner-replay-");
         let baseline = assemble(&task, &state, None, worktree.path()).await;
         let host = host(case);
@@ -412,7 +417,7 @@ async fn checked_in_replays_enter_the_production_assemble_prompt_context_boundar
             for kept in ["q1-r1", "q1-r2", "q2-r1", "q2-r2", "q3-r1", "q3-r2"] {
                 assert!(rendered.contains(kept), "missing {kept}");
             }
-            for omitted in ["q1-r3", "q2-r3", "q3-r3", "q4-r1"] {
+            for omitted in ["q1-r3", "q2-r3", "q3-r3", "q4-r1", "q4-r2", "q4-r3"] {
                 assert!(!rendered.contains(omitted), "unexpected {omitted}");
             }
         }

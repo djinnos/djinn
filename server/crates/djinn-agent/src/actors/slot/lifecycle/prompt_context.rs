@@ -9,9 +9,9 @@ use djinn_core::models::Task;
 
 use crate::actors::slot::MergeConflictMetadata;
 use crate::actors::slot::helpers::{
-    COMBINED_BRIEF_TOTAL_CHARS, NotePackDisposition, build_reviewer_diff_context,
-    build_role_code_graph_context, derive_task_scope_paths, extract_worker_context,
-    format_attempt_history, pack_knowledge_notes, recent_feedback,
+    COMBINED_BRIEF_TOTAL_CHARS, KnowledgePackConfig, NotePackDisposition,
+    build_reviewer_diff_context, build_role_code_graph_context, derive_task_scope_paths,
+    extract_worker_context, format_attempt_history, pack_ranked_knowledge_notes, recent_feedback,
 };
 use crate::actors::slot::lifecycle::attempt_context;
 use crate::context::AgentContext;
@@ -401,12 +401,6 @@ async fn load_epic_context(
 /// Production confidence threshold for knowledge-note injection.
 const KNOWLEDGE_MIN_CONFIDENCE: f64 = 0.3;
 
-/// Production injection limit (top-K) for knowledge notes.
-const KNOWLEDGE_INJECTION_LIMIT: usize = 10;
-
-/// Character budget for the rendered knowledge-notes prompt section.
-const KNOWLEDGE_BUDGET_CHARS: usize = 2000;
-
 /// Note types queried for knowledge-context injection.
 const KNOWLEDGE_NOTE_TYPES: &[&str] = &["pattern", "pitfall", "case"];
 
@@ -504,7 +498,7 @@ async fn load_knowledge_context_with_planner(
             &task_paths,
             KNOWLEDGE_NOTE_TYPES,
             KNOWLEDGE_MIN_CONFIDENCE,
-            KNOWLEDGE_INJECTION_LIMIT,
+            app_state.knowledge_injection.knowledge_injection_limit as usize,
         ),
         note_repo.query_by_scope_overlap_trace_candidates(
             &task.project_id,
@@ -577,14 +571,34 @@ async fn load_knowledge_context_with_planner(
             "Lifecycle: failed to query knowledge trace candidates"
         );
         let pack_start = tokio::time::Instant::now();
-        let packed = pack_knowledge_notes(&notes, KNOWLEDGE_BUDGET_CHARS);
+        let packed = pack_ranked_knowledge_notes(
+            &notes,
+            KnowledgePackConfig {
+                minimum_confidence: f64::NEG_INFINITY,
+                top_k: app_state.knowledge_injection.knowledge_injection_limit as usize,
+                total_byte_budget: app_state
+                    .knowledge_injection
+                    .knowledge_injection_budget_bytes as usize,
+                line_byte_cap: app_state
+                    .knowledge_injection
+                    .knowledge_injection_line_cap_bytes as usize,
+            },
+        );
         let pack_ms = pack_start.elapsed().as_millis() as i64;
         let rendered = if notes.is_empty() {
             None
         } else {
             Some(packed.rendered)
         };
-        let rendered = merge_planned_knowledge(rendered, &notes, &note_repo, task, planner).await;
+        let rendered = merge_planned_knowledge(
+            rendered,
+            &notes,
+            &note_repo,
+            task,
+            planner,
+            app_state.knowledge_injection,
+        )
+        .await;
         persist_knowledge_trace(
             task,
             &task_paths,
@@ -622,7 +636,19 @@ async fn load_knowledge_context_with_planner(
 
     // Render the prompt using the packed API (byte-identical to format_knowledge_notes).
     let pack_start = tokio::time::Instant::now();
-    let packed = pack_knowledge_notes(&notes, KNOWLEDGE_BUDGET_CHARS);
+    let packed = pack_ranked_knowledge_notes(
+        &notes,
+        KnowledgePackConfig {
+            minimum_confidence: f64::NEG_INFINITY,
+            top_k: app_state.knowledge_injection.knowledge_injection_limit as usize,
+            total_byte_budget: app_state
+                .knowledge_injection
+                .knowledge_injection_budget_bytes as usize,
+            line_byte_cap: app_state
+                .knowledge_injection
+                .knowledge_injection_line_cap_bytes as usize,
+        },
+    );
     let pack_ms = pack_start.elapsed().as_millis() as i64;
 
     // Apply budget-pruned classification from packing outcomes.
@@ -634,7 +660,15 @@ async fn load_knowledge_context_with_planner(
     } else {
         Some(packed.rendered)
     };
-    let rendered = merge_planned_knowledge(rendered, &notes, &note_repo, task, planner).await;
+    let rendered = merge_planned_knowledge(
+        rendered,
+        &notes,
+        &note_repo,
+        task,
+        planner,
+        app_state.knowledge_injection,
+    )
+    .await;
 
     // Persist the trace (fail-open). Measure the persist phase separately.
     let persist_start = tokio::time::Instant::now();

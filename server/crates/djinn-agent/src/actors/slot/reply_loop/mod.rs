@@ -198,6 +198,14 @@ fn persist_tool_results_before_compaction(
         })
         .collect()
 }
+/// Test-support gateway for the production dispatcher persistence boundary.
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) fn persist_tool_results_before_compaction_for_test(
+    stash: &mut OutputStash,
+    results: &[djinn_slot::host::PreCompactionToolResult],
+) -> Result<Vec<djinn_compaction::ToolOutputPointer>, String> {
+    persist_tool_results_before_compaction(stash, results)
+}
 
 impl djinn_slot::host::SlotToolDispatcher for AgentToolDispatcher {
     fn is_stash_tool(&self, tool_name: &str) -> bool {

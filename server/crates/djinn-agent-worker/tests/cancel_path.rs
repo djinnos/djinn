@@ -486,6 +486,7 @@ async fn worker_observes_host_initiated_cancel() {
         flow: SupervisorFlow::Planning,
         model_id_per_role: per_role,
         read_source_project_ids: Vec::new(),
+        knowledge_injection: djinn_core::models::KnowledgeInjectionConfig::default(),
         github_owner: None,
         github_install_token: None,
         commit_author_name: None,
