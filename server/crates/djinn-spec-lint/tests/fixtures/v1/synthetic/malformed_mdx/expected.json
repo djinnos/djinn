@@ -1,0 +1,1 @@
+{"body_format":"mdx","body_sha256":"6f0fb9d0ca13789e3098bcbb5212339c939890985e882d3d7fe3925c88804c95","checked_at":"2026-07-20T00:00:00Z","errors":[{"code":"MDX_PARSE_ERROR","message":"MDX structure parsing failed: unclosed <Callout> block (no closing </Callout> found)","severity":"error","span":{"end":29,"start":0}}],"linter_version":"v1","skipped_tiers":[],"warnings":[]}

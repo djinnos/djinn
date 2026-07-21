@@ -1,0 +1,12 @@
+{
+  "body_format": "mdx",
+  "source": {
+    "source_proposal_short_id": null,
+    "source_revision_sequence": null,
+    "source_revision_note": "Historic revision sequence is unavailable in this database-independent fixture.",
+    "redaction_note": "Synthetic malformed MDX."
+  },
+  "expected_slices": [
+    {"severity": "error", "code": "MDX_PARSE_ERROR", "slice": "Before\n<Callout id=\"broken\">\n"}
+  ]
+}
