@@ -7229,7 +7229,8 @@ async fn evidence_reap_is_live_lookup_error_counts_as_crashed_unproven() {
 
 /// A non-NULL dispatch group is terminalized through the exact-group repository
 /// operation: all pending peers in the same group receive one outcome/evidence
-/// tuple, while unrelated groups for the same task remain untouched.
+/// tuple, while every independently eligible group on the same task is
+/// classified from its own owner evidence in that same sweep.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn evidence_reap_nonnull_group_terminalizes_all_peers_with_one_evidence() {
     use djinn_db::TaskAttemptRepository;
@@ -7239,6 +7240,10 @@ async fn evidence_reap_nonnull_group_terminalizes_all_peers_with_one_evidence() 
     let repo = TaskAttemptRepository::new(db.clone());
 
     let owner_id = register_incarnation(&db, true).await;
+    let owner_b = register_incarnation(&db, true).await;
+    let incarnation_repo = djinn_db::CoordinatorIncarnationRepository::new(db.clone());
+    let owner_a_lease = incarnation_repo.get(&owner_id).await.unwrap().unwrap();
+    let owner_b_lease = incarnation_repo.get(&owner_b).await.unwrap().unwrap();
     let group_a = uuid::Uuid::now_v7().to_string();
     let group_b = uuid::Uuid::now_v7().to_string();
 
@@ -7263,7 +7268,6 @@ async fn evidence_reap_nonnull_group_terminalizes_all_peers_with_one_evidence() 
     .await;
 
     // An unrelated pending peer in group B (different owner, different group).
-    let owner_b = register_incarnation(&db, true).await;
     let peer_b =
         seed_pending_attempt_with_identity(&db, &task.id, "worker", Some(&owner_b), Some(&group_b))
             .await;
@@ -7272,10 +7276,8 @@ async fn evidence_reap_nonnull_group_terminalizes_all_peers_with_one_evidence() 
         backdate_attempt(&db, id).await;
     }
 
-    // Both groups are reap-eligible, but one sweep reconciles only the oldest
-    // exact group for a task. This prevents one owner classification from
-    // spilling across concurrently persisted dispatch groups; a later sweep
-    // can independently classify group B from its own owner evidence.
+    // Both groups are equally reap-eligible and must each be classified from
+    // their own immutable owner lease during this one sweep.
     crate::health::reap_orphaned_pending_attempts_with_threshold(&db, 15 * 60, "periodic").await;
 
     // Both peers in group A are interrupted with the same evidence.
@@ -7289,13 +7291,25 @@ async fn evidence_reap_nonnull_group_terminalizes_all_peers_with_one_evidence() 
             serde_json::from_str(row.summary_json.as_deref().unwrap()).unwrap();
         assert_eq!(sj["failure_class"], "environmental_owner_expired");
         assert_eq!(sj["owner_incarnation_id"], owner_id);
+        assert_eq!(
+            sj["owner_lease_last_renewed_at"], owner_a_lease.last_renewed_at,
+            "{label}: group A must retain its owner's durable expiry evidence"
+        );
     }
 
-    // Group B remains pending even though it is equally old and its owner is
-    // expired. Only the exact group-A boundary explains why it is untouched.
+    // Group B is independently terminalized with its own owner and expiry
+    // evidence, rather than inheriting group A's classification.
     let row_b = repo.get(&peer_b).await.unwrap().unwrap();
-    assert_eq!(row_b.outcome, "pending");
-    assert!(row_b.summary_json.is_none());
+    assert_eq!(row_b.outcome, "interrupted");
+    let sj_b: serde_json::Value =
+        serde_json::from_str(row_b.summary_json.as_deref().unwrap()).unwrap();
+    assert_eq!(sj_b["failure_class"], "environmental_owner_expired");
+    assert_eq!(sj_b["owner_incarnation_id"], owner_b);
+    assert_eq!(
+        sj_b["owner_lease_last_renewed_at"], owner_b_lease.last_renewed_at,
+        "group B must retain its own owner's durable expiry evidence"
+    );
+    assert_ne!(sj_b["owner_incarnation_id"], owner_id);
 }
 
 /// A legacy NULL-group row is reaped singly: only that one row is terminalized,
