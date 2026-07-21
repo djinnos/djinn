@@ -9008,23 +9008,44 @@ mod tests {
             .await
             .unwrap();
         let revision = repo.revisions(&proposal.id).await.unwrap().remove(0);
-        let lint = repo.lint_for_revision(&revision).await.unwrap();
+        let (linter_version, revision_id, body_sha256, result_json) =
+            sqlx::query_as::<_, (String, String, String, serde_json::Value)>(
+                "SELECT linter_version, revision_id, body_sha256, result_json \
+             FROM proposal_revision_lint_results \
+             WHERE proposal_id = $1 AND revision_seq = $2",
+            )
+            .bind(&proposal.id)
+            .bind(revision.seq)
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
+
+        // Inspect the durable row directly rather than `lint_for_revision`: that
+        // read boundary deliberately recomputes stale or malformed cache rows.
         assert_eq!(
-            lint.warnings
+            linter_version,
+            djinn_spec_lint::SpecLintResultV1::LINTER_VERSION
+        );
+        assert_eq!(revision_id, revision.id);
+        assert_eq!(body_sha256, djinn_spec_lint::body_sha256(&revision.body));
+        let persisted: djinn_spec_lint::SpecLintResultV1 =
+            serde_json::from_value(result_json).unwrap();
+        let mut expected = djinn_spec_lint::lint(
+            &revision.body,
+            djinn_spec_lint::BodyFormat::Markdown,
+            persisted.checked_at.clone(),
+        );
+        expected.sort_violations();
+        assert_eq!(persisted, expected);
+        assert_eq!(
+            persisted
+                .warnings
                 .iter()
                 .map(|warning| warning.code.as_str())
                 .collect::<Vec<_>>(),
             ["UNRESOLVED_LOCAL_REFERENCE"]
         );
-        assert_eq!(lint.skipped_tiers[0].tier, "mdx_structure");
-        assert_eq!(lint.skipped_tiers[0].reason, "BODY_FORMAT_MARKDOWN");
-        let rows: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM proposal_revision_lint_results WHERE proposal_id = $1",
-        )
-        .bind(&proposal.id)
-        .fetch_one(db.pool())
-        .await
-        .unwrap();
-        assert_eq!(rows, 1);
+        assert_eq!(persisted.skipped_tiers[0].tier, "mdx_structure");
+        assert_eq!(persisted.skipped_tiers[0].reason, "BODY_FORMAT_MARKDOWN");
     }
 }
