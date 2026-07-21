@@ -879,7 +879,10 @@ fn block_content_ignores_non_content_required_blocks() {
 // complete fixture corpus or control-plane-only schema/MCP response types.
 
 fn assert_parse_results_match(body: &str) {
-    match (parse_mdx_blocks(body), djinn_spec_lint::parse_mdx_blocks(body)) {
+    match (
+        parse_mdx_blocks(body),
+        djinn_spec_lint::parse_mdx_blocks(body),
+    ) {
         (Ok(retained), Ok(canonical)) => {
             assert_eq!(retained.len(), canonical.len(), "body: {body}");
             for (retained, canonical) in retained.iter().zip(&canonical) {
@@ -941,7 +944,9 @@ after
     );
 
     // Bare JSON is raw block content, not an MDX expression.
-    assert_parse_results_match("<JsonExplorer id=\"json\">\n{\n  \"active\": true\n}\n</JsonExplorer>");
+    assert_parse_results_match(
+        "<JsonExplorer id=\"json\">\n{\n  \"active\": true\n}\n</JsonExplorer>",
+    );
 }
 
 #[test]
@@ -997,6 +1002,9 @@ fn retained_facade_matches_canonical_validation_and_question_form_outcomes() {
     }
     assert_validation_outcomes_match(
         validate_question_form_placement_for_format(invalid_question_form, "markdown"),
-        djinn_spec_lint::validate_question_form_placement_for_format(invalid_question_form, "markdown"),
+        djinn_spec_lint::validate_question_form_placement_for_format(
+            invalid_question_form,
+            "markdown",
+        ),
     );
 }

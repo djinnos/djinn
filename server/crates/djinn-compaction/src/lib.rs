@@ -17,14 +17,37 @@ mod prompts;
 mod summarizer;
 mod truncate;
 
-pub use policy::{compact_conversation, needs_compaction};
+pub use policy::{compact_conversation, compact_conversation_with_pointers, needs_compaction};
 pub use prompts::CompactionContext;
 pub use prompts::{
-    COMPACTION_SUMMARY_END_MARKER, PARTIAL_COMPACTION_CONTINUATION, strip_compaction_markers,
+    COMPACTION_SUMMARY_END_MARKER, OUTPUT_LOOKUP_ADVISORY, PARTIAL_COMPACTION_CONTINUATION,
+    strip_compaction_markers,
 };
 pub use prompts::{extract_prior_summary, previous_summary_block};
 
 pub use summarizer::{call_llm_for_summary_for_test, do_partial_compact_for_test};
+
+/// Storage-neutral metadata for a tool result whose full output has been
+/// durably persisted (e.g. in `djinn-agent::OutputStash`) and is retrievable
+/// by `tool_use_id` via `output_view`.
+///
+/// `djinn-compaction` owns this plain contract so it never depends on the
+/// durable substrate implementation. Callers that have access to the stash
+/// map their records into this struct before invoking compaction; when no
+/// pointers are supplied, microcompaction falls back to the legacy
+/// `[Cleared — …]` placeholder and non-tool transcript behavior is unchanged.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToolOutputPointer {
+    /// The `tool_use_id` that identifies the stashed output for retrieval.
+    pub tool_use_id: String,
+    /// The conversation turn (0-indexed from the most recent assistant message)
+    /// the output belongs to.
+    pub turn: u64,
+    /// Character count of the original, full tool result before compaction.
+    pub original_chars: usize,
+    /// Output kind (e.g. `"tool_result"`).
+    pub result_kind: String,
+}
 /// Maximum length for a message identity that fits the boundary table's
 /// `VARCHAR(36)` id columns (`first_message_id`, `last_compacted_message_id`,
 /// `first_retained_message_id` — see migration 92).

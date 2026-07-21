@@ -180,7 +180,9 @@ async fn preserves_two_closed_turns() {
             .any(|block| matches!(block, ContentBlock::ToolUse { id, .. } if id == "unanswered"))
     }));
     assert!(
-        summary_requests.iter().any(|request| request.contains("\"path\":\"unanswered\"")),
+        summary_requests
+            .iter()
+            .any(|request| request.contains("\"path\":\"unanswered\"")),
         "the trailing unanswered tool call must be included in the summary request"
     );
 }
