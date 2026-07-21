@@ -450,16 +450,10 @@ async fn maybe_inject_soft_budget_reminder(
     turns: u32,
     total_tokens_in: u32,
     total_tokens_out: u32,
-    current_context_tokens: u32,
     conversation: &mut Conversation,
 ) -> bool {
     if *injected
-        || !soft_budget_threshold_exceeded(
-            session_budget,
-            total_tokens_in,
-            total_tokens_out,
-            current_context_tokens,
-        )
+        || !soft_budget_threshold_exceeded(session_budget, total_tokens_in, total_tokens_out)
     {
         return false;
     }
@@ -679,12 +673,8 @@ pub async fn run_reply_loop(
         // we settle the session as a typed no_progress_submission.
         let mut no_progress_guard_triggered = false;
         loop {
-            let hard_budget_exceeded = hard_budget_threshold_exceeded(
-                &session_budget,
-                total_tokens_in,
-                total_tokens_out,
-                current_context_tokens,
-            );
+            let hard_budget_exceeded =
+                hard_budget_threshold_exceeded(&session_budget, total_tokens_in, total_tokens_out);
             let budget_wind_down_should_stop = budget_wind_down_final_turn_spent
                 && wind_down_reason
                     .as_ref()
@@ -758,7 +748,6 @@ pub async fn run_reply_loop(
                 turns,
                 total_tokens_in,
                 total_tokens_out,
-                current_context_tokens,
                 conversation,
             )
             .await;
@@ -828,8 +817,7 @@ pub async fn run_reply_loop(
                     .await
                     .map_err(anyhow::Error::msg)?;
                     if compacted {
-                        total_tokens_in = 0;
-                        total_tokens_out = 0;
+                        // Lifetime spend persists across reactive compaction.
                         current_context_tokens = 0;
                         compaction_attempts += 1;
                         tool_dispatcher.clear_stash();
@@ -1000,8 +988,7 @@ pub async fn run_reply_loop(
                 .await
                 .map_err(anyhow::Error::msg)?;
                 if compacted {
-                    total_tokens_in = 0;
-                    total_tokens_out = 0;
+                    // Lifetime spend persists across reactive compaction.
                     current_context_tokens = 0;
                     compaction_attempts += 1;
                     tool_dispatcher.clear_stash();
@@ -1217,8 +1204,7 @@ pub async fn run_reply_loop(
                 .await
                 .map_err(anyhow::Error::msg)?;
                 if compacted {
-                    total_tokens_in = 0;
-                    total_tokens_out = 0;
+                    // Lifetime spend persists across proactive compaction.
                     current_context_tokens = 0;
                     tool_dispatcher.clear_stash();
                     if should_retry_after_tool_call_compaction(compacted, !turn_tool_calls.is_empty()) {

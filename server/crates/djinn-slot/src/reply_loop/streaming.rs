@@ -16,6 +16,7 @@ use djinn_core::events::DjinnEventEnvelope;
 use djinn_provider::message::ContentBlock;
 use djinn_provider::provider::{LlmProvider, StreamEvent};
 
+use super::budget::record_provider_usage;
 use super::error_handling::{
     MAX_COMPACTION_RETRIES, is_context_length_error, is_orphaned_tool_call_error,
 };
@@ -370,15 +371,11 @@ pub(super) async fn consume_provider_stream(
                         state.turn_cache_read = usage.cache_read;
                         state.turn_cache_write = usage.cache_write;
                         state.turn_reasoning_out = usage.reasoning_output;
-                        *ctx.current_context_tokens = usage.context_total();
-                        *ctx.total_tokens_in = ctx.total_tokens_in.saturating_add(usage.input);
-                        *ctx.total_tokens_out = ctx.total_tokens_out.saturating_add(usage.output);
-                        *ctx.total_cache_read =
-                            ctx.total_cache_read.saturating_add(usage.cache_read);
-                        *ctx.total_cache_write =
-                            ctx.total_cache_write.saturating_add(usage.cache_write);
-                        *ctx.total_reasoning_out =
-                            ctx.total_reasoning_out.saturating_add(usage.reasoning_output);
+                        record_provider_usage(
+                            ctx.total_tokens_in, ctx.total_tokens_out, ctx.total_cache_read,
+                            ctx.total_cache_write, ctx.total_reasoning_out,
+                            ctx.current_context_tokens, &usage,
+                        );
                         let usage_pct = if ctx.context_window > 0 {
                             *ctx.current_context_tokens as f64 / ctx.context_window as f64
                         } else {
