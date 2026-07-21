@@ -32,6 +32,9 @@ impl From<djinn_db::Error> for Error {
             djinn_db::Error::InvalidData(msg) => Self::Internal(msg),
             djinn_db::Error::Internal(msg) => Self::Internal(msg),
             djinn_db::Error::InvalidTransition(msg) => Self::InvalidTransition(msg),
+            // Preserve the stable rejection code until the control-plane schema
+            // gains a dedicated lint-diagnostics response.
+            djinn_db::Error::SpecLintRejected(rejection) => Self::Internal(rejection.code),
         }
     }
 }
