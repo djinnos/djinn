@@ -11,6 +11,9 @@ use tokio_util::io::StreamReader;
 use super::AuthMethod;
 use super::error::{ProviderError, redact_secrets};
 use super::first_event::first_event_budget;
+use super::transport::{
+    TransportClassificationInput, classify_exhausted_transport, initial_request_transport_category,
+};
 use crate::rate_limit::{activate_suppression_window, clear_suppression_window};
 
 /// Collect the secret values an `AuthMethod` puts on the wire so a misbehaving
@@ -176,6 +179,36 @@ fn provider_status_error(
     anyhow::Error::new(typed).context(format!("provider API error {status}: {redacted}"))
 }
 
+/// Preserve a pre-body eligible observation through request retry wrappers, but
+/// only expose it once the ordinary initial-request retry budget is exhausted.
+fn exhausted_transport_error(
+    retries_exhausted: bool,
+    observed: Option<super::transport::ExhaustedTransportCategory>,
+    input: TransportClassificationInput,
+    estimated_payload_chars: usize,
+    context: String,
+) -> anyhow::Error {
+    match classify_exhausted_transport(retries_exhausted, observed, input, estimated_payload_chars)
+    {
+        Some(diagnostic) => anyhow::Error::new(ProviderError::ExhaustedTransport(diagnostic)),
+        None => anyhow::Error::new(ProviderError::Transport),
+    }
+    .context(context)
+}
+
+fn initial_stream_read_category(
+    error: &std::io::Error,
+) -> Option<super::transport::ExhaustedTransportCategory> {
+    let message = error.to_string().to_ascii_lowercase();
+    if message.contains("connection reset") || message.contains("reset by peer") {
+        Some(super::transport::ExhaustedTransportCategory::ConnectionReset)
+    } else if message.contains("unexpected eof") || message.contains("connection closed") {
+        Some(super::transport::ExhaustedTransportCategory::UnexpectedEof)
+    } else {
+        None
+    }
+}
+
 // ─── Retry configuration ────────────────────────────────────────────────────
 
 /// Maximum number of retries for transient HTTP errors.
@@ -264,7 +297,7 @@ impl ApiClient {
         extra_headers: HeaderMap,
     ) -> Pin<Box<dyn Stream<Item = anyhow::Result<String>> + Send>> {
         let request_body = serde_json::to_vec(&body).expect("serde_json::Value serializes");
-        let _estimated_payload_chars = request_body.len();
+        let estimated_payload_chars = request_body.len();
         let client = self.inner.clone();
         let url = url.to_string();
         let auth = auth.clone();
@@ -278,6 +311,7 @@ impl ApiClient {
             // Retry loop for the initial HTTP request.
             let response = 'retry: {
                 let mut attempt = 0u32;
+                let mut observed_transport_category = None;
                 loop {
                     let mut req = client.post(&url).header(reqwest::header::CONTENT_TYPE, "application/json").body(request_body.clone());
 
@@ -331,10 +365,21 @@ impl ApiClient {
                             // Non-retryable or exhausted retries.
                             let retry_after_ms = retry_after_ms(resp.headers());
                             let body_text = resp.text().await.unwrap_or_default();
+                            if let Some(diagnostic) = classify_exhausted_transport(
+                                attempt >= MAX_RETRIES,
+                                observed_transport_category,
+                                TransportClassificationInput::ProviderBody,
+                                estimated_payload_chars,
+                            ) {
+                                yield Err(anyhow::Error::new(ProviderError::ExhaustedTransport(diagnostic)).context(format!("provider API error {status}: {}", redact_secrets(&body_text, &secret_refs))));
+                                return;
+                            }
                             yield Err(provider_status_error(status, &body_text, retry_after_ms, &secret_refs));
                             return;
                         }
                         Err(e) => {
+                            let current_category = initial_request_transport_category(&e);
+                            observed_transport_category = observed_transport_category.or(current_category);
                             let is_retryable = e.is_connect()
                                 || e.is_timeout()
                                 || e.is_request();
@@ -352,8 +397,8 @@ impl ApiClient {
                                 continue;
                             }
 
-                            yield Err(anyhow::Error::new(ProviderError::Transport)
-                                .context(format!("failed to send SSE request after {} attempts: {}", attempt + 1, e)));
+                            let input = current_category.map(TransportClassificationInput::Eligible).unwrap_or(TransportClassificationInput::UnknownTransport);
+                            yield Err(exhausted_transport_error(is_retryable && attempt >= MAX_RETRIES, observed_transport_category, input, estimated_payload_chars, format!("failed to send SSE request after {} attempts: {}", attempt + 1, e)));
                             return;
                         }
                     }
@@ -404,8 +449,20 @@ impl ApiClient {
                     }
                     Ok(Ok(None)) => break, // end of stream
                     Ok(Err(e)) => {
-                        yield Err(anyhow::Error::new(ProviderError::Transport)
-                            .context(format!("SSE read error: {}", e)));
+                        let input = if first_event_received {
+                            TransportClassificationInput::PostFirstEvent
+                        } else {
+                            initial_stream_read_category(&e)
+                                .map(TransportClassificationInput::Eligible)
+                                .unwrap_or(TransportClassificationInput::UnknownTransport)
+                        };
+                        yield Err(exhausted_transport_error(
+                            !first_event_received,
+                            None,
+                            input,
+                            estimated_payload_chars,
+                            format!("SSE read error: {}", e),
+                        ));
                         break;
                     }
                     Err(_) => {
@@ -414,11 +471,17 @@ impl ApiClient {
                             // arrived within the derived budget. Emit a typed
                             // retryable Transport error so downstream failover
                             // can classify it (not an empty turn).
-                            yield Err(anyhow::Error::new(ProviderError::Transport).context(format!(
-                                "SSE first-event (TTFT) timeout: no data event received within {}s for model {:?}",
-                                first_event_timeout.as_secs(),
-                                model_id
-                            )));
+                            yield Err(exhausted_transport_error(
+                                true,
+                                None,
+                                TransportClassificationInput::Eligible(super::transport::ExhaustedTransportCategory::SseFirstEventTimeout),
+                                estimated_payload_chars,
+                                format!(
+                                    "SSE first-event (TTFT) timeout: no data event received within {}s for model {:?}",
+                                    first_event_timeout.as_secs(),
+                                    model_id
+                                ),
+                            ));
                         } else {
                             yield Err(anyhow::Error::new(ProviderError::Transport).context(format!(
                                 "SSE stream timed out: no data received for {}s",
@@ -447,7 +510,7 @@ impl ApiClient {
         extra_headers: HeaderMap,
     ) -> Pin<Box<dyn Stream<Item = anyhow::Result<SseFrame>> + Send>> {
         let request_body = serde_json::to_vec(&body).expect("serde_json::Value serializes");
-        let _estimated_payload_chars = request_body.len();
+        let estimated_payload_chars = request_body.len();
         let client = self.inner.clone();
         let url = url.to_string();
         let auth = auth.clone();
@@ -459,6 +522,7 @@ impl ApiClient {
             log_outbound_request("POST", &url, &body, &auth, &extra_headers);
             let response = 'retry: {
                 let mut attempt = 0u32;
+                let mut observed_transport_category = None;
                 loop {
                     let mut req = client.post(&url).header(reqwest::header::CONTENT_TYPE, "application/json").body(request_body.clone());
 
@@ -507,10 +571,21 @@ impl ApiClient {
 
                             let retry_after_ms = retry_after_ms(resp.headers());
                             let body_text = resp.text().await.unwrap_or_default();
+                            if let Some(diagnostic) = classify_exhausted_transport(
+                                attempt >= MAX_RETRIES,
+                                observed_transport_category,
+                                TransportClassificationInput::ProviderBody,
+                                estimated_payload_chars,
+                            ) {
+                                yield Err(anyhow::Error::new(ProviderError::ExhaustedTransport(diagnostic)).context(format!("provider API error {status}: {}", redact_secrets(&body_text, &secret_refs))));
+                                return;
+                            }
                             yield Err(provider_status_error(status, &body_text, retry_after_ms, &secret_refs));
                             return;
                         }
                         Err(e) => {
+                            let current_category = initial_request_transport_category(&e);
+                            observed_transport_category = observed_transport_category.or(current_category);
                             let is_retryable = e.is_connect()
                                 || e.is_timeout()
                                 || e.is_request();
@@ -528,8 +603,8 @@ impl ApiClient {
                                 continue;
                             }
 
-                            yield Err(anyhow::Error::new(ProviderError::Transport)
-                                .context(format!("failed to send SSE request after {} attempts: {}", attempt + 1, e)));
+                            let input = current_category.map(TransportClassificationInput::Eligible).unwrap_or(TransportClassificationInput::UnknownTransport);
+                            yield Err(exhausted_transport_error(is_retryable && attempt >= MAX_RETRIES, observed_transport_category, input, estimated_payload_chars, format!("failed to send SSE request after {} attempts: {}", attempt + 1, e)));
                             return;
                         }
                     }
@@ -567,17 +642,35 @@ impl ApiClient {
                     }
                     Ok(Ok(None)) => break,
                     Ok(Err(e)) => {
-                        yield Err(anyhow::Error::new(ProviderError::Transport)
-                            .context(format!("SSE read error: {}", e)));
+                        let input = if first_event_received {
+                            TransportClassificationInput::PostFirstEvent
+                        } else {
+                            initial_stream_read_category(&e)
+                                .map(TransportClassificationInput::Eligible)
+                                .unwrap_or(TransportClassificationInput::UnknownTransport)
+                        };
+                        yield Err(exhausted_transport_error(
+                            !first_event_received,
+                            None,
+                            input,
+                            estimated_payload_chars,
+                            format!("SSE read error: {}", e),
+                        ));
                         break;
                     }
                     Err(_) => {
                         if !first_event_received {
-                            yield Err(anyhow::Error::new(ProviderError::Transport).context(format!(
-                                "SSE first-event (TTFT) timeout: no data event received within {}s for model {:?}",
-                                first_event_timeout.as_secs(),
-                                model_id
-                            )));
+                            yield Err(exhausted_transport_error(
+                                true,
+                                None,
+                                TransportClassificationInput::Eligible(super::transport::ExhaustedTransportCategory::SseFirstEventTimeout),
+                                estimated_payload_chars,
+                                format!(
+                                    "SSE first-event (TTFT) timeout: no data event received within {}s for model {:?}",
+                                    first_event_timeout.as_secs(),
+                                    model_id
+                                ),
+                            ));
                         } else {
                             yield Err(anyhow::Error::new(ProviderError::Transport).context(format!(
                                 "SSE stream timed out: no data received for {}s",
@@ -603,11 +696,13 @@ impl ApiClient {
         extra_headers: HeaderMap,
     ) -> anyhow::Result<String> {
         let request_body = serde_json::to_vec(&body).expect("serde_json::Value serializes");
+        let estimated_payload_chars = request_body.len();
         let secrets = auth_secrets(auth);
         let secret_refs: Vec<&str> = secrets.iter().map(String::as_str).collect();
         // Env-gated capture of the literal outbound request (default OFF).
         log_outbound_request("POST", url, &body, auth, &extra_headers);
         let mut attempt = 0u32;
+        let mut observed_transport_category = None;
         loop {
             let mut req = self
                 .inner
@@ -677,6 +772,8 @@ impl ApiClient {
                     ));
                 }
                 Err(e) => {
+                    let current_category = initial_request_transport_category(&e);
+                    observed_transport_category = observed_transport_category.or(current_category);
                     let is_retryable = e.is_connect() || e.is_timeout() || e.is_request();
                     if should_retry(attempt, is_retryable) {
                         attempt += 1;
@@ -685,13 +782,16 @@ impl ApiClient {
                         tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
                         continue;
                     }
-                    return Err(
-                        anyhow::Error::new(ProviderError::Transport).context(format!(
-                            "failed to send POST after {} attempts: {}",
-                            attempt + 1,
-                            e
-                        )),
-                    );
+                    let input = current_category
+                        .map(TransportClassificationInput::Eligible)
+                        .unwrap_or(TransportClassificationInput::UnknownTransport);
+                    return Err(exhausted_transport_error(
+                        is_retryable && attempt >= MAX_RETRIES,
+                        observed_transport_category,
+                        input,
+                        estimated_payload_chars,
+                        format!("failed to send POST after {} attempts: {}", attempt + 1, e),
+                    ));
                 }
             }
         }
