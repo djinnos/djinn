@@ -576,7 +576,8 @@ pub(crate) async fn call_proposal_show(
         return Err(format!("proposal not found: {}", p.id));
     };
 
-    let mut result = serde_json::json!({});
+    let latest_lint = committed_latest_lint(&proposal_repo, &proposal).await?;
+    let mut result = serde_json::json!({ "latest_lint": latest_lint });
 
     if field_selected("proposal") {
         let acceptance: serde_json::Value =
@@ -587,6 +588,26 @@ pub(crate) async fn call_proposal_show(
         result["body"] = serde_json::json!(proposal.body);
         result["status"] = serde_json::json!(proposal.status);
         result["acceptance_criteria"] = acceptance;
+    }
+
+    if field_selected("revisions") {
+        let stored_revisions = proposal_repo
+            .revisions(&proposal.id)
+            .await
+            .map_err(|e| e.to_string())?;
+        let mut revisions = Vec::with_capacity(stored_revisions.len());
+        for revision in &stored_revisions {
+            let lint = proposal_repo
+                .lint_for_revision(revision)
+                .await
+                .map_err(|e| e.to_string())?;
+            let mut model = djinn_control_plane::tools::proposal_ops::ProposalRevisionModel::from(revision);
+            model.lint = Some(lint);
+            revisions.push(model);
+        }
+        let mode = p.revision_bodies.as_deref().unwrap_or("excerpt");
+        djinn_control_plane::tools::proposal_ops::apply_revision_body_mode(&mut revisions, mode);
+        result["revisions"] = serde_json::to_value(revisions).map_err(|e| e.to_string())?;
     }
 
     if field_selected("targets") {
