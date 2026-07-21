@@ -719,10 +719,12 @@ pub enum TransitionAction {
     /// reaper after a deploy) is adopted on every ready pass — skipping
     /// dispatch — but polled by NOBODY (the PR poller only polls
     /// `pr_draft`/`pr_review`), so it wedges (incident gton: 470 adoptions
-    /// overnight, 9h wedge). Only legal from `open`. Strike-free: it does NOT
-    /// bump `reopen_count`, carries no `reopen_class`, and records no
-    /// intervention — the PR already exists, this is a bookkeeping handoff, not
-    /// a rework. Applied by the coordinator with a `system` actor (no user).
+    /// overnight, 9h wedge). It is legal from every non-terminal status so the
+    /// coordinator terminal gate can preserve a PR discovered while handling
+    /// exhaustion. Strike-free: it does NOT bump `reopen_count`, carries no
+    /// `reopen_class`, and records no intervention — the PR already exists,
+    /// this is a bookkeeping handoff, not a rework. Applied by the coordinator
+    /// with a `system` actor (no user).
     AdoptionHandoff,
 }
 
@@ -1266,17 +1268,10 @@ pub fn compute_transition(
         }
 
         TransitionAction::AdoptionHandoff => {
-            // Respawn-guard open-PR adoption handoff: the guard adopted an
-            // existing open PR for a dispatch-eligible worker task, so move the
-            // task out of the dispatchable `open` column into the poller-owned
-            // `pr_review` column. Only legal from `open` — the adoption path
-            // only fires for `open` worker tasks, and a task already in a
-            // poller-owned status needs no handoff (the caller no-ops before
-            // reaching here). Strike-free, like `ParkForRemediation`: no
-            // `reopen_count` bump, no `reopen_class`, no intervention. The PR
-            // already exists; this is a bookkeeping handoff, not a rework.
-            if *from != TaskStatus::Open {
-                return bad("adoption_handoff is only valid from open");
+            // Shared poller handoff: the terminal exhaustion gate may discover
+            // a PR on any non-terminal row. It preserves owner and PR fields.
+            if matches!(from, TaskStatus::Closed) {
+                return bad("adoption_handoff is not valid from closed");
             }
             TransitionApply {
                 to_status: Some(TaskStatus::PrReview),
@@ -1332,6 +1327,7 @@ pub fn compute_transition_for_issue_type(
                 | TransitionAction::ParkForRemediation
                 | TransitionAction::ArbiterPark
                 | TransitionAction::ArbiterSupersede
+                | TransitionAction::AdoptionHandoff
         );
         if !allowed {
             return Err(Error::InvalidTransition(format!(

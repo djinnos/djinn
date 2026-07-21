@@ -445,67 +445,54 @@ const HANDOFF_ACTOR_ROLE: &str = "respawn_guard";
 ///
 /// Best-effort: transition errors are logged and never propagated. Returns
 /// `true` when the task was moved to `pr_review`, `false` on no-op/error.
-pub async fn handoff_adopted_pr_to_poller(
+pub async fn handoff_pr_to_poller(
     task_repo: &TaskRepository,
     task_id: &str,
     current_status: &str,
     pr_url: &str,
-) -> bool {
-    // Idempotent no-op: already poller-owned.
+    reason: &str,
+) -> std::result::Result<bool, String> {
     if current_status == TaskStatus::PrDraft.as_str()
         || current_status == TaskStatus::PrReview.as_str()
     {
-        tracing::debug!(
-            task_id = %task_id,
-            current_status = %current_status,
-            "respawn_guard: adopted task already poller-owned — handoff is a no-op"
-        );
-        return false;
+        tracing::debug!(task_id = %task_id, current_status = %current_status, "respawn_guard: task already poller-owned — handoff is a no-op");
+        return Ok(false);
     }
-    // The handoff transition is only legal from `open` (the adoption path only
-    // fires for dispatchable `open` worker tasks). Anything else is unexpected;
-    // don't force a status the state machine would reject.
-    if current_status != TaskStatus::Open.as_str() {
-        tracing::warn!(
-            task_id = %task_id,
-            current_status = %current_status,
-            pr_url = %pr_url,
-            "respawn_guard: adopted task in unexpected status — skipping poller handoff"
-        );
-        return false;
-    }
-    let reason =
-        format!("respawn_guard: adopted open PR {pr_url} — handing off to PR poller (pr_review)");
     match task_repo
         .transition(
             task_id,
             TransitionAction::AdoptionHandoff,
             HANDOFF_ACTOR_ID,
             HANDOFF_ACTOR_ROLE,
-            Some(&reason),
+            Some(reason),
             None,
         )
         .await
     {
         Ok(task) => {
-            tracing::info!(
-                task_id = %task_id,
-                pr_url = %pr_url,
-                to_status = %task.status,
-                "respawn_guard: adopted open PR handed off to PR poller (open → pr_review)"
-            );
-            true
+            tracing::info!(task_id = %task_id, pr_url = %pr_url, to_status = %task.status, "respawn_guard: PR handed off to poller (pr_review)");
+            Ok(true)
         }
         Err(e) => {
-            tracing::warn!(
-                task_id = %task_id,
-                pr_url = %pr_url,
-                error = %e,
-                "respawn_guard: failed to hand adopted PR off to PR poller (best-effort)"
-            );
-            false
+            tracing::warn!(task_id = %task_id, pr_url = %pr_url, error = %e, "respawn_guard: failed to hand PR off to poller");
+            Err(e.to_string())
         }
     }
+}
+
+/// Compatibility wrapper for the respawn-guard adoption path. The terminal
+/// gate uses [`handoff_pr_to_poller`] directly so it can fail safe on errors.
+pub async fn handoff_adopted_pr_to_poller(
+    task_repo: &TaskRepository,
+    task_id: &str,
+    current_status: &str,
+    pr_url: &str,
+) -> bool {
+    let reason =
+        format!("respawn_guard: adopted open PR {pr_url} — handing off to PR poller (pr_review)");
+    handoff_pr_to_poller(task_repo, task_id, current_status, pr_url, &reason)
+        .await
+        .unwrap_or(false)
 }
 
 #[cfg(test)]
