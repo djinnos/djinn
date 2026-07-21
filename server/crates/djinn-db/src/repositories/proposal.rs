@@ -1554,6 +1554,93 @@ impl ProposalRepository {
         .await?)
     }
 
+    /// Return lint results for one immutable stored revision.
+    ///
+    /// The lint table is a cache, not an authority: its version, revision
+    /// identity, body hash, serialized contract, format, and diagnostic spans
+    /// must all agree with the stored revision before it can be returned.
+    pub async fn lint_for_revision(
+        &self,
+        revision: &ProposalRevision,
+    ) -> Result<djinn_spec_lint::SpecLintResultV1> {
+        self.db.ensure_initialized().await?;
+
+        // Re-read the immutable snapshot rather than trusting a caller-provided
+        // body. This keeps recomputation bound to the exact persisted revision
+        // identified by all three parts of the lint table's foreign key.
+        let revision = sqlx::query_as::<_, ProposalRevision>(
+            r#"SELECT id, proposal_id, seq, title, body, body_format,
+                    acceptance_criteria::text AS acceptance_criteria,
+                    edited_by_user_id, event_kind, status_from, status_to,
+                    event_metadata::text AS event_metadata, created_at
+             FROM proposal_revisions
+             WHERE id = $1 AND proposal_id = $2 AND seq = $3"#,
+        )
+        .bind(&revision.id)
+        .bind(&revision.proposal_id)
+        .bind(revision.seq)
+        .fetch_optional(self.db.pool())
+        .await?
+        .ok_or_else(|| {
+            Error::InvalidData(format!(
+                "proposal revision not found: {}/{}/{}",
+                revision.proposal_id, revision.seq, revision.id
+            ))
+        })?;
+
+        let format = match revision.body_format.as_str() {
+            "markdown" => djinn_spec_lint::BodyFormat::Markdown,
+            "mdx" => djinn_spec_lint::BodyFormat::Mdx,
+            other => {
+                return Err(Error::InvalidData(format!(
+                    "invalid proposal body_format for spec lint: {other}"
+                )));
+            }
+        };
+        let expected_hash = djinn_spec_lint::body_sha256(&revision.body);
+
+        let cached = sqlx::query(
+            r#"SELECT linter_version, revision_id, body_sha256, result_json
+                 FROM proposal_revision_lint_results
+                 WHERE proposal_id = $1 AND revision_seq = $2
+                   AND linter_version = $3"#,
+        )
+        .bind(&revision.proposal_id)
+        .bind(revision.seq)
+        .bind(djinn_spec_lint::SpecLintResultV1::LINTER_VERSION)
+        .fetch_optional(self.db.pool())
+        .await?;
+
+        if let Some(cached) = cached {
+            let cached_version: String = cached.try_get("linter_version")?;
+            let cached_revision_id: String = cached.try_get("revision_id")?;
+            let cached_hash: String = cached.try_get("body_sha256")?;
+            let cached_json: serde_json::Value = cached.try_get("result_json")?;
+            if cached_version == djinn_spec_lint::SpecLintResultV1::LINTER_VERSION
+                && cached_revision_id == revision.id
+                && cached_hash == expected_hash
+                && let Ok(result) =
+                    serde_json::from_value::<djinn_spec_lint::SpecLintResultV1>(cached_json)
+                && result.linter_version == djinn_spec_lint::SpecLintResultV1::LINTER_VERSION
+                && result.body_sha256 == expected_hash
+                && result.body_format == format
+                && result.validate_for_body(&revision.body).is_ok()
+            {
+                return Ok(result);
+            }
+        }
+
+        // Repository reads must be reproducible even when repairing legacy or
+        // corrupt cache rows. This timestamp intentionally does not consult a
+        // clock; persisted creation-time results retain their own provenance.
+        let mut result = djinn_spec_lint::lint(&revision.body, format, "1970-01-01T00:00:00.000Z");
+        result.sort_violations();
+        result
+            .validate_for_body(&revision.body)
+            .map_err(|e| Error::Internal(format!("invalid spec lint result: {e}")))?;
+        Ok(result)
+    }
+
     /// Return the `created_at` of the latest `refinement_start` lifecycle event
     /// for this proposal — the boundary that separates the current refinement
     /// run's debate-trail entries from any prior (interrupted) run's entries.
@@ -3917,6 +4004,136 @@ mod tests {
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].entity_type, "proposal");
         assert_eq!(events[0].action, "created");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn lint_for_revision_returns_the_complete_valid_mdx_cache_entry() {
+        let db = test_db();
+        let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+        let proposal = repo
+            .create(ProposalCreateInput {
+                title: "MDX lint cache",
+                body: "<Callout id=\"note\">content</Callout>",
+                acceptance_criteria: None,
+                status: None,
+                body_format: Some("mdx"),
+            })
+            .await
+            .unwrap();
+        let revision = repo.revisions(&proposal.id).await.unwrap().remove(0);
+        let cached_json: serde_json::Value = sqlx::query_scalar(
+            "SELECT result_json FROM proposal_revision_lint_results WHERE proposal_id = $1 AND revision_seq = $2 AND linter_version = $3",
+        )
+        .bind(&revision.proposal_id)
+        .bind(revision.seq)
+        .bind(djinn_spec_lint::SpecLintResultV1::LINTER_VERSION)
+        .fetch_one(db.pool())
+        .await
+        .unwrap();
+        let cached: djinn_spec_lint::SpecLintResultV1 =
+            serde_json::from_value(cached_json).unwrap();
+
+        let result = repo.lint_for_revision(&revision).await.unwrap();
+        assert_eq!(
+            result, cached,
+            "a valid cache entry must be returned intact"
+        );
+        assert_eq!(result.body_format, djinn_spec_lint::BodyFormat::Mdx);
+        assert!(result.skipped_tiers.is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn lint_for_revision_recomputes_all_invalid_cache_cases_deterministically() {
+        let db = test_db();
+        let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+        let expected = djinn_spec_lint::lint(
+            "",
+            djinn_spec_lint::BodyFormat::Markdown,
+            "1970-01-01T00:00:00.000Z",
+        );
+
+        for (title, mutation) in [
+            (
+                "missing",
+                "DELETE FROM proposal_revision_lint_results WHERE proposal_id = $1 AND revision_seq = $2",
+            ),
+            (
+                "old version",
+                "UPDATE proposal_revision_lint_results SET linter_version = 'v0' WHERE proposal_id = $1 AND revision_seq = $2",
+            ),
+            (
+                "future version",
+                "UPDATE proposal_revision_lint_results SET linter_version = 'v999' WHERE proposal_id = $1 AND revision_seq = $2",
+            ),
+            (
+                "hash mismatch",
+                "UPDATE proposal_revision_lint_results SET body_sha256 = 'not-the-body-hash' WHERE proposal_id = $1 AND revision_seq = $2",
+            ),
+        ] {
+            let proposal = repo.create(create_input(title)).await.unwrap();
+            let revision = repo.revisions(&proposal.id).await.unwrap().remove(0);
+            sqlx::query(mutation)
+                .bind(&revision.proposal_id)
+                .bind(revision.seq)
+                .execute(db.pool())
+                .await
+                .unwrap();
+            assert_eq!(
+                repo.lint_for_revision(&revision).await.unwrap(),
+                expected,
+                "{title} cache row must recompute"
+            );
+        }
+
+        let proposal = repo.create(create_input("malformed json")).await.unwrap();
+        let revision = repo.revisions(&proposal.id).await.unwrap().remove(0);
+        sqlx::query(
+            "UPDATE proposal_revision_lint_results SET result_json = $1 WHERE proposal_id = $2 AND revision_seq = $3",
+        )
+        .bind(serde_json::json!({"not": "a SpecLintResultV1"}))
+        .bind(&revision.proposal_id)
+        .bind(revision.seq)
+        .execute(db.pool())
+        .await
+        .unwrap();
+        assert_eq!(repo.lint_for_revision(&revision).await.unwrap(), expected);
+
+        let proposal = repo.create(create_input("invalid span")).await.unwrap();
+        let revision = repo.revisions(&proposal.id).await.unwrap().remove(0);
+        sqlx::query(
+            "UPDATE proposal_revision_lint_results SET result_json = $1 WHERE proposal_id = $2 AND revision_seq = $3",
+        )
+        .bind(serde_json::json!({
+            "linter_version": "v1",
+            "body_sha256": djinn_spec_lint::body_sha256(""),
+            "body_format": "markdown",
+            "checked_at": "cached",
+            "errors": [{"code": "BAD", "severity": "error", "message": "bad", "span": {"start": 0, "end": 1}}],
+            "warnings": [],
+            "skipped_tiers": [{"tier": "mdx_structure", "reason": "BODY_FORMAT_MARKDOWN"}],
+        }))
+        .bind(&revision.proposal_id)
+        .bind(revision.seq)
+        .execute(db.pool())
+        .await
+        .unwrap();
+        assert_eq!(repo.lint_for_revision(&revision).await.unwrap(), expected);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn lint_for_revision_rejects_unknown_stored_body_format() {
+        let db = test_db();
+        let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+        let proposal = repo.create(create_input("unknown format")).await.unwrap();
+        let revision = repo.revisions(&proposal.id).await.unwrap().remove(0);
+        sqlx::query("UPDATE proposal_revisions SET body_format = 'rst' WHERE id = $1")
+            .bind(&revision.id)
+            .execute(db.pool())
+            .await
+            .unwrap();
+
+        let error = repo.lint_for_revision(&revision).await.unwrap_err();
+        assert!(format!("{error}").contains("invalid proposal body_format for spec lint: rst"));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
