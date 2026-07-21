@@ -68,6 +68,52 @@ function clamp(v: number, lo: number, hi: number): number {
   return Math.max(lo, Math.min(hi, v));
 }
 
+function lifecycleChangedTs(raw: Record<string, unknown>): number | null {
+  const v = raw.lifecycle_changed_at;
+  if (typeof v !== "string") return null;
+  const parsed = Date.parse(v);
+  return Number.isNaN(parsed) ? null : Math.floor(parsed / 1000);
+}
+
+export const GHOST_OPACITY = 0.22;
+export const GHOST_INTERACTION_OPACITY = 0.6;
+export const GHOST_LINK_OPACITY = 0.18;
+export const LIFECYCLE_FADE_MS = 600;
+const RECENT_LIFECYCLE_WINDOW_SECONDS = 7 * DAY;
+
+/** Pure timing helpers make the lifecycle fade independently testable. */
+export function isRecentLifecycleTransition(changedAt: number | null, referenceSeconds: number): boolean {
+  return changedAt !== null && changedAt <= referenceSeconds && referenceSeconds - changedAt <= RECENT_LIFECYCLE_WINDOW_SECONDS;
+}
+
+export function lifecycleGhostOpacity(
+  recent: boolean,
+  fadeStartedAt: number | undefined,
+  now: number,
+  reducedMotion: boolean,
+): number {
+  if (!recent || reducedMotion || fadeStartedAt === undefined) return GHOST_OPACITY;
+  return GHOST_INTERACTION_OPACITY + (GHOST_OPACITY - GHOST_INTERACTION_OPACITY) * clamp((now - fadeStartedAt) / LIFECYCLE_FADE_MS, 0, 1);
+}
+
+/** A fade begins only once its normal reveal completed and is never restarted. */
+export function shouldStartLifecycleFade(
+  recent: boolean,
+  reducedMotion: boolean,
+  birth: number,
+  fadeStartedAt: number | undefined,
+  completed: ReadonlySet<string>,
+  nodeId: string,
+): boolean {
+  return recent && !reducedMotion && birth >= 0.99 && fadeStartedAt === undefined && !completed.has(nodeId);
+}
+
+export function desaturate(hex: string): string {
+  const [r, g, b] = hexToRgb(hex);
+  const gray = Math.round(r * 0.299 + g * 0.587 + b * 0.114);
+  return `rgb(${gray},${gray},${gray})`;
+}
+
 /** FNV-1a — stable per-id seed for band placement jitter. */
 function hash(input: string): number {
   let h = 2166136261;
@@ -111,6 +157,8 @@ export interface DiskNode {
   isOrphan: boolean;
   isGhost: boolean;
   lifecycle: "active" | "archived" | "deprecated";
+  /** Server-recorded lifecycle transition, retained for the one-shot ghost fade. */
+  lifecycleChangedAt: number | null;
   connectionCount: number;
   color: string;
   ts: number | null;
@@ -133,6 +181,62 @@ interface DiskLink {
   a: number;
   b: number;
   kind: string;
+}
+
+/** A mixed lifecycle supersedes association always reads active → ghost. */
+export function visualLinkDirection(link: DiskLink, nodes: DiskNode[]): { from: number; to: number; directed: boolean } {
+  const a = nodes[link.a];
+  const b = nodes[link.b];
+  if (link.kind === "supersedes" && a.isGhost !== b.isGhost) {
+    return a.isGhost ? { from: link.b, to: link.a, directed: true } : { from: link.a, to: link.b, directed: true };
+  }
+  return { from: link.a, to: link.b, directed: false };
+}
+
+/** Rendering semantics shared by link batching and focused regression tests. */
+export function visualLinkStyle(link: DiskLink, nodes: DiskNode[]): {
+  batchKey: string;
+  dashed: boolean;
+  ghostConnected: boolean;
+  opacity: number;
+} {
+  const ghostConnected = nodes[link.a].isGhost || nodes[link.b].isGhost;
+  const typed = TYPED_EDGE_STYLES[link.kind];
+  return {
+    batchKey: `${link.kind}:${ghostConnected ? "ghost" : "ordinary"}`,
+    dashed: Boolean(typed?.dashed),
+    ghostConnected,
+    opacity: ghostConnected ? GHOST_LINK_OPACITY : typed ? 0.3 : 0.14,
+  };
+}
+
+/** Ghosts have no persistent canvas title; interaction reveals their pill. */
+export function ghostNodeRenderSemantics(
+  color: string,
+  isGhost: boolean,
+  hot: boolean,
+  recent: boolean,
+  fadeStartedAt: number | undefined,
+  now: number,
+  reducedMotion: boolean,
+): { fill: string; labelVisible: boolean; opacity: number } {
+  return {
+    fill: isGhost ? desaturate(color) : color,
+    labelVisible: isGhost && hot,
+    opacity: isGhost
+      ? (hot ? GHOST_INTERACTION_OPACITY : lifecycleGhostOpacity(recent, fadeStartedAt, now, reducedMotion))
+      : 1,
+  };
+}
+
+/** Preserve the canvas's pre-existing minimum pointer target outside the orb. */
+export function memoryGraphHitSlop(cameraScale: number): number {
+  return Math.max(10 / cameraScale, 6);
+}
+
+/** Keep the visible pointer/focus pill aligned with the ghost control's name. */
+export function memoryGraphHoverPillMeta(node: Pick<DiskNode, "isGhost" | "isOrphan" | "lifecycle" | "noteType" | "ts">): string {
+  return `${node.noteType}${node.ts ? ` · ${formatDay(node.ts)}` : ""}${node.isOrphan ? " · orphan" : ""}${node.isGhost ? ` · ${node.lifecycle}` : ""}`;
 }
 
 interface DiskRing {
@@ -362,6 +466,7 @@ export function buildMemoryGraphDisk(payload: MemoryGraphOutput): DiskModel {
       isOrphan: Boolean(n.is_orphan),
       isGhost: usesGhostFallback,
       lifecycle: n.status === "deprecated" ? "deprecated" : n.status === "archived" ? "archived" : "active",
+      lifecycleChangedAt: lifecycleChangedTs(n),
       connectionCount,
       color: colorForNote(n.note_type, Boolean(n.is_orphan)),
       ts: nodeTs(n),
@@ -411,7 +516,7 @@ export function buildMemoryGraphDisk(payload: MemoryGraphOutput): DiskModel {
     nodes.push({
       id: raw.id, title: raw.title, permalink: raw.permalink, noteType: raw.note_type,
       isProposal: raw.entity_type === "proposal", isOrphan: Boolean(raw.is_orphan), isGhost: true, lifecycle,
-      connectionCount, color: colorForNote(raw.note_type, Boolean(raw.is_orphan)), ts: nodeTs(raw),
+      connectionCount, color: colorForNote(raw.note_type, Boolean(raw.is_orphan)), ts: nodeTs(raw), lifecycleChangedAt: lifecycleChangedTs(raw),
       rec: recOf(raw), igniteAt: 0, tr, ring, r,
       x: (anchor?.x ?? 0) + Math.cos(angle) * distance,
       y: (anchor?.y ?? 0) + Math.sin(angle) * distance, vx: 0, vy: 0,
@@ -674,8 +779,11 @@ export function MemoryGraphCanvas({ projectSlug, reloadKey, onSelectNote }: Memo
   const cameraRef = useRef<Camera>({ k: 1, x: 0, y: 0 });
   const userCamRef = useRef(false);
   const hoverRef = useRef<number>(-1);
+  const focusRef = useRef<number>(-1);
   const hoverRingRef = useRef<number>(-1);
   const pointerRef = useRef<{ x: number; y: number } | null>(null);
+  const lifecycleFadeStartsRef = useRef<Map<string, number>>(new Map());
+  const completedLifecycleFadesRef = useRef<Set<string>>(new Set());
 
   // ── Fetch memory_graph on project / reload change ──────────────────────────
   useEffect(() => {
@@ -710,6 +818,8 @@ export function MemoryGraphCanvas({ projectSlug, reloadKey, onSelectNote }: Memo
         ringGrowRef.current = new Float32Array(disk.rings.length);
         labelFadeRef.current = new Float32Array(disk.rings.length);
         revealRef.current = 0;
+        lifecycleFadeStartsRef.current = new Map();
+        completedLifecycleFadesRef.current = new Set();
         playingRef.current = true;
         userCamRef.current = false;
         setPlaying(true);
@@ -874,33 +984,40 @@ export function MemoryGraphCanvas({ projectSlug, reloadKey, onSelectNote }: Memo
       // Links: quiet threads; a hovered node's links light up. Quiet edges
       // batch into one path per style so a 10k-edge graph costs a handful of
       // stroke calls, not one per edge.
-      const hover = hoverRef.current;
+      const hover = focusRef.current >= 0 ? focusRef.current : hoverRef.current;
       const revealed = (idx: number) => disk.nodes[idx].igniteAt <= reveal + 1e-3;
       const hotLinks: DiskLink[] = [];
       const quietByStyle = new Map<string, DiskLink[]>();
       for (const l of disk.links) {
         if (!revealed(l.a) || !revealed(l.b)) continue;
+        if (visualLinkDirection(l, disk.nodes).directed) {
+          hotLinks.push(l);
+          continue;
+        }
         if (hover === l.a || hover === l.b) {
           hotLinks.push(l);
           continue;
         }
-        const bucket = quietByStyle.get(l.kind);
+        const bucketKey = visualLinkStyle(l, disk.nodes).batchKey;
+        const bucket = quietByStyle.get(bucketKey);
         if (bucket) bucket.push(l);
-        else quietByStyle.set(l.kind, [l]);
+        else quietByStyle.set(bucketKey, [l]);
       }
-      for (const [kind, bucket] of quietByStyle) {
+      for (const [, bucket] of quietByStyle) {
+        const kind = bucket[0].kind;
         const typed = TYPED_EDGE_STYLES[kind];
+        const style = visualLinkStyle(bucket[0], disk.nodes);
         ctx.beginPath();
         for (const l of bucket) {
           ctx.moveTo(disk.nodes[l.a].x, disk.nodes[l.a].y);
           ctx.lineTo(disk.nodes[l.b].x, disk.nodes[l.b].y);
         }
         if (typed) {
-          ctx.strokeStyle = rgba(typed.color, 0.3);
+          ctx.strokeStyle = rgba(typed.color, style.opacity);
           ctx.lineWidth = 0.9 / cam.k;
-          ctx.setLineDash(typed.dashed ? [4 / cam.k, 4 / cam.k] : []);
+          ctx.setLineDash(style.dashed ? [4 / cam.k, 4 / cam.k] : []);
         } else {
-          ctx.strokeStyle = "rgba(148,163,184,0.14)";
+          ctx.strokeStyle = `rgba(148,163,184,${style.opacity})`;
           ctx.lineWidth = 0.7 / cam.k;
           ctx.setLineDash([]);
         }
@@ -908,11 +1025,19 @@ export function MemoryGraphCanvas({ projectSlug, reloadKey, onSelectNote }: Memo
       }
       for (const l of hotLinks) {
         const typed = TYPED_EDGE_STYLES[l.kind];
+        const direction = visualLinkDirection(l, disk.nodes);
+        const from = disk.nodes[direction.from];
+        const to = disk.nodes[direction.to];
         ctx.beginPath();
-        ctx.moveTo(disk.nodes[l.a].x, disk.nodes[l.a].y);
-        ctx.lineTo(disk.nodes[l.b].x, disk.nodes[l.b].y);
+        ctx.moveTo(from.x, from.y);
+        ctx.lineTo(to.x, to.y);
         if (typed) {
-          ctx.strokeStyle = rgba(typed.color, 0.85);
+          if (direction.directed) {
+            const gradient = ctx.createLinearGradient(from.x, from.y, to.x, to.y);
+            gradient.addColorStop(0, rgba(typed.color, 0.85));
+            gradient.addColorStop(1, rgba(desaturate(typed.color), GHOST_INTERACTION_OPACITY));
+            ctx.strokeStyle = gradient;
+          } else ctx.strokeStyle = rgba(typed.color, 0.85);
           ctx.lineWidth = 1.4 / cam.k;
           ctx.setLineDash(typed.dashed ? [4 / cam.k, 4 / cam.k] : []);
         } else {
@@ -921,6 +1046,17 @@ export function MemoryGraphCanvas({ projectSlug, reloadKey, onSelectNote }: Memo
           ctx.setLineDash([]);
         }
         ctx.stroke();
+        if (direction.directed && typed) {
+          const angle = Math.atan2(to.y - from.y, to.x - from.x);
+          const arrow = 5 / cam.k;
+          ctx.beginPath();
+          ctx.moveTo(to.x, to.y);
+          ctx.lineTo(to.x - Math.cos(angle - 0.5) * arrow, to.y - Math.sin(angle - 0.5) * arrow);
+          ctx.lineTo(to.x - Math.cos(angle + 0.5) * arrow, to.y - Math.sin(angle + 0.5) * arrow);
+          ctx.closePath();
+          ctx.fillStyle = rgba(desaturate(typed.color), GHOST_INTERACTION_OPACITY);
+          ctx.fill();
+        }
       }
       ctx.setLineDash([]);
 
@@ -937,6 +1073,23 @@ export function MemoryGraphCanvas({ projectSlug, reloadKey, onSelectNote }: Memo
         const ink = styleInk(n.rec) * birth * (n.isOrphan ? 0.55 : 1);
         const hot = hover === i;
         const r = n.r * (0.35 + 0.65 * birth) * (hot ? 1.25 : 1);
+
+        if (n.isGhost) {
+          const reducedMotion = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false;
+          const recent = isRecentLifecycleTransition(n.lifecycleChangedAt, Math.floor(Date.now() / 1000));
+          let fadeStartedAt = lifecycleFadeStartsRef.current.get(n.id);
+          if (shouldStartLifecycleFade(recent, reducedMotion, birth, fadeStartedAt, completedLifecycleFadesRef.current, n.id)) {
+            fadeStartedAt = now;
+            lifecycleFadeStartsRef.current.set(n.id, now);
+          }
+          const ghostInk = ghostNodeRenderSemantics(n.color, true, hot, recent, fadeStartedAt, now, reducedMotion).opacity;
+          if (fadeStartedAt !== undefined && now - fadeStartedAt >= LIFECYCLE_FADE_MS) {
+            completedLifecycleFadesRef.current.add(n.id);
+            lifecycleFadeStartsRef.current.delete(n.id);
+          }
+          drawOrb(ctx, n.x, n.y, r, desaturate(n.color), ghostInk * birth, ghostInk * 0.38, glowMult, n.isProposal, 1);
+          return;
+        }
 
         if (hot) {
           drawOrb(ctx, n.x, n.y, r, n.color, clamp(ink + 0.15, 0, 1), 0.6 * ink, glowMult, n.isProposal, 1);
@@ -978,7 +1131,7 @@ export function MemoryGraphCanvas({ projectSlug, reloadKey, onSelectNote }: Memo
         const n = disk.nodes[hover];
         const sx = n.x * cam.k + cam.x;
         const sy = n.y * cam.k + cam.y;
-        const meta = `${n.noteType}${n.ts ? ` · ${formatDay(n.ts)}` : ""}${n.isOrphan ? " · orphan" : ""}`;
+        const meta = memoryGraphHoverPillMeta(n);
         ctx.font = "11px JetBrains Mono, ui-monospace, monospace";
         const w = Math.max(ctx.measureText(n.title).width, ctx.measureText(meta).width) + 16;
         const bx = clamp(sx + 12, 4, size.w - w - 4);
@@ -1003,7 +1156,7 @@ export function MemoryGraphCanvas({ projectSlug, reloadKey, onSelectNote }: Memo
         const wx = (p.x - cam.x) / cam.k;
         const wy = (p.y - cam.y) / cam.k;
         let best = -1;
-        let bestD = Math.max(10 / cam.k, 6);
+        let bestD = memoryGraphHitSlop(cam.k);
         disk.nodes.forEach((n, i) => {
           if (appear[i] <= 0.5) return;
           const d = Math.hypot(n.x - wx, n.y - wy) - n.r;
@@ -1140,6 +1293,26 @@ export function MemoryGraphCanvas({ projectSlug, reloadKey, onSelectNote }: Memo
         onPointerLeave={onPointerLeave}
         onWheel={onWheel}
       />
+
+      {/* Canvas cannot expose its hit targets to assistive technology. These
+          controls deliberately mirror only ghosts; focus drives the same
+          canvas hover state and activation follows the pointer callback. */}
+      {disk && (
+        <div className="sr-only" aria-label="Lifecycle ghost notes">
+          {disk.nodes.map((node, index) => node.isGhost && (
+            <button
+              key={node.id}
+              type="button"
+              aria-label={`${node.title} — ${node.lifecycle}`}
+              onFocus={() => { focusRef.current = index; }}
+              onBlur={() => { if (focusRef.current === index) focusRef.current = -1; }}
+              onClick={() => onSelectNote?.(node.permalink)}
+            >
+              {node.title} — {node.lifecycle}
+            </button>
+          ))}
+        </div>
+      )}
 
       <label className="absolute right-3 top-3 z-10 flex items-center gap-2 rounded-full border border-[#2d2d3d] bg-[#0a0a10]/85 px-3 py-2 text-xs text-zinc-300 backdrop-blur">
         <input
