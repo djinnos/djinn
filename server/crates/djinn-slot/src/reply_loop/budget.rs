@@ -66,9 +66,44 @@ impl UsageAccountingForTest {
         );
     }
 
-    /// Compaction clears only the old request's occupancy snapshot.
-    pub fn clear_occupancy_after_compaction(&mut self) {
+    /// A reactive compaction clears only the old request's occupancy snapshot.
+    pub fn clear_occupancy_after_reactive_compaction(&mut self) {
         self.current_context_tokens = 0;
+    }
+
+    /// A proactive compaction clears only the old request's occupancy snapshot.
+    pub fn clear_occupancy_after_proactive_compaction(&mut self) {
+        self.current_context_tokens = 0;
+    }
+
+    /// Evaluate the production soft cumulative-spend predicate for a fixed test
+    /// budget. Context occupancy is deliberately not an input to this decision.
+    pub fn exceeds_soft_lifetime_budget(
+        &self,
+        max_cumulative_tokens: u64,
+        soft_threshold_ratio: f64,
+    ) -> bool {
+        lifetime_budget_threshold_exceeded(
+            self.lifetime_tokens_in,
+            self.lifetime_tokens_out,
+            max_cumulative_tokens,
+            soft_threshold_ratio,
+        )
+    }
+
+    /// Evaluate the production hard cumulative-spend predicate for a fixed test
+    /// budget. Context occupancy is deliberately not an input to this decision.
+    pub fn exceeds_hard_lifetime_budget(
+        &self,
+        max_cumulative_tokens: u64,
+        hard_threshold_ratio: f64,
+    ) -> bool {
+        lifetime_budget_threshold_exceeded(
+            self.lifetime_tokens_in,
+            self.lifetime_tokens_out,
+            max_cumulative_tokens,
+            hard_threshold_ratio,
+        )
     }
 }
 
@@ -250,56 +285,51 @@ impl SessionBudgetPolicy {
     }
 }
 
-/// Decide whether the reply loop's in-memory usage accumulator has crossed
-/// the resolved soft-threshold for the session budget.
+/// Decide whether the reply loop's lifetime spend has crossed the resolved
+/// soft-threshold for the session budget.
 pub(crate) fn soft_budget_threshold_exceeded(
     budget: &ResolvedSessionBudget,
     total_tokens_in: u32,
     total_tokens_out: u32,
-    current_context_tokens: u32,
 ) -> bool {
-    if budget.max_cumulative_tokens == 0 || budget.soft_threshold_ratio <= 0.0 {
-        return false;
-    }
-    let cumulative_spend = total_tokens_in.saturating_add(total_tokens_out);
-    let soft_cap = (budget.max_cumulative_tokens as f64) * budget.soft_threshold_ratio;
-    if (cumulative_spend as f64) >= soft_cap {
-        return true;
-    }
-    if budget.context_window_known && budget.context_window_tokens > 0 {
-        let context_pressure =
-            (current_context_tokens as f64) / (budget.context_window_tokens as f64);
-        if context_pressure >= budget.soft_threshold_ratio {
-            return true;
-        }
-    }
-    false
+    lifetime_budget_threshold_exceeded(
+        total_tokens_in,
+        total_tokens_out,
+        budget.max_cumulative_tokens,
+        budget.soft_threshold_ratio,
+    )
 }
 
-/// Decide whether the reply loop's in-memory usage accumulator has crossed
-/// the resolved hard-threshold for the session budget.
+/// Decide whether the reply loop's lifetime spend has crossed the resolved
+/// hard-threshold for the session budget.
 pub(crate) fn hard_budget_threshold_exceeded(
     budget: &ResolvedSessionBudget,
     total_tokens_in: u32,
     total_tokens_out: u32,
-    current_context_tokens: u32,
 ) -> bool {
-    if budget.max_cumulative_tokens == 0 || budget.hard_threshold_ratio <= 0.0 {
+    lifetime_budget_threshold_exceeded(
+        total_tokens_in,
+        total_tokens_out,
+        budget.max_cumulative_tokens,
+        budget.hard_threshold_ratio,
+    )
+}
+
+/// Shared cumulative-spend predicate used by the reply loop and its stable
+/// test-support seam. Current-context occupancy is intentionally excluded:
+/// `needs_compaction` owns context-window pressure decisions.
+fn lifetime_budget_threshold_exceeded(
+    total_tokens_in: u32,
+    total_tokens_out: u32,
+    max_cumulative_tokens: u64,
+    threshold_ratio: f64,
+) -> bool {
+    if max_cumulative_tokens == 0 || threshold_ratio <= 0.0 {
         return false;
     }
     let cumulative_spend = total_tokens_in.saturating_add(total_tokens_out);
-    let hard_cap = (budget.max_cumulative_tokens as f64) * budget.hard_threshold_ratio;
-    if (cumulative_spend as f64) >= hard_cap {
-        return true;
-    }
-    if budget.context_window_known && budget.context_window_tokens > 0 {
-        let context_pressure =
-            (current_context_tokens as f64) / (budget.context_window_tokens as f64);
-        if context_pressure >= budget.hard_threshold_ratio {
-            return true;
-        }
-    }
-    false
+    let threshold_cap = (max_cumulative_tokens as f64) * threshold_ratio;
+    (cumulative_spend as f64) >= threshold_cap
 }
 
 impl Default for SessionBudgetPolicy {

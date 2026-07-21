@@ -450,16 +450,10 @@ async fn maybe_inject_soft_budget_reminder(
     turns: u32,
     total_tokens_in: u32,
     total_tokens_out: u32,
-    current_context_tokens: u32,
     conversation: &mut Conversation,
 ) -> bool {
     if *injected
-        || !soft_budget_threshold_exceeded(
-            session_budget,
-            total_tokens_in,
-            total_tokens_out,
-            current_context_tokens,
-        )
+        || !soft_budget_threshold_exceeded(session_budget, total_tokens_in, total_tokens_out)
     {
         return false;
     }
@@ -679,12 +673,8 @@ pub async fn run_reply_loop(
         // we settle the session as a typed no_progress_submission.
         let mut no_progress_guard_triggered = false;
         loop {
-            let hard_budget_exceeded = hard_budget_threshold_exceeded(
-                &session_budget,
-                total_tokens_in,
-                total_tokens_out,
-                current_context_tokens,
-            );
+            let hard_budget_exceeded =
+                hard_budget_threshold_exceeded(&session_budget, total_tokens_in, total_tokens_out);
             let budget_wind_down_should_stop = budget_wind_down_final_turn_spent
                 && wind_down_reason
                     .as_ref()
@@ -758,7 +748,6 @@ pub async fn run_reply_loop(
                 turns,
                 total_tokens_in,
                 total_tokens_out,
-                current_context_tokens,
                 conversation,
             )
             .await;
