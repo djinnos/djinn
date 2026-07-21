@@ -2099,6 +2099,12 @@ async fn preservation_gate_called_during_terminal_task_failure() {
         !active.iter().any(|s| s.id == session.id),
         "session should be interrupted after terminal task failure"
     );
+
+    let closed_task = task_repo.get(&task.id).await.unwrap().unwrap();
+    assert_eq!(
+        closed_task.status, "closed",
+        "the PR-less terminal path must still ForceClose after checkpoint/session handling"
+    );
 }
 
 /// Preservation telemetry counter is incremented with the right outcome and
