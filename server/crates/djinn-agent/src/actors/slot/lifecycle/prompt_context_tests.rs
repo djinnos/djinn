@@ -2317,6 +2317,11 @@ async fn planner_production_boundary_scope_budget_runs_planner_without_injection
     let knowledge = context.knowledge_context.expect("scope context");
     assert!(knowledge.contains("Scope budget note"));
     assert!(!knowledge.contains("Oversized planned note"));
+    assert_eq!(knowledge.lines().count(), 1, "configured top-K limits scope retrieval");
+    assert!(
+        knowledge.lines().all(|line| line.len() <= 128),
+        "configured line cap truncates the scope summary rather than using the total budget"
+    );
     assert!(
         knowledge.len()
             <= app_state

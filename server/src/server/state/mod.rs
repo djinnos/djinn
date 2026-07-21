@@ -3714,6 +3714,36 @@ mod build_admission_config_tests {
         )
     }
 
+    #[test]
+    fn agent_context_preserves_startup_resolved_knowledge_injection_config() {
+        let resolved = KnowledgeInjectionConfig {
+            knowledge_injection_budget_bytes: 4_096,
+            knowledge_injection_line_cap_bytes: 256,
+            knowledge_injection_limit: 3,
+            injection_starvation_threshold_percent: 50,
+            injection_starvation_query_floor: 20,
+            retrieval_health_window_minutes: 1_440,
+        };
+        let db = Database::open_in_memory().expect("test database");
+        let runtime = DatabaseRuntimeManager::new(
+            crate::db::runtime::DatabaseRuntimeConfig::postgres(db.bootstrap_info().target.clone()),
+        );
+        let state = AppState::new_inner(
+            db,
+            runtime,
+            CancellationToken::new(),
+            djinn_core::doctor::RetrievalHealthConfig::default(),
+            Arc::new(djinn_telemetry::memory_retrieval::MemoryRetrievalMetrics::new()),
+            resolved,
+            BuildAdmissionConfig {
+                mode: BuildAdmissionMode::Observe,
+                cap: BuildAdmissionConfig::DEFAULT_CAP,
+            },
+        );
+
+        assert_eq!(state.agent_context().knowledge_injection, resolved);
+    }
+
     fn admission(state: &AppState) -> &Arc<BuildAdmissionController> {
         state
             .inner
