@@ -14,6 +14,70 @@ fn rendered_counter_value(metric: &str, kind: &str) -> f64 {
         .unwrap_or(0.0)
 }
 
+/// Read one bounded strike-decision series from the process recorder. The
+/// cross-path tests take a render delta around the live coordinator call, not
+/// around the retry classifier, because the coordinator owns metric emission.
+fn rendered_strike_decision_value(decision: &str, source: &str) -> f64 {
+    let rendered = djinn_telemetry::render().unwrap();
+    let prefix = format!(
+        "djinn_dispatch_strike_decisions_total{{decision=\"{decision}\",source=\"{source}\"}} "
+    );
+    rendered
+        .lines()
+        .find_map(|line| line.strip_prefix(&prefix))
+        .unwrap_or_else(|| panic!("missing strike-decision series {decision}/{source}"))
+        .parse()
+        .unwrap()
+}
+
+/// Guard the cardinality contract at the rendered recorder boundary. Dispatch
+/// identity is durable evidence and structured logging context, never a metric
+/// label: this counter may have exactly its bounded decision/source pair.
+fn assert_strike_decision_labels_are_bounded() {
+    let rendered = djinn_telemetry::render().unwrap();
+    let allowed_decisions = ["counted", "exempted"];
+    let allowed_sources = [
+        "environmental_owner_expired",
+        "spawn_failed",
+        "crashed",
+        "other_terminal",
+    ];
+    let series: Vec<_> = rendered
+        .lines()
+        .filter(|line| line.starts_with("djinn_dispatch_strike_decisions_total{"))
+        .collect();
+    assert!(
+        !series.is_empty(),
+        "strike-decision metric must render series"
+    );
+    for line in series {
+        let labels = line
+            .strip_prefix("djinn_dispatch_strike_decisions_total{")
+            .and_then(|line| line.split_once("} "))
+            .map(|(labels, _)| labels)
+            .unwrap_or_else(|| panic!("malformed strike-decision series: {line}"));
+        let mut labels = labels.split(',');
+        let decision = labels.next().unwrap_or_default();
+        let source = labels.next().unwrap_or_default();
+        assert!(
+            labels.next().is_none(),
+            "unexpected identifying label in {line}"
+        );
+        assert!(
+            allowed_decisions.contains(
+                &decision
+                    .trim_start_matches("decision=\"")
+                    .trim_end_matches('"')
+            ),
+            "unexpected decision label in {line}"
+        );
+        assert!(
+            allowed_sources.contains(&source.trim_start_matches("source=\"").trim_end_matches('"')),
+            "unexpected source label in {line}"
+        );
+    }
+}
+
 // ── Model failover via the health circuit-breaker ────────────────────────
 
 /// A model tripped on a stall is skipped by `try_dispatch_to_pool`, which
@@ -7372,26 +7436,44 @@ async fn spawn_failed_dispatch_orphan_reaches_no_pr_terminal_cap_live() {
         .unwrap();
     let attempts = TaskAttemptRepository::new(db.clone());
     let mut actor = coordinator_actor_for_tests(&db, &tx);
+    // Capture the first persisted spawn-failure evaluation. Later loop rounds
+    // prove the cap; this delta proves the live coordinator emits exactly once.
+    let counted_before = rendered_strike_decision_value("counted", "spawn_failed");
 
     for strike in 1..=MAX_DISPATCH_FAILURES {
         let attempt_id = seed_pending_attempt(&db, &task.id, "lead").await;
-        attempts.advance_to_terminal(TerminalTaskAttemptParams {
-            id: &attempt_id,
-            outcome: TaskAttemptOutcome::SpawnFailed,
-            pr_url: None,
-            submit_ref: None,
-            checkpoint_ref: None,
-            mirror_head_sha: None,
-            github_head_sha: None,
-            summary: Some("dispatch setup failed"),
-            summary_json: Some(r#"{"failure_class":"dispatch_failure_orphan"}"#),
-            log_tail: None,
-        }).await.unwrap();
-        actor.last_dispatched.insert(task.id.clone(), DispatchMarker {
-            instant: StdInstant::now(), role: "lead".to_owned(),
-        });
+        attempts
+            .advance_to_terminal(TerminalTaskAttemptParams {
+                id: &attempt_id,
+                outcome: TaskAttemptOutcome::SpawnFailed,
+                pr_url: None,
+                submit_ref: None,
+                checkpoint_ref: None,
+                mirror_head_sha: None,
+                github_head_sha: None,
+                summary: Some("dispatch setup failed"),
+                summary_json: Some(r#"{"failure_class":"dispatch_failure_orphan"}"#),
+                log_tail: None,
+            })
+            .await
+            .unwrap();
+        actor.last_dispatched.insert(
+            task.id.clone(),
+            DispatchMarker {
+                instant: StdInstant::now(),
+                role: "lead".to_owned(),
+            },
+        );
 
         actor.dispatch_ready_tasks(Some(&task.project_id)).await;
+        if strike == 1 {
+            assert_eq!(
+                rendered_strike_decision_value("counted", "spawn_failed") - counted_before,
+                1.0,
+                "one live spawn_failed reappearance must emit one counted decision"
+            );
+            assert_strike_decision_labels_are_bounded();
+        }
         if strike < MAX_DISPATCH_FAILURES {
             assert_eq!(actor.dispatch_failure_streak.get(&task.id), Some(&strike));
             assert!(actor.dispatch_cooldowns.contains_key(&task.id));
@@ -7401,7 +7483,10 @@ async fn spawn_failed_dispatch_orphan_reaches_no_pr_terminal_cap_live() {
     }
 
     let closed = TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx))
-        .get(&task.id).await.unwrap().unwrap();
+        .get(&task.id)
+        .await
+        .unwrap()
+        .unwrap();
     assert!(closed.pr_url.is_none(), "fixture is intentionally PR-less");
     assert_eq!(closed.status, "closed");
 }
@@ -7423,24 +7508,59 @@ async fn expired_owner_group_reap_redispatches_without_touching_peer_group() {
     let unrelated_group = uuid::Uuid::now_v7().to_string();
 
     let coordinator_attempt = record_dispatch_start_with_identity(
-        &db, &task.id, "lead", None, "coordinator-dispatch-start", &owner, &group,
-    ).await.expect("persist coordinator dispatch-start");
+        &db,
+        &task.id,
+        "lead",
+        None,
+        "coordinator-dispatch-start",
+        &owner,
+        &group,
+    )
+    .await
+    .expect("persist coordinator dispatch-start");
     let supervisor_attempt = record_dispatch_start_with_identity(
-        &db, &task.id, "worker", None, "task-run:supervisor-run", &owner, &group,
-    ).await.expect("persist correlated supervisor attempt");
+        &db,
+        &task.id,
+        "worker",
+        None,
+        "task-run:supervisor-run",
+        &owner,
+        &group,
+    )
+    .await
+    .expect("persist correlated supervisor attempt");
     let run_repo = TaskRunRepository::new(db.clone());
-    run_repo.create(CreateTaskRunParams {
-        id: "supervisor-run", project_id: &task.project_id, task_id: &task.id,
-        trigger_type: "new_task", status: Some("running"), workspace_path: None,
-        mirror_ref: None, dispatch_group_id: Some(&group),
-    }).await.expect("persist live supervisor run");
+    run_repo
+        .create(CreateTaskRunParams {
+            id: "supervisor-run",
+            project_id: &task.project_id,
+            task_id: &task.id,
+            trigger_type: "new_task",
+            status: Some("running"),
+            workspace_path: None,
+            mirror_ref: None,
+            dispatch_group_id: Some(&group),
+        })
+        .await
+        .expect("persist live supervisor run");
     let unrelated = record_dispatch_start_with_identity(
-        &db, &task.id, "planner", None, "unrelated-dispatch-start", &owner, &unrelated_group,
-    ).await.expect("persist unrelated pending group");
+        &db,
+        &task.id,
+        "planner",
+        None,
+        "unrelated-dispatch-start",
+        &owner,
+        &unrelated_group,
+    )
+    .await
+    .expect("persist unrelated pending group");
 
     // The restart ends the live supervisor run; only then does the exact owner
     // expire. Every pending row is equally old enough to be a reap candidate.
-    run_repo.update_status("supervisor-run", TaskRunStatus::Interrupted).await.unwrap();
+    run_repo
+        .update_status("supervisor-run", TaskRunStatus::Interrupted)
+        .await
+        .unwrap();
     for attempt in [&coordinator_attempt, &supervisor_attempt, &unrelated] {
         backdate_attempt(&db, attempt).await;
     }
@@ -7450,23 +7570,47 @@ async fn expired_owner_group_reap_redispatches_without_touching_peer_group() {
     let attempts = TaskAttemptRepository::new(db.clone());
     for attempt in [&coordinator_attempt, &supervisor_attempt] {
         let row = attempts.get(attempt).await.unwrap().unwrap();
-        let evidence: serde_json::Value = serde_json::from_str(row.summary_json.as_deref().unwrap()).unwrap();
+        let evidence: serde_json::Value =
+            serde_json::from_str(row.summary_json.as_deref().unwrap()).unwrap();
         assert_eq!(row.outcome, "interrupted");
         assert_eq!(evidence["failure_class"], "environmental_owner_expired");
         assert_eq!(evidence["owner_incarnation_id"], owner);
         assert!(evidence["owner_lease_last_renewed_at"].is_string());
     }
-    assert_eq!(attempts.get(&unrelated).await.unwrap().unwrap().outcome, "pending");
+    assert_eq!(
+        attempts.get(&unrelated).await.unwrap().unwrap().outcome,
+        "pending"
+    );
 
     let mut actor = coordinator_actor_for_tests(&db, &tx);
-    actor.last_dispatched.insert(task.id.clone(), DispatchMarker {
-        instant: StdInstant::now(), role: "worker".to_owned(),
-    });
+    actor.last_dispatched.insert(
+        task.id.clone(),
+        DispatchMarker {
+            instant: StdInstant::now(),
+            role: "worker".to_owned(),
+        },
+    );
+    // The decision is emitted by dispatch_ready_tasks, after it reads the
+    // reaper's durable evidence; rendering around this call keeps the test on
+    // the real persisted owner-expiry path.
+    let exempted_before = rendered_strike_decision_value("exempted", "environmental_owner_expired");
     actor.dispatch_ready_tasks(Some(&task.project_id)).await;
-    assert_eq!(actor.dispatched, 1, "evidenced interruption must redispatch");
+    assert_eq!(
+        rendered_strike_decision_value("exempted", "environmental_owner_expired") - exempted_before,
+        1.0,
+        "one live reaped environmental interruption must emit one exempted decision"
+    );
+    assert_strike_decision_labels_are_bounded();
+    assert_eq!(
+        actor.dispatched, 1,
+        "evidenced interruption must redispatch"
+    );
     assert!(!actor.dispatch_failure_streak.contains_key(&task.id));
     assert!(!actor.dispatch_cooldowns.contains_key(&task.id));
     let refreshed = TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx))
-        .get(&task.id).await.unwrap().unwrap();
+        .get(&task.id)
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(refreshed.status, "open");
 }
