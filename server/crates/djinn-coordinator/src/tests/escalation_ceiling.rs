@@ -273,6 +273,89 @@ async fn below_ceiling_creates_planner_escalation_and_parks() {
     }
 }
 
+/// Snapshot observations are useful to the PR poller, but terminal exhaustion
+/// never treats them (or cached `Task.ci_status`) as authority to destroy a
+/// durable PR. Each table row reaches the autonomous ceiling through the real
+/// caller and must take the same poller-owned handoff.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn ceiling_pr_handoff_is_invariant_across_pr_snapshot_observations() {
+    struct SnapshotCase {
+        name: &'static str,
+        status: CiStatus,
+        head: &'static str,
+        baseline: Option<&'static str>,
+    }
+
+    let cases = [
+        SnapshotCase { name: "current-head-passing-mergeable", status: CiStatus::Passing, head: "green-head", baseline: Some("green-head") },
+        SnapshotCase { name: "head-mismatch-push-race", status: CiStatus::Passing, head: "pushed-head", baseline: Some("old-head") },
+        SnapshotCase { name: "pending-checks", status: CiStatus::Pending, head: "pending-head", baseline: Some("pending-head") },
+        SnapshotCase { name: "unknown-checks", status: CiStatus::Unknown, head: "unknown-head", baseline: Some("unknown-head") },
+        SnapshotCase { name: "unknown-mergeability", status: CiStatus::Passing, head: "mergeability-unknown", baseline: None },
+        SnapshotCase { name: "github-observation-unavailable", status: CiStatus::Unknown, head: "unavailable-head", baseline: None },
+    ];
+
+    let db = test_helpers::create_test_db();
+    let (tx, _rx) = broadcast::channel(256);
+    let repo = TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx));
+    let mut actor = coordinator_actor_for_tests(&db, &tx);
+
+    for (index, case) in cases.iter().enumerate() {
+        let task = make_task_with_reopen_count(&db, &tx, 0).await;
+        repo.set_pr_url(
+            &task.id,
+            &format!("https://github.example/acme/repo/pull/{}", 9000 + index),
+        )
+        .await
+        .unwrap();
+        let observed = seed_failing_ci_snapshot(
+            &repo,
+            &task,
+            case.head,
+            case.baseline,
+            0,
+            case.status.clone(),
+        )
+        .await;
+        for n in 0..(MAX_AUTONOMOUS_ESCALATIONS as usize) {
+            seed_prior_escalation(&db, &repo, &observed, n).await;
+        }
+
+        assert!(
+            !actor
+                .escalate_to_planner_or_terminally_fail(&observed, case.name)
+                .await,
+            "{} must reach the terminal gate rather than create another escalation",
+            case.name
+        );
+        let after = repo.get(&task.id).await.unwrap().unwrap();
+        assert_eq!(after.status, "pr_review", "{}", case.name);
+        assert_eq!(after.owner, observed.owner, "{}", case.name);
+        assert_eq!(
+            repo.list_blockers(&task.id).await.unwrap().len(),
+            MAX_AUTONOMOUS_ESCALATIONS as usize,
+            "{} must not create a fresh remediation blocker", case.name
+        );
+        assert!(
+            repo.list_activity(&task.id).await.unwrap().iter().any(|entry| {
+                entry.payload.contains("terminal_close_deferred_pr_handoff")
+            }),
+            "{} must record the identical durable PR handoff", case.name
+        );
+    }
+
+    // The no-PR control uses the same exhausted autonomous caller and retains
+    // its established ForceClose behavior.
+    let no_pr = make_task_with_reopen_count(&db, &tx, 0).await;
+    for n in 0..(MAX_AUTONOMOUS_ESCALATIONS as usize) {
+        seed_prior_escalation(&db, &repo, &no_pr, n).await;
+    }
+    assert!(!actor.escalate_to_planner_or_terminally_fail(&no_pr, "no-pr-control").await);
+    let no_pr_after = repo.get(&no_pr.id).await.unwrap().unwrap();
+    assert_eq!(no_pr_after.status, "closed");
+    assert!(no_pr_after.close_reason.is_some());
+}
+
 /// At the ceiling: the loop-breaker terminally fails (ForceClose) the source
 /// instead of creating another escalation, releasing its blockers. No human
 /// hold is ever produced.
