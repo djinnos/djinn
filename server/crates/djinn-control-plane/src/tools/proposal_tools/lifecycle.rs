@@ -325,9 +325,6 @@ impl DjinnMcpServer {
                         sessions_killed: 0,
                         disposition: ProposalDispositionSummary::default(),
                         error: None,
-                code: None,
-                violations: None,
-                latest_lint: None,
                     }),
                     Err(e) => err(e.to_string()),
                 }

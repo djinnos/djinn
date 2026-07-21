@@ -1339,9 +1339,10 @@ mod lint_mutation_contract_tests {
         expected_body: &str,
     ) -> String {
         assert!(response.get("error").is_none(), "mutation failed: {response:?}");
-        let proposal = response.get("proposal").expect("successful proposal payload");
-        let id = proposal["id"].as_str().expect("proposal id").to_string();
-        let seq = proposal["latest_revision_seq"].as_i64().expect("head sequence") as i32;
+        let id = response["id"].as_str().expect("proposal id").to_string();
+        let seq = response["latest_revision_seq"]
+            .as_i64()
+            .expect("head sequence") as i32;
         let revisions = repo.revisions(&id).await.unwrap();
         let revision = revisions
             .iter()
@@ -1407,7 +1408,7 @@ mod lint_mutation_contract_tests {
             }))
             .await
             .unwrap();
-        let patch_id = patch_seed["proposal"]["id"].as_str().unwrap();
+        let patch_id = patch_seed["id"].as_str().unwrap();
         let patched_body = "Patched [dangling local reference](#missing-after-patch).";
         let patched = server
             .dispatch_tool("proposal_block_patch", serde_json::json!({
@@ -1422,7 +1423,7 @@ mod lint_mutation_contract_tests {
 
         // Ensure the update result stayed on its original proposal rather than
         // accidentally taking the import-create branch.
-        assert_eq!(updated["proposal"]["id"], update_id);
+        assert_eq!(updated["id"], update_id);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1465,7 +1466,7 @@ mod lint_mutation_contract_tests {
             }))
             .await
             .unwrap();
-        let id = seed["proposal"]["id"].as_str().unwrap().to_string();
+        let id = seed["id"].as_str().unwrap().to_string();
         let before = repo.get(&id).await.unwrap().unwrap();
         let before_lints = lint_row_count(&db, Some(&id)).await;
 
