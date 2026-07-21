@@ -1,0 +1,13 @@
+{
+  "body_format": "markdown",
+  "source": {
+    "source_proposal_short_id": null,
+    "source_revision_sequence": null,
+    "source_revision_note": "Historic revision sequence is unavailable in this database-independent fixture.",
+    "redaction_note": "Synthetic duplicate and warning-only section cases."
+  },
+  "expected_slices": [
+    {"severity": "error", "code": "DUPLICATE_SECTION_CONTENT", "slice": "# Same\na b c d e\n"},
+    {"severity": "warning", "code": "REPEATED_SECTION_HEADING", "slice": "# Other"}
+  ]
+}
