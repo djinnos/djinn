@@ -4132,8 +4132,18 @@ export namespace MemoryGraphOutputSchema {
   folder: string
   id: string
   is_orphan?: boolean
+  /**
+   * Exact time a note last changed lifecycle state. Historical inactive
+   * notes, and proposal nodes, legitimately have no transition timestamp.
+   */
+  lifecycle_changed_at?: string
   note_type: string
   permalink: string
+  /**
+   * Lifecycle status for note nodes. Proposal nodes are semantic context and
+   * are consequently always represented as `active`.
+   */
+  status: string
   title: string
   [k: string]: any
   }
