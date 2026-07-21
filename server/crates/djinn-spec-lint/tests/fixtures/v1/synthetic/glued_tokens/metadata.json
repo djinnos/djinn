@@ -1,0 +1,12 @@
+{
+  "body_format": "markdown",
+  "source": {
+    "source_proposal_short_id": null,
+    "source_revision_sequence": null,
+    "source_revision_note": "Historic revision sequence is unavailable in this database-independent fixture.",
+    "redaction_note": "Synthetic UTF-8 glued punctuation."
+  },
+  "expected_slices": [
+    {"severity": "error", "code": "GLUED_TERMINAL_TOKEN", "slice": "."}
+  ]
+}
