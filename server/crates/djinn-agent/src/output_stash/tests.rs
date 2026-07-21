@@ -1,3 +1,5 @@
+// djinn:allow-oversize — durable output-stash regressions share routing and
+// compatibility fixtures with the existing module-level test harness.
 use super::*;
 
 /// Force-initialize the test-binary-wide durable root (an isolated, persistent
