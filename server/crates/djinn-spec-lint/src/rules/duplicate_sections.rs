@@ -50,8 +50,7 @@ pub(crate) fn lint_duplicate_sections(body: &str, tree: &Node) -> Vec<Violation>
         let (later_heading, later_end, later_shingles) = &sections[later];
         let mut has_matching_heading = false;
         let mut has_duplicate_content = false;
-        for earlier in 0..later {
-            let (first_heading, _, first_shingles) = &sections[earlier];
+        for (first_heading, _, first_shingles) in sections.iter().take(later) {
             if first_heading.depth != later_heading.depth
                 || first_heading.normalized_text != later_heading.normalized_text
             {
