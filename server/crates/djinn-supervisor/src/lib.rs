@@ -1289,6 +1289,29 @@ impl TaskRunSupervisor {
             );
         }
 
+        // Seed the workspace-local git identity so RAW shell `git` run by the
+        // in-pod agent (e.g. `git merge <sha>`) is authored as the task creator,
+        // matching the programmatic commit paths (proactive sync below, the
+        // post-worker auto-commit, the checkpoint) that already pass identity
+        // explicitly via env. Without this the agent's shell commits fall back
+        // to the pod's generic `Djinn Agent <djinn@djinn.task>` identity, which
+        // fails the repo's CLA check and hard-blocks the PR (observed on
+        // task/5qnq: a raw `git merge` merge commit authored as the bot). Only
+        // seeded when the host resolved a creator identity; absent → leave the
+        // config unset (current behavior). Best-effort; never fails the run.
+        if let (Some(name), Some(email)) = (
+            spec.commit_author_name.as_deref(),
+            spec.commit_author_email.as_deref(),
+        ) && let Err(e) = workspace.set_identity(GitIdentity { name, email }).await
+        {
+            tracing::warn!(
+                task_run_id = %run_id,
+                task_id = %spec.task_id,
+                error = %e,
+                "supervisor: failed to seed workspace git identity (raw shell commits may fall back to the pod default)"
+            );
+        }
+
         // Reset tracked-file mtimes to their last-touched commit time so cargo's
         // path-crate fingerprints match the shared CARGO_TARGET_DIR across runs
         // (the ephemeral clone gave every file a fresh checkout mtime). Done
