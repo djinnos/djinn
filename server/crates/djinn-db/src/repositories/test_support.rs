@@ -8,6 +8,24 @@ use crate::database::Database;
 use crate::repositories::note::NoteRepository;
 use djinn_memory::Note;
 
+/// Create a fresh FK-valid user for a raw latest-schema fixture.
+/// UUIDv7-derived values avoid a repository-wide fixed test identity.
+pub async fn seed_test_user(db: &Database) -> String {
+    db.ensure_initialized().await.unwrap();
+    let uuid = uuid::Uuid::now_v7();
+    let id = uuid.to_string();
+    let github_id = (uuid.as_u128() & i64::MAX as u128) as i64;
+    let github_login = format!("fixture-{}", uuid.simple());
+    sqlx::query("INSERT INTO users (id, github_id, github_login) VALUES ($1, $2, $3)")
+        .bind(&id)
+        .bind(github_id)
+        .bind(&github_login)
+        .execute(db.pool())
+        .await
+        .expect("failed to seed fixture user");
+    id
+}
+
 // ── Seed helpers for usage-analytics route tests ─────────────────────────
 // These insert rows directly via raw SQL so integration tests outside
 // djinn-db can seed deterministic fixture data without going through the
@@ -40,6 +58,7 @@ pub struct UsageTestTaskSeed<'a> {
 /// contract tests. Returns the generated task id.
 pub async fn seed_task_row(db: &Database, seed: UsageTestTaskSeed<'_>) -> String {
     db.ensure_initialized().await.unwrap();
+    let creator = seed_test_user(db).await;
     let task_uuid = uuid::Uuid::now_v7();
     let id = task_uuid.to_string();
     let compact_id = task_uuid.simple().to_string();
@@ -51,13 +70,13 @@ pub async fn seed_task_row(db: &Database, seed: UsageTestTaskSeed<'_>) -> String
           reopen_count, continuation_count, verification_failure_count, \
           total_reopen_count, \
           intervention_count, created_at, updated_at, closed_at, close_reason, \
-          merge_commit_sha, memory_refs, merge_conflict_metadata, agent_type, pr_url) \
+          merge_commit_sha, memory_refs, merge_conflict_metadata, agent_type, pr_url, created_by_user_id) \
          VALUES ($1, $2, $3, NULL, 'test title', 'test desc', 'test design', \
                  'task', $4, 0, '', '[]', '[]', \
                  0, 0, 0, \
                  $5, \
                  0, '2025-01-01T00:00:00Z', '2025-01-01T00:00:00Z', NULL, $6, \
-                 NULL, '[]', NULL, NULL, NULL)",
+                 NULL, '[]', NULL, NULL, NULL, $7)",
     )
     .bind(&id)
     .bind(seed.project_id)
@@ -65,6 +84,7 @@ pub async fn seed_task_row(db: &Database, seed: UsageTestTaskSeed<'_>) -> String
     .bind(seed.status)
     .bind(seed.total_reopen_count)
     .bind(seed.close_reason)
+    .bind(&creator)
     .execute(db.pool())
     .await
     .expect("failed to seed task row");
@@ -75,15 +95,17 @@ pub async fn seed_task_row(db: &Database, seed: UsageTestTaskSeed<'_>) -> String
 /// integration tests. Raw fixture SQL stays behind the `djinn-db` boundary.
 pub async fn seed_board_health_mismatch_candidate(db: &Database, project_id: &str, task_id: &str) {
     db.ensure_initialized().await.unwrap();
+    let creator = seed_test_user(db).await;
     sqlx::query(
         "INSERT INTO tasks \
          (id, project_id, short_id, title, description, design, issue_type, status, \
-          labels, acceptance_criteria, memory_refs, total_reopen_count) \
+          labels, acceptance_criteria, memory_refs, total_reopen_count, created_by_user_id) \
          VALUES ($1, $2, 'mismatch-storm', 'mismatch storm', 'requires task_create', \
-                 '', 'task', 'open', '[]'::jsonb, '[]'::jsonb, '[]'::jsonb, 3)",
+                 '', 'task', 'open', '[]'::jsonb, '[]'::jsonb, '[]'::jsonb, 3, $3)",
     )
     .bind(task_id)
     .bind(project_id)
+    .bind(&creator)
     .execute(db.pool())
     .await
     .expect("failed to seed board-health mismatch candidate");

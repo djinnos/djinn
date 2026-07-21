@@ -346,11 +346,12 @@ mod tests {
 
     async fn seed_task(db: &Database, task_id: &str, project_id: &str) {
         db.ensure_initialized().await.unwrap();
+        let creator = crate::repositories::test_support::seed_test_user(db).await;
         sqlx::query(
             "INSERT INTO tasks (id, project_id, short_id, title, description, design, \
-             issue_type, status, priority, acceptance_criteria, created_at, updated_at) \
+             issue_type, status, priority, acceptance_criteria, created_at, updated_at, created_by_user_id) \
              VALUES ($1, $2, $3, 'test', 'test', '', 'task', 'open', 0, '[]', \
-             '2025-01-01T00:00:00Z', '2025-01-01T00:00:00Z') \
+             '2025-01-01T00:00:00Z', '2025-01-01T00:00:00Z', $4) \
              ON CONFLICT (id) DO NOTHING",
         )
         .bind(task_id)
@@ -358,6 +359,7 @@ mod tests {
         // `tasks.short_id` is VARCHAR(32); the UUID task id is intentionally
         // stored only in `id`, not interpolated into this fixture value.
         .bind("test-task")
+        .bind(&creator)
         .execute(db.pool())
         .await
         .unwrap();
