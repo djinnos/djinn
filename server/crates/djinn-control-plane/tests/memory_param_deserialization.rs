@@ -176,3 +176,27 @@ fn task_refs_params_deserialize() {
     assert_eq!(p.project, "/tmp/p");
     assert_eq!(p.permalink, "references/n");
 }
+
+#[test]
+fn graph_params_deserialize_lifecycle_filters_and_limit() {
+    let p: GraphParams = serde_json::from_value(serde_json::json!({
+        "project": "/tmp/p",
+        "statuses": ["active", "archived", "deprecated"],
+        "lifecycle_limit": 17
+    }))
+    .unwrap();
+    assert_eq!(p.statuses.as_deref(), Some(&["active".to_string(), "archived".to_string(), "deprecated".to_string()][..]));
+    assert_eq!(p.lifecycle_limit, Some(17));
+}
+
+#[test]
+fn graph_params_preserve_empty_unknown_and_boundary_values_for_handler_validation() {
+    for value in [serde_json::json!([]), serde_json::json!(["unknown"])] {
+        let p: GraphParams = serde_json::from_value(serde_json::json!({"project":"/tmp/p", "statuses": value})).unwrap();
+        assert!(p.statuses.is_some());
+    }
+    for limit in [-1, 0, 1001] {
+        let p: GraphParams = serde_json::from_value(serde_json::json!({"project":"/tmp/p", "statuses":["archived"], "lifecycle_limit":limit})).unwrap();
+        assert_eq!(p.lifecycle_limit, Some(limit));
+    }
+}

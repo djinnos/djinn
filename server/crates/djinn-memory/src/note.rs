@@ -480,6 +480,10 @@ pub struct GraphNode {
     pub title: String,
     pub note_type: String,
     pub folder: String,
+    #[serde(default = "default_active_status")]
+    pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lifecycle_changed_at: Option<String>,
     /// Total resolved edges incident to this node (inbound + outbound).
     pub connection_count: i64,
     #[serde(default)]
@@ -499,6 +503,10 @@ pub struct GraphNode {
 
 fn default_note_entity_type() -> String {
     "note".to_string()
+}
+
+fn default_active_status() -> String {
+    "active".to_string()
 }
 
 /// A resolved wikilink edge between two notes.
@@ -544,6 +552,28 @@ pub struct GraphResponse {
     /// derived_from) sourced from `note_associations` where `kind <> 'co_access'`.
     #[serde(default)]
     pub typed_edges: Vec<TypedEdge>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lifecycle_summary: Option<GraphLifecycleSummary>,
+}
+
+#[derive(Clone, Debug)]
+pub struct GraphOptions {
+    pub statuses: Vec<String>,
+    pub lifecycle_limit: usize,
+    pub include_lifecycle_summary: bool,
+}
+
+impl Default for GraphOptions {
+    fn default() -> Self {
+        Self { statuses: vec!["active".to_string()], lifecycle_limit: 500, include_lifecycle_summary: false }
+    }
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, JsonSchema)]
+pub struct GraphLifecycleSummary {
+    pub inactive_total: i64,
+    pub inactive_returned: i64,
+    pub inactive_omitted: i64,
 }
 
 /// A wikilink pointing to a note that does not exist.

@@ -25,7 +25,7 @@ pub use note::{
     BrokenLink, BrokenLinkRepair, BuildContextResponse, ContradictionCandidate,
     ContradictionWarning, ContradictsAnnotation, ExtractedNoteAuditAttribution,
     ExtractedNoteAuditCategory, ExtractedNoteAuditFinding, ExtractedNoteAuditReport, GitLogEntry,
-    GraphEdge, GraphNode, GraphResponse, HealthReport, LifecycleHealth, MemorySearchEntityRow,
+    GraphEdge, GraphLifecycleSummary, GraphNode, GraphOptions, GraphResponse, HealthReport, LifecycleHealth, MemorySearchEntityRow,
     Note, NoteAbstract, NoteCompact, NoteDedupCandidate, NoteOverview, NoteQualityAssessment,
     NoteSearchResult, OrphanNote, ProposalOverview, RecentSweepMetrics, ReindexSummary,
     StaleFolder, SupersedesAnnotation, TypeRisk, TypedEdge, note_status,
