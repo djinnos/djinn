@@ -20,7 +20,7 @@ import { HugeiconsIcon } from "@hugeicons/react";
 import { AlertCircleIcon, PauseIcon, PlayIcon, RefreshIcon } from "@hugeicons/core-free-icons";
 
 import { callMcpTool } from "@/api/mcpClient";
-import type { MemoryGraphOutput } from "@/api/generated/mcp-tools.gen";
+import type { MemoryGraphInput, MemoryGraphOutput } from "@/api/generated/mcp-tools.gen";
 import {
   colorForNote,
   createSeededRandom,
@@ -605,7 +605,7 @@ type FetchState =
   | { status: "loading" }
   | { status: "empty" }
   | { status: "error"; error: string }
-  | { status: "ready"; disk: DiskModel };
+  | { status: "ready"; disk: DiskModel; inactiveOmitted: number };
 
 interface Camera {
   k: number;
@@ -624,8 +624,22 @@ function fitCamera(w: number, h: number, outer: number, fullOuter: number): Came
   return { k, x: w / 2, y: h / 2 + h * 0.04 };
 }
 
+const lifecycleGhostPreferenceKey = (projectSlug: string) =>
+  `djinn:memory-graph:lifecycle-ghosts:${projectSlug}`;
+
+/** Missing or inaccessible preferences intentionally fail open to ghosts. */
+function readLifecycleGhostPreference(projectSlug: string): boolean {
+  try {
+    return window.localStorage.getItem(lifecycleGhostPreferenceKey(projectSlug)) !== "0";
+  } catch {
+    return true;
+  }
+}
+
 export function MemoryGraphCanvas({ projectSlug, reloadKey, onSelectNote }: MemoryGraphCanvasProps) {
   const [state, setState] = useState<FetchState>({ status: "loading" });
+  const [lifecycleGhosts, setLifecycleGhosts] = useState(true);
+  const [preferenceProject, setPreferenceProject] = useState<string | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const sliderRef = useRef<HTMLInputElement | null>(null);
@@ -647,12 +661,25 @@ export function MemoryGraphCanvas({ projectSlug, reloadKey, onSelectNote }: Memo
 
   // ── Fetch memory_graph on project / reload change ──────────────────────────
   useEffect(() => {
+    if (preferenceProject !== projectSlug) {
+      setLifecycleGhosts(readLifecycleGhostPreference(projectSlug));
+      setPreferenceProject(projectSlug);
+      return;
+    }
+
     let cancelled = false;
 
     (async () => {
       try {
         setState({ status: "loading" });
-        const raw = await callMcpTool("memory_graph", { project: projectSlug });
+        const input: MemoryGraphInput = lifecycleGhosts
+          ? {
+              project: projectSlug,
+              statuses: ["active", "archived", "deprecated"],
+              lifecycle_limit: 500,
+            }
+          : { project: projectSlug };
+        const raw = await callMcpTool("memory_graph", input);
         if (cancelled) return;
         const payload = parseMemoryGraphResponse(raw);
         if (!payload || payload.nodes.length === 0) {
@@ -669,7 +696,11 @@ export function MemoryGraphCanvas({ projectSlug, reloadKey, onSelectNote }: Memo
         userCamRef.current = false;
         setPlaying(true);
         setFinished(false);
-        setState({ disk, status: "ready" });
+        setState({
+          disk,
+          inactiveOmitted: payload.lifecycle_summary?.inactive_omitted ?? 0,
+          status: "ready",
+        });
       } catch (err) {
         if (cancelled) return;
         setState({ error: err instanceof Error ? err.message : String(err), status: "error" });
@@ -679,7 +710,7 @@ export function MemoryGraphCanvas({ projectSlug, reloadKey, onSelectNote }: Memo
     return () => {
       cancelled = true;
     };
-  }, [projectSlug, reloadKey]);
+  }, [lifecycleGhosts, preferenceProject, projectSlug, reloadKey]);
 
   const disk = state.status === "ready" ? state.disk : null;
 
@@ -1057,6 +1088,17 @@ export function MemoryGraphCanvas({ projectSlug, reloadKey, onSelectNote }: Memo
     setFinished(revealRef.current >= 1);
   }, []);
 
+  const onLifecycleGhostsChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
+    const enabled = e.target.checked;
+    try {
+      window.localStorage.setItem(lifecycleGhostPreferenceKey(projectSlug), enabled ? "1" : "0");
+      setLifecycleGhosts(enabled);
+    } catch {
+      // Storage failures fail open so they cannot make the graph unusable.
+      setLifecycleGhosts(true);
+    }
+  }, [projectSlug]);
+
   const noteTypes = disk
     ? [...new Set(disk.nodes.filter((n) => !n.isOrphan).map((n) => n.noteType))].slice(0, 6)
     : [];
@@ -1076,6 +1118,22 @@ export function MemoryGraphCanvas({ projectSlug, reloadKey, onSelectNote }: Memo
         onPointerLeave={onPointerLeave}
         onWheel={onWheel}
       />
+
+      <label className="absolute right-3 top-3 z-10 flex items-center gap-2 rounded-full border border-[#2d2d3d] bg-[#0a0a10]/85 px-3 py-2 text-xs text-zinc-300 backdrop-blur">
+        <input
+          type="checkbox"
+          checked={lifecycleGhosts}
+          onChange={onLifecycleGhostsChange}
+          className="accent-violet-400"
+        />
+        Show lifecycle ghosts
+      </label>
+
+      {state.status === "ready" && lifecycleGhosts && state.inactiveOmitted > 0 && (
+        <div className="absolute right-3 top-14 z-10 rounded-full border border-[#2d2d3d] bg-[#0a0a10]/85 px-3 py-1.5 font-mono text-[11px] text-zinc-400 backdrop-blur">
+          500 shown · {state.inactiveOmitted} older hidden
+        </div>
+      )}
 
       {/* Legend */}
       {disk && (
