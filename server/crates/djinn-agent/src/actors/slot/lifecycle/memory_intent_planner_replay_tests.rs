@@ -375,7 +375,7 @@ async fn checked_in_replays_enter_the_production_assemble_prompt_context_boundar
         );
 
         let failure = case.expected_outcome != "success" || case.finalization_fails;
-        if failure || case.full_scope_budget {
+        if failure {
             assert_eq!(
                 first.knowledge_context, baseline.knowledge_context,
                 "{} scope-only fallback",
@@ -420,13 +420,17 @@ async fn checked_in_replays_enter_the_production_assemble_prompt_context_boundar
             let rendered_baseline = baseline
                 .knowledge_context
                 .as_deref()
-                .expect("near-full scope baseline");
+                .expect("scope baseline");
             assert!(
-                (1_900..=2_000).contains(&rendered_baseline.len()),
-                "scope baseline must materially consume the production budget"
+                rendered_baseline.contains("scope baseline"),
+                "L0 abstract must be rendered instead of the L1 overview"
             );
-            assert_eq!(first.knowledge_context.as_deref(), Some(rendered_baseline));
-            assert!(first.knowledge_context.as_deref().unwrap().len() <= 2_000);
+            let rendered = first
+                .knowledge_context
+                .as_deref()
+                .expect("planned knowledge context");
+            assert!(rendered.contains("Short planned"));
+            assert!(rendered.len() <= 2_000);
             assert_eq!(search.requests.lock().expect("search requests").len(), 4);
         }
         if let Some(summary) = &case.resume_compaction_summary {
