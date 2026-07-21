@@ -24,6 +24,7 @@ fn terminal_params<'a>(
             durations_ms,
             estimated_injected_tokens: 10,
         },
+        rollout_label: "cohort:terminal-test",
         terminal_state: KnowledgeTraceTerminalState::Success,
         terminal_at: "2026-07-20T12:00:00.000Z",
         candidate_count: Some(5),

@@ -523,7 +523,11 @@ async fn load_knowledge_context_with_planner(
             // otherwise the empty array records that the candidate universe was
             // unavailable without changing the production fail-open behavior.
             let (error_candidates, cap_exceeded) = match trace_candidates_result {
-                Ok(candidates) => (Vec::new(), candidates.len() >= djinn_db::repositories::retrieval_trace::DEFAULT_CANDIDATE_CAP as usize),
+                Ok(candidates) => (
+                    Vec::new(),
+                    candidates.len()
+                        >= djinn_db::repositories::retrieval_trace::DEFAULT_CANDIDATE_CAP as usize,
+                ),
                 Err(trace_error) => {
                     tracing::warn!(task_id = %task.short_id, error = %trace_error, "Lifecycle: failed to query knowledge trace candidates");
                     (Vec::new(), false)
@@ -606,7 +610,7 @@ async fn load_knowledge_context_with_planner(
             planner.map(|p| (p.session_id, p.task_run_id)),
             rollout,
             djinn_db::repositories::retrieval_trace::RetrievalTraceOutcome::Error,
-                None,
+            None,
         )
         .await;
         return rendered;
@@ -626,8 +630,12 @@ async fn load_knowledge_context_with_planner(
         KnowledgePackConfig {
             minimum_confidence: KNOWLEDGE_MIN_CONFIDENCE,
             top_k: app_state.knowledge_injection.knowledge_injection_limit as usize,
-            total_byte_budget: app_state.knowledge_injection.knowledge_injection_budget_bytes as usize,
-            line_byte_cap: app_state.knowledge_injection.knowledge_injection_line_cap_bytes as usize,
+            total_byte_budget: app_state
+                .knowledge_injection
+                .knowledge_injection_budget_bytes as usize,
+            line_byte_cap: app_state
+                .knowledge_injection
+                .knowledge_injection_line_cap_bytes as usize,
         },
     );
     let pack_ms = pack_start.elapsed().as_millis() as i64;
@@ -820,8 +828,13 @@ fn apply_budget_outcomes(
 }
 
 /// Convert exact pack outcomes into detailed candidate records.
-fn trace_candidates_from_pack(notes: &[djinn_memory::Note], packed: &crate::actors::slot::helpers::PackedKnowledgeNotes) -> Vec<djinn_db::repositories::retrieval_trace::TraceCandidate> {
-    use djinn_db::repositories::retrieval_trace::{CandidateOutcome, SkippedReason, TraceCandidate};
+fn trace_candidates_from_pack(
+    notes: &[djinn_memory::Note],
+    packed: &crate::actors::slot::helpers::PackedKnowledgeNotes,
+) -> Vec<djinn_db::repositories::retrieval_trace::TraceCandidate> {
+    use djinn_db::repositories::retrieval_trace::{
+        CandidateOutcome, SkippedReason, TraceCandidate,
+    };
     notes.iter().zip(&packed.outcomes).enumerate().map(|(index, (note, outcome))| {
         let (outcome, skipped_reason) = match outcome.disposition {
             NotePackDisposition::Injected => (CandidateOutcome::Injected, None),
@@ -840,16 +853,26 @@ fn trace_candidates_from_pack(notes: &[djinn_memory::Note], packed: &crate::acto
     }).collect()
 }
 
-fn pack_disposition_counts(packed: &crate::actors::slot::helpers::PackedKnowledgeNotes) -> djinn_db::repositories::retrieval_trace::KnowledgeTraceDispositionCounts {
+fn pack_disposition_counts(
+    packed: &crate::actors::slot::helpers::PackedKnowledgeNotes,
+) -> djinn_db::repositories::retrieval_trace::KnowledgeTraceDispositionCounts {
     use djinn_db::repositories::retrieval_trace::KnowledgeTraceDispositionCounts;
-    let mut counts = KnowledgeTraceDispositionCounts { confidence_filtered: 0, not_top_k: 0, oversized_skipped: 0, injected: 0, budget_pruned: 0 };
-    for outcome in &packed.outcomes { match outcome.disposition {
-        NotePackDisposition::ConfidenceFiltered => counts.confidence_filtered += 1,
-        NotePackDisposition::NotTopK => counts.not_top_k += 1,
-        NotePackDisposition::OversizedSkipped => counts.oversized_skipped += 1,
-        NotePackDisposition::Injected => counts.injected += 1,
-        NotePackDisposition::BudgetPruned => counts.budget_pruned += 1,
-    }}
+    let mut counts = KnowledgeTraceDispositionCounts {
+        confidence_filtered: 0,
+        not_top_k: 0,
+        oversized_skipped: 0,
+        injected: 0,
+        budget_pruned: 0,
+    };
+    for outcome in &packed.outcomes {
+        match outcome.disposition {
+            NotePackDisposition::ConfidenceFiltered => counts.confidence_filtered += 1,
+            NotePackDisposition::NotTopK => counts.not_top_k += 1,
+            NotePackDisposition::OversizedSkipped => counts.oversized_skipped += 1,
+            NotePackDisposition::Injected => counts.injected += 1,
+            NotePackDisposition::BudgetPruned => counts.budget_pruned += 1,
+        }
+    }
     counts
 }
 
@@ -876,7 +899,9 @@ async fn persist_knowledge_trace(
     attribution: Option<(&str, &str)>,
     rollout: &RolloutMode,
     outcome: djinn_db::repositories::retrieval_trace::RetrievalTraceOutcome,
-    terminal_dispositions: Option<djinn_db::repositories::retrieval_trace::KnowledgeTraceDispositionCounts>,
+    terminal_dispositions: Option<
+        djinn_db::repositories::retrieval_trace::KnowledgeTraceDispositionCounts,
+    >,
 ) {
     use djinn_db::repositories::retrieval_trace::{
         CreateRetrievalTraceParams, CreateRetrievalTraceWithSemanticsParams,
@@ -934,14 +959,29 @@ async fn persist_knowledge_trace(
         estimated_injected_tokens,
     };
     let write = if let Some(dispositions) = terminal_dispositions {
-        let terminal_at = time::OffsetDateTime::now_utc().format(&time::format_description::well_known::Rfc3339).expect("RFC3339 timestamp");
-        repo.insert_terminal(djinn_db::repositories::retrieval_trace::CreateRetrievalTraceTerminalParams {
-            trace: params, terminal_state: djinn_db::repositories::retrieval_trace::KnowledgeTraceTerminalState::Success,
-            terminal_at: &terminal_at, candidate_count: Some(candidates.len() as i32),
-            injected_count: Some(dispositions.injected), dispositions: Some(dispositions),
-        }).await
+        let terminal_at = time::OffsetDateTime::now_utc()
+            .format(&time::format_description::well_known::Rfc3339)
+            .expect("RFC3339 timestamp");
+        repo.insert_terminal(
+            djinn_db::repositories::retrieval_trace::CreateRetrievalTraceTerminalParams {
+                trace: params,
+                rollout_label: rollout.label(),
+                terminal_state:
+                    djinn_db::repositories::retrieval_trace::KnowledgeTraceTerminalState::Success,
+                terminal_at: &terminal_at,
+                candidate_count: Some(candidates.len() as i32),
+                injected_count: Some(dispositions.injected),
+                dispositions: Some(dispositions),
+            },
+        )
+        .await
     } else {
-        repo.insert_with_semantics(CreateRetrievalTraceWithSemanticsParams { trace: params, rollout_label: rollout.label(), outcome }).await
+        repo.insert_with_semantics(CreateRetrievalTraceWithSemanticsParams {
+            trace: params,
+            rollout_label: rollout.label(),
+            outcome,
+        })
+        .await
     };
     if let Err(e) = write {
         tracing::warn!(task_id = %task.short_id, error = %e, "Lifecycle: failed to persist retrieval trace for knowledge context; continuing (fail-open)");
