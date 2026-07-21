@@ -79,7 +79,9 @@ pub enum Severity {
     Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, JsonSchema,
 )]
 pub struct Utf8ByteSpan {
+    #[schemars(with = "i64")]
     pub start: usize,
+    #[schemars(with = "i64")]
     pub end: usize,
 }
 

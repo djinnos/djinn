@@ -6,13 +6,15 @@ use crate::tools::epic_ops::{AcceptanceCriterionItem, parse_acceptance_criteria_
 use djinn_core::models::{
     Proposal, ProposalFeedback, ProposalRevision, ProposalSignoff, ProposalTarget,
 };
-use serde::{Deserialize, Serialize};
 use djinn_spec_lint::SpecLintResultV1;
+use serde::{Deserialize, Serialize};
 
 /// A half-open UTF-8 byte span in a lint rejection diagnostic.
 #[derive(Serialize, Deserialize, Clone, schemars::JsonSchema)]
 pub struct ProposalLintViolationSpan {
+    #[schemars(with = "i64")]
     pub start_byte: usize,
+    #[schemars(with = "i64")]
     pub end_byte: usize,
 }
 

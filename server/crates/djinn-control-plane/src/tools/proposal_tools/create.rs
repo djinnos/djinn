@@ -70,14 +70,16 @@ use super::params::{
     ProposalListParams, ProposalShowParams, ProposalTargetParams, ProposalUpdateParams,
 };
 
-
 /// Load lint through the repository for the immutable revision selected by the
 /// committed proposal head; do not run a separate control-plane lint.
 async fn committed_head_lint(
     repo: &ProposalRepository,
     proposal: &djinn_core::models::Proposal,
 ) -> Result<djinn_spec_lint::SpecLintResultV1, String> {
-    let revisions = repo.revisions(&proposal.id).await.map_err(|e| e.to_string())?;
+    let revisions = repo
+        .revisions(&proposal.id)
+        .await
+        .map_err(|e| e.to_string())?;
     let revision = revisions
         .iter()
         .rev()
@@ -88,7 +90,9 @@ async fn committed_head_lint(
                 proposal.id, proposal.latest_revision_seq
             )
         })?;
-    repo.lint_for_revision(revision).await.map_err(|e| e.to_string())
+    repo.lint_for_revision(revision)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 async fn successful_mutation_response(

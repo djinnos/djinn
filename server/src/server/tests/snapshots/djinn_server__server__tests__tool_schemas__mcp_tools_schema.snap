@@ -15624,6 +15624,56 @@ expression: signatures
           ],
           "type": "object"
         },
+        "BodyFormat": {
+          "description": "Body encoding supplied by the caller.",
+          "enum": [
+            "markdown",
+            "mdx"
+          ],
+          "type": "string"
+        },
+        "ProposalLintRejectionViolation": {
+          "description": "Stable structured diagnostic published when repository lint rejects a write.",
+          "properties": {
+            "code": {
+              "type": "string"
+            },
+            "message": {
+              "type": "string"
+            },
+            "severity": {
+              "type": "string"
+            },
+            "span": {
+              "$ref": "#/$defs/ProposalLintViolationSpan"
+            }
+          },
+          "required": [
+            "code",
+            "message",
+            "severity",
+            "span"
+          ],
+          "type": "object"
+        },
+        "ProposalLintViolationSpan": {
+          "description": "A half-open UTF-8 byte span in a lint rejection diagnostic.",
+          "properties": {
+            "end_byte": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "start_byte": {
+              "format": "int64",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "start_byte",
+            "end_byte"
+          ],
+          "type": "object"
+        },
         "ProposalListSummary": {
           "description": "Compact tribunal/readiness state for a single proposal row on the list.\n\nEvery field is a cheap, batched approximation of the richer per-proposal\ngate/refinement status surfaced by `proposal_show` — enough to drive the\nlist-row chips (tribunal round / awaiting-review / evidence, and a gate\npass/fail dot with a \"why blocked\" tooltip) without the several-queries-per-\nrow those full builders cost.",
           "properties": {
@@ -15668,6 +15718,116 @@ expression: signatures
             "unresolved_blocking_count"
           ],
           "type": "object"
+        },
+        "Severity": {
+          "description": "Stable diagnostic severity.",
+          "enum": [
+            "error",
+            "warning"
+          ],
+          "type": "string"
+        },
+        "SkippedTier": {
+          "description": "A deterministic record of a lint tier that did not run.",
+          "properties": {
+            "reason": {
+              "type": "string"
+            },
+            "tier": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "tier",
+            "reason"
+          ],
+          "type": "object"
+        },
+        "SpecLintResultV1": {
+          "description": "Stable V1 persistence and API contract. `checked_at` is supplied by the\ncaller; linting never reads a clock.",
+          "properties": {
+            "body_format": {
+              "$ref": "#/$defs/BodyFormat"
+            },
+            "body_sha256": {
+              "type": "string"
+            },
+            "checked_at": {
+              "type": "string"
+            },
+            "errors": {
+              "items": {
+                "$ref": "#/$defs/Violation"
+              },
+              "type": "array"
+            },
+            "linter_version": {
+              "type": "string"
+            },
+            "skipped_tiers": {
+              "items": {
+                "$ref": "#/$defs/SkippedTier"
+              },
+              "type": "array"
+            },
+            "warnings": {
+              "items": {
+                "$ref": "#/$defs/Violation"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "linter_version",
+            "body_sha256",
+            "body_format",
+            "checked_at",
+            "errors",
+            "warnings",
+            "skipped_tiers"
+          ],
+          "type": "object"
+        },
+        "Utf8ByteSpan": {
+          "description": "A half-open UTF-8 byte range in the original body.",
+          "properties": {
+            "end": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "start": {
+              "format": "int64",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "start",
+            "end"
+          ],
+          "type": "object"
+        },
+        "Violation": {
+          "properties": {
+            "code": {
+              "type": "string"
+            },
+            "message": {
+              "type": "string"
+            },
+            "severity": {
+              "$ref": "#/$defs/Severity"
+            },
+            "span": {
+              "$ref": "#/$defs/Utf8ByteSpan"
+            }
+          },
+          "required": [
+            "code",
+            "severity",
+            "message",
+            "span"
+          ],
+          "type": "object"
         }
       },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -15705,6 +15865,13 @@ expression: signatures
             "null"
           ]
         },
+        "code": {
+          "description": "Additive stable machine-readable rejection code.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "created_at": {
           "type": "string"
         },
@@ -15724,6 +15891,17 @@ expression: signatures
             "integer",
             "null"
           ]
+        },
+        "latest_lint": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SpecLintResultV1"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Additive lint result for the exact committed head revision."
         },
         "latest_revision_seq": {
           "description": "Head revision number (sign-offs anchored earlier are stale).",
@@ -15790,6 +15968,16 @@ expression: signatures
         },
         "updated_at": {
           "type": "string"
+        },
+        "violations": {
+          "description": "Additive ordered diagnostics for `SPEC_LINT_REJECTED`.",
+          "items": {
+            "$ref": "#/$defs/ProposalLintRejectionViolation"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
         }
       },
       "type": "object"
@@ -16010,6 +16198,56 @@ expression: signatures
           ],
           "type": "object"
         },
+        "BodyFormat": {
+          "description": "Body encoding supplied by the caller.",
+          "enum": [
+            "markdown",
+            "mdx"
+          ],
+          "type": "string"
+        },
+        "ProposalLintRejectionViolation": {
+          "description": "Stable structured diagnostic published when repository lint rejects a write.",
+          "properties": {
+            "code": {
+              "type": "string"
+            },
+            "message": {
+              "type": "string"
+            },
+            "severity": {
+              "type": "string"
+            },
+            "span": {
+              "$ref": "#/$defs/ProposalLintViolationSpan"
+            }
+          },
+          "required": [
+            "code",
+            "message",
+            "severity",
+            "span"
+          ],
+          "type": "object"
+        },
+        "ProposalLintViolationSpan": {
+          "description": "A half-open UTF-8 byte span in a lint rejection diagnostic.",
+          "properties": {
+            "end_byte": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "start_byte": {
+              "format": "int64",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "start_byte",
+            "end_byte"
+          ],
+          "type": "object"
+        },
         "ProposalListSummary": {
           "description": "Compact tribunal/readiness state for a single proposal row on the list.\n\nEvery field is a cheap, batched approximation of the richer per-proposal\ngate/refinement status surfaced by `proposal_show` — enough to drive the\nlist-row chips (tribunal round / awaiting-review / evidence, and a gate\npass/fail dot with a \"why blocked\" tooltip) without the several-queries-per-\nrow those full builders cost.",
           "properties": {
@@ -16054,6 +16292,116 @@ expression: signatures
             "unresolved_blocking_count"
           ],
           "type": "object"
+        },
+        "Severity": {
+          "description": "Stable diagnostic severity.",
+          "enum": [
+            "error",
+            "warning"
+          ],
+          "type": "string"
+        },
+        "SkippedTier": {
+          "description": "A deterministic record of a lint tier that did not run.",
+          "properties": {
+            "reason": {
+              "type": "string"
+            },
+            "tier": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "tier",
+            "reason"
+          ],
+          "type": "object"
+        },
+        "SpecLintResultV1": {
+          "description": "Stable V1 persistence and API contract. `checked_at` is supplied by the\ncaller; linting never reads a clock.",
+          "properties": {
+            "body_format": {
+              "$ref": "#/$defs/BodyFormat"
+            },
+            "body_sha256": {
+              "type": "string"
+            },
+            "checked_at": {
+              "type": "string"
+            },
+            "errors": {
+              "items": {
+                "$ref": "#/$defs/Violation"
+              },
+              "type": "array"
+            },
+            "linter_version": {
+              "type": "string"
+            },
+            "skipped_tiers": {
+              "items": {
+                "$ref": "#/$defs/SkippedTier"
+              },
+              "type": "array"
+            },
+            "warnings": {
+              "items": {
+                "$ref": "#/$defs/Violation"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "linter_version",
+            "body_sha256",
+            "body_format",
+            "checked_at",
+            "errors",
+            "warnings",
+            "skipped_tiers"
+          ],
+          "type": "object"
+        },
+        "Utf8ByteSpan": {
+          "description": "A half-open UTF-8 byte range in the original body.",
+          "properties": {
+            "end": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "start": {
+              "format": "int64",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "start",
+            "end"
+          ],
+          "type": "object"
+        },
+        "Violation": {
+          "properties": {
+            "code": {
+              "type": "string"
+            },
+            "message": {
+              "type": "string"
+            },
+            "severity": {
+              "$ref": "#/$defs/Severity"
+            },
+            "span": {
+              "$ref": "#/$defs/Utf8ByteSpan"
+            }
+          },
+          "required": [
+            "code",
+            "severity",
+            "message",
+            "span"
+          ],
+          "type": "object"
         }
       },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -16091,6 +16439,13 @@ expression: signatures
             "null"
           ]
         },
+        "code": {
+          "description": "Additive stable machine-readable rejection code.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "created_at": {
           "type": "string"
         },
@@ -16110,6 +16465,17 @@ expression: signatures
             "integer",
             "null"
           ]
+        },
+        "latest_lint": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SpecLintResultV1"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Additive lint result for the exact committed head revision."
         },
         "latest_revision_seq": {
           "description": "Head revision number (sign-offs anchored earlier are stale).",
@@ -16176,6 +16542,16 @@ expression: signatures
         },
         "updated_at": {
           "type": "string"
+        },
+        "violations": {
+          "description": "Additive ordered diagnostics for `SPEC_LINT_REJECTED`.",
+          "items": {
+            "$ref": "#/$defs/ProposalLintRejectionViolation"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
         }
       },
       "type": "object"
@@ -16927,6 +17303,56 @@ expression: signatures
           ],
           "type": "object"
         },
+        "BodyFormat": {
+          "description": "Body encoding supplied by the caller.",
+          "enum": [
+            "markdown",
+            "mdx"
+          ],
+          "type": "string"
+        },
+        "ProposalLintRejectionViolation": {
+          "description": "Stable structured diagnostic published when repository lint rejects a write.",
+          "properties": {
+            "code": {
+              "type": "string"
+            },
+            "message": {
+              "type": "string"
+            },
+            "severity": {
+              "type": "string"
+            },
+            "span": {
+              "$ref": "#/$defs/ProposalLintViolationSpan"
+            }
+          },
+          "required": [
+            "code",
+            "message",
+            "severity",
+            "span"
+          ],
+          "type": "object"
+        },
+        "ProposalLintViolationSpan": {
+          "description": "A half-open UTF-8 byte span in a lint rejection diagnostic.",
+          "properties": {
+            "end_byte": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "start_byte": {
+              "format": "int64",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "start_byte",
+            "end_byte"
+          ],
+          "type": "object"
+        },
         "ProposalListSummary": {
           "description": "Compact tribunal/readiness state for a single proposal row on the list.\n\nEvery field is a cheap, batched approximation of the richer per-proposal\ngate/refinement status surfaced by `proposal_show` — enough to drive the\nlist-row chips (tribunal round / awaiting-review / evidence, and a gate\npass/fail dot with a \"why blocked\" tooltip) without the several-queries-per-\nrow those full builders cost.",
           "properties": {
@@ -16971,6 +17397,116 @@ expression: signatures
             "unresolved_blocking_count"
           ],
           "type": "object"
+        },
+        "Severity": {
+          "description": "Stable diagnostic severity.",
+          "enum": [
+            "error",
+            "warning"
+          ],
+          "type": "string"
+        },
+        "SkippedTier": {
+          "description": "A deterministic record of a lint tier that did not run.",
+          "properties": {
+            "reason": {
+              "type": "string"
+            },
+            "tier": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "tier",
+            "reason"
+          ],
+          "type": "object"
+        },
+        "SpecLintResultV1": {
+          "description": "Stable V1 persistence and API contract. `checked_at` is supplied by the\ncaller; linting never reads a clock.",
+          "properties": {
+            "body_format": {
+              "$ref": "#/$defs/BodyFormat"
+            },
+            "body_sha256": {
+              "type": "string"
+            },
+            "checked_at": {
+              "type": "string"
+            },
+            "errors": {
+              "items": {
+                "$ref": "#/$defs/Violation"
+              },
+              "type": "array"
+            },
+            "linter_version": {
+              "type": "string"
+            },
+            "skipped_tiers": {
+              "items": {
+                "$ref": "#/$defs/SkippedTier"
+              },
+              "type": "array"
+            },
+            "warnings": {
+              "items": {
+                "$ref": "#/$defs/Violation"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "linter_version",
+            "body_sha256",
+            "body_format",
+            "checked_at",
+            "errors",
+            "warnings",
+            "skipped_tiers"
+          ],
+          "type": "object"
+        },
+        "Utf8ByteSpan": {
+          "description": "A half-open UTF-8 byte range in the original body.",
+          "properties": {
+            "end": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "start": {
+              "format": "int64",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "start",
+            "end"
+          ],
+          "type": "object"
+        },
+        "Violation": {
+          "properties": {
+            "code": {
+              "type": "string"
+            },
+            "message": {
+              "type": "string"
+            },
+            "severity": {
+              "$ref": "#/$defs/Severity"
+            },
+            "span": {
+              "$ref": "#/$defs/Utf8ByteSpan"
+            }
+          },
+          "required": [
+            "code",
+            "severity",
+            "message",
+            "span"
+          ],
+          "type": "object"
         }
       },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -17008,6 +17544,13 @@ expression: signatures
             "null"
           ]
         },
+        "code": {
+          "description": "Additive stable machine-readable rejection code.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "created_at": {
           "type": "string"
         },
@@ -17027,6 +17570,17 @@ expression: signatures
             "integer",
             "null"
           ]
+        },
+        "latest_lint": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SpecLintResultV1"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Additive lint result for the exact committed head revision."
         },
         "latest_revision_seq": {
           "description": "Head revision number (sign-offs anchored earlier are stale).",
@@ -17093,6 +17647,16 @@ expression: signatures
         },
         "updated_at": {
           "type": "string"
+        },
+        "violations": {
+          "description": "Additive ordered diagnostics for `SPEC_LINT_REJECTED`.",
+          "items": {
+            "$ref": "#/$defs/ProposalLintRejectionViolation"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
         }
       },
       "type": "object"
@@ -17417,6 +17981,56 @@ expression: signatures
           ],
           "type": "object"
         },
+        "BodyFormat": {
+          "description": "Body encoding supplied by the caller.",
+          "enum": [
+            "markdown",
+            "mdx"
+          ],
+          "type": "string"
+        },
+        "ProposalLintRejectionViolation": {
+          "description": "Stable structured diagnostic published when repository lint rejects a write.",
+          "properties": {
+            "code": {
+              "type": "string"
+            },
+            "message": {
+              "type": "string"
+            },
+            "severity": {
+              "type": "string"
+            },
+            "span": {
+              "$ref": "#/$defs/ProposalLintViolationSpan"
+            }
+          },
+          "required": [
+            "code",
+            "message",
+            "severity",
+            "span"
+          ],
+          "type": "object"
+        },
+        "ProposalLintViolationSpan": {
+          "description": "A half-open UTF-8 byte span in a lint rejection diagnostic.",
+          "properties": {
+            "end_byte": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "start_byte": {
+              "format": "int64",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "start_byte",
+            "end_byte"
+          ],
+          "type": "object"
+        },
         "ProposalListSummary": {
           "description": "Compact tribunal/readiness state for a single proposal row on the list.\n\nEvery field is a cheap, batched approximation of the richer per-proposal\ngate/refinement status surfaced by `proposal_show` — enough to drive the\nlist-row chips (tribunal round / awaiting-review / evidence, and a gate\npass/fail dot with a \"why blocked\" tooltip) without the several-queries-per-\nrow those full builders cost.",
           "properties": {
@@ -17461,6 +18075,116 @@ expression: signatures
             "unresolved_blocking_count"
           ],
           "type": "object"
+        },
+        "Severity": {
+          "description": "Stable diagnostic severity.",
+          "enum": [
+            "error",
+            "warning"
+          ],
+          "type": "string"
+        },
+        "SkippedTier": {
+          "description": "A deterministic record of a lint tier that did not run.",
+          "properties": {
+            "reason": {
+              "type": "string"
+            },
+            "tier": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "tier",
+            "reason"
+          ],
+          "type": "object"
+        },
+        "SpecLintResultV1": {
+          "description": "Stable V1 persistence and API contract. `checked_at` is supplied by the\ncaller; linting never reads a clock.",
+          "properties": {
+            "body_format": {
+              "$ref": "#/$defs/BodyFormat"
+            },
+            "body_sha256": {
+              "type": "string"
+            },
+            "checked_at": {
+              "type": "string"
+            },
+            "errors": {
+              "items": {
+                "$ref": "#/$defs/Violation"
+              },
+              "type": "array"
+            },
+            "linter_version": {
+              "type": "string"
+            },
+            "skipped_tiers": {
+              "items": {
+                "$ref": "#/$defs/SkippedTier"
+              },
+              "type": "array"
+            },
+            "warnings": {
+              "items": {
+                "$ref": "#/$defs/Violation"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "linter_version",
+            "body_sha256",
+            "body_format",
+            "checked_at",
+            "errors",
+            "warnings",
+            "skipped_tiers"
+          ],
+          "type": "object"
+        },
+        "Utf8ByteSpan": {
+          "description": "A half-open UTF-8 byte range in the original body.",
+          "properties": {
+            "end": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "start": {
+              "format": "int64",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "start",
+            "end"
+          ],
+          "type": "object"
+        },
+        "Violation": {
+          "properties": {
+            "code": {
+              "type": "string"
+            },
+            "message": {
+              "type": "string"
+            },
+            "severity": {
+              "$ref": "#/$defs/Severity"
+            },
+            "span": {
+              "$ref": "#/$defs/Utf8ByteSpan"
+            }
+          },
+          "required": [
+            "code",
+            "severity",
+            "message",
+            "span"
+          ],
+          "type": "object"
         }
       },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -17498,6 +18222,13 @@ expression: signatures
             "null"
           ]
         },
+        "code": {
+          "description": "Additive stable machine-readable rejection code.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "created_at": {
           "type": "string"
         },
@@ -17517,6 +18248,17 @@ expression: signatures
             "integer",
             "null"
           ]
+        },
+        "latest_lint": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SpecLintResultV1"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Additive lint result for the exact committed head revision."
         },
         "latest_revision_seq": {
           "description": "Head revision number (sign-offs anchored earlier are stale).",
@@ -17583,6 +18325,16 @@ expression: signatures
         },
         "updated_at": {
           "type": "string"
+        },
+        "violations": {
+          "description": "Additive ordered diagnostics for `SPEC_LINT_REJECTED`.",
+          "items": {
+            "$ref": "#/$defs/ProposalLintRejectionViolation"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
         }
       },
       "type": "object"
@@ -17635,6 +18387,56 @@ expression: signatures
           ],
           "type": "object"
         },
+        "BodyFormat": {
+          "description": "Body encoding supplied by the caller.",
+          "enum": [
+            "markdown",
+            "mdx"
+          ],
+          "type": "string"
+        },
+        "ProposalLintRejectionViolation": {
+          "description": "Stable structured diagnostic published when repository lint rejects a write.",
+          "properties": {
+            "code": {
+              "type": "string"
+            },
+            "message": {
+              "type": "string"
+            },
+            "severity": {
+              "type": "string"
+            },
+            "span": {
+              "$ref": "#/$defs/ProposalLintViolationSpan"
+            }
+          },
+          "required": [
+            "code",
+            "message",
+            "severity",
+            "span"
+          ],
+          "type": "object"
+        },
+        "ProposalLintViolationSpan": {
+          "description": "A half-open UTF-8 byte span in a lint rejection diagnostic.",
+          "properties": {
+            "end_byte": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "start_byte": {
+              "format": "int64",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "start_byte",
+            "end_byte"
+          ],
+          "type": "object"
+        },
         "ProposalListSummary": {
           "description": "Compact tribunal/readiness state for a single proposal row on the list.\n\nEvery field is a cheap, batched approximation of the richer per-proposal\ngate/refinement status surfaced by `proposal_show` — enough to drive the\nlist-row chips (tribunal round / awaiting-review / evidence, and a gate\npass/fail dot with a \"why blocked\" tooltip) without the several-queries-per-\nrow those full builders cost.",
           "properties": {
@@ -17679,6 +18481,116 @@ expression: signatures
             "unresolved_blocking_count"
           ],
           "type": "object"
+        },
+        "Severity": {
+          "description": "Stable diagnostic severity.",
+          "enum": [
+            "error",
+            "warning"
+          ],
+          "type": "string"
+        },
+        "SkippedTier": {
+          "description": "A deterministic record of a lint tier that did not run.",
+          "properties": {
+            "reason": {
+              "type": "string"
+            },
+            "tier": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "tier",
+            "reason"
+          ],
+          "type": "object"
+        },
+        "SpecLintResultV1": {
+          "description": "Stable V1 persistence and API contract. `checked_at` is supplied by the\ncaller; linting never reads a clock.",
+          "properties": {
+            "body_format": {
+              "$ref": "#/$defs/BodyFormat"
+            },
+            "body_sha256": {
+              "type": "string"
+            },
+            "checked_at": {
+              "type": "string"
+            },
+            "errors": {
+              "items": {
+                "$ref": "#/$defs/Violation"
+              },
+              "type": "array"
+            },
+            "linter_version": {
+              "type": "string"
+            },
+            "skipped_tiers": {
+              "items": {
+                "$ref": "#/$defs/SkippedTier"
+              },
+              "type": "array"
+            },
+            "warnings": {
+              "items": {
+                "$ref": "#/$defs/Violation"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "linter_version",
+            "body_sha256",
+            "body_format",
+            "checked_at",
+            "errors",
+            "warnings",
+            "skipped_tiers"
+          ],
+          "type": "object"
+        },
+        "Utf8ByteSpan": {
+          "description": "A half-open UTF-8 byte range in the original body.",
+          "properties": {
+            "end": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "start": {
+              "format": "int64",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "start",
+            "end"
+          ],
+          "type": "object"
+        },
+        "Violation": {
+          "properties": {
+            "code": {
+              "type": "string"
+            },
+            "message": {
+              "type": "string"
+            },
+            "severity": {
+              "$ref": "#/$defs/Severity"
+            },
+            "span": {
+              "$ref": "#/$defs/Utf8ByteSpan"
+            }
+          },
+          "required": [
+            "code",
+            "severity",
+            "message",
+            "span"
+          ],
+          "type": "object"
         }
       },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -17716,6 +18628,13 @@ expression: signatures
             "null"
           ]
         },
+        "code": {
+          "description": "Additive stable machine-readable rejection code.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "created_at": {
           "type": "string"
         },
@@ -17735,6 +18654,17 @@ expression: signatures
             "integer",
             "null"
           ]
+        },
+        "latest_lint": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SpecLintResultV1"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Additive lint result for the exact committed head revision."
         },
         "latest_revision_seq": {
           "description": "Head revision number (sign-offs anchored earlier are stale).",
@@ -17801,6 +18731,16 @@ expression: signatures
         },
         "updated_at": {
           "type": "string"
+        },
+        "violations": {
+          "description": "Additive ordered diagnostics for `SPEC_LINT_REJECTED`.",
+          "items": {
+            "$ref": "#/$defs/ProposalLintRejectionViolation"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
         }
       },
       "type": "object"
@@ -20588,6 +21528,56 @@ expression: signatures
           ],
           "type": "object"
         },
+        "BodyFormat": {
+          "description": "Body encoding supplied by the caller.",
+          "enum": [
+            "markdown",
+            "mdx"
+          ],
+          "type": "string"
+        },
+        "ProposalLintRejectionViolation": {
+          "description": "Stable structured diagnostic published when repository lint rejects a write.",
+          "properties": {
+            "code": {
+              "type": "string"
+            },
+            "message": {
+              "type": "string"
+            },
+            "severity": {
+              "type": "string"
+            },
+            "span": {
+              "$ref": "#/$defs/ProposalLintViolationSpan"
+            }
+          },
+          "required": [
+            "code",
+            "message",
+            "severity",
+            "span"
+          ],
+          "type": "object"
+        },
+        "ProposalLintViolationSpan": {
+          "description": "A half-open UTF-8 byte span in a lint rejection diagnostic.",
+          "properties": {
+            "end_byte": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "start_byte": {
+              "format": "int64",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "start_byte",
+            "end_byte"
+          ],
+          "type": "object"
+        },
         "ProposalListSummary": {
           "description": "Compact tribunal/readiness state for a single proposal row on the list.\n\nEvery field is a cheap, batched approximation of the richer per-proposal\ngate/refinement status surfaced by `proposal_show` — enough to drive the\nlist-row chips (tribunal round / awaiting-review / evidence, and a gate\npass/fail dot with a \"why blocked\" tooltip) without the several-queries-per-\nrow those full builders cost.",
           "properties": {
@@ -20632,6 +21622,116 @@ expression: signatures
             "unresolved_blocking_count"
           ],
           "type": "object"
+        },
+        "Severity": {
+          "description": "Stable diagnostic severity.",
+          "enum": [
+            "error",
+            "warning"
+          ],
+          "type": "string"
+        },
+        "SkippedTier": {
+          "description": "A deterministic record of a lint tier that did not run.",
+          "properties": {
+            "reason": {
+              "type": "string"
+            },
+            "tier": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "tier",
+            "reason"
+          ],
+          "type": "object"
+        },
+        "SpecLintResultV1": {
+          "description": "Stable V1 persistence and API contract. `checked_at` is supplied by the\ncaller; linting never reads a clock.",
+          "properties": {
+            "body_format": {
+              "$ref": "#/$defs/BodyFormat"
+            },
+            "body_sha256": {
+              "type": "string"
+            },
+            "checked_at": {
+              "type": "string"
+            },
+            "errors": {
+              "items": {
+                "$ref": "#/$defs/Violation"
+              },
+              "type": "array"
+            },
+            "linter_version": {
+              "type": "string"
+            },
+            "skipped_tiers": {
+              "items": {
+                "$ref": "#/$defs/SkippedTier"
+              },
+              "type": "array"
+            },
+            "warnings": {
+              "items": {
+                "$ref": "#/$defs/Violation"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "linter_version",
+            "body_sha256",
+            "body_format",
+            "checked_at",
+            "errors",
+            "warnings",
+            "skipped_tiers"
+          ],
+          "type": "object"
+        },
+        "Utf8ByteSpan": {
+          "description": "A half-open UTF-8 byte range in the original body.",
+          "properties": {
+            "end": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "start": {
+              "format": "int64",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "start",
+            "end"
+          ],
+          "type": "object"
+        },
+        "Violation": {
+          "properties": {
+            "code": {
+              "type": "string"
+            },
+            "message": {
+              "type": "string"
+            },
+            "severity": {
+              "$ref": "#/$defs/Severity"
+            },
+            "span": {
+              "$ref": "#/$defs/Utf8ByteSpan"
+            }
+          },
+          "required": [
+            "code",
+            "severity",
+            "message",
+            "span"
+          ],
+          "type": "object"
         }
       },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -20669,6 +21769,13 @@ expression: signatures
             "null"
           ]
         },
+        "code": {
+          "description": "Additive stable machine-readable rejection code.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "created_at": {
           "type": "string"
         },
@@ -20688,6 +21795,17 @@ expression: signatures
             "integer",
             "null"
           ]
+        },
+        "latest_lint": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SpecLintResultV1"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Additive lint result for the exact committed head revision."
         },
         "latest_revision_seq": {
           "description": "Head revision number (sign-offs anchored earlier are stale).",
@@ -20754,6 +21872,16 @@ expression: signatures
         },
         "updated_at": {
           "type": "string"
+        },
+        "violations": {
+          "description": "Additive ordered diagnostics for `SPEC_LINT_REJECTED`.",
+          "items": {
+            "$ref": "#/$defs/ProposalLintRejectionViolation"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
         }
       },
       "type": "object"
@@ -20811,6 +21939,56 @@ expression: signatures
           ],
           "type": "object"
         },
+        "BodyFormat": {
+          "description": "Body encoding supplied by the caller.",
+          "enum": [
+            "markdown",
+            "mdx"
+          ],
+          "type": "string"
+        },
+        "ProposalLintRejectionViolation": {
+          "description": "Stable structured diagnostic published when repository lint rejects a write.",
+          "properties": {
+            "code": {
+              "type": "string"
+            },
+            "message": {
+              "type": "string"
+            },
+            "severity": {
+              "type": "string"
+            },
+            "span": {
+              "$ref": "#/$defs/ProposalLintViolationSpan"
+            }
+          },
+          "required": [
+            "code",
+            "message",
+            "severity",
+            "span"
+          ],
+          "type": "object"
+        },
+        "ProposalLintViolationSpan": {
+          "description": "A half-open UTF-8 byte span in a lint rejection diagnostic.",
+          "properties": {
+            "end_byte": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "start_byte": {
+              "format": "int64",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "start_byte",
+            "end_byte"
+          ],
+          "type": "object"
+        },
         "ProposalListSummary": {
           "description": "Compact tribunal/readiness state for a single proposal row on the list.\n\nEvery field is a cheap, batched approximation of the richer per-proposal\ngate/refinement status surfaced by `proposal_show` — enough to drive the\nlist-row chips (tribunal round / awaiting-review / evidence, and a gate\npass/fail dot with a \"why blocked\" tooltip) without the several-queries-per-\nrow those full builders cost.",
           "properties": {
@@ -20855,6 +22033,116 @@ expression: signatures
             "unresolved_blocking_count"
           ],
           "type": "object"
+        },
+        "Severity": {
+          "description": "Stable diagnostic severity.",
+          "enum": [
+            "error",
+            "warning"
+          ],
+          "type": "string"
+        },
+        "SkippedTier": {
+          "description": "A deterministic record of a lint tier that did not run.",
+          "properties": {
+            "reason": {
+              "type": "string"
+            },
+            "tier": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "tier",
+            "reason"
+          ],
+          "type": "object"
+        },
+        "SpecLintResultV1": {
+          "description": "Stable V1 persistence and API contract. `checked_at` is supplied by the\ncaller; linting never reads a clock.",
+          "properties": {
+            "body_format": {
+              "$ref": "#/$defs/BodyFormat"
+            },
+            "body_sha256": {
+              "type": "string"
+            },
+            "checked_at": {
+              "type": "string"
+            },
+            "errors": {
+              "items": {
+                "$ref": "#/$defs/Violation"
+              },
+              "type": "array"
+            },
+            "linter_version": {
+              "type": "string"
+            },
+            "skipped_tiers": {
+              "items": {
+                "$ref": "#/$defs/SkippedTier"
+              },
+              "type": "array"
+            },
+            "warnings": {
+              "items": {
+                "$ref": "#/$defs/Violation"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "linter_version",
+            "body_sha256",
+            "body_format",
+            "checked_at",
+            "errors",
+            "warnings",
+            "skipped_tiers"
+          ],
+          "type": "object"
+        },
+        "Utf8ByteSpan": {
+          "description": "A half-open UTF-8 byte range in the original body.",
+          "properties": {
+            "end": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "start": {
+              "format": "int64",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "start",
+            "end"
+          ],
+          "type": "object"
+        },
+        "Violation": {
+          "properties": {
+            "code": {
+              "type": "string"
+            },
+            "message": {
+              "type": "string"
+            },
+            "severity": {
+              "$ref": "#/$defs/Severity"
+            },
+            "span": {
+              "$ref": "#/$defs/Utf8ByteSpan"
+            }
+          },
+          "required": [
+            "code",
+            "severity",
+            "message",
+            "span"
+          ],
+          "type": "object"
         }
       },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -20892,6 +22180,13 @@ expression: signatures
             "null"
           ]
         },
+        "code": {
+          "description": "Additive stable machine-readable rejection code.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "created_at": {
           "type": "string"
         },
@@ -20911,6 +22206,17 @@ expression: signatures
             "integer",
             "null"
           ]
+        },
+        "latest_lint": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SpecLintResultV1"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Additive lint result for the exact committed head revision."
         },
         "latest_revision_seq": {
           "description": "Head revision number (sign-offs anchored earlier are stale).",
@@ -20977,6 +22283,16 @@ expression: signatures
         },
         "updated_at": {
           "type": "string"
+        },
+        "violations": {
+          "description": "Additive ordered diagnostics for `SPEC_LINT_REJECTED`.",
+          "items": {
+            "$ref": "#/$defs/ProposalLintRejectionViolation"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
         }
       },
       "type": "object"
@@ -21243,6 +22559,56 @@ expression: signatures
           ],
           "type": "object"
         },
+        "BodyFormat": {
+          "description": "Body encoding supplied by the caller.",
+          "enum": [
+            "markdown",
+            "mdx"
+          ],
+          "type": "string"
+        },
+        "ProposalLintRejectionViolation": {
+          "description": "Stable structured diagnostic published when repository lint rejects a write.",
+          "properties": {
+            "code": {
+              "type": "string"
+            },
+            "message": {
+              "type": "string"
+            },
+            "severity": {
+              "type": "string"
+            },
+            "span": {
+              "$ref": "#/$defs/ProposalLintViolationSpan"
+            }
+          },
+          "required": [
+            "code",
+            "message",
+            "severity",
+            "span"
+          ],
+          "type": "object"
+        },
+        "ProposalLintViolationSpan": {
+          "description": "A half-open UTF-8 byte span in a lint rejection diagnostic.",
+          "properties": {
+            "end_byte": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "start_byte": {
+              "format": "int64",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "start_byte",
+            "end_byte"
+          ],
+          "type": "object"
+        },
         "ProposalListSummary": {
           "description": "Compact tribunal/readiness state for a single proposal row on the list.\n\nEvery field is a cheap, batched approximation of the richer per-proposal\ngate/refinement status surfaced by `proposal_show` — enough to drive the\nlist-row chips (tribunal round / awaiting-review / evidence, and a gate\npass/fail dot with a \"why blocked\" tooltip) without the several-queries-per-\nrow those full builders cost.",
           "properties": {
@@ -21287,6 +22653,116 @@ expression: signatures
             "unresolved_blocking_count"
           ],
           "type": "object"
+        },
+        "Severity": {
+          "description": "Stable diagnostic severity.",
+          "enum": [
+            "error",
+            "warning"
+          ],
+          "type": "string"
+        },
+        "SkippedTier": {
+          "description": "A deterministic record of a lint tier that did not run.",
+          "properties": {
+            "reason": {
+              "type": "string"
+            },
+            "tier": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "tier",
+            "reason"
+          ],
+          "type": "object"
+        },
+        "SpecLintResultV1": {
+          "description": "Stable V1 persistence and API contract. `checked_at` is supplied by the\ncaller; linting never reads a clock.",
+          "properties": {
+            "body_format": {
+              "$ref": "#/$defs/BodyFormat"
+            },
+            "body_sha256": {
+              "type": "string"
+            },
+            "checked_at": {
+              "type": "string"
+            },
+            "errors": {
+              "items": {
+                "$ref": "#/$defs/Violation"
+              },
+              "type": "array"
+            },
+            "linter_version": {
+              "type": "string"
+            },
+            "skipped_tiers": {
+              "items": {
+                "$ref": "#/$defs/SkippedTier"
+              },
+              "type": "array"
+            },
+            "warnings": {
+              "items": {
+                "$ref": "#/$defs/Violation"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "linter_version",
+            "body_sha256",
+            "body_format",
+            "checked_at",
+            "errors",
+            "warnings",
+            "skipped_tiers"
+          ],
+          "type": "object"
+        },
+        "Utf8ByteSpan": {
+          "description": "A half-open UTF-8 byte range in the original body.",
+          "properties": {
+            "end": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "start": {
+              "format": "int64",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "start",
+            "end"
+          ],
+          "type": "object"
+        },
+        "Violation": {
+          "properties": {
+            "code": {
+              "type": "string"
+            },
+            "message": {
+              "type": "string"
+            },
+            "severity": {
+              "$ref": "#/$defs/Severity"
+            },
+            "span": {
+              "$ref": "#/$defs/Utf8ByteSpan"
+            }
+          },
+          "required": [
+            "code",
+            "severity",
+            "message",
+            "span"
+          ],
+          "type": "object"
         }
       },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -21324,6 +22800,13 @@ expression: signatures
             "null"
           ]
         },
+        "code": {
+          "description": "Additive stable machine-readable rejection code.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "created_at": {
           "type": "string"
         },
@@ -21343,6 +22826,17 @@ expression: signatures
             "integer",
             "null"
           ]
+        },
+        "latest_lint": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SpecLintResultV1"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Additive lint result for the exact committed head revision."
         },
         "latest_revision_seq": {
           "description": "Head revision number (sign-offs anchored earlier are stale).",
@@ -21409,6 +22903,16 @@ expression: signatures
         },
         "updated_at": {
           "type": "string"
+        },
+        "violations": {
+          "description": "Additive ordered diagnostics for `SPEC_LINT_REJECTED`.",
+          "items": {
+            "$ref": "#/$defs/ProposalLintRejectionViolation"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
         }
       },
       "type": "object"

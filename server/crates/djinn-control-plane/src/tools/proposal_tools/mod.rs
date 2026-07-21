@@ -169,14 +169,33 @@ pub(super) fn err_single(error: impl Into<String>) -> ProposalSingleResponse {
 pub(super) fn proposal_mutation_error(error: djinn_db::Error) -> ProposalSingleResponse {
     match error {
         djinn_db::Error::SpecLintRejected(rejection) => {
-            let mut violations: Vec<_> = rejection.violations.into_iter().map(|violation| ProposalLintRejectionViolation {
-                code: violation.code, message: violation.message, severity: "error".to_string(),
-                span: ProposalLintViolationSpan { start_byte: violation.span_start, end_byte: violation.span_end },
-            }).collect();
-            violations.sort_by(|a, b| a.span.start_byte.cmp(&b.span.start_byte).then(a.span.end_byte.cmp(&b.span.end_byte)).then(a.code.cmp(&b.code)));
+            let mut violations: Vec<_> = rejection
+                .violations
+                .into_iter()
+                .map(|violation| ProposalLintRejectionViolation {
+                    code: violation.code,
+                    message: violation.message,
+                    severity: "error".to_string(),
+                    span: ProposalLintViolationSpan {
+                        start_byte: violation.span_start,
+                        end_byte: violation.span_end,
+                    },
+                })
+                .collect();
+            violations.sort_by(|a, b| {
+                a.span
+                    .start_byte
+                    .cmp(&b.span.start_byte)
+                    .then(a.span.end_byte.cmp(&b.span.end_byte))
+                    .then(a.code.cmp(&b.code))
+            });
             ProposalSingleResponse {
-                proposal: None, mdx: None, error: Some(rejection.code.clone()),
-                code: Some(rejection.code), violations: Some(violations), latest_lint: None,
+                proposal: None,
+                mdx: None,
+                error: Some(rejection.code.clone()),
+                code: Some(rejection.code),
+                violations: Some(violations),
+                latest_lint: None,
             }
         }
         other => err_single(other.to_string()),

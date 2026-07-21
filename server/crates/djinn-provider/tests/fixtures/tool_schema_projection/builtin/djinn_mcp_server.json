@@ -15797,13 +15797,11 @@
           "properties": {
             "start_byte": {
               "type": "integer",
-              "format": "uint",
-              "minimum": 0
+              "format": "int64"
             },
             "end_byte": {
               "type": "integer",
-              "format": "uint",
-              "minimum": 0
+              "format": "int64"
             }
           },
           "required": [
@@ -15901,13 +15899,11 @@
           "properties": {
             "start": {
               "type": "integer",
-              "format": "uint",
-              "minimum": 0
+              "format": "int64"
             },
             "end": {
               "type": "integer",
-              "format": "uint",
-              "minimum": 0
+              "format": "int64"
             }
           },
           "required": [
@@ -16383,13 +16379,11 @@
           "properties": {
             "start_byte": {
               "type": "integer",
-              "format": "uint",
-              "minimum": 0
+              "format": "int64"
             },
             "end_byte": {
               "type": "integer",
-              "format": "uint",
-              "minimum": 0
+              "format": "int64"
             }
           },
           "required": [
@@ -16487,13 +16481,11 @@
           "properties": {
             "start": {
               "type": "integer",
-              "format": "uint",
-              "minimum": 0
+              "format": "int64"
             },
             "end": {
               "type": "integer",
-              "format": "uint",
-              "minimum": 0
+              "format": "int64"
             }
           },
           "required": [
@@ -17498,13 +17490,11 @@
           "properties": {
             "start_byte": {
               "type": "integer",
-              "format": "uint",
-              "minimum": 0
+              "format": "int64"
             },
             "end_byte": {
               "type": "integer",
-              "format": "uint",
-              "minimum": 0
+              "format": "int64"
             }
           },
           "required": [
@@ -17602,13 +17592,11 @@
           "properties": {
             "start": {
               "type": "integer",
-              "format": "uint",
-              "minimum": 0
+              "format": "int64"
             },
             "end": {
               "type": "integer",
-              "format": "uint",
-              "minimum": 0
+              "format": "int64"
             }
           },
           "required": [
@@ -18183,13 +18171,11 @@
           "properties": {
             "start_byte": {
               "type": "integer",
-              "format": "uint",
-              "minimum": 0
+              "format": "int64"
             },
             "end_byte": {
               "type": "integer",
-              "format": "uint",
-              "minimum": 0
+              "format": "int64"
             }
           },
           "required": [
@@ -18287,13 +18273,11 @@
           "properties": {
             "start": {
               "type": "integer",
-              "format": "uint",
-              "minimum": 0
+              "format": "int64"
             },
             "end": {
               "type": "integer",
-              "format": "uint",
-              "minimum": 0
+              "format": "int64"
             }
           },
           "required": [
@@ -18594,13 +18578,11 @@
           "properties": {
             "start_byte": {
               "type": "integer",
-              "format": "uint",
-              "minimum": 0
+              "format": "int64"
             },
             "end_byte": {
               "type": "integer",
-              "format": "uint",
-              "minimum": 0
+              "format": "int64"
             }
           },
           "required": [
@@ -18698,13 +18680,11 @@
           "properties": {
             "start": {
               "type": "integer",
-              "format": "uint",
-              "minimum": 0
+              "format": "int64"
             },
             "end": {
               "type": "integer",
-              "format": "uint",
-              "minimum": 0
+              "format": "int64"
             }
           },
           "required": [
@@ -21749,13 +21729,11 @@
           "properties": {
             "start_byte": {
               "type": "integer",
-              "format": "uint",
-              "minimum": 0
+              "format": "int64"
             },
             "end_byte": {
               "type": "integer",
-              "format": "uint",
-              "minimum": 0
+              "format": "int64"
             }
           },
           "required": [
@@ -21853,13 +21831,11 @@
           "properties": {
             "start": {
               "type": "integer",
-              "format": "uint",
-              "minimum": 0
+              "format": "int64"
             },
             "end": {
               "type": "integer",
-              "format": "uint",
-              "minimum": 0
+              "format": "int64"
             }
           },
           "required": [
@@ -22165,13 +22141,11 @@
           "properties": {
             "start_byte": {
               "type": "integer",
-              "format": "uint",
-              "minimum": 0
+              "format": "int64"
             },
             "end_byte": {
               "type": "integer",
-              "format": "uint",
-              "minimum": 0
+              "format": "int64"
             }
           },
           "required": [
@@ -22269,13 +22243,11 @@
           "properties": {
             "start": {
               "type": "integer",
-              "format": "uint",
-              "minimum": 0
+              "format": "int64"
             },
             "end": {
               "type": "integer",
-              "format": "uint",
-              "minimum": 0
+              "format": "int64"
             }
           },
           "required": [
@@ -22791,13 +22763,11 @@
           "properties": {
             "start_byte": {
               "type": "integer",
-              "format": "uint",
-              "minimum": 0
+              "format": "int64"
             },
             "end_byte": {
               "type": "integer",
-              "format": "uint",
-              "minimum": 0
+              "format": "int64"
             }
           },
           "required": [
@@ -22895,13 +22865,11 @@
           "properties": {
             "start": {
               "type": "integer",
-              "format": "uint",
-              "minimum": 0
+              "format": "int64"
             },
             "end": {
               "type": "integer",
-              "format": "uint",
-              "minimum": 0
+              "format": "int64"
             }
           },
           "required": [
