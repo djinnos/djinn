@@ -61,7 +61,7 @@ use super::mdx::{
 // Re-import shared helpers kept in `mod.rs` as `pub(super)`.
 use super::{
     build_gate_status, err_show, err_single, evaluate_composed_gate, format_readiness_error,
-    parse_ac_items, proposal_not_found_error,
+    parse_ac_items, proposal_mutation_error, proposal_not_found_error,
 };
 
 // Parameter structs live in `params.rs` to keep this file under the size guard.
@@ -70,6 +70,43 @@ use super::params::{
     ProposalListParams, ProposalShowParams, ProposalTargetParams, ProposalUpdateParams,
 };
 
+
+/// Load lint through the repository for the immutable revision selected by the
+/// committed proposal head; do not run a separate control-plane lint.
+async fn committed_head_lint(
+    repo: &ProposalRepository,
+    proposal: &djinn_core::models::Proposal,
+) -> Result<djinn_spec_lint::SpecLintResultV1, String> {
+    let revisions = repo.revisions(&proposal.id).await.map_err(|e| e.to_string())?;
+    let revision = revisions
+        .iter()
+        .rev()
+        .find(|revision| revision.seq == proposal.latest_revision_seq)
+        .ok_or_else(|| {
+            format!(
+                "committed head revision not found: {}/{}",
+                proposal.id, proposal.latest_revision_seq
+            )
+        })?;
+    repo.lint_for_revision(revision).await.map_err(|e| e.to_string())
+}
+
+async fn successful_mutation_response(
+    repo: &ProposalRepository,
+    proposal: djinn_core::models::Proposal,
+) -> ProposalSingleResponse {
+    match committed_head_lint(repo, &proposal).await {
+        Ok(latest_lint) => ProposalSingleResponse {
+            proposal: Some(ProposalModel::from(&proposal)),
+            mdx: None,
+            error: None,
+            code: None,
+            violations: None,
+            latest_lint: Some(latest_lint),
+        },
+        Err(error) => err_single(error),
+    }
+}
 // ── Target/show response helpers ─────────────────────────────────────────────
 
 /// List a proposal's targets and resolve each project id to an `owner/repo`
@@ -341,7 +378,7 @@ impl DjinnMcpServer {
             .await
         {
             Ok(p) => p,
-            Err(e) => return Json(err_single(e.to_string())),
+            Err(e) => return Json(proposal_mutation_error(e)),
         };
 
         // Seed target projects (best-effort: unresolvable refs are skipped).
@@ -384,11 +421,7 @@ impl DjinnMcpServer {
             proposal
         };
 
-        Json(ProposalSingleResponse {
-            proposal: Some(ProposalModel::from(&proposal)),
-            mdx: None,
-            error: None,
-        })
+        Json(successful_mutation_response(&repo, proposal).await)
     }
 
     /// Import a portable proposal.mdx document, creating or updating a proposal.
@@ -465,7 +498,7 @@ impl DjinnMcpServer {
                 .await
             {
                 Ok(proposal) => proposal,
-                Err(e) => return Json(err_single(e.to_string())),
+                Err(e) => return Json(proposal_mutation_error(e)),
             }
         } else {
             match repo
@@ -479,15 +512,11 @@ impl DjinnMcpServer {
                 .await
             {
                 Ok(proposal) => proposal,
-                Err(e) => return Json(err_single(e.to_string())),
+                Err(e) => return Json(proposal_mutation_error(e)),
             }
         };
 
-        Json(ProposalSingleResponse {
-            proposal: Some(ProposalModel::from(&proposal)),
-            mdx: None,
-            error: None,
-        })
+        Json(successful_mutation_response(&repo, proposal).await)
     }
 
     /// Export a proposal as a portable proposal.mdx string.
@@ -573,6 +602,9 @@ impl DjinnMcpServer {
             proposal: Some(ProposalModel::from(&proposal)),
             mdx: Some(mdx_output),
             error: None,
+            code: None,
+            violations: None,
+            latest_lint: None,
         })
     }
 
@@ -1033,12 +1065,8 @@ impl DjinnMcpServer {
             )
             .await
         {
-            Ok(updated) => Json(ProposalSingleResponse {
-                proposal: Some(ProposalModel::from(&updated)),
-                mdx: None,
-                error: None,
-            }),
-            Err(e) => Json(err_single(e.to_string())),
+            Ok(updated) => Json(successful_mutation_response(&repo, updated).await),
+            Err(e) => Json(proposal_mutation_error(e)),
         }
     }
 
@@ -1104,12 +1132,8 @@ impl DjinnMcpServer {
             )
             .await
         {
-            Ok(updated) => Json(ProposalSingleResponse {
-                proposal: Some(ProposalModel::from(&updated)),
-                mdx: None,
-                error: None,
-            }),
-            Err(e) => Json(err_single(e.to_string())),
+            Ok(updated) => Json(successful_mutation_response(&repo, updated).await),
+            Err(e) => Json(proposal_mutation_error(e)),
         }
     }
 

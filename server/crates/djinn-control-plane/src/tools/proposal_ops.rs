@@ -7,6 +7,23 @@ use djinn_core::models::{
     Proposal, ProposalFeedback, ProposalRevision, ProposalSignoff, ProposalTarget,
 };
 use serde::{Deserialize, Serialize};
+use djinn_spec_lint::SpecLintResultV1;
+
+/// A half-open UTF-8 byte span in a lint rejection diagnostic.
+#[derive(Serialize, Deserialize, Clone, schemars::JsonSchema)]
+pub struct ProposalLintViolationSpan {
+    pub start_byte: usize,
+    pub end_byte: usize,
+}
+
+/// Stable structured diagnostic published when repository lint rejects a write.
+#[derive(Serialize, Deserialize, Clone, schemars::JsonSchema)]
+pub struct ProposalLintRejectionViolation {
+    pub code: String,
+    pub message: String,
+    pub severity: String,
+    pub span: ProposalLintViolationSpan,
+}
 
 // ── Revision metadata convention ─────────────────────────────────────────────
 //
@@ -393,6 +410,15 @@ pub struct ProposalSingleResponse {
     pub mdx: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// Additive stable machine-readable rejection code.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub code: Option<String>,
+    /// Additive ordered diagnostics for `SPEC_LINT_REJECTED`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub violations: Option<Vec<ProposalLintRejectionViolation>>,
+    /// Additive lint result for the exact committed head revision.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub latest_lint: Option<SpecLintResultV1>,
 }
 
 #[derive(Serialize, Deserialize, Clone, schemars::JsonSchema)]
