@@ -947,8 +947,8 @@ pub async fn build_multi_project_housekeeping_fixture(db: &Database) -> Housekee
 
 /// Ensure the `doctor_findings` table exists in the database. The test DB is
 /// cloned from `djinn_test_template` which may not include the latest migration
-/// if the template hasn't been rebuilt. This is a no-op if the table already
-/// exists.
+/// if the template hasn't been rebuilt. Existing template tables are upgraded
+/// with the current additive doctor-finding columns and indexes.
 ///
 /// Placed inside `djinn-db::test_support` so all raw SQL stays within the
 /// `djinn-db` crate boundary (enforced by the raw-SQL boundary CI check).
@@ -962,12 +962,10 @@ pub async fn ensure_doctor_findings_schema(db: &Database) {
     .await
     .expect("check doctor_findings existence");
 
-    if matches!(exists, Some((count,)) if count > 0) {
-        return;
-    }
-
-    // Apply the migration SQL inline. This matches migration 61.
-    sqlx::query(
+    if !matches!(exists, Some((count,)) if count > 0) {
+        // Apply the base migration SQL inline. The ALTER/index below bring an
+        // older cloned template forward to the current doctor-finding schema.
+        sqlx::query(
         r#"CREATE TABLE IF NOT EXISTS doctor_findings (
             id                VARCHAR(36)  NOT NULL PRIMARY KEY,
             run_id            VARCHAR(64)  NULL,
@@ -978,13 +976,20 @@ pub async fn ensure_doctor_findings_schema(db: &Database) {
             evidence          JSONB        NOT NULL DEFAULT '{}'::jsonb,
             resolver_snapshot JSONB        NULL,
             detail            TEXT         NULL,
+            deduplication_key VARCHAR(255) NULL,
             CONSTRAINT doctor_findings_severity_check
                 CHECK (severity IN ('info', 'warn', 'critical'))
         )"#,
-    )
-    .execute(db.pool())
-    .await
-    .expect("create doctor_findings table");
+        )
+        .execute(db.pool())
+        .await
+        .expect("create doctor_findings table");
+    }
+
+    sqlx::query("ALTER TABLE doctor_findings ADD COLUMN IF NOT EXISTS deduplication_key VARCHAR(255) NULL")
+        .execute(db.pool())
+        .await
+        .expect("add doctor_findings.deduplication_key");
 
     sqlx::query("CREATE INDEX IF NOT EXISTS doctor_findings_created_at_idx ON doctor_findings (created_at DESC)")
         .execute(db.pool())
@@ -1004,6 +1009,10 @@ pub async fn ensure_doctor_findings_schema(db: &Database) {
         .execute(db.pool())
         .await
         .expect("create doctor_findings_entity_ids_gin_idx");
+    sqlx::query("CREATE UNIQUE INDEX IF NOT EXISTS doctor_findings_deduplication_key_unique ON doctor_findings (deduplication_key) WHERE deduplication_key IS NOT NULL")
+        .execute(db.pool())
+        .await
+        .expect("create doctor_findings_deduplication_key_unique");
 }
 
 /// Overwrite the `encrypted_value` column of a credential row with arbitrary
