@@ -700,6 +700,7 @@ async fn load_knowledge_context_with_planner(
 ///
 /// Budget pruning and dedupe are applied later by [`apply_budget_outcomes`] once
 /// the packed-note outcomes are available.
+#[cfg(test)]
 fn classify_knowledge_candidates(
     candidates: &[djinn_db::repositories::note::ScopeOverlapTraceCandidate],
     production_ids: &std::collections::HashSet<&str>,
@@ -742,6 +743,7 @@ fn classify_knowledge_candidates(
 
 /// Classify all candidates as `search_error` — used when the production query fails
 /// but the trace candidate fetch succeeded.
+#[cfg(test)]
 fn classify_knowledge_candidates_for_error(
     candidates: &[djinn_db::repositories::note::ScopeOverlapTraceCandidate],
 ) -> Vec<djinn_db::repositories::retrieval_trace::TraceCandidate> {
@@ -776,6 +778,7 @@ fn classify_knowledge_candidates_for_error(
 /// Deduplication: if multiple injected candidates resolve to the same permalink
 /// (shouldn't happen in practice but handled defensively), the first wins and
 /// subsequent ones become `Dedupe`.
+#[cfg(test)]
 fn apply_budget_outcomes(
     mut candidates: Vec<djinn_db::repositories::retrieval_trace::TraceCandidate>,
     packed: &crate::actors::slot::helpers::PackedKnowledgeNotes,
