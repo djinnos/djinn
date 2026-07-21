@@ -102,13 +102,15 @@ function rgba(hex: string, alpha: number): string {
 
 // ── Disk model ───────────────────────────────────────────────────────────────
 
-interface DiskNode {
+export interface DiskNode {
   id: string;
   title: string;
   permalink: string;
   noteType: string;
   isProposal: boolean;
   isOrphan: boolean;
+  isGhost: boolean;
+  lifecycle: "active" | "archived" | "deprecated";
   connectionCount: number;
   color: string;
   ts: number | null;
@@ -118,6 +120,7 @@ interface DiskNode {
   igniteAt: number;
   /** Time-anchored target radius (inside its ring's band). */
   tr: number;
+  ring: number;
   /** Draw radius. */
   r: number;
   x: number;
@@ -233,8 +236,14 @@ function placeRadius(ringIndex: number, id: string): number {
   return outer - (0.15 + 0.7 * h) * (outer - inner);
 }
 
-function buildDisk(payload: MemoryGraphOutput): DiskModel {
-  const rawNodes = payload.nodes;
+export function buildMemoryGraphDisk(payload: MemoryGraphOutput): DiskModel {
+  // Missing status is the legacy active-only wire contract.
+  const activeRawNodes = payload.nodes.filter((n) => n.status !== "archived" && n.status !== "deprecated");
+  const ghostRawNodes = payload.nodes.filter((n) => n.status === "archived" || n.status === "deprecated");
+  // With no active nodes there is no active model to preserve; retain a stable
+  // fallback disk for the returned ghosts.
+  const rawNodes = activeRawNodes.length ? activeRawNodes : ghostRawNodes;
+  const ghostsToAppend = activeRawNodes.length ? ghostRawNodes : [];
   const stamps = rawNodes.map((n) => nodeTs(n)).filter((v): v is number => v !== null);
   const minTs = stamps.length ? Math.min(...stamps) : null;
   const maxTs = stamps.length ? Math.max(...stamps) : null;
@@ -327,7 +336,8 @@ function buildDisk(payload: MemoryGraphOutput): DiskModel {
 
   const nodes: DiskNode[] = rawNodes.map((n) => {
     const rec = recOf(n);
-    const tr = placeRadius(ringIndexOf(n), n.id);
+    const ring = ringIndexOf(n);
+    const tr = placeRadius(ring, n.id);
     const angle = (orderIndex.get(n.id) ?? 0) * GOLDEN_ANGLE + ((hash(n.id) % 100) / 100 - 0.5) * 0.5;
     const connectionCount = Number(n.connection_count) || 0;
     return {
@@ -337,12 +347,15 @@ function buildDisk(payload: MemoryGraphOutput): DiskModel {
       noteType: n.note_type,
       isProposal: n.entity_type === "proposal",
       isOrphan: Boolean(n.is_orphan),
+      isGhost: false,
+      lifecycle: "active",
       connectionCount,
       color: colorForNote(n.note_type, Boolean(n.is_orphan)),
       ts: nodeTs(n),
       rec,
       igniteAt: igniteByNode.get(n.id) ?? rec,
       tr,
+      ring,
       r: Math.max(1.1, (3 + Math.sqrt(connectionCount) * 0.9 + (n.entity_type === "proposal" ? 0.6 : 0)) * sizeScale),
       x: Math.cos(angle) * tr,
       y: Math.sin(angle) * tr,
@@ -364,8 +377,44 @@ function buildDisk(payload: MemoryGraphOutput): DiskModel {
     if (a !== undefined && b !== undefined && a !== b) links.push({ a, b, kind: e.kind });
   }
 
+  // Freeze the complete active/proposal layout before placing lifecycle ghosts.
   relax(nodes, links);
-  return { links, maxTs, minTs, nodes, rings, timed };
+  const activeById = new Map(nodes.map((n) => [n.id, n]));
+  const edgeEndpoints = [...payload.edges, ...(payload.typed_edges ?? [])];
+  for (const raw of ghostsToAppend) {
+    const neighbors = edgeEndpoints
+      .filter((edge) => edge.source_id === raw.id || edge.target_id === raw.id)
+      .map((edge) => activeById.get(edge.source_id === raw.id ? edge.target_id : edge.source_id))
+      .filter((node): node is DiskNode => node !== undefined)
+      .sort((a, b) => hash(`${raw.id}|${a.id}`) - hash(`${raw.id}|${b.id}`) || a.id.localeCompare(b.id));
+    const connectionCount = Number(raw.connection_count) || 0;
+    const lifecycle = raw.status === "deprecated" ? "deprecated" : "archived";
+    const r = Math.max(1.1, (3 + Math.sqrt(connectionCount) * 0.9) * sizeScale);
+    const anchor = neighbors[0];
+    const ring = anchor?.ring ?? ringIndexOf(raw);
+    const tr = placeRadius(ring, raw.id);
+    const angle = (hash(raw.id) / 0xffffffff) * Math.PI * 2;
+    const distance = anchor ? anchor.r + r + 14 : tr;
+    nodes.push({
+      id: raw.id, title: raw.title, permalink: raw.permalink, noteType: raw.note_type,
+      isProposal: raw.entity_type === "proposal", isOrphan: Boolean(raw.is_orphan), isGhost: true, lifecycle,
+      connectionCount, color: colorForNote(raw.note_type, Boolean(raw.is_orphan)), ts: nodeTs(raw),
+      rec: recOf(raw), igniteAt: 0, tr, ring, r,
+      x: (anchor?.x ?? 0) + Math.cos(angle) * distance,
+      y: (anchor?.y ?? 0) + Math.sin(angle) * distance, vx: 0, vy: 0,
+    });
+  }
+  const allIndexById = new Map(nodes.map((n, i) => [n.id, i]));
+  const allLinks: DiskLink[] = [];
+  for (const edge of payload.edges) {
+    const a = allIndexById.get(edge.source_id); const b = allIndexById.get(edge.target_id);
+    if (a !== undefined && b !== undefined && a !== b) allLinks.push({ a, b, kind: "wikilink" });
+  }
+  for (const edge of payload.typed_edges ?? []) {
+    const a = allIndexById.get(edge.source_id); const b = allIndexById.get(edge.target_id);
+    if (a !== undefined && b !== undefined && a !== b) allLinks.push({ a, b, kind: edge.kind });
+  }
+  return { links: allLinks, maxTs, minTs, nodes, rings, timed };
 }
 
 /** Short-range repulsion cutoff (world units, squared). */
@@ -610,7 +659,7 @@ export function MemoryGraphCanvas({ projectSlug, reloadKey, onSelectNote }: Memo
           setState({ status: "empty" });
           return;
         }
-        const disk = buildDisk(payload);
+        const disk = buildMemoryGraphDisk(payload);
         if (cancelled) return;
         appearRef.current = new Float32Array(disk.nodes.length);
         ringGrowRef.current = new Float32Array(disk.rings.length);
