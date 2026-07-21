@@ -12,6 +12,7 @@ djinn-telemetry = { path = "../djinn-telemetry" }
 djinn-core = { path = "../djinn-core", features = ["sqlx"] }
 djinn-db = { path = "../djinn-db" }
 djinn-memory = { path = "../djinn-memory" }
+djinn-spec-lint = { path = "../djinn-spec-lint" }
 djinn-git = { path = "../djinn-git" }
 djinn-provider = { path = "../djinn-provider" }
 djinn-stack = { path = "../djinn-stack" }
