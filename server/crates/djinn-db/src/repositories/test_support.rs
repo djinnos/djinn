@@ -44,6 +44,16 @@ pub async fn seed_task_row(db: &Database, seed: UsageTestTaskSeed<'_>) -> String
     let id = task_uuid.to_string();
     let compact_id = task_uuid.simple().to_string();
     let short_id = format!("task-{}-{}", &compact_id[..8], &compact_id[20..32]);
+    let creator_id = uuid::Uuid::now_v7().to_string();
+    let creator_login = format!("usage-test-{compact_id}");
+    let github_id = i64::from_be_bytes(task_uuid.as_bytes()[8..].try_into().unwrap()) & i64::MAX;
+    sqlx::query("INSERT INTO users (id, github_id, github_login) VALUES ($1, $2, $3)")
+        .bind(&creator_id)
+        .bind(github_id)
+        .bind(&creator_login)
+        .execute(db.pool())
+        .await
+        .expect("failed to seed task creator");
     sqlx::query(
         "INSERT INTO tasks \
          (id, project_id, short_id, epic_id, title, description, design, \
@@ -51,13 +61,14 @@ pub async fn seed_task_row(db: &Database, seed: UsageTestTaskSeed<'_>) -> String
           reopen_count, continuation_count, verification_failure_count, \
           total_reopen_count, \
           intervention_count, created_at, updated_at, closed_at, close_reason, \
-          merge_commit_sha, memory_refs, merge_conflict_metadata, agent_type, pr_url) \
+          merge_commit_sha, memory_refs, merge_conflict_metadata, agent_type, pr_url, \
+          created_by_user_id) \
          VALUES ($1, $2, $3, NULL, 'test title', 'test desc', 'test design', \
                  'task', $4, 0, '', '[]', '[]', \
                  0, 0, 0, \
                  $5, \
                  0, '2025-01-01T00:00:00Z', '2025-01-01T00:00:00Z', NULL, $6, \
-                 NULL, '[]', NULL, NULL, NULL)",
+                 NULL, '[]', NULL, NULL, NULL, $7)",
     )
     .bind(&id)
     .bind(seed.project_id)
@@ -65,6 +76,7 @@ pub async fn seed_task_row(db: &Database, seed: UsageTestTaskSeed<'_>) -> String
     .bind(seed.status)
     .bind(seed.total_reopen_count)
     .bind(seed.close_reason)
+    .bind(&creator_id)
     .execute(db.pool())
     .await
     .expect("failed to seed task row");

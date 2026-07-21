@@ -140,14 +140,19 @@ async fn seed_reader_contract(harness: &McpTestHarness, fixture: &Value) {
     let task_id = context["task_id"].as_str().expect("fixed task id");
     let session_id = context["session_id"].as_str().expect("fixed session id");
     let task_run_id = context["task_run_id"].as_str().expect("fixed task run id");
+    let task_creator = UserRepository::new(harness.db().clone())
+        .upsert_from_github(8_420_000, "revision-contract-creator", None, None)
+        .await
+        .expect("seed fixed task creator");
     let mut task_insert = QueryBuilder::<Postgres>::new(
-        "INSERT INTO tasks (id, project_id, short_id, title, description, design, labels, acceptance_criteria, memory_refs) VALUES (",
+        "INSERT INTO tasks (id, project_id, short_id, title, description, design, labels, acceptance_criteria, memory_refs, created_by_user_id) VALUES (",
     );
     {
         let mut values = task_insert.separated(", ");
         values.push_bind(task_id);
         values.push_bind(project_id);
         values.push("'fixed-task', 'Fixed contract task', '', '', '[]', '[]', '[]'");
+        values.push_bind(task_creator.id);
     }
     task_insert
         .push(")")
