@@ -1494,7 +1494,11 @@ impl ProposalRepository {
             .bind(revision.status_to)
             .execute(&mut **tx)
             .await?;
-        sqlx::query("INSERT INTO proposal_revision_lint_results (proposal_id, revision_seq, linter_version, revision_id, body_sha256, result_json) VALUES ($1, $2, $3, $4, $5, $6)")
+        // Status snapshots retain the current head's sequence. They must still
+        // be linted above, but that head already owns this cache key from its
+        // material revision. Keep that valid result rather than conflicting on
+        // the per-(proposal, sequence, linter) cache primary key.
+        sqlx::query("INSERT INTO proposal_revision_lint_results (proposal_id, revision_seq, linter_version, revision_id, body_sha256, result_json) VALUES ($1, $2, $3, $4, $5, $6) ON CONFLICT (proposal_id, revision_seq, linter_version) DO NOTHING")
             .bind(revision.proposal_id)
             .bind(revision.seq)
             .bind(&result.linter_version)
@@ -2959,8 +2963,12 @@ impl ProposalRepository {
     /// occurred.
     pub async fn advance_draft_to_in_review(&self, proposal_id: &str) -> Result<bool> {
         self.db.ensure_initialized().await?;
-        let Some(proposal) = self.get(proposal_id).await? else { return Ok(false); };
-        if proposal.status != "draft" { return Ok(false); }
+        let Some(proposal) = self.get(proposal_id).await? else {
+            return Ok(false);
+        };
+        if proposal.status != "draft" {
+            return Ok(false);
+        }
         let acceptance_criteria: serde_json::Value =
             serde_json::from_str(&proposal.acceptance_criteria).unwrap_or(serde_json::json!([]));
         let mut tx = self.db.pool().begin().await?;
@@ -2973,21 +2981,30 @@ impl ProposalRepository {
         .execute(&mut *tx)
         .await?
         .rows_affected();
-        if changed == 0 { return Ok(false); }
+        if changed == 0 {
+            return Ok(false);
+        }
         self.insert_revision_checked(
             &mut tx,
             ProposalRevisionSnapshot {
-                proposal_id, seq: proposal.latest_revision_seq, title: &proposal.title,
-                body: &proposal.body, body_format: &proposal.body_format,
-                acceptance_criteria: &acceptance_criteria, edited_by: None,
-                event_metadata: None, event_kind: "status_change",
-                status_from: Some("draft"), status_to: Some("in_review"),
+                proposal_id,
+                seq: proposal.latest_revision_seq,
+                title: &proposal.title,
+                body: &proposal.body,
+                body_format: &proposal.body_format,
+                acceptance_criteria: &acceptance_criteria,
+                edited_by: None,
+                event_metadata: None,
+                event_kind: "status_change",
+                status_from: Some("draft"),
+                status_to: Some("in_review"),
             },
         )
         .await?;
         tx.commit().await?;
         let updated = self.get_required(proposal_id).await?;
-        self.events.send(DjinnEventEnvelope::proposal_updated(&updated));
+        self.events
+            .send(DjinnEventEnvelope::proposal_updated(&updated));
         Ok(true)
     }
 
