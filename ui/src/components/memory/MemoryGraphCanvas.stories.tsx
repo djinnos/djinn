@@ -237,7 +237,10 @@ const ghostConnectedContradictsPayload = {
 };
 
 // Fixed transition data keeps this visual state repeatable and explicitly
-// documents the seven-day recent-transition case.
+// documents the seven-day recent-transition case. The two transition stories
+// freeze Date.now to the following day, keeping this payload recent regardless
+// of when Storybook is opened.
+const recentLifecycleReferenceTime = "2026-07-21T12:00:00Z";
 const recentTransitionFadePayload = {
   ...lifecyclePayload,
   nodes: lifecyclePayload.nodes.map((node) =>
@@ -265,6 +268,14 @@ function useReducedMotion() {
     }),
   });
   return () => Object.defineProperty(window, "matchMedia", { configurable: true, value: original });
+}
+
+function freezeDateNow(iso: string) {
+  const original = Date.now;
+  Date.now = () => Date.parse(iso);
+  return () => {
+    Date.now = original;
+  };
 }
 
 /** Same notes with `created_at` stripped — drives the ordinal-fallback path. */
@@ -387,17 +398,24 @@ export const GhostConnectedContradicts: Story = {
 /** A recently archived note performs its one-shot 60% → 22% transition fade. */
 export const RecentLifecycleTransitionFade: Story = {
   beforeEach: () => {
+    const restoreDateNow = freezeDateNow(recentLifecycleReferenceTime);
     setGhostPreference(true);
     setMcpToolResponder(graphResponder(recentTransitionFadePayload));
+    return restoreDateNow;
   },
 };
 
 /** Reduced motion renders the recent lifecycle ghost immediately at steady opacity. */
 export const ReducedMotionLifecycleGhost: Story = {
   beforeEach: () => {
+    const restoreDateNow = freezeDateNow(recentLifecycleReferenceTime);
+    const restoreReducedMotion = useReducedMotion();
     setGhostPreference(true);
     setMcpToolResponder(graphResponder(recentTransitionFadePayload));
-    return useReducedMotion();
+    return () => {
+      restoreReducedMotion();
+      restoreDateNow();
+    };
   },
 };
 
