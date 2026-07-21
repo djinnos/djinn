@@ -18,6 +18,19 @@ import {
   TYPED_EDGE_KINDS,
   TYPED_EDGE_STYLES,
 } from "@/lib/memoryGraphAdapter";
+import {
+  legacyActiveOnlyResponse,
+  malformedEdgeCollectionsResponse,
+  malformedEdgeEndpointsResponse,
+  malformedLifecycleStatusResponse,
+  malformedLifecycleSummaryResponse,
+  malformedLifecycleTimestampResponse,
+  nullLifecycleChangedAtResponse,
+  omittedEdgeCollectionsResponse,
+  omittedLifecycleChangedAtResponse,
+  validLifecycleResponse,
+  validLifecycleSummaryResponse,
+} from "@/lib/__fixtures__/memoryGraphLifecycle";
 
 // ── colorForNote / palette ───────────────────────────────────────────────────
 
@@ -318,5 +331,82 @@ describe("parseMemoryGraphResponse", () => {
       lifecycle_summary: { inactive_total: "two", inactive_returned: -1, inactive_omitted: Number.NaN },
     });
     expect("lifecycle_summary" in bad!).toBe(false);
+  });
+
+  it("parses fixture-backed active, archived, and deprecated statuses and ISO transition times", () => {
+    const parsed = parseMemoryGraphResponse(validLifecycleResponse);
+
+    expect(parsed).not.toBeNull();
+    expect(parsed!.nodes.map(({ id, status, lifecycle_changed_at }) => ({ id, status, lifecycle_changed_at }))).toEqual([
+      { id: "active-note", status: "active", lifecycle_changed_at: undefined },
+      { id: "archived-note", status: "archived", lifecycle_changed_at: "2026-07-20T12:34:56.789Z" },
+      { id: "deprecated-note", status: "deprecated", lifecycle_changed_at: "2026-07-19T08:00:00Z" },
+    ]);
+  });
+
+  it("keeps fixture-backed null and omitted transition timestamps absent", () => {
+    const nullTime = parseMemoryGraphResponse(nullLifecycleChangedAtResponse);
+    const omittedTime = parseMemoryGraphResponse(omittedLifecycleChangedAtResponse);
+
+    expect(nullTime!.nodes[0]).toMatchObject({ id: "archived-null-time", status: "archived" });
+    expect(omittedTime!.nodes[0]).toMatchObject({ id: "deprecated-missing-time", status: "deprecated" });
+    expect("lifecycle_changed_at" in nullTime!.nodes[0]).toBe(false);
+    expect("lifecycle_changed_at" in omittedTime!.nodes[0]).toBe(false);
+  });
+
+  it("parses the complete fixture-backed lifecycle summary", () => {
+    expect(parseMemoryGraphResponse(validLifecycleSummaryResponse)!.lifecycle_summary).toEqual({
+      inactive_total: 5,
+      inactive_returned: 2,
+      inactive_omitted: 3,
+    });
+  });
+
+  it("safely omits malformed fixture lifecycle status, timestamp, and summary fields", () => {
+    const badStatus = parseMemoryGraphResponse(malformedLifecycleStatusResponse);
+    const badTimestamp = parseMemoryGraphResponse(malformedLifecycleTimestampResponse);
+    const badSummary = parseMemoryGraphResponse(malformedLifecycleSummaryResponse);
+
+    expect("status" in badStatus!.nodes[0]).toBe(false);
+    expect("lifecycle_changed_at" in badTimestamp!.nodes[0]).toBe(false);
+    expect("lifecycle_summary" in badSummary!).toBe(false);
+  });
+
+  it("defaults missing or malformed fixture edge arrays to endpoint-safe empty collections", () => {
+    for (const fixture of [malformedEdgeCollectionsResponse, omittedEdgeCollectionsResponse]) {
+      const parsed = parseMemoryGraphResponse(fixture);
+      expect(parsed!.edges).toEqual([]);
+      expect(parsed!.typed_edges).toEqual([]);
+    }
+  });
+
+  it("does not emit fixture edges without valid source and target endpoints", () => {
+    const parsed = parseMemoryGraphResponse(malformedEdgeEndpointsResponse);
+
+    expect(parsed!.edges).toEqual([
+      { source_id: "edge-source", target_id: "edge-target", raw_text: "valid edge" },
+    ]);
+    expect(parsed!.typed_edges).toEqual([
+      { source_id: "edge-source", target_id: "edge-target", kind: "builds_on", weight: 1 },
+    ]);
+  });
+
+  it("preserves the normalized node and empty wikilink and typed edges for the legacy active-only fixture", () => {
+    expect(parseMemoryGraphResponse(legacyActiveOnlyResponse)).toEqual({
+      nodes: [
+        {
+          id: "legacy-active",
+          permalink: "notes/legacy-active",
+          title: "Legacy active note",
+          note_type: "adr",
+          folder: "notes",
+          connection_count: 1,
+          is_orphan: false,
+          broken_targets: [],
+        },
+      ],
+      edges: [],
+      typed_edges: [],
+    });
   });
 });
