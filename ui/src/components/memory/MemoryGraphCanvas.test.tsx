@@ -1,7 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 
-import { buildMemoryGraphDisk, GHOST_INTERACTION_OPACITY, GHOST_OPACITY, isRecentLifecycleTransition, lifecycleGhostOpacity, MemoryGraphCanvas, memoryGraphCameraFitRadius, visualLinkDirection } from "./MemoryGraphCanvas";
+import {
+  buildMemoryGraphDisk, desaturate, ghostNodeRenderSemantics, GHOST_INTERACTION_OPACITY, GHOST_LINK_OPACITY,
+  GHOST_OPACITY, isRecentLifecycleTransition, LIFECYCLE_FADE_MS, lifecycleGhostOpacity, memoryGraphCameraFitRadius,
+  memoryGraphHitSlop, MemoryGraphCanvas, shouldStartLifecycleFade, visualLinkDirection, visualLinkStyle,
+} from "./MemoryGraphCanvas";
 import type { MemoryGraphOutput } from "@/api/generated/mcp-tools.gen";
 import { validLifecycleResponse } from "@/lib/__fixtures__/memoryGraphLifecycle";
 
@@ -47,10 +51,57 @@ describe("lifecycle ghost semantics", () => {
     expect(lifecycleGhostOpacity(true, 10, 10, true)).toBe(GHOST_OPACITY);
   });
 
-  it("directs canonical reversed mixed supersedes from active to ghost", () => {
-    const disk = buildMemoryGraphDisk({ nodes: [layoutNode("active", "2024-01-01T00:00:00Z", "active"), layoutNode("ghost", "2024-01-02T00:00:00Z", "archived")], edges: [], typed_edges: [{ source_id: "ghost", target_id: "active", kind: "supersedes", weight: 1 }] });
-    const direction = visualLinkDirection(disk.links[0], disk.nodes);
-    expect([disk.nodes[direction.from].id, disk.nodes[direction.to].id, direction.directed]).toStrictEqual(["active", "ghost", true]);
+  it("renders ghost fill, labels, and hit area only in their intended interaction states", () => {
+    expect(desaturate("#ff0000")).toBe("rgb(76,76,76)");
+    expect(ghostNodeRenderSemantics("#ff0000", true, false, false, undefined, 0, false)).toStrictEqual({
+      fill: "rgb(76,76,76)", labelVisible: false, opacity: GHOST_OPACITY,
+    });
+    // Pointer hover and keyboard focus both feed the same `hot` canvas state.
+    expect(ghostNodeRenderSemantics("#ff0000", true, true, false, undefined, 0, false)).toStrictEqual({
+      fill: "rgb(76,76,76)", labelVisible: true, opacity: GHOST_INTERACTION_OPACITY,
+    });
+    expect(memoryGraphHitSlop(1)).toBe(10);
+    expect(memoryGraphHitSlop(3)).toBe(6);
+  });
+
+  it("keeps quiet ordinary links bright while ghost-connected links are separate and subdued", () => {
+    const disk = buildMemoryGraphDisk({
+      nodes: [layoutNode("active-a", "2024-01-01T00:00:00Z", "active"), layoutNode("active-b", "2024-01-02T00:00:00Z", "active"), layoutNode("ghost", "2024-01-03T00:00:00Z", "archived")],
+      edges: [{ raw_text: "ordinary", source_id: "active-a", target_id: "active-b" }, { raw_text: "ghost", source_id: "active-a", target_id: "ghost" }],
+      typed_edges: [],
+    });
+    const styles = disk.links.map((link) => visualLinkStyle(link, disk.nodes));
+    expect(styles).toEqual(expect.arrayContaining([
+      expect.objectContaining({ batchKey: "wikilink:ordinary", ghostConnected: false, opacity: 0.14 }),
+      expect.objectContaining({ batchKey: "wikilink:ghost", ghostConnected: true, opacity: GHOST_LINK_OPACITY }),
+    ]));
+  });
+
+  it("directs either canonical mixed supersedes order active-to-ghost and leaves same-class supersedes undirected", () => {
+    for (const [source, target] of [["active", "ghost"], ["ghost", "active"]]) {
+      const disk = buildMemoryGraphDisk({ nodes: [layoutNode("active", "2024-01-01T00:00:00Z", "active"), layoutNode("ghost", "2024-01-02T00:00:00Z", "archived")], edges: [], typed_edges: [{ source_id: source, target_id: target, kind: "supersedes", weight: 1 }] });
+      const direction = visualLinkDirection(disk.links[0], disk.nodes);
+      expect([disk.nodes[direction.from].id, disk.nodes[direction.to].id, direction.directed]).toStrictEqual(["active", "ghost", true]);
+    }
+    const sameClass = buildMemoryGraphDisk({ nodes: [layoutNode("first", "2024-01-01T00:00:00Z", "active"), layoutNode("second", "2024-01-02T00:00:00Z", "active")], edges: [], typed_edges: [{ source_id: "first", target_id: "second", kind: "supersedes", weight: 1 }] });
+    expect(visualLinkDirection(sameClass.links[0], sameClass.nodes).directed).toBe(false);
+  });
+
+  it("keeps ghost-connected contradicts non-directional and dashed", () => {
+    const disk = buildMemoryGraphDisk({ nodes: [layoutNode("active", "2024-01-01T00:00:00Z", "active"), layoutNode("ghost", "2024-01-02T00:00:00Z", "deprecated")], edges: [], typed_edges: [{ source_id: "ghost", target_id: "active", kind: "contradicts", weight: 1 }] });
+    expect(visualLinkDirection(disk.links[0], disk.nodes).directed).toBe(false);
+    expect(visualLinkStyle(disk.links[0], disk.nodes)).toMatchObject({ dashed: true, opacity: GHOST_LINK_OPACITY });
+  });
+
+  it("does not restart a completed recent fade across hover or rerender state", () => {
+    const now = 1_000_000;
+    const completed = new Set<string>();
+    expect(shouldStartLifecycleFade(true, false, 1, undefined, completed, "ghost")).toBe(true);
+    expect(lifecycleGhostOpacity(true, now, now + LIFECYCLE_FADE_MS, false)).toBe(GHOST_OPACITY);
+    completed.add("ghost"); // Render completion persists in the component ref.
+    expect(shouldStartLifecycleFade(true, false, 1, undefined, completed, "ghost")).toBe(false);
+    expect(shouldStartLifecycleFade(true, false, 1, undefined, completed, "ghost")).toBe(false);
+    expect(shouldStartLifecycleFade(true, true, 1, undefined, new Set(), "ghost")).toBe(false);
   });
 });
 

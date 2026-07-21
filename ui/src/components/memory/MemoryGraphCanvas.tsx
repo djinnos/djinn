@@ -96,7 +96,19 @@ export function lifecycleGhostOpacity(
   return GHOST_INTERACTION_OPACITY + (GHOST_OPACITY - GHOST_INTERACTION_OPACITY) * clamp((now - fadeStartedAt) / LIFECYCLE_FADE_MS, 0, 1);
 }
 
-function desaturate(hex: string): string {
+/** A fade begins only once its normal reveal completed and is never restarted. */
+export function shouldStartLifecycleFade(
+  recent: boolean,
+  reducedMotion: boolean,
+  birth: number,
+  fadeStartedAt: number | undefined,
+  completed: ReadonlySet<string>,
+  nodeId: string,
+): boolean {
+  return recent && !reducedMotion && birth >= 0.99 && fadeStartedAt === undefined && !completed.has(nodeId);
+}
+
+export function desaturate(hex: string): string {
   const [r, g, b] = hexToRgb(hex);
   const gray = Math.round(r * 0.299 + g * 0.587 + b * 0.114);
   return `rgb(${gray},${gray},${gray})`;
@@ -179,6 +191,47 @@ export function visualLinkDirection(link: DiskLink, nodes: DiskNode[]): { from: 
     return a.isGhost ? { from: link.b, to: link.a, directed: true } : { from: link.a, to: link.b, directed: true };
   }
   return { from: link.a, to: link.b, directed: false };
+}
+
+/** Rendering semantics shared by link batching and focused regression tests. */
+export function visualLinkStyle(link: DiskLink, nodes: DiskNode[]): {
+  batchKey: string;
+  dashed: boolean;
+  ghostConnected: boolean;
+  opacity: number;
+} {
+  const ghostConnected = nodes[link.a].isGhost || nodes[link.b].isGhost;
+  const typed = TYPED_EDGE_STYLES[link.kind];
+  return {
+    batchKey: `${link.kind}:${ghostConnected ? "ghost" : "ordinary"}`,
+    dashed: Boolean(typed?.dashed),
+    ghostConnected,
+    opacity: ghostConnected ? GHOST_LINK_OPACITY : typed ? 0.3 : 0.14,
+  };
+}
+
+/** Ghosts have no persistent canvas title; interaction reveals their pill. */
+export function ghostNodeRenderSemantics(
+  color: string,
+  isGhost: boolean,
+  hot: boolean,
+  recent: boolean,
+  fadeStartedAt: number | undefined,
+  now: number,
+  reducedMotion: boolean,
+): { fill: string; labelVisible: boolean; opacity: number } {
+  return {
+    fill: isGhost ? desaturate(color) : color,
+    labelVisible: isGhost && hot,
+    opacity: isGhost
+      ? (hot ? GHOST_INTERACTION_OPACITY : lifecycleGhostOpacity(recent, fadeStartedAt, now, reducedMotion))
+      : 1,
+  };
+}
+
+/** Preserve the canvas's pre-existing minimum pointer target outside the orb. */
+export function memoryGraphHitSlop(cameraScale: number): number {
+  return Math.max(10 / cameraScale, 6);
 }
 
 interface DiskRing {
@@ -940,24 +993,26 @@ export function MemoryGraphCanvas({ projectSlug, reloadKey, onSelectNote }: Memo
           hotLinks.push(l);
           continue;
         }
-        const bucket = quietByStyle.get(l.kind);
+        const bucketKey = visualLinkStyle(l, disk.nodes).batchKey;
+        const bucket = quietByStyle.get(bucketKey);
         if (bucket) bucket.push(l);
-        else quietByStyle.set(l.kind, [l]);
+        else quietByStyle.set(bucketKey, [l]);
       }
-      for (const [kind, bucket] of quietByStyle) {
+      for (const [, bucket] of quietByStyle) {
+        const kind = bucket[0].kind;
         const typed = TYPED_EDGE_STYLES[kind];
-        const ghostConnected = bucket.some((link) => disk.nodes[link.a].isGhost || disk.nodes[link.b].isGhost);
+        const style = visualLinkStyle(bucket[0], disk.nodes);
         ctx.beginPath();
         for (const l of bucket) {
           ctx.moveTo(disk.nodes[l.a].x, disk.nodes[l.a].y);
           ctx.lineTo(disk.nodes[l.b].x, disk.nodes[l.b].y);
         }
         if (typed) {
-          ctx.strokeStyle = rgba(typed.color, ghostConnected ? GHOST_LINK_OPACITY : 0.3);
+          ctx.strokeStyle = rgba(typed.color, style.opacity);
           ctx.lineWidth = 0.9 / cam.k;
-          ctx.setLineDash(typed.dashed ? [4 / cam.k, 4 / cam.k] : []);
+          ctx.setLineDash(style.dashed ? [4 / cam.k, 4 / cam.k] : []);
         } else {
-          ctx.strokeStyle = `rgba(148,163,184,${ghostConnected ? GHOST_LINK_OPACITY : 0.14})`;
+          ctx.strokeStyle = `rgba(148,163,184,${style.opacity})`;
           ctx.lineWidth = 0.7 / cam.k;
           ctx.setLineDash([]);
         }
@@ -1018,11 +1073,11 @@ export function MemoryGraphCanvas({ projectSlug, reloadKey, onSelectNote }: Memo
           const reducedMotion = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false;
           const recent = isRecentLifecycleTransition(n.lifecycleChangedAt, Math.floor(Date.now() / 1000));
           let fadeStartedAt = lifecycleFadeStartsRef.current.get(n.id);
-          if (recent && !reducedMotion && birth >= 0.99 && fadeStartedAt === undefined && !completedLifecycleFadesRef.current.has(n.id)) {
+          if (shouldStartLifecycleFade(recent, reducedMotion, birth, fadeStartedAt, completedLifecycleFadesRef.current, n.id)) {
             fadeStartedAt = now;
             lifecycleFadeStartsRef.current.set(n.id, now);
           }
-          const ghostInk = hot ? GHOST_INTERACTION_OPACITY : lifecycleGhostOpacity(recent, fadeStartedAt, now, reducedMotion);
+          const ghostInk = ghostNodeRenderSemantics(n.color, true, hot, recent, fadeStartedAt, now, reducedMotion).opacity;
           if (fadeStartedAt !== undefined && now - fadeStartedAt >= LIFECYCLE_FADE_MS) {
             completedLifecycleFadesRef.current.add(n.id);
             lifecycleFadeStartsRef.current.delete(n.id);
@@ -1071,7 +1126,7 @@ export function MemoryGraphCanvas({ projectSlug, reloadKey, onSelectNote }: Memo
         const n = disk.nodes[hover];
         const sx = n.x * cam.k + cam.x;
         const sy = n.y * cam.k + cam.y;
-        const meta = `${n.noteType}${n.ts ? ` · ${formatDay(n.ts)}` : ""}${n.isOrphan ? " · orphan" : ""}`;
+        const meta = `${n.noteType}${n.ts ? ` · ${formatDay(n.ts)}` : ""}${n.isOrphan ? " · orphan" : ""}${n.isGhost ? ` · ${n.lifecycle}` : ""}`;
         ctx.font = "11px JetBrains Mono, ui-monospace, monospace";
         const w = Math.max(ctx.measureText(n.title).width, ctx.measureText(meta).width) + 16;
         const bx = clamp(sx + 12, 4, size.w - w - 4);
@@ -1096,7 +1151,7 @@ export function MemoryGraphCanvas({ projectSlug, reloadKey, onSelectNote }: Memo
         const wx = (p.x - cam.x) / cam.k;
         const wy = (p.y - cam.y) / cam.k;
         let best = -1;
-        let bestD = Math.max(10 / cam.k, 6);
+        let bestD = memoryGraphHitSlop(cam.k);
         disk.nodes.forEach((n, i) => {
           if (appear[i] <= 0.5) return;
           const d = Math.hypot(n.x - wx, n.y - wy) - n.r;
