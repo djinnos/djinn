@@ -1067,16 +1067,14 @@ mod created_by_tests {
             })
             .await;
 
-        let stamped: Option<String> = sqlx::query_scalar!(
-            "SELECT created_by_user_id FROM tasks WHERE id = $1",
-            created_id
-        )
-        .fetch_one(db.pool())
-        .await
-        .unwrap();
+        let stamped: String =
+            sqlx::query_scalar("SELECT created_by_user_id FROM tasks WHERE id = $1")
+                .bind(created_id)
+                .fetch_one(db.pool())
+                .await
+                .unwrap();
         assert_eq!(
-            stamped.as_deref(),
-            Some(user_id.as_str()),
+            stamped, user_id,
             "created_by_user_id must match the SESSION_USER_ID task-local"
         );
 
