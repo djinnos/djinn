@@ -107,8 +107,8 @@ async fn apply_prior_migrations(connection: &mut PgConnection) {
 }
 
 async fn apply_migration_137(connection: &mut PgConnection) {
-    let sql = std::fs::read_to_string(migrations_dir().join(MIGRATION_FILE))
-        .expect("read migration 137");
+    let sql =
+        std::fs::read_to_string(migrations_dir().join(MIGRATION_FILE)).expect("read migration 137");
     connection
         .execute(sql.as_str())
         .await
@@ -133,7 +133,10 @@ async fn assert_schema(pool: &sqlx::PgPool) {
         .await
         .unwrap_or_else(|error| panic!("inspect lint result column {column}: {error}"));
         assert_eq!(actual_type, data_type, "lint result column {column} type");
-        assert_eq!(actual_nullable, nullable, "lint result column {column} nullability");
+        assert_eq!(
+            actual_nullable, nullable,
+            "lint result column {column} nullability"
+        );
     }
 
     let primary_key: Vec<String> = sqlx::query_scalar(
@@ -146,7 +149,10 @@ async fn assert_schema(pool: &sqlx::PgPool) {
     .fetch_all(pool)
     .await
     .expect("inspect lint result primary key");
-    assert_eq!(primary_key, ["proposal_id", "revision_seq", "linter_version"]);
+    assert_eq!(
+        primary_key,
+        ["proposal_id", "revision_seq", "linter_version"]
+    );
 
     let fk: String = sqlx::query_scalar(
         "SELECT pg_get_constraintdef(oid) FROM pg_constraint \
@@ -155,7 +161,10 @@ async fn assert_schema(pool: &sqlx::PgPool) {
     .fetch_one(pool)
     .await
     .expect("inspect lint result foreign key");
-    assert!(fk.contains("ON DELETE CASCADE"), "lint result FK must cascade: {fk}");
+    assert!(
+        fk.contains("ON DELETE CASCADE"),
+        "lint result FK must cascade: {fk}"
+    );
 
     let (data_type, nullable): (String, String) = sqlx::query_as(
         "SELECT data_type, is_nullable FROM information_schema.columns \
@@ -249,7 +258,10 @@ async fn assert_constraints_and_cascades(pool: &sqlx::PgPool) {
     )
     .execute(pool)
     .await;
-    assert!(duplicate.is_err(), "non-NULL doctor deduplication keys must be unique");
+    assert!(
+        duplicate.is_err(),
+        "non-NULL doctor deduplication keys must be unique"
+    );
 
     sqlx::query("DELETE FROM proposal_revisions WHERE id = 'revision-lint-one'")
         .execute(pool)
@@ -261,7 +273,10 @@ async fn assert_constraints_and_cascades(pool: &sqlx::PgPool) {
     .fetch_one(pool)
     .await
     .expect("count cascaded lint rows");
-    assert_eq!(remaining, 0, "deleting a revision must cascade its lint result");
+    assert_eq!(
+        remaining, 0,
+        "deleting a revision must cascade its lint result"
+    );
 
     sqlx::query("DELETE FROM proposals WHERE id = 'proposal-lint-two'")
         .execute(pool)
@@ -273,7 +288,10 @@ async fn assert_constraints_and_cascades(pool: &sqlx::PgPool) {
     .fetch_one(pool)
     .await
     .expect("count proposal-cascaded lint rows");
-    assert_eq!(remaining, 0, "deleting a proposal must cascade lint results via revisions");
+    assert_eq!(
+        remaining, 0,
+        "deleting a proposal must cascade lint results via revisions"
+    );
 }
 
 #[tokio::test]
@@ -289,10 +307,7 @@ async fn migration_137_applies_cleanly_and_migrator_rerun_is_idempotent() {
             .run(&pool)
             .await
             .expect("apply all migrations to a clean database");
-        migrator
-            .run(&pool)
-            .await
-            .expect("rerun applied migrator");
+        migrator.run(&pool).await.expect("rerun applied migrator");
 
         assert_schema(&pool).await;
         assert_constraints_and_cascades(&pool).await;
@@ -332,7 +347,10 @@ async fn migration_137_is_additive_and_raw_rerun_preserves_null_doctor_rows() {
         .fetch_one(&pool)
         .await
         .expect("read legacy doctor finding");
-        assert_eq!(legacy_key, None, "migration must not backfill legacy doctor rows");
+        assert_eq!(
+            legacy_key, None,
+            "migration must not backfill legacy doctor rows"
+        );
         assert_constraints_and_cascades(&pool).await;
         pool.close().await;
     })
