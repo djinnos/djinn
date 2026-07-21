@@ -21,6 +21,7 @@ pub(crate) struct DispatchStrikeDecision {
     pub decision: &'static str,
     pub source: &'static str,
 }
+
 impl CoordinatorActor {
     pub(crate) async fn latest_attempt_strike_decision(
         &self,
@@ -31,37 +32,38 @@ impl CoordinatorActor {
             .list_for_task(task_id)
             .await
             .ok()?;
-        let a = attempts.iter().filter(|a| a.role == role).find(|a| {
-            a.outcome != TaskAttemptOutcome::Deferred.as_str()
-                && a.outcome != TaskAttemptOutcome::AdoptedPr.as_str()
+        // A newer pending dispatch in another group is in-flight, not evidence
+        // for the same-role retry decision. Evaluate only terminal attempts.
+        let attempt = attempts.iter().filter(|attempt| attempt.role == role).find(|attempt| {
+            !matches!(
+                attempt.outcome.as_str(),
+                "pending" | "submitted" | "deferred" | "adopted_pr"
+            )
         })?;
-        let source = match a.outcome.as_str() {
+        let source = match attempt.outcome.as_str() {
             "spawn_failed" => djinn_telemetry::dispatch::STRIKE_SOURCE_SPAWN_FAILED,
             "crashed" => djinn_telemetry::dispatch::STRIKE_SOURCE_CRASHED,
             _ => djinn_telemetry::dispatch::STRIKE_SOURCE_OTHER_TERMINAL,
         };
-        let valid = a.outcome == "interrupted"
-            && a.dispatch_owner_incarnation_id
-                .as_deref()
-                .is_some_and(|owner| {
-                    a.summary_json
-                        .as_deref()
-                        .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
-                        .is_some_and(|v| {
-                            v["failure_class"] == "environmental_owner_expired"
-                                && v["owner_incarnation_id"] == owner
-                                && v["owner_classification"] == "expired"
-                                && v["owner_lease_last_renewed_at"].is_string()
-                        })
-                });
+        let exempted = attempt.outcome == "interrupted"
+            && attempt.dispatch_owner_incarnation_id.as_deref().is_some_and(|owner| {
+                attempt.summary_json.as_deref()
+                    .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+                    .is_some_and(|evidence| {
+                        evidence["failure_class"] == "environmental_owner_expired"
+                            && evidence["owner_incarnation_id"] == owner
+                            && evidence["owner_classification"] == "expired"
+                            && evidence["owner_lease_last_renewed_at"].is_string()
+                    })
+            });
         Some(DispatchStrikeDecision {
-            exempted: valid,
-            decision: if valid {
+            exempted,
+            decision: if exempted {
                 djinn_telemetry::dispatch::STRIKE_DECISION_EXEMPTED
             } else {
                 djinn_telemetry::dispatch::STRIKE_DECISION_COUNTED
             },
-            source: if valid {
+            source: if exempted {
                 djinn_telemetry::dispatch::STRIKE_SOURCE_ENVIRONMENTAL_OWNER_EXPIRED
             } else {
                 source
@@ -69,6 +71,7 @@ impl CoordinatorActor {
         })
     }
 }
+
 /// uv3p Part B: what the fleet actually did after the current intervention (or
 /// after a human released a prior hold), derived from `task_attempts` rows.
 /// Drives the attempted-remediation park gate, the forced model rotation at
