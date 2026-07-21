@@ -2410,7 +2410,7 @@ async fn planner_enrichment_non_default_top_k_and_budget_are_discriminating() {
     let events = EventBus::noop();
     let mut task =
         create_project_epic_task(&db, &events, "Planner config epic", "Planner config task").await;
-    task.created_by_user_id = Some("creator-real".into());
+    task.created_by_user_id = "creator-real".into();
     let note_repo = NoteRepository::new(db, EventBus::noop());
     let planner_config = crate::context::MemoryIntentPlannerConfig {
         enabled: true,
@@ -2446,7 +2446,7 @@ async fn planner_enrichment_non_default_top_k_and_budget_are_discriminating() {
         host: &top_k_host,
         session_id: "session-top-k",
         task_run_id: "run-top-k",
-        creator_id: task.created_by_user_id.as_deref(),
+        creator_id: Some(task.created_by_user_id.as_str()),
         acceptance_criteria: vec![],
         resume_compaction_summary: None,
         planned_note_search: Some(&top_k_search),
@@ -2508,7 +2508,7 @@ async fn planner_enrichment_non_default_top_k_and_budget_are_discriminating() {
         host: &budget_host,
         session_id: "session-budget",
         task_run_id: "run-budget",
-        creator_id: task.created_by_user_id.as_deref(),
+        creator_id: Some(task.created_by_user_id.as_str()),
         acceptance_criteria: vec![],
         resume_compaction_summary: None,
         planned_note_search: Some(&budget_search),
