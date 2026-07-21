@@ -1401,7 +1401,7 @@ mod block_patch_tests {
     }
 
     #[test]
-    fn code_property_is_the_only_property_alignment_exception() {
+    fn canonical_code_and_template_properties_are_alignment_exceptions() {
         let body = "<AnnotatedCode id=\"a\" code={`let x = 1;`} />";
         let start = body.find("let x = 1;").unwrap();
         let end = start + "let x = 1;".len();
@@ -1445,6 +1445,27 @@ mod block_patch_tests {
             "canonical template property must be patchable"
         );
 
+        let raw_brace_template = "<RichText id=\"r\" template=\"Hello } later\" />";
+        let later_start = raw_brace_template.find("later").unwrap();
+        let raw_brace_result = resolve_byte_range_selector(
+            raw_brace_template,
+            &ByteRangeSelector {
+                start: later_start as i64,
+                end: (later_start + "later".len()) as i64,
+                expected_text: Some("later".into()),
+            },
+        );
+        assert!(
+            raw_brace_result.is_ok(),
+            "a raw closing brace in a template literal must not truncate its property span: {raw_brace_result:?}"
+        );
+
+        let raw_brace_code = "<AnnotatedCode id=\"a\" code='const close = \"}\"; later();' />";
+        assert!(
+            resolve_exact_text_selector(raw_brace_code, "later()").is_ok(),
+            "a brace in a code string must not truncate its property span"
+        );
+
         let cross_node_body = "first paragraph.\n\nsecond paragraph.";
         let cross_start = cross_node_body.find("paragraph.").unwrap() + 1;
         let cross_end = cross_node_body.rfind("paragraph.").unwrap() + "paragraph".len();
@@ -1460,6 +1481,46 @@ mod block_patch_tests {
             .unwrap_err()
             .contains(PATCH_RANGE_NOT_NODE_ALIGNED),
             "a range partially spanning two top-level paragraphs must be rejected"
+        );
+    }
+
+    #[test]
+    fn property_looking_text_in_other_attributes_is_not_patchable() {
+        let quoted = "<RichText id=\"r\" label=\"prefix code={`spoof quoted`} suffix\" />";
+        let quoted_start = quoted.find("spoof quoted").unwrap();
+        assert!(
+            resolve_exact_text_selector(quoted, "spoof quoted")
+                .unwrap_err()
+                .contains(PATCH_RANGE_NOT_NODE_ALIGNED),
+            "code-looking text inside a quoted unrelated property must not authorize a patch"
+        );
+        assert!(
+            resolve_byte_range_selector(
+                quoted,
+                &ByteRangeSelector {
+                    start: quoted_start as i64,
+                    end: (quoted_start + "spoof quoted".len()) as i64,
+                    expected_text: Some("spoof quoted".into()),
+                },
+            )
+            .unwrap_err()
+            .contains(PATCH_RANGE_NOT_NODE_ALIGNED)
+        );
+
+        let braced = r#"<AnnotatedCode id="a" meta={{ nested: { text: "escaped \" template={`spoof braced`}" } }} />"#;
+        let braced_start = braced.find("spoof braced").unwrap();
+        assert!(
+            resolve_byte_range_selector(
+                braced,
+                &ByteRangeSelector {
+                    start: braced_start as i64,
+                    end: (braced_start + "spoof braced".len()) as i64,
+                    expected_text: Some("spoof braced".into()),
+                },
+            )
+            .unwrap_err()
+            .contains(PATCH_RANGE_NOT_NODE_ALIGNED),
+            "template-looking text inside a nested braced property must not authorize a patch"
         );
     }
 }

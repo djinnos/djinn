@@ -48,6 +48,92 @@ impl std::fmt::Display for DocumentError {
         f.write_str(&self.0)
     }
 }
+
+/// Advance from the first byte after an opening quote to its unescaped closing
+/// quote. The caller retains the closing-quote offset so value spans omit the
+/// delimiters.
+fn skip_quoted(bytes: &[u8], index: &mut usize, quote: u8) -> Option<()> {
+    loop {
+        match *bytes.get(*index)? {
+            b'\\' => {
+                *index += 1;
+                bytes.get(*index)?;
+                *index += 1;
+            }
+            byte if byte == quote => return Some(()),
+            _ => *index += 1,
+        }
+    }
+}
+
+/// Skip one balanced JavaScript expression container. Strings and template
+/// literals are opaque to brace balancing; `${...}` substitutions inside a
+/// template recursively use the same balancing rule. This remains a small
+/// opening-tag boundary lexer rather than a second document grammar.
+fn skip_braced_expression(bytes: &[u8], index: &mut usize) -> Option<usize> {
+    if bytes.get(*index) != Some(&b'{') {
+        return None;
+    }
+    *index += 1;
+    loop {
+        match *bytes.get(*index)? {
+            quote @ (b'\'' | b'"') => {
+                *index += 1;
+                skip_quoted(bytes, index, quote)?;
+                *index += 1;
+            }
+            b'`' => skip_template_literal(bytes, index)?,
+            b'/' if bytes.get(*index + 1) == Some(&b'/') => {
+                *index += 2;
+                while bytes.get(*index).is_some_and(|byte| *byte != b'\n') {
+                    *index += 1;
+                }
+            }
+            b'/' if bytes.get(*index + 1) == Some(&b'*') => {
+                *index += 2;
+                while !(bytes.get(*index) == Some(&b'*') && bytes.get(*index + 1) == Some(&b'/')) {
+                    bytes.get(*index)?;
+                    *index += 1;
+                }
+                *index += 2;
+            }
+            b'{' => {
+                skip_braced_expression(bytes, index)?;
+            }
+            b'}' => {
+                let closing = *index;
+                *index += 1;
+                return Some(closing);
+            }
+            _ => *index += 1,
+        }
+    }
+}
+
+fn skip_template_literal(bytes: &[u8], index: &mut usize) -> Option<()> {
+    if bytes.get(*index) != Some(&b'`') {
+        return None;
+    }
+    *index += 1;
+    loop {
+        match *bytes.get(*index)? {
+            b'\\' => {
+                *index += 1;
+                bytes.get(*index)?;
+                *index += 1;
+            }
+            b'`' => {
+                *index += 1;
+                return Some(());
+            }
+            b'$' if bytes.get(*index + 1) == Some(&b'{') => {
+                *index += 1;
+                skip_braced_expression(bytes, index)?;
+            }
+            _ => *index += 1,
+        }
+    }
+}
 impl std::error::Error for DocumentError {}
 
 /// Parse MDX and collect every registered block, including nested blocks, in
@@ -76,6 +162,12 @@ pub fn analyze_mdx_document(body: &str) -> Result<DocumentAnalysis, DocumentErro
     Ok(DocumentAnalysis {
         registered_blocks,
         top_level_nodes,
+    })
+}
+
+fn has_property(attributes: &[AttributeContent], wanted: &str) -> bool {
+    attributes.iter().any(|attribute| {
+        matches!(attribute, AttributeContent::Property(property) if property.name == wanted)
     })
 }
 
@@ -144,6 +236,7 @@ fn collect_element(
             id_value_span: id_value_span(body, position.start.offset),
             patchable_property_spans: ["code", "template"]
                 .into_iter()
+                .filter(|name| has_property(attributes, name))
                 .filter_map(|name| property_value_span(body, position.start.offset, name))
                 .collect(),
         });
@@ -230,29 +323,14 @@ fn value_bounds(bytes: &[u8], index: &mut usize) -> Option<(usize, usize)> {
         quote @ (b'\'' | b'"') => {
             *index += 1;
             let start = *index;
-            while bytes.get(*index) != Some(&quote) {
-                *index += 1;
-            }
+            skip_quoted(bytes, index, quote)?;
             let end = *index;
             *index += 1;
             Some((start, end))
         }
         b'{' => {
-            *index += 1;
-            let start = *index;
-            let mut depth = 1usize;
-            while depth > 0 {
-                match *bytes.get(*index)? {
-                    b'{' => depth += 1,
-                    b'}' => depth -= 1,
-                    _ => {}
-                }
-                if depth > 0 {
-                    *index += 1;
-                }
-            }
-            let end = *index;
-            *index += 1;
+            let start = *index + 1;
+            let end = skip_braced_expression(bytes, index)?;
             Some((start, end))
         }
         _ => {
@@ -272,4 +350,37 @@ fn skip_braced(bytes: &[u8], index: &mut usize) -> Option<()> {
     let (_, end) = value_bounds(bytes, index)?;
     *index = end + 1;
     Some(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::property_value_span;
+
+    #[test]
+    fn braced_property_span_ignores_braces_inside_strings_and_templates() {
+        for (source, property, selected) in [
+            (
+                "<RichText id=\"r\" template={`Hello } later`} />",
+                "template",
+                "later",
+            ),
+            (
+                "<AnnotatedCode id=\"a\" code={`const close = \"}\"; later();`} />",
+                "code",
+                "later()",
+            ),
+        ] {
+            let span = property_value_span(source, 0, property).unwrap();
+            let selected_start = source.find(selected).unwrap();
+            assert!(span.start <= selected_start);
+            assert!(span.end >= selected_start + selected.len());
+        }
+    }
+
+    #[test]
+    fn property_scan_skips_spoofing_text_in_complete_attribute_values() {
+        let source = r#"<RichText label="escaped \" code={`quoted spoof`}" meta={{ nested: { text: "template={`braced spoof`}" } }} id="r" />"#;
+        assert!(property_value_span(source, 0, "code").is_none());
+        assert!(property_value_span(source, 0, "template").is_none());
+    }
 }
