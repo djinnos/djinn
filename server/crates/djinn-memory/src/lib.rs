@@ -25,10 +25,11 @@ pub use note::{
     BrokenLink, BrokenLinkRepair, BuildContextResponse, ContradictionCandidate,
     ContradictionWarning, ContradictsAnnotation, ExtractedNoteAuditAttribution,
     ExtractedNoteAuditCategory, ExtractedNoteAuditFinding, ExtractedNoteAuditReport, GitLogEntry,
-    GraphEdge, GraphNode, GraphResponse, HealthReport, LifecycleHealth, MemorySearchEntityRow,
-    Note, NoteAbstract, NoteCompact, NoteDedupCandidate, NoteOverview, NoteQualityAssessment,
-    NoteSearchResult, OrphanNote, ProposalOverview, RecentSweepMetrics, ReindexSummary,
-    StaleFolder, SupersedesAnnotation, TypeRisk, TypedEdge, note_status,
+    GraphEdge, GraphNode, GraphOptions, GraphResponse, HealthReport, LifecycleGraphSummary,
+    LifecycleHealth, MemorySearchEntityRow, Note, NoteAbstract, NoteCompact, NoteDedupCandidate,
+    NoteOverview, NoteQualityAssessment, NoteSearchResult, OrphanNote, ProposalOverview,
+    RecentSweepMetrics, ReindexSummary, StaleFolder, SupersedesAnnotation, TypeRisk, TypedEdge,
+    note_status,
 };
 pub use note_association::{NoteAssociation, association_kind, canonical_pair};
 pub use proposal::ProposalSearchResult;

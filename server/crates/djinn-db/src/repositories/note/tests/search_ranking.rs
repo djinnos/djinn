@@ -1,5 +1,6 @@
 use super::*;
 use crate::repositories::note::NoteSearchParams;
+use djinn_memory::GraphOptions;
 
 /// Pin every non-lexical RRF signal (temporal recency, access_count,
 /// confidence) to a fixed value across all notes in a project so a
@@ -831,10 +832,22 @@ async fn lifecycle_graph_read_does_not_leak_into_unified_lexical_search() {
             .await
             .unwrap();
     }
-    // Graph visualization is a read-only surface. The lifecycle-aware graph
-    // contract can include inactive nodes without changing this independent
-    // unified-memory retrieval path.
-    let lifecycle_graph = repo.graph(&project.id).await.unwrap();
+    // This is the explicit lifecycle visualization request, distinct from the
+    // active-only `graph()` compatibility path.
+    let lifecycle_graph = repo
+        .graph_with_options(
+            &project.id,
+            GraphOptions {
+                statuses: Some(vec![
+                    "active".into(),
+                    "archived".into(),
+                    "deprecated".into(),
+                ]),
+                lifecycle_limit: Some(500),
+            },
+        )
+        .await
+        .unwrap();
     let graph_ids: std::collections::HashSet<_> = lifecycle_graph
         .nodes
         .iter()
@@ -842,8 +855,9 @@ async fn lifecycle_graph_read_does_not_leak_into_unified_lexical_search() {
         .collect();
     assert!(graph_ids.contains(archived.id.as_str()));
     assert!(graph_ids.contains(deprecated.id.as_str()));
-    // `search` is the repository path behind normal unified memory_search.
-    let results = repo
+    // `search` returns the unified note/proposal rows consumed by normal
+    // memory_search, rather than a graph-specific result shape.
+    let unified_results = repo
         .search(NoteSearchParams {
             project_id: &project.id,
             query: "lifecycle isolation marker",
@@ -857,8 +871,11 @@ async fn lifecycle_graph_read_does_not_leak_into_unified_lexical_search() {
         })
         .await
         .unwrap();
-    let result_ids: std::collections::HashSet<_> =
-        results.iter().map(|result| result.id.as_str()).collect();
+    assert!(unified_results.iter().all(|result| result.entity == "note"));
+    let result_ids: std::collections::HashSet<_> = unified_results
+        .iter()
+        .map(|result| result.id.as_str())
+        .collect();
     assert!(result_ids.contains(active.id.as_str()));
     assert!(!result_ids.contains(archived.id.as_str()));
     assert!(!result_ids.contains(deprecated.id.as_str()));
