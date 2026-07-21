@@ -59,12 +59,9 @@ pub async fn run_postgres_migrations_on_connection(
         .await
         .map_err(DbError::from)?;
     if let Some(operator_id) = context.designated_operator_user_id.as_deref() {
+        // Keep whitespace-only input on the migration's explicit preflight
+        // path so callers receive the durable contract marker.
         let operator_id = operator_id.trim();
-        if operator_id.is_empty() {
-            return Err(DbError::InvalidData(
-                "migration designated operator user id must not be blank".to_owned(),
-            ));
-        }
         sqlx::query("SELECT set_config('djinn.migration_designated_operator_user_id', $1, false)")
             .bind(operator_id)
             .execute(&mut *conn)

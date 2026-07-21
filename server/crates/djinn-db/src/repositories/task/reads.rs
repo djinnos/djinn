@@ -831,7 +831,7 @@ impl TaskRepository {
     pub async fn created_by_user_id(&self, task_id: &str) -> Result<Option<String>> {
         self.db.ensure_initialized().await?;
         let row: Option<String> =
-            sqlx::query_scalar("SELECT created_by_user_id FROM tasks WHERE id = ")
+            sqlx::query_scalar("SELECT created_by_user_id FROM tasks WHERE id = $1")
                 .bind(task_id)
                 .fetch_optional(self.db.pool())
                 .await?;
