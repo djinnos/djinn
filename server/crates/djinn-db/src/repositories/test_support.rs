@@ -986,10 +986,12 @@ pub async fn ensure_doctor_findings_schema(db: &Database) {
         .expect("create doctor_findings table");
     }
 
-    sqlx::query("ALTER TABLE doctor_findings ADD COLUMN IF NOT EXISTS deduplication_key VARCHAR(255) NULL")
-        .execute(db.pool())
-        .await
-        .expect("add doctor_findings.deduplication_key");
+    sqlx::query(
+        "ALTER TABLE doctor_findings ADD COLUMN IF NOT EXISTS deduplication_key VARCHAR(255) NULL",
+    )
+    .execute(db.pool())
+    .await
+    .expect("add doctor_findings.deduplication_key");
 
     sqlx::query("CREATE INDEX IF NOT EXISTS doctor_findings_created_at_idx ON doctor_findings (created_at DESC)")
         .execute(db.pool())

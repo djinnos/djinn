@@ -1346,6 +1346,7 @@ dependencies = [
  "djinn-core",
  "djinn-db",
  "djinn-memory",
+ "djinn-spec-lint",
  "djinn-stack",
  "futures",
  "globset",
