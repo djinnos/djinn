@@ -15,60 +15,6 @@ use djinn_db::repositories::task_arbitration::{
 };
 use djinn_db::repositories::task_attempt::TaskAttemptRepository;
 
-#[derive(Clone, Copy)]
-pub(crate) struct DispatchStrikeDecision {
-    pub exempted: bool,
-    pub decision: &'static str,
-    pub source: &'static str,
-}
-impl CoordinatorActor {
-    pub(crate) async fn latest_attempt_strike_decision(
-        &self,
-        task_id: &str,
-        role: &str,
-    ) -> Option<DispatchStrikeDecision> {
-        let attempts = TaskAttemptRepository::new(self.db.clone())
-            .list_for_task(task_id)
-            .await
-            .ok()?;
-        let a = attempts.iter().filter(|a| a.role == role).find(|a| {
-            a.outcome != TaskAttemptOutcome::Deferred.as_str()
-                && a.outcome != TaskAttemptOutcome::AdoptedPr.as_str()
-        })?;
-        let source = match a.outcome.as_str() {
-            "spawn_failed" => djinn_telemetry::dispatch::STRIKE_SOURCE_SPAWN_FAILED,
-            "crashed" => djinn_telemetry::dispatch::STRIKE_SOURCE_CRASHED,
-            _ => djinn_telemetry::dispatch::STRIKE_SOURCE_OTHER_TERMINAL,
-        };
-        let valid = a.outcome == "interrupted"
-            && a.dispatch_owner_incarnation_id
-                .as_deref()
-                .is_some_and(|owner| {
-                    a.summary_json
-                        .as_deref()
-                        .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
-                        .is_some_and(|v| {
-                            v["failure_class"] == "environmental_owner_expired"
-                                && v["owner_incarnation_id"] == owner
-                                && v["owner_classification"] == "expired"
-                                && v["owner_lease_last_renewed_at"].is_string()
-                        })
-                });
-        Some(DispatchStrikeDecision {
-            exempted: valid,
-            decision: if valid {
-                djinn_telemetry::dispatch::STRIKE_DECISION_EXEMPTED
-            } else {
-                djinn_telemetry::dispatch::STRIKE_DECISION_COUNTED
-            },
-            source: if valid {
-                djinn_telemetry::dispatch::STRIKE_SOURCE_ENVIRONMENTAL_OWNER_EXPIRED
-            } else {
-                source
-            },
-        })
-    }
-}
 /// uv3p Part B: what the fleet actually did after the current intervention (or
 /// after a human released a prior hold), derived from `task_attempts` rows.
 /// Drives the attempted-remediation park gate, the forced model rotation at
