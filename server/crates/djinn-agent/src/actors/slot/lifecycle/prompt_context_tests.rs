@@ -2484,7 +2484,12 @@ async fn planner_enrichment_non_default_top_k_and_budget_are_discriminating() {
     assert_eq!(configured_top_k.matches("**[Note]").count(), 2);
     assert_eq!(default_top_k.matches("**[Note]").count(), 3);
 
-    let budget_host = RecordingPlannerHost::with_content(valid_planner_payload());
+    // Three distinct queries allow the established two-note per-query cap to
+    // admit all six unique rows under the default global budget. Four rows fit
+    // within 4 KiB, while the fifth makes the default and configured budgets
+    // observably diverge.
+    let budget_payload = r#"{"queries":[{"type":"pitfall","query":"Planner budget query one"},{"type":"pattern","query":"Planner budget query two"},{"type":"case","query":"Planner budget query three"}]}"#;
+    let budget_host = RecordingPlannerHost::with_content(budget_payload);
     let budget_search = RecordingPlannedNoteSearch {
         rows: (0..6)
             .map(|index| {
