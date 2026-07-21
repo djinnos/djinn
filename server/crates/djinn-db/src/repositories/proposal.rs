@@ -8843,6 +8843,11 @@ mod tests {
         let db = test_db();
         let (bus, events) = capturing_bus();
         let repo = ProposalRepository::new(db.clone(), bus);
+        // The count queries intentionally run before a repository write, so
+        // initialize this lazily-cloned test database before using its raw
+        // pool. Repository methods do this themselves, but raw fixture
+        // assertions must not rely on a later write to create the clone.
+        db.ensure_initialized().await.unwrap();
         let before: (i64, i64, i64) = (
             sqlx::query_scalar("SELECT COUNT(*) FROM proposals")
                 .fetch_one(db.pool())
