@@ -105,6 +105,7 @@ fn test_agent_context(db: Database) -> AgentContext {
         read_source_authorization: djinn_agent::context::ReadSourceAuthorization::default(),
         reconciliation_sweep: ReconciliationSweepConfig::default(),
         memory_intent_planner: djinn_agent::context::MemoryIntentPlannerConfig::default(),
+        knowledge_injection: djinn_core::models::KnowledgeInjectionConfig::default(),
         compaction_cs: djinn_slot::reply_loop::CompactionCriticalSection::default(),
     }
 }
@@ -352,6 +353,7 @@ async fn supervisor_clones_from_mirror_without_worktrees() {
         flow: SupervisorFlow::Spike,
         model_id_per_role: Default::default(),
         read_source_project_ids: Vec::new(),
+        knowledge_injection: djinn_core::models::KnowledgeInjectionConfig::default(),
         github_owner: None,
         github_install_token: None,
         commit_author_name: None,
@@ -646,6 +648,7 @@ async fn supervisor_spike_runs_to_close_with_stubbed_provider() {
         flow: SupervisorFlow::Spike,
         model_id_per_role: Default::default(),
         read_source_project_ids: Vec::new(),
+        knowledge_injection: djinn_core::models::KnowledgeInjectionConfig::default(),
         github_owner: None,
         github_install_token: None,
         commit_author_name: None,
@@ -976,6 +979,7 @@ async fn proactive_sync_merges_advanced_base_into_behind_task_branch() {
         flow: SupervisorFlow::NewTask,
         model_id_per_role: Default::default(),
         read_source_project_ids: Vec::new(),
+        knowledge_injection: djinn_core::models::KnowledgeInjectionConfig::default(),
         github_owner: None,
         github_install_token: None,
         commit_author_name: None,

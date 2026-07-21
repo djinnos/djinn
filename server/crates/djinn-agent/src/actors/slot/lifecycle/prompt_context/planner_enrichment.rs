@@ -3,7 +3,7 @@
 use std::collections::HashSet;
 
 use djinn_core::message::{Conversation, Message};
-use djinn_core::models::Task;
+use djinn_core::models::{KnowledgeInjectionConfig, Task};
 use djinn_db::NoteRepository;
 
 use crate::actors::slot::lifecycle::memory_intent_planner::{
@@ -11,8 +11,9 @@ use crate::actors::slot::lifecycle::memory_intent_planner::{
     prepare_planner_request,
 };
 
-use super::KNOWLEDGE_BUDGET_CHARS;
 use super::types::{MemoryIntentPlannerInvocation, PlannedNoteSearch};
+
+const PLANNED_NOTES_PER_QUERY_LIMIT: usize = 2;
 
 /// Gated attributed planner enrichment for the real prompt-assembly path.
 pub(super) async fn merge_planned_knowledge(
@@ -21,6 +22,7 @@ pub(super) async fn merge_planned_knowledge(
     note_repo: &NoteRepository,
     task: &Task,
     planner: Option<&MemoryIntentPlannerInvocation<'_>>,
+    knowledge_injection: KnowledgeInjectionConfig,
 ) -> Option<String> {
     let Some(invocation) = planner.filter(|p| p.config.is_enabled()) else {
         return scope;
@@ -89,17 +91,22 @@ pub(super) async fn merge_planned_knowledge(
         // suppress the next unique, ranked row.
         let mut rendered_for_query = 0;
         for row in bucket.expect("checked") {
-            if rendered_for_query == 2 {
+            if rendered_for_query == PLANNED_NOTES_PER_QUERY_LIMIT {
                 break;
             }
-            if count == 6 || ids.contains(&row.id) || links.contains(&row.permalink) {
+            if count == knowledge_injection.knowledge_injection_limit as usize
+                || ids.contains(&row.id)
+                || links.contains(&row.permalink)
+            {
                 continue;
             }
             let line = format!(
                 "- **[Note] {}**: {} (permalink: {})",
                 row.title, row.snippet, row.permalink
             );
-            if output.len() + usize::from(!output.is_empty()) + line.len() > KNOWLEDGE_BUDGET_CHARS
+            if line.len() > knowledge_injection.knowledge_injection_line_cap_bytes as usize
+                || output.len() + usize::from(!output.is_empty()) + line.len()
+                    > knowledge_injection.knowledge_injection_budget_bytes as usize
             {
                 return (!output.is_empty()).then_some(output);
             }
