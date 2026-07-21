@@ -262,7 +262,7 @@ fn has_unanswered_tool_use(msg: &Message, following: &[Message]) -> bool {
 ///
 /// Only messages at/after `floor` are considered, so the system message (passed
 /// as the floor when present) is never pulled into the preserved tail.
-fn preserved_tail_range(
+pub(super) fn preserved_tail_range(
     messages: &[Message],
     floor: usize,
     max_turns: usize,
@@ -360,7 +360,8 @@ pub(super) fn rebuild_full_compaction_messages(
 
 pub(super) fn rebuild_partial_compaction_messages(
     prefix: &[Message],
-    tail_len: usize,
+    compacted_len: usize,
+    preserved_tail: &[Message],
     summary: String,
     ctx: &CompactionContext,
     last_user_text: &Option<String>,
@@ -370,10 +371,15 @@ pub(super) fn rebuild_partial_compaction_messages(
     new_messages.push(Message::user(wrap_full_summary(&format!(
         "[Partial compaction: the following is a summary of {} messages that were \
          compacted to free context space. Earlier messages are preserved above.]\n\n{}",
-        tail_len, summary,
+        compacted_len, summary,
     ))));
 
     new_messages.push(Message::assistant(PARTIAL_COMPACTION_CONTINUATION));
+
+    // Keep the closed tail after the continuation marker so the cacheable pivot
+    // prefix remains byte-for-byte unchanged and the latest resolved turns are
+    // not folded into the summary.
+    new_messages.extend_from_slice(preserved_tail);
 
     if matches!(
         ctx,
@@ -381,9 +387,8 @@ pub(super) fn rebuild_partial_compaction_messages(
     ) && let Some(last_user) = last_user_text
     {
         let already_appended = new_messages
-            .last()
-            .map(|m| m.role == Role::User && m.text_content() == *last_user)
-            .unwrap_or(false);
+            .iter()
+            .any(|m| m.role == Role::User && m.text_content() == *last_user);
         if !already_appended {
             new_messages.push(Message::user(last_user.clone()));
         }
@@ -577,6 +582,7 @@ mod tests {
         let rebuilt = rebuild_partial_compaction_messages(
             &prefix,
             3,
+            &[],
             "summary".to_string(),
             &CompactionContext::MidSession("worker".to_string()),
             &Some("latest user".to_string()),
@@ -1148,6 +1154,7 @@ mod tests {
         let rebuilt = rebuild_partial_compaction_messages(
             &prefix,
             3,
+            &[],
             "partial summary".to_string(),
             &CompactionContext::MidSession("worker".to_string()),
             &None,

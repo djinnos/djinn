@@ -36,7 +36,6 @@ use crate::tools::acting_user::acting_caps;
 use crate::tools::list_response::{
     self, ListMeta, NamedListResponse, named_list_response_schema, serialize_named_list_response,
 };
-use crate::tools::proposal_blocks::{parse_mdx_blocks, validate_question_form_placement};
 use crate::tools::proposal_ops::{
     ProposalDebateTrailModel, ProposalDeleteResponse, ProposalEpicModel, ProposalListRow,
     ProposalListSummary, ProposalModel, ProposalShowResponse, ProposalSignoffModel,
@@ -53,6 +52,7 @@ use djinn_db::{
     EpicRepository, ProjectRepository, ProposalListQuery, ProposalListSummaryRow,
     ProposalRepository,
 };
+use djinn_spec_lint::{parse_mdx_blocks, validate_question_form_placement};
 
 use super::mdx::{
     ProposalBlockPatchParams, apply_block_patch, parse_proposal_mdx, split_proposal_mdx_frontmatter,

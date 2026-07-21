@@ -2,8 +2,8 @@ use djinn_provider::message::{Conversation, Message, Role};
 use djinn_provider::provider::LlmProvider;
 
 use super::prompts::{
-    CompactionContext, extract_prior_summary, last_user_text, rebuild_full_compaction_messages,
-    rebuild_partial_compaction_messages,
+    CompactionContext, extract_prior_summary, last_user_text, preserved_tail_range,
+    rebuild_full_compaction_messages, rebuild_partial_compaction_messages,
 };
 use super::summarizer::{do_compact, do_partial_compact, is_context_error_message};
 
@@ -34,6 +34,9 @@ const PARTIAL_COMPACTION_PIVOT: f64 = 0.6;
 /// tail after the pivot is estimated to reclaim less than this fraction of the
 /// context window.
 const PARTIAL_COMPACTION_MIN_RECLAIM: f64 = 0.2;
+
+/// Number of fully resolved turns retained verbatim after a partial summary.
+const PARTIAL_COMPACTION_PRESERVED_TURNS: usize = 2;
 
 /// Maximum retries when the compaction request itself overflows the context.
 /// On each retry the oldest 20% of message groups are dropped from the input.
@@ -504,23 +507,42 @@ async fn partial_compact(
     }
 
     let prefix = &messages[..pivot_idx];
-    let tail = &messages[pivot_idx..];
+    // Use the same closed-turn range as full compaction, constrained by the
+    // pivot. The tail therefore cannot overlap the stable cache prefix, cannot
+    // begin with a tool result, and excludes a dangling final ToolUse.
+    let (preserved_start, preserved_end) =
+        preserved_tail_range(messages, pivot_idx, PARTIAL_COMPACTION_PRESERVED_TURNS)
+            .unwrap_or((messages.len(), messages.len()));
+    // `preserved_end` can fall before the conversation end when a trailing
+    // ToolUse has not received its result. Include that non-retained suffix in
+    // the summary input so every message is represented exactly once by either
+    // the prefix, summary, or verbatim closed tail.
+    let mut compacted_messages = messages[pivot_idx..preserved_start].to_vec();
+    compacted_messages.extend_from_slice(&messages[preserved_end..]);
+    let preserved_tail = &messages[preserved_start..preserved_end];
 
     tracing::info!(
         pivot_idx,
         prefix_messages = prefix.len(),
-        tail_messages = tail.len(),
+        compacted_messages = compacted_messages.len(),
+        preserved_tail_messages = preserved_tail.len(),
         tail_tokens,
         total_tokens,
         "partial_compact: attempting partial compaction"
     );
 
-    let summary = do_partial_compact(provider, tail).await?;
+    let summary = do_partial_compact(provider, &compacted_messages).await?;
     // C4: cap the summary length before it is re-inserted, so a verbose model
     // cannot blow the context window with its own summary.
     let summary = cap_summary(summary, context_window);
-    conversation.messages =
-        rebuild_partial_compaction_messages(prefix, tail.len(), summary, ctx, last_user_text);
+    conversation.messages = rebuild_partial_compaction_messages(
+        prefix,
+        compacted_messages.len(),
+        preserved_tail,
+        summary,
+        ctx,
+        last_user_text,
+    );
     Ok(true)
 }
 
