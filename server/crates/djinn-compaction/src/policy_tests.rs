@@ -620,8 +620,13 @@ fn aggressive_microcompact_clears_more_than_default() {
     let mut conv_aggressive = build_tool_conversation(10);
 
     let tokens_default = microcompact(&mut conv_default, 10);
-    let tokens_aggressive =
-        microcompact_with_thresholds(&mut conv_aggressive, 10, AGGRESSIVE_MICROCOMPACT_AGE, 0);
+    let tokens_aggressive = microcompact_with_thresholds(
+        &mut conv_aggressive,
+        10,
+        AGGRESSIVE_MICROCOMPACT_AGE,
+        0,
+        &[],
+    );
 
     assert!(tokens_aggressive >= tokens_default);
 }

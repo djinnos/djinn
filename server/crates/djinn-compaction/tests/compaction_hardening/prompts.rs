@@ -60,6 +60,34 @@ impl LlmProvider for SummaryProvider {
     }
 }
 
+/// Provider fixture that forces every summarisation attempt to report a context
+/// limit, driving the outer overflow-retry and aggressive-microcompaction path.
+struct ContextLimitProvider;
+
+impl LlmProvider for ContextLimitProvider {
+    fn name(&self) -> &str {
+        "context-limit-fixture"
+    }
+
+    fn stream<'a>(
+        &'a self,
+        _: &'a Conversation,
+        _: &'a [Value],
+        _: Option<ToolChoice>,
+    ) -> Pin<
+        Box<
+            dyn futures::Future<
+                    Output = anyhow::Result<
+                        Pin<Box<dyn futures::Stream<Item = anyhow::Result<StreamEvent>> + Send>>,
+                    >,
+                > + Send
+                + 'a,
+        >,
+    > {
+        Box::pin(async { Err(anyhow::anyhow!("context limit exceeded")) })
+    }
+}
+
 /// Build a conversation with `num_turns` resolved tool-call turns, each
 /// consisting of an assistant `ToolUse`, a user `ToolResult`, and an assistant
 /// follow-up. This matches the shape microcompaction expects so that
@@ -279,6 +307,81 @@ async fn pointer_placeholder_includes_metadata_and_hint() {
         recent_survives,
         "most recent exempt tool result (call_11) must survive microcompaction unchanged"
     );
+}
+
+/// When every summary request overflows, the aggressive microcompaction fallback
+/// must still use caller-supplied pointer metadata for results that the initial
+/// pass preserved due to its recent-turn exemption.
+#[tokio::test]
+async fn overflow_retry_aggressive_microcompaction_keeps_pointer_metadata() {
+    let provider = ContextLimitProvider;
+    let mut conversation = Conversation {
+        // The initial pass exempts call_3 as a recent result. The aggressive
+        // fallback removes that exemption and must replace it with a pointer.
+        messages: build_tool_conversation(4),
+    };
+    let pointers = [ToolOutputPointer {
+        tool_use_id: "call_3".into(),
+        turn: 42,
+        original_chars: 222,
+        result_kind: "tool_result".into(),
+    }];
+
+    let compacted = compact_conversation_with_pointers(
+        &provider,
+        &mut conversation,
+        "fixture-session",
+        "fixture-task",
+        CompactionContext::MidSession("worker".into()),
+        // Keep deterministic fallback from removing the in-place placeholder.
+        1_000_000,
+        &pointers,
+    )
+    .await;
+
+    assert!(
+        !compacted,
+        "the all-overflow fixture should leave the original conversation in place"
+    );
+    let placeholder = conversation
+        .messages
+        .iter()
+        .flat_map(|message| message.content.iter())
+        .find_map(|block| match block {
+            ContentBlock::ToolResult {
+                tool_use_id,
+                content,
+                ..
+            } if tool_use_id == "call_3" => content.first().and_then(|item| item.as_text()),
+            _ => None,
+        })
+        .expect("call_3 tool result remains paired and in place");
+
+    assert!(
+        placeholder.starts_with("[Cleared"),
+        "placeholder: {placeholder}"
+    );
+    assert!(
+        placeholder.contains("turn 42"),
+        "placeholder: {placeholder}"
+    );
+    assert!(
+        placeholder.contains("222 chars"),
+        "placeholder: {placeholder}"
+    );
+    assert!(
+        placeholder.contains("tool_result"),
+        "placeholder: {placeholder}"
+    );
+    assert!(
+        placeholder.contains("tool_use_id=\"call_3\""),
+        "placeholder: {placeholder}"
+    );
+    assert!(
+        placeholder.contains("output_view(tool_use_id=\"call_3\")"),
+        "placeholder: {placeholder}"
+    );
+    assert!(find_orphaned_tool_result(&conversation.messages).is_none());
 }
 
 /// When no pointer metadata is supplied, microcompaction falls back to the

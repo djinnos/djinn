@@ -121,13 +121,14 @@ fn microcompact_with_thresholds(
     current_turn: usize,
     age_threshold: usize,
     exempt_recent: usize,
+    pointers: &[ToolOutputPointer],
 ) -> usize {
     microcompact_with_pointers(
         conversation,
         current_turn,
         age_threshold,
         exempt_recent,
-        &[],
+        pointers,
     )
 }
 
@@ -351,7 +352,8 @@ pub async fn compact_conversation_with_pointers(
     }
 
     let compact_result =
-        do_compact_with_overflow_retry(provider, conversation, &ctx, task_id, session_id).await;
+        do_compact_with_overflow_retry(provider, conversation, &ctx, task_id, session_id, pointers)
+            .await;
 
     match compact_result {
         Ok(summary) => {
@@ -403,6 +405,7 @@ async fn do_compact_with_overflow_retry(
     ctx: &CompactionContext,
     task_id: &str,
     session_id: &str,
+    pointers: &[ToolOutputPointer],
 ) -> anyhow::Result<String> {
     let mut messages_for_compact = conversation.messages.clone();
 
@@ -457,8 +460,13 @@ async fn do_compact_with_overflow_retry(
         .filter(|m| m.role == Role::Assistant)
         .count();
 
-    let tokens_reclaimed =
-        microcompact_with_thresholds(conversation, current_turn, AGGRESSIVE_MICROCOMPACT_AGE, 0);
+    let tokens_reclaimed = microcompact_with_thresholds(
+        conversation,
+        current_turn,
+        AGGRESSIVE_MICROCOMPACT_AGE,
+        0,
+        pointers,
+    );
 
     tracing::info!(
         task_id = %task_id,
