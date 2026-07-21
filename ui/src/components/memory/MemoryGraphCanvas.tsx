@@ -142,7 +142,7 @@ interface DiskRing {
   ratio: number;
 }
 
-interface DiskModel {
+export interface DiskModel {
   nodes: DiskNode[];
   links: DiskLink[];
   rings: DiskRing[];
@@ -241,8 +241,10 @@ export function buildMemoryGraphDisk(payload: MemoryGraphOutput): DiskModel {
   const activeRawNodes = payload.nodes.filter((n) => n.status !== "archived" && n.status !== "deprecated");
   const ghostRawNodes = payload.nodes.filter((n) => n.status === "archived" || n.status === "deprecated");
   // With no active nodes there is no active model to preserve; retain a stable
-  // fallback disk for the returned ghosts.
-  const rawNodes = activeRawNodes.length ? activeRawNodes : ghostRawNodes;
+  // fallback disk for the returned ghosts. They remain lifecycle ghosts rather
+  // than silently becoming active nodes in this degenerate case.
+  const usesGhostFallback = activeRawNodes.length === 0;
+  const rawNodes = usesGhostFallback ? ghostRawNodes : activeRawNodes;
   const ghostsToAppend = activeRawNodes.length ? ghostRawNodes : [];
   const stamps = rawNodes.map((n) => nodeTs(n)).filter((v): v is number => v !== null);
   const minTs = stamps.length ? Math.min(...stamps) : null;
@@ -283,7 +285,18 @@ export function buildMemoryGraphDisk(payload: MemoryGraphOutput): DiskModel {
     }));
     ringIndexOf = (n) => {
       const ts = nodeTs(n);
-      return ts !== null ? (indexOfStart.get(bucketStart(ts, unit)) ?? starts.length - 1) : starts.length - 1;
+      if (ts === null) return starts.length - 1;
+      const start = bucketStart(ts, unit);
+      const exact = indexOfStart.get(start);
+      if (exact !== undefined) return exact;
+      // A ghost's creation bucket need not be populated by an active node.
+      // Choose the nearest frozen calendar ring without changing the active
+      // ring selection or introducing a new ring into the disk.
+      let nearest = 0;
+      for (let i = 1; i < starts.length; i += 1) {
+        if (Math.abs(starts[i] - start) < Math.abs(starts[nearest] - start)) nearest = i;
+      }
+      return nearest;
     };
   } else {
     // Undated fallback: scale the ring count with node count so a large
@@ -347,13 +360,13 @@ export function buildMemoryGraphDisk(payload: MemoryGraphOutput): DiskModel {
       noteType: n.note_type,
       isProposal: n.entity_type === "proposal",
       isOrphan: Boolean(n.is_orphan),
-      isGhost: false,
-      lifecycle: "active",
+      isGhost: usesGhostFallback,
+      lifecycle: n.status === "deprecated" ? "deprecated" : n.status === "archived" ? "archived" : "active",
       connectionCount,
       color: colorForNote(n.note_type, Boolean(n.is_orphan)),
       ts: nodeTs(n),
       rec,
-      igniteAt: igniteByNode.get(n.id) ?? rec,
+      igniteAt: usesGhostFallback ? 0 : (igniteByNode.get(n.id) ?? rec),
       tr,
       ring,
       r: Math.max(1.1, (3 + Math.sqrt(connectionCount) * 0.9 + (n.entity_type === "proposal" ? 0.6 : 0)) * sizeScale),
@@ -624,6 +637,11 @@ function fitCamera(w: number, h: number, outer: number, fullOuter: number): Came
   return { k, x: w / 2, y: h / 2 + h * 0.04 };
 }
 
+/** The frozen active disk extent used by camera fitting (exposed for layout invariants). */
+export function memoryGraphCameraFitRadius(disk: DiskModel): number {
+  return disk.rings[disk.rings.length - 1]?.r ?? RING_OUTER;
+}
+
 const lifecycleGhostPreferenceKey = (projectSlug: string) =>
   `djinn:memory-graph:lifecycle-ghosts:${projectSlug}`;
 
@@ -723,7 +741,11 @@ export function MemoryGraphCanvas({ projectSlug, reloadKey, onSelectNote }: Memo
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
 
-    const fullOuter = disk.rings[disk.rings.length - 1]?.r ?? RING_OUTER;
+    const fullOuter = memoryGraphCameraFitRadius(disk);
+    // Ghosts render independently of playback. Keeping this set separate is
+    // important: lifecycle payloads must not advance the active reveal count
+    // or frontier-relative ink calculation.
+    const activeNodes = disk.nodes.filter((node) => !node.isGhost);
     let raf = 0;
     let last = performance.now();
     let size = { h: container.clientHeight, w: container.clientWidth };
@@ -782,8 +804,8 @@ export function MemoryGraphCanvas({ projectSlug, reloadKey, onSelectNote }: Memo
             year: "numeric",
           });
         } else {
-          const visible = disk.nodes.filter((n) => n.igniteAt <= reveal + 1e-3).length;
-          dateRef.current.textContent = `${visible} / ${disk.nodes.length} notes`;
+          const visible = activeNodes.filter((n) => n.igniteAt <= reveal + 1e-3).length;
+          dateRef.current.textContent = `${visible} / ${activeNodes.length} notes`;
         }
       }
 
@@ -819,7 +841,7 @@ export function MemoryGraphCanvas({ projectSlug, reloadKey, onSelectNote }: Memo
       // Frontier-relative recency: a lone frontier note still reads as fresh
       // even when the playhead has left empty space behind it.
       let frontier = LEAD_IN;
-      for (const n of disk.nodes) if (n.igniteAt <= reveal + 1e-3) frontier = Math.max(frontier, n.rec);
+      for (const n of activeNodes) if (n.igniteAt <= reveal + 1e-3) frontier = Math.max(frontier, n.rec);
       const styleInk = (rec: number) => recencyInk(clamp(rec / Math.max(frontier, LEAD_IN), 0, 1));
 
       // Rings: a ring is laid one band ahead of the playhead and grows out
