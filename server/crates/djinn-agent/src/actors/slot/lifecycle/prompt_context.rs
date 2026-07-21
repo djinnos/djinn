@@ -647,7 +647,10 @@ async fn load_knowledge_context_with_planner(
     let rendered = (!packed.rendered.is_empty()).then_some(packed.rendered.clone());
     let rendered = merge_planned_knowledge(
         rendered,
-        &trace_notes,
+        // Planner duplicate suppression retains the production-query contract:
+        // below-threshold and outside-top-K trace-only notes must not hide a
+        // matching planned-search result from prompt enrichment.
+        &notes,
         &note_repo,
         task,
         planner,
