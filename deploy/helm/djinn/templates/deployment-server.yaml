@@ -528,12 +528,22 @@ spec:
               port: api
             periodSeconds: 10
             initialDelaySeconds: 5
+            # The default 1s timeout fails spuriously when task-run pods
+            # oversubscribe the node during compile/link storms; /health is
+            # cheap, so a slow answer means CPU starvation, not sickness.
+            timeoutSeconds: 5
           livenessProbe:
             httpGet:
               path: /health
               port: api
             periodSeconds: 30
             initialDelaySeconds: 30
+            timeoutSeconds: 5
+            # 5 × 30s = 150s of sustained unresponsiveness before a restart.
+            # Every liveness restart wipes in-memory session-activity state
+            # and orphans the running worker fleet, so restarting the server
+            # must be a last resort, not a response to load spikes.
+            failureThreshold: 5
       volumes:
         - name: mirrors
           persistentVolumeClaim:
