@@ -6897,6 +6897,14 @@ export namespace ProposalBlockPatchInputSchema {
 export type ProposalBlockPatchInput = ProposalBlockPatchInputSchema.ProposalBlockPatchInput;
 export namespace ProposalBlockPatchOutputSchema {
   export type AcceptanceCriterionItem = (string | AcceptanceCriterionStatus)
+  /**
+   * Body encoding supplied by the caller.
+   */
+  export type BodyFormat = ("markdown" | "mdx")
+  /**
+   * Stable diagnostic severity.
+   */
+  export type Severity = ("error" | "warning")
 
   export interface ProposalBlockPatchOutput {
   /**
@@ -6915,6 +6923,10 @@ export namespace ProposalBlockPatchOutputSchema {
    */
   build_owner_user_id?: string
   closed_at?: string
+  /**
+   * Additive stable machine-readable rejection code.
+   */
+  code?: string
   created_at?: string
   error?: string
   id?: string
@@ -6922,6 +6934,10 @@ export namespace ProposalBlockPatchOutputSchema {
    * Last proposal revision that the in-flight build has reconciled against.
    */
   last_reconciled_revision_seq?: number
+  /**
+   * Additive lint result for the exact committed head revision.
+   */
+  latest_lint?: (SpecLintResultV1 | null)
   /**
    * Head revision number (sign-offs anchored earlier are stale).
    */
@@ -6963,11 +6979,52 @@ export namespace ProposalBlockPatchOutputSchema {
    */
   unresolved_feedback_count?: number
   updated_at?: string
+  /**
+   * Additive ordered diagnostics for `SPEC_LINT_REJECTED`.
+   */
+  violations?: ProposalLintRejectionViolation[]
   [k: string]: any
   }
   export interface AcceptanceCriterionStatus {
   criterion: string
   met?: boolean
+  [k: string]: any
+  }
+  /**
+   * Stable V1 persistence and API contract. `checked_at` is supplied by the
+   * caller; linting never reads a clock.
+   */
+  export interface SpecLintResultV1 {
+  body_format: BodyFormat
+  body_sha256: string
+  checked_at: string
+  errors: Violation[]
+  linter_version: string
+  skipped_tiers: SkippedTier[]
+  warnings: Violation[]
+  [k: string]: any
+  }
+  export interface Violation {
+  code: string
+  message: string
+  severity: Severity
+  span: Utf8ByteSpan
+  [k: string]: any
+  }
+  /**
+   * A half-open UTF-8 byte range in the original body.
+   */
+  export interface Utf8ByteSpan {
+  end: number
+  start: number
+  [k: string]: any
+  }
+  /**
+   * A deterministic record of a lint tier that did not run.
+   */
+  export interface SkippedTier {
+  reason: string
+  tier: string
   [k: string]: any
   }
   /**
@@ -7012,6 +7069,24 @@ export namespace ProposalBlockPatchOutputSchema {
    * Count of unresolved blocking (non-verdict) debate objections.
    */
   unresolved_blocking_count: number
+  [k: string]: any
+  }
+  /**
+   * Stable structured diagnostic published when repository lint rejects a write.
+   */
+  export interface ProposalLintRejectionViolation {
+  code: string
+  message: string
+  severity: string
+  span: ProposalLintViolationSpan
+  [k: string]: any
+  }
+  /**
+   * A half-open UTF-8 byte span in a lint rejection diagnostic.
+   */
+  export interface ProposalLintViolationSpan {
+  end_byte: number
+  start_byte: number
   [k: string]: any
   }
 
@@ -7107,6 +7182,14 @@ export namespace ProposalCreateInputSchema {
 export type ProposalCreateInput = ProposalCreateInputSchema.ProposalCreateInput;
 export namespace ProposalCreateOutputSchema {
   export type AcceptanceCriterionItem = (string | AcceptanceCriterionStatus)
+  /**
+   * Body encoding supplied by the caller.
+   */
+  export type BodyFormat = ("markdown" | "mdx")
+  /**
+   * Stable diagnostic severity.
+   */
+  export type Severity = ("error" | "warning")
 
   export interface ProposalCreateOutput {
   /**
@@ -7125,6 +7208,10 @@ export namespace ProposalCreateOutputSchema {
    */
   build_owner_user_id?: string
   closed_at?: string
+  /**
+   * Additive stable machine-readable rejection code.
+   */
+  code?: string
   created_at?: string
   error?: string
   id?: string
@@ -7132,6 +7219,10 @@ export namespace ProposalCreateOutputSchema {
    * Last proposal revision that the in-flight build has reconciled against.
    */
   last_reconciled_revision_seq?: number
+  /**
+   * Additive lint result for the exact committed head revision.
+   */
+  latest_lint?: (SpecLintResultV1 | null)
   /**
    * Head revision number (sign-offs anchored earlier are stale).
    */
@@ -7173,11 +7264,52 @@ export namespace ProposalCreateOutputSchema {
    */
   unresolved_feedback_count?: number
   updated_at?: string
+  /**
+   * Additive ordered diagnostics for `SPEC_LINT_REJECTED`.
+   */
+  violations?: ProposalLintRejectionViolation[]
   [k: string]: any
   }
   export interface AcceptanceCriterionStatus {
   criterion: string
   met?: boolean
+  [k: string]: any
+  }
+  /**
+   * Stable V1 persistence and API contract. `checked_at` is supplied by the
+   * caller; linting never reads a clock.
+   */
+  export interface SpecLintResultV1 {
+  body_format: BodyFormat
+  body_sha256: string
+  checked_at: string
+  errors: Violation[]
+  linter_version: string
+  skipped_tiers: SkippedTier[]
+  warnings: Violation[]
+  [k: string]: any
+  }
+  export interface Violation {
+  code: string
+  message: string
+  severity: Severity
+  span: Utf8ByteSpan
+  [k: string]: any
+  }
+  /**
+   * A half-open UTF-8 byte range in the original body.
+   */
+  export interface Utf8ByteSpan {
+  end: number
+  start: number
+  [k: string]: any
+  }
+  /**
+   * A deterministic record of a lint tier that did not run.
+   */
+  export interface SkippedTier {
+  reason: string
+  tier: string
   [k: string]: any
   }
   /**
@@ -7222,6 +7354,24 @@ export namespace ProposalCreateOutputSchema {
    * Count of unresolved blocking (non-verdict) debate objections.
    */
   unresolved_blocking_count: number
+  [k: string]: any
+  }
+  /**
+   * Stable structured diagnostic published when repository lint rejects a write.
+   */
+  export interface ProposalLintRejectionViolation {
+  code: string
+  message: string
+  severity: string
+  span: ProposalLintViolationSpan
+  [k: string]: any
+  }
+  /**
+   * A half-open UTF-8 byte span in a lint rejection diagnostic.
+   */
+  export interface ProposalLintViolationSpan {
+  end_byte: number
+  start_byte: number
   [k: string]: any
   }
 
@@ -7588,6 +7738,14 @@ export namespace ProposalExportInputSchema {
 export type ProposalExportInput = ProposalExportInputSchema.ProposalExportInput;
 export namespace ProposalExportOutputSchema {
   export type AcceptanceCriterionItem = (string | AcceptanceCriterionStatus)
+  /**
+   * Body encoding supplied by the caller.
+   */
+  export type BodyFormat = ("markdown" | "mdx")
+  /**
+   * Stable diagnostic severity.
+   */
+  export type Severity = ("error" | "warning")
 
   export interface ProposalExportOutput {
   /**
@@ -7606,6 +7764,10 @@ export namespace ProposalExportOutputSchema {
    */
   build_owner_user_id?: string
   closed_at?: string
+  /**
+   * Additive stable machine-readable rejection code.
+   */
+  code?: string
   created_at?: string
   error?: string
   id?: string
@@ -7613,6 +7775,10 @@ export namespace ProposalExportOutputSchema {
    * Last proposal revision that the in-flight build has reconciled against.
    */
   last_reconciled_revision_seq?: number
+  /**
+   * Additive lint result for the exact committed head revision.
+   */
+  latest_lint?: (SpecLintResultV1 | null)
   /**
    * Head revision number (sign-offs anchored earlier are stale).
    */
@@ -7654,11 +7820,52 @@ export namespace ProposalExportOutputSchema {
    */
   unresolved_feedback_count?: number
   updated_at?: string
+  /**
+   * Additive ordered diagnostics for `SPEC_LINT_REJECTED`.
+   */
+  violations?: ProposalLintRejectionViolation[]
   [k: string]: any
   }
   export interface AcceptanceCriterionStatus {
   criterion: string
   met?: boolean
+  [k: string]: any
+  }
+  /**
+   * Stable V1 persistence and API contract. `checked_at` is supplied by the
+   * caller; linting never reads a clock.
+   */
+  export interface SpecLintResultV1 {
+  body_format: BodyFormat
+  body_sha256: string
+  checked_at: string
+  errors: Violation[]
+  linter_version: string
+  skipped_tiers: SkippedTier[]
+  warnings: Violation[]
+  [k: string]: any
+  }
+  export interface Violation {
+  code: string
+  message: string
+  severity: Severity
+  span: Utf8ByteSpan
+  [k: string]: any
+  }
+  /**
+   * A half-open UTF-8 byte range in the original body.
+   */
+  export interface Utf8ByteSpan {
+  end: number
+  start: number
+  [k: string]: any
+  }
+  /**
+   * A deterministic record of a lint tier that did not run.
+   */
+  export interface SkippedTier {
+  reason: string
+  tier: string
   [k: string]: any
   }
   /**
@@ -7703,6 +7910,24 @@ export namespace ProposalExportOutputSchema {
    * Count of unresolved blocking (non-verdict) debate objections.
    */
   unresolved_blocking_count: number
+  [k: string]: any
+  }
+  /**
+   * Stable structured diagnostic published when repository lint rejects a write.
+   */
+  export interface ProposalLintRejectionViolation {
+  code: string
+  message: string
+  severity: string
+  span: ProposalLintViolationSpan
+  [k: string]: any
+  }
+  /**
+   * A half-open UTF-8 byte span in a lint rejection diagnostic.
+   */
+  export interface ProposalLintViolationSpan {
+  end_byte: number
+  start_byte: number
   [k: string]: any
   }
 
@@ -7836,6 +8061,14 @@ export namespace ProposalGraduateInputSchema {
 export type ProposalGraduateInput = ProposalGraduateInputSchema.ProposalGraduateInput;
 export namespace ProposalGraduateOutputSchema {
   export type AcceptanceCriterionItem = (string | AcceptanceCriterionStatus)
+  /**
+   * Body encoding supplied by the caller.
+   */
+  export type BodyFormat = ("markdown" | "mdx")
+  /**
+   * Stable diagnostic severity.
+   */
+  export type Severity = ("error" | "warning")
 
   export interface ProposalGraduateOutput {
   /**
@@ -7854,6 +8087,10 @@ export namespace ProposalGraduateOutputSchema {
    */
   build_owner_user_id?: string
   closed_at?: string
+  /**
+   * Additive stable machine-readable rejection code.
+   */
+  code?: string
   created_at?: string
   error?: string
   id?: string
@@ -7861,6 +8098,10 @@ export namespace ProposalGraduateOutputSchema {
    * Last proposal revision that the in-flight build has reconciled against.
    */
   last_reconciled_revision_seq?: number
+  /**
+   * Additive lint result for the exact committed head revision.
+   */
+  latest_lint?: (SpecLintResultV1 | null)
   /**
    * Head revision number (sign-offs anchored earlier are stale).
    */
@@ -7902,11 +8143,52 @@ export namespace ProposalGraduateOutputSchema {
    */
   unresolved_feedback_count?: number
   updated_at?: string
+  /**
+   * Additive ordered diagnostics for `SPEC_LINT_REJECTED`.
+   */
+  violations?: ProposalLintRejectionViolation[]
   [k: string]: any
   }
   export interface AcceptanceCriterionStatus {
   criterion: string
   met?: boolean
+  [k: string]: any
+  }
+  /**
+   * Stable V1 persistence and API contract. `checked_at` is supplied by the
+   * caller; linting never reads a clock.
+   */
+  export interface SpecLintResultV1 {
+  body_format: BodyFormat
+  body_sha256: string
+  checked_at: string
+  errors: Violation[]
+  linter_version: string
+  skipped_tiers: SkippedTier[]
+  warnings: Violation[]
+  [k: string]: any
+  }
+  export interface Violation {
+  code: string
+  message: string
+  severity: Severity
+  span: Utf8ByteSpan
+  [k: string]: any
+  }
+  /**
+   * A half-open UTF-8 byte range in the original body.
+   */
+  export interface Utf8ByteSpan {
+  end: number
+  start: number
+  [k: string]: any
+  }
+  /**
+   * A deterministic record of a lint tier that did not run.
+   */
+  export interface SkippedTier {
+  reason: string
+  tier: string
   [k: string]: any
   }
   /**
@@ -7951,6 +8233,24 @@ export namespace ProposalGraduateOutputSchema {
    * Count of unresolved blocking (non-verdict) debate objections.
    */
   unresolved_blocking_count: number
+  [k: string]: any
+  }
+  /**
+   * Stable structured diagnostic published when repository lint rejects a write.
+   */
+  export interface ProposalLintRejectionViolation {
+  code: string
+  message: string
+  severity: string
+  span: ProposalLintViolationSpan
+  [k: string]: any
+  }
+  /**
+   * A half-open UTF-8 byte span in a lint rejection diagnostic.
+   */
+  export interface ProposalLintViolationSpan {
+  end_byte: number
+  start_byte: number
   [k: string]: any
   }
 
@@ -7969,6 +8269,14 @@ export namespace ProposalImportInputSchema {
 export type ProposalImportInput = ProposalImportInputSchema.ProposalImportInput;
 export namespace ProposalImportOutputSchema {
   export type AcceptanceCriterionItem = (string | AcceptanceCriterionStatus)
+  /**
+   * Body encoding supplied by the caller.
+   */
+  export type BodyFormat = ("markdown" | "mdx")
+  /**
+   * Stable diagnostic severity.
+   */
+  export type Severity = ("error" | "warning")
 
   export interface ProposalImportOutput {
   /**
@@ -7987,6 +8295,10 @@ export namespace ProposalImportOutputSchema {
    */
   build_owner_user_id?: string
   closed_at?: string
+  /**
+   * Additive stable machine-readable rejection code.
+   */
+  code?: string
   created_at?: string
   error?: string
   id?: string
@@ -7994,6 +8306,10 @@ export namespace ProposalImportOutputSchema {
    * Last proposal revision that the in-flight build has reconciled against.
    */
   last_reconciled_revision_seq?: number
+  /**
+   * Additive lint result for the exact committed head revision.
+   */
+  latest_lint?: (SpecLintResultV1 | null)
   /**
    * Head revision number (sign-offs anchored earlier are stale).
    */
@@ -8035,11 +8351,52 @@ export namespace ProposalImportOutputSchema {
    */
   unresolved_feedback_count?: number
   updated_at?: string
+  /**
+   * Additive ordered diagnostics for `SPEC_LINT_REJECTED`.
+   */
+  violations?: ProposalLintRejectionViolation[]
   [k: string]: any
   }
   export interface AcceptanceCriterionStatus {
   criterion: string
   met?: boolean
+  [k: string]: any
+  }
+  /**
+   * Stable V1 persistence and API contract. `checked_at` is supplied by the
+   * caller; linting never reads a clock.
+   */
+  export interface SpecLintResultV1 {
+  body_format: BodyFormat
+  body_sha256: string
+  checked_at: string
+  errors: Violation[]
+  linter_version: string
+  skipped_tiers: SkippedTier[]
+  warnings: Violation[]
+  [k: string]: any
+  }
+  export interface Violation {
+  code: string
+  message: string
+  severity: Severity
+  span: Utf8ByteSpan
+  [k: string]: any
+  }
+  /**
+   * A half-open UTF-8 byte range in the original body.
+   */
+  export interface Utf8ByteSpan {
+  end: number
+  start: number
+  [k: string]: any
+  }
+  /**
+   * A deterministic record of a lint tier that did not run.
+   */
+  export interface SkippedTier {
+  reason: string
+  tier: string
   [k: string]: any
   }
   /**
@@ -8084,6 +8441,24 @@ export namespace ProposalImportOutputSchema {
    * Count of unresolved blocking (non-verdict) debate objections.
    */
   unresolved_blocking_count: number
+  [k: string]: any
+  }
+  /**
+   * Stable structured diagnostic published when repository lint rejects a write.
+   */
+  export interface ProposalLintRejectionViolation {
+  code: string
+  message: string
+  severity: string
+  span: ProposalLintViolationSpan
+  [k: string]: any
+  }
+  /**
+   * A half-open UTF-8 byte span in a lint rejection diagnostic.
+   */
+  export interface ProposalLintViolationSpan {
+  end_byte: number
+  start_byte: number
   [k: string]: any
   }
 
@@ -9585,6 +9960,14 @@ export namespace ProposalSignoffInputSchema {
 export type ProposalSignoffInput = ProposalSignoffInputSchema.ProposalSignoffInput;
 export namespace ProposalSignoffOutputSchema {
   export type AcceptanceCriterionItem = (string | AcceptanceCriterionStatus)
+  /**
+   * Body encoding supplied by the caller.
+   */
+  export type BodyFormat = ("markdown" | "mdx")
+  /**
+   * Stable diagnostic severity.
+   */
+  export type Severity = ("error" | "warning")
 
   export interface ProposalSignoffOutput {
   /**
@@ -9603,6 +9986,10 @@ export namespace ProposalSignoffOutputSchema {
    */
   build_owner_user_id?: string
   closed_at?: string
+  /**
+   * Additive stable machine-readable rejection code.
+   */
+  code?: string
   created_at?: string
   error?: string
   id?: string
@@ -9610,6 +9997,10 @@ export namespace ProposalSignoffOutputSchema {
    * Last proposal revision that the in-flight build has reconciled against.
    */
   last_reconciled_revision_seq?: number
+  /**
+   * Additive lint result for the exact committed head revision.
+   */
+  latest_lint?: (SpecLintResultV1 | null)
   /**
    * Head revision number (sign-offs anchored earlier are stale).
    */
@@ -9651,11 +10042,52 @@ export namespace ProposalSignoffOutputSchema {
    */
   unresolved_feedback_count?: number
   updated_at?: string
+  /**
+   * Additive ordered diagnostics for `SPEC_LINT_REJECTED`.
+   */
+  violations?: ProposalLintRejectionViolation[]
   [k: string]: any
   }
   export interface AcceptanceCriterionStatus {
   criterion: string
   met?: boolean
+  [k: string]: any
+  }
+  /**
+   * Stable V1 persistence and API contract. `checked_at` is supplied by the
+   * caller; linting never reads a clock.
+   */
+  export interface SpecLintResultV1 {
+  body_format: BodyFormat
+  body_sha256: string
+  checked_at: string
+  errors: Violation[]
+  linter_version: string
+  skipped_tiers: SkippedTier[]
+  warnings: Violation[]
+  [k: string]: any
+  }
+  export interface Violation {
+  code: string
+  message: string
+  severity: Severity
+  span: Utf8ByteSpan
+  [k: string]: any
+  }
+  /**
+   * A half-open UTF-8 byte range in the original body.
+   */
+  export interface Utf8ByteSpan {
+  end: number
+  start: number
+  [k: string]: any
+  }
+  /**
+   * A deterministic record of a lint tier that did not run.
+   */
+  export interface SkippedTier {
+  reason: string
+  tier: string
   [k: string]: any
   }
   /**
@@ -9700,6 +10132,24 @@ export namespace ProposalSignoffOutputSchema {
    * Count of unresolved blocking (non-verdict) debate objections.
    */
   unresolved_blocking_count: number
+  [k: string]: any
+  }
+  /**
+   * Stable structured diagnostic published when repository lint rejects a write.
+   */
+  export interface ProposalLintRejectionViolation {
+  code: string
+  message: string
+  severity: string
+  span: ProposalLintViolationSpan
+  [k: string]: any
+  }
+  /**
+   * A half-open UTF-8 byte span in a lint rejection diagnostic.
+   */
+  export interface ProposalLintViolationSpan {
+  end_byte: number
+  start_byte: number
   [k: string]: any
   }
 
@@ -9722,6 +10172,14 @@ export namespace ProposalSignoffClearInputSchema {
 export type ProposalSignoffClearInput = ProposalSignoffClearInputSchema.ProposalSignoffClearInput;
 export namespace ProposalSignoffClearOutputSchema {
   export type AcceptanceCriterionItem = (string | AcceptanceCriterionStatus)
+  /**
+   * Body encoding supplied by the caller.
+   */
+  export type BodyFormat = ("markdown" | "mdx")
+  /**
+   * Stable diagnostic severity.
+   */
+  export type Severity = ("error" | "warning")
 
   export interface ProposalSignoffClearOutput {
   /**
@@ -9740,6 +10198,10 @@ export namespace ProposalSignoffClearOutputSchema {
    */
   build_owner_user_id?: string
   closed_at?: string
+  /**
+   * Additive stable machine-readable rejection code.
+   */
+  code?: string
   created_at?: string
   error?: string
   id?: string
@@ -9747,6 +10209,10 @@ export namespace ProposalSignoffClearOutputSchema {
    * Last proposal revision that the in-flight build has reconciled against.
    */
   last_reconciled_revision_seq?: number
+  /**
+   * Additive lint result for the exact committed head revision.
+   */
+  latest_lint?: (SpecLintResultV1 | null)
   /**
    * Head revision number (sign-offs anchored earlier are stale).
    */
@@ -9788,11 +10254,52 @@ export namespace ProposalSignoffClearOutputSchema {
    */
   unresolved_feedback_count?: number
   updated_at?: string
+  /**
+   * Additive ordered diagnostics for `SPEC_LINT_REJECTED`.
+   */
+  violations?: ProposalLintRejectionViolation[]
   [k: string]: any
   }
   export interface AcceptanceCriterionStatus {
   criterion: string
   met?: boolean
+  [k: string]: any
+  }
+  /**
+   * Stable V1 persistence and API contract. `checked_at` is supplied by the
+   * caller; linting never reads a clock.
+   */
+  export interface SpecLintResultV1 {
+  body_format: BodyFormat
+  body_sha256: string
+  checked_at: string
+  errors: Violation[]
+  linter_version: string
+  skipped_tiers: SkippedTier[]
+  warnings: Violation[]
+  [k: string]: any
+  }
+  export interface Violation {
+  code: string
+  message: string
+  severity: Severity
+  span: Utf8ByteSpan
+  [k: string]: any
+  }
+  /**
+   * A half-open UTF-8 byte range in the original body.
+   */
+  export interface Utf8ByteSpan {
+  end: number
+  start: number
+  [k: string]: any
+  }
+  /**
+   * A deterministic record of a lint tier that did not run.
+   */
+  export interface SkippedTier {
+  reason: string
+  tier: string
   [k: string]: any
   }
   /**
@@ -9837,6 +10344,24 @@ export namespace ProposalSignoffClearOutputSchema {
    * Count of unresolved blocking (non-verdict) debate objections.
    */
   unresolved_blocking_count: number
+  [k: string]: any
+  }
+  /**
+   * Stable structured diagnostic published when repository lint rejects a write.
+   */
+  export interface ProposalLintRejectionViolation {
+  code: string
+  message: string
+  severity: string
+  span: ProposalLintViolationSpan
+  [k: string]: any
+  }
+  /**
+   * A half-open UTF-8 byte span in a lint rejection diagnostic.
+   */
+  export interface ProposalLintViolationSpan {
+  end_byte: number
+  start_byte: number
   [k: string]: any
   }
 
@@ -9953,6 +10478,14 @@ export namespace ProposalUpdateInputSchema {
 export type ProposalUpdateInput = ProposalUpdateInputSchema.ProposalUpdateInput;
 export namespace ProposalUpdateOutputSchema {
   export type AcceptanceCriterionItem = (string | AcceptanceCriterionStatus)
+  /**
+   * Body encoding supplied by the caller.
+   */
+  export type BodyFormat = ("markdown" | "mdx")
+  /**
+   * Stable diagnostic severity.
+   */
+  export type Severity = ("error" | "warning")
 
   export interface ProposalUpdateOutput {
   /**
@@ -9971,6 +10504,10 @@ export namespace ProposalUpdateOutputSchema {
    */
   build_owner_user_id?: string
   closed_at?: string
+  /**
+   * Additive stable machine-readable rejection code.
+   */
+  code?: string
   created_at?: string
   error?: string
   id?: string
@@ -9978,6 +10515,10 @@ export namespace ProposalUpdateOutputSchema {
    * Last proposal revision that the in-flight build has reconciled against.
    */
   last_reconciled_revision_seq?: number
+  /**
+   * Additive lint result for the exact committed head revision.
+   */
+  latest_lint?: (SpecLintResultV1 | null)
   /**
    * Head revision number (sign-offs anchored earlier are stale).
    */
@@ -10019,11 +10560,52 @@ export namespace ProposalUpdateOutputSchema {
    */
   unresolved_feedback_count?: number
   updated_at?: string
+  /**
+   * Additive ordered diagnostics for `SPEC_LINT_REJECTED`.
+   */
+  violations?: ProposalLintRejectionViolation[]
   [k: string]: any
   }
   export interface AcceptanceCriterionStatus {
   criterion: string
   met?: boolean
+  [k: string]: any
+  }
+  /**
+   * Stable V1 persistence and API contract. `checked_at` is supplied by the
+   * caller; linting never reads a clock.
+   */
+  export interface SpecLintResultV1 {
+  body_format: BodyFormat
+  body_sha256: string
+  checked_at: string
+  errors: Violation[]
+  linter_version: string
+  skipped_tiers: SkippedTier[]
+  warnings: Violation[]
+  [k: string]: any
+  }
+  export interface Violation {
+  code: string
+  message: string
+  severity: Severity
+  span: Utf8ByteSpan
+  [k: string]: any
+  }
+  /**
+   * A half-open UTF-8 byte range in the original body.
+   */
+  export interface Utf8ByteSpan {
+  end: number
+  start: number
+  [k: string]: any
+  }
+  /**
+   * A deterministic record of a lint tier that did not run.
+   */
+  export interface SkippedTier {
+  reason: string
+  tier: string
   [k: string]: any
   }
   /**
@@ -10068,6 +10650,24 @@ export namespace ProposalUpdateOutputSchema {
    * Count of unresolved blocking (non-verdict) debate objections.
    */
   unresolved_blocking_count: number
+  [k: string]: any
+  }
+  /**
+   * Stable structured diagnostic published when repository lint rejects a write.
+   */
+  export interface ProposalLintRejectionViolation {
+  code: string
+  message: string
+  severity: string
+  span: ProposalLintViolationSpan
+  [k: string]: any
+  }
+  /**
+   * A half-open UTF-8 byte span in a lint rejection diagnostic.
+   */
+  export interface ProposalLintViolationSpan {
+  end_byte: number
+  start_byte: number
   [k: string]: any
   }
 
