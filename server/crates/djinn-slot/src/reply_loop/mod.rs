@@ -9,6 +9,9 @@
 //! [`crate::host::SlotToolDispatcher`] trait; compaction uses `djinn-compaction`
 //! directly; and `djinn-agent` is never imported.
 
+#[cfg(any(test, feature = "test-support"))]
+pub mod budget;
+#[cfg(not(any(test, feature = "test-support")))]
 pub(crate) mod budget;
 pub mod compaction_guard;
 pub mod error_handling;
