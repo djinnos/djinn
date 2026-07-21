@@ -325,6 +325,7 @@ async fn dispatch_proposal_tools(
 ) -> Option<Result<serde_json::Value, String>> {
     match name {
         "proposal_show" => Some(task_epic::call_proposal_show(ctx, args).await),
+        "proposal_create" => Some(task_epic::call_proposal_create(ctx, args).await),
         "proposal_update" => Some(task_epic::call_proposal_update(ctx, args).await),
         "proposal_block_patch" => Some(task_epic::call_proposal_block_patch(ctx, args).await),
         "get_block_catalog" => Some(task_epic::call_get_block_catalog(ctx, args).await),
