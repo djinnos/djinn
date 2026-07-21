@@ -480,6 +480,7 @@ async fn load_knowledge_context_with_planner(
             planner.map(|p| (p.session_id, p.task_run_id)),
             rollout,
             disabled_knowledge_outcome(rollout),
+            None,
         )
         .await;
         return None;
@@ -500,7 +501,7 @@ async fn load_knowledge_context_with_planner(
             KNOWLEDGE_MIN_CONFIDENCE,
             app_state.knowledge_injection.knowledge_injection_limit as usize,
         ),
-        note_repo.query_by_scope_overlap_trace_candidates(
+        note_repo.query_by_scope_overlap_trace_notes(
             &task.project_id,
             &task_paths,
             KNOWLEDGE_NOTE_TYPES,
@@ -522,20 +523,13 @@ async fn load_knowledge_context_with_planner(
             // otherwise the empty array records that the candidate universe was
             // unavailable without changing the production fail-open behavior.
             let (error_candidates, cap_exceeded) = match trace_candidates_result {
-                Ok(candidates) => {
-                    let cap_exceeded = candidates.len()
-                        >= djinn_db::repositories::retrieval_trace::DEFAULT_CANDIDATE_CAP as usize;
-                    (
-                        classify_knowledge_candidates_for_error(&candidates),
-                        cap_exceeded,
-                    )
-                }
+                Ok(candidates) => (
+                    Vec::new(),
+                    candidates.len()
+                        >= djinn_db::repositories::retrieval_trace::DEFAULT_CANDIDATE_CAP as usize,
+                ),
                 Err(trace_error) => {
-                    tracing::warn!(
-                        task_id = %task.short_id,
-                        error = %trace_error,
-                        "Lifecycle: failed to query knowledge trace candidates"
-                    );
+                    tracing::warn!(task_id = %task.short_id, error = %trace_error, "Lifecycle: failed to query knowledge trace candidates");
                     (Vec::new(), false)
                 }
             };
@@ -555,6 +549,7 @@ async fn load_knowledge_context_with_planner(
                 planner.map(|p| (p.session_id, p.task_run_id)),
                 rollout,
                 djinn_db::repositories::retrieval_trace::RetrievalTraceOutcome::Error,
+                None,
             )
             .await;
             return None;
@@ -615,31 +610,25 @@ async fn load_knowledge_context_with_planner(
             planner.map(|p| (p.session_id, p.task_run_id)),
             rollout,
             djinn_db::repositories::retrieval_trace::RetrievalTraceOutcome::Error,
+            None,
         )
         .await;
         return rendered;
     }
 
     let classification_start = tokio::time::Instant::now();
-    let trace_candidates = trace_candidates_result.expect("trace candidate result checked above");
-    let candidate_cap_exceeded = trace_candidates.len()
+    let trace_notes = trace_candidates_result.expect("trace candidate result checked above");
+    let candidate_cap_exceeded = trace_notes.len()
         >= djinn_db::repositories::retrieval_trace::DEFAULT_CANDIDATE_CAP as usize;
 
-    // Build the set of production note IDs (those that passed confidence + top-K)
-    // for fast membership lookup during classification.
-    let production_ids: std::collections::HashSet<&str> =
-        notes.iter().map(|n| n.id.as_str()).collect();
-
-    // Classify each trace candidate deterministically.
-    let classified = classify_knowledge_candidates(&trace_candidates, &production_ids);
-    let classification_ms = classification_start.elapsed().as_millis() as i64;
-
-    // Render the prompt using the packed API (byte-identical to format_knowledge_notes).
+    // Pack the full ranked trace-candidate universe exactly once. The concurrent
+    // production query above remains authoritative for its legacy error semantics,
+    // but successful prompt text and terminal counts share these outcomes.
     let pack_start = tokio::time::Instant::now();
     let packed = pack_ranked_knowledge_notes(
-        &notes,
+        &trace_notes,
         KnowledgePackConfig {
-            minimum_confidence: f64::NEG_INFINITY,
+            minimum_confidence: KNOWLEDGE_MIN_CONFIDENCE,
             top_k: app_state.knowledge_injection.knowledge_injection_limit as usize,
             total_byte_budget: app_state
                 .knowledge_injection
@@ -650,18 +639,17 @@ async fn load_knowledge_context_with_planner(
         },
     );
     let pack_ms = pack_start.elapsed().as_millis() as i64;
-
-    // Apply budget-pruned classification from packing outcomes.
-    let trace_candidates_final = apply_budget_outcomes(classified, &packed, &notes);
+    let trace_candidates_final = trace_candidates_from_pack(&trace_notes, &packed);
+    let terminal_dispositions = pack_disposition_counts(&packed);
+    let classification_ms = classification_start.elapsed().as_millis() as i64;
     let estimated_injected_tokens = packed.total_injected_tokens as i32;
 
-    let rendered = if notes.is_empty() {
-        None
-    } else {
-        Some(packed.rendered)
-    };
+    let rendered = (!packed.rendered.is_empty()).then_some(packed.rendered.clone());
     let rendered = merge_planned_knowledge(
         rendered,
+        // Planner duplicate suppression retains the production-query contract:
+        // below-threshold and outside-top-K trace-only notes must not hide a
+        // matching planned-search result from prompt enrichment.
         &notes,
         &note_repo,
         task,
@@ -696,6 +684,7 @@ async fn load_knowledge_context_with_planner(
         } else {
             djinn_db::repositories::retrieval_trace::RetrievalTraceOutcome::Empty
         },
+        Some(terminal_dispositions),
     )
     .await;
 
@@ -711,6 +700,7 @@ async fn load_knowledge_context_with_planner(
 ///
 /// Budget pruning and dedupe are applied later by [`apply_budget_outcomes`] once
 /// the packed-note outcomes are available.
+#[cfg(test)]
 fn classify_knowledge_candidates(
     candidates: &[djinn_db::repositories::note::ScopeOverlapTraceCandidate],
     production_ids: &std::collections::HashSet<&str>,
@@ -753,6 +743,7 @@ fn classify_knowledge_candidates(
 
 /// Classify all candidates as `search_error` — used when the production query fails
 /// but the trace candidate fetch succeeded.
+#[cfg(test)]
 fn classify_knowledge_candidates_for_error(
     candidates: &[djinn_db::repositories::note::ScopeOverlapTraceCandidate],
 ) -> Vec<djinn_db::repositories::retrieval_trace::TraceCandidate> {
@@ -787,6 +778,7 @@ fn classify_knowledge_candidates_for_error(
 /// Deduplication: if multiple injected candidates resolve to the same permalink
 /// (shouldn't happen in practice but handled defensively), the first wins and
 /// subsequent ones become `Dedupe`.
+#[cfg(test)]
 fn apply_budget_outcomes(
     mut candidates: Vec<djinn_db::repositories::retrieval_trace::TraceCandidate>,
     packed: &crate::actors::slot::helpers::PackedKnowledgeNotes,
@@ -841,6 +833,55 @@ fn apply_budget_outcomes(
     candidates
 }
 
+/// Convert exact pack outcomes into detailed candidate records.
+fn trace_candidates_from_pack(
+    notes: &[djinn_memory::Note],
+    packed: &crate::actors::slot::helpers::PackedKnowledgeNotes,
+) -> Vec<djinn_db::repositories::retrieval_trace::TraceCandidate> {
+    use djinn_db::repositories::retrieval_trace::{
+        CandidateOutcome, SkippedReason, TraceCandidate,
+    };
+    notes.iter().zip(&packed.outcomes).enumerate().map(|(index, (note, outcome))| {
+        let (outcome, skipped_reason) = match outcome.disposition {
+            NotePackDisposition::Injected => (CandidateOutcome::Injected, None),
+            NotePackDisposition::ConfidenceFiltered => (CandidateOutcome::Skipped, Some(SkippedReason::MinConfidence)),
+            NotePackDisposition::NotTopK => (CandidateOutcome::Skipped, Some(SkippedReason::NotTopK)),
+            // Detailed legacy candidates cannot express oversized separately;
+            // taxonomy-v1 counts below retain that exact disposition.
+            NotePackDisposition::OversizedSkipped | NotePackDisposition::BudgetPruned => (CandidateOutcome::Skipped, Some(SkippedReason::BudgetPruned)),
+        };
+        TraceCandidate {
+            note_id: note.id.clone(), permalink: Some(note.permalink.clone()), title: Some(note.title.clone()),
+            outcome, rank: Some((index + 1) as i32), confidence: Some(note.confidence), skipped_reason,
+            source: Some("scope_overlap".to_owned()),
+            scope: Some(serde_json::json!({"folder": note.folder, "note_type": note.note_type, "scope_paths": note.scope_paths})),
+        }
+    }).collect()
+}
+
+fn pack_disposition_counts(
+    packed: &crate::actors::slot::helpers::PackedKnowledgeNotes,
+) -> djinn_db::repositories::retrieval_trace::KnowledgeTraceDispositionCounts {
+    use djinn_db::repositories::retrieval_trace::KnowledgeTraceDispositionCounts;
+    let mut counts = KnowledgeTraceDispositionCounts {
+        confidence_filtered: 0,
+        not_top_k: 0,
+        oversized_skipped: 0,
+        injected: 0,
+        budget_pruned: 0,
+    };
+    for outcome in &packed.outcomes {
+        match outcome.disposition {
+            NotePackDisposition::ConfidenceFiltered => counts.confidence_filtered += 1,
+            NotePackDisposition::NotTopK => counts.not_top_k += 1,
+            NotePackDisposition::OversizedSkipped => counts.oversized_skipped += 1,
+            NotePackDisposition::Injected => counts.injected += 1,
+            NotePackDisposition::BudgetPruned => counts.budget_pruned += 1,
+        }
+    }
+    counts
+}
+
 /// Per-phase durations (milliseconds) for the knowledge-context retrieval trace.
 #[derive(Default)]
 struct KnowledgeTraceDurations {
@@ -864,6 +905,9 @@ async fn persist_knowledge_trace(
     attribution: Option<(&str, &str)>,
     rollout: &RolloutMode,
     outcome: djinn_db::repositories::retrieval_trace::RetrievalTraceOutcome,
+    terminal_dispositions: Option<
+        djinn_db::repositories::retrieval_trace::KnowledgeTraceDispositionCounts,
+    >,
 ) {
     use djinn_db::repositories::retrieval_trace::{
         CreateRetrievalTraceParams, CreateRetrievalTraceWithSemanticsParams,
@@ -920,20 +964,33 @@ async fn persist_knowledge_trace(
         durations_ms: &durations_ms,
         estimated_injected_tokens,
     };
-
-    if let Err(e) = repo
-        .insert_with_semantics(CreateRetrievalTraceWithSemanticsParams {
+    let write = if let Some(dispositions) = terminal_dispositions {
+        let terminal_at = time::OffsetDateTime::now_utc()
+            .format(&time::format_description::well_known::Rfc3339)
+            .expect("RFC3339 timestamp");
+        repo.insert_terminal(
+            djinn_db::repositories::retrieval_trace::CreateRetrievalTraceTerminalParams {
+                trace: params,
+                rollout_label: rollout.label(),
+                terminal_state:
+                    djinn_db::repositories::retrieval_trace::KnowledgeTraceTerminalState::Success,
+                terminal_at: &terminal_at,
+                candidate_count: Some(candidates.len() as i32),
+                injected_count: Some(dispositions.injected),
+                dispositions: Some(dispositions),
+            },
+        )
+        .await
+    } else {
+        repo.insert_with_semantics(CreateRetrievalTraceWithSemanticsParams {
             trace: params,
             rollout_label: rollout.label(),
             outcome,
         })
         .await
-    {
-        tracing::warn!(
-            task_id = %task.short_id,
-            error = %e,
-            "Lifecycle: failed to persist retrieval trace for knowledge context; continuing (fail-open)"
-        );
+    };
+    if let Err(e) = write {
+        tracing::warn!(task_id = %task.short_id, error = %e, "Lifecycle: failed to persist retrieval trace for knowledge context; continuing (fail-open)");
     }
 }
 
