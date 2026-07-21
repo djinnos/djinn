@@ -1327,13 +1327,7 @@ mod block_patch_tests {
             })
             .await
             .unwrap();
-        let lint_rows_before: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM proposal_revision_lint_results WHERE proposal_id = $1",
-        )
-        .bind(&proposal.id)
-        .fetch_one(db.pool())
-        .await
-        .unwrap();
+        let lint_rows_before = repo.lint_result_count(&proposal.id).await.unwrap();
 
         // This redacted g6cc fixture reproduces the historical unclosed
         // delimiter splice. The shared transformation accepts the selected
@@ -1356,13 +1350,7 @@ mod block_patch_tests {
         let unchanged = repo.get(&proposal.id).await.unwrap().unwrap();
         assert_eq!(unchanged.latest_revision_seq, 1);
         assert_eq!(unchanged.body, "Stable intro.\n\nReplace me.");
-        let lint_rows_after: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM proposal_revision_lint_results WHERE proposal_id = $1",
-        )
-        .bind(&proposal.id)
-        .fetch_one(db.pool())
-        .await
-        .unwrap();
+        let lint_rows_after = repo.lint_result_count(&proposal.id).await.unwrap();
         assert_eq!(lint_rows_after, lint_rows_before);
     }
 

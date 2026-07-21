@@ -1641,6 +1641,20 @@ impl ProposalRepository {
         Ok(result)
     }
 
+    /// Count persisted lint results for a proposal.
+    ///
+    /// This is primarily useful for verifying that rejected repository writes
+    /// leave both revision history and its associated lint-result rows intact.
+    pub async fn lint_result_count(&self, proposal_id: &str) -> Result<i64> {
+        self.db.ensure_initialized().await?;
+        Ok(sqlx::query_scalar(
+            "SELECT COUNT(*) FROM proposal_revision_lint_results WHERE proposal_id = $1",
+        )
+        .bind(proposal_id)
+        .fetch_one(self.db.pool())
+        .await?)
+    }
+
     /// Return the `created_at` of the latest `refinement_start` lifecycle event
     /// for this proposal — the boundary that separates the current refinement
     /// run's debate-trail entries from any prior (interrupted) run's entries.
