@@ -1,3 +1,5 @@
+// djinn:allow-oversize — durable output-stash regressions share routing and
+// compatibility fixtures with the existing module-level test harness.
 use super::*;
 
 /// Force-initialize the test-binary-wide durable root (an isolated, persistent
@@ -1379,4 +1381,191 @@ fn owner_qualified_durable_identity_allows_same_tool_use_id() {
             .unwrap()
             .contains("session B")
     );
+}
+
+#[test]
+fn routed_output_list_reopens_complete_truncated_and_partial_spill_records() {
+    let root = gc_root("routed-reload-retrieval");
+    let owner_session = "trusted-reload-session";
+    let records = [
+        (
+            "complete-output",
+            "complete stored bytes\n",
+            DurableOutputDetails {
+                turn: 3,
+                result_kind: "tool_result".into(),
+                original_chars: "complete stored bytes\n".chars().count(),
+                stored_chars: "complete stored bytes\n".chars().count(),
+                completeness: "complete".into(),
+            },
+        ),
+        (
+            "truncated-output",
+            "truncated stored bytes\n",
+            DurableOutputDetails {
+                turn: 4,
+                result_kind: "shell_stdout".into(),
+                original_chars: 80,
+                stored_chars: "truncated stored bytes\n".chars().count(),
+                completeness: "truncated".into(),
+            },
+        ),
+        (
+            "partial-spill-output",
+            "partial spill stored bytes\n",
+            DurableOutputDetails {
+                turn: 5,
+                result_kind: "shell_stdout".into(),
+                original_chars: 120,
+                stored_chars: "partial spill stored bytes\n".chars().count(),
+                completeness: "partial-spill".into(),
+            },
+        ),
+    ];
+
+    let mut original = OutputStash::with_session_id_and_durable_root(owner_session, root.clone());
+    for (id, stored, details) in &records {
+        original
+            .insert_with_metadata(
+                (*id).into(),
+                "shell".into(),
+                (*stored).into(),
+                details.clone(),
+            )
+            .unwrap();
+    }
+    // A pointer without readable stored bytes is not an authoritative result.
+    original
+        .insert(
+            "missing-blob-output".into(),
+            "shell".into(),
+            "missing blob bytes\n".into(),
+        )
+        .unwrap();
+    original.clear();
+    assert!(original.entries.is_empty());
+    let missing_pointer = parse_durable_pointer(
+        &std::fs::read_to_string(owner_id_pointer_path(
+            &root,
+            owner_session,
+            "missing-blob-output",
+        ))
+        .unwrap(),
+    )
+    .unwrap();
+    std::fs::remove_file(blob_path(&root, &missing_pointer.content_hash)).unwrap();
+    drop(original);
+
+    // A process-style reopen has no in-memory entries. Exercise the real routed
+    // output_list and output_view paths rather than the underlying helpers.
+    let reopened = Mutex::new(OutputStash::with_session_id_and_durable_root(
+        owner_session,
+        root.clone(),
+    ));
+    let listed = serde_json::from_str::<Vec<serde_json::Value>>(
+        &handle_stash_tool(&reopened, "output_list", None).expect("routed list after reopen"),
+    )
+    .expect("output_list JSON metadata");
+    assert_eq!(listed.len(), records.len());
+    assert!(!listed.iter().any(|metadata| {
+        metadata["tool_use_id"] == serde_json::Value::String("missing-blob-output".into())
+    }));
+
+    for (id, stored, details) in &records {
+        let metadata = listed
+            .iter()
+            .find(|metadata| metadata["tool_use_id"] == serde_json::Value::String((*id).into()))
+            .expect("every durable record is listed");
+        assert_eq!(metadata["owner_session_id"], owner_session);
+        assert_eq!(metadata["turn"], details.turn);
+        assert_eq!(metadata["original_chars"], details.original_chars);
+        assert_eq!(metadata["stored_chars"], details.stored_chars);
+        assert_eq!(metadata["completeness"], details.completeness);
+
+        let args = serde_json::json!({"tool_use_id": id})
+            .as_object()
+            .unwrap()
+            .clone();
+        let viewed = handle_stash_tool(&reopened, "output_view", Some(&args))
+            .expect("every listed pointer is viewable after reopen");
+        assert!(viewed.contains(stored), "view lost stored bytes for {id}");
+    }
+
+    // A second trusted session knows the exact IDs but cannot discover or view
+    // the first session's durable outputs.
+    let foreign = Mutex::new(OutputStash::with_session_id_and_durable_root(
+        "other-trusted-session",
+        root,
+    ));
+    assert_eq!(
+        handle_stash_tool(&foreign, "output_list", None).unwrap(),
+        "[]"
+    );
+    for (id, _, _) in &records {
+        let args = serde_json::json!({"tool_use_id": id})
+            .as_object()
+            .unwrap()
+            .clone();
+        assert!(handle_stash_tool(&foreign, "output_view", Some(&args)).is_err());
+    }
+}
+
+#[test]
+fn routed_view_reads_v1_and_legacy_remains_compatible_but_unlisted() {
+    let root = gc_root("routed-legacy-v1-compatibility");
+    let owner_session = "trusted-compat-session";
+    let legacy_id = "legacy-routed-output";
+    let v1_id = "v1-routed-output";
+    let legacy_body = "legacy stored bytes\n";
+    let v1_body = "v1 stored bytes\n";
+    let legacy_hash = write_gc_blob(&root, legacy_body);
+    let v1_hash = write_gc_blob(&root, v1_body);
+    let ids = root.join("ids");
+    atomic_write(
+        &ids,
+        &id_pointer_path(&root, legacy_id),
+        format!("shell\t{legacy_hash}").as_bytes(),
+    )
+    .unwrap();
+    atomic_write(
+        &ids,
+        &id_pointer_path(&root, v1_id),
+        DurablePointerRecord::new_v1("shell", &v1_hash, Some(owner_session), 1)
+            .serialize()
+            .as_bytes(),
+    )
+    .unwrap();
+
+    let stash = Mutex::new(OutputStash::with_session_id_and_durable_root(
+        owner_session,
+        root.clone(),
+    ));
+    // Historic records cannot enter authoritative output_list because neither
+    // contains v2 ownership and completeness metadata. A v1 record with a
+    // matching owner remains available through the routed trusted-session view.
+    assert_eq!(
+        handle_stash_tool(&stash, "output_list", None).unwrap(),
+        "[]"
+    );
+    let v1_args = serde_json::json!({"tool_use_id": v1_id})
+        .as_object()
+        .unwrap()
+        .clone();
+    assert!(
+        handle_stash_tool(&stash, "output_view", Some(&v1_args))
+            .expect("v1 pointer remains readable for its trusted owner")
+            .contains(v1_body)
+    );
+
+    // Unknown-owner legacy records remain readable through the explicit
+    // compatibility path, but are intentionally denied to a trusted v2 session.
+    assert_eq!(
+        durable_read_at(&root, legacy_id, None).unwrap(),
+        ("shell".into(), legacy_body.into())
+    );
+    let legacy_args = serde_json::json!({"tool_use_id": legacy_id})
+        .as_object()
+        .unwrap()
+        .clone();
+    assert!(handle_stash_tool(&stash, "output_view", Some(&legacy_args)).is_err());
 }
