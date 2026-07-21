@@ -636,4 +636,28 @@ mod compaction_persistence_tests {
         assert!(stash.list_durable_outputs().unwrap().is_empty());
         assert!(stash.view("missing", 0, 10).is_err());
     }
+
+    #[test]
+    fn failed_persistence_can_retry_without_emitting_a_dead_pointer() {
+        let mut stash = stash("failure-retry");
+        let results = vec![result("retry", "durable after retry", 7)];
+
+        stash.set_fail_durable_writes_for_test(true);
+        assert!(persist_tool_results_before_compaction(&mut stash, &results).is_err());
+        assert!(stash.list_durable_outputs().unwrap().is_empty());
+        assert!(stash.view("retry", 0, 10).is_err());
+
+        stash.set_fail_durable_writes_for_test(false);
+        let pointers = persist_tool_results_before_compaction(&mut stash, &results).unwrap();
+        assert_eq!(pointers.len(), 1);
+        assert_eq!(pointers[0].tool_use_id, "retry");
+        assert_eq!(pointers[0].turn, 7);
+        stash.clear();
+        assert!(
+            stash
+                .view("retry", 0, 10)
+                .unwrap()
+                .contains("durable after retry")
+        );
+    }
 }
