@@ -371,6 +371,148 @@ pub async fn close_task_at(db: &Database, task_id: &str, closed_at: &str) {
         .expect("failed to close task at timestamp");
 }
 
+/// Backdate a `coordinator_incarnations` row's `last_renewed_at` by a
+/// PostgreSQL `interval` string (e.g. `'1 hour'`).
+///
+/// Test-fixture helper for the coordinator's orphaned-pending-attempt reaper,
+/// which classifies orphans from the durable owner lease's expiry relative to
+/// the orphan threshold.
+pub async fn backdate_coordinator_incarnation_lease(
+    db: &Database,
+    incarnation_id: &str,
+    interval: &str,
+) {
+    db.ensure_initialized().await.unwrap();
+    sqlx::query(
+        "UPDATE coordinator_incarnations SET last_renewed_at = to_char(
+             now() AT TIME ZONE 'utc' - $1::interval,
+             'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"')
+         WHERE id = $2",
+    )
+    .bind(interval)
+    .bind(incarnation_id)
+    .execute(db.pool())
+    .await
+    .unwrap();
+}
+
+/// Insert a pending `task_attempts` row with an arbitrary (possibly malformed)
+/// `dispatch_owner_incarnation_id`, bypassing the repository's UUID validation.
+/// Used by reaper evidence tests to seed a malformed-owner orphan.
+pub async fn insert_pending_attempt_with_raw_owner(
+    db: &Database,
+    id: &str,
+    task_id: &str,
+    role: &str,
+    dispatch_key: &str,
+    owner_incarnation_id: &str,
+) {
+    db.ensure_initialized().await.unwrap();
+    sqlx::query(
+        r#"INSERT INTO task_attempts (id, task_id, role, attempt_seq, dispatch_key, outcome,
+           dispatch_owner_incarnation_id, dispatch_group_id)
+           VALUES ($1, $2, $3, 1, $4, 'pending', $5, NULL)"#,
+    )
+    .bind(id)
+    .bind(task_id)
+    .bind(role)
+    .bind(dispatch_key)
+    .bind(owner_incarnation_id)
+    .execute(db.pool())
+    .await
+    .unwrap();
+}
+
+/// Replace the `coordinator_incarnations` table with a view that returns the
+/// specified row on the **first** query but returns no rows on all subsequent
+/// queries. This simulates the incarnation row vanishing between the reaper's
+/// `get()` call (which succeeds) and its `is_live()` call (which returns
+/// `None`), exercising the ambiguous-owner classification branch.
+///
+/// **Not for production use.** Panics on SQL errors.
+pub async fn make_coordinator_incarnation_vanish_after_first_read(
+    db: &Database,
+    incarnation_id: &str,
+    registered_at: &str,
+    last_renewed_at: &str,
+) {
+    db.ensure_initialized().await.unwrap();
+    // Drop the real table and replace it with a view backed by an access
+    // counter sequence. The first SELECT from the view returns the row
+    // (counter = 1); every subsequent SELECT returns nothing.
+    sqlx::query("DROP TABLE IF EXISTS coordinator_incarnations")
+        .execute(db.pool())
+        .await
+        .unwrap();
+    sqlx::query("DROP SEQUENCE IF EXISTS ci_access_count")
+        .execute(db.pool())
+        .await
+        .unwrap();
+    sqlx::query("CREATE SEQUENCE ci_access_count")
+        .execute(db.pool())
+        .await
+        .unwrap();
+    let sql = format!(
+        r#"CREATE VIEW coordinator_incarnations AS
+           SELECT '{incarnation_id}'::varchar AS id,
+                  '{registered_at}'::varchar AS registered_at,
+                  '{last_renewed_at}'::varchar AS last_renewed_at
+           WHERE nextval('ci_access_count') = 1"#
+    );
+    sqlx::query(&sql).execute(db.pool()).await.unwrap();
+}
+
+/// Replace the `coordinator_incarnations` table with a view that returns the
+/// specified row on the **first** query but **raises an error** on all
+/// subsequent queries. This simulates the incarnation table becoming
+/// unavailable between the reaper's `get()` call (which succeeds) and its
+/// `is_live()` call (which returns `Err`), exercising the is_live lookup-error
+/// classification branch.
+///
+/// **Not for production use.** Panics on SQL errors.
+pub async fn make_coordinator_incarnation_error_after_first_read(
+    db: &Database,
+    incarnation_id: &str,
+    registered_at: &str,
+    last_renewed_at: &str,
+) {
+    db.ensure_initialized().await.unwrap();
+    sqlx::query("DROP TABLE IF EXISTS coordinator_incarnations")
+        .execute(db.pool())
+        .await
+        .unwrap();
+    sqlx::query("DROP SEQUENCE IF EXISTS ci_access_count")
+        .execute(db.pool())
+        .await
+        .unwrap();
+    sqlx::query("CREATE SEQUENCE ci_access_count")
+        .execute(db.pool())
+        .await
+        .unwrap();
+    // Guard function: admits the first SELECT and raises on every later one.
+    sqlx::query(
+        r#"CREATE OR REPLACE FUNCTION ci_error_guard() RETURNS boolean AS $$
+           BEGIN
+             IF nextval('ci_access_count') >= 2 THEN
+               RAISE EXCEPTION 'simulated coordinator_incarnations lookup error';
+             END IF;
+             RETURN true;
+           END;
+           $$ LANGUAGE plpgsql"#,
+    )
+    .execute(db.pool())
+    .await
+    .unwrap();
+    let sql = format!(
+        r#"CREATE VIEW coordinator_incarnations AS
+           SELECT '{incarnation_id}'::varchar AS id,
+                  '{registered_at}'::varchar AS registered_at,
+                  '{last_renewed_at}'::varchar AS last_renewed_at
+           WHERE ci_error_guard()"#
+    );
+    sqlx::query(&sql).execute(db.pool()).await.unwrap();
+}
+
 /// Wire a blocker edge: `blocking_task_id` blocks `task_id`. Test-fixture helper.
 pub async fn add_blocker_edge(db: &Database, task_id: &str, blocking_task_id: &str) {
     db.ensure_initialized().await.unwrap();

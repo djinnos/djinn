@@ -1239,6 +1239,7 @@ dependencies = [
  "djinn-memory",
  "djinn-provider",
  "djinn-slot",
+ "djinn-spec-lint",
  "djinn-stack",
  "djinn-telemetry",
  "futures",

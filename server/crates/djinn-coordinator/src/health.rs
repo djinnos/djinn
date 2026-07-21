@@ -2841,6 +2841,7 @@ pub(super) async fn reap_orphaned_pending_attempts_with_threshold(
     };
 
     let repo = djinn_db::TaskAttemptRepository::new(db.clone());
+    let incarnation_repo = djinn_db::CoordinatorIncarnationRepository::new(db.clone());
     let orphans = match repo.list_orphaned_pending(&threshold_iso).await {
         Ok(rows) => rows,
         Err(e) => {
@@ -2853,76 +2854,131 @@ pub(super) async fn reap_orphaned_pending_attempts_with_threshold(
         }
     };
 
-    // Outcome selection by reap reason. A `startup` reap fires immediately after
-    // this coordinator boots: any `pending` attempt with no live task_run and no
-    // running session at boot was orphaned because a DEPLOY/ROLLOUT killed its
-    // pod out from under it — an ENVIRONMENTAL interruption, not a task failure.
-    // Stamp it `Interrupted` so the dispatch reappearance path recognizes it and
-    // skips the failure streak / cooldown escalation ("treat like it never ran").
-    // The `periodic` reap is conservative — a pending attempt still orphaned after
-    // the periodic threshold with no live run is more likely a genuine mid-run
-    // loss, so it stays `Crashed` (both are is_infra ⇒ quality/park exempt; they
-    // differ only in whether the reappearance streak counts them).
-    let (orphan_outcome, orphan_failure_class, orphan_summary) = if reason == "startup" {
-        (
-            djinn_core::models::task_attempt::TaskAttemptOutcome::Interrupted,
-            "environmental_interrupt_startup_reap",
-            "orphaned pending attempt reaped at startup (deploy/rollout interrupted the run): \
-             environmental non-attempt, no dispatch penalty",
-        )
-    } else {
-        (
-            djinn_core::models::task_attempt::TaskAttemptOutcome::Crashed,
-            "orphaned_pending_attempt",
-            "orphaned pending attempt reaped: no live task_run or running session",
-        )
-    };
+    // Evidence-based orphan classification (proposal 9gg5 / epic ars3).
+    //
+    // Startup and periodic sweeps apply exactly the same owner-lease rule: only
+    // a non-NULL immutable owner whose durable lease is resolved AND expired
+    // beyond the supplied threshold may be stamped `interrupted` with
+    // `failure_class=environmental_owner_expired`. The `reason` argument is log
+    // context only and must never influence the exemption decision.
+    //
+    //   - Expired owner → interrupted / environmental_owner_expired
+    //   - Live owner     → crashed / orphaned_pending_attempt
+    //   - NULL, malformed, missing, lookup-error, or otherwise ambiguous
+    //     ownership → crashed / orphaned_pending_attempt_unproven
+    //
+    // For a candidate with a non-NULL dispatch_group_id, reconcile pending
+    // correlated peers with the transactional exact-group terminalization
+    // primitive, so every member of the group receives one outcome/evidence
+    // tuple. For a legacy NULL-group row, terminalize only that row. Never infer
+    // peers from task, role, timestamps, or dispatch-key parsing.
 
-    for orphan in orphans {
-        let summary_json = serde_json::json!({
-            "recovery_classifier": "orphaned_pending_attempt_reaper",
-            "reason": reason,
-            "threshold_secs": threshold_secs,
-            "failure_class": orphan_failure_class,
-        })
-        .to_string();
-        match repo
-            .advance_to_terminal(djinn_db::TerminalTaskAttemptParams {
-                id: &orphan.id,
-                outcome: orphan_outcome,
-                pr_url: None,
-                submit_ref: None,
-                checkpoint_ref: None,
-                mirror_head_sha: None,
-                github_head_sha: None,
-                summary: Some(orphan_summary),
-                summary_json: Some(&summary_json),
-                log_tail: None,
-            })
-            .await
+    // Track non-NULL groups already terminalized so a later orphan in the same
+    // group is skipped (the batch op already handled all pending members).
+    let mut terminalized_groups: std::collections::HashSet<String> =
+        std::collections::HashSet::new();
+
+    for orphan in &orphans {
+        // Skip if this row's non-NULL group was already batch-terminalized.
+        if let Some(gid) = &orphan.dispatch_group_id
+            && terminalized_groups.contains(gid)
         {
-            Ok(updated) => {
-                tracing::warn!(
-                    attempt_id = %orphan.id,
-                    task_id = %orphan.task_id,
-                    role = %orphan.role,
-                    dispatch_key = %orphan.dispatch_key,
-                    attempt_created_at = %orphan.created_at,
-                    threshold = %threshold_iso,
-                    outcome = %updated.outcome,
-                    reason = reason,
-                    "CoordinatorActor: reaped orphaned pending task_attempt"
-                );
+            continue;
+        }
+
+        // Resolve the durable owner lease for the evidence decision.
+        let (outcome, failure_class, summary, owner_evidence) =
+            classify_orphan_owner(&incarnation_repo, orphan, &threshold_iso).await;
+
+        let summary_json = build_reap_evidence_json(
+            reason,
+            threshold_secs,
+            &threshold_iso,
+            failure_class,
+            &owner_evidence,
+        );
+
+        let outcome_str = outcome.as_str().to_string();
+        let summary_json_str = summary_json.clone();
+
+        if let Some(group_id) = &orphan.dispatch_group_id {
+            // Non-NULL dispatch group: terminalize all pending peers in the
+            // exact group transactionally with one outcome/evidence tuple.
+            match repo
+                .terminalize_dispatch_group(
+                    group_id,
+                    outcome,
+                    djinn_db::DispatchGroupTerminalEvidence {
+                        summary: Some(summary),
+                        summary_json: Some(&summary_json_str),
+                    },
+                )
+                .await
+            {
+                Ok(term) => {
+                    terminalized_groups.insert(group_id.clone());
+                    tracing::warn!(
+                        attempt_ids = ?term.updated_attempt_ids,
+                        task_id = %orphan.task_id,
+                        role = %orphan.role,
+                        dispatch_group_id = %group_id,
+                        outcome = %outcome_str,
+                        reason = reason,
+                        "CoordinatorActor: reaped orphaned pending dispatch group"
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        attempt_id = %orphan.id,
+                        task_id = %orphan.task_id,
+                        role = %orphan.role,
+                        dispatch_group_id = %group_id,
+                        error = %e,
+                        reason = reason,
+                        "CoordinatorActor: failed to reap orphaned pending dispatch group"
+                    );
+                }
             }
-            Err(e) => {
-                tracing::warn!(
-                    attempt_id = %orphan.id,
-                    task_id = %orphan.task_id,
-                    role = %orphan.role,
-                    error = %e,
-                    reason = reason,
-                    "CoordinatorActor: failed to reap orphaned pending task_attempt"
-                );
+        } else {
+            // Legacy NULL-group row: terminalize only this single row.
+            match repo
+                .advance_to_terminal(djinn_db::TerminalTaskAttemptParams {
+                    id: &orphan.id,
+                    outcome,
+                    pr_url: None,
+                    submit_ref: None,
+                    checkpoint_ref: None,
+                    mirror_head_sha: None,
+                    github_head_sha: None,
+                    summary: Some(summary),
+                    summary_json: Some(&summary_json),
+                    log_tail: None,
+                })
+                .await
+            {
+                Ok(updated) => {
+                    tracing::warn!(
+                        attempt_id = %orphan.id,
+                        task_id = %orphan.task_id,
+                        role = %orphan.role,
+                        dispatch_key = %orphan.dispatch_key,
+                        attempt_created_at = %orphan.created_at,
+                        threshold = %threshold_iso,
+                        outcome = %updated.outcome,
+                        reason = reason,
+                        "CoordinatorActor: reaped orphaned pending task_attempt"
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        attempt_id = %orphan.id,
+                        task_id = %orphan.task_id,
+                        role = %orphan.role,
+                        error = %e,
+                        reason = reason,
+                        "CoordinatorActor: failed to reap orphaned pending task_attempt"
+                    );
+                }
             }
         }
     }
@@ -3008,6 +3064,200 @@ pub(super) async fn reap_orphaned_pending_attempts_with_threshold(
             }
         }
     }
+}
+
+// ─── Orphan owner-lease evidence helpers ───────────────────────────────────
+
+/// Durable owner-lease evidence recorded in `summary_json` so a later retry
+/// decision can validate the complete positive environmental tuple
+/// (interrupted + environmental_owner_expired + non-null owner + recorded
+/// expiry evidence).
+#[derive(Clone, Debug, Default)]
+struct OwnerLeaseEvidence {
+    /// The non-NULL immutable owner incarnation UUID (only present for the
+    /// environmental/expired and live-owner proven cases).
+    owner_incarnation_id: Option<String>,
+    /// The incarnation's recorded `last_renewed_at` lease timestamp (present
+    /// when the lease row was resolved).
+    last_renewed_at: Option<String>,
+    /// The incarnation's `registered_at` timestamp (present when resolved).
+    registered_at: Option<String>,
+    /// Human-readable classification of why the owner was classified this way
+    /// (expired / live / null_owner / malformed_owner / missing_owner /
+    /// lookup_error / ambiguous). For structured-log diagnostics only; not a
+    /// retry-accounting key.
+    classification: &'static str,
+}
+
+/// Classify one orphaned pending attempt from its durable owner lease.
+///
+/// Returns the `(outcome, failure_class, summary, evidence)` tuple. The caller
+/// uses the outcome for terminalization and the evidence for `summary_json`.
+async fn classify_orphan_owner(
+    incarnation_repo: &djinn_db::CoordinatorIncarnationRepository,
+    orphan: &djinn_db::OrphanedPendingAttempt,
+    threshold_iso: &str,
+) -> (
+    djinn_core::models::task_attempt::TaskAttemptOutcome,
+    &'static str,
+    &'static str,
+    OwnerLeaseEvidence,
+) {
+    use djinn_core::models::task_attempt::TaskAttemptOutcome;
+
+    let owner_id = match &orphan.dispatch_owner_incarnation_id {
+        Some(id) if uuid::Uuid::parse_str(id).is_ok() => id.as_str(),
+        Some(_) => {
+            // Malformed owner UUID — ambiguous ownership, fail closed.
+            return (
+                TaskAttemptOutcome::Crashed,
+                "orphaned_pending_attempt_unproven",
+                "orphaned pending attempt reaped: malformed dispatch owner incarnation id",
+                OwnerLeaseEvidence {
+                    classification: "malformed_owner",
+                    ..Default::default()
+                },
+            );
+        }
+        None => {
+            // NULL owner (legacy row or never-propagated) — ambiguous, fail closed.
+            return (
+                TaskAttemptOutcome::Crashed,
+                "orphaned_pending_attempt_unproven",
+                "orphaned pending attempt reaped: no dispatch owner incarnation (legacy NULL)",
+                OwnerLeaseEvidence {
+                    classification: "null_owner",
+                    ..Default::default()
+                },
+            );
+        }
+    };
+
+    // Resolve the durable lease row for this owner.
+    match incarnation_repo.get(owner_id).await {
+        Ok(Some(inc)) => {
+            // Lease resolved — check liveness against the same orphan threshold.
+            match incarnation_repo.is_live(owner_id, threshold_iso).await {
+                Ok(Some(true)) => {
+                    // Live owner — the dispatch is still potentially owned.
+                    // Count as crashed (genuine orphan with a live owner).
+                    (
+                        TaskAttemptOutcome::Crashed,
+                        "orphaned_pending_attempt",
+                        "orphaned pending attempt reaped: owner lease is live \
+                         (dispatch still potentially owned)",
+                        OwnerLeaseEvidence {
+                            owner_incarnation_id: Some(inc.id.clone()),
+                            last_renewed_at: Some(inc.last_renewed_at.clone()),
+                            registered_at: Some(inc.registered_at.clone()),
+                            classification: "live",
+                        },
+                    )
+                }
+                Ok(Some(false)) => {
+                    // Expired owner — environmental interruption. This is the
+                    // sole path that produces the exempt positive tuple.
+                    (
+                        TaskAttemptOutcome::Interrupted,
+                        "environmental_owner_expired",
+                        "orphaned pending attempt reaped: owner lease expired beyond threshold \
+                         (environmental interruption, no dispatch penalty)",
+                        OwnerLeaseEvidence {
+                            owner_incarnation_id: Some(inc.id.clone()),
+                            last_renewed_at: Some(inc.last_renewed_at.clone()),
+                            registered_at: Some(inc.registered_at.clone()),
+                            classification: "expired",
+                        },
+                    )
+                }
+                Ok(None) => {
+                    // is_live returned None but get returned Some — the row
+                    // vanished between calls. Ambiguous, fail closed.
+                    (
+                        TaskAttemptOutcome::Crashed,
+                        "orphaned_pending_attempt_unproven",
+                        "orphaned pending attempt reaped: owner lease disappeared \
+                         during liveness check (ambiguous)",
+                        OwnerLeaseEvidence {
+                            owner_incarnation_id: Some(owner_id.to_string()),
+                            last_renewed_at: Some(inc.last_renewed_at.clone()),
+                            registered_at: Some(inc.registered_at.clone()),
+                            classification: "ambiguous",
+                        },
+                    )
+                }
+                Err(_) => {
+                    // Lookup error on is_live — ambiguous, fail closed.
+                    (
+                        TaskAttemptOutcome::Crashed,
+                        "orphaned_pending_attempt_unproven",
+                        "orphaned pending attempt reaped: owner lease liveness check failed \
+                         (lookup error)",
+                        OwnerLeaseEvidence {
+                            owner_incarnation_id: Some(owner_id.to_string()),
+                            last_renewed_at: Some(inc.last_renewed_at.clone()),
+                            registered_at: Some(inc.registered_at.clone()),
+                            classification: "lookup_error",
+                        },
+                    )
+                }
+            }
+        }
+        Ok(None) => {
+            // Owner UUID is well-formed but no lease row exists — the
+            // incarnation was never registered or was deleted. Ambiguous.
+            (
+                TaskAttemptOutcome::Crashed,
+                "orphaned_pending_attempt_unproven",
+                "orphaned pending attempt reaped: owner incarnation not found \
+                 (never registered or deleted)",
+                OwnerLeaseEvidence {
+                    owner_incarnation_id: Some(owner_id.to_string()),
+                    classification: "missing_owner",
+                    ..Default::default()
+                },
+            )
+        }
+        Err(_) => {
+            // Lookup error on get — ambiguous, fail closed.
+            (
+                TaskAttemptOutcome::Crashed,
+                "orphaned_pending_attempt_unproven",
+                "orphaned pending attempt reaped: owner lease lookup failed (lookup error)",
+                OwnerLeaseEvidence {
+                    owner_incarnation_id: Some(owner_id.to_string()),
+                    classification: "lookup_error",
+                    ..Default::default()
+                },
+            )
+        }
+    }
+}
+
+/// Build the durable `summary_json` evidence object for a reaped orphan.
+///
+/// The object uses bounded, explicit keys including `failure_class`, the
+/// immutable owner identity, and the observed durable lease-expiry evidence.
+/// It is identical across all members terminalized from one dispatch group.
+fn build_reap_evidence_json(
+    reason: &str,
+    threshold_secs: i64,
+    threshold_iso: &str,
+    failure_class: &str,
+    evidence: &OwnerLeaseEvidence,
+) -> String {
+    serde_json::json!({
+        "recovery_classifier": "orphaned_pending_attempt_reaper",
+        "reason": reason,
+        "threshold_secs": threshold_secs,
+        "threshold_iso": threshold_iso,
+        "failure_class": failure_class,
+        "owner_incarnation_id": evidence.owner_incarnation_id,
+        "owner_lease_last_renewed_at": evidence.last_renewed_at,
+        "owner_lease_registered_at": evidence.registered_at,
+        "owner_classification": evidence.classification,
+    })
+    .to_string()
 }
 
 #[cfg(test)]
