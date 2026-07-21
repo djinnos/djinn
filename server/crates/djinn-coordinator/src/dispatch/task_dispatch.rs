@@ -1531,9 +1531,7 @@ impl CoordinatorActor {
     /// is exercised by the live MCP/session path, not these unit fixtures.
     #[cfg(not(test))]
     async fn task_is_ownerless(&self, task: &djinn_core::models::Task) -> bool {
-        let Some(uid) = task.created_by_user_id.as_deref() else {
-            return true;
-        };
+        let uid = task.created_by_user_id.as_str();
         let creator_lookup = djinn_db::UserRepository::new(self.db.clone())
             .get_by_id(uid)
             .await
@@ -1541,7 +1539,7 @@ impl CoordinatorActor {
 
         task_ownerless_from_creator_lookup(
             &task.short_id,
-            task.created_by_user_id.as_deref(),
+            Some(task.created_by_user_id.as_str()),
             creator_lookup,
         )
     }
@@ -2343,13 +2341,13 @@ impl CoordinatorActor {
             // credentials (own + org-shared) — the same set the worker resolves
             // with — so the coordinator never offers a model it can't auth.
             // Memoized per (role, creator) for the pass.
-            let base_model_ids = match role_models_cache.get(&(role, creator.clone())) {
+            let base_model_ids = match role_models_cache.get(&(role, Some(creator.clone()))) {
                 Some(v) => v.clone(),
                 None => {
                     let v = self
-                        .resolve_dispatch_models_for_role(role, creator.as_deref())
+                        .resolve_dispatch_models_for_role(role, Some(creator.as_str()))
                         .await;
-                    role_models_cache.insert((role, creator.clone()), v.clone());
+                    role_models_cache.insert((role, Some(creator.clone())), v.clone());
                     v
                 }
             };
@@ -2368,10 +2366,10 @@ impl CoordinatorActor {
                 post_intervention_lane::use_plan_lane_for_post_intervention_workers(),
             );
             let user_model_ids = self
-                .resolve_user_model_priority_with_lane(creator.as_deref(), role, effective_lane)
+                .resolve_user_model_priority_with_lane(Some(creator.as_str()), role, effective_lane)
                 .await;
             let model_preference_ids = self
-                .resolve_role_model_preference(&task.project_id, role, creator.as_deref())
+                .resolve_role_model_preference(&task.project_id, role, Some(creator.as_str()))
                 .await;
             let mut seen = std::collections::HashSet::new();
             let mut model_ids: Vec<String> = Vec::with_capacity(
@@ -2465,7 +2463,7 @@ impl CoordinatorActor {
             // task. Reorders in place (entries != implementer first, preserving
             // priority); collapses to same-model when nothing else is viable.
             if role == "reviewer" {
-                self.apply_diverse_review_ordering(&task, creator.as_deref(), &mut model_ids)
+                self.apply_diverse_review_ordering(&task, Some(creator.as_str()), &mut model_ids)
                     .await;
             }
 
@@ -2481,7 +2479,7 @@ impl CoordinatorActor {
             // applies (the dispatch loop's `is_available` gate + escalating
             // backoff), and a half-open (cooldown-expired) throttle model is
             // still tried when it is the only option.
-            deprioritize_throttle_cooling(&self.health, creator.as_deref(), &mut model_ids);
+            deprioritize_throttle_cooling(&self.health, Some(creator.as_str()), &mut model_ids);
 
             // Structured observability: emit one log record per candidate in
             // the final ordered list so post-apply / post-rollback model order
@@ -2489,7 +2487,7 @@ impl CoordinatorActor {
             super::lane_resolution_log::emit_lane_resolution_candidates(
                 &task.short_id,
                 role,
-                creator.as_deref().unwrap_or(""),
+                creator.as_str(),
                 &model_ids,
             );
 
@@ -2623,7 +2621,8 @@ impl CoordinatorActor {
             // but all-at-cap ⇒ the user is simply busy — skip this pass (NOT
             // terminal, no streak/cooldown; retries next tick as their sessions
             // free). Tasks with no creator (legacy NULL) are ungated.
-            if let Some(c) = creator.as_deref() {
+            {
+                let c = creator.as_str();
                 if !creator_caps.contains_key(c) {
                     let settings = djinn_db::UserSettingsRepository::new(self.db.clone())
                         .get(c)
@@ -2789,7 +2788,7 @@ impl CoordinatorActor {
                     &task.short_id,
                     role,
                     task.reopen_count.max(0) as u32,
-                    creator.as_deref(),
+                    Some(creator.as_str()),
                     model_ids,
                     |pool, model_id| {
                         let pool = pool.clone();
@@ -2874,8 +2873,8 @@ impl CoordinatorActor {
                     // used (the first health-available one — the elastic pool
                     // accepts it), so further same-creator+model tasks in THIS
                     // pass respect the cap before the session row is visible.
-                    if let Some(c) = creator.as_deref()
-                        && let Some(used) = model_ids
+                    let c = creator.as_str();
+                    if let Some(used) = model_ids
                             .iter()
                             .find(|m| self.health.is_available(Some(c), m))
                     {
@@ -2935,7 +2934,7 @@ impl CoordinatorActor {
                 } => {
                     let breaker_open_for_all_candidates = model_ids
                         .iter()
-                        .all(|model_id| !self.health.is_available(creator.as_deref(), model_id));
+                        .all(|model_id| !self.health.is_available(Some(creator.as_str()), model_id));
                     if breaker_open_for_all_candidates {
                         record_dispatch_outcome(djinn_telemetry::dispatch::OUTCOME_BREAKER);
                         tracing::debug!(outcome = "breaker", task_id = %task.short_id, role);
@@ -3061,7 +3060,7 @@ mod inflight_ledger_tests {
             merge_conflict_metadata: None,
             memory_refs: "[]".to_owned(),
             agent_type: None,
-            created_by_user_id: creator.map(str::to_owned),
+            created_by_user_id: creator.unwrap_or("test-user").to_owned(),
             ci_status: "unknown".to_owned(),
             ci_head_sha: None,
             ci_pr_number: None,
@@ -4092,7 +4091,7 @@ mod inflight_ledger_tests {
         assert!(fixture_ready.iter().all(|task| {
             task.status == "open"
                 && task.issue_type == "task"
-                && task.created_by_user_id.as_deref() == Some(fixture.created_by_user_id.as_str())
+                && task.created_by_user_id == fixture.created_by_user_id
                 && crate::roles::RoleRegistry::new()
                     .role_for_task(task, &crate::roles::DispatchContext)
                     == Some("worker")
@@ -5852,7 +5851,7 @@ mod failover_chain_tests {
             merge_conflict_metadata: None,
             memory_refs: "[]".to_owned(),
             agent_type: None,
-            created_by_user_id: None,
+            created_by_user_id: "test-user".to_owned(),
             ci_status: "unknown".to_owned(),
             ci_head_sha: None,
             ci_pr_number: None,
@@ -6046,7 +6045,7 @@ mod failover_chain_tests {
             merge_conflict_metadata: None,
             memory_refs: "[]".to_owned(),
             agent_type: None,
-            created_by_user_id: None,
+            created_by_user_id: "test-user".to_owned(),
             ci_status: "unknown".to_owned(),
             ci_head_sha: None,
             ci_pr_number: None,
@@ -6304,7 +6303,7 @@ mod failover_chain_tests {
                 &task.short_id,
                 "worker",
                 0,
-                Some(task.created_by_user_id.as_deref().unwrap_or("user-x")),
+                Some(task.created_by_user_id.as_str()),
                 &["provider/model-a".to_owned(), "provider/model-b".to_owned()],
                 |pool, model_id| {
                     let pool = pool.clone();
@@ -6442,7 +6441,7 @@ mod failover_chain_tests {
         // post-fix the breaker check is deferred to
         // `apply_chain_exhaustion_side_effects` and that path was never
         // invoked because the chain was rescued.
-        let scope = Some(task.created_by_user_id.as_deref().unwrap_or("user-x"));
+        let scope = Some(task.created_by_user_id.as_str());
         let model_a_health = actor.health.model_health(scope, "provider/model-a");
         assert!(
             !model_a_health.auto_disabled,
@@ -6608,7 +6607,7 @@ mod failover_chain_tests {
             merge_conflict_metadata: None,
             memory_refs: "[]".to_owned(),
             agent_type: None,
-            created_by_user_id: None,
+            created_by_user_id: "test-user".to_owned(),
             ci_status: "unknown".to_owned(),
             ci_head_sha: None,
             ci_pr_number: None,
@@ -7017,7 +7016,7 @@ mod failover_chain_tests {
                 &task.short_id,
                 "worker",
                 0,
-                Some(task.created_by_user_id.as_deref().unwrap_or("user-x")),
+                Some(task.created_by_user_id.as_str()),
                 &["provider/model-a".to_owned(), "provider/model-b".to_owned()],
                 |pool, model_id| {
                     let pool = pool.clone();

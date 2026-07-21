@@ -1076,7 +1076,7 @@ mod created_by_tests {
         .unwrap();
         assert_eq!(
             stamped.as_deref(),
-            Some(user_id.as_str()),
+            user_id.as_str(),
             "created_by_user_id must match the SESSION_USER_ID task-local"
         );
 
@@ -1164,8 +1164,8 @@ mod created_by_tests {
             .await
             .unwrap();
         assert_eq!(
-            inherited.created_by_user_id.as_deref(),
-            Some(epic_owner.id.as_str()),
+            inherited.created_by_user_id.as_str(),
+            epic_owner.id.as_str(),
             "background task under an owned epic must inherit the epic's creator"
         );
 
@@ -1190,8 +1190,8 @@ mod created_by_tests {
             })
             .await;
         assert_eq!(
-            session_owned.created_by_user_id.as_deref(),
-            Some(session_user.id.as_str()),
+            session_owned.created_by_user_id.as_str(),
+            session_user.id.as_str(),
             "an in-scope SESSION_USER_ID must take precedence over the epic's creator"
         );
     }

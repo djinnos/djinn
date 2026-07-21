@@ -41,7 +41,7 @@ fn test_task(
         merge_conflict_metadata: None,
         memory_refs: "[]".to_string(),
         agent_type: None,
-        created_by_user_id: None,
+        created_by_user_id: "test-user".to_owned(),
         ci_status: ci_status.to_string(),
         ci_head_sha: Some("head-sha-3t22".to_string()),
         ci_pr_number: Some(42),

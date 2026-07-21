@@ -304,7 +304,7 @@ mod tests {
             merge_conflict_metadata: None,
             memory_refs: "[]".to_owned(),
             agent_type: None,
-            created_by_user_id: None,
+            created_by_user_id: "test-user".to_owned(),
             ci_status: "unknown".to_owned(),
             ci_head_sha: None,
             ci_pr_number: None,

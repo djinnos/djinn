@@ -5014,7 +5014,7 @@ async fn rendered_worker_prompt_uses_signature_only_tool_section() {
         merge_conflict_metadata: None,
         memory_refs: "[]".to_string(),
         agent_type: None,
-        created_by_user_id: None,
+        created_by_user_id: "test-user".to_owned(),
         ci_status: "unknown".to_string(),
         ci_head_sha: None,
         ci_pr_number: None,

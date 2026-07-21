@@ -2499,7 +2499,7 @@ impl CoordinatorActor {
         let source_task = task_repo.get(source_task_id).await.ok().flatten();
         let source_creator = source_task
             .as_ref()
-            .and_then(|t| t.created_by_user_id.clone());
+            .map(|t| t.created_by_user_id.clone());
 
         // A held remediation (human-review OR planner-park escalation) is
         // idempotent: if the source is already held by an unresolved blocker, a
@@ -2815,7 +2815,7 @@ impl CoordinatorActor {
                 &review_task.short_id,
                 "planner",
                 review_task.reopen_count.max(0) as u32,
-                review_task.created_by_user_id.as_deref(),
+                Some(review_task.created_by_user_id.as_str()),
                 &model_ids,
                 |pool, model_id| {
                     let pool = pool.clone();
@@ -2858,14 +2858,14 @@ impl CoordinatorActor {
                     .iter()
                     .find(|m| {
                         self.health
-                            .is_available(review_task.created_by_user_id.as_deref(), m)
+                            .is_available(Some(review_task.created_by_user_id.as_str()), m)
                     })
                     .cloned();
                 if let Some(model) = dispatched_model {
                     self.record_inflight_dispatch(
                         &review_task.id,
                         Some(&review_task.short_id),
-                        review_task.created_by_user_id.as_deref(),
+                        Some(review_task.created_by_user_id.as_str()),
                         &model,
                         "planner",
                     )

@@ -2340,8 +2340,8 @@ mod tests {
         assert_eq!(task.priority, PRIORITY_CRITICAL);
         assert_eq!(task.owner, "planner");
         assert_eq!(
-            task.created_by_user_id.as_deref(),
-            Some(build_owner.id.as_str())
+            task.created_by_user_id.as_str(),
+            build_owner.id.as_str()
         );
         assert!(task.design.contains("Single-flight / coalesce first"));
         assert!(task.design.contains("do **not** re-scope running tasks"));

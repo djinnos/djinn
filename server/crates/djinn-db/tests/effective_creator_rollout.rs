@@ -409,6 +409,68 @@ fn coordinator_enables_db_test_support_only_on_its_dev_edge() {
 }
 
 #[test]
+fn task_creator_consumers_do_not_restore_nullable_idioms() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../");
+    let mut files = Vec::new();
+    for crate_name in [
+        "djinn-agent",
+        "djinn-coordinator",
+        "djinn-control-plane",
+        "djinn-slot",
+        "djinn-db",
+    ] {
+        rust_sources(
+            &root.join("server/crates").join(crate_name).join("src"),
+            &mut files,
+        );
+    }
+
+    // Require a field-access dot before the creator name so legitimately
+    // optional local variables (for example a repository lookup result named
+    // `created_by_user_id`) are not classified as Task-field consumers.
+    let nullable_deref = [".", "created_by_user_id", ".as_deref("].concat();
+    let nullable_presence = [".", "created_by_user_id", ".is_some("].concat();
+    let optional_task_extract = [".and_then(|t|t.", "created_by_user_id"].concat();
+    let mut violations = Vec::new();
+    for file in files {
+        let source = std::fs::read_to_string(&file).expect("release source readable");
+        let compact: String = source
+            .chars()
+            .filter(|character| !character.is_whitespace())
+            .collect();
+        for (line_number, line) in source.lines().enumerate() {
+            if line.contains(&nullable_deref) || line.contains(&nullable_presence) {
+                violations.push(format!(
+                    "{}:{}: {}",
+                    file.strip_prefix(&root).unwrap().display(),
+                    line_number + 1,
+                    line.trim()
+                ));
+            }
+        }
+        if compact.contains(&optional_task_extract) {
+            violations.push(format!(
+                "{}: Option<Task> creator extraction must use map",
+                file.strip_prefix(&root).unwrap().display()
+            ));
+        }
+        if compact.split(';').any(|statement| {
+            statement.contains("letSome(") && statement.contains("=task.created_by_user_id")
+        }) {
+            violations.push(format!(
+                "{}: concrete Task creator must not be destructured as Option",
+                file.strip_prefix(&root).unwrap().display()
+            ));
+        }
+    }
+    assert!(
+        violations.is_empty(),
+        "nullable-era Task.created_by_user_id consumers:\n{}",
+        violations.join("\n")
+    );
+}
+
+#[test]
 fn inventoried_producers_reach_the_transactional_provenance_boundary() {
     let inventory: Value =
         serde_json::from_str(include_str!("fixtures/effective_creator_producers.json"))

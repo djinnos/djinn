@@ -315,7 +315,7 @@ async fn user_dispatch_pause_defers_only_matching_creator() {
     pause_dispatch(
         &db,
         &tx,
-        djinn_db::DispatchPauseTarget::user(paused_task.created_by_user_id.clone().unwrap()),
+        djinn_db::DispatchPauseTarget::user(paused_task.created_by_user_id.clone()),
         "user maintenance",
     )
     .await;
@@ -327,7 +327,7 @@ async fn user_dispatch_pause_defers_only_matching_creator() {
     assert!(
         pause_state
             .users
-            .contains_key(paused_task.created_by_user_id.as_deref().unwrap())
+            .contains_key(paused_task.created_by_user_id.as_str())
     );
 
     let mut actor = coordinator_actor_for_tests(&db, &tx);
@@ -370,7 +370,7 @@ async fn user_dispatch_pause_does_not_block_unaffected_creator() {
 
     let other_task = open_task(&db, &tx, "unpaused user task").await;
     let other_task = set_task_creator(&db, &tx, &other_task, 10_002, "other-user").await;
-    assert!(other_task.created_by_user_id.as_deref() != Some(paused_user_id.as_str()));
+    assert!(other_task.created_by_user_id != paused_user_id);
 
     let mut actor = coordinator_actor_for_tests(&db, &tx);
     actor.dispatch_ready_tasks(None).await;

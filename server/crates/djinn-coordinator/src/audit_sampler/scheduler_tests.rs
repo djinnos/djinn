@@ -786,8 +786,8 @@ async fn atomic_materialization_creates_task_and_links_in_one_tx() {
     assert_eq!(task.issue_type, "task");
     assert_eq!(task.description, "test description");
     assert_eq!(
-        task.created_by_user_id.as_deref(),
-        Some(source_creator_id.as_str())
+        task.created_by_user_id.as_str(),
+        source_creator_id.as_str()
     );
 
     // Verify the selection is linked.

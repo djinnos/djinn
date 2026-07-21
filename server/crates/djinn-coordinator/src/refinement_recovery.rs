@@ -451,14 +451,12 @@ impl CoordinatorActor {
                 if task.status != "closed" {
                     open_ids.push(task.id.clone());
                 }
-                if let Some(uid) = task.created_by_user_id.clone() {
-                    let is_newer = latest_user
-                        .as_ref()
-                        .map(|(at, _)| task.created_at > *at)
-                        .unwrap_or(true);
-                    if is_newer {
-                        latest_user = Some((task.created_at.clone(), uid));
-                    }
+                let is_newer = latest_user
+                    .as_ref()
+                    .map(|(at, _)| task.created_at > *at)
+                    .unwrap_or(true);
+                if is_newer {
+                    latest_user = Some((task.created_at.clone(), task.created_by_user_id.clone()));
                 }
             }
         }
