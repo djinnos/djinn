@@ -1,0 +1,58 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT ta.id AS \"id!\", ta.task_id AS \"task_id!\", ta.role AS \"role!\",\n                ta.dispatch_key AS \"dispatch_key!\", ta.created_at AS \"created_at!\",\n                ta.dispatch_owner_incarnation_id,\n                ta.dispatch_group_id\n             FROM task_attempts ta\n             WHERE ta.outcome = 'pending'\n               AND ta.created_at < $1\n               AND NOT EXISTS (\n                   SELECT 1 FROM task_runs tr\n                   WHERE tr.task_id = ta.task_id\n                     AND tr.status IN ('starting', 'running')\n                     AND tr.ended_at IS NULL\n               )\n               AND NOT EXISTS (\n                   SELECT 1 FROM sessions s\n                   WHERE s.task_id = ta.task_id\n                     AND s.status = 'running'\n               )\n             ORDER BY ta.created_at ASC",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id!",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 1,
+        "name": "task_id!",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 2,
+        "name": "role!",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 3,
+        "name": "dispatch_key!",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 4,
+        "name": "created_at!",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 5,
+        "name": "dispatch_owner_incarnation_id",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 6,
+        "name": "dispatch_group_id",
+        "type_info": "Varchar"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      true
+    ]
+  },
+  "hash": "5ab0fc6de297f9c4fa2365c9cf4eff4423dce32ab508158275b48cd61b917c47"
+}
