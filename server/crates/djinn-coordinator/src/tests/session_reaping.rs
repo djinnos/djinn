@@ -7272,10 +7272,10 @@ async fn evidence_reap_nonnull_group_terminalizes_all_peers_with_one_evidence() 
         backdate_attempt(&db, id).await;
     }
 
-    // Reap with a 0-second threshold so group B's owner is also expired; but
-    // we reap just group A by checking that group B is also reaped (it should
-    // be — both owners are expired). The key assertion is that each group gets
-    // its own outcome/evidence.
+    // Both groups are reap-eligible, but one sweep reconciles only the oldest
+    // exact group for a task. This prevents one owner classification from
+    // spilling across concurrently persisted dispatch groups; a later sweep
+    // can independently classify group B from its own owner evidence.
     crate::health::reap_orphaned_pending_attempts_with_threshold(&db, 15 * 60, "periodic").await;
 
     // Both peers in group A are interrupted with the same evidence.
@@ -7291,13 +7291,11 @@ async fn evidence_reap_nonnull_group_terminalizes_all_peers_with_one_evidence() 
         assert_eq!(sj["owner_incarnation_id"], owner_id);
     }
 
-    // Group B peer is also interrupted but with its own owner evidence.
+    // Group B remains pending even though it is equally old and its owner is
+    // expired. Only the exact group-A boundary explains why it is untouched.
     let row_b = repo.get(&peer_b).await.unwrap().unwrap();
-    assert_eq!(row_b.outcome, "interrupted");
-    let sj_b: serde_json::Value =
-        serde_json::from_str(row_b.summary_json.as_deref().unwrap()).unwrap();
-    assert_eq!(sj_b["owner_incarnation_id"], owner_b);
-    assert_ne!(sj_b["owner_incarnation_id"], owner_id);
+    assert_eq!(row_b.outcome, "pending");
+    assert!(row_b.summary_json.is_none());
 }
 
 /// A legacy NULL-group row is reaped singly: only that one row is terminalized,
