@@ -122,6 +122,7 @@ pub(crate) fn build_refinement_actor(
         tick: tokio::time::interval(STUCK_INTERVAL),
         db: db.clone(),
         coordinator_incarnation_id: uuid::Uuid::now_v7().to_string(),
+        boot_at: ::time::OffsetDateTime::now_utc(),
         events_tx: events_tx.clone(),
         pool,
         build_admission: None,

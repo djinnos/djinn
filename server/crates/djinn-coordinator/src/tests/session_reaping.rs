@@ -489,7 +489,11 @@ async fn stall_timeout_tears_down_taskrun_job_through_slot_pool_kill_path() {
         .await
         .unwrap();
     session_repo
-        .backdate_started_at(&session.id, "40 minutes")
+        // Backdate past HARD_RUNTIME_CAP_SECS (3h) so the classifier's claim
+        // lease is exhausted and the Slow verdict is NOT extension-eligible —
+        // this is a genuinely dead pre-restart session that must die on the
+        // first sweep. (A <3h session would now get one grace extension.)
+        .backdate_started_at(&session.id, "190 minutes")
         .await
         .unwrap();
 
@@ -552,6 +556,10 @@ async fn stall_timeout_tears_down_taskrun_job_through_slot_pool_kill_path() {
 
     let mut actor = coordinator_actor_for_tests(&db, &tx);
     actor.pool = pool;
+    // Coordinator booted BEFORE this session and has since been up longer than
+    // the stall threshold, so the restart-amnesia window has fully elapsed and
+    // a genuinely dead pre-restart session is kill-eligible again this sweep.
+    actor.boot_at = ::time::OffsetDateTime::now_utc() - ::time::Duration::minutes(40);
     actor.enforce_session_stall_timeout().await;
 
     assert_eq!(
@@ -2502,7 +2510,10 @@ async fn stall_kill_still_fires_without_db_progress() {
         .await
         .unwrap();
     session_repo
-        .backdate_started_at(&session.id, "40 minutes")
+        // Backdate past HARD_RUNTIME_CAP_SECS (3h): the classifier lease is
+        // exhausted, so the Slow verdict is not extension-eligible and this
+        // genuinely dead pre-restart session is killed on the first sweep.
+        .backdate_started_at(&session.id, "190 minutes")
         .await
         .unwrap();
     // Frozen counters: the row shows tokens, but the watermark below already
@@ -2565,6 +2576,10 @@ async fn stall_kill_still_fires_without_db_progress() {
 
     let mut actor = coordinator_actor_for_tests(&db, &tx);
     actor.pool = pool;
+    // Coordinator booted BEFORE this session and has since been up longer than
+    // the stall threshold, so the restart-amnesia window has fully elapsed and
+    // a genuinely dead pre-restart session is kill-eligible again this sweep.
+    actor.boot_at = ::time::OffsetDateTime::now_utc() - ::time::Duration::minutes(40);
     // Watermark already equals the live DB total → no progress observed.
     actor
         .stall_progress_watermark
@@ -2629,7 +2644,10 @@ async fn dispatch_stalled_worker_session(
         .await
         .unwrap();
     session_repo
-        .backdate_started_at(&session.id, "40 minutes")
+        // Backdate past HARD_RUNTIME_CAP_SECS (3h) so the classifier lease is
+        // exhausted and the Slow verdict is not extension-eligible — a
+        // genuinely dead pre-restart session that must die on the first sweep.
+        .backdate_started_at(&session.id, "190 minutes")
         .await
         .unwrap();
 
@@ -2696,6 +2714,10 @@ async fn first_stall_cancel_does_not_escalate_to_planner() {
 
     let mut actor = coordinator_actor_for_tests(&db, &tx);
     actor.pool = pool;
+    // Coordinator booted BEFORE this session and has since been up longer than
+    // the stall threshold, so the restart-amnesia window has fully elapsed and
+    // a genuinely dead pre-restart session is kill-eligible again this sweep.
+    actor.boot_at = ::time::OffsetDateTime::now_utc() - ::time::Duration::minutes(40);
     actor.enforce_session_stall_timeout().await;
 
     assert!(
@@ -2729,6 +2751,10 @@ async fn second_consecutive_stall_cancel_escalates_to_planner() {
 
     let mut actor = coordinator_actor_for_tests(&db, &tx);
     actor.pool = pool;
+    // Coordinator booted BEFORE this session and has since been up longer than
+    // the stall threshold, so the restart-amnesia window has fully elapsed and
+    // a genuinely dead pre-restart session is kill-eligible again this sweep.
+    actor.boot_at = ::time::OffsetDateTime::now_utc() - ::time::Duration::minutes(40);
     // Pre-seed the first strike at the task's current status: a prior session
     // already stall-cancelled and the status has not advanced since.
     let current = actor
@@ -3436,9 +3462,11 @@ async fn hard_runtime_cap_zombie_reap_forces_dead_timeout() {
         .backdate_started_at(&session.id, "20 minutes")
         .await
         .unwrap();
-    // Also backdate the task_run.started_at so hard_runtime_deadline_exceeded fires.
+    // Also backdate the task_run.started_at past HARD_RUNTIME_CAP_SECS (3h) so
+    // hard_runtime_deadline_exceeded fires (the total-lifetime ceiling, aligned
+    // with the K8s Job activeDeadlineSeconds — not the 10-minute zombie cap).
     TaskRunRepository::new(db.clone())
-        .backdate_started_at(run_id, "20 minutes")
+        .backdate_started_at(run_id, "190 minutes")
         .await
         .unwrap();
 
@@ -5797,10 +5825,13 @@ async fn dead_verdict_with_fresh_db_activity_suppresses_reap() {
         })
         .await
         .unwrap();
-    // Backdate past the 10-minute zombie hard cap so the raw age gate fires
-    // and the classifier's claim TTL is zero (extension budget exhausted).
+    // Backdate past the zombie age gate (10 min) AND past HARD_RUNTIME_CAP_SECS
+    // (3h) so the classifier's claim TTL is zero (extension budget exhausted)
+    // and the Slow verdict carries the slow_extended outcome. The task_run is
+    // left fresh, so hard_runtime_deadline_exceeded does NOT fire — this
+    // isolates the Slow-suppresses-reap path from the hard-cap path.
     session_repo
-        .backdate_started_at(&session.id, "20 minutes")
+        .backdate_started_at(&session.id, "190 minutes")
         .await
         .unwrap();
     // NOTE: tokens are intentionally LEFT at zero so the pre-classifier
@@ -5907,9 +5938,9 @@ async fn dead_verdict_with_fresh_db_activity_suppresses_reap() {
         Some("slow"),
         "classifier must record Slow verdict on session row — not Dead"
     );
-    // With a 20-minute-old session the claim TTL is zero → extension budget
-    // exhausted → the classifier tags the Slow verdict with SlowExtended
-    // outcome and HardRuntimeExceeded-adjacent reason.
+    // With a session older than HARD_RUNTIME_CAP_SECS (3h) the claim TTL is
+    // zero → extension budget exhausted → the classifier tags the Slow verdict
+    // with SlowExtended outcome and HardRuntimeExceeded-adjacent reason.
     assert_eq!(
         outcome_kind.as_deref(),
         Some("slow_extended"),
@@ -5980,17 +6011,22 @@ async fn hard_cap_takes_precedence_over_slow_extension_budget_in_stall_path() {
     let run_id = "run-hard-cap-precedence";
     let (pool, _cancel, session) = dispatch_stalled_worker_session(&db, &tx, &task, run_id).await;
 
-    // Backdate the task_run's started_at so `hard_runtime_deadline_exceeded`
-    // is true. Without this, the classifier sees a fresh task_run and would
-    // return Slow + extension_eligible — the slow-extension branch would fire,
-    // and the hard-cap precedence invariant would not be exercised.
+    // Backdate the task_run's started_at past HARD_RUNTIME_CAP_SECS (3h) so
+    // `hard_runtime_deadline_exceeded` is true. Without this, the classifier
+    // sees a fresh task_run and would return Slow + extension_eligible — the
+    // slow-extension branch would fire, and the hard-cap precedence invariant
+    // would not be exercised.
     TaskRunRepository::new(db.clone())
-        .backdate_started_at(run_id, "20 minutes")
+        .backdate_started_at(run_id, "190 minutes")
         .await
         .unwrap();
 
     let mut actor = coordinator_actor_for_tests(&db, &tx);
     actor.pool = pool;
+    // Coordinator booted BEFORE this session and has since been up longer than
+    // the stall threshold, so the restart-amnesia window has fully elapsed and
+    // the sweep reaches the classifier (where the hard cap takes precedence).
+    actor.boot_at = ::time::OffsetDateTime::now_utc() - ::time::Duration::minutes(40);
     // Sanity: budget is fully available (count = 0, max_extensions = 3).
     assert!(
         actor.worker_lifecycle_config.slow_extension.enabled,
