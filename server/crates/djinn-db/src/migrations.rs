@@ -58,16 +58,22 @@ pub async fn run_postgres_migrations_on_connection(
         .execute(&mut *conn)
         .await
         .map_err(DbError::from)?;
-    if let Some(operator_id) = context.designated_operator_user_id.as_deref() {
-        // Keep whitespace-only input on the migration's explicit preflight
-        // path so callers receive the durable contract marker.
-        let operator_id = operator_id.trim();
-        sqlx::query("SELECT set_config('djinn.migration_designated_operator_user_id', $1, false)")
-            .bind(operator_id)
-            .execute(&mut *conn)
-            .await
-            .map_err(DbError::from)?;
-    }
+    // Always replace the session value. `run_direct` can fail before recording
+    // migration 136, and its caller may then retry on this same connection.
+    // Leaving a prior value in place would turn a later unset invocation into
+    // an accidental retry using stale designated-operator authority.
+    // Whitespace-only input is deliberately stored as empty so migration 136's
+    // durable preflight emits `creator_contract_designated_operator_unset`.
+    let operator_id = context
+        .designated_operator_user_id
+        .as_deref()
+        .map(str::trim)
+        .unwrap_or("");
+    sqlx::query("SELECT set_config('djinn.migration_designated_operator_user_id', $1, false)")
+        .bind(operator_id)
+        .execute(&mut *conn)
+        .await
+        .map_err(DbError::from)?;
     sqlx::migrate!("./migrations_postgres")
         .run_direct(&mut *conn)
         .await

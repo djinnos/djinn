@@ -821,24 +821,16 @@ async fn atomic_materialization_rolls_back_when_creator_is_unavailable() {
     )
     .await;
     let audit_repo = AuditSamplerRepository::new(db.clone());
-    let source_task_id = audit_repo
-        .list_unmaterialized_selections()
-        .await
-        .unwrap()
-        .into_iter()
-        .find(|item| item.selection_id == sel.id)
-        .and_then(|item| item.task_id)
-        .unwrap();
-    TaskRepository::new(db.clone(), djinn_core::events::EventBus::noop())
-        .clear_created_by_user_id(&source_task_id)
-        .await
-        .unwrap();
+    // The post-contract schema forbids clearing a persisted creator. A missing
+    // typed source relation is the production-equivalent unavailable
+    // provenance and must still roll back materialization atomically.
+    let unavailable_source_task_id = "00000000-0000-7000-8000-000000000000";
     let error = audit_repo
         .materialize_audit_task_atomic(
             &sel.id,
             &project_id,
             None,
-            Some(&source_task_id),
+            Some(unavailable_source_task_id),
             "Audit review: unavailable creator",
             "must roll back",
         )

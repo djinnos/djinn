@@ -161,6 +161,35 @@ async fn unset_zero_task_and_forced_post_update_failure_are_atomic() {
                 .contains("creator_contract_designated_operator_unset")
         );
     }
+    // A failed attempt can leave a session-scoped setting behind. The next
+    // invocation must explicitly clear it when no designated operator is
+    // supplied rather than reusing stale authority from this connection.
+    let invalid_error = run_postgres_migrations_on_connection(
+        &mut conn,
+        &MigrationContext {
+            designated_operator_user_id: Some("missing-operator".into()),
+        },
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        invalid_error
+            .to_string()
+            .contains("creator_contract_designated_operator_invalid:missing-operator")
+    );
+    let unset_error = run_postgres_migrations_on_connection(
+        &mut conn,
+        &MigrationContext {
+            designated_operator_user_id: None,
+        },
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        unset_error
+            .to_string()
+            .contains("creator_contract_designated_operator_unset")
+    );
     conn.execute("INSERT INTO projects (id,name,path,verification_rules) VALUES ('00000000-0000-7000-8000-000000000450','rollback','/rollback','[]'); INSERT INTO tasks (id,project_id,short_id,title,description,design,issue_type,labels,acceptance_criteria,memory_refs) VALUES ('00000000-0000-7000-8000-000000000451','00000000-0000-7000-8000-000000000450','null','','','','task','[]','[]','[]'); ALTER TABLE tasks ADD CONSTRAINT tasks_created_by_user_id_not_null CHECK (true)").await.unwrap();
     assert!(
         run_postgres_migrations_on_connection(
@@ -171,6 +200,19 @@ async fn unset_zero_task_and_forced_post_update_failure_are_atomic() {
         )
         .await
         .is_err()
+    );
+    let unset_after_valid_error = run_postgres_migrations_on_connection(
+        &mut conn,
+        &MigrationContext {
+            designated_operator_user_id: None,
+        },
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        unset_after_valid_error
+            .to_string()
+            .contains("creator_contract_designated_operator_unset")
     );
     assert_eq!(
         sqlx::query_scalar::<_, i64>("SELECT count(*) FROM tasks WHERE created_by_user_id IS NULL")
