@@ -1680,17 +1680,10 @@ async fn compact_conversation_in_critical_section(
 
     let boundary_repo = SessionCompactionBoundaryRepository::new(slot_ctx.db.clone());
     let boundary_id = record_compaction_started(&boundary_repo, session_id, conversation).await;
-
     let compacted = compact_conversation_with_pointers(
-        provider,
-        conversation,
-        session_id,
-        task_id,
-        CompactionContext::MidSession(role_name.to_string()),
-        context_window,
-        &pointers,
-    )
-    .await;
+        provider, conversation, session_id, task_id,
+        CompactionContext::MidSession(role_name.to_string()), context_window, &pointers,
+    ).await;
 
     if compacted {
         let summary = conversation
@@ -1711,6 +1704,36 @@ async fn compact_conversation_in_critical_section(
     }
 
     Ok(compacted)
+}
+
+/// The write-before-replacement portion of the reply-loop compaction path.
+async fn compact_conversation_after_persist<F>(
+    provider: &dyn LlmProvider, conversation: &mut Conversation, session_id: &str,
+    task_id: &str, role_name: &str, context_window: i64, persist: F,
+) -> Result<bool, String>
+where
+    F: FnOnce(&[PreCompactionToolResult]) -> Result<Vec<djinn_compaction::ToolOutputPointer>, String>,
+{
+    let results = inline_tool_results(conversation);
+    let pointers = persist(&results)?;
+    Ok(compact_conversation_with_pointers(
+        provider, conversation, session_id, task_id,
+        CompactionContext::MidSession(role_name.to_string()), context_window, &pointers,
+    ).await)
+}
+
+/// Test-support gateway for the production write-before-replacement sequence.
+#[cfg(any(test, feature = "test-support"))]
+pub async fn compact_conversation_after_persist_for_test<F>(
+    provider: &dyn LlmProvider, conversation: &mut Conversation, context_window: i64, persist: F,
+) -> Result<bool, String>
+where
+    F: FnOnce(&[PreCompactionToolResult]) -> Result<Vec<djinn_compaction::ToolOutputPointer>, String>,
+{
+    compact_conversation_after_persist(
+        provider, conversation, "compaction-hardening-session", "compaction-hardening-task",
+        "worker", context_window, persist,
+    ).await
 }
 
 fn inline_tool_results(conversation: &Conversation) -> Vec<PreCompactionToolResult> {
