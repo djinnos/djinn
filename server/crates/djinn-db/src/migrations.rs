@@ -22,7 +22,7 @@ pub struct MigrationContext {
     pub designated_operator_user_id: Option<String>,
 }
 
-pub const CREATOR_CONTRACT_MIGRATION_VERSION: i64 = 136;
+pub const CREATOR_CONTRACT_MIGRATION_VERSION: i64 = 137;
 
 /// Exact caller-selected identity for the fresh-install-only provisioner.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -59,10 +59,10 @@ pub async fn run_postgres_migrations_on_connection(
         .await
         .map_err(DbError::from)?;
     // Always replace the session value. `run_direct` can fail before recording
-    // migration 136, and its caller may then retry on this same connection.
+    // migration 137, and its caller may then retry on this same connection.
     // Leaving a prior value in place would turn a later unset invocation into
     // an accidental retry using stale designated-operator authority.
-    // Whitespace-only input is deliberately stored as empty so migration 136's
+    // Whitespace-only input is deliberately stored as empty so migration 137's
     // durable preflight emits `creator_contract_designated_operator_unset`.
     let operator_id = context
         .designated_operator_user_id

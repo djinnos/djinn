@@ -1,4 +1,4 @@
-//! Live-Postgres fixture harness for migration 136's creator contract.
+//! Live-Postgres fixture harness for migration 137's creator contract.
 //!
 //! The owned runner receives a per-connection `MigrationContext`; these tests
 //! intentionally never mutate process-global environment for operator input.
@@ -17,7 +17,7 @@ fn base_database_url() -> String {
 }
 
 /// This deliberately uses SQL fixtures rather than task prose: every winning
-/// tier below is a durable typed relation consumed by migration 136.
+/// tier below is a durable typed relation consumed by migration 137.
 #[tokio::test]
 async fn typed_provenance_fixture_matrix_is_deterministic() {
     const OP: &str = "00000000-0000-7000-8000-000000000136";
