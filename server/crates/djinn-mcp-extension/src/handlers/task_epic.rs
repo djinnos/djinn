@@ -10,7 +10,7 @@ use djinn_control_plane::tools::epic_ops::{
 };
 use djinn_control_plane::tools::proposal_blocks::validate_question_form_placement;
 use djinn_control_plane::tools::proposal_tools::{
-    ProposalBlockPatchParams, ProposalUpdateParams, apply_block_patch,
+    ProposalBlockPatchParams, ProposalCreateParams, ProposalUpdateParams, apply_block_patch,
 };
 use djinn_control_plane::tools::task_tools::{
     CommentTaskRequest as SharedCommentTaskRequest, CreateTaskRequest as SharedCreateTaskRequest,
@@ -18,8 +18,8 @@ use djinn_control_plane::tools::task_tools::{
     create_task as shared_create_task, update_task as shared_update_task,
 };
 use djinn_control_plane::tools::validation::{
-    resolve_body_format_and_validate, validate_ac_count, validate_design, validate_proposal_status,
-    validate_title,
+    resolve_body_format_and_validate, validate_ac_count, validate_design,
+    validate_proposal_create_status, validate_proposal_status, validate_title,
 };
 use djinn_db::repositories::proposal::ProposalAcceptanceCriteriaAmendment;
 use djinn_db::{
@@ -486,6 +486,67 @@ pub(crate) async fn call_epic_close(
 }
 
 // ── Proposal tools ──────────────────────────────────────────────────────────
+
+/// Create a proposal through the in-pod authoring surface.
+///
+/// Whole-document lint enforcement remains exclusively in
+/// [`ProposalRepository::create`], and the returned lint data is read from the
+/// immutable revision that call committed.
+pub(crate) async fn call_proposal_create(
+    ctx: &dyn ExtensionContext,
+    arguments: &Option<serde_json::Map<String, serde_json::Value>>,
+) -> Result<serde_json::Value, String> {
+    let p: ProposalCreateParams = parse_args(arguments)?;
+    let title = validate_title(&p.title)?;
+    let body = p.body.as_deref().unwrap_or("");
+    validate_design(body)?;
+    let body_format = resolve_body_format_and_validate(body, p.body_format.as_deref())?;
+    if body_format == "mdx" {
+        validate_question_form_placement(body)?;
+    }
+    let acceptance_criteria = p.acceptance_criteria.unwrap_or_default();
+    validate_ac_count(acceptance_criteria.len())?;
+    let status = validate_proposal_create_status(p.status.as_deref())?;
+    let ac_json = serde_json::to_string(&acceptance_criteria).unwrap_or_else(|_| "[]".to_string());
+
+    let proposal_repo = ProposalRepository::new(ctx.db(), ctx.event_bus());
+    let proposal = match proposal_repo
+        .create(djinn_db::ProposalCreateInput {
+            title: &title,
+            body,
+            acceptance_criteria: Some(&ac_json),
+            status,
+            body_format: Some(body_format),
+        })
+        .await
+    {
+        Ok(proposal) => proposal,
+        Err(error) => return proposal_authoring_error(error),
+    };
+
+    // Preserve the server's best-effort target seeding without authoring any
+    // proposal/revision state outside the repository.
+    if let Some(target_projects) = p.target_projects {
+        let project_repo = ProjectRepository::new(ctx.db(), ctx.event_bus());
+        for target in target_projects {
+            if let Ok(Some(project_id)) = project_repo.resolve(&target).await {
+                let _ = proposal_repo
+                    .add_target(&proposal.id, &project_id, "primary")
+                    .await;
+            }
+        }
+    }
+
+    let latest_lint = committed_latest_lint(&proposal_repo, &proposal).await?;
+    Ok(serde_json::json!({
+        "ok": true,
+        "id": proposal.id,
+        "short_id": proposal.short_id,
+        "status": proposal.status,
+        "latest_revision_seq": proposal.latest_revision_seq,
+        "latest_lint": latest_lint,
+    }))
+}
 
 /// Return lint data from the immutable revision that was actually committed.
 /// The repository validates its cache against that exact stored snapshot.
