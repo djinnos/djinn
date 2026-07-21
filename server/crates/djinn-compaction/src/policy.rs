@@ -1,11 +1,15 @@
+use std::collections::HashMap;
+
 use djinn_provider::message::{Conversation, Message, Role};
 use djinn_provider::provider::LlmProvider;
 
 use super::prompts::{
     CompactionContext, extract_prior_summary, last_user_text, preserved_tail_range,
     rebuild_full_compaction_messages, rebuild_partial_compaction_messages,
+    tool_result_pointer_placeholder,
 };
 use super::summarizer::{do_compact, do_partial_compact, is_context_error_message};
+use crate::ToolOutputPointer;
 
 /// Find the indices of a compaction summary anchor pair in `messages`.
 ///
@@ -101,12 +105,14 @@ pub fn needs_compaction(total_tokens_in: u32, context_window: i64) -> bool {
 /// counted from the end of the conversation (most recent = turn 0).
 ///
 /// Returns the estimated number of tokens reclaimed (chars / 4 heuristic).
+#[cfg(test)]
 pub(crate) fn microcompact(conversation: &mut Conversation, current_turn: usize) -> usize {
-    microcompact_with_thresholds(
+    microcompact_with_pointers(
         conversation,
         current_turn,
         MICROCOMPACT_AGE_THRESHOLD,
         MICROCOMPACT_EXEMPT_RECENT,
+        &[],
     )
 }
 
@@ -116,7 +122,33 @@ fn microcompact_with_thresholds(
     age_threshold: usize,
     exempt_recent: usize,
 ) -> usize {
+    microcompact_with_pointers(
+        conversation,
+        current_turn,
+        age_threshold,
+        exempt_recent,
+        &[],
+    )
+}
+
+/// Core microcompaction: replace tool-result content in old turns with a
+/// placeholder. When caller-supplied [`ToolOutputPointer`] metadata is
+/// available for a `tool_use_id`, the placeholder carries turn, original
+/// character count, output kind, and an actionable `output_view` hint.
+/// Otherwise the legacy `[Cleared — …]` placeholder is used.
+fn microcompact_with_pointers(
+    conversation: &mut Conversation,
+    current_turn: usize,
+    age_threshold: usize,
+    exempt_recent: usize,
+    pointers: &[ToolOutputPointer],
+) -> usize {
     use djinn_provider::message::ContentBlock;
+
+    let pointer_map: HashMap<&str, &ToolOutputPointer> = pointers
+        .iter()
+        .map(|p| (p.tool_use_id.as_str(), p))
+        .collect();
 
     let messages = &mut conversation.messages;
     let mut turn_map: Vec<usize> = vec![0; messages.len()];
@@ -148,7 +180,12 @@ fn microcompact_with_thresholds(
         }
 
         for block in &mut msg.content {
-            if let ContentBlock::ToolResult { content, .. } = block {
+            if let ContentBlock::ToolResult {
+                content,
+                tool_use_id,
+                ..
+            } = block
+            {
                 let already_cleared = content.len() == 1
                     && content[0]
                         .as_text()
@@ -166,7 +203,15 @@ fn microcompact_with_thresholds(
                     })
                     .sum();
 
-                let placeholder = format!("[Cleared — tool result from turn {msg_turn}]");
+                let placeholder = match pointer_map.get(tool_use_id.as_str()) {
+                    Some(ptr) => tool_result_pointer_placeholder(
+                        &ptr.tool_use_id,
+                        ptr.turn,
+                        ptr.original_chars,
+                        &ptr.result_kind,
+                    ),
+                    None => format!("[Cleared — tool result from turn {msg_turn}]"),
+                };
                 let placeholder_chars = placeholder.len();
 
                 *content = vec![ContentBlock::text(placeholder)];
@@ -180,6 +225,10 @@ fn microcompact_with_thresholds(
 
 /// Compact `conversation` in-place using LLM summarisation, with a
 /// deterministic truncation fallback if summarisation fails.
+///
+/// This is the legacy entry point with no pointer metadata: microcompaction
+/// placeholders fall back to `[Cleared — …]`. Callers with durable
+/// tool-output pointers should use [`compact_conversation_with_pointers`].
 pub async fn compact_conversation(
     provider: &dyn LlmProvider,
     conversation: &mut Conversation,
@@ -187,6 +236,37 @@ pub async fn compact_conversation(
     task_id: &str,
     ctx: CompactionContext,
     context_window: i64,
+) -> bool {
+    compact_conversation_with_pointers(
+        provider,
+        conversation,
+        session_id,
+        task_id,
+        ctx,
+        context_window,
+        &[],
+    )
+    .await
+}
+
+/// Compact `conversation` in-place using LLM summarisation, with a
+/// deterministic truncation fallback if summarisation fails.
+///
+/// `pointers` supplies storage-neutral [`ToolOutputPointer`] metadata for
+/// tool results whose full output has been durably persisted by the caller.
+/// When a pointer matches a `tool_use_id` being microcompacted, the
+/// placeholder carries turn, original character count, output kind, and an
+/// actionable `output_view(tool_use_id=…)` hint. Pointers with no matching
+/// `tool_use_id` in the conversation are ignored. Non-tool transcript
+/// behavior, message ordering, and retention semantics are unchanged.
+pub async fn compact_conversation_with_pointers(
+    provider: &dyn LlmProvider,
+    conversation: &mut Conversation,
+    session_id: &str,
+    task_id: &str,
+    ctx: CompactionContext,
+    context_window: i64,
+    pointers: &[ToolOutputPointer],
 ) -> bool {
     // NOTE: the conversation is already persisted incrementally by the reply
     // loop (`persist_session_message` per assistant/tool-result turn), so we no
@@ -197,7 +277,13 @@ pub async fn compact_conversation(
         .iter()
         .filter(|m| m.role == Role::Assistant)
         .count();
-    let tokens_reclaimed = microcompact(conversation, current_turn);
+    let tokens_reclaimed = microcompact_with_pointers(
+        conversation,
+        current_turn,
+        MICROCOMPACT_AGE_THRESHOLD,
+        MICROCOMPACT_EXEMPT_RECENT,
+        pointers,
+    );
 
     if tokens_reclaimed > 0 {
         let total_chars: usize = conversation

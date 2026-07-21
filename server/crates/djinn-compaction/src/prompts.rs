@@ -49,7 +49,9 @@ pub(super) const TEMPLATE_RULES: &str = "Write the summary using EXACTLY the sec
 Under each heading use terse bullet points. If a section has nothing to record, write `(none)` — \
 never omit a heading. Preserve exact file paths, function names, type names, line numbers, and \
 error messages verbatim. Output only the summary in this format — no preamble, no reasoning, no \
-closing remarks — and never mention this summary, the conversation's length, or that compaction occurred.";
+closing remarks — and never mention this summary, the conversation's length, or that compaction occurred.\n\
+Compacted tool-result outputs are durable: use output_list to discover all retained outputs and \
+output_view(tool_use_id=...) to retrieve a specific one in full.";
 
 // C-4: anchored / incremental summaries. The assistant continuation message that
 // `rebuild_full_compaction_messages` inserts right after a summary is a fixed,
@@ -72,6 +74,34 @@ pub const FULL_COMPACTION_CONTINUATION: &str = "Your context was compacted. The 
 pub const PARTIAL_COMPACTION_CONTINUATION: &str = "Part of your context was compacted. The messages above the summary are \
      preserved verbatim; the summary covers your more recent work. Continue \
      calling tools as necessary to complete the task.";
+
+/// Advisory lookup hint appended to the summariser rules so the model knows
+/// compacted tool outputs are retrievable. When compaction placeholders
+/// ([`tool_result_pointer_placeholder`]) no longer survive a subsequent full
+/// compaction, `output_list` is the authoritative discovery path and
+/// `output_view` retrieves individual outputs by `tool_use_id`.
+pub const OUTPUT_LOOKUP_ADVISORY: &str = "Compacted tool-result outputs are durable: use output_list to discover \
+     all retained outputs and output_view(tool_use_id=...) to retrieve a specific one in full.";
+
+/// Render a microcompaction placeholder for a tool result whose full output
+/// has been durably persisted and is retrievable by `tool_use_id`.
+///
+/// The placeholder states the turn, original character count, output kind,
+/// and `tool_use_id`, plus an actionable `output_view` hint — so the model
+/// can recover the full content at any time. When no pointer metadata is
+/// available, microcompaction falls back to the legacy `[Cleared — …]`
+/// placeholder.
+pub(super) fn tool_result_pointer_placeholder(
+    tool_use_id: &str,
+    turn: u64,
+    original_chars: usize,
+    result_kind: &str,
+) -> String {
+    format!(
+        "[Cleared — {result_kind} from turn {turn}, originally {original_chars} chars. \
+         Recover it with output_view(tool_use_id=\"{tool_use_id}\").]"
+    )
+}
 
 /// Wrap a summary text with the full-compaction end marker so that
 /// [`extract_prior_summary`] can locate the boundary later.
