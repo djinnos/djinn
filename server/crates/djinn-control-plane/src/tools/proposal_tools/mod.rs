@@ -103,7 +103,10 @@ use rmcp::handler::server::wrapper::Parameters;
 
 use crate::server::DjinnMcpServer;
 use crate::tools::acting_user::acting_caps;
-use crate::tools::proposal_ops::{ProposalShowResponse, ProposalSingleResponse};
+use crate::tools::proposal_ops::{
+    ProposalLintRejectionViolation, ProposalLintViolationSpan, ProposalShowResponse,
+    ProposalSingleResponse,
+};
 #[allow(unused_imports)]
 use djinn_db::{EpicRepository, ProjectRepository, ProposalRepository, TaskRepository};
 
@@ -156,6 +159,46 @@ pub(super) fn err_single(error: impl Into<String>) -> ProposalSingleResponse {
         proposal: None,
         mdx: None,
         error: Some(error.into()),
+        code: None,
+        violations: None,
+        latest_lint: None,
+    }
+}
+
+/// Keep the legacy `error` string while retaining repository lint diagnostics.
+pub(super) fn proposal_mutation_error(error: djinn_db::Error) -> ProposalSingleResponse {
+    match error {
+        djinn_db::Error::SpecLintRejected(rejection) => {
+            let mut violations: Vec<_> = rejection
+                .violations
+                .into_iter()
+                .map(|violation| ProposalLintRejectionViolation {
+                    code: violation.code,
+                    message: violation.message,
+                    severity: "error".to_string(),
+                    span: ProposalLintViolationSpan {
+                        start_byte: violation.span_start,
+                        end_byte: violation.span_end,
+                    },
+                })
+                .collect();
+            violations.sort_by(|a, b| {
+                a.span
+                    .start_byte
+                    .cmp(&b.span.start_byte)
+                    .then(a.span.end_byte.cmp(&b.span.end_byte))
+                    .then(a.code.cmp(&b.code))
+            });
+            ProposalSingleResponse {
+                proposal: None,
+                mdx: None,
+                error: Some(rejection.code.clone()),
+                code: Some(rejection.code),
+                violations: Some(violations),
+                latest_lint: None,
+            }
+        }
+        other => err_single(other.to_string()),
     }
 }
 

@@ -15766,6 +15766,166 @@
             "gate_ready",
             "unresolved_blocking_count"
           ]
+        },
+        "ProposalLintRejectionViolation": {
+          "description": "Stable structured diagnostic published when repository lint rejects a write.",
+          "type": "object",
+          "properties": {
+            "code": {
+              "type": "string"
+            },
+            "message": {
+              "type": "string"
+            },
+            "severity": {
+              "type": "string"
+            },
+            "span": {
+              "$ref": "#/$defs/ProposalLintViolationSpan"
+            }
+          },
+          "required": [
+            "code",
+            "message",
+            "severity",
+            "span"
+          ]
+        },
+        "ProposalLintViolationSpan": {
+          "description": "A half-open UTF-8 byte span in a lint rejection diagnostic.",
+          "type": "object",
+          "properties": {
+            "start_byte": {
+              "type": "integer",
+              "format": "int64"
+            },
+            "end_byte": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          "required": [
+            "start_byte",
+            "end_byte"
+          ]
+        },
+        "SpecLintResultV1": {
+          "description": "Stable V1 persistence and API contract. `checked_at` is supplied by the\ncaller; linting never reads a clock.",
+          "type": "object",
+          "properties": {
+            "linter_version": {
+              "type": "string"
+            },
+            "body_sha256": {
+              "type": "string"
+            },
+            "body_format": {
+              "$ref": "#/$defs/BodyFormat"
+            },
+            "checked_at": {
+              "type": "string"
+            },
+            "errors": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/Violation"
+              }
+            },
+            "warnings": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/Violation"
+              }
+            },
+            "skipped_tiers": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/SkippedTier"
+              }
+            }
+          },
+          "required": [
+            "linter_version",
+            "body_sha256",
+            "body_format",
+            "checked_at",
+            "errors",
+            "warnings",
+            "skipped_tiers"
+          ]
+        },
+        "BodyFormat": {
+          "description": "Body encoding supplied by the caller.",
+          "type": "string",
+          "enum": [
+            "markdown",
+            "mdx"
+          ]
+        },
+        "Violation": {
+          "type": "object",
+          "properties": {
+            "code": {
+              "type": "string"
+            },
+            "severity": {
+              "$ref": "#/$defs/Severity"
+            },
+            "message": {
+              "type": "string"
+            },
+            "span": {
+              "$ref": "#/$defs/Utf8ByteSpan"
+            }
+          },
+          "required": [
+            "code",
+            "severity",
+            "message",
+            "span"
+          ]
+        },
+        "Severity": {
+          "description": "Stable diagnostic severity.",
+          "type": "string",
+          "enum": [
+            "error",
+            "warning"
+          ]
+        },
+        "Utf8ByteSpan": {
+          "description": "A half-open UTF-8 byte range in the original body.",
+          "type": "object",
+          "properties": {
+            "start": {
+              "type": "integer",
+              "format": "int64"
+            },
+            "end": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          "required": [
+            "start",
+            "end"
+          ]
+        },
+        "SkippedTier": {
+          "description": "A deterministic record of a lint tier that did not run.",
+          "type": "object",
+          "properties": {
+            "tier": {
+              "type": "string"
+            },
+            "reason": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "tier",
+            "reason"
+          ]
         }
       },
       "type": "object",
@@ -15887,6 +16047,34 @@
           "type": [
             "string",
             "null"
+          ]
+        },
+        "code": {
+          "description": "Additive stable machine-readable rejection code.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "violations": {
+          "description": "Additive ordered diagnostics for `SPEC_LINT_REJECTED`.",
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "$ref": "#/$defs/ProposalLintRejectionViolation"
+          }
+        },
+        "latest_lint": {
+          "description": "Additive lint result for the exact committed head revision.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SpecLintResultV1"
+            },
+            {
+              "type": "null"
+            }
           ]
         }
       }
@@ -16160,6 +16348,166 @@
             "gate_ready",
             "unresolved_blocking_count"
           ]
+        },
+        "ProposalLintRejectionViolation": {
+          "description": "Stable structured diagnostic published when repository lint rejects a write.",
+          "type": "object",
+          "properties": {
+            "code": {
+              "type": "string"
+            },
+            "message": {
+              "type": "string"
+            },
+            "severity": {
+              "type": "string"
+            },
+            "span": {
+              "$ref": "#/$defs/ProposalLintViolationSpan"
+            }
+          },
+          "required": [
+            "code",
+            "message",
+            "severity",
+            "span"
+          ]
+        },
+        "ProposalLintViolationSpan": {
+          "description": "A half-open UTF-8 byte span in a lint rejection diagnostic.",
+          "type": "object",
+          "properties": {
+            "start_byte": {
+              "type": "integer",
+              "format": "int64"
+            },
+            "end_byte": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          "required": [
+            "start_byte",
+            "end_byte"
+          ]
+        },
+        "SpecLintResultV1": {
+          "description": "Stable V1 persistence and API contract. `checked_at` is supplied by the\ncaller; linting never reads a clock.",
+          "type": "object",
+          "properties": {
+            "linter_version": {
+              "type": "string"
+            },
+            "body_sha256": {
+              "type": "string"
+            },
+            "body_format": {
+              "$ref": "#/$defs/BodyFormat"
+            },
+            "checked_at": {
+              "type": "string"
+            },
+            "errors": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/Violation"
+              }
+            },
+            "warnings": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/Violation"
+              }
+            },
+            "skipped_tiers": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/SkippedTier"
+              }
+            }
+          },
+          "required": [
+            "linter_version",
+            "body_sha256",
+            "body_format",
+            "checked_at",
+            "errors",
+            "warnings",
+            "skipped_tiers"
+          ]
+        },
+        "BodyFormat": {
+          "description": "Body encoding supplied by the caller.",
+          "type": "string",
+          "enum": [
+            "markdown",
+            "mdx"
+          ]
+        },
+        "Violation": {
+          "type": "object",
+          "properties": {
+            "code": {
+              "type": "string"
+            },
+            "severity": {
+              "$ref": "#/$defs/Severity"
+            },
+            "message": {
+              "type": "string"
+            },
+            "span": {
+              "$ref": "#/$defs/Utf8ByteSpan"
+            }
+          },
+          "required": [
+            "code",
+            "severity",
+            "message",
+            "span"
+          ]
+        },
+        "Severity": {
+          "description": "Stable diagnostic severity.",
+          "type": "string",
+          "enum": [
+            "error",
+            "warning"
+          ]
+        },
+        "Utf8ByteSpan": {
+          "description": "A half-open UTF-8 byte range in the original body.",
+          "type": "object",
+          "properties": {
+            "start": {
+              "type": "integer",
+              "format": "int64"
+            },
+            "end": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          "required": [
+            "start",
+            "end"
+          ]
+        },
+        "SkippedTier": {
+          "description": "A deterministic record of a lint tier that did not run.",
+          "type": "object",
+          "properties": {
+            "tier": {
+              "type": "string"
+            },
+            "reason": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "tier",
+            "reason"
+          ]
         }
       },
       "type": "object",
@@ -16281,6 +16629,34 @@
           "type": [
             "string",
             "null"
+          ]
+        },
+        "code": {
+          "description": "Additive stable machine-readable rejection code.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "violations": {
+          "description": "Additive ordered diagnostics for `SPEC_LINT_REJECTED`.",
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "$ref": "#/$defs/ProposalLintRejectionViolation"
+          }
+        },
+        "latest_lint": {
+          "description": "Additive lint result for the exact committed head revision.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SpecLintResultV1"
+            },
+            {
+              "type": "null"
+            }
           ]
         }
       }
@@ -17083,6 +17459,166 @@
             "gate_ready",
             "unresolved_blocking_count"
           ]
+        },
+        "ProposalLintRejectionViolation": {
+          "description": "Stable structured diagnostic published when repository lint rejects a write.",
+          "type": "object",
+          "properties": {
+            "code": {
+              "type": "string"
+            },
+            "message": {
+              "type": "string"
+            },
+            "severity": {
+              "type": "string"
+            },
+            "span": {
+              "$ref": "#/$defs/ProposalLintViolationSpan"
+            }
+          },
+          "required": [
+            "code",
+            "message",
+            "severity",
+            "span"
+          ]
+        },
+        "ProposalLintViolationSpan": {
+          "description": "A half-open UTF-8 byte span in a lint rejection diagnostic.",
+          "type": "object",
+          "properties": {
+            "start_byte": {
+              "type": "integer",
+              "format": "int64"
+            },
+            "end_byte": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          "required": [
+            "start_byte",
+            "end_byte"
+          ]
+        },
+        "SpecLintResultV1": {
+          "description": "Stable V1 persistence and API contract. `checked_at` is supplied by the\ncaller; linting never reads a clock.",
+          "type": "object",
+          "properties": {
+            "linter_version": {
+              "type": "string"
+            },
+            "body_sha256": {
+              "type": "string"
+            },
+            "body_format": {
+              "$ref": "#/$defs/BodyFormat"
+            },
+            "checked_at": {
+              "type": "string"
+            },
+            "errors": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/Violation"
+              }
+            },
+            "warnings": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/Violation"
+              }
+            },
+            "skipped_tiers": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/SkippedTier"
+              }
+            }
+          },
+          "required": [
+            "linter_version",
+            "body_sha256",
+            "body_format",
+            "checked_at",
+            "errors",
+            "warnings",
+            "skipped_tiers"
+          ]
+        },
+        "BodyFormat": {
+          "description": "Body encoding supplied by the caller.",
+          "type": "string",
+          "enum": [
+            "markdown",
+            "mdx"
+          ]
+        },
+        "Violation": {
+          "type": "object",
+          "properties": {
+            "code": {
+              "type": "string"
+            },
+            "severity": {
+              "$ref": "#/$defs/Severity"
+            },
+            "message": {
+              "type": "string"
+            },
+            "span": {
+              "$ref": "#/$defs/Utf8ByteSpan"
+            }
+          },
+          "required": [
+            "code",
+            "severity",
+            "message",
+            "span"
+          ]
+        },
+        "Severity": {
+          "description": "Stable diagnostic severity.",
+          "type": "string",
+          "enum": [
+            "error",
+            "warning"
+          ]
+        },
+        "Utf8ByteSpan": {
+          "description": "A half-open UTF-8 byte range in the original body.",
+          "type": "object",
+          "properties": {
+            "start": {
+              "type": "integer",
+              "format": "int64"
+            },
+            "end": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          "required": [
+            "start",
+            "end"
+          ]
+        },
+        "SkippedTier": {
+          "description": "A deterministic record of a lint tier that did not run.",
+          "type": "object",
+          "properties": {
+            "tier": {
+              "type": "string"
+            },
+            "reason": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "tier",
+            "reason"
+          ]
         }
       },
       "type": "object",
@@ -17204,6 +17740,34 @@
           "type": [
             "string",
             "null"
+          ]
+        },
+        "code": {
+          "description": "Additive stable machine-readable rejection code.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "violations": {
+          "description": "Additive ordered diagnostics for `SPEC_LINT_REJECTED`.",
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "$ref": "#/$defs/ProposalLintRejectionViolation"
+          }
+        },
+        "latest_lint": {
+          "description": "Additive lint result for the exact committed head revision.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SpecLintResultV1"
+            },
+            {
+              "type": "null"
+            }
           ]
         }
       }
@@ -17576,6 +18140,166 @@
             "gate_ready",
             "unresolved_blocking_count"
           ]
+        },
+        "ProposalLintRejectionViolation": {
+          "description": "Stable structured diagnostic published when repository lint rejects a write.",
+          "type": "object",
+          "properties": {
+            "code": {
+              "type": "string"
+            },
+            "message": {
+              "type": "string"
+            },
+            "severity": {
+              "type": "string"
+            },
+            "span": {
+              "$ref": "#/$defs/ProposalLintViolationSpan"
+            }
+          },
+          "required": [
+            "code",
+            "message",
+            "severity",
+            "span"
+          ]
+        },
+        "ProposalLintViolationSpan": {
+          "description": "A half-open UTF-8 byte span in a lint rejection diagnostic.",
+          "type": "object",
+          "properties": {
+            "start_byte": {
+              "type": "integer",
+              "format": "int64"
+            },
+            "end_byte": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          "required": [
+            "start_byte",
+            "end_byte"
+          ]
+        },
+        "SpecLintResultV1": {
+          "description": "Stable V1 persistence and API contract. `checked_at` is supplied by the\ncaller; linting never reads a clock.",
+          "type": "object",
+          "properties": {
+            "linter_version": {
+              "type": "string"
+            },
+            "body_sha256": {
+              "type": "string"
+            },
+            "body_format": {
+              "$ref": "#/$defs/BodyFormat"
+            },
+            "checked_at": {
+              "type": "string"
+            },
+            "errors": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/Violation"
+              }
+            },
+            "warnings": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/Violation"
+              }
+            },
+            "skipped_tiers": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/SkippedTier"
+              }
+            }
+          },
+          "required": [
+            "linter_version",
+            "body_sha256",
+            "body_format",
+            "checked_at",
+            "errors",
+            "warnings",
+            "skipped_tiers"
+          ]
+        },
+        "BodyFormat": {
+          "description": "Body encoding supplied by the caller.",
+          "type": "string",
+          "enum": [
+            "markdown",
+            "mdx"
+          ]
+        },
+        "Violation": {
+          "type": "object",
+          "properties": {
+            "code": {
+              "type": "string"
+            },
+            "severity": {
+              "$ref": "#/$defs/Severity"
+            },
+            "message": {
+              "type": "string"
+            },
+            "span": {
+              "$ref": "#/$defs/Utf8ByteSpan"
+            }
+          },
+          "required": [
+            "code",
+            "severity",
+            "message",
+            "span"
+          ]
+        },
+        "Severity": {
+          "description": "Stable diagnostic severity.",
+          "type": "string",
+          "enum": [
+            "error",
+            "warning"
+          ]
+        },
+        "Utf8ByteSpan": {
+          "description": "A half-open UTF-8 byte range in the original body.",
+          "type": "object",
+          "properties": {
+            "start": {
+              "type": "integer",
+              "format": "int64"
+            },
+            "end": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          "required": [
+            "start",
+            "end"
+          ]
+        },
+        "SkippedTier": {
+          "description": "A deterministic record of a lint tier that did not run.",
+          "type": "object",
+          "properties": {
+            "tier": {
+              "type": "string"
+            },
+            "reason": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "tier",
+            "reason"
+          ]
         }
       },
       "type": "object",
@@ -17697,6 +18421,34 @@
           "type": [
             "string",
             "null"
+          ]
+        },
+        "code": {
+          "description": "Additive stable machine-readable rejection code.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "violations": {
+          "description": "Additive ordered diagnostics for `SPEC_LINT_REJECTED`.",
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "$ref": "#/$defs/ProposalLintRejectionViolation"
+          }
+        },
+        "latest_lint": {
+          "description": "Additive lint result for the exact committed head revision.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SpecLintResultV1"
+            },
+            {
+              "type": "null"
+            }
           ]
         }
       }
@@ -17795,6 +18547,166 @@
             "gate_ready",
             "unresolved_blocking_count"
           ]
+        },
+        "ProposalLintRejectionViolation": {
+          "description": "Stable structured diagnostic published when repository lint rejects a write.",
+          "type": "object",
+          "properties": {
+            "code": {
+              "type": "string"
+            },
+            "message": {
+              "type": "string"
+            },
+            "severity": {
+              "type": "string"
+            },
+            "span": {
+              "$ref": "#/$defs/ProposalLintViolationSpan"
+            }
+          },
+          "required": [
+            "code",
+            "message",
+            "severity",
+            "span"
+          ]
+        },
+        "ProposalLintViolationSpan": {
+          "description": "A half-open UTF-8 byte span in a lint rejection diagnostic.",
+          "type": "object",
+          "properties": {
+            "start_byte": {
+              "type": "integer",
+              "format": "int64"
+            },
+            "end_byte": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          "required": [
+            "start_byte",
+            "end_byte"
+          ]
+        },
+        "SpecLintResultV1": {
+          "description": "Stable V1 persistence and API contract. `checked_at` is supplied by the\ncaller; linting never reads a clock.",
+          "type": "object",
+          "properties": {
+            "linter_version": {
+              "type": "string"
+            },
+            "body_sha256": {
+              "type": "string"
+            },
+            "body_format": {
+              "$ref": "#/$defs/BodyFormat"
+            },
+            "checked_at": {
+              "type": "string"
+            },
+            "errors": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/Violation"
+              }
+            },
+            "warnings": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/Violation"
+              }
+            },
+            "skipped_tiers": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/SkippedTier"
+              }
+            }
+          },
+          "required": [
+            "linter_version",
+            "body_sha256",
+            "body_format",
+            "checked_at",
+            "errors",
+            "warnings",
+            "skipped_tiers"
+          ]
+        },
+        "BodyFormat": {
+          "description": "Body encoding supplied by the caller.",
+          "type": "string",
+          "enum": [
+            "markdown",
+            "mdx"
+          ]
+        },
+        "Violation": {
+          "type": "object",
+          "properties": {
+            "code": {
+              "type": "string"
+            },
+            "severity": {
+              "$ref": "#/$defs/Severity"
+            },
+            "message": {
+              "type": "string"
+            },
+            "span": {
+              "$ref": "#/$defs/Utf8ByteSpan"
+            }
+          },
+          "required": [
+            "code",
+            "severity",
+            "message",
+            "span"
+          ]
+        },
+        "Severity": {
+          "description": "Stable diagnostic severity.",
+          "type": "string",
+          "enum": [
+            "error",
+            "warning"
+          ]
+        },
+        "Utf8ByteSpan": {
+          "description": "A half-open UTF-8 byte range in the original body.",
+          "type": "object",
+          "properties": {
+            "start": {
+              "type": "integer",
+              "format": "int64"
+            },
+            "end": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          "required": [
+            "start",
+            "end"
+          ]
+        },
+        "SkippedTier": {
+          "description": "A deterministic record of a lint tier that did not run.",
+          "type": "object",
+          "properties": {
+            "tier": {
+              "type": "string"
+            },
+            "reason": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "tier",
+            "reason"
+          ]
         }
       },
       "type": "object",
@@ -17916,6 +18828,34 @@
           "type": [
             "string",
             "null"
+          ]
+        },
+        "code": {
+          "description": "Additive stable machine-readable rejection code.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "violations": {
+          "description": "Additive ordered diagnostics for `SPEC_LINT_REJECTED`.",
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "$ref": "#/$defs/ProposalLintRejectionViolation"
+          }
+        },
+        "latest_lint": {
+          "description": "Additive lint result for the exact committed head revision.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SpecLintResultV1"
+            },
+            {
+              "type": "null"
+            }
           ]
         }
       }
@@ -20758,6 +21698,166 @@
             "gate_ready",
             "unresolved_blocking_count"
           ]
+        },
+        "ProposalLintRejectionViolation": {
+          "description": "Stable structured diagnostic published when repository lint rejects a write.",
+          "type": "object",
+          "properties": {
+            "code": {
+              "type": "string"
+            },
+            "message": {
+              "type": "string"
+            },
+            "severity": {
+              "type": "string"
+            },
+            "span": {
+              "$ref": "#/$defs/ProposalLintViolationSpan"
+            }
+          },
+          "required": [
+            "code",
+            "message",
+            "severity",
+            "span"
+          ]
+        },
+        "ProposalLintViolationSpan": {
+          "description": "A half-open UTF-8 byte span in a lint rejection diagnostic.",
+          "type": "object",
+          "properties": {
+            "start_byte": {
+              "type": "integer",
+              "format": "int64"
+            },
+            "end_byte": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          "required": [
+            "start_byte",
+            "end_byte"
+          ]
+        },
+        "SpecLintResultV1": {
+          "description": "Stable V1 persistence and API contract. `checked_at` is supplied by the\ncaller; linting never reads a clock.",
+          "type": "object",
+          "properties": {
+            "linter_version": {
+              "type": "string"
+            },
+            "body_sha256": {
+              "type": "string"
+            },
+            "body_format": {
+              "$ref": "#/$defs/BodyFormat"
+            },
+            "checked_at": {
+              "type": "string"
+            },
+            "errors": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/Violation"
+              }
+            },
+            "warnings": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/Violation"
+              }
+            },
+            "skipped_tiers": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/SkippedTier"
+              }
+            }
+          },
+          "required": [
+            "linter_version",
+            "body_sha256",
+            "body_format",
+            "checked_at",
+            "errors",
+            "warnings",
+            "skipped_tiers"
+          ]
+        },
+        "BodyFormat": {
+          "description": "Body encoding supplied by the caller.",
+          "type": "string",
+          "enum": [
+            "markdown",
+            "mdx"
+          ]
+        },
+        "Violation": {
+          "type": "object",
+          "properties": {
+            "code": {
+              "type": "string"
+            },
+            "severity": {
+              "$ref": "#/$defs/Severity"
+            },
+            "message": {
+              "type": "string"
+            },
+            "span": {
+              "$ref": "#/$defs/Utf8ByteSpan"
+            }
+          },
+          "required": [
+            "code",
+            "severity",
+            "message",
+            "span"
+          ]
+        },
+        "Severity": {
+          "description": "Stable diagnostic severity.",
+          "type": "string",
+          "enum": [
+            "error",
+            "warning"
+          ]
+        },
+        "Utf8ByteSpan": {
+          "description": "A half-open UTF-8 byte range in the original body.",
+          "type": "object",
+          "properties": {
+            "start": {
+              "type": "integer",
+              "format": "int64"
+            },
+            "end": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          "required": [
+            "start",
+            "end"
+          ]
+        },
+        "SkippedTier": {
+          "description": "A deterministic record of a lint tier that did not run.",
+          "type": "object",
+          "properties": {
+            "tier": {
+              "type": "string"
+            },
+            "reason": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "tier",
+            "reason"
+          ]
         }
       },
       "type": "object",
@@ -20879,6 +21979,34 @@
           "type": [
             "string",
             "null"
+          ]
+        },
+        "code": {
+          "description": "Additive stable machine-readable rejection code.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "violations": {
+          "description": "Additive ordered diagnostics for `SPEC_LINT_REJECTED`.",
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "$ref": "#/$defs/ProposalLintRejectionViolation"
+          }
+        },
+        "latest_lint": {
+          "description": "Additive lint result for the exact committed head revision.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SpecLintResultV1"
+            },
+            {
+              "type": "null"
+            }
           ]
         }
       }
@@ -20982,6 +22110,166 @@
             "gate_ready",
             "unresolved_blocking_count"
           ]
+        },
+        "ProposalLintRejectionViolation": {
+          "description": "Stable structured diagnostic published when repository lint rejects a write.",
+          "type": "object",
+          "properties": {
+            "code": {
+              "type": "string"
+            },
+            "message": {
+              "type": "string"
+            },
+            "severity": {
+              "type": "string"
+            },
+            "span": {
+              "$ref": "#/$defs/ProposalLintViolationSpan"
+            }
+          },
+          "required": [
+            "code",
+            "message",
+            "severity",
+            "span"
+          ]
+        },
+        "ProposalLintViolationSpan": {
+          "description": "A half-open UTF-8 byte span in a lint rejection diagnostic.",
+          "type": "object",
+          "properties": {
+            "start_byte": {
+              "type": "integer",
+              "format": "int64"
+            },
+            "end_byte": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          "required": [
+            "start_byte",
+            "end_byte"
+          ]
+        },
+        "SpecLintResultV1": {
+          "description": "Stable V1 persistence and API contract. `checked_at` is supplied by the\ncaller; linting never reads a clock.",
+          "type": "object",
+          "properties": {
+            "linter_version": {
+              "type": "string"
+            },
+            "body_sha256": {
+              "type": "string"
+            },
+            "body_format": {
+              "$ref": "#/$defs/BodyFormat"
+            },
+            "checked_at": {
+              "type": "string"
+            },
+            "errors": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/Violation"
+              }
+            },
+            "warnings": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/Violation"
+              }
+            },
+            "skipped_tiers": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/SkippedTier"
+              }
+            }
+          },
+          "required": [
+            "linter_version",
+            "body_sha256",
+            "body_format",
+            "checked_at",
+            "errors",
+            "warnings",
+            "skipped_tiers"
+          ]
+        },
+        "BodyFormat": {
+          "description": "Body encoding supplied by the caller.",
+          "type": "string",
+          "enum": [
+            "markdown",
+            "mdx"
+          ]
+        },
+        "Violation": {
+          "type": "object",
+          "properties": {
+            "code": {
+              "type": "string"
+            },
+            "severity": {
+              "$ref": "#/$defs/Severity"
+            },
+            "message": {
+              "type": "string"
+            },
+            "span": {
+              "$ref": "#/$defs/Utf8ByteSpan"
+            }
+          },
+          "required": [
+            "code",
+            "severity",
+            "message",
+            "span"
+          ]
+        },
+        "Severity": {
+          "description": "Stable diagnostic severity.",
+          "type": "string",
+          "enum": [
+            "error",
+            "warning"
+          ]
+        },
+        "Utf8ByteSpan": {
+          "description": "A half-open UTF-8 byte range in the original body.",
+          "type": "object",
+          "properties": {
+            "start": {
+              "type": "integer",
+              "format": "int64"
+            },
+            "end": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          "required": [
+            "start",
+            "end"
+          ]
+        },
+        "SkippedTier": {
+          "description": "A deterministic record of a lint tier that did not run.",
+          "type": "object",
+          "properties": {
+            "tier": {
+              "type": "string"
+            },
+            "reason": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "tier",
+            "reason"
+          ]
         }
       },
       "type": "object",
@@ -21103,6 +22391,34 @@
           "type": [
             "string",
             "null"
+          ]
+        },
+        "code": {
+          "description": "Additive stable machine-readable rejection code.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "violations": {
+          "description": "Additive ordered diagnostics for `SPEC_LINT_REJECTED`.",
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "$ref": "#/$defs/ProposalLintRejectionViolation"
+          }
+        },
+        "latest_lint": {
+          "description": "Additive lint result for the exact committed head revision.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SpecLintResultV1"
+            },
+            {
+              "type": "null"
+            }
           ]
         }
       }
@@ -21416,6 +22732,166 @@
             "gate_ready",
             "unresolved_blocking_count"
           ]
+        },
+        "ProposalLintRejectionViolation": {
+          "description": "Stable structured diagnostic published when repository lint rejects a write.",
+          "type": "object",
+          "properties": {
+            "code": {
+              "type": "string"
+            },
+            "message": {
+              "type": "string"
+            },
+            "severity": {
+              "type": "string"
+            },
+            "span": {
+              "$ref": "#/$defs/ProposalLintViolationSpan"
+            }
+          },
+          "required": [
+            "code",
+            "message",
+            "severity",
+            "span"
+          ]
+        },
+        "ProposalLintViolationSpan": {
+          "description": "A half-open UTF-8 byte span in a lint rejection diagnostic.",
+          "type": "object",
+          "properties": {
+            "start_byte": {
+              "type": "integer",
+              "format": "int64"
+            },
+            "end_byte": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          "required": [
+            "start_byte",
+            "end_byte"
+          ]
+        },
+        "SpecLintResultV1": {
+          "description": "Stable V1 persistence and API contract. `checked_at` is supplied by the\ncaller; linting never reads a clock.",
+          "type": "object",
+          "properties": {
+            "linter_version": {
+              "type": "string"
+            },
+            "body_sha256": {
+              "type": "string"
+            },
+            "body_format": {
+              "$ref": "#/$defs/BodyFormat"
+            },
+            "checked_at": {
+              "type": "string"
+            },
+            "errors": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/Violation"
+              }
+            },
+            "warnings": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/Violation"
+              }
+            },
+            "skipped_tiers": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/SkippedTier"
+              }
+            }
+          },
+          "required": [
+            "linter_version",
+            "body_sha256",
+            "body_format",
+            "checked_at",
+            "errors",
+            "warnings",
+            "skipped_tiers"
+          ]
+        },
+        "BodyFormat": {
+          "description": "Body encoding supplied by the caller.",
+          "type": "string",
+          "enum": [
+            "markdown",
+            "mdx"
+          ]
+        },
+        "Violation": {
+          "type": "object",
+          "properties": {
+            "code": {
+              "type": "string"
+            },
+            "severity": {
+              "$ref": "#/$defs/Severity"
+            },
+            "message": {
+              "type": "string"
+            },
+            "span": {
+              "$ref": "#/$defs/Utf8ByteSpan"
+            }
+          },
+          "required": [
+            "code",
+            "severity",
+            "message",
+            "span"
+          ]
+        },
+        "Severity": {
+          "description": "Stable diagnostic severity.",
+          "type": "string",
+          "enum": [
+            "error",
+            "warning"
+          ]
+        },
+        "Utf8ByteSpan": {
+          "description": "A half-open UTF-8 byte range in the original body.",
+          "type": "object",
+          "properties": {
+            "start": {
+              "type": "integer",
+              "format": "int64"
+            },
+            "end": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          "required": [
+            "start",
+            "end"
+          ]
+        },
+        "SkippedTier": {
+          "description": "A deterministic record of a lint tier that did not run.",
+          "type": "object",
+          "properties": {
+            "tier": {
+              "type": "string"
+            },
+            "reason": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "tier",
+            "reason"
+          ]
         }
       },
       "type": "object",
@@ -21537,6 +23013,34 @@
           "type": [
             "string",
             "null"
+          ]
+        },
+        "code": {
+          "description": "Additive stable machine-readable rejection code.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "violations": {
+          "description": "Additive ordered diagnostics for `SPEC_LINT_REJECTED`.",
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "$ref": "#/$defs/ProposalLintRejectionViolation"
+          }
+        },
+        "latest_lint": {
+          "description": "Additive lint result for the exact committed head revision.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SpecLintResultV1"
+            },
+            {
+              "type": "null"
+            }
           ]
         }
       }
