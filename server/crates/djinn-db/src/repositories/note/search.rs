@@ -752,7 +752,6 @@ impl NoteRepository {
     ) -> Result<Vec<Note>> {
         self.db.ensure_initialized().await?;
 
-        // Build the note_type IN clause — these are controlled strings, safe to interpolate.
         let types_in = note_types
             .iter()
             .map(|t| format!("'{t}'"))
@@ -822,13 +821,8 @@ impl NoteRepository {
         Ok(query.fetch_all(self.db.pool()).await?)
     }
 
-    /// Query the complete ranked scope-overlap universe used by bounded prompt
-    /// packing. This retains note bodies and L0 summaries so packing decisions
-    /// and rendered output are made from the same candidates.
-    ///
-    /// The production query remains available to callers that need its legacy
-    /// confidence/top-K boundary. This helper keeps identical eligibility,
-    /// scope matching, and ordering while removing only those two gates.
+    /// Query the complete ranked scope-overlap universe, including note bodies
+    /// and L0 summaries, without the production confidence/top-K gates.
     pub async fn query_by_scope_overlap_trace_notes(
         &self,
         project_id: &str,
@@ -845,11 +839,7 @@ impl NoteRepository {
             .collect::<Vec<_>>()
             .join(", ");
 
-        // Postgres positional binds. Fixed param: $1 = project_id. Per-task-path
-        // EXISTS binds start at $2 and each path consumes three placeholders
-        // (LIKE/LIKE/=). Unlike the production query, this intentionally has no
-        // confidence bind: NULL confidence rows must reach `Note` mapping so a
-        // malformed trace universe remains a trace-search error.
+        // No confidence bind: NULL rows must reach `Note` mapping and fail there.
         let mut path_binds: Vec<String> = Vec::new();
         let mut next = 2;
 
@@ -876,9 +866,7 @@ impl NoteRepository {
             format!("(jsonb_array_length(n.scope_paths) = 0 OR {exists_or})")
         };
 
-        // This is deliberately separate from `query_by_scope_overlap`: using
-        // `confidence >= -infinity` would still filter SQL NULL confidence and
-        // silently change the established trace-query failure semantics.
+        // `confidence >= -infinity` would incorrectly filter SQL NULL confidence.
         let sql = format!(
             "SELECT n.id, n.project_id, n.permalink, n.title, n.file_path,
                     n.storage, n.note_type, n.folder, n.status, n.tags::text AS tags, n.content,

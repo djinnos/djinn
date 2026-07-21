@@ -842,9 +842,7 @@ impl RetrievalTraceRepository {
         self.insert_with_values(params, "enabled", outcome).await
     }
 
-    /// Insert a trace with rollout/outcome semantics supplied by an informed
-    /// caller. Validation occurs before SQL so fail-open callers receive an
-    /// ordinary `Result` instead of a durable contradictory trace.
+    /// Insert a trace with caller-supplied rollout/outcome semantics.
     pub async fn insert_with_semantics(
         &self,
         params: CreateRetrievalTraceWithSemanticsParams<'_>,
