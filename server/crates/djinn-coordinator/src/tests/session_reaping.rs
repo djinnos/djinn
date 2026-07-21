@@ -7505,8 +7505,8 @@ async fn spawn_failed_dispatch_orphan_reaches_no_pr_terminal_cap_live() {
 
 /// A live coordinator dispatch and its worker supervisor run retain one owner
 /// and exact group. After that owner's lease expires, periodic reaping
-/// reconciles every eligible exact group independently; the live retry path
-/// exempts the evidenced interruption and dispatches.
+/// reconciles the eligible group while a younger peer group remains pending;
+/// the live retry path exempts the evidenced interruption and dispatches.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn expired_owner_group_reap_redispatches_after_reaping_each_eligible_group() {
     use crate::dispatch::attempt_lifecycle::record_dispatch_start_with_identity;
@@ -7569,12 +7569,13 @@ async fn expired_owner_group_reap_redispatches_after_reaping_each_eligible_group
     .expect("persist unrelated pending group");
 
     // The restart ends the live supervisor run; only then does the exact owner
-    // expire. Every pending row is equally old enough to be a reap candidate.
+    // expire. Age just the correlated coordinator/supervisor group: the
+    // unrelated exact group is deliberately younger than the reap threshold.
     run_repo
         .update_status("supervisor-run", TaskRunStatus::Interrupted)
         .await
         .unwrap();
-    for attempt in [&coordinator_attempt, &supervisor_attempt, &unrelated] {
+    for attempt in [&coordinator_attempt, &supervisor_attempt] {
         backdate_attempt(&db, attempt).await;
     }
     djinn_db::test_support::backdate_coordinator_incarnation_lease(&db, &owner, "1 hour").await;
@@ -7588,21 +7589,18 @@ async fn expired_owner_group_reap_redispatches_after_reaping_each_eligible_group
         assert_eq!(row.outcome, "interrupted");
         assert_eq!(evidence["failure_class"], "environmental_owner_expired");
         assert_eq!(evidence["owner_incarnation_id"], owner);
+        assert_eq!(evidence["owner_classification"], "expired");
         assert!(evidence["owner_lease_last_renewed_at"].is_string());
     }
-    // The independently eligible group is terminalized in this same sweep,
-    // using its own exact group rather than task-level suppression.
     let unrelated_row = attempts.get(&unrelated).await.unwrap().unwrap();
-    let unrelated_evidence: serde_json::Value =
-        serde_json::from_str(unrelated_row.summary_json.as_deref().unwrap()).unwrap();
-    assert_eq!(unrelated_row.outcome, "interrupted");
     assert_eq!(
-        unrelated_evidence["failure_class"],
-        "environmental_owner_expired"
+        unrelated_row.outcome, "pending",
+        "the younger unrelated exact group must remain pending because it is below the threshold"
     );
-    assert_eq!(unrelated_evidence["owner_incarnation_id"], owner);
-    assert!(unrelated_evidence["owner_lease_last_renewed_at"].is_string());
-
+    assert!(
+        unrelated_row.summary_json.is_none(),
+        "the below-threshold group must not receive owner-expiry evidence"
+    );
     let mut actor = coordinator_actor_for_tests(&db, &tx);
     actor.last_dispatched.insert(
         task.id.clone(),

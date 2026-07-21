@@ -32,16 +32,12 @@ impl CoordinatorActor {
             .list_for_task(task_id)
             .await
             .ok()?;
-        // A newer pending dispatch in another group is in-flight, not evidence
-        // for the same-role retry decision. Evaluate only terminal attempts.
         let attempt = attempts
             .iter()
             .filter(|attempt| attempt.role == role)
             .find(|attempt| {
-                !matches!(
-                    attempt.outcome.as_str(),
-                    "pending" | "submitted" | "deferred" | "adopted_pr"
-                )
+                attempt.outcome != TaskAttemptOutcome::Deferred.as_str()
+                    && attempt.outcome != TaskAttemptOutcome::AdoptedPr.as_str()
             })?;
         let source = match attempt.outcome.as_str() {
             "spawn_failed" => djinn_telemetry::dispatch::STRIKE_SOURCE_SPAWN_FAILED,
