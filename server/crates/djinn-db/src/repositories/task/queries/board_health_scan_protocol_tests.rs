@@ -185,6 +185,7 @@ async fn failed_evaluation_keeps_cursor_and_repeats_the_exact_page_after_restart
     assert!(max_retained <= BOARD_HEALTH_MISMATCH_PAGE_SIZE as usize);
 }
 
+#[allow(clippy::disallowed_methods)] // Wall-clock bound is the behavior under test.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn ten_thousand_candidates_finish_in_forty_bounded_pages_under_two_minutes() {
     let (db, repo, project) = setup_repo().await;
