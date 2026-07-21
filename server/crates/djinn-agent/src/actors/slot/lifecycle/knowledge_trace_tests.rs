@@ -712,12 +712,18 @@ async fn load_knowledge_context_rendered_matches_pack_knowledge_notes() {
             &derive_task_scope_paths(&task, None),
             KNOWLEDGE_NOTE_TYPES,
             KNOWLEDGE_MIN_CONFIDENCE,
-            KNOWLEDGE_INJECTION_LIMIT,
+            app_state.knowledge_injection.knowledge_injection_limit as usize,
         )
         .await
         .expect("production query");
 
-    let expected = pack_knowledge_notes(&notes, KNOWLEDGE_BUDGET_CHARS).rendered;
+    let expected = pack_knowledge_notes(
+        &notes,
+        app_state
+            .knowledge_injection
+            .knowledge_injection_budget_bytes as usize,
+    )
+    .rendered;
 
     assert_eq!(
         rendered, expected,

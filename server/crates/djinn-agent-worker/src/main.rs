@@ -88,6 +88,7 @@ use djinn_agent::file_time::FileTime;
 use djinn_agent::lsp::LspManager;
 use djinn_agent::roles::RoleRegistry;
 use djinn_core::events::EventBus;
+use djinn_core::models::KnowledgeInjectionConfig;
 use djinn_db::{Database, DatabaseConnectConfig, PostgresDatabaseConfig};
 use djinn_graph::graph_parity::{GraphArtifactBlobParityError, assert_graph_artifact_blob_parity};
 use djinn_provider::catalog::{CatalogService, HealthTracker};
@@ -1987,6 +1988,7 @@ async fn run_task_run(args: WorkerDefaultArgs) -> Result<()> {
         rpc.clone(),
         spec.project_id.clone(),
         spec.read_source_project_ids.clone(),
+        spec.knowledge_injection,
     );
     let worker_services: Arc<dyn SupervisorServices> = Arc::new(WorkerSupervisorServices::new(
         rpc.clone(),
@@ -2580,6 +2582,7 @@ fn build_worker_agent_context(
     rpc: Arc<RpcServices>,
     project_id: String,
     read_source_project_ids: Vec<String>,
+    knowledge_injection: KnowledgeInjectionConfig,
 ) -> AgentContext {
     use djinn_core::events::DjinnEventEnvelope;
     use djinn_supervisor::services::SerializableDjinnEvent;
@@ -2635,6 +2638,7 @@ fn build_worker_agent_context(
         ),
         reconciliation_sweep: ReconciliationSweepConfig::default(),
         memory_intent_planner: djinn_agent::context::MemoryIntentPlannerConfig::from_env(),
+        knowledge_injection,
         compaction_cs: djinn_slot::reply_loop::CompactionCriticalSection::default(),
     }
 }
@@ -2964,6 +2968,14 @@ mod tests {
 
     #[tokio::test]
     async fn worker_context_authorization_preserves_zero_one_and_multiple_immutable_grants() {
+        let resolved = KnowledgeInjectionConfig {
+            knowledge_injection_budget_bytes: 4_096,
+            knowledge_injection_line_cap_bytes: 256,
+            knowledge_injection_limit: 3,
+            injection_starvation_threshold_percent: 50,
+            injection_starvation_query_floor: 20,
+            retrieval_health_window_minutes: 1_440,
+        };
         for targets in [
             Vec::<String>::new(),
             vec!["target-a".into()],
@@ -2973,12 +2985,36 @@ mod tests {
             let (read, write) = tokio::io::split(stream);
             let cancel = CancellationToken::new();
             let (rpc, _tasks) = RpcServices::from_split(read, write, cancel.clone());
+            let spec = TaskRunSpec {
+                task_run_id: "worker-config-propagation".into(),
+                task_attempt_id: None,
+                task_id: "task".into(),
+                project_id: "immutable-owner".into(),
+                trigger: djinn_core::models::TaskRunTrigger::NewTask,
+                base_branch: "main".into(),
+                task_branch: "djinn/task".into(),
+                flow: djinn_runtime::SupervisorFlow::NewTask,
+                model_id_per_role: Default::default(),
+                read_source_project_ids: targets.clone(),
+                knowledge_injection: resolved,
+                github_owner: None,
+                github_install_token: None,
+                commit_author_name: None,
+                commit_author_email: None,
+                resume_lifecycle_metadata: None,
+                is_evidence_spike: false,
+            };
+            let spec: TaskRunSpec =
+                bincode::deserialize(&bincode::serialize(&spec).expect("serialize worker spec"))
+                    .expect("deserialize worker spec");
             let context = build_worker_agent_context(
                 Database::open_in_memory().expect("in-memory worker database"),
                 rpc,
-                "immutable-owner".into(),
-                targets.clone(),
+                spec.project_id,
+                spec.read_source_project_ids,
+                spec.knowledge_injection,
             );
+            assert_eq!(context.knowledge_injection, resolved);
             let authorization = context.read_source_authorization;
             cancel.cancel();
             assert_eq!(

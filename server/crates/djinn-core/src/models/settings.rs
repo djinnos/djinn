@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 /// Immutable process configuration for bounded knowledge injection and retrieval health.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct KnowledgeInjectionConfig {
     pub knowledge_injection_budget_bytes: u32,
     pub knowledge_injection_line_cap_bytes: u32,
