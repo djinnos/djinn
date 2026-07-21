@@ -728,6 +728,93 @@ mod tests {
     }
 
     #[test]
+    fn knowledge_injection_config_rejects_each_present_invalid_source_value() {
+        without_config_env(|| {
+            for (field, environment) in [
+                ("knowledge_injection_budget_bytes", "DJINN_KNOWLEDGE_INJECTION_BUDGET_BYTES"),
+                ("knowledge_injection_line_cap_bytes", "DJINN_KNOWLEDGE_INJECTION_LINE_CAP_BYTES"),
+                ("knowledge_injection_limit", "DJINN_KNOWLEDGE_INJECTION_LIMIT"),
+                ("injection_starvation_threshold_percent", "DJINN_INJECTION_STARVATION_THRESHOLD_PERCENT"),
+                ("injection_starvation_query_floor", "DJINN_INJECTION_STARVATION_QUERY_FLOOR"),
+                ("retrieval_health_window_minutes", "DJINN_RETRIEVAL_HEALTH_WINDOW_MINUTES"),
+            ] {
+                for rejected in ["not-a-number", "0"] {
+                    unsafe { std::env::set_var(environment, rejected) };
+                    let error = KnowledgeInjectionConfig::from_settings_and_env(&DjinnSettings::default())
+                        .unwrap_err()
+                        .to_string();
+                    assert!(
+                        error.contains(field) && error.contains(rejected),
+                        "environment {environment}={rejected}: {error}"
+                    );
+                    unsafe { std::env::remove_var(environment) };
+
+                    let raw = if rejected == "0" {
+                        format!(r#"{{"{field}":0}}"#)
+                    } else {
+                        format!(r#"{{"{field}":"{rejected}"}}"#)
+                    };
+                    let error = DjinnSettings::from_db_value_validated(&raw)
+                        .unwrap_err()
+                        .to_string();
+                    assert!(
+                        error.contains(field) && error.contains(rejected),
+                        "persisted {raw}: {error}"
+                    );
+                }
+            }
+
+            unsafe { std::env::set_var("DJINN_KNOWLEDGE_INJECTION_BUDGET_BYTES", "8192") };
+            let error = DjinnSettings::from_db_value_validated(
+                r#"{"knowledge_injection_budget_bytes":255}"#,
+            )
+            .unwrap_err()
+            .to_string();
+            assert!(
+                error.contains("knowledge_injection_budget_bytes") && error.contains("255"),
+                "valid environment override must not conceal an invalid persisted value: {error}"
+            );
+        });
+    }
+
+    #[test]
+    fn knowledge_injection_config_cross_field_errors_are_deterministic() {
+        without_config_env(|| {
+            let persisted = DjinnSettings {
+                knowledge_injection_budget_bytes: Some(256),
+                knowledge_injection_line_cap_bytes: Some(257),
+                ..Default::default()
+            };
+            assert_eq!(
+                KnowledgeInjectionConfig::from_settings(&persisted)
+                    .unwrap_err()
+                    .to_string(),
+                "invalid knowledge_injection_line_cap_bytes value `257 (knowledge_injection_budget_bytes=256)`: must be less than or equal to knowledge_injection_budget_bytes"
+            );
+
+            assert_eq!(
+                DjinnSettings::from_db_value_validated(
+                    r#"{"knowledge_injection_budget_bytes":256,"knowledge_injection_line_cap_bytes":257}"#,
+                )
+                .unwrap_err()
+                .to_string(),
+                "invalid knowledge_injection_line_cap_bytes value `257 (knowledge_injection_budget_bytes=256)`: must be less than or equal to knowledge_injection_budget_bytes"
+            );
+
+            unsafe {
+                std::env::set_var("DJINN_KNOWLEDGE_INJECTION_BUDGET_BYTES", "256");
+                std::env::set_var("DJINN_KNOWLEDGE_INJECTION_LINE_CAP_BYTES", "257");
+            }
+            assert_eq!(
+                KnowledgeInjectionConfig::from_settings_and_env(&DjinnSettings::default())
+                    .unwrap_err()
+                    .to_string(),
+                "invalid knowledge_injection_line_cap_bytes value `257 (knowledge_injection_budget_bytes=256)`: must be less than or equal to knowledge_injection_budget_bytes"
+            );
+        });
+    }
+
+    #[test]
     fn from_db_value_parses_typed_format() {
         let raw = r#"{"dispatch_limit":100,"models":["openai/gpt-4o"]}"#;
         let s = DjinnSettings::from_db_value(raw);
