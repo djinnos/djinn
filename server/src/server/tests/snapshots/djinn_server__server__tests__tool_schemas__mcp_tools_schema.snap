@@ -8772,8 +8772,26 @@ expression: signatures
     "input_schema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
+        "lifecycle_limit": {
+          "description": "Maximum archived/deprecated nodes when inactive statuses are requested.",
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
         "project": {
           "type": "string"
+        },
+        "statuses": {
+          "description": "Optional lifecycle statuses for visualization. Omission retains the\nactive-only graph compatibility contract.",
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
         }
       },
       "required": [
@@ -8800,6 +8818,28 @@ expression: signatures
             "source_id",
             "target_id",
             "raw_text"
+          ],
+          "type": "object"
+        },
+        "GraphLifecycleSummary": {
+          "properties": {
+            "inactive_omitted": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "inactive_returned": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "inactive_total": {
+              "format": "int64",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "inactive_total",
+            "inactive_returned",
+            "inactive_omitted"
           ],
           "type": "object"
         },
@@ -8840,10 +8880,20 @@ expression: signatures
               "default": false,
               "type": "boolean"
             },
+            "lifecycle_changed_at": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "note_type": {
               "type": "string"
             },
             "permalink": {
+              "type": "string"
+            },
+            "status": {
+              "default": "active",
               "type": "string"
             },
             "title": {
@@ -8908,6 +8958,16 @@ expression: signatures
           "type": [
             "string",
             "null"
+          ]
+        },
+        "lifecycle_summary": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/GraphLifecycleSummary"
+            },
+            {
+              "type": "null"
+            }
           ]
         },
         "nodes": {
