@@ -473,7 +473,11 @@ fn atomic_write(
 /// Resolve a `tool_use_id` from the durable store. Returns `(tool_name, full_text)`
 /// on success. Errors (no root, missing/corrupt pointer or blob) propagate as a
 /// human-readable message — never a panic.
-#[cfg(any(test, feature = "test-support"))]
+///
+/// This convenience wrapper is used only by this module's unit tests. The
+/// test-support integration path supplies an explicit durable root through
+/// `OutputStash` and therefore calls `durable_read_at` instead.
+#[cfg(test)]
 fn durable_read(tool_use_id: &str) -> Result<(String, String), String> {
     let root = durable_root().ok_or("durable stash unavailable (no cache dir)")?;
     durable_read_at(&root, tool_use_id, None)
