@@ -1194,11 +1194,12 @@ mod tests {
     async fn insert_epic_child(db: &Database, epic: &Epic, short_id: &str, status: &str) -> String {
         let id = uuid::Uuid::now_v7().to_string();
         let title = format!("Child {short_id}");
+        let creator = crate::repositories::test_support::seed_test_user(db).await;
         sqlx::query(
             r#"INSERT INTO tasks (id, project_id, short_id, epic_id, title, description, design,
-                    issue_type, priority, owner, status, labels, acceptance_criteria, memory_refs)
+                    issue_type, priority, owner, status, labels, acceptance_criteria, memory_refs, created_by_user_id)
                VALUES ($1, $2, $3, $4, $5, '', '', 'task', 1, '', $6,
-                       '[]'::jsonb, '[]'::jsonb, '[]'::jsonb)"#,
+                       '[]'::jsonb, '[]'::jsonb, '[]'::jsonb, $7)"#,
         )
         .bind(&id)
         .bind(&epic.project_id)
@@ -1206,6 +1207,7 @@ mod tests {
         .bind(&epic.id)
         .bind(&title)
         .bind(status)
+        .bind(&creator)
         .execute(db.pool())
         .await
         .unwrap();
@@ -1791,18 +1793,20 @@ mod tests {
 
         let epic = repo.create("Counts", "", "", "", "", None).await.unwrap();
         let pool = db.pool();
+        let creator = crate::repositories::test_support::seed_test_user(&db).await;
 
         // Insert tasks directly via SQL.
         for short in ["t001", "t002"] {
             let id = uuid::Uuid::now_v7().to_string();
             sqlx::query!(
                 "INSERT INTO tasks (id, project_id, short_id, epic_id, title, description, design,
-                                    issue_type, priority, owner, status, continuation_count, labels, acceptance_criteria, memory_refs)
-                 VALUES ($1, $2, $3, $4, 'T', '', '', 'task', 0, '', 'open', 0, '[]'::jsonb, '[]'::jsonb, '[]'::jsonb)",
+                                    issue_type, priority, owner, status, continuation_count, labels, acceptance_criteria, memory_refs, created_by_user_id)
+                 VALUES ($1, $2, $3, $4, 'T', '', '', 'task', 0, '', 'open', 0, '[]'::jsonb, '[]'::jsonb, '[]'::jsonb, $5)",
                 id,
                 epic.project_id,
                 short,
-                epic.id
+                epic.id,
+                creator
             )
             .execute(pool)
             .await
@@ -1811,11 +1815,12 @@ mod tests {
         let t3_id = uuid::Uuid::now_v7().to_string();
         sqlx::query!(
             "INSERT INTO tasks (id, project_id, short_id, epic_id, title, description, design,
-                                issue_type, priority, owner, status, continuation_count, labels, acceptance_criteria, memory_refs)
-             VALUES ($1, $2, 't003', $3, 'T3', '', '', 'task', 0, '', 'open', 0, '[]'::jsonb, '[]'::jsonb, '[]'::jsonb)",
+                                issue_type, priority, owner, status, continuation_count, labels, acceptance_criteria, memory_refs, created_by_user_id)
+             VALUES ($1, $2, 't003', $3, 'T3', '', '', 'task', 0, '', 'open', 0, '[]'::jsonb, '[]'::jsonb, '[]'::jsonb, $4)",
             t3_id,
             epic.project_id,
-            epic.id
+            epic.id,
+            creator
         )
         .execute(pool)
         .await
@@ -1838,17 +1843,19 @@ mod tests {
 
         let epic = repo.create("Delete", "", "", "", "", None).await.unwrap();
         let pool = db.pool();
+        let creator = crate::repositories::test_support::seed_test_user(&db).await;
 
         for short in ["t001", "t002"] {
             let id = uuid::Uuid::now_v7().to_string();
             sqlx::query!(
                 "INSERT INTO tasks (id, project_id, short_id, epic_id, title, description, design,
-                                    issue_type, priority, owner, status, continuation_count, labels, acceptance_criteria, memory_refs)
-                 VALUES ($1, $2, $3, $4, 'T', '', '', 'task', 0, '', 'open', 0, '[]'::jsonb, '[]'::jsonb, '[]'::jsonb)",
+                                    issue_type, priority, owner, status, continuation_count, labels, acceptance_criteria, memory_refs, created_by_user_id)
+                 VALUES ($1, $2, $3, $4, 'T', '', '', 'task', 0, '', 'open', 0, '[]'::jsonb, '[]'::jsonb, '[]'::jsonb, $5)",
                 id,
                 epic.project_id,
                 short,
-                epic.id
+                epic.id,
+                creator
             )
             .execute(pool)
             .await
