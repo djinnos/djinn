@@ -424,6 +424,7 @@ mod tests {
             flow: SupervisorFlow::Planning,
             model_id_per_role: HashMap::new(),
             read_source_project_ids: Vec::new(),
+            knowledge_injection: djinn_core::models::KnowledgeInjectionConfig::default(),
             github_owner: None,
             github_install_token: None,
             commit_author_name: None,

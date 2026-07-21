@@ -25,6 +25,7 @@ use djinn_agent::lsp::LspManager;
 use djinn_agent::roles::RoleRegistry;
 use djinn_agent::runtime_bridge::{K8sTokenReviewValidator, RuntimeKind, runtime_kind};
 use djinn_core::clock::{Clock, SystemClock as SystemClockTrait};
+use djinn_core::models::KnowledgeInjectionConfig;
 use djinn_db::{
     AdmissionHandoffAuthority, AdmissionHandoffRepository, Database, NoopNoteVectorStore,
     NoteVectorStore, ProjectRepository, QdrantCodeChunkConfig, QdrantCodeChunkVectorStore,
@@ -370,6 +371,8 @@ struct Inner {
     pub health_tracker: HealthTracker,
     /// Immutable retrieval-health config parsed once at startup.
     pub retrieval_config: djinn_core::doctor::RetrievalHealthConfig,
+    /// Immutable bounded knowledge-packing configuration resolved at startup.
+    pub knowledge_injection_config: KnowledgeInjectionConfig,
     /// Process-owned retrieval telemetry shared by every MCP session.
     pub retrieval_metrics: Arc<djinn_telemetry::memory_retrieval::MemoryRetrievalMetrics>,
     pub role_registry: Arc<RoleRegistry>,
@@ -514,6 +517,7 @@ impl AppState {
             cancel,
             djinn_core::doctor::RetrievalHealthConfig::default(),
             Arc::new(djinn_telemetry::memory_retrieval::MemoryRetrievalMetrics::new()),
+            KnowledgeInjectionConfig::default(),
             BuildAdmissionConfig {
                 mode: BuildAdmissionMode::Observe,
                 cap: BuildAdmissionConfig::DEFAULT_CAP,
@@ -527,6 +531,7 @@ impl AppState {
         cancel: CancellationToken,
         retrieval_config: djinn_core::doctor::RetrievalHealthConfig,
         retrieval_metrics: Arc<djinn_telemetry::memory_retrieval::MemoryRetrievalMetrics>,
+        knowledge_injection_config: KnowledgeInjectionConfig,
     ) -> Result<Self, String> {
         let admission_config = BuildAdmissionConfig::from_env()?;
         Ok(Self::new_inner(
@@ -535,6 +540,7 @@ impl AppState {
             cancel,
             retrieval_config,
             retrieval_metrics,
+            knowledge_injection_config,
             admission_config,
         ))
     }
@@ -545,6 +551,7 @@ impl AppState {
         cancel: CancellationToken,
         retrieval_config: djinn_core::doctor::RetrievalHealthConfig,
         retrieval_metrics: Arc<djinn_telemetry::memory_retrieval::MemoryRetrievalMetrics>,
+        knowledge_injection_config: KnowledgeInjectionConfig,
         admission_config: BuildAdmissionConfig,
     ) -> Self {
         let (events, _) = broadcast::channel(EVENT_CHANNEL_CAPACITY);
@@ -592,6 +599,7 @@ impl AppState {
                 health_tracker: HealthTracker::new(),
                 retrieval_config,
                 retrieval_metrics,
+                knowledge_injection_config,
                 role_registry: Arc::new(RoleRegistry::new()),
                 coordinator: Arc::new(tokio::sync::Mutex::new(None)),
                 pool: Mutex::new(None),
@@ -1208,6 +1216,7 @@ impl AppState {
             cancel,
             djinn_core::doctor::RetrievalHealthConfig::default(),
             Arc::new(djinn_telemetry::memory_retrieval::MemoryRetrievalMetrics::new()),
+            KnowledgeInjectionConfig::default(),
         )
         .map_err(anyhow::Error::msg)
     }
@@ -1854,6 +1863,7 @@ impl AppState {
             read_source_authorization: djinn_agent::context::ReadSourceAuthorization::default(),
             reconciliation_sweep: djinn_agent::context::ReconciliationSweepConfig::from_env(),
             memory_intent_planner: djinn_agent::context::MemoryIntentPlannerConfig::from_env(),
+            knowledge_injection: self.inner.knowledge_injection_config,
             compaction_cs: djinn_slot::reply_loop::CompactionCriticalSection::default(),
         }
     }
@@ -3699,8 +3709,39 @@ mod build_admission_config_tests {
             CancellationToken::new(),
             djinn_core::doctor::RetrievalHealthConfig::default(),
             Arc::new(djinn_telemetry::memory_retrieval::MemoryRetrievalMetrics::new()),
+            KnowledgeInjectionConfig::default(),
             config,
         )
+    }
+
+    #[tokio::test]
+    async fn agent_context_preserves_startup_resolved_knowledge_injection_config() {
+        let resolved = KnowledgeInjectionConfig {
+            knowledge_injection_budget_bytes: 4_096,
+            knowledge_injection_line_cap_bytes: 256,
+            knowledge_injection_limit: 3,
+            injection_starvation_threshold_percent: 50,
+            injection_starvation_query_floor: 20,
+            retrieval_health_window_minutes: 1_440,
+        };
+        let db = Database::open_in_memory().expect("test database");
+        let runtime = DatabaseRuntimeManager::new(
+            crate::db::runtime::DatabaseRuntimeConfig::postgres(db.bootstrap_info().target.clone()),
+        );
+        let state = AppState::new_inner(
+            db,
+            runtime,
+            CancellationToken::new(),
+            djinn_core::doctor::RetrievalHealthConfig::default(),
+            Arc::new(djinn_telemetry::memory_retrieval::MemoryRetrievalMetrics::new()),
+            resolved,
+            BuildAdmissionConfig {
+                mode: BuildAdmissionMode::Observe,
+                cap: BuildAdmissionConfig::DEFAULT_CAP,
+            },
+        );
+
+        assert_eq!(state.agent_context().knowledge_injection, resolved);
     }
 
     fn admission(state: &AppState) -> &Arc<BuildAdmissionController> {

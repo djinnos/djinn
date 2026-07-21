@@ -66,6 +66,7 @@ fn test_agent_context(db: Database) -> AgentContext {
         read_source_authorization: djinn_agent::context::ReadSourceAuthorization::default(),
         reconciliation_sweep: djinn_agent::context::ReconciliationSweepConfig::default(),
         memory_intent_planner: djinn_agent::context::MemoryIntentPlannerConfig::default(),
+        knowledge_injection: djinn_core::models::KnowledgeInjectionConfig::default(),
         compaction_cs: djinn_slot::reply_loop::CompactionCriticalSection::default(),
     }
 }

@@ -26,6 +26,7 @@ use crate::lsp::LspManager;
 use crate::roles::RoleRegistry;
 use djinn_core::clock::{Clock, SystemClock as SystemClockTrait};
 use djinn_core::events::EventBus;
+use djinn_core::models::KnowledgeInjectionConfig;
 use djinn_db::Database;
 use djinn_orchestration_types::coordinator::BackgroundWorkTracker;
 use djinn_provider::catalog::{CatalogService, HealthTracker};
@@ -242,6 +243,8 @@ pub struct AgentContext {
     /// planner. Composition roots may inject an enabled value; ordinary
     /// construction keeps the feature disabled.
     pub memory_intent_planner: MemoryIntentPlannerConfig,
+    /// Immutable bounded knowledge-packing limits resolved before composition.
+    pub knowledge_injection: KnowledgeInjectionConfig,
     /// Configuration for the periodic reconciliation sweep (stale PRs,
     /// branches, and orphan worker sessions).  Read from environment
     /// variables at `AgentContext` construction time via
