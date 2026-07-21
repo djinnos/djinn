@@ -145,6 +145,49 @@ async fn assert_task_status(
     assert_eq!(updated.status, expected, "task {} status", task.short_id);
 }
 
+/// The real chain-exhaustion retry cap must enter the terminal gate rather
+/// than choosing a close action from cached CI state. A durable PR always
+/// hands off to the poller; the otherwise identical no-PR control closes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn dispatch_exhaustion_cap_hands_pr_to_poller_and_force_closes_no_pr() {
+    let db = test_helpers::create_test_db();
+    let (tx, _rx) = broadcast::channel(256);
+    let repo = TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx));
+    let pr_task = open_task(&db, &tx, "dispatch-cap-pr-handoff").await;
+    let no_pr_task = open_task(&db, &tx, "dispatch-cap-no-pr-control").await;
+    repo.set_pr_url(&pr_task.id, "https://github.example/acme/repo/pull/811")
+        .await
+        .unwrap();
+
+    let pr_task = repo.get(&pr_task.id).await.unwrap().unwrap();
+    let mut actor = coordinator_actor_for_tests(&db, &tx);
+    for _ in 0..MAX_DISPATCH_FAILURES {
+        actor
+            .apply_chain_exhaustion_side_effects(&pr_task, "worker", &[])
+            .await;
+    }
+    for _ in 0..MAX_DISPATCH_FAILURES {
+        actor
+            .apply_chain_exhaustion_side_effects(&no_pr_task, "worker", &[])
+            .await;
+    }
+
+    let pr_after = repo.get(&pr_task.id).await.unwrap().unwrap();
+    assert_eq!(pr_after.status, "pr_review");
+    assert_eq!(pr_after.owner, pr_task.owner);
+    assert!(
+        repo.list_activity(&pr_task.id)
+            .await
+            .unwrap()
+            .iter()
+            .any(|entry| entry.payload.contains("terminal_close_deferred_pr_handoff")),
+        "the dispatch-cap PR path must leave durable poller-handoff evidence"
+    );
+    let no_pr_after = repo.get(&no_pr_task.id).await.unwrap().unwrap();
+    assert_eq!(no_pr_after.status, "closed");
+    assert!(no_pr_after.close_reason.is_some());
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn dispatch_span_records_task_and_model_fields() {
     let db = test_helpers::create_test_db();
