@@ -17,10 +17,12 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{RoleKind, StageError, StageOutcome, TaskRunOutcome, TaskRunSpec};
 
+pub mod lease;
 pub mod rpc;
 pub mod server;
 pub mod wire;
 
+pub use lease::*;
 pub use wire::{
     BillingSource, CostBasisHint, SerializableCreateSessionParams, SerializableCreateTaskRunParams,
     SerializableDjinnEvent,
@@ -59,6 +61,28 @@ pub trait SupervisorServices: Send + Sync + 'static {
     /// Supervisor-wide cancellation token.  Flagged when the task-run is torn
     /// down (server shutdown, user kill).
     fn cancel(&self) -> &CancellationToken;
+
+    async fn queue_lease(&self, _: LeaseQueueRequest) -> LeaseResult {
+        LeaseResult::LeaseUnavailable
+    }
+    async fn grant_lease(&self, _: LeaseGrantRequest) -> LeaseResult {
+        LeaseResult::LeaseUnavailable
+    }
+    async fn lease_status(&self, _: LeaseStatusRequest) -> LeaseResult {
+        LeaseResult::LeaseUnavailable
+    }
+    async fn abandon_lease(&self, _: LeaseAbandonRequest) -> LeaseResult {
+        LeaseResult::LeaseUnavailable
+    }
+    async fn bind_lease_pod(&self, _: LeaseBindRequest) -> LeaseResult {
+        LeaseResult::LeaseUnavailable
+    }
+    async fn cancel_lease(&self, _: LeaseCancelRequest) -> LeaseResult {
+        LeaseResult::LeaseUnavailable
+    }
+    async fn release_lease(&self, _: LeaseReleaseRequest) -> LeaseResult {
+        LeaseResult::LeaseUnavailable
+    }
 
     /// Load the [`Task`] row backing this task-run.  Called once, before the
     /// first stage executes.
