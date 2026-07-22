@@ -764,11 +764,7 @@ async fn atomic_materialization_creates_task_and_links_in_one_tx() {
         .find(|item| item.selection_id == sel.id)
         .and_then(|item| item.task_id)
         .expect("seeded selection has source task provenance");
-    let source_creator_id = task_repo
-        .created_by_user_id(&source_task_id)
-        .await
-        .unwrap()
-        .expect("seeded source task has a creator");
+    let source_creator_id = task_repo.created_by_user_id(&source_task_id).await.unwrap();
     let task_id = audit_repo
         .materialize_audit_task_atomic(
             &sel.id,
@@ -785,10 +781,7 @@ async fn atomic_materialization_creates_task_and_links_in_one_tx() {
     let task = task_repo.get(&task_id).await.unwrap().unwrap();
     assert_eq!(task.issue_type, "task");
     assert_eq!(task.description, "test description");
-    assert_eq!(
-        task.created_by_user_id.as_deref(),
-        Some(source_creator_id.as_str())
-    );
+    assert_eq!(task.created_by_user_id.as_str(), source_creator_id.as_str());
 
     // Verify the selection is linked.
     let updated = audit_repo
@@ -821,24 +814,12 @@ async fn atomic_materialization_rolls_back_when_creator_is_unavailable() {
     )
     .await;
     let audit_repo = AuditSamplerRepository::new(db.clone());
-    let source_task_id = audit_repo
-        .list_unmaterialized_selections()
-        .await
-        .unwrap()
-        .into_iter()
-        .find(|item| item.selection_id == sel.id)
-        .and_then(|item| item.task_id)
-        .unwrap();
-    TaskRepository::new(db.clone(), djinn_core::events::EventBus::noop())
-        .clear_created_by_user_id(&source_task_id)
-        .await
-        .unwrap();
     let error = audit_repo
         .materialize_audit_task_atomic(
             &sel.id,
             &project_id,
             None,
-            Some(&source_task_id),
+            Some("missing-source-task"),
             "Audit review: unavailable creator",
             "must roll back",
         )
@@ -885,7 +866,7 @@ async fn atomic_materialization_rolls_back_when_selection_link_fails() {
         .into_iter()
         .find(|item| item.selection_id == sel.id)
         .and_then(|item| item.task_id)
-        .unwrap();
+        .expect("seeded selection has source task provenance");
     let error = audit_repo
         .materialize_audit_task_atomic(
             &uuid::Uuid::now_v7().to_string(),
