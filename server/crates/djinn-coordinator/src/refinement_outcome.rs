@@ -1133,7 +1133,9 @@ impl CoordinatorActor {
             .latest_lint
             .as_ref()
             .map(|lint| serde_json::to_string_pretty(lint).unwrap_or_else(|_| format!("{lint:?}")))
-            .unwrap_or_else(|| "unavailable (reported above as a Spec integrity failure)".to_string());
+            .unwrap_or_else(|| {
+                "unavailable (reported above as a Spec integrity failure)".to_string()
+            });
         format!(
             "{failures}\n\nLatest SpecLintResultV1 summary (errors and warnings):\n{lint_summary}"
         )
