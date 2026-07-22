@@ -18,15 +18,16 @@ pub mod test_support {
         apply_all_migrations_to_fresh_database, backdate_coordinator_incarnation_lease,
         backdate_task_attempt_created_at, backdate_task_updated_at,
         build_multi_project_housekeeping_fixture, close_task_at,
-        corrupt_credential_encrypted_value, delete_session_row, drop_table_cascade_for_test,
-        drop_table_for_test, ensure_doctor_findings_schema, event_bus_for,
-        insert_pending_attempt_with_raw_owner, make_coordinator_incarnation_error_after_first_read,
+        corrupt_credential_encrypted_value, delete_proposal_lint_results_for_test,
+        delete_session_row, drop_table_cascade_for_test, drop_table_for_test,
+        ensure_doctor_findings_schema, event_bus_for, insert_pending_attempt_with_raw_owner,
+        make_coordinator_incarnation_error_after_first_read,
         make_coordinator_incarnation_vanish_after_first_read, make_project,
         nullify_note_confidence_for_test, override_debate_trail_body_metadata,
         reject_admission_create_started_for_test, reject_new_task_arbitrations_for_test,
-        rename_note_confidence_column_for_test, seed_board_health_mismatch_candidate,
-        seed_chat_session_row, seed_project, seed_session_row, seed_session_row_with_id,
-        seed_task_row,
+        rename_note_confidence_column_for_test, replace_legacy_proposal_head_for_test,
+        seed_board_health_mismatch_candidate, seed_chat_session_row, seed_project,
+        seed_session_row, seed_session_row_with_id, seed_task_row,
     };
 }
 
