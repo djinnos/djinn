@@ -17,6 +17,7 @@
 //! revisions), so they remain here rather than in a separate native-skill
 //! module.
 
+use djinn_spec_lint::analyze_mdx_document;
 use rmcp::schemars;
 use serde::Deserialize;
 use serde_json::Value as JsonValue;
@@ -160,6 +161,7 @@ pub struct ByteRangeSelector {
 }
 
 /// Resolved byte range in the proposal body.
+#[derive(Debug)]
 pub(crate) struct ResolvedRange {
     start: usize,
     end: usize,
@@ -208,18 +210,17 @@ fn resolve_heading_selector(body: &str, heading_text: &str) -> Result<ResolvedRa
         return Err("heading_text must not be empty".into());
     }
 
-    // First pass: find all headings matching the needle using line-based scan.
-    let mut matches: Vec<(usize, usize)> = Vec::new(); // (line_byte_start, heading_level)
-    let mut offset = 0usize;
-    for line in body.lines() {
-        if let Some(stripped) = line.strip_prefix('#') {
-            let hashes = 1 + stripped.len() - stripped.trim_start_matches('#').len();
-            let text = line[hashes..].trim();
-            if text == needle {
-                matches.push((offset, hashes));
-            }
+    let document =
+        analyze_mdx_document(body).map_err(|error| format!("could not parse document: {error}"))?;
+    let mut matches = Vec::new();
+    for (index, node) in document.top_level_nodes.iter().enumerate() {
+        let Some(level) = node.heading_level else {
+            continue;
+        };
+        let text = atx_heading_text(&body[node.span.start..node.span.end], level);
+        if text == needle {
+            matches.push((index, level));
         }
-        offset += line.len() + 1; // +1 for '\n'
     }
 
     if matches.is_empty() {
@@ -232,21 +233,16 @@ fn resolve_heading_selector(body: &str, heading_text: &str) -> Result<ResolvedRa
         ));
     }
 
-    let (heading_start, heading_level) = matches[0];
-
-    // Find the end of this section: next heading at same or higher level, or
-    // end of body.
+    let (heading_index, heading_level) = matches[0];
+    let heading_start = document.top_level_nodes[heading_index].span.start;
     let mut section_end = body.len();
-    let mut pos = heading_start;
-    for line in body[heading_start..].lines().skip(1) {
-        pos += line.len() + 1;
-        if let Some(stripped) = line.strip_prefix('#') {
-            let hashes = 1 + stripped.len() - stripped.trim_start_matches('#').len();
-            if hashes <= heading_level {
-                // Trim back to just before this heading line's start.
-                section_end = pos - line.len() - 1;
-                break;
-            }
+    for node in document.top_level_nodes.iter().skip(heading_index + 1) {
+        if node
+            .heading_level
+            .is_some_and(|level| level <= heading_level)
+        {
+            section_end = node.span.start;
+            break;
         }
     }
 
@@ -255,6 +251,27 @@ fn resolve_heading_selector(body: &str, heading_text: &str) -> Result<ResolvedRa
         end: section_end,
         selector_description: format!("heading: {needle}"),
     })
+}
+
+/// Return visible text from an AST-confirmed ATX heading. A trailing `#` only
+/// closes a heading when it is separated from its text by whitespace, so
+/// `# C#` correctly selects the literal heading text `C#`.
+fn atx_heading_text(source: &str, level: u8) -> &str {
+    let after_prefix = source
+        .get(level as usize..)
+        .unwrap_or(source)
+        .trim_start_matches([' ', '\t']);
+    let text = after_prefix.trim_end_matches(['\r', '\n']);
+    let closing_start = text.trim_end_matches('#').len();
+    if closing_start < text.len()
+        && text.as_bytes()[..closing_start]
+            .last()
+            .is_some_and(u8::is_ascii_whitespace)
+    {
+        text[..closing_start].trim_end()
+    } else {
+        text.trim()
+    }
 }
 
 /// Match an exact text substring. Must occur exactly once.
@@ -279,9 +296,11 @@ fn resolve_exact_text_selector(body: &str, text: &str) -> Result<ResolvedRange, 
         ));
     }
     let start = matches[0];
+    let end = start + needle.len();
+    ensure_node_aligned(body, start, end)?;
     Ok(ResolvedRange {
         start,
-        end: start + needle.len(),
+        end,
         selector_description: format!("exact_text ({} bytes)", needle.len()),
     })
 }
@@ -316,6 +335,9 @@ fn resolve_byte_range_selector(
     if start >= end {
         return Err("byte_range start must be less than end".into());
     }
+    if !body.is_char_boundary(start) || !body.is_char_boundary(end) {
+        return Err("byte_range start and end must be UTF-8 character boundaries".into());
+    }
     if let Some(ref expected) = br.expected_text {
         let actual = &body[start..end];
         if actual != expected {
@@ -325,11 +347,40 @@ fn resolve_byte_range_selector(
             ));
         }
     }
+    ensure_node_aligned(body, start, end)?;
     Ok(ResolvedRange {
         start,
         end,
         selector_description: format!("byte_range[{}..{}]", start, end),
     })
+}
+
+const PATCH_RANGE_NOT_NODE_ALIGNED: &str = "PATCH_RANGE_NOT_NODE_ALIGNED";
+
+fn ensure_node_aligned(body: &str, start: usize, end: usize) -> Result<(), String> {
+    let document =
+        analyze_mdx_document(body).map_err(|error| format!("could not parse document: {error}"))?;
+    let aligned = document
+        .top_level_nodes
+        .iter()
+        .any(|node| node.span.start == start)
+        && document
+            .top_level_nodes
+            .iter()
+            .any(|node| node.span.end == end);
+    let patchable_property = document.registered_blocks.iter().any(|block| {
+        block
+            .patchable_property_spans
+            .iter()
+            .any(|span| span.start <= start && end <= span.end)
+    });
+    if aligned || patchable_property {
+        Ok(())
+    } else {
+        Err(format!(
+            "{PATCH_RANGE_NOT_NODE_ALIGNED}: exact_text and byte_range selectors must cover complete top-level AST nodes or one canonical code/template property"
+        ))
+    }
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -812,10 +863,18 @@ Should we use Redis or Memcached?
 
 #[cfg(test)]
 mod block_patch_tests {
+    use super::{
+        ByteRangeSelector, PATCH_RANGE_NOT_NODE_ALIGNED, resolve_byte_range_selector,
+        resolve_exact_text_selector, resolve_heading_selector,
+    };
     use crate::server::DjinnMcpServer;
     use crate::state::stubs::test_mcp_state;
     use djinn_core::events::EventBus;
     use djinn_db::{Database, ProposalCreateInput, ProposalRepository};
+
+    const HISTORICAL_SPLICE_BODY: &str = include_str!(
+        "../../../../djinn-spec-lint/tests/fixtures/v1/synthetic/delimiter_failures/body.md"
+    );
 
     async fn test_server() -> (DjinnMcpServer, Database) {
         let db = Database::open_in_memory().unwrap();
@@ -936,7 +995,9 @@ mod block_patch_tests {
                 "proposal_block_patch",
                 serde_json::json!({
                     "id": proposal.id,
-                    "selector": { "exact_text": "Content here." },
+                    // Deliberately missing: the stale guard must run before
+                    // selector resolution can report this error.
+                    "selector": { "exact_text": "not present" },
                     "operation": "replace",
                     "block_mdx": "<Diagram id=\"d1\" />\n",
                     "expected_latest_revision_seq": 99,
@@ -1185,9 +1246,9 @@ mod block_patch_tests {
                     "id": proposal.id,
                     "selector": {
                         "byte_range": {
-                            "start": 4,
-                            "end": 7,
-                            "expected_text": "bbb"
+                            "start": 0,
+                            "end": 11,
+                            "expected_text": "aaa bbb ccc"
                         }
                     },
                     "operation": "replace",
@@ -1203,7 +1264,7 @@ mod block_patch_tests {
             response.get("error")
         );
         let stored = repo.get(&proposal.id).await.unwrap().unwrap();
-        assert_eq!(stored.body, "aaa DDD ccc");
+        assert_eq!(stored.body, "DDD");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1213,7 +1274,7 @@ mod block_patch_tests {
         let proposal = repo
             .create(ProposalCreateInput {
                 title: "Stale Range",
-                body: "aaa bbb ccc",
+                body: "paragraph one.\n\nparagraph two.",
                 acceptance_criteria: Some("[]"),
                 status: None,
                 body_format: None,
@@ -1228,8 +1289,8 @@ mod block_patch_tests {
                     "id": proposal.id,
                     "selector": {
                         "byte_range": {
-                            "start": 4,
-                            "end": 7,
+                            "start": 1,
+                            "end": 5,
                             "expected_text": "XXX"
                         }
                     },
@@ -1242,6 +1303,212 @@ mod block_patch_tests {
 
         let error = response.get("error").and_then(|v| v.as_str()).unwrap();
         assert!(error.contains("text mismatch"), "error was: {error}");
+        assert!(
+            !error.contains(PATCH_RANGE_NOT_NODE_ALIGNED),
+            "expected-text guard must precede alignment: {error}"
+        );
+        let unchanged = repo.get(&proposal.id).await.unwrap().unwrap();
+        assert_eq!(unchanged.latest_revision_seq, 1);
+        assert_eq!(repo.revisions(&proposal.id).await.unwrap().len(), 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn block_patch_rejected_candidate_keeps_revision_and_lint_rows() {
+        let (server, db) = test_server().await;
+        let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+        let proposal = repo
+            .create(ProposalCreateInput {
+                title: "Historical splice reproduction",
+                body: "Stable intro.\n\nReplace me.",
+                acceptance_criteria: Some("[]"),
+                status: None,
+                body_format: Some("markdown"),
+            })
+            .await
+            .unwrap();
+        let lint_rows_before = repo.lint_result_count(&proposal.id).await.unwrap();
+
+        // This redacted g6cc fixture reproduces the historical unclosed
+        // delimiter splice. The shared transformation accepts the selected
+        // AST node, then the repository must lint the complete candidate.
+        let response = server
+            .dispatch_tool(
+                "proposal_block_patch",
+                serde_json::json!({
+                    "id": proposal.id,
+                    "selector": { "exact_text": "Replace me." },
+                    "operation": "replace",
+                    "block_mdx": HISTORICAL_SPLICE_BODY,
+                }),
+            )
+            .await
+            .unwrap();
+        let error = response.get("error").and_then(|v| v.as_str()).unwrap();
+        assert!(error.contains("SPEC_LINT_REJECTED"), "error was: {error}");
+
+        let unchanged = repo.get(&proposal.id).await.unwrap().unwrap();
+        assert_eq!(unchanged.latest_revision_seq, 1);
+        assert_eq!(unchanged.body, "Stable intro.\n\nReplace me.");
+        let lint_rows_after = repo.lint_result_count(&proposal.id).await.unwrap();
+        assert_eq!(lint_rows_after, lint_rows_before);
+    }
+
+    #[test]
+    fn selectors_use_ast_boundaries_and_parsed_heading_outline() {
+        let body = "# Root\r\n\r\n## Nested\r\n\r\né paragraph\r\n\r\n# C#\r\nEOF";
+        let nested = resolve_heading_selector(body, "Nested").unwrap();
+        assert_eq!(
+            &body[nested.start..nested.end],
+            "## Nested\r\n\r\né paragraph\r\n\r\n"
+        );
+        let eof = resolve_heading_selector(body, "C#").unwrap();
+        assert_eq!(&body[eof.start..eof.end], "# C#\r\nEOF");
+        assert!(
+            resolve_heading_selector("# Same\n\n# Same", "Same")
+                .unwrap_err()
+                .contains("ambiguous")
+        );
+        assert!(
+            resolve_exact_text_selector("first paragraph.\n\nsecond paragraph.", "first")
+                .unwrap_err()
+                .contains(PATCH_RANGE_NOT_NODE_ALIGNED)
+        );
+        assert!(
+            resolve_byte_range_selector(
+                "first paragraph.\n\nsecond paragraph.",
+                &ByteRangeSelector {
+                    start: 1,
+                    end: 5,
+                    expected_text: None
+                },
+            )
+            .unwrap_err()
+            .contains(PATCH_RANGE_NOT_NODE_ALIGNED)
+        );
+    }
+
+    #[test]
+    fn canonical_code_and_template_properties_are_alignment_exceptions() {
+        let body = "<AnnotatedCode id=\"a\" code={`let x = 1;`} />";
+        let start = body.find("let x = 1;").unwrap();
+        let end = start + "let x = 1;".len();
+        assert!(
+            resolve_byte_range_selector(
+                body,
+                &ByteRangeSelector {
+                    start: start as i64,
+                    end: end as i64,
+                    expected_text: Some("let x = 1;".into()),
+                }
+            )
+            .is_ok()
+        );
+        let id_start = body.find("\"a\"").unwrap() + 1;
+        assert!(
+            resolve_byte_range_selector(
+                body,
+                &ByteRangeSelector {
+                    start: id_start as i64,
+                    end: id_start as i64 + 1,
+                    expected_text: None,
+                }
+            )
+            .unwrap_err()
+            .contains(PATCH_RANGE_NOT_NODE_ALIGNED)
+        );
+        let template_body = "<RichText id=\"r\" template={`Hello {{name}}`} />";
+        let template_start = template_body.find("Hello {{name}}").unwrap();
+        let template_end = template_start + "Hello {{name}}".len();
+        assert!(
+            resolve_byte_range_selector(
+                template_body,
+                &ByteRangeSelector {
+                    start: template_start as i64,
+                    end: template_end as i64,
+                    expected_text: Some("Hello {{name}}".into()),
+                },
+            )
+            .is_ok(),
+            "canonical template property must be patchable"
+        );
+
+        let raw_brace_template = "<RichText id=\"r\" template=\"Hello } later\" />";
+        let later_start = raw_brace_template.find("later").unwrap();
+        let raw_brace_result = resolve_byte_range_selector(
+            raw_brace_template,
+            &ByteRangeSelector {
+                start: later_start as i64,
+                end: (later_start + "later".len()) as i64,
+                expected_text: Some("later".into()),
+            },
+        );
+        assert!(
+            raw_brace_result.is_ok(),
+            "a raw closing brace in a template literal must not truncate its property span: {raw_brace_result:?}"
+        );
+
+        let raw_brace_code = "<AnnotatedCode id=\"a\" code='const close = \"}\"; later();' />";
+        assert!(
+            resolve_exact_text_selector(raw_brace_code, "later()").is_ok(),
+            "a brace in a code string must not truncate its property span"
+        );
+
+        let cross_node_body = "first paragraph.\n\nsecond paragraph.";
+        let cross_start = cross_node_body.find("paragraph.").unwrap() + 1;
+        let cross_end = cross_node_body.rfind("paragraph.").unwrap() + "paragraph".len();
+        assert!(
+            resolve_byte_range_selector(
+                cross_node_body,
+                &ByteRangeSelector {
+                    start: cross_start as i64,
+                    end: cross_end as i64,
+                    expected_text: None,
+                },
+            )
+            .unwrap_err()
+            .contains(PATCH_RANGE_NOT_NODE_ALIGNED),
+            "a range partially spanning two top-level paragraphs must be rejected"
+        );
+    }
+
+    #[test]
+    fn property_looking_text_in_other_attributes_is_not_patchable() {
+        let quoted = "<RichText id=\"r\" label=\"prefix code={`spoof quoted`} suffix\" />";
+        let quoted_start = quoted.find("spoof quoted").unwrap();
+        assert!(
+            resolve_exact_text_selector(quoted, "spoof quoted")
+                .unwrap_err()
+                .contains(PATCH_RANGE_NOT_NODE_ALIGNED),
+            "code-looking text inside a quoted unrelated property must not authorize a patch"
+        );
+        assert!(
+            resolve_byte_range_selector(
+                quoted,
+                &ByteRangeSelector {
+                    start: quoted_start as i64,
+                    end: (quoted_start + "spoof quoted".len()) as i64,
+                    expected_text: Some("spoof quoted".into()),
+                },
+            )
+            .unwrap_err()
+            .contains(PATCH_RANGE_NOT_NODE_ALIGNED)
+        );
+
+        let braced = r#"<AnnotatedCode id="a" meta={{ nested: { text: "escaped \" template={`spoof braced`}" } }} />"#;
+        let braced_start = braced.find("spoof braced").unwrap();
+        assert!(
+            resolve_byte_range_selector(
+                braced,
+                &ByteRangeSelector {
+                    start: braced_start as i64,
+                    end: (braced_start + "spoof braced".len()) as i64,
+                    expected_text: Some("spoof braced".into()),
+                },
+            )
+            .unwrap_err()
+            .contains(PATCH_RANGE_NOT_NODE_ALIGNED),
+            "template-looking text inside a nested braced property must not authorize a patch"
+        );
     }
 }
 
