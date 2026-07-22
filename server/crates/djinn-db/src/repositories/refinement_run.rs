@@ -26,6 +26,120 @@ pub struct LoadRefinementRunSnapshotRequest {
     pub heartbeat_grace_millis: i64,
 }
 
+/// A leased dispatch intent returned after a successful compare-and-swap claim.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RefinementIntentLease {
+    pub intent_id: String,
+    pub run_id: String,
+    pub generation: i32,
+    pub round: i32,
+    pub phase: RefinementPhase,
+    pub role: RefinementRole,
+    pub owner: String,
+    pub expires_at: DbTimestamp,
+}
+
+/// A pending or currently leased exact-run intent. This projection is read-only.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RefinementPendingIntent {
+    pub intent_id: String,
+    pub run_id: String,
+    pub generation: i32,
+    pub round: i32,
+    pub phase: RefinementPhase,
+    pub role: RefinementRole,
+    pub state: RefinementIntentState,
+    pub claimed_by: Option<String>,
+    pub claim_expires_at: Option<DbTimestamp>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClaimRefinementIntentRequest {
+    pub run_id: String,
+    pub intent_id: String,
+    pub generation: i32,
+    pub owner: String,
+    pub lease_millis: i64,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReleaseRefinementIntentClaimRequest {
+    pub run_id: String,
+    pub intent_id: String,
+    pub generation: i32,
+    pub owner: String,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AcknowledgeRefinementTaskMaterializationRequest {
+    pub run_id: String,
+    pub intent_id: String,
+    pub generation: i32,
+    pub task_id: String,
+    pub owner: String,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CompleteRefinementIntentRequest {
+    pub run_id: String,
+    pub intent_id: String,
+    pub generation: i32,
+    pub owner: String,
+    pub next_round: i32,
+    pub next_phase: RefinementPhase,
+    pub next_role: RefinementRole,
+    pub next_idempotency_key: String,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RefinementNextIntent {
+    pub intent_id: String,
+    pub round: i32,
+    pub phase: RefinementPhase,
+    pub role: RefinementRole,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ParkRefinementRunRequest {
+    pub run_id: String,
+    pub generation: i32,
+    pub kind: RefinementParkKind,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TerminalRefinementRunRequest {
+    pub run_id: String,
+    pub generation: i32,
+    pub reason: RefinementStopReason,
+}
+/// A named durable append boundary that is permitted to move the heartbeat.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RefinementDurableProgress {
+    DebateAppend,
+    VerdictAppend,
+    TaskStarted,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RefinementLifecycleAggregate {
+    pub stale_run_count: i64,
+    pub reaped_phantom_last_24h: i64,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum RefinementIntentMutationError {
+    #[error(transparent)]
+    Database(#[from] Error),
+    #[error("invalid refinement intent mutation: {0}")]
+    InvalidRequest(String),
+    #[error("run {run_id} generation {generation} is not current")]
+    GenerationConflict { run_id: String, generation: i32 },
+    #[error("intent {intent_id} is not claimable by {owner}")]
+    ClaimConflict { intent_id: String, owner: String },
+    #[error("task {task_id} does not have the required refinement correlation")]
+    TaskCorrelationMismatch { task_id: String },
+}
+impl From<sqlx::Error> for RefinementIntentMutationError {
+    fn from(error: sqlx::Error) -> Self {
+        Self::Database(Error::from(error))
+    }
+}
+pub(super) type IntentMutationResult<T> = std::result::Result<T, RefinementIntentMutationError>;
+
 /// An exact run snapshot together with the one DB observation used to decide it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RefinementRunSnapshotResult {
@@ -60,7 +174,7 @@ impl From<sqlx::Error> for RefinementRunSnapshotError {
     }
 }
 
-type SnapshotResult<T> = std::result::Result<T, RefinementRunSnapshotError>;
+pub(super) type SnapshotResult<T> = std::result::Result<T, RefinementRunSnapshotError>;
 
 /// Suffix used to derive the first dispatch intent's idempotency key.
 ///
@@ -436,7 +550,7 @@ async fn insert_admission(
     })
 }
 
-async fn load_snapshot_in_transaction(
+pub(super) async fn load_snapshot_in_transaction(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     run_id: &str,
     heartbeat_grace_millis: i64,
@@ -600,7 +714,7 @@ fn run_state(value: String) -> SnapshotResult<RefinementRunState> {
         _ => Err(invalid("run state", &value)),
     }
 }
-fn intent_state(value: String) -> SnapshotResult<RefinementIntentState> {
+pub(super) fn intent_state(value: String) -> SnapshotResult<RefinementIntentState> {
     match value.as_str() {
         "pending" => Ok(RefinementIntentState::Pending),
         "claimed" => Ok(RefinementIntentState::Claimed),
@@ -609,7 +723,7 @@ fn intent_state(value: String) -> SnapshotResult<RefinementIntentState> {
         _ => Err(invalid("intent state", &value)),
     }
 }
-fn phase(value: String) -> SnapshotResult<RefinementPhase> {
+pub(super) fn phase(value: String) -> SnapshotResult<RefinementPhase> {
     match value.as_str() {
         "adversary_attack" => Ok(RefinementPhase::AdversaryAttack),
         "advocate_revision" => Ok(RefinementPhase::AdvocateRevision),
@@ -617,7 +731,7 @@ fn phase(value: String) -> SnapshotResult<RefinementPhase> {
         _ => Err(invalid("phase", &value)),
     }
 }
-fn role(value: String) -> SnapshotResult<RefinementRole> {
+pub(super) fn role(value: String) -> SnapshotResult<RefinementRole> {
     match value.as_str() {
         "adversary" => Ok(RefinementRole::Adversary),
         "advocate" => Ok(RefinementRole::Advocate),
@@ -650,7 +764,7 @@ fn task_state(value: String) -> SnapshotResult<RefinementTaskState> {
 fn invalid(field: &str, value: &str) -> RefinementRunSnapshotError {
     RefinementRunSnapshotError::InvalidEvidence(format!("unknown {field} {value:?}"))
 }
-fn timestamp(value: &str) -> SnapshotResult<DbTimestamp> {
+pub(super) fn timestamp(value: &str) -> SnapshotResult<DbTimestamp> {
     chrono::DateTime::parse_from_rfc3339(value)
         .map(|v| DbTimestamp(v.timestamp_millis()))
         .map_err(|e| {

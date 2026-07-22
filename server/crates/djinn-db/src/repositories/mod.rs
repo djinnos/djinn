@@ -32,6 +32,7 @@ pub mod project_workspace_coverage;
 pub mod project_workspace_graph;
 pub mod proposal;
 pub mod refinement_run;
+mod refinement_run_lifecycle;
 pub mod repo_graph_cache;
 pub mod repo_graph_generation;
 pub mod repo_graph_retention;
