@@ -1,4 +1,4 @@
-//! Migration 141 — task creator contract.
+//! Migration 142 — task creator contract.
 //!
 //! Verifies the transactional backfill migration that fills every NULL
 //! `tasks.created_by_user_id` using deterministic typed precedence and then
@@ -1181,14 +1181,14 @@ async fn full_runner_applies_contract_migration_with_operator() {
             .expect("connect to verify");
 
         let applied: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM _sqlx_migrations WHERE version = 141 AND success = TRUE",
+            "SELECT COUNT(*) FROM _sqlx_migrations WHERE version = 142 AND success = TRUE",
         )
         .fetch_one(&pool)
         .await
         .expect("check migration recorded");
         assert!(
             applied == 1,
-            "migration 141 should be recorded in _sqlx_migrations"
+            "migration 142 should be recorded in _sqlx_migrations"
         );
 
         let is_nullable: String = sqlx::query_scalar(

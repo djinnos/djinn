@@ -1,4 +1,4 @@
--- Migration 141 — Task creator contract.
+-- Migration 142 — Task creator contract.
 --
 -- Backfills every NULL `tasks.created_by_user_id` using deterministic typed
 -- precedence and then contracts the column to NOT NULL. The migration requires

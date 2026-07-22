@@ -5,8 +5,8 @@ use std::path::{Path, PathBuf};
 use sqlx::postgres::PgConnection;
 use sqlx::{Connection, Executor};
 
-pub(crate) const MIGRATION_VERSION: u64 = 141;
-pub(crate) const MIGRATION_FILE: &str = "141_task_creator_contract.sql";
+pub(crate) const MIGRATION_VERSION: u64 = 142;
+pub(crate) const MIGRATION_FILE: &str = "142_task_creator_contract.sql";
 pub(crate) const DESIGNATED: &str = "00000000-0000-7000-8000-000000000099";
 
 // ═══════════════════════════════════════════════════════════════════════════
