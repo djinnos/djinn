@@ -1,3 +1,5 @@
+#![allow(clippy::expect_used, clippy::unwrap_used)]
+
 use djinn_provider::message::{ContentBlock, Conversation, Message};
 use djinn_provider::provider::{
     ExhaustedTransportCategory, ExhaustedTransportDiagnostic, LlmProvider, ProviderError,
@@ -8,7 +10,8 @@ use djinn_slot::reply_loop::error_handling::{
     classify_exhausted_transport, is_oversized_transport_payload,
 };
 use djinn_slot::reply_loop::turn::{
-    ReplyLoopContext, TransportRecoveryCompactionHook,
+    ReplyLoopContext, TransportRecoveryBudgetCheckHook, TransportRecoveryCompactionHook,
+    set_transport_recovery_budget_check_hook_for_test,
     set_transport_recovery_compaction_hook_for_test,
 };
 use djinn_slot::{CompactionCriticalSection, run_reply_loop};
@@ -136,12 +139,13 @@ static RECOVERY_TEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 async fn run_case(
     script: Vec<Outcome>,
     compaction: Result<bool, &'static str>,
-) -> (usize, usize, anyhow::Result<()>) {
+) -> (usize, usize, usize, anyhow::Result<()>) {
     let _serial = RECOVERY_TEST_LOCK
         .get_or_init(|| Mutex::new(()))
         .lock()
         .unwrap();
     let compactions = Arc::new(AtomicUsize::new(0));
+    let budget_checks = Arc::new(AtomicUsize::new(0));
     let count = Arc::clone(&compactions);
     let result = compaction.map_err(str::to_owned);
     let hook: TransportRecoveryCompactionHook = Arc::new(move || {
@@ -149,6 +153,11 @@ async fn run_case(
         result.clone()
     });
     set_transport_recovery_compaction_hook_for_test(Some(hook));
+    let budget_count = Arc::clone(&budget_checks);
+    let budget_hook: TransportRecoveryBudgetCheckHook = Arc::new(move || {
+        budget_count.fetch_add(1, Ordering::SeqCst);
+    });
+    set_transport_recovery_budget_check_hook_for_test(Some(budget_hook));
     let provider = ScriptedProvider::new(script);
     let db = djinn_slot::test_helpers::create_test_db();
     let cancel = CancellationToken::new();
@@ -199,32 +208,36 @@ async fn run_case(
     .await
     .0;
     set_transport_recovery_compaction_hook_for_test(None);
+    set_transport_recovery_budget_check_hook_for_test(None);
     (
         provider.calls.load(Ordering::SeqCst),
         compactions.load(Ordering::SeqCst),
+        budget_checks.load(Ordering::SeqCst),
         output,
     )
 }
 
 #[tokio::test]
 async fn recovery_is_one_shot() {
-    let (calls, compacted, result) =
+    let (calls, compacted, budget_checks, result) =
         run_case(vec![Outcome::Eligible, Outcome::Success], Ok(true)).await;
-    assert_eq!((calls, compacted), (2, 1));
+    assert_eq!((calls, compacted, budget_checks), (2, 1, 2));
     assert!(result.is_ok());
-    let (calls, compacted, result) = run_case(vec![Outcome::Eligible], Err("summary failed")).await;
-    assert_eq!((calls, compacted), (1, 1));
+    let (calls, compacted, budget_checks, result) =
+        run_case(vec![Outcome::Eligible], Err("summary failed")).await;
+    assert_eq!((calls, compacted, budget_checks), (1, 1, 1));
     assert!(format!("{:#}", result.unwrap_err()).contains("exhausted transport error"));
-    let (calls, compacted, result) =
+    let (calls, compacted, budget_checks, result) =
         run_case(vec![Outcome::Eligible, Outcome::Eligible], Ok(true)).await;
-    assert_eq!((calls, compacted), (2, 1));
+    assert_eq!((calls, compacted, budget_checks), (2, 1, 2));
     assert!(format!("{:#}", result.unwrap_err()).contains("exhausted transport error"));
-    let (calls, compacted, result) =
+    let (calls, compacted, budget_checks, result) =
         run_case(vec![Outcome::Empty200, Outcome::Success], Ok(true)).await;
-    assert_eq!((calls, compacted), (2, 1));
+    assert_eq!((calls, compacted, budget_checks), (2, 1, 2));
     assert!(result.is_ok());
-    let (calls, compacted, result) = run_case(vec![Outcome::Excluded], Ok(true)).await;
-    assert_eq!((calls, compacted), (1, 0));
+    let (calls, compacted, budget_checks, result) =
+        run_case(vec![Outcome::Excluded], Ok(true)).await;
+    assert_eq!((calls, compacted, budget_checks), (1, 0, 1));
     assert!(
         result
             .unwrap_err()

@@ -537,9 +537,20 @@ pub struct ReplyLoopContext<'a> {
 #[cfg(feature = "test-support")]
 pub type TransportRecoveryCompactionHook = Arc<dyn Fn() -> Result<bool, String> + Send + Sync>;
 
+/// Observes each completed pass through the lifetime/hard/soft budget checks.
+/// This lets the stable integration fixture prove recovery re-enters the loop
+/// head before its one provider retry.
+#[cfg(feature = "test-support")]
+pub type TransportRecoveryBudgetCheckHook = Arc<dyn Fn() + Send + Sync>;
+
 #[cfg(feature = "test-support")]
 static TRANSPORT_RECOVERY_COMPACTION_HOOK: OnceLock<
     Mutex<Option<TransportRecoveryCompactionHook>>,
+> = OnceLock::new();
+
+#[cfg(feature = "test-support")]
+static TRANSPORT_RECOVERY_BUDGET_CHECK_HOOK: OnceLock<
+    Mutex<Option<TransportRecoveryBudgetCheckHook>>,
 > = OnceLock::new();
 
 #[cfg(feature = "test-support")]
@@ -547,6 +558,16 @@ pub fn set_transport_recovery_compaction_hook_for_test(
     hook: Option<TransportRecoveryCompactionHook>,
 ) {
     *TRANSPORT_RECOVERY_COMPACTION_HOOK
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = hook;
+}
+
+#[cfg(feature = "test-support")]
+pub fn set_transport_recovery_budget_check_hook_for_test(
+    hook: Option<TransportRecoveryBudgetCheckHook>,
+) {
+    *TRANSPORT_RECOVERY_BUDGET_CHECK_HOOK
         .get_or_init(|| Mutex::new(None))
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner) = hook;
@@ -832,6 +853,15 @@ pub async fn run_reply_loop(
                 conversation,
             )
             .await;
+            #[cfg(feature = "test-support")]
+            if let Some(hook) = TRANSPORT_RECOVERY_BUDGET_CHECK_HOOK
+                .get_or_init(|| Mutex::new(None))
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone()
+            {
+                hook();
+            }
             turns += 1;
             let env_diag = runtime_env_diagnostics(session_id, project_path, worktree_path);
             tracing::info!(
