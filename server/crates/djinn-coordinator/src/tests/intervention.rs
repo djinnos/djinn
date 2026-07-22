@@ -1609,6 +1609,128 @@ async fn second_strike_parks_task_after_prior_intervention() {
     );
 }
 
+/// Drive a task to the exact second-strike park condition — `intervention_count
+/// == 1`, quality strikes back at threshold, and enough terminated
+/// post-intervention sessions to satisfy the uv3p attempted-remediation gate —
+/// so that trigger A WOULD park it on the next worker dispatch. Returns the task
+/// after the setup completes.
+async fn seed_task_at_second_strike_park_condition(
+    db: &Database,
+    tx: &broadcast::Sender<DjinnEventEnvelope>,
+) -> djinn_core::models::Task {
+    let repo = TaskRepository::new(db.clone(), crate::events::event_bus_for(tx));
+    let task = make_task_with_reopen_count(db, tx, REOPEN_INTERVENTION_THRESHOLD).await;
+    // One completed planner intervention (bumps intervention_count, resets
+    // reopen_count), then climb back to the quality-strike threshold.
+    repo.reset_intervention_counters(&task.id).await.unwrap();
+    for _ in 0..REOPEN_INTERVENTION_THRESHOLD {
+        repo.set_status(&task.id, "closed").await.unwrap();
+        repo.set_status(&task.id, "open").await.unwrap();
+    }
+    // uv3p attempted-remediation gate: NON_ATTEMPT_PARK_THRESHOLD (2) distinct
+    // models terminated pre-submission after the intervention, so the park rung
+    // would fire rather than redispatch for more evidence.
+    seed_terminated_post_intervention_sessions(db, tx, &task.id, &["m-a", "m-b"]).await;
+    let task = repo.get(&task.id).await.unwrap().unwrap();
+    assert_eq!(task.intervention_count, 1, "one prior planner intervention");
+    assert_eq!(task.reopen_count, REOPEN_INTERVENTION_THRESHOLD);
+    task
+}
+
+/// Regression (incident k6hm, 2026-07-21): a task that has exhausted its
+/// intervention budget on EARLIER review rejections then hits a trivial merge
+/// conflict against main. A conflict means main moved under an otherwise-healthy
+/// PR — it is not evidence the worker cannot converge on the acceptance
+/// criteria — so the dispatch tick must route it to the normal ConflictRetry
+/// rework worker, NOT consume the second strike and park it into
+/// `needs_lead_intervention` / the arbitration lane.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn merge_conflict_reopen_at_intervention_cap_does_not_park() {
+    let db = test_helpers::create_test_db();
+    let (tx, _rx) = broadcast::channel(256);
+    let mut actor = coordinator_actor_for_tests(&db, &tx);
+    let repo = TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx));
+
+    let task = seed_task_at_second_strike_park_condition(&db, &tx).await;
+
+    // The current re-dispatch is driven by an unresolved merge conflict on an
+    // otherwise-green PR (required CI not failing + populated conflict metadata).
+    repo.set_pr_url(&task.id, "https://github.com/acme/repo/pull/2412")
+        .await
+        .unwrap();
+    repo.set_merge_conflict_metadata(&task.id, Some(r#"{"files":["src/lib.rs"]}"#))
+        .await
+        .unwrap();
+    let task = repo.get(&task.id).await.unwrap().unwrap();
+
+    // Precondition: the task-row facts derive a MergeConflict rework signal.
+    assert_eq!(
+        crate::dispatch::respawn_guard::PrReworkSignal::from_task_row(
+            task.ci_status.as_str(),
+            task.merge_conflict_metadata.as_deref(),
+        ),
+        Some(crate::dispatch::respawn_guard::PrReworkSignal::MergeConflict),
+        "setup must present a merge-conflict rework signal (CI not failing)"
+    );
+
+    actor.dispatch_ready_tasks(Some(&task.project_id)).await;
+
+    // The merge conflict must NOT have been parked to the arbitration lane.
+    let after = repo.get(&task.id).await.unwrap().unwrap();
+    assert_ne!(
+        after.status, "needs_lead_intervention",
+        "a merge-conflict reopen must never park to needs_lead_intervention, even at \
+         the intervention cap — it routes to the ConflictRetry rework worker"
+    );
+
+    let arb_repo = TaskArbitrationRepository::new(db.clone());
+    let (_cycle, existing) = arb_repo.resolve_current_hold_cycle(&task.id).await.unwrap();
+    assert!(
+        existing.is_none(),
+        "a merge-conflict reopen must not create an arbitration/hold-cycle row"
+    );
+    let blockers = repo.list_blockers(&task.id).await.unwrap();
+    assert!(
+        blockers.iter().all(|b| b.status == "closed"),
+        "a merge-conflict reopen must not create a human-review hold blocker"
+    );
+}
+
+/// Control for `merge_conflict_reopen_at_intervention_cap_does_not_park`:
+/// through the SAME dispatch tick, an identical second-strike task WITHOUT a
+/// merge-conflict signal (a genuine quality strike) still parks to
+/// `needs_lead_intervention` with a durable arbitration row. Proves the exempt
+/// path above is scoped to merge conflicts and does not weaken genuine
+/// quality-strike parking.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn genuine_quality_strike_at_intervention_cap_still_parks_through_dispatch() {
+    let db = test_helpers::create_test_db();
+    let (tx, _rx) = broadcast::channel(256);
+    let mut actor = coordinator_actor_for_tests(&db, &tx);
+    let repo = TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx));
+
+    // No pr_url / no merge_conflict_metadata — a plain review-rejection loop.
+    let task = seed_task_at_second_strike_park_condition(&db, &tx).await;
+    assert!(
+        task.merge_conflict_metadata.is_none(),
+        "control task must carry no merge-conflict signal"
+    );
+
+    actor.dispatch_ready_tasks(Some(&task.project_id)).await;
+
+    let after = repo.get(&task.id).await.unwrap().unwrap();
+    assert_eq!(
+        after.status, "needs_lead_intervention",
+        "a genuine quality strike at the intervention cap must still park"
+    );
+    let arb_repo = TaskArbitrationRepository::new(db.clone());
+    let (_cycle, existing) = arb_repo.resolve_current_hold_cycle(&task.id).await.unwrap();
+    assert!(
+        existing.is_some(),
+        "the genuine-quality-strike park must create an unconsumed arbitration row"
+    );
+}
+
 /// uv3p Part B (AC #2 / cgcl-7fj3-nlus shape): a task at the second-strike
 /// condition (`intervention_count == 1`, quality strikes at threshold) with
 /// ZERO sessions dispatched since the intervention must NOT park — the

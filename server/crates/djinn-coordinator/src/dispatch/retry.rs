@@ -948,6 +948,19 @@ impl CoordinatorActor {
                          healthy infrastructure rather than penalizing the task.{skip_note}"
                     )
                 }
+                djinn_core::models::ReopenClass::MergeConflict => {
+                    // Merge-conflict reopen: main moved under an approved PR. This
+                    // is NOT a worker quality strike (it is excluded from
+                    // quality-strike counts and does not increment reopen_count),
+                    // so it must never use the AC-non-convergence phrasing. A
+                    // conflict is a mechanical rebase, not a failure to converge.
+                    format!(
+                        "The post-intervention remediation WAS attempted and submitted, but the PR \
+                         then hit a merge conflict against the base branch (main moved). This is a \
+                         mechanical rebase, not an acceptance-criteria failure, and is excluded from \
+                         quality-strike counts.{skip_note}"
+                    )
+                }
                 _ => {
                     // review_rejected / other quality strikes keep the existing AC phrasing.
                     format!(

@@ -9,7 +9,10 @@ use djinn_db::repositories::refinement_run::LoadRefinementRunSnapshotRequest;
 use djinn_db::test_support::{
     UsageTestSessionSeed, UsageTestTaskSeed, seed_project, seed_session_row_with_id, seed_task_row,
 };
-use djinn_db::{Database, ProposalRepository};
+use djinn_db::{
+    AdmitRefinementRunRequest, Database, ProposalRepository, RefinementAdmissionError,
+    RefinementAdmissionOutcome, RefinementAdmissionSource,
+};
 
 const OLD: &str = "2000-01-01T00:00:00.000Z";
 const FUTURE: &str = "2999-01-01T00:00:00.000Z";
@@ -155,6 +158,158 @@ fn request(run_id: String) -> LoadRefinementRunSnapshotRequest {
         run_id,
         heartbeat_grace_millis: GRACE,
     }
+}
+
+fn admission(proposal_id: String, idempotency_key: impl Into<String>) -> AdmitRefinementRunRequest {
+    AdmitRefinementRunRequest {
+        proposal_id,
+        idempotency_key: idempotency_key.into(),
+        source: RefinementAdmissionSource::Demand {
+            demand_id: "concurrent-demand".into(),
+        },
+        heartbeat_grace_millis: GRACE,
+    }
+}
+
+fn winner(outcome: &RefinementAdmissionOutcome) -> (&str, &str, i32) {
+    match outcome {
+        RefinementAdmissionOutcome::Admitted {
+            run_id,
+            intent_id,
+            generation,
+        }
+        | RefinementAdmissionOutcome::Existing {
+            run_id,
+            intent_id,
+            generation,
+        } => (run_id, intent_id, *generation),
+    }
+}
+
+#[tokio::test]
+async fn concurrent_same_key_admission_has_one_winner_and_first_intent() {
+    let db = Database::open_in_memory().unwrap();
+    db.ensure_initialized().await.unwrap();
+    let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+    let proposal_id = proposal(&db).await;
+    let request = admission(proposal_id.clone(), "same-key-race");
+
+    let (left, right) = tokio::join!(
+        repo.admit_refinement_run(request.clone()),
+        repo.admit_refinement_run(request)
+    );
+    let left = left.unwrap();
+    let right = right.unwrap();
+    let (left_run, left_intent, left_generation) = winner(&left);
+    let (right_run, right_intent, right_generation) = winner(&right);
+    assert_eq!(
+        (left_run, left_intent, left_generation),
+        (right_run, right_intent, right_generation)
+    );
+    assert!(matches!(
+        (&left, &right),
+        (RefinementAdmissionOutcome::Admitted { .. }, RefinementAdmissionOutcome::Existing { .. })
+            | (RefinementAdmissionOutcome::Existing { .. }, RefinementAdmissionOutcome::Admitted { .. })
+    ));
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM refinement_runs WHERE proposal_id = $1 AND state IN ('running', 'parked')",
+        )
+        .bind(&proposal_id)
+        .fetch_one(db.pool())
+        .await
+        .unwrap(),
+        1
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM refinement_dispatch_intents WHERE run_id = $1 AND state = 'pending'",
+        )
+        .bind(left_run)
+        .fetch_one(db.pool())
+        .await
+        .unwrap(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn concurrent_distinct_reap_admission_has_one_successor_and_audit() {
+    let db = Database::open_in_memory().unwrap();
+    db.ensure_initialized().await.unwrap();
+    let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+    let proposal_id = proposal(&db).await;
+    let stale_run_id = run(&db, &proposal_id, 1).await;
+
+    let (left, right) = tokio::join!(
+        repo.reap_and_admit(admission(proposal_id.clone(), "stale-race-left")),
+        repo.reap_and_admit(admission(proposal_id.clone(), "stale-race-right"))
+    );
+    let admitted = match (left, right) {
+        (
+            Ok(RefinementAdmissionOutcome::Admitted { run_id, .. }),
+            Err(RefinementAdmissionError::AlreadyActive { .. }),
+        )
+        | (
+            Err(RefinementAdmissionError::AlreadyActive { .. }),
+            Ok(RefinementAdmissionOutcome::Admitted { run_id, .. }),
+        ) => run_id,
+        results => panic!(
+            "expected one admitted successor and one AlreadyActive result, got {results:?}"
+        ),
+    };
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM refinement_runs WHERE proposal_id = $1 AND state IN ('running', 'parked')",
+        )
+        .bind(&proposal_id)
+        .fetch_one(db.pool())
+        .await
+        .unwrap(),
+        1
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i32>("SELECT generation FROM refinement_runs WHERE id = $1")
+            .bind(&admitted)
+            .fetch_one(db.pool())
+            .await
+            .unwrap(),
+        2
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM refinement_dispatch_intents WHERE run_id = $1 AND state = 'pending'",
+        )
+        .bind(&admitted)
+        .fetch_one(db.pool())
+        .await
+        .unwrap(),
+        1
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM proposal_revisions WHERE refinement_run_id = $1 AND event_kind = 'refinement_stop' AND refinement_stop_tag = 'reaped_phantom'",
+        )
+        .bind(&stale_run_id)
+        .fetch_one(db.pool())
+        .await
+        .unwrap(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn admission_rejects_key_that_cannot_form_first_intent_key() {
+    let db = Database::open_in_memory().unwrap();
+    db.ensure_initialized().await.unwrap();
+    let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+    let proposal_id = proposal(&db).await;
+    let key = "x".repeat(255 - "/adversary/1".len() + 1);
+
+    assert!(matches!(
+        repo.admit_refinement_run(admission(proposal_id, key)).await,
+        Err(RefinementAdmissionError::InvalidRequest(_))
+    ));
 }
 
 #[tokio::test]

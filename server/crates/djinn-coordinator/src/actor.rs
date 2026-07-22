@@ -865,14 +865,54 @@ impl CoordinatorActor {
         }
     }
 
-    /// Renew this runtime's immutable incarnation lease on the maintenance cadence.
-    async fn renew_coordinator_incarnation(&self) {
-        health::renew_coordinator_incarnation(&self.db, &self.coordinator_incarnation_id).await;
+    /// Spawn the dedicated incarnation-lease renewal task.
+    ///
+    /// Renewal must NOT live on the coordinator mailbox / tick path. It used to
+    /// piggy-back on the 15-minute [`STALE_SWEEP_INTERVAL`] inside `run_tick`,
+    /// so this live coordinator's own lease was always ~15 min stale by the time
+    /// the orphan reaper (same sweep, run first) checked it against the 5-minute
+    /// [`health::ORPHANED_PENDING_ATTEMPT_THRESHOLD_SECS`] liveness window. The
+    /// reaper then read the live owner as "expired" and stamped its in-flight
+    /// pending dispatch groups `interrupted` / `environmental_owner_expired` — a
+    /// strike-exempt outcome that let genuinely-failing tasks loop
+    /// dispatch→reap forever without ever accumulating a strike.
+    ///
+    /// A dedicated task renewing every
+    /// [`health::COORDINATOR_INCARNATION_RENEWAL_INTERVAL`] (60s, 5x under the
+    /// expiry window) cannot be starved by a slow tick or the heavy stale sweep,
+    /// so the live owner reads truthfully live. It is scoped to the actor's
+    /// cancellation token: when the process/leader stops, renewal stops and the
+    /// lease correctly expires for the next boot's startup reaper.
+    fn spawn_incarnation_renewal(&self) {
+        let db = self.db.clone();
+        let incarnation_id = self.coordinator_incarnation_id.clone();
+        let cancel = self.cancel.clone();
+        tokio::spawn(async move {
+            let mut ticker = time::interval(health::COORDINATOR_INCARNATION_RENEWAL_INTERVAL);
+            // A delayed renewal must not fire a catch-up burst; one on-time
+            // renewal restores liveness.
+            ticker.set_missed_tick_behavior(time::MissedTickBehavior::Delay);
+            // The first tick is immediate; startup already registered the lease,
+            // so skip it and renew on the cadence thereafter.
+            ticker.tick().await;
+            loop {
+                tokio::select! {
+                    biased;
+                    _ = cancel.cancelled() => break,
+                    _ = ticker.tick() => {
+                        health::renew_coordinator_incarnation(&db, &incarnation_id).await;
+                    }
+                }
+            }
+        });
     }
 
     pub(super) async fn run(mut self) {
         tracing::info!("CoordinatorActor started");
         self.register_coordinator_incarnation().await;
+        // Keep the incarnation lease fresh from a dedicated task so a slow tick
+        // never lets the reaper read this live coordinator as expired.
+        self.spawn_incarnation_renewal();
 
         let _startup_imports_complete = match ProjectRepository::new(
             self.db.clone(),
@@ -1105,8 +1145,11 @@ impl CoordinatorActor {
         self.poll_pr_statuses().await;
         if self.last_stale_sweep.elapsed() >= STALE_SWEEP_INTERVAL {
             let app_state = self.maintenance_context();
+            // The incarnation lease is NOT renewed here: it lives on the
+            // dedicated `spawn_incarnation_renewal` task so a slow tick or this
+            // heavy sweep can never let the reaper (run inside
+            // `sweep_stale_resources`) read this live coordinator as expired.
             health::sweep_stale_resources(&self.db, &app_state).await;
-            self.renew_coordinator_incarnation().await;
             self.last_stale_sweep = SystemClock::new().now_instant();
         }
         if self.last_auto_dispatch_sweep.elapsed() >= AUTO_DISPATCH_SWEEP_INTERVAL {
@@ -2512,7 +2555,7 @@ mod tests {
         );
 
         tokio::time::sleep(StdDuration::from_millis(10)).await;
-        first.renew_coordinator_incarnation().await;
+        health::renew_coordinator_incarnation(&first.db, &first.coordinator_incarnation_id).await;
         let first_after_first = leases
             .get(&first.coordinator_incarnation_id)
             .await
@@ -2538,7 +2581,7 @@ mod tests {
         );
 
         tokio::time::sleep(StdDuration::from_millis(10)).await;
-        second.renew_coordinator_incarnation().await;
+        health::renew_coordinator_incarnation(&second.db, &second.coordinator_incarnation_id).await;
         let first_after_second = leases
             .get(&first.coordinator_incarnation_id)
             .await

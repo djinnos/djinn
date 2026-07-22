@@ -3117,6 +3117,7 @@ pub fn trigger_as_str(t: TaskRunTrigger) -> &'static str {
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+#[allow(clippy::disallowed_methods)] // tests seed TestClock with real time for duration/timeout assertions
 mod tests {
     use super::*;
     use async_trait::async_trait;
