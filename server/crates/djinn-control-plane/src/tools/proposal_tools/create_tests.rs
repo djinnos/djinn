@@ -1,3 +1,4 @@
+// djinn:allow-oversize
 // Tests for the CRUD/create concern in `proposal_tools/create.rs`.
 //
 // These tests are split out of `create.rs` so the production module stays under
@@ -882,6 +883,9 @@ mod body_excerpt_tests {
         assert!(rev["body_excerpt"].is_string());
         assert!(rev["body_truncated"].as_bool().unwrap());
         assert_eq!(rev["body_excerpt"].as_str().unwrap().chars().count(), 512);
+        assert!(show["latest_lint"].is_object());
+        assert!(rev["lint"].is_object());
+        assert_eq!(rev["lint"]["body_sha256"], show["latest_lint"]["body_sha256"]);
     }
 
     /// `revision_bodies: "full"` restores full revision bodies.
@@ -951,6 +955,8 @@ mod body_excerpt_tests {
         assert!(rev.get("body").is_none());
         assert!(rev.get("body_excerpt").is_none());
         assert!(rev.get("body_truncated").is_none());
+        assert!(rev["lint"].is_object(), "omit mode retains revision lint");
+        assert!(show["latest_lint"].is_object());
     }
 
     /// Invalid `fields` returns an error naming the invalid value and accepted values.
