@@ -75,6 +75,8 @@ pub struct QueueBuildLeaseInput {
     pub immutable_identity: String,
     /// RFC3339 timestamp, interpreted by PostgreSQL.
     pub queue_deadline: Option<String>,
+    /// Absolute deadline retained while queued and carried into its grant.
+    pub launch_deadline: Option<String>,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BuildLeaseRow {
@@ -147,8 +149,8 @@ impl BuildLeaseRepository {
                 QueueBuildLeaseResult::LeaseIdentityConflict { existing: row }
             });
         }
-        let row = sqlx::query_as::<_, DbRow>(&format!("INSERT INTO build_leases (consumer_kind,consumer_id,immutable_identity,queue_deadline,state) VALUES ($1,$2,$3,$4::timestamptz,'queued') RETURNING {COLS}"))
-            .bind(input.key.consumer_kind.as_str()).bind(&input.key.consumer_id).bind(&input.immutable_identity).bind(&input.queue_deadline).fetch_one(&mut *tx).await?;
+        let row = sqlx::query_as::<_, DbRow>(&format!("INSERT INTO build_leases (consumer_kind,consumer_id,immutable_identity,queue_deadline,launch_deadline,state) VALUES ($1,$2,$3,$4::timestamptz,$5::timestamptz,'queued') RETURNING {COLS}"))
+            .bind(input.key.consumer_kind.as_str()).bind(&input.key.consumer_id).bind(&input.immutable_identity).bind(&input.queue_deadline).bind(&input.launch_deadline).fetch_one(&mut *tx).await?;
         tx.commit().await?;
         Ok(QueueBuildLeaseResult::Queued {
             row: row.try_into()?,
@@ -186,7 +188,10 @@ impl BuildLeaseRepository {
                 cap,
             });
         };
-        let row = sqlx::query_as::<_, DbRow>(&format!("UPDATE build_leases SET state='granted', fencing_token=nextval('build_lease_fencing_token_seq'), granted_at=$1::timestamptz, launch_deadline=$2::timestamptz, updated_at=now() WHERE consumer_kind=$3 AND consumer_id=$4 RETURNING {COLS}"))
+        // Coordinator-originated deadlines are durable queue data. Direct
+        // repository users may still supply one at grant time, but may not
+        // erase a deadline already retained on the queued row.
+        let row = sqlx::query_as::<_, DbRow>(&format!("UPDATE build_leases SET state='granted', fencing_token=nextval('build_lease_fencing_token_seq'), granted_at=$1::timestamptz, launch_deadline=COALESCE($2::timestamptz, launch_deadline), updated_at=now() WHERE consumer_kind=$3 AND consumer_id=$4 RETURNING {COLS}"))
             .bind(now).bind(launch_deadline).bind(kind).bind(id).fetch_one(&mut *tx).await?;
         tx.commit().await?;
         Ok(GrantNextBuildLeaseResult::Granted(row.try_into()?))
@@ -211,6 +216,18 @@ impl BuildLeaseRepository {
         Ok(snapshot)
     }
 
+    /// Look up one durable row, including a retained terminal outcome. Service
+    /// retries use this instead of `snapshot`, whose recovery view excludes
+    /// terminal rows.
+    pub async fn get(&self, key: &BuildLeaseKey) -> DbResult<Option<BuildLeaseRow>> {
+        self.db.ensure_initialized().await?;
+        let mut tx = self.db.pool().begin().await?;
+        lock(&mut tx).await?;
+        let row = fetch(&mut tx, key, false).await?;
+        tx.commit().await?;
+        Ok(row)
+    }
+
     /// Status reports are idempotent, token-fenced and cannot resurrect terminal work.
     pub async fn status(
         &self,
@@ -229,29 +246,69 @@ impl BuildLeaseRepository {
                 "status must be a post-grant occupied lifecycle state".into(),
             ));
         }
-        self.transition(
-            key,
-            token,
-            &[
+        // Status reports are acknowledgements, never commands to move a lease
+        // backwards. In particular, a delayed Launching acknowledgement after
+        // bind must replay the bound row rather than overwrite its pod binding.
+        let allowed = match state {
+            BuildLeaseState::Launching => {
+                &[BuildLeaseState::Granted, BuildLeaseState::Launching][..]
+            }
+            BuildLeaseState::Bound => &[
+                BuildLeaseState::Granted,
+                BuildLeaseState::Launching,
+                BuildLeaseState::Bound,
+            ][..],
+            BuildLeaseState::Active => &[
+                BuildLeaseState::Launching,
+                BuildLeaseState::Bound,
+                BuildLeaseState::Active,
+            ][..],
+            BuildLeaseState::Suspect => &[
                 BuildLeaseState::Granted,
                 BuildLeaseState::Launching,
                 BuildLeaseState::Bound,
                 BuildLeaseState::Active,
                 BuildLeaseState::Suspect,
-            ],
-            state,
-            None,
-            cleanup,
-        )
-        .await
+            ][..],
+            BuildLeaseState::Queued | BuildLeaseState::Granted | BuildLeaseState::Terminal => {
+                unreachable!("validated above")
+            }
+        };
+        self.transition(key, token, allowed, state, None, cleanup)
+            .await
     }
-    pub async fn abandon(
+    /// Atomically abandon only an ungranted queued request. Terminal rows are
+    /// replayed so a lost abandon response remains idempotent.
+    pub async fn abandon_queued(
         &self,
         key: &BuildLeaseKey,
-        token: i64,
         cleanup: Option<serde_json::Value>,
     ) -> DbResult<BuildLeaseRow> {
-        self.terminal(key, Some(token), "abandoned", cleanup).await
+        self.db.ensure_initialized().await?;
+        let mut tx = self.db.pool().begin().await?;
+        lock(&mut tx).await?;
+        let row = fetch(&mut tx, key, true)
+            .await?
+            .ok_or_else(|| DbError::InvalidTransition("unknown build lease".into()))?;
+        if row.state == BuildLeaseState::Terminal {
+            tx.commit().await?;
+            return Ok(row);
+        }
+        if row.state != BuildLeaseState::Queued {
+            return Err(DbError::InvalidTransition(
+                "cannot abandon occupied build lease".into(),
+            ));
+        }
+        let result = sqlx::query_as::<_, DbRow>(&format!(
+            "UPDATE build_leases SET state='terminal',terminal_reason='abandoned',candidate_cleanup=COALESCE($1, candidate_cleanup),terminal_at=now(),updated_at=now() WHERE consumer_kind=$2 AND consumer_id=$3 RETURNING {COLS}"
+        ))
+        .bind(cleanup.map(sqlx::types::Json))
+        .bind(key.consumer_kind.as_str())
+        .bind(&key.consumer_id)
+        .fetch_one(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        result.try_into()
     }
     pub async fn cancel(
         &self,
@@ -259,6 +316,15 @@ impl BuildLeaseRepository {
         cleanup: Option<serde_json::Value>,
     ) -> DbResult<BuildLeaseRow> {
         self.terminal(key, None, "cancelled", cleanup).await
+    }
+    /// Fenced counterpart for a cancel request that carries a grant token.
+    pub async fn cancel_fenced(
+        &self,
+        key: &BuildLeaseKey,
+        token: i64,
+        cleanup: Option<serde_json::Value>,
+    ) -> DbResult<BuildLeaseRow> {
+        self.terminal(key, Some(token), "cancelled", cleanup).await
     }
     pub async fn release(
         &self,
@@ -281,19 +347,59 @@ impl BuildLeaseRepository {
         if pod_uid.trim().is_empty() {
             return Err(DbError::InvalidData("pod UID must not be blank".into()));
         }
-        self.transition(
-            key,
-            token,
-            &[
-                BuildLeaseState::Granted,
-                BuildLeaseState::Launching,
-                BuildLeaseState::Bound,
-            ],
-            BuildLeaseState::Bound,
-            Some(pod_uid),
-            cleanup,
-        )
-        .await
+        self.db.ensure_initialized().await?;
+        let mut tx = self.db.pool().begin().await?;
+        lock(&mut tx).await?;
+        let row = fetch(&mut tx, key, true)
+            .await?
+            .ok_or_else(|| DbError::InvalidTransition("unknown build lease".into()))?;
+        if row.fencing_token != Some(token) {
+            return Err(DbError::InvalidTransition(
+                "stale build lease fencing token".into(),
+            ));
+        }
+        if row
+            .bound_pod_uid
+            .as_deref()
+            .is_some_and(|uid| uid != pod_uid)
+        {
+            return Err(DbError::InvalidTransition(
+                "pod UID does not match build lease".into(),
+            ));
+        }
+        // A delayed bind with the committed immutable pod identity replays the
+        // forward row without moving Active, Suspect, or Terminal backward.
+        if matches!(
+            row.state,
+            BuildLeaseState::Bound
+                | BuildLeaseState::Active
+                | BuildLeaseState::Suspect
+                | BuildLeaseState::Terminal
+        ) && row.bound_pod_uid.as_deref() == Some(pod_uid)
+        {
+            tx.commit().await?;
+            return Ok(row);
+        }
+        if !matches!(
+            row.state,
+            BuildLeaseState::Granted | BuildLeaseState::Launching
+        ) {
+            return Err(DbError::InvalidTransition(format!(
+                "cannot bind build lease from {:?}",
+                row.state
+            )));
+        }
+        let result = sqlx::query_as::<_, DbRow>(&format!(
+            "UPDATE build_leases SET state='bound',bound_pod_uid=$1,candidate_cleanup=COALESCE($2,candidate_cleanup),updated_at=now() WHERE consumer_kind=$3 AND consumer_id=$4 RETURNING {COLS}"
+        ))
+        .bind(pod_uid)
+        .bind(cleanup.map(sqlx::types::Json))
+        .bind(key.consumer_kind.as_str())
+        .bind(&key.consumer_id)
+        .fetch_one(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        result.try_into()
     }
     pub async fn expire_deadlines(&self, now: &str) -> DbResult<Vec<BuildLeaseRow>> {
         self.db.ensure_initialized().await?;
@@ -321,16 +427,14 @@ impl BuildLeaseRepository {
         let row = fetch(&mut tx, key, true)
             .await?
             .ok_or_else(|| DbError::InvalidTransition("unknown build lease".into()))?;
-        if row.state == BuildLeaseState::Terminal {
-            tx.commit().await?;
-            return Ok(row);
-        }
-        if let Some(token) = token
-            && row.fencing_token != Some(token)
-        {
+        if token.is_some() && row.fencing_token != token {
             return Err(DbError::InvalidTransition(
                 "stale build lease fencing token".into(),
             ));
+        }
+        if row.state == BuildLeaseState::Terminal {
+            tx.commit().await?;
+            return Ok(row);
         }
         let result=sqlx::query_as::<_,DbRow>(&format!("UPDATE build_leases SET state='terminal',terminal_reason=$1,candidate_cleanup=COALESCE($2, candidate_cleanup),terminal_at=now(),updated_at=now() WHERE consumer_kind=$3 AND consumer_id=$4 RETURNING {COLS}")).bind(reason).bind(cleanup.map(sqlx::types::Json)).bind(key.consumer_kind.as_str()).bind(&key.consumer_id).fetch_one(&mut *tx).await?;
         tx.commit().await?;
@@ -355,6 +459,21 @@ impl BuildLeaseRepository {
             return Err(DbError::InvalidTransition(
                 "stale build lease fencing token".into(),
             ));
+        }
+        // Close the race between a service replay read and this locked
+        // transition. A delayed grant acknowledgement requests Launching, but
+        // any later durable state is already its successful forward outcome.
+        if state == BuildLeaseState::Launching
+            && matches!(
+                row.state,
+                BuildLeaseState::Bound
+                    | BuildLeaseState::Active
+                    | BuildLeaseState::Suspect
+                    | BuildLeaseState::Terminal
+            )
+        {
+            tx.commit().await?;
+            return Ok(row);
         }
         if row.state == state && (pod_uid.is_none() || row.bound_pod_uid.as_deref() == pod_uid) {
             tx.commit().await?;
@@ -516,6 +635,7 @@ mod tests {
             },
             immutable_identity: identity.into(),
             queue_deadline: None,
+            launch_deadline: None,
         }
     }
 
@@ -650,6 +770,12 @@ mod tests {
         ));
         let bound = repo.bind(&request.key, token, "pod-a", None).await.unwrap();
         assert_eq!(bound.bound_pod_uid.as_deref(), Some("pod-a"));
+        let delayed_grant = repo
+            .status(&request.key, token, BuildLeaseState::Launching, None)
+            .await
+            .unwrap();
+        assert_eq!(delayed_grant.state, BuildLeaseState::Bound);
+        assert_eq!(delayed_grant.bound_pod_uid.as_deref(), Some("pod-a"));
         assert_eq!(
             repo.bind(&request.key, token, "pod-a", None)
                 .await
@@ -661,6 +787,63 @@ mod tests {
             repo.bind(&request.key, token, "pod-b", None).await,
             Err(DbError::InvalidTransition(_))
         ));
+
+        repo.status(&request.key, token, BuildLeaseState::Active, None)
+            .await
+            .unwrap();
+        assert_eq!(
+            repo.status(&request.key, token, BuildLeaseState::Launching, None)
+                .await
+                .unwrap()
+                .state,
+            BuildLeaseState::Active
+        );
+        assert_eq!(
+            repo.bind(&request.key, token, "pod-a", None)
+                .await
+                .unwrap()
+                .state,
+            BuildLeaseState::Active
+        );
+        assert!(
+            repo.bind(&request.key, token + 1, "pod-a", None)
+                .await
+                .is_err()
+        );
+        assert!(repo.bind(&request.key, token, "pod-b", None).await.is_err());
+        assert_eq!(
+            repo.get(&request.key).await.unwrap().unwrap().state,
+            BuildLeaseState::Active
+        );
+
+        repo.status(&request.key, token, BuildLeaseState::Suspect, None)
+            .await
+            .unwrap();
+        assert_eq!(
+            repo.status(&request.key, token, BuildLeaseState::Launching, None)
+                .await
+                .unwrap()
+                .state,
+            BuildLeaseState::Suspect
+        );
+        assert_eq!(
+            repo.bind(&request.key, token, "pod-a", None)
+                .await
+                .unwrap()
+                .state,
+            BuildLeaseState::Suspect
+        );
+        repo.release(&request.key, token, None).await.unwrap();
+        let terminal = repo.bind(&request.key, token, "pod-a", None).await.unwrap();
+        assert_eq!(terminal.state, BuildLeaseState::Terminal);
+        assert_eq!(terminal.terminal_reason.as_deref(), Some("released"));
+        let delayed_grant = repo
+            .status(&request.key, token, BuildLeaseState::Launching, None)
+            .await
+            .unwrap();
+        assert_eq!(delayed_grant.state, BuildLeaseState::Terminal);
+        assert_eq!(delayed_grant.terminal_reason.as_deref(), Some("released"));
+        assert!(repo.bind(&request.key, token, "pod-b", None).await.is_err());
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

@@ -957,7 +957,13 @@ async fn cancelled_knowledge_load_persists_cancelled_terminal_without_prompt_tex
     let project_id = task.project_id.clone();
     let note_repo = NoteRepository::new(db.clone(), EventBus::noop());
     note_repo
-        .create(&project_id, "Would have been injected", "content", "pattern", "[]")
+        .create(
+            &project_id,
+            "Would have been injected",
+            "content",
+            "pattern",
+            "[]",
+        )
         .await
         .expect("seed note");
 
@@ -966,17 +972,14 @@ async fn cancelled_knowledge_load_persists_cancelled_terminal_without_prompt_tex
     cancellation.cancel();
     let rollout = knowledge_context_rollout_from_env();
 
-    let rendered = load_knowledge_context_with_planner(
-        &task,
-        None,
-        &app_state,
-        None,
-        &rollout,
-        &cancellation,
-    )
-    .await;
+    let rendered =
+        load_knowledge_context_with_planner(&task, None, &app_state, None, &rollout, &cancellation)
+            .await;
 
-    assert!(rendered.is_none(), "cancelled retrieval must not inject prompt text");
+    assert!(
+        rendered.is_none(),
+        "cancelled retrieval must not inject prompt text"
+    );
     let trace = latest_trace(&db, &project_id)
         .await
         .expect("cancelled terminal trace");
