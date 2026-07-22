@@ -213,18 +213,19 @@ impl BuildLeaseService {
             Ok(QueueBuildLeaseResult::Queued { row, .. }) => {
                 // Exact replay after a lost response must use the durable state
                 // rather than whether this request happened to grant the row.
-                if let Some(result) = queue_result(&row) {
+                if let Some(result) = self.queue_result(&row).await {
                     return result;
                 }
                 match self.drain().await {
                     // Re-read through idempotent queue after drain: it includes
                     // a newly minted grant or terminalized queue deadline.
                     Ok(_) => match self.repository.queue(&input).await {
-                        Ok(QueueBuildLeaseResult::Queued { row, .. }) => queue_result(&row)
-                            .unwrap_or_else(|| {
+                        Ok(QueueBuildLeaseResult::Queued { row, .. }) => {
+                            self.queue_result(&row).await.unwrap_or_else(|| {
                                 self.telemetry.outcome(LeaseTelemetryOutcome::Queued);
                                 LeaseResult::Queued(status(&row))
-                            }),
+                            })
+                        }
                         Ok(QueueBuildLeaseResult::LeaseIdentityConflict { .. }) | Err(_) => {
                             self.unavailable()
                         }
@@ -453,6 +454,24 @@ impl BuildLeaseService {
         self.telemetry.outcome(LeaseTelemetryOutcome::Unavailable);
         LeaseResult::LeaseUnavailable
     }
+    async fn queue_result(&self, row: &BuildLeaseRow) -> Option<LeaseResult> {
+        if row.state == BuildLeaseState::Terminal
+            && row.terminal_reason.as_deref() == Some("deadline_expired")
+        {
+            let credit = self
+                .repository
+                .consume_timeout_credit(&row.key)
+                .await
+                .ok()?;
+            return Some(LeaseResult::LeaseWaitTimeout {
+                timeout_credit: credit.then_some(djinn_supervisor::services::TimeoutCredit {
+                    units: 1,
+                    retry_after_ms: 0,
+                }),
+            });
+        }
+        queue_result(row)
+    }
     fn publish(&self, rows: &[BuildLeaseRow]) {
         let (queued, occupied) = rows
             .iter()
@@ -605,6 +624,7 @@ mod tests {
             .then(|| "pod-a".into()),
             candidate_cleanup: None,
             terminal_reason: terminal_reason.map(str::to_owned),
+            timeout_credit_consumed: false,
             created_at: "2026-01-01T00:00:00Z".into(),
             updated_at: "2026-01-01T00:00:00Z".into(),
             granted_at: None,
