@@ -459,8 +459,15 @@ pub(crate) async fn load_knowledge_context(
 ) -> Option<String> {
     let rollout = knowledge_context_rollout_from_env();
     let cancellation = CancellationToken::new();
-    load_knowledge_context_with_planner(task, epic_context, app_state, None, &rollout, &cancellation)
-        .await
+    load_knowledge_context_with_planner(
+        task,
+        epic_context,
+        app_state,
+        None,
+        &rollout,
+        &cancellation,
+    )
+    .await
 }
 
 async fn load_knowledge_context_with_planner(

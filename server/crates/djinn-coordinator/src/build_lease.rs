@@ -254,50 +254,23 @@ impl BuildLeaseService {
         }
         self.pause.before_transaction(LeaseOperation::Status).await;
         let (key, _) = identity(&request.identity);
-        match self.repository.snapshot().await {
-            Ok(snapshot) => snapshot
-                .rows
-                .into_iter()
-                .find(|row| row.key == key)
-                .map_or_else(
-                    || self.unavailable(),
-                    |row| {
-                        self.telemetry.outcome(LeaseTelemetryOutcome::Status);
-                        LeaseResult::Status(status(&row))
-                    },
-                ),
-            Err(_) => self.unavailable(),
+        match self.repository.get(&key).await {
+            Ok(Some(row)) => {
+                self.telemetry.outcome(LeaseTelemetryOutcome::Status);
+                LeaseResult::Status(status(&row))
+            }
+            Ok(None) | Err(_) => self.unavailable(),
         }
     }
 
     pub async fn abandon(&self, request: LeaseAbandonRequest) -> LeaseResult {
-        let _guard = self.operation.lock().await;
-        if !self.is_ready() {
-            return self.unavailable();
-        }
-        // The contract has no fencing token: abandon can only terminalize a
-        // queued request, and therefore can never revoke occupied work.
-        self.pause.before_transaction(LeaseOperation::Abandon).await;
-        let (key, _) = identity(&request.identity);
-        match self.repository.snapshot().await {
-            Ok(snapshot)
-                if snapshot
-                    .rows
-                    .iter()
-                    .any(|row| row.key == key && row.state == BuildLeaseState::Queued) =>
-            {
-                let evidence = request
-                    .candidate_cleanup
-                    .then(|| serde_json::json!({"candidate_cleanup": true}));
-                match self.repository.cancel(&key, evidence).await {
-                    Ok(row) => LeaseResult::Abandoned {
-                        candidate_cleanup: row.candidate_cleanup.is_some(),
-                    },
-                    Err(_) => self.unavailable(),
-                }
-            }
-            Ok(_) | Err(_) => self.unavailable(),
-        }
+        self.terminal(
+            request.identity,
+            None,
+            request.candidate_cleanup,
+            LeaseOperation::Abandon,
+        )
+        .await
     }
     pub async fn bind(&self, request: LeaseBindRequest) -> LeaseResult {
         let _guard = self.operation.lock().await;
@@ -371,6 +344,15 @@ impl BuildLeaseService {
         }
         self.pause.before_transaction(op).await;
         let (key, _) = identity(&id);
+        // A delayed grant acknowledgement must replay a forward durable state:
+        // it may not change Bound back to Launching or lose its pod UID.
+        match self.repository.get(&key).await {
+            Ok(Some(row)) if row.fencing_token == Some(token.0 as i64) => match row.state {
+                BuildLeaseState::Granted | BuildLeaseState::Launching => {}
+                _ => return LeaseResult::Status(status(&row)),
+            },
+            Ok(Some(_)) | Ok(None) | Err(_) => return self.unavailable(),
+        }
         match self
             .repository
             .status(&key, token.0 as i64, state, None)
@@ -395,8 +377,27 @@ impl BuildLeaseService {
         self.pause.before_transaction(op).await;
         let (key, _) = identity(&id);
         let evidence = cleanup.then(|| serde_json::json!({"candidate_cleanup": true}));
+        // Terminal rows are retained replay records. A supplied token remains
+        // fenced even on retry, so stale callers cannot claim a terminal result.
+        match self.repository.get(&key).await {
+            Ok(Some(row)) if row.state == BuildLeaseState::Terminal => {
+                if token.is_some_and(|value| row.fencing_token != Some(value.0 as i64)) {
+                    return self.unavailable();
+                }
+                return terminal_result(op, &row);
+            }
+            // The contract has no abandon token; it may only remove a queued
+            // row and can never revoke an occupied lease.
+            Ok(Some(row))
+                if op == LeaseOperation::Abandon && row.state != BuildLeaseState::Queued =>
+            {
+                return self.unavailable();
+            }
+            Ok(Some(_)) => {}
+            Ok(None) | Err(_) => return self.unavailable(),
+        }
         let row = match op {
-            LeaseOperation::Abandon => self.repository.cancel(&key, evidence).await,
+            LeaseOperation::Abandon => self.repository.abandon_queued(&key, evidence).await,
             LeaseOperation::Cancel => match token {
                 Some(token) => {
                     self.repository
@@ -419,17 +420,7 @@ impl BuildLeaseService {
             Ok(row) => {
                 let _ = self.drain().await;
                 self.telemetry.outcome(LeaseTelemetryOutcome::Terminal);
-                match op {
-                    LeaseOperation::Abandon => LeaseResult::Abandoned {
-                        candidate_cleanup: row.candidate_cleanup.is_some(),
-                    },
-                    LeaseOperation::Cancel => LeaseResult::Cancelled {
-                        candidate_cleanup: row.candidate_cleanup.is_some(),
-                    },
-                    _ => LeaseResult::Released {
-                        candidate_cleanup: row.candidate_cleanup.is_some(),
-                    },
-                }
+                terminal_result(op, &row)
             }
             Err(_) => self.unavailable(),
         }
@@ -544,7 +535,22 @@ fn queue_result(row: &BuildLeaseRow) -> Option<LeaseResult> {
                 timeout_credit: None,
             })
         }
+        BuildLeaseState::Terminal => Some(LeaseResult::Status(status(row))),
         _ => None,
+    }
+}
+fn terminal_result(op: LeaseOperation, row: &BuildLeaseRow) -> LeaseResult {
+    match op {
+        LeaseOperation::Abandon => LeaseResult::Abandoned {
+            candidate_cleanup: row.candidate_cleanup.is_some(),
+        },
+        LeaseOperation::Cancel => LeaseResult::Cancelled {
+            candidate_cleanup: row.candidate_cleanup.is_some(),
+        },
+        LeaseOperation::Release => LeaseResult::Released {
+            candidate_cleanup: row.candidate_cleanup.is_some(),
+        },
+        _ => LeaseResult::LeaseUnavailable,
     }
 }
 fn status(row: &BuildLeaseRow) -> LeaseStatus {

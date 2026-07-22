@@ -216,6 +216,18 @@ impl BuildLeaseRepository {
         Ok(snapshot)
     }
 
+    /// Look up one durable row, including a retained terminal outcome. Service
+    /// retries use this instead of `snapshot`, whose recovery view excludes
+    /// terminal rows.
+    pub async fn get(&self, key: &BuildLeaseKey) -> DbResult<Option<BuildLeaseRow>> {
+        self.db.ensure_initialized().await?;
+        let mut tx = self.db.pool().begin().await?;
+        lock(&mut tx).await?;
+        let row = fetch(&mut tx, key, false).await?;
+        tx.commit().await?;
+        Ok(row)
+    }
+
     /// Status reports are idempotent, token-fenced and cannot resurrect terminal work.
     pub async fn status(
         &self,
@@ -234,29 +246,69 @@ impl BuildLeaseRepository {
                 "status must be a post-grant occupied lifecycle state".into(),
             ));
         }
-        self.transition(
-            key,
-            token,
-            &[
+        // Status reports are acknowledgements, never commands to move a lease
+        // backwards. In particular, a delayed Launching acknowledgement after
+        // bind must replay the bound row rather than overwrite its pod binding.
+        let allowed = match state {
+            BuildLeaseState::Launching => {
+                &[BuildLeaseState::Granted, BuildLeaseState::Launching][..]
+            }
+            BuildLeaseState::Bound => &[
+                BuildLeaseState::Granted,
+                BuildLeaseState::Launching,
+                BuildLeaseState::Bound,
+            ][..],
+            BuildLeaseState::Active => &[
+                BuildLeaseState::Launching,
+                BuildLeaseState::Bound,
+                BuildLeaseState::Active,
+            ][..],
+            BuildLeaseState::Suspect => &[
                 BuildLeaseState::Granted,
                 BuildLeaseState::Launching,
                 BuildLeaseState::Bound,
                 BuildLeaseState::Active,
                 BuildLeaseState::Suspect,
-            ],
-            state,
-            None,
-            cleanup,
-        )
-        .await
+            ][..],
+            BuildLeaseState::Queued | BuildLeaseState::Granted | BuildLeaseState::Terminal => {
+                unreachable!("validated above")
+            }
+        };
+        self.transition(key, token, allowed, state, None, cleanup)
+            .await
     }
-    pub async fn abandon(
+    /// Atomically abandon only an ungranted queued request. Terminal rows are
+    /// replayed so a lost abandon response remains idempotent.
+    pub async fn abandon_queued(
         &self,
         key: &BuildLeaseKey,
-        token: i64,
         cleanup: Option<serde_json::Value>,
     ) -> DbResult<BuildLeaseRow> {
-        self.terminal(key, Some(token), "abandoned", cleanup).await
+        self.db.ensure_initialized().await?;
+        let mut tx = self.db.pool().begin().await?;
+        lock(&mut tx).await?;
+        let row = fetch(&mut tx, key, true)
+            .await?
+            .ok_or_else(|| DbError::InvalidTransition("unknown build lease".into()))?;
+        if row.state == BuildLeaseState::Terminal {
+            tx.commit().await?;
+            return Ok(row);
+        }
+        if row.state != BuildLeaseState::Queued {
+            return Err(DbError::InvalidTransition(
+                "cannot abandon occupied build lease".into(),
+            ));
+        }
+        let result = sqlx::query_as::<_, DbRow>(&format!(
+            "UPDATE build_leases SET state='terminal',terminal_reason='abandoned',candidate_cleanup=COALESCE($1, candidate_cleanup),terminal_at=now(),updated_at=now() WHERE consumer_kind=$2 AND consumer_id=$3 RETURNING {COLS}"
+        ))
+        .bind(cleanup.map(sqlx::types::Json))
+        .bind(key.consumer_kind.as_str())
+        .bind(&key.consumer_id)
+        .fetch_one(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        result.try_into()
     }
     pub async fn cancel(
         &self,
@@ -335,16 +387,16 @@ impl BuildLeaseRepository {
         let row = fetch(&mut tx, key, true)
             .await?
             .ok_or_else(|| DbError::InvalidTransition("unknown build lease".into()))?;
+        if let Some(token) = token {
+            if row.fencing_token != Some(token) {
+                return Err(DbError::InvalidTransition(
+                    "stale build lease fencing token".into(),
+                ));
+            }
+        }
         if row.state == BuildLeaseState::Terminal {
             tx.commit().await?;
             return Ok(row);
-        }
-        if let Some(token) = token
-            && row.fencing_token != Some(token)
-        {
-            return Err(DbError::InvalidTransition(
-                "stale build lease fencing token".into(),
-            ));
         }
         let result=sqlx::query_as::<_,DbRow>(&format!("UPDATE build_leases SET state='terminal',terminal_reason=$1,candidate_cleanup=COALESCE($2, candidate_cleanup),terminal_at=now(),updated_at=now() WHERE consumer_kind=$3 AND consumer_id=$4 RETURNING {COLS}")).bind(reason).bind(cleanup.map(sqlx::types::Json)).bind(key.consumer_kind.as_str()).bind(&key.consumer_id).fetch_one(&mut *tx).await?;
         tx.commit().await?;
