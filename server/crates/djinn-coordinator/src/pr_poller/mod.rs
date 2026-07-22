@@ -136,6 +136,7 @@ mod ci_helpers;
 mod conversation_resolution;
 mod installation;
 mod merged_change_projection;
+mod merged_reconcile;
 pub(crate) mod pr_cleanup;
 mod pr_commands;
 mod pr_rejection_fingerprint;
