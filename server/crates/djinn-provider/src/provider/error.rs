@@ -40,6 +40,9 @@ pub enum ProviderError {
     /// Network/transport failure (connect, timeout, broken stream).
     #[error("transport error")]
     Transport,
+    /// Eligible stream-initial failure after ordinary request retries.
+    #[error("exhausted transport error ({:?})", .0.category)]
+    ExhaustedTransport(crate::provider::transport::ExhaustedTransportDiagnostic),
     /// Provider returned a 200 but no usable completion (empty turn / refusal).
     #[error("empty completion")]
     EmptyCompletion,
@@ -58,6 +61,7 @@ impl ProviderError {
         match self {
             ProviderError::RateLimit { .. }
             | ProviderError::Transport
+            | ProviderError::ExhaustedTransport(_)
             | ProviderError::EmptyCompletion => true,
             ProviderError::ProviderInternal { status } => (500..600).contains(status),
             ProviderError::Authentication

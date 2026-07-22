@@ -29,7 +29,7 @@
 use super::*;
 use super::{spawn_sse_server, test_anthropic_config, test_provider};
 use crate::message::{Conversation, Message};
-use crate::provider::ProviderError;
+use crate::provider::{ExhaustedTransportCategory, ProviderError};
 use futures::TryStreamExt;
 
 #[test]
@@ -360,7 +360,7 @@ async fn test_stream_uses_payload_type_over_sse_event_name() {
 async fn test_stream_raw_eof_before_message_stop_yields_error() {
     // A stream that emits data events but ends (raw EOF) before the
     // Anthropic terminal `message_stop` frame must yield a typed retryable
-    // Transport error, not silently close the stream.
+    // unexpected-EOF diagnostic, not silently close the stream.
     let body = concat!(
         "event: message_start\\n",
         "data: {\\\"type\\\":\\\"message_start\\\",\\\"message\\\":{\\\"usage\\\":{\\\"input_tokens\\\":7}}}\\n\\n",
@@ -373,6 +373,8 @@ async fn test_stream_raw_eof_before_message_stop_yields_error() {
     let provider = AnthropicProvider::new(config);
     let mut conv = Conversation::new();
     conv.push(Message::user("Hello"));
+    let request_body = provider.build_request(&conv, &[], None);
+    let expected_payload_bytes = serde_json::to_vec(&request_body).unwrap().len();
 
     let err = provider
         .stream(&conv, &[], None)
@@ -385,13 +387,17 @@ async fn test_stream_raw_eof_before_message_stop_yields_error() {
     let pe = err
         .downcast_ref::<ProviderError>()
         .expect("typed ProviderError must be downcastable from the stream error");
-    assert_eq!(*pe, ProviderError::Transport);
+    match pe {
+        ProviderError::ExhaustedTransport(diagnostic) => {
+            assert_eq!(
+                diagnostic.category,
+                ExhaustedTransportCategory::UnexpectedEof
+            );
+            assert_eq!(diagnostic.estimated_payload_chars, expected_payload_bytes);
+        }
+        other => panic!("expected exhausted unexpected-EOF transport, got {other:?}"),
+    }
     assert!(pe.retryable(), "truncated stream must be retryable");
-    assert!(
-        err.to_string().contains("message_stop"),
-        "error message must mention message_stop: {}",
-        err
-    );
 }
 
 #[tokio::test]
