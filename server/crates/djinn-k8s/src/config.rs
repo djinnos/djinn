@@ -61,7 +61,10 @@ pub struct KubernetesConfig {
     /// run in the background and don't affect worker latency, so a generous
     /// deadline is safe. Tunable per deployment via
     /// `DJINN_K8S_WARM_JOB_TIMEOUT_SECONDS`; raise it if a larger workspace
-    /// consistently hits the deadline.
+    /// consistently hits the deadline. This sets the Job's
+    /// `activeDeadlineSeconds`; the in-process watcher deadline follows it
+    /// (plus a small grace) so a long warm run is not declared failed while the
+    /// Job is still legitimately running.
     pub warm_job_timeout_seconds: i64,
     /// MySQL DSN forwarded to the warm Pod so `djinn-agent-worker
     /// warm-graph` can reuse the server's backing MySQL instance.

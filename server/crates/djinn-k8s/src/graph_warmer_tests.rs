@@ -5,7 +5,7 @@ use super::*;
 use djinn_core::events::EventBus;
 use djinn_db::RepoGraphCacheInsert;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 type CapturedJobs = Arc<Mutex<Vec<(String, Job)>>>;
 
@@ -170,6 +170,21 @@ fn watcher_poll_retries_transient_errors_and_respects_deadline() {
         terminal_outcome_after_poll(WarmJobObservation::ApiError, true),
         Some(WarmTerminalOutcome::Failed),
         "persistent API errors cannot extend polling past the deadline"
+    );
+}
+
+#[test]
+fn watch_deadline_follows_configured_job_timeout_plus_slack() {
+    assert_eq!(
+        watch_deadline(7200),
+        Duration::from_secs(7200) + WATCH_DEADLINE_SLACK,
+        "the watcher deadline tracks the Job's activeDeadlineSeconds so a long \
+         warm run reports the apiserver's verdict rather than a manufactured one"
+    );
+    assert_eq!(
+        watch_deadline(-1),
+        WATCH_DEADLINE_SLACK,
+        "a non-positive timeout clamps to zero before adding slack"
     );
 }
 
