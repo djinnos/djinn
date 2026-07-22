@@ -124,14 +124,16 @@ mod tests {
         run_id: &str,
         status: &str,
     ) {
+        let creator = crate::repositories::test_support::seed_test_user(&repo.db).await;
         sqlx::query(
             "INSERT INTO tasks (id, project_id, short_id, epic_id, title, description, design,
                                 issue_type, priority, owner, status, continuation_count, labels,
-                                acceptance_criteria, memory_refs)
-             VALUES ($1, $2, 'short', NULL, 't', '', '', 'task', 0, '', 'open', 0, '[]', '[]', '[]')",
+                                acceptance_criteria, memory_refs, created_by_user_id)
+             VALUES ($1, $2, 'short', NULL, 't', '', '', 'task', 0, '', 'open', 0, '[]', '[]', '[]', $3)",
         )
         .bind(task_id)
         .bind(project_id)
+        .bind(creator)
         .execute(repo.db.pool())
         .await
         .expect("seed task");
