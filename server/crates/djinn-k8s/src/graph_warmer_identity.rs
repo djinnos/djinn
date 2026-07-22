@@ -12,6 +12,35 @@ use k8s_openapi::api::batch::v1::Job;
 use crate::graph_warmer::WarmAdmissionRequest;
 use crate::label_value::LABEL_VALUE_MAX_BYTES;
 
+/// Immutable inputs supplied by the durable warm-lease protocol before a Job
+/// is created. Its request id is the stable idempotency key, not a
+/// process-local attempt id.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LeasedWarmJobIdentity {
+    pub warm_request_id: String,
+    pub graph_revision: String,
+    pub object_name: String,
+    pub fencing_token: u64,
+}
+
+impl LeasedWarmJobIdentity {
+    /// Derive the deterministic object name from the persisted request id.
+    pub fn new(
+        project_id: &str,
+        warm_request_id: impl Into<String>,
+        graph_revision: impl Into<String>,
+        fencing_token: u64,
+    ) -> Self {
+        let warm_request_id = warm_request_id.into();
+        Self {
+            object_name: deterministic_warm_job_name(project_id, &warm_request_id),
+            warm_request_id,
+            graph_revision: graph_revision.into(),
+            fencing_token,
+        }
+    }
+}
+
 /// Longest project segment that keeps [`deterministic_warm_job_name`] inside
 /// the label-value budget: `djinn-warm-` (11) + project + `-g1-` (4) +
 /// 16 hex digits = 31 + project, so the project segment gets 32 bytes.
