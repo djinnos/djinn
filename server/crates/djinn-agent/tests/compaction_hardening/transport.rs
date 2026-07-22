@@ -273,3 +273,81 @@ async fn recovery_is_one_shot() {
     assert_eq!((calls, compacted, budget_checks), (4, 2, 4));
     assert!(result.is_ok());
 }
+
+/// Unlike the hook-driven one-shot fixture, this drives the production writer
+/// and verifies its durable cause and occupancy snapshots.
+#[tokio::test]
+async fn oversized_transport_compaction_persists_boundary_occupancy() {
+    let _serial = RECOVERY_TEST_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap();
+    set_transport_recovery_compaction_hook_for_test(None);
+    set_transport_recovery_budget_check_hook_for_test(None);
+
+    let provider =
+        ScriptedProvider::new(vec![Outcome::Eligible, Outcome::Success, Outcome::Success]);
+    let db = djinn_slot::test_helpers::create_test_db();
+    let cancel = CancellationToken::new();
+    let slot = djinn_slot::test_helpers::agent_context_from_db(db.clone(), cancel.clone());
+    let project = djinn_slot::test_helpers::create_test_project(&db).await;
+    let epic = djinn_slot::test_helpers::create_test_epic(&db, &project.id).await;
+    let task = djinn_slot::test_helpers::create_test_task(&db, &project.id, &epic.id).await;
+    let session = djinn_db::SessionRepository::new(db.clone(), slot.event_bus.clone())
+        .create(djinn_db::repositories::session::CreateSessionParams {
+            project_id: &project.id,
+            task_id: Some(&task.id),
+            model: "fixture/model",
+            agent_type: "worker",
+            metadata_json: None,
+            task_run_id: None,
+            pricing: None,
+            cost_basis: None,
+        })
+        .await
+        .unwrap();
+    let cs = CompactionCriticalSection::new();
+    let mut conversation = Conversation::new();
+    conversation.push(Message::user("éééé"));
+    let result = run_reply_loop(
+        ReplyLoopContext {
+            provider: &provider,
+            tools: &[],
+            task_id: &task.id,
+            task_short_id: "fixture",
+            session_id: &session.id,
+            project_path: "/tmp",
+            worktree_path: std::path::Path::new("/tmp"),
+            role_name: "worker",
+            finalize_tool_names: &["submit_work"],
+            context_window: 2,
+            model_id: "fixture/model",
+            cancel: &cancel,
+            global_cancel: &cancel,
+            ctx: &slot,
+            active_skill_names: &[],
+            active_mcp_server_names: &[],
+            max_turns_override: Some(8),
+            compaction_cs: &cs,
+        },
+        &mut conversation,
+        false,
+    )
+    .await
+    .0;
+    assert!(
+        result.is_ok(),
+        "oversized recovery should complete: {result:?}"
+    );
+    let boundary = djinn_db::SessionCompactionBoundaryRepository::new(db)
+        .latest_completed_boundary(&session.id)
+        .await
+        .unwrap()
+        .expect("oversized recovery must persist a boundary");
+    assert_eq!(
+        boundary.trigger,
+        Some(djinn_db::CompactionTrigger::OversizedTransport)
+    );
+    assert_eq!(boundary.current_context_tokens_before, Some(0));
+    assert_eq!(boundary.current_context_tokens_after, Some(0));
+}
