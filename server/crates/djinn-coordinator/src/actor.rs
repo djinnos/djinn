@@ -161,6 +161,10 @@ pub(super) struct CoordinatorActor {
     /// visible without allowing the synchronous check to read the database.
     pub(super) closed_parent_open_children_source:
         Option<Arc<crate::doctor::TaskRepositoryClosedParentOpenChildrenSource>>,
+    #[cfg(not(test))]
+    #[allow(dead_code)]
+    pub(super) retrieval_health_source:
+        Option<Arc<crate::doctor::retrieval_health::RetrievalHealthSource>>,
     /// Per-task state of the PR poller's offloaded clean-merge fast path. The
     /// heavy mechanical merge (fetch + ephemeral clone + merge + push) runs in a
     /// spawned background task instead of inline on this tick; the poller reads
@@ -531,6 +535,15 @@ impl CoordinatorActor {
             Arc::new(crate::doctor::live_mover::NoOpLiveMoverSource),
             Arc::clone(&stranded_ready_source) as Arc<dyn crate::doctor::StrandedReadySource>,
         );
+        let retrieval_health_source =
+            Arc::new(crate::doctor::retrieval_health::RetrievalHealthSource::new(
+                db.clone(),
+                djinn_core::models::KnowledgeInjectionConfig::default(),
+            ));
+        crate::doctor::register_retrieval_health_checks(
+            djinn_core::doctor::registry(),
+            Arc::clone(&retrieval_health_source),
+        );
         let closed_parent_open_children_source = Arc::new(
             crate::doctor::TaskRepositoryClosedParentOpenChildrenSource::new(
                 db.clone(),
@@ -577,6 +590,8 @@ impl CoordinatorActor {
             closed_parent_open_children_source: Some(Arc::clone(
                 &closed_parent_open_children_source,
             )),
+            #[cfg(not(test))]
+            retrieval_health_source: Some(retrieval_health_source),
             auto_merge_tracker: Arc::new(std::sync::Mutex::new(HashMap::new())),
             consolidation_runner: consolidation_runner
                 .unwrap_or_else(|| Arc::new(DbConsolidationRunner::new(db.clone()))),
