@@ -27,6 +27,7 @@ use djinn_core::clock::{Clock, SystemClock};
 use djinn_core::doctor::{
     DoctorCheckRun, DoctorRegistry, Finding, FindingSeverity, run_cheap_subset,
 };
+use djinn_db::repositories::doctor_finding::KeyedDoctorFinding;
 use djinn_db::{DoctorFindingRepository, NewDoctorFinding};
 use serde_json::json;
 use tracing::{error, info, warn};
@@ -73,6 +74,40 @@ pub fn finding_to_new_row(finding: &Finding, run_id: Option<&str>) -> NewDoctorF
         resolver_snapshot,
         detail: Some(finding.detail.clone()),
     }
+}
+
+fn is_retrieval_check(name: &str) -> bool {
+    matches!(
+        name,
+        "memory.retrieval_zero_result"
+            | "memory.injection_starvation"
+            | "memory.retrieval_health_refresh"
+    )
+}
+
+fn retrieval_active_key(finding: &Finding) -> String {
+    if finding.check_name == "memory.retrieval_health_refresh" {
+        return "refresh".to_owned();
+    }
+    finding
+        .entity_ids
+        .get("finding_key")
+        .cloned()
+        .unwrap_or_else(|| {
+            format!(
+                "{}:{}",
+                finding
+                    .entity_ids
+                    .get("project_id")
+                    .map(String::as_str)
+                    .unwrap_or("unknown"),
+                finding
+                    .entity_ids
+                    .get("entry_point")
+                    .map(String::as_str)
+                    .unwrap_or("all")
+            )
+        })
 }
 
 /// Best-effort task-id lookup for a finding, used to attach a board activity
@@ -222,12 +257,31 @@ pub async fn run_cheap_doctor_checks(
     let task_repo =
         djinn_db::TaskRepository::new(db.clone(), crate::events::event_bus_for(events_tx));
 
+    let retrieval: Vec<KeyedDoctorFinding> = runs
+        .iter()
+        .flat_map(|run| run.findings.iter())
+        .filter(|finding| is_retrieval_check(&finding.check_name))
+        .map(|finding| KeyedDoctorFinding {
+            active_key: retrieval_active_key(finding),
+            finding: finding_to_new_row(finding, run_id),
+        })
+        .collect();
+    if runs.iter().any(|run| is_retrieval_check(run.check_name)) {
+        if let Err(error) = finding_repo
+            .reconcile_retrieval_findings(retrieval, &[])
+            .await
+        {
+            warn!(error = %error, "CoordinatorActor: failed to reconcile retrieval doctor findings");
+        }
+    }
     for run in &runs {
         let check_name = run.check_name;
         let findings_count = run.findings.len();
         let run_started = SystemClock::new().now_instant();
 
-        persist_findings(&finding_repo, run_id, &run.findings).await;
+        if !is_retrieval_check(check_name) {
+            persist_findings(&finding_repo, run_id, &run.findings).await;
+        }
 
         for finding in &run.findings {
             // This check is a dry-run: durable doctor evidence is allowed, but

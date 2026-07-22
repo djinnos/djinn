@@ -49,6 +49,12 @@ pub mod severity {
     }
 }
 
+#[derive(Clone, Debug)]
+pub struct KeyedDoctorFinding {
+    pub active_key: String,
+    pub finding: NewDoctorFinding,
+}
+
 /// A persisted doctor finding — one row of `doctor_findings`.
 ///
 /// This is the durable shape, not the in-memory `Finding` from
@@ -65,6 +71,8 @@ pub struct DoctorFinding {
     pub run_id: Option<String>,
     /// Wall-clock UTC ISO-8601 timestamp the finding was recorded.
     pub created_at: String,
+    pub status: String,
+    pub observed_at: String,
     pub check_name: String,
     /// One of `severity::INFO`, `severity::WARN`, `severity::CRITICAL`.
     pub severity: String,
@@ -179,6 +187,26 @@ impl DoctorFindingRepository {
         Ok(out)
     }
 
+    /// Reconcile retrieval-health findings; preserved keys are not mutated.
+    pub async fn reconcile_retrieval_findings(
+        &self,
+        findings: Vec<KeyedDoctorFinding>,
+        preserve_keys: &[String],
+    ) -> Result<Vec<DoctorFinding>> {
+        self.db.ensure_initialized().await?;
+        let mut emitted = Vec::new();
+        let mut rows = Vec::new();
+        for keyed in findings {
+            emitted.push(keyed.active_key.clone());
+            let n = keyed.finding;
+            let row = sqlx::query(&format!(r#"INSERT INTO doctor_findings (id,run_id,check_name,severity,entity_ids,evidence,resolver_snapshot,detail,active_key,status) VALUES ($1,$2,$3,$4,$5::jsonb,$6::jsonb,$7::jsonb,$8,$9,'active') ON CONFLICT (check_name,active_key) WHERE active_key IS NOT NULL DO UPDATE SET run_id=EXCLUDED.run_id,severity=EXCLUDED.severity,entity_ids=EXCLUDED.entity_ids,evidence=EXCLUDED.evidence,resolver_snapshot=EXCLUDED.resolver_snapshot,detail=EXCLUDED.detail,status='active',observed_at=to_char(now() AT TIME ZONE 'utc','YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') RETURNING {SELECT_COLS}"#))
+                .bind(Uuid::now_v7().to_string()).bind(n.run_id.as_deref()).bind(&n.check_name).bind(&n.severity).bind(&n.entity_ids).bind(&n.evidence).bind(n.resolver_snapshot.as_ref()).bind(n.detail.as_deref()).bind(&keyed.active_key).fetch_one(self.db.pool()).await?;
+            rows.push(row_to_finding(&row));
+        }
+        sqlx::query(r#"UPDATE doctor_findings SET status='resolved',observed_at=to_char(now() AT TIME ZONE 'utc','YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') WHERE status='active' AND check_name IN ('memory.retrieval_zero_result','memory.injection_starvation','memory.retrieval_health_refresh') AND NOT (active_key=ANY($1)) AND NOT (active_key=ANY($2))"#).bind(&emitted).bind(preserve_keys).execute(self.db.pool()).await?;
+        Ok(rows)
+    }
+
     /// Fetch a finding by its primary key. `None` if not found.
     pub async fn get(&self, id: &str) -> Result<Option<DoctorFinding>> {
         self.db.ensure_initialized().await?;
@@ -288,7 +316,7 @@ impl DoctorFindingRepository {
 /// Column list shared by every read path. Cast JSONB columns to `text` so
 /// the runtime query path can deserialize them through `serde_json::from_str`
 /// uniformly — this avoids the macro vs runtime split on JSONB types.
-const SELECT_COLS: &str = "id, run_id, created_at, check_name, severity, \
+const SELECT_COLS: &str = "id, run_id, created_at, status, observed_at, check_name, severity, \
      entity_ids::text AS entity_ids_text, \
      evidence::text AS evidence_text, \
      resolver_snapshot::text AS resolver_snapshot_text, \
@@ -308,6 +336,12 @@ fn row_to_finding(row: &sqlx::postgres::PgRow) -> DoctorFinding {
         id: row.get("id"),
         run_id: row.get("run_id"),
         created_at: row.get("created_at"),
+        status: row
+            .try_get("status")
+            .unwrap_or_else(|_| "active".to_owned()),
+        observed_at: row
+            .try_get("observed_at")
+            .unwrap_or_else(|_| row.get("created_at")),
         check_name: row.get("check_name"),
         severity: row.get("severity"),
         entity_ids: serde_json::from_str(&entity_ids_text)
