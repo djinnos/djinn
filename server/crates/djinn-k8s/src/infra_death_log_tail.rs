@@ -198,20 +198,26 @@ fn redact_sensitive_env_assignments(input: &str) -> String {
 
 // ─── Truncation ─────────────────────────────────────────────────────────────
 
-/// Truncate `s` to at most `max_bytes` bytes at a UTF-8 character boundary.
+/// Truncate `s` to at most `max_bytes` bytes at a UTF-8 character boundary,
+/// keeping the END of the string.
 ///
-/// Returns the longest valid UTF-8 prefix of `s` whose byte length is ≤
+/// Returns the longest valid UTF-8 suffix of `s` whose byte length is ≤
 /// `max_bytes`.  If `s` is already within the limit, it is returned as-is.
+///
+/// The suffix (not the prefix) is what matters for a crash capture: the panic
+/// message is the last thing a dying worker prints.  The 2026-07-22 v0.6.114
+/// outage was undiagnosable because prefix truncation systematically discarded
+/// the panic text while keeping routine startup lines.
 pub fn truncate_log_tail_utf8(s: &str, max_bytes: usize) -> &str {
     if s.len() <= max_bytes {
         return s;
     }
-    // Find the last char boundary at or before max_bytes.
-    let mut end = max_bytes;
-    while end > 0 && !s.is_char_boundary(end) {
-        end -= 1;
+    // Find the first char boundary at or after len - max_bytes.
+    let mut start = s.len() - max_bytes;
+    while start < s.len() && !s.is_char_boundary(start) {
+        start += 1;
     }
-    &s[..end]
+    &s[start..]
 }
 
 /// Combined redact + truncate helper used by the infra-death capture path.
@@ -376,10 +382,13 @@ async fn do_capture(
     };
 
     // 2. Fetch logs from the `worker` container (falls back to first container).
+    // No `limit_bytes`: the apiserver applies it to the FRONT of the
+    // tail-lines window, which discards the panic text at the end — the one
+    // part a crash capture exists to keep.  `tail_lines` bounds the fetch;
+    // `prepare_log_tail` bounds the stored size from the suffix side.
     let log_params = kube::api::LogParams {
         container: Some("worker".to_owned()),
         tail_lines: Some(LOG_TAIL_LINE_COUNT),
-        limit_bytes: Some(TASK_ATTEMPT_LOG_TAIL_MAX_LEN as i64),
         ..Default::default()
     };
 
@@ -553,25 +562,23 @@ mod tests {
     }
 
     #[test]
-    fn truncate_on_utf8_boundary() {
-        // "é" is 2 bytes in UTF-8.
+    fn truncate_on_utf8_boundary_keeps_suffix() {
+        // "é" is 2 bytes in UTF-8: a(0) b(1) c(2) é(3-4) d(5) e(6) f(7).
         let s = "abcédef";
-        // 3 (abc) + 2 (é) = 5, then d at 6.
-        // Truncating at 5 should give "abcé".
-        assert_eq!(truncate_log_tail_utf8(s, 5), "abcé");
-        // Truncating at 4 should give "abc" (é starts at byte 3, ends at 5).
-        assert_eq!(truncate_log_tail_utf8(s, 4), "abc");
+        // Last 5 bytes start exactly at é's boundary (byte 3).
+        assert_eq!(truncate_log_tail_utf8(s, 5), "édef");
+        // Last 4 bytes would start mid-é (byte 4) — advance past it.
+        assert_eq!(truncate_log_tail_utf8(s, 4), "def");
     }
 
     #[test]
-    fn truncate_multibyte_no_split() {
-        // "🦀" is 4 bytes in UTF-8.
+    fn truncate_multibyte_no_split_keeps_suffix() {
+        // "🦀" is 4 bytes in UTF-8: a(0) 🦀(1-4) b(5).
         let s = "a🦀b";
-        // Byte 1 = 'a', bytes 2-5 = '🦀', byte 6 = 'b'.
-        // Truncating at 3 should give "a" (byte 2 starts 🦀 but 3 < 4).
-        assert_eq!(truncate_log_tail_utf8(s, 3), "a");
-        // Truncating at 5 should give "a🦀" (complete 🦀 at byte 5).
-        assert_eq!(truncate_log_tail_utf8(s, 5), "a🦀");
+        // Last 3 bytes would start mid-🦀 — advance to 'b'.
+        assert_eq!(truncate_log_tail_utf8(s, 3), "b");
+        // Last 5 bytes start exactly at 🦀's boundary.
+        assert_eq!(truncate_log_tail_utf8(s, 5), "🦀b");
     }
 
     #[test]
@@ -585,8 +592,24 @@ mod tests {
     }
 
     #[test]
-    fn truncate_ascii() {
-        assert_eq!(truncate_log_tail_utf8("hello world", 5), "hello");
+    fn truncate_ascii_keeps_suffix() {
+        assert_eq!(truncate_log_tail_utf8("hello world", 5), "world");
+    }
+
+    #[test]
+    fn truncate_keeps_panic_line_at_end() {
+        // Incident regression (2026-07-22): a giant routine log line before
+        // the panic must not evict the panic text from the capture.
+        let noise = format!("INFO sqlx slow statement: {}\n", "x".repeat(TASK_ATTEMPT_LOG_TAIL_MAX_LEN));
+        let panic_line = "thread 'main' panicked at src/lib.rs:42: boom";
+        let log = format!("{noise}{panic_line}");
+        let result = prepare_log_tail(&log);
+        assert!(result.len() <= TASK_ATTEMPT_LOG_TAIL_MAX_LEN);
+        assert!(
+            result.ends_with(panic_line),
+            "panic line must survive truncation, got tail: {:?}",
+            &result[result.len().saturating_sub(80)..]
+        );
     }
 
     #[test]
