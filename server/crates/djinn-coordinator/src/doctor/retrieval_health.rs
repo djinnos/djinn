@@ -21,8 +21,48 @@ pub const RETRIEVAL_HEALTH_REFRESH_NAME: &str = "memory.retrieval_health_refresh
 pub struct RetrievalHealthSource {
     repository: RetrievalTraceRepository,
     config: KnowledgeInjectionConfig,
+    publication: Arc<RetrievalHealthPublication>,
+}
+
+/// The synchronous state shared by the source and all of its Cheap checks.
+/// A new `Arc` is installed only after the complete repository response maps.
+struct RetrievalHealthPublication {
     snapshot: Mutex<Arc<TaxonomyV1RetrievalSnapshot>>,
     last_error: Mutex<Option<String>>,
+}
+
+impl RetrievalHealthPublication {
+    fn new() -> Self {
+        Self {
+            snapshot: Mutex::new(Arc::new(TaxonomyV1RetrievalSnapshot::new())),
+            last_error: Mutex::new(None),
+        }
+    }
+
+    fn snapshot(&self) -> Arc<TaxonomyV1RetrievalSnapshot> {
+        Arc::clone(&self.snapshot.lock().unwrap_or_else(|e| e.into_inner()))
+    }
+
+    fn finish(&self, next: Result<TaxonomyV1RetrievalSnapshot, String>) -> Result<(), String> {
+        match next {
+            Ok(snapshot) => {
+                *self.snapshot.lock().unwrap_or_else(|e| e.into_inner()) = Arc::new(snapshot);
+                *self.last_error.lock().unwrap_or_else(|e| e.into_inner()) = None;
+                Ok(())
+            }
+            Err(error) => {
+                *self.last_error.lock().unwrap_or_else(|e| e.into_inner()) = Some(error.clone());
+                Err(error)
+            }
+        }
+    }
+
+    fn refresh_error(&self) -> Option<String> {
+        self.last_error
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
 }
 
 impl RetrievalHealthSource {
@@ -30,13 +70,12 @@ impl RetrievalHealthSource {
         Self {
             repository: RetrievalTraceRepository::new(db),
             config,
-            snapshot: Mutex::new(Arc::new(TaxonomyV1RetrievalSnapshot::new())),
-            last_error: Mutex::new(None),
+            publication: Arc::new(RetrievalHealthPublication::new()),
         }
     }
 
     pub fn snapshot(&self) -> Arc<TaxonomyV1RetrievalSnapshot> {
-        Arc::clone(&self.snapshot.lock().unwrap_or_else(|e| e.into_inner()))
+        self.publication.snapshot()
     }
 
     pub async fn refresh(&self) -> Result<(), String> {
@@ -56,25 +95,11 @@ impl RetrievalHealthSource {
                 .map_err(|e| e.to_string()),
             (Err(error), _) | (_, Err(error)) => Err(error),
         };
-        let next = groups.and_then(map_groups);
-        match next {
-            Ok(snapshot) => {
-                *self.snapshot.lock().unwrap_or_else(|e| e.into_inner()) = Arc::new(snapshot);
-                *self.last_error.lock().unwrap_or_else(|e| e.into_inner()) = None;
-                Ok(())
-            }
-            Err(error) => {
-                *self.last_error.lock().unwrap_or_else(|e| e.into_inner()) = Some(error.clone());
-                Err(error)
-            }
-        }
+        self.publication.finish(groups.and_then(map_groups))
     }
 
     fn refresh_error(&self) -> Option<String> {
-        self.last_error
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone()
+        self.publication.refresh_error()
     }
 }
 
@@ -183,11 +208,15 @@ fn map_groups(
 }
 
 pub struct SourceZeroResultCheck {
-    source: Arc<RetrievalHealthSource>,
+    config: KnowledgeInjectionConfig,
+    publication: Arc<RetrievalHealthPublication>,
 }
 impl SourceZeroResultCheck {
     pub fn new(source: Arc<RetrievalHealthSource>) -> Self {
-        Self { source }
+        Self {
+            config: source.config,
+            publication: Arc::clone(&source.publication),
+        }
     }
 }
 impl DoctorCheck for SourceZeroResultCheck {
@@ -198,22 +227,23 @@ impl DoctorCheck for SourceZeroResultCheck {
         "Flags taxonomy-v1 successful retrieval queries with zero candidates"
     }
     fn run(&self) -> DoctorResult<Vec<Finding>> {
-        TaxonomyV1RetrievalZeroResultCheck::new(
-            self.source.config,
-            (*self.source.snapshot()).clone(),
-        )
-        .run()
+        TaxonomyV1RetrievalZeroResultCheck::new(self.config, (*self.publication.snapshot()).clone())
+            .run()
     }
     fn cadence(&self) -> DoctorCheckCadence {
         DoctorCheckCadence::Cheap
     }
 }
 pub struct SourceInjectionStarvationCheck {
-    source: Arc<RetrievalHealthSource>,
+    config: KnowledgeInjectionConfig,
+    publication: Arc<RetrievalHealthPublication>,
 }
 impl SourceInjectionStarvationCheck {
     pub fn new(source: Arc<RetrievalHealthSource>) -> Self {
-        Self { source }
+        Self {
+            config: source.config,
+            publication: Arc::clone(&source.publication),
+        }
     }
 }
 impl DoctorCheck for SourceInjectionStarvationCheck {
@@ -224,7 +254,7 @@ impl DoctorCheck for SourceInjectionStarvationCheck {
         "Flags starved load_knowledge_context candidate-bearing queries"
     }
     fn run(&self) -> DoctorResult<Vec<Finding>> {
-        InjectionStarvationCheck::new(self.source.config, (*self.source.snapshot()).clone()).run()
+        InjectionStarvationCheck::new(self.config, (*self.publication.snapshot()).clone()).run()
     }
     fn cadence(&self) -> DoctorCheckCadence {
         DoctorCheckCadence::Cheap
@@ -266,5 +296,155 @@ impl DoctorCheck for RetrievalHealthRefreshCheck {
     }
     fn cadence(&self) -> DoctorCheckCadence {
         DoctorCheckCadence::Cheap
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use djinn_db::repositories::retrieval_trace::{
+        RetrievalTaxonomyValidationError, RetrievalTraceEntryPoint, TaxonomyV1RetrievalHealthCounts,
+    };
+
+    fn group(entry_point: RetrievalTraceEntryPoint) -> TaxonomyV1RetrievalHealthGroup {
+        TaxonomyV1RetrievalHealthGroup {
+            project_id: "project".into(),
+            entry_point,
+            taxonomy_version: 1,
+            window_start: "2026-01-01T00:00:00Z".into(),
+            window_end: "2026-01-01T01:00:00Z".into(),
+            refreshed_at: "2026-01-01T01:00:01Z".into(),
+            invalid: false,
+            counts: TaxonomyV1RetrievalHealthCounts {
+                total_queries: 10,
+                successful_queries: 10,
+                zero_candidate_queries: 10,
+                candidate_bearing_queries: 10,
+                starved_queries: 10,
+                ..Default::default()
+            },
+            validation_errors: vec![],
+        }
+    }
+
+    #[test]
+    fn maps_healthy_and_malformed_siblings() {
+        let healthy = group(RetrievalTraceEntryPoint::LoadKnowledgeContext);
+        let mut malformed = group(RetrievalTraceEntryPoint::Dispatch);
+        malformed.invalid = true;
+        malformed.validation_errors = vec![
+            RetrievalTaxonomyValidationError {
+                trace_id: "b".into(),
+                reason: "second".into(),
+            },
+            RetrievalTaxonomyValidationError {
+                trace_id: "a".into(),
+                reason: "first".into(),
+            },
+        ];
+        let snapshot = map_groups(vec![healthy, malformed]).unwrap();
+        assert_eq!(snapshot.valid_groups().count(), 1);
+        let invalid: Vec<_> = snapshot.invalid_groups().collect();
+        assert_eq!(invalid.len(), 1);
+        assert_eq!(invalid[0].invalid_reason, "a:first; b:second");
+    }
+
+    #[test]
+    fn rejected_values_preserve_prior_snapshot_without_partial_publication() {
+        let publication = RetrievalHealthPublication::new();
+        publication
+            .finish(map_groups(vec![group(
+                RetrievalTraceEntryPoint::LoadKnowledgeContext,
+            )]))
+            .unwrap();
+        let prior = publication.snapshot();
+        let count_fields = [
+            "total_queries",
+            "successful_queries",
+            "errored_queries",
+            "zero_candidate_queries",
+            "candidate_bearing_queries",
+            "starved_queries",
+            "injected_queries",
+            "candidate_total",
+            "injected_total",
+            "confidence_filtered_total",
+            "not_top_k_total",
+            "oversized_skipped_total",
+            "injected_disposition_total",
+            "budget_pruned_total",
+            "legacy_unclassified_queries",
+            "invalid_taxonomy_queries",
+        ];
+        for field in count_fields {
+            let mut bad = group(RetrievalTraceEntryPoint::LoadKnowledgeContext);
+            match field {
+                "total_queries" => bad.counts.total_queries = -1,
+                "successful_queries" => bad.counts.successful_queries = -1,
+                "errored_queries" => bad.counts.errored_queries = -1,
+                "zero_candidate_queries" => bad.counts.zero_candidate_queries = -1,
+                "candidate_bearing_queries" => bad.counts.candidate_bearing_queries = -1,
+                "starved_queries" => bad.counts.starved_queries = -1,
+                "injected_queries" => bad.counts.injected_queries = -1,
+                "candidate_total" => bad.counts.candidate_total = -1,
+                "injected_total" => bad.counts.injected_total = -1,
+                "confidence_filtered_total" => bad.counts.confidence_filtered_total = -1,
+                "not_top_k_total" => bad.counts.not_top_k_total = -1,
+                "oversized_skipped_total" => bad.counts.oversized_skipped_total = -1,
+                "injected_disposition_total" => bad.counts.injected_disposition_total = -1,
+                "budget_pruned_total" => bad.counts.budget_pruned_total = -1,
+                "legacy_unclassified_queries" => bad.counts.legacy_unclassified_queries = -1,
+                "invalid_taxonomy_queries" => bad.counts.invalid_taxonomy_queries = -1,
+                _ => unreachable!(),
+            }
+            assert!(
+                publication.finish(map_groups(vec![bad])).is_err(),
+                "{field}"
+            );
+            assert!(Arc::ptr_eq(&prior, &publication.snapshot()), "{field}");
+        }
+        for field in ["window_start", "window_end", "refreshed_at"] {
+            let mut bad = group(RetrievalTraceEntryPoint::LoadKnowledgeContext);
+            match field {
+                "window_start" => bad.window_start = "invalid".into(),
+                "window_end" => bad.window_end = "invalid".into(),
+                "refreshed_at" => bad.refreshed_at = "invalid".into(),
+                _ => unreachable!(),
+            }
+            assert!(
+                publication.finish(map_groups(vec![bad])).is_err(),
+                "{field}"
+            );
+            assert!(Arc::ptr_eq(&prior, &publication.snapshot()), "{field}");
+        }
+    }
+
+    #[test]
+    fn source_backed_resolvers_share_one_atomic_publication() {
+        let publication = Arc::new(RetrievalHealthPublication::new());
+        publication
+            .finish(map_groups(vec![group(
+                RetrievalTraceEntryPoint::LoadKnowledgeContext,
+            )]))
+            .unwrap();
+        let config = KnowledgeInjectionConfig {
+            injection_starvation_query_floor: 1,
+            injection_starvation_threshold_percent: 50,
+            ..Default::default()
+        };
+        let zero = SourceZeroResultCheck {
+            config,
+            publication: Arc::clone(&publication),
+        };
+        let starvation = SourceInjectionStarvationCheck {
+            config,
+            publication: Arc::clone(&publication),
+        };
+        assert!(Arc::ptr_eq(
+            &zero.publication.snapshot(),
+            &starvation.publication.snapshot()
+        ));
+        assert_eq!(zero.run().unwrap().len(), 1);
+        assert_eq!(starvation.run().unwrap().len(), 1);
     }
 }
