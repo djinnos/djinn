@@ -275,7 +275,7 @@ function normalizeKeywords(value: unknown): string[] | undefined {
   return keywords.length > 0 ? keywords : undefined;
 }
 
-function normalizeKind(value: unknown): SnapshotNodeKind {
+export function normalizeKind(value: unknown): SnapshotNodeKind {
   if (
     value === "folder" ||
     value === "file" ||
