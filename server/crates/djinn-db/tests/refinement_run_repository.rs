@@ -14,7 +14,7 @@ use djinn_db::test_support::{
 };
 use djinn_db::{
     AdmitRefinementRunRequest, Database, ProposalRepository, RefinementAdmissionOutcome,
-    RefinementAdmissionSource,
+    RefinementAdmissionSource, RefinementDurableProgress, RefinementIntentMutationError,
 };
 use serde_json::Value;
 use tokio::sync::Barrier;
@@ -90,7 +90,7 @@ async fn install_failure(db: &Database, boundary: &str) {
             "CREATE TRIGGER refinement_admission_failure BEFORE INSERT ON refinement_runs FOR EACH ROW EXECUTE FUNCTION refinement_admission_failure_for_test()"
         }
         "lifecycle_start" => {
-            "CREATE TRIGGER refinement_admission_failure BEFORE INSERT ON proposal_revisions FOR EACH ROW EXECUTE FUNCTION refinement_admission_failure_for_test()"
+            "CREATE TRIGGER refinement_admission_failure BEFORE INSERT ON proposal_revisions FOR EACH ROW WHEN (NEW.event_kind = 'refinement_start') EXECUTE FUNCTION refinement_admission_failure_for_test()"
         }
         "first_intent" => {
             "CREATE TRIGGER refinement_admission_failure BEFORE INSERT ON refinement_dispatch_intents FOR EACH ROW EXECUTE FUNCTION refinement_admission_failure_for_test()"
@@ -334,7 +334,8 @@ async fn phantom_09no_96fy_evidence_is_scoped_to_the_exact_run_and_reaped_with_c
     assert_eq!(sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM proposal_revisions WHERE refinement_run_id = $1 AND event_kind = 'refinement_start'").bind(&successor).fetch_one(db.pool()).await.unwrap(), 1);
     assert_eq!(sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM refinement_dispatch_intents WHERE run_id = $1 AND state = 'pending'").bind(&successor).fetch_one(db.pool()).await.unwrap(), 1);
 
-    // A delayed old-generation mutation must not make the successor live or replace it.
+    // Make the winner stale first. A delayed progress notification for the reaped
+    // generation must be rejected rather than reviving any exact-run snapshot.
     sqlx::query("UPDATE refinement_dispatch_intents SET state = 'cancelled', terminal_at = $2 WHERE run_id = $1").bind(&successor).bind(OLD).execute(db.pool()).await.unwrap();
     sqlx::query("UPDATE refinement_runs SET heartbeat_at = $2 WHERE id = $1")
         .bind(&successor)
@@ -342,6 +343,17 @@ async fn phantom_09no_96fy_evidence_is_scoped_to_the_exact_run_and_reaped_with_c
         .execute(db.pool())
         .await
         .unwrap();
+    let before_old_mutation = durable_shape(&db, &proposal_id).await;
+    assert!(matches!(
+        repo.record_refinement_durable_progress(
+            &phantom,
+            2,
+            RefinementDurableProgress::DebateAppend,
+        )
+        .await,
+        Err(RefinementIntentMutationError::GenerationConflict { .. })
+    ));
+    assert_eq!(durable_shape(&db, &proposal_id).await, before_old_mutation);
     let current = repo
         .load_current_refinement_run_snapshot(&proposal_id, GRACE)
         .await
@@ -367,6 +379,27 @@ async fn snapshot_and_24_hour_aggregate_reads_are_byte_for_byte_pure() {
         RefinementAdmissionOutcome::Admitted { run_id, .. } => run_id,
         _ => unreachable!(),
     };
+    // This fixture has both a stale active run and a recent phantom-reap audit
+    // row, so the lifecycle aggregate exercises both its counters.
+    sqlx::query("UPDATE refinement_dispatch_intents SET state = 'cancelled', terminal_at = $2 WHERE run_id = $1")
+        .bind(&run_id)
+        .bind(OLD)
+        .execute(db.pool())
+        .await
+        .unwrap();
+    sqlx::query("UPDATE refinement_runs SET heartbeat_at = $2 WHERE id = $1")
+        .bind(&run_id)
+        .bind(OLD)
+        .execute(db.pool())
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO proposal_revisions (id, proposal_id, seq, title, body, body_format, acceptance_criteria, edited_by_user_id, event_kind, event_metadata, refinement_run_id, refinement_stop_tag) VALUES ($1, $2, 2, '', '', 'markdown', '[]', NULL, 'refinement_stop', '{}'::jsonb, $3, 'reaped_phantom')")
+        .bind(uuid::Uuid::now_v7().to_string())
+        .bind(&proposal_id)
+        .bind(&run_id)
+        .execute(db.pool())
+        .await
+        .unwrap();
     let before = durable_shape(&db, &proposal_id).await;
     for _ in 0..3 {
         repo.load_refinement_run_snapshot(LoadRefinementRunSnapshotRequest {
@@ -378,9 +411,12 @@ async fn snapshot_and_24_hour_aggregate_reads_are_byte_for_byte_pure() {
         repo.load_current_refinement_run_snapshot(&proposal_id, GRACE)
             .await
             .unwrap();
-        repo.load_refinement_run_aggregates(&proposal_id, 86_400_000)
+        let aggregate = repo
+            .load_refinement_lifecycle_aggregate(&proposal_id, GRACE)
             .await
             .unwrap();
+        assert_eq!(aggregate.stale_run_count, 1);
+        assert_eq!(aggregate.reaped_phantom_last_24h, 1);
     }
     assert_eq!(durable_shape(&db, &proposal_id).await, before);
 }
