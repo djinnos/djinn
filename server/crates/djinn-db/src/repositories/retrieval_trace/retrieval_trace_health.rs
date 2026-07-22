@@ -117,13 +117,13 @@ WITH bounded AS (
   WHEN terminal_state = 'success' AND candidate_count IS NOT NULL AND injected_count IS NOT NULL
    AND confidence_filtered_count IS NOT NULL AND not_top_k_count IS NOT NULL AND oversized_skipped_count IS NOT NULL AND budget_pruned_count IS NOT NULL
    AND candidate_count >= 0 AND injected_count >= 0 AND confidence_filtered_count >= 0 AND not_top_k_count >= 0 AND oversized_skipped_count >= 0 AND budget_pruned_count >= 0
-   AND injected_count = candidate_count - confidence_filtered_count - not_top_k_count - oversized_skipped_count - budget_pruned_count
-   AND candidate_count = confidence_filtered_count + not_top_k_count + oversized_skipped_count + injected_count + budget_pruned_count THEN 'success'
+   AND injected_count::bigint = candidate_count::bigint - confidence_filtered_count::bigint - not_top_k_count::bigint - oversized_skipped_count::bigint - budget_pruned_count::bigint
+   AND candidate_count::bigint = confidence_filtered_count::bigint + not_top_k_count::bigint + oversized_skipped_count::bigint + injected_count::bigint + budget_pruned_count::bigint THEN 'success'
   WHEN terminal_state IN ('error','cancelled') AND candidate_count IS NULL AND injected_count IS NULL AND confidence_filtered_count IS NULL AND not_top_k_count IS NULL AND oversized_skipped_count IS NULL AND budget_pruned_count IS NULL THEN 'exceptional'
   WHEN terminal_state IS NULL OR terminal_state NOT IN ('success','error','cancelled') THEN 'invalid_terminal_state'
   WHEN terminal_state = 'success' AND (candidate_count IS NULL OR injected_count IS NULL OR confidence_filtered_count IS NULL OR not_top_k_count IS NULL OR oversized_skipped_count IS NULL OR budget_pruned_count IS NULL) THEN 'missing_success_counts'
   WHEN terminal_state = 'success' AND (candidate_count < 0 OR injected_count < 0 OR confidence_filtered_count < 0 OR not_top_k_count < 0 OR oversized_skipped_count < 0 OR budget_pruned_count < 0) THEN 'negative_count'
-  WHEN terminal_state = 'success' AND injected_count <> candidate_count - confidence_filtered_count - not_top_k_count - oversized_skipped_count - budget_pruned_count THEN 'injected_count_mismatch'
+  WHEN terminal_state = 'success' AND injected_count::bigint <> candidate_count::bigint - confidence_filtered_count::bigint - not_top_k_count::bigint - oversized_skipped_count::bigint - budget_pruned_count::bigint THEN 'injected_count_mismatch'
   WHEN terminal_state = 'success' THEN 'histogram_partition_mismatch'
   ELSE 'exceptional_has_counts' END AS classification FROM bounded
 )
