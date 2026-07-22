@@ -7135,7 +7135,10 @@ async fn startup_reap_classifies_different_incarnation_orphan_as_environmental_r
     );
     let sj: serde_json::Value = serde_json::from_str(row.summary_json.as_deref().unwrap()).unwrap();
     assert_eq!(sj["failure_class"], "environmental_restart_orphan");
-    assert_eq!(sj["owner_classification"], "restart_orphan_different_incarnation");
+    assert_eq!(
+        sj["owner_classification"],
+        "restart_orphan_different_incarnation"
+    );
     assert_eq!(sj["boot_incarnation_id"], current);
     assert_eq!(sj["reason"], "startup");
 }
