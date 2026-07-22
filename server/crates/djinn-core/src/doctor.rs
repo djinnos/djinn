@@ -52,7 +52,7 @@ pub use checks::retrieval::{
     MIN_WINDOW_HOURS, MIN_ZERO_RESULT_THRESHOLD, RETRIEVAL_TAXONOMY_V1,
     RETRIEVAL_ZERO_RESULT_NAME, RetrievalHealthConfig, RetrievalHealthConfigError,
     RetrievalHealthDataSource, RetrievalHealthSnapshot, RetrievalProjectWindowSnapshot,
-    RetrievalZeroResultCheck, TaxonomyV1DispositionHistogram, TaxonomyV1InvalidGroupSnapshot,
+    RetrievalZeroResultCheck, TaxonomyV1DispositionHistogram, TaxonomyV1GroupKey, TaxonomyV1InvalidGroupSnapshot,
     TaxonomyV1QueryCounters, TaxonomyV1RetrievalSnapshot, TaxonomyV1RetrievalZeroResultCheck,
     TaxonomyV1ValidGroupSnapshot, resolve_injection_starvation_v1,
     resolve_retrieval_zero_result_v1,

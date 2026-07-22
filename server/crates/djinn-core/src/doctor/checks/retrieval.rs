@@ -437,62 +437,265 @@ pub const RETRIEVAL_TAXONOMY_V1: &str = "taxonomy-v1";
 pub const LOAD_KNOWLEDGE_CONTEXT_ENTRY_POINT: &str = "load_knowledge_context";
 pub const INJECTION_STARVATION_NAME: &str = "memory.injection_starvation";
 
-/// Complete five-way terminal disposition histogram from a versioned rollup.
+/// Complete candidate-disposition histogram from a versioned rollup.
+///
+/// These are dispositions of every candidate returned by a successful v1
+/// query, not query terminal states. Query success, error, and cancellation
+/// remain in [`TaxonomyV1QueryCounters`].
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TaxonomyV1DispositionHistogram {
-    pub succeeded: u64, pub errored: u64, pub cancelled: u64, pub disabled: u64, pub unknown: u64,
+    pub confidence_filtered: u64,
+    pub not_top_k: u64,
+    pub oversized_skipped: u64,
+    pub injected: u64,
+    pub budget_pruned: u64,
 }
 /// Versioned counters which never include legacy or malformed taxonomy rows.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TaxonomyV1QueryCounters {
-    pub total_queries: u64, pub successful_queries: u64, pub errored_queries: u64,
-    pub cancelled_queries: u64, pub zero_candidate_queries: u64, pub candidate_bearing_queries: u64,
-    pub starved_queries: u64, pub injected_queries: u64,
+    pub total_queries: u64,
+    pub successful_queries: u64,
+    pub errored_queries: u64,
+    pub cancelled_queries: u64,
+    pub zero_candidate_queries: u64,
+    pub candidate_bearing_queries: u64,
+    pub starved_queries: u64,
+    pub injected_queries: u64,
 }
 /// One independently keyed valid project/entry-point rollup.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TaxonomyV1ValidGroupSnapshot {
-    pub project_id: String, pub entry_point: String, pub taxonomy_version: String,
-    pub window_start: OffsetDateTime, pub window_end: OffsetDateTime, pub refreshed_at: OffsetDateTime,
-    pub counters: TaxonomyV1QueryCounters, pub candidate_total: u64, pub injected_total: u64,
-    pub dispositions: TaxonomyV1DispositionHistogram, pub legacy_unclassified_queries: u64,
+    pub project_id: String,
+    pub entry_point: String,
+    pub taxonomy_version: String,
+    pub window_start: OffsetDateTime,
+    pub window_end: OffsetDateTime,
+    pub refreshed_at: OffsetDateTime,
+    pub counters: TaxonomyV1QueryCounters,
+    pub candidate_total: u64,
+    pub injected_total: u64,
+    pub dispositions: TaxonomyV1DispositionHistogram,
+    pub legacy_unclassified_queries: u64,
     pub invalid_taxonomy_queries: u64,
 }
 /// Identity and exclusions for a malformed group. Such a group is never evaluated.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TaxonomyV1InvalidGroupSnapshot {
-    pub project_id: String, pub entry_point: String, pub taxonomy_version: String,
-    pub window_start: OffsetDateTime, pub window_end: OffsetDateTime, pub refreshed_at: OffsetDateTime,
-    pub legacy_unclassified_queries: u64, pub invalid_taxonomy_queries: u64, pub invalid_reason: String,
+    pub project_id: String,
+    pub entry_point: String,
+    pub taxonomy_version: String,
+    pub window_start: OffsetDateTime,
+    pub window_end: OffsetDateTime,
+    pub refreshed_at: OffsetDateTime,
+    pub legacy_unclassified_queries: u64,
+    pub invalid_taxonomy_queries: u64,
+    pub invalid_reason: String,
 }
-impl TaxonomyV1InvalidGroupSnapshot { pub fn finding_key(&self, check: &str) -> String { format!("{check}:{}:{}", self.project_id, self.entry_point) } }
+impl TaxonomyV1InvalidGroupSnapshot {
+    /// The stable identity downstream reconciliation uses to preserve an
+    /// earlier finding while this malformed group is intentionally skipped.
+    pub fn finding_key(&self, check: &str) -> String {
+        format!("{check}:{}:{}", self.project_id, self.entry_point)
+    }
+}
+
+/// The unique project/entry-point identity of one refresh group.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct TaxonomyV1GroupKey {
+    pub project_id: String,
+    pub entry_point: String,
+}
+
+impl TaxonomyV1GroupKey {
+    pub fn new(project_id: impl Into<String>, entry_point: impl Into<String>) -> Self {
+        Self {
+            project_id: project_id.into(),
+            entry_point: entry_point.into(),
+        }
+    }
+}
+
+impl From<&TaxonomyV1ValidGroupSnapshot> for TaxonomyV1GroupKey {
+    fn from(group: &TaxonomyV1ValidGroupSnapshot) -> Self {
+        Self::new(&group.project_id, &group.entry_point)
+    }
+}
+
+impl From<&TaxonomyV1InvalidGroupSnapshot> for TaxonomyV1GroupKey {
+    fn from(group: &TaxonomyV1InvalidGroupSnapshot) -> Self {
+        Self::new(&group.project_id, &group.entry_point)
+    }
+}
+
 /// An atomically-populated refresh; valid siblings remain evaluable beside invalid groups.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TaxonomyV1RetrievalSnapshot { pub valid_groups: Vec<TaxonomyV1ValidGroupSnapshot>, pub invalid_groups: Vec<TaxonomyV1InvalidGroupSnapshot> }
+///
+/// Maps make `(project_id, entry_point)` uniqueness structural: inserting a
+/// replacement group is explicit and cannot create duplicate finding keys.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TaxonomyV1RetrievalSnapshot {
+    valid_groups: BTreeMap<TaxonomyV1GroupKey, TaxonomyV1ValidGroupSnapshot>,
+    invalid_groups: BTreeMap<TaxonomyV1GroupKey, TaxonomyV1InvalidGroupSnapshot>,
+}
+
+impl TaxonomyV1RetrievalSnapshot {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Insert a valid group, returning the group it replaced at the same key.
+    pub fn insert_valid_group(
+        &mut self,
+        group: TaxonomyV1ValidGroupSnapshot,
+    ) -> Option<TaxonomyV1ValidGroupSnapshot> {
+        self.valid_groups.insert((&group).into(), group)
+    }
+
+    /// Insert an invalid group without making it eligible for evaluation.
+    pub fn insert_invalid_group(
+        &mut self,
+        group: TaxonomyV1InvalidGroupSnapshot,
+    ) -> Option<TaxonomyV1InvalidGroupSnapshot> {
+        self.invalid_groups.insert((&group).into(), group)
+    }
+
+    pub fn valid_groups(&self) -> impl Iterator<Item = &TaxonomyV1ValidGroupSnapshot> {
+        self.valid_groups.values()
+    }
+
+    pub fn invalid_groups(&self) -> impl Iterator<Item = &TaxonomyV1InvalidGroupSnapshot> {
+        self.invalid_groups.values()
+    }
+}
 
 /// Pure zero-candidate resolver. Invalid groups are intentionally absent.
-pub fn resolve_retrieval_zero_result_v1(snapshot: &TaxonomyV1RetrievalSnapshot, config: KnowledgeInjectionConfig) -> Vec<Finding> {
-    snapshot.valid_groups.iter().filter(|g| g.taxonomy_version == RETRIEVAL_TAXONOMY_V1).filter_map(|g| resolve_v1(g, config, RETRIEVAL_ZERO_RESULT_NAME, g.counters.zero_candidate_queries, g.counters.successful_queries, "resolve_retrieval_zero_result_v1")).collect()
+pub fn resolve_retrieval_zero_result_v1(
+    snapshot: &TaxonomyV1RetrievalSnapshot,
+    config: KnowledgeInjectionConfig,
+) -> Vec<Finding> {
+    snapshot
+        .valid_groups()
+        .filter(|g| g.taxonomy_version == RETRIEVAL_TAXONOMY_V1)
+        .filter_map(|g| {
+            resolve_v1(
+                g,
+                config,
+                RETRIEVAL_ZERO_RESULT_NAME,
+                g.counters.zero_candidate_queries,
+                g.counters.successful_queries,
+                "resolve_retrieval_zero_result_v1",
+            )
+        })
+        .collect()
 }
 /// Pure starvation resolver restricted to load_knowledge_context candidate-bearing queries.
-pub fn resolve_injection_starvation_v1(snapshot: &TaxonomyV1RetrievalSnapshot, config: KnowledgeInjectionConfig) -> Vec<Finding> {
-    snapshot.valid_groups.iter().filter(|g| g.taxonomy_version == RETRIEVAL_TAXONOMY_V1 && g.entry_point == LOAD_KNOWLEDGE_CONTEXT_ENTRY_POINT).filter_map(|g| resolve_v1(g, config, INJECTION_STARVATION_NAME, g.counters.starved_queries, g.counters.candidate_bearing_queries, "resolve_injection_starvation_v1")).collect()
+pub fn resolve_injection_starvation_v1(
+    snapshot: &TaxonomyV1RetrievalSnapshot,
+    config: KnowledgeInjectionConfig,
+) -> Vec<Finding> {
+    snapshot
+        .valid_groups()
+        .filter(|g| {
+            g.taxonomy_version == RETRIEVAL_TAXONOMY_V1
+                && g.entry_point == LOAD_KNOWLEDGE_CONTEXT_ENTRY_POINT
+        })
+        .filter_map(|g| {
+            resolve_v1(
+                g,
+                config,
+                INJECTION_STARVATION_NAME,
+                g.counters.starved_queries,
+                g.counters.candidate_bearing_queries,
+                "resolve_injection_starvation_v1",
+            )
+        })
+        .collect()
 }
-fn resolve_v1(g: &TaxonomyV1ValidGroupSnapshot, config: KnowledgeInjectionConfig, name: &'static str, numerator: u64, denominator: u64, resolver: &'static str) -> Option<Finding> {
-    let triggered = denominator >= u64::from(config.injection_starvation_query_floor) && numerator > 0 && u128::from(numerator) * 100 >= u128::from(denominator) * u128::from(config.injection_starvation_threshold_percent);
-    if !triggered { return None; }
-    let ratio = format!("{numerator}/{denominator}"); let key = format!("{name}:{}:{}", g.project_id, g.entry_point);
+fn resolve_v1(
+    g: &TaxonomyV1ValidGroupSnapshot,
+    config: KnowledgeInjectionConfig,
+    name: &'static str,
+    numerator: u64,
+    denominator: u64,
+    resolver: &'static str,
+) -> Option<Finding> {
+    let triggered = denominator >= u64::from(config.injection_starvation_query_floor)
+        && numerator > 0
+        && u128::from(numerator) * 100
+            >= u128::from(denominator) * u128::from(config.injection_starvation_threshold_percent);
+    if !triggered {
+        return None;
+    }
+    let ratio = format!("{numerator}/{denominator}");
+    let key = format!("{name}:{}:{}", g.project_id, g.entry_point);
     let evidence = json!({"finding_key":key,"project_id":g.project_id,"entry_point":g.entry_point,"taxonomy_version":g.taxonomy_version,"window":{"start":iso_format(g.window_start),"end":iso_format(g.window_end)},"refreshed_at":iso_format(g.refreshed_at),"numerator":numerator,"denominator":denominator,"exact_ratio":ratio,"configured_threshold_percent":config.injection_starvation_threshold_percent,"configured_query_floor":config.injection_starvation_query_floor,"configured_window_minutes":config.retrieval_health_window_minutes,"query_counters":g.counters,"candidate_total":g.candidate_total,"injected_total":g.injected_total,"dispositions":g.dispositions,"legacy_unclassified_queries":g.legacy_unclassified_queries,"invalid_taxonomy_queries":g.invalid_taxonomy_queries});
-    Some(Finding::new(FindingSeverity::Warn, name, ResolverSnapshot::new(resolver, evidence.clone(), json!({"triggered":true,"exact_ratio":ratio})), format!("{name} {key} is {ratio}")).with_entity_id("project_id", &g.project_id).with_entity_id("entry_point", &g.entry_point).with_entity_id("finding_key", key).with_evidence(evidence))
+    Some(
+        Finding::new(
+            FindingSeverity::Warn,
+            name,
+            ResolverSnapshot::new(
+                resolver,
+                evidence.clone(),
+                json!({"triggered":true,"exact_ratio":ratio}),
+            ),
+            format!("{name} {key} is {ratio}"),
+        )
+        .with_entity_id("project_id", &g.project_id)
+        .with_entity_id("entry_point", &g.entry_point)
+        .with_entity_id("finding_key", key)
+        .with_evidence(evidence),
+    )
 }
 /// Cheap wrapper around the zero-candidate pure resolver.
-pub struct TaxonomyV1RetrievalZeroResultCheck { config: KnowledgeInjectionConfig, snapshot: TaxonomyV1RetrievalSnapshot }
-impl TaxonomyV1RetrievalZeroResultCheck { pub fn new(config: KnowledgeInjectionConfig, snapshot: TaxonomyV1RetrievalSnapshot) -> Self { Self { config, snapshot } } }
-impl DoctorCheck for TaxonomyV1RetrievalZeroResultCheck { fn name(&self)->&'static str { RETRIEVAL_ZERO_RESULT_NAME } fn description(&self)->&'static str { "Flags taxonomy-v1 successful retrieval queries with zero candidates" } fn run(&self)->DoctorResult<Vec<Finding>> { Ok(resolve_retrieval_zero_result_v1(&self.snapshot,self.config)) } fn cadence(&self)->DoctorCheckCadence { DoctorCheckCadence::Cheap } }
+pub struct TaxonomyV1RetrievalZeroResultCheck {
+    config: KnowledgeInjectionConfig,
+    snapshot: TaxonomyV1RetrievalSnapshot,
+}
+impl TaxonomyV1RetrievalZeroResultCheck {
+    pub fn new(config: KnowledgeInjectionConfig, snapshot: TaxonomyV1RetrievalSnapshot) -> Self {
+        Self { config, snapshot }
+    }
+}
+impl DoctorCheck for TaxonomyV1RetrievalZeroResultCheck {
+    fn name(&self) -> &'static str {
+        RETRIEVAL_ZERO_RESULT_NAME
+    }
+    fn description(&self) -> &'static str {
+        "Flags taxonomy-v1 successful retrieval queries with zero candidates"
+    }
+    fn run(&self) -> DoctorResult<Vec<Finding>> {
+        Ok(resolve_retrieval_zero_result_v1(
+            &self.snapshot,
+            self.config,
+        ))
+    }
+    fn cadence(&self) -> DoctorCheckCadence {
+        DoctorCheckCadence::Cheap
+    }
+}
 /// Cheap wrapper around the load_knowledge_context starvation resolver.
-pub struct InjectionStarvationCheck { config: KnowledgeInjectionConfig, snapshot: TaxonomyV1RetrievalSnapshot }
-impl InjectionStarvationCheck { pub fn new(config: KnowledgeInjectionConfig, snapshot: TaxonomyV1RetrievalSnapshot) -> Self { Self { config, snapshot } } }
-impl DoctorCheck for InjectionStarvationCheck { fn name(&self)->&'static str { INJECTION_STARVATION_NAME } fn description(&self)->&'static str { "Flags starved load_knowledge_context candidate-bearing queries" } fn run(&self)->DoctorResult<Vec<Finding>> { Ok(resolve_injection_starvation_v1(&self.snapshot,self.config)) } fn cadence(&self)->DoctorCheckCadence { DoctorCheckCadence::Cheap } }
+pub struct InjectionStarvationCheck {
+    config: KnowledgeInjectionConfig,
+    snapshot: TaxonomyV1RetrievalSnapshot,
+}
+impl InjectionStarvationCheck {
+    pub fn new(config: KnowledgeInjectionConfig, snapshot: TaxonomyV1RetrievalSnapshot) -> Self {
+        Self { config, snapshot }
+    }
+}
+impl DoctorCheck for InjectionStarvationCheck {
+    fn name(&self) -> &'static str {
+        INJECTION_STARVATION_NAME
+    }
+    fn description(&self) -> &'static str {
+        "Flags starved load_knowledge_context candidate-bearing queries"
+    }
+    fn run(&self) -> DoctorResult<Vec<Finding>> {
+        Ok(resolve_injection_starvation_v1(&self.snapshot, self.config))
+    }
+    fn cadence(&self) -> DoctorCheckCadence {
+        DoctorCheckCadence::Cheap
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Tests
@@ -963,34 +1166,148 @@ mod tests {
         assert!(findings.is_empty());
     }
 
-    fn v1_group(project: &str, entry: &str, successful: u64, zero: u64, candidates: u64, starved: u64) -> TaxonomyV1ValidGroupSnapshot {
-        TaxonomyV1ValidGroupSnapshot { project_id: project.into(), entry_point: entry.into(), taxonomy_version: RETRIEVAL_TAXONOMY_V1.into(), window_start: ts(0), window_end: ts(24), refreshed_at: ts(25), counters: TaxonomyV1QueryCounters { total_queries: successful + 3, successful_queries: successful, errored_queries: 2, cancelled_queries: 1, zero_candidate_queries: zero, candidate_bearing_queries: candidates, starved_queries: starved, injected_queries: candidates - starved }, candidate_total: candidates * 2, injected_total: candidates - starved, dispositions: TaxonomyV1DispositionHistogram { succeeded: successful, errored: 2, cancelled: 1, disabled: 0, unknown: 0 }, legacy_unclassified_queries: 5, invalid_taxonomy_queries: 0 }
+    fn v1_group(
+        project: &str,
+        entry: &str,
+        successful: u64,
+        zero: u64,
+        candidate_bearing: u64,
+        starved: u64,
+    ) -> TaxonomyV1ValidGroupSnapshot {
+        TaxonomyV1ValidGroupSnapshot {
+            project_id: project.into(),
+            entry_point: entry.into(),
+            taxonomy_version: RETRIEVAL_TAXONOMY_V1.into(),
+            window_start: ts(0),
+            window_end: ts(24),
+            refreshed_at: ts(25),
+            counters: TaxonomyV1QueryCounters {
+                total_queries: successful + 3,
+                successful_queries: successful,
+                errored_queries: 2,
+                cancelled_queries: 1,
+                zero_candidate_queries: zero,
+                candidate_bearing_queries: candidate_bearing,
+                starved_queries: starved,
+                injected_queries: candidate_bearing - starved,
+            },
+            candidate_total: 10,
+            injected_total: 2,
+            dispositions: TaxonomyV1DispositionHistogram {
+                confidence_filtered: 1,
+                not_top_k: 2,
+                oversized_skipped: 3,
+                injected: 2,
+                budget_pruned: 2,
+            },
+            legacy_unclassified_queries: 5,
+            invalid_taxonomy_queries: 0,
+        }
     }
-    fn v1_config() -> KnowledgeInjectionConfig { KnowledgeInjectionConfig { injection_starvation_threshold_percent: 50, injection_starvation_query_floor: 2, retrieval_health_window_minutes: 60, ..KnowledgeInjectionConfig::default() } }
+
+    fn v1_snapshot(groups: impl IntoIterator<Item = TaxonomyV1ValidGroupSnapshot>) -> TaxonomyV1RetrievalSnapshot {
+        let mut snapshot = TaxonomyV1RetrievalSnapshot::new();
+        for group in groups {
+            snapshot.insert_valid_group(group);
+        }
+        snapshot
+    }
+
+    fn v1_config() -> KnowledgeInjectionConfig {
+        KnowledgeInjectionConfig {
+            injection_starvation_threshold_percent: 50,
+            injection_starvation_query_floor: 2,
+            retrieval_health_window_minutes: 60,
+            ..KnowledgeInjectionConfig::default()
+        }
+    }
 
     #[test]
-    fn v1_resolvers_are_inclusive_and_independent() {
-        let snapshot = TaxonomyV1RetrievalSnapshot { valid_groups: vec![v1_group("p1", "memory_search", 2, 1, 0, 0), v1_group("p2", "memory_search", 2, 0, 0, 0), v1_group("p1", LOAD_KNOWLEDGE_CONTEXT_ENTRY_POINT, 2, 0, 2, 1)], invalid_groups: vec![] };
+    fn v1_resolvers_are_inclusive_independent_and_exclude_terminal_failures() {
+        let mut error_heavy = v1_group("p1", "memory_search", 2, 1, 0, 0);
+        error_heavy.counters.total_queries = 102;
+        error_heavy.counters.errored_queries = 99;
+        let snapshot = v1_snapshot([
+            error_heavy,
+            v1_group("p2", "memory_search", 2, 0, 0, 0),
+            v1_group("p1", LOAD_KNOWLEDGE_CONTEXT_ENTRY_POINT, 2, 0, 2, 1),
+        ]);
         let zero = resolve_retrieval_zero_result_v1(&snapshot, v1_config());
         assert_eq!(zero.len(), 1, "50 percent equality triggers");
         assert_eq!(zero[0].entity_ids["finding_key"], "memory.retrieval_zero_result:p1:memory_search");
+        assert_eq!(zero[0].evidence["exact_ratio"], "1/2", "errors are excluded from the denominator");
         let starvation = resolve_injection_starvation_v1(&snapshot, v1_config());
         assert_eq!(starvation.len(), 1);
         assert_eq!(starvation[0].entity_ids["finding_key"], "memory.injection_starvation:p1:load_knowledge_context");
     }
 
     #[test]
-    fn v1_floor_and_complete_evidence() {
-        let below = TaxonomyV1RetrievalSnapshot { valid_groups: vec![v1_group("p", "memory_search", 1, 1, 0, 0)], invalid_groups: vec![] };
-        assert!(resolve_retrieval_zero_result_v1(&below, v1_config()).is_empty());
-        let snapshot = TaxonomyV1RetrievalSnapshot { valid_groups: vec![v1_group("p", "memory_search", 2, 2, 0, 0)], invalid_groups: vec![] };
+    fn v1_floor_zero_candidates_and_healthy_groups_do_not_emit() {
+        let snapshot = v1_snapshot([
+            v1_group("below-floor", "memory_search", 1, 1, 0, 0),
+            v1_group("zero-candidates", LOAD_KNOWLEDGE_CONTEXT_ENTRY_POINT, 2, 0, 0, 0),
+            v1_group("healthy", "memory_search", 2, 0, 2, 0),
+        ]);
+        assert!(resolve_retrieval_zero_result_v1(&snapshot, v1_config()).is_empty());
+        assert!(resolve_injection_starvation_v1(&snapshot, v1_config()).is_empty());
+    }
+
+    #[test]
+    fn v1_historical_starvation_shape_only_evaluates_load_knowledge_context() {
+        // The 2026-07-14 incident shape: candidate-bearing successful loads,
+        // but every candidate was skipped by budget packing.
+        let mut historical = v1_group("history", LOAD_KNOWLEDGE_CONTEXT_ENTRY_POINT, 20, 0, 20, 20);
+        historical.candidate_total = 20;
+        historical.injected_total = 0;
+        historical.dispositions = TaxonomyV1DispositionHistogram {
+            confidence_filtered: 0,
+            not_top_k: 0,
+            oversized_skipped: 0,
+            injected: 0,
+            budget_pruned: 20,
+        };
+        let snapshot = v1_snapshot([
+            historical,
+            v1_group("history", "memory_search", 20, 0, 20, 20),
+        ]);
+        let findings = resolve_injection_starvation_v1(&snapshot, v1_config());
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].evidence["exact_ratio"], "20/20");
+        assert_eq!(findings[0].entity_ids["entry_point"], LOAD_KNOWLEDGE_CONTEXT_ENTRY_POINT);
+    }
+
+    #[test]
+    fn v1_snapshot_keys_groups_and_preserves_invalid_keys_without_evaluation() {
+        let mut snapshot = v1_snapshot([v1_group("project", "entry", 2, 2, 0, 0)]);
+        let replaced = snapshot.insert_valid_group(v1_group("project", "entry", 2, 0, 0, 0));
+        assert!(replaced.is_some(), "the group key is unique");
+        let invalid = TaxonomyV1InvalidGroupSnapshot {
+            project_id: "project".into(), entry_point: "bad-entry".into(), taxonomy_version: RETRIEVAL_TAXONOMY_V1.into(),
+            window_start: ts(0), window_end: ts(24), refreshed_at: ts(25), legacy_unclassified_queries: 4,
+            invalid_taxonomy_queries: 3, invalid_reason: "malformed disposition".into(),
+        };
+        assert_eq!(invalid.finding_key(RETRIEVAL_ZERO_RESULT_NAME), "memory.retrieval_zero_result:project:bad-entry");
+        assert_eq!(invalid.finding_key(INJECTION_STARVATION_NAME), "memory.injection_starvation:project:bad-entry");
+        snapshot.insert_invalid_group(invalid);
+        assert_eq!(snapshot.invalid_groups().count(), 1);
+        assert!(resolve_retrieval_zero_result_v1(&snapshot, v1_config()).is_empty());
+    }
+
+    #[test]
+    fn v1_evidence_has_complete_candidate_taxonomy_and_wrappers_are_cheap() {
+        let snapshot = v1_snapshot([v1_group("p", "memory_search", 2, 2, 0, 0)]);
         let finding = resolve_retrieval_zero_result_v1(&snapshot, v1_config()).pop().unwrap();
-        assert_eq!(finding.evidence["exact_ratio"], "2/2");
-        assert_eq!(finding.evidence["configured_window_minutes"], 60);
-        assert!(finding.evidence["refreshed_at"].is_string());
-        assert_eq!(finding.evidence["query_counters"]["errored_queries"], 2);
-        assert_eq!(finding.evidence["dispositions"]["cancelled"], 1);
-        assert_eq!(finding.evidence["legacy_unclassified_queries"], 5);
+        let evidence = &finding.evidence;
+        for field in ["project_id", "entry_point", "taxonomy_version", "window", "refreshed_at", "numerator", "denominator", "exact_ratio", "configured_threshold_percent", "configured_query_floor", "configured_window_minutes", "query_counters", "candidate_total", "injected_total", "dispositions", "legacy_unclassified_queries", "invalid_taxonomy_queries"] {
+            assert!(!evidence[field].is_null(), "missing {field}");
+        }
+        for field in ["confidence_filtered", "not_top_k", "oversized_skipped", "injected", "budget_pruned"] {
+            assert!(!evidence["dispositions"][field].is_null(), "missing disposition {field}");
+        }
+        assert_eq!(evidence["query_counters"]["cancelled_queries"], 1);
+        assert_eq!(evidence["dispositions"]["budget_pruned"], 2);
+        assert_eq!(TaxonomyV1RetrievalZeroResultCheck::new(v1_config(), snapshot.clone()).cadence(), DoctorCheckCadence::Cheap);
+        assert_eq!(InjectionStarvationCheck::new(v1_config(), snapshot).cadence(), DoctorCheckCadence::Cheap);
     }
 
 }
