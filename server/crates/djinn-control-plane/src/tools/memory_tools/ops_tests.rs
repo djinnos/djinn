@@ -6,8 +6,10 @@ mod tests {
 
     use djinn_core::events::{DjinnEventEnvelope, EventBus};
     use djinn_db::repositories::retrieval_trace::{
-        RetrievalTaxonomyValidationError, RetrievalTraceEntryPoint,
-        TaxonomyV1RetrievalHealthCounts, TaxonomyV1RetrievalHealthGroup,
+        CreateRetrievalTraceParams, CreateRetrievalTraceTerminalParams, DEFAULT_CANDIDATE_CAP,
+        KnowledgeTraceDispositionCounts, KnowledgeTraceTerminalState,
+        RetrievalTaxonomyValidationError, RetrievalTraceEntryPoint, RetrievalTraceOutcome,
+        RetrievalTraceRepository, TaxonomyV1RetrievalHealthCounts, TaxonomyV1RetrievalHealthGroup,
     };
     use djinn_db::{
         Database, NoteRepository, ProjectRepository, test_support::drop_table_for_test,
@@ -15,6 +17,7 @@ mod tests {
     use djinn_telemetry::memory_retrieval::{
         RetrievalEntryPoint, RetrievalOutcome, RetrievalStage,
     };
+    use time::{OffsetDateTime, format_description::well_known::Iso8601};
     use tokio::sync::broadcast;
 
     use crate::bridge::{RuntimeOps, SemanticQueryEmbedding};
@@ -228,6 +231,47 @@ mod tests {
             .unwrap()
             .expect("note")
             .access_count
+    }
+
+    async fn insert_taxonomy_terminal(
+        repo: &RetrievalTraceRepository,
+        project_id: &str,
+        entry_point: RetrievalTraceEntryPoint,
+        terminal_state: KnowledgeTraceTerminalState,
+        outcome: RetrievalTraceOutcome,
+        terminal_at: &str,
+        candidate_count: Option<i32>,
+        injected_count: Option<i32>,
+        dispositions: Option<KnowledgeTraceDispositionCounts>,
+    ) -> String {
+        let candidates = serde_json::json!([]);
+        let durations = serde_json::json!({});
+        repo.insert_terminal(CreateRetrievalTraceTerminalParams {
+            trace: CreateRetrievalTraceParams {
+                project_id,
+                session_id: None,
+                task_run_id: None,
+                task_id: None,
+                entry_point,
+                trigger: None,
+                candidates: &candidates,
+                candidate_cap: DEFAULT_CANDIDATE_CAP,
+                candidate_cap_exceeded: false,
+                sampling_metadata: None,
+                durations_ms: &durations,
+                estimated_injected_tokens: 1,
+            },
+            rollout_label: "cohort:memory-health-tool-test",
+            outcome,
+            terminal_state,
+            terminal_at,
+            candidate_count,
+            injected_count,
+            dispositions,
+        })
+        .await
+        .expect("persist taxonomy-v1 retrieval terminal")
+        .id
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -967,6 +1011,268 @@ mod tests {
         .await;
         assert!(orphans.error.is_none(), "{:?}", orphans.error);
         assert_eq!(orphans.orphans.len() as i64, health.orphan_note_count);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn memory_health_serializes_persisted_taxonomy_v1_groups_without_pooling_projects() {
+        let setup = setup_server().await;
+        let db = setup.server.state.db().clone();
+        let projects = ProjectRepository::new(db.clone(), setup.server.state.event_bus());
+        let project_id = projects
+            .resolve(&setup.project)
+            .await
+            .expect("resolve requested project")
+            .expect("requested project exists");
+        let other_project = projects
+            .create("other-project", "test", "other-project")
+            .await
+            .expect("create second project");
+        let traces = RetrievalTraceRepository::new(db.clone());
+        let terminal_at = OffsetDateTime::now_utc()
+            .format(&Iso8601::DEFAULT)
+            .expect("format terminal timestamp");
+        let injected_dispositions = KnowledgeTraceDispositionCounts {
+            confidence_filtered: 1,
+            not_top_k: 1,
+            oversized_skipped: 1,
+            injected: 1,
+            budget_pruned: 1,
+        };
+
+        // The requested project's load group includes each terminal shape. The
+        // malformed row must make just this group invalid without hiding the
+        // healthy dispatch group below.
+        insert_taxonomy_terminal(
+            &traces,
+            &project_id,
+            RetrievalTraceEntryPoint::LoadKnowledgeContext,
+            KnowledgeTraceTerminalState::Success,
+            RetrievalTraceOutcome::Injected,
+            &terminal_at,
+            Some(5),
+            Some(1),
+            Some(injected_dispositions),
+        )
+        .await;
+        insert_taxonomy_terminal(
+            &traces,
+            &project_id,
+            RetrievalTraceEntryPoint::LoadKnowledgeContext,
+            KnowledgeTraceTerminalState::Success,
+            RetrievalTraceOutcome::Empty,
+            &terminal_at,
+            Some(2),
+            Some(0),
+            Some(KnowledgeTraceDispositionCounts {
+                confidence_filtered: 0,
+                not_top_k: 1,
+                oversized_skipped: 0,
+                injected: 0,
+                budget_pruned: 1,
+            }),
+        )
+        .await;
+        insert_taxonomy_terminal(
+            &traces,
+            &project_id,
+            RetrievalTraceEntryPoint::LoadKnowledgeContext,
+            KnowledgeTraceTerminalState::Success,
+            RetrievalTraceOutcome::Empty,
+            &terminal_at,
+            Some(0),
+            Some(0),
+            Some(KnowledgeTraceDispositionCounts {
+                confidence_filtered: 0,
+                not_top_k: 0,
+                oversized_skipped: 0,
+                injected: 0,
+                budget_pruned: 0,
+            }),
+        )
+        .await;
+        for state in [
+            KnowledgeTraceTerminalState::Error,
+            KnowledgeTraceTerminalState::Cancelled,
+        ] {
+            insert_taxonomy_terminal(
+                &traces,
+                &project_id,
+                RetrievalTraceEntryPoint::LoadKnowledgeContext,
+                state,
+                RetrievalTraceOutcome::Error,
+                &terminal_at,
+                None,
+                None,
+                None,
+            )
+            .await;
+        }
+        let malformed_id = insert_taxonomy_terminal(
+            &traces,
+            &project_id,
+            RetrievalTraceEntryPoint::LoadKnowledgeContext,
+            KnowledgeTraceTerminalState::Success,
+            RetrievalTraceOutcome::Injected,
+            &terminal_at,
+            Some(5),
+            Some(1),
+            Some(injected_dispositions),
+        )
+        .await;
+        sqlx::query("UPDATE retrieval_traces SET injected_count = 4 WHERE id = $1")
+            .bind(&malformed_id)
+            .execute(db.pool())
+            .await
+            .expect("make taxonomy-v1 terminal malformed");
+
+        // Legacy payloads remain explicitly unclassified even if their JSON
+        // looks candidate-bearing; the tool must not infer a taxonomy from it.
+        let legacy_candidates = serde_json::json!([{"outcome": "injected"}]);
+        let durations = serde_json::json!({});
+        let legacy = traces
+            .insert(CreateRetrievalTraceParams {
+                project_id: &project_id,
+                session_id: None,
+                task_run_id: None,
+                task_id: None,
+                entry_point: RetrievalTraceEntryPoint::LoadKnowledgeContext,
+                trigger: None,
+                candidates: &legacy_candidates,
+                candidate_cap: DEFAULT_CANDIDATE_CAP,
+                candidate_cap_exceeded: false,
+                sampling_metadata: None,
+                durations_ms: &durations,
+                estimated_injected_tokens: 99,
+            })
+            .await
+            .expect("persist legacy terminal-shaped trace");
+        sqlx::query("UPDATE retrieval_traces SET terminal_at = $1 WHERE id = $2")
+            .bind(&terminal_at)
+            .bind(&legacy.id)
+            .execute(db.pool())
+            .await
+            .expect("place legacy trace in health window");
+
+        // A healthy group for a second entry point in the requested project
+        // remains visible beside the invalid load group. A separate project's
+        // group proves the response applies its requested-project filter.
+        insert_taxonomy_terminal(
+            &traces,
+            &project_id,
+            RetrievalTraceEntryPoint::Dispatch,
+            KnowledgeTraceTerminalState::Success,
+            RetrievalTraceOutcome::Injected,
+            &terminal_at,
+            Some(5),
+            Some(1),
+            Some(injected_dispositions),
+        )
+        .await;
+        insert_taxonomy_terminal(
+            &traces,
+            &other_project.id,
+            RetrievalTraceEntryPoint::Dispatch,
+            KnowledgeTraceTerminalState::Success,
+            RetrievalTraceOutcome::Injected,
+            &terminal_at,
+            Some(5),
+            Some(1),
+            Some(injected_dispositions),
+        )
+        .await;
+
+        let response = ops::memory_health(
+            &setup.server,
+            HealthParams {
+                project: Some(setup.project),
+            },
+        )
+        .await;
+        assert!(response.error.is_none(), "{:?}", response.error);
+        let body = serde_json::to_value(response).expect("serialize memory_health response");
+        let groups = body["retrieval"]["persisted"]["groups"]
+            .as_array()
+            .expect("serialized taxonomy-v1 groups");
+        assert_eq!(groups.len(), 2);
+        assert!(groups.iter().all(|group| group["project_id"] == project_id));
+        assert!(
+            groups
+                .iter()
+                .all(|group| group["project_id"] != other_project.id)
+        );
+
+        let load = groups
+            .iter()
+            .find(|group| group["entry_point"] == "load_knowledge_context")
+            .expect("requested load group");
+        assert_eq!(load["taxonomy_version"], 1);
+        assert!(load["window_start"].is_string());
+        assert!(load["window_end"].is_string());
+        assert!(load["refreshed_at"].is_string());
+        assert_eq!(load["invalid"], true);
+        assert_eq!(load["total_queries"], 5);
+        assert_eq!(load["successful_queries"], 3);
+        assert_eq!(load["errored_queries"], 2);
+        assert_eq!(load["zero_candidate_queries"], 1);
+        assert_eq!(load["zero_result_queries"], load["zero_candidate_queries"]);
+        assert_eq!(load["candidate_bearing_queries"], 2);
+        assert_eq!(load["starved_queries"], 1);
+        assert_eq!(load["injected_queries"], 1);
+        assert_eq!(load["candidate_total"], 7);
+        assert_eq!(load["injected_total"], 1);
+        let dispositions = &load["dispositions"];
+        assert_eq!(dispositions["confidence_filtered_total"], 1);
+        assert_eq!(dispositions["not_top_k_total"], 2);
+        assert_eq!(dispositions["oversized_skipped_total"], 1);
+        assert_eq!(dispositions["injected_total"], 1);
+        assert_eq!(dispositions["budget_pruned_total"], 2);
+        assert_eq!(
+            dispositions["confidence_filtered_total"].as_i64().unwrap()
+                + dispositions["not_top_k_total"].as_i64().unwrap()
+                + dispositions["oversized_skipped_total"].as_i64().unwrap()
+                + dispositions["injected_total"].as_i64().unwrap()
+                + dispositions["budget_pruned_total"].as_i64().unwrap(),
+            load["candidate_total"].as_i64().unwrap()
+        );
+        assert_eq!(load["legacy_unclassified_queries"], 1);
+        assert_eq!(load["invalid_taxonomy_queries"], 1);
+        assert_eq!(load["validation_errors"][0]["trace_id"], malformed_id);
+        assert_eq!(
+            load["validation_errors"][0]["reason"],
+            "injected_count_mismatch"
+        );
+
+        let dispatch = groups
+            .iter()
+            .find(|group| group["entry_point"] == "dispatch")
+            .expect("healthy requested-project dispatch group");
+        assert_eq!(dispatch["invalid"], false);
+        assert_eq!(dispatch["total_queries"], 1);
+        assert_eq!(dispatch["candidate_total"], 5);
+        assert_eq!(dispatch["injected_total"], 1);
+        assert_eq!(dispatch["invalid_taxonomy_queries"], 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn memory_health_taxonomy_v1_response_reports_empty_window() {
+        let setup = setup_server().await;
+        let response = ops::memory_health(
+            &setup.server,
+            HealthParams {
+                project: Some(setup.project),
+            },
+        )
+        .await;
+        let body = serde_json::to_value(response).expect("serialize empty health response");
+        assert_eq!(body["retrieval"]["persisted"]["status"], "available");
+        assert!(body["retrieval"]["persisted"]["window_start"].is_string());
+        assert!(body["retrieval"]["persisted"]["window_end"].is_string());
+        assert!(
+            body["retrieval"]["persisted"]["groups"]
+                .as_array()
+                .expect("empty taxonomy-v1 groups")
+                .is_empty()
+        );
     }
 
     #[test]
