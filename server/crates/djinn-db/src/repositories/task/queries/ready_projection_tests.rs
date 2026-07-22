@@ -11,6 +11,21 @@ use crate::database::Database;
 use crate::repositories::user::UserRepository;
 use djinn_core::auth_context::SESSION_USER_ID;
 use djinn_core::events::EventBus;
+use djinn_core::models::TaskRefinementCorrelation;
+use djinn_core::refinement_liveness::{RefinementPhase, RefinementRole};
+
+fn assert_adversary_correlation(task: &djinn_core::models::Task, run_id: &str, intent_id: &str) {
+    let correlation = task
+        .refinement_correlation()
+        .expect("ready projection must contain a complete valid correlation")
+        .expect("ready projection must not collapse a correlated task to ordinary");
+    assert_eq!(correlation.run_id(), run_id);
+    assert_eq!(correlation.intent_id(), intent_id);
+    assert_eq!(correlation.generation(), 7);
+    assert_eq!(correlation.round(), 3);
+    assert_eq!(correlation.phase(), RefinementPhase::AdversaryAttack);
+    assert_eq!(correlation.role(), RefinementRole::Adversary);
+}
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn list_ready_projects_created_by_user_id() {
@@ -76,6 +91,121 @@ async fn list_ready_projects_created_by_user_id() {
         Some(user_id.as_str()),
         "list_ready must SELECT created_by_user_id, not default it to None"
     );
+}
+
+/// Both dispatch-read projections hydrate `Task` through runtime SQL, where
+/// omitted `#[sqlx(default)]` fields otherwise silently become `None`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn ready_and_claim_preserve_refinement_correlation() {
+    let db = Database::open_in_memory().unwrap();
+    db.ensure_initialized().await.unwrap();
+    let project_id = uuid::Uuid::now_v7().to_string();
+    let proposal_id = uuid::Uuid::now_v7().to_string();
+    let run_id = uuid::Uuid::now_v7().to_string();
+    let intent_id = uuid::Uuid::now_v7().to_string();
+    sqlx::query!(
+        "INSERT INTO projects (id, name, github_owner, github_repo) VALUES ($1, $2, $3, $4)",
+        project_id,
+        "p",
+        "test",
+        format!("refinement-ready-projection-{project_id}"),
+    )
+    .execute(db.pool())
+    .await
+    .unwrap();
+
+    // Migration 138 makes both task correlation IDs foreign keys, so persist
+    // the exact run and intent identity exercised by these projections.
+    sqlx::query(
+        "INSERT INTO proposals (id, short_id, title, body, body_format, acceptance_criteria, status, latest_revision_seq) \
+         VALUES ($1, $2, 'Ready projection proposal', '', 'markdown', '[]'::jsonb, 'draft', 1)",
+    )
+    .bind(&proposal_id)
+    .bind(format!("p{}", &proposal_id[..8]))
+    .execute(db.pool())
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO refinement_runs \
+         (id, proposal_id, generation, idempotency_key, state, terminal_at, stop_tag) \
+         VALUES ($1, $2, 7, $3, 'terminal', '2026-01-01T00:00:00.000Z', 'operator_stop')",
+    )
+    .bind(&run_id)
+    .bind(&proposal_id)
+    .bind(format!("ready-projection-run-{run_id}"))
+    .execute(db.pool())
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO refinement_dispatch_intents \
+         (id, run_id, round, phase, role, idempotency_key) \
+         VALUES ($1, $2, 3, 'adversary_attack', 'adversary', $3)",
+    )
+    .bind(&intent_id)
+    .bind(&run_id)
+    .bind(format!("ready-projection-intent-{intent_id}"))
+    .execute(db.pool())
+    .await
+    .unwrap();
+
+    let repo = TaskRepository::new(db.clone(), EventBus::noop());
+    let task = repo
+        .create_fixture_in_project(
+            &project_id,
+            None,
+            "correlated ready task",
+            "",
+            "",
+            "task",
+            0,
+            "",
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    let correlation = TaskRefinementCorrelation::new(
+        run_id.clone(),
+        intent_id.clone(),
+        7,
+        3,
+        RefinementPhase::AdversaryAttack,
+        RefinementRole::Adversary,
+    )
+    .unwrap();
+    repo.set_refinement_correlation(&task.id, Some(&correlation))
+        .await
+        .unwrap();
+
+    let ready = repo
+        .list_ready(ReadyQuery {
+            project_id: Some(project_id.clone()),
+            limit: 1,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    let ready_task = ready
+        .iter()
+        .find(|candidate| candidate.id == task.id)
+        .expect("correlated task must be ready");
+    assert_adversary_correlation(ready_task, &run_id, &intent_id);
+
+    let claimed = repo
+        .claim(
+            ReadyQuery {
+                project_id: Some(project_id),
+                limit: 1,
+                ..Default::default()
+            },
+            "dispatcher",
+            "system",
+        )
+        .await
+        .unwrap()
+        .expect("correlated task must be claimable");
+    assert_eq!(claimed.id, task.id);
+    assert_adversary_correlation(&claimed, &run_id, &intent_id);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

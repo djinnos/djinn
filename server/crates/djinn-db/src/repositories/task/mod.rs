@@ -2692,7 +2692,7 @@ macro_rules! task_select_where_id {
                 intervention_count, last_intervention_at,
                 created_at, updated_at, closed_at,
                 close_reason, merge_commit_sha, pr_url, merge_conflict_metadata, memory_refs::text AS memory_refs,
-                agent_type, created_by_user_id,
+                agent_type, created_by_user_id, refinement_run_id, refinement_intent_id, refinement_generation, refinement_round, refinement_phase, refinement_role,
                 COALESCE((SELECT s.ci_status FROM task_pr_ci_snapshots s WHERE s.task_id = tasks.id ORDER BY s.last_seen_at DESC LIMIT 1), 'unknown') AS ci_status,
                 (SELECT s.head_sha FROM task_pr_ci_snapshots s WHERE s.task_id = tasks.id ORDER BY s.last_seen_at DESC LIMIT 1) AS ci_head_sha,
                 (SELECT s.pr_number FROM task_pr_ci_snapshots s WHERE s.task_id = tasks.id ORDER BY s.last_seen_at DESC LIMIT 1) AS ci_pr_number,
