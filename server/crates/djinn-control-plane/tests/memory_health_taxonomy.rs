@@ -152,9 +152,8 @@ async fn memory_health_tool_assembles_persisted_taxonomy_groups_without_pooling(
         Some(injected),
     )
     .await;
-    sqlx::query("UPDATE retrieval_traces SET injected_count = 4 WHERE id = $1")
-        .bind(&malformed_id)
-        .execute(db.pool())
+    traces
+        .corrupt_injected_count_for_test(&malformed_id, 4)
         .await
         .expect("make taxonomy-v1 terminal malformed");
 
@@ -176,10 +175,8 @@ async fn memory_health_tool_assembles_persisted_taxonomy_groups_without_pooling(
         })
         .await
         .expect("persist legacy trace");
-    sqlx::query("UPDATE retrieval_traces SET terminal_at = $1 WHERE id = $2")
-        .bind(&terminal_at)
-        .bind(&legacy.id)
-        .execute(db.pool())
+    traces
+        .update_terminal_at_for_test(&legacy.id, &terminal_at)
         .await
         .expect("place legacy trace in health window");
 
@@ -209,7 +206,11 @@ async fn memory_health_tool_assembles_persisted_taxonomy_groups_without_pooling(
         .as_array()
         .expect("serialized taxonomy-v1 groups");
     assert_eq!(groups.len(), 2);
-    assert!(groups.iter().all(|group| group["project_id"] == requested.id));
+    assert!(
+        groups
+            .iter()
+            .all(|group| group["project_id"] == requested.id)
+    );
     assert!(groups.iter().all(|group| group["project_id"] != other.id));
 
     let load = groups
@@ -234,7 +235,10 @@ async fn memory_health_tool_assembles_persisted_taxonomy_groups_without_pooling(
     assert_eq!(load["legacy_unclassified_queries"], 1);
     assert_eq!(load["invalid_taxonomy_queries"], 1);
     assert_eq!(load["validation_errors"][0]["trace_id"], malformed_id);
-    assert_eq!(load["validation_errors"][0]["reason"], "injected_count_mismatch");
+    assert_eq!(
+        load["validation_errors"][0]["reason"],
+        "injected_count_mismatch"
+    );
     let dispositions = &load["dispositions"];
     let histogram_total = [
         "confidence_filtered_total",
@@ -271,8 +275,10 @@ async fn memory_health_tool_reports_an_available_empty_taxonomy_window() {
     assert_eq!(response["retrieval"]["persisted"]["status"], "available");
     assert!(response["retrieval"]["persisted"]["window_start"].is_string());
     assert!(response["retrieval"]["persisted"]["window_end"].is_string());
-    assert!(response["retrieval"]["persisted"]["groups"]
-        .as_array()
-        .expect("empty taxonomy-v1 groups")
-        .is_empty());
+    assert!(
+        response["retrieval"]["persisted"]["groups"]
+            .as_array()
+            .expect("empty taxonomy-v1 groups")
+            .is_empty()
+    );
 }
