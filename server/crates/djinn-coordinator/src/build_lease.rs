@@ -98,15 +98,86 @@ pub enum LeaseTelemetryOutcome {
     Terminal,
     Status,
 }
+impl LeaseTelemetryOutcome {
+    const fn as_label(self) -> &'static str {
+        match self {
+            Self::Queued => "queued",
+            Self::Granted => "granted",
+            Self::Timeout => "timeout",
+            Self::Conflict => "conflict",
+            Self::Unavailable => "unavailable",
+            Self::Terminal => "terminal",
+            Self::Status => "status",
+        }
+    }
+}
+impl LeaseTelemetryState {
+    const fn as_label(self) -> &'static str {
+        match self {
+            Self::Queued => "queued",
+            Self::Occupied => "occupied",
+            Self::Terminal => "terminal",
+            Self::NotReady => "not_ready",
+        }
+    }
+}
+impl LeaseOperation {
+    const fn as_label(self) -> &'static str {
+        match self {
+            Self::Recover => "recover",
+            Self::Queue => "queue",
+            Self::Grant => "grant",
+            Self::Status => "status",
+            Self::Abandon => "abandon",
+            Self::Bind => "bind",
+            Self::Cancel => "cancel",
+            Self::Release => "release",
+            Self::Expire => "expire",
+            Self::SetCap => "set_cap",
+        }
+    }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LeaseTelemetryConsumer {
+    TaskInvocation,
+    GraphWarm,
+    System,
+}
+impl LeaseTelemetryConsumer {
+    const fn as_label(self) -> &'static str {
+        match self {
+            Self::TaskInvocation => "task_invocation",
+            Self::GraphWarm => "graph_warm",
+            Self::System => "system",
+        }
+    }
+}
 pub trait LeaseTelemetry: Send + Sync {
     fn state(&self, state: LeaseTelemetryState, count: u64);
     fn outcome(&self, outcome: LeaseTelemetryOutcome);
+    fn operation(&self, operation: LeaseOperation, consumer: LeaseTelemetryConsumer);
 }
 #[derive(Default)]
 pub struct NoopLeaseTelemetry;
 impl LeaseTelemetry for NoopLeaseTelemetry {
     fn state(&self, _: LeaseTelemetryState, _: u64) {}
     fn outcome(&self, _: LeaseTelemetryOutcome) {}
+    fn operation(&self, _: LeaseOperation, _: LeaseTelemetryConsumer) {}
+}
+
+#[derive(Default)]
+pub struct MetricsLeaseTelemetry;
+impl LeaseTelemetry for MetricsLeaseTelemetry {
+    fn state(&self, state: LeaseTelemetryState, count: u64) {
+        metrics::gauge!("djinn_build_lease_units", "state" => state.as_label()).set(count as f64);
+    }
+    fn outcome(&self, outcome: LeaseTelemetryOutcome) {
+        metrics::counter!("djinn_build_lease_outcomes_total", "outcome" => outcome.as_label())
+            .increment(1);
+    }
+    fn operation(&self, operation: LeaseOperation, consumer: LeaseTelemetryConsumer) {
+        metrics::counter!("djinn_build_lease_operations_total", "operation" => operation.as_label(), "consumer" => consumer.as_label()).increment(1);
+    }
 }
 
 /// Coordinator policy owner over the one repository-global FIFO.
@@ -130,7 +201,7 @@ impl BuildLeaseService {
             cap,
             Arc::new(SystemLeaseClock),
             Arc::new(NoopLeaseTransactionPause),
-            Arc::new(NoopLeaseTelemetry),
+            Arc::new(MetricsLeaseTelemetry),
         )
     }
 
@@ -179,6 +250,8 @@ impl BuildLeaseService {
         if !self.is_ready() || cap < 0 {
             return self.unavailable();
         }
+        self.telemetry
+            .operation(LeaseOperation::SetCap, LeaseTelemetryConsumer::System);
         self.pause.before_transaction(LeaseOperation::SetCap).await;
         match self.repository.set_cap(cap).await {
             Ok(_) => {
@@ -195,6 +268,8 @@ impl BuildLeaseService {
         if !self.is_ready() {
             return self.unavailable();
         }
+        self.telemetry
+            .operation(LeaseOperation::Queue, telemetry_consumer(&request.identity));
         self.pause.before_transaction(LeaseOperation::Queue).await;
         let (key, immutable_identity) = identity(&request.identity);
         let input = QueueBuildLeaseInput {
@@ -253,6 +328,8 @@ impl BuildLeaseService {
         if !self.is_ready() {
             return self.unavailable();
         }
+        self.telemetry
+            .operation(LeaseOperation::Status, telemetry_consumer(&request.identity));
         self.pause.before_transaction(LeaseOperation::Status).await;
         let (key, _) = identity(&request.identity);
         match self.repository.get(&key).await {
@@ -278,6 +355,8 @@ impl BuildLeaseService {
         if !self.is_ready() {
             return self.unavailable();
         }
+        self.telemetry
+            .operation(LeaseOperation::Bind, telemetry_consumer(&request.identity));
         self.pause.before_transaction(LeaseOperation::Bind).await;
         let (key, _) = identity(&request.identity);
         match self
@@ -313,6 +392,8 @@ impl BuildLeaseService {
         if !self.is_ready() {
             return self.unavailable();
         }
+        self.telemetry
+            .operation(LeaseOperation::Expire, LeaseTelemetryConsumer::System);
         self.pause.before_transaction(LeaseOperation::Expire).await;
         match self
             .repository
@@ -344,6 +425,7 @@ impl BuildLeaseService {
         if !self.is_ready() {
             return self.unavailable();
         }
+        self.telemetry.operation(op, telemetry_consumer(&id));
         self.pause.before_transaction(op).await;
         let (key, _) = identity(&id);
         // A delayed grant acknowledgement must replay a forward durable state:
@@ -376,6 +458,7 @@ impl BuildLeaseService {
         if !self.is_ready() {
             return self.unavailable();
         }
+        self.telemetry.operation(op, telemetry_consumer(&id));
         self.pause.before_transaction(op).await;
         let (key, _) = identity(&id);
         let evidence = cleanup.then(|| serde_json::json!({"candidate_cleanup": true}));
@@ -505,6 +588,12 @@ fn identity(id: &LeaseIdentity) -> (BuildLeaseKey, String) {
                 v.project_id, v.warm_request_id, v.graph_revision
             ),
         ),
+    }
+}
+fn telemetry_consumer(id: &LeaseIdentity) -> LeaseTelemetryConsumer {
+    match id {
+        LeaseIdentity::TaskInvocation(_) => LeaseTelemetryConsumer::TaskInvocation,
+        LeaseIdentity::GraphWarm(_) => LeaseTelemetryConsumer::GraphWarm,
     }
 }
 fn timestamp(ms: i64) -> String {

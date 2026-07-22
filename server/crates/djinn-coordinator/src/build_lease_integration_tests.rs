@@ -9,7 +9,8 @@ use async_trait::async_trait;
 use djinn_db::{BuildLeaseRepository, BuildLeaseState, Database};
 use djinn_supervisor::services::{
     GraphWarmLeaseIdentity, LeaseAbandonRequest, LeaseBindRequest, LeaseCancelRequest,
-    LeaseDeadlines, LeaseIdentity, LeaseQueueRequest, LeaseReleaseRequest, LeaseResult,
+    LeaseDeadlines, LeaseGrantRequest, LeaseIdentity, LeaseQueueRequest, LeaseReleaseRequest,
+    LeaseResult, LeaseStatusRequest,
 };
 use tokio::sync::{Semaphore, mpsc};
 
@@ -400,4 +401,39 @@ async fn lost_terminal_responses_cleanup_and_suspect_occupancy_retry() {
         }
     ));
     assert_eq!(repository.snapshot().await.unwrap().occupied, 0);
+}
+
+
+#[tokio::test]
+async fn lost_grant_and_abandon_responses_replay_durable_winners() {
+    let (grant_service, _, _) = service(1).await;
+    let token = match grant_service.queue(request("lost-grant", 0, 0)).await {
+        LeaseResult::Granted(grant) => grant.fencing_token,
+        other => panic!("expected grant, got {other:?}"),
+    };
+    let grant = LeaseGrantRequest { identity: warm("lost-grant"), fencing_token: token };
+    assert!(matches!(grant_service.grant(grant.clone()).await, LeaseResult::Status(status) if status.state == djinn_supervisor::services::LeaseState::Launching));
+    assert!(matches!(grant_service.grant(grant).await, LeaseResult::Status(status) if status.state == djinn_supervisor::services::LeaseState::Launching));
+
+    let (service, _, _) = service(0).await;
+    assert!(matches!(service.queue(request("lost-abandon", 0, 0)).await, LeaseResult::Queued(_)));
+    let abandon = LeaseAbandonRequest { identity: warm("lost-abandon"), candidate_cleanup: true };
+    assert!(matches!(service.abandon(abandon.clone()).await, LeaseResult::Abandoned { candidate_cleanup: true }));
+    assert!(matches!(service.abandon(abandon).await, LeaseResult::Abandoned { candidate_cleanup: true }));
+}
+
+#[tokio::test]
+async fn queued_restart_and_warm_status_are_idempotent() {
+    let (service, repository, clock) = service(0).await;
+    assert!(matches!(service.queue(request("queued-after-restart", 0, 0)).await, LeaseResult::Queued(_)));
+    let recovered = BuildLeaseService::with_seams(
+        repository,
+        0,
+        clock,
+        Arc::new(crate::build_lease::NoopLeaseTransactionPause),
+        Arc::new(crate::build_lease::NoopLeaseTelemetry),
+    );
+    assert!(matches!(recovered.recover().await, LeaseResult::Status(_)));
+    assert!(matches!(recovered.status(LeaseStatusRequest { identity: warm("queued-after-restart") }).await, LeaseResult::Status(status) if status.state == djinn_supervisor::services::LeaseState::Queued));
+    assert!(matches!(recovered.status(LeaseStatusRequest { identity: warm("queued-after-restart") }).await, LeaseResult::Status(status) if status.state == djinn_supervisor::services::LeaseState::Queued));
 }
