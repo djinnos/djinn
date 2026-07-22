@@ -57,8 +57,8 @@ use djinn_slot::helpers::{
 };
 use djinn_stack::environment::EnvironmentConfig;
 use djinn_supervisor::services::{
-    LeaseAbandonRequest, LeaseBindRequest, LeaseCancelRequest, LeaseGrantRequest,
-    LeaseQueueRequest, LeaseReleaseRequest, LeaseResult, LeaseStatusRequest,
+    BillingSource, CostBasisHint, LeaseAbandonRequest, LeaseBindRequest, LeaseCancelRequest,
+    LeaseGrantRequest, LeaseQueueRequest, LeaseReleaseRequest, LeaseResult, LeaseStatusRequest,
     SerializableCreateSessionParams, SerializableCreateTaskRunParams, SerializableDjinnEvent,
 };
 use djinn_supervisor::{
@@ -116,6 +116,30 @@ impl WorkerSupervisorServices {
             captured_workspace_path,
         }
     }
+}
+
+/// Derive the `(CostBasisHint, BillingSource)` for a worker-pod session from the
+/// Secret-mounted credential kind plus the model id.
+///
+/// The in-Pod path builds its provider locally and never runs the host's
+/// `resolve_model_and_credential`, so `stage.rs` cannot derive the billing
+/// signal from a resolved credential — the worker must derive it here and hand
+/// it through `worker_execute_stage`. The `SerializableCredential` variant is
+/// exactly the `credential_is_oauth` evidence `derive_billing_signal` needs.
+///
+/// Returns `None` only when `model_id` fails to parse into `provider/model`; the
+/// stage then keeps its legacy string-classifier behavior for that session.
+fn worker_billing_signal(
+    cred: &SerializableCredential,
+    model_id: &str,
+) -> Option<(CostBasisHint, BillingSource)> {
+    let (provider_id, model_name) = parse_model_id(model_id).ok()?;
+    let credential_is_oauth = matches!(cred, SerializableCredential::OAuthConfig { .. });
+    Some(djinn_agent::supervisor::derive_billing_signal(
+        &provider_id,
+        &model_name,
+        credential_is_oauth,
+    ))
 }
 
 /// Reconstruct an [`LlmProvider`] from a per-role [`SerializableCredential`]
@@ -386,6 +410,14 @@ impl SupervisorServices for WorkerSupervisorServices {
         let provider =
             build_provider_from_serializable(cred, &model_id, context_window, base_url_override)?;
 
+        // Derive the billing signal HERE — the in-Pod path never runs the host's
+        // `resolve_model_and_credential`, so `stage.rs` cannot derive it from a
+        // resolved credential. The `SerializableCredential` kind IS the
+        // `credential_is_oauth` evidence. Without this, every worker-pod session
+        // fell to the legacy string path and mis-booked openai plan usage as
+        // `cost_basis = 'actual'` with a NULL `billing_source`.
+        let billing_signal = worker_billing_signal(cred, &model_id);
+
         worker_execute_stage(
             task,
             workspace,
@@ -395,6 +427,7 @@ impl SupervisorServices for WorkerSupervisorServices {
             self.agent_context.clone(),
             self.cancel.clone(),
             provider,
+            billing_signal,
             self,
         )
         .await
@@ -690,6 +723,32 @@ mod tests {
             key_name: "MINIMAX_API_KEY".to_string(),
             api_key: "test-key".to_string(),
         }
+    }
+
+    /// Regression for the prod pod-path bug: a ChatGPT/Codex PLAN OAuth
+    /// credential on an `openai/*` model must yield `SubscriptionPlan` +
+    /// `PlanOauth` through `worker_billing_signal`, so the worker-created
+    /// session books `projected` instead of `actual` with a NULL billing_source.
+    #[test]
+    fn worker_billing_signal_openai_oauth_is_subscription_plan() {
+        let oauth = SerializableCredential::OAuthConfig {
+            config_json: "{}".to_string(),
+        };
+        let (hint, source) =
+            worker_billing_signal(&oauth, "openai/gpt-5.6-terra").expect("model id parses");
+        assert_eq!(hint, CostBasisHint::SubscriptionPlan);
+        assert_eq!(source, BillingSource::PlanOauth);
+    }
+
+    /// An API-key credential on a metered provider stays `MeteredApi` +
+    /// `ApiKey` — OAuth transport is the only thing that flips a session to a
+    /// plan, and there is none here.
+    #[test]
+    fn worker_billing_signal_anthropic_api_key_is_metered() {
+        let (hint, source) = worker_billing_signal(&api_key_credential(), "anthropic/claude-opus-4-8")
+            .expect("model id parses");
+        assert_eq!(hint, CostBasisHint::MeteredApi);
+        assert_eq!(source, BillingSource::ApiKey);
     }
 
     #[test]
