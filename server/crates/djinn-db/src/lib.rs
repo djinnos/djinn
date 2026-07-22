@@ -186,8 +186,9 @@ pub use repositories::{
         ProposalRepository, ProposalUpdateInput,
     },
     refinement_run::{
-        LoadRefinementRunSnapshotRequest, RefinementRunAggregate, RefinementRunSnapshotError,
-        RefinementRunSnapshotResult,
+        AdmitRefinementRunRequest, LoadRefinementRunSnapshotRequest, RefinementAdmissionError,
+        RefinementAdmissionOutcome, RefinementAdmissionSource, RefinementRunAggregate,
+        RefinementRunSnapshotError, RefinementRunSnapshotResult,
     },
     repo_graph_cache::{CachedRepoGraph, RepoGraphCacheInsert, RepoGraphCacheRepository},
     repo_graph_generation::{

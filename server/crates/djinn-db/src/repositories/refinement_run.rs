@@ -62,7 +62,149 @@ impl From<sqlx::Error> for RefinementRunSnapshotError {
 
 type SnapshotResult<T> = std::result::Result<T, RefinementRunSnapshotError>;
 
+/// Durable origin for an admission request.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum RefinementAdmissionSource {
+    ExplicitStart { actor: String },
+    Demand { demand_id: String },
+    Revision { revision_id: String },
+}
+
+/// Input to the serialized refinement admission authority.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AdmitRefinementRunRequest {
+    pub proposal_id: String,
+    pub idempotency_key: String,
+    pub source: RefinementAdmissionSource,
+    pub heartbeat_grace_millis: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RefinementAdmissionOutcome {
+    Admitted {
+        run_id: String,
+        intent_id: String,
+        generation: i32,
+    },
+    Existing {
+        run_id: String,
+        intent_id: String,
+        generation: i32,
+    },
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum RefinementAdmissionError {
+    #[error(transparent)]
+    Database(#[from] Error),
+    #[error("invalid refinement admission: {0}")]
+    InvalidRequest(String),
+    #[error("proposal not found: {proposal_id}")]
+    ProposalNotFound { proposal_id: String },
+    #[error("refinement already active for proposal {proposal_id}: run {run_id}")]
+    AlreadyActive { proposal_id: String, run_id: String },
+    #[error("generation {generation} for proposal {proposal_id} requires stale reap")]
+    GenerationConflict {
+        proposal_id: String,
+        generation: i32,
+    },
+    #[error("admission conflicted with another transaction")]
+    AdmissionConflict,
+}
+
+impl From<sqlx::Error> for RefinementAdmissionError {
+    fn from(error: sqlx::Error) -> Self {
+        Self::Database(Error::from(error))
+    }
+}
+
 impl ProposalRepository {
+    /// Admit the first generation. A stale current run is left untouched; use
+    /// `reap_and_admit` to make a destructive stale replacement explicit.
+    pub async fn admit_refinement_run(
+        &self,
+        request: AdmitRefinementRunRequest,
+    ) -> std::result::Result<RefinementAdmissionOutcome, RefinementAdmissionError> {
+        self.admit_refinement_run_inner(request, false).await
+    }
+
+    /// Atomically reap an evaluator-stale generation and create its successor.
+    pub async fn reap_and_admit(
+        &self,
+        request: AdmitRefinementRunRequest,
+    ) -> std::result::Result<RefinementAdmissionOutcome, RefinementAdmissionError> {
+        self.admit_refinement_run_inner(request, true).await
+    }
+
+    async fn admit_refinement_run_inner(
+        &self,
+        request: AdmitRefinementRunRequest,
+        allow_reap: bool,
+    ) -> std::result::Result<RefinementAdmissionOutcome, RefinementAdmissionError> {
+        validate_admission(&request)?;
+        self.db().ensure_initialized().await?;
+        let mut tx = self.db().pool().begin().await?;
+        let seq = sqlx::query_scalar::<_, i32>(
+            "SELECT latest_revision_seq FROM proposals WHERE id = $1 FOR UPDATE",
+        )
+        .bind(&request.proposal_id)
+        .fetch_optional(&mut *tx)
+        .await?
+        .ok_or_else(|| RefinementAdmissionError::ProposalNotFound {
+            proposal_id: request.proposal_id.clone(),
+        })?;
+        if let Some(row) = sqlx::query("SELECT id, generation FROM refinement_runs WHERE proposal_id = $1 AND idempotency_key = $2")
+            .bind(&request.proposal_id).bind(&request.idempotency_key).fetch_optional(&mut *tx).await? {
+            let run_id: String = row.get("id");
+            let intent_id = first_intent_id(&mut tx, &run_id).await?;
+            let outcome = RefinementAdmissionOutcome::Existing { run_id, intent_id, generation: row.get("generation") };
+            tx.commit().await?;
+            return Ok(outcome);
+        }
+        let current = sqlx::query("SELECT id, generation FROM refinement_runs WHERE proposal_id = $1 AND state IN ('running', 'parked') ORDER BY generation DESC LIMIT 1")
+            .bind(&request.proposal_id).fetch_optional(&mut *tx).await?;
+        let generation = if let Some(row) = current {
+            let run_id: String = row.get("id");
+            let generation: i32 = row.get("generation");
+            let snapshot =
+                load_snapshot_in_transaction(&mut tx, &run_id, request.heartbeat_grace_millis)
+                    .await
+                    .map_err(snapshot_admission_error)?;
+            if !matches!(
+                snapshot.map(|snapshot| snapshot.liveness),
+                Some(RefinementLivenessResult::Stale { .. })
+            ) {
+                return Err(RefinementAdmissionError::AlreadyActive {
+                    proposal_id: request.proposal_id,
+                    run_id,
+                });
+            }
+            if !allow_reap {
+                return Err(RefinementAdmissionError::GenerationConflict {
+                    proposal_id: request.proposal_id,
+                    generation,
+                });
+            }
+            reap_stale_run(&mut tx, &request.proposal_id, seq, &run_id, generation).await?;
+            generation
+                .checked_add(1)
+                .ok_or(RefinementAdmissionError::AdmissionConflict)?
+        } else {
+            sqlx::query_scalar::<_, Option<i32>>(
+                "SELECT max(generation) FROM refinement_runs WHERE proposal_id = $1",
+            )
+            .bind(&request.proposal_id)
+            .fetch_one(&mut *tx)
+            .await?
+            .unwrap_or(0)
+            .checked_add(1)
+            .ok_or(RefinementAdmissionError::AdmissionConflict)?
+        };
+        let outcome = insert_admission(&mut tx, &request, seq, generation).await?;
+        tx.commit().await?;
+        Ok(outcome)
+    }
     /// Load one exact run and evaluate it using a repeatable-read database-time
     /// observation. Evidence belonging to any other run is never selected.
     pub async fn load_refinement_run_snapshot(
@@ -156,6 +298,135 @@ impl ProposalRepository {
         tx.commit().await?;
         Ok(aggregates)
     }
+}
+
+fn validate_admission(
+    request: &AdmitRefinementRunRequest,
+) -> std::result::Result<(), RefinementAdmissionError> {
+    if request.proposal_id.trim().is_empty()
+        || request.idempotency_key.trim().is_empty()
+        || request.idempotency_key.len() > 255
+        || request.heartbeat_grace_millis < 0
+    {
+        return Err(RefinementAdmissionError::InvalidRequest(
+            "invalid proposal, idempotency key, or heartbeat grace".into(),
+        ));
+    }
+    let identity = match &request.source {
+        RefinementAdmissionSource::ExplicitStart { actor } => actor,
+        RefinementAdmissionSource::Demand { demand_id } => demand_id,
+        RefinementAdmissionSource::Revision { revision_id } => revision_id,
+    };
+    if identity.trim().is_empty() {
+        return Err(RefinementAdmissionError::InvalidRequest(
+            "admission source identity must not be blank".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn snapshot_admission_error(error: RefinementRunSnapshotError) -> RefinementAdmissionError {
+    match error {
+        RefinementRunSnapshotError::Database(error) => RefinementAdmissionError::Database(error),
+        RefinementRunSnapshotError::InvalidEvidence(detail) => {
+            RefinementAdmissionError::InvalidRequest(detail)
+        }
+    }
+}
+
+async fn first_intent_id(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    run_id: &str,
+) -> std::result::Result<String, RefinementAdmissionError> {
+    sqlx::query_scalar(
+        "SELECT id FROM refinement_dispatch_intents WHERE run_id = $1 ORDER BY round, id LIMIT 1",
+    )
+    .bind(run_id)
+    .fetch_optional(&mut **tx)
+    .await?
+    .ok_or_else(|| {
+        RefinementAdmissionError::InvalidRequest(format!(
+            "idempotency winner {run_id} has no first intent"
+        ))
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn lifecycle(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    proposal_id: &str,
+    seq: i32,
+    kind: &str,
+    run_id: &str,
+    metadata: serde_json::Value,
+    tag: Option<&str>,
+    context: Option<serde_json::Value>,
+) -> std::result::Result<String, RefinementAdmissionError> {
+    let id = uuid::Uuid::now_v7().to_string();
+    sqlx::query("INSERT INTO proposal_revisions (id, proposal_id, seq, title, body, body_format, acceptance_criteria, edited_by_user_id, event_kind, event_metadata, refinement_run_id, refinement_stop_tag, refinement_stop_context) VALUES ($1, $2, $3, '', '', 'markdown', '[]', NULL, $4, $5, $6, $7, $8)")
+        .bind(&id).bind(proposal_id).bind(seq).bind(kind).bind(metadata).bind(run_id).bind(tag).bind(context).execute(&mut **tx).await?;
+    Ok(id)
+}
+
+async fn reap_stale_run(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    proposal_id: &str,
+    seq: i32,
+    run_id: &str,
+    generation: i32,
+) -> std::result::Result<(), RefinementAdmissionError> {
+    let context = serde_json::json!({"prior_run_id":run_id,"generation":generation as u64,"evidence_summary":"shared evaluator found no live exact-run evidence"});
+    let result = sqlx::query("UPDATE refinement_runs SET state = 'terminal', terminal_at = to_char(transaction_timestamp() AT TIME ZONE 'utc', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"'), stop_tag = 'reaped_phantom', stop_context = $3, updated_at = to_char(transaction_timestamp() AT TIME ZONE 'utc', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') WHERE id = $1 AND proposal_id = $2 AND generation = $4 AND state IN ('running', 'parked')")
+        .bind(run_id).bind(proposal_id).bind(&context).bind(generation).execute(&mut **tx).await?;
+    if result.rows_affected() != 1 {
+        return Err(RefinementAdmissionError::AdmissionConflict);
+    }
+    lifecycle(
+        tx,
+        proposal_id,
+        seq,
+        "refinement_stop",
+        run_id,
+        serde_json::json!({"reason_tag":"reaped_phantom","stop_context":context}),
+        Some("reaped_phantom"),
+        Some(context),
+    )
+    .await?;
+    Ok(())
+}
+
+async fn insert_admission(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    request: &AdmitRefinementRunRequest,
+    seq: i32,
+    generation: i32,
+) -> std::result::Result<RefinementAdmissionOutcome, RefinementAdmissionError> {
+    let run_id = uuid::Uuid::now_v7().to_string();
+    sqlx::query("INSERT INTO refinement_runs (id, proposal_id, generation, idempotency_key) VALUES ($1, $2, $3, $4)").bind(&run_id).bind(&request.proposal_id).bind(generation).bind(&request.idempotency_key).execute(&mut **tx).await?;
+    let metadata = serde_json::json!({"run_id":run_id,"generation":generation,"source":request.source,"idempotency_key":request.idempotency_key});
+    let start_id = lifecycle(
+        tx,
+        &request.proposal_id,
+        seq,
+        "refinement_start",
+        &run_id,
+        metadata,
+        None,
+        None,
+    )
+    .await?;
+    sqlx::query("UPDATE refinement_runs SET source_start_revision_id = $2 WHERE id = $1")
+        .bind(&run_id)
+        .bind(&start_id)
+        .execute(&mut **tx)
+        .await?;
+    let intent_id = uuid::Uuid::now_v7().to_string();
+    sqlx::query("INSERT INTO refinement_dispatch_intents (id, run_id, round, phase, role, idempotency_key) VALUES ($1, $2, 1, 'adversary_attack', 'adversary', $3)").bind(&intent_id).bind(&run_id).bind(format!("{}/adversary/1", request.idempotency_key)).execute(&mut **tx).await?;
+    Ok(RefinementAdmissionOutcome::Admitted {
+        run_id,
+        intent_id,
+        generation,
+    })
 }
 
 async fn load_snapshot_in_transaction(
