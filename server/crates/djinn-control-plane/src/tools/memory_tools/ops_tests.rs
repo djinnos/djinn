@@ -5,6 +5,10 @@ mod tests {
     use std::sync::Arc;
 
     use djinn_core::events::{DjinnEventEnvelope, EventBus};
+    use djinn_db::repositories::retrieval_trace::{
+        RetrievalTaxonomyValidationError, RetrievalTraceEntryPoint,
+        TaxonomyV1RetrievalHealthCounts, TaxonomyV1RetrievalHealthGroup,
+    };
     use djinn_db::{
         Database, NoteRepository, ProjectRepository, test_support::drop_table_for_test,
     };
@@ -965,6 +969,68 @@ mod tests {
         assert_eq!(orphans.orphans.len() as i64, health.orphan_note_count);
     }
 
+    #[test]
+    fn taxonomy_v1_health_summary_preserves_authoritative_group_truth() {
+        let summary = ops::taxonomy_v1_summary(TaxonomyV1RetrievalHealthGroup {
+            project_id: "project-a".to_string(),
+            entry_point: RetrievalTraceEntryPoint::LoadKnowledgeContext,
+            taxonomy_version: 1,
+            window_start: "2026-07-20T12:00:00Z".to_string(),
+            window_end: "2026-07-20T13:00:00Z".to_string(),
+            refreshed_at: "2026-07-20T13:05:00Z".to_string(),
+            invalid: true,
+            counts: TaxonomyV1RetrievalHealthCounts {
+                total_queries: 5,
+                successful_queries: 3,
+                errored_queries: 2,
+                zero_candidate_queries: 1,
+                candidate_bearing_queries: 2,
+                starved_queries: 1,
+                injected_queries: 1,
+                candidate_total: 7,
+                injected_total: 1,
+                confidence_filtered_total: 1,
+                not_top_k_total: 1,
+                oversized_skipped_total: 2,
+                injected_disposition_total: 1,
+                budget_pruned_total: 2,
+                legacy_unclassified_queries: 4,
+                invalid_taxonomy_queries: 1,
+            },
+            validation_errors: vec![RetrievalTaxonomyValidationError {
+                trace_id: "malformed-terminal".to_string(),
+                reason: "histogram_partition_mismatch".to_string(),
+            }],
+        });
+
+        assert_eq!(summary.project_id, "project-a");
+        assert_eq!(summary.entry_point, "load_knowledge_context");
+        assert_eq!(summary.taxonomy_version, 1);
+        assert_eq!(summary.zero_candidate_queries, 1);
+        assert_eq!(summary.zero_result_queries, summary.zero_candidate_queries);
+        assert_eq!(summary.total_queries, 5);
+        assert_eq!(
+            summary.successful_queries + summary.errored_queries,
+            summary.total_queries
+        );
+        assert_eq!(summary.candidate_bearing_queries, 2);
+        assert_eq!(summary.starved_queries, 1);
+        assert_eq!(summary.injected_queries, 1);
+        assert_eq!(summary.candidate_total, 7);
+        assert_eq!(
+            summary.dispositions.confidence_filtered_total
+                + summary.dispositions.not_top_k_total
+                + summary.dispositions.oversized_skipped_total
+                + summary.dispositions.injected_total
+                + summary.dispositions.budget_pruned_total,
+            summary.candidate_total
+        );
+        assert_eq!(summary.legacy_unclassified_queries, 4);
+        assert_eq!(summary.invalid_taxonomy_queries, 1);
+        assert!(summary.invalid);
+        assert_eq!(summary.validation_errors[0].trace_id, "malformed-terminal");
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn memory_health_response_exposes_split_orphan_and_isolation_metrics() {
         let setup = setup_server().await;
@@ -1021,8 +1087,8 @@ mod tests {
         assert!(response.machine_connected_orphan_count.is_some());
         assert_eq!(response.retrieval.persisted.status, "available");
         assert_eq!(response.retrieval.process.status, "available");
-        assert_eq!(response.retrieval.persisted.summaries.len(), 4);
-        assert_eq!(response.retrieval.process.summaries.len(), 4);
+        assert_eq!(response.retrieval.persisted.groups.len(), 0);
+        assert_eq!(response.retrieval.process.process_summaries.len(), 4);
 
         // orphan_note_count is a backward-compatible alias
         assert_eq!(response.orphan_note_count, response.authored_orphan_count);
@@ -1105,7 +1171,7 @@ mod tests {
         assert!(response.retrieval.process.started_at.is_some());
         assert!(response.retrieval.process.window_start.is_some());
         assert!(response.retrieval.process.window_end.is_some());
-        assert!(response.retrieval.process.summaries.is_empty());
+        assert!(response.retrieval.process.process_summaries.is_empty());
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1135,7 +1201,7 @@ mod tests {
         );
         assert!(response.retrieval.persisted.window_start.is_some());
         assert!(response.retrieval.persisted.window_end.is_some());
-        assert!(response.retrieval.persisted.summaries.is_empty());
+        assert!(response.retrieval.persisted.groups.is_empty());
         assert_eq!(response.retrieval.process.status, "available");
     }
 
