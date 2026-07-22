@@ -91,7 +91,7 @@ mod tests {
         }
     }
 
-    fn task(project_id: &str, created_by_user_id: Option<&str>) -> Task {
+    fn task(project_id: &str, created_by_user_id: &str) -> Task {
         Task {
             id: "task-id".to_owned(),
             short_id: "task".to_owned(),
@@ -107,7 +107,7 @@ mod tests {
             owner: String::new(),
             labels: "[]".to_owned(),
             memory_refs: "[]".to_owned(),
-            created_by_user_id: created_by_user_id.map(str::to_owned),
+            created_by_user_id: created_by_user_id.to_owned(),
             reopen_count: 0,
             continuation_count: 0,
             total_reopen_count: 0,
@@ -159,7 +159,7 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(
-            matching_task_dispatch_pause(&state, &task("project-a", Some("user-a")))
+            matching_task_dispatch_pause(&state, &task("project-a", "user-a"))
                 .map(|(scope, _, _)| scope),
             Some("global")
         );
@@ -167,21 +167,20 @@ mod tests {
         state.global = None;
         state.projects.insert("project-a".to_owned(), pause());
         assert_eq!(
-            matching_task_dispatch_pause(&state, &task("project-a", Some("user-b")))
+            matching_task_dispatch_pause(&state, &task("project-a", "user-b"))
                 .map(|(scope, _, _)| scope),
             Some("project")
         );
-        assert!(matching_task_dispatch_pause(&state, &task("project-b", Some("user-b"))).is_none());
+        assert!(matching_task_dispatch_pause(&state, &task("project-b", "user-b")).is_none());
 
         state.projects.clear();
         state.users.insert("user-a".to_owned(), pause());
         assert_eq!(
-            matching_task_dispatch_pause(&state, &task("project-b", Some("user-a")))
+            matching_task_dispatch_pause(&state, &task("project-b", "user-a"))
                 .map(|(scope, _, _)| scope),
             Some("user")
         );
-        assert!(matching_task_dispatch_pause(&state, &task("project-b", Some("user-b"))).is_none());
-        assert!(matching_task_dispatch_pause(&state, &task("project-b", None)).is_none());
+        assert!(matching_task_dispatch_pause(&state, &task("project-b", "user-b")).is_none());
     }
 
     #[test]
