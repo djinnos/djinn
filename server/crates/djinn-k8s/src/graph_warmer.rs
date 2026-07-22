@@ -243,7 +243,9 @@ pub use graph_warmer_lifecycle::{
     KubeClientJobWatcher, NoopJobWatcher, WarmJobWatcher, WarmTerminalOutcome,
 };
 #[cfg(test)]
-use graph_warmer_lifecycle::{WarmJobObservation, terminal_outcome_after_poll};
+use graph_warmer_lifecycle::{
+    WATCH_DEADLINE_SLACK, WarmJobObservation, terminal_outcome_after_poll, watch_deadline,
+};
 
 /// In-process convergence hook invoked when a warm Job reaches terminal
 /// success. The canonical-graph warm runs in a *separate* K8s Job pod that
@@ -811,7 +813,10 @@ impl K8sGraphWarmer {
     /// path). Reads the merge-storm debounce policy from the environment.
     pub fn new(client: kube::Client, config: KubernetesConfig, db: Database) -> Self {
         let dispatcher = Arc::new(KubeClientDispatcher::new(client.clone()));
-        let watcher = Arc::new(KubeClientJobWatcher::new(client.clone()));
+        let watcher = Arc::new(KubeClientJobWatcher::new(
+            client.clone(),
+            config.warm_job_timeout_seconds,
+        ));
         let lister: Arc<dyn WarmJobLister> = Arc::new(KubeClientWarmJobLister::new(client.clone()));
         let mut w = Self::with_dispatcher_and_lister(config, db, dispatcher, watcher, Some(lister));
         w.client = Some(client);
