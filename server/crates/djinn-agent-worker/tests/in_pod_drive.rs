@@ -123,6 +123,12 @@ fn fixture_task(task_id: &str, project_id: &str) -> Task {
         ci_mq_first_seen_at: None,
         ci_mq_last_seen_at: None,
         unresolved_blocker_count: 0,
+            refinement_run_id: None,
+            refinement_intent_id: None,
+            refinement_generation: None,
+            refinement_round: None,
+            refinement_phase: None,
+            refinement_role: None,
     }
 }
 
