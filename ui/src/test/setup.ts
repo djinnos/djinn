@@ -9,6 +9,23 @@ if (typeof globalThis.TransformStream === "undefined") {
   globalThis.WritableStream = streams.WritableStream as typeof globalThis.WritableStream;
 }
 
+// jsdom also omits the Compression Streams API — the galaxy artifact client
+// decodes an explicit gzip body via DecompressionStream. Expose the Node
+// implementation so that code path is exercised under test.
+if (typeof globalThis.DecompressionStream === "undefined") {
+  const streams = await import("node:stream/web");
+  globalThis.CompressionStream = streams.CompressionStream as typeof globalThis.CompressionStream;
+  globalThis.DecompressionStream = streams.DecompressionStream as typeof globalThis.DecompressionStream;
+}
+
+// jsdom's Blob (v29) has no `.stream()`, which real browsers do and the galaxy
+// artifact client uses to feed the gzip decoder. Swap in Node's spec-complete
+// Blob so that decode path runs under test.
+if (typeof (globalThis.Blob?.prototype as { stream?: unknown } | undefined)?.stream !== "function") {
+  const { Blob } = await import("node:buffer");
+  globalThis.Blob = Blob as unknown as typeof globalThis.Blob;
+}
+
 // jsdom doesn't provide WebGL2RenderingContext — sigma 3.x CJS build
 // references it at import time; stub so the module can load.
 if (typeof globalThis.WebGL2RenderingContext === "undefined") {
