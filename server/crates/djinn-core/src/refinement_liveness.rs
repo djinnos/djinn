@@ -574,6 +574,91 @@ mod tests {
     }
 
     #[test]
+    fn liveness_evidence_uses_the_documented_precedence_order() {
+        let mut value = snapshot();
+
+        let mut pending = intent(RefinementIntentState::Pending);
+        pending.intent_id = "intent-priority".into();
+        value.intents.push(pending);
+
+        let mut active_task = task(RefinementTaskState::Open);
+        active_task.task_id = "task-priority".into();
+        value.tasks.push(active_task);
+
+        let mut session_task = task(RefinementTaskState::Closed);
+        session_task.task_id = "task-session".into();
+        value.tasks.push(session_task);
+        value.sessions.push(RefinementSessionEvidence {
+            session_id: "session-priority".into(),
+            task_id: "task-session".into(),
+            run_id: "run-current".into(),
+            state: RefinementSessionState::Live,
+        });
+
+        let mut handoff_intent = intent(RefinementIntentState::Pending);
+        handoff_intent.intent_id = "intent-handoff".into();
+        value.between_phase = Some(RefinementBetweenPhaseSnapshot {
+            run_id: "run-current".into(),
+            next_intent: handoff_intent,
+        });
+        value.heartbeat = Some(RefinementHeartbeatSnapshot {
+            run_id: "run-current".into(),
+            heartbeat_at: DbTimestamp(9_500),
+            grace_millis: 500,
+        });
+
+        assert_eq!(
+            evaluate_refinement_liveness(&value, NOW),
+            RefinementLivenessResult::Live {
+                evidence: RefinementLivenessEvidence::PendingIntent {
+                    intent_id: "intent-priority".into(),
+                },
+            }
+        );
+
+        value.intents.clear();
+        assert_eq!(
+            evaluate_refinement_liveness(&value, NOW),
+            RefinementLivenessResult::Live {
+                evidence: RefinementLivenessEvidence::OpenTask {
+                    task_id: "task-priority".into(),
+                },
+            }
+        );
+
+        value.tasks.remove(0);
+        assert_eq!(
+            evaluate_refinement_liveness(&value, NOW),
+            RefinementLivenessResult::Live {
+                evidence: RefinementLivenessEvidence::LiveSession {
+                    session_id: "session-priority".into(),
+                    task_id: "task-session".into(),
+                },
+            }
+        );
+
+        value.sessions.clear();
+        assert_eq!(
+            evaluate_refinement_liveness(&value, NOW),
+            RefinementLivenessResult::Live {
+                evidence: RefinementLivenessEvidence::BetweenPhase {
+                    intent_id: "intent-handoff".into(),
+                },
+            }
+        );
+
+        value.between_phase = None;
+        assert_eq!(
+            evaluate_refinement_liveness(&value, NOW),
+            RefinementLivenessResult::Live {
+                evidence: RefinementLivenessEvidence::FreshHeartbeat {
+                    heartbeat_at: DbTimestamp(9_500),
+                },
+            }
+        );
+    }
+
+    #[test]
     fn terminal_always_wins_and_absent_evidence_is_stale() {
         let mut value = snapshot();
         value.run.state = RefinementRunState::Terminal;
@@ -636,7 +721,7 @@ mod tests {
         }
         assert!(
             serde_json::from_str::<RefinementStopReason>(
-                r#"{\"tag\":\"new_future_stop\",\"context\":{}}"#
+                r#"{"tag":"new_future_stop","context":{}}"#
             )
             .is_err()
         );
