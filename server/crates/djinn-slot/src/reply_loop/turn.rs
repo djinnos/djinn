@@ -51,7 +51,7 @@ use super::persistence::{
 use super::phase::SessionPhaseTracker;
 use super::streaming::{StreamLoopContext, StreamTurnState, consume_provider_stream};
 use super::tool_dispatch::{ToolDispatchContext, collect_tool_results, tool_runtime_metadata};
-use djinn_db::SessionCompactionBoundaryRepository;
+use djinn_db::{CompactionTrigger, SessionCompactionBoundaryRepository};
 
 /// True when `model_id` (a `provider/model` string) is served by the Codex /
 /// OpenAI consumer backend that signals over-quota by answering a turn with an
@@ -581,6 +581,7 @@ async fn compact_transport_recovery_in_critical_section(
     task_id: &str,
     role_name: &str,
     context_window: i64,
+    current_context_tokens: u32,
     compaction_cs: &CompactionCriticalSection,
     slot_ctx: &SlotContext,
 ) -> Result<bool, String> {
@@ -601,6 +602,8 @@ async fn compact_transport_recovery_in_critical_section(
         task_id,
         role_name,
         context_window,
+        CompactionTrigger::OversizedTransport,
+        current_context_tokens,
         compaction_cs,
         slot_ctx,
     )
@@ -921,7 +924,7 @@ pub async fn run_reply_loop(
                     );
                     match compact_transport_recovery_in_critical_section(
                         provider, conversation, session_id, task_id, role_name, context_window,
-                        compaction_cs, slot_ctx,
+                        current_context_tokens, compaction_cs, slot_ctx,
                     )
                     .await
                     {
@@ -967,6 +970,12 @@ pub async fn run_reply_loop(
                         task_id,
                         role_name,
                         context_window,
+                        if is_orphaned_tool_call_error(&e) {
+                            CompactionTrigger::OrphanRepair
+                        } else {
+                            CompactionTrigger::ContextError
+                        },
+                        current_context_tokens,
                         compaction_cs,
                         slot_ctx,
                     )
@@ -1049,7 +1058,7 @@ pub async fn run_reply_loop(
                         .exit_provider_wait();
                     match compact_transport_recovery_in_critical_section(
                         provider, conversation, session_id, task_id, role_name, context_window,
-                        compaction_cs, slot_ctx,
+                        current_context_tokens, compaction_cs, slot_ctx,
                     )
                     .await
                     {
@@ -1176,6 +1185,8 @@ pub async fn run_reply_loop(
                     task_id,
                     role_name,
                     context_window,
+                    CompactionTrigger::ContextError,
+                    current_context_tokens,
                     compaction_cs,
                     slot_ctx,
                 )
@@ -1233,7 +1244,7 @@ pub async fn run_reply_loop(
                     let _ = transport_compaction_guard.try_begin();
                     match compact_transport_recovery_in_critical_section(
                         provider, conversation, session_id, task_id, role_name, context_window,
-                        compaction_cs, slot_ctx,
+                        current_context_tokens, compaction_cs, slot_ctx,
                     )
                     .await
                     {
@@ -1437,6 +1448,8 @@ pub async fn run_reply_loop(
                     task_id,
                     role_name,
                     context_window,
+                    CompactionTrigger::Proactive,
+                    current_context_tokens,
                     compaction_cs,
                     slot_ctx,
                 )
@@ -1891,6 +1904,8 @@ async fn compact_conversation_in_critical_section(
     task_id: &str,
     role_name: &str,
     context_window: i64,
+    trigger: CompactionTrigger,
+    current_context_tokens_before: u32,
     compaction_cs: &CompactionCriticalSection,
     slot_ctx: &SlotContext,
 ) -> Result<bool, String> {
@@ -1898,7 +1913,14 @@ async fn compact_conversation_in_critical_section(
     let dispatcher = slot_ctx.tool_dispatcher.as_deref();
 
     let boundary_repo = SessionCompactionBoundaryRepository::new(slot_ctx.db.clone());
-    let boundary_id = record_compaction_started(&boundary_repo, session_id, conversation).await;
+    let boundary_id = record_compaction_started(
+        &boundary_repo,
+        session_id,
+        conversation,
+        trigger,
+        current_context_tokens_before,
+    )
+    .await;
     // Production and the hardening fixture share this boundary: a failed durable
     // write returns before compaction can replace any inline tool result.
     let compacted = compact_conversation_after_persist(
@@ -1918,6 +1940,9 @@ async fn compact_conversation_in_critical_section(
     .await?;
 
     if compacted {
+        // The reply loop resets occupancy at a successful compaction boundary;
+        // lifetime counters remain with the caller and are never telemetry input.
+        let current_context_tokens_after = 0;
         let summary = conversation
             .messages
             .iter()
@@ -1931,6 +1956,7 @@ async fn compact_conversation_in_critical_section(
             boundary_id.as_deref(),
             conversation,
             &summary,
+            current_context_tokens_after,
         )
         .await;
     }
@@ -2155,6 +2181,8 @@ mod tests {
             "t-success",
             "worker",
             1_000_000,
+            CompactionTrigger::ManualTest,
+            0,
             &section,
             &slot_ctx,
         )
@@ -2194,6 +2222,8 @@ mod tests {
             "t-noop",
             "worker",
             10_000,
+            CompactionTrigger::ManualTest,
+            0,
             &section,
             &slot_ctx,
         )
@@ -2224,6 +2254,8 @@ mod tests {
             "t-error",
             "worker",
             10_000,
+            CompactionTrigger::ManualTest,
+            0,
             &section,
             &slot_ctx,
         )
@@ -2263,6 +2295,8 @@ mod tests {
             "t-panic",
             "worker",
             10_000,
+            CompactionTrigger::ManualTest,
+            0,
             &section,
             &slot_ctx,
         ))
@@ -2309,6 +2343,8 @@ mod tests {
                 "t-persist-order",
                 "worker",
                 1_000_000,
+                CompactionTrigger::ManualTest,
+                0,
                 &section,
                 &slot_ctx,
             )
@@ -2341,6 +2377,8 @@ mod tests {
             "t-persist-fail",
             "worker",
             1_000_000,
+            CompactionTrigger::ManualTest,
+            0,
             &section,
             &slot_ctx,
         )

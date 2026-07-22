@@ -3487,16 +3487,26 @@ async fn worker_compaction_boundary_with_no_provider_id_succeeds() {
     let boundary_repo = SessionCompactionBoundaryRepository::new(db.clone());
 
     // record_compaction_started → gather_boundary_identity → bounded_message_identity
-    let boundary_id =
-        super::persistence::record_compaction_started(&boundary_repo, &session.id, &conv)
-            .await
-            .expect("boundary persistence must succeed (no 22001)");
+    let boundary_id = super::persistence::record_compaction_started(
+        &boundary_repo,
+        &session.id,
+        &conv,
+        djinn_db::CompactionTrigger::ManualTest,
+        123,
+    )
+    .await
+    .expect("boundary persistence must succeed (no 22001)");
 
     let boundary = boundary_repo
         .fetch_by_id(&boundary_id)
         .await
         .expect("fetch boundary");
     assert_eq!(boundary.phase, djinn_db::CompactionPhase::Started);
+    assert_eq!(
+        boundary.trigger,
+        Some(djinn_db::CompactionTrigger::ManualTest)
+    );
+    assert_eq!(boundary.current_context_tokens_before, Some(123));
 
     // Every id column must have been populated and must fit VARCHAR(36).
     let first_id = boundary
@@ -3532,6 +3542,7 @@ async fn worker_compaction_boundary_with_no_provider_id_succeeds() {
         Some(&boundary_id),
         &conv,
         "test summary",
+        17,
     )
     .await;
 
@@ -3541,6 +3552,7 @@ async fn worker_compaction_boundary_with_no_provider_id_succeeds() {
         .expect("fetch completed boundary");
     assert_eq!(completed.phase, djinn_db::CompactionPhase::Ended);
     assert_eq!(completed.summary_text.as_deref(), Some("test summary"));
+    assert_eq!(completed.current_context_tokens_after, Some(17));
 }
 
 // ---------------------------------------------------------------------------
