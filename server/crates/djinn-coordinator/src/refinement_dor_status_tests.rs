@@ -9,8 +9,7 @@ use super::refinement_cap_tests::{
 };
 use djinn_core::events::{DjinnEventEnvelope, EventBus};
 use djinn_db::{
-    DoctorFindingRepository, NewDoctorFinding, ProposalDebateTrailCreateInput, ProposalRepository,
-    ProposalUpdateInput, TaskRepository,
+    ProposalDebateTrailCreateInput, ProposalRepository, ProposalUpdateInput, TaskRepository,
 };
 
 /// Regression (proposal 019f0c32): structured acceptance criteria added
@@ -535,7 +534,58 @@ async fn clean_material_revision_restores_semantic_adjudication() {
     let pool = spawn_test_pool(&db, 4);
     let mut actor = build_refinement_actor(&db, &events_tx, pool.clone());
 
-    // First corrupt the head so a lint row would exist if persisted.
+    // Preserve the initial revision's durable lint row. Then create a second,
+    // clean material head so the legacy fixture can remove only that head's
+    // cache entry; historical lint must never be deleted or reattached.
+    let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+    let initial = repo
+        .get(&proposal_id)
+        .await
+        .expect("read initial proposal")
+        .expect("proposal exists");
+    let initial_revision = repo
+        .revisions(&proposal_id)
+        .await
+        .expect("read initial revisions")
+        .into_iter()
+        .find(|revision| {
+            revision.seq == initial.latest_revision_seq && revision.event_kind == "spec_revision"
+        })
+        .expect("initial material revision");
+    let initial_lint_revision_id: String = sqlx::query_scalar(
+        "SELECT revision_id FROM proposal_revision_lint_results \
+         WHERE proposal_id = $1 AND revision_seq = $2",
+    )
+    .bind(&proposal_id)
+    .bind(initial_revision.seq)
+    .fetch_one(db.pool())
+    .await
+    .expect("initial revision must retain its lint row");
+    assert_eq!(initial_lint_revision_id, initial_revision.id);
+
+    repo.update(
+        &proposal_id,
+        ProposalUpdateInput {
+            title: &initial.title,
+            body: READY_BODY,
+            acceptance_criteria: &initial.acceptance_criteria,
+            status: &initial.status,
+            superseded_by: initial.superseded_by.as_deref(),
+            body_format: Some("mdx"),
+            event_metadata: None,
+        },
+    )
+    .await
+    .expect("create clean intermediate material revision");
+    let legacy_head = repo
+        .get(&proposal_id)
+        .await
+        .expect("read intermediate proposal")
+        .expect("proposal exists");
+
+    // Make only the current material head a legacy corrupt snapshot. Deleting
+    // its cache row models a pre-lint head while retaining the original
+    // revision's row as historical evidence.
     djinn_db::test_support::replace_legacy_proposal_head_for_test(
         &db,
         &proposal_id,
@@ -543,7 +593,14 @@ async fn clean_material_revision_restores_semantic_adjudication() {
         "mdx",
     )
     .await;
-    djinn_db::test_support::delete_proposal_lint_results_for_test(&db, &proposal_id).await;
+    sqlx::query(
+        "DELETE FROM proposal_revision_lint_results WHERE proposal_id = $1 AND revision_seq = $2",
+    )
+    .bind(&proposal_id)
+    .bind(legacy_head.latest_revision_seq)
+    .execute(db.pool())
+    .await
+    .expect("remove only corrupt legacy head lint row");
 
     let corrupt_readiness = actor
         .evaluate_proposal_readiness(&proposal_id)
@@ -602,6 +659,19 @@ async fn clean_material_revision_restores_semantic_adjudication() {
         new_head_seq > current.latest_revision_seq,
         "clean revision must be material (seq advanced)"
     );
+    let retained_initial_lint_revision_id: String = sqlx::query_scalar(
+        "SELECT revision_id FROM proposal_revision_lint_results \
+         WHERE proposal_id = $1 AND revision_seq = $2",
+    )
+    .bind(&proposal_id)
+    .bind(initial_revision.seq)
+    .fetch_one(db.pool())
+    .await
+    .expect("historical lint row must remain after clean revision");
+    assert_eq!(
+        retained_initial_lint_revision_id, initial_revision.id,
+        "historical lint must remain attached to its original immutable revision"
+    );
 
     // A non-blocking judge verdict against the clean head must now park for
     // human review — ordinary semantic adjudication is restored.
@@ -636,69 +706,37 @@ async fn clean_material_revision_restores_semantic_adjudication() {
     );
 }
 
-/// Regression (criterion 4): tribunal readiness does not consult doctor
-/// findings. A doctor finding claiming the corrupt proposal's integrity is
-/// healthy ("info") must NOT suppress the lint-integrity failure surfaced by
-/// the shared `lint_for_revision` readiness result.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn doctor_findings_not_consulted_by_readiness_evaluation() {
-    use djinn_control_plane::tools::proposal_readiness::ReadinessCheck;
+/// Regression (criterion 4): keep tribunal production code structurally bound
+/// to the shared readiness constructor. Runtime results alone cannot distinguish
+/// that constructor from an accidental duplicate linter or ignored doctor query.
+#[test]
+fn tribunal_readiness_uses_only_shared_lint_constructor() {
+    let outcome = include_str!("refinement_outcome.rs");
+    let dispatch = include_str!("refinement_dispatch.rs");
 
-    let db = crate::test_helpers::create_test_db();
-    let (proposal_id, _) = seed_ready_proposal(&db).await;
-    let (events_tx, _events_rx) = tokio::sync::broadcast::channel::<DjinnEventEnvelope>(256);
-    let pool = spawn_test_pool(&db, 4);
-    let actor = build_refinement_actor(&db, &events_tx, pool.clone());
-
-    // Corrupt the head with no persisted lint row.
-    djinn_db::test_support::replace_legacy_proposal_head_for_test(
-        &db,
-        &proposal_id,
-        CORRUPT_MDX_BODY,
-        "mdx",
-    )
-    .await;
-    djinn_db::test_support::delete_proposal_lint_results_for_test(&db, &proposal_id).await;
-
-    // Seed a doctor finding that claims the proposal's spec integrity is clean.
-    // If the readiness path consulted doctor findings, this would suppress the
-    // integrity failure — which it must not.
-    djinn_db::test_support::ensure_doctor_findings_schema(&db).await;
-    DoctorFindingRepository::new(db.clone())
-        .insert(NewDoctorFinding {
-            run_id: Some("spec-integrity-doctor-run".to_string()),
-            check_name: "spec_integrity".to_string(),
-            severity: djinn_db::doctor_severity::INFO.to_string(),
-            entity_ids: serde_json::json!([proposal_id]),
-            evidence: serde_json::json!({"status": "healthy", "errors": []}),
-            resolver_snapshot: None,
-            detail: Some("Doctor sweep found no spec integrity issues".to_string()),
-        })
-        .await
-        .expect("seed doctor finding");
-
-    let result = actor
-        .evaluate_proposal_readiness(&proposal_id)
-        .await
-        .expect("readiness with doctor finding present");
-
-    // The shared lint-aware result must still report the corrupt head's
-    // DUPLICATE_BLOCK_ID — doctor findings are ignored.
     assert!(
-        !result.ready,
-        "doctor finding must not suppress lint-integrity failure"
+        outcome.contains("evaluate_latest_head_readiness(&proposal_repo"),
+        "coordinator readiness must call the shared latest-head constructor"
     );
+    for (path, source) in [
+        ("refinement_outcome.rs", outcome),
+        ("refinement_dispatch.rs", dispatch),
+    ] {
+        for forbidden in [
+            "DoctorFindingRepository",
+            "doctor_findings",
+            "djinn_spec_lint::lint(",
+            "djinn_spec_lint::body_sha256",
+        ] {
+            assert!(
+                !source.contains(forbidden),
+                "{path} must not consult doctor findings or run an independent linter ({forbidden})"
+            );
+        }
+    }
     assert!(
-        result
-            .failures
-            .iter()
-            .any(|f| f.check == ReadinessCheck::SpecIntegrity),
-        "SpecIntegrity failure must persist despite healthy doctor finding"
-    );
-    let lint = result.latest_lint.as_ref().expect("lint summary present");
-    assert!(
-        lint.errors.iter().any(|v| v.code == "DUPLICATE_BLOCK_ID"),
-        "lint must report DUPLICATE_BLOCK_ID regardless of doctor findings"
+        !dispatch.contains("lint_for_revision"),
+        "dispatch must consume the coordinator's shared readiness result rather than lint directly"
     );
 }
 
