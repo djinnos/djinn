@@ -36,6 +36,10 @@ use djinn_core::models::{SessionRecord, SessionStatus, Task, TaskRunStatus};
 use djinn_runtime::wire::{ControlMsg, WorkerEvent, WorkspaceRef};
 use serde::{Deserialize, Serialize};
 
+use crate::services::lease::{
+    LeaseAbandonRequest, LeaseBindRequest, LeaseCancelRequest, LeaseGrantRequest,
+    LeaseQueueRequest, LeaseReleaseRequest, LeaseResult, LeaseStatusRequest,
+};
 use crate::{
     BranchPublicationResult, RoleKind, StageError, StageOutcome, TaskRunOutcome, TaskRunSpec,
 };
@@ -339,7 +343,9 @@ pub struct PlannerAttemptResult {
 #[allow(clippy::large_enum_variant)]
 pub enum ServiceRpcRequest {
     /// [`crate::SupervisorServices::load_task`].
-    LoadTask { task_id: String },
+    LoadTask {
+        task_id: String,
+    },
     /// [`crate::SupervisorServices::execute_stage`].  `workspace` is shipped
     /// as a [`WorkspaceRef`] — the launcher rehydrates it via
     /// `Workspace::attach_existing` before delegating to the concrete impl.
@@ -350,8 +356,33 @@ pub enum ServiceRpcRequest {
         task_run_id: String,
         spec: TaskRunSpec,
     },
+    // Lease-v1 variants are appended to preserve positional bincode indices.
+    QueueLease {
+        request: LeaseQueueRequest,
+    },
+    GrantLease {
+        request: LeaseGrantRequest,
+    },
+    LeaseStatus {
+        request: LeaseStatusRequest,
+    },
+    AbandonLease {
+        request: LeaseAbandonRequest,
+    },
+    BindLeasePod {
+        request: LeaseBindRequest,
+    },
+    CancelLease {
+        request: LeaseCancelRequest,
+    },
+    ReleaseLease {
+        request: LeaseReleaseRequest,
+    },
     /// [`crate::SupervisorServices::open_pr`].
-    OpenPr { spec: TaskRunSpec, task: Task },
+    OpenPr {
+        spec: TaskRunSpec,
+        task: Task,
+    },
     /// [`crate::SupervisorServices::create_task_run`].  Wire surface added
     /// in Phase 3; driven by `TaskRunSupervisor::run` as of Phase 4 (commit
     /// `a6bd7e1a4`).
@@ -365,10 +396,14 @@ pub enum ServiceRpcRequest {
     },
     /// [`crate::SupervisorServices::get_model_context_window`].
     /// Phase 6b — catalog read extraction.
-    GetModelContextWindow { model_id: String },
+    GetModelContextWindow {
+        model_id: String,
+    },
     /// [`crate::SupervisorServices::get_provider_base_url`].
     /// Phase 6b — catalog read extraction.
-    GetProviderBaseUrl { catalog_provider_id: String },
+    GetProviderBaseUrl {
+        catalog_provider_id: String,
+    },
     /// [`crate::SupervisorServices::pick_any_default_model`].
     /// Phase 6b — catalog read extraction.
     PickAnyDefaultModel,
@@ -394,7 +429,9 @@ pub enum ServiceRpcRequest {
     },
     /// [`crate::SupervisorServices::get_environment_config`].  Phase 6d —
     /// project environment-config extraction.
-    GetEnvironmentConfig { project_id: String },
+    GetEnvironmentConfig {
+        project_id: String,
+    },
     /// [`crate::SupervisorServices::invoke_llm`].  Phase 6a-redux —
     /// host-side LLM invocation. The worker (Phase 7) will use this to keep
     /// vault credentials off the worker side.
@@ -430,7 +467,9 @@ pub enum ServiceRpcRequest {
     /// gap-2 — bridges worker-side `event_bus.send(..)` calls to the host's
     /// broadcast bus so SSE subscribers (web UI session live-feed) see
     /// session-message / token-update / lifecycle events in real time.
-    EmitDjinnEvent { event: SerializableDjinnEvent },
+    EmitDjinnEvent {
+        event: SerializableDjinnEvent,
+    },
     /// [`crate::SupervisorServices::tool_github_search`]. Phase 7-followup
     /// gap-3 — workers have no GitHub App credentials mounted; this RPC
     /// runs the tool host-side.
@@ -458,7 +497,9 @@ pub enum ServiceRpcRequest {
     /// BLOCKER — bridges worker-side activity-tracker touches into the
     /// host's tracker so the coordinator's stall poller doesn't reap a
     /// long-running K8s worker mid-flow.
-    TouchActivity { task_id: String },
+    TouchActivity {
+        task_id: String,
+    },
     /// [`crate::SupervisorServices::transition_task`]. Lets the in-Pod
     /// supervisor walk the task through its status machine (Start →
     /// SubmitTaskReview → TaskReviewStart → TaskReviewApprove/Reject →
@@ -510,7 +551,9 @@ pub enum ServiceRpcRequest {
     /// [`crate::SupervisorServices::complete_monitored_reopen`].
     /// Marks the monitored-reopen attempt complete on a terminal worker
     /// outcome.  Appended at the enum tail for bincode stability.
-    CompleteMonitoredReopen { task_id: String },
+    CompleteMonitoredReopen {
+        task_id: String,
+    },
     /// [`crate::SupervisorServices::record_arbiter_session_termination`].
     /// Records bounded session termination accounting.  Appended at the
     /// enum tail for bincode stability.
@@ -522,10 +565,15 @@ pub enum ServiceRpcRequest {
     /// Pushes the task branch to GitHub for a task with an existing open PR
     /// so GitHub Actions evaluates the latest mirror commit.  Appended at the
     /// enum tail for bincode stability.
-    PublishBranchToGithub { spec: TaskRunSpec, task: Task },
+    PublishBranchToGithub {
+        spec: TaskRunSpec,
+        task: Task,
+    },
     /// Dedicated host-side planner LLM call with durable attribution.
     /// Appended at the enum tail for bincode stability.
-    PlanMemoryIntents { request: AttributedPlannerRequest },
+    PlanMemoryIntents {
+        request: AttributedPlannerRequest,
+    },
     /// [`crate::SupervisorServices::tool_ci_artifact`]. `arguments` is opaque
     /// JSON (the JSON-encoded `serde_json::Map<String, serde_json::Value>`);
     /// see `ToolGithubSearch`. Appended at the enum tail for bincode stability.
@@ -629,6 +677,13 @@ pub enum ServiceRpcResponse {
     /// `Ok` carries opaque JSON; see `ToolGithubSearch`.
     /// Appended at the enum tail for bincode stability.
     ToolCiArtifact(Result<String, String>),
+    QueueLease(LeaseResult),
+    GrantLease(LeaseResult),
+    LeaseStatus(LeaseResult),
+    AbandonLease(LeaseResult),
+    BindLeasePod(LeaseResult),
+    CancelLease(LeaseResult),
+    ReleaseLease(LeaseResult),
 }
 
 #[cfg(test)]

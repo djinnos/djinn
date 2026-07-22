@@ -1303,6 +1303,27 @@ async fn dispatch(
             let result = services.plan_memory_intents(request).await;
             ServiceRpcResponse::PlanMemoryIntents(result)
         }
+        ServiceRpcRequest::QueueLease { request } => {
+            ServiceRpcResponse::QueueLease(services.queue_lease(request).await)
+        }
+        ServiceRpcRequest::GrantLease { request } => {
+            ServiceRpcResponse::GrantLease(services.grant_lease(request).await)
+        }
+        ServiceRpcRequest::LeaseStatus { request } => {
+            ServiceRpcResponse::LeaseStatus(services.lease_status(request).await)
+        }
+        ServiceRpcRequest::AbandonLease { request } => {
+            ServiceRpcResponse::AbandonLease(services.abandon_lease(request).await)
+        }
+        ServiceRpcRequest::BindLeasePod { request } => {
+            ServiceRpcResponse::BindLeasePod(services.bind_lease_pod(request).await)
+        }
+        ServiceRpcRequest::CancelLease { request } => {
+            ServiceRpcResponse::CancelLease(services.cancel_lease(request).await)
+        }
+        ServiceRpcRequest::ReleaseLease { request } => {
+            ServiceRpcResponse::ReleaseLease(services.release_lease(request).await)
+        }
     }
 }
 
