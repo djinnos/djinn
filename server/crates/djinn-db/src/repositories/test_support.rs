@@ -8,6 +8,57 @@ use crate::database::Database;
 use crate::repositories::note::NoteRepository;
 use djinn_memory::Note;
 
+/// Replace a material proposal head without its normal write-time validation.
+///
+/// This is exclusively for legacy-data fixtures: it keeps the current sequence
+/// while changing both the live proposal and its immutable `spec_revision`
+/// snapshot. Lifecycle audit rows at the same sequence are deliberately left
+/// untouched.
+///
+/// **Not for production use.** Panics on SQL errors.
+pub async fn replace_legacy_proposal_head_for_test(
+    db: &Database,
+    proposal_id: &str,
+    body: &str,
+    body_format: &str,
+) {
+    db.ensure_initialized().await.unwrap();
+    let mut transaction = db.pool().begin().await.unwrap();
+    sqlx::query("UPDATE proposals SET body = $1, body_format = $2 WHERE id = $3")
+        .bind(body)
+        .bind(body_format)
+        .bind(proposal_id)
+        .execute(&mut *transaction)
+        .await
+        .expect("failed to replace legacy proposal head");
+    sqlx::query(
+        "UPDATE proposal_revisions SET body = $1, body_format = $2 \
+         WHERE proposal_id = $3 \
+           AND seq = (SELECT latest_revision_seq FROM proposals WHERE id = $3) \
+           AND event_kind = 'spec_revision'",
+    )
+    .bind(body)
+    .bind(body_format)
+    .bind(proposal_id)
+    .execute(&mut *transaction)
+    .await
+    .expect("failed to replace legacy material head snapshot");
+    transaction.commit().await.unwrap();
+}
+
+/// Delete a proposal's lint cache rows to model a head written before lint
+/// persistence was introduced.
+///
+/// **Not for production use.** Panics on SQL errors.
+pub async fn delete_proposal_lint_results_for_test(db: &Database, proposal_id: &str) {
+    db.ensure_initialized().await.unwrap();
+    sqlx::query("DELETE FROM proposal_revision_lint_results WHERE proposal_id = $1")
+        .bind(proposal_id)
+        .execute(db.pool())
+        .await
+        .expect("failed to delete proposal lint results");
+}
+
 /// Create a fresh FK-valid user for a raw latest-schema fixture.
 /// UUIDv7-derived values avoid a repository-wide fixed test identity.
 pub async fn seed_test_user(db: &Database) -> String {
