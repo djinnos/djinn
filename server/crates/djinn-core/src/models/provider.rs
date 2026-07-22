@@ -22,6 +22,23 @@ pub struct Pricing {
     pub cache_write_per_million: f64,
 }
 
+impl Pricing {
+    /// `true` when at least one per-million rate is non-zero.
+    ///
+    /// An all-zero `Pricing` is what the catalog carries for flat-rate
+    /// subscription / coding-plan models (billed monthly, so models.dev reports
+    /// $0 per token). Cost-basis classification treats such a snapshot as
+    /// *unpriced* rather than a real $0.00 spend: a zero-priced subscription
+    /// session must not book as `"projected"` $0.00, and a zero-priced metered
+    /// session must not book as `"actual"` $0.00.
+    pub fn is_priced(&self) -> bool {
+        self.input_per_million != 0.0
+            || self.output_per_million != 0.0
+            || self.cache_read_per_million != 0.0
+            || self.cache_write_per_million != 0.0
+    }
+}
+
 /// A single model from the catalog.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Model {

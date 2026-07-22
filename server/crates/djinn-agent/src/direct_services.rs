@@ -2600,9 +2600,16 @@ fn intern_envelope(wire: SerializableDjinnEvent) -> Result<DjinnEventEnvelope, (
 /// path) provider classification.
 ///
 /// Precedence:
-/// 1. `SubscriptionPlan` hint → `"projected"`
-/// 2. `MeteredApi` hint → priced `"actual"` / unpriced `"unpriced"`
+/// 1. `SubscriptionPlan` hint → `"projected"` when priced, else `"unpriced"`
+/// 2. `MeteredApi` hint → `"actual"` when priced, else `"unpriced"`
 /// 3. No hint → legacy `classify_provider` + pricing availability
+///
+/// A `Pricing` snapshot only counts as priced when at least one per-million rate
+/// is non-zero (`Pricing::is_priced`). Flat-rate subscription / coding-plan
+/// models carry an all-zero snapshot in the catalog; classifying them as
+/// `"projected"` $0.00 (or a zero-priced metered session as `"actual"` $0.00)
+/// pollutes the usage dashboard's cost stack. Missing pricing (`None`) and
+/// all-zero pricing both resolve to `"unpriced"`.
 ///
 /// This is extracted as a pure function so the decision logic can be tested
 /// without instantiating a `DirectServices` / database.
@@ -2611,19 +2618,27 @@ pub(crate) fn determine_cost_basis(
     pricing: Option<&djinn_core::models::Pricing>,
     provider_id: Option<&str>,
 ) -> &'static str {
+    // A snapshot counts as "priced" only when present AND non-zero.
+    let is_priced = pricing.is_some_and(djinn_core::models::Pricing::is_priced);
     match hint {
-        Some(CostBasisHint::SubscriptionPlan) => "projected",
+        Some(CostBasisHint::SubscriptionPlan) => {
+            if is_priced {
+                "projected"
+            } else {
+                "unpriced"
+            }
+        }
         Some(CostBasisHint::MeteredApi) => {
-            if pricing.is_some() {
+            if is_priced {
                 "actual"
             } else {
                 "unpriced"
             }
         }
         None => {
-            // Legacy path: classify by provider id alone.
-            match (provider_id, pricing) {
-                (Some(pid), Some(_)) => {
+            // Legacy path: classify by provider id + non-zero pricing.
+            match (provider_id, is_priced) {
+                (Some(pid), true) => {
                     if classify_provider(pid).is_subscription() {
                         "projected"
                     } else {
@@ -2706,6 +2721,48 @@ mod tests {
         );
         // Also covers the case where no provider_id is present at all.
         assert_eq!(determine_cost_basis(hint, None, None), "unpriced");
+    }
+
+    /// A subscription-plan session whose catalog pricing is all-zero (the
+    /// flat-rate coding-plan case) must NOT book as `"projected"` $0.00 — an
+    /// all-zero snapshot is unpriced, not real projected spend. Both an explicit
+    /// all-zero `Pricing` and missing pricing resolve to `"unpriced"`.
+    #[test]
+    fn cost_basis_subscription_plan_zero_pricing_gives_unpriced() {
+        let hint = Some(CostBasisHint::SubscriptionPlan);
+        assert_eq!(
+            determine_cost_basis(hint, Some(&Pricing::default()), Some("kimi-for-coding")),
+            "unpriced"
+        );
+        assert_eq!(
+            determine_cost_basis(hint, None, Some("kimi-for-coding")),
+            "unpriced"
+        );
+    }
+
+    /// A metered session with an all-zero pricing snapshot must NOT book as
+    /// `"actual"` $0.00 — it is unpriced, like a missing snapshot.
+    #[test]
+    fn cost_basis_metered_zero_pricing_gives_unpriced() {
+        let hint = Some(CostBasisHint::MeteredApi);
+        assert_eq!(
+            determine_cost_basis(hint, Some(&Pricing::default()), Some("openai")),
+            "unpriced"
+        );
+    }
+
+    /// Legacy (no hint) path also requires non-zero pricing: an all-zero
+    /// snapshot resolves to `"unpriced"` regardless of provider class.
+    #[test]
+    fn cost_basis_legacy_zero_pricing_gives_unpriced() {
+        assert_eq!(
+            determine_cost_basis(None, Some(&Pricing::default()), Some("openai")),
+            "unpriced"
+        );
+        assert_eq!(
+            determine_cost_basis(None, Some(&Pricing::default()), Some("minimax-coding-plan")),
+            "unpriced"
+        );
     }
 
     /// OAuth transport alone (without subscription evidence) must NOT blanket

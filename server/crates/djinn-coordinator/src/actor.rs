@@ -1150,6 +1150,10 @@ impl CoordinatorActor {
             // heavy sweep can never let the reaper (run inside
             // `sweep_stale_resources`) read this live coordinator as expired.
             health::sweep_stale_resources(&self.db, &app_state).await;
+            // Piggyback on the slow stale-sweep cadence (never per tick): close
+            // the PR poller's blind spot by reconciling merged-but-unnoticed PRs
+            // for non-terminal tasks that sit outside poller-owned statuses.
+            self.reconcile_blindspot_merged_prs().await;
             self.last_stale_sweep = SystemClock::new().now_instant();
         }
         if self.last_auto_dispatch_sweep.elapsed() >= AUTO_DISPATCH_SWEEP_INTERVAL {
