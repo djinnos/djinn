@@ -244,6 +244,53 @@ mod smoke {
         assert_eq!(registry.len(), 2, "still two checks, the new ones");
     }
 
+    #[tokio::test]
+    async fn retrieval_health_checks_register_once_despite_initial_refresh_failure() {
+        // This isolated construction seam makes no repository or MCP call:
+        // registration must not depend on the source's first refresh succeeding.
+        let source = Arc::new(
+            retrieval_health::RetrievalHealthSource::failing_initial_refresh_for_test(
+                djinn_core::models::KnowledgeInjectionConfig::default(),
+            ),
+        );
+        let registry = DoctorRegistry::new();
+        let replaced = register_retrieval_health_checks(&registry, Arc::clone(&source));
+        assert!(
+            replaced.is_empty(),
+            "a fresh registry must not replace a retrieval-health check"
+        );
+        assert!(
+            source.refresh().await.is_err(),
+            "the injected initial refresh must fail after startup registration"
+        );
+
+        let names: Vec<_> = registry
+            .enumerate()
+            .into_iter()
+            .map(|(name, _)| name)
+            .filter(|name| {
+                matches!(
+                    *name,
+                    "memory.retrieval_zero_result"
+                        | "memory.injection_starvation"
+                        | "memory.retrieval_health_refresh"
+                )
+            })
+            .collect();
+        assert_eq!(names.len(), 3, "each required retrieval check is registered");
+        for required in [
+            "memory.retrieval_zero_result",
+            "memory.injection_starvation",
+            "memory.retrieval_health_refresh",
+        ] {
+            assert_eq!(
+                names.iter().filter(|name| **name == required).count(),
+                1,
+                "{required} must be registered exactly once after refresh failure"
+            );
+        }
+    }
+
     #[test]
     fn doctor_run_with_live_mover_predicate_finds_divergent_task() {
         let registry = DoctorRegistry::new();

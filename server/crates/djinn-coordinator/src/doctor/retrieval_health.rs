@@ -19,7 +19,9 @@ pub const RETRIEVAL_HEALTH_REFRESH_NAME: &str = "memory.retrieval_health_refresh
 
 /// One shared source; successful refreshes replace the complete immutable snapshot.
 pub struct RetrievalHealthSource {
-    repository: RetrievalTraceRepository,
+    // `None` is only constructed by the isolated registration test seam below;
+    // production construction always supplies the coordinator repository.
+    repository: Option<RetrievalTraceRepository>,
     config: KnowledgeInjectionConfig,
     publication: Arc<RetrievalHealthPublication>,
 }
@@ -68,7 +70,21 @@ impl RetrievalHealthPublication {
 impl RetrievalHealthSource {
     pub fn new(db: Database, config: KnowledgeInjectionConfig) -> Self {
         Self {
-            repository: RetrievalTraceRepository::new(db),
+            repository: Some(RetrievalTraceRepository::new(db)),
+            config,
+            publication: Arc::new(RetrievalHealthPublication::new()),
+        }
+    }
+
+    /// Build a source whose first refresh fails without opening a database.
+    ///
+    /// This keeps startup-registration tests isolated from database setup while
+    /// exercising the same failure-preserving publication path as a repository
+    /// refresh error.
+    #[cfg(test)]
+    pub(crate) fn failing_initial_refresh_for_test(config: KnowledgeInjectionConfig) -> Self {
+        Self {
+            repository: None,
             config,
             publication: Arc::new(RetrievalHealthPublication::new()),
         }
@@ -87,13 +103,13 @@ impl RetrievalHealthSource {
                 .format(&Iso8601::DEFAULT)
                 .map_err(|error| error.to_string())
         };
-        let groups = match (format(from), format(until)) {
-            (Ok(from), Ok(until)) => self
-                .repository
+        let groups = match (format(from), format(until), self.repository.as_ref()) {
+            (Ok(from), Ok(until), Some(repository)) => repository
                 .taxonomy_v1_health_rollup(&from, &until, &until)
                 .await
                 .map_err(|e| e.to_string()),
-            (Err(error), _) | (_, Err(error)) => Err(error),
+            (Err(error), _, _) | (_, Err(error), _) => Err(error),
+            (_, _, None) => Err("test retrieval-health initial refresh failure".to_owned()),
         };
         self.publication.finish(groups.and_then(map_groups))
     }
