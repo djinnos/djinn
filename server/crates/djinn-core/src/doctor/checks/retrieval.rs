@@ -529,8 +529,9 @@ impl From<&TaxonomyV1InvalidGroupSnapshot> for TaxonomyV1GroupKey {
 
 /// An atomically-populated refresh; valid siblings remain evaluable beside invalid groups.
 ///
-/// Maps make `(project_id, entry_point)` uniqueness structural: inserting a
-/// replacement group is explicit and cannot create duplicate finding keys.
+/// The maps are mutually exclusive by `(project_id, entry_point)`: inserting a
+/// replacement group removes the prior validity state, so malformed data can
+/// never leave an evaluable sibling with the same downstream finding key.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct TaxonomyV1RetrievalSnapshot {
     valid_groups: BTreeMap<TaxonomyV1GroupKey, TaxonomyV1ValidGroupSnapshot>,
@@ -547,7 +548,9 @@ impl TaxonomyV1RetrievalSnapshot {
         &mut self,
         group: TaxonomyV1ValidGroupSnapshot,
     ) -> Option<TaxonomyV1ValidGroupSnapshot> {
-        self.valid_groups.insert((&group).into(), group)
+        let key = (&group).into();
+        self.invalid_groups.remove(&key);
+        self.valid_groups.insert(key, group)
     }
 
     /// Insert an invalid group without making it eligible for evaluation.
@@ -555,7 +558,9 @@ impl TaxonomyV1RetrievalSnapshot {
         &mut self,
         group: TaxonomyV1InvalidGroupSnapshot,
     ) -> Option<TaxonomyV1InvalidGroupSnapshot> {
-        self.invalid_groups.insert((&group).into(), group)
+        let key = (&group).into();
+        self.valid_groups.remove(&key);
+        self.invalid_groups.insert(key, group)
     }
 
     pub fn valid_groups(&self) -> impl Iterator<Item = &TaxonomyV1ValidGroupSnapshot> {
@@ -1277,20 +1282,63 @@ mod tests {
     }
 
     #[test]
-    fn v1_snapshot_keys_groups_and_preserves_invalid_keys_without_evaluation() {
-        let mut snapshot = v1_snapshot([v1_group("project", "entry", 2, 2, 0, 0)]);
-        let replaced = snapshot.insert_valid_group(v1_group("project", "entry", 2, 0, 0, 0));
+    fn v1_snapshot_groups_are_mutually_exclusive_and_invalid_groups_are_not_evaluated() {
+        let mut snapshot = v1_snapshot([v1_group(
+            "project",
+            LOAD_KNOWLEDGE_CONTEXT_ENTRY_POINT,
+            2,
+            0,
+            2,
+            1,
+        )]);
+        let replaced = snapshot.insert_valid_group(v1_group(
+            "project",
+            LOAD_KNOWLEDGE_CONTEXT_ENTRY_POINT,
+            2,
+            0,
+            2,
+            1,
+        ));
         assert!(replaced.is_some(), "the group key is unique");
+        assert_eq!(resolve_injection_starvation_v1(&snapshot, v1_config()).len(), 1);
         let invalid = TaxonomyV1InvalidGroupSnapshot {
-            project_id: "project".into(), entry_point: "bad-entry".into(), taxonomy_version: RETRIEVAL_TAXONOMY_V1.into(),
-            window_start: ts(0), window_end: ts(24), refreshed_at: ts(25), legacy_unclassified_queries: 4,
-            invalid_taxonomy_queries: 3, invalid_reason: "malformed disposition".into(),
+            project_id: "project".into(),
+            entry_point: LOAD_KNOWLEDGE_CONTEXT_ENTRY_POINT.into(),
+            taxonomy_version: RETRIEVAL_TAXONOMY_V1.into(),
+            window_start: ts(0),
+            window_end: ts(24),
+            refreshed_at: ts(25),
+            legacy_unclassified_queries: 4,
+            invalid_taxonomy_queries: 3,
+            invalid_reason: "malformed disposition".into(),
         };
-        assert_eq!(invalid.finding_key(RETRIEVAL_ZERO_RESULT_NAME), "memory.retrieval_zero_result:project:bad-entry");
-        assert_eq!(invalid.finding_key(INJECTION_STARVATION_NAME), "memory.injection_starvation:project:bad-entry");
+        assert_eq!(
+            invalid.finding_key(RETRIEVAL_ZERO_RESULT_NAME),
+            "memory.retrieval_zero_result:project:load_knowledge_context"
+        );
+        assert_eq!(
+            invalid.finding_key(INJECTION_STARVATION_NAME),
+            "memory.injection_starvation:project:load_knowledge_context"
+        );
         snapshot.insert_invalid_group(invalid);
         assert_eq!(snapshot.invalid_groups().count(), 1);
-        assert!(resolve_retrieval_zero_result_v1(&snapshot, v1_config()).is_empty());
+        assert_eq!(snapshot.valid_groups().count(), 0);
+        assert!(resolve_injection_starvation_v1(&snapshot, v1_config()).is_empty());
+
+        snapshot.insert_valid_group(v1_group(
+            "project",
+            LOAD_KNOWLEDGE_CONTEXT_ENTRY_POINT,
+            2,
+            0,
+            2,
+            1,
+        ));
+        assert_eq!(
+            snapshot.invalid_groups().count(),
+            0,
+            "a valid replacement removes invalid state"
+        );
+        assert_eq!(resolve_injection_starvation_v1(&snapshot, v1_config()).len(), 1);
     }
 
     #[test]
