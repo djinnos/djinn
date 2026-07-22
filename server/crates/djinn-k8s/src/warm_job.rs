@@ -19,14 +19,16 @@ use std::collections::BTreeMap;
 
 use k8s_openapi::api::batch::v1::{Job, JobSpec};
 use k8s_openapi::api::core::v1::{
-    Container, EmptyDirVolumeSource, EnvVar, PersistentVolumeClaimVolumeSource, PodSpec,
-    PodTemplateSpec, ResourceRequirements, Toleration, Volume, VolumeMount,
+    ConfigMapVolumeSource, Container, EmptyDirVolumeSource, EnvVar, EnvVarSource,
+    ObjectFieldSelector, PersistentVolumeClaimVolumeSource, PodSpec, PodTemplateSpec,
+    ResourceRequirements, Toleration, Volume, VolumeMount,
 };
 use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
 use uuid::Uuid;
 
 use crate::config::KubernetesConfig;
+use crate::graph_warmer_identity::LeasedWarmJobIdentity;
 
 /// Label key identifying a graph-warm Job.
 pub const LABEL_WARM: &str = "djinn.app/warm";
@@ -36,6 +38,13 @@ pub const LABEL_PROJECT_ID: &str = "djinn.app/project-id";
 pub const COMPONENT_GRAPH_WARM: &str = "graph-warm";
 /// Label key identifying which djinn-internal component created the resource.
 pub const LABEL_COMPONENT: &str = "djinn.app/component";
+/// Durable identity annotations used for inventory and trace correlation.
+/// They are deliberately annotations rather than exported metric labels.
+pub const ANNOTATION_WARM_REQUEST_ID: &str = "djinn.app/warm-request-id";
+pub const ANNOTATION_GRAPH_REVISION: &str = "djinn.app/graph-revision";
+pub const ANNOTATION_FENCING_TOKEN: &str = "djinn.app/fencing-token";
+pub const GATE_AUTHORIZATION_KEY: &str = "authorization";
+pub const VOLUME_WARM_GATE: &str = "warm-gate";
 
 /// Mount path for the read-only mirror PVC (mirrors the task-run Job).
 pub const MIRROR_MOUNT_DIR: &str = "/mirror";
@@ -312,6 +321,105 @@ exec {bin} warm-graph "{project_id}"
             ..JobSpec::default()
         }),
         ..Job::default()
+    }
+}
+
+/// Build a deterministic, lease-gated Job from inputs persisted before
+/// Kubernetes create. The legacy [`build_warm_job`] wrapper remains available
+/// for existing callers that do not yet participate in the lease protocol.
+pub fn build_leased_warm_job(
+    config: &KubernetesConfig,
+    project_id: &str,
+    project_image_tag: &str,
+    policy: Option<&djinn_stack::environment::CargoCachePolicy>,
+    identity: &LeasedWarmJobIdentity,
+) -> Job {
+    let mut job = build_warm_job(config, project_id, project_image_tag, policy);
+    job.metadata.name = Some(identity.object_name.clone());
+    let annotations = BTreeMap::from([
+        (
+            ANNOTATION_WARM_REQUEST_ID.into(),
+            identity.warm_request_id.clone(),
+        ),
+        (
+            ANNOTATION_GRAPH_REVISION.into(),
+            identity.graph_revision.clone(),
+        ),
+        (
+            ANNOTATION_FENCING_TOKEN.into(),
+            identity.fencing_token.to_string(),
+        ),
+    ]);
+    job.metadata.annotations = Some(annotations.clone());
+
+    let spec = job.spec.as_mut().expect("warm job always has a spec");
+    spec.template.metadata.get_or_insert_default().annotations = Some(annotations);
+    let pod = spec
+        .template
+        .spec
+        .as_mut()
+        .expect("warm job always has a pod spec");
+    pod.volumes.get_or_insert_default().push(Volume {
+        name: VOLUME_WARM_GATE.into(),
+        config_map: Some(ConfigMapVolumeSource {
+            name: warm_gate_config_map_name(&identity.object_name),
+            optional: Some(true),
+            ..ConfigMapVolumeSource::default()
+        }),
+        ..Volume::default()
+    });
+    // Kubernetes runs init containers to completion before the warmer starts.
+    // The authorization must match this Pod's immutable UID and fencing token.
+    pod.init_containers = Some(vec![warm_gate_container(project_image_tag, identity)]);
+    job
+}
+
+/// Stable ConfigMap name used by the external gate controller to deliver its
+/// `pod-uid:fencing-token` authorization payload.
+pub(crate) fn warm_gate_config_map_name(job_name: &str) -> String {
+    format!("{}-gate", &job_name[..job_name.len().min(58)])
+}
+
+fn warm_gate_container(project_image_tag: &str, identity: &LeasedWarmJobIdentity) -> Container {
+    let command = format!(
+        r#"set -eu
+expected="${{DJINN_BOUND_POD_UID}}:${{DJINN_WARM_FENCING_TOKEN}}"
+while :; do
+  if [ -f /var/run/djinn-warm-gate/{key} ] && [ "$(cat /var/run/djinn-warm-gate/{key})" = "$expected" ]; then
+    exit 0
+  fi
+  sleep 1
+done"#,
+        key = GATE_AUTHORIZATION_KEY,
+    );
+    Container {
+        name: "warm-lease-gate".into(),
+        image: Some(project_image_tag.into()),
+        command: Some(vec!["/bin/bash".into(), "-c".into(), command]),
+        env: Some(vec![
+            EnvVar {
+                name: "DJINN_BOUND_POD_UID".into(),
+                value_from: Some(EnvVarSource {
+                    field_ref: Some(ObjectFieldSelector {
+                        field_path: "metadata.uid".into(),
+                        ..ObjectFieldSelector::default()
+                    }),
+                    ..EnvVarSource::default()
+                }),
+                ..EnvVar::default()
+            },
+            env_var(
+                "DJINN_WARM_FENCING_TOKEN",
+                &identity.fencing_token.to_string(),
+            ),
+        ]),
+        volume_mounts: Some(vec![VolumeMount {
+            name: VOLUME_WARM_GATE.into(),
+            mount_path: "/var/run/djinn-warm-gate".into(),
+            read_only: Some(true),
+            ..VolumeMount::default()
+        }]),
+        ..Container::default()
     }
 }
 

@@ -15,7 +15,10 @@
 use super::*;
 use crate::config::KubernetesConfig;
 use crate::label_value::{LABEL_VALUE_MAX_BYTES, is_valid_label_value};
-use crate::warm_job::build_warm_job;
+use crate::warm_job::{
+    ANNOTATION_FENCING_TOKEN, ANNOTATION_GRAPH_REVISION, ANNOTATION_WARM_REQUEST_ID,
+    GATE_AUTHORIZATION_KEY, VOLUME_WARM_GATE, build_leased_warm_job, build_warm_job,
+};
 
 /// A realistic production project id — a full 36-char UUIDv7, which is what
 /// overran every budget in the original failure.
@@ -31,6 +34,114 @@ fn warm_request(project_id: &str, revision: &str) -> WarmAdmissionRequest {
         work_id,
         generation: 1,
     }
+}
+
+#[test]
+fn leased_manifest_is_deterministic_and_closed_until_its_uid_is_authorized() {
+    let cfg = KubernetesConfig::for_testing();
+    let identity = LeasedWarmJobIdentity::new(PROJECT_ID, "warm-request-019f", REVISION, 73);
+    let retry = LeasedWarmJobIdentity::new(PROJECT_ID, "warm-request-019f", REVISION, 73);
+    assert_eq!(identity.object_name, retry.object_name);
+
+    let job = build_leased_warm_job(&cfg, PROJECT_ID, "example/warm:latest", None, &identity);
+    assert_eq!(
+        job.metadata.name.as_deref(),
+        Some(identity.object_name.as_str())
+    );
+    let annotations = job.metadata.annotations.as_ref().expect("Job annotations");
+    let template = job
+        .spec
+        .as_ref()
+        .expect("Job spec")
+        .template
+        .metadata
+        .as_ref()
+        .expect("template metadata");
+    assert_eq!(template.annotations.as_ref(), Some(annotations));
+    assert_eq!(
+        annotations
+            .get(ANNOTATION_WARM_REQUEST_ID)
+            .map(String::as_str),
+        Some("warm-request-019f")
+    );
+    assert_eq!(
+        annotations
+            .get(ANNOTATION_GRAPH_REVISION)
+            .map(String::as_str),
+        Some(REVISION)
+    );
+    assert_eq!(
+        annotations
+            .get(ANNOTATION_FENCING_TOKEN)
+            .map(String::as_str),
+        Some("73")
+    );
+
+    let pod = job.spec.as_ref().unwrap().template.spec.as_ref().unwrap();
+    let gate = pod
+        .init_containers
+        .as_ref()
+        .expect("closed gate init container");
+    assert_eq!(gate.len(), 1);
+    let script = gate[0].command.as_ref().expect("gate command")[2].as_str();
+    assert!(
+        script.contains("while :; do"),
+        "gate must be closed by default: {script}"
+    );
+    assert!(
+        script.contains("DJINN_BOUND_POD_UID"),
+        "gate must bind UID: {script}"
+    );
+    assert!(
+        script.contains("DJINN_WARM_FENCING_TOKEN"),
+        "gate must fence authorization: {script}"
+    );
+    assert!(script.contains(GATE_AUTHORIZATION_KEY));
+    assert!(pod.containers[0].command.as_ref().unwrap()[2].contains("warm-graph"));
+
+    let gate_volume = pod
+        .volumes
+        .as_ref()
+        .unwrap()
+        .iter()
+        .find(|volume| volume.name == VOLUME_WARM_GATE)
+        .expect("authorization volume");
+    assert_eq!(
+        gate_volume.config_map.as_ref().unwrap().optional,
+        Some(true)
+    );
+    let warmer = &pod.containers[0];
+    assert_eq!(
+        warmer
+            .resources
+            .as_ref()
+            .unwrap()
+            .requests
+            .as_ref()
+            .unwrap()["cpu"]
+            .0,
+        "4"
+    );
+    assert_eq!(
+        warmer.resources.as_ref().unwrap().limits.as_ref().unwrap()["cpu"].0,
+        "4"
+    );
+    assert!(
+        warmer
+            .volume_mounts
+            .as_ref()
+            .unwrap()
+            .iter()
+            .any(|mount| mount.name == crate::warm_job::VOLUME_WORKSPACE)
+    );
+    assert!(
+        warmer
+            .volume_mounts
+            .as_ref()
+            .unwrap()
+            .iter()
+            .any(|mount| mount.name == crate::job::VOLUME_CACHE)
+    );
 }
 
 /// Assert every label on `job` (both object and Pod-template) is legal, and

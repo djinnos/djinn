@@ -31,10 +31,10 @@ pub use graph_warmer::{
     WarmAdmissionRequest, WarmAdmissionTransition, WarmCompletionSink, WarmJobDispatcher,
     WarmJobLister, WarmJobManifest, WarmJobWatcher, WarmTerminalOutcome,
 };
-pub use graph_warmer_identity::warm_work_id;
+pub use graph_warmer_identity::{LeasedWarmJobIdentity, warm_work_id};
 pub use runtime::KubernetesRuntime;
 pub use token_review::TokenReviewer;
-pub use warm_job::build_warm_job;
+pub use warm_job::{build_leased_warm_job, build_warm_job};
 pub use workload_inventory::{
     KubeWorkloadInventory, LABEL_ADMISSION_DOMAIN, LABEL_ADMISSION_GENERATION,
     LABEL_ADMISSION_WORK_ID, UidGetResult, WorkloadInventory, WorkloadObjectKind, WorkloadRecord,
