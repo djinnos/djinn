@@ -460,6 +460,21 @@ impl BuildLeaseRepository {
                 "stale build lease fencing token".into(),
             ));
         }
+        // Close the race between a service replay read and this locked
+        // transition. A delayed grant acknowledgement requests Launching, but
+        // any later durable state is already its successful forward outcome.
+        if state == BuildLeaseState::Launching
+            && matches!(
+                row.state,
+                BuildLeaseState::Bound
+                    | BuildLeaseState::Active
+                    | BuildLeaseState::Suspect
+                    | BuildLeaseState::Terminal
+            )
+        {
+            tx.commit().await?;
+            return Ok(row);
+        }
         if row.state == state && (pod_uid.is_none() || row.bound_pod_uid.as_deref() == pod_uid) {
             tx.commit().await?;
             return Ok(row);
@@ -755,6 +770,12 @@ mod tests {
         ));
         let bound = repo.bind(&request.key, token, "pod-a", None).await.unwrap();
         assert_eq!(bound.bound_pod_uid.as_deref(), Some("pod-a"));
+        let delayed_grant = repo
+            .status(&request.key, token, BuildLeaseState::Launching, None)
+            .await
+            .unwrap();
+        assert_eq!(delayed_grant.state, BuildLeaseState::Bound);
+        assert_eq!(delayed_grant.bound_pod_uid.as_deref(), Some("pod-a"));
         assert_eq!(
             repo.bind(&request.key, token, "pod-a", None)
                 .await
@@ -770,6 +791,13 @@ mod tests {
         repo.status(&request.key, token, BuildLeaseState::Active, None)
             .await
             .unwrap();
+        assert_eq!(
+            repo.status(&request.key, token, BuildLeaseState::Launching, None)
+                .await
+                .unwrap()
+                .state,
+            BuildLeaseState::Active
+        );
         assert_eq!(
             repo.bind(&request.key, token, "pod-a", None)
                 .await
@@ -792,6 +820,13 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(
+            repo.status(&request.key, token, BuildLeaseState::Launching, None)
+                .await
+                .unwrap()
+                .state,
+            BuildLeaseState::Suspect
+        );
+        assert_eq!(
             repo.bind(&request.key, token, "pod-a", None)
                 .await
                 .unwrap()
@@ -802,6 +837,12 @@ mod tests {
         let terminal = repo.bind(&request.key, token, "pod-a", None).await.unwrap();
         assert_eq!(terminal.state, BuildLeaseState::Terminal);
         assert_eq!(terminal.terminal_reason.as_deref(), Some("released"));
+        let delayed_grant = repo
+            .status(&request.key, token, BuildLeaseState::Launching, None)
+            .await
+            .unwrap();
+        assert_eq!(delayed_grant.state, BuildLeaseState::Terminal);
+        assert_eq!(delayed_grant.terminal_reason.as_deref(), Some("released"));
         assert!(repo.bind(&request.key, token, "pod-b", None).await.is_err());
     }
 
