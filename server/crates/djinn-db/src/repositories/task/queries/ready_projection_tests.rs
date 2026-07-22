@@ -100,6 +100,9 @@ async fn ready_and_claim_preserve_refinement_correlation() {
     let db = Database::open_in_memory().unwrap();
     db.ensure_initialized().await.unwrap();
     let project_id = uuid::Uuid::now_v7().to_string();
+    let proposal_id = uuid::Uuid::now_v7().to_string();
+    let run_id = uuid::Uuid::now_v7().to_string();
+    let intent_id = uuid::Uuid::now_v7().to_string();
     sqlx::query!(
         "INSERT INTO projects (id, name, github_owner, github_repo) VALUES ($1, $2, $3, $4)",
         project_id,
@@ -107,6 +110,40 @@ async fn ready_and_claim_preserve_refinement_correlation() {
         "test",
         format!("refinement-ready-projection-{project_id}"),
     )
+    .execute(db.pool())
+    .await
+    .unwrap();
+
+    // Migration 138 makes both task correlation IDs foreign keys, so persist
+    // the exact run and intent identity exercised by these projections.
+    sqlx::query(
+        "INSERT INTO proposals (id, short_id, title, body, body_format, acceptance_criteria, status, latest_revision_seq) \
+         VALUES ($1, $2, 'Ready projection proposal', '', 'markdown', '[]'::jsonb, 'draft', 1)",
+    )
+    .bind(&proposal_id)
+    .bind(format!("p{}", &proposal_id[..8]))
+    .execute(db.pool())
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO refinement_runs \
+         (id, proposal_id, generation, idempotency_key, state, terminal_at, stop_tag) \
+         VALUES ($1, $2, 7, $3, 'terminal', '2026-01-01T00:00:00.000Z', 'operator_stop')",
+    )
+    .bind(&run_id)
+    .bind(&proposal_id)
+    .bind(format!("ready-projection-run-{run_id}"))
+    .execute(db.pool())
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO refinement_dispatch_intents \
+         (id, run_id, round, phase, role, idempotency_key) \
+         VALUES ($1, $2, 3, 'adversary_attack', 'adversary', $3)",
+    )
+    .bind(&intent_id)
+    .bind(&run_id)
+    .bind(format!("ready-projection-intent-{intent_id}"))
     .execute(db.pool())
     .await
     .unwrap();
@@ -128,8 +165,8 @@ async fn ready_and_claim_preserve_refinement_correlation() {
         .await
         .unwrap();
     let correlation = TaskRefinementCorrelation::new(
-        "run-for-ready-projection".into(),
-        "intent-for-ready-projection".into(),
+        run_id.clone(),
+        intent_id.clone(),
         7,
         3,
         RefinementPhase::AdversaryAttack,
@@ -152,11 +189,7 @@ async fn ready_and_claim_preserve_refinement_correlation() {
         .iter()
         .find(|candidate| candidate.id == task.id)
         .expect("correlated task must be ready");
-    assert_adversary_correlation(
-        ready_task,
-        "run-for-ready-projection",
-        "intent-for-ready-projection",
-    );
+    assert_adversary_correlation(ready_task, &run_id, &intent_id);
 
     let claimed = repo
         .claim(
@@ -172,11 +205,7 @@ async fn ready_and_claim_preserve_refinement_correlation() {
         .unwrap()
         .expect("correlated task must be claimable");
     assert_eq!(claimed.id, task.id);
-    assert_adversary_correlation(
-        &claimed,
-        "run-for-ready-projection",
-        "intent-for-ready-projection",
-    );
+    assert_adversary_correlation(&claimed, &run_id, &intent_id);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
