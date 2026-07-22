@@ -622,11 +622,11 @@ fn ranked_packer_continues_after_budget_miss_and_charges_newlines_exactly() {
         total_byte_budget: 500,
         line_byte_cap: 500,
     };
-    let budget = pack_ranked_knowledge_notes(&[first.clone()], open)
+    let budget = pack_ranked_knowledge_notes(std::slice::from_ref(&first), open)
         .rendered
         .len()
         + 1
-        + pack_ranked_knowledge_notes(&[small.clone()], open)
+        + pack_ranked_knowledge_notes(std::slice::from_ref(&small), open)
             .rendered
             .len();
     let packed = pack_ranked_knowledge_notes(
