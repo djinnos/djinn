@@ -87,16 +87,36 @@ export async function sha256Hex(bytes: BufferSource): Promise<string> {
   return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
-/** The producer's canonical semantic domain: payload JSON with only this hash omitted. */
-export function canonicalSemanticJson(payload: Record<string, unknown>): string {
-  const { graph_content_hash: _graphContentHash, ...hashInput } = payload;
-  return JSON.stringify(hashInput);
+/**
+ * The producer's canonical semantic domain is the payload's own decoded BYTES
+ * with only the `graph_content_hash` field spliced out — deliberately not a JS
+ * re-serialization. serde_json/ryu formats an integral f64 as `0.0`/`1.0`,
+ * which is not a fixed point of `JSON.parse`→`JSON.stringify` (`0`/`1`), so
+ * re-stringifying would diverge from the producer bytes for real artifacts.
+ *
+ * The producer serializes the same struct twice: once with `graph_content_hash`
+ * absent (the hash input) and once with it present (the final payload). Because
+ * the field is written in a fixed serde position (immediately after
+ * `generation_id`, immediately before `truncated`), the final payload minus the
+ * literal `"graph_content_hash":"<hex>",` substring is byte-identical to the
+ * hash input. `payloadHash` has already been validated as 64 lowercase hex, so
+ * the literal is exact; it must occur exactly once or we refuse to guess.
+ */
+export function canonicalSemanticJson(payloadText: string, payloadHash: string): string {
+  const literal = `"graph_content_hash":"${payloadHash}",`;
+  const first = payloadText.indexOf(literal);
+  if (first === -1 || payloadText.indexOf(literal, first + 1) !== -1) {
+    fail("semantic hash field is not uniquely spliceable");
+  }
+  return payloadText.slice(0, first) + payloadText.slice(first + literal.length);
 }
 
 export async function validateGalaxyArtifact(
   requestedProjectId: string,
   headers: Headers,
   payload: unknown,
+  /** Exact decompressed payload bytes as text, the producer's own serialization. */
+  payloadText: string,
   /** Exact compressed HTTP representation, before gzip decoding. */
   transportBytes: BufferSource,
 ): Promise<ValidatedGalaxyArtifact> {
@@ -123,7 +143,7 @@ export async function validateGalaxyArtifact(
   if (payloadGeneration !== identity.generationId) fail("generation identity mismatch");
   if (payloadCommit !== identity.commitSha) fail("commit identity mismatch");
   if (payloadHash !== identity.semanticHash || !/^[0-9a-f]{64}$/.test(payloadHash)) fail("semantic hash identity mismatch");
-  const computedHash = await sha256Hex(new TextEncoder().encode(canonicalSemanticJson(raw)));
+  const computedHash = await sha256Hex(new TextEncoder().encode(canonicalSemanticJson(payloadText, payloadHash)));
   if (computedHash !== payloadHash) fail("semantic hash recomputation mismatch");
   if (!Array.isArray(raw.nodes) || !Array.isArray(raw.edges)) fail("nodes or edges is not an array");
   const nodes = raw.nodes.map(node); const edges = raw.edges.map(edge);
