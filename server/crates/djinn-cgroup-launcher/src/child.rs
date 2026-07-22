@@ -34,9 +34,8 @@ pub trait WorkerInspector {
 pub struct NativeWorkerInspector;
 impl WorkerInspector for NativeWorkerInspector {
     fn worker_identity(&self, pid: u32) -> Result<WorkerIdentity, Error> {
-        // This kernel-owned cross-process source is deliberately mandatory:
-        // an unavailable Dumpable field is not evidence that the worker is
-        // safe to accept.
+        // UID/GID are kernel-owned procfs fields. Do not accept a
+        // caller-supplied readiness assertion here.
         let status = std::fs::read_to_string(format!("/proc/{pid}/status"))?;
         let field = |name| {
             status
@@ -47,13 +46,64 @@ impl WorkerInspector for NativeWorkerInspector {
         };
         let uid = field("Uid:")?.parse().map_err(|_| Error::InvalidWorker)?;
         let gid = field("Gid:")?.parse().map_err(|_| Error::InvalidWorker)?;
-        let dumpable = match field("Dumpable:")? {
-            "0" => false,
-            "1" => true,
-            _ => return Err(Error::InvalidWorker),
-        };
+        // Linux does not expose PR_GET_DUMPABLE in procfs (CoreDumping is an
+        // in-progress core dump, not the dumpability policy). Opening
+        // /proc/<pid>/mem performs a kernel ptrace-access check. Temporarily
+        // use the required worker fs credentials so this observes policy
+        // instead of relying on root privilege; CAP_SYS_PTRACE would bypass
+        // the policy and therefore rejects readiness fail-closed.
+        let dumpable = worker_mem_accessible(pid, uid, gid)?;
         Ok(WorkerIdentity { uid, gid, dumpable })
     }
+}
+
+fn worker_mem_accessible(pid: u32, uid: u32, gid: u32) -> Result<bool, Error> {
+    // linux/capability.h: CAP_SYS_PTRACE is capability 19. libc does not
+    // expose capability-number constants on every supported target.
+    const CAP_SYS_PTRACE: u32 = 19;
+    if has_effective_capability(CAP_SYS_PTRACE)? {
+        return Err(Error::InvalidWorker);
+    }
+    let previous_gid = unsafe { libc::setfsgid(gid) };
+    let previous_uid = unsafe { libc::setfsuid(uid) };
+    // setfs*id reports the prior value rather than errno. Probe the resulting
+    // value before relying on it, then leave the requested value in place for
+    // the access check.
+    let active_gid = unsafe { libc::setfsgid(gid) };
+    let active_uid = unsafe { libc::setfsuid(uid) };
+    if active_uid != uid as libc::c_int || active_gid != gid as libc::c_int {
+        let _ = unsafe { libc::setfsuid(previous_uid as libc::uid_t) };
+        let _ = unsafe { libc::setfsgid(previous_gid as libc::gid_t) };
+        return Err(Error::InvalidWorker);
+    }
+    let opened = std::fs::File::open(format!("/proc/{pid}/mem")).is_ok();
+    // Restoration failures leave the broker with unsafe credentials.
+    let restored_uid = unsafe { libc::setfsuid(previous_uid as libc::uid_t) } == uid as libc::c_int;
+    let restored_gid = unsafe { libc::setfsgid(previous_gid as libc::gid_t) } == gid as libc::c_int;
+    if !restored_uid || !restored_gid {
+        return Err(Error::InvalidWorker);
+    }
+    Ok(opened)
+}
+
+fn has_effective_capability(capability: u32) -> Result<bool, Error> {
+    let header = CapabilityHeader {
+        version: 0x2008_0522,
+        pid: 0,
+    };
+    let mut data = [CapabilityData {
+        effective: 0,
+        permitted: 0,
+        inheritable: 0,
+    }; 2];
+    if unsafe { libc::syscall(libc::SYS_capget, &raw const header, data.as_mut_ptr()) } != 0 {
+        return Err(Error::Io(std::io::Error::last_os_error()));
+    }
+    let word = usize::try_from(capability / 32).map_err(|_| Error::InvalidWorker)?;
+    let bit = capability % 32;
+    Ok(data
+        .get(word)
+        .is_some_and(|capabilities| capabilities.effective & (1 << bit) != 0))
 }
 
 pub fn verify_worker_ready(inspector: &impl WorkerInspector, pid: u32) -> Result<(), Error> {
@@ -229,21 +279,52 @@ impl ChildSyscalls for NativeChildSyscalls {
         const LD_NR: u16 = (libc::BPF_LD | libc::BPF_W | libc::BPF_ABS) as u16;
         const JEQ: u16 = (libc::BPF_JMP | libc::BPF_JEQ | libc::BPF_K) as u16;
         const RET: u16 = (libc::BPF_RET | libc::BPF_K) as u16;
-        let allowed = [
-            libc::SYS_execve as u32,
-            libc::SYS_execveat as u32,
-            libc::SYS_exit as u32,
-            libc::SYS_exit_group as u32,
-            libc::SYS_rt_sigreturn as u32,
+        // Seccomp remains active after exec. An exec-only allow-list breaks a
+        // dynamic loader before ordinary task commands begin. The preparation
+        // above has already removed credentials, mounts, cgroups, and control
+        // descriptors, so retain ordinary runtime syscalls and deny the
+        // remaining namespace, cross-process, and kernel-control surface.
+        let denied = [
+            libc::SYS_setns as u32,
+            libc::SYS_unshare as u32,
+            libc::SYS_mount as u32,
+            libc::SYS_umount2 as u32,
+            libc::SYS_pivot_root as u32,
+            libc::SYS_ptrace as u32,
+            libc::SYS_process_vm_readv as u32,
+            libc::SYS_process_vm_writev as u32,
+            libc::SYS_bpf as u32,
+            libc::SYS_perf_event_open as u32,
+            libc::SYS_kexec_load as u32,
+            libc::SYS_init_module as u32,
+            libc::SYS_finit_module as u32,
+            libc::SYS_delete_module as u32,
+            libc::SYS_reboot as u32,
+            libc::SYS_swapon as u32,
+            libc::SYS_swapoff as u32,
+            libc::SYS_keyctl as u32,
+            libc::SYS_add_key as u32,
+            libc::SYS_request_key as u32,
+            libc::SYS_open_by_handle_at as u32,
+            libc::SYS_name_to_handle_at as u32,
+            libc::SYS_pidfd_getfd as u32,
+            libc::SYS_capset as u32,
+            libc::SYS_setuid as u32,
+            libc::SYS_setgid as u32,
+            libc::SYS_setreuid as u32,
+            libc::SYS_setregid as u32,
+            libc::SYS_setresuid as u32,
+            libc::SYS_setresgid as u32,
+            libc::SYS_setgroups as u32,
         ];
-        let mut filter = Vec::with_capacity(allowed.len() * 2 + 2);
+        let mut filter = Vec::with_capacity(denied.len() * 2 + 2);
         filter.push(libc::sock_filter {
             code: LD_NR,
             jt: 0,
             jf: 0,
             k: 0,
         });
-        for syscall in allowed {
+        for syscall in denied {
             filter.push(libc::sock_filter {
                 code: JEQ,
                 jt: 0,
@@ -254,14 +335,14 @@ impl ChildSyscalls for NativeChildSyscalls {
                 code: RET,
                 jt: 0,
                 jf: 0,
-                k: RET_ALLOW,
+                k: RET_ERRNO,
             });
         }
         filter.push(libc::sock_filter {
             code: RET,
             jt: 0,
             jf: 0,
-            k: RET_ERRNO,
+            k: RET_ALLOW,
         });
         let program = libc::sock_fprog {
             len: filter
@@ -289,39 +370,48 @@ impl ChildSyscalls for NativeChildSyscalls {
 mod tests {
     use super::*;
     #[derive(Default)]
-    struct Calls(Vec<String>);
+    struct Calls {
+        calls: Vec<String>,
+        fail_at: Option<&'static str>,
+    }
+    impl Calls {
+        fn record(
+            &mut self,
+            call: impl Into<String>,
+            operation: &'static str,
+        ) -> Result<(), Error> {
+            self.calls.push(call.into());
+            if self.fail_at == Some(operation) {
+                Err(Error::ChildPreparation(operation))
+            } else {
+                Ok(())
+            }
+        }
+    }
     impl ChildSyscalls for Calls {
         fn close(&mut self, fd: RawFd) -> Result<(), Error> {
-            self.0.push(format!("close:{fd}"));
-            Ok(())
+            self.record(format!("close:{fd}"), "close")
         }
         fn set_groups_empty(&mut self) -> Result<(), Error> {
-            self.0.push("groups".into());
-            Ok(())
+            self.record("groups", "groups")
         }
         fn clear_capabilities(&mut self) -> Result<(), Error> {
-            self.0.push("caps".into());
-            Ok(())
+            self.record("caps", "caps")
         }
         fn set_gid(&mut self, _: u32) -> Result<(), Error> {
-            self.0.push("gid".into());
-            Ok(())
+            self.record("gid", "gid")
         }
         fn set_uid(&mut self, _: u32) -> Result<(), Error> {
-            self.0.push("uid".into());
-            Ok(())
+            self.record("uid", "uid")
         }
         fn set_umask(&mut self, _: u32) -> Result<(), Error> {
-            self.0.push("umask".into());
-            Ok(())
+            self.record("umask", "umask")
         }
         fn set_no_new_privs(&mut self) -> Result<(), Error> {
-            self.0.push("nnp".into());
-            Ok(())
+            self.record("nnp", "nnp")
         }
         fn install_restricted_seccomp(&mut self) -> Result<(), Error> {
-            self.0.push("seccomp".into());
-            Ok(())
+            self.record("seccomp", "seccomp")
         }
     }
     #[test]
@@ -343,10 +433,59 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            calls.0,
+            calls.calls,
             [
                 "close:9", "close:10", "groups", "gid", "uid", "caps", "umask", "nnp", "seccomp"
             ]
+        );
+    }
+    #[test]
+    fn child_preparation_stops_at_the_first_syscall_failure() {
+        let mut calls = Calls {
+            fail_at: Some("uid"),
+            ..Calls::default()
+        };
+        let error = prepare_child(
+            &mut calls,
+            &[ChildDescriptor {
+                fd: 9,
+                kind: DescriptorKind::BrokerSocket,
+            }],
+            &ChildMounts::isolated(),
+        )
+        .unwrap_err();
+        assert!(matches!(error, Error::ChildPreparation("uid")));
+        assert_eq!(calls.calls, ["close:9", "groups", "gid", "uid"]);
+    }
+    #[test]
+    fn every_protected_descriptor_is_closed_before_child_credentials_drop() {
+        let mut calls = Calls::default();
+        prepare_child(
+            &mut calls,
+            &[
+                ChildDescriptor {
+                    fd: 9,
+                    kind: DescriptorKind::BrokerSocket,
+                },
+                ChildDescriptor {
+                    fd: 10,
+                    kind: DescriptorKind::BrokerCredential,
+                },
+                ChildDescriptor {
+                    fd: 11,
+                    kind: DescriptorKind::ControlAuthority,
+                },
+                ChildDescriptor {
+                    fd: 12,
+                    kind: DescriptorKind::PrivateCgroupMount,
+                },
+            ],
+            &ChildMounts::isolated(),
+        )
+        .unwrap();
+        assert_eq!(
+            &calls.calls[..4],
+            ["close:9", "close:10", "close:11", "close:12"]
         );
     }
     #[test]
