@@ -1365,6 +1365,16 @@ pub async fn run_reply_loop(
                 );
                 return Err(provider_failure_prose_error(&snippet));
             }
+            // A non-empty assistant turn has now passed all provider-turn
+            // validation. Transport recovery is one-shot only for the failed
+            // request plus its immediate retry; a later provider turn (for
+            // example after dispatching a tool call) gets its own one-shot
+            // allowance. Reset here, before any successful-turn path can
+            // finalize, compact proactively, dispatch tools, or continue, but
+            // never on empty/reasoning-only retries or terminal/error paths.
+            if transport_compaction_guard.attempted() {
+                transport_compaction_guard.reset_after_completed_turn();
+            }
             let assistant_msg = Message {
                 role: Role::Assistant,
                 content: assistant_content,

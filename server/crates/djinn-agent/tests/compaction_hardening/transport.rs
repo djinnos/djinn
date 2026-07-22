@@ -63,6 +63,7 @@ enum Outcome {
     Eligible,
     Empty200,
     Excluded,
+    ToolCall,
     Success,
 }
 struct ScriptedProvider {
@@ -115,6 +116,15 @@ impl LlmProvider for ScriptedProvider {
                 Outcome::Empty200 => {
                     Ok(Box::pin(stream::empty()) as Pin<Box<dyn futures::Stream<Item = _> + Send>>)
                 }
+                Outcome::ToolCall => Ok(Box::pin(stream::iter(vec![
+                    Ok(StreamEvent::Delta(ContentBlock::ToolUse {
+                        id: "fixture-tool-call".into(),
+                        name: "fixture_tool".into(),
+                        input: serde_json::json!({}),
+                    })),
+                    Ok(StreamEvent::Done),
+                ]))
+                    as Pin<Box<dyn futures::Stream<Item = _> + Send>>),
                 Outcome::Success => Ok(Box::pin(stream::iter(vec![
                     Ok(StreamEvent::Delta(ContentBlock::Text {
                         text: "done".into(),
@@ -191,7 +201,7 @@ async fn run_case(
             project_path: "/tmp",
             worktree_path: std::path::Path::new("/tmp"),
             role_name: "worker",
-            finalize_tool_names: &[],
+            finalize_tool_names: &["submit_work"],
             context_window: 2,
             model_id: "fixture/model",
             cancel: &cancel,
@@ -244,4 +254,22 @@ async fn recovery_is_one_shot() {
             .to_string()
             .contains("provider stream init failed")
     );
+
+    // Recovery is one-shot per provider turn, not per reply-loop session. The
+    // first recovery retry completes as a tool-call turn, then the independent
+    // next provider turn may compact and retry once for its own oversized
+    // failure. This executes the production reset, tool-dispatch, and retry
+    // paths and keeps the still-oversized immediate-retry assertion above.
+    let (calls, compacted, budget_checks, result) = run_case(
+        vec![
+            Outcome::Eligible,
+            Outcome::ToolCall,
+            Outcome::Eligible,
+            Outcome::Success,
+        ],
+        Ok(true),
+    )
+    .await;
+    assert_eq!((calls, compacted, budget_checks), (4, 2, 4));
+    assert!(result.is_ok());
 }
