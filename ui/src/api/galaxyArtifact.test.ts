@@ -1,5 +1,7 @@
 import { createHash, webcrypto } from "node:crypto";
 import { readFile } from "node:fs/promises";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { gzipSync } from "node:zlib";
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -12,8 +14,17 @@ import {
   validateGalaxyArtifact,
 } from "./galaxyArtifactSchema";
 
-const fixture = new URL("../../../server/crates/djinn-graph/src/galaxy_artifact/fixtures/", import.meta.url);
+// Resolve the producer's golden fixtures from a plain filesystem path. Building
+// it from `fileURLToPath(import.meta.url)` avoids Vite's `new URL(<literal>,
+// import.meta.url)` asset rewrite, which would otherwise turn the fixture path
+// into a non-file `/@fs/` URL that `readFile` rejects.
+const fixtureDir = path.resolve(
+  path.dirname(fileURLToPath(import.meta.url)),
+  "../../../server/crates/djinn-graph/src/galaxy_artifact/fixtures",
+);
+const fixturePath = (name: string) => path.join(fixtureDir, name);
 let payloadText: string;
+let hashInputText: string;
 let payload: Record<string, unknown>;
 let gzip: Uint8Array;
 let manifest: { graph_content_hash: string; transport_sha256: string };
@@ -21,10 +32,13 @@ let manifest: { graph_content_hash: string; transport_sha256: string };
 beforeAll(async () => {
   // The browser client uses Web Crypto; jsdom supplies no subtle implementation.
   if (!globalThis.crypto?.subtle) Object.defineProperty(globalThis, "crypto", { value: webcrypto });
-  [payloadText, gzip, manifest] = await Promise.all([
-    readFile(new URL("payload.json", fixture), "utf8"),
-    readFile(new URL("payload.json.gz", fixture)),
-    readFile(new URL("manifest.json", fixture), "utf8").then(JSON.parse),
+  [payloadText, hashInputText, gzip, manifest] = await Promise.all([
+    readFile(fixturePath("payload.json"), "utf8"),
+    // The producer's exact hash-input bytes: the final payload with only the
+    // graph_content_hash field absent. The client rehashes over these bytes.
+    readFile(fixturePath("hash_input.json"), "utf8"),
+    readFile(fixturePath("payload.json.gz")),
+    readFile(fixturePath("manifest.json"), "utf8").then(JSON.parse),
   ]);
   payload = JSON.parse(payloadText) as Record<string, unknown>;
 });
@@ -54,17 +68,34 @@ function artifactResponse(etag = `"${manifest.transport_sha256}"`): Response {
   return new Response(gzip, { status: 200, headers: headers(etag, { "content-type": "application/gzip" }) });
 }
 
+/**
+ * Splice the graph_content_hash field into producer-serialized bytes at its
+ * fixed serde position (immediately after generation_id, immediately before
+ * truncated), mirroring how the Rust producer serializes the final payload so
+ * that final-minus-field is byte-identical to the hashed input.
+ */
+function spliceHashField(hashInput: string, graphContentHash: string): string {
+  const marker = ',"truncated":';
+  const at = hashInput.indexOf(marker);
+  if (at === -1) throw new Error("test fixture is missing the truncated field");
+  return `${hashInput.slice(0, at)},"graph_content_hash":"${graphContentHash}"${hashInput.slice(at)}`;
+}
+
 /** Derive valid later generations from the producer golden, never a hand schema. */
 function generationResponse(generationId: string, generatedAt: string) {
+  // Mirror the producer: hash the payload bytes with graph_content_hash absent,
+  // then serialize the final payload with the hash spliced back into place.
   const next = structuredClone(payload);
   next.generation_id = generationId;
   next.generated_at = generatedAt;
-  next.graph_content_hash = hash(canonicalSemanticJson(next));
-  const bytes = gzipSync(JSON.stringify(next));
+  delete next.graph_content_hash;
+  const hashInput = JSON.stringify(next);
+  const graphContentHash = hash(hashInput);
+  const bytes = gzipSync(spliceHashField(hashInput, graphContentHash));
   const etag = `"${hash(bytes)}"`;
   const responseHeaders = headers(etag, {
     [IDENTITY_HEADERS.generationId]: generationId,
-    [IDENTITY_HEADERS.semanticHash]: next.graph_content_hash as string,
+    [IDENTITY_HEADERS.semanticHash]: graphContentHash,
     "content-type": "application/gzip",
   });
   return { etag, response: new Response(bytes, { status: 200, headers: responseHeaders }) };
@@ -74,12 +105,17 @@ describe("producer galaxy artifact golden", () => {
   it("independently hashes both producer domains and validates the real payload", async () => {
     // This is intentionally Node crypto rather than the validator helper.
     expect(hash(gzip)).toBe(manifest.transport_sha256);
-    expect(hash(canonicalSemanticJson(payload))).toBe(manifest.graph_content_hash);
+    // The semantic domain is the payload bytes with only the hash field spliced
+    // out — byte-identical to the producer's separate hash_input.json.
+    const spliced = canonicalSemanticJson(payloadText, manifest.graph_content_hash);
+    expect(spliced).toBe(hashInputText);
+    expect(hash(spliced)).toBe(manifest.graph_content_hash);
 
     const validated = await validateGalaxyArtifact(
       "test-project",
       headers(`"${manifest.transport_sha256}"`),
       payload,
+      payloadText,
       gzip,
     );
     expect(validated.snapshot.nodes).toHaveLength(5);
@@ -87,8 +123,70 @@ describe("producer galaxy artifact golden", () => {
 
   it("rejects valid JSON when the syntactically strong ETag is not its transport hash", async () => {
     await expect(validateGalaxyArtifact(
-      "test-project", headers(`"${"a".repeat(64)}"`), payload, gzip,
+      "test-project", headers(`"${"a".repeat(64)}"`), payload, payloadText, gzip,
     )).rejects.toThrow("transport etag recomputation mismatch");
+  });
+
+  it("refuses to guess when the semantic hash field is not uniquely spliceable", () => {
+    const h = "b".repeat(64);
+    const literal = `"graph_content_hash":"${h}",`;
+    expect(() => canonicalSemanticJson(`{${literal}"truncated":false}${literal}`, h))
+      .toThrow("semantic hash field is not uniquely spliceable");
+    expect(() => canonicalSemanticJson('{"truncated":false}', h))
+      .toThrow("semantic hash field is not uniquely spliceable");
+  });
+});
+
+describe("producer float formatting is not a JS re-serialization fixed point", () => {
+  it("validates producer bytes whose integral floats JSON.stringify would renormalize", async () => {
+    // serde_json/ryu emits an integral f64 as 0.0 / 1.0; JSON.parse->JSON.stringify
+    // collapses these to 0 / 1, so a re-stringify would never rehash. The client
+    // must hash the producer's raw bytes with only the hash field spliced out.
+    const hashInput =
+      '{"project_id":"test-project","git_head":"abc123","generated_at":"2026-07-18T00:00:00Z"' +
+      ',"generation_id":"019f741c-0000-7000-8000-000000000000","truncated":false' +
+      ',"total_nodes":1,"total_edges":1,"node_cap":1' +
+      ',"nodes":[{"id":"file:src/app.rs","uid":"file:src/app.rs","kind":"file"' +
+      ',"label":"src/app.rs","pagerank":0.0,"is_test":false,"x":1.0,"y":0.0}]' +
+      ',"edges":[{"from":"file:src/app.rs","to":"file:src/app.rs"' +
+      ',"kind":"ContainsDefinition","confidence":1.0}]}';
+    // Proof this exercises the bug: a JS round-trip is not byte-stable here.
+    expect(JSON.stringify(JSON.parse(hashInput))).not.toBe(hashInput);
+
+    const graphContentHash = hash(hashInput);
+    const bytes = gzipSync(spliceHashField(hashInput, graphContentHash));
+    const etag = `"${hash(bytes)}"`;
+    const fetchMock = vi.fn().mockResolvedValueOnce(new Response(bytes, {
+      status: 200,
+      headers: headers(etag, {
+        [IDENTITY_HEADERS.semanticHash]: graphContentHash,
+        "content-type": "application/gzip",
+      }),
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const outcome = await fetchGalaxyArtifact("test-project");
+    expect(outcome).toMatchObject({ kind: "artifact" });
+    if (outcome.kind === "artifact") {
+      expect(outcome.artifact.snapshot.nodes[0].pagerank).toBe(0);
+      expect(outcome.artifact.snapshot.nodes[0].x).toBe(1);
+    }
+  });
+
+  it("rejects tampered payload bytes even when transport and identity self-agree", async () => {
+    // Flip one semantic byte (a pagerank digit) while leaving the graph_content_hash
+    // field intact, and recompute the transport etag over the tampered gzip so the
+    // transport and identity checks pass. The spliced rehash must still catch it.
+    const tampered = payloadText.replace('"pagerank":0.38662203610895207', '"pagerank":0.38662203610895208');
+    expect(tampered).not.toBe(payloadText);
+    const bytes = gzipSync(tampered);
+    const etag = `"${hash(bytes)}"`;
+    const fetchMock = vi.fn().mockResolvedValueOnce(new Response(bytes, {
+      status: 200,
+      headers: headers(etag, { "content-type": "application/gzip" }),
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+    await expect(fetchGalaxyArtifact("test-project")).rejects.toThrow("semantic hash recomputation mismatch");
   });
 });
 

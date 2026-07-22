@@ -372,3 +372,26 @@ async fn update_plain_markdown_stays_markdown() {
     let stored = repo.get(&existing.id).await.unwrap().unwrap();
     assert_eq!(stored.body_format, "markdown");
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn block_patch_stale_revision_is_rejected_before_selector_resolution() {
+    let ctx = test_ctx().await;
+    let existing = seed_markdown_proposal(&ctx).await;
+    let err = call_proposal_block_patch(
+        &ctx,
+        &args(serde_json::json!({
+            "id": existing.id,
+            "expected_latest_revision_seq": 99,
+            "selector": { "exact_text": "not present" },
+            "operation": "replace",
+            "block_mdx": "replacement",
+        })),
+    )
+    .await
+    .expect_err("stale guard must run before selection");
+    assert!(err.contains("stale revision"), "error was: {err}");
+    let repo = ProposalRepository::new(ctx.db(), ctx.event_bus());
+    let stored = repo.get(&existing.id).await.unwrap().unwrap();
+    assert_eq!(stored.latest_revision_seq, 1);
+    assert_eq!(repo.revisions(&existing.id).await.unwrap().len(), 1);
+}

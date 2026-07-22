@@ -38,7 +38,7 @@ async function errorCode(response: Response): Promise<string> {
   return (body as { code: string }).code;
 }
 
-async function parseResponseJson(response: Response): Promise<{ payload: unknown; transportBytes: ArrayBuffer }> {
+async function parseResponseJson(response: Response): Promise<{ payload: unknown; payloadText: string; transportBytes: ArrayBuffer }> {
   const bytes = await response.arrayBuffer();
   // The route deliberately sends an explicit gzip artifact rather than HTTP
   // Content-Encoding gzip: Fetch would otherwise decode the bytes before this
@@ -50,7 +50,9 @@ async function parseResponseJson(response: Response): Promise<{ payload: unknown
     const stream = new Blob([bytes]).stream().pipeThrough(new DecompressionStream("gzip"));
     text = await new Response(stream).text();
   } catch { failure("artifact gzip could not be parsed"); }
-  try { return { payload: JSON.parse(text), transportBytes: bytes }; } catch { failure("artifact JSON could not be parsed"); }
+  // The decompressed text is the producer's own serialization; the validator
+  // recomputes the semantic hash over these exact bytes, never a re-stringify.
+  try { return { payload: JSON.parse(text), payloadText: text, transportBytes: bytes }; } catch { failure("artifact JSON could not be parsed"); }
 }
 
 /**
@@ -88,8 +90,8 @@ export async function fetchGalaxyArtifact(
   }
   if (response.status === 401 || response.status === 403) failure(`authorization failed (${response.status})`);
   if (response.status !== 200) failure(`unexpected HTTP status ${response.status}`);
-  const { payload, transportBytes } = await parseResponseJson(response);
-  const artifact = await validateGalaxyArtifact(projectId, response.headers, payload, transportBytes);
+  const { payload, payloadText, transportBytes } = await parseResponseJson(response);
+  const artifact = await validateGalaxyArtifact(projectId, response.headers, payload, payloadText, transportBytes);
   const projectCache = cache.get(projectId) ?? new Map<string, ValidatedGalaxyArtifact>();
   projectCache.set(artifact.etag, artifact);
   cache.set(projectId, projectCache);
