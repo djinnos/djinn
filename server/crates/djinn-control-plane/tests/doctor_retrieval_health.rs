@@ -182,9 +182,14 @@ async fn injected_retrieval_config_drives_memory_health_and_doctor_prefetch() {
     assert_eq!(health["retrieval"]["config_window_hours"], 72);
     assert!(health["retrieval"]["persisted"]["window_start"].is_string());
     assert!(health["retrieval"]["persisted"]["window_end"].is_string());
-    assert_eq!(
-        health["retrieval"]["persisted"]["summaries"][0]["total_queries"],
-        8
+    // The legacy test helper deliberately writes pre-taxonomy traces. They are
+    // excluded from authoritative taxonomy-v1 groups rather than inferred from
+    // candidate JSON by memory_health.
+    assert!(
+        health["retrieval"]["persisted"]["groups"]
+            .as_array()
+            .expect("taxonomy-v1 groups")
+            .is_empty()
     );
 
     let response = harness
