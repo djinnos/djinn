@@ -4924,16 +4924,18 @@ mod tests {
     // production-named repository files without evaluating enclosing cfgs.
     #[cfg(test)]
     async fn insert_task(db: &Database, project_id: &str, epic_id: &str, short_id: &str) -> String {
+        let creator = crate::repositories::test_support::seed_test_user(db).await;
         let id = uuid::Uuid::now_v7().to_string();
-        sqlx::query!(
+        sqlx::query(
             "INSERT INTO tasks (id, project_id, short_id, epic_id, title, description, design,
-                                issue_type, priority, owner, status, continuation_count, labels, acceptance_criteria, memory_refs)
-             VALUES ($1, $2, $3, $4, 'T', '', '', 'task', 0, '', 'open', 0, '[]'::jsonb, '[]'::jsonb, '[]'::jsonb)",
-            id,
-            project_id,
-            short_id,
-            epic_id
+                                issue_type, priority, owner, status, continuation_count, labels, acceptance_criteria, memory_refs, created_by_user_id)
+             VALUES ($1, $2, $3, $4, 'T', '', '', 'task', 0, '', 'open', 0, '[]'::jsonb, '[]'::jsonb, '[]'::jsonb, $5)",
         )
+        .bind(&id)
+        .bind(project_id)
+        .bind(short_id)
+        .bind(epic_id)
+        .bind(&creator)
         .execute(db.pool())
         .await
         .unwrap();
