@@ -17,11 +17,13 @@ use djinn_control_plane::bridge::RuntimeOps;
 use djinn_core::clock::{Clock, SystemClock};
 use djinn_core::events::DjinnEventEnvelope;
 use djinn_core::models::parse_json_array;
+use djinn_core::refinement_liveness::{RefinementLivenessResult, RefinementParkKind};
 use djinn_db::Database;
 use djinn_db::NoteRepository;
 use djinn_db::ProjectRepository;
 use djinn_db::{
-    ActivityQuery, DispatchStateRecord, DispatchStateRepository, ReadyQuery, TaskRepository,
+    ActivityQuery, DispatchStateRecord, DispatchStateRepository, LoadRefinementRunSnapshotRequest,
+    ProposalRepository, ReadyQuery, TaskRepository,
 };
 use djinn_provider::catalog::CatalogService;
 use djinn_provider::catalog::health::HealthTracker;
@@ -321,14 +323,12 @@ pub(super) struct CoordinatorActor {
     pub(super) pr_cleanup_config: PrCleanupConfig,
     /// Durable-progress / preservation-aware controlled-exit lifecycle config.
     pub(super) worker_lifecycle_config: super::worker_lifecycle::WorkerLifecycleConfig,
-    /// Active refinement loops by proposal_id.  The coordinator is the
-    /// authoritative source for duplicate-start rejection — a proposal that
-    /// already has an entry here cannot be started again until the loop
-    /// completes or is terminated.
+    /// Recoverable refinement projections keyed by exact durable run identity.
+    /// Proposal id is retained in state as data, never cache authorization.
     pub(super) active_refinements: HashMap<String, super::refinement::RefinementLoopState>,
-    /// In-flight refinement sessions by proposal_id.  Tracks which task is
-    /// currently running for each active refinement loop so the coordinator
-    /// can detect session completion and advance the phase.
+    /// In-flight refinement sessions keyed by exact durable run identity. Tracks
+    /// which task is currently running for each active refinement loop so the
+    /// coordinator can detect session completion and advance the phase.
     pub(super) refinement_sessions: HashMap<String, super::refinement_dispatch::RefinementSession>,
     // Metrics
     pub(super) dispatched: u64,
@@ -1374,6 +1374,9 @@ impl CoordinatorActor {
             CoordinatorMessage::DebugSnapshot { reply } => {
                 let _ = reply.send(self.dispatch_state_snapshot());
             }
+            CoordinatorMessage::WakeRefinementRun { run_id } => {
+                self.hydrate_refinement_wake(&run_id).await;
+            }
             CoordinatorMessage::StartProposalRefinement {
                 proposal_id,
                 current_revision_seq,
@@ -1477,6 +1480,42 @@ impl CoordinatorActor {
         );
 
         Ok(())
+    }
+
+    /// Rebuild a disposable exact-run projection after a post-commit wake.
+    /// Non-current or unreadable observations are no-ops and never write state.
+    async fn hydrate_refinement_wake(&mut self, run_id: &str) {
+        const GRACE_MILLIS: i64 = 60_000;
+        let repo = ProposalRepository::new(self.db.clone(), crate::events::event_bus_for(&self.events_tx));
+        let exact = match repo.load_refinement_run_snapshot(LoadRefinementRunSnapshotRequest {
+            run_id: run_id.to_owned(),
+            heartbeat_grace_millis: GRACE_MILLIS,
+        }).await {
+            Ok(Some(snapshot)) => snapshot,
+            Ok(None) | Err(_) => return,
+        };
+        let current = match repo.load_current_refinement_run_snapshot(&exact.proposal_id, GRACE_MILLIS).await {
+            Ok(Some(snapshot)) => snapshot,
+            Ok(None) | Err(_) => return,
+        };
+        if exact.snapshot.run.run_id != current.snapshot.run.run_id
+            || exact.generation != current.generation
+            || !matches!(exact.liveness, RefinementLivenessResult::Live { .. }) {
+            return;
+        }
+        let revision_seq = match repo.get(&exact.proposal_id).await {
+            Ok(Some(proposal)) => proposal.latest_revision_seq,
+            _ => return,
+        };
+        let mut state = super::refinement::RefinementLoopState::new(&exact.proposal_id, revision_seq)
+            .with_run_identity(exact.snapshot.run.run_id.clone(), exact.generation);
+        if let Some(park) = &exact.snapshot.park {
+            state.phase = match park.kind {
+                RefinementParkKind::AwaitingReview => super::refinement::RefinementPhase::AwaitingHumanReview,
+                RefinementParkKind::AwaitingEvidence => super::refinement::RefinementPhase::AwaitingEvidence,
+            };
+        }
+        self.active_refinements.insert(run_id.to_owned(), state);
     }
 
     async fn handle_event_result(

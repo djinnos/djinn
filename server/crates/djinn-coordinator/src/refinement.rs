@@ -207,6 +207,11 @@ impl Default for RefinementConfig {
 /// for snapshot/debug purposes.
 #[derive(Debug, Clone)]
 pub struct RefinementLoopState {
+    /// Exact durable identity for this recoverable projection. Empty only for
+    /// the legacy compatibility path while admission callers are cut over.
+    pub run_id: String,
+    /// Durable generation paired with `run_id`, used to fence late observations.
+    pub generation: i32,
     /// The proposal being refined.
     pub proposal_id: String,
     /// Loop configuration.
@@ -262,6 +267,8 @@ impl RefinementLoopState {
         config: RefinementConfig,
     ) -> Self {
         Self {
+            run_id: String::new(),
+            generation: 0,
             proposal_id: proposal_id.into(),
             config,
             phase: RefinementPhase::AdversaryAttack,
@@ -276,6 +283,13 @@ impl RefinementLoopState {
             dispatch_failures: 0,
             stop_reason: None,
         }
+    }
+
+    /// Attach the exact durable identity after loading an admitted run snapshot.
+    pub fn with_run_identity(mut self, run_id: impl Into<String>, generation: i32) -> Self {
+        self.run_id = run_id.into();
+        self.generation = generation;
+        self
     }
 
     /// Attribute this refinement run to a specific user (owner of the spawned

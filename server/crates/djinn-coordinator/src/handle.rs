@@ -267,9 +267,12 @@ impl CoordinatorHandle {
         rx.await.map_err(|_| CoordinatorError::NoResponse)
     }
 
-    /// Start a proposal refinement run.  The coordinator is authoritative for
-    /// duplicate-start rejection — if the proposal already has an active
-    /// refinement loop the call returns an error.
+    /// Deliver a post-commit refinement wake keyed by the exact durable run.
+    pub async fn wake_refinement_run(&self, run_id: String) -> Result<(), CoordinatorError> {
+        self.send(CoordinatorMessage::WakeRefinementRun { run_id }).await
+    }
+
+    /// Legacy compatibility surface; durable admission is outside this actor.
     pub async fn start_proposal_refinement(
         &self,
         proposal_id: String,
