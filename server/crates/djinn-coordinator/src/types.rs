@@ -488,6 +488,24 @@ pub(super) const PROVIDER_RETRY_AFTER_MAX: Duration = Duration::from_secs(6 * 60
 /// also keeps review-type tasks from wedging open forever.
 pub(super) const MAX_DISPATCH_FAILURES: u32 = 10;
 
+/// Consecutive failover-chain exhaustions for a task whose role lane has a
+/// SINGLE candidate model, after which the coordinator surfaces a durable,
+/// operator-visible signal (a task activity entry) instead of only backing off
+/// silently.
+///
+/// A single-candidate lane cannot fail *over* to anything — when that one model
+/// keeps failing environmentally the escalating cooldown quietly decays the
+/// retry cadence, but nothing tells an operator the lane is stuck on one model
+/// that needs a second candidate or provider investigation (the k6hm ~19h hot
+/// loop, 2026-07-22). The signal is emitted **once** as the streak crosses this
+/// threshold (not every cycle) so the timeline stays readable, and the task is
+/// NOT closed — it resumes automatically once the environment heals.
+///
+/// `3` mirrors the depth of [`STREAK_INTERVENTION_THRESHOLD`]'s intent: past the
+/// first couple of cooldown rungs a one-off pod/infra blip has been absorbed, so
+/// a persisting single-candidate exhaustion is worth an operator's attention.
+pub(super) const SINGLE_CANDIDATE_EXHAUSTION_SIGNAL_THRESHOLD: u32 = 3;
+
 /// Consecutive same-role failed dispatch attempts after which the task is
 /// routed to a Planner intervention (trigger B) instead of only riding the
 /// cooldown ladder toward [`MAX_DISPATCH_FAILURES`].
