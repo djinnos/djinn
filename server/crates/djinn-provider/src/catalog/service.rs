@@ -19,10 +19,9 @@ const FETCH_TIMEOUT: Duration = Duration::from_secs(10);
 const REFRESH_LOG_MAX_AGE: Duration = Duration::from_secs(60 * 60); // 1 hour
 
 fn has_nonzero_pricing(pricing: &Pricing) -> bool {
-    pricing.input_per_million != 0.0
-        || pricing.output_per_million != 0.0
-        || pricing.cache_read_per_million != 0.0
-        || pricing.cache_write_per_million != 0.0
+    // Single source of truth: `Pricing::is_priced` (djinn-core). Kept as a
+    // free fn so it can still be passed as a fn-pointer to `Option::filter`.
+    pricing.is_priced()
 }
 
 /// Build-time embedded snapshot of models.dev/api.json.
@@ -966,17 +965,39 @@ const PRICING_REFERENCE_MAP: &[(&str, &str)] = &[
 /// canonical match in the base provider's catalog, so [`PRICING_REFERENCE_MAP`]
 /// alone can't price them.
 ///
-/// Kimi for Coding ships coding ids (`k2p7`, `k2p5`) that don't appear in
-/// moonshotai's pay-as-you-go list (which uses `kimi-k2-thinking`, `kimi-k2.5`,
-/// …). They're the same Kimi-K2 family billed at the standard K2 rate, so we
-/// point them at `moonshotai/kimi-k2-thinking` ($0.6 in / $2.5 out / $0.15
-/// cache). The second tuple field is the **canonical** plan-model id (see
-/// [`canonical_model_id`]).
+/// Kimi for Coding ships coding ids (`k3`, `k2p7`, `k2p5`, and the newer
+/// upstream `kimi-for-coding` / `kimi-for-coding-highspeed`) that don't
+/// canonically match a moonshotai pay-as-you-go id, so we pin each to its true
+/// counterpart in moonshotai's list:
+///   • `k3`  → `moonshotai/kimi-k3`             ($3 in / $15 out / $0.3 cache)
+///   • `k2p7`→ `moonshotai/kimi-k2.7-code`      ($0.95 / $4 / $0.19)
+///   • `k2p5`→ `moonshotai/kimi-k2.5`           ($0.6 / $3 / $0.1)
+///   • `kimi-for-coding`           → `moonshotai/kimi-k2.7-code`
+///   • `kimi-for-coding-highspeed` → `moonshotai/kimi-k2.7-code-highspeed`
+///
+/// `k2p7`/`k2p5` previously stood in on `kimi-k2-thinking` because their true
+/// counterparts did not yet exist upstream; models.dev now carries them, so the
+/// aliases point at the exact plan-equivalent models. The second tuple field is
+/// the **canonical** plan-model id (see [`canonical_model_id`]) — lowercase
+/// alphanumeric only, so `kimi-for-coding` → `kimiforcoding`.
 ///
 /// (plan_provider_id, canonical_plan_model_id, base_provider_id, base_model_id)
 const PRICING_MODEL_ALIAS: &[(&str, &str, &str, &str)] = &[
-    ("kimi-for-coding", "k2p7", "moonshotai", "kimi-k2-thinking"),
-    ("kimi-for-coding", "k2p5", "moonshotai", "kimi-k2-thinking"),
+    ("kimi-for-coding", "k3", "moonshotai", "kimi-k3"),
+    ("kimi-for-coding", "k2p7", "moonshotai", "kimi-k2.7-code"),
+    ("kimi-for-coding", "k2p5", "moonshotai", "kimi-k2.5"),
+    (
+        "kimi-for-coding",
+        "kimiforcoding",
+        "moonshotai",
+        "kimi-k2.7-code",
+    ),
+    (
+        "kimi-for-coding",
+        "kimiforcodinghighspeed",
+        "moonshotai",
+        "kimi-k2.7-code-highspeed",
+    ),
 ];
 
 /// Strip non-alphanumeric chars and lowercase so plan/base model ids match

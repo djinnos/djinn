@@ -279,12 +279,25 @@ fn enrich_plan_pricing_borrows_payg_rates_for_zero_priced_plan_models() {
 
 #[test]
 fn enrich_plan_pricing_applies_explicit_model_alias() {
-    // kimi-for-coding ships `k2p7`/`k2p5`, which don't canonically match any
-    // moonshotai id — they must be priced via PRICING_MODEL_ALIAS instead.
-    let kimi_rate = Pricing {
+    // kimi-for-coding ships `k3`/`k2p7`/`k2p5`, which don't canonically match
+    // any moonshotai id — they must be priced via PRICING_MODEL_ALIAS from their
+    // true moonshotai counterparts.
+    let k3_rate = Pricing {
+        input_per_million: 3.0,
+        output_per_million: 15.0,
+        cache_read_per_million: 0.3,
+        cache_write_per_million: 0.0,
+    };
+    let k2p7_rate = Pricing {
+        input_per_million: 0.95,
+        output_per_million: 4.0,
+        cache_read_per_million: 0.19,
+        cache_write_per_million: 0.0,
+    };
+    let k2p5_rate = Pricing {
         input_per_million: 0.6,
-        output_per_million: 2.5,
-        cache_read_per_million: 0.15,
+        output_per_million: 3.0,
+        cache_read_per_million: 0.1,
         cache_write_per_million: 0.0,
     };
     let mk = |provider: &str, id: &str, pricing: Pricing| Model {
@@ -302,26 +315,62 @@ fn enrich_plan_pricing_applies_explicit_model_alias() {
     let mut idx: HashMap<String, Vec<Model>> = HashMap::new();
     idx.insert(
         "moonshotai".to_string(),
-        vec![mk("moonshotai", "kimi-k2-thinking", kimi_rate.clone())],
+        vec![
+            mk("moonshotai", "kimi-k3", k3_rate.clone()),
+            mk("moonshotai", "kimi-k2.7-code", k2p7_rate.clone()),
+            mk("moonshotai", "kimi-k2.5", k2p5_rate.clone()),
+        ],
     );
     idx.insert(
         "kimi-for-coding".to_string(),
         vec![
+            mk("kimi-for-coding", "k3", Pricing::default()),
             mk("kimi-for-coding", "k2p7", Pricing::default()),
             mk("kimi-for-coding", "k2p5", Pricing::default()),
+            // Newer upstream model ids that canonicalize to `kimiforcoding`.
+            mk("kimi-for-coding", "kimi-for-coding", Pricing::default()),
         ],
     );
 
     enrich_plan_pricing(&mut idx);
 
-    for id in ["k2p7", "k2p5"] {
-        let m = idx["kimi-for-coding"].iter().find(|m| m.id == id).unwrap();
-        assert!(
-            has_nonzero_pricing(&m.pricing),
-            "{id} should be priced via the explicit kimi alias"
-        );
-        assert_eq!(m.pricing.output_per_million, 2.5);
-    }
+    // k3 is priced from moonshotai/kimi-k3 (the fix: previously k3 had no alias
+    // and booked $0.00 "projected").
+    let k3 = idx["kimi-for-coding"]
+        .iter()
+        .find(|m| m.id == "k3")
+        .unwrap();
+    assert!(
+        has_nonzero_pricing(&k3.pricing),
+        "k3 should be priced via the explicit kimi alias"
+    );
+    assert_eq!(k3.pricing.input_per_million, 3.0);
+    assert_eq!(k3.pricing.output_per_million, 15.0);
+    assert_eq!(k3.pricing.cache_read_per_million, 0.3);
+
+    // k2p7 / k2p5 now resolve to their true counterparts, not kimi-k2-thinking.
+    let k2p7 = idx["kimi-for-coding"]
+        .iter()
+        .find(|m| m.id == "k2p7")
+        .unwrap();
+    assert_eq!(k2p7.pricing.output_per_million, 4.0);
+    let k2p5 = idx["kimi-for-coding"]
+        .iter()
+        .find(|m| m.id == "k2p5")
+        .unwrap();
+    assert_eq!(k2p5.pricing.output_per_million, 3.0);
+
+    // The upstream `kimi-for-coding` model id (canonical `kimiforcoding`) is
+    // priced from kimi-k2.7-code.
+    let kfc = idx["kimi-for-coding"]
+        .iter()
+        .find(|m| m.id == "kimi-for-coding")
+        .unwrap();
+    assert!(
+        has_nonzero_pricing(&kfc.pricing),
+        "kimi-for-coding model id should be priced via the explicit alias"
+    );
+    assert_eq!(kfc.pricing.output_per_million, 4.0);
 }
 
 #[test]
