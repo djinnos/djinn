@@ -1,4 +1,5 @@
 use super::task_select_where_id;
+// djinn:allow-oversize — legacy module over byte-size threshold; split when touched substantively.
 use super::*;
 
 /// Producer provenance for creator attribution. Producers provide facts, never
