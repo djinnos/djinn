@@ -207,7 +207,29 @@ pub async fn evaluate_latest_head_readiness(
     acceptance_criteria: &[AcceptanceCriterionItem],
     target_count: usize,
 ) -> LatestHeadReadinessResult {
-    let readiness = evaluate_proposal_readiness(&proposal.body, acceptance_criteria, target_count);
+    evaluate_latest_head_readiness_for_candidate(
+        repo,
+        proposal,
+        &proposal.body,
+        acceptance_criteria,
+        target_count,
+    )
+    .await
+}
+
+/// Evaluate candidate structural readiness while loading lint for the current
+/// immutable head. Mutation gates use this before a candidate is persisted:
+/// the candidate body and acceptance criteria must be validated, while a
+/// reachable corrupt current head still fails closed through the same shared
+/// repository-backed lint result as every other readiness surface.
+pub async fn evaluate_latest_head_readiness_for_candidate(
+    repo: &ProposalRepository,
+    proposal: &djinn_core::models::Proposal,
+    body: &str,
+    acceptance_criteria: &[AcceptanceCriterionItem],
+    target_count: usize,
+) -> LatestHeadReadinessResult {
+    let readiness = evaluate_proposal_readiness(body, acceptance_criteria, target_count);
     compose_latest_head_readiness(
         readiness,
         resolve_and_lint_current_head(repo, proposal).await,
@@ -735,6 +757,29 @@ Entry points: src/main.rs.
         assert!(result.failures.is_empty());
         assert!(result.latest_lint.is_some());
         assert!(result.latest_lint.unwrap().errors.is_empty());
+    }
+
+    #[tokio::test]
+    async fn candidate_readiness_keeps_candidate_body_and_ac_checks() {
+        let (_db, repo, proposal) = test_repo_and_proposal(READY_BODY, None).await;
+        let result = evaluate_latest_head_readiness_for_candidate(
+            &repo,
+            &proposal,
+            "candidate body without required coverage",
+            &[],
+            1,
+        )
+        .await;
+
+        assert!(!result.ready);
+        assert!(
+            result.latest_lint.is_some(),
+            "current-head lint is retained"
+        );
+        assert!(result.failures.iter().any(|failure| {
+            failure.check == ReadinessCheck::ProblemCoverage
+                || failure.check == ReadinessCheck::AcceptanceCriteriaCount
+        }));
     }
 
     #[tokio::test]

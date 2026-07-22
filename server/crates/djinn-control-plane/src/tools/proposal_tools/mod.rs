@@ -84,9 +84,7 @@ pub use signoff::ProposalSignoffParams;
 
 // Re-export shared readiness/gate helpers from `signoff.rs` so `create.rs`
 // and `lifecycle.rs` can continue importing from `super::*`.
-pub(super) use signoff::{
-    build_gate_status, evaluate_composed_gate, format_readiness_error, parse_ac_items,
-};
+pub(super) use signoff::{build_gate_status, evaluate_composed_gate, parse_ac_items};
 
 // Re-export MDX/block-patch types so the public module path
 // `crate::tools::proposal_tools::{...}` stays stable for existing dispatch
