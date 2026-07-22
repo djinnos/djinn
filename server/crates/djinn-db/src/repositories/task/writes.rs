@@ -147,23 +147,22 @@ pub(crate) async fn resolve_effective_creator(
 /// (`explicit_source_creator`): the incoming peer row's own creator is the
 /// only admissible attribution fact — peer sync replicates attribution, it
 /// never resolves a local fallback identity. The candidate is checked against
-/// the local `users` table inside the caller's open transaction; a creator
-/// unknown to this instance degrades to `NULL`, mirroring the schema's
-/// `ON DELETE SET NULL` attribution policy, so one unreplicated user cannot
-/// fail the whole row sync with a non-retriable FK violation.
+/// the local `users` table inside the caller's open transaction. An unknown
+/// creator is rejected rather than weakening the mandatory attribution
+/// contract or silently replacing the incoming peer binding.
 pub(crate) async fn incoming_task_creator(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    incoming: Option<&str>,
-) -> Result<Option<String>> {
-    let Some(candidate) = incoming else {
-        return Ok(None);
-    };
-    Ok(
-        sqlx::query_scalar::<_, String>("SELECT id FROM users WHERE id = $1")
-            .bind(candidate)
-            .fetch_optional(&mut **tx)
-            .await?,
-    )
+    incoming: &str,
+) -> Result<String> {
+    sqlx::query_scalar::<_, String>("SELECT id FROM users WHERE id = $1")
+        .bind(incoming)
+        .fetch_optional(&mut **tx)
+        .await?
+        .ok_or_else(|| {
+            Error::InvalidData(format!(
+                "{EFFECTIVE_CREATOR_UNAVAILABLE}: unknown_peer_creator"
+            ))
+        })
 }
 
 impl TaskRepository {
@@ -174,23 +173,6 @@ impl TaskRepository {
         self.db.ensure_initialized().await?;
         sqlx::query("UPDATE tasks SET created_by_user_id = $1 WHERE id = $2")
             .bind(user_id)
-            .bind(id)
-            .execute(self.db.pool())
-            .await?;
-        Ok(())
-    }
-
-    /// Test-support helper for fixtures that exercise unavailable creator
-    /// provenance against nullable expand-phase task rows. The creator
-    /// contract forbids NULL on migrated schemas, so this deliberately
-    /// reopens the column in the per-test database clone first.
-    #[cfg(any(test, feature = "test-support"))]
-    pub async fn clear_created_by_user_id(&self, id: &str) -> Result<()> {
-        self.db.ensure_initialized().await?;
-        sqlx::query("ALTER TABLE tasks ALTER COLUMN created_by_user_id DROP NOT NULL")
-            .execute(self.db.pool())
-            .await?;
-        sqlx::query("UPDATE tasks SET created_by_user_id = NULL WHERE id = $1")
             .bind(id)
             .execute(self.db.pool())
             .await?;
@@ -1029,8 +1011,8 @@ impl TaskRepository {
 #[cfg(test)]
 mod created_by_tests {
     //! Phase 3B — verify that task inserts stamp `created_by_user_id` from the
-    //! `SESSION_USER_ID` task-local and default to NULL when no user context
-    //! is in scope.
+    //! `SESSION_USER_ID` task-local and reject unresolvable provenance when no
+    //! user context is in scope.
 
     use super::{EFFECTIVE_CREATOR_UNAVAILABLE, EffectiveCreatorProvenance, TaskRepository};
     use crate::database::Database;
@@ -1206,8 +1188,7 @@ mod created_by_tests {
             .await
             .unwrap();
         assert_eq!(
-            inherited.created_by_user_id.as_deref(),
-            Some(epic_owner.id.as_str()),
+            inherited.created_by_user_id, epic_owner.id,
             "background task under an owned epic must inherit the epic's creator"
         );
 
@@ -1232,8 +1213,7 @@ mod created_by_tests {
             })
             .await;
         assert_eq!(
-            session_owned.created_by_user_id.as_deref(),
-            Some(session_user.id.as_str()),
+            session_owned.created_by_user_id, session_user.id,
             "an in-scope SESSION_USER_ID must take precedence over the epic's creator"
         );
     }

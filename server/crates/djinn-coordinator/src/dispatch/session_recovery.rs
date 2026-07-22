@@ -877,7 +877,7 @@ impl CoordinatorActor {
             // trip would disable the model for everyone on one user's bad luck.
             let task_repo = self.task_repo();
             let task_row = task_repo.get(task_id).await.ok().flatten();
-            let scope = task_row.as_ref().and_then(|t| t.created_by_user_id.clone());
+            let scope = task_row.as_ref().map(|t| t.created_by_user_id.clone());
             let current_status = task_row
                 .as_ref()
                 .map(|t| t.status.clone())

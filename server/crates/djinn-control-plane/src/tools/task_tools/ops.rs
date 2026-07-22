@@ -72,7 +72,7 @@ pub(crate) fn task_to_response(task: &Task) -> TaskResponse {
         intervention_count: task.intervention_count,
         last_intervention_at: task.last_intervention_at.clone(),
         agent_type: task.agent_type.clone(),
-        created_by_user_id: task.created_by_user_id.clone(),
+        created_by_user_id: Some(task.created_by_user_id.clone()),
         created_at: task.created_at.clone(),
         updated_at: task.updated_at.clone(),
         closed_at: task.closed_at.clone(),
