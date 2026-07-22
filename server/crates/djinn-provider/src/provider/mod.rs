@@ -452,6 +452,17 @@ pub trait LlmProvider: Send + Sync {
         >,
     >;
 
+    /// Exact UTF-8 JSON request-body length for this provider's stream call.
+    /// `None` is deliberately ineligible for empty-stream recovery.
+    fn stream_request_body_bytes(
+        &self,
+        _conversation: &Conversation,
+        _tools: &[Value],
+        _tool_choice: Option<ToolChoice>,
+    ) -> Option<usize> {
+        None
+    }
+
     /// Clone of this provider's [`ProviderConfig`], if it has one.
     ///
     /// Real network providers return `Some(self.config.clone())`; test mocks

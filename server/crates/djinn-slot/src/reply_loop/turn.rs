@@ -29,13 +29,13 @@ use super::budget::{
 };
 use super::compaction_guard::CompactionCriticalSection;
 use super::error_handling::{
-    BudgetWindDownIgnored, MAX_COMPACTION_RETRIES, empty_start_streak_feeds_breaker,
-    empty_turn_backoff, empty_turn_is_reasoning_only, is_context_length_error,
-    is_orphaned_tool_call_error, is_provider_failure_prose, next_nudge_message,
-    is_oversized_transport_payload, reasoning_only_nudge_message,
-    should_retry_after_tool_call_compaction, TransportCompactionRecoveryGuard,
-    should_retry_empty_assistant_turn, should_retry_empty_stream, soft_budget_converge_message,
-    tool_choice_for_turn, wind_down_message,
+    BudgetWindDownIgnored, MAX_COMPACTION_RETRIES, TransportCompactionRecoveryGuard,
+    empty_start_streak_feeds_breaker, empty_turn_backoff, empty_turn_is_reasoning_only,
+    is_context_length_error, is_orphaned_tool_call_error, is_oversized_transport_payload,
+    is_provider_failure_prose, next_nudge_message, reasoning_only_nudge_message,
+    should_retry_after_tool_call_compaction, should_retry_empty_assistant_turn,
+    should_retry_empty_stream, soft_budget_converge_message, tool_choice_for_turn,
+    wind_down_message,
 };
 use super::loop_guard::{
     AssistantOutputSignature, LoopGuardCondition, LoopGuardError, LoopGuardReason, LoopGuardState,
@@ -1130,21 +1130,16 @@ pub async fn run_reply_loop(
                     model_id,
                     diag,
                 );
-                // The successful-HTTP no-event path has no typed transport
-                // error. Its serialized OpenAI-compatible request JSON is the
-                // byte representation available at the reply-loop boundary.
-                let estimated_payload_chars = serde_json::to_vec(&serialize_llm_input(
-                    conversation,
-                    tools,
-                ))
-                .map(|body| body.len())
-                .unwrap_or(0);
+                // This must be the final provider wire body, not persistence's
+                // OpenAI-shaped serialization. Unknown sizes are ineligible.
+                let estimated_payload_chars = provider.stream_request_body_bytes(
+                    request_conversation.as_ref(), tools, tool_choice,
+                );
                 let known_context_window_tokens = u32::try_from(context_window).unwrap_or(0);
                 if !transport_compaction_guard.attempted()
-                    && is_oversized_transport_payload(
-                        estimated_payload_chars,
-                        known_context_window_tokens,
-                    )
+                    && estimated_payload_chars.is_some_and(|bytes| {
+                        is_oversized_transport_payload(bytes, known_context_window_tokens)
+                    })
                 {
                     // Flip before compaction so errors cannot loop recovery.
                     let _ = transport_compaction_guard.try_begin();
@@ -1162,10 +1157,10 @@ pub async fn run_reply_loop(
                             continue;
                         }
                         Ok(false) => return Err(terminal_error.context(format!(
-                            "oversized empty-stream compaction was not applied; estimated_payload_chars={estimated_payload_chars}"
+                            "oversized empty-stream compaction was not applied; estimated_payload_chars={estimated_payload_chars:?}"
                         ))),
                         Err(compaction_error) => return Err(terminal_error.context(format!(
-                            "oversized empty-stream compaction failed; estimated_payload_chars={estimated_payload_chars}, compaction_error={compaction_error}"
+                            "oversized empty-stream compaction failed; estimated_payload_chars={estimated_payload_chars:?}, compaction_error={compaction_error}"
                         ))),
                     }
                 }

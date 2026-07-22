@@ -1,7 +1,9 @@
 use djinn_slot::reply_loop::error_handling::{
-    ExhaustedTransportCategory, TransportClassificationInput, classify_exhausted_transport,
-    is_oversized_transport_payload, TransportCompactionRecoveryGuard,
+    ExhaustedTransportCategory, TransportClassificationInput, TransportCompactionRecoveryGuard,
+    classify_exhausted_transport, is_oversized_transport_payload,
 };
+use std::collections::VecDeque;
+
 #[test]
 fn utf8_byte_classifier_boundaries() {
     let below = "éééx";
@@ -41,37 +43,148 @@ fn utf8_byte_classifier_boundaries() {
     }
 }
 
+#[derive(Clone, Copy)]
+enum TransportResult {
+    EligibleOversized,
+    EmptyHttp200,
+    Excluded,
+    Success,
+}
+
+/// Deterministic fake transport plus the compaction seam used by the recovery
+/// boundary. It executes the same guard and exact-byte predicate as the loop.
+struct FakeReplyLoop {
+    transport: VecDeque<TransportResult>,
+    provider_calls: usize,
+    compaction_calls: usize,
+    budget_reentries: usize,
+    compaction_succeeds: bool,
+    payload_bytes: Option<usize>,
+    window_tokens: u32,
+    terminal: Option<&'static str>,
+}
+
+impl FakeReplyLoop {
+    fn run(&mut self) {
+        let mut guard = TransportCompactionRecoveryGuard::default();
+        while let Some(result) = self.transport.pop_front() {
+            self.provider_calls += 1;
+            let eligible = match result {
+                TransportResult::EligibleOversized | TransportResult::EmptyHttp200 => self
+                    .payload_bytes
+                    .is_some_and(|bytes| is_oversized_transport_payload(bytes, self.window_tokens)),
+                TransportResult::Excluded | TransportResult::Success => false,
+            };
+            if matches!(result, TransportResult::Success) {
+                return;
+            }
+            if eligible && guard.try_begin() {
+                self.compaction_calls += 1;
+                if !self.compaction_succeeds {
+                    self.terminal = Some("original transport/empty-stream error");
+                    return;
+                }
+                self.budget_reentries += 1;
+                continue;
+            }
+            self.terminal = Some(match result {
+                TransportResult::EmptyHttp200 => "original empty-stream error",
+                _ => "original transport error",
+            });
+            return;
+        }
+    }
+}
+
 #[test]
 fn recovery_is_one_shot() {
-    // The reply loop invokes this guard before entering its compaction critical
-    // section. These deterministic counters model a successful recovery retry,
-    // a compaction failure, an still-oversized retry, the empty-stream path, and
-    // an excluded failure: no scenario is allowed a second compaction/retry.
-    for scenario in [
-        "success_then_retry",
-        "compaction_failure",
-        "still_oversized_retry",
-        "exhausted_empty_stream",
-        "excluded_failure",
-    ] {
-        let mut guard = TransportCompactionRecoveryGuard::default();
-        let mut compactions = 0;
-        let mut recovery_retries = 0;
-        let eligible = scenario != "excluded_failure";
-        if eligible && guard.try_begin() {
-            compactions += 1;
-            if scenario == "success_then_retry" || scenario == "still_oversized_retry" {
-                recovery_retries += 1;
-            }
-        }
-        // A compaction error and a failed recovery retry both revisit the same
-        // guard; neither may create a second attempt.
-        if eligible {
-            assert!(!guard.try_begin(), "{scenario}");
-        } else {
-            assert!(!guard.attempted(), "{scenario}");
-        }
-        assert!(compactions <= 1, "{scenario}");
-        assert!(recovery_retries <= 1, "{scenario}");
+    let cases = [
+        (
+            "success then retry",
+            vec![TransportResult::EligibleOversized, TransportResult::Success],
+            true,
+            Some(8),
+            2,
+            2,
+            1,
+            1,
+            None,
+        ),
+        (
+            "compaction failure",
+            vec![TransportResult::EligibleOversized],
+            false,
+            Some(8),
+            2,
+            1,
+            1,
+            0,
+            Some("original transport/empty-stream error"),
+        ),
+        (
+            "still oversized retry",
+            vec![
+                TransportResult::EligibleOversized,
+                TransportResult::EligibleOversized,
+            ],
+            true,
+            Some(8),
+            2,
+            2,
+            1,
+            1,
+            Some("original transport error"),
+        ),
+        (
+            "exhausted empty stream",
+            vec![TransportResult::EmptyHttp200, TransportResult::Success],
+            true,
+            Some(8),
+            2,
+            2,
+            1,
+            1,
+            None,
+        ),
+        (
+            "excluded failure",
+            vec![TransportResult::Excluded],
+            true,
+            Some(8),
+            2,
+            1,
+            0,
+            0,
+            Some("original transport error"),
+        ),
+    ];
+    for (
+        name,
+        script,
+        compaction_succeeds,
+        payload_bytes,
+        window_tokens,
+        calls,
+        compactions,
+        budgets,
+        terminal,
+    ) in cases
+    {
+        let mut loop_ = FakeReplyLoop {
+            transport: script.into(),
+            provider_calls: 0,
+            compaction_calls: 0,
+            budget_reentries: 0,
+            compaction_succeeds,
+            payload_bytes,
+            window_tokens,
+            terminal: None,
+        };
+        loop_.run();
+        assert_eq!(loop_.provider_calls, calls, "{name}");
+        assert_eq!(loop_.compaction_calls, compactions, "{name}");
+        assert_eq!(loop_.budget_reentries, budgets, "{name}");
+        assert_eq!(loop_.terminal, terminal, "{name}");
+        assert!(loop_.compaction_calls <= 1, "{name}");
     }
 }
