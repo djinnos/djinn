@@ -32,9 +32,34 @@ async fn apply_migration(conn: &mut PgConnection, target: u64) {
         .find(|(version, _)| *version == target)
         .unwrap_or_else(|| panic!("migration {target} exists"));
     let sql = std::fs::read_to_string(&path).expect("read migration SQL");
+    // The creator-contract migration refuses to run without a validated
+    // designated operator bound to the session, so provision one before
+    // crossing that boundary and unbind it afterwards.
+    let is_creator_contract =
+        target as i64 == djinn_db::migrations::CREATOR_CONTRACT_MIGRATION_VERSION;
+    if is_creator_contract {
+        sqlx::query(
+            "INSERT INTO users (id, github_id, github_login) \
+             VALUES ('user-boundary-operator', 9000000134, 'compaction-boundary-operator') \
+             ON CONFLICT DO NOTHING",
+        )
+        .execute(&mut *conn)
+        .await
+        .expect("seed designated operator user");
+        sqlx::query("SELECT set_config('djinn.migration_designated_operator_user_id', 'user-boundary-operator', false)")
+            .execute(&mut *conn)
+            .await
+            .expect("bind designated operator GUC");
+    }
     conn.execute(sql.as_str())
         .await
         .unwrap_or_else(|error| panic!("apply {}: {error}", path.display()));
+    if is_creator_contract {
+        sqlx::query("RESET djinn.migration_designated_operator_user_id")
+            .execute(&mut *conn)
+            .await
+            .expect("unbind designated operator GUC");
+    }
 }
 
 fn server_prefix(base: &str) -> String {
