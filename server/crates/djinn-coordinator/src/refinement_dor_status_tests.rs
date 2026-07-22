@@ -8,7 +8,9 @@ use super::refinement_cap_tests::{
     build_refinement_actor, seed_refinement_fixture, spawn_test_pool,
 };
 use djinn_core::events::{DjinnEventEnvelope, EventBus};
-use djinn_db::{ProposalRepository, TaskRepository};
+use djinn_db::{
+    ProposalDebateTrailCreateInput, ProposalRepository, ProposalUpdateInput, TaskRepository,
+};
 
 /// Regression (proposal 019f0c32): structured acceptance criteria added
 /// mid-refinement must be reflected in the DoR readiness evaluation, and
@@ -84,11 +86,15 @@ async fn structured_acs_added_mid_refinement_clear_missing_ac_dor_status() {
         refreshed.failures
     );
 
-    // Drive the real injection path used at dispatch: fold the readiness into
-    // the "Current DoR status" string and create the tribunal task.
-    let readiness_context = refreshed
-        .to_error_string()
-        .unwrap_or_else(|| "Proposal currently meets all DoR checks.".to_string());
+    // Drive the real injection path used at dispatch. The coordinator must use
+    // the shared latest-head result, including the repository-backed complete
+    // lint summary, rather than rebuilding a body-only DoR result.
+    assert!(
+        refreshed.latest_lint.is_some(),
+        "shared latest-head readiness must resolve the current revision lint"
+    );
+    let readiness_context =
+        super::super::actor::CoordinatorActor::format_readiness_context(&refreshed);
     let task_id = actor
         .create_refinement_task_with_context(
             &fixture.proposal_id,
@@ -112,6 +118,12 @@ async fn structured_acs_added_mid_refinement_clear_missing_ac_dor_status() {
             .description
             .contains("At least one acceptance criterion is required"),
         "injected DoR status must not claim ACs are missing once structured ACs exist:\n{}",
+        task.description
+    );
+    assert!(
+        task.description
+            .contains("Latest SpecLintResultV1 summary (errors and warnings):"),
+        "judge/refinement context must include the complete latest lint summary:\n{}",
         task.description
     );
 }
@@ -210,5 +222,592 @@ async fn refinement_task_creation_fails_closed_when_user_unresolvable() {
     assert_eq!(
         tasks_after, tasks_before,
         "unresolvable ownership must not insert a tribunal task"
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Criterion-4 regression tests: coordinator tribunal readiness and verdict
+// gating consume the shared latest-head lint-aware result via
+// `lint_for_revision`, not doctor findings or an independent integrity check.
+// ─────────────────────────────────────────────────────────────────────────
+
+/// A body that passes all deterministic DoR heuristics (problem, scope,
+/// objectives, grounding, dependencies, open-questions) so the only DoR
+/// failures are spec-integrity errors from the linter.
+const READY_BODY: &str = r#"
+# Problem
+Users cannot do X.
+# Scope
+In scope: Y. Out of scope: Z.
+# Objectives
+Deliver A.
+# Dependencies
+None.
+# Open Questions
+What if D fails?
+Entry points: src/main.rs.
+"#;
+
+/// A body that passes all DoR heuristics AND has spec-integrity errors
+/// (duplicate MDX block IDs). Requires `mdx` body format so the linter
+/// parses the block tags and reports `DUPLICATE_BLOCK_ID`.
+const CORRUPT_MDX_BODY: &str = "\
+# Problem\n\
+Users cannot do X.\n\
+# Scope\n\
+In scope: Y. Out of scope: Z.\n\
+# Objectives\n\
+Deliver A.\n\
+# Dependencies\n\
+None.\n\
+# Open Questions\n\
+What if D fails?\n\
+Entry points: src/main.rs.\n\
+<Callout id=\"dup\">one</Callout>\n\
+<Callout id=\"dup\">two</Callout>";
+
+/// Create a ready proposal (all DoR sections + ACs + target) directly in the
+/// test DB, returning its id.
+async fn seed_ready_proposal(db: &djinn_db::Database) -> (String, String) {
+    let project = crate::test_helpers::create_test_project(db).await;
+    let user_id = djinn_core::auth_context::SESSION_USER_ID
+        .scope(None, async {
+            djinn_db::UserRepository::new(db.clone())
+                .upsert_from_github(999_001, "dor-status-user", None, None)
+                .await
+                .expect("create test user")
+                .id
+        })
+        .await;
+    let proposal = djinn_core::auth_context::SESSION_USER_ID
+        .scope(Some(user_id.clone()), async {
+            ProposalRepository::new(db.clone(), EventBus::noop())
+                .create(djinn_db::ProposalCreateInput {
+                    title: "DoR lint gate test",
+                    body: READY_BODY,
+                    acceptance_criteria: Some(r#"["Result is testable"]"#),
+                    status: Some("building"),
+                    body_format: None,
+                })
+                .await
+                .expect("create ready proposal")
+        })
+        .await;
+    ProposalRepository::new(db.clone(), EventBus::noop())
+        .add_target(&proposal.id, &project.id, "primary")
+        .await
+        .expect("add proposal target");
+    ProposalRepository::new(db.clone(), EventBus::noop())
+        .start_refinement_with_owner(&proposal.id, Some(&user_id))
+        .await
+        .expect("start refinement");
+    (proposal.id, project.id)
+}
+
+/// Append a judge verdict debate-trail entry at `round`.
+async fn add_judge_verdict(
+    db: &djinn_db::Database,
+    proposal_id: &str,
+    round: i32,
+    blocking: bool,
+    against_revision_seq: i32,
+) {
+    ProposalRepository::new(db.clone(), EventBus::noop())
+        .add_debate_trail_entry(ProposalDebateTrailCreateInput {
+            proposal_id,
+            kind: "verdict",
+            body: if blocking { "needs work" } else { "ready" },
+            blocking,
+            agent_role: "judge",
+            author_kind: "agent",
+            author_model: None,
+            source_task_id: None,
+            against_revision_seq,
+            round,
+            body_metadata: None,
+        })
+        .await
+        .expect("append judge verdict");
+}
+
+/// Regression (criterion 4): a reachable legacy corrupt head with no persisted
+/// lint row is synchronously recomputed through `lint_for_revision` cache
+/// repair by `evaluate_proposal_readiness`. The shared result must include the
+/// exact `DUPLICATE_BLOCK_ID` byte-range failure and leave `ready=false`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn corrupt_legacy_head_recomputed_and_blocks_readiness() {
+    use djinn_control_plane::tools::proposal_readiness::ReadinessCheck;
+
+    let db = crate::test_helpers::create_test_db();
+    let (proposal_id, _) = seed_ready_proposal(&db).await;
+    let (events_tx, _events_rx) = tokio::sync::broadcast::channel::<DjinnEventEnvelope>(256);
+    let pool = spawn_test_pool(&db, 4);
+    let actor = build_refinement_actor(&db, &events_tx, pool.clone());
+
+    // Baseline: the ready head has no integrity failures.
+    let baseline = actor
+        .evaluate_proposal_readiness(&proposal_id)
+        .await
+        .expect("baseline readiness");
+    assert!(
+        baseline.ready,
+        "ready head must pass DoR before corruption: {:?}",
+        baseline.failures
+    );
+
+    // Simulate a legacy material head written before repository-boundary linting,
+    // with no persisted lint result.
+    djinn_db::test_support::replace_legacy_proposal_head_for_test(
+        &db,
+        &proposal_id,
+        CORRUPT_MDX_BODY,
+        "mdx",
+    )
+    .await;
+    djinn_db::test_support::delete_proposal_lint_results_for_test(&db, &proposal_id).await;
+    let row_count_after_delete = ProposalRepository::new(db.clone(), EventBus::noop())
+        .lint_result_count(&proposal_id)
+        .await
+        .expect("count lint rows after delete");
+    assert_eq!(
+        row_count_after_delete, 0,
+        "legacy head starts without persisted lint"
+    );
+
+    // `evaluate_proposal_readiness` must synchronously repair the cache through
+    // `lint_for_revision` and surface the `DUPLICATE_BLOCK_ID` integrity failure.
+    let result = actor
+        .evaluate_proposal_readiness(&proposal_id)
+        .await
+        .expect("readiness after corrupt head");
+    assert!(
+        !result.ready,
+        "corrupt head must block readiness: {:?}",
+        result.failures
+    );
+
+    let lint = result
+        .latest_lint
+        .as_ref()
+        .expect("recomputed lint summary must be present");
+    assert!(
+        !lint.errors.is_empty(),
+        "recomputed lint must contain errors"
+    );
+    assert!(
+        lint.errors.iter().any(|v| v.code == "DUPLICATE_BLOCK_ID"),
+        "lint must report DUPLICATE_BLOCK_ID: {:?}",
+        lint.errors
+    );
+
+    // The exact byte-range integrity failure must appear in the DoR result.
+    let integrity_failures: Vec<_> = result
+        .failures
+        .iter()
+        .filter(|f| f.check == ReadinessCheck::SpecIntegrity)
+        .collect();
+    assert!(
+        !integrity_failures.is_empty(),
+        "corrupt head must produce SpecIntegrity DoR failures"
+    );
+    let expected_messages: Vec<_> = lint
+        .errors
+        .iter()
+        .map(|v| {
+            format!(
+                "Spec integrity: {} at bytes {}..{}",
+                v.code, v.span.start, v.span.end
+            )
+        })
+        .collect();
+    let actual_messages: Vec<_> = integrity_failures
+        .iter()
+        .map(|f| match &f.detail {
+            djinn_control_plane::tools::proposal_readiness::ReadinessFailureDetail::Generic {
+                message,
+            } => message.clone(),
+            detail => panic!("unexpected integrity detail: {detail:?}"),
+        })
+        .collect();
+    assert_eq!(
+        actual_messages, expected_messages,
+        "integrity failures must match exact byte-range lint errors"
+    );
+
+    // `lint_for_revision` recomputes but does NOT persist a lint row (cache
+    // repair is read-only). After deleting all lint rows, the count must
+    // remain 0 — proving the evaluation does not write lint rows and the
+    // historical rows were not disturbed.
+    let row_count_after_eval = ProposalRepository::new(db.clone(), EventBus::noop())
+        .lint_result_count(&proposal_id)
+        .await
+        .expect("count lint rows after eval");
+    assert_eq!(
+        row_count_after_eval, 0,
+        "evaluate_proposal_readiness must not persist lint rows during read-only cache repair"
+    );
+}
+
+/// Regression (criterion 4): an approve/ready verdict cannot be recorded or
+/// acted upon when the current head is corrupt. The judge's non-blocking
+/// verdict must be converted to blocking by the shared readiness re-evaluation
+/// inside `process_judge_outcome`, so the tribunal does NOT park for human
+/// review.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn approve_verdict_blocked_when_corrupt_head_recomputed() {
+    use super::RefinementSession;
+    use crate::refinement::RefinementPhase;
+    use std::time::Instant;
+
+    let db = crate::test_helpers::create_test_db();
+    let (proposal_id, _) = seed_ready_proposal(&db).await;
+    let (events_tx, _events_rx) = tokio::sync::broadcast::channel::<DjinnEventEnvelope>(256);
+    let pool = spawn_test_pool(&db, 4);
+    let mut actor = build_refinement_actor(&db, &events_tx, pool.clone());
+
+    // Corrupt the head (MDX duplicate block IDs) with no persisted lint row.
+    djinn_db::test_support::replace_legacy_proposal_head_for_test(
+        &db,
+        &proposal_id,
+        CORRUPT_MDX_BODY,
+        "mdx",
+    )
+    .await;
+    djinn_db::test_support::delete_proposal_lint_results_for_test(&db, &proposal_id).await;
+
+    let head_seq = ProposalRepository::new(db.clone(), EventBus::noop())
+        .get(&proposal_id)
+        .await
+        .expect("read proposal")
+        .expect("proposal exists")
+        .latest_revision_seq;
+
+    // Seed an approve (non-blocking) judge verdict — the judge semantically
+    // approved, but the machine gate must override it.
+    add_judge_verdict(&db, &proposal_id, 1, false, head_seq).await;
+
+    // Park the state machine in JudgeAdjudication so process_refinement_outcome
+    // routes to process_judge_outcome.
+    let run_id = "dor-corrupt-head-run".to_string();
+    let generation = 1;
+    actor.active_refinements.insert(
+        run_id.clone(),
+        crate::refinement::RefinementLoopState::new(&proposal_id, head_seq)
+            .with_run_identity(run_id.clone(), generation)
+            .with_attributed_user(None),
+    );
+
+    // Drive the judge outcome through the real coordinator path.
+    let session = RefinementSession {
+        run_id: run_id.clone(),
+        generation,
+        task_id: "test-judge-task".to_string(),
+        phase: RefinementPhase::JudgeAdjudication,
+        dispatched_at: Instant::now(),
+        session_started_at: Some(Instant::now()),
+        model_id: "test/mock".to_string(),
+    };
+    actor.process_refinement_outcome(&run_id, &session).await;
+
+    // The tribunal must NOT have parked for human review — the approve verdict
+    // was converted to blocking by the readiness re-evaluation.
+    let state = actor
+        .active_refinements
+        .get(&run_id)
+        .expect("refinement state still active");
+    assert_ne!(
+        state.phase,
+        RefinementPhase::AwaitingHumanReview,
+        "corrupt head must prevent approve verdict from parking for human review"
+    );
+}
+
+/// Regression (criterion 4): after a clean material revision becomes current,
+/// the next judge pass resumes ordinary semantic adjudication — a non-blocking
+/// verdict parks for human review.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn clean_material_revision_restores_semantic_adjudication() {
+    use super::RefinementSession;
+    use crate::refinement::RefinementPhase;
+    use std::time::Instant;
+
+    let db = crate::test_helpers::create_test_db();
+    let (proposal_id, _) = seed_ready_proposal(&db).await;
+    let (events_tx, _events_rx) = tokio::sync::broadcast::channel::<DjinnEventEnvelope>(256);
+    let pool = spawn_test_pool(&db, 4);
+    let mut actor = build_refinement_actor(&db, &events_tx, pool.clone());
+
+    // Preserve the initial revision's durable lint row. Then create a second,
+    // clean material head so the legacy fixture can remove only that head's
+    // cache entry; historical lint must never be deleted or reattached.
+    let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+    let initial = repo
+        .get(&proposal_id)
+        .await
+        .expect("read initial proposal")
+        .expect("proposal exists");
+    let initial_revision = repo
+        .revisions(&proposal_id)
+        .await
+        .expect("read initial revisions")
+        .into_iter()
+        .find(|revision| {
+            revision.seq == initial.latest_revision_seq && revision.event_kind == "spec_revision"
+        })
+        .expect("initial material revision");
+    let initial_lint_revision_id = djinn_db::test_support::proposal_lint_revision_id_for_test(
+        &db,
+        &proposal_id,
+        initial_revision.seq,
+    )
+    .await
+    .expect("initial revision must retain its lint row");
+    assert_eq!(initial_lint_revision_id, initial_revision.id);
+
+    repo.update(
+        &proposal_id,
+        ProposalUpdateInput {
+            title: &initial.title,
+            body: READY_BODY,
+            acceptance_criteria: &initial.acceptance_criteria,
+            status: &initial.status,
+            superseded_by: initial.superseded_by.as_deref(),
+            body_format: Some("mdx"),
+            event_metadata: None,
+        },
+    )
+    .await
+    .expect("create clean intermediate material revision");
+    let legacy_head = repo
+        .get(&proposal_id)
+        .await
+        .expect("read intermediate proposal")
+        .expect("proposal exists");
+
+    // Make only the current material head a legacy corrupt snapshot. Deleting
+    // its cache row models a pre-lint head while retaining the original
+    // revision's row as historical evidence.
+    djinn_db::test_support::replace_legacy_proposal_head_for_test(
+        &db,
+        &proposal_id,
+        CORRUPT_MDX_BODY,
+        "mdx",
+    )
+    .await;
+    djinn_db::test_support::delete_proposal_lint_result_for_revision_for_test(
+        &db,
+        &proposal_id,
+        legacy_head.latest_revision_seq,
+    )
+    .await;
+
+    let corrupt_readiness = actor
+        .evaluate_proposal_readiness(&proposal_id)
+        .await
+        .expect("corrupt readiness");
+    assert!(!corrupt_readiness.ready, "corrupt head must not be ready");
+
+    // Now create a clean material revision (no duplicate IDs). This bumps
+    // latest_revision_seq and writes a new spec_revision row.
+    let current = ProposalRepository::new(db.clone(), EventBus::noop())
+        .get(&proposal_id)
+        .await
+        .expect("read proposal")
+        .expect("proposal exists");
+    ProposalRepository::new(db.clone(), EventBus::noop())
+        .update(
+            &proposal_id,
+            ProposalUpdateInput {
+                title: &current.title,
+                body: READY_BODY,
+                acceptance_criteria: &current.acceptance_criteria,
+                status: &current.status,
+                superseded_by: current.superseded_by.as_deref(),
+                body_format: Some("markdown"),
+                event_metadata: None,
+            },
+        )
+        .await
+        .expect("clean material revision");
+
+    let clean_readiness = actor
+        .evaluate_proposal_readiness(&proposal_id)
+        .await
+        .expect("clean readiness");
+    assert!(
+        clean_readiness.ready,
+        "clean material revision must restore readiness: {:?}",
+        clean_readiness.failures
+    );
+    let clean_lint = clean_readiness
+        .latest_lint
+        .as_ref()
+        .expect("clean lint summary");
+    assert!(
+        clean_lint.errors.is_empty(),
+        "clean head must have no lint errors"
+    );
+
+    let new_head_seq = ProposalRepository::new(db.clone(), EventBus::noop())
+        .get(&proposal_id)
+        .await
+        .expect("read proposal")
+        .expect("proposal exists")
+        .latest_revision_seq;
+    assert!(
+        new_head_seq > current.latest_revision_seq,
+        "clean revision must be material (seq advanced)"
+    );
+    let retained_initial_lint_revision_id =
+        djinn_db::test_support::proposal_lint_revision_id_for_test(
+            &db,
+            &proposal_id,
+            initial_revision.seq,
+        )
+        .await
+        .expect("historical lint row must remain after clean revision");
+    assert_eq!(
+        retained_initial_lint_revision_id, initial_revision.id,
+        "historical lint must remain attached to its original immutable revision"
+    );
+
+    // A non-blocking judge verdict against the clean head must now park for
+    // human review — ordinary semantic adjudication is restored.
+    add_judge_verdict(&db, &proposal_id, 1, false, new_head_seq).await;
+
+    let run_id = "dor-clean-head-run".to_string();
+    let generation = 1;
+    actor.active_refinements.insert(
+        run_id.clone(),
+        crate::refinement::RefinementLoopState::new(&proposal_id, new_head_seq)
+            .with_run_identity(run_id.clone(), generation)
+            .with_attributed_user(None),
+    );
+
+    let session = RefinementSession {
+        run_id: run_id.clone(),
+        generation,
+        task_id: "test-judge-task-clean".to_string(),
+        phase: RefinementPhase::JudgeAdjudication,
+        dispatched_at: Instant::now(),
+        session_started_at: Some(Instant::now()),
+        model_id: "test/mock".to_string(),
+    };
+    actor.process_refinement_outcome(&run_id, &session).await;
+
+    let state = actor
+        .active_refinements
+        .get(&run_id)
+        .expect("refinement state still active");
+    assert_eq!(
+        state.phase,
+        RefinementPhase::AwaitingHumanReview,
+        "clean head must allow approve verdict to park for human review \
+         (semantic adjudication restored)"
+    );
+}
+
+/// Regression (criterion 4): keep tribunal production code structurally bound
+/// to the shared readiness constructor. Runtime results alone cannot distinguish
+/// that constructor from an accidental duplicate linter or ignored doctor query.
+#[test]
+fn tribunal_readiness_uses_only_shared_lint_constructor() {
+    let outcome = include_str!("refinement_outcome.rs");
+    let dispatch = include_str!("refinement_dispatch.rs");
+
+    assert!(
+        outcome.contains("evaluate_latest_head_readiness(&proposal_repo"),
+        "coordinator readiness must call the shared latest-head constructor"
+    );
+    for (path, source) in [
+        ("refinement_outcome.rs", outcome),
+        ("refinement_dispatch.rs", dispatch),
+    ] {
+        for forbidden in [
+            "DoctorFindingRepository",
+            "doctor_findings",
+            "djinn_spec_lint::lint(",
+            "djinn_spec_lint::body_sha256",
+        ] {
+            assert!(
+                !source.contains(forbidden),
+                "{path} must not consult doctor findings or run an independent linter ({forbidden})"
+            );
+        }
+    }
+    assert!(
+        !dispatch.contains("lint_for_revision"),
+        "dispatch must consume the coordinator's shared readiness result rather than lint directly"
+    );
+}
+
+/// Regression (criterion 4): `resolve_refinement_review` (human acceptance)
+/// also re-evaluates the current head through the shared readiness result and
+/// must reject a human accept when the head is corrupt.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn human_accept_rejected_when_corrupt_head_recomputed() {
+    let db = crate::test_helpers::create_test_db();
+    let (proposal_id, _) = seed_ready_proposal(&db).await;
+    let (events_tx, _events_rx) = tokio::sync::broadcast::channel::<DjinnEventEnvelope>(256);
+    let pool = spawn_test_pool(&db, 4);
+    let mut actor = build_refinement_actor(&db, &events_tx, pool.clone());
+
+    let head_seq = ProposalRepository::new(db.clone(), EventBus::noop())
+        .get(&proposal_id)
+        .await
+        .expect("read proposal")
+        .expect("proposal exists")
+        .latest_revision_seq;
+
+    // Park the tribunal as if the judge already approved (ready) and the human
+    // is about to accept.
+    let mut state = crate::refinement::RefinementLoopState::new(&proposal_id, head_seq)
+        .with_attributed_user(None);
+    state.phase = crate::refinement::RefinementPhase::AwaitingHumanReview;
+    actor.active_refinements.insert(proposal_id.clone(), state);
+
+    // Corrupt the head after the tribunal parked — the head changed.
+    djinn_db::test_support::replace_legacy_proposal_head_for_test(
+        &db,
+        &proposal_id,
+        CORRUPT_MDX_BODY,
+        "mdx",
+    )
+    .await;
+    djinn_db::test_support::delete_proposal_lint_results_for_test(&db, &proposal_id).await;
+
+    // Human acceptance must be rejected because the current head is corrupt.
+    let result = actor
+        .resolve_refinement_review(&proposal_id, true, None)
+        .await;
+    assert!(
+        result.is_err(),
+        "human accept must be rejected when current head is corrupt: {:?}",
+        result
+    );
+    let err_msg = result.unwrap_err();
+    assert!(
+        err_msg.contains("machine readiness is blocking"),
+        "error must reference machine readiness blocking: {err_msg}"
+    );
+
+    // The accept was rejected — the refinement was NOT resolved as accepted.
+    // `record_judge_verdict(blocking=true)` converts the parked review back
+    // into an active round (AdversaryAttack), confirming the corrupt head's
+    // blocking readiness was acted upon rather than accepted. The key invariant
+    // is that the refinement did NOT complete/resolve as an acceptance.
+    let state = actor
+        .active_refinements
+        .get(&proposal_id)
+        .expect("refinement still active after rejected accept");
+    assert_ne!(
+        state.phase,
+        crate::refinement::RefinementPhase::Complete,
+        "corrupt head must prevent human accept from completing the refinement"
+    );
+    // The refinement session must not have been resolved/cleared.
+    assert!(
+        actor.active_refinements.contains_key(&proposal_id),
+        "refinement must remain active (not resolved) after rejected accept"
     );
 }
