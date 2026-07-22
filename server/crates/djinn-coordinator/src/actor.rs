@@ -1451,7 +1451,7 @@ impl CoordinatorActor {
 
     /// Rebuild a disposable exact-run projection after a post-commit wake.
     /// Non-current or unreadable observations are no-ops and never write state.
-    async fn hydrate_refinement_wake(&mut self, run_id: &str) {
+    pub(super) async fn hydrate_refinement_wake(&mut self, run_id: &str) {
         const GRACE_MILLIS: i64 = 60_000;
         let repo = ProposalRepository::new(
             self.db.clone(),
@@ -1480,6 +1480,15 @@ impl CoordinatorActor {
         {
             return;
         }
+        // A replay is only a wake hint. Preserve an already-advanced projection
+        // and its matching in-flight session.
+        if self
+            .active_refinements
+            .get(run_id)
+            .is_some_and(|state| state.generation == exact.generation)
+        {
+            return;
+        }
         let revision_seq = match repo.get(&exact.proposal_id).await {
             Ok(Some(proposal)) => proposal.latest_revision_seq,
             _ => return,
@@ -1497,7 +1506,38 @@ impl CoordinatorActor {
                 }
             };
         }
+        let stale_run_ids: Vec<String> = self
+            .active_refinements
+            .iter()
+            .filter(|(_, retained)| retained.proposal_id == exact.proposal_id)
+            .map(|(retained_run_id, _)| retained_run_id.clone())
+            .collect();
+        for stale_run_id in stale_run_ids {
+            self.active_refinements.remove(&stale_run_id);
+            self.refinement_sessions.remove(&stale_run_id);
+        }
         self.active_refinements.insert(run_id.to_owned(), state);
+    }
+
+    pub(super) async fn refinement_projection_is_current(
+        &self,
+        run_id: &str,
+        generation: i32,
+        proposal_id: &str,
+    ) -> bool {
+        const GRACE_MILLIS: i64 = 60_000;
+        let repo = ProposalRepository::new(
+            self.db.clone(),
+            crate::events::event_bus_for(&self.events_tx),
+        );
+        matches!(
+            repo.load_current_refinement_run_snapshot(proposal_id, GRACE_MILLIS)
+                .await,
+            Ok(Some(current))
+                if current.snapshot.run.run_id == run_id
+                    && current.generation == generation
+                    && matches!(current.liveness, RefinementLivenessResult::Live { .. })
+        )
     }
 
     async fn handle_event_result(
@@ -2497,7 +2537,7 @@ mod tests {
         // A disposable entry must not turn a replay into an authorization error.
         actor.active_refinements.insert(
             "durable-run-1".to_owned(),
-            super::refinement::RefinementLoopState::new("p-dup", 1),
+            crate::refinement::RefinementLoopState::new("p-dup", 1),
         );
         let (tx2, rx2) = tokio::sync::oneshot::channel();
         actor

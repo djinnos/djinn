@@ -56,6 +56,10 @@ const REFINEMENT_DISPATCH_RETRY_CAP: i32 = 3;
 /// The in-flight session tracking for one active refinement loop.
 #[derive(Debug, Clone)]
 pub(super) struct RefinementSession {
+    /// Exact durable run and generation observed when this disposable session
+    /// projection was created. These fence late task observations.
+    pub run_id: String,
+    pub generation: i32,
     /// The task id of the refinement task currently dispatched.
     pub task_id: String,
     /// Which phase this session is executing.
@@ -152,8 +156,22 @@ impl CoordinatorActor {
             return;
         }
 
+        if !state.run_id.is_empty()
+            && !self
+                .refinement_projection_is_current(run_id, state.generation, &proposal_id)
+                .await
+        {
+            self.active_refinements.remove(run_id);
+            self.refinement_sessions.remove(run_id);
+            return;
+        }
+
         // Check if there's an in-flight session for this refinement.
         if let Some(session) = self.refinement_sessions.get(run_id).cloned() {
+            if session.run_id != state.run_id || session.generation != state.generation {
+                self.refinement_sessions.remove(run_id);
+                return;
+            }
             let Some(running_tasks) = running_tasks else {
                 // Pool liveness unknown this tick (get_status errored). Do NOT
                 // treat a possibly-running session as finished — defer to the
@@ -835,6 +853,8 @@ impl CoordinatorActor {
                 self.refinement_sessions.insert(
                     run_id.to_string(),
                     RefinementSession {
+                        run_id: run_id.to_string(),
+                        generation: state.generation,
                         task_id,
                         phase,
                         dispatched_at: SystemClock::new().now_instant(),
@@ -888,15 +908,18 @@ impl CoordinatorActor {
                     "Cleared linked evidence spike after valid findings receipt"
                 );
 
-                if let Some(state) = self.active_refinements.get_mut(proposal_id) {
-                    state.resume_after_evidence_received();
-                } else {
+                let Some(run_id) = self.active_refinements.iter().find_map(|(run_id, state)| {
+                    (state.proposal_id == proposal_id).then(|| run_id.clone())
+                }) else {
                     tracing::debug!(
                         proposal_id = %proposal_id,
                         spike_task_id = %spike_task_id,
                         "Evidence received for proposal without in-memory refinement loop; startup re-drive owns recovery"
                     );
                     return;
+                };
+                if let Some(state) = self.active_refinements.get_mut(&run_id) {
+                    state.resume_after_evidence_received();
                 }
 
                 let lifecycle_state = self.derive_proposal_evidence_lifecycle(&proposal).await;
@@ -910,7 +933,7 @@ impl CoordinatorActor {
                     return;
                 }
 
-                self.dispatch_next_refinement_phase(proposal_id).await;
+                self.dispatch_next_refinement_phase(&run_id).await;
             }
             Err(e) => {
                 tracing::warn!(
@@ -943,3 +966,7 @@ mod refinement_evidence_resume_tests;
 #[cfg(test)]
 #[path = "refinement_recovery_tests.rs"]
 mod refinement_recovery_tests;
+
+#[cfg(test)]
+#[path = "refinement_wake_tests.rs"]
+mod refinement_wake_tests;
