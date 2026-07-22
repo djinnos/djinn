@@ -910,8 +910,9 @@ async fn persist_knowledge_trace(
     >,
 ) {
     use djinn_db::repositories::retrieval_trace::{
-        CreateRetrievalTraceParams, CreateRetrievalTraceWithSemanticsParams,
-        RetrievalTraceEntryPoint, RetrievalTraceRepository, validate_candidates,
+        CreateRetrievalTraceParams, CreateRetrievalTraceTerminalParams,
+        KnowledgeTraceTerminalState, RetrievalTraceEntryPoint, RetrievalTraceRepository,
+        validate_candidates,
     };
 
     // Validate candidate invariants before serialization.
@@ -964,30 +965,34 @@ async fn persist_knowledge_trace(
         durations_ms: &durations_ms,
         estimated_injected_tokens,
     };
-    let write = if let Some(dispositions) = terminal_dispositions {
-        let terminal_at = time::OffsetDateTime::now_utc()
-            .format(&time::format_description::well_known::Rfc3339)
-            .expect("RFC3339 timestamp");
-        repo.insert_terminal(
-            djinn_db::repositories::retrieval_trace::CreateRetrievalTraceTerminalParams {
+    let terminal_at = time::OffsetDateTime::now_utc()
+        .format(&time::format_description::well_known::Rfc3339)
+        .expect("RFC3339 timestamp");
+    let write = match terminal_dispositions {
+        Some(dispositions) => repo
+            .insert_terminal(CreateRetrievalTraceTerminalParams {
                 trace: params,
                 rollout_label: rollout.label(),
-                terminal_state:
-                    djinn_db::repositories::retrieval_trace::KnowledgeTraceTerminalState::Success,
+                outcome,
+                terminal_state: KnowledgeTraceTerminalState::Success,
                 terminal_at: &terminal_at,
                 candidate_count: Some(candidates.len() as i32),
                 injected_count: Some(dispositions.injected),
                 dispositions: Some(dispositions),
-            },
-        )
-        .await
-    } else {
-        repo.insert_with_semantics(CreateRetrievalTraceWithSemanticsParams {
-            trace: params,
-            rollout_label: rollout.label(),
-            outcome,
-        })
-        .await
+            })
+            .await,
+        None => repo
+            .insert_terminal(CreateRetrievalTraceTerminalParams {
+                trace: params,
+                rollout_label: rollout.label(),
+                outcome,
+                terminal_state: KnowledgeTraceTerminalState::Error,
+                terminal_at: &terminal_at,
+                candidate_count: None,
+                injected_count: None,
+                dispositions: None,
+            })
+            .await,
     };
     if let Err(e) = write {
         tracing::warn!(task_id = %task.short_id, error = %e, "Lifecycle: failed to persist retrieval trace for knowledge context; continuing (fail-open)");
