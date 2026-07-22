@@ -112,6 +112,65 @@ async fn environmental_interrupt_reappearance_dispatches_without_streak_or_coold
     );
 }
 
+/// A startup restart-orphan (`environmental_restart_orphan` + startup boot
+/// evidence) has no owner-expiry tuple — its owner may legitimately be NULL — but
+/// the recorded boot evidence proves it was an environmental server restart. The
+/// same-role dispatch path must re-dispatch it once with no streak or cooldown.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn environmental_restart_orphan_reappearance_dispatches_without_streak_or_cooldown() {
+    let db = test_helpers::create_test_db();
+    let (tx, _rx) = broadcast::channel(256);
+    let (task, _project_path) =
+        create_simple_task(&db, &tx, "task", "worker interrupted by server restart").await;
+    let task = TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx))
+        .set_status(&task.id, "needs_task_review")
+        .await
+        .unwrap();
+
+    let boot = uuid::Uuid::now_v7().to_string();
+    let evidence = serde_json::json!({
+        "failure_class": "environmental_restart_orphan",
+        "reason": "startup",
+        "boot_incarnation_id": boot,
+        "owner_classification": "restart_orphan_null_owner",
+    })
+    .to_string();
+    // NULL owner: exactly the mixed-version supervisor row the incident struck.
+    seed_terminal_attempt(
+        &db,
+        &task.id,
+        "reviewer",
+        TaskAttemptOutcome::Interrupted,
+        None,
+        Some(&evidence),
+    )
+    .await;
+
+    let mut actor = coordinator_actor_for_tests(&db, &tx);
+    actor.last_dispatched.insert(
+        task.id.clone(),
+        DispatchMarker {
+            instant: StdInstant::now(),
+            role: "reviewer".to_owned(),
+        },
+    );
+
+    actor.dispatch_ready_tasks(None).await;
+
+    assert_eq!(
+        actor.dispatched, 1,
+        "a startup restart orphan must re-dispatch"
+    );
+    assert!(
+        !actor.dispatch_failure_streak.contains_key(&task.id),
+        "a startup restart orphan must not add a dispatch-failure streak"
+    );
+    assert!(
+        !actor.dispatch_cooldowns.contains_key(&task.id),
+        "a startup restart orphan must not apply an escalating cooldown"
+    );
+}
+
 /// A generic `interrupted` row has no durable owner-expiry proof. The actual
 /// same-role dispatch path must count it once, rather than using outcome alone.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
