@@ -275,6 +275,9 @@ impl DirectServices {
                 agent_context,
                 cancel,
                 provider_override,
+                // Host path derives the billing signal from the resolved
+                // credential inside `execute_stage`; nothing to pre-supply.
+                billing_signal: None,
             },
             task_runs,
             build_lease,
