@@ -1297,7 +1297,7 @@ pub fn task_to_response(t: &Task) -> TaskResponse {
             .map(AnyJson),
         pr_url: t.pr_url.clone(),
         agent_type: t.agent_type.clone(),
-        created_by_user_id: t.created_by_user_id.clone(),
+        created_by_user_id: Some(t.created_by_user_id.clone()),
         warning: None,
         ci_status: task_ci_status(t),
         ci_gate_state: task_ci_gate_state(t),

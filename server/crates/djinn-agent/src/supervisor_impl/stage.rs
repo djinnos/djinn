@@ -1043,7 +1043,7 @@ pub(crate) async fn execute_stage(
             host: &planner_host,
             session_id: &session_id,
             task_run_id,
-            creator_id: task.created_by_user_id.as_deref(),
+            creator_id: Some(task.created_by_user_id.as_str()),
             acceptance_criteria: serde_json::from_str::<Vec<serde_json::Value>>(
                 &task.acceptance_criteria,
             )
@@ -1293,7 +1293,7 @@ pub(crate) async fn execute_stage(
     let (reply_result, final_output, tokens_in, tokens_out, cache_read, cache_write) =
         djinn_core::auth_context::SESSION_USER_ID
             .scope(
-                task.created_by_user_id.clone(),
+                Some(task.created_by_user_id.clone()),
                 djinn_core::auth_context::REVISION_CALLER_CONTEXT
                     .scope(revision_caller, reply_loop_fut),
             )

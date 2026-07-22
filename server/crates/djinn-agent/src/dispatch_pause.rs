@@ -63,7 +63,7 @@ pub(crate) fn matching_task_dispatch_pause<'a>(
         return Some(("project", Some(task.project_id.clone()), pause));
     }
 
-    let creator = task.created_by_user_id.as_deref()?;
+    let creator = task.created_by_user_id.as_str();
     pause_state
         .users
         .get(creator)
