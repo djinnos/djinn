@@ -4,6 +4,7 @@ resolver = "2"
 
 [workspace.dependencies]
 workspace-hack = { version = "0.1.0", path = "crates/workspace-hack" }
+djinn-cgroup-launcher = { path = "crates/djinn-cgroup-launcher" }
 globset = "0.4"
 
 [workspace.lints.clippy]

@@ -19,6 +19,7 @@ pub mod closed_parent_open_children;
 pub mod leader_tick;
 pub mod live_mover;
 pub mod mismatch_scan;
+pub mod retrieval_health;
 pub mod stranded_ready;
 
 use std::sync::Arc;
@@ -63,6 +64,29 @@ pub fn register_doctor_checks(
         registered.push(previous);
     }
     registered
+}
+
+/// Register the shared retrieval source checks independently of refresh success.
+pub fn register_retrieval_health_checks(
+    registry: &DoctorRegistry,
+    source: Arc<retrieval_health::RetrievalHealthSource>,
+) -> Vec<String> {
+    let mut replaced = Vec::new();
+    let checks: [Arc<dyn DoctorCheck>; 3] = [
+        Arc::new(retrieval_health::SourceZeroResultCheck::new(Arc::clone(
+            &source,
+        ))),
+        Arc::new(retrieval_health::SourceInjectionStarvationCheck::new(
+            Arc::clone(&source),
+        )),
+        Arc::new(retrieval_health::RetrievalHealthRefreshCheck::new(source)),
+    ];
+    for check in checks {
+        if let Some(previous) = registry.register(check) {
+            replaced.push(previous);
+        }
+    }
+    replaced
 }
 
 /// Register the closed-parent orphan dry-run check while preserving the older
@@ -218,6 +242,53 @@ mod smoke {
             "second registration must report the replaced names"
         );
         assert_eq!(registry.len(), 2, "still two checks, the new ones");
+    }
+
+    #[tokio::test]
+    async fn retrieval_health_checks_register_once_despite_initial_refresh_failure() {
+        // This isolated construction seam makes no repository or MCP call:
+        // registration must not depend on the source's first refresh succeeding.
+        let source = Arc::new(
+            retrieval_health::RetrievalHealthSource::failing_initial_refresh_for_test(
+                djinn_core::models::KnowledgeInjectionConfig::default(),
+            ),
+        );
+        let registry = DoctorRegistry::new();
+        let replaced = register_retrieval_health_checks(&registry, Arc::clone(&source));
+        assert!(
+            replaced.is_empty(),
+            "a fresh registry must not replace a retrieval-health check"
+        );
+        assert!(
+            source.refresh().await.is_err(),
+            "the injected initial refresh must fail after startup registration"
+        );
+
+        let names: Vec<_> = registry
+            .enumerate()
+            .into_iter()
+            .map(|(name, _)| name)
+            .filter(|name| {
+                matches!(
+                    *name,
+                    "memory.retrieval_zero_result"
+                        | "memory.injection_starvation"
+                        | "memory.retrieval_health_refresh"
+                )
+            })
+            .collect();
+        assert_eq!(names.len(), 3, "each required retrieval check is registered");
+        for required in [
+            "memory.retrieval_zero_result",
+            "memory.injection_starvation",
+            "memory.retrieval_health_refresh",
+        ] {
+            assert_eq!(
+                names.iter().filter(|name| **name == required).count(),
+                1,
+                "{required} must be registered exactly once after refresh failure"
+            );
+        }
     }
 
     #[test]
