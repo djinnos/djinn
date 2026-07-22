@@ -3,7 +3,7 @@
 use djinn_core::events::EventBus;
 use djinn_core::refinement_liveness::{
     RefinementLivenessEvidence, RefinementLivenessResult, RefinementParkKind,
-    RefinementStaleReason, RefinementStopReason,
+    RefinementStaleReason, RefinementStopReason, RefinementTaskState,
 };
 use djinn_db::repositories::refinement_run::LoadRefinementRunSnapshotRequest;
 use djinn_db::test_support::{
@@ -291,6 +291,46 @@ async fn snapshot_maps_exact_run_evidence_and_excludes_late_prior_rows() {
             .liveness,
         RefinementLivenessResult::Live {
             evidence: RefinementLivenessEvidence::FreshHeartbeat { .. }
+        }
+    ));
+}
+
+/// Post-worker task statuses remain valid exact-run evidence even though the
+/// liveness evaluator intentionally projects them into a smaller vocabulary.
+#[tokio::test]
+async fn snapshot_and_aggregate_accept_post_worker_task_status() {
+    let db = Database::open_in_memory().unwrap();
+    db.ensure_initialized().await.unwrap();
+    let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+    let proposal_id = proposal(&db).await;
+    let run_id = run(&db, &proposal_id, 1).await;
+    let task_id = task(&db, &run_id, None, "needs_task_review").await;
+
+    let exact = repo
+        .load_refinement_run_snapshot(request(run_id.clone()))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(exact.snapshot.tasks.len(), 1);
+    assert_eq!(exact.snapshot.tasks[0].task_id, task_id);
+    assert_eq!(exact.snapshot.tasks[0].state, RefinementTaskState::Open);
+    assert_eq!(
+        exact.liveness,
+        RefinementLivenessResult::Live {
+            evidence: RefinementLivenessEvidence::OpenTask { task_id }
+        }
+    );
+
+    let aggregates = repo
+        .load_refinement_run_aggregates(&proposal_id, GRACE)
+        .await
+        .unwrap();
+    assert_eq!(aggregates.len(), 1);
+    assert_eq!(aggregates[0].run_id, run_id);
+    assert!(matches!(
+        aggregates[0].liveness,
+        RefinementLivenessResult::Live {
+            evidence: RefinementLivenessEvidence::OpenTask { .. }
         }
     ));
 }

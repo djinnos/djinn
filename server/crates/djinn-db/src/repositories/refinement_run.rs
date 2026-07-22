@@ -351,7 +351,18 @@ fn task_state(value: String) -> SnapshotResult<RefinementTaskState> {
     match value.as_str() {
         "open" => Ok(RefinementTaskState::Open),
         "queued" => Ok(RefinementTaskState::Queued),
-        "in_progress" | "running" => Ok(RefinementTaskState::Running),
+        // `TaskStatus` has role-specific in-flight states while the evaluator
+        // has a smaller liveness vocabulary. A task waiting for a role is
+        // open; role-owned and PR-completion states remain running evidence.
+        "needs_task_review" | "needs_lead_intervention" => Ok(RefinementTaskState::Open),
+        "in_progress"
+        | "running"
+        | "in_task_review"
+        | "approved"
+        | "pr_draft"
+        | "pr_ready"
+        | "pr_review"
+        | "in_lead_intervention" => Ok(RefinementTaskState::Running),
         "pool_paused" => Ok(RefinementTaskState::PoolPaused),
         "closed" => Ok(RefinementTaskState::Closed),
         "cancelled" => Ok(RefinementTaskState::Cancelled),
