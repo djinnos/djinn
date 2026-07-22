@@ -478,6 +478,19 @@ pub struct TaxonomyV1ValidGroupSnapshot {
     pub legacy_unclassified_queries: u64,
     pub invalid_taxonomy_queries: u64,
 }
+
+impl TaxonomyV1ValidGroupSnapshot {
+    /// The stable project/entry-point identity shared by grouped rollups and findings.
+    pub fn group_key(&self) -> TaxonomyV1GroupKey {
+        self.into()
+    }
+
+    /// The stable finding identity for a check evaluated against this group.
+    pub fn finding_key(&self, check: &str) -> String {
+        format!("{check}:{}:{}", self.project_id, self.entry_point)
+    }
+}
+
 /// Identity and exclusions for a malformed group. Such a group is never evaluated.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TaxonomyV1InvalidGroupSnapshot {
@@ -492,6 +505,11 @@ pub struct TaxonomyV1InvalidGroupSnapshot {
     pub invalid_reason: String,
 }
 impl TaxonomyV1InvalidGroupSnapshot {
+    /// The stable project/entry-point identity shared by grouped rollups and findings.
+    pub fn group_key(&self) -> TaxonomyV1GroupKey {
+        self.into()
+    }
+
     /// The stable identity downstream reconciliation uses to preserve an
     /// earlier finding while this malformed group is intentionally skipped.
     pub fn finding_key(&self, check: &str) -> String {
@@ -541,6 +559,25 @@ pub struct TaxonomyV1RetrievalSnapshot {
 impl TaxonomyV1RetrievalSnapshot {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Construct one immutable refresh from its valid and malformed groups.
+    ///
+    /// Invalid groups are inserted after valid groups, deliberately preserving
+    /// malformed-group state if a producer accidentally supplies both shapes
+    /// for the same project/entry-point identity.
+    pub fn from_groups(
+        valid_groups: impl IntoIterator<Item = TaxonomyV1ValidGroupSnapshot>,
+        invalid_groups: impl IntoIterator<Item = TaxonomyV1InvalidGroupSnapshot>,
+    ) -> Self {
+        let mut snapshot = Self::new();
+        for group in valid_groups {
+            snapshot.insert_valid_group(group);
+        }
+        for group in invalid_groups {
+            snapshot.insert_invalid_group(group);
+        }
+        snapshot
     }
 
     /// Insert a valid group, returning the group it replaced at the same key.
@@ -631,7 +668,7 @@ fn resolve_v1(
         return None;
     }
     let ratio = format!("{numerator}/{denominator}");
-    let key = format!("{name}:{}:{}", g.project_id, g.entry_point);
+    let key = g.finding_key(name);
     let evidence = json!({"finding_key":key,"project_id":g.project_id,"entry_point":g.entry_point,"taxonomy_version":g.taxonomy_version,"window":{"start":iso_format(g.window_start),"end":iso_format(g.window_end)},"refreshed_at":iso_format(g.refreshed_at),"numerator":numerator,"denominator":denominator,"exact_ratio":ratio,"configured_threshold_percent":config.injection_starvation_threshold_percent,"configured_query_floor":config.injection_starvation_query_floor,"configured_window_minutes":config.retrieval_health_window_minutes,"query_counters":g.counters,"candidate_total":g.candidate_total,"injected_total":g.injected_total,"dispositions":g.dispositions,"legacy_unclassified_queries":g.legacy_unclassified_queries,"invalid_taxonomy_queries":g.invalid_taxonomy_queries});
     Some(
         Finding::new(
@@ -1416,6 +1453,83 @@ mod tests {
         );
         assert_eq!(
             InjectionStarvationCheck::new(v1_config(), snapshot).cadence(),
+            DoctorCheckCadence::Cheap
+        );
+    }
+
+    #[test]
+    fn v1_public_facade_constructs_valid_and_invalid_adapter_shapes() {
+        use crate::doctor::{
+            InjectionStarvationCheck as PublicInjectionStarvationCheck,
+            TaxonomyV1DispositionHistogram as PublicDispositionHistogram,
+            TaxonomyV1InvalidGroupSnapshot as PublicInvalidGroup,
+            TaxonomyV1QueryCounters as PublicQueryCounters,
+            TaxonomyV1RetrievalSnapshot as PublicSnapshot,
+            TaxonomyV1RetrievalZeroResultCheck as PublicZeroResultCheck,
+            TaxonomyV1ValidGroupSnapshot as PublicValidGroup,
+            resolve_injection_starvation_v1 as public_resolve_starvation,
+            resolve_retrieval_zero_result_v1 as public_resolve_zero_result,
+        };
+
+        let valid = PublicValidGroup {
+            project_id: "healthy-project".into(),
+            entry_point: "memory_search".into(),
+            taxonomy_version: RETRIEVAL_TAXONOMY_V1.into(),
+            window_start: ts(0),
+            window_end: ts(60),
+            refreshed_at: ts(61),
+            counters: PublicQueryCounters {
+                total_queries: 4,
+                successful_queries: 2,
+                errored_queries: 1,
+                cancelled_queries: 1,
+                zero_candidate_queries: 1,
+                candidate_bearing_queries: 1,
+                starved_queries: 0,
+                injected_queries: 1,
+            },
+            candidate_total: 5,
+            injected_total: 1,
+            dispositions: PublicDispositionHistogram {
+                confidence_filtered: 1,
+                not_top_k: 1,
+                oversized_skipped: 1,
+                injected: 1,
+                budget_pruned: 1,
+            },
+            legacy_unclassified_queries: 2,
+            invalid_taxonomy_queries: 0,
+        };
+        let invalid = PublicInvalidGroup {
+            project_id: "malformed-project".into(),
+            entry_point: LOAD_KNOWLEDGE_CONTEXT_ENTRY_POINT.into(),
+            taxonomy_version: RETRIEVAL_TAXONOMY_V1.into(),
+            window_start: ts(0),
+            window_end: ts(60),
+            refreshed_at: ts(61),
+            legacy_unclassified_queries: 3,
+            invalid_taxonomy_queries: 1,
+            invalid_reason: "candidate histogram does not match total".into(),
+        };
+        let valid_key = valid.group_key();
+        let invalid_key = invalid.group_key();
+        let snapshot = PublicSnapshot::from_groups([valid], [invalid]);
+
+        assert_eq!(valid_key, TaxonomyV1GroupKey::new("healthy-project", "memory_search"));
+        assert_eq!(
+            invalid_key,
+            TaxonomyV1GroupKey::new("malformed-project", LOAD_KNOWLEDGE_CONTEXT_ENTRY_POINT)
+        );
+        assert_eq!(snapshot.valid_groups().count(), 1);
+        assert_eq!(snapshot.invalid_groups().count(), 1);
+        assert_eq!(public_resolve_zero_result(&snapshot, v1_config()).len(), 1);
+        assert!(public_resolve_starvation(&snapshot, v1_config()).is_empty());
+        assert_eq!(
+            PublicZeroResultCheck::new(v1_config(), snapshot.clone()).cadence(),
+            DoctorCheckCadence::Cheap
+        );
+        assert_eq!(
+            PublicInjectionStarvationCheck::new(v1_config(), snapshot).cadence(),
             DoctorCheckCadence::Cheap
         );
     }
