@@ -267,8 +267,18 @@ pub async fn run_cheap_doctor_checks(
         })
         .collect();
     if runs.iter().any(|run| is_retrieval_check(run.check_name)) {
+        // A refresh failure is indeterminate, not healthy absence: preserve all
+        // previously active alarms while reconciling the refresh-error key.
+        let preserve_all_alarms = runs.iter().any(|run| {
+            run.check_name == "memory.retrieval_health_refresh" && !run.findings.is_empty()
+        });
+        let preserve_keys = if preserve_all_alarms {
+            vec!["__preserve_all_retrieval_alarms__".to_owned()]
+        } else {
+            Vec::new()
+        };
         if let Err(error) = finding_repo
-            .reconcile_retrieval_findings(retrieval, &[])
+            .reconcile_retrieval_findings(retrieval, &preserve_keys)
             .await
         {
             warn!(error = %error, "CoordinatorActor: failed to reconcile retrieval doctor findings");

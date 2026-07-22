@@ -203,7 +203,7 @@ impl DoctorFindingRepository {
                 .bind(Uuid::now_v7().to_string()).bind(n.run_id.as_deref()).bind(&n.check_name).bind(&n.severity).bind(&n.entity_ids).bind(&n.evidence).bind(n.resolver_snapshot.as_ref()).bind(n.detail.as_deref()).bind(&keyed.active_key).fetch_one(self.db.pool()).await?;
             rows.push(row_to_finding(&row));
         }
-        sqlx::query(r#"UPDATE doctor_findings SET status='resolved',observed_at=to_char(now() AT TIME ZONE 'utc','YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') WHERE status='active' AND check_name IN ('memory.retrieval_zero_result','memory.injection_starvation','memory.retrieval_health_refresh') AND NOT (active_key=ANY($1)) AND NOT (active_key=ANY($2))"#).bind(&emitted).bind(preserve_keys).execute(self.db.pool()).await?;
+        sqlx::query(r#"UPDATE doctor_findings SET status='resolved',observed_at=to_char(now() AT TIME ZONE 'utc','YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') WHERE status='active' AND check_name IN ('memory.retrieval_zero_result','memory.injection_starvation','memory.retrieval_health_refresh') AND NOT (active_key=ANY($1)) AND NOT (active_key=ANY($2)) AND NOT ($2 @> ARRAY['__preserve_all_retrieval_alarms__']::text[] AND check_name IN ('memory.retrieval_zero_result','memory.injection_starvation'))"#).bind(&emitted).bind(preserve_keys).execute(self.db.pool()).await?;
         Ok(rows)
     }
 

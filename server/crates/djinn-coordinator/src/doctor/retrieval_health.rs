@@ -31,6 +31,7 @@ pub struct RetrievalHealthSource {
 struct RetrievalHealthPublication {
     snapshot: Mutex<Arc<TaxonomyV1RetrievalSnapshot>>,
     last_error: Mutex<Option<String>>,
+    last_attempt: Mutex<Option<OffsetDateTime>>,
     last_success: Mutex<Option<OffsetDateTime>>,
 }
 
@@ -39,6 +40,7 @@ impl RetrievalHealthPublication {
         Self {
             snapshot: Mutex::new(Arc::new(TaxonomyV1RetrievalSnapshot::new())),
             last_error: Mutex::new(None),
+            last_attempt: Mutex::new(None),
             last_success: Mutex::new(None),
         }
     }
