@@ -186,9 +186,14 @@ pub use repositories::{
         ProposalRepository, ProposalUpdateInput,
     },
     refinement_run::{
-        AdmitRefinementRunRequest, LoadRefinementRunSnapshotRequest, RefinementAdmissionError,
-        RefinementAdmissionOutcome, RefinementAdmissionSource, RefinementRunAggregate,
+        AcknowledgeRefinementTaskMaterializationRequest, AdmitRefinementRunRequest,
+        ClaimRefinementIntentRequest, CompleteRefinementIntentRequest,
+        LoadRefinementRunSnapshotRequest, ParkRefinementRunRequest, RefinementAdmissionError,
+        RefinementAdmissionOutcome, RefinementAdmissionSource, RefinementDurableProgress,
+        RefinementIntentLease, RefinementIntentMutationError, RefinementLifecycleAggregate,
+        RefinementNextIntent, RefinementPendingIntent, RefinementRunAggregate,
         RefinementRunSnapshotError, RefinementRunSnapshotResult,
+        ReleaseRefinementIntentClaimRequest, TerminalRefinementRunRequest,
     },
     repo_graph_cache::{CachedRepoGraph, RepoGraphCacheInsert, RepoGraphCacheRepository},
     repo_graph_generation::{
