@@ -1145,8 +1145,7 @@ impl TaskRunSpecInputs {
             _ => None,
         };
         let task_repo = TaskRepository::new(app_state.db.clone(), app_state.event_bus.clone());
-        let created_by_user_id: Option<String> =
-            task_repo.created_by_user_id(&task.id).await.ok().flatten();
+        let created_by_user_id: Option<String> = task_repo.created_by_user_id(&task.id).await.ok();
         let (commit_author_name, commit_author_email) =
             resolve_commit_author(app_state, created_by_user_id.as_deref()).await;
         let resume_lifecycle_metadata =

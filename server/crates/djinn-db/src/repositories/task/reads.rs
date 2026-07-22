@@ -510,12 +510,10 @@ impl TaskRepository {
             }
         }
 
-        // Peer attribution flows through the transactional provenance
-        // boundary: bind the incoming row's creator only when it is known to
-        // this instance, so an unreplicated user degrades attribution instead
-        // of failing the sync on the users FK.
-        let created_by_user_id =
-            incoming_task_creator(&mut tx, task.created_by_user_id.as_deref()).await?;
+        // Peer attribution flows through the transactional provenance boundary:
+        // bind the incoming concrete creator only when it is known to this
+        // instance, rejecting an unknown user rather than writing NULL.
+        let created_by_user_id = incoming_task_creator(&mut tx, &task.created_by_user_id).await?;
 
         // Clone task for mutation if we need to extend short_id
         let mut task = task.clone();
@@ -708,9 +706,8 @@ impl TaskRepository {
         }
 
         // Same transactional provenance boundary as `upsert_peer`: only a
-        // locally-known incoming creator is bound.
-        let created_by_user_id =
-            incoming_task_creator(tx, task.created_by_user_id.as_deref()).await?;
+        // locally-known incoming concrete creator is bound.
+        let created_by_user_id = incoming_task_creator(tx, &task.created_by_user_id).await?;
 
         // Clone task for mutation if we need to extend short_id
         let mut task = task.clone();
@@ -913,17 +910,15 @@ impl TaskRepository {
 
     /// Read only the `created_by_user_id` column for a single task.
     ///
-    /// Returns `None` when the task is not found or when the column is NULL
-    /// (background-agent-created tasks).  Errors are propagated.
-    pub async fn created_by_user_id(&self, task_id: &str) -> Result<Option<String>> {
+    /// Returns the concrete creator for a task. Missing tasks are reported as
+    /// an error; migrated task rows cannot have a NULL creator.
+    pub async fn created_by_user_id(&self, task_id: &str) -> Result<String> {
         self.db.ensure_initialized().await?;
-        let row: Option<Option<String>> =
-            sqlx::query_scalar("SELECT created_by_user_id FROM tasks WHERE id = $1")
-                .bind(task_id)
-                .fetch_optional(self.db.pool())
-                .await?;
-        // Flatten: outer None = no row, inner None = NULL column value.
-        Ok(row.flatten())
+        sqlx::query_scalar("SELECT created_by_user_id FROM tasks WHERE id = $1")
+            .bind(task_id)
+            .fetch_optional(self.db.pool())
+            .await?
+            .ok_or_else(|| Error::Internal(format!("task not found: {task_id}")))
     }
 
     /// Count exact-title matches for integration tests that verify transactional
