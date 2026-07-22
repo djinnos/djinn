@@ -1,4 +1,9 @@
 //! Shared test utilities for djinn-slot tests.
+//!
+//! This module is also built into downstream `test-support` feature builds, so
+//! test assertions intentionally use panic-based helpers even when Clippy sees
+//! the module as part of the library target.
+#![allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 
 use std::collections::VecDeque;
 use std::pin::Pin;
