@@ -26,10 +26,8 @@ async fn with_database(f: impl AsyncFnOnce(sqlx::PgPool)) {
         .connect(&format!("{prefix}/{name}"))
         .await
         .expect("connect test database");
-    sqlx::migrate!("./migrations_postgres")
-        .run(&pool)
-        .await
-        .expect("apply migrations");
+    djinn_db::test_support::apply_all_migrations_to_fresh_database(&format!("{prefix}/{name}"))
+        .await;
     f(pool.clone()).await;
     pool.close().await;
 

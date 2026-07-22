@@ -53,7 +53,24 @@ async fn fresh() -> (Database, RepoGraphRetentionRepository) {
         .await
         .expect("migration connection");
     let migration_files = migrations();
-    for (_, path) in &migration_files {
+    for (version, path) in &migration_files {
+        // The creator-contract migration refuses to run without a validated
+        // designated operator bound to the session; provision one before
+        // crossing that boundary.
+        if *version as i64 == djinn_db::migrations::CREATOR_CONTRACT_MIGRATION_VERSION {
+            sqlx::query(
+                "INSERT INTO users (id, github_id, github_login) \
+                 VALUES ('user-retention-operator', 9000000202, 'retention-compat-operator') \
+                 ON CONFLICT DO NOTHING",
+            )
+            .execute(&mut migration)
+            .await
+            .expect("seed designated operator user");
+            sqlx::query("SELECT set_config('djinn.migration_designated_operator_user_id', 'user-retention-operator', false)")
+                .execute(&mut migration)
+                .await
+                .expect("bind designated operator GUC");
+        }
         let sql = std::fs::read_to_string(&path).expect("read migration");
         migration
             .execute(sql.as_str())
