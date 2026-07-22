@@ -25,6 +25,7 @@
 //! - Catalog non-nullability and direct SQL NULL rejection.
 //! - Deleting a referenced user fails under NOT NULL + FK.
 
+#[path = "support/migrations_task_creator_contract.rs"]
 mod migrations_task_creator_contract_support;
 
 use djinn_db::migrations::MigrationContext;
