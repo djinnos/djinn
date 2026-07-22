@@ -34,7 +34,7 @@ use crate::tools::proposal_ops::{
     ProposalSignoffModel, ProposalSingleResponse, ProposalTargetModel, ProposalTargetsResponse,
     apply_revision_body_mode, validate_revision_bodies_value, validate_show_fields,
 };
-use crate::tools::proposal_readiness::evaluate_proposal_readiness;
+use crate::tools::proposal_readiness::evaluate_latest_head_readiness;
 use crate::tools::validation::{
     resolve_body_format_and_validate, validate_ac_count, validate_design, validate_limit,
     validate_offset, validate_proposal_create_status, validate_proposal_status, validate_sort,
@@ -265,13 +265,16 @@ fn judge_verdict_is_needs_work(verdict_body: &str) -> bool {
 /// Compose the list-row tribunal/readiness summary from a proposal row plus its
 /// batched raw facts. Deterministic and query-free (all data is already loaded):
 /// runs the in-memory DoR evaluator and approximates the composed gate.
-fn build_list_summary(
+async fn build_list_summary(
+    repo: &ProposalRepository,
     proposal: &djinn_core::models::proposal::Proposal,
     raw: &ProposalListSummaryRow,
 ) -> ProposalListSummary {
     let ac_items = parse_ac_items(&proposal.acceptance_criteria);
     let dor_ready =
-        evaluate_proposal_readiness(&proposal.body, &ac_items, raw.target_count as usize).ready;
+        evaluate_latest_head_readiness(repo, proposal, &ac_items, raw.target_count as usize)
+            .await
+            .ready;
 
     let needs_evidence = proposal.linked_spike_task_id.is_some();
     let judge_needs_work = raw
@@ -359,16 +362,9 @@ impl DjinnMcpServer {
             }
         }
 
-        // Deterministic DoR gate: block entering `in_review` when the spec is
-        // not ready. Existing body/MDX/AC-count validation already passed.
+        // The persisted-head composed gate below is authoritative after target
+        // seeding, when it can await shared current-head lint readiness.
         let effective_status = status.unwrap_or("draft");
-        if effective_status == "in_review" {
-            let ac_items = parse_ac_items(&ac_json);
-            let readiness = evaluate_proposal_readiness(body, &ac_items, resolved_target_ids.len());
-            if let Some(err) = format_readiness_error(&readiness) {
-                return Json(err_single(err));
-            }
-        }
 
         let repo = ProposalRepository::new(self.state.db().clone(), self.state.event_bus());
         let proposal = match repo
@@ -888,23 +884,22 @@ impl DjinnMcpServer {
         let include_excerpts = p.include_excerpts.unwrap_or(false);
         let include_acceptance_criteria = p.include_acceptance_criteria.unwrap_or(false);
 
-        let rows: Vec<ProposalListRow> = result
-            .proposals
-            .iter()
-            .map(|(p, count)| {
-                let model = ProposalListRow::from_proposal(
-                    p,
-                    *count,
-                    include_bodies,
-                    include_excerpts,
-                    include_acceptance_criteria,
-                );
-                match summaries.get(&p.id) {
-                    Some(raw) => model.with_list_summary(build_list_summary(p, raw)),
-                    None => model,
+        let mut rows = Vec::with_capacity(result.proposals.len());
+        for (proposal, count) in &result.proposals {
+            let model = ProposalListRow::from_proposal(
+                proposal,
+                *count,
+                include_bodies,
+                include_excerpts,
+                include_acceptance_criteria,
+            );
+            rows.push(match summaries.get(&proposal.id) {
+                Some(raw) => {
+                    model.with_list_summary(build_list_summary(&repo, proposal, raw).await)
                 }
-            })
-            .collect();
+                None => model,
+            });
+        }
 
         Json(list_response::success::<ProposalListResponse>(
             rows,

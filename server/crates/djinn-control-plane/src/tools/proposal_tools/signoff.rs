@@ -30,7 +30,7 @@ use crate::server::DjinnMcpServer;
 use crate::tools::acting_user::acting_caps;
 use crate::tools::epic_ops::AcceptanceCriterionItem;
 use crate::tools::proposal_ops::{ProposalModel, ProposalSingleResponse};
-use crate::tools::proposal_readiness::evaluate_proposal_readiness;
+use crate::tools::proposal_readiness::{ReadinessCheck, evaluate_latest_head_readiness};
 use djinn_db::ProposalRepository;
 
 use super::{err_single, proposal_not_found_error};
@@ -143,25 +143,27 @@ async fn current_human_gate_authority(
 pub(crate) async fn evaluate_composed_gate(
     repo: &ProposalRepository,
     proposal: &djinn_core::models::proposal::Proposal,
-    body: &str,
-    ac_json: &str,
+    _body: &str,
+    _ac_json: &str,
     target_count: usize,
 ) -> ComposedGateResult {
     let mut failures: Vec<String> = Vec::new();
 
-    // 1. Deterministic DoR check (existing evaluator, reused not duplicated).
-    let ac_items = parse_ac_items(ac_json);
-    let readiness = evaluate_proposal_readiness(body, &ac_items, target_count);
-    let readiness_error = format_readiness_error(&readiness);
+    let ac_items = parse_ac_items(&proposal.acceptance_criteria);
+    let readiness = evaluate_latest_head_readiness(repo, proposal, &ac_items, target_count).await;
 
     // Consult current human authority before deciding whether deterministic
     // readiness failures block. A current explicit override or human acceptance
     // is scoped to the latest revision only; stale lifecycle rows do not apply.
     let human_authority_is_current = current_human_gate_authority(repo, proposal).await;
-    if let Some(err) = readiness_error
-        && !human_authority_is_current
-    {
-        failures.push(err);
+    let integrity_failed = readiness
+        .failures
+        .iter()
+        .any(|failure| failure.check == ReadinessCheck::SpecIntegrity);
+    if !readiness.ready && (!human_authority_is_current || integrity_failed) {
+        if let Some(details) = readiness.to_error_string() {
+            failures.push(format!("proposal not ready for review: {details}"));
+        }
         // Preserve the historical no-authority DoR blocking behavior: DoR-only
         // failures stop the gate before tribunal diagnostics are appended.
         return ComposedGateResult { failures };
@@ -250,15 +252,14 @@ pub(crate) async fn evaluate_composed_gate(
 pub(crate) async fn build_gate_status(
     repo: &ProposalRepository,
     proposal: &djinn_core::models::proposal::Proposal,
-    body: &str,
-    ac_json: &str,
+    _body: &str,
+    _ac_json: &str,
     target_count: usize,
 ) -> crate::tools::proposal_ops::ProposalGateStatusModel {
     use crate::tools::proposal_ops::{GateFailureModel, ProposalGateStatusModel};
 
-    // 1. Deterministic DoR
-    let ac_items = parse_ac_items(ac_json);
-    let readiness = evaluate_proposal_readiness(body, &ac_items, target_count);
+    let ac_items = parse_ac_items(&proposal.acceptance_criteria);
+    let readiness = evaluate_latest_head_readiness(repo, proposal, &ac_items, target_count).await;
     let dor_failures: Vec<GateFailureModel> = readiness
         .failures
         .iter()
@@ -293,7 +294,11 @@ pub(crate) async fn build_gate_status(
 
     // Add DoR failures to explanations only when they are actually blocking.
     // Keep `dor_failures` populated either way so clients can show diagnostics.
-    if !dor_ready && !human_authority_is_current {
+    let integrity_failed = readiness
+        .failures
+        .iter()
+        .any(|failure| failure.check == ReadinessCheck::SpecIntegrity);
+    if !dor_ready && (!human_authority_is_current || integrity_failed) {
         for f in &dor_failures {
             blocked_explanations.push(f.message.clone());
         }
