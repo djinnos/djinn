@@ -232,6 +232,8 @@ impl BuildLeaseService {
     /// Recover queued and all occupied rows before opening the service.
     pub async fn recover(&self) -> LeaseResult {
         let _guard = self.operation.lock().await;
+        self.telemetry
+            .operation(LeaseOperation::Recover, LeaseTelemetryConsumer::System);
         self.pause.before_transaction(LeaseOperation::Recover).await;
         match self.repository.snapshot().await {
             Ok(snapshot) => {
@@ -328,8 +330,10 @@ impl BuildLeaseService {
         if !self.is_ready() {
             return self.unavailable();
         }
-        self.telemetry
-            .operation(LeaseOperation::Status, telemetry_consumer(&request.identity));
+        self.telemetry.operation(
+            LeaseOperation::Status,
+            telemetry_consumer(&request.identity),
+        );
         self.pause.before_transaction(LeaseOperation::Status).await;
         let (key, _) = identity(&request.identity);
         match self.repository.get(&key).await {
@@ -514,6 +518,8 @@ impl BuildLeaseService {
     async fn drain(&self) -> Result<Option<BuildLeaseRow>, ()> {
         let mut last = None;
         loop {
+            self.telemetry
+                .operation(LeaseOperation::Grant, LeaseTelemetryConsumer::System);
             self.pause.before_transaction(LeaseOperation::Grant).await;
             match self
                 .repository
@@ -689,6 +695,8 @@ fn status(row: &BuildLeaseRow) -> LeaseStatus {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
+
     use super::*;
 
     fn row(state: BuildLeaseState, terminal_reason: Option<&str>) -> BuildLeaseRow {
@@ -779,5 +787,134 @@ mod tests {
                 timeout_credit: None
             }
         );
+    }
+
+    #[test]
+    fn production_metrics_use_only_bounded_typed_labels() {
+        let (_, rendered) = djinn_telemetry::render_isolated(|| {
+            let telemetry = MetricsLeaseTelemetry;
+            for operation in [
+                LeaseOperation::Queue,
+                LeaseOperation::Grant,
+                LeaseOperation::Status,
+                LeaseOperation::Abandon,
+                LeaseOperation::Bind,
+                LeaseOperation::Cancel,
+                LeaseOperation::Release,
+            ] {
+                telemetry.operation(operation, LeaseTelemetryConsumer::TaskInvocation);
+                telemetry.operation(operation, LeaseTelemetryConsumer::GraphWarm);
+            }
+            for operation in [
+                LeaseOperation::Recover,
+                LeaseOperation::Grant,
+                LeaseOperation::Expire,
+                LeaseOperation::SetCap,
+            ] {
+                telemetry.operation(operation, LeaseTelemetryConsumer::System);
+            }
+            for state in [
+                LeaseTelemetryState::Queued,
+                LeaseTelemetryState::Occupied,
+                LeaseTelemetryState::Terminal,
+                LeaseTelemetryState::NotReady,
+            ] {
+                telemetry.state(state, 1);
+            }
+            for outcome in [
+                LeaseTelemetryOutcome::Queued,
+                LeaseTelemetryOutcome::Granted,
+                LeaseTelemetryOutcome::Timeout,
+                LeaseTelemetryOutcome::Conflict,
+                LeaseTelemetryOutcome::Unavailable,
+                LeaseTelemetryOutcome::Terminal,
+                LeaseTelemetryOutcome::Status,
+            ] {
+                telemetry.outcome(outcome);
+            }
+        });
+
+        let allowed_keys = BTreeSet::from(["operation", "consumer", "state", "outcome"]);
+        let allowed_operations = BTreeSet::from([
+            "recover", "queue", "grant", "status", "abandon", "bind", "cancel", "release",
+            "expire", "set_cap",
+        ]);
+        let allowed_consumers = BTreeSet::from(["task_invocation", "graph_warm", "system"]);
+        let allowed_states = BTreeSet::from(["queued", "occupied", "terminal", "not_ready"]);
+        let allowed_outcomes = BTreeSet::from([
+            "queued",
+            "granted",
+            "timeout",
+            "conflict",
+            "unavailable",
+            "terminal",
+            "status",
+        ]);
+        let mut seen_operations = BTreeSet::new();
+        let mut seen_consumers = BTreeSet::new();
+        let mut seen_states = BTreeSet::new();
+        let mut seen_outcomes = BTreeSet::new();
+
+        for line in rendered
+            .lines()
+            .filter(|line| line.starts_with("djinn_build_lease_") && !line.starts_with('#'))
+        {
+            let labels = line
+                .split_once('{')
+                .and_then(|(_, rest)| rest.split_once('}').map(|(labels, _)| labels))
+                .unwrap_or("");
+            let mut line_keys = BTreeSet::new();
+            for label in labels.split(',').filter(|label| !label.is_empty()) {
+                let (key, quoted_value) = label.split_once('=').unwrap_or((label, ""));
+                let value = quoted_value.trim_matches('"');
+                assert!(allowed_keys.contains(key), "unbounded metric key in {line}");
+                line_keys.insert(key);
+                if key == "operation" {
+                    assert!(allowed_operations.contains(value));
+                    seen_operations.insert(value);
+                } else if key == "consumer" {
+                    assert!(allowed_consumers.contains(value));
+                    seen_consumers.insert(value);
+                } else if key == "state" {
+                    assert!(allowed_states.contains(value));
+                    seen_states.insert(value);
+                } else if key == "outcome" {
+                    assert!(allowed_outcomes.contains(value));
+                    seen_outcomes.insert(value);
+                }
+            }
+            if line.starts_with("djinn_build_lease_operations_total") {
+                assert_eq!(line_keys, BTreeSet::from(["operation", "consumer"]));
+            } else if line.starts_with("djinn_build_lease_units") {
+                assert_eq!(line_keys, BTreeSet::from(["state"]));
+            } else if line.starts_with("djinn_build_lease_outcomes_total") {
+                assert_eq!(line_keys, BTreeSet::from(["outcome"]));
+            }
+        }
+
+        assert_eq!(seen_operations, allowed_operations);
+        assert_eq!(seen_consumers, allowed_consumers);
+        assert_eq!(seen_states, allowed_states);
+        assert_eq!(seen_outcomes, allowed_outcomes);
+        for identifier in [
+            "task-run-secret-7f91",
+            "pod-secret-7f91",
+            "invocation-secret-7f91",
+            "request-secret-7f91",
+            "lease-secret-7f91",
+            "fencing-secret-7f91",
+        ] {
+            assert!(!rendered.contains(identifier));
+        }
+        for forbidden_key in [
+            "task_run_id",
+            "pod_uid",
+            "invocation_id",
+            "request_id",
+            "lease_id",
+            "fencing_token",
+        ] {
+            assert!(!rendered.contains(&format!("{forbidden_key}=\"")));
+        }
     }
 }
