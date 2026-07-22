@@ -22,7 +22,7 @@ pub struct MigrationContext {
     pub designated_operator_user_id: Option<String>,
 }
 
-pub const CREATOR_CONTRACT_MIGRATION_VERSION: i64 = 132;
+pub const CREATOR_CONTRACT_MIGRATION_VERSION: i64 = 141;
 
 /// Exact caller-selected identity for the fresh-install-only provisioner.
 #[derive(Clone, Debug, PartialEq, Eq)]
