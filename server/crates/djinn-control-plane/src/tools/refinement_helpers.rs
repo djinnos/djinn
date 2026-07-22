@@ -120,7 +120,7 @@ pub(crate) async fn verify_active_judge_authorization(
     };
 
     // The caller must match the Judge task's attributed user.
-    let task_owner = task.created_by_user_id.as_deref().unwrap_or("");
+    let task_owner = task.created_by_user_id.as_str();
     if task_owner.is_empty() || task_owner != caller_id {
         return Err(format!(
             "caller '{}' is not the active Judge for this proposal \

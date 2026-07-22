@@ -250,7 +250,7 @@ pub(crate) fn task_with_ci(
         merge_conflict_metadata: None,
         memory_refs: "[]".into(),
         agent_type: None,
-        created_by_user_id: None,
+        created_by_user_id: "fixture-user".into(),
         ci_status: ci_status.into(),
         ci_head_sha: ci_head_sha.map(Into::into),
         ci_pr_number,

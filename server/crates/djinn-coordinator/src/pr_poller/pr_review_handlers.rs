@@ -831,7 +831,7 @@ impl CoordinatorActor {
     pub(crate) async fn task_created_by_user_id(&self, task_id: &str) -> Option<String> {
         let task_repo = self.task_repo();
         match task_repo.get(task_id).await {
-            Ok(Some(task)) => task.created_by_user_id.clone(),
+            Ok(Some(task)) => Some(task.created_by_user_id.clone()),
             _ => None,
         }
     }

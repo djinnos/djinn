@@ -87,8 +87,8 @@ async fn list_ready_projects_created_by_user_id() {
         .find(|t| t.id == task_id)
         .expect("a freshly-created open task must appear in list_ready");
     assert_eq!(
-        got.created_by_user_id.as_deref(),
-        Some(user_id.as_str()),
+        got.created_by_user_id.as_str(),
+        user_id.as_str(),
         "list_ready must SELECT created_by_user_id, not default it to None"
     );
 }
@@ -394,8 +394,8 @@ async fn list_by_status_filtered_projects_created_by_user_id() {
         .find(|t| t.id == task_id)
         .expect("the needs_task_review task must appear in list_by_status_filtered");
     assert_eq!(
-        got.created_by_user_id.as_deref(),
-        Some(user_id.as_str()),
+        got.created_by_user_id.as_str(),
+        user_id.as_str(),
         "list_by_status_filtered must SELECT created_by_user_id, not default it to None"
     );
 }
