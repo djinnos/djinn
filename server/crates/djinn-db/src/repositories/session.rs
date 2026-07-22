@@ -1574,14 +1574,16 @@ mod tests {
 
         let task_id = uuid::Uuid::now_v7().to_string();
         let short_id = format!("t{}{}", &task_id[..6], &task_id[task_id.len() - 6..]);
+        let creator = crate::repositories::test_support::seed_test_user(db).await;
         sqlx::query!(
             "INSERT INTO tasks (id, project_id, short_id, epic_id, title, description, design,
-                                issue_type, priority, owner, status, continuation_count, labels, acceptance_criteria, memory_refs)
-             VALUES ($1, $2, $3, $4, 'Task', '', '', 'task', 0, '', 'open', 0, '[]'::jsonb, '[]'::jsonb, '[]'::jsonb)",
+                                issue_type, priority, owner, status, continuation_count, labels, acceptance_criteria, memory_refs, created_by_user_id)
+             VALUES ($1, $2, $3, $4, 'Task', '', '', 'task', 0, '', 'open', 0, '[]'::jsonb, '[]'::jsonb, '[]'::jsonb, $5)",
             task_id,
             epic.project_id,
             short_id,
-            epic.id
+            epic.id,
+            creator
         )
         .execute(db.pool())
         .await
@@ -2575,17 +2577,23 @@ mod tests {
     }
 
     /// Insert a task under a given existing epic.  Returns the task id.
-    async fn create_task_under_epic(db: &Database, project_id: &str, epic_id: &str) -> String {
+    async fn create_task_under_epic(
+        db: &Database,
+        project_id: &str,
+        epic_id: &str,
+        creator: &str,
+    ) -> String {
         let task_id = uuid::Uuid::now_v7().to_string();
         let short_id = format!("t{}{}", &task_id[..6], &task_id[task_id.len() - 6..]);
         sqlx::query!(
             "INSERT INTO tasks (id, project_id, short_id, epic_id, title, description, design,
-                                issue_type, priority, owner, status, continuation_count, labels, acceptance_criteria, memory_refs)
-             VALUES ($1, $2, $3, $4, 'Task', '', '', 'task', 0, '', 'open', 0, '[]'::jsonb, '[]'::jsonb, '[]'::jsonb)",
+                                issue_type, priority, owner, status, continuation_count, labels, acceptance_criteria, memory_refs, created_by_user_id)
+             VALUES ($1, $2, $3, $4, 'Task', '', '', 'task', 0, '', 'open', 0, '[]'::jsonb, '[]'::jsonb, '[]'::jsonb, $5)",
             task_id,
             project_id,
             short_id,
-            epic_id
+            epic_id,
+            creator
         )
         .execute(db.pool())
         .await
@@ -2607,9 +2615,10 @@ mod tests {
             .await
             .unwrap();
 
-        let task_a1 = create_task_under_epic(&db, &epic_a.project_id, &epic_a.id).await;
-        let task_a2 = create_task_under_epic(&db, &epic_a.project_id, &epic_a.id).await;
-        let task_b1 = create_task_under_epic(&db, &epic_b.project_id, &epic_b.id).await;
+        let creator = crate::repositories::test_support::seed_test_user(&db).await;
+        let task_a1 = create_task_under_epic(&db, &epic_a.project_id, &epic_a.id, &creator).await;
+        let task_a2 = create_task_under_epic(&db, &epic_a.project_id, &epic_a.id, &creator).await;
+        let task_b1 = create_task_under_epic(&db, &epic_b.project_id, &epic_b.id, &creator).await;
 
         let repo = SessionRepository::new(db.clone(), bus);
 
