@@ -50,6 +50,8 @@ pub mod audit_sampler;
 pub mod build_admission;
 pub mod build_admission_handoff;
 pub mod build_admission_inventory;
+/// Durable v1 lease service; v0 admission remains rollout authority.
+pub mod build_lease;
 pub mod cargo_warm_base_gc;
 pub(crate) mod ci_preflight_gate;
 pub mod ci_reproduction;

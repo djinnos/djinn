@@ -969,8 +969,8 @@ async fn persist_knowledge_trace(
         .format(&time::format_description::well_known::Rfc3339)
         .expect("RFC3339 timestamp");
     let write = match terminal_dispositions {
-        Some(dispositions) => repo
-            .insert_terminal(CreateRetrievalTraceTerminalParams {
+        Some(dispositions) => {
+            repo.insert_terminal(CreateRetrievalTraceTerminalParams {
                 trace: params,
                 rollout_label: rollout.label(),
                 outcome,
@@ -980,9 +980,10 @@ async fn persist_knowledge_trace(
                 injected_count: Some(dispositions.injected),
                 dispositions: Some(dispositions),
             })
-            .await,
-        None => repo
-            .insert_terminal(CreateRetrievalTraceTerminalParams {
+            .await
+        }
+        None => {
+            repo.insert_terminal(CreateRetrievalTraceTerminalParams {
                 trace: params,
                 rollout_label: rollout.label(),
                 outcome,
@@ -992,7 +993,8 @@ async fn persist_knowledge_trace(
                 injected_count: None,
                 dispositions: None,
             })
-            .await,
+            .await
+        }
     };
     if let Err(e) = write {
         tracing::warn!(task_id = %task.short_id, error = %e, "Lifecycle: failed to persist retrieval trace for knowledge context; continuing (fail-open)");
