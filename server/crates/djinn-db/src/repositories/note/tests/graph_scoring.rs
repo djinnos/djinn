@@ -4,6 +4,7 @@
 // runtime-typed; compile-time check not possible.
 use super::*;
 use crate::repositories::note::{NoteAssociationKind, NoteSearchParams};
+use crate::repositories::test_support::seed_test_user;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn task_affinity_scores_task_epic_blocker_and_max() {
@@ -12,6 +13,7 @@ async fn task_affinity_scores_task_epic_blocker_and_max() {
     let (tx, _rx) = broadcast::channel(256);
     let project = make_project(&db, tmp.path()).await;
     let repo = NoteRepository::new(db.clone(), event_bus_for(&tx));
+    let creator = seed_test_user(&db).await;
 
     let task_note = repo
         .create(&project.id, "Task Note", "body", "reference", "[]")
@@ -51,8 +53,9 @@ async fn task_affinity_scores_task_epic_blocker_and_max() {
     let task_id = uuid::Uuid::now_v7().to_string();
     sqlx::query(
         "INSERT INTO tasks (id, project_id, short_id, epic_id, title, description, design,
-                            issue_type, priority, owner, status, continuation_count, memory_refs)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13::jsonb)",
+                            issue_type, priority, owner, status, continuation_count, memory_refs,
+                            created_by_user_id)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13::jsonb, $14)",
     )
     .bind(&task_id)
     .bind(&project.id)
@@ -67,6 +70,7 @@ async fn task_affinity_scores_task_epic_blocker_and_max() {
     .bind("open")
     .bind(0_i64)
     .bind(serde_json::json!([task_note.id.clone(), overlap_note.id.clone()]).to_string())
+    .bind(&creator)
     .execute(db.pool())
     .await
     .unwrap();
@@ -74,8 +78,9 @@ async fn task_affinity_scores_task_epic_blocker_and_max() {
     let blocker_id = uuid::Uuid::now_v7().to_string();
     sqlx::query(
         "INSERT INTO tasks (id, project_id, short_id, epic_id, title, description, design,
-                            issue_type, priority, owner, status, continuation_count, memory_refs)
-         VALUES ($1, $2, $3, NULL, $4, $5, $6, $7, $8, $9, $10, $11, $12::jsonb)",
+                            issue_type, priority, owner, status, continuation_count, memory_refs,
+                            created_by_user_id)
+         VALUES ($1, $2, $3, NULL, $4, $5, $6, $7, $8, $9, $10, $11, $12::jsonb, $13)",
     )
     .bind(&blocker_id)
     .bind(&project.id)
@@ -96,6 +101,7 @@ async fn task_affinity_scores_task_epic_blocker_and_max() {
         ])
         .to_string(),
     )
+    .bind(&creator)
     .execute(db.pool())
     .await
     .unwrap();
@@ -129,6 +135,7 @@ async fn task_affinity_scores_include_repo_map_neighbors_for_task_memory_refs() 
     let (tx, _rx) = broadcast::channel(256);
     let project = make_project(&db, tmp.path()).await;
     let repo = NoteRepository::new(db.clone(), event_bus_for(&tx));
+    let creator = seed_test_user(&db).await;
 
     let adr = repo
         .create(
@@ -155,8 +162,9 @@ async fn task_affinity_scores_include_repo_map_neighbors_for_task_memory_refs() 
     let task_id = uuid::Uuid::now_v7().to_string();
     sqlx::query(
         "INSERT INTO tasks (id, project_id, short_id, epic_id, title, description, design,
-                            issue_type, priority, owner, status, continuation_count, memory_refs)
-         VALUES ($1, $2, $3, NULL, $4, $5, $6, $7, $8, $9, $10, $11, $12::jsonb)",
+                            issue_type, priority, owner, status, continuation_count, memory_refs,
+                            created_by_user_id)
+         VALUES ($1, $2, $3, NULL, $4, $5, $6, $7, $8, $9, $10, $11, $12::jsonb, $13)",
     )
     .bind(&task_id)
     .bind(&project.id)
@@ -170,6 +178,7 @@ async fn task_affinity_scores_include_repo_map_neighbors_for_task_memory_refs() 
     .bind("open")
     .bind(0_i64)
     .bind(serde_json::json!([adr.permalink.clone()]).to_string())
+    .bind(&creator)
     .execute(db.pool())
     .await
     .unwrap();

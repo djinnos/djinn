@@ -1543,6 +1543,7 @@ pub mod dispatch {
     pub const STRIKE_DECISION_COUNTED: &str = "counted";
     pub const STRIKE_DECISION_EXEMPTED: &str = "exempted";
     pub const STRIKE_SOURCE_ENVIRONMENTAL_OWNER_EXPIRED: &str = "environmental_owner_expired";
+    pub const STRIKE_SOURCE_ENVIRONMENTAL_RESTART_ORPHAN: &str = "environmental_restart_orphan";
     pub const STRIKE_SOURCE_SPAWN_FAILED: &str = "spawn_failed";
     pub const STRIKE_SOURCE_CRASHED: &str = "crashed";
     pub const STRIKE_SOURCE_OTHER_TERMINAL: &str = "other_terminal";
