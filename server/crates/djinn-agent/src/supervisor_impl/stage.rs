@@ -250,7 +250,13 @@ fn classify_provider_failure(err: &anyhow::Error) -> Option<ProviderFailureClass
 /// (`is_subscription_provider` / `governable_subscription_for_model`) remain an
 /// additional signal so e.g. a `zai-coding-plan/...` API-key session is still
 /// `SubscriptionPlan`.
-fn derive_billing_signal(
+///
+/// Exported (via `crate::supervisor::derive_billing_signal`) because the in-Pod
+/// worker path (`djinn-agent-worker`) builds its provider from a Secret-mounted
+/// credential and never runs `resolve_model_and_credential`; it derives the
+/// signal itself from the `SerializableCredential` kind and hands it to
+/// `worker_execute_stage`.
+pub fn derive_billing_signal(
     provider_id: &str,
     model_name: &str,
     credential_is_oauth: bool,
@@ -857,18 +863,27 @@ pub(crate) async fn execute_stage(
     };
 
     // The session is intentionally created before extension loading so every
-    // diagnostic has a session foreign key. Preserve its billing attribution
-    // from the credential already resolved above rather than dropping it while
-    // moving creation earlier in the stage.
-    let billing_signal = resolved.as_ref().map(|resolved| {
-        derive_billing_signal(
-            &resolved.catalog_provider_id,
-            &resolved.model_name,
-            matches!(
-                resolved.provider_credential.as_ref(),
-                Some(ProviderCredential::OAuthConfig(_))
-            ),
-        )
+    // diagnostic has a session foreign key. Preserve its billing attribution.
+    //
+    // On the host path `resolved` is populated and we derive the signal from the
+    // resolved credential. On the in-Pod worker path `provider_override` is set,
+    // `resolved` is `None`, and the worker has already derived the signal from
+    // the Secret-mounted `SerializableCredential` — it arrives via
+    // `callbacks.billing_signal`. Without this, every worker-pod session fell
+    // through to the legacy string path and mis-booked openai plan usage as
+    // `actual` (billing_source NULL). The `test/supervisor-stub` integration
+    // case passes `None` and keeps its prior unpriced/legacy behavior.
+    let billing_signal = callbacks.billing_signal.or_else(|| {
+        resolved.as_ref().map(|resolved| {
+            derive_billing_signal(
+                &resolved.catalog_provider_id,
+                &resolved.model_name,
+                matches!(
+                    resolved.provider_credential.as_ref(),
+                    Some(ProviderCredential::OAuthConfig(_))
+                ),
+            )
+        })
     });
 
     let _ = services
