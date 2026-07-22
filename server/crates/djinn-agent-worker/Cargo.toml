@@ -13,7 +13,7 @@ name = "djinn-agent-worker"
 path = "src/main.rs"
 
 [dependencies]
-djinn-agent = { path = "../djinn-agent" }
+djinn-agent = { path = "../djinn-agent", features = ["test-support"] }
 djinn-core = { path = "../djinn-core" }
 djinn-db = { path = "../djinn-db" }
 djinn-git = { path = "../djinn-git" }

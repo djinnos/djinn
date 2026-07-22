@@ -313,7 +313,10 @@ fn v1_public_facade_constructs_valid_and_invalid_adapter_shapes() {
     let invalid_key = invalid.group_key();
     let snapshot = PublicSnapshot::from_groups([valid], [invalid]);
 
-    assert_eq!(valid_key, TaxonomyV1GroupKey::new("healthy-project", "memory_search"));
+    assert_eq!(
+        valid_key,
+        TaxonomyV1GroupKey::new("healthy-project", "memory_search")
+    );
     assert_eq!(
         invalid_key,
         TaxonomyV1GroupKey::new("malformed-project", LOAD_KNOWLEDGE_CONTEXT_ENTRY_POINT)
