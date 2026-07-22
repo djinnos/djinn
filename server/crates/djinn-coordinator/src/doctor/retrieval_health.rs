@@ -31,6 +31,7 @@ pub struct RetrievalHealthSource {
 struct RetrievalHealthPublication {
     snapshot: Mutex<Arc<TaxonomyV1RetrievalSnapshot>>,
     last_error: Mutex<Option<String>>,
+    last_success: Mutex<Option<OffsetDateTime>>,
 }
 
 impl RetrievalHealthPublication {
@@ -38,6 +39,7 @@ impl RetrievalHealthPublication {
         Self {
             snapshot: Mutex::new(Arc::new(TaxonomyV1RetrievalSnapshot::new())),
             last_error: Mutex::new(None),
+            last_success: Mutex::new(None),
         }
     }
 
@@ -50,6 +52,8 @@ impl RetrievalHealthPublication {
             Ok(snapshot) => {
                 *self.snapshot.lock().unwrap_or_else(|e| e.into_inner()) = Arc::new(snapshot);
                 *self.last_error.lock().unwrap_or_else(|e| e.into_inner()) = None;
+                *self.last_success.lock().unwrap_or_else(|e| e.into_inner()) =
+                    Some(OffsetDateTime::now_utc());
                 Ok(())
             }
             Err(error) => {
@@ -64,6 +68,15 @@ impl RetrievalHealthPublication {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .clone()
+    }
+
+    fn refresh_failure_evidence(&self) -> Option<serde_json::Value> {
+        let error = self.refresh_error()?;
+        let attempted_at = OffsetDateTime::now_utc();
+        let last_success = *self.last_success.lock().unwrap_or_else(|e| e.into_inner());
+        Some(
+            serde_json::json!({"error_class":"retrieval_health_refresh_failed","attempted_at":attempted_at.format(&Iso8601::DEFAULT).ok(),"last_success_at":last_success.and_then(|at| at.format(&Iso8601::DEFAULT).ok()),"last_success_age_seconds":last_success.map(|at| (attempted_at-at).whole_seconds()),"detail":error.chars().take(512).collect::<String>()}),
+        )
     }
 }
 
@@ -243,6 +256,9 @@ impl DoctorCheck for SourceZeroResultCheck {
         "Flags taxonomy-v1 successful retrieval queries with zero candidates"
     }
     fn run(&self) -> DoctorResult<Vec<Finding>> {
+        if self.publication.refresh_error().is_some() {
+            return Ok(Vec::new());
+        }
         TaxonomyV1RetrievalZeroResultCheck::new(self.config, (*self.publication.snapshot()).clone())
             .run()
     }
@@ -270,6 +286,9 @@ impl DoctorCheck for SourceInjectionStarvationCheck {
         "Flags starved load_knowledge_context candidate-bearing queries"
     }
     fn run(&self) -> DoctorResult<Vec<Finding>> {
+        if self.publication.refresh_error().is_some() {
+            return Ok(Vec::new());
+        }
         InjectionStarvationCheck::new(self.config, (*self.publication.snapshot()).clone()).run()
     }
     fn cadence(&self) -> DoctorCheckCadence {
@@ -294,19 +313,25 @@ impl DoctorCheck for RetrievalHealthRefreshCheck {
     fn run(&self) -> DoctorResult<Vec<Finding>> {
         Ok(self
             .source
-            .refresh_error()
+            .publication
+            .refresh_failure_evidence()
             .into_iter()
-            .map(|error| {
+            .map(|evidence| {
+                let detail = evidence["detail"]
+                    .as_str()
+                    .unwrap_or("retrieval refresh failed")
+                    .to_owned();
                 Finding::new(
                     djinn_core::doctor::FindingSeverity::Error,
                     RETRIEVAL_HEALTH_REFRESH_NAME,
                     djinn_core::doctor::ResolverSnapshot::new(
                         "retrieval_health_refresh",
-                        serde_json::json!({"error": error}),
+                        evidence.clone(),
                         serde_json::json!({"healthy": false}),
                     ),
-                    error,
+                    detail,
                 )
+                .with_evidence(evidence)
             })
             .collect())
     }
