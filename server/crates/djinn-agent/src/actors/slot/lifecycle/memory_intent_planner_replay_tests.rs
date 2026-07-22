@@ -252,6 +252,7 @@ async fn assemble(
         arbiter_directive: None,
         mcp_server_instructions: &BTreeMap::new(),
         extension_diagnostics: &[],
+        cancellation: None,
         memory_intent_planner: planner,
     })
     .await
