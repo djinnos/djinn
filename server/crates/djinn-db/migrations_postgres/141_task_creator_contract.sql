@@ -76,20 +76,30 @@ WITH valid_source AS (
       )
     GROUP BY b.blocking_task_id, b.task_id
 ),
--- Targets with multiple distinct source links are ambiguous: do not guess.
+-- Join each raw source link to validate the source task exists and its
+-- creator joins `users`. Dangling source IDs and sources whose creator is
+-- NULL or deleted drop out here, BEFORE ambiguity is considered.
+source_valid AS (
+    SELECT vs.target_task_id,
+           vs.source_task_id,
+           src.created_by_user_id AS creator_id
+    FROM valid_source vs
+    JOIN tasks src ON src.id = vs.source_task_id
+    JOIN users u ON u.id = src.created_by_user_id
+),
+-- Ambiguity is measured ONLY among valid source rows: a target with
+-- multiple valid source tasks (after the validity join) is ambiguous.
 ambiguous_targets AS (
     SELECT target_task_id
-    FROM valid_source
+    FROM source_valid
     GROUP BY target_task_id
     HAVING COUNT(DISTINCT source_task_id) > 1
 ),
 source_creator AS (
-    SELECT vs.target_task_id, src.created_by_user_id AS creator_id
-    FROM valid_source vs
-    JOIN tasks src ON src.id = vs.source_task_id
-    JOIN users u ON u.id = src.created_by_user_id
-    WHERE vs.target_task_id NOT IN (SELECT target_task_id FROM ambiguous_targets)
-    GROUP BY vs.target_task_id, src.created_by_user_id
+    SELECT sv.target_task_id, sv.creator_id
+    FROM source_valid sv
+    WHERE sv.target_task_id NOT IN (SELECT target_task_id FROM ambiguous_targets)
+    GROUP BY sv.target_task_id, sv.creator_id
 ),
 epic_creator AS (
     SELECT t.id AS target_task_id, e.created_by_user_id AS creator_id

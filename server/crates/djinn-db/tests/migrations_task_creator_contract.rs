@@ -144,6 +144,20 @@ fn migration_sql() -> String {
     std::fs::read_to_string(&migration).expect("read contract migration sql")
 }
 
+/// Extract only the data-backfill CTE+UPDATE statement from the migration,
+/// so rollback and idempotence tests can rerun the *real* data step rather
+/// than a synthetic substitute.
+fn migration_data_step_sql() -> String {
+    let sql = migration_sql();
+    let start = sql
+        .find("WITH valid_source AS (")
+        .expect("find data step WITH clause");
+    let end = sql
+        .find("-- ── 3.")
+        .expect("find zero-NULL assertion marker");
+    sql[start..end].trim().to_owned()
+}
+
 async fn set_operator(conn: &mut PgConnection, operator_id: &str) {
     sqlx::query("SELECT set_config('djinn.migration_designated_operator_user_id', $1, false)")
         .bind(operator_id)
@@ -696,6 +710,108 @@ async fn ambiguous_source_links_advance() {
 }
 
 #[tokio::test]
+async fn valid_source_survives_alongside_dangling_source_link() {
+    with_temp_database("src_valid_dangling", |db_url| async move {
+        let mut conn = PgConnection::connect(&db_url)
+            .await
+            .expect("connect fresh database");
+        apply_prior_migrations(&mut conn).await;
+
+        seed_project(&mut conn, "project-1").await;
+        seed_user(&mut conn, "user-source-valid", false).await;
+        seed_user(&mut conn, "user-epic", false).await;
+        seed_user(&mut conn, DESIGNATED, false).await;
+
+        // A valid source task with a valid creator.
+        seed_task(
+            &mut conn,
+            "task-source-valid",
+            "project-1",
+            Some("user-source-valid"),
+        )
+        .await;
+        seed_epic(&mut conn, "epic-1", "project-1", Some("user-epic")).await;
+        seed_task_with_epic(
+            &mut conn,
+            "task-target",
+            "project-1",
+            Some("epic-1"),
+            None,
+            None,
+        )
+        .await;
+
+        // Valid audit link.
+        seed_audit_source_link(&mut conn, "task-target", "task-source-valid", "v").await;
+        // Dangling audit link — source task does not exist.
+        seed_audit_source_link(&mut conn, "task-target", "task-source-deleted", "d").await;
+
+        set_operator(&mut conn, DESIGNATED).await;
+        apply_contract_migration(&mut conn).await;
+
+        assert_eq!(
+            get_task_creator(&mut conn, "task-target").await,
+            Some("user-source-valid".to_owned()),
+            "valid source creator must win even when a dangling source link is present"
+        );
+        conn.close().await.expect("close");
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn valid_source_survives_alongside_null_creator_source_link() {
+    with_temp_database("src_valid_null", |db_url| async move {
+        let mut conn = PgConnection::connect(&db_url)
+            .await
+            .expect("connect fresh database");
+        apply_prior_migrations(&mut conn).await;
+
+        seed_project(&mut conn, "project-1").await;
+        seed_user(&mut conn, "user-source-valid", false).await;
+        seed_user(&mut conn, "user-epic", false).await;
+        seed_user(&mut conn, DESIGNATED, false).await;
+
+        // Valid source task with a valid creator.
+        seed_task(
+            &mut conn,
+            "task-source-valid",
+            "project-1",
+            Some("user-source-valid"),
+        )
+        .await;
+        // Source task that exists but has a NULL creator.
+        seed_task(&mut conn, "task-source-null", "project-1", None).await;
+        seed_epic(&mut conn, "epic-1", "project-1", Some("user-epic")).await;
+        seed_task_with_epic(
+            &mut conn,
+            "task-target",
+            "project-1",
+            Some("epic-1"),
+            None,
+            None,
+        )
+        .await;
+
+        // Valid audit link.
+        seed_audit_source_link(&mut conn, "task-target", "task-source-valid", "v").await;
+        // Audit link to a source task that exists but has NULL creator.
+        seed_audit_source_link(&mut conn, "task-target", "task-source-null", "n").await;
+
+        set_operator(&mut conn, DESIGNATED).await;
+        apply_contract_migration(&mut conn).await;
+
+        assert_eq!(
+            get_task_creator(&mut conn, "task-target").await,
+            Some("user-source-valid".to_owned()),
+            "valid source creator must win even when a second source has NULL creator"
+        );
+        conn.close().await.expect("close");
+    })
+    .await;
+}
+
+#[tokio::test]
 async fn remediation_hold_source_link_wins() {
     with_temp_database("hold_src", |db_url| async move {
         let mut conn = PgConnection::connect(&db_url)
@@ -1140,29 +1256,102 @@ async fn rollback_on_preflight_failure_leaves_column_nullable() {
             .expect("connect fresh database");
         apply_prior_migrations(&mut conn).await;
 
+        // Zero tasks — purely a preflight failure.
+        clear_operator(&mut conn).await;
+
+        let sql = migration_sql();
+        let err = conn
+            .execute(sql.as_str())
+            .await
+            .expect_err("unset operator must fail");
+        assert!(
+            err.to_string()
+                .contains("creator_contract_designated_operator_unset"),
+            "expected unset marker"
+        );
+        assert!(
+            column_is_nullable(&mut conn).await,
+            "column should remain nullable after preflight failure"
+        );
+        conn.close().await.expect("close");
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn forced_post_update_failure_rolls_back_data_and_schema() {
+    with_temp_database("rb_forced", |db_url| async move {
+        let mut conn = PgConnection::connect(&db_url)
+            .await
+            .expect("connect fresh database");
+        apply_prior_migrations(&mut conn).await;
+
         seed_project(&mut conn, "project-1").await;
         seed_user(&mut conn, DESIGNATED, false).await;
-        seed_task(&mut conn, "task-1", "project-1", None).await;
+        // task-rb starts NULL so the data step will update it.
+        seed_task(&mut conn, "task-rb", "project-1", None).await;
 
-        // Successful migration.
         set_operator(&mut conn, DESIGNATED).await;
-        apply_contract_migration(&mut conn).await;
-        assert!(
-            !column_is_nullable(&mut conn).await,
-            "column should be NOT NULL after successful migration"
-        );
 
-        // Temp CHECK constraint must have been dropped.
+        // Build a migration variant that runs the real preflight, the real
+        // data step, then a forced failure BEFORE the contraction step.
+        // This proves the data UPDATE is rolled back together with the
+        // schema change on any failure between them.
+        let full_sql = migration_sql();
+        let data_step = migration_data_step_sql();
+        // The preflight DO block is everything before the data step.
+        let preflight_end = full_sql
+            .find("WITH valid_source AS (")
+            .expect("find data step start");
+        let preflight_sql = full_sql[..preflight_end].trim();
+
+        let mut tx = conn.begin().await.expect("begin transaction");
+
+        // Preflight.
+        tx.execute(preflight_sql).await.expect("preflight succeeds");
+        // Real data step.
+        tx.execute(data_step.as_str())
+            .await
+            .expect("data step succeeds");
+        // Verify the data step updated the task inside the tx.
+        let updated: Option<String> =
+            sqlx::query_scalar("SELECT created_by_user_id FROM tasks WHERE id = 'task-rb'")
+                .fetch_one(&mut *tx)
+                .await
+                .expect("check updated value");
+        assert_eq!(
+            updated,
+            Some(DESIGNATED.to_owned()),
+            "data step should have filled the task within the transaction"
+        );
+        // Forced failure: an invalid statement.
+        let forced = tx.execute("SELECT 1 / 0").await;
+        assert!(forced.is_err(), "forced failure should raise an error");
+
+        // Roll back the transaction.
+        drop(tx);
+
+        // After rollback: task value restored to NULL, column still nullable.
+        assert_eq!(
+            get_task_creator(&mut conn, "task-rb").await,
+            None,
+            "task value should be restored to NULL after rollback"
+        );
+        assert!(
+            column_is_nullable(&mut conn).await,
+            "column should remain nullable after rollback"
+        );
+        // No temp CHECK constraint leaked.
         let constraint_count: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM pg_constraint \
              WHERE conname = 'tasks_created_by_user_id_not_null_check'",
         )
         .fetch_one(&mut conn)
         .await
-        .expect("check temp constraint removed");
+        .expect("check temp constraint absent");
         assert_eq!(
             constraint_count, 0,
-            "temporary NOT VALID check constraint should be dropped after success"
+            "no temp CHECK constraint should remain after rollback"
         );
 
         conn.close().await.expect("close");
@@ -1250,18 +1439,18 @@ async fn data_step_is_idempotent() {
             "task should be filled after first migration run"
         );
 
-        // Re-running just the NULL-only UPDATE portion is idempotent.
-        let affected: i64 = sqlx::query(
-            "UPDATE tasks SET created_by_user_id = created_by_user_id \
-             WHERE created_by_user_id IS NULL",
-        )
-        .execute(&mut conn)
-        .await
-        .map(|r| r.rows_affected() as i64)
-        .unwrap_or(0);
+        // Rerun the REAL data step CTE+UPDATE from the migration file (not a
+        // synthetic substitute). Because there are no NULL creators left,
+        // it must affect zero rows and leave the value unchanged.
+        let data_step = migration_data_step_sql();
+        let affected: i64 = conn
+            .execute(data_step.as_str())
+            .await
+            .map(|r| r.rows_affected() as i64)
+            .expect("data step rerun should succeed");
         assert_eq!(
             affected, 0,
-            "re-running the NULL-only update should affect zero rows (idempotent)"
+            "re-running the real data step should affect zero rows (idempotent)"
         );
 
         assert_eq!(
