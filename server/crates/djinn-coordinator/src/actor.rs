@@ -929,7 +929,11 @@ impl CoordinatorActor {
         // Reap pending task_attempts orphaned while this coordinator was down
         // (or wedged from before the reaper existed) so the respawn guard
         // unblocks those (task, role) pairs immediately after a deploy.
-        health::reap_orphaned_pending_attempts_for_startup(&self.db).await;
+        health::reap_orphaned_pending_attempts_for_startup(
+            &self.db,
+            &self.coordinator_incarnation_id,
+        )
+        .await;
         let startup_context = self.maintenance_context();
         health::reap_orphaned_taskrun_jobs_for_startup(&self.db, &startup_context).await;
         self.rehydrate_durable_dispatch_state().await;
