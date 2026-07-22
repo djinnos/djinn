@@ -600,7 +600,10 @@ mod tests {
     fn truncate_keeps_panic_line_at_end() {
         // Incident regression (2026-07-22): a giant routine log line before
         // the panic must not evict the panic text from the capture.
-        let noise = format!("INFO sqlx slow statement: {}\n", "x".repeat(TASK_ATTEMPT_LOG_TAIL_MAX_LEN));
+        let noise = format!(
+            "INFO sqlx slow statement: {}\n",
+            "x".repeat(TASK_ATTEMPT_LOG_TAIL_MAX_LEN)
+        );
         let panic_line = "thread 'main' panicked at src/lib.rs:42: boom";
         let log = format!("{noise}{panic_line}");
         let result = prepare_log_tail(&log);

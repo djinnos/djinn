@@ -12,6 +12,9 @@ mod list_summary_tests {
     use djinn_db::{
         Database, ProjectRepository, ProposalCreateInput, ProposalDebateTrailCreateInput,
         ProposalRepository,
+        test_support::{
+            delete_proposal_lint_results_for_test, replace_legacy_proposal_head_for_test,
+        },
     };
 
     /// A well-formed body that passes all deterministic readiness checks.
@@ -165,6 +168,46 @@ What happens if D fails?
         assert_eq!(c["dor_ready"], serde_json::json!(true));
         assert_eq!(c["gate_ready"], serde_json::json!(true));
         assert_eq!(c["unresolved_blocking_count"], serde_json::json!(0));
+    }
+
+    /// A list row must synchronously recompute a legacy head with no cached lint
+    /// result. The old in-memory evaluator would mark this complete proposal ready.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn proposal_list_blocks_uncached_legacy_integrity_failure() {
+        let (server, db) = test_server().await;
+        let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+        let project = ProjectRepository::new(db.clone(), EventBus::noop())
+            .create("svc-list-legacy", "test", "svc-list-legacy-repo")
+            .await
+            .unwrap();
+        let proposal = repo
+            .create(ProposalCreateInput {
+                title: "Legacy corrupt list row",
+                body: ready_body(),
+                acceptance_criteria: Some(r#"[{"criterion":"API returns 200","met":false}]"#),
+                status: None,
+                body_format: Some("mdx"),
+            })
+            .await
+            .unwrap();
+        repo.add_target(&proposal.id, &project.id, "primary")
+            .await
+            .unwrap();
+        let corrupt_body = format!(
+            "{}\n<Callout id=\"duplicate\">one</Callout>\n<Callout id=\"duplicate\">two</Callout>",
+            ready_body()
+        );
+        replace_legacy_proposal_head_for_test(&db, &proposal.id, &corrupt_body, "mdx").await;
+        delete_proposal_lint_results_for_test(&db, &proposal.id).await;
+        assert_eq!(repo.lint_result_count(&proposal.id).await.unwrap(), 0);
+
+        let list = server
+            .dispatch_tool("proposal_list", serde_json::json!({ "limit": 50 }))
+            .await
+            .unwrap();
+        let summary = summary_for(&list, &proposal.id).expect("legacy proposal list summary");
+        assert_eq!(summary["dor_ready"], serde_json::json!(false));
+        assert_eq!(summary["gate_ready"], serde_json::json!(false));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

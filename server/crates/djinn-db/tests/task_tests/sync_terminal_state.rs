@@ -147,8 +147,8 @@ async fn transactional_peer_upsert_round_trips_distinct_refinement_correlations(
     // Fresh peer INSERTs must carry a locally-known creator now that the
     // creator contract forbids NULL attribution on new rows.
     let peer_creator = djinn_db::repositories::test_support::seed_test_user(&db).await;
-    first.created_by_user_id = Some(peer_creator.clone());
-    second.created_by_user_id = Some(peer_creator);
+    first.created_by_user_id = peer_creator.clone();
+    second.created_by_user_id = peer_creator;
     first.refinement_run_id = Some(first_run_id.clone());
     first.refinement_intent_id = Some(first_intent_id.clone());
     first.refinement_generation = Some(1);
