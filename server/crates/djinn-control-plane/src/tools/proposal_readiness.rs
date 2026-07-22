@@ -226,7 +226,8 @@ async fn resolve_and_lint_current_head(
         .iter()
         .rev()
         .find(|revision| {
-            revision.seq == proposal.latest_revision_seq
+            revision.event_kind == "spec_revision"
+                && revision.seq == proposal.latest_revision_seq
                 && revision.body == proposal.body
                 && revision.body_format == proposal.body_format
         })
@@ -753,8 +754,7 @@ Entry points: src/main.rs.
         let corrupt_body = format!(
             "{READY_BODY}\n<Callout id=\"duplicate\">one</Callout>\n<Callout id=\"duplicate\">two</Callout>"
         );
-        // Simulate a legacy row written before repository-boundary linting. Its
-        // old cache entry has the wrong body hash, so the repository recomputes.
+        // Simulate a legacy row written before repository-boundary linting.
         sqlx::query("UPDATE proposals SET body = $1 WHERE id = $2")
             .bind(&corrupt_body)
             .bind(&proposal.id)
@@ -768,6 +768,22 @@ Entry points: src/main.rs.
             .execute(db.pool())
             .await
             .unwrap();
+        sqlx::query("DELETE FROM proposal_revision_lint_results WHERE proposal_id = $1")
+            .bind(&proposal.id)
+            .execute(db.pool())
+            .await
+            .unwrap();
+        let lint_row_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM proposal_revision_lint_results WHERE proposal_id = $1",
+        )
+        .bind(&proposal.id)
+        .fetch_one(db.pool())
+        .await
+        .unwrap();
+        assert_eq!(
+            lint_row_count, 0,
+            "legacy head starts without persisted lint"
+        );
         let proposal = repo.get(&proposal.id).await.unwrap().unwrap();
         let acs = vec![ac_text("The result is testable")];
         let result = evaluate_latest_head_readiness(&repo, &proposal, &acs, 1).await;
@@ -801,11 +817,16 @@ Entry points: src/main.rs.
     }
 
     #[tokio::test]
-    async fn latest_head_readiness_ignores_same_sequence_lifecycle_row() {
+    async fn latest_head_readiness_ignores_same_sequence_status_change_row() {
         let (_db, repo, proposal) = test_repo_and_proposal(READY_BODY, None).await;
-        repo.record_refinement_lifecycle(&proposal.id, "refinement_start", None)
-            .await
-            .unwrap();
+        repo.advance_draft_to_in_review(&proposal.id).await.unwrap();
+        let revisions = repo.revisions(&proposal.id).await.unwrap();
+        assert!(revisions.iter().any(|revision| {
+            revision.event_kind == "status_change"
+                && revision.seq == proposal.latest_revision_seq
+                && revision.body == proposal.body
+                && revision.body_format == proposal.body_format
+        }));
         let acs = vec![ac_text("The result is testable")];
         let result = evaluate_latest_head_readiness(&repo, &proposal, &acs, 1).await;
 
