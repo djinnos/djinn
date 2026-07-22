@@ -213,6 +213,9 @@ pub struct CreateRetrievalTraceTerminalParams<'a> {
     pub trace: CreateRetrievalTraceParams<'a>,
     /// Persisted verbatim so terminal writes retain the effective rollout cohort.
     pub rollout_label: &'a str,
+    /// Semantic retrieval outcome retained independently from terminal state.
+    /// This keeps disabled terminals distinct from retrieval errors.
+    pub outcome: RetrievalTraceOutcome,
     pub terminal_state: KnowledgeTraceTerminalState,
     pub terminal_at: &'a str,
     pub candidate_count: Option<i32>,
@@ -223,6 +226,14 @@ fn validate_terminal_trace(params: &CreateRetrievalTraceTerminalParams<'_>) -> R
     parse_retrieval_trace_utc_timestamp(params.terminal_at, "terminal_at")?;
     match params.terminal_state {
         KnowledgeTraceTerminalState::Success => {
+            if !matches!(
+                params.outcome,
+                RetrievalTraceOutcome::Injected | RetrievalTraceOutcome::Empty
+            ) {
+                return Err(DbError::InvalidData(
+                    "successful taxonomy-v1 terminal requires injected or empty outcome".to_owned(),
+                ));
+            }
             let candidate_count = params.candidate_count.ok_or_else(|| {
                 DbError::InvalidData(
                     "successful taxonomy-v1 trace requires candidate_count".to_owned(),
