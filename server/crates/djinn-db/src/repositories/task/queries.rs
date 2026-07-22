@@ -682,27 +682,24 @@ impl TaskRepository {
                 let mut tx = self.db.pool().begin().await?;
                 // NOTE: dynamic SQL (stale_hours inlined) — compile-time check not possible
                 let sql = format!(
-                    r#"SELECT id, project_id, short_id, epic_id, title, description, design, issue_type,
-                            status, priority, owner, labels::text AS labels, acceptance_criteria::text AS acceptance_criteria,
-                            reopen_count, continuation_count,
-                            total_reopen_count,
-                            intervention_count, last_intervention_at,
-                            created_at, updated_at, closed_at,
-                            close_reason, merge_commit_sha, pr_url, merge_conflict_metadata, memory_refs::text AS memory_refs
+                    r#"SELECT id
                      FROM tasks
                      WHERE status = 'in_progress'
                        AND updated_at < to_char((now() at time zone 'utc') - (interval '1 hour' * {stale_hours}), 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')"#
                 );
-                let stale: Vec<Task> = sqlx::query_as(&sql).fetch_all(&mut *tx).await?;
+                // Reconciliation only needs IDs to perform the update. Hydrate
+                // each changed row through the canonical projection below so a
+                // Task cannot be decoded from a stale partial projection.
+                let stale_ids: Vec<String> = sqlx::query_scalar(&sql).fetch_all(&mut *tx).await?;
 
                 let mut healed: Vec<Task> = Vec::new();
-                for task in stale {
+                for task_id in stale_ids {
                     sqlx::query!(
                         r#"UPDATE tasks
                          SET status = 'open',
                              updated_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
                          WHERE id = $1"#,
-                        task.id
+                        task_id
                     )
                     .execute(&mut *tx)
                     .await?;
@@ -718,13 +715,13 @@ impl TaskRepository {
                             (id, task_id, actor_id, actor_role, event_type, payload)
                          VALUES ($1, $2, 'system', 'system', 'status_changed', $3)",
                         activity_id,
-                        task.id,
+                        task_id,
                         payload
                     )
                     .execute(&mut *tx)
                     .await?;
 
-                    let updated: Task = task_select_where_id!(&task.id).fetch_one(&mut *tx).await?;
+                    let updated: Task = task_select_where_id!(&task_id).fetch_one(&mut *tx).await?;
                     healed.push(updated);
                 }
                 tx.commit().await?;
