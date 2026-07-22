@@ -179,6 +179,9 @@ mod composed_gate_tests {
     use djinn_db::{
         Database, EffectiveCreatorProvenance, ProjectRepository, ProposalCreateInput,
         ProposalDebateTrailCreateInput, ProposalRepository, TaskRepository, UserRepository,
+        test_support::{
+            delete_proposal_lint_results_for_test, replace_legacy_proposal_head_for_test,
+        },
     };
 
     /// A well-formed body that passes all deterministic readiness checks.
@@ -299,6 +302,21 @@ What happens if D fails?
         title: &str,
     ) -> djinn_core::models::proposal::Proposal {
         create_proposal_with_body(repo, project_repo, user_id, title, ready_body()).await
+    }
+
+    async fn replace_with_uncached_corrupt_legacy_head(
+        db: &Database,
+        repo: &ProposalRepository,
+        proposal: &djinn_core::models::proposal::Proposal,
+    ) -> djinn_core::models::proposal::Proposal {
+        let corrupt_body = format!(
+            "{}\n<Callout id=\"duplicate\">one</Callout>\n<Callout id=\"duplicate\">two</Callout>",
+            ready_body()
+        );
+        replace_legacy_proposal_head_for_test(db, &proposal.id, &corrupt_body, "mdx").await;
+        delete_proposal_lint_results_for_test(db, &proposal.id).await;
+        assert_eq!(repo.lint_result_count(&proposal.id).await.unwrap(), 0);
+        repo.get(&proposal.id).await.unwrap().unwrap()
     }
 
     /// A needs-work judge verdict blocks sign-off with a deterministic
@@ -829,6 +847,83 @@ What happens if D fails?
         );
     }
 
+    /// Detail and composed gates independently recompute uncached legacy heads
+    /// and never let human semantic authority override spec-integrity failures.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn uncached_legacy_integrity_blocks_detail_and_composed_gate_despite_override() {
+        let (server, db, user_id) = setup_test_server_and_user().await;
+        let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+        let project_repo = ProjectRepository::new(db.clone(), EventBus::noop());
+        let proposal =
+            create_ready_proposal(&repo, &project_repo, &user_id, "Legacy corruption").await;
+        let proposal = replace_with_uncached_corrupt_legacy_head(&db, &repo, &proposal).await;
+        let override_meta = serde_json::json!({
+            "override_on_revision_seq": proposal.latest_revision_seq,
+            "reason": "Human accepted semantic readiness",
+            "override_by_user_id": user_id,
+        });
+        repo.record_refinement_lifecycle(&proposal.id, "verdict_override", Some(&override_meta))
+            .await
+            .unwrap();
+
+        let composed = super::super::evaluate_composed_gate(
+            &repo,
+            &proposal,
+            &proposal.body,
+            &proposal.acceptance_criteria,
+            1,
+        )
+        .await;
+        assert!(
+            composed
+                .failures
+                .iter()
+                .any(|failure| failure.contains("Spec integrity: ")),
+            "uncached integrity must block composed gate: {composed:?}"
+        );
+
+        delete_proposal_lint_results_for_test(&db, &proposal.id).await;
+        assert_eq!(repo.lint_result_count(&proposal.id).await.unwrap(), 0);
+        let gate = show_gate_status(&server, &user_id, &proposal.id).await;
+        assert_eq!(gate["dor_ready"], serde_json::json!(false));
+        assert_eq!(gate["ready"], serde_json::json!(false));
+        assert_eq!(gate["human_override_active"], serde_json::json!(true));
+
+        let revision = repo
+            .revisions(&proposal.id)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|revision| {
+                revision.seq == proposal.latest_revision_seq
+                    && revision.body == proposal.body
+                    && revision.body_format == proposal.body_format
+            })
+            .expect("legacy material head revision");
+        let expected_messages: Vec<String> = repo
+            .lint_for_revision(&revision)
+            .await
+            .unwrap()
+            .errors
+            .iter()
+            .map(|violation| {
+                format!(
+                    "Spec integrity: {} at bytes {}..{}",
+                    violation.code, violation.span.start, violation.span.end
+                )
+            })
+            .collect();
+        assert!(!expected_messages.is_empty(), "fixture must be corrupt");
+        let detail_messages: Vec<String> = gate["dor_failures"]
+            .as_array()
+            .expect("gate must expose DoR failures")
+            .iter()
+            .filter_map(|failure| failure["message"].as_str().map(str::to_owned))
+            .filter(|message| message.starts_with("Spec integrity: "))
+            .collect();
+        assert_eq!(detail_messages, expected_messages, "exact integrity ranges");
+    }
+
     /// Without current authority, `proposal_show` preserves the historical
     /// DoR-only blocking status and explanations.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1165,7 +1260,6 @@ What happens if D fails?
         );
     }
 }
-
 
 // P4 tribunal regression tests — extracted to `tribunal_tests.rs`
 // to meet the 1500-line file-size guard.
