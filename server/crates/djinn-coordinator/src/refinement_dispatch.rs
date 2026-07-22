@@ -690,8 +690,11 @@ impl CoordinatorActor {
         // current DoR findings.
         let readiness_context = readiness
             .as_ref()
-            .and_then(|r| r.to_error_string())
-            .unwrap_or_else(|| "Proposal currently meets all DoR checks.".to_string());
+            .map(CoordinatorActor::format_readiness_context)
+            .unwrap_or_else(|| {
+                "Current proposal head could not be resolved for shared DoR/lint readiness."
+                    .to_string()
+            });
 
         // Retrieve the latest current-revision human reviewer feedback recorded
         // by a demand round. The helper filters to the proposal's current

@@ -84,11 +84,14 @@ async fn structured_acs_added_mid_refinement_clear_missing_ac_dor_status() {
         refreshed.failures
     );
 
-    // Drive the real injection path used at dispatch: fold the readiness into
-    // the "Current DoR status" string and create the tribunal task.
-    let readiness_context = refreshed
-        .to_error_string()
-        .unwrap_or_else(|| "Proposal currently meets all DoR checks.".to_string());
+    // Drive the real injection path used at dispatch. The coordinator must use
+    // the shared latest-head result, including the repository-backed complete
+    // lint summary, rather than rebuilding a body-only DoR result.
+    assert!(
+        refreshed.latest_lint.is_some(),
+        "shared latest-head readiness must resolve the current revision lint"
+    );
+    let readiness_context = super::super::actor::CoordinatorActor::format_readiness_context(&refreshed);
     let task_id = actor
         .create_refinement_task_with_context(
             &fixture.proposal_id,
@@ -112,6 +115,11 @@ async fn structured_acs_added_mid_refinement_clear_missing_ac_dor_status() {
             .description
             .contains("At least one acceptance criterion is required"),
         "injected DoR status must not claim ACs are missing once structured ACs exist:\n{}",
+        task.description
+    );
+    assert!(
+        task.description.contains("Latest SpecLintResultV1 summary (errors and warnings):"),
+        "judge/refinement context must include the complete latest lint summary:\n{}",
         task.description
     );
 }

@@ -8,7 +8,9 @@
 use djinn_control_plane::tools::epic_ops::{
     AcceptanceCriterionItem, parse_acceptance_criteria_array,
 };
-use djinn_control_plane::tools::proposal_readiness::evaluate_proposal_readiness;
+use djinn_control_plane::tools::proposal_readiness::{
+    LatestHeadReadinessResult, evaluate_latest_head_readiness,
+};
 use djinn_core::models::{Proposal, ProposalDebateTrail, TransitionAction};
 use djinn_db::{
     EffectiveCreatorProvenance, ProposalRepository, TaskRepository, UserSettingsRepository,
@@ -420,7 +422,7 @@ impl CoordinatorActor {
             run_start.as_deref(),
         );
 
-        let verdict = if let Some(entry) = verdict_entry {
+        let mut verdict = if let Some(entry) = verdict_entry {
             JudgeVerdictResult {
                 body: entry.body.clone(),
                 blocking: entry.blocking,
@@ -437,6 +439,28 @@ impl CoordinatorActor {
                 blocking: true,
             }
         };
+
+        // A Judge's semantic approval is never authority to bypass the
+        // deterministic current-head gate. Reconstructing this shared result
+        // also makes a legacy head with no durable lint row synchronously pass
+        // through `lint_for_revision` cache repair before approval is acted on.
+        // Do not substitute doctor findings or invoke another linter here.
+        if !verdict.blocking {
+            let readiness = self.evaluate_proposal_readiness(proposal_id).await;
+            if !readiness.as_ref().is_some_and(|result| result.ready) {
+                let context = readiness
+                    .as_ref()
+                    .map(Self::format_readiness_context)
+                    .unwrap_or_else(|| {
+                        "Current proposal head could not be resolved for shared DoR/lint readiness."
+                            .to_string()
+                    });
+                verdict.blocking = true;
+                verdict.body = format!(
+                    "Judge ready verdict converted to blocking: current-head machine readiness failed. {context}"
+                );
+            }
+        }
 
         let now_awaiting = if let Some(state) = self.active_refinements.get_mut(proposal_id) {
             state.record_judge_verdict(&verdict);
@@ -509,6 +533,33 @@ impl CoordinatorActor {
         };
         if !state.is_awaiting_human_review() {
             return Err("refinement is not awaiting human review".into());
+        }
+
+        // The head may have changed after the Judge parked the tribunal. Check
+        // the same shared latest-head result immediately before a human accept
+        // can act on that ready verdict. A corrupt legacy head is recomputed
+        // synchronously and resumed as a blocking adjudication; a later clean
+        // material revision naturally passes without touching lint history.
+        if accept {
+            let readiness = self.evaluate_proposal_readiness(proposal_id).await;
+            if !readiness.as_ref().is_some_and(|result| result.ready) {
+                let context = readiness
+                    .as_ref()
+                    .map(Self::format_readiness_context)
+                    .unwrap_or_else(|| {
+                        "Current proposal head could not be resolved for shared DoR/lint readiness."
+                            .to_string()
+                    });
+                if let Some(state) = self.active_refinements.get_mut(proposal_id) {
+                    state.record_judge_verdict(&JudgeVerdictResult {
+                        body: context.clone(),
+                        blocking: true,
+                    });
+                }
+                return Err(format!(
+                    "cannot accept refinement while current-head machine readiness is blocking: {context}"
+                ));
+            }
         }
 
         if !accept
@@ -1032,11 +1083,17 @@ impl CoordinatorActor {
         Some(context)
     }
 
-    /// Evaluate proposal readiness using the deterministic P1 DoR evaluator.
+    /// Evaluate readiness through the shared current-head DoR/lint constructor.
+    ///
+    /// This is deliberately the sole coordinator path to
+    /// `ProposalRepository::lint_for_revision`: the control-plane helper
+    /// resolves the immutable material head and owns synchronous cache repair
+    /// for legacy revisions. Tribunal code neither reads doctor findings nor
+    /// runs an independent integrity check.
     pub(super) async fn evaluate_proposal_readiness(
         &self,
         proposal_id: &str,
-    ) -> Option<djinn_control_plane::tools::proposal_readiness::ProposalReadinessResult> {
+    ) -> Option<LatestHeadReadinessResult> {
         let event_bus = crate::events::event_bus_for(&self.events_tx);
         let proposal_repo = ProposalRepository::new(self.db.clone(), event_bus);
 
@@ -1060,11 +1117,26 @@ impl CoordinatorActor {
         let ac_items: Vec<AcceptanceCriterionItem> =
             parse_acceptance_criteria_array(&proposal.acceptance_criteria);
 
-        Some(evaluate_proposal_readiness(
-            &proposal.body,
-            &ac_items,
-            target_count,
-        ))
+        Some(
+            evaluate_latest_head_readiness(&proposal_repo, &proposal, &ac_items, target_count)
+                .await,
+        )
+    }
+
+    /// Render all shared readiness evidence for a tribunal task. Warnings stay
+    /// visible without changing the lint-aware `ready` decision.
+    pub(super) fn format_readiness_context(readiness: &LatestHeadReadinessResult) -> String {
+        let failures = readiness
+            .to_error_string()
+            .unwrap_or_else(|| "Proposal currently meets all DoR checks.".to_string());
+        let lint_summary = readiness
+            .latest_lint
+            .as_ref()
+            .map(|lint| serde_json::to_string_pretty(lint).unwrap_or_else(|_| format!("{lint:?}")))
+            .unwrap_or_else(|| "unavailable (reported above as a Spec integrity failure)".to_string());
+        format!(
+            "{failures}\n\nLatest SpecLintResultV1 summary (errors and warnings):\n{lint_summary}"
+        )
     }
 }
 
