@@ -1256,38 +1256,42 @@ impl SessionRepository {
     }
 
     /// Best-effort backfill of price snapshot columns for existing sessions
-    /// whose snapshots were never captured at creation time.
+    /// whose snapshots were never captured (`NULL`) OR were captured all-zero
+    /// (the flat-rate coding-plan signature — e.g. the kimi-for-coding/k3 rows
+    /// migration 141 flipped to `unpriced`, which the catalog can now price via
+    /// the k3 alias).
     ///
     /// **Approximate historical pricing:** the pricing data passed in comes from
     /// the *current* catalog and does not reflect what the model cost when the
-    /// session actually ran.  Callers should log this caveat.  Sessions whose
-    /// `model_id` is not present in `pricing_by_model`, or whose supplied
-    /// pricing is all-zero/default, are intentionally skipped — they remain
-    /// all-NULL for snapshots and `cost_usd`.
+    /// session actually ran.  Callers should log this caveat.  Models whose
+    /// supplied pricing is all-zero/default are intentionally skipped — an
+    /// unknown price must never be recorded as a real $0.00.
     ///
-    /// Only sessions with all four snapshot columns `NULL` are touched;
-    /// sessions that already captured a start-time snapshot are preserved.
-    /// Idempotent: re-running with the same pricing is a no-op on already-
-    /// backfilled rows.
+    /// Each tuple is `(model_id, pricing, is_subscription)`. A repriced row that
+    /// is currently `cost_basis = 'unpriced'` is promoted to `'projected'` when
+    /// its model's provider classifies as a subscription; for non-subscription
+    /// providers the pricing is filled but the basis stays `'unpriced'` (we
+    /// cannot know plan-vs-key without per-row credential evidence). Rows already
+    /// `'actual'` / `'projected'` keep their basis.
+    ///
+    /// Only rows whose four snapshot columns are ALL `NULL` or ALL literal `0`
+    /// are touched; partially-zero rows and rows with a real captured snapshot
+    /// are preserved. Idempotent: once repriced (non-zero snapshots) a row no
+    /// longer matches either arm, so re-running is a no-op.
     ///
     /// Returns the total number of rows updated across all models.
     pub async fn backfill_pricing_snapshots(
         &self,
-        pricing_by_model: &[(String, Pricing)],
+        pricing_by_model: &[(String, Pricing, bool)],
     ) -> Result<u64> {
         self.db.ensure_initialized().await?;
 
         let mut total_updated: u64 = 0;
-        for (model_id, pricing) in pricing_by_model {
-            // `Pricing::default()` (all zero rates) represents "pricing
-            // unknown" for custom/seed catalog entries, not a known free
-            // model.  Leave those rows NULL so the analytics layer never
-            // conflates unknown cost with zero cost.
-            if pricing.input_per_million == 0.0
-                && pricing.output_per_million == 0.0
-                && pricing.cache_read_per_million == 0.0
-                && pricing.cache_write_per_million == 0.0
-            {
+        for (model_id, pricing, is_subscription) in pricing_by_model {
+            // All-zero pricing represents "pricing unknown" for custom/seed
+            // catalog entries, not a known free model.  Leave those rows as-is
+            // so the analytics layer never conflates unknown cost with zero.
+            if !pricing.is_priced() {
                 continue;
             }
 
@@ -1307,18 +1311,29 @@ impl SessionRepository {
                          + COALESCE(tokens_out, 0)::double precision * $2
                          + COALESCE(cache_read_tokens, 0)::double precision * $3
                          + COALESCE(cache_write_tokens, 0)::double precision * $4
-                     ) / 1000000.0
+                     ) / 1000000.0,
+                     cost_basis = CASE
+                         WHEN cost_basis = 'unpriced' AND $6 THEN 'projected'
+                         ELSE cost_basis
+                     END
                  WHERE model_id = $5
-                   AND input_price_per_million_snapshot IS NULL
-                   AND output_price_per_million_snapshot IS NULL
-                   AND cache_read_price_per_million_snapshot IS NULL
-                   AND cache_write_price_per_million_snapshot IS NULL"#,
+                   AND (
+                        (input_price_per_million_snapshot IS NULL
+                         AND output_price_per_million_snapshot IS NULL
+                         AND cache_read_price_per_million_snapshot IS NULL
+                         AND cache_write_price_per_million_snapshot IS NULL)
+                     OR (input_price_per_million_snapshot = 0
+                         AND output_price_per_million_snapshot = 0
+                         AND cache_read_price_per_million_snapshot = 0
+                         AND cache_write_price_per_million_snapshot = 0)
+                   )"#,
             )
             .bind(input_rate)
             .bind(output_rate)
             .bind(cache_read_rate)
             .bind(cache_write_rate)
             .bind(model_id.as_str())
+            .bind(*is_subscription)
             .execute(self.db.pool())
             .await?;
 
@@ -1326,6 +1341,43 @@ impl SessionRepository {
         }
 
         Ok(total_updated)
+    }
+
+    /// Boot-time, idempotent repair of plan-backed `openai/*` sessions that old
+    /// worker pods mis-booked as `cost_basis = 'actual'` before the in-Pod
+    /// billing-signal fix. Runtime equivalent of migration 141 step 2, re-run
+    /// every boot so sessions created during a post-deploy image-rebuild window
+    /// (an old worker image still dispatching) are cleaned on the next restart.
+    ///
+    /// GATED on install-wide credential evidence, queried live so it stays
+    /// generic for any deployment: applies ONLY when a non-revoked ChatGPT/Codex
+    /// plan OAuth credential (`__OAUTH_CHATGPT_CODEX`) exists AND no non-revoked
+    /// `OPENAI_API_KEY` credential exists — under that gate an `openai/*` session
+    /// cannot be metered API spend, so the correct basis is `projected`. The
+    /// EXISTS / NOT EXISTS gate is inlined in the UPDATE so it is atomic.
+    /// Idempotent: gated on `cost_basis = 'actual'`, so once rewritten a row no
+    /// longer matches.
+    ///
+    /// Returns the number of rows reclassified (0 when the gate does not hold).
+    pub async fn reclassify_plan_openai_sessions_if_gated(&self) -> Result<u64> {
+        self.db.ensure_initialized().await?;
+        let result = sqlx::query(
+            r#"UPDATE sessions
+                 SET cost_basis = 'projected'
+               WHERE cost_basis = 'actual'
+                 AND model_id LIKE 'openai/%'
+                 AND EXISTS (
+                      SELECT 1 FROM credentials c
+                       WHERE c.key_name = '__OAUTH_CHATGPT_CODEX'
+                         AND c.revoked_at IS NULL)
+                 AND NOT EXISTS (
+                      SELECT 1 FROM credentials c
+                       WHERE c.key_name = 'OPENAI_API_KEY'
+                         AND c.revoked_at IS NULL)"#,
+        )
+        .execute(self.db.pool())
+        .await?;
+        Ok(result.rows_affected())
     }
 
     /// Candidates for the extraction backfill sweep: completed task-runs whose
@@ -3180,6 +3232,7 @@ mod tests {
                 cache_read_per_million: 0.5,
                 cache_write_per_million: 2.5,
             },
+            false,
         )];
 
         let updated = repo.backfill_pricing_snapshots(&pricing).await.unwrap();
@@ -3236,6 +3289,7 @@ mod tests {
                 cache_read_per_million: 99.0,
                 cache_write_per_million: 99.0,
             },
+            false,
         )];
         let updated = repo.backfill_pricing_snapshots(&new_pricing).await.unwrap();
         assert_eq!(updated, 0, "existing snapshots must not be overwritten");
@@ -3287,6 +3341,7 @@ mod tests {
                 cache_read_per_million: 0.5,
                 cache_write_per_million: 2.5,
             },
+            false,
         )];
         let updated = repo.backfill_pricing_snapshots(&pricing).await.unwrap();
         assert_eq!(updated, 0, "uncatalogued model must not be touched");
@@ -3331,7 +3386,7 @@ mod tests {
         .await
         .unwrap();
 
-        let pricing = vec![("custom/seed-model".to_string(), Pricing::default())];
+        let pricing = vec![("custom/seed-model".to_string(), Pricing::default(), false)];
         let updated = repo.backfill_pricing_snapshots(&pricing).await.unwrap();
         assert_eq!(
             updated, 0,
@@ -3374,6 +3429,7 @@ mod tests {
                 cache_read_per_million: 1.0,
                 cache_write_per_million: 3.0,
             },
+            false,
         )];
 
         // First run.
@@ -3389,6 +3445,160 @@ mod tests {
         assert_eq!(fetched.output_price_per_million_snapshot, Some(15.0));
         assert_eq!(fetched.cache_read_price_per_million_snapshot, Some(1.0));
         assert_eq!(fetched.cache_write_price_per_million_snapshot, Some(3.0));
+    }
+
+    /// The migration-141 aftermath: a zero-snapshot 'unpriced' session for a
+    /// subscription-provider model is now repriced from the catalog AND promoted
+    /// to 'projected'. Idempotent on a second run.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn backfill_reprices_zero_snapshot_unpriced_subscription_session() {
+        let db = test_db();
+        let (project_id, task_id) = create_task(&db, EventBus::noop()).await;
+        let repo = SessionRepository::new(db.clone(), EventBus::noop());
+
+        // Zero-snapshot 'unpriced' row — the flat-rate coding-plan k3 signature.
+        let created = repo
+            .create(CreateSessionParams {
+                project_id: &project_id,
+                task_id: Some(&task_id),
+                model: "kimi-for-coding/k3",
+                agent_type: "worker",
+                metadata_json: None,
+                task_run_id: None,
+                pricing: Some(&Pricing::default()),
+                cost_basis: Some("unpriced"),
+            })
+            .await
+            .unwrap();
+        assert_eq!(created.input_price_per_million_snapshot, Some(0.0));
+        assert_eq!(created.cost_basis, "unpriced");
+
+        sqlx::query(
+            "UPDATE sessions SET tokens_in = 1000000, tokens_out = 1000000 WHERE id = $1",
+        )
+        .bind(&created.id)
+        .execute(db.pool())
+        .await
+        .unwrap();
+
+        let pricing = vec![(
+            "kimi-for-coding/k3".to_string(),
+            Pricing {
+                input_per_million: 3.0,
+                output_per_million: 15.0,
+                cache_read_per_million: 0.3,
+                cache_write_per_million: 0.0,
+            },
+            true, // subscription provider
+        )];
+
+        let n = repo.backfill_pricing_snapshots(&pricing).await.unwrap();
+        assert_eq!(n, 1, "zero-snapshot row must be repriced");
+
+        let f = repo.get(&created.id).await.unwrap().unwrap();
+        assert_eq!(f.input_price_per_million_snapshot, Some(3.0));
+        assert_eq!(f.output_price_per_million_snapshot, Some(15.0));
+        assert_eq!(f.cost_basis, "projected", "subscription row promoted");
+        // cost_usd = (1M*3 + 1M*15) / 1M = 18.0
+        assert!((f.cost_usd.unwrap() - 18.0).abs() < 1e-6);
+
+        // Second run: snapshots are now non-zero → no match → no-op.
+        let n2 = repo.backfill_pricing_snapshots(&pricing).await.unwrap();
+        assert_eq!(n2, 0, "repricing must be idempotent");
+    }
+
+    /// Boot-repair gate: `openai/*` 'actual' rows flip to 'projected' only when a
+    /// Codex plan OAuth credential exists and no OpenAI API key does.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn reclassify_plan_openai_sessions_is_credential_gated() {
+        let db = test_db();
+        let (project_id, task_id) = create_task(&db, EventBus::noop()).await;
+        let repo = SessionRepository::new(db.clone(), EventBus::noop());
+
+        let priced = Pricing {
+            input_per_million: 2.0,
+            output_per_million: 8.0,
+            cache_read_per_million: 0.5,
+            cache_write_per_million: 2.5,
+        };
+        let s = repo
+            .create(CreateSessionParams {
+                project_id: &project_id,
+                task_id: Some(&task_id),
+                model: "openai/gpt-5.6-terra",
+                agent_type: "worker",
+                metadata_json: None,
+                task_run_id: None,
+                pricing: Some(&priced),
+                cost_basis: Some("actual"),
+            })
+            .await
+            .unwrap();
+
+        let insert_cred = |key: &str| {
+            let db = db.clone();
+            let key = key.to_string();
+            async move {
+                sqlx::query(
+                    "INSERT INTO credentials (id, provider_id, key_name, encrypted_value) \
+                     VALUES ($1, $2, $3, $4)",
+                )
+                .bind(uuid::Uuid::now_v7().to_string())
+                .bind("chatgpt_codex")
+                .bind(key)
+                .bind(Vec::<u8>::new())
+                .execute(db.pool())
+                .await
+                .unwrap();
+            }
+        };
+
+        // No credentials → gate closed → no-op.
+        assert_eq!(
+            repo.reclassify_plan_openai_sessions_if_gated().await.unwrap(),
+            0
+        );
+        assert_eq!(repo.get(&s.id).await.unwrap().unwrap().cost_basis, "actual");
+
+        // Codex plan OAuth present, no OpenAI API key → gate open → flip.
+        insert_cred("__OAUTH_CHATGPT_CODEX").await;
+        assert_eq!(
+            repo.reclassify_plan_openai_sessions_if_gated().await.unwrap(),
+            1
+        );
+        assert_eq!(
+            repo.get(&s.id).await.unwrap().unwrap().cost_basis,
+            "projected"
+        );
+
+        // Idempotent second run.
+        assert_eq!(
+            repo.reclassify_plan_openai_sessions_if_gated().await.unwrap(),
+            0
+        );
+
+        // With an OpenAI API key also present, the gate closes: a fresh 'actual'
+        // openai row is left untouched.
+        let s2 = repo
+            .create(CreateSessionParams {
+                project_id: &project_id,
+                task_id: Some(&task_id),
+                model: "openai/gpt-5.5",
+                agent_type: "worker",
+                metadata_json: None,
+                task_run_id: None,
+                pricing: Some(&priced),
+                cost_basis: Some("actual"),
+            })
+            .await
+            .unwrap();
+        insert_cred("OPENAI_API_KEY").await;
+        assert_eq!(
+            repo.reclassify_plan_openai_sessions_if_gated().await.unwrap(),
+            0,
+            "presence of an OpenAI API key closes the gate"
+        );
+        assert_eq!(repo.get(&s2.id).await.unwrap().unwrap().cost_basis, "actual");
     }
 
     // ── Cost-basis derivation tests ─────────────────────────────────────────

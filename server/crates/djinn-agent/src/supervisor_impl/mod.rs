@@ -56,8 +56,19 @@ pub(crate) use stage::execute_stage;
 pub(crate) struct SupervisorCallbackContext {
     pub agent_context: AgentContext,
     pub cancel: CancellationToken,
-    /// Test seam: integration tests inject a stubbed `LlmProvider` so the
-    /// stage can run end-to-end without a real vault credential.  Production
-    /// callers leave this `None`.
+    /// Injected `LlmProvider`. This is THE production in-Pod worker path
+    /// (`djinn-agent-worker` builds the provider from a Secret-mounted
+    /// credential and passes it here) as well as the integration-test stub
+    /// seam. When set, `execute_stage` skips `resolve_model_and_credential`.
+    /// Host dispatch leaves this `None` and resolves the credential itself.
     pub provider_override: Option<Arc<dyn LlmProvider>>,
+    /// Billing signal `(CostBasisHint, BillingSource)` pre-derived by the
+    /// caller. The worker path derives it from the `SerializableCredential`
+    /// kind (host resolution is unavailable in-Pod) and supplies it here so
+    /// the session books the correct `cost_basis`. `None` for the host path
+    /// (derived from the resolved credential) and the supervisor-stub test.
+    pub billing_signal: Option<(
+        djinn_supervisor::services::CostBasisHint,
+        djinn_supervisor::services::BillingSource,
+    )>,
 }

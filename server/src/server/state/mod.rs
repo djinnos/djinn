@@ -2544,6 +2544,7 @@ impl AppState {
     /// as free).  Idempotent — safe to rerun.
     async fn backfill_session_pricing_on_startup(&self) {
         use djinn_db::SessionRepository;
+        use djinn_provider::catalog::builtin::classify_provider;
 
         let pricing_map = self.catalog().pricing_for_all_models();
         if pricing_map.is_empty() {
@@ -2551,8 +2552,18 @@ impl AppState {
             return;
         }
 
-        let pricing_vec: Vec<(String, djinn_core::models::Pricing)> =
-            pricing_map.into_iter().collect();
+        // Tag each model with whether its provider classifies as a subscription
+        // so the repository can promote a repriced 'unpriced' row to 'projected'.
+        // The catalog key is the canonical `<provider_id>/<model_id>`; the
+        // provider is the segment before the first '/'.
+        let pricing_vec: Vec<(String, djinn_core::models::Pricing, bool)> = pricing_map
+            .into_iter()
+            .map(|(model_id, pricing)| {
+                let provider_id = model_id.split_once('/').map(|(p, _)| p).unwrap_or("");
+                let is_subscription = classify_provider(provider_id).is_subscription();
+                (model_id, pricing, is_subscription)
+            })
+            .collect();
         let model_count = pricing_vec.len();
 
         let repo = SessionRepository::new(self.db().clone(), self.event_bus());
@@ -2570,7 +2581,27 @@ impl AppState {
             Err(e) => {
                 tracing::warn!(
                     error = %e,
-                    "pricing backfill failed — sessions with NULL snapshots remain"
+                    "pricing backfill failed — sessions with NULL/zero snapshots remain"
+                );
+            }
+        }
+
+        // Clean up plan-backed openai sessions that old worker pods mis-booked
+        // as 'actual' during a post-deploy image-rebuild window. Gated on live
+        // credential evidence, so it's a no-op on deployments without a Codex
+        // plan credential (or with an OpenAI API key present).
+        match repo.reclassify_plan_openai_sessions_if_gated().await {
+            Ok(0) => {}
+            Ok(n) => {
+                tracing::info!(
+                    rows_reclassified = n,
+                    "cost_basis repair: plan-backed openai sessions moved actual → projected"
+                );
+            }
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "cost_basis repair for plan-backed openai sessions failed"
                 );
             }
         }
