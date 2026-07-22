@@ -75,6 +75,8 @@ pub struct QueueBuildLeaseInput {
     pub immutable_identity: String,
     /// RFC3339 timestamp, interpreted by PostgreSQL.
     pub queue_deadline: Option<String>,
+    /// Absolute deadline retained while queued and carried into its grant.
+    pub launch_deadline: Option<String>,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BuildLeaseRow {
@@ -147,8 +149,8 @@ impl BuildLeaseRepository {
                 QueueBuildLeaseResult::LeaseIdentityConflict { existing: row }
             });
         }
-        let row = sqlx::query_as::<_, DbRow>(&format!("INSERT INTO build_leases (consumer_kind,consumer_id,immutable_identity,queue_deadline,state) VALUES ($1,$2,$3,$4::timestamptz,'queued') RETURNING {COLS}"))
-            .bind(input.key.consumer_kind.as_str()).bind(&input.key.consumer_id).bind(&input.immutable_identity).bind(&input.queue_deadline).fetch_one(&mut *tx).await?;
+        let row = sqlx::query_as::<_, DbRow>(&format!("INSERT INTO build_leases (consumer_kind,consumer_id,immutable_identity,queue_deadline,launch_deadline,state) VALUES ($1,$2,$3,$4::timestamptz,$5::timestamptz,'queued') RETURNING {COLS}"))
+            .bind(input.key.consumer_kind.as_str()).bind(&input.key.consumer_id).bind(&input.immutable_identity).bind(&input.queue_deadline).bind(&input.launch_deadline).fetch_one(&mut *tx).await?;
         tx.commit().await?;
         Ok(QueueBuildLeaseResult::Queued {
             row: row.try_into()?,
@@ -186,7 +188,10 @@ impl BuildLeaseRepository {
                 cap,
             });
         };
-        let row = sqlx::query_as::<_, DbRow>(&format!("UPDATE build_leases SET state='granted', fencing_token=nextval('build_lease_fencing_token_seq'), granted_at=$1::timestamptz, launch_deadline=$2::timestamptz, updated_at=now() WHERE consumer_kind=$3 AND consumer_id=$4 RETURNING {COLS}"))
+        // Coordinator-originated deadlines are durable queue data. Direct
+        // repository users may still supply one at grant time, but may not
+        // erase a deadline already retained on the queued row.
+        let row = sqlx::query_as::<_, DbRow>(&format!("UPDATE build_leases SET state='granted', fencing_token=nextval('build_lease_fencing_token_seq'), granted_at=$1::timestamptz, launch_deadline=COALESCE($2::timestamptz, launch_deadline), updated_at=now() WHERE consumer_kind=$3 AND consumer_id=$4 RETURNING {COLS}"))
             .bind(now).bind(launch_deadline).bind(kind).bind(id).fetch_one(&mut *tx).await?;
         tx.commit().await?;
         Ok(GrantNextBuildLeaseResult::Granted(row.try_into()?))
@@ -259,6 +264,15 @@ impl BuildLeaseRepository {
         cleanup: Option<serde_json::Value>,
     ) -> DbResult<BuildLeaseRow> {
         self.terminal(key, None, "cancelled", cleanup).await
+    }
+    /// Fenced counterpart for a cancel request that carries a grant token.
+    pub async fn cancel_fenced(
+        &self,
+        key: &BuildLeaseKey,
+        token: i64,
+        cleanup: Option<serde_json::Value>,
+    ) -> DbResult<BuildLeaseRow> {
+        self.terminal(key, Some(token), "cancelled", cleanup).await
     }
     pub async fn release(
         &self,
@@ -516,6 +530,7 @@ mod tests {
             },
             immutable_identity: identity.into(),
             queue_deadline: None,
+            launch_deadline: None,
         }
     }
 

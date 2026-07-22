@@ -201,6 +201,7 @@ impl BuildLeaseService {
             key: key.clone(),
             immutable_identity,
             queue_deadline: deadline(request.deadlines.queue_deadline_ms),
+            launch_deadline: deadline(request.deadlines.launch_deadline_ms),
         };
         match self.repository.queue(&input).await {
             Ok(QueueBuildLeaseResult::LeaseIdentityConflict { .. }) => {
@@ -209,14 +210,28 @@ impl BuildLeaseService {
                     identity: request.identity,
                 }
             }
-            Ok(QueueBuildLeaseResult::Queued { row, .. }) => match self.drain().await {
-                Ok(Some(granted)) if granted.key == key => granted_result(&granted),
-                Ok(_) => {
-                    self.telemetry.outcome(LeaseTelemetryOutcome::Queued);
-                    LeaseResult::Queued(status(&row))
+            Ok(QueueBuildLeaseResult::Queued { row, .. }) => {
+                // Exact replay after a lost response must use the durable state
+                // rather than whether this request happened to grant the row.
+                if let Some(result) = queue_result(&row) {
+                    return result;
                 }
-                Err(()) => self.unavailable(),
-            },
+                match self.drain().await {
+                    // Re-read through idempotent queue after drain: it includes
+                    // a newly minted grant or terminalized queue deadline.
+                    Ok(_) => match self.repository.queue(&input).await {
+                        Ok(QueueBuildLeaseResult::Queued { row, .. }) => queue_result(&row)
+                            .unwrap_or_else(|| {
+                                self.telemetry.outcome(LeaseTelemetryOutcome::Queued);
+                                LeaseResult::Queued(status(&row))
+                            }),
+                        Ok(QueueBuildLeaseResult::LeaseIdentityConflict { .. }) | Err(_) => {
+                            self.unavailable()
+                        }
+                    },
+                    Err(()) => self.unavailable(),
+                }
+            }
             Err(_) => self.unavailable(),
         }
     }
@@ -381,9 +396,15 @@ impl BuildLeaseService {
         let (key, _) = identity(&id);
         let evidence = cleanup.then(|| serde_json::json!({"candidate_cleanup": true}));
         let row = match op {
-            LeaseOperation::Abandon | LeaseOperation::Cancel => {
-                self.repository.cancel(&key, evidence).await
-            }
+            LeaseOperation::Abandon => self.repository.cancel(&key, evidence).await,
+            LeaseOperation::Cancel => match token {
+                Some(token) => {
+                    self.repository
+                        .cancel_fenced(&key, token.0 as i64, evidence)
+                        .await
+                }
+                None => self.repository.cancel(&key, evidence).await,
+            },
             LeaseOperation::Release => match token {
                 Some(token) => {
                     self.repository
@@ -512,6 +533,19 @@ fn granted_result(row: &BuildLeaseRow) -> LeaseResult {
         fencing_token: LeaseFencingToken(row.fencing_token.unwrap_or_default() as u64),
         deadlines: deadlines(row),
     })
+}
+/// Queue responses are reconstructed from durable state for idempotent grant
+/// and queue-timeout retries. `None` means the row is still awaiting capacity.
+fn queue_result(row: &BuildLeaseRow) -> Option<LeaseResult> {
+    match row.state {
+        BuildLeaseState::Granted => Some(granted_result(row)),
+        BuildLeaseState::Terminal if row.terminal_reason.as_deref() == Some("deadline_expired") => {
+            Some(LeaseResult::LeaseWaitTimeout {
+                timeout_credit: None,
+            })
+        }
+        _ => None,
+    }
 }
 fn status(row: &BuildLeaseRow) -> LeaseStatus {
     LeaseStatus {
