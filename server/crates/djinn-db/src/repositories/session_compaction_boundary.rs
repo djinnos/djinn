@@ -325,6 +325,22 @@ impl SessionCompactionBoundaryRepository {
         .transpose()
     }
 
+    /// Return the most recently created boundary in either phase. This keeps
+    /// failure diagnostics able to inspect a truthful `Started` row.
+    pub async fn latest_boundary(&self, session_id: &str) -> Result<Option<CompactionBoundary>> {
+        self.db.ensure_initialized().await?;
+        let id: Option<String> = sqlx::query_scalar(
+            "SELECT id FROM session_compaction_boundaries WHERE session_id = $1 ORDER BY created_at DESC, id DESC LIMIT 1",
+        )
+        .bind(session_id)
+        .fetch_optional(self.db.pool())
+        .await?;
+        match id {
+            Some(id) => self.fetch_by_id(&id).await.map(Some),
+            None => Ok(None),
+        }
+    }
+
     /// Count all boundary rows (any phase) for a session.
     pub async fn boundary_count(&self, session_id: &str) -> Result<i64> {
         self.db.ensure_initialized().await?;
