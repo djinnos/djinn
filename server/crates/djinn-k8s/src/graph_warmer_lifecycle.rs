@@ -14,8 +14,12 @@ use tracing::{debug, warn};
 /// Interval used by the Job-watcher loop to poll `.status.succeeded` /
 /// `.status.failed`.
 const WATCH_POLL_INTERVAL: Duration = Duration::from_secs(2);
-/// Backstop cap on watcher polling if the apiserver keeps returning errors.
-const WATCH_DEADLINE: Duration = Duration::from_secs(3600);
+/// Grace added on top of the Job's `activeDeadlineSeconds` to derive the
+/// watcher deadline. `activeDeadlineSeconds` bounds the Job itself — after it
+/// expires the apiserver marks the Job Failed — so the watcher should outlive
+/// that moment slightly to report the apiserver's real terminal verdict
+/// instead of manufacturing one.
+pub(super) const WATCH_DEADLINE_SLACK: Duration = Duration::from_secs(300);
 
 /// Terminal outcome reported by a [`WarmJobWatcher`]. Drives the in-process
 /// convergence hook: on [`WarmTerminalOutcome::Succeeded`] the warm Job pod has
@@ -57,11 +61,24 @@ pub trait WarmJobWatcher: Send + Sync {
 /// [`WATCH_POLL_INTERVAL`].
 pub struct KubeClientJobWatcher {
     client: kube::Client,
+    /// How long to keep polling before failing conservatively. Follows the
+    /// Job's `activeDeadlineSeconds` plus [`WATCH_DEADLINE_SLACK`] so the
+    /// watcher outlives the Job it observes.
+    deadline: Duration,
+}
+
+/// Derive the watcher deadline from the Job's configured
+/// `activeDeadlineSeconds` (`KubernetesConfig::warm_job_timeout_seconds`).
+pub(super) fn watch_deadline(job_timeout_seconds: i64) -> Duration {
+    Duration::from_secs(job_timeout_seconds.max(0) as u64) + WATCH_DEADLINE_SLACK
 }
 
 impl KubeClientJobWatcher {
-    pub fn new(client: kube::Client) -> Self {
-        Self { client }
+    pub fn new(client: kube::Client, job_timeout_seconds: i64) -> Self {
+        Self {
+            client,
+            deadline: watch_deadline(job_timeout_seconds),
+        }
     }
 }
 
@@ -105,7 +122,7 @@ pub(super) fn terminal_outcome_after_poll(
 impl WarmJobWatcher for KubeClientJobWatcher {
     async fn wait_terminal(&self, namespace: &str, job_name: &str) -> WarmTerminalOutcome {
         let api: Api<Job> = Api::namespaced(self.client.clone(), namespace);
-        let deadline = SystemClock::new().now_instant() + WATCH_DEADLINE;
+        let deadline = SystemClock::new().now_instant() + self.deadline;
         loop {
             let observation = match api.get(job_name).await {
                 Ok(job) => {

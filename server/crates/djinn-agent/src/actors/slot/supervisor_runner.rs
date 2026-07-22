@@ -104,6 +104,48 @@ async fn surface_credential_revocation(
     }
 }
 
+/// Best-effort dedup for the repeated "failed over off model X" failover
+/// comments. A role lane with a single candidate model that keeps failing
+/// environmentally (image pull, unschedulable, stage-init hang) would otherwise
+/// append an identical — or, when the elapsed time varies, near-identical —
+/// comment every dispatch cycle, burying the task timeline (the k6hm loop,
+/// 2026-07-22, logged the same comment three times in a day). Returns `true`
+/// when a prior activity comment for THIS task already reports a failover off
+/// `model_id`, so the caller can skip re-appending. Matches on the stable
+/// `failed over off model {model_id}` phrase so it is insensitive to the
+/// per-cycle elapsed-time suffix. On a read failure it returns `false` (better a
+/// duplicate than a silently dropped operator signal). This only gates the
+/// timeline COMMENT — the health/breaker `record_stall` +
+/// `note_task_provider_failure` side effects still fire every cycle.
+async fn failover_comment_already_logged(
+    task_repo: &TaskRepository,
+    task_id: &str,
+    model_id: &str,
+) -> bool {
+    let needle = format!("failed over off model {model_id}");
+    match task_repo.list_activity(task_id).await {
+        Ok(entries) => entries.iter().any(|entry| {
+            serde_json::from_str::<serde_json::Value>(&entry.payload)
+                .ok()
+                .and_then(|v| {
+                    v.get("body")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_owned)
+                })
+                .is_some_and(|body| body.contains(&needle))
+        }),
+        Err(e) => {
+            tracing::warn!(
+                task_id,
+                error = %e,
+                "supervisor dispatch: failed to read activity for failover-comment dedup; \
+                 appending anyway"
+            );
+            false
+        }
+    }
+}
+
 /// Record stall + failover + activity when the worker never completed its
 /// startup handshake within the deadline.
 async fn apply_handshake_timeout_failover(
@@ -123,22 +165,24 @@ async fn apply_handshake_timeout_failover(
             retry_after_ms: None,
         },
     );
-    let _ = task_repo
-        .log_activity(
-            Some(&task.id),
-            "system",
-            "system",
-            "comment",
-            &serde_json::json!({
-                "body": format!(
-                    "Worker Pod failed to complete its startup handshake within the \
-                     deadline (image pull, unschedulable, or crash-loop). Tore down the \
-                     Job and failed over off model {model_id}."
-                )
-            })
-            .to_string(),
-        )
-        .await;
+    if !failover_comment_already_logged(task_repo, &task.id, model_id).await {
+        let _ = task_repo
+            .log_activity(
+                Some(&task.id),
+                "system",
+                "system",
+                "comment",
+                &serde_json::json!({
+                    "body": format!(
+                        "Worker Pod failed to complete its startup handshake within the \
+                         deadline (image pull, unschedulable, or crash-loop). Tore down the \
+                         Job and failed over off model {model_id}."
+                    )
+                })
+                .to_string(),
+            )
+            .await;
+    }
     tracing::warn!(
         task_id = %task.short_id,
         %model_id,
@@ -609,24 +653,26 @@ pub(super) async fn dispatch_task_runtime(
                 retry_after_ms: None,
             },
         );
-        let _ = task_repo
-            .log_activity(
-                Some(&task.id),
-                "agent-supervisor",
-                "system",
-                "stage_init_timeout",
-                &serde_json::json!({
-                    "body": format!(
-                        "Stage init hung at step '{step}' — no session / first provider \
-                         turn within {elapsed_secs}s (pre-session liveness deadline). \
-                         Tore down the Job and failed over off model {model_id}."
-                    ),
-                    "stage_step": step,
-                    "elapsed_secs": elapsed_secs,
-                })
-                .to_string(),
-            )
-            .await;
+        if !failover_comment_already_logged(&task_repo, &task.id, &model_id).await {
+            let _ = task_repo
+                .log_activity(
+                    Some(&task.id),
+                    "agent-supervisor",
+                    "system",
+                    "stage_init_timeout",
+                    &serde_json::json!({
+                        "body": format!(
+                            "Stage init hung at step '{step}' — no session / first provider \
+                             turn within {elapsed_secs}s (pre-session liveness deadline). \
+                             Tore down the Job and failed over off model {model_id}."
+                        ),
+                        "stage_step": step,
+                        "elapsed_secs": elapsed_secs,
+                    })
+                    .to_string(),
+                )
+                .await;
+        }
         return Err(anyhow::Error::new(timeout));
     }
     match (report_result, teardown) {
@@ -2723,5 +2769,61 @@ mod tests {
                 "{label} must remain pending because it is not in the current exact group"
             );
         }
+    }
+
+    /// The failover-comment dedup guard must recognize a prior "failed over off
+    /// model X" comment (insensitive to a per-cycle elapsed-time suffix), so the
+    /// same comment is not appended every dispatch cycle — while a failover onto
+    /// a DIFFERENT model still surfaces a fresh comment.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn failover_comment_dedup_suppresses_repeats_per_model() {
+        use crate::test_helpers;
+        use tokio_util::sync::CancellationToken;
+
+        let db = test_helpers::create_test_db();
+        let project = test_helpers::create_test_project(&db).await;
+        let epic = test_helpers::create_test_epic(&db, &project.id).await;
+        let task = test_helpers::create_test_task(&db, &project.id, &epic.id).await;
+        let app_state = test_helpers::agent_context_from_db(db.clone(), CancellationToken::new());
+        let task_repo = TaskRepository::new(db.clone(), app_state.event_bus.clone());
+
+        let model = "openai/gpt-5.6-sol";
+
+        // No prior comment: the guard allows the write.
+        assert!(
+            !failover_comment_already_logged(&task_repo, &task.id, model).await,
+            "no prior comment ⇒ dedup guard must not suppress"
+        );
+
+        // First failover comment, with a cycle-specific elapsed suffix.
+        task_repo
+            .log_activity(
+                Some(&task.id),
+                "agent-supervisor",
+                "system",
+                "stage_init_timeout",
+                &serde_json::json!({
+                    "body": format!(
+                        "Stage init hung ... within 480s. Tore down the Job and \
+                         failed over off model {model}."
+                    ),
+                })
+                .to_string(),
+            )
+            .await
+            .expect("log first failover comment");
+
+        // A later cycle for the SAME model is suppressed even though its elapsed
+        // suffix would differ.
+        assert!(
+            failover_comment_already_logged(&task_repo, &task.id, model).await,
+            "an existing failover comment for this model must suppress the repeat"
+        );
+
+        // A failover onto a DIFFERENT model is still surfaced.
+        assert!(
+            !failover_comment_already_logged(&task_repo, &task.id, "zai/glm-5.2").await,
+            "a different model has no prior comment ⇒ must not be suppressed"
+        );
     }
 }

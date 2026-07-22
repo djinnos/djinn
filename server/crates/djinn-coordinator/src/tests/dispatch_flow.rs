@@ -163,12 +163,22 @@ async fn dispatch_exhaustion_cap_hands_pr_to_poller_and_force_closes_no_pr() {
     let mut actor = coordinator_actor_for_tests(&db, &tx);
     for _ in 0..MAX_DISPATCH_FAILURES {
         actor
-            .apply_chain_exhaustion_side_effects(&pr_task, "worker", &[])
+            .apply_chain_exhaustion_side_effects(
+                &pr_task,
+                "worker",
+                &[String::from("m-a"), String::from("m-b")],
+                &[],
+            )
             .await;
     }
     for _ in 0..MAX_DISPATCH_FAILURES {
         actor
-            .apply_chain_exhaustion_side_effects(&no_pr_task, "worker", &[])
+            .apply_chain_exhaustion_side_effects(
+                &no_pr_task,
+                "worker",
+                &[String::from("m-a"), String::from("m-b")],
+                &[],
+            )
             .await;
     }
 
@@ -186,6 +196,109 @@ async fn dispatch_exhaustion_cap_hands_pr_to_poller_and_force_closes_no_pr() {
     let no_pr_after = repo.get(&no_pr_task.id).await.unwrap().unwrap();
     assert_eq!(no_pr_after.status, "closed");
     assert!(no_pr_after.close_reason.is_some());
+}
+
+/// A single-candidate role lane that keeps exhausting must surface a durable,
+/// deduplicated operator signal (not silently back off forever, and not
+/// spam the timeline every cycle). The signal fires exactly once as the streak
+/// crosses [`SINGLE_CANDIDATE_EXHAUSTION_SIGNAL_THRESHOLD`], names the stuck
+/// model, does NOT close the task, and never fires for a multi-candidate lane.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn single_candidate_exhaustion_surfaces_dedup_operator_signal() {
+    fn signal_count(entries: &[djinn_core::models::ActivityEntry]) -> usize {
+        entries
+            .iter()
+            .filter(|e| e.event_type == "single_candidate_failover_exhaustion")
+            .count()
+    }
+
+    let db = test_helpers::create_test_db();
+    let (tx, _rx) = broadcast::channel(256);
+    let repo = TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx));
+
+    let single_task = open_task(&db, &tx, "single-candidate-lane").await;
+    let multi_task = open_task(&db, &tx, "multi-candidate-lane").await;
+    let mut actor = coordinator_actor_for_tests(&db, &tx);
+    let model = "openai/gpt-5.6-sol".to_string();
+
+    // Below the threshold: backing off, but no operator signal yet.
+    for _ in 0..(SINGLE_CANDIDATE_EXHAUSTION_SIGNAL_THRESHOLD - 1) {
+        actor
+            .apply_chain_exhaustion_side_effects(
+                &single_task,
+                "worker",
+                std::slice::from_ref(&model),
+                &[],
+            )
+            .await;
+    }
+    let entries = repo.list_activity(&single_task.id).await.unwrap();
+    assert_eq!(signal_count(&entries), 0, "no signal before the threshold");
+
+    // Crossing the threshold: exactly one signal, naming the stuck model.
+    actor
+        .apply_chain_exhaustion_side_effects(
+            &single_task,
+            "worker",
+            std::slice::from_ref(&model),
+            &[],
+        )
+        .await;
+    let entries = repo.list_activity(&single_task.id).await.unwrap();
+    assert_eq!(
+        signal_count(&entries),
+        1,
+        "exactly one signal at the threshold"
+    );
+    let signal = entries
+        .iter()
+        .find(|e| e.event_type == "single_candidate_failover_exhaustion")
+        .unwrap();
+    assert!(
+        signal.payload.contains("openai/gpt-5.6-sol"),
+        "signal must name the stuck single candidate model"
+    );
+
+    // Further exhaustion cycles must NOT append another identical signal.
+    actor
+        .apply_chain_exhaustion_side_effects(
+            &single_task,
+            "worker",
+            std::slice::from_ref(&model),
+            &[],
+        )
+        .await;
+    let entries = repo.list_activity(&single_task.id).await.unwrap();
+    assert_eq!(
+        signal_count(&entries),
+        1,
+        "signal must not be re-appended every cycle (dedup)"
+    );
+
+    // The task must NOT be closed — it resumes when the environment heals.
+    assert_task_status(&db, &tx, &single_task, "open").await;
+
+    // A multi-candidate lane never triggers the single-candidate signal, even
+    // past the threshold (existing rotation behavior is preserved).
+    for _ in 0..(SINGLE_CANDIDATE_EXHAUSTION_SIGNAL_THRESHOLD + 1) {
+        actor
+            .apply_chain_exhaustion_side_effects(
+                &multi_task,
+                "worker",
+                &[
+                    String::from("openai/gpt-5.6-sol"),
+                    String::from("zai/glm-5.2"),
+                ],
+                &[],
+            )
+            .await;
+    }
+    let entries = repo.list_activity(&multi_task.id).await.unwrap();
+    assert_eq!(
+        signal_count(&entries),
+        0,
+        "multi-candidate lanes must never emit the single-candidate signal"
+    );
 }
 
 #[tokio::test(flavor = "current_thread")]

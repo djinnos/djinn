@@ -64,12 +64,12 @@ fn test_task(
         ci_mq_first_seen_at: None,
         ci_mq_last_seen_at: None,
         unresolved_blocker_count: 0,
-            refinement_run_id: None,
-            refinement_intent_id: None,
-            refinement_generation: None,
-            refinement_round: None,
-            refinement_phase: None,
-            refinement_role: None,
+        refinement_run_id: None,
+        refinement_intent_id: None,
+        refinement_generation: None,
+        refinement_round: None,
+        refinement_phase: None,
+        refinement_role: None,
     }
 }
 
@@ -138,6 +138,34 @@ fn review_rejected_park_reason_keeps_ac_phrasing() {
     assert!(
         !reason.contains("merge-queue full suite failed"),
         "review_rejected park must NOT mention merge-queue failure; got: {reason}"
+    );
+}
+
+#[test]
+fn merge_conflict_park_reason_never_uses_ac_phrasing() {
+    // A merge conflict means main moved under an approved PR — it must be
+    // labeled as a mechanical rebase, never as an acceptance-criteria failure
+    // (incident k6hm mislabeled a conflict as AC non-convergence).
+    let task = test_task("passing", "[]", None);
+    let history = post_intervention_history_with_submission(ReopenClass::MergeConflict);
+
+    let reason = CoordinatorActor::compute_park_reason(&task, &history);
+
+    assert!(
+        reason.contains("merge conflict against the base branch"),
+        "merge_conflict park should name the conflict; got: {reason}"
+    );
+    assert!(
+        reason.contains("mechanical rebase"),
+        "merge_conflict park should frame it as a mechanical rebase; got: {reason}"
+    );
+    assert!(
+        !reason.contains("acceptance criteria still did not pass"),
+        "merge_conflict park must NOT use the AC phrasing; got: {reason}"
+    );
+    assert!(
+        !reason.contains("merge-queue full suite failed"),
+        "merge_conflict park must NOT be mislabeled as a merge-queue failure; got: {reason}"
     );
 }
 
