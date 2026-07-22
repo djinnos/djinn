@@ -1478,6 +1478,11 @@ impl CoordinatorActor {
         &mut self,
         task: &djinn_core::models::Task,
         role: &str,
+        // The full candidate list the exhausted chain traversed (the role
+        // lane's resolved fallback models). Used only to detect the
+        // single-candidate case for the operator-visible signal; breaker/
+        // cooldown accounting is unchanged for multi-candidate lanes.
+        candidate_models: &[String],
         exhausted_observations: &[djinn_provider::catalog::HealthKey],
     ) {
         // Apply deferred breaker checks for THIS chain's observed failures
@@ -1542,6 +1547,116 @@ impl CoordinatorActor {
                 },
             )
             .await;
+
+            // Single-candidate lanes cannot fail *over* to anything: when the
+            // one configured model keeps failing environmentally the escalating
+            // cooldown above quietly decays the retry cadence, but nothing tells
+            // an operator the lane is wedged on one model. Surface a durable,
+            // deduplicated signal exactly as the streak crosses the threshold
+            // (fires once per climb, not every cycle) so the timeline stays
+            // readable. The task is NOT closed — it resumes automatically once
+            // the environment heals.
+            if candidate_models.len() == 1 && streak == SINGLE_CANDIDATE_EXHAUSTION_SIGNAL_THRESHOLD
+            {
+                self.emit_single_candidate_exhaustion_signal(
+                    task,
+                    role,
+                    &candidate_models[0],
+                    streak,
+                )
+                .await;
+            }
+        }
+    }
+
+    /// Emit a durable, operator-visible task activity entry stating plainly that
+    /// a role lane has a single candidate model that has failed environmentally
+    /// for several consecutive dispatch cycles, so an operator can add a second
+    /// candidate or investigate provider health.
+    ///
+    /// Deduplicated: if an identical signal body is already on the task's
+    /// activity log this is a no-op, so re-entry at the same streak (or a read
+    /// failure elsewhere) never double-posts. The `streak` is baked into the
+    /// body, so a later climb to a higher threshold would post a distinct entry;
+    /// today the single call site fires only at
+    /// [`SINGLE_CANDIDATE_EXHAUSTION_SIGNAL_THRESHOLD`], giving one entry per
+    /// climb.
+    async fn emit_single_candidate_exhaustion_signal(
+        &self,
+        task: &djinn_core::models::Task,
+        role: &str,
+        model_id: &str,
+        streak: u32,
+    ) {
+        let body = format!(
+            "Role lane `{role}` has a single candidate model `{model_id}`, and {streak} \
+             consecutive dispatch cycles for this task have failed environmentally — the \
+             failover chain has no alternative candidate to fail over to. The task is on an \
+             escalating dispatch backoff and will resume automatically once the environment \
+             heals; it has NOT been closed. To stop the retries, add a second candidate model \
+             to this role lane or investigate the health of `{model_id}` / its provider."
+        );
+        let repo = self.task_repo();
+        // Dedup: skip if this exact signal body already exists on the timeline.
+        // Best-effort — on a read failure we fall through and post (better a
+        // duplicate than a silently-dropped operator signal).
+        match repo.list_activity(&task.id).await {
+            Ok(entries) => {
+                let already_present = entries.iter().any(|entry| {
+                    entry.event_type == "single_candidate_failover_exhaustion"
+                        && serde_json::from_str::<serde_json::Value>(&entry.payload)
+                            .ok()
+                            .and_then(|v| {
+                                v.get("body")
+                                    .and_then(serde_json::Value::as_str)
+                                    .map(str::to_owned)
+                            })
+                            .as_deref()
+                            == Some(body.as_str())
+                });
+                if already_present {
+                    return;
+                }
+            }
+            Err(e) => {
+                tracing::warn!(
+                    task_id = %task.short_id,
+                    error = %e,
+                    "CoordinatorActor: failed to read activity for single-candidate \
+                     exhaustion dedup; posting signal anyway"
+                );
+            }
+        }
+        let payload = serde_json::json!({
+            "body": body,
+            "role": role,
+            "model_id": model_id,
+            "consecutive_exhaustions": streak,
+        });
+        if let Err(e) = repo
+            .log_activity(
+                Some(&task.id),
+                "coordinator",
+                "system",
+                "single_candidate_failover_exhaustion",
+                &payload.to_string(),
+            )
+            .await
+        {
+            tracing::warn!(
+                task_id = %task.short_id,
+                error = %e,
+                "CoordinatorActor: failed to persist single-candidate failover exhaustion signal"
+            );
+        } else {
+            tracing::warn!(
+                task_id = %task.short_id,
+                role,
+                %model_id,
+                streak,
+                "CoordinatorActor: single-candidate role lane exhausted for \
+                 {streak} consecutive cycles — surfaced operator signal"
+            );
         }
     }
 
@@ -3013,8 +3128,13 @@ impl CoordinatorActor {
                     // breaker side effects apply ONLY to failures from THIS
                     // dispatch attempt — not from a fallback-rescued or
                     // unrelated earlier chain (AC2).
-                    self.apply_chain_exhaustion_side_effects(&task, role, &exhausted_observations)
-                        .await;
+                    self.apply_chain_exhaustion_side_effects(
+                        &task,
+                        role,
+                        model_ids,
+                        &exhausted_observations,
+                    )
+                    .await;
                 }
             }
         }
@@ -6002,7 +6122,12 @@ mod failover_chain_tests {
             _ => panic!("expected DispatchOutcome::Failed"),
         };
         actor
-            .apply_chain_exhaustion_side_effects(&task, "worker", &exhausted_observations)
+            .apply_chain_exhaustion_side_effects(
+                &task,
+                "worker",
+                &[String::from("m-a"), String::from("m-b")],
+                &exhausted_observations,
+            )
             .await;
 
         // failure streak should be 1
@@ -6052,7 +6177,12 @@ mod failover_chain_tests {
             _ => Vec::new(),
         };
         actor
-            .apply_chain_exhaustion_side_effects(&task, "worker", &exhausted_observations2)
+            .apply_chain_exhaustion_side_effects(
+                &task,
+                "worker",
+                &[String::from("m-a"), String::from("m-b")],
+                &exhausted_observations2,
+            )
             .await;
 
         assert_eq!(
@@ -6174,7 +6304,12 @@ mod failover_chain_tests {
                 _ => Vec::new(),
             };
             actor
-                .apply_chain_exhaustion_side_effects(&task, "worker", &exhausted_observations)
+                .apply_chain_exhaustion_side_effects(
+                    &task,
+                    "worker",
+                    &[String::from("m-a"), String::from("m-b")],
+                    &exhausted_observations,
+                )
                 .await;
 
             // After round 2: consecutive_failures = 2 for each candidate.
@@ -6221,7 +6356,12 @@ mod failover_chain_tests {
             _ => Vec::new(),
         };
         actor
-            .apply_chain_exhaustion_side_effects(&task, "worker", &exhausted_observations)
+            .apply_chain_exhaustion_side_effects(
+                &task,
+                "worker",
+                &[String::from("m-a"), String::from("m-b")],
+                &exhausted_observations,
+            )
             .await;
 
         // Breaker IS tripped for model-a after chain exhaustion.
@@ -6588,6 +6728,7 @@ mod failover_chain_tests {
             .apply_chain_exhaustion_side_effects(
                 &task, // reuse the task fixture (only its id is read for streak)
                 "worker",
+                &[String::from("m-a"), String::from("m-b")],
                 &exhausted_unrelated,
             )
             .await;
@@ -6818,7 +6959,12 @@ mod failover_chain_tests {
             _ => unreachable!("asserted Failed above"),
         };
         actor
-            .apply_chain_exhaustion_side_effects(&task, "worker", &exhausted_observations)
+            .apply_chain_exhaustion_side_effects(
+                &task,
+                "worker",
+                &[String::from("m-a"), String::from("m-b")],
+                &exhausted_observations,
+            )
             .await;
 
         // ── Step 3: After ONE exhausted-chain failure, breaker MUST NOT trip
@@ -6880,7 +7026,12 @@ mod failover_chain_tests {
                 _ => unreachable!(),
             };
             actor
-                .apply_chain_exhaustion_side_effects(&task, "worker", &exhausted_observations)
+                .apply_chain_exhaustion_side_effects(
+                    &task,
+                    "worker",
+                    &[String::from("m-a"), String::from("m-b")],
+                    &exhausted_observations,
+                )
                 .await;
 
             let running_total = 1 + exhaustion_round;
