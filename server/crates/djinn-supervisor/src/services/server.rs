@@ -1303,6 +1303,27 @@ async fn dispatch(
             let result = services.plan_memory_intents(request).await;
             ServiceRpcResponse::PlanMemoryIntents(result)
         }
+        ServiceRpcRequest::QueueLease { request } => {
+            ServiceRpcResponse::QueueLease(services.queue_lease(request).await)
+        }
+        ServiceRpcRequest::GrantLease { request } => {
+            ServiceRpcResponse::GrantLease(services.grant_lease(request).await)
+        }
+        ServiceRpcRequest::LeaseStatus { request } => {
+            ServiceRpcResponse::LeaseStatus(services.lease_status(request).await)
+        }
+        ServiceRpcRequest::AbandonLease { request } => {
+            ServiceRpcResponse::AbandonLease(services.abandon_lease(request).await)
+        }
+        ServiceRpcRequest::BindLeasePod { request } => {
+            ServiceRpcResponse::BindLeasePod(services.bind_lease_pod(request).await)
+        }
+        ServiceRpcRequest::CancelLease { request } => {
+            ServiceRpcResponse::CancelLease(services.cancel_lease(request).await)
+        }
+        ServiceRpcRequest::ReleaseLease { request } => {
+            ServiceRpcResponse::ReleaseLease(services.release_lease(request).await)
+        }
     }
 }
 
@@ -2075,5 +2096,498 @@ mod tests {
         let _ = bg.reader.await;
         handle.cancel();
         let _ = handle.join.await;
+    }
+
+    // ── Lease-v1 in-memory RPC/server transport tests ────────────────
+
+    use crate::services::lease::{
+        LeaseAbandonRequest, LeaseBindRequest, LeaseCancelRequest, LeaseFencingToken,
+        LeaseGrantRequest, LeaseIdentity, LeaseQueueRequest, LeaseReleaseRequest, LeaseResult,
+        LeaseStatusRequest, TaskInvocationLeaseIdentity,
+    };
+
+    /// Test double that returns a configurable canned [`LeaseResult`] from
+    /// every lease method, and reuses `FakeServices`'s `load_task` for the
+    /// one required non-lease method exercised by the transport setup.
+    struct LeaseFakeServices {
+        cancel: CancellationToken,
+        canned_result: LeaseResult,
+    }
+
+    fn sample_lease_identity() -> LeaseIdentity {
+        LeaseIdentity::TaskInvocation(TaskInvocationLeaseIdentity {
+            task_id: "t1".into(),
+            task_run_id: "run-1".into(),
+            invocation_id: "inv-1".into(),
+        })
+    }
+
+    #[async_trait]
+    impl SupervisorServices for LeaseFakeServices {
+        fn cancel(&self) -> &CancellationToken {
+            &self.cancel
+        }
+
+        async fn queue_lease(&self, _req: LeaseQueueRequest) -> LeaseResult {
+            self.canned_result.clone()
+        }
+        async fn grant_lease(&self, _req: LeaseGrantRequest) -> LeaseResult {
+            self.canned_result.clone()
+        }
+        async fn lease_status(&self, _req: LeaseStatusRequest) -> LeaseResult {
+            self.canned_result.clone()
+        }
+        async fn abandon_lease(&self, _req: LeaseAbandonRequest) -> LeaseResult {
+            self.canned_result.clone()
+        }
+        async fn bind_lease_pod(&self, _req: LeaseBindRequest) -> LeaseResult {
+            self.canned_result.clone()
+        }
+        async fn cancel_lease(&self, _req: LeaseCancelRequest) -> LeaseResult {
+            self.canned_result.clone()
+        }
+        async fn release_lease(&self, _req: LeaseReleaseRequest) -> LeaseResult {
+            self.canned_result.clone()
+        }
+
+        async fn load_task(&self, task_id: String) -> Result<Task, String> {
+            let mut t = fixture_task();
+            t.id = task_id;
+            Ok(t)
+        }
+
+        async fn execute_stage(
+            &self,
+            _task: &Task,
+            _workspace: &Workspace,
+            _role_kind: RoleKind,
+            _task_run_id: &str,
+            _spec: &TaskRunSpec,
+        ) -> Result<StageOutcome, StageError> {
+            unimplemented!()
+        }
+        async fn open_pr(&self, _spec: &TaskRunSpec, _task: &Task) -> TaskRunOutcome {
+            unimplemented!()
+        }
+        async fn create_task_run(
+            &self,
+            _params: super::super::wire::SerializableCreateTaskRunParams,
+        ) -> Result<(), String> {
+            unimplemented!()
+        }
+        async fn update_task_run_status(
+            &self,
+            _run_id: String,
+            _status: djinn_core::models::TaskRunStatus,
+        ) -> Result<(), String> {
+            unimplemented!()
+        }
+        async fn get_model_context_window(&self, _model_id: String) -> Result<i64, String> {
+            unimplemented!()
+        }
+        async fn get_provider_base_url(
+            &self,
+            _catalog_provider_id: String,
+        ) -> Result<String, String> {
+            unimplemented!()
+        }
+        async fn pick_any_default_model(&self) -> Result<Option<String>, String> {
+            unimplemented!()
+        }
+        async fn create_session(
+            &self,
+            _params: super::super::wire::SerializableCreateSessionParams,
+        ) -> Result<djinn_core::models::SessionRecord, String> {
+            unimplemented!()
+        }
+        async fn publish_session_message(
+            &self,
+            _session_id: String,
+            _task_id: String,
+            _agent_type: String,
+            _message: serde_json::Value,
+        ) -> Result<(), String> {
+            unimplemented!()
+        }
+        async fn get_environment_config(
+            &self,
+            _project_id: String,
+        ) -> Result<djinn_stack::environment::EnvironmentConfig, String> {
+            unimplemented!()
+        }
+        async fn invoke_llm(
+            &self,
+            _model_id: String,
+            _conversation: djinn_provider::message::Conversation,
+            _tools: Vec<serde_json::Value>,
+            _tool_choice: Option<djinn_provider::provider::ToolChoice>,
+        ) -> Result<djinn_provider::provider::LlmResponse, String> {
+            unimplemented!()
+        }
+        #[allow(clippy::too_many_arguments)]
+        async fn update_session_status(
+            &self,
+            _session_id: String,
+            _status: djinn_core::models::SessionStatus,
+            _tokens_in: i64,
+            _tokens_out: i64,
+            _cache_read: i64,
+            _cache_write: i64,
+            _parked_reason: Option<String>,
+        ) -> Result<(), String> {
+            unimplemented!()
+        }
+        async fn emit_djinn_event(
+            &self,
+            _event: super::super::wire::SerializableDjinnEvent,
+        ) -> Result<(), String> {
+            unimplemented!()
+        }
+        async fn tool_github_search(
+            &self,
+            _project_id: Option<String>,
+            _arguments: serde_json::Map<String, serde_json::Value>,
+        ) -> Result<serde_json::Value, String> {
+            unimplemented!()
+        }
+        async fn tool_github_fetch_file(
+            &self,
+            _project_id: Option<String>,
+            _arguments: serde_json::Map<String, serde_json::Value>,
+        ) -> Result<serde_json::Value, String> {
+            unimplemented!()
+        }
+        async fn tool_ci_job_log(
+            &self,
+            _session_task_id: Option<String>,
+            _arguments: serde_json::Map<String, serde_json::Value>,
+        ) -> Result<serde_json::Value, String> {
+            unimplemented!()
+        }
+        async fn touch_activity(&self, _task_id: String) -> Result<(), String> {
+            unimplemented!()
+        }
+        async fn transition_task(
+            &self,
+            _task_id: String,
+            _action: String,
+            _reason: Option<String>,
+        ) -> Result<(), String> {
+            unimplemented!()
+        }
+        async fn record_arbiter_decision(
+            &self,
+            _task_id: String,
+            _decision: String,
+            _evidence_json: String,
+        ) -> Result<(), String> {
+            unimplemented!()
+        }
+        async fn start_monitored_reopen(
+            &self,
+            _task_id: String,
+            _directive: String,
+            _verification_command: String,
+            _exclude_models: Vec<String>,
+        ) -> Result<(), String> {
+            unimplemented!()
+        }
+        async fn complete_monitored_reopen(&self, _task_id: String) -> Result<(), String> {
+            unimplemented!()
+        }
+        async fn record_arbiter_session_termination(
+            &self,
+            _task_id: String,
+            _is_infra_failure: bool,
+        ) -> Result<bool, String> {
+            unimplemented!()
+        }
+        async fn publish_branch_to_github(
+            &self,
+            _spec: &TaskRunSpec,
+            _task: &Task,
+        ) -> super::super::BranchPublicationResult {
+            unimplemented!()
+        }
+        async fn plan_memory_intents(
+            &self,
+            _request: super::super::wire::AttributedPlannerRequest,
+        ) -> Result<super::super::wire::PlannerAttemptResult, String> {
+            unimplemented!()
+        }
+        async fn tool_ci_artifact(
+            &self,
+            _session_task_id: Option<String>,
+            _arguments: serde_json::Map<String, serde_json::Value>,
+        ) -> Result<serde_json::Value, String> {
+            unimplemented!()
+        }
+    }
+
+    /// Helper: spin up an in-memory unix-socket server backed by
+    /// `LeaseFakeServices` and return a connected `RpcServices` client +
+    /// teardown handles.
+    async fn lease_transport(
+        canned: LeaseResult,
+    ) -> (
+        Arc<super::super::rpc::RpcServices>,
+        super::super::rpc::RpcBackgroundTasks,
+        ServeHandle,
+        CancellationToken,
+        tempfile::TempDir,
+    ) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let sock = dir.path().join("lease.sock");
+        let services: Arc<dyn SupervisorServices> = Arc::new(LeaseFakeServices {
+            cancel: CancellationToken::new(),
+            canned_result: canned,
+        });
+        let handle = serve_on_unix_socket(&sock, services)
+            .await
+            .expect("bind server");
+        let client_cancel = CancellationToken::new();
+        let (rpc, bg) = super::super::rpc::RpcServices::connect_unix(&sock, client_cancel.clone())
+            .await
+            .expect("connect rpc");
+        (rpc, bg, handle, client_cancel, dir)
+    }
+
+    /// Teardown helper matching the production ordering: drop client first
+    /// (closing the outbound channel so the writer drains), await writer,
+    /// cancel + await reader, then cancel + await the server handle.
+    async fn teardown(
+        rpc: Arc<super::super::rpc::RpcServices>,
+        bg: super::super::rpc::RpcBackgroundTasks,
+        handle: ServeHandle,
+        client_cancel: CancellationToken,
+    ) {
+        drop(rpc);
+        let _ = bg.writer.await;
+        client_cancel.cancel();
+        let _ = bg.reader.await;
+        handle.cancel();
+        let _ = handle.join.await;
+    }
+
+    /// A normal semantic `LeaseResult::Granted` survives the full
+    /// client→server→dispatch→client round-trip with its fencing token
+    /// and deadlines intact.
+    #[tokio::test]
+    async fn lease_transport_granted_survives_dispatch() {
+        use crate::services::lease::{LeaseDeadlines, LeaseGrant};
+        let canned = LeaseResult::Granted(LeaseGrant {
+            fencing_token: LeaseFencingToken(77),
+            deadlines: LeaseDeadlines {
+                queue_deadline_ms: 30_000,
+                launch_deadline_ms: 60_000,
+            },
+        });
+        let (rpc, bg, handle, cc, _dir) = lease_transport(canned).await;
+        let result = rpc
+            .queue_lease(LeaseQueueRequest {
+                identity: sample_lease_identity(),
+                deadlines: LeaseDeadlines {
+                    queue_deadline_ms: 10,
+                    launch_deadline_ms: 20,
+                },
+            })
+            .await;
+        match result {
+            LeaseResult::Granted(grant) => {
+                assert_eq!(grant.fencing_token, LeaseFencingToken(77));
+                assert_eq!(grant.deadlines.queue_deadline_ms, 30_000);
+            }
+            other => panic!("expected Granted, got {other:?}"),
+        }
+        teardown(rpc, bg, handle, cc).await;
+    }
+
+    /// A typed `LeaseIdentityConflict` survives dispatch with the conflict
+    /// identity intact — it must NOT be collapsed to `LeaseUnavailable`.
+    #[tokio::test]
+    async fn lease_transport_identity_conflict_survives_dispatch() {
+        let identity = sample_lease_identity();
+        let canned = LeaseResult::LeaseIdentityConflict {
+            identity: identity.clone(),
+        };
+        let (rpc, bg, handle, cc, _dir) = lease_transport(canned).await;
+        let result = rpc
+            .grant_lease(LeaseGrantRequest {
+                identity: sample_lease_identity(),
+                fencing_token: LeaseFencingToken(1),
+            })
+            .await;
+        match result {
+            LeaseResult::LeaseIdentityConflict { identity: got } => {
+                assert_eq!(got, identity);
+            }
+            other => panic!("expected LeaseIdentityConflict, got {other:?}"),
+        }
+        teardown(rpc, bg, handle, cc).await;
+    }
+
+    /// A typed `LeaseWaitTimeout` survives dispatch with the bounded
+    /// timeout credit intact — it must NOT be collapsed to
+    /// `LeaseUnavailable`.
+    #[tokio::test]
+    async fn lease_transport_wait_timeout_survives_dispatch() {
+        use crate::services::lease::TimeoutCredit;
+        let canned = LeaseResult::LeaseWaitTimeout {
+            timeout_credit: Some(TimeoutCredit {
+                units: 2,
+                retry_after_ms: 15_000,
+            }),
+        };
+        let (rpc, bg, handle, cc, _dir) = lease_transport(canned).await;
+        let result = rpc
+            .queue_lease(LeaseQueueRequest {
+                identity: sample_lease_identity(),
+                deadlines: crate::services::lease::LeaseDeadlines {
+                    queue_deadline_ms: 1,
+                    launch_deadline_ms: 2,
+                },
+            })
+            .await;
+        match result {
+            LeaseResult::LeaseWaitTimeout { timeout_credit } => {
+                let credit = timeout_credit.expect("credit");
+                assert_eq!(credit.units, 2);
+                assert_eq!(credit.retry_after_ms, 15_000);
+            }
+            other => panic!("expected LeaseWaitTimeout, got {other:?}"),
+        }
+        teardown(rpc, bg, handle, cc).await;
+    }
+
+    /// When the transport is broken (server dropped before the RPC call),
+    /// the `RpcServices` impl must map the failure to `LeaseUnavailable`
+    /// rather than panicking or returning an `Err`.
+    #[tokio::test]
+    async fn lease_transport_broken_maps_to_unavailable() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let sock = dir.path().join("broken.sock");
+        let services: Arc<dyn SupervisorServices> = Arc::new(LeaseFakeServices {
+            cancel: CancellationToken::new(),
+            canned_result: LeaseResult::LeaseUnavailable,
+        });
+        let handle = serve_on_unix_socket(&sock, services)
+            .await
+            .expect("bind server");
+        let client_cancel = CancellationToken::new();
+        let (rpc, bg) = super::super::rpc::RpcServices::connect_unix(&sock, client_cancel.clone())
+            .await
+            .expect("connect rpc");
+
+        // Tear down the server side, breaking the transport.
+        handle.cancel();
+        let _ = handle.join.await;
+
+        // The RPC call should fail and map to LeaseUnavailable.
+        let result = rpc
+            .queue_lease(LeaseQueueRequest {
+                identity: sample_lease_identity(),
+                deadlines: crate::services::lease::LeaseDeadlines {
+                    queue_deadline_ms: 1,
+                    launch_deadline_ms: 2,
+                },
+            })
+            .await;
+        assert!(
+            matches!(result, LeaseResult::LeaseUnavailable),
+            "expected LeaseUnavailable on broken transport, got {result:?}"
+        );
+
+        drop(rpc);
+        let _ = bg.writer.await;
+        client_cancel.cancel();
+        let _ = bg.reader.await;
+    }
+
+    /// Every lease operation family round-trips through the transport and
+    /// returns the canned result (proving all seven dispatch arms work).
+    #[tokio::test]
+    async fn lease_transport_all_operations_roundtrip() {
+        use crate::services::lease::{LeaseDeadlines, LeaseState, LeaseStatus};
+        let canned = LeaseResult::Status(LeaseStatus {
+            state: LeaseState::Active,
+            fencing_token: Some(LeaseFencingToken(5)),
+            deadlines: LeaseDeadlines {
+                queue_deadline_ms: 1,
+                launch_deadline_ms: 2,
+            },
+            pod_uid: Some("pod-1".into()),
+            candidate_cleanup: true,
+        });
+        let (rpc, bg, handle, cc, _dir) = lease_transport(canned).await;
+
+        // queue
+        let r = rpc
+            .queue_lease(LeaseQueueRequest {
+                identity: sample_lease_identity(),
+                deadlines: LeaseDeadlines {
+                    queue_deadline_ms: 1,
+                    launch_deadline_ms: 2,
+                },
+            })
+            .await;
+        assert!(matches!(r, LeaseResult::Status(_)));
+
+        // grant
+        let r = rpc
+            .grant_lease(LeaseGrantRequest {
+                identity: sample_lease_identity(),
+                fencing_token: LeaseFencingToken(1),
+            })
+            .await;
+        assert!(matches!(r, LeaseResult::Status(_)));
+
+        // status
+        let r = rpc
+            .lease_status(LeaseStatusRequest {
+                identity: sample_lease_identity(),
+            })
+            .await;
+        assert!(matches!(r, LeaseResult::Status(_)));
+
+        // abandon
+        let r = rpc
+            .abandon_lease(LeaseAbandonRequest {
+                identity: sample_lease_identity(),
+                candidate_cleanup: true,
+            })
+            .await;
+        assert!(matches!(r, LeaseResult::Status(_)));
+
+        // bind
+        let r = rpc
+            .bind_lease_pod(LeaseBindRequest {
+                identity: sample_lease_identity(),
+                fencing_token: LeaseFencingToken(1),
+                pod_uid: "pod-x".into(),
+            })
+            .await;
+        assert!(matches!(r, LeaseResult::Status(_)));
+
+        // cancel
+        let r = rpc
+            .cancel_lease(LeaseCancelRequest {
+                identity: sample_lease_identity(),
+                fencing_token: Some(LeaseFencingToken(1)),
+                candidate_cleanup: false,
+            })
+            .await;
+        assert!(matches!(r, LeaseResult::Status(_)));
+
+        // release
+        let r = rpc
+            .release_lease(LeaseReleaseRequest {
+                identity: sample_lease_identity(),
+                fencing_token: LeaseFencingToken(1),
+                candidate_cleanup: true,
+            })
+            .await;
+        assert!(matches!(r, LeaseResult::Status(_)));
+
+        teardown(rpc, bg, handle, cc).await;
     }
 }

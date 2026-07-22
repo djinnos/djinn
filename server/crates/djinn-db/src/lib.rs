@@ -72,6 +72,11 @@ pub use repositories::{
         MergedChangeRow, RecordOutcomeParams, SampleFrameRow, SamplePolicyRow, SelectionRow,
         UnmaterializedSelection, UpsertMergedChangeParams,
     },
+    build_lease::{
+        BuildLeaseConsumerKind, BuildLeaseKey, BuildLeaseRepository, BuildLeaseRow,
+        BuildLeaseSnapshot, BuildLeaseState, GrantNextBuildLeaseResult, QueueBuildLeaseInput,
+        QueueBuildLeaseResult,
+    },
     chat_interruption_notice::{
         ChatInterruptionNotice, ChatInterruptionNoticeRepository, CreateChatInterruptionNotice,
     },
