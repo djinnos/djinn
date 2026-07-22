@@ -789,7 +789,7 @@ A rationale description.
     #[test]
     fn qa_id_is_stable_across_calls() {
         let note = pitfall_note_fixture();
-        let qa1 = &extract_qa_pairs(&[note.clone()]).pairs[0];
+        let qa1 = &extract_qa_pairs(std::slice::from_ref(&note)).pairs[0];
         let qa2 = &extract_qa_pairs(&[note]).pairs[0];
         assert_eq!(qa1.qa_id, qa2.qa_id, "QA ID must be deterministic");
     }

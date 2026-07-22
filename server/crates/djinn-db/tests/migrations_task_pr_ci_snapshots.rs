@@ -231,10 +231,8 @@ async fn migration_85_applies_on_fresh_database_and_sets_defaults() {
             .connect(&db_url)
             .await
             .expect("connect fresh migration database");
-        sqlx::migrate!("./migrations_postgres")
-            .run(&pool)
-            .await
-            .expect("apply all migrations to fresh database");
+        let operator =
+            djinn_db::test_support::apply_all_migrations_to_fresh_database(&db_url).await;
 
         assert_schema(&pool).await;
 
@@ -247,10 +245,11 @@ async fn migration_85_applies_on_fresh_database_and_sets_defaults() {
         .expect("seed defaults project");
         sqlx::query(
             "INSERT INTO tasks \
-             (id, project_id, short_id, title, description, design, labels, acceptance_criteria, memory_refs) \
+             (id, project_id, short_id, title, description, design, labels, acceptance_criteria, memory_refs, created_by_user_id) \
              VALUES ('task-defaults', 'project-defaults', 'defaults', 'title', 'description', 'design', \
-                     '[]'::jsonb, '[]'::jsonb, '[]'::jsonb)",
+                     '[]'::jsonb, '[]'::jsonb, '[]'::jsonb, $1)",
         )
+        .bind(&operator)
         .execute(&pool)
         .await
         .expect("seed defaults task");
@@ -415,10 +414,8 @@ async fn migration_116_adds_nullable_merge_queue_lane_columns_and_constraints() 
             .connect(&db_url)
             .await
             .expect("connect fresh migration database");
-        sqlx::migrate!("./migrations_postgres")
-            .run(&pool)
-            .await
-            .expect("apply all migrations to fresh database");
+        let operator =
+            djinn_db::test_support::apply_all_migrations_to_fresh_database(&db_url).await;
 
         // Pre-existing PR-head lane schema is still intact.
         assert_schema(&pool).await;
@@ -478,10 +475,11 @@ async fn migration_116_adds_nullable_merge_queue_lane_columns_and_constraints() 
         .expect("seed mq project");
         sqlx::query(
             "INSERT INTO tasks \
-             (id, project_id, short_id, title, description, design, labels, acceptance_criteria, memory_refs) \
+             (id, project_id, short_id, title, description, design, labels, acceptance_criteria, memory_refs, created_by_user_id) \
              VALUES ('task-mq', 'project-mq', 'mq', 'title', 'description', 'design', \
-                     '[]'::jsonb, '[]'::jsonb, '[]'::jsonb)",
+                     '[]'::jsonb, '[]'::jsonb, '[]'::jsonb, $1)",
         )
+        .bind(&operator)
         .execute(&pool)
         .await
         .expect("seed mq task");
