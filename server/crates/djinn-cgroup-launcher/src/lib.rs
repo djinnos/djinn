@@ -24,16 +24,23 @@ impl UnleasedQuota {
         Ok(Self(millicores))
     }
 
-    pub fn millicores(self) -> u16 { self.0 }
+    pub fn millicores(self) -> u16 {
+        self.0
+    }
 
     fn cpu_max(self) -> String {
         // cpu.max quota is in microseconds per period.  1000m is one CPU.
-        format!("{} {DEFAULT_PERIOD_US}", u64::from(self.0) * DEFAULT_PERIOD_US / 1000)
+        format!(
+            "{} {DEFAULT_PERIOD_US}",
+            u64::from(self.0) * DEFAULT_PERIOD_US / 1000
+        )
     }
 }
 
 impl Default for UnleasedQuota {
-    fn default() -> Self { Self(Self::DEFAULT_MILLICORES) }
+    fn default() -> Self {
+        Self(Self::DEFAULT_MILLICORES)
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -44,12 +51,21 @@ pub struct LauncherConfig {
 
 impl LauncherConfig {
     pub fn new(unleased_millicores: Option<u16>, expected_uid: u32) -> Result<Self, Error> {
-        Ok(Self { unleased_quota: UnleasedQuota::new(unleased_millicores.unwrap_or(UnleasedQuota::DEFAULT_MILLICORES))?, expected_uid })
+        Ok(Self {
+            unleased_quota: UnleasedQuota::new(
+                unleased_millicores.unwrap_or(UnleasedQuota::DEFAULT_MILLICORES),
+            )?,
+            expected_uid,
+        })
     }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum CgroupMode { V1, V2, Hybrid }
+pub enum CgroupMode {
+    V1,
+    V2,
+    Hybrid,
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Readiness {
@@ -64,9 +80,18 @@ pub struct Readiness {
 
 impl Readiness {
     pub fn validate(&self, expected_uid: u32) -> Result<(), Error> {
-        if self.mode != CgroupMode::V2 { return Err(Error::NotCgroupV2); }
-        if !self.root_writable { return Err(Error::ReadOnlyDelegation); }
-        if self.owner_uid != expected_uid { return Err(Error::IncompatibleOwnership { expected: expected_uid, actual: self.owner_uid }); }
+        if self.mode != CgroupMode::V2 {
+            return Err(Error::NotCgroupV2);
+        }
+        if !self.root_writable {
+            return Err(Error::ReadOnlyDelegation);
+        }
+        if self.owner_uid != expected_uid {
+            return Err(Error::IncompatibleOwnership {
+                expected: expected_uid,
+                actual: self.owner_uid,
+            });
+        }
         if self.delegated_controllers != BTreeSet::from(["cpu".to_owned()]) {
             return Err(Error::OverbroadOrMissingCpuDelegation);
         }
@@ -90,8 +115,12 @@ pub struct Leaf {
 }
 
 impl Leaf {
-    pub fn name(&self) -> &str { &self.name }
-    pub fn cgroup_fd(&self) -> RawFd { self.fd }
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+    pub fn cgroup_fd(&self) -> RawFd {
+        self.fd
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Default)]
@@ -117,7 +146,11 @@ pub trait CgroupFs {
 pub trait CloneIntoCgroup {
     /// This is the only child-spawn seam. Implementations must use
     /// `clone3(CLONE_INTO_CGROUP)` with `target_cgroup_fd` before exec.
-    fn clone_into_cgroup(&mut self, target_cgroup_fd: RawFd, invocation: &Invocation) -> Result<(), Error>;
+    fn clone_into_cgroup(
+        &mut self,
+        target_cgroup_fd: RawFd,
+        invocation: &Invocation,
+    ) -> Result<(), Error>;
 }
 
 pub struct Launcher<F, S> {
@@ -129,13 +162,18 @@ pub struct Launcher<F, S> {
 impl<F: CgroupFs, S: CloneIntoCgroup> Launcher<F, S> {
     pub fn new(fs: F, syscall: S, config: LauncherConfig) -> Result<Self, Error> {
         fs.readiness()?.validate(config.expected_uid)?;
-        Ok(Self { fs, syscall, config })
+        Ok(Self {
+            fs,
+            syscall,
+            config,
+        })
     }
 
     pub fn create(&mut self, name: &str, invocation: Invocation) -> Result<Leaf, Error> {
         validate_leaf_name(name)?;
         let fd = self.fs.create_direct_child(name)?;
-        self.fs.write_leaf(fd, "cpu.max", &self.config.unleased_quota.cpu_max())?;
+        self.fs
+            .write_leaf(fd, "cpu.max", &self.config.unleased_quota.cpu_max())?;
         // Clone is deliberately last: all readiness and leaf setup failures
         // occur before the child can execute.
         if let Err(error) = self.syscall.clone_into_cgroup(fd, &invocation) {
@@ -144,7 +182,13 @@ impl<F: CgroupFs, S: CloneIntoCgroup> Launcher<F, S> {
             let _ = self.fs.remove_leaf(fd, name);
             return Err(error);
         }
-        Ok(Leaf { name: name.to_owned(), fd, invocation, lifted: false, terminal: false })
+        Ok(Leaf {
+            name: name.to_owned(),
+            fd,
+            invocation,
+            lifted: false,
+            terminal: false,
+        })
     }
 
     pub fn sample(&mut self, leaf: &Leaf) -> Result<CpuStat, Error> {
@@ -152,10 +196,17 @@ impl<F: CgroupFs, S: CloneIntoCgroup> Launcher<F, S> {
     }
 
     pub fn fenced_lift(&mut self, leaf: &mut Leaf, fence: u64) -> Result<(), Error> {
-        if leaf.terminal { return Err(Error::TerminalIntent); }
-        if leaf.lifted { return Err(Error::LiftAlreadyApplied); }
-        if leaf.invocation.fence != fence { return Err(Error::FenceMismatch); }
-        self.fs.write_leaf(leaf.fd, "cpu.max", &format!("max {DEFAULT_PERIOD_US}"))?;
+        if leaf.terminal {
+            return Err(Error::TerminalIntent);
+        }
+        if leaf.lifted {
+            return Err(Error::LiftAlreadyApplied);
+        }
+        if leaf.invocation.fence != fence {
+            return Err(Error::FenceMismatch);
+        }
+        self.fs
+            .write_leaf(leaf.fd, "cpu.max", &format!("max {DEFAULT_PERIOD_US}"))?;
         leaf.lifted = true;
         Ok(())
     }
@@ -169,7 +220,11 @@ impl<F: CgroupFs, S: CloneIntoCgroup> Launcher<F, S> {
 
     pub fn wait_empty(&mut self, leaf: &Leaf) -> Result<(), Error> {
         let events = self.fs.read_leaf(leaf.fd, "cgroup.events")?;
-        if populated_zero(&events)? { Ok(()) } else { Err(Error::StillPopulated) }
+        if populated_zero(&events)? {
+            Ok(())
+        } else {
+            Err(Error::StillPopulated)
+        }
     }
 
     pub fn remove(&mut self, leaf: &Leaf) -> Result<(), Error> {
@@ -177,7 +232,9 @@ impl<F: CgroupFs, S: CloneIntoCgroup> Launcher<F, S> {
         self.fs.remove_leaf(leaf.fd, &leaf.name)
     }
 
-    pub fn into_parts(self) -> (F, S) { (self.fs, self.syscall) }
+    pub fn into_parts(self) -> (F, S) {
+        (self.fs, self.syscall)
+    }
 }
 
 fn validate_leaf_name(name: &str) -> Result<(), Error> {
@@ -192,8 +249,12 @@ fn parse_cpu_stat(input: &str) -> Result<CpuStat, Error> {
     for line in input.lines() {
         let mut fields = line.split_ascii_whitespace();
         let Some(key) = fields.next() else { continue };
-        let Some(raw) = fields.next() else { return Err(Error::InvalidCpuStat); };
-        if fields.next().is_some() { return Err(Error::InvalidCpuStat); }
+        let Some(raw) = fields.next() else {
+            return Err(Error::InvalidCpuStat);
+        };
+        if fields.next().is_some() {
+            return Err(Error::InvalidCpuStat);
+        }
         let value = raw.parse().map_err(|_| Error::InvalidCpuStat)?;
         match key {
             "usage_usec" => result.usage_usec = value,
@@ -202,7 +263,7 @@ fn parse_cpu_stat(input: &str) -> Result<CpuStat, Error> {
             "nr_periods" => result.nr_periods = value,
             "nr_throttled" => result.nr_throttled = value,
             "throttled_usec" => result.throttled_usec = value,
-            _ => {},
+            _ => {}
         }
     }
     Ok(result)
@@ -212,7 +273,11 @@ fn populated_zero(input: &str) -> Result<bool, Error> {
     for line in input.lines() {
         let mut fields = line.split_ascii_whitespace();
         if fields.next() == Some("populated") {
-            return match (fields.next(), fields.next()) { (Some("0"), None) => Ok(true), (Some("1"), None) => Ok(false), _ => Err(Error::InvalidEvents) };
+            return match (fields.next(), fields.next()) {
+                (Some("0"), None) => Ok(true),
+                (Some("1"), None) => Ok(false),
+                _ => Err(Error::InvalidEvents),
+            };
         }
     }
     Err(Error::InvalidEvents)
@@ -252,113 +317,437 @@ pub enum Error {
 
 /// Linux no-follow implementation for the filesystem seam. It only ever uses
 /// `openat` relative to its already opened delegated root or leaf descriptor.
-pub struct NativeCgroupFs { root: RawFd, readiness: Readiness }
+pub struct NativeCgroupFs {
+    root: RawFd,
+    readiness: Readiness,
+}
 
 impl NativeCgroupFs {
     pub fn open(root: impl AsRef<Path>, expected_uid: u32) -> Result<Self, Error> {
         let root_path = root.as_ref().to_path_buf();
         let metadata = fs::symlink_metadata(&root_path)?;
-        if metadata.file_type().is_symlink() { return Err(Error::UnsafeLeafName); }
+        if metadata.file_type().is_symlink() {
+            return Err(Error::UnsafeLeafName);
+        }
         #[cfg(unix)]
         use std::os::unix::fs::{MetadataExt, PermissionsExt};
         #[cfg(unix)]
         let owner_uid = metadata.uid();
         #[cfg(unix)]
-        let root_writable = metadata.permissions().mode() & 0o222 != 0 && metadata.permissions().mode() & 0o022 == 0;
+        let root_writable = metadata.permissions().mode() & 0o222 != 0
+            && metadata.permissions().mode() & 0o022 == 0;
         let controllers = fs::read_to_string(root_path.join("cgroup.subtree_control"))?
-            .split_ascii_whitespace().map(str::to_owned).collect();
+            .split_ascii_whitespace()
+            .map(str::to_owned)
+            .collect();
         let mode = inspect_cgroup_mode()?;
-        let readiness = Readiness { mode, root_writable, owner_uid, delegated_controllers: controllers };
+        let readiness = Readiness {
+            mode,
+            root_writable,
+            owner_uid,
+            delegated_controllers: controllers,
+        };
         readiness.validate(expected_uid)?;
         let root = open_dir(root_path.as_os_str())?;
         Ok(Self { root, readiness })
     }
 }
 
-impl Drop for NativeCgroupFs { fn drop(&mut self) { unsafe { libc::close(self.root); } } }
+impl Drop for NativeCgroupFs {
+    fn drop(&mut self) {
+        unsafe {
+            libc::close(self.root);
+        }
+    }
+}
 
 impl CgroupFs for NativeCgroupFs {
-    fn readiness(&self) -> Result<Readiness, Error> { Ok(self.readiness.clone()) }
+    fn readiness(&self) -> Result<Readiness, Error> {
+        Ok(self.readiness.clone())
+    }
     fn create_direct_child(&mut self, name: &str) -> Result<RawFd, Error> {
         validate_leaf_name(name)?;
         let name = CString::new(name).map_err(|_| Error::UnsafeLeafName)?;
         let rc = unsafe { libc::mkdirat(self.root, name.as_ptr(), 0o700) };
-        if rc != 0 { return Err(io::Error::last_os_error().into()); }
-        let fd = unsafe { libc::openat(self.root, name.as_ptr(), libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC) };
-        if fd < 0 { return Err(io::Error::last_os_error().into()); }
+        if rc != 0 {
+            return Err(io::Error::last_os_error().into());
+        }
+        let fd = unsafe {
+            libc::openat(
+                self.root,
+                name.as_ptr(),
+                libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            )
+        };
+        if fd < 0 {
+            return Err(io::Error::last_os_error().into());
+        }
         Ok(fd)
     }
     fn write_leaf(&mut self, fd: RawFd, file: &str, value: &str) -> Result<(), Error> {
         let file = safe_control_file(file)?;
-        let target = unsafe { libc::openat(fd, file.as_ptr(), libc::O_WRONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC) };
-        if target < 0 { return Err(io::Error::last_os_error().into()); }
+        let target = unsafe {
+            libc::openat(
+                fd,
+                file.as_ptr(),
+                libc::O_WRONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            )
+        };
+        if target < 0 {
+            return Err(io::Error::last_os_error().into());
+        }
         let bytes = value.as_bytes();
         let written = unsafe { libc::write(target, bytes.as_ptr().cast(), bytes.len()) };
-        unsafe { libc::close(target); }
-        if written != bytes.len() as isize { return Err(io::Error::last_os_error().into()); }
+        unsafe {
+            libc::close(target);
+        }
+        if written != bytes.len() as isize {
+            return Err(io::Error::last_os_error().into());
+        }
         Ok(())
     }
     fn read_leaf(&mut self, fd: RawFd, file: &str) -> Result<String, Error> {
         let file = safe_control_file(file)?;
-        let target = unsafe { libc::openat(fd, file.as_ptr(), libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC) };
-        if target < 0 { return Err(io::Error::last_os_error().into()); }
-        let mut bytes = Vec::new(); let mut chunk = [0_u8; 4096];
-        loop { let count = unsafe { libc::read(target, chunk.as_mut_ptr().cast(), chunk.len()) }; if count < 0 { unsafe { libc::close(target); } return Err(io::Error::last_os_error().into()); } if count == 0 { break; } bytes.extend_from_slice(&chunk[..count as usize]); }
-        unsafe { libc::close(target); }
+        let target = unsafe {
+            libc::openat(
+                fd,
+                file.as_ptr(),
+                libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            )
+        };
+        if target < 0 {
+            return Err(io::Error::last_os_error().into());
+        }
+        let mut bytes = Vec::new();
+        let mut chunk = [0_u8; 4096];
+        loop {
+            let count = unsafe { libc::read(target, chunk.as_mut_ptr().cast(), chunk.len()) };
+            if count < 0 {
+                unsafe {
+                    libc::close(target);
+                }
+                return Err(io::Error::last_os_error().into());
+            }
+            if count == 0 {
+                break;
+            }
+            bytes.extend_from_slice(&chunk[..count as usize]);
+        }
+        unsafe {
+            libc::close(target);
+        }
         String::from_utf8(bytes).map_err(|_| Error::InvalidCpuStat)
     }
     fn remove_leaf(&mut self, fd: RawFd, name: &str) -> Result<(), Error> {
-        unsafe { libc::close(fd); }
+        unsafe {
+            libc::close(fd);
+        }
         let name = CString::new(name).map_err(|_| Error::UnsafeLeafName)?;
-        if unsafe { libc::unlinkat(self.root, name.as_ptr(), libc::AT_REMOVEDIR) } != 0 { return Err(io::Error::last_os_error().into()); }
+        if unsafe { libc::unlinkat(self.root, name.as_ptr(), libc::AT_REMOVEDIR) } != 0 {
+            return Err(io::Error::last_os_error().into());
+        }
         Ok(())
     }
 }
 
 fn safe_control_file(file: &str) -> Result<CString, Error> {
-    if file.contains('/') || file.contains('\0') { return Err(Error::UnsafeLeafName); }
+    if file.contains('/') || file.contains('\0') {
+        return Err(Error::UnsafeLeafName);
+    }
     CString::new(file).map_err(|_| Error::UnsafeLeafName)
 }
 fn open_dir(path: &std::ffi::OsStr) -> Result<RawFd, Error> {
     use std::os::unix::ffi::OsStrExt;
     let path = CString::new(path.as_bytes()).map_err(|_| Error::UnsafeLeafName)?;
-    let fd = unsafe { libc::open(path.as_ptr(), libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC) };
-    if fd < 0 { Err(io::Error::last_os_error().into()) } else { Ok(fd) }
+    let fd = unsafe {
+        libc::open(
+            path.as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        )
+    };
+    if fd < 0 {
+        Err(io::Error::last_os_error().into())
+    } else {
+        Ok(fd)
+    }
 }
 fn inspect_cgroup_mode() -> Result<CgroupMode, Error> {
     let mounts = fs::read_to_string("/proc/self/mountinfo")?;
-    let has_v1 = mounts.lines().any(|line| line.split(" - ").nth(1).is_some_and(|tail| tail.starts_with("cgroup ")));
-    let has_v2 = mounts.lines().any(|line| line.split(" - ").nth(1).is_some_and(|tail| tail.starts_with("cgroup2 ")));
-    Ok(match (has_v1, has_v2) { (false, true) => CgroupMode::V2, (true, true) => CgroupMode::Hybrid, _ => CgroupMode::V1 })
+    let has_v1 = mounts.lines().any(|line| {
+        line.split(" - ")
+            .nth(1)
+            .is_some_and(|tail| tail.starts_with("cgroup "))
+    });
+    let has_v2 = mounts.lines().any(|line| {
+        line.split(" - ")
+            .nth(1)
+            .is_some_and(|tail| tail.starts_with("cgroup2 "))
+    });
+    Ok(match (has_v1, has_v2) {
+        (false, true) => CgroupMode::V2,
+        (true, true) => CgroupMode::Hybrid,
+        _ => CgroupMode::V1,
+    })
 }
 
 /// The production broker supplies a real clone3 implementation. This safe
 /// default makes unsupported/denied kernels fail before any child exec.
 pub struct DenyClone3;
-impl CloneIntoCgroup for DenyClone3 { fn clone_into_cgroup(&mut self, _: RawFd, _: &Invocation) -> Result<(), Error> { Err(Error::CloneDenied) } }
+impl CloneIntoCgroup for DenyClone3 {
+    fn clone_into_cgroup(&mut self, _: RawFd, _: &Invocation) -> Result<(), Error> {
+        Err(Error::CloneDenied)
+    }
+}
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashMap;
+    use std::{collections::HashMap, path::PathBuf};
 
-    #[derive(Default)] struct FakeFs { readiness: Option<Readiness>, files: HashMap<(RawFd, String), String>, created: Vec<String>, removed: Vec<String>, next: i32 }
-    impl FakeFs { fn ready() -> Self { Self { readiness: Some(Readiness { mode: CgroupMode::V2, root_writable: true, owner_uid: 7, delegated_controllers: BTreeSet::from(["cpu".into()]) }), next: 10, ..Self::default() } } }
-    impl CgroupFs for FakeFs {
-        fn readiness(&self) -> Result<Readiness, Error> { Ok(self.readiness.clone().unwrap()) }
-        fn create_direct_child(&mut self, name: &str) -> Result<RawFd, Error> { self.created.push(name.into()); self.next += 1; Ok(self.next) }
-        fn write_leaf(&mut self, fd: RawFd, file: &str, value: &str) -> Result<(), Error> { self.files.insert((fd, file.into()), value.into()); Ok(()) }
-        fn read_leaf(&mut self, fd: RawFd, file: &str) -> Result<String, Error> { Ok(self.files.get(&(fd, file.into())).cloned().unwrap_or_default()) }
-        fn remove_leaf(&mut self, _: RawFd, name: &str) -> Result<(), Error> { self.removed.push(name.into()); Ok(()) }
+    #[derive(Default)]
+    struct FakeFs {
+        readiness: Option<Readiness>,
+        files: HashMap<(RawFd, String), String>,
+        created: Vec<String>,
+        removed: Vec<String>,
+        next: i32,
     }
-    #[derive(Default)] struct FakeClone { calls: Vec<(RawFd, Invocation)>, deny: bool }
-    impl CloneIntoCgroup for FakeClone { fn clone_into_cgroup(&mut self, fd: RawFd, inv: &Invocation) -> Result<(), Error> { if self.deny { return Err(Error::CloneDenied); } self.calls.push((fd, inv.clone())); Ok(()) } }
-    fn launcher() -> Launcher<FakeFs, FakeClone> { Launcher::new(FakeFs::ready(), FakeClone::default(), LauncherConfig::new(None, 7).unwrap()).unwrap() }
-    fn invocation() -> Invocation { Invocation { id: "run-1".into(), fence: 99 } }
+    impl FakeFs {
+        fn ready() -> Self {
+            Self {
+                readiness: Some(Readiness {
+                    mode: CgroupMode::V2,
+                    root_writable: true,
+                    owner_uid: 7,
+                    delegated_controllers: BTreeSet::from(["cpu".into()]),
+                }),
+                next: 10,
+                ..Self::default()
+            }
+        }
+    }
+    impl CgroupFs for FakeFs {
+        fn readiness(&self) -> Result<Readiness, Error> {
+            Ok(self.readiness.clone().unwrap())
+        }
+        fn create_direct_child(&mut self, name: &str) -> Result<RawFd, Error> {
+            self.created.push(name.into());
+            self.next += 1;
+            Ok(self.next)
+        }
+        fn write_leaf(&mut self, fd: RawFd, file: &str, value: &str) -> Result<(), Error> {
+            self.files.insert((fd, file.into()), value.into());
+            Ok(())
+        }
+        fn read_leaf(&mut self, fd: RawFd, file: &str) -> Result<String, Error> {
+            Ok(self
+                .files
+                .get(&(fd, file.into()))
+                .cloned()
+                .unwrap_or_default())
+        }
+        fn remove_leaf(&mut self, _: RawFd, name: &str) -> Result<(), Error> {
+            self.removed.push(name.into());
+            Ok(())
+        }
+    }
+    #[derive(Default)]
+    struct FakeClone {
+        attempts: Vec<(RawFd, Invocation)>,
+        exec_calls: Vec<(RawFd, Invocation)>,
+        deny: bool,
+    }
+    impl CloneIntoCgroup for FakeClone {
+        fn clone_into_cgroup(&mut self, fd: RawFd, inv: &Invocation) -> Result<(), Error> {
+            self.attempts.push((fd, inv.clone()));
+            if self.deny {
+                return Err(Error::CloneDenied);
+            }
+            self.exec_calls.push((fd, inv.clone()));
+            Ok(())
+        }
+    }
+    fn launcher() -> Launcher<FakeFs, FakeClone> {
+        Launcher::new(
+            FakeFs::ready(),
+            FakeClone::default(),
+            LauncherConfig::new(None, 7).unwrap(),
+        )
+        .unwrap()
+    }
+    fn invocation() -> Invocation {
+        Invocation {
+            id: "run-1".into(),
+            fence: 99,
+        }
+    }
 
-    #[test] fn fresh_invocation_is_passed_with_leaf_fd() { let mut l = launcher(); let leaf = l.create("invocation-1", invocation()).unwrap(); let (_, clone) = l.into_parts(); assert_eq!(clone.calls, vec![(leaf.fd, invocation())]); }
-    #[test] fn lift_is_one_way_and_fenced() { let mut l = launcher(); let mut leaf = l.create("one", invocation()).unwrap(); assert!(matches!(l.fenced_lift(&mut leaf, 98), Err(Error::FenceMismatch))); l.fenced_lift(&mut leaf, 99).unwrap(); assert!(matches!(l.fenced_lift(&mut leaf, 99), Err(Error::LiftAlreadyApplied))); }
-    #[test] fn remove_requires_descendant_emptiness() { let mut l = launcher(); let leaf = l.create("one", invocation()).unwrap(); assert!(matches!(l.remove(&leaf), Err(Error::InvalidEvents))); let fd = leaf.fd; l.fs.files.insert((fd, "cgroup.events".into()), "populated 1\n".into()); assert!(matches!(l.remove(&leaf), Err(Error::StillPopulated))); l.fs.files.insert((fd, "cgroup.events".into()), "populated 0\n".into()); l.remove(&leaf).unwrap(); assert_eq!(l.fs.removed, vec!["one"]); }
-    #[test] fn readiness_and_paths_fail_closed() { for mode in [CgroupMode::V1, CgroupMode::Hybrid] { let mut fs = FakeFs::ready(); fs.readiness.as_mut().unwrap().mode = mode; assert!(matches!(Launcher::new(fs, FakeClone::default(), LauncherConfig::new(None, 7).unwrap()), Err(Error::NotCgroupV2))); } let mut fs = FakeFs::ready(); fs.readiness.as_mut().unwrap().delegated_controllers.insert("memory".into()); assert!(matches!(Launcher::new(fs, FakeClone::default(), LauncherConfig::new(None, 7).unwrap()), Err(Error::OverbroadOrMissingCpuDelegation))); assert!(matches!(validate_leaf_name("../escape"), Err(Error::UnsafeLeafName))); }
-    #[test] fn denied_clone_never_reports_a_leaf() { let mut l = Launcher::new(FakeFs::ready(), FakeClone { deny: true, ..FakeClone::default() }, LauncherConfig::new(None, 7).unwrap()).unwrap(); assert!(matches!(l.create("one", invocation()), Err(Error::CloneDenied))); }
+    #[test]
+    fn quota_configuration_has_a_safe_default_and_closed_bounds() {
+        assert_eq!(UnleasedQuota::default().millicores(), 250);
+        assert_eq!(
+            LauncherConfig::new(None, 7)
+                .unwrap()
+                .unleased_quota
+                .millicores(),
+            250
+        );
+        assert_eq!(UnleasedQuota::new(50).unwrap().millicores(), 50);
+        assert_eq!(UnleasedQuota::new(1000).unwrap().millicores(), 1000);
+        assert!(matches!(
+            UnleasedQuota::new(49),
+            Err(Error::InvalidQuota(49))
+        ));
+        assert!(matches!(
+            UnleasedQuota::new(1001),
+            Err(Error::InvalidQuota(1001))
+        ));
+    }
+
+    #[test]
+    fn fresh_invocation_is_passed_with_leaf_fd() {
+        let mut l = launcher();
+        let leaf = l.create("invocation-1", invocation()).unwrap();
+        let (_, clone) = l.into_parts();
+        assert_eq!(clone.exec_calls, vec![(leaf.fd, invocation())]);
+    }
+    #[test]
+    fn lift_is_one_way_and_fenced() {
+        let mut l = launcher();
+        let mut leaf = l.create("one", invocation()).unwrap();
+        assert!(matches!(
+            l.fenced_lift(&mut leaf, 98),
+            Err(Error::FenceMismatch)
+        ));
+        l.fenced_lift(&mut leaf, 99).unwrap();
+        assert!(matches!(
+            l.fenced_lift(&mut leaf, 99),
+            Err(Error::LiftAlreadyApplied)
+        ));
+    }
+    #[test]
+    fn remove_requires_descendant_emptiness() {
+        let mut l = launcher();
+        let leaf = l.create("one", invocation()).unwrap();
+        assert!(matches!(l.remove(&leaf), Err(Error::InvalidEvents)));
+        let fd = leaf.fd;
+        l.fs.files
+            .insert((fd, "cgroup.events".into()), "populated 1\n".into());
+        assert!(matches!(l.remove(&leaf), Err(Error::StillPopulated)));
+        l.fs.files
+            .insert((fd, "cgroup.events".into()), "populated 0\n".into());
+        l.remove(&leaf).unwrap();
+        assert_eq!(l.fs.removed, vec!["one"]);
+    }
+    #[test]
+    fn readiness_rejects_all_unsupported_delegation_profiles() {
+        for mode in [CgroupMode::V1, CgroupMode::Hybrid] {
+            let mut fs = FakeFs::ready();
+            fs.readiness.as_mut().unwrap().mode = mode;
+            assert!(matches!(
+                Launcher::new(
+                    fs,
+                    FakeClone::default(),
+                    LauncherConfig::new(None, 7).unwrap()
+                ),
+                Err(Error::NotCgroupV2)
+            ));
+        }
+        let mut missing_cpu = FakeFs::ready();
+        missing_cpu
+            .readiness
+            .as_mut()
+            .unwrap()
+            .delegated_controllers
+            .clear();
+        assert!(matches!(
+            Launcher::new(
+                missing_cpu,
+                FakeClone::default(),
+                LauncherConfig::new(None, 7).unwrap()
+            ),
+            Err(Error::OverbroadOrMissingCpuDelegation)
+        ));
+        let mut overbroad = FakeFs::ready();
+        overbroad
+            .readiness
+            .as_mut()
+            .unwrap()
+            .delegated_controllers
+            .insert("memory".into());
+        assert!(matches!(
+            Launcher::new(
+                overbroad,
+                FakeClone::default(),
+                LauncherConfig::new(None, 7).unwrap()
+            ),
+            Err(Error::OverbroadOrMissingCpuDelegation)
+        ));
+        let mut read_only = FakeFs::ready();
+        read_only.readiness.as_mut().unwrap().root_writable = false;
+        assert!(matches!(
+            Launcher::new(
+                read_only,
+                FakeClone::default(),
+                LauncherConfig::new(None, 7).unwrap()
+            ),
+            Err(Error::ReadOnlyDelegation)
+        ));
+        let mut wrong_owner = FakeFs::ready();
+        wrong_owner.readiness.as_mut().unwrap().owner_uid = 8;
+        assert!(matches!(
+            Launcher::new(
+                wrong_owner,
+                FakeClone::default(),
+                LauncherConfig::new(None, 7).unwrap()
+            ),
+            Err(Error::IncompatibleOwnership {
+                expected: 7,
+                actual: 8
+            })
+        ));
+    }
+
+    #[test]
+    fn leaf_paths_and_actual_symlinks_are_rejected() {
+        assert!(matches!(
+            validate_leaf_name("../escape"),
+            Err(Error::UnsafeLeafName)
+        ));
+        let base = std::env::var_os("CARGO_TARGET_TMPDIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| std::env::current_dir().unwrap())
+            .join(format!(
+                "djinn-cgroup-launcher-symlink-{}",
+                std::process::id()
+            ));
+        let link = base.join("root-link");
+        std::fs::create_dir(&base).unwrap();
+        std::os::unix::fs::symlink(&base, &link).unwrap();
+        let result = open_dir(link.as_os_str());
+        std::fs::remove_file(&link).unwrap();
+        std::fs::remove_dir(&base).unwrap();
+        assert!(matches!(result, Err(Error::Io(_))));
+    }
+
+    #[test]
+    fn denied_clone_never_executes_a_child() {
+        let mut l = Launcher::new(
+            FakeFs::ready(),
+            FakeClone {
+                deny: true,
+                ..FakeClone::default()
+            },
+            LauncherConfig::new(None, 7).unwrap(),
+        )
+        .unwrap();
+        assert!(matches!(
+            l.create("one", invocation()),
+            Err(Error::CloneDenied)
+        ));
+        let (fs, clone) = l.into_parts();
+        assert_eq!(clone.attempts.len(), 1);
+        assert!(clone.exec_calls.is_empty());
+        assert_eq!(fs.removed, vec!["one"]);
+    }
 }
