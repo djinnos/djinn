@@ -9413,6 +9413,14 @@ export namespace ProposalShowOutputSchema {
    * PausedOrFrozen, and Terminal.
    */
   export type EvidenceLifecyclePhase = ("awaiting_evidence" | "evidence_received" | "evidence_failed")
+  /**
+   * Body encoding supplied by the caller.
+   */
+  export type BodyFormat = ("markdown" | "mdx")
+  /**
+   * Stable diagnostic severity.
+   */
+  export type Severity = ("error" | "warning")
   export type AcceptanceCriterionItem = (string | AcceptanceCriterionStatus)
 
   export interface ProposalShowOutput {
@@ -9429,6 +9437,10 @@ export namespace ProposalShowOutputSchema {
    * Always present on a successful `proposal_show` response.
    */
   gate_status?: (ProposalGateStatusModel | null)
+  /**
+   * Repository-backed lint result for the exact current head revision.
+   */
+  latest_lint?: (SpecLintResultV1 | null)
   /**
    * Memory notes linked to this proposal's graduated epics/tasks.
    */
@@ -9686,6 +9698,43 @@ export namespace ProposalShowOutputSchema {
   [k: string]: any
   }
   /**
+   * Stable V1 persistence and API contract. `checked_at` is supplied by the
+   * caller; linting never reads a clock.
+   */
+  export interface SpecLintResultV1 {
+  body_format: BodyFormat
+  body_sha256: string
+  checked_at: string
+  errors: Violation[]
+  linter_version: string
+  skipped_tiers: SkippedTier[]
+  warnings: Violation[]
+  [k: string]: any
+  }
+  export interface Violation {
+  code: string
+  message: string
+  severity: Severity
+  span: Utf8ByteSpan
+  [k: string]: any
+  }
+  /**
+   * A half-open UTF-8 byte range in the original body.
+   */
+  export interface Utf8ByteSpan {
+  end: number
+  start: number
+  [k: string]: any
+  }
+  /**
+   * A deterministic record of a lint tier that did not run.
+   */
+  export interface SkippedTier {
+  reason: string
+  tier: string
+  [k: string]: any
+  }
+  /**
    * A memory note linked to a proposal via its graduated epics/tasks.
    */
   export interface ProposalMemoryRefModel {
@@ -9900,6 +9949,14 @@ export namespace ProposalShowOutputSchema {
   event_kind: string
   event_metadata?: string
   id: string
+  /**
+   * Repository-backed lint result for this exact immutable revision.
+   * 
+   * This is additive so clients deserializing historical responses that
+   * predate lint publication continue to work. Read handlers always set it
+   * from `ProposalRepository::lint_for_revision`.
+   */
+  lint?: (SpecLintResultV1 | null)
   seq: number
   status_from?: string
   status_to?: string
