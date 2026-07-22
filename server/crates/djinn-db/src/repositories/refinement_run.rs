@@ -171,7 +171,8 @@ async fn load_snapshot_in_transaction(
         .await?,
     );
     let run = sqlx::query(
-        "SELECT id, state, stop_tag, stop_context, heartbeat_at FROM refinement_runs WHERE id = $1",
+        "SELECT id, state, park_kind, stop_tag, stop_context, heartbeat_at \
+         FROM refinement_runs WHERE id = $1",
     )
     .bind(run_id)
     .fetch_optional(&mut **tx)
@@ -229,7 +230,7 @@ async fn load_snapshot_in_transaction(
 
 fn park_for(row: &PgRow, run_id: &str) -> SnapshotResult<Option<RefinementParkSnapshot>> {
     let state: String = row.get("state");
-    let kind: Option<String> = row.try_get("park_kind").ok();
+    let kind: Option<String> = row.get("park_kind");
     if state != "parked" {
         return Ok(None);
     }
