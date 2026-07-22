@@ -32,7 +32,8 @@ use super::error_handling::{
     BudgetWindDownIgnored, MAX_COMPACTION_RETRIES, empty_start_streak_feeds_breaker,
     empty_turn_backoff, empty_turn_is_reasoning_only, is_context_length_error,
     is_orphaned_tool_call_error, is_provider_failure_prose, next_nudge_message,
-    reasoning_only_nudge_message, should_retry_after_tool_call_compaction,
+    is_oversized_transport_payload, reasoning_only_nudge_message,
+    should_retry_after_tool_call_compaction, TransportCompactionRecoveryGuard,
     should_retry_empty_assistant_turn, should_retry_empty_stream, soft_budget_converge_message,
     tool_choice_for_turn, wind_down_message,
 };
@@ -115,6 +116,25 @@ fn truncated_stream_error(text_len: usize, tool_call_count: usize) -> anyhow::Er
          (text_len={text_len}, tool_calls={tool_call_count}); the truncated output has been \
          flushed as observed artifacts for resume but must not be persisted as a complete turn"
         ))
+}
+
+/// Select only typed, exhausted stream-init failures whose exact serialized
+/// request byte count proves the request is at least one known context window.
+fn oversized_exhausted_transport(
+    error: &anyhow::Error,
+    known_context_window_tokens: i64,
+) -> Option<djinn_provider::provider::ExhaustedTransportDiagnostic> {
+    let known_context_window_tokens = u32::try_from(known_context_window_tokens).ok()?;
+    let djinn_provider::provider::ProviderError::ExhaustedTransport(diagnostic) =
+        error.downcast_ref::<djinn_provider::provider::ProviderError>()?
+    else {
+        return None;
+    };
+    is_oversized_transport_payload(
+        diagnostic.estimated_payload_chars,
+        known_context_window_tokens,
+    )
+    .then_some(*diagnostic)
 }
 
 /// Production normal-completion assembly for a consumed turn.
@@ -626,6 +646,9 @@ pub async fn run_reply_loop(
         let mut assistant_message_count: usize = 0;
         let mut assistant_fragments: Vec<String> = Vec::new();
         let mut compaction_attempts: u32 = 0;
+        // Unlike context/orphan recovery, transport recovery is a one-shot
+        // escape hatch for a failed request and its single immediate retry.
+        let mut transport_compaction_guard = TransportCompactionRecoveryGuard::default();
         let mut empty_turn_retries: u32 = 0;
         let is_codex = is_codex_openai_family(model_id);
         let mut consecutive_nudge_count: u32 = 0;
@@ -787,6 +810,51 @@ pub async fn run_reply_loop(
                 .await;
             let stream = match stream_result {
                 Ok(s) => s,
+                Err(e)
+                    if !transport_compaction_guard.attempted()
+                        && oversized_exhausted_transport(&e, context_window).is_some() =>
+                {
+                    let diagnostic = match oversized_exhausted_transport(&e, context_window) {
+                        Some(diagnostic) => diagnostic,
+                        None => return Err(e),
+                    };
+                    // Set the guard before entering compaction: a failed summary
+                    // must never re-enter this recovery path on a later turn.
+                    let _ = transport_compaction_guard.try_begin();
+                    phase_tracker
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .exit_provider_wait();
+                    tracing::warn!(
+                        task_id = %task_id,
+                        category = ?diagnostic.category,
+                        estimated_payload_chars = diagnostic.estimated_payload_chars,
+                        "ReplyLoop: exhausted oversized transport on stream init; compacting once"
+                    );
+                    match compact_conversation_in_critical_section(
+                        provider, conversation, session_id, task_id, role_name, context_window,
+                        compaction_cs, slot_ctx,
+                    )
+                    .await
+                    {
+                        Ok(true) => {
+                            current_context_tokens = 0;
+                            tool_dispatcher.clear_stash();
+                            conversation.push(Message::user("Continue with the task."));
+                            // Re-enter at the loop head so lifetime/hard/soft
+                            // budget policy is evaluated before the one retry.
+                            continue;
+                        }
+                        Ok(false) => return Err(e.context(format!(
+                            "oversized transport compaction was not applied; category={:?}, estimated_payload_chars={}",
+                            diagnostic.category, diagnostic.estimated_payload_chars
+                        ))),
+                        Err(compaction_error) => return Err(e.context(format!(
+                            "oversized transport compaction failed; category={:?}, estimated_payload_chars={}, compaction_error={compaction_error}",
+                            diagnostic.category, diagnostic.estimated_payload_chars
+                        ))),
+                    }
+                }
                 Err(e) if (is_context_length_error(&e) || is_orphaned_tool_call_error(&e))
                     && compaction_attempts < MAX_COMPACTION_RETRIES =>
                 {
@@ -850,7 +918,7 @@ pub async fn run_reply_loop(
                 otel_session: otel_session.as_ref(),
                 phase_tracker: Some(&phase_tracker),
             };
-            let mut stream_state = consume_provider_stream(StreamLoopContext {
+            let mut stream_state = match consume_provider_stream(StreamLoopContext {
                 provider,
                 stream,
                 tool_metadata: &tool_metadata,
@@ -876,7 +944,45 @@ pub async fn run_reply_loop(
                 total_cache_write: &mut total_cache_write,
                 total_reasoning_out: &mut total_reasoning_out,
             })
-            .await?;
+            .await {
+                Ok(state) => state,
+                Err(e)
+                    if !transport_compaction_guard.attempted()
+                        && oversized_exhausted_transport(&e, context_window).is_some() =>
+                {
+                    let diagnostic = match oversized_exhausted_transport(&e, context_window) {
+                        Some(diagnostic) => diagnostic,
+                        None => return Err(e),
+                    };
+                    let _ = transport_compaction_guard.try_begin();
+                    phase_tracker
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .exit_provider_wait();
+                    match compact_conversation_in_critical_section(
+                        provider, conversation, session_id, task_id, role_name, context_window,
+                        compaction_cs, slot_ctx,
+                    )
+                    .await
+                    {
+                        Ok(true) => {
+                            current_context_tokens = 0;
+                            tool_dispatcher.clear_stash();
+                            conversation.push(Message::user("Continue with the task."));
+                            continue;
+                        }
+                        Ok(false) => return Err(e.context(format!(
+                            "oversized transport compaction was not applied; category={:?}, estimated_payload_chars={}",
+                            diagnostic.category, diagnostic.estimated_payload_chars
+                        ))),
+                        Err(compaction_error) => return Err(e.context(format!(
+                            "oversized transport compaction failed; category={:?}, estimated_payload_chars={}, compaction_error={compaction_error}",
+                            diagnostic.category, diagnostic.estimated_payload_chars
+                        ))),
+                    }
+                }
+                Err(e) => return Err(e),
+            };
             phase_tracker.lock().unwrap_or_else(std::sync::PoisonError::into_inner).exit_provider_wait();
             // Flush any observed assistant/tool content before returning on
             // interrupt, cancellation, or early stream end.  This persists the
@@ -1018,12 +1124,52 @@ pub async fn run_reply_loop(
                     continue;
                 }
                 let diag = runtime_fs_diagnostics(project_path, worktree_path);
-                return Err(empty_turn_terminal_error(
+                let terminal_error = empty_turn_terminal_error(
                     "no-event",
                     empty_turn_retries,
                     model_id,
                     diag,
-                ));
+                );
+                // The successful-HTTP no-event path has no typed transport
+                // error. Its serialized OpenAI-compatible request JSON is the
+                // byte representation available at the reply-loop boundary.
+                let estimated_payload_chars = serde_json::to_vec(&serialize_llm_input(
+                    conversation,
+                    tools,
+                ))
+                .map(|body| body.len())
+                .unwrap_or(0);
+                let known_context_window_tokens = u32::try_from(context_window).unwrap_or(0);
+                if !transport_compaction_guard.attempted()
+                    && is_oversized_transport_payload(
+                        estimated_payload_chars,
+                        known_context_window_tokens,
+                    )
+                {
+                    // Flip before compaction so errors cannot loop recovery.
+                    let _ = transport_compaction_guard.try_begin();
+                    match compact_conversation_in_critical_section(
+                        provider, conversation, session_id, task_id, role_name, context_window,
+                        compaction_cs, slot_ctx,
+                    )
+                    .await
+                    {
+                        Ok(true) => {
+                            current_context_tokens = 0;
+                            tool_dispatcher.clear_stash();
+                            conversation.push(Message::user("Continue with the task."));
+                            // Re-enter through the budget checks before retrying.
+                            continue;
+                        }
+                        Ok(false) => return Err(terminal_error.context(format!(
+                            "oversized empty-stream compaction was not applied; estimated_payload_chars={estimated_payload_chars}"
+                        ))),
+                        Err(compaction_error) => return Err(terminal_error.context(format!(
+                            "oversized empty-stream compaction failed; estimated_payload_chars={estimated_payload_chars}, compaction_error={compaction_error}"
+                        ))),
+                    }
+                }
+                return Err(terminal_error);
             }
             // Canonical assembly: provider-state blocks, one unsigned
             // thinking block from unresolved fragments (reconciled by exact

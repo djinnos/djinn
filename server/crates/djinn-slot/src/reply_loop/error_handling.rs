@@ -27,6 +27,33 @@ pub fn is_oversized_transport_payload(
     )
 }
 
+/// Per-turn guard for the single oversized-transport recovery. `try_begin`
+/// flips the state before compaction is attempted, so a compaction failure
+/// cannot cause a second recovery retry.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct TransportCompactionRecoveryGuard {
+    attempted: bool,
+}
+
+impl TransportCompactionRecoveryGuard {
+    pub fn try_begin(&mut self) -> bool {
+        if self.attempted {
+            false
+        } else {
+            self.attempted = true;
+            true
+        }
+    }
+
+    pub fn attempted(&self) -> bool {
+        self.attempted
+    }
+
+    pub fn reset_after_completed_turn(&mut self) {
+        self.attempted = false;
+    }
+}
+
 /// Provider/account failure patterns that may appear as "successful" assistant
 /// prose when the model echoes back a rate-limit, quota, out-of-credits, or
 /// provider error message instead of refusing or erroring at the HTTP/stream
