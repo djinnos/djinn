@@ -853,48 +853,279 @@ mod tests {
 #[cfg(test)]
 mod lease_adapter_conformance_tests {
     use super::WorkerSupervisorServices;
-    use std::sync::{Arc, Mutex};
     use djinn_agent::direct_services::DirectServices;
     use djinn_db::BuildLeaseRepository;
     use djinn_runtime::ResolvedCredentials;
-    use djinn_supervisor::services::{LeaseAbandonRequest, LeaseBindRequest, LeaseCancelRequest, LeaseDeadlines, LeaseGrantRequest, LeaseIdentity, LeaseQueueRequest, LeaseReleaseRequest, LeaseResult, LeaseStatusRequest, TaskInvocationLeaseIdentity};
+    use djinn_supervisor::services::{
+        LeaseAbandonRequest, LeaseBindRequest, LeaseCancelRequest, LeaseDeadlines,
+        LeaseGrantRequest, LeaseIdentity, LeaseQueueRequest, LeaseReleaseRequest, LeaseResult,
+        LeaseState, LeaseStatusRequest, TaskInvocationLeaseIdentity,
+    };
     use djinn_supervisor::{RpcServices, SupervisorServices, serve_on_unix_socket};
+    use std::{
+        sync::{Arc, Mutex},
+        time::{SystemTime, UNIX_EPOCH},
+    };
     use tokio_util::sync::CancellationToken;
 
-    fn identity(id: &str) -> LeaseIdentity { LeaseIdentity::TaskInvocation(TaskInvocationLeaseIdentity { task_id: "task".into(), task_run_id: "run".into(), invocation_id: id.into() }) }
-    fn queue(id: &str) -> LeaseQueueRequest { LeaseQueueRequest { identity: identity(id), deadlines: LeaseDeadlines { queue_deadline_ms: 0, launch_deadline_ms: 0 } } }
+    fn identity(id: &str) -> LeaseIdentity {
+        LeaseIdentity::TaskInvocation(TaskInvocationLeaseIdentity {
+            task_id: "task".into(),
+            task_run_id: "run".into(),
+            invocation_id: id.into(),
+        })
+    }
+    fn queue(id: &str) -> LeaseQueueRequest {
+        LeaseQueueRequest {
+            identity: identity(id),
+            deadlines: LeaseDeadlines {
+                queue_deadline_ms: 0,
+                launch_deadline_ms: 0,
+            },
+        }
+    }
+    fn expired_queue(id: &str) -> LeaseQueueRequest {
+        let now_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("wall clock")
+            .as_millis() as i64;
+        LeaseQueueRequest {
+            identity: identity(id),
+            deadlines: LeaseDeadlines {
+                queue_deadline_ms: now_ms - 1,
+                launch_deadline_ms: 0,
+            },
+        }
+    }
 
     async fn script(s: &dyn SupervisorServices) -> Vec<LeaseResult> {
         let mut out = vec![s.queue_lease(queue("one")).await];
-        let token = match &out[0] { LeaseResult::Granted(g) => g.fencing_token.clone(), x => panic!("grant: {x:?}") };
-        out.push(s.queue_lease(queue("one")).await); // duplicate acquire
-        out.push(s.queue_lease(LeaseQueueRequest { identity: LeaseIdentity::TaskInvocation(TaskInvocationLeaseIdentity { task_id: "conflict".into(), task_run_id: "run".into(), invocation_id: "one".into() }), deadlines: LeaseDeadlines { queue_deadline_ms: 0, launch_deadline_ms: 0 } }).await);
-        out.push(s.grant_lease(LeaseGrantRequest { identity: identity("one"), fencing_token: token.clone() }).await);
-        out.push(s.lease_status(LeaseStatusRequest { identity: identity("one") }).await);
-        out.push(s.bind_lease_pod(LeaseBindRequest { identity: identity("one"), fencing_token: token.clone(), pod_uid: "pod".into() }).await);
-        out.push(s.release_lease(LeaseReleaseRequest { identity: identity("one"), fencing_token: token.clone(), candidate_cleanup: true }).await);
-        out.push(s.release_lease(LeaseReleaseRequest { identity: identity("one"), fencing_token: token, candidate_cleanup: false }).await); // duplicate release
+        let token = match &out[0] {
+            LeaseResult::Granted(g) => g.fencing_token.clone(),
+            x => panic!("grant: {x:?}"),
+        };
+        out.push(s.queue_lease(queue("one")).await);
+        out.push(
+            s.queue_lease(LeaseQueueRequest {
+                identity: LeaseIdentity::TaskInvocation(TaskInvocationLeaseIdentity {
+                    task_id: "conflict".into(),
+                    task_run_id: "run".into(),
+                    invocation_id: "one".into(),
+                }),
+                deadlines: LeaseDeadlines {
+                    queue_deadline_ms: 0,
+                    launch_deadline_ms: 0,
+                },
+            })
+            .await,
+        );
+        out.push(
+            s.grant_lease(LeaseGrantRequest {
+                identity: identity("one"),
+                fencing_token: token.clone(),
+            })
+            .await,
+        );
+        out.push(
+            s.lease_status(LeaseStatusRequest {
+                identity: identity("one"),
+            })
+            .await,
+        );
+        out.push(
+            s.bind_lease_pod(LeaseBindRequest {
+                identity: identity("one"),
+                fencing_token: token.clone(),
+                pod_uid: "pod".into(),
+            })
+            .await,
+        );
+        // The bound lease occupies the sole unit, making this a real queued acquire.
         out.push(s.queue_lease(queue("queued")).await);
-        out.push(s.abandon_lease(LeaseAbandonRequest { identity: identity("queued"), candidate_cleanup: true }).await);
+        out.push(
+            s.abandon_lease(LeaseAbandonRequest {
+                identity: identity("queued"),
+                candidate_cleanup: true,
+            })
+            .await,
+        );
+        out.push(
+            s.release_lease(LeaseReleaseRequest {
+                identity: identity("one"),
+                fencing_token: token.clone(),
+                candidate_cleanup: true,
+            })
+            .await,
+        );
+        out.push(
+            s.release_lease(LeaseReleaseRequest {
+                identity: identity("one"),
+                fencing_token: token,
+                candidate_cleanup: false,
+            })
+            .await,
+        );
         out.push(s.queue_lease(queue("cancel")).await);
-        out.push(s.cancel_lease(LeaseCancelRequest { identity: identity("cancel"), fencing_token: None, candidate_cleanup: false }).await);
-        out.push(s.cancel_lease(LeaseCancelRequest { identity: identity("cancel"), fencing_token: None, candidate_cleanup: true }).await); // duplicate cancel
+        out.push(
+            s.cancel_lease(LeaseCancelRequest {
+                identity: identity("cancel"),
+                fencing_token: None,
+                candidate_cleanup: false,
+            })
+            .await,
+        );
+        out.push(
+            s.cancel_lease(LeaseCancelRequest {
+                identity: identity("cancel"),
+                fencing_token: None,
+                candidate_cleanup: true,
+            })
+            .await,
+        );
+        assert_eq!(out[0], out[1], "duplicate queue must replay its grant");
+        assert!(matches!(out[2], LeaseResult::LeaseIdentityConflict { .. }));
+        assert!(
+            matches!(&out[3], LeaseResult::Status(status) if status.state == LeaseState::Launching)
+        );
+        assert!(
+            matches!(&out[4], LeaseResult::Status(status) if status.state == LeaseState::Launching)
+        );
+        assert!(matches!(&out[5], LeaseResult::Bound(status) if status.state == LeaseState::Bound));
+        assert!(
+            matches!(&out[6], LeaseResult::Queued(status) if status.state == LeaseState::Queued)
+        );
+        assert_eq!(
+            out[7],
+            LeaseResult::Abandoned {
+                candidate_cleanup: true
+            }
+        );
+        assert_eq!(
+            out[8],
+            LeaseResult::Released {
+                candidate_cleanup: true
+            }
+        );
+        assert_eq!(
+            out[8], out[9],
+            "duplicate release must replay its terminal winner"
+        );
+        assert!(matches!(out[10], LeaseResult::Granted(_)));
+        assert_eq!(
+            out[11],
+            LeaseResult::Cancelled {
+                candidate_cleanup: false
+            }
+        );
+        assert_eq!(
+            out[11], out[12],
+            "duplicate cancel must replay its terminal winner"
+        );
         out
     }
-    async fn host() -> Arc<DirectServices> {
+    async fn committed_timeout(s: &dyn SupervisorServices) -> Vec<LeaseResult> {
+        let first = s.queue_lease(expired_queue("expired")).await;
+        let retry = s.queue_lease(expired_queue("expired")).await;
+        for result in [&first, &retry] {
+            match result {
+                LeaseResult::LeaseWaitTimeout { timeout_credit } => assert!(
+                    timeout_credit.is_none(),
+                    "durable timeout replay must not mint an unbounded timeout credit"
+                ),
+                other => panic!("expected committed LeaseWaitTimeout, got {other:?}"),
+            }
+        }
+        assert_eq!(
+            first, retry,
+            "expired queue retry must replay the durable timeout"
+        );
+        vec![first, retry]
+    }
+    async fn host_with_cap(cap: i64) -> Arc<DirectServices> {
         let db = djinn_agent::test_helpers::create_test_db();
-        BuildLeaseRepository::new(db.clone()).set_cap(1).await.expect("cap");
-        Arc::new(DirectServices::new(djinn_agent::test_helpers::agent_context_from_db(db, CancellationToken::new()), CancellationToken::new()))
+        BuildLeaseRepository::new(db.clone())
+            .set_cap(cap)
+            .await
+            .expect("cap");
+        Arc::new(DirectServices::new(
+            djinn_agent::test_helpers::agent_context_from_db(db, CancellationToken::new()),
+            CancellationToken::new(),
+        ))
     }
     #[tokio::test]
     async fn direct_and_worker_rpc_run_the_same_lease_operation_script() {
-        let direct_results = script(host().await.as_ref()).await;
-        let server = host().await;
-        let dir = tempfile::Builder::new().prefix("lease-").tempdir_in("/var/tmp").expect("dir"); let path = dir.path().join("rpc.sock");
-        let server_handle = serve_on_unix_socket(&path, server).await.expect("serve"); let cancel = CancellationToken::new();
-        let (rpc, background) = RpcServices::connect_unix(&path, cancel.clone()).await.expect("rpc");
-        let worker = WorkerSupervisorServices::new(rpc.clone(), ResolvedCredentials::default(), CancellationToken::new(), djinn_agent::test_helpers::agent_context_from_db(djinn_agent::test_helpers::create_test_db(), CancellationToken::new()), Arc::new(Mutex::new(None)));
+        let direct = host_with_cap(1).await;
+        let direct_results = script(direct.as_ref()).await;
+        let direct_timeout_host = host_with_cap(0).await;
+        let direct_timeout = committed_timeout(direct_timeout_host.as_ref()).await;
+        let server = host_with_cap(1).await;
+        let dir = tempfile::Builder::new()
+            .prefix("lease-")
+            .tempdir_in("/var/tmp")
+            .expect("dir");
+        let path = dir.path().join("rpc.sock");
+        let server_handle = serve_on_unix_socket(&path, server.clone())
+            .await
+            .expect("serve");
+        let cancel = CancellationToken::new();
+        let (rpc, background) = RpcServices::connect_unix(&path, cancel.clone())
+            .await
+            .expect("rpc");
+        let worker = WorkerSupervisorServices::new(
+            rpc.clone(),
+            ResolvedCredentials::default(),
+            CancellationToken::new(),
+            djinn_agent::test_helpers::agent_context_from_db(
+                djinn_agent::test_helpers::create_test_db(),
+                CancellationToken::new(),
+            ),
+            Arc::new(Mutex::new(None)),
+        );
         assert_eq!(direct_results, script(&worker).await);
-        drop(worker); drop(rpc); let _ = background.writer.await; cancel.cancel(); let _ = background.reader.await; server_handle.cancel(); let _ = server_handle.join.await;
+        let timeout_server = host_with_cap(0).await;
+        let timeout_path = dir.path().join("timeout-rpc.sock");
+        let timeout_handle = serve_on_unix_socket(&timeout_path, timeout_server)
+            .await
+            .expect("serve timeout");
+        let timeout_cancel = CancellationToken::new();
+        let (timeout_rpc, timeout_background) =
+            RpcServices::connect_unix(&timeout_path, timeout_cancel.clone())
+                .await
+                .expect("connect timeout rpc");
+        let timeout_worker = WorkerSupervisorServices::new(
+            timeout_rpc.clone(),
+            ResolvedCredentials::default(),
+            CancellationToken::new(),
+            djinn_agent::test_helpers::agent_context_from_db(
+                djinn_agent::test_helpers::create_test_db(),
+                CancellationToken::new(),
+            ),
+            Arc::new(Mutex::new(None)),
+        );
+        let rpc_timeout = committed_timeout(&timeout_worker).await;
+        assert_eq!(
+            direct_timeout, rpc_timeout,
+            "durable timeout transcript differs by adapter"
+        );
+        drop(timeout_worker);
+        drop(timeout_rpc);
+        let _ = timeout_background.writer.await;
+        timeout_cancel.cancel();
+        let _ = timeout_background.reader.await;
+        timeout_handle.cancel();
+        let _ = timeout_handle.join.await;
+        server_handle.cancel();
+        let _ = server_handle.join.await;
+        let unavailable = worker.queue_lease(queue("transport-lost")).await;
+        assert!(matches!(unavailable, LeaseResult::LeaseUnavailable));
+        assert_ne!(
+            unavailable, rpc_timeout[0],
+            "transport loss is not a committed timeout"
+        );
+        drop(worker);
+        drop(rpc);
+        let _ = background.writer.await;
+        cancel.cancel();
+        let _ = background.reader.await;
     }
 }

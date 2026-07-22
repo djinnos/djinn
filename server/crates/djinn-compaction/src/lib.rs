@@ -17,7 +17,10 @@ mod prompts;
 mod summarizer;
 mod truncate;
 
-pub use policy::{compact_conversation, compact_conversation_with_pointers, needs_compaction};
+pub use policy::{
+    CompactionOutcome, compact_conversation, compact_conversation_with_pointers,
+    compact_conversation_with_pointers_outcome, needs_compaction,
+};
 pub use prompts::CompactionContext;
 pub use prompts::{
     COMPACTION_SUMMARY_END_MARKER, OUTPUT_LOOKUP_ADVISORY, PARTIAL_COMPACTION_CONTINUATION,

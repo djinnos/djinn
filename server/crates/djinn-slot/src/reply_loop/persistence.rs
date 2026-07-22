@@ -1,7 +1,7 @@
 use djinn_compaction::{COMPACTION_SUMMARY_END_MARKER, bounded_message_identity};
 use djinn_db::{
-    BeginCompactionParams, CompleteCompactionParams, SessionCompactionBoundaryRepository,
-    SessionMessageRepository,
+    BeginCompactionParams, CompactionTrigger, CompleteCompactionParams,
+    SessionCompactionBoundaryRepository, SessionMessageRepository,
 };
 use djinn_provider::message::{Conversation, Message, Role};
 
@@ -36,6 +36,8 @@ pub(super) async fn record_compaction_started(
     repo: &SessionCompactionBoundaryRepository,
     session_id: &str,
     conversation: &Conversation,
+    trigger: CompactionTrigger,
+    current_context_tokens_before: u32,
 ) -> Option<String> {
     let (
         first_message_id,
@@ -53,8 +55,8 @@ pub(super) async fn record_compaction_started(
         .record_compaction_started(BeginCompactionParams {
             session_id,
             schema_version: 1,
-            trigger: None,
-            current_context_tokens_before: None,
+            trigger: Some(trigger),
+            current_context_tokens_before: Some(i64::from(current_context_tokens_before)),
             first_message_id: first_message_id.as_deref(),
             last_compacted_message_id: last_compacted_message_id.as_deref(),
             first_retained_message_id: first_retained_message_id.as_deref(),
@@ -94,6 +96,7 @@ pub(super) async fn complete_compaction_boundary(
     boundary_id: Option<&str>,
     compacted_conversation: &Conversation,
     summary_text: &str,
+    current_context_tokens_after: u32,
 ) {
     let Some(boundary_id) = boundary_id else {
         return;
@@ -115,7 +118,7 @@ pub(super) async fn complete_compaction_boundary(
         .complete_compaction_boundary(CompleteCompactionParams {
             boundary_id,
             schema_version: 1,
-            current_context_tokens_after: None,
+            current_context_tokens_after: Some(i64::from(current_context_tokens_after)),
             first_message_id: first_message_id.as_deref(),
             last_compacted_message_id: last_compacted_message_id.as_deref(),
             first_retained_message_id: first_retained_message_id.as_deref(),

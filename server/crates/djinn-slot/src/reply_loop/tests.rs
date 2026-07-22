@@ -466,6 +466,19 @@ async fn count_persisted_assistant_messages(
         .unwrap_or(0)
 }
 
+/// Read the newest boundary regardless of phase. Failure fixtures need this
+/// rather than `latest_completed_boundary` to inspect truthful Started rows.
+async fn latest_boundary(
+    slot_ctx: &crate::host::SlotContext,
+    session_id: &str,
+) -> djinn_db::CompactionBoundary {
+    SessionCompactionBoundaryRepository::new(slot_ctx.db.clone())
+        .latest_boundary(session_id)
+        .await
+        .expect("read latest boundary")
+        .expect("boundary row must exist")
+}
+
 #[test]
 fn extract_stash_content_shell_extracts_stdout() {
     let value = serde_json::json!({
@@ -579,6 +592,17 @@ async fn proactive_compaction_fires_when_current_context_exceeds_threshold() {
         djinn_provider::message::Role::System,
         "first message should still be the system prompt"
     );
+    let boundary = SessionCompactionBoundaryRepository::new(slot_ctx.db.clone())
+        .latest_completed_boundary(&session_id)
+        .await
+        .expect("read proactive boundary")
+        .expect("proactive compaction must persist a completed boundary");
+    assert_eq!(
+        boundary.trigger,
+        Some(djinn_db::CompactionTrigger::Proactive)
+    );
+    assert_eq!(boundary.current_context_tokens_before, Some(8_500));
+    assert_eq!(boundary.current_context_tokens_after, Some(0));
 }
 
 /// Compaction must NOT fire based on the cumulative sum of input tokens across
@@ -771,6 +795,90 @@ async fn reactive_compaction_on_context_length_error() {
         persisted > 0,
         "expected session messages persisted per-turn"
     );
+    let boundary = SessionCompactionBoundaryRepository::new(slot_ctx.db.clone())
+        .latest_completed_boundary(&session_id)
+        .await
+        .expect("read context-error boundary")
+        .expect("context error must persist a completed boundary");
+    assert_eq!(
+        boundary.trigger,
+        Some(djinn_db::CompactionTrigger::ContextError)
+    );
+    assert_eq!(boundary.current_context_tokens_before, Some(500));
+    assert_eq!(boundary.current_context_tokens_after, Some(0));
+}
+
+/// An orphaned tool-result provider rejection uses the dedicated repair cause,
+/// even when no prior provider usage snapshot exists.
+#[tokio::test]
+async fn orphan_repair_compaction_persists_trigger_and_occupancy() {
+    let provider = MockProvider::new(vec![
+        MockResponse {
+            text: None,
+            tool_calls: vec![],
+            input_tokens: 0,
+            output_tokens: 0,
+            _error: Some(anyhow::anyhow!(
+                "No tool call found for function call output"
+            )),
+        },
+        MockResponse::text_only("Summary: repaired orphaned tool output.", 10),
+        MockResponse::text_only("Done.", 20),
+    ]);
+    let mut h = ReplyLoopHarness::new().await;
+    let (result, ..) = h.run(&provider, &[]).await;
+    assert!(result.is_ok(), "orphan repair should recover: {result:?}");
+    let boundary = SessionCompactionBoundaryRepository::new(h.slot_ctx.db.clone())
+        .latest_completed_boundary(&h.session_id)
+        .await
+        .expect("read orphan-repair boundary")
+        .expect("orphan repair must persist a completed boundary");
+    assert_eq!(
+        boundary.trigger,
+        Some(djinn_db::CompactionTrigger::OrphanRepair)
+    );
+    assert_eq!(boundary.current_context_tokens_before, Some(0));
+    assert_eq!(boundary.current_context_tokens_after, Some(0));
+}
+
+/// A reactive reset followed by proactive pressure must keep lifetime spend
+/// monotonic while each persisted boundary records only its local occupancy.
+#[tokio::test]
+async fn two_compactions_persist_reset_occupancy_not_lifetime_spend() {
+    let provider = MockProvider::new(vec![
+        MockResponse::tool_call("first", "nonexistent_tool", 5_000),
+        MockResponse {
+            text: None,
+            tool_calls: vec![],
+            input_tokens: 0,
+            output_tokens: 0,
+            _error: Some(anyhow::anyhow!("context_length_exceeded")),
+        },
+        MockResponse::text_only("Summary after reactive recovery.", 50),
+        MockResponse::tool_call("second", "nonexistent_tool", 8_500),
+        MockResponse::text_only("Summary after proactive compaction.", 50),
+        MockResponse::text_only("Done.", 25),
+    ]);
+    let mut h = ReplyLoopHarness::new().await;
+    let (result, _output, lifetime_in, ..) = h.run(&provider, &[]).await;
+    assert!(
+        result.is_ok(),
+        "both compactions should recover: {result:?}"
+    );
+    assert!(
+        lifetime_in >= 13_500,
+        "lifetime accounting must retain both pre-compaction requests, got {lifetime_in}"
+    );
+    let repo = SessionCompactionBoundaryRepository::new(h.slot_ctx.db.clone());
+    assert_eq!(repo.boundary_count(&h.session_id).await.unwrap(), 2);
+    let latest = repo
+        .latest_completed_boundary(&h.session_id)
+        .await
+        .unwrap()
+        .expect("second compaction boundary");
+    assert_eq!(latest.trigger, Some(djinn_db::CompactionTrigger::Proactive));
+    assert_eq!(latest.current_context_tokens_before, Some(8_500));
+    assert_eq!(latest.current_context_tokens_after, Some(0));
 }
 
 #[test]
@@ -3415,20 +3523,25 @@ async fn failed_reactive_compaction_leaves_started_only_boundary() {
         "error must reference context_length_exceeded; got: {err_msg}"
     );
 
-    // Verify boundary state: no completed boundary after failed compaction.
-    // Note: the Started boundary insert is best-effort in persistence.rs and
-    // may be silently swallowed if the DB write fails. The key regression is
-    // that NO completed boundary exists (LatestCompleted remains None).
-    // Pure boundary-row lifecycle is tested in djinn-db crate tests.
+    // A failed summarizer leaves its truthful Started boundary intact; it must
+    // not invent a completion or an after-occupancy snapshot.
     let boundary_repo = SessionCompactionBoundaryRepository::new(h.slot_ctx.db.clone());
-    let latest_completed = boundary_repo
-        .latest_completed_boundary(&h.session_id)
-        .await
-        .unwrap();
     assert!(
-        latest_completed.is_none(),
+        boundary_repo
+            .latest_completed_boundary(&h.session_id)
+            .await
+            .expect("read completed boundary")
+            .is_none(),
         "no completed boundary should exist after failed compaction"
     );
+    let boundary = latest_boundary(&h.slot_ctx, &h.session_id).await;
+    assert_eq!(boundary.phase, djinn_db::CompactionPhase::Started);
+    assert_eq!(
+        boundary.trigger,
+        Some(djinn_db::CompactionTrigger::ContextError)
+    );
+    assert_eq!(boundary.current_context_tokens_before, Some(5_000));
+    assert_eq!(boundary.current_context_tokens_after, None);
 
     // The raw conversation history must still be loadable and unchanged.
     let msg_repo =
@@ -3487,16 +3600,26 @@ async fn worker_compaction_boundary_with_no_provider_id_succeeds() {
     let boundary_repo = SessionCompactionBoundaryRepository::new(db.clone());
 
     // record_compaction_started → gather_boundary_identity → bounded_message_identity
-    let boundary_id =
-        super::persistence::record_compaction_started(&boundary_repo, &session.id, &conv)
-            .await
-            .expect("boundary persistence must succeed (no 22001)");
+    let boundary_id = super::persistence::record_compaction_started(
+        &boundary_repo,
+        &session.id,
+        &conv,
+        djinn_db::CompactionTrigger::ManualTest,
+        123,
+    )
+    .await
+    .expect("boundary persistence must succeed (no 22001)");
 
     let boundary = boundary_repo
         .fetch_by_id(&boundary_id)
         .await
         .expect("fetch boundary");
     assert_eq!(boundary.phase, djinn_db::CompactionPhase::Started);
+    assert_eq!(
+        boundary.trigger,
+        Some(djinn_db::CompactionTrigger::ManualTest)
+    );
+    assert_eq!(boundary.current_context_tokens_before, Some(123));
 
     // Every id column must have been populated and must fit VARCHAR(36).
     let first_id = boundary
@@ -3532,6 +3655,7 @@ async fn worker_compaction_boundary_with_no_provider_id_succeeds() {
         Some(&boundary_id),
         &conv,
         "test summary",
+        17,
     )
     .await;
 
@@ -3541,6 +3665,7 @@ async fn worker_compaction_boundary_with_no_provider_id_succeeds() {
         .expect("fetch completed boundary");
     assert_eq!(completed.phase, djinn_db::CompactionPhase::Ended);
     assert_eq!(completed.summary_text.as_deref(), Some("test summary"));
+    assert_eq!(completed.current_context_tokens_after, Some(17));
 }
 
 // ---------------------------------------------------------------------------
@@ -5037,12 +5162,12 @@ async fn rendered_worker_prompt_uses_signature_only_tool_section() {
         ci_mq_first_seen_at: None,
         ci_mq_last_seen_at: None,
         unresolved_blocker_count: 0,
-            refinement_run_id: None,
-            refinement_intent_id: None,
-            refinement_generation: None,
-            refinement_round: None,
-            refinement_phase: None,
-            refinement_role: None,
+        refinement_run_id: None,
+        refinement_intent_id: None,
+        refinement_generation: None,
+        refinement_round: None,
+        refinement_phase: None,
+        refinement_role: None,
     };
     let task_ctx = djinn_roles::prompts::TaskContext {
         project_path: "/tmp/project".to_string(),

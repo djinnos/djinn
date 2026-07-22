@@ -17,11 +17,10 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use djinn_coordinator::build_lease::BuildLeaseService;
 use djinn_core::events::DjinnEventEnvelope;
 use djinn_core::models::SessionRecord;
 use djinn_core::models::{Task, TaskRunStatus};
-use djinn_db::{BuildLeaseRepository, TaskRunRepository};
-use djinn_coordinator::build_lease::BuildLeaseService;
 use djinn_db::repositories::llm_call_attempt::{
     CreateLlmCallAttemptParams, FinalizeLlmCallAttemptParams, LlmCallAttemptRepository,
     LlmCallOutcome,
@@ -29,6 +28,7 @@ use djinn_db::repositories::llm_call_attempt::{
 use djinn_db::repositories::session::CreateSessionParams;
 use djinn_db::repositories::task_run::CreateTaskRunParams;
 use djinn_db::repositories::task_run_outcome::TaskRunOutcomeRepository;
+use djinn_db::{BuildLeaseRepository, TaskRunRepository};
 use djinn_db::{EffectiveCreatorProvenance, SessionRepository};
 use djinn_stack::environment::EnvironmentConfig;
 use djinn_supervisor::services::wire::{PlannerAttemptResult, PlannerOutcome};
@@ -288,7 +288,10 @@ impl DirectServices {
     /// `BuildLeaseService` unchanged.
     async fn recover_build_lease(&self) -> bool {
         self.build_lease.is_ready()
-            || !matches!(self.build_lease.recover().await, LeaseResult::LeaseUnavailable)
+            || !matches!(
+                self.build_lease.recover().await,
+                LeaseResult::LeaseUnavailable
+            )
     }
 
     #[cfg(test)]
@@ -921,31 +924,45 @@ impl SupervisorServices for DirectServices {
     }
 
     async fn queue_lease(&self, request: LeaseQueueRequest) -> LeaseResult {
-        if !self.recover_build_lease().await { return LeaseResult::LeaseUnavailable; }
+        if !self.recover_build_lease().await {
+            return LeaseResult::LeaseUnavailable;
+        }
         self.build_lease.queue(request).await
     }
     async fn grant_lease(&self, request: LeaseGrantRequest) -> LeaseResult {
-        if !self.recover_build_lease().await { return LeaseResult::LeaseUnavailable; }
+        if !self.recover_build_lease().await {
+            return LeaseResult::LeaseUnavailable;
+        }
         self.build_lease.grant(request).await
     }
     async fn lease_status(&self, request: LeaseStatusRequest) -> LeaseResult {
-        if !self.recover_build_lease().await { return LeaseResult::LeaseUnavailable; }
+        if !self.recover_build_lease().await {
+            return LeaseResult::LeaseUnavailable;
+        }
         self.build_lease.status(request).await
     }
     async fn abandon_lease(&self, request: LeaseAbandonRequest) -> LeaseResult {
-        if !self.recover_build_lease().await { return LeaseResult::LeaseUnavailable; }
+        if !self.recover_build_lease().await {
+            return LeaseResult::LeaseUnavailable;
+        }
         self.build_lease.abandon(request).await
     }
     async fn bind_lease_pod(&self, request: LeaseBindRequest) -> LeaseResult {
-        if !self.recover_build_lease().await { return LeaseResult::LeaseUnavailable; }
+        if !self.recover_build_lease().await {
+            return LeaseResult::LeaseUnavailable;
+        }
         self.build_lease.bind(request).await
     }
     async fn cancel_lease(&self, request: LeaseCancelRequest) -> LeaseResult {
-        if !self.recover_build_lease().await { return LeaseResult::LeaseUnavailable; }
+        if !self.recover_build_lease().await {
+            return LeaseResult::LeaseUnavailable;
+        }
         self.build_lease.cancel(request).await
     }
     async fn release_lease(&self, request: LeaseReleaseRequest) -> LeaseResult {
-        if !self.recover_build_lease().await { return LeaseResult::LeaseUnavailable; }
+        if !self.recover_build_lease().await {
+            return LeaseResult::LeaseUnavailable;
+        }
         self.build_lease.release(request).await
     }
 
