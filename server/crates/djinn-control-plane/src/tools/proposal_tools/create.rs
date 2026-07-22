@@ -5,16 +5,8 @@
 // delete mutation surface plus target add/remove and the cohesive list/show/
 // target response shaping used by those tools.
 //
-// CRUD/target ownership checklist for task xpj0:
-// - moved here: `proposal_add_target`, `proposal_remove_target`,
-//   `target_models`, `finish_targets`, and `graduated_epic_models`;
-// - already owned here: create/import/export/show/list tools; update/delete/
-//   block-patch moved here from the py7d sibling slice;
-// - tests for the CRUD concern live in `create_tests.rs` so this production
-//   module stays under the Server Size Guard threshold;
-// - intentionally shared in `mod.rs`: composed gate/readiness helpers and
-//   `err_single`/`err_show` response constructors used by later feedback,
-//   signoff, lifecycle, and refinement slices.
+// CRUD tests live in `create_tests.rs`; cross-slice gate/readiness and response
+// helpers remain shared in `mod.rs`.
 //
 // Debate-trail and refinement-status data fetches in `proposal_show`:
 // `proposal_show` fetches the debate trail (`repo.debate_trail`) and refinement

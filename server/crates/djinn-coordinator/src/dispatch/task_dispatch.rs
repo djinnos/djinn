@@ -3137,6 +3137,12 @@ mod inflight_ledger_tests {
             ci_mq_first_seen_at: None,
             ci_mq_last_seen_at: None,
             unresolved_blocker_count: 0,
+            refinement_run_id: None,
+            refinement_intent_id: None,
+            refinement_generation: None,
+            refinement_round: None,
+            refinement_phase: None,
+            refinement_role: None,
         }
     }
 
@@ -5930,6 +5936,12 @@ mod failover_chain_tests {
             ci_mq_first_seen_at: None,
             ci_mq_last_seen_at: None,
             unresolved_blocker_count: 0,
+            refinement_run_id: None,
+            refinement_intent_id: None,
+            refinement_generation: None,
+            refinement_round: None,
+            refinement_phase: None,
+            refinement_role: None,
         };
 
         let attempted_models: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
@@ -6124,6 +6136,12 @@ mod failover_chain_tests {
             ci_mq_first_seen_at: None,
             ci_mq_last_seen_at: None,
             unresolved_blocker_count: 0,
+            refinement_run_id: None,
+            refinement_intent_id: None,
+            refinement_generation: None,
+            refinement_round: None,
+            refinement_phase: None,
+            refinement_role: None,
         };
 
         // Run 2 chain exhaustions — breaker threshold is 3, so breaker should
@@ -6686,6 +6704,12 @@ mod failover_chain_tests {
             ci_mq_first_seen_at: None,
             ci_mq_last_seen_at: None,
             unresolved_blocker_count: 0,
+            refinement_run_id: None,
+            refinement_intent_id: None,
+            refinement_generation: None,
+            refinement_round: None,
+            refinement_phase: None,
+            refinement_role: None,
         };
 
         // ── Step 1: Two model-a failures, each rescued by model-b ─────────
