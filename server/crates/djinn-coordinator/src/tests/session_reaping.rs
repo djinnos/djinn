@@ -7093,6 +7093,192 @@ async fn evidence_reap_null_owner_counts_as_crashed_unproven() {
     assert_eq!(sj["owner_classification"], "null_owner");
 }
 
+/// Startup boot-evidence classification (Part 2): a pre-boot orphan whose owner
+/// is a DIFFERENT incarnation than this boot's is an environmental restart
+/// orphan — `interrupted`/`environmental_restart_orphan` — even when the prior
+/// owner's lease still reads "live" (a just-dead incarnation renewed 30s before
+/// the crash). This is the exact incident case: the reap must NOT stamp
+/// `crashed` (durable, strike-counted) for a server-restart orphan.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn startup_reap_classifies_different_incarnation_orphan_as_environmental_restart() {
+    use djinn_db::TaskAttemptRepository;
+
+    let db = test_helpers::create_test_db();
+    let (tx, _rx) = broadcast::channel(256);
+    let repo = TaskAttemptRepository::new(db.clone());
+
+    // Prior incarnation whose lease still reads LIVE against the 5-minute window
+    // (it renewed seconds before the crash). Under a single 10s startup
+    // threshold this owner would read "live" and mis-classify `crashed`.
+    let prior_owner = register_incarnation(&db, false).await;
+    let group_id = uuid::Uuid::now_v7().to_string();
+    let (task, _n) = create_task_with_note(&db, &tx, "restart-orphan-different").await;
+    let attempt = seed_pending_attempt_with_identity(
+        &db,
+        &task.id,
+        "worker",
+        Some(&prior_owner),
+        Some(&group_id),
+    )
+    .await;
+    // 30s old: past the 10s startup age gate, inside the 5m lease window.
+    djinn_db::test_support::backdate_task_attempt_created_at(&db, &attempt, "30 seconds").await;
+
+    // This boot's incarnation differs from the orphan's owner (single-leader).
+    let current = uuid::Uuid::now_v7().to_string();
+    crate::health::reap_orphaned_pending_attempts_for_startup(&db, &current).await;
+
+    let row = repo.get(&attempt).await.unwrap().unwrap();
+    assert_eq!(
+        row.outcome, "interrupted",
+        "a pre-boot different-incarnation orphan is environmental, not crashed"
+    );
+    let sj: serde_json::Value = serde_json::from_str(row.summary_json.as_deref().unwrap()).unwrap();
+    assert_eq!(sj["failure_class"], "environmental_restart_orphan");
+    assert_eq!(sj["owner_classification"], "restart_orphan_different_incarnation");
+    assert_eq!(sj["boot_incarnation_id"], current);
+    assert_eq!(sj["reason"], "startup");
+}
+
+/// Startup boot-evidence classification (Part 2): a pre-boot orphan with a NULL
+/// owner (a mixed-version supervisor `task-run:<id>` row, the k6hm case) is also
+/// an environmental restart orphan at boot — never `crashed`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn startup_reap_classifies_null_owner_orphan_as_environmental_restart() {
+    use djinn_db::TaskAttemptRepository;
+
+    let db = test_helpers::create_test_db();
+    let (tx, _rx) = broadcast::channel(256);
+    let repo = TaskAttemptRepository::new(db.clone());
+
+    let (task, _n) = create_task_with_note(&db, &tx, "restart-orphan-null").await;
+    let attempt = seed_pending_attempt(&db, &task.id, "worker").await; // NULL owner
+    djinn_db::test_support::backdate_task_attempt_created_at(&db, &attempt, "30 seconds").await;
+
+    let current = uuid::Uuid::now_v7().to_string();
+    crate::health::reap_orphaned_pending_attempts_for_startup(&db, &current).await;
+
+    let row = repo.get(&attempt).await.unwrap().unwrap();
+    assert_eq!(row.outcome, "interrupted");
+    let sj: serde_json::Value = serde_json::from_str(row.summary_json.as_deref().unwrap()).unwrap();
+    assert_eq!(sj["failure_class"], "environmental_restart_orphan");
+    assert_eq!(sj["owner_classification"], "restart_orphan_null_owner");
+    assert_eq!(sj["boot_incarnation_id"], current);
+}
+
+/// Part 1 age-gate decoupling: the startup reap uses a 10s age gate, so a
+/// 30-second-old pre-boot orphan is reaped while a freshly-created (<10s) one is
+/// spared — the sub-threshold row could still be a legitimately-starting
+/// dispatch that has not yet registered its run/session.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn startup_reap_age_gate_reaps_thirty_second_orphan_spares_fresh() {
+    use djinn_db::TaskAttemptRepository;
+
+    let db = test_helpers::create_test_db();
+    let (tx, _rx) = broadcast::channel(256);
+    let repo = TaskAttemptRepository::new(db.clone());
+
+    let (task_old, _n) = create_task_with_note(&db, &tx, "age-gate-old").await;
+    let old = seed_pending_attempt(&db, &task_old.id, "worker").await;
+    djinn_db::test_support::backdate_task_attempt_created_at(&db, &old, "30 seconds").await;
+
+    let (task_new, _n) = create_task_with_note(&db, &tx, "age-gate-new").await;
+    let fresh = seed_pending_attempt(&db, &task_new.id, "worker").await; // ~0s old
+
+    let current = uuid::Uuid::now_v7().to_string();
+    crate::health::reap_orphaned_pending_attempts_for_startup(&db, &current).await;
+
+    assert_eq!(
+        repo.get(&old).await.unwrap().unwrap().outcome,
+        "interrupted",
+        "a 30s-old pre-boot orphan is past the 10s startup age gate → reaped"
+    );
+    assert_eq!(
+        repo.get(&fresh).await.unwrap().unwrap().outcome,
+        "pending",
+        "a sub-10s orphan is spared: it may still be a starting dispatch"
+    );
+}
+
+/// The `environmental_restart_orphan` startup evidence is strike-exempt (Part 2):
+/// a restart must never book a dispatch strike, even for a NULL-owner row where
+/// the owner-expiry tuple cannot be satisfied.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn latest_attempt_strike_decision_exempts_environmental_restart_orphan() {
+    use djinn_core::models::task_attempt::TaskAttemptOutcome;
+    use djinn_db::{TaskAttemptRepository, TerminalTaskAttemptParams};
+
+    let db = test_helpers::create_test_db();
+    let (tx, _rx) = broadcast::channel(256);
+    let actor = coordinator_actor_for_tests(&db, &tx);
+
+    // Reproduce the durable evidence the startup reaper writes for a NULL-owner
+    // restart orphan.
+    let boot = uuid::Uuid::now_v7().to_string();
+    let evidence = format!(
+        r#"{{"failure_class":"environmental_restart_orphan","reason":"startup","boot_incarnation_id":"{boot}","owner_classification":"restart_orphan_null_owner"}}"#
+    );
+    let (task, _n) = create_task_with_note(&db, &tx, "restart-orphan-strike").await;
+    let attempt = seed_pending_attempt(&db, &task.id, "reviewer").await; // NULL owner
+    TaskAttemptRepository::new(db.clone())
+        .advance_to_terminal(TerminalTaskAttemptParams {
+            id: &attempt,
+            outcome: TaskAttemptOutcome::Interrupted,
+            pr_url: None,
+            submit_ref: None,
+            checkpoint_ref: None,
+            mirror_head_sha: None,
+            github_head_sha: None,
+            summary: None,
+            summary_json: Some(&evidence),
+            log_tail: None,
+        })
+        .await
+        .unwrap();
+
+    let decision = actor
+        .latest_attempt_strike_decision(&task.id, "reviewer")
+        .await
+        .unwrap();
+    assert!(
+        decision.exempted,
+        "a startup restart orphan must be strike-exempt"
+    );
+    assert_eq!(
+        decision.decision,
+        djinn_telemetry::dispatch::STRIKE_DECISION_EXEMPTED
+    );
+
+    // A restart-orphan class WITHOUT the boot evidence must fail closed.
+    let (task2, _n) = create_task_with_note(&db, &tx, "restart-orphan-noboot").await;
+    let a2 = seed_pending_attempt(&db, &task2.id, "reviewer").await;
+    TaskAttemptRepository::new(db.clone())
+        .advance_to_terminal(TerminalTaskAttemptParams {
+            id: &a2,
+            outcome: TaskAttemptOutcome::Interrupted,
+            pr_url: None,
+            submit_ref: None,
+            checkpoint_ref: None,
+            mirror_head_sha: None,
+            github_head_sha: None,
+            summary: None,
+            summary_json: Some(
+                r#"{"failure_class":"environmental_restart_orphan","reason":"periodic"}"#,
+            ),
+            log_tail: None,
+        })
+        .await
+        .unwrap();
+    assert!(
+        !actor
+            .latest_attempt_strike_decision(&task2.id, "reviewer")
+            .await
+            .unwrap()
+            .exempted,
+        "restart-orphan evidence without startup boot proof must fail closed"
+    );
+}
+
 /// A malformed owner UUID is counted `crashed/orphaned_pending_attempt_unproven`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn evidence_reap_malformed_owner_counts_as_crashed_unproven() {
