@@ -59,6 +59,49 @@ pub async fn delete_proposal_lint_results_for_test(db: &Database, proposal_id: &
         .expect("failed to delete proposal lint results");
 }
 
+/// Delete one revision's lint cache row to model a current head written before
+/// lint persistence while retaining all historical revision results.
+///
+/// **Not for production use.** Panics on SQL errors.
+pub async fn delete_proposal_lint_result_for_revision_for_test(
+    db: &Database,
+    proposal_id: &str,
+    revision_seq: i32,
+) {
+    db.ensure_initialized().await.unwrap();
+    sqlx::query(
+        "DELETE FROM proposal_revision_lint_results \
+         WHERE proposal_id = $1 AND revision_seq = $2",
+    )
+    .bind(proposal_id)
+    .bind(revision_seq)
+    .execute(db.pool())
+    .await
+    .expect("failed to delete proposal revision lint result");
+}
+
+/// Return the immutable revision id to which a persisted lint result is
+/// attached. Tests use this to assert that later material revisions neither
+/// delete nor reattach historical lint rows.
+///
+/// **Not for production use.** Panics on SQL errors.
+pub async fn proposal_lint_revision_id_for_test(
+    db: &Database,
+    proposal_id: &str,
+    revision_seq: i32,
+) -> Option<String> {
+    db.ensure_initialized().await.unwrap();
+    sqlx::query_scalar(
+        "SELECT revision_id FROM proposal_revision_lint_results \
+         WHERE proposal_id = $1 AND revision_seq = $2",
+    )
+    .bind(proposal_id)
+    .bind(revision_seq)
+    .fetch_optional(db.pool())
+    .await
+    .expect("failed to read proposal revision lint attachment")
+}
+
 /// Create a fresh FK-valid user for a raw latest-schema fixture.
 /// UUIDv7-derived values avoid a repository-wide fixed test identity.
 pub async fn seed_test_user(db: &Database) -> String {

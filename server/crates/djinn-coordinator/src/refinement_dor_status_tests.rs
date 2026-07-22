@@ -552,13 +552,11 @@ async fn clean_material_revision_restores_semantic_adjudication() {
             revision.seq == initial.latest_revision_seq && revision.event_kind == "spec_revision"
         })
         .expect("initial material revision");
-    let initial_lint_revision_id: String = sqlx::query_scalar(
-        "SELECT revision_id FROM proposal_revision_lint_results \
-         WHERE proposal_id = $1 AND revision_seq = $2",
+    let initial_lint_revision_id = djinn_db::test_support::proposal_lint_revision_id_for_test(
+        &db,
+        &proposal_id,
+        initial_revision.seq,
     )
-    .bind(&proposal_id)
-    .bind(initial_revision.seq)
-    .fetch_one(db.pool())
     .await
     .expect("initial revision must retain its lint row");
     assert_eq!(initial_lint_revision_id, initial_revision.id);
@@ -593,14 +591,12 @@ async fn clean_material_revision_restores_semantic_adjudication() {
         "mdx",
     )
     .await;
-    sqlx::query(
-        "DELETE FROM proposal_revision_lint_results WHERE proposal_id = $1 AND revision_seq = $2",
+    djinn_db::test_support::delete_proposal_lint_result_for_revision_for_test(
+        &db,
+        &proposal_id,
+        legacy_head.latest_revision_seq,
     )
-    .bind(&proposal_id)
-    .bind(legacy_head.latest_revision_seq)
-    .execute(db.pool())
-    .await
-    .expect("remove only corrupt legacy head lint row");
+    .await;
 
     let corrupt_readiness = actor
         .evaluate_proposal_readiness(&proposal_id)
@@ -659,15 +655,14 @@ async fn clean_material_revision_restores_semantic_adjudication() {
         new_head_seq > current.latest_revision_seq,
         "clean revision must be material (seq advanced)"
     );
-    let retained_initial_lint_revision_id: String = sqlx::query_scalar(
-        "SELECT revision_id FROM proposal_revision_lint_results \
-         WHERE proposal_id = $1 AND revision_seq = $2",
-    )
-    .bind(&proposal_id)
-    .bind(initial_revision.seq)
-    .fetch_one(db.pool())
-    .await
-    .expect("historical lint row must remain after clean revision");
+    let retained_initial_lint_revision_id =
+        djinn_db::test_support::proposal_lint_revision_id_for_test(
+            &db,
+            &proposal_id,
+            initial_revision.seq,
+        )
+        .await
+        .expect("historical lint row must remain after clean revision");
     assert_eq!(
         retained_initial_lint_revision_id, initial_revision.id,
         "historical lint must remain attached to its original immutable revision"
