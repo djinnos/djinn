@@ -143,6 +143,58 @@ impl TaskRepository {
             .await?)
     }
 
+    /// List tasks the PR poller's status-scoped loops never observe but which
+    /// still carry a live PR reference: a non-empty `pr_url`, a non-terminal
+    /// status, and a status the poller does NOT own (`pr_draft` / `pr_review`
+    /// are polled directly and must be excluded so their loops keep sole
+    /// ownership). This is the poller's blind spot (`open`, `in_progress`,
+    /// `needs_task_review`, `needs_lead_intervention`, ...): a PR can merge —
+    /// or its head CI can change — while the task sits in one of these states
+    /// with nothing reconciling it. The reconciliation pass iterates this set.
+    /// The result is intentionally small (only non-terminal tasks that ever
+    /// opened a PR), so a single unfiltered scan per slow tick is cheap.
+    pub async fn list_reconcilable_pr_tasks(&self) -> Result<Vec<Task>> {
+        self.db.ensure_initialized().await?;
+        Ok(sqlx::query_as::<_, Task>(
+            r#"SELECT id, project_id, short_id, epic_id, title, description, design, issue_type,
+                    status, priority, owner, labels::text AS labels, acceptance_criteria::text AS acceptance_criteria,
+                    reopen_count, continuation_count,
+                    total_reopen_count,
+                    intervention_count, last_intervention_at,
+                    created_at, updated_at, closed_at,
+                    close_reason, merge_commit_sha, pr_url, merge_conflict_metadata, memory_refs::text AS memory_refs,
+                    agent_type, created_by_user_id, refinement_run_id, refinement_intent_id, refinement_generation, refinement_round, refinement_phase, refinement_role,
+                    COALESCE((SELECT s.ci_status FROM task_pr_ci_snapshots s WHERE s.task_id = tasks.id ORDER BY s.last_seen_at DESC LIMIT 1), 'unknown') AS ci_status,
+                    (SELECT s.head_sha FROM task_pr_ci_snapshots s WHERE s.task_id = tasks.id ORDER BY s.last_seen_at DESC LIMIT 1) AS ci_head_sha,
+                    (SELECT s.pr_number FROM task_pr_ci_snapshots s WHERE s.task_id = tasks.id ORDER BY s.last_seen_at DESC LIMIT 1) AS ci_pr_number,
+                    COALESCE((SELECT s.blocking_required_check_names::text FROM task_pr_ci_snapshots s WHERE s.task_id = tasks.id ORDER BY s.last_seen_at DESC LIMIT 1), '[]') AS ci_blocking_required_check_names,
+                    (SELECT s.failure_fingerprint FROM task_pr_ci_snapshots s WHERE s.task_id = tasks.id ORDER BY s.last_seen_at DESC LIMIT 1) AS ci_failure_fingerprint,
+                    (SELECT s.first_seen_at FROM task_pr_ci_snapshots s WHERE s.task_id = tasks.id ORDER BY s.last_seen_at DESC LIMIT 1) AS ci_first_seen_at,
+                    (SELECT s.last_seen_at FROM task_pr_ci_snapshots s WHERE s.task_id = tasks.id ORDER BY s.last_seen_at DESC LIMIT 1) AS ci_last_seen_at,
+                    COALESCE((SELECT s.same_signature_count FROM task_pr_ci_snapshots s WHERE s.task_id = tasks.id ORDER BY s.last_seen_at DESC LIMIT 1), 0) AS ci_same_signature_count,
+                    (SELECT s.last_remediation_base_sha FROM task_pr_ci_snapshots s WHERE s.task_id = tasks.id ORDER BY s.last_seen_at DESC LIMIT 1) AS ci_last_remediation_base_sha,
+                    (SELECT s.mq_state FROM task_pr_ci_snapshots s WHERE s.task_id = tasks.id ORDER BY s.last_seen_at DESC LIMIT 1) AS ci_mq_state,
+                    (SELECT s.mq_run_id FROM task_pr_ci_snapshots s WHERE s.task_id = tasks.id ORDER BY s.last_seen_at DESC LIMIT 1) AS ci_mq_run_id,
+                    (SELECT s.mq_head_sha FROM task_pr_ci_snapshots s WHERE s.task_id = tasks.id ORDER BY s.last_seen_at DESC LIMIT 1) AS ci_mq_head_sha,
+                    (SELECT s.mq_failed_check_names::text FROM task_pr_ci_snapshots s WHERE s.task_id = tasks.id ORDER BY s.last_seen_at DESC LIMIT 1) AS ci_mq_failed_check_names,
+                    (SELECT s.mq_failure_fingerprint FROM task_pr_ci_snapshots s WHERE s.task_id = tasks.id ORDER BY s.last_seen_at DESC LIMIT 1) AS ci_mq_failure_fingerprint,
+                    (SELECT s.mq_same_signature_count FROM task_pr_ci_snapshots s WHERE s.task_id = tasks.id ORDER BY s.last_seen_at DESC LIMIT 1) AS ci_mq_same_signature_count,
+                    (SELECT s.mq_first_seen_at FROM task_pr_ci_snapshots s WHERE s.task_id = tasks.id ORDER BY s.last_seen_at DESC LIMIT 1) AS ci_mq_first_seen_at,
+                    (SELECT s.mq_last_seen_at FROM task_pr_ci_snapshots s WHERE s.task_id = tasks.id ORDER BY s.last_seen_at DESC LIMIT 1) AS ci_mq_last_seen_at,
+                    (SELECT ta.mirror_head_sha FROM task_attempts ta WHERE ta.task_id = tasks.id AND (ta.mirror_head_sha IS NOT NULL OR ta.github_head_sha IS NOT NULL OR ta.github_publication_error IS NOT NULL) ORDER BY ta.created_at DESC LIMIT 1) AS ci_mirror_head_sha,
+                    (SELECT ta.github_head_sha FROM task_attempts ta WHERE ta.task_id = tasks.id AND (ta.mirror_head_sha IS NOT NULL OR ta.github_head_sha IS NOT NULL OR ta.github_publication_error IS NOT NULL) ORDER BY ta.created_at DESC LIMIT 1) AS ci_github_head_sha,
+                    (SELECT CASE WHEN ta.mirror_head_sha IS NOT NULL AND ta.github_head_sha IS NOT NULL THEN ta.mirror_head_sha != ta.github_head_sha END FROM task_attempts ta WHERE ta.task_id = tasks.id AND (ta.mirror_head_sha IS NOT NULL OR ta.github_head_sha IS NOT NULL OR ta.github_publication_error IS NOT NULL) ORDER BY ta.created_at DESC LIMIT 1) AS ci_heads_diverged,
+                    (SELECT ta.github_publication_error FROM task_attempts ta WHERE ta.task_id = tasks.id AND ta.github_publication_error IS NOT NULL ORDER BY ta.created_at DESC LIMIT 1) AS ci_head_observation_error,
+                    CAST(0 AS BIGINT) AS unresolved_blocker_count
+             FROM tasks
+             WHERE pr_url IS NOT NULL AND pr_url <> ''
+               AND status NOT IN ('closed', 'pr_draft', 'pr_review')
+             ORDER BY priority, created_at"#,
+        )
+        .fetch_all(self.db.pool())
+        .await?)
+    }
+
     pub async fn get(&self, id: &str) -> Result<Option<Task>> {
         self.db.ensure_initialized().await?;
         Ok(task_select_where_id!(id)
