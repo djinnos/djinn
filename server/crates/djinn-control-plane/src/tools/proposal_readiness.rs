@@ -471,7 +471,12 @@ fn has_grounding(normalized: &str) -> bool {
 mod tests {
     use super::*;
     use djinn_core::events::EventBus;
-    use djinn_db::{Database, ProposalCreateInput};
+    use djinn_db::{
+        Database, ProposalCreateInput,
+        test_support::{
+            delete_proposal_lint_results_for_test, replace_legacy_proposal_head_for_test,
+        },
+    };
 
     const READY_BODY: &str = r#"
 # Problem
@@ -754,32 +759,11 @@ Entry points: src/main.rs.
         let corrupt_body = format!(
             "{READY_BODY}\n<Callout id=\"duplicate\">one</Callout>\n<Callout id=\"duplicate\">two</Callout>"
         );
-        // Simulate a legacy row written before repository-boundary linting.
-        sqlx::query("UPDATE proposals SET body = $1 WHERE id = $2")
-            .bind(&corrupt_body)
-            .bind(&proposal.id)
-            .execute(db.pool())
-            .await
-            .unwrap();
-        sqlx::query("UPDATE proposal_revisions SET body = $1 WHERE proposal_id = $2 AND seq = $3")
-            .bind(&corrupt_body)
-            .bind(&proposal.id)
-            .bind(proposal.latest_revision_seq)
-            .execute(db.pool())
-            .await
-            .unwrap();
-        sqlx::query("DELETE FROM proposal_revision_lint_results WHERE proposal_id = $1")
-            .bind(&proposal.id)
-            .execute(db.pool())
-            .await
-            .unwrap();
-        let lint_row_count: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM proposal_revision_lint_results WHERE proposal_id = $1",
-        )
-        .bind(&proposal.id)
-        .fetch_one(db.pool())
-        .await
-        .unwrap();
+        // Simulate a legacy material head written before repository-boundary
+        // linting, with no persisted lint result.
+        replace_legacy_proposal_head_for_test(&db, &proposal.id, &corrupt_body, "mdx").await;
+        delete_proposal_lint_results_for_test(&db, &proposal.id).await;
+        let lint_row_count = repo.lint_result_count(&proposal.id).await.unwrap();
         assert_eq!(
             lint_row_count, 0,
             "legacy head starts without persisted lint"
@@ -844,17 +828,7 @@ Entry points: src/main.rs.
     #[tokio::test]
     async fn latest_head_readiness_fails_closed_when_lint_cannot_load() {
         let (db, repo, proposal) = test_repo_and_proposal(READY_BODY, None).await;
-        sqlx::query("UPDATE proposals SET body_format = 'unknown' WHERE id = $1")
-            .bind(&proposal.id)
-            .execute(db.pool())
-            .await
-            .unwrap();
-        sqlx::query("UPDATE proposal_revisions SET body_format = 'unknown' WHERE proposal_id = $1 AND seq = $2")
-            .bind(&proposal.id)
-            .bind(proposal.latest_revision_seq)
-            .execute(db.pool())
-            .await
-            .unwrap();
+        replace_legacy_proposal_head_for_test(&db, &proposal.id, READY_BODY, "unknown").await;
         let proposal = repo.get(&proposal.id).await.unwrap().unwrap();
         let acs = vec![ac_text("The result is testable")];
         let result = evaluate_latest_head_readiness(&repo, &proposal, &acs, 1).await;
