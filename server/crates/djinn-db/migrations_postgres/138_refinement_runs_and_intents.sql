@@ -141,10 +141,22 @@ FROM refinement_runs runs
 WHERE runs.source_start_revision_id = r.id;
 UPDATE proposal_revisions stop SET refinement_run_id = runs.id,
     refinement_stop_tag = runs.stop_tag, refinement_stop_context = runs.stop_context
-FROM refinement_runs runs
-WHERE runs.terminal_at IS NOT NULL AND stop.event_kind = 'refinement_stop'
-  AND stop.proposal_id = runs.proposal_id AND stop.created_at = runs.terminal_at
-  AND stop.id = (runs.stop_context->>'legacy_source_revision_id');
+FROM (
+    -- A shared following stop is ambiguous for nested legacy starts. As with
+    -- interior rows, correlate it only when exactly one run names that row.
+    SELECT stop_row.id, min(run_row.id) AS run_id
+    FROM proposal_revisions stop_row
+    JOIN refinement_runs run_row
+      ON stop_row.id = (run_row.stop_context->>'legacy_source_revision_id')
+    WHERE run_row.terminal_at IS NOT NULL
+      AND stop_row.event_kind = 'refinement_stop'
+      AND stop_row.proposal_id = run_row.proposal_id
+      AND stop_row.created_at = run_row.terminal_at
+    GROUP BY stop_row.id
+    HAVING count(*) = 1
+) candidate
+JOIN refinement_runs runs ON runs.id = candidate.run_id
+WHERE stop.id = candidate.id;
 UPDATE proposal_revisions r SET refinement_run_id = candidate.run_id
 FROM (
     -- A nested/overlapping legacy interval is not evidence for either run.

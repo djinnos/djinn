@@ -132,8 +132,8 @@ async fn migration_138_backfills_deterministic_intervals_and_stop_vocabulary() {
         lifecycle(&pool,"ordinary","p-1","status_change","2025-01-04T00:00:00Z",Some(serde_json::json!({"keep":"me"}))).await;
         drop(pool); migration(&mut c).await; drop(c);
         let pool = PgPoolOptions::new().max_connections(1).connect(&url).await.unwrap();
-        let tags: Vec<String> = sqlx::query_scalar("SELECT refinement_stop_tag FROM proposal_revisions WHERE event_kind='refinement_stop' ORDER BY id").fetch_all(&pool).await.unwrap();
-        assert!(canonical.iter().all(|x| tags.contains(&x.to_string())));
+        let tags: Vec<Option<String>> = sqlx::query_scalar("SELECT refinement_stop_tag FROM proposal_revisions WHERE event_kind='refinement_stop' ORDER BY id").fetch_all(&pool).await.unwrap();
+        assert!(canonical.iter().all(|x| tags.contains(&Some(x.to_string()))));
         assert_eq!(sqlx::query_scalar::<_,String>("SELECT refinement_stop_tag FROM proposal_revisions WHERE id='alias-stop'").fetch_one(&pool).await.unwrap(), "adversary_dry");
         assert_eq!(sqlx::query_scalar::<_,String>("SELECT refinement_stop_tag FROM proposal_revisions WHERE id='dry-stop'").fetch_one(&pool).await.unwrap(), "adversary_dry");
         assert_eq!(sqlx::query_scalar::<_,String>("SELECT refinement_stop_tag FROM proposal_revisions WHERE id='null-stop'").fetch_one(&pool).await.unwrap(), "unknown_legacy");
@@ -154,6 +154,7 @@ async fn migration_138_backfills_deterministic_intervals_and_stop_vocabulary() {
         assert_eq!(sqlx::query_scalar::<_,i32>("SELECT generation FROM refinement_runs WHERE source_start_revision_id='b-start'").fetch_one(&pool).await.unwrap(), 2);
         for id in ["solo-start", "solo-row", "solo-stop"] { assert_eq!(sqlx::query_scalar::<_,Option<String>>("SELECT refinement_run_id FROM proposal_revisions WHERE id=$1").bind(id).fetch_one(&pool).await.unwrap().as_deref(), Some(solo)); }
         assert_eq!(sqlx::query_scalar::<_,Option<String>>("SELECT refinement_run_id FROM proposal_revisions WHERE id='ambiguous'").fetch_one(&pool).await.unwrap(), None);
+        assert_eq!(sqlx::query_scalar::<_,Option<String>>("SELECT refinement_run_id FROM proposal_revisions WHERE id='overlap-stop'").fetch_one(&pool).await.unwrap(), None);
         assert_eq!(sqlx::query_scalar::<_,Option<String>>("SELECT refinement_run_id FROM proposal_debate_trail WHERE id='ambiguous-debate'").fetch_one(&pool).await.unwrap(), None);
         assert_eq!(sqlx::query_scalar::<_,Option<String>>("SELECT refinement_run_id FROM tasks WHERE id='task-ambiguous'").fetch_one(&pool).await.unwrap(), None);
         assert_eq!(sqlx::query_scalar::<_,Option<String>>("SELECT refinement_run_id FROM proposal_debate_trail WHERE id='solo-debate'").fetch_one(&pool).await.unwrap().as_deref(), Some(solo));
@@ -173,15 +174,14 @@ async fn migration_138_constraints_allow_successor_after_terminal() {
         sqlx::query("INSERT INTO refinement_runs (id,proposal_id,generation,idempotency_key,state) VALUES ($1,'p',1,'one','running')").bind(run).execute(&pool).await.unwrap();
         assert!(sqlx::query("INSERT INTO refinement_runs (id,proposal_id,generation,idempotency_key,state) VALUES ('00000000-0000-0000-0000-000000000002','p',2,'two','running')").execute(&pool).await.is_err());
         assert!(sqlx::query("INSERT INTO refinement_dispatch_intents (id,run_id,round,phase,role,idempotency_key) VALUES ('00000000-0000-0000-0000-000000000003',$1,1,'debate','judge','i')").bind(run).execute(&pool).await.is_ok());
-        assert!(sqlx::query("INSERT INTO refinement_runs (id,proposal_id,generation,idempotency_key,state) VALUES ('00000000-0000-0000-0000-000000000008','p',1,'different','terminal')").execute(&pool).await.is_err());
-        assert!(sqlx::query("INSERT INTO refinement_runs (id,proposal_id,generation,idempotency_key,state) VALUES ('00000000-0000-0000-0000-000000000009','p',3,'one','terminal')").execute(&pool).await.is_err());
         assert!(sqlx::query("INSERT INTO refinement_dispatch_intents (id,run_id,round,phase,role,idempotency_key) VALUES ('00000000-0000-0000-0000-000000000004',$1,1,'debate','judge','j')").bind(run).execute(&pool).await.is_err());
         assert!(sqlx::query("INSERT INTO refinement_dispatch_intents (id,run_id,round,phase,role,idempotency_key) VALUES ('00000000-0000-0000-0000-000000000010',$1,2,'debate','judge','i')").bind(run).execute(&pool).await.is_err());
-        assert!(sqlx::query("UPDATE refinement_runs SET stop_tag='not-canonical' WHERE id=$1").bind(run).execute(&pool).await.is_err());
+        assert!(sqlx::query("UPDATE refinement_runs SET state='terminal', terminal_at='2025-01-01T00:00:00Z', stop_tag='not-canonical' WHERE id=$1").bind(run).execute(&pool).await.is_err());
         assert!(sqlx::query("INSERT INTO proposal_revisions (id,proposal_id,seq,title,body,event_kind,refinement_stop_tag) VALUES ('bad-stop','p',1,'','','refinement_stop','not-canonical')").execute(&pool).await.is_err());
         assert!(sqlx::query("UPDATE refinement_runs SET state='terminal', terminal_at='2025-01-01T00:00:00Z', stop_tag='unknown_legacy' WHERE id=$1").bind(run).execute(&pool).await.is_ok());
+        assert!(sqlx::query("INSERT INTO refinement_runs (id,proposal_id,generation,idempotency_key,state,terminal_at,stop_tag) VALUES ('00000000-0000-0000-0000-000000000008','p',1,'different','terminal','2025-01-01T00:00:00Z','unknown_legacy')").execute(&pool).await.is_err());
+        assert!(sqlx::query("INSERT INTO refinement_runs (id,proposal_id,generation,idempotency_key,state,terminal_at,stop_tag) VALUES ('00000000-0000-0000-0000-000000000009','p',2,'one','terminal','2025-01-01T00:00:00Z','unknown_legacy')").execute(&pool).await.is_err());
         assert!(sqlx::query("INSERT INTO refinement_runs (id,proposal_id,generation,idempotency_key,state) VALUES ('00000000-0000-0000-0000-000000000005','p',2,'two','running')").execute(&pool).await.is_ok());
-        assert!(sqlx::query("INSERT INTO refinement_runs (id,proposal_id,generation,idempotency_key,state) VALUES ('00000000-0000-0000-0000-000000000006','p',3,'three','terminal')").execute(&pool).await.is_err());
         pool.close().await;
     }).await;
 }
