@@ -90,6 +90,7 @@ pub struct BuildLeaseRow {
     pub bound_pod_uid: Option<String>,
     pub candidate_cleanup: Option<serde_json::Value>,
     pub terminal_reason: Option<String>,
+    pub timeout_credit_consumed: bool,
     pub created_at: String,
     pub updated_at: String,
     pub granted_at: Option<String>,
@@ -226,6 +227,27 @@ impl BuildLeaseRepository {
         let row = fetch(&mut tx, key, false).await?;
         tx.commit().await?;
         Ok(row)
+    }
+
+    /// Atomically consume the one retry credit attached to a committed queue
+    /// deadline. False covers both replay and non-timeout terminal rows.
+    pub async fn consume_timeout_credit(&self, key: &BuildLeaseKey) -> DbResult<bool> {
+        self.db.ensure_initialized().await?;
+        let mut tx = self.db.pool().begin().await?;
+        lock(&mut tx).await?;
+        let consumed = sqlx::query_scalar::<_, bool>(
+            "UPDATE build_leases SET timeout_credit_consumed=TRUE, updated_at=now() \
+             WHERE consumer_kind=$1 AND consumer_id=$2 AND state='terminal' \
+             AND terminal_reason='deadline_expired' AND timeout_credit_consumed=FALSE \
+             RETURNING TRUE",
+        )
+        .bind(key.consumer_kind.as_str())
+        .bind(&key.consumer_id)
+        .fetch_optional(&mut *tx)
+        .await?
+        .unwrap_or(false);
+        tx.commit().await?;
+        Ok(consumed)
     }
 
     /// Status reports are idempotent, token-fenced and cannot resurrect terminal work.
@@ -506,7 +528,7 @@ impl BuildLeaseRepository {
     }
 }
 
-const COLS: &str = "consumer_kind,consumer_id,immutable_identity,enqueue_sequence,fencing_token,state,queue_deadline::text,launch_deadline::text,bound_pod_uid,candidate_cleanup,terminal_reason,created_at::text,updated_at::text,granted_at::text,terminal_at::text";
+const COLS: &str = "consumer_kind,consumer_id,immutable_identity,enqueue_sequence,fencing_token,state,queue_deadline::text,launch_deadline::text,bound_pod_uid,candidate_cleanup,terminal_reason,timeout_credit_consumed,created_at::text,updated_at::text,granted_at::text,terminal_at::text";
 #[derive(sqlx::FromRow)]
 struct DbRow {
     consumer_kind: String,
@@ -520,6 +542,7 @@ struct DbRow {
     bound_pod_uid: Option<String>,
     candidate_cleanup: Option<sqlx::types::Json<serde_json::Value>>,
     terminal_reason: Option<String>,
+    timeout_credit_consumed: bool,
     created_at: String,
     updated_at: String,
     granted_at: Option<String>,
@@ -542,6 +565,7 @@ impl TryFrom<DbRow> for BuildLeaseRow {
             bound_pod_uid: v.bound_pod_uid,
             candidate_cleanup: v.candidate_cleanup.map(|v| v.0),
             terminal_reason: v.terminal_reason,
+            timeout_credit_consumed: v.timeout_credit_consumed,
             created_at: v.created_at,
             updated_at: v.updated_at,
             granted_at: v.granted_at,

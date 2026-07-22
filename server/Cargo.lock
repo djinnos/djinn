@@ -1300,6 +1300,7 @@ dependencies = [
  "hmac",
  "insta",
  "libc",
+ "metrics",
  "regex",
  "reqwest 0.13.4",
  "serde",
