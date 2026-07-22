@@ -4,8 +4,13 @@ pub mod error;
 pub mod first_event;
 pub mod format;
 pub mod telemetry;
+pub mod transport;
 
 pub use error::ProviderError;
+pub use transport::{
+    ExhaustedTransportCategory, ExhaustedTransportDiagnostic, TransportClassificationInput,
+    classify_exhausted_transport, oversized_transport_request,
+};
 
 use std::pin::Pin;
 
