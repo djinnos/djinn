@@ -102,11 +102,13 @@ async fn evidence_receipt_clears_link_and_dispatches_advocate_with_findings_cont
         &fixture.proposal_id,
         Some(fixture.user_id.clone()),
     );
-    actor
+    let mut state = actor
         .active_refinements
-        .get_mut(&fixture.proposal_id)
+        .remove(&fixture.proposal_id)
         .expect("state exists")
-        .record_needs_evidence();
+        .with_run_identity("run-123", 1);
+    state.record_needs_evidence();
+    actor.active_refinements.insert("run-123".into(), state);
 
     actor
         .persist_terminal_linked_spike_evidence_from_closed_task(&task)
@@ -121,8 +123,8 @@ async fn evidence_receipt_clears_link_and_dispatches_advocate_with_findings_cont
     assert!(updated.needs_evidence_claim.is_none());
     let session = actor
         .refinement_sessions
-        .get(&fixture.proposal_id)
-        .expect("Advocate session dispatched");
+        .get("run-123")
+        .expect("Advocate session dispatched for exact run");
     assert_eq!(session.phase, RefinementPhase::AdvocateRevision);
     let advocate_task = task_repo
         .get(&session.task_id)
