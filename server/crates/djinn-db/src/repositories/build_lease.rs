@@ -347,19 +347,59 @@ impl BuildLeaseRepository {
         if pod_uid.trim().is_empty() {
             return Err(DbError::InvalidData("pod UID must not be blank".into()));
         }
-        self.transition(
-            key,
-            token,
-            &[
-                BuildLeaseState::Granted,
-                BuildLeaseState::Launching,
-                BuildLeaseState::Bound,
-            ],
-            BuildLeaseState::Bound,
-            Some(pod_uid),
-            cleanup,
-        )
-        .await
+        self.db.ensure_initialized().await?;
+        let mut tx = self.db.pool().begin().await?;
+        lock(&mut tx).await?;
+        let row = fetch(&mut tx, key, true)
+            .await?
+            .ok_or_else(|| DbError::InvalidTransition("unknown build lease".into()))?;
+        if row.fencing_token != Some(token) {
+            return Err(DbError::InvalidTransition(
+                "stale build lease fencing token".into(),
+            ));
+        }
+        if row
+            .bound_pod_uid
+            .as_deref()
+            .is_some_and(|uid| uid != pod_uid)
+        {
+            return Err(DbError::InvalidTransition(
+                "pod UID does not match build lease".into(),
+            ));
+        }
+        // A delayed bind with the committed immutable pod identity replays the
+        // forward row without moving Active, Suspect, or Terminal backward.
+        if matches!(
+            row.state,
+            BuildLeaseState::Bound
+                | BuildLeaseState::Active
+                | BuildLeaseState::Suspect
+                | BuildLeaseState::Terminal
+        ) && row.bound_pod_uid.as_deref() == Some(pod_uid)
+        {
+            tx.commit().await?;
+            return Ok(row);
+        }
+        if !matches!(
+            row.state,
+            BuildLeaseState::Granted | BuildLeaseState::Launching
+        ) {
+            return Err(DbError::InvalidTransition(format!(
+                "cannot bind build lease from {:?}",
+                row.state
+            )));
+        }
+        let result = sqlx::query_as::<_, DbRow>(&format!(
+            "UPDATE build_leases SET state='bound',bound_pod_uid=$1,candidate_cleanup=COALESCE($2,candidate_cleanup),updated_at=now() WHERE consumer_kind=$3 AND consumer_id=$4 RETURNING {COLS}"
+        ))
+        .bind(pod_uid)
+        .bind(cleanup.map(sqlx::types::Json))
+        .bind(key.consumer_kind.as_str())
+        .bind(&key.consumer_id)
+        .fetch_one(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        result.try_into()
     }
     pub async fn expire_deadlines(&self, now: &str) -> DbResult<Vec<BuildLeaseRow>> {
         self.db.ensure_initialized().await?;
@@ -387,12 +427,10 @@ impl BuildLeaseRepository {
         let row = fetch(&mut tx, key, true)
             .await?
             .ok_or_else(|| DbError::InvalidTransition("unknown build lease".into()))?;
-        if let Some(token) = token {
-            if row.fencing_token != Some(token) {
-                return Err(DbError::InvalidTransition(
-                    "stale build lease fencing token".into(),
-                ));
-            }
+        if token.is_some() && row.fencing_token != token {
+            return Err(DbError::InvalidTransition(
+                "stale build lease fencing token".into(),
+            ));
         }
         if row.state == BuildLeaseState::Terminal {
             tx.commit().await?;
@@ -728,6 +766,43 @@ mod tests {
             repo.bind(&request.key, token, "pod-b", None).await,
             Err(DbError::InvalidTransition(_))
         ));
+
+        repo.status(&request.key, token, BuildLeaseState::Active, None)
+            .await
+            .unwrap();
+        assert_eq!(
+            repo.bind(&request.key, token, "pod-a", None)
+                .await
+                .unwrap()
+                .state,
+            BuildLeaseState::Active
+        );
+        assert!(
+            repo.bind(&request.key, token + 1, "pod-a", None)
+                .await
+                .is_err()
+        );
+        assert!(repo.bind(&request.key, token, "pod-b", None).await.is_err());
+        assert_eq!(
+            repo.get(&request.key).await.unwrap().unwrap().state,
+            BuildLeaseState::Active
+        );
+
+        repo.status(&request.key, token, BuildLeaseState::Suspect, None)
+            .await
+            .unwrap();
+        assert_eq!(
+            repo.bind(&request.key, token, "pod-a", None)
+                .await
+                .unwrap()
+                .state,
+            BuildLeaseState::Suspect
+        );
+        repo.release(&request.key, token, None).await.unwrap();
+        let terminal = repo.bind(&request.key, token, "pod-a", None).await.unwrap();
+        assert_eq!(terminal.state, BuildLeaseState::Terminal);
+        assert_eq!(terminal.terminal_reason.as_deref(), Some("released"));
+        assert!(repo.bind(&request.key, token, "pod-b", None).await.is_err());
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

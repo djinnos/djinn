@@ -284,7 +284,8 @@ impl BuildLeaseService {
             .bind(&key, request.fencing_token.0 as i64, &request.pod_uid, None)
             .await
         {
-            Ok(row) => LeaseResult::Bound(status(&row)),
+            Ok(row) if row.state == BuildLeaseState::Bound => LeaseResult::Bound(status(&row)),
+            Ok(row) => LeaseResult::Status(status(&row)),
             Err(_) => self.unavailable(),
         }
     }
@@ -384,7 +385,7 @@ impl BuildLeaseService {
                 if token.is_some_and(|value| row.fencing_token != Some(value.0 as i64)) {
                     return self.unavailable();
                 }
-                return terminal_result(op, &row);
+                return terminal_result(&row);
             }
             // The contract has no abandon token; it may only remove a queued
             // row and can never revoke an occupied lease.
@@ -420,7 +421,7 @@ impl BuildLeaseService {
             Ok(row) => {
                 let _ = self.drain().await;
                 self.telemetry.outcome(LeaseTelemetryOutcome::Terminal);
-                terminal_result(op, &row)
+                terminal_result(&row)
             }
             Err(_) => self.unavailable(),
         }
@@ -529,26 +530,28 @@ fn granted_result(row: &BuildLeaseRow) -> LeaseResult {
 /// and queue-timeout retries. `None` means the row is still awaiting capacity.
 fn queue_result(row: &BuildLeaseRow) -> Option<LeaseResult> {
     match row.state {
+        BuildLeaseState::Queued => None,
         BuildLeaseState::Granted => Some(granted_result(row)),
-        BuildLeaseState::Terminal if row.terminal_reason.as_deref() == Some("deadline_expired") => {
-            Some(LeaseResult::LeaseWaitTimeout {
-                timeout_credit: None,
-            })
-        }
-        BuildLeaseState::Terminal => Some(LeaseResult::Status(status(row))),
-        _ => None,
+        BuildLeaseState::Launching
+        | BuildLeaseState::Bound
+        | BuildLeaseState::Active
+        | BuildLeaseState::Suspect => Some(LeaseResult::Status(status(row))),
+        BuildLeaseState::Terminal => Some(terminal_result(row)),
     }
 }
-fn terminal_result(op: LeaseOperation, row: &BuildLeaseRow) -> LeaseResult {
-    match op {
-        LeaseOperation::Abandon => LeaseResult::Abandoned {
+fn terminal_result(row: &BuildLeaseRow) -> LeaseResult {
+    match row.terminal_reason.as_deref() {
+        Some("abandoned") => LeaseResult::Abandoned {
             candidate_cleanup: row.candidate_cleanup.is_some(),
         },
-        LeaseOperation::Cancel => LeaseResult::Cancelled {
+        Some("cancelled") => LeaseResult::Cancelled {
             candidate_cleanup: row.candidate_cleanup.is_some(),
         },
-        LeaseOperation::Release => LeaseResult::Released {
+        Some("released") => LeaseResult::Released {
             candidate_cleanup: row.candidate_cleanup.is_some(),
+        },
+        Some("deadline_expired") => LeaseResult::LeaseWaitTimeout {
+            timeout_credit: None,
         },
         _ => LeaseResult::LeaseUnavailable,
     }
@@ -573,5 +576,99 @@ fn status(row: &BuildLeaseRow) -> LeaseStatus {
         deadlines: deadlines(row),
         pod_uid: row.bound_pod_uid.clone(),
         candidate_cleanup: row.candidate_cleanup.is_some(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn row(state: BuildLeaseState, terminal_reason: Option<&str>) -> BuildLeaseRow {
+        BuildLeaseRow {
+            key: BuildLeaseKey {
+                consumer_kind: BuildLeaseConsumerKind::GraphWarm,
+                consumer_id: "stable-request".into(),
+            },
+            immutable_identity: "warm:project:stable-request:revision".into(),
+            enqueue_sequence: 1,
+            fencing_token: (state != BuildLeaseState::Queued).then_some(17),
+            state,
+            queue_deadline: Some("2026-01-01T00:01:00Z".into()),
+            launch_deadline: Some("2026-01-01T00:02:00Z".into()),
+            bound_pod_uid: matches!(
+                state,
+                BuildLeaseState::Bound
+                    | BuildLeaseState::Active
+                    | BuildLeaseState::Suspect
+                    | BuildLeaseState::Terminal
+            )
+            .then(|| "pod-a".into()),
+            candidate_cleanup: None,
+            terminal_reason: terminal_reason.map(str::to_owned),
+            created_at: "2026-01-01T00:00:00Z".into(),
+            updated_at: "2026-01-01T00:00:00Z".into(),
+            granted_at: None,
+            terminal_at: None,
+        }
+    }
+
+    #[test]
+    fn queue_replay_uses_typed_result_for_every_durable_state() {
+        assert_eq!(queue_result(&row(BuildLeaseState::Queued, None)), None);
+        assert!(matches!(
+            queue_result(&row(BuildLeaseState::Granted, None)),
+            Some(LeaseResult::Granted(_))
+        ));
+        for state in [
+            BuildLeaseState::Launching,
+            BuildLeaseState::Bound,
+            BuildLeaseState::Active,
+            BuildLeaseState::Suspect,
+        ] {
+            assert!(matches!(
+                queue_result(&row(state, None)),
+                Some(LeaseResult::Status(_))
+            ));
+        }
+        assert!(matches!(
+            queue_result(&row(BuildLeaseState::Terminal, Some("abandoned"))),
+            Some(LeaseResult::Abandoned { .. })
+        ));
+        assert!(matches!(
+            queue_result(&row(BuildLeaseState::Terminal, Some("cancelled"))),
+            Some(LeaseResult::Cancelled { .. })
+        ));
+        assert!(matches!(
+            queue_result(&row(BuildLeaseState::Terminal, Some("released"))),
+            Some(LeaseResult::Released { .. })
+        ));
+        assert!(matches!(
+            queue_result(&row(BuildLeaseState::Terminal, Some("deadline_expired"))),
+            Some(LeaseResult::LeaseWaitTimeout { .. })
+        ));
+    }
+
+    #[test]
+    fn terminal_replay_uses_persisted_winner_and_cleanup() {
+        let mut cancelled = row(BuildLeaseState::Terminal, Some("cancelled"));
+        cancelled.candidate_cleanup = Some(serde_json::json!({"candidate_cleanup": true}));
+        assert_eq!(
+            terminal_result(&cancelled),
+            LeaseResult::Cancelled {
+                candidate_cleanup: true
+            }
+        );
+        assert_eq!(
+            terminal_result(&row(BuildLeaseState::Terminal, Some("released"))),
+            LeaseResult::Released {
+                candidate_cleanup: false
+            }
+        );
+        assert_eq!(
+            terminal_result(&row(BuildLeaseState::Terminal, Some("deadline_expired"))),
+            LeaseResult::LeaseWaitTimeout {
+                timeout_credit: None
+            }
+        );
     }
 }
