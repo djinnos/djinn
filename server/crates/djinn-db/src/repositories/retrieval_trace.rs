@@ -792,7 +792,8 @@ mod retrieval_trace_health;
 use retrieval_trace_health::*;
 pub use retrieval_trace_health::{
     CandidateScoreSummary, DurationStageSummary, RetrievalTraceHealthEvidence,
-    RetrievalTraceHealthRollup, SkipReasonCounts,
+    RetrievalTaxonomyValidationError, RetrievalTraceHealthRollup, SkipReasonCounts,
+    TaxonomyV1RetrievalHealthCounts, TaxonomyV1RetrievalHealthGroup,
 };
 
 // ── Repository ────────────────────────────────────────────────────────────────
@@ -1156,6 +1157,39 @@ impl RetrievalTraceRepository {
             combined,
             per_entry_point,
         })
+    }
+
+    /// Return authoritative taxonomy-v1 terminal evidence for every project
+    /// and supported entry point in one `[from, until)` window.
+    pub async fn taxonomy_v1_health_rollup(
+        &self,
+        from: &str,
+        until: &str,
+        refreshed_at: &str,
+    ) -> Result<Vec<TaxonomyV1RetrievalHealthGroup>> {
+        let from = parse_retrieval_trace_utc_timestamp(from, "from")?;
+        let until = parse_retrieval_trace_utc_timestamp(until, "until")?;
+        parse_retrieval_trace_utc_timestamp(refreshed_at, "refreshed_at")?;
+        if from >= until {
+            return Err(DbError::InvalidData(
+                "taxonomy-v1 health rollup requires from before until".to_owned(),
+            ));
+        }
+        let from = format_retrieval_trace_utc_timestamp(from);
+        let until = format_retrieval_trace_utc_timestamp(until);
+        self.db.ensure_initialized().await?;
+        let rows: Vec<TaxonomyV1HealthGroupRow> =
+            sqlx::query_as(TAXONOMY_V1_HEALTH_GROUPED_SQL)
+                .bind(&from)
+                .bind(&until)
+                .fetch_all(self.db.pool())
+                .await?;
+        rows.into_iter()
+            .map(|row| {
+                build_taxonomy_v1_group(row, &from, &until, refreshed_at)
+                    .map_err(DbError::InvalidData)
+            })
+            .collect()
     }
 
     /// Prune trace rows older than an eligible retention cutoff for one project.

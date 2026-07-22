@@ -21,6 +21,92 @@ pub struct CandidateScoreSummary {
     pub avg: Option<f64>,
 }
 
+#[derive(sqlx::FromRow)]
+pub(super) struct TaxonomyV1HealthGroupRow {
+    pub(super) project_id: String,
+    pub(super) entry_point: String,
+    total_queries: i64, successful_queries: i64, errored_queries: i64,
+    zero_candidate_queries: i64, candidate_bearing_queries: i64,
+    starved_queries: i64, injected_queries: i64, candidate_total: i64,
+    injected_total: i64, confidence_filtered_total: i64, not_top_k_total: i64,
+    oversized_skipped_total: i64, injected_disposition_total: i64,
+    budget_pruned_total: i64, legacy_unclassified_queries: i64,
+    invalid_taxonomy_queries: i64, validation_errors: serde_json::Value,
+}
+
+pub(super) fn build_taxonomy_v1_group(
+    row: TaxonomyV1HealthGroupRow, window_start: &str, window_end: &str, refreshed_at: &str,
+) -> Result<TaxonomyV1RetrievalHealthGroup, String> {
+    let entry_point = RetrievalTraceEntryPoint::parse(&row.entry_point)
+        .ok_or_else(|| format!("unknown entry_point in taxonomy-v1 health rollup: {}", row.entry_point))?;
+    let validation_errors = serde_json::from_value(row.validation_errors)
+        .map_err(|err| format!("invalid taxonomy-v1 validation telemetry: {err}"))?;
+    let counts = TaxonomyV1RetrievalHealthCounts {
+        total_queries: row.total_queries, successful_queries: row.successful_queries,
+        errored_queries: row.errored_queries, zero_candidate_queries: row.zero_candidate_queries,
+        candidate_bearing_queries: row.candidate_bearing_queries, starved_queries: row.starved_queries,
+        injected_queries: row.injected_queries, candidate_total: row.candidate_total,
+        injected_total: row.injected_total, confidence_filtered_total: row.confidence_filtered_total,
+        not_top_k_total: row.not_top_k_total, oversized_skipped_total: row.oversized_skipped_total,
+        injected_disposition_total: row.injected_disposition_total, budget_pruned_total: row.budget_pruned_total,
+        legacy_unclassified_queries: row.legacy_unclassified_queries,
+        invalid_taxonomy_queries: row.invalid_taxonomy_queries,
+    };
+    Ok(TaxonomyV1RetrievalHealthGroup {
+        project_id: row.project_id, entry_point, taxonomy_version: 1,
+        window_start: window_start.to_owned(), window_end: window_end.to_owned(),
+        refreshed_at: refreshed_at.to_owned(), invalid: counts.invalid_taxonomy_queries > 0,
+        counts, validation_errors,
+    })
+}
+
+/// Sole authoritative terminal-time bounded health query. Legacy/unknown rows
+/// and malformed v1 rows are classified before aggregation and cannot affect
+/// versioned counters or histograms.
+pub(super) const TAXONOMY_V1_HEALTH_GROUPED_SQL: &str = r#"
+WITH bounded AS (
+ SELECT id, project_id, entry_point, knowledge_trace_taxonomy_version, terminal_state,
+        candidate_count, injected_count, confidence_filtered_count, not_top_k_count,
+        oversized_skipped_count, budget_pruned_count FROM retrieval_traces
+ WHERE terminal_at >= $1 AND terminal_at < $2
+   AND entry_point IN ('dispatch','jit_pitfalls','load_knowledge_context','format_knowledge_notes')
+), classified AS (
+ SELECT *, CASE
+  WHEN knowledge_trace_taxonomy_version IS DISTINCT FROM 1 THEN 'legacy'
+  WHEN terminal_state = 'success' AND candidate_count IS NOT NULL AND injected_count IS NOT NULL
+   AND confidence_filtered_count IS NOT NULL AND not_top_k_count IS NOT NULL AND oversized_skipped_count IS NOT NULL AND budget_pruned_count IS NOT NULL
+   AND candidate_count >= 0 AND injected_count >= 0 AND confidence_filtered_count >= 0 AND not_top_k_count >= 0 AND oversized_skipped_count >= 0 AND budget_pruned_count >= 0
+   AND injected_count = candidate_count - confidence_filtered_count - not_top_k_count - oversized_skipped_count - budget_pruned_count
+   AND candidate_count = confidence_filtered_count + not_top_k_count + oversized_skipped_count + injected_count + budget_pruned_count THEN 'success'
+  WHEN terminal_state IN ('error','cancelled') AND candidate_count IS NULL AND injected_count IS NULL AND confidence_filtered_count IS NULL AND not_top_k_count IS NULL AND oversized_skipped_count IS NULL AND budget_pruned_count IS NULL THEN 'exceptional'
+  WHEN terminal_state IS NULL OR terminal_state NOT IN ('success','error','cancelled') THEN 'invalid_terminal_state'
+  WHEN terminal_state = 'success' AND (candidate_count IS NULL OR injected_count IS NULL OR confidence_filtered_count IS NULL OR not_top_k_count IS NULL OR oversized_skipped_count IS NULL OR budget_pruned_count IS NULL) THEN 'missing_success_counts'
+  WHEN terminal_state = 'success' AND (candidate_count < 0 OR injected_count < 0 OR confidence_filtered_count < 0 OR not_top_k_count < 0 OR oversized_skipped_count < 0 OR budget_pruned_count < 0) THEN 'negative_count'
+  WHEN terminal_state = 'success' AND injected_count <> candidate_count - confidence_filtered_count - not_top_k_count - oversized_skipped_count - budget_pruned_count THEN 'injected_count_mismatch'
+  WHEN terminal_state = 'success' THEN 'histogram_partition_mismatch'
+  ELSE 'exceptional_has_counts' END AS classification FROM bounded
+)
+SELECT project_id, entry_point,
+ count(*) FILTER (WHERE classification IN ('success','exceptional'))::bigint AS total_queries,
+ count(*) FILTER (WHERE classification='success')::bigint AS successful_queries,
+ count(*) FILTER (WHERE classification='exceptional')::bigint AS errored_queries,
+ count(*) FILTER (WHERE classification='success' AND candidate_count=0)::bigint AS zero_candidate_queries,
+ count(*) FILTER (WHERE classification='success' AND candidate_count>0)::bigint AS candidate_bearing_queries,
+ count(*) FILTER (WHERE classification='success' AND candidate_count>0 AND injected_count=0)::bigint AS starved_queries,
+ count(*) FILTER (WHERE classification='success' AND injected_count>0)::bigint AS injected_queries,
+ coalesce(sum(candidate_count) FILTER (WHERE classification='success'),0)::bigint AS candidate_total,
+ coalesce(sum(injected_count) FILTER (WHERE classification='success'),0)::bigint AS injected_total,
+ coalesce(sum(confidence_filtered_count) FILTER (WHERE classification='success'),0)::bigint AS confidence_filtered_total,
+ coalesce(sum(not_top_k_count) FILTER (WHERE classification='success'),0)::bigint AS not_top_k_total,
+ coalesce(sum(oversized_skipped_count) FILTER (WHERE classification='success'),0)::bigint AS oversized_skipped_total,
+ coalesce(sum(injected_count) FILTER (WHERE classification='success'),0)::bigint AS injected_disposition_total,
+ coalesce(sum(budget_pruned_count) FILTER (WHERE classification='success'),0)::bigint AS budget_pruned_total,
+ count(*) FILTER (WHERE classification='legacy')::bigint AS legacy_unclassified_queries,
+ count(*) FILTER (WHERE classification NOT IN ('legacy','success','exceptional'))::bigint AS invalid_taxonomy_queries,
+ coalesce(jsonb_agg(jsonb_build_object('trace_id',id,'reason',classification) ORDER BY id) FILTER (WHERE classification NOT IN ('legacy','success','exceptional')),'[]'::jsonb) AS validation_errors
+FROM classified GROUP BY project_id, entry_point ORDER BY project_id, entry_point
+"#;
+
 /// Summary of a single duration stage (e.g. `retrieval_ms`) across one or more
 /// traces.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -69,6 +155,48 @@ pub struct RetrievalTraceHealthEvidence {
 pub struct RetrievalTraceHealthRollup {
     pub combined: RetrievalTraceHealthEvidence,
     pub per_entry_point: HashMap<RetrievalTraceEntryPoint, RetrievalTraceHealthEvidence>,
+}
+
+/// A deterministic, field-level explanation for a malformed v1 terminal.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RetrievalTaxonomyValidationError {
+    pub trace_id: String,
+    pub reason: String,
+}
+
+/// Version-homogeneous counters for one project/entry-point terminal window.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TaxonomyV1RetrievalHealthCounts {
+    pub total_queries: i64,
+    pub successful_queries: i64,
+    pub errored_queries: i64,
+    pub zero_candidate_queries: i64,
+    pub candidate_bearing_queries: i64,
+    pub starved_queries: i64,
+    pub injected_queries: i64,
+    pub candidate_total: i64,
+    pub injected_total: i64,
+    pub confidence_filtered_total: i64,
+    pub not_top_k_total: i64,
+    pub oversized_skipped_total: i64,
+    pub injected_disposition_total: i64,
+    pub budget_pruned_total: i64,
+    pub legacy_unclassified_queries: i64,
+    pub invalid_taxonomy_queries: i64,
+}
+
+/// Authoritative bounded taxonomy-v1 evidence. The window is `[start, end)`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TaxonomyV1RetrievalHealthGroup {
+    pub project_id: String,
+    pub entry_point: RetrievalTraceEntryPoint,
+    pub taxonomy_version: i32,
+    pub window_start: String,
+    pub window_end: String,
+    pub refreshed_at: String,
+    pub invalid: bool,
+    pub counts: TaxonomyV1RetrievalHealthCounts,
+    pub validation_errors: Vec<RetrievalTaxonomyValidationError>,
 }
 
 // ── Health rollup helpers ───────────────────────────────────────────────────

@@ -41,6 +41,83 @@ fn terminal_params<'a>(
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn taxonomy_v1_rollup_groups_terminal_windows_and_excludes_invalid_rows() {
+    let db = test_db();
+    let project_a = "019f4900-0000-7000-8000-000000000139";
+    let project_b = "019f4900-0000-7000-8000-000000000140";
+    seed_project(&db, project_a).await;
+    seed_project(&db, project_b).await;
+    let repo = RetrievalTraceRepository::new(db.clone());
+    let candidates = json!([]);
+    let durations = json!({});
+
+    repo.insert_terminal(terminal_params(project_a, &candidates, &durations)).await.unwrap();
+    let mut starved = terminal_params(project_a, &candidates, &durations);
+    starved.candidate_count = Some(2);
+    starved.injected_count = Some(0);
+    starved.outcome = RetrievalTraceOutcome::Empty;
+    starved.dispositions = Some(KnowledgeTraceDispositionCounts { confidence_filtered: 0, not_top_k: 1, oversized_skipped: 0, injected: 0, budget_pruned: 1 });
+    repo.insert_terminal(starved).await.unwrap();
+    let mut zero = terminal_params(project_a, &candidates, &durations);
+    zero.outcome = RetrievalTraceOutcome::Empty;
+    zero.candidate_count = Some(0);
+    zero.injected_count = Some(0);
+    zero.dispositions = Some(KnowledgeTraceDispositionCounts { confidence_filtered: 0, not_top_k: 0, oversized_skipped: 0, injected: 0, budget_pruned: 0 });
+    repo.insert_terminal(zero).await.unwrap();
+    for state in [KnowledgeTraceTerminalState::Error, KnowledgeTraceTerminalState::Cancelled] {
+        let mut exceptional = terminal_params(project_a, &candidates, &durations);
+        exceptional.terminal_state = state;
+        exceptional.outcome = RetrievalTraceOutcome::Error;
+        exceptional.candidate_count = None;
+        exceptional.injected_count = None;
+        exceptional.dispositions = None;
+        repo.insert_terminal(exceptional).await.unwrap();
+    }
+
+    let malformed = repo.insert_terminal(terminal_params(project_a, &candidates, &durations)).await.unwrap();
+    sqlx::query("UPDATE retrieval_traces SET injected_count = 4 WHERE id = $1")
+        .bind(&malformed.id).execute(db.pool()).await.unwrap();
+    let legacy = repo.insert(CreateRetrievalTraceParams {
+        project_id: project_a, session_id: None, task_run_id: None, task_id: None,
+        entry_point: RetrievalTraceEntryPoint::LoadKnowledgeContext, trigger: None,
+        candidates: &candidates, candidate_cap: 50, candidate_cap_exceeded: false,
+        sampling_metadata: None, durations_ms: &durations, estimated_injected_tokens: 0,
+    }).await.unwrap();
+    sqlx::query("UPDATE retrieval_traces SET terminal_at = $1 WHERE id = $2")
+        .bind("2026-07-20T12:00:00.000Z").bind(&legacy.id).execute(db.pool()).await.unwrap();
+    let mut other = terminal_params(project_b, &candidates, &durations);
+    other.trace.entry_point = RetrievalTraceEntryPoint::Dispatch;
+    repo.insert_terminal(other).await.unwrap();
+    let mut outside = terminal_params(project_a, &candidates, &durations);
+    outside.terminal_at = "2026-07-20T13:00:00.000Z";
+    repo.insert_terminal(outside).await.unwrap();
+
+    let groups = repo.taxonomy_v1_health_rollup(
+        "2026-07-20T12:00:00.000Z", "2026-07-20T13:00:00.000Z", "2026-07-20T13:05:00.000Z",
+    ).await.unwrap();
+    assert_eq!(groups.len(), 2);
+    let load = groups.iter().find(|g| g.project_id == project_a && g.entry_point == RetrievalTraceEntryPoint::LoadKnowledgeContext).unwrap();
+    assert!(load.invalid);
+    assert_eq!(load.taxonomy_version, 1);
+    assert_eq!(load.counts.total_queries, 5);
+    assert_eq!(load.counts.successful_queries, 3);
+    assert_eq!(load.counts.errored_queries, 2);
+    assert_eq!(load.counts.zero_candidate_queries, 1);
+    assert_eq!(load.counts.candidate_bearing_queries, 2);
+    assert_eq!(load.counts.starved_queries, 1);
+    assert_eq!(load.counts.injected_queries, 1);
+    assert_eq!(load.counts.candidate_total, 7);
+    assert_eq!(load.counts.injected_total, 1);
+    assert_eq!(load.counts.confidence_filtered_total + load.counts.not_top_k_total + load.counts.oversized_skipped_total + load.counts.injected_disposition_total + load.counts.budget_pruned_total, load.counts.candidate_total);
+    assert_eq!(load.counts.legacy_unclassified_queries, 1);
+    assert_eq!(load.counts.invalid_taxonomy_queries, 1);
+    assert_eq!(load.validation_errors[0].reason, "injected_count_mismatch");
+    let dispatch = groups.iter().find(|g| g.project_id == project_b).unwrap();
+    assert_eq!(dispatch.entry_point, RetrievalTraceEntryPoint::Dispatch);
+    assert_eq!(dispatch.counts.total_queries, 1);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn terminal_write_is_atomic_and_legacy_writes_are_null_taxonomy() {
     let db = test_db();
     let project_id = "019f4900-0000-7000-8000-000000000136";
