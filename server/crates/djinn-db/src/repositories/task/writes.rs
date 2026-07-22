@@ -814,6 +814,49 @@ impl TaskRepository {
         Ok(())
     }
 
+    /// Persist an exact validated refinement correlation without changing task
+    /// creation, dispatch, or session behavior.
+    pub async fn set_refinement_correlation(
+        &self,
+        id: &str,
+        correlation: Option<&djinn_core::models::TaskRefinementCorrelation>,
+    ) -> Result<Task> {
+        self.db.ensure_initialized().await?;
+        let id = id.to_owned();
+        let correlation = correlation.cloned();
+        let task = crate::retry::retry_on_serialization_failure(
+            crate::retry::DEFAULT_MAX_TX_RETRIES,
+            || {
+                let id = id.clone();
+                let correlation = correlation.clone();
+                async move {
+                    let (run_id, intent_id, generation, round, phase, role) = match correlation {
+                        Some(value) => {
+                            let phase = match value.phase {
+                                djinn_core::refinement_liveness::RefinementPhase::AdversaryAttack => "adversary_attack",
+                                djinn_core::refinement_liveness::RefinementPhase::AdvocateRevision => "advocate_revision",
+                                djinn_core::refinement_liveness::RefinementPhase::JudgeAdjudication => "judge_adjudication",
+                            };
+                            let role = match value.role {
+                                djinn_core::refinement_liveness::RefinementRole::Adversary => "adversary",
+                                djinn_core::refinement_liveness::RefinementRole::Advocate => "advocate",
+                                djinn_core::refinement_liveness::RefinementRole::Judge => "judge",
+                            };
+                            (Some(value.run_id), Some(value.intent_id), Some(value.generation), Some(value.round), Some(phase), Some(role))
+                        }
+                        None => (None, None, None, None, None, None),
+                    };
+                    sqlx::query("UPDATE tasks SET refinement_run_id = $1, refinement_intent_id = $2, refinement_generation = $3, refinement_round = $4, refinement_phase = $5, refinement_role = $6 WHERE id = $7")
+                        .bind(run_id).bind(intent_id).bind(generation).bind(round).bind(phase).bind(role).bind(&id)
+                        .execute(self.db.pool()).await?;
+                    Ok::<_, crate::Error>(task_select_where_id!(&id).fetch_one(self.db.pool()).await?)
+                }
+            },
+        ).await?;
+        self.events.send(DjinnEventEnvelope::task_updated(&task, false));
+        Ok(task)
+    }
+
     /// Set or clear the `agent_type` specialist name on a task.
     pub async fn update_agent_type(&self, id: &str, agent_type: Option<&str>) -> Result<Task> {
         self.db.ensure_initialized().await?;

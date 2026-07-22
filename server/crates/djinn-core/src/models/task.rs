@@ -2,6 +2,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Result};
+use crate::refinement_liveness::{RefinementPhase, RefinementRole};
 
 // ── ReopenClass ──────────────────────────────────────────────────────────────
 
@@ -529,6 +530,54 @@ pub struct Task {
     /// Populated by list queries via subquery; defaults to 0 elsewhere.
     #[cfg_attr(feature = "sqlx", sqlx(default))]
     pub unresolved_blocker_count: i64,
+    #[cfg_attr(feature = "sqlx", sqlx(default))]
+    pub refinement_run_id: Option<String>,
+    #[cfg_attr(feature = "sqlx", sqlx(default))]
+    pub refinement_intent_id: Option<String>,
+    #[cfg_attr(feature = "sqlx", sqlx(default))]
+    pub refinement_generation: Option<i64>,
+    #[cfg_attr(feature = "sqlx", sqlx(default))]
+    pub refinement_round: Option<i64>,
+    #[cfg_attr(feature = "sqlx", sqlx(default))]
+    pub refinement_phase: Option<String>,
+    #[cfg_attr(feature = "sqlx", sqlx(default))]
+    pub refinement_role: Option<String>,
+}
+
+/// Exact, validated refinement identity attached to a task.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TaskRefinementCorrelation {
+    pub run_id: String,
+    pub intent_id: String,
+    pub generation: i64,
+    pub round: i64,
+    pub phase: RefinementPhase,
+    pub role: RefinementRole,
+}
+
+impl TaskRefinementCorrelation {
+    pub fn new(run_id: String, intent_id: String, generation: i64, round: i64, phase: RefinementPhase, role: RefinementRole) -> Result<Self> {
+        if run_id.trim().is_empty() || intent_id.trim().is_empty() { return Err(Error::Internal("refinement correlation IDs must be nonblank".into())); }
+        if generation <= 0 || round <= 0 { return Err(Error::Internal("refinement correlation generation and round must be positive".into())); }
+        if !matches!((phase, role),
+            (RefinementPhase::AdversaryAttack, RefinementRole::Adversary)
+            | (RefinementPhase::AdvocateRevision, RefinementRole::Advocate)
+            | (RefinementPhase::JudgeAdjudication, RefinementRole::Judge)
+        ) { return Err(Error::Internal("invalid refinement phase/role pairing".into())); }
+        Ok(Self { run_id, intent_id, generation, round, phase, role })
+    }
+}
+
+impl Task {
+    /// Decode complete task correlation; preserve all-null ordinary/historical rows.
+    pub fn refinement_correlation(&self) -> Result<Option<TaskRefinementCorrelation>> {
+        let present = [self.refinement_run_id.is_some(), self.refinement_intent_id.is_some(), self.refinement_generation.is_some(), self.refinement_round.is_some(), self.refinement_phase.is_some(), self.refinement_role.is_some()];
+        if present.iter().all(|value| !value) { return Ok(None); }
+        if present.iter().any(|value| !value) { return Err(Error::Internal("partial refinement task correlation".into())); }
+        let phase = serde_json::from_value(serde_json::Value::String(self.refinement_phase.clone().expect("all fields checked"))).map_err(|_| Error::Internal("invalid refinement phase".into()))?;
+        let role = serde_json::from_value(serde_json::Value::String(self.refinement_role.clone().expect("all fields checked"))).map_err(|_| Error::Internal("invalid refinement role".into()))?;
+        TaskRefinementCorrelation::new(self.refinement_run_id.clone().expect("all fields checked"), self.refinement_intent_id.clone().expect("all fields checked"), self.refinement_generation.expect("all fields checked"), self.refinement_round.expect("all fields checked"), phase, role).map(Some)
+    }
 }
 
 // ── Evidence-spike detection ──────────────────────────────────────────────────
@@ -1486,6 +1535,19 @@ mod tests {
             }
             _ => None,
         }
+    }
+
+    #[test]
+    fn refinement_correlation_validates_complete_and_rejects_invalid_values() {
+        let valid = TaskRefinementCorrelation::new(
+            "run-1".into(), "intent-1".into(), 1, 2,
+            RefinementPhase::AdversaryAttack, RefinementRole::Adversary,
+        ).unwrap();
+        assert_eq!(serde_json::from_str::<TaskRefinementCorrelation>(&serde_json::to_string(&valid).unwrap()).unwrap(), valid);
+        assert!(TaskRefinementCorrelation::new(" ".into(), "intent".into(), 1, 1, RefinementPhase::AdversaryAttack, RefinementRole::Adversary).is_err());
+        assert!(TaskRefinementCorrelation::new("run".into(), "intent".into(), 0, 1, RefinementPhase::AdversaryAttack, RefinementRole::Adversary).is_err());
+        assert!(TaskRefinementCorrelation::new("run".into(), "intent".into(), 1, 0, RefinementPhase::AdversaryAttack, RefinementRole::Adversary).is_err());
+        assert!(TaskRefinementCorrelation::new("run".into(), "intent".into(), 1, 1, RefinementPhase::AdversaryAttack, RefinementRole::Judge).is_err());
     }
 
     #[test]

@@ -16,7 +16,7 @@ impl TaskRepository {
                     intervention_count, last_intervention_at,
                     created_at, updated_at, closed_at,
                     close_reason, merge_commit_sha, pr_url, merge_conflict_metadata, memory_refs::text AS memory_refs,
-                    agent_type, created_by_user_id,
+                    agent_type, created_by_user_id, refinement_run_id, refinement_intent_id, refinement_generation, refinement_round, refinement_phase, refinement_role,
                     COALESCE((SELECT s.ci_status FROM task_pr_ci_snapshots s WHERE s.task_id = tasks.id ORDER BY s.last_seen_at DESC LIMIT 1), 'unknown') AS ci_status,
                     (SELECT s.head_sha FROM task_pr_ci_snapshots s WHERE s.task_id = tasks.id ORDER BY s.last_seen_at DESC LIMIT 1) AS ci_head_sha,
                     (SELECT s.pr_number FROM task_pr_ci_snapshots s WHERE s.task_id = tasks.id ORDER BY s.last_seen_at DESC LIMIT 1) AS ci_pr_number,
@@ -55,7 +55,7 @@ impl TaskRepository {
                     intervention_count, last_intervention_at,
                     created_at, updated_at, closed_at,
                     close_reason, merge_commit_sha, pr_url, merge_conflict_metadata, memory_refs::text AS memory_refs,
-                    agent_type, created_by_user_id,
+                    agent_type, created_by_user_id, refinement_run_id, refinement_intent_id, refinement_generation, refinement_round, refinement_phase, refinement_role,
                     COALESCE((SELECT s.ci_status FROM task_pr_ci_snapshots s WHERE s.task_id = tasks.id ORDER BY s.last_seen_at DESC LIMIT 1), 'unknown') AS ci_status,
                     (SELECT s.head_sha FROM task_pr_ci_snapshots s WHERE s.task_id = tasks.id ORDER BY s.last_seen_at DESC LIMIT 1) AS ci_head_sha,
                     (SELECT s.pr_number FROM task_pr_ci_snapshots s WHERE s.task_id = tasks.id ORDER BY s.last_seen_at DESC LIMIT 1) AS ci_pr_number,
@@ -113,7 +113,7 @@ impl TaskRepository {
                     intervention_count, last_intervention_at,
                     created_at, updated_at, closed_at,
                     close_reason, merge_commit_sha, pr_url, merge_conflict_metadata, memory_refs::text AS memory_refs,
-                    agent_type, created_by_user_id,
+                    agent_type, created_by_user_id, refinement_run_id, refinement_intent_id, refinement_generation, refinement_round, refinement_phase, refinement_role,
                     COALESCE((SELECT s.ci_status FROM task_pr_ci_snapshots s WHERE s.task_id = tasks.id ORDER BY s.last_seen_at DESC LIMIT 1), 'unknown') AS ci_status,
                     (SELECT s.head_sha FROM task_pr_ci_snapshots s WHERE s.task_id = tasks.id ORDER BY s.last_seen_at DESC LIMIT 1) AS ci_head_sha,
                     (SELECT s.pr_number FROM task_pr_ci_snapshots s WHERE s.task_id = tasks.id ORDER BY s.last_seen_at DESC LIMIT 1) AS ci_pr_number,
@@ -160,7 +160,7 @@ impl TaskRepository {
                     intervention_count, last_intervention_at,
                     created_at, updated_at, closed_at,
                     close_reason, merge_commit_sha, pr_url, merge_conflict_metadata, memory_refs::text AS memory_refs,
-                    agent_type, created_by_user_id,
+                    agent_type, created_by_user_id, refinement_run_id, refinement_intent_id, refinement_generation, refinement_round, refinement_phase, refinement_role,
                     COALESCE((SELECT s.ci_status FROM task_pr_ci_snapshots s WHERE s.task_id = tasks.id ORDER BY s.last_seen_at DESC LIMIT 1), 'unknown') AS ci_status,
                     (SELECT s.head_sha FROM task_pr_ci_snapshots s WHERE s.task_id = tasks.id ORDER BY s.last_seen_at DESC LIMIT 1) AS ci_head_sha,
                     (SELECT s.pr_number FROM task_pr_ci_snapshots s WHERE s.task_id = tasks.id ORDER BY s.last_seen_at DESC LIMIT 1) AS ci_pr_number,
@@ -200,7 +200,7 @@ impl TaskRepository {
                     intervention_count, last_intervention_at,
                     created_at, updated_at, closed_at,
                     close_reason, merge_commit_sha, pr_url, merge_conflict_metadata, memory_refs::text AS memory_refs,
-                    agent_type, created_by_user_id,
+                    agent_type, created_by_user_id, refinement_run_id, refinement_intent_id, refinement_generation, refinement_round, refinement_phase, refinement_role,
                     COALESCE((SELECT s.ci_status FROM task_pr_ci_snapshots s WHERE s.task_id = tasks.id ORDER BY s.last_seen_at DESC LIMIT 1), 'unknown') AS ci_status,
                     (SELECT s.head_sha FROM task_pr_ci_snapshots s WHERE s.task_id = tasks.id ORDER BY s.last_seen_at DESC LIMIT 1) AS ci_head_sha,
                     (SELECT s.pr_number FROM task_pr_ci_snapshots s WHERE s.task_id = tasks.id ORDER BY s.last_seen_at DESC LIMIT 1) AS ci_pr_number,
@@ -243,7 +243,7 @@ impl TaskRepository {
                     intervention_count, last_intervention_at,
                     created_at, updated_at, closed_at,
                     close_reason, merge_commit_sha, pr_url, merge_conflict_metadata, memory_refs::text AS memory_refs,
-                    agent_type, created_by_user_id,
+                    agent_type, created_by_user_id, refinement_run_id, refinement_intent_id, refinement_generation, refinement_round, refinement_phase, refinement_role,
                     COALESCE((SELECT s.ci_status FROM task_pr_ci_snapshots s WHERE s.task_id = tasks.id ORDER BY s.last_seen_at DESC LIMIT 1), 'unknown') AS ci_status,
                     (SELECT s.head_sha FROM task_pr_ci_snapshots s WHERE s.task_id = tasks.id ORDER BY s.last_seen_at DESC LIMIT 1) AS ci_head_sha,
                     (SELECT s.pr_number FROM task_pr_ci_snapshots s WHERE s.task_id = tasks.id ORDER BY s.last_seen_at DESC LIMIT 1) AS ci_pr_number,
@@ -287,7 +287,7 @@ impl TaskRepository {
                     intervention_count, last_intervention_at,
                     created_at, updated_at, closed_at,
                     close_reason, merge_commit_sha, pr_url, merge_conflict_metadata, memory_refs::text AS memory_refs,
-                    agent_type, created_by_user_id,
+                    agent_type, created_by_user_id, refinement_run_id, refinement_intent_id, refinement_generation, refinement_round, refinement_phase, refinement_role,
                     COALESCE((SELECT s.ci_status FROM task_pr_ci_snapshots s WHERE s.task_id = tasks.id ORDER BY s.last_seen_at DESC LIMIT 1), 'unknown') AS ci_status,
                     (SELECT s.head_sha FROM task_pr_ci_snapshots s WHERE s.task_id = tasks.id ORDER BY s.last_seen_at DESC LIMIT 1) AS ci_head_sha,
                     (SELECT s.pr_number FROM task_pr_ci_snapshots s WHERE s.task_id = tasks.id ORDER BY s.last_seen_at DESC LIMIT 1) AS ci_pr_number,
@@ -333,7 +333,7 @@ impl TaskRepository {
                     intervention_count, last_intervention_at,
                     created_at, updated_at, closed_at,
                     close_reason, merge_commit_sha, pr_url, merge_conflict_metadata, memory_refs::text AS memory_refs,
-                    agent_type, created_by_user_id,
+                    agent_type, created_by_user_id, refinement_run_id, refinement_intent_id, refinement_generation, refinement_round, refinement_phase, refinement_role,
                     COALESCE((SELECT s.ci_status FROM task_pr_ci_snapshots s WHERE s.task_id = tasks.id ORDER BY s.last_seen_at DESC LIMIT 1), 'unknown') AS ci_status,
                     (SELECT s.head_sha FROM task_pr_ci_snapshots s WHERE s.task_id = tasks.id ORDER BY s.last_seen_at DESC LIMIT 1) AS ci_head_sha,
                     (SELECT s.pr_number FROM task_pr_ci_snapshots s WHERE s.task_id = tasks.id ORDER BY s.last_seen_at DESC LIMIT 1) AS ci_pr_number,
@@ -367,7 +367,7 @@ impl TaskRepository {
                     intervention_count, last_intervention_at,
                     created_at, updated_at, closed_at,
                     close_reason, merge_commit_sha, pr_url, merge_conflict_metadata, memory_refs::text AS memory_refs,
-                    agent_type, created_by_user_id,
+                    agent_type, created_by_user_id, refinement_run_id, refinement_intent_id, refinement_generation, refinement_round, refinement_phase, refinement_role,
                     COALESCE((SELECT s.ci_status FROM task_pr_ci_snapshots s WHERE s.task_id = tasks.id ORDER BY s.last_seen_at DESC LIMIT 1), 'unknown') AS ci_status,
                     (SELECT s.head_sha FROM task_pr_ci_snapshots s WHERE s.task_id = tasks.id ORDER BY s.last_seen_at DESC LIMIT 1) AS ci_head_sha,
                     (SELECT s.pr_number FROM task_pr_ci_snapshots s WHERE s.task_id = tasks.id ORDER BY s.last_seen_at DESC LIMIT 1) AS ci_pr_number,
@@ -481,10 +481,10 @@ impl TaskRepository {
                     total_reopen_count,
                     intervention_count, last_intervention_at,
                     created_at, updated_at, closed_at,
-                    close_reason, merge_commit_sha, pr_url, merge_conflict_metadata, memory_refs, created_by_user_id
+                    close_reason, merge_commit_sha, pr_url, merge_conflict_metadata, memory_refs, created_by_user_id, refinement_run_id, refinement_intent_id, refinement_generation, refinement_round, refinement_phase, refinement_role
                  ) VALUES (
                     $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::jsonb,
-                    $13::jsonb, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26::jsonb, $27
+                    $13::jsonb, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26::jsonb, $27, $28, $29, $30, $31, $32, $33
                  )
                  ON CONFLICT (id) DO UPDATE SET
                     project_id          = EXCLUDED.project_id,
@@ -509,6 +509,12 @@ impl TaskRepository {
                     merge_conflict_metadata = CASE WHEN EXCLUDED.updated_at > tasks.updated_at AND NOT (tasks.status = 'closed' AND EXCLUDED.status != 'closed') THEN EXCLUDED.merge_conflict_metadata ELSE tasks.merge_conflict_metadata END,
                     memory_refs         = CASE WHEN EXCLUDED.updated_at > tasks.updated_at AND NOT (tasks.status = 'closed' AND EXCLUDED.status != 'closed') THEN EXCLUDED.memory_refs ELSE tasks.memory_refs END,
                     created_by_user_id  = CASE WHEN EXCLUDED.updated_at > tasks.updated_at AND NOT (tasks.status = 'closed' AND EXCLUDED.status != 'closed') THEN EXCLUDED.created_by_user_id ELSE tasks.created_by_user_id END,
+                    refinement_run_id = CASE WHEN EXCLUDED.updated_at > tasks.updated_at THEN EXCLUDED.refinement_run_id ELSE tasks.refinement_run_id END,
+                    refinement_intent_id = CASE WHEN EXCLUDED.updated_at > tasks.updated_at THEN EXCLUDED.refinement_intent_id ELSE tasks.refinement_intent_id END,
+                    refinement_generation = CASE WHEN EXCLUDED.updated_at > tasks.updated_at THEN EXCLUDED.refinement_generation ELSE tasks.refinement_generation END,
+                    refinement_round = CASE WHEN EXCLUDED.updated_at > tasks.updated_at THEN EXCLUDED.refinement_round ELSE tasks.refinement_round END,
+                    refinement_phase = CASE WHEN EXCLUDED.updated_at > tasks.updated_at THEN EXCLUDED.refinement_phase ELSE tasks.refinement_phase END,
+                    refinement_role = CASE WHEN EXCLUDED.updated_at > tasks.updated_at THEN EXCLUDED.refinement_role ELSE tasks.refinement_role END,
                     updated_at          = CASE WHEN EXCLUDED.updated_at > tasks.updated_at AND NOT (tasks.status = 'closed' AND EXCLUDED.status != 'closed') THEN EXCLUDED.updated_at ELSE tasks.updated_at END"#,
             )
             .bind(&task.id)
@@ -538,6 +544,7 @@ impl TaskRepository {
             .bind(&task.merge_conflict_metadata)
             .bind(&task.memory_refs)
             .bind(&created_by_user_id)
+            .bind(&task.refinement_run_id).bind(&task.refinement_intent_id).bind(task.refinement_generation).bind(task.refinement_round).bind(&task.refinement_phase).bind(&task.refinement_role)
             .execute(&mut *tx)
             .await;
 
@@ -667,10 +674,10 @@ impl TaskRepository {
                     total_reopen_count,
                     intervention_count, last_intervention_at,
                     created_at, updated_at, closed_at,
-                    close_reason, merge_commit_sha, pr_url, merge_conflict_metadata, memory_refs, created_by_user_id
+                    close_reason, merge_commit_sha, pr_url, merge_conflict_metadata, memory_refs, created_by_user_id, refinement_run_id, refinement_intent_id, refinement_generation, refinement_round, refinement_phase, refinement_role
                  ) VALUES (
                     $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::jsonb,
-                    $13::jsonb, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26::jsonb, $27
+                    $13::jsonb, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26::jsonb, $27, $28, $29, $30, $31, $32, $33
                  )
                  ON CONFLICT (id) DO UPDATE SET
                     project_id          = EXCLUDED.project_id,
@@ -693,6 +700,12 @@ impl TaskRepository {
                     merge_commit_sha    = CASE WHEN EXCLUDED.updated_at > tasks.updated_at AND NOT (tasks.status = 'closed' AND EXCLUDED.status != 'closed') THEN EXCLUDED.merge_commit_sha ELSE tasks.merge_commit_sha END,
                     pr_url              = CASE WHEN EXCLUDED.updated_at > tasks.updated_at AND NOT (tasks.status = 'closed' AND EXCLUDED.status != 'closed') THEN EXCLUDED.pr_url ELSE tasks.pr_url END,
                     created_by_user_id  = CASE WHEN EXCLUDED.updated_at > tasks.updated_at AND NOT (tasks.status = 'closed' AND EXCLUDED.status != 'closed') THEN EXCLUDED.created_by_user_id ELSE tasks.created_by_user_id END,
+                    refinement_run_id = CASE WHEN EXCLUDED.updated_at > tasks.updated_at THEN EXCLUDED.refinement_run_id ELSE tasks.refinement_run_id END,
+                    refinement_intent_id = CASE WHEN EXCLUDED.updated_at > tasks.updated_at THEN EXCLUDED.refinement_intent_id ELSE tasks.refinement_intent_id END,
+                    refinement_generation = CASE WHEN EXCLUDED.updated_at > tasks.updated_at THEN EXCLUDED.refinement_generation ELSE tasks.refinement_generation END,
+                    refinement_round = CASE WHEN EXCLUDED.updated_at > tasks.updated_at THEN EXCLUDED.refinement_round ELSE tasks.refinement_round END,
+                    refinement_phase = CASE WHEN EXCLUDED.updated_at > tasks.updated_at THEN EXCLUDED.refinement_phase ELSE tasks.refinement_phase END,
+                    refinement_role = CASE WHEN EXCLUDED.updated_at > tasks.updated_at THEN EXCLUDED.refinement_role ELSE tasks.refinement_role END,
                     merge_conflict_metadata = CASE WHEN EXCLUDED.updated_at > tasks.updated_at AND NOT (tasks.status = 'closed' AND EXCLUDED.status != 'closed') THEN EXCLUDED.merge_conflict_metadata ELSE tasks.merge_conflict_metadata END,
                     memory_refs         = CASE WHEN EXCLUDED.updated_at > tasks.updated_at AND NOT (tasks.status = 'closed' AND EXCLUDED.status != 'closed') THEN EXCLUDED.memory_refs ELSE tasks.memory_refs END,
                     updated_at          = CASE WHEN EXCLUDED.updated_at > tasks.updated_at AND NOT (tasks.status = 'closed' AND EXCLUDED.status != 'closed') THEN EXCLUDED.updated_at ELSE tasks.updated_at END"#,
