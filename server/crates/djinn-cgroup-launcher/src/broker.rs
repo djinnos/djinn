@@ -6,7 +6,8 @@
 use std::{collections::HashMap, fs::File, io::Read, os::fd::RawFd};
 
 use crate::{
-    CgroupFs, CloneIntoCgroup, CpuStat, Error, Invocation, Launcher, Leaf, child::WorkerIdentity,
+    CgroupFs, CloneIntoCgroup, CpuStat, Error, Invocation, Launcher, Leaf,
+    child::{NativeWorkerInspector, WorkerInspector, verify_worker_ready},
 };
 
 pub const WORKER_UID: u32 = 1000;
@@ -115,27 +116,29 @@ struct ActiveInvocation {
 
 /// The broker has no coordinator/service capability. All state is scoped to an
 /// authenticated connection and one broker-assigned invocation binding.
-pub struct Broker<F, S, N = OsNonceSource> {
+pub struct Broker<F, S, N = OsNonceSource, I = NativeWorkerInspector> {
     launcher: Launcher<F, S>,
     config: BrokerConfig,
     nonces: N,
+    inspector: I,
     next_connection: u64,
     connections: HashMap<ConnectionId, UnixPeer>,
     active: HashMap<String, ActiveInvocation>,
 }
 
-impl<F: CgroupFs, S: CloneIntoCgroup, N: NonceSource> Broker<F, S, N> {
+impl<F: CgroupFs, S: CloneIntoCgroup, N: NonceSource, I: WorkerInspector> Broker<F, S, N, I> {
     pub fn new(
         launcher: Launcher<F, S>,
         config: BrokerConfig,
         nonces: N,
-        worker: WorkerIdentity,
+        inspector: I,
     ) -> Result<Self, Error> {
-        worker.validate()?;
+        verify_worker_ready(&inspector, config.worker_pid)?;
         Ok(Self {
             launcher,
             config,
             nonces,
+            inspector,
             next_connection: 0,
             connections: HashMap::new(),
             active: HashMap::new(),
@@ -148,6 +151,7 @@ impl<F: CgroupFs, S: CloneIntoCgroup, N: NonceSource> Broker<F, S, N> {
         peer: &P,
         credential: &[u8],
     ) -> Result<ConnectionId, Error> {
+        self.verify_worker_ready()?;
         let actual = peer.peer_credentials()?;
         if actual.pid != self.config.worker_pid
             || actual.uid != self.config.worker_uid
@@ -197,6 +201,7 @@ impl<F: CgroupFs, S: CloneIntoCgroup, N: NonceSource> Broker<F, S, N> {
         nonce: ControlNonce,
         leaf_name: &str,
     ) -> Result<ControlNonce, Error> {
+        self.verify_worker_ready()?;
         self.validate_and_rotate(connection, id, nonce)?;
         let invocation = self
             .active
@@ -288,6 +293,9 @@ impl<F: CgroupFs, S: CloneIntoCgroup, N: NonceSource> Broker<F, S, N> {
             .then_some(())
             .ok_or(Error::UnauthenticatedPeer)
     }
+    fn verify_worker_ready(&self) -> Result<(), Error> {
+        verify_worker_ready(&self.inspector, self.config.worker_pid)
+    }
     fn validate_and_rotate(
         &mut self,
         connection: ConnectionId,
@@ -314,7 +322,12 @@ impl<F: CgroupFs, S: CloneIntoCgroup, N: NonceSource> Broker<F, S, N> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::child::WorkerIdentity;
     use std::collections::{BTreeSet, HashMap};
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    };
     struct Fs {
         files: HashMap<(RawFd, String), String>,
         next: RawFd,
@@ -361,7 +374,24 @@ mod tests {
             Ok(())
         }
     }
-    fn broker() -> Broker<Fs, Clone, Nonces> {
+    #[derive(Clone)]
+    struct Inspector(Arc<AtomicBool>);
+    impl Inspector {
+        fn new(dumpable: bool) -> Self {
+            Self(Arc::new(AtomicBool::new(dumpable)))
+        }
+    }
+    impl WorkerInspector for Inspector {
+        fn worker_identity(&self, pid: u32) -> Result<WorkerIdentity, Error> {
+            assert_eq!(pid, 42);
+            Ok(WorkerIdentity {
+                uid: 1000,
+                gid: 1000,
+                dumpable: self.0.load(Ordering::SeqCst),
+            })
+        }
+    }
+    fn broker_with(inspector: Inspector) -> Broker<Fs, Clone, Nonces, Inspector> {
         let launcher = Launcher::new(
             Fs::ready(),
             Clone,
@@ -372,13 +402,12 @@ mod tests {
             launcher,
             BrokerConfig::worker(42, b"private".to_vec()).unwrap(),
             Nonces(0),
-            WorkerIdentity {
-                uid: 1000,
-                gid: 1000,
-                dumpable: false,
-            },
+            inspector,
         )
         .unwrap()
+    }
+    fn broker() -> Broker<Fs, Clone, Nonces, Inspector> {
+        broker_with(Inspector::new(false))
     }
     #[derive(Clone, Copy)]
     struct FakePeer(UnixPeer);
@@ -462,7 +491,7 @@ mod tests {
             Err(Error::FenceMismatch)
         ));
         assert!(matches!(
-            Broker::<Fs, Clone, Nonces>::new(
+            Broker::<Fs, Clone, Nonces, Inspector>::new(
                 Launcher::new(
                     Fs::ready(),
                     Clone,
@@ -471,12 +500,34 @@ mod tests {
                 .unwrap(),
                 BrokerConfig::worker(42, b"x".to_vec()).unwrap(),
                 Nonces(0),
-                WorkerIdentity {
-                    uid: 1000,
-                    gid: 1000,
-                    dumpable: true
-                }
+                Inspector::new(true)
             ),
+            Err(Error::InvalidWorker)
+        ));
+    }
+
+    #[test]
+    fn worker_is_reinspected_before_spawn() {
+        let inspector = Inspector::new(false);
+        let mut broker = broker_with(inspector.clone());
+        let peer = FakePeer(UnixPeer {
+            pid: 42,
+            uid: 1000,
+            gid: 1000,
+        });
+        let connection = broker.authenticate(&peer, b"private").unwrap();
+        let nonce = broker
+            .begin_invocation(
+                connection,
+                Invocation {
+                    id: "one".into(),
+                    fence: 9,
+                },
+            )
+            .unwrap();
+        inspector.0.store(true, Ordering::SeqCst);
+        assert!(matches!(
+            broker.create(connection, "one", nonce, "leaf"),
             Err(Error::InvalidWorker)
         ));
     }

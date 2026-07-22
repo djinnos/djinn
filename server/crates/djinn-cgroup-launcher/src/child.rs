@@ -26,26 +26,41 @@ impl WorkerIdentity {
 
 /// Injected worker inspection seam, permitting readiness tests without /proc.
 pub trait WorkerInspector {
-    fn worker_identity(&self) -> Result<WorkerIdentity, Error>;
+    /// Inspect the worker identified by the kernel PID authenticated on the
+    /// broker socket. Implementations must not trust caller-supplied fields.
+    fn worker_identity(&self, pid: u32) -> Result<WorkerIdentity, Error>;
 }
 
 pub struct NativeWorkerInspector;
 impl WorkerInspector for NativeWorkerInspector {
-    fn worker_identity(&self) -> Result<WorkerIdentity, Error> {
-        let dumpable = unsafe { libc::prctl(libc::PR_GET_DUMPABLE) };
-        if dumpable < 0 {
-            return Err(Error::Io(std::io::Error::last_os_error()));
-        }
-        Ok(WorkerIdentity {
-            uid: unsafe { libc::geteuid() },
-            gid: unsafe { libc::getegid() },
-            dumpable: dumpable != 0,
-        })
+    fn worker_identity(&self, pid: u32) -> Result<WorkerIdentity, Error> {
+        // This kernel-owned cross-process source is deliberately mandatory:
+        // an unavailable Dumpable field is not evidence that the worker is
+        // safe to accept.
+        let status = std::fs::read_to_string(format!("/proc/{pid}/status"))?;
+        let field = |name| {
+            status
+                .lines()
+                .find_map(|line| line.strip_prefix(name))
+                .and_then(|value| value.split_ascii_whitespace().next())
+                .ok_or(Error::InvalidWorker)
+        };
+        let uid = field("Uid:")?.parse().map_err(|_| Error::InvalidWorker)?;
+        let gid = field("Gid:")?.parse().map_err(|_| Error::InvalidWorker)?;
+        let dumpable = match field("Dumpable:")? {
+            "0" => false,
+            "1" => true,
+            _ => return Err(Error::InvalidWorker),
+        };
+        Ok(WorkerIdentity { uid, gid, dumpable })
     }
 }
 
-pub fn verify_worker_ready(inspector: &impl WorkerInspector) -> Result<(), Error> {
-    inspector.worker_identity()?.validate()
+pub fn verify_worker_ready(inspector: &impl WorkerInspector, pid: u32) -> Result<(), Error> {
+    if pid == 0 {
+        return Err(Error::InvalidWorker);
+    }
+    inspector.worker_identity(pid)?.validate()
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -110,22 +125,35 @@ pub fn prepare_child(
             syscalls.close(descriptor.fd)?;
         }
     }
-    // These operations must happen while the broker still holds the privilege
-    // necessary to make them irreversible.
+    // Keep CAP_SETGID/CAP_SETUID until both IDs have been changed; clearing
+    // capabilities before these calls makes the native sequence impossible.
     syscalls.set_groups_empty()?;
-    syscalls.clear_capabilities()?;
     syscalls.set_gid(ARTIFACT_GID)?;
     syscalls.set_uid(CHILD_UID)?;
+    syscalls.clear_capabilities()?;
     syscalls.set_umask(0o002)?;
     syscalls.set_no_new_privs()?;
     syscalls.install_restricted_seccomp()?;
     Ok(())
 }
 
-/// Production implementation for the portions that do not require a runtime
-/// seccomp profile. `install_restricted_seccomp` fails closed until the broker
-/// injects an audited BPF profile through its syscall seam.
+/// Production child syscall implementation.
 pub struct NativeChildSyscalls;
+
+#[repr(C)]
+struct CapabilityHeader {
+    version: u32,
+    pid: i32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct CapabilityData {
+    effective: u32,
+    permitted: u32,
+    inheritable: u32,
+}
+
 impl ChildSyscalls for NativeChildSyscalls {
     fn close(&mut self, fd: RawFd) -> Result<(), Error> {
         if unsafe { libc::close(fd) } == 0 {
@@ -142,9 +170,31 @@ impl ChildSyscalls for NativeChildSyscalls {
         }
     }
     fn clear_capabilities(&mut self) -> Result<(), Error> {
-        Err(Error::ChildPreparation(
-            "capability clearing requires audited runtime seam",
-        ))
+        let header = CapabilityHeader {
+            version: 0x2008_0522,
+            pid: 0,
+        };
+        let data = [CapabilityData {
+            effective: 0,
+            permitted: 0,
+            inheritable: 0,
+        }; 2];
+        if unsafe { libc::syscall(libc::SYS_capset, &raw const header, data.as_ptr()) } != 0 {
+            return Err(Error::Io(std::io::Error::last_os_error()));
+        }
+        if unsafe {
+            libc::prctl(
+                libc::PR_CAP_AMBIENT,
+                libc::PR_CAP_AMBIENT_CLEAR_ALL,
+                0,
+                0,
+                0,
+            )
+        } != 0
+        {
+            return Err(Error::Io(std::io::Error::last_os_error()));
+        }
+        Ok(())
     }
     fn set_gid(&mut self, gid: u32) -> Result<(), Error> {
         if unsafe { libc::setresgid(gid, gid, gid) } == 0 {
@@ -174,7 +224,64 @@ impl ChildSyscalls for NativeChildSyscalls {
         }
     }
     fn install_restricted_seccomp(&mut self) -> Result<(), Error> {
-        Err(Error::SeccompUnavailable)
+        const RET_ALLOW: u32 = libc::SECCOMP_RET_ALLOW;
+        const RET_ERRNO: u32 = libc::SECCOMP_RET_ERRNO | libc::EPERM as u32;
+        const LD_NR: u16 = (libc::BPF_LD | libc::BPF_W | libc::BPF_ABS) as u16;
+        const JEQ: u16 = (libc::BPF_JMP | libc::BPF_JEQ | libc::BPF_K) as u16;
+        const RET: u16 = (libc::BPF_RET | libc::BPF_K) as u16;
+        let allowed = [
+            libc::SYS_execve as u32,
+            libc::SYS_execveat as u32,
+            libc::SYS_exit as u32,
+            libc::SYS_exit_group as u32,
+            libc::SYS_rt_sigreturn as u32,
+        ];
+        let mut filter = Vec::with_capacity(allowed.len() * 2 + 2);
+        filter.push(libc::sock_filter {
+            code: LD_NR,
+            jt: 0,
+            jf: 0,
+            k: 0,
+        });
+        for syscall in allowed {
+            filter.push(libc::sock_filter {
+                code: JEQ,
+                jt: 0,
+                jf: 1,
+                k: syscall,
+            });
+            filter.push(libc::sock_filter {
+                code: RET,
+                jt: 0,
+                jf: 0,
+                k: RET_ALLOW,
+            });
+        }
+        filter.push(libc::sock_filter {
+            code: RET,
+            jt: 0,
+            jf: 0,
+            k: RET_ERRNO,
+        });
+        let program = libc::sock_fprog {
+            len: filter
+                .len()
+                .try_into()
+                .map_err(|_| Error::SeccompUnavailable)?,
+            filter: filter.as_mut_ptr(),
+        };
+        if unsafe {
+            libc::prctl(
+                libc::PR_SET_SECCOMP,
+                libc::SECCOMP_MODE_FILTER,
+                &raw const program,
+            )
+        } == 0
+        {
+            Ok(())
+        } else {
+            Err(Error::Io(std::io::Error::last_os_error()))
+        }
     }
 }
 
@@ -238,7 +345,7 @@ mod tests {
         assert_eq!(
             calls.0,
             [
-                "close:9", "close:10", "groups", "caps", "gid", "uid", "umask", "nnp", "seccomp"
+                "close:9", "close:10", "groups", "gid", "uid", "caps", "umask", "nnp", "seccomp"
             ]
         );
     }
@@ -262,13 +369,25 @@ mod tests {
             .validate()
             .is_err()
         );
-        assert!(
+        for mounts in [
             ChildMounts {
                 broker_socket: true,
                 ..ChildMounts::isolated()
-            }
-            .validate()
-            .is_err()
-        );
+            },
+            ChildMounts {
+                worker_private: true,
+                ..ChildMounts::isolated()
+            },
+            ChildMounts {
+                private_cgroup: true,
+                ..ChildMounts::isolated()
+            },
+            ChildMounts {
+                control_mount: true,
+                ..ChildMounts::isolated()
+            },
+        ] {
+            assert!(mounts.validate().is_err());
+        }
     }
 }
