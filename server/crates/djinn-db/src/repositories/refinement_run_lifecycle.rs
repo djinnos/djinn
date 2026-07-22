@@ -147,7 +147,7 @@ async fn touch_heartbeat(
     run_id: &str,
     generation: i32,
 ) -> IntentMutationResult<()> {
-    let updated = sqlx::query("UPDATE refinement_runs SET heartbeat_at = to_char(transaction_timestamp() AT TIME ZONE 'utc', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"'), updated_at = to_char(transaction_timestamp() AT TIME ZONE 'utc', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') WHERE id = $1 AND generation = $2").bind(run_id).bind(generation).execute(&mut **tx).await?;
+    let updated = sqlx::query("UPDATE refinement_runs SET heartbeat_at = to_char(transaction_timestamp() AT TIME ZONE 'utc', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"'), updated_at = to_char(transaction_timestamp() AT TIME ZONE 'utc', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') WHERE id = $1 AND generation = $2 AND state IN ('running', 'parked')").bind(run_id).bind(generation).execute(&mut **tx).await?;
     if updated.rows_affected() == 1 {
         Ok(())
     } else {
