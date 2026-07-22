@@ -20,12 +20,23 @@ pub struct RegisteredBlockOccurrence {
     /// The source range of the `id` value, excluding its surrounding quotes or
     /// expression braces. `None` means the block has no `id` attribute.
     pub id_value_span: Option<Utf8ByteSpan>,
+    /// Ranges for explicitly patchable code/template property values. The
+    /// opening-tag lexer is anchored by this parsed MDX element's span.
+    pub patchable_property_spans: Vec<Utf8ByteSpan>,
+}
+
+/// A source-positioned direct child of the parsed document root.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TopLevelNodeOccurrence {
+    pub span: Utf8ByteSpan,
+    pub heading_level: Option<u8>,
 }
 
 /// The reusable source-positioned view of a successfully parsed MDX body.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct DocumentAnalysis {
     pub registered_blocks: Vec<RegisteredBlockOccurrence>,
+    pub top_level_nodes: Vec<TopLevelNodeOccurrence>,
 }
 
 /// A markdown-rs MDX parse failure.
@@ -37,6 +48,92 @@ impl std::fmt::Display for DocumentError {
         f.write_str(&self.0)
     }
 }
+
+/// Advance from the first byte after an opening quote to its unescaped closing
+/// quote. The caller retains the closing-quote offset so value spans omit the
+/// delimiters.
+fn skip_quoted(bytes: &[u8], index: &mut usize, quote: u8) -> Option<()> {
+    loop {
+        match *bytes.get(*index)? {
+            b'\\' => {
+                *index += 1;
+                bytes.get(*index)?;
+                *index += 1;
+            }
+            byte if byte == quote => return Some(()),
+            _ => *index += 1,
+        }
+    }
+}
+
+/// Skip one balanced JavaScript expression container. Strings and template
+/// literals are opaque to brace balancing; `${...}` substitutions inside a
+/// template recursively use the same balancing rule. This remains a small
+/// opening-tag boundary lexer rather than a second document grammar.
+fn skip_braced_expression(bytes: &[u8], index: &mut usize) -> Option<usize> {
+    if bytes.get(*index) != Some(&b'{') {
+        return None;
+    }
+    *index += 1;
+    loop {
+        match *bytes.get(*index)? {
+            quote @ (b'\'' | b'"') => {
+                *index += 1;
+                skip_quoted(bytes, index, quote)?;
+                *index += 1;
+            }
+            b'`' => skip_template_literal(bytes, index)?,
+            b'/' if bytes.get(*index + 1) == Some(&b'/') => {
+                *index += 2;
+                while bytes.get(*index).is_some_and(|byte| *byte != b'\n') {
+                    *index += 1;
+                }
+            }
+            b'/' if bytes.get(*index + 1) == Some(&b'*') => {
+                *index += 2;
+                while !(bytes.get(*index) == Some(&b'*') && bytes.get(*index + 1) == Some(&b'/')) {
+                    bytes.get(*index)?;
+                    *index += 1;
+                }
+                *index += 2;
+            }
+            b'{' => {
+                skip_braced_expression(bytes, index)?;
+            }
+            b'}' => {
+                let closing = *index;
+                *index += 1;
+                return Some(closing);
+            }
+            _ => *index += 1,
+        }
+    }
+}
+
+fn skip_template_literal(bytes: &[u8], index: &mut usize) -> Option<()> {
+    if bytes.get(*index) != Some(&b'`') {
+        return None;
+    }
+    *index += 1;
+    loop {
+        match *bytes.get(*index)? {
+            b'\\' => {
+                *index += 1;
+                bytes.get(*index)?;
+                *index += 1;
+            }
+            b'`' => {
+                *index += 1;
+                return Some(());
+            }
+            b'$' if bytes.get(*index + 1) == Some(&b'{') => {
+                *index += 1;
+                skip_braced_expression(bytes, index)?;
+            }
+            _ => *index += 1,
+        }
+    }
+}
 impl std::error::Error for DocumentError {}
 
 /// Parse MDX and collect every registered block, including nested blocks, in
@@ -46,7 +143,32 @@ pub fn analyze_mdx_document(body: &str) -> Result<DocumentAnalysis, DocumentErro
         .map_err(|error| DocumentError(error.reason))?;
     let mut registered_blocks = Vec::new();
     collect_registered_blocks(body, &tree, &mut registered_blocks);
-    Ok(DocumentAnalysis { registered_blocks })
+    let mut top_level_nodes = Vec::new();
+    if let Node::Root(root) = &tree {
+        for child in &root.children {
+            if let Some(position) = child.position() {
+                let span = Utf8ByteSpan::new(body, position.start.offset, position.end.offset)
+                    .expect("markdown-rs node positions address the original source");
+                top_level_nodes.push(TopLevelNodeOccurrence {
+                    span,
+                    heading_level: match child {
+                        Node::Heading(heading) => Some(heading.depth),
+                        _ => None,
+                    },
+                });
+            }
+        }
+    }
+    Ok(DocumentAnalysis {
+        registered_blocks,
+        top_level_nodes,
+    })
+}
+
+fn has_property(attributes: &[AttributeContent], wanted: &str) -> bool {
+    attributes.iter().any(|attribute| {
+        matches!(attribute, AttributeContent::Property(property) if property.name == wanted)
+    })
 }
 
 fn collect_registered_blocks(
@@ -112,6 +234,11 @@ fn collect_element(
             id,
             element_span,
             id_value_span: id_value_span(body, position.start.offset),
+            patchable_property_spans: ["code", "template"]
+                .into_iter()
+                .filter(|name| has_property(attributes, name))
+                .filter_map(|name| property_value_span(body, position.start.offset, name))
+                .collect(),
         });
     }
     for child in children {
@@ -139,6 +266,12 @@ fn attribute_value(attributes: &[AttributeContent], wanted: &str) -> Option<Stri
 /// element start. Quoted, braced, and bare values are handled without applying
 /// a document-wide regular expression.
 fn id_value_span(body: &str, element_start: usize) -> Option<Utf8ByteSpan> {
+    property_value_span(body, element_start, "id")
+}
+
+/// Locate a property value in an opening tag anchored by an AST element start.
+/// This is intentionally not a document-wide selector grammar.
+fn property_value_span(body: &str, element_start: usize, wanted: &str) -> Option<Utf8ByteSpan> {
     let bytes = body.as_bytes();
     let mut index = element_start + 1;
     while index < bytes.len() && !bytes[index].is_ascii_whitespace() && bytes[index] != b'>' {
@@ -164,7 +297,7 @@ fn id_value_span(body: &str, element_start: usize) -> Option<Utf8ByteSpan> {
         let name = &body[name_start..index];
         skip_whitespace(bytes, &mut index);
         if bytes.get(index) != Some(&b'=') {
-            if name == "id" {
+            if name == wanted {
                 return Utf8ByteSpan::new(body, name_start, index).ok();
             }
             continue;
@@ -172,7 +305,7 @@ fn id_value_span(body: &str, element_start: usize) -> Option<Utf8ByteSpan> {
         index += 1;
         skip_whitespace(bytes, &mut index);
         let (start, end) = value_bounds(bytes, &mut index)?;
-        if name == "id" {
+        if name == wanted {
             return Utf8ByteSpan::new(body, start, end).ok();
         }
     }
@@ -190,29 +323,14 @@ fn value_bounds(bytes: &[u8], index: &mut usize) -> Option<(usize, usize)> {
         quote @ (b'\'' | b'"') => {
             *index += 1;
             let start = *index;
-            while bytes.get(*index) != Some(&quote) {
-                *index += 1;
-            }
+            skip_quoted(bytes, index, quote)?;
             let end = *index;
             *index += 1;
             Some((start, end))
         }
         b'{' => {
-            *index += 1;
-            let start = *index;
-            let mut depth = 1usize;
-            while depth > 0 {
-                match *bytes.get(*index)? {
-                    b'{' => depth += 1,
-                    b'}' => depth -= 1,
-                    _ => {}
-                }
-                if depth > 0 {
-                    *index += 1;
-                }
-            }
-            let end = *index;
-            *index += 1;
+            let start = *index + 1;
+            let end = skip_braced_expression(bytes, index)?;
             Some((start, end))
         }
         _ => {
@@ -232,4 +350,37 @@ fn skip_braced(bytes: &[u8], index: &mut usize) -> Option<()> {
     let (_, end) = value_bounds(bytes, index)?;
     *index = end + 1;
     Some(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::property_value_span;
+
+    #[test]
+    fn braced_property_span_ignores_braces_inside_strings_and_templates() {
+        for (source, property, selected) in [
+            (
+                "<RichText id=\"r\" template={`Hello } later`} />",
+                "template",
+                "later",
+            ),
+            (
+                "<AnnotatedCode id=\"a\" code={`const close = \"}\"; later();`} />",
+                "code",
+                "later()",
+            ),
+        ] {
+            let span = property_value_span(source, 0, property).unwrap();
+            let selected_start = source.find(selected).unwrap();
+            assert!(span.start <= selected_start);
+            assert!(span.end >= selected_start + selected.len());
+        }
+    }
+
+    #[test]
+    fn property_scan_skips_spoofing_text_in_complete_attribute_values() {
+        let source = r#"<RichText label="escaped \" code={`quoted spoof`}" meta={{ nested: { text: "template={`braced spoof`}" } }} id="r" />"#;
+        assert!(property_value_span(source, 0, "code").is_none());
+        assert!(property_value_span(source, 0, "template").is_none());
+    }
 }
