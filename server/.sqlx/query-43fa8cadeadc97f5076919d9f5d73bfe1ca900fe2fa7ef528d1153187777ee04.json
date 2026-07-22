@@ -1,0 +1,131 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\nWITH bounded AS (\n SELECT id, project_id, entry_point, knowledge_trace_taxonomy_version, terminal_state,\n        candidate_count, injected_count, confidence_filtered_count, not_top_k_count,\n        oversized_skipped_count, budget_pruned_count FROM retrieval_traces\n WHERE terminal_at::timestamptz >= $1::text::timestamptz\n   AND terminal_at::timestamptz < $2::text::timestamptz\n   AND entry_point IN ('dispatch','jit_pitfalls','load_knowledge_context','format_knowledge_notes')\n), classified AS (\n SELECT *, CASE\n  WHEN knowledge_trace_taxonomy_version IS DISTINCT FROM 1 THEN 'legacy'\n  WHEN terminal_state = 'success' AND candidate_count IS NOT NULL AND injected_count IS NOT NULL\n   AND confidence_filtered_count IS NOT NULL AND not_top_k_count IS NOT NULL AND oversized_skipped_count IS NOT NULL AND budget_pruned_count IS NOT NULL\n   AND candidate_count >= 0 AND injected_count >= 0 AND confidence_filtered_count >= 0 AND not_top_k_count >= 0 AND oversized_skipped_count >= 0 AND budget_pruned_count >= 0\n   AND injected_count::bigint = candidate_count::bigint - confidence_filtered_count::bigint - not_top_k_count::bigint - oversized_skipped_count::bigint - budget_pruned_count::bigint\n   AND candidate_count::bigint = confidence_filtered_count::bigint + not_top_k_count::bigint + oversized_skipped_count::bigint + injected_count::bigint + budget_pruned_count::bigint THEN 'success'\n  WHEN terminal_state IN ('error','cancelled') AND candidate_count IS NULL AND injected_count IS NULL AND confidence_filtered_count IS NULL AND not_top_k_count IS NULL AND oversized_skipped_count IS NULL AND budget_pruned_count IS NULL THEN 'exceptional'\n  WHEN terminal_state IS NULL OR terminal_state NOT IN ('success','error','cancelled') THEN 'invalid_terminal_state'\n  WHEN terminal_state = 'success' AND (candidate_count IS NULL OR injected_count IS NULL OR confidence_filtered_count IS NULL OR not_top_k_count IS NULL OR oversized_skipped_count IS NULL OR budget_pruned_count IS NULL) THEN 'missing_success_counts'\n  WHEN terminal_state = 'success' AND (candidate_count < 0 OR injected_count < 0 OR confidence_filtered_count < 0 OR not_top_k_count < 0 OR oversized_skipped_count < 0 OR budget_pruned_count < 0) THEN 'negative_count'\n  WHEN terminal_state = 'success' AND injected_count::bigint <> candidate_count::bigint - confidence_filtered_count::bigint - not_top_k_count::bigint - oversized_skipped_count::bigint - budget_pruned_count::bigint THEN 'injected_count_mismatch'\n  WHEN terminal_state = 'success' THEN 'histogram_partition_mismatch'\n  ELSE 'exceptional_has_counts' END AS classification FROM bounded\n)\nSELECT project_id, entry_point,\n count(*) FILTER (WHERE classification IN ('success','exceptional'))::bigint AS \"total_queries!\",\n count(*) FILTER (WHERE classification='success')::bigint AS \"successful_queries!\",\n count(*) FILTER (WHERE classification='exceptional')::bigint AS \"errored_queries!\",\n count(*) FILTER (WHERE classification='success' AND candidate_count=0)::bigint AS \"zero_candidate_queries!\",\n count(*) FILTER (WHERE classification='success' AND candidate_count>0)::bigint AS \"candidate_bearing_queries!\",\n count(*) FILTER (WHERE classification='success' AND candidate_count>0 AND injected_count=0)::bigint AS \"starved_queries!\",\n count(*) FILTER (WHERE classification='success' AND injected_count>0)::bigint AS \"injected_queries!\",\n coalesce(sum(candidate_count) FILTER (WHERE classification='success'),0)::bigint AS \"candidate_total!\",\n coalesce(sum(injected_count) FILTER (WHERE classification='success'),0)::bigint AS \"injected_total!\",\n coalesce(sum(confidence_filtered_count) FILTER (WHERE classification='success'),0)::bigint AS \"confidence_filtered_total!\",\n coalesce(sum(not_top_k_count) FILTER (WHERE classification='success'),0)::bigint AS \"not_top_k_total!\",\n coalesce(sum(oversized_skipped_count) FILTER (WHERE classification='success'),0)::bigint AS \"oversized_skipped_total!\",\n coalesce(sum(injected_count) FILTER (WHERE classification='success'),0)::bigint AS \"injected_disposition_total!\",\n coalesce(sum(budget_pruned_count) FILTER (WHERE classification='success'),0)::bigint AS \"budget_pruned_total!\",\n count(*) FILTER (WHERE classification='legacy')::bigint AS \"legacy_unclassified_queries!\",\n count(*) FILTER (WHERE classification NOT IN ('legacy','success','exceptional'))::bigint AS \"invalid_taxonomy_queries!\",\n coalesce(jsonb_agg(jsonb_build_object('trace_id',id,'reason',classification) ORDER BY id) FILTER (WHERE classification NOT IN ('legacy','success','exceptional')),'[]'::jsonb) AS validation_errors\nFROM classified GROUP BY project_id, entry_point ORDER BY project_id, entry_point\n",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "project_id",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 1,
+        "name": "entry_point",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 2,
+        "name": "total_queries!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 3,
+        "name": "successful_queries!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 4,
+        "name": "errored_queries!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 5,
+        "name": "zero_candidate_queries!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 6,
+        "name": "candidate_bearing_queries!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 7,
+        "name": "starved_queries!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 8,
+        "name": "injected_queries!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 9,
+        "name": "candidate_total!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 10,
+        "name": "injected_total!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 11,
+        "name": "confidence_filtered_total!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 12,
+        "name": "not_top_k_total!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 13,
+        "name": "oversized_skipped_total!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 14,
+        "name": "injected_disposition_total!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 15,
+        "name": "budget_pruned_total!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 16,
+        "name": "legacy_unclassified_queries!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 17,
+        "name": "invalid_taxonomy_queries!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 18,
+        "name": "validation_errors",
+        "type_info": "Jsonb"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null
+    ]
+  },
+  "hash": "43fa8cadeadc97f5076919d9f5d73bfe1ca900fe2fa7ef528d1153187777ee04"
+}
