@@ -745,26 +745,24 @@ async fn lifecycle_aggregate_uses_shared_evaluator_and_only_reads_durable_state(
         .execute(db.pool())
         .await
         .unwrap();
-    let stale_before_read: (String, String) = sqlx::query_as(
-        "SELECT heartbeat_at, updated_at FROM refinement_runs WHERE id = $1",
-    )
-    .bind(&run_id)
-    .fetch_one(db.pool())
-    .await
-    .unwrap();
+    let stale_before_read: (String, String) =
+        sqlx::query_as("SELECT heartbeat_at, updated_at FROM refinement_runs WHERE id = $1")
+            .bind(&run_id)
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
     let aggregate = repo
         .load_refinement_lifecycle_aggregate(&proposal_id, GRACE)
         .await
         .unwrap();
     assert_eq!(aggregate.stale_run_count, 1);
     assert_eq!(aggregate.reaped_phantom_last_24h, 1);
-    let stale_after_read: (String, String) = sqlx::query_as(
-        "SELECT heartbeat_at, updated_at FROM refinement_runs WHERE id = $1",
-    )
-    .bind(&run_id)
-    .fetch_one(db.pool())
-    .await
-    .unwrap();
+    let stale_after_read: (String, String) =
+        sqlx::query_as("SELECT heartbeat_at, updated_at FROM refinement_runs WHERE id = $1")
+            .bind(&run_id)
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
     assert_eq!(stale_before_read, stale_after_read);
 }
 
@@ -877,35 +875,69 @@ async fn expired_owner_cannot_materialize_or_complete_an_intent() {
     sqlx::query("UPDATE tasks SET refinement_generation = 1, refinement_round = 1, refinement_phase = 'adversary_attack', refinement_role = 'adversary' WHERE id = $1")
         .bind(&task_id).execute(db.pool()).await.unwrap();
     repo.claim_refinement_intent(ClaimRefinementIntentRequest {
-        run_id: run_id.clone(), intent_id: intent_id.clone(), generation: 1,
-        owner: "expired-owner".into(), lease_millis: 60_000,
-    }).await.unwrap().unwrap();
+        run_id: run_id.clone(),
+        intent_id: intent_id.clone(),
+        generation: 1,
+        owner: "expired-owner".into(),
+        lease_millis: 60_000,
+    })
+    .await
+    .unwrap()
+    .unwrap();
     sqlx::query("UPDATE refinement_dispatch_intents SET claim_expires_at = $2 WHERE id = $1")
-        .bind(&intent_id).bind(OLD).execute(db.pool()).await.unwrap();
-    let heartbeat_before: String = sqlx::query_scalar("SELECT heartbeat_at FROM refinement_runs WHERE id = $1")
-        .bind(&run_id).fetch_one(db.pool()).await.unwrap();
+        .bind(&intent_id)
+        .bind(OLD)
+        .execute(db.pool())
+        .await
+        .unwrap();
+    let heartbeat_before: String =
+        sqlx::query_scalar("SELECT heartbeat_at FROM refinement_runs WHERE id = $1")
+            .bind(&run_id)
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
     assert!(matches!(
-        repo.acknowledge_refinement_task_materialization(AcknowledgeRefinementTaskMaterializationRequest {
-            run_id: run_id.clone(), intent_id: intent_id.clone(), generation: 1,
-            task_id, owner: "expired-owner".into(),
-        }).await,
+        repo.acknowledge_refinement_task_materialization(
+            AcknowledgeRefinementTaskMaterializationRequest {
+                run_id: run_id.clone(),
+                intent_id: intent_id.clone(),
+                generation: 1,
+                task_id,
+                owner: "expired-owner".into(),
+            }
+        )
+        .await,
         Err(RefinementIntentMutationError::ClaimConflict { .. })
     ));
     assert!(matches!(
         repo.complete_refinement_intent(CompleteRefinementIntentRequest {
-            run_id: run_id.clone(), intent_id: intent_id.clone(), generation: 1,
-            owner: "expired-owner".into(), next_round: 1,
-            next_phase: RefinementPhase::AdvocateRevision, next_role: RefinementRole::Advocate,
+            run_id: run_id.clone(),
+            intent_id: intent_id.clone(),
+            generation: 1,
+            owner: "expired-owner".into(),
+            next_round: 1,
+            next_phase: RefinementPhase::AdvocateRevision,
+            next_role: RefinementRole::Advocate,
             next_idempotency_key: "must-not-exist".into(),
-        }).await,
+        })
+        .await,
         Err(RefinementIntentMutationError::ClaimConflict { .. })
     ));
-    let heartbeat_after: String = sqlx::query_scalar("SELECT heartbeat_at FROM refinement_runs WHERE id = $1")
-        .bind(&run_id).fetch_one(db.pool()).await.unwrap();
+    let heartbeat_after: String =
+        sqlx::query_scalar("SELECT heartbeat_at FROM refinement_runs WHERE id = $1")
+            .bind(&run_id)
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
     assert_eq!(heartbeat_before, heartbeat_after);
     assert_eq!(
-        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM refinement_dispatch_intents WHERE run_id = $1")
-            .bind(&run_id).fetch_one(db.pool()).await.unwrap(),
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM refinement_dispatch_intents WHERE run_id = $1"
+        )
+        .bind(&run_id)
+        .fetch_one(db.pool())
+        .await
+        .unwrap(),
         1
     );
 }
