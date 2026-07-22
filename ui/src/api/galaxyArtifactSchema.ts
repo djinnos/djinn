@@ -1,3 +1,4 @@
+import { normalizeKind } from "@/lib/codeGraphAdapter";
 import type { SnapshotEdge, SnapshotNode, SnapshotPayload } from "@/lib/codeGraphAdapter";
 
 export const GALAXY_ARTIFACT_VERSION = 1;
@@ -34,6 +35,18 @@ function string(value: unknown, name: string): string {
   if (typeof value !== "string" || value.length === 0) fail(`${name} is missing or invalid`);
   return value;
 }
+// Content string: type-guarded only, value-tolerant. Reserved for node/edge
+// display fields (label, keywords, symbol_kind, file_path, community_id,
+// workspace, reason, …) whose producer counterparts are unconstrained `String`
+// / `Option<String>` and can legitimately be empty (e.g. a synthetic Table /
+// Process node whose `display_name` prettifies to ""). The renderer's adapter
+// (`codeGraphAdapter`) already tolerates empty here, so hard-failing on empty
+// would make this validator stricter than both the producer and the consumer
+// it feeds. Identity/structure strings (ids, hashes, headers) keep `string`.
+function contentString(value: unknown, name: string): string {
+  if (typeof value !== "string") fail(`${name} is not a string`);
+  return value;
+}
 function finite(value: unknown, name: string): number {
   if (typeof value !== "number" || !Number.isFinite(value)) fail(`${name} is not finite`);
   return value;
@@ -43,9 +56,12 @@ function integer(value: unknown, name: string): number {
   if (!Number.isInteger(number) || number < 0) fail(`${name} is not a non-negative integer`);
   return number;
 }
+// Optional content string: type-guarded, value-tolerant (empty allowed). Only
+// used for optional node/edge display fields, never for identity — see
+// `contentString`.
 function optionalString(value: unknown, name: string): string | undefined {
   if (value === undefined) return undefined;
-  return string(value, name);
+  return contentString(value, name);
 }
 function optionalFinite(value: unknown, name: string): number | undefined {
   if (value === undefined) return undefined;
@@ -54,15 +70,20 @@ function optionalFinite(value: unknown, name: string): number | undefined {
 
 function node(value: unknown, index: number): SnapshotNode {
   const raw = record(value, `nodes[${index}]`);
-  const kind = string(raw.kind, `nodes[${index}].kind`);
-  if (kind !== "file" && kind !== "folder" && kind !== "symbol" && kind !== "community") {
-    fail(`nodes[${index}].kind is unknown`);
-  }
+  // Validate `kind` as a present, non-empty string, then normalize it exactly
+  // the way the renderer's adapter does — the producer emits synthetic kinds
+  // ("process", "table", "route", "tool") beyond file/folder/symbol/community,
+  // and `normalizeKind` folds anything outside the renderable set to "symbol".
+  // Enumerating the set here made the validator stricter than both the producer
+  // and the adapter it feeds. Safe post-hash: the semantic hash is computed over
+  // the raw producer bytes (see `canonicalSemanticJson`), so normalizing values
+  // afterward cannot affect integrity verification.
+  const kind = normalizeKind(string(raw.kind, `nodes[${index}].kind`));
   const keywords = raw.keywords === undefined ? undefined : Array.isArray(raw.keywords)
-    ? raw.keywords.map((keyword, keywordIndex) => string(keyword, `nodes[${index}].keywords[${keywordIndex}]`))
+    ? raw.keywords.map((keyword, keywordIndex) => contentString(keyword, `nodes[${index}].keywords[${keywordIndex}]`))
     : fail(`nodes[${index}].keywords is not an array`);
   return {
-    id: string(raw.id, `nodes[${index}].id`), kind, label: string(raw.label, `nodes[${index}].label`),
+    id: string(raw.id, `nodes[${index}].id`), kind, label: contentString(raw.label, `nodes[${index}].label`),
     symbol_kind: optionalString(raw.symbol_kind, `nodes[${index}].symbol_kind`),
     file_path: optionalString(raw.file_path, `nodes[${index}].file_path`),
     pagerank: finite(raw.pagerank, `nodes[${index}].pagerank`),
