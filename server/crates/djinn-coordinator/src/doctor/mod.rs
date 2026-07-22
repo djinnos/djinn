@@ -277,7 +277,11 @@ mod smoke {
                 )
             })
             .collect();
-        assert_eq!(names.len(), 3, "each required retrieval check is registered");
+        assert_eq!(
+            names.len(),
+            3,
+            "each required retrieval check is registered"
+        );
         for required in [
             "memory.retrieval_zero_result",
             "memory.injection_starvation",

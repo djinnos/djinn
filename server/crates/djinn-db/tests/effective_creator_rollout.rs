@@ -417,6 +417,36 @@ fn inventoried_producers_reach_the_transactional_provenance_boundary() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../");
     let mut inventory_keys = BTreeSet::new();
 
+    // A callsite is protected only while its resolver keeps the structured,
+    // fail-closed unavailable-creator contract. In particular, peer upserts
+    // must not turn an unknown incoming creator into an unrelated error.
+    let boundary_source = std::fs::read_to_string(
+        root.join("server/crates/djinn-db/src/repositories/task/writes.rs"),
+    )
+    .expect("creator provenance boundary source exists");
+    let resolver = extract_function_body(&boundary_source, "resolve_effective_creator")
+        .expect("creator provenance boundary must exist: resolve_effective_creator");
+    // This is deliberately the terminal expression, rather than a marker
+    // search: explicit-identity validation above also uses this error, but
+    // provenance exhaustion must not fall through to a different failure.
+    assert!(
+        resolver
+            .trim()
+            .ends_with("Err(Error::InvalidData(EFFECTIVE_CREATOR_UNAVAILABLE.to_owned()))\n}"),
+        "resolve_effective_creator must terminate exhausted provenance with effective_creator_unavailable"
+    );
+
+    let incoming = extract_function_body(&boundary_source, "incoming_task_creator")
+        .expect("creator provenance boundary must exist: incoming_task_creator");
+    // Peer sync has only one unavailable outcome. Couple the check to its
+    // final `ok_or_else` failure exit so an unrelated error cannot replace it.
+    assert!(
+        incoming.trim().ends_with(
+            "Error::InvalidData(format!(\n                \"{EFFECTIVE_CREATOR_UNAVAILABLE}: unknown_peer_creator\"\n            ))\n        })\n}"
+        ),
+        "incoming_task_creator must terminate an unknown peer creator with effective_creator_unavailable"
+    );
+
     for writer in writers {
         let path = writer["path"].as_str().expect("writer path");
         let symbol = writer["enclosing_symbol"].as_str().expect("writer symbol");
@@ -812,5 +842,184 @@ pub async fn runtime_writer() { repo.create_in_project_with_provenance(); }"#,
             "server/crates/example/src/runtime.rs::runtime_writer"
         )]),
         "a writer after a bounded cfg(test) module remains a production candidate"
+    );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Schema-graduation proof surface: invoke the migration-140 contract matrix
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// The migration was renumbered from 140 to 142 after main claimed 141 (sibling
+// `typx`). Include the canonical integration-test module itself, rather than
+// merely its fixture helpers. The prescribed rollout binary now executes every
+// canonical preflight, precedence/residue, rollback, idempotence, and catalog
+// assertion without a weaker duplicate matrix.
+
+#[path = "migrations_task_creator_contract.rs"]
+mod canonical_migration_140_matrix;
+
+#[path = "support/migrations_task_creator_contract.rs"]
+#[allow(dead_code)]
+mod contract_support;
+
+use sqlx::Connection;
+use sqlx::postgres::PgConnection;
+
+/// The migration file under test — renamed from 140 to 142 by `typx`.
+#[test]
+fn migration_matrix_file_is_the_renumbered_creator_contract() {
+    let dir = contract_support::migrations_dir();
+    let path = dir.join(contract_support::MIGRATION_FILE);
+    assert!(
+        path.exists(),
+        "creator-contract migration file must exist at {}",
+        path.display()
+    );
+    assert_eq!(contract_support::MIGRATION_VERSION, 142);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Persisted refinement-owner recovery through schema graduation
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Durable recovery attribution lives on `proposals`, not on tribunal task
+/// correlation columns. Preserve that persisted owner through the task-creator
+/// graduation and bind recovery to that exact field.
+#[tokio::test]
+async fn persisted_refinement_owner_survives_schema_graduation() {
+    contract_support::with_temp_database("rollout_ref_owner", |db_url| async move {
+        let mut conn = PgConnection::connect(&db_url).await.expect("connect");
+        contract_support::apply_prior_migrations(&mut conn).await;
+
+        contract_support::seed_project(&mut conn, "project-1").await;
+        contract_support::seed_user(&mut conn, "u-refinement-owner", false).await;
+        contract_support::seed_user(&mut conn, contract_support::DESIGNATED, false).await;
+        contract_support::seed_proposal(&mut conn, "proposal-owner", None, None).await;
+        sqlx::query("UPDATE proposals SET refinement_owner_user_id = $2 WHERE id = $1")
+            .bind("proposal-owner")
+            .bind("u-refinement-owner")
+            .execute(&mut conn)
+            .await
+            .expect("seed persisted proposal refinement owner");
+
+        contract_support::set_operator(&mut conn, contract_support::DESIGNATED).await;
+        contract_support::apply_contract_migration(&mut conn).await;
+
+        let owner: Option<String> = sqlx::query_scalar(
+            "SELECT refinement_owner_user_id FROM proposals WHERE id = 'proposal-owner'",
+        )
+        .fetch_one(&mut conn)
+        .await
+        .expect("read persisted proposal refinement owner");
+        assert_eq!(owner.as_deref(), Some("u-refinement-owner"));
+        conn.close().await.expect("close");
+    })
+    .await;
+
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../");
+    let recovery = std::fs::read_to_string(
+        root.join("server/crates/djinn-coordinator/src/refinement_recovery.rs"),
+    )
+    .expect("refinement recovery source exists");
+    assert!(
+        recovery.contains("let attributed_user_id = proposal.refinement_owner_user_id.clone()")
+            && recovery.contains(".with_attributed_user(attributed_user_id)"),
+        "restart recovery must attribute resumed refinement from proposal.refinement_owner_user_id"
+    );
+    assert!(
+        recovery.contains("let (_task_attributed_user, run_task_count"),
+        "tribunal task rows may reconstruct only run state, never owner attribution"
+    );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Legacy board-health guard retention through schema graduation
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Execute the legacy behavioral guard: a closed mismatch candidate must not
+/// be returned by the board-health report after schema graduation.
+#[tokio::test]
+async fn legacy_board_health_guard_excludes_closed_mismatch_candidates() {
+    use djinn_core::events::EventBus;
+    use djinn_db::{Database, TaskRepository};
+
+    let db = Database::open_in_memory().expect("open in-memory db");
+    db.ensure_initialized().await.expect("initialize db");
+    djinn_db::test_support::seed_project(&db, "board-health-project", "board-health").await;
+    djinn_db::test_support::seed_board_health_mismatch_candidate(
+        &db,
+        "board-health-project",
+        "closed-mismatch",
+    )
+    .await;
+    sqlx::query("UPDATE tasks SET status = 'closed' WHERE id = 'closed-mismatch'")
+        .execute(db.pool())
+        .await
+        .expect("close mismatch candidate");
+
+    let health = TaskRepository::new(db, EventBus::noop())
+        .board_health(24)
+        .await
+        .expect("load board health");
+    assert!(
+        health["repeated_reopen_role_tool_mismatches"]
+            .as_array()
+            .expect("mismatch section is an array")
+            .is_empty(),
+        "closed mismatch candidates must never be returned"
+    );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Concrete release repository typing and dead-helper removal
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// The dead `cfg(test)` creator-less `create_with_short_id` helper must be
+/// removed from the release repository.
+#[test]
+fn dead_create_with_short_id_helper_is_removed() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../");
+    let writes = root.join("server/crates/djinn-db/src/repositories/task/writes.rs");
+    let source = std::fs::read_to_string(&writes).expect("writes source readable");
+    assert!(
+        !source.contains("fn create_with_short_id"),
+        "dead cfg(test) create_with_short_id helper must be removed"
+    );
+}
+
+/// The release repository must not expose any nullable-creator insert path.
+#[test]
+fn release_repository_typing_rejects_nullable_creator() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../");
+    let writes = root.join("server/crates/djinn-db/src/repositories/task/writes.rs");
+    let source = std::fs::read_to_string(&writes).expect("writes source readable");
+
+    let direct_inserts = direct_task_insert_constants(&source);
+    for (_, sql) in &direct_inserts {
+        assert!(
+            sql.contains("created_by_user_id"),
+            "boundary INSERT must name created_by_user_id"
+        );
+        assert!(
+            !sql.to_ascii_uppercase().contains("NULL"),
+            "boundary INSERT must not bind NULL creator"
+        );
+    }
+
+    assert!(
+        source.contains("provenance: EffectiveCreatorProvenance<'_>"),
+        "release write boundary must require EffectiveCreatorProvenance"
+    );
+
+    let task_model =
+        std::fs::read_to_string(root.join("server/crates/djinn-core/src/models/task.rs"))
+            .expect("release Task model source readable");
+    assert!(
+        task_model.contains("pub created_by_user_id: String,"),
+        "release Task projection must expose a concrete String creator"
+    );
+    assert!(
+        !task_model.contains("pub created_by_user_id: Option<String>,"),
+        "release Task projection must not regress to an optional creator"
     );
 }
