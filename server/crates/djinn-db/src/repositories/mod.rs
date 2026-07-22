@@ -2,6 +2,7 @@ pub mod admission_handoff;
 pub mod admission_journal;
 pub mod agent;
 pub mod audit_sampler;
+pub mod build_lease;
 pub mod chat_interruption_notice;
 pub mod code_chunk;
 pub mod commit_file_changes;
