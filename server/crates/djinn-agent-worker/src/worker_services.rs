@@ -849,3 +849,52 @@ mod tests {
         assert_eq!(rebuilt.tool_schema_compat, None);
     }
 }
+
+#[cfg(test)]
+mod lease_adapter_conformance_tests {
+    use super::WorkerSupervisorServices;
+    use std::sync::{Arc, Mutex};
+    use djinn_agent::direct_services::DirectServices;
+    use djinn_db::BuildLeaseRepository;
+    use djinn_runtime::ResolvedCredentials;
+    use djinn_supervisor::services::{LeaseAbandonRequest, LeaseBindRequest, LeaseCancelRequest, LeaseDeadlines, LeaseGrantRequest, LeaseIdentity, LeaseQueueRequest, LeaseReleaseRequest, LeaseResult, LeaseStatusRequest, TaskInvocationLeaseIdentity};
+    use djinn_supervisor::{RpcServices, SupervisorServices, serve_on_unix_socket};
+    use tokio_util::sync::CancellationToken;
+
+    fn identity(id: &str) -> LeaseIdentity { LeaseIdentity::TaskInvocation(TaskInvocationLeaseIdentity { task_id: "task".into(), task_run_id: "run".into(), invocation_id: id.into() }) }
+    fn queue(id: &str) -> LeaseQueueRequest { LeaseQueueRequest { identity: identity(id), deadlines: LeaseDeadlines { queue_deadline_ms: 0, launch_deadline_ms: 0 } } }
+
+    async fn script(s: &dyn SupervisorServices) -> Vec<LeaseResult> {
+        let mut out = vec![s.queue_lease(queue("one")).await];
+        let token = match &out[0] { LeaseResult::Granted(g) => g.fencing_token.clone(), x => panic!("grant: {x:?}") };
+        out.push(s.queue_lease(queue("one")).await); // duplicate acquire
+        out.push(s.queue_lease(LeaseQueueRequest { identity: LeaseIdentity::TaskInvocation(TaskInvocationLeaseIdentity { task_id: "conflict".into(), task_run_id: "run".into(), invocation_id: "one".into() }), deadlines: LeaseDeadlines { queue_deadline_ms: 0, launch_deadline_ms: 0 } }).await);
+        out.push(s.grant_lease(LeaseGrantRequest { identity: identity("one"), fencing_token: token.clone() }).await);
+        out.push(s.lease_status(LeaseStatusRequest { identity: identity("one") }).await);
+        out.push(s.bind_lease_pod(LeaseBindRequest { identity: identity("one"), fencing_token: token.clone(), pod_uid: "pod".into() }).await);
+        out.push(s.release_lease(LeaseReleaseRequest { identity: identity("one"), fencing_token: token.clone(), candidate_cleanup: true }).await);
+        out.push(s.release_lease(LeaseReleaseRequest { identity: identity("one"), fencing_token: token, candidate_cleanup: false }).await); // duplicate release
+        out.push(s.queue_lease(queue("queued")).await);
+        out.push(s.abandon_lease(LeaseAbandonRequest { identity: identity("queued"), candidate_cleanup: true }).await);
+        out.push(s.queue_lease(queue("cancel")).await);
+        out.push(s.cancel_lease(LeaseCancelRequest { identity: identity("cancel"), fencing_token: None, candidate_cleanup: false }).await);
+        out.push(s.cancel_lease(LeaseCancelRequest { identity: identity("cancel"), fencing_token: None, candidate_cleanup: true }).await); // duplicate cancel
+        out
+    }
+    async fn host() -> Arc<DirectServices> {
+        let db = djinn_agent::test_helpers::create_test_db();
+        BuildLeaseRepository::new(db.clone()).set_cap(1).await.expect("cap");
+        Arc::new(DirectServices::new(djinn_agent::test_helpers::agent_context_from_db(db, CancellationToken::new()), CancellationToken::new()))
+    }
+    #[tokio::test]
+    async fn direct_and_worker_rpc_run_the_same_lease_operation_script() {
+        let direct_results = script(host().await.as_ref()).await;
+        let server = host().await;
+        let dir = tempfile::Builder::new().prefix("lease-").tempdir_in("/var/tmp").expect("dir"); let path = dir.path().join("rpc.sock");
+        let server_handle = serve_on_unix_socket(&path, server).await.expect("serve"); let cancel = CancellationToken::new();
+        let (rpc, background) = RpcServices::connect_unix(&path, cancel.clone()).await.expect("rpc");
+        let worker = WorkerSupervisorServices::new(rpc.clone(), ResolvedCredentials::default(), CancellationToken::new(), djinn_agent::test_helpers::agent_context_from_db(djinn_agent::test_helpers::create_test_db(), CancellationToken::new()), Arc::new(Mutex::new(None)));
+        assert_eq!(direct_results, script(&worker).await);
+        drop(worker); drop(rpc); let _ = background.writer.await; cancel.cancel(); let _ = background.reader.await; server_handle.cancel(); let _ = server_handle.join.await;
+    }
+}
