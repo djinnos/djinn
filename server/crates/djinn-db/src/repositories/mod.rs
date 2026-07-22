@@ -31,6 +31,7 @@ pub mod project_live_state_migration;
 pub mod project_workspace_coverage;
 pub mod project_workspace_graph;
 pub mod proposal;
+pub mod refinement_run;
 pub mod repo_graph_cache;
 pub mod repo_graph_generation;
 pub mod repo_graph_retention;
