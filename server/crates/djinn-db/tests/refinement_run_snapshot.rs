@@ -2,7 +2,8 @@
 
 use djinn_core::events::EventBus;
 use djinn_core::refinement_liveness::{
-    RefinementLivenessEvidence, RefinementLivenessResult, RefinementParkKind, RefinementStaleReason,
+    RefinementLivenessEvidence, RefinementLivenessResult, RefinementParkKind,
+    RefinementStaleReason, RefinementStopReason,
 };
 use djinn_db::repositories::refinement_run::LoadRefinementRunSnapshotRequest;
 use djinn_db::test_support::{
@@ -19,6 +20,57 @@ async fn proposal(db: &Database) -> String {
     sqlx::query("INSERT INTO proposals (id, short_id, title, body, body_format, acceptance_criteria, status, latest_revision_seq) VALUES ($1, $2, 'snapshot', '', 'markdown', '[]'::jsonb, 'draft', 1)")
         .bind(&id).bind(id.replace('-', "")).execute(db.pool()).await.unwrap();
     id
+}
+
+#[tokio::test]
+async fn migration_138_terminal_context_loads_and_aggregates() {
+    let db = Database::open_in_memory().unwrap();
+    db.ensure_initialized().await.unwrap();
+    let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+    let proposal_id = proposal(&db).await;
+    let run_id = run(&db, &proposal_id, 1).await;
+    let legacy_context = serde_json::json!({
+        "legacy_source_revision_id": "legacy-stop-row",
+        "legacy_metadata": {"stop_reason": "operator_stop"}
+    });
+    sqlx::query(
+        "UPDATE refinement_runs SET state = 'terminal', terminal_at = $2, \
+         stop_tag = 'operator_stop', stop_context = $3 WHERE id = $1",
+    )
+    .bind(&run_id)
+    .bind(OLD)
+    .bind(legacy_context)
+    .execute(db.pool())
+    .await
+    .unwrap();
+
+    let expected = RefinementStopReason::OperatorStop {
+        actor: "legacy_migration".into(),
+        reason: None,
+    };
+    let snapshot = repo
+        .load_refinement_run_snapshot(request(run_id.clone()))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        snapshot.liveness,
+        RefinementLivenessResult::Terminal {
+            reason: Some(expected.clone())
+        }
+    );
+    let aggregates = repo
+        .load_refinement_run_aggregates(&proposal_id, GRACE)
+        .await
+        .unwrap();
+    assert_eq!(aggregates.len(), 1);
+    assert_eq!(aggregates[0].run_id, run_id);
+    assert_eq!(
+        aggregates[0].liveness,
+        RefinementLivenessResult::Terminal {
+            reason: Some(expected)
+        }
+    );
 }
 
 async fn run(db: &Database, proposal_id: &str, generation: i32) -> String {

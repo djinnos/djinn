@@ -372,10 +372,61 @@ fn stop_reason(
     tag: &str,
     context: Option<serde_json::Value>,
 ) -> SnapshotResult<RefinementStopReason> {
+    if let Some(legacy) = context.as_ref().and_then(legacy_stop_context) {
+        return Ok(legacy_stop_reason(tag, legacy));
+    }
     serde_json::from_value(
         serde_json::json!({"tag": tag, "context": context.unwrap_or(serde_json::Value::Null)}),
     )
     .map_err(|e| {
         RefinementRunSnapshotError::InvalidEvidence(format!("invalid stop reason {tag:?}: {e}"))
     })
+}
+
+/// Migration 138 wraps historical lifecycle metadata rather than storing the
+/// `RefinementStopReason` serde context directly. Recognize that owned wrapper
+/// before attempting the normal modern-row deserialization path.
+fn legacy_stop_context(context: &serde_json::Value) -> Option<&serde_json::Value> {
+    context
+        .as_object()?
+        .contains_key("legacy_source_revision_id")
+        .then_some(context)
+}
+
+fn legacy_stop_reason(tag: &str, context: &serde_json::Value) -> RefinementStopReason {
+    let metadata = context
+        .get("legacy_metadata")
+        .and_then(serde_json::Value::as_object);
+    let source_row = context
+        .get("legacy_source_revision_id")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("migration-138")
+        .to_owned();
+    let text = |key: &str| {
+        metadata
+            .and_then(|metadata| metadata.get(key))
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned)
+    };
+    match tag {
+        "adversary_dry" => RefinementStopReason::AdversaryDry,
+        "round_cap" => RefinementStopReason::RoundCap,
+        "spawn_cap" => RefinementStopReason::SpawnCap,
+        "human_accepted" => RefinementStopReason::HumanAccepted,
+        "human_rejected" => RefinementStopReason::HumanRejected,
+        "interrupted" => RefinementStopReason::Interrupted {
+            detail: text("detail").or_else(|| text("message")),
+        },
+        "operator_stop" => RefinementStopReason::OperatorStop {
+            actor: text("actor").unwrap_or_else(|| "legacy_migration".to_owned()),
+            reason: text("detail").or_else(|| text("message")),
+        },
+        // These tags require structured fields that historical lifecycle rows
+        // did not guarantee. Preserve their normalized tag and source without
+        // inventing details that the durable row does not contain.
+        _ => RefinementStopReason::UnknownLegacy {
+            original_value: tag.to_owned(),
+            source_row,
+        },
+    }
 }
