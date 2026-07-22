@@ -6,7 +6,7 @@ use sqlx::{Decode, Postgres, Type};
 use crate::Result;
 use crate::database::Database;
 use crate::error::DbError;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
 /// Maximum rows returned per `list_by_project` page when the caller does not
 /// provide an explicit limit.
@@ -1080,83 +1080,6 @@ impl RetrievalTraceRepository {
             .execute(self.db.pool())
             .await?;
         Ok(())
-    }
-
-    /// Aggregate health evidence for workload retrieval traces in a project
-    /// over a half-open `[from, until)` UTC time window.
-    ///
-    /// This uses direct aggregate SQL over every matching row; it does not
-    /// apply the list pagination limit. The result contains both a combined
-    /// project-level view and a per-entry-point breakdown.
-    ///
-    /// `from` and `until` are ISO-8601 UTC timestamp strings (e.g.
-    /// `2026-07-01T00:00:00.000Z`). Only the workload entry points in
-    /// [`WORKLOAD_ENTRY_POINTS`] are included.
-    ///
-    /// Database errors are returned as [`DbError::Sqlx`] so callers can decide
-    /// whether to fail open or surface the error.
-    pub async fn health_rollup(
-        &self,
-        project_id: &str,
-        from: &str,
-        until: &str,
-    ) -> Result<RetrievalTraceHealthRollup> {
-        self.db.ensure_initialized().await?;
-
-        let trace_candidate_rows: Vec<TraceCandidateStatsRow> =
-            sqlx::query_as(HEALTH_ROLLUP_TRACE_CANDIDATE_PER_EP_SQL)
-                .bind(project_id)
-                .bind(from)
-                .bind(until)
-                .fetch_all(self.db.pool())
-                .await?;
-
-        let duration_rows: Vec<DurationStageStatsRow> =
-            sqlx::query_as(HEALTH_ROLLUP_DURATION_PER_EP_SQL)
-                .bind(project_id)
-                .bind(from)
-                .bind(until)
-                .fetch_all(self.db.pool())
-                .await?;
-
-        let mut per_entry_point = HashMap::new();
-        for row in &trace_candidate_rows {
-            let ep = RetrievalTraceEntryPoint::parse(&row.entry_point).ok_or_else(|| {
-                DbError::InvalidData(format!(
-                    "unknown entry_point in health rollup: {}",
-                    row.entry_point
-                ))
-            })?;
-            let durations: Vec<_> = duration_rows
-                .iter()
-                .filter(|d| d.entry_point == row.entry_point)
-                .cloned()
-                .collect();
-            per_entry_point.insert(ep, build_evidence(row, &durations));
-        }
-
-        let combined_stats: TraceCandidateStatsCombinedRow =
-            sqlx::query_as(HEALTH_ROLLUP_TRACE_CANDIDATE_COMBINED_SQL)
-                .bind(project_id)
-                .bind(from)
-                .bind(until)
-                .fetch_one(self.db.pool())
-                .await?;
-
-        let combined_durations: Vec<DurationStageStatsCombinedRow> =
-            sqlx::query_as(HEALTH_ROLLUP_DURATION_COMBINED_SQL)
-                .bind(project_id)
-                .bind(from)
-                .bind(until)
-                .fetch_all(self.db.pool())
-                .await?;
-
-        let combined = build_evidence_combined(&combined_stats, &combined_durations);
-
-        Ok(RetrievalTraceHealthRollup {
-            combined,
-            per_entry_point,
-        })
     }
 
     /// Return authoritative taxonomy-v1 terminal evidence for every project
