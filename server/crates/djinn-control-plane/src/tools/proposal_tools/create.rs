@@ -38,8 +38,9 @@ use crate::tools::list_response::{
 };
 use crate::tools::proposal_ops::{
     ProposalDebateTrailModel, ProposalDeleteResponse, ProposalEpicModel, ProposalListRow,
-    ProposalListSummary, ProposalModel, ProposalShowResponse, ProposalSignoffModel,
-    ProposalSingleResponse, ProposalTargetModel, ProposalTargetsResponse, apply_revision_body_mode,
+    ProposalListSummary, ProposalModel, ProposalRevisionModel, ProposalShowResponse,
+    ProposalSignoffModel, ProposalSingleResponse, ProposalTargetModel, ProposalTargetsResponse,
+    apply_revision_body_mode,
     validate_revision_bodies_value, validate_show_fields,
 };
 use crate::tools::proposal_readiness::evaluate_proposal_readiness;
@@ -80,16 +81,21 @@ async fn committed_head_lint(
         .revisions(&proposal.id)
         .await
         .map_err(|e| e.to_string())?;
-    let revision = revisions
-        .iter()
-        .rev()
-        .find(|revision| revision.seq == proposal.latest_revision_seq)
-        .ok_or_else(|| {
-            format!(
-                "committed head revision not found: {}/{}",
-                proposal.id, proposal.latest_revision_seq
-            )
-        })?;
+    // Lifecycle rows retain the material head's sequence but deliberately use
+    // an empty body. Match the complete committed snapshot identity rather
+    // than sequence alone so a later refinement event cannot substitute its
+    // lightweight history row for the proposal head.
+    let revision = revisions.iter().rev().find(|revision| {
+        revision.seq == proposal.latest_revision_seq
+            && revision.body == proposal.body
+            && revision.body_format == proposal.body_format
+    })
+    .ok_or_else(|| {
+        format!(
+            "committed head revision not found: {}/{} with matching body and format",
+            proposal.id, proposal.latest_revision_seq,
+        )
+    })?;
     repo.lint_for_revision(revision)
         .await
         .map_err(|e| e.to_string())
@@ -645,6 +651,13 @@ impl DjinnMcpServer {
             return Json(err_show(proposal_not_found_error(&p.id)));
         };
 
+        // Resolve the head through its immutable stored revision. The repository
+        // validates cache version/body hash and recomputes old or stale rows.
+        let latest_lint = match committed_head_lint(&repo, &proposal).await {
+            Ok(lint) => Some(lint),
+            Err(e) => return Json(err_show(e)),
+        };
+
         // ── proposal ────────────────────────────────────────────────────
         let proposal_model = if field_selected("proposal") {
             Some(ProposalModel::from(&proposal))
@@ -679,7 +692,19 @@ impl DjinnMcpServer {
         let mut revisions: Option<Vec<crate::tools::proposal_ops::ProposalRevisionModel>> =
             if field_selected("revisions") {
                 match repo.revisions(&proposal.id).await {
-                    Ok(r) => Some(r.iter().map(Into::into).collect()),
+                    Ok(r) => {
+                        let mut models = Vec::with_capacity(r.len());
+                        for revision in &r {
+                            let lint = match repo.lint_for_revision(revision).await {
+                                Ok(lint) => lint,
+                                Err(e) => return Json(err_show(e.to_string())),
+                            };
+                            let mut model = ProposalRevisionModel::from(revision);
+                            model.lint = Some(lint);
+                            models.push(model);
+                        }
+                        Some(models)
+                    }
                     Err(e) => return Json(err_show(e.to_string())),
                 }
             } else {
@@ -783,6 +808,7 @@ impl DjinnMcpServer {
 
         Json(ProposalShowResponse {
             proposal: proposal_model,
+            latest_lint,
             targets,
             feedback,
             revisions,
