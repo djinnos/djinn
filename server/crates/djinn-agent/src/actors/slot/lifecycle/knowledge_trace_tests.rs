@@ -72,6 +72,25 @@ async fn latest_trace(
     .next()
 }
 
+fn assert_exceptional_terminal(
+    trace: &djinn_db::repositories::retrieval_trace::RetrievalTraceRow,
+    outcome: RetrievalTraceOutcome,
+) {
+    assert_eq!(trace.knowledge_trace_taxonomy_version, Some(1));
+    assert_eq!(trace.terminal_state.as_deref(), Some("error"));
+    assert!(
+        trace.terminal_at.is_some(),
+        "exceptional terminal has timestamp"
+    );
+    assert_eq!(trace.outcome, outcome);
+    assert_eq!(trace.candidate_count, None);
+    assert_eq!(trace.injected_count, None);
+    assert_eq!(trace.confidence_filtered_count, None);
+    assert_eq!(trace.not_top_k_count, None);
+    assert_eq!(trace.oversized_skipped_count, None);
+    assert_eq!(trace.budget_pruned_count, None);
+}
+
 /// Extract the candidate outcomes from a trace row as (note_id, outcome, skipped_reason).
 fn candidate_outcomes(
     row: &djinn_db::repositories::retrieval_trace::RetrievalTraceRow,
@@ -606,7 +625,7 @@ async fn trace_candidate_search_failure_does_not_change_prompt_output() {
         "NULL-confidence note excluded from production results"
     );
     let trace = latest_trace(&db, &project_id).await.expect("error trace");
-    assert_eq!(trace.outcome, RetrievalTraceOutcome::Error);
+    assert_exceptional_terminal(&trace, RetrievalTraceOutcome::Error);
     assert!(trace.candidates_typed().is_empty());
 }
 
@@ -648,7 +667,7 @@ async fn production_search_error_returns_none_fail_open() {
         "production search error must return None (fail-open)"
     );
     let trace = latest_trace(&db, &project_id).await.expect("error trace");
-    assert_eq!(trace.outcome, RetrievalTraceOutcome::Error);
+    assert_exceptional_terminal(&trace, RetrievalTraceOutcome::Error);
     assert!(trace.candidates_typed().is_empty());
 }
 

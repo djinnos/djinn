@@ -25,6 +25,7 @@ fn terminal_params<'a>(
             estimated_injected_tokens: 10,
         },
         rollout_label: "cohort:terminal-test",
+        outcome: RetrievalTraceOutcome::Injected,
         terminal_state: KnowledgeTraceTerminalState::Success,
         terminal_at: "2026-07-20T12:00:00.000Z",
         candidate_count: Some(5),
@@ -104,6 +105,7 @@ async fn successful_terminal_without_injections_has_empty_outcome() {
     let durations = json!({});
     let mut params = terminal_params(project_id, &candidates, &durations);
     params.trace.estimated_injected_tokens = 0;
+    params.outcome = RetrievalTraceOutcome::Empty;
     params.candidate_count = Some(0);
     params.injected_count = Some(0);
     params.dispositions = Some(KnowledgeTraceDispositionCounts {
@@ -135,6 +137,7 @@ async fn error_and_cancelled_terminals_do_not_fabricate_dispositions() {
     ] {
         let mut params = terminal_params(project_id, &candidates, &durations);
         params.terminal_state = state;
+        params.outcome = RetrievalTraceOutcome::Error;
         params.candidate_count = None;
         params.injected_count = None;
         params.dispositions = None;
