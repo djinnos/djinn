@@ -11,6 +11,21 @@ use std::fmt;
 // Re-export provider-layer classifiers so callers in the reply loop can import
 // them from this module as before.
 pub use djinn_provider::error_classify::{is_context_length_error, is_orphaned_tool_call_error};
+pub use djinn_provider::provider::{
+    ExhaustedTransportCategory, ExhaustedTransportDiagnostic, TransportClassificationInput,
+    classify_exhausted_transport,
+};
+
+/// Exact serialized-body predicate; the compatibility value name means UTF-8 bytes.
+pub fn is_oversized_transport_payload(
+    estimated_payload_chars: usize,
+    known_context_window_tokens: u32,
+) -> bool {
+    djinn_provider::provider::oversized_transport_request(
+        estimated_payload_chars,
+        known_context_window_tokens,
+    )
+}
 
 /// Provider/account failure patterns that may appear as "successful" assistant
 /// prose when the model echoes back a rate-limit, quota, out-of-credits, or

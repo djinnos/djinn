@@ -18,13 +18,13 @@
 //! Acceptance-criterion coverage:
 //!
 //! - AC1: a successful HTTP response that never delivers a usable `data:`
-//!   event must surface as a typed `ProviderError::Transport` (retryable,
+//!   event must surface as a typed exhausted-transport diagnostic (retryable,
 //!   feeds failover), not an empty turn.
 //! - AC4: a focused async/client test exercises the actual first-event
 //!   timeout behavior end-to-end.
 //!
 //! Adapter semantics are deliberately untouched here: we assert on the
-//! `ProviderError::Transport` typed error returned by the transport, NOT
+//! typed error returned by the transport, NOT
 //! on any `[DONE]`-style terminal handling.
 
 use std::sync::Arc;
@@ -34,6 +34,7 @@ use std::time::Duration;
 use djinn_provider::provider::AuthMethod;
 use djinn_provider::provider::client::ApiClient;
 use djinn_provider::provider::error::ProviderError;
+use djinn_provider::provider::{ExhaustedTransportCategory, ExhaustedTransportDiagnostic};
 use futures::StreamExt;
 use reqwest::header::HeaderMap;
 use serde_json::json;
@@ -110,9 +111,8 @@ async fn drain_for_error(
 #[tokio::test]
 async fn stream_sse_first_event_timeout_emits_typed_transport_error() {
     // AC1: a successful 200 SSE response that never delivers a usable
-    // `data:` event must surface as a typed `ProviderError::Transport` (the
-    // retryable provider-failure class), not an empty turn that would fool
-    // downstream code into believing the model produced nothing.
+    // `data:` event must surface as a typed exhausted-transport error (the
+    // retryable provider-failure class), not an empty turn.
     let (addr, cancel) = spawn_held_sse_server().await;
 
     // Use a 200 ms override so the test fires in well under a second.
@@ -131,17 +131,17 @@ async fn stream_sse_first_event_timeout_emits_typed_transport_error() {
         .await
         .expect("stream should yield a typed error from the TTFT guard");
 
-    // The error must be the typed, retryable `ProviderError::Transport`.
-    // Downstream failover uses `ProviderError::is_retryable()` and the
-    // `Transport` variant to drive reroute — a plain anyhow string error
-    // would not be classified and would risk becoming an empty turn.
+    // The diagnostic carries the exact UTF-8 length of the serialized body.
     let provider_err = err
         .downcast_ref::<ProviderError>()
         .unwrap_or_else(|| panic!("expected ProviderError, got: {err:?}"));
     assert_eq!(
         provider_err,
-        &ProviderError::Transport,
-        "expected typed ProviderError::Transport, got: {provider_err:?}"
+        &ProviderError::ExhaustedTransport(ExhaustedTransportDiagnostic {
+            category: ExhaustedTransportCategory::SseFirstEventTimeout,
+            estimated_payload_chars: 62,
+        }),
+        "expected typed exhausted transport diagnostic, got: {provider_err:?}"
     );
 
     // The error message must mention the TTFT context so operators can
@@ -182,8 +182,13 @@ async fn stream_sse_first_event_timeout_uses_override_for_reasoning_floor() {
 
     assert_eq!(
         err.downcast_ref::<ProviderError>(),
-        Some(&ProviderError::Transport),
-        "reasoning model + override must still produce typed Transport: {err:?}"
+        Some(&ProviderError::ExhaustedTransport(
+            ExhaustedTransportDiagnostic {
+                category: ExhaustedTransportCategory::SseFirstEventTimeout,
+                estimated_payload_chars: 28,
+            }
+        )),
+        "reasoning model + override must produce a typed timeout diagnostic: {err:?}"
     );
 
     cancel.store(true, Ordering::Relaxed);
