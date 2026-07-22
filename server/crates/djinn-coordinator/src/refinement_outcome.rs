@@ -793,26 +793,24 @@ impl CoordinatorActor {
         }
     }
 
-    /// Resolve a user id to the display identity used for the legacy `owner`
-    /// column (their GitHub login). Returns `None` when the user can't be
-    /// resolved (missing row or lookup error) so callers fall back to the prior
-    /// "system" owner rather than failing task creation. `created_by_user_id`
-    /// remains the authoritative ownership field — this is display/filter only.
-    pub(super) async fn resolve_owner_identity(&self, user_id: &str) -> Option<String> {
+    /// Resolve a persisted user id to the GitHub login required by the legacy
+    /// `owner` display/filter column. The caller must fail task creation when
+    /// this integrity boundary cannot be satisfied.
+    pub(super) async fn resolve_owner_identity(&self, user_id: &str) -> Result<String, String> {
         match djinn_db::UserRepository::new(self.db.clone())
             .get_by_id(user_id)
             .await
         {
-            Ok(Some(user)) => Some(user.github_login),
-            Ok(None) => None,
+            Ok(Some(user)) if !user.github_login.trim().is_empty() => Ok(user.github_login),
+            Ok(Some(_)) => Err("persisted user has an empty GitHub login".to_string()),
+            Ok(None) => Err("no persisted user row exists".to_string()),
             Err(e) => {
                 tracing::warn!(
                     user_id = %user_id,
                     error = %e,
-                    "Failed to resolve owner identity for refinement task; \
-                     falling back to system owner"
+                    "Failed to resolve persisted refinement owner identity"
                 );
-                None
+                Err("persisted user lookup failed".to_string())
             }
         }
     }
@@ -906,6 +904,52 @@ impl CoordinatorActor {
             .map(|p| format!("\"{}\"", p.title))
             .unwrap_or_else(|| proposal_id.to_string());
 
+        // A task's creator and legacy display owner both derive from the durable
+        // refinement owner. Do not trust a runtime value unless it agrees with
+        // the proposal record; direct callers must not bypass that boundary.
+        let Some(attributed_user_id) = attributed_user_id else {
+            tracing::warn!(
+                proposal_id,
+                agent_type,
+                "Cannot create refinement task: durable attributed user is unavailable"
+            );
+            return None;
+        };
+        let Some(durable_owner_user_id) = proposal
+            .as_ref()
+            .and_then(|proposal| proposal.refinement_owner_user_id.as_deref())
+        else {
+            tracing::warn!(
+                proposal_id,
+                agent_type,
+                "Cannot create refinement task: proposal has no durable refinement owner"
+            );
+            return None;
+        };
+        if attributed_user_id != durable_owner_user_id {
+            tracing::warn!(
+                proposal_id,
+                agent_type,
+                attributed_user_id,
+                durable_owner_user_id,
+                "Cannot create refinement task: runtime attribution disagrees with durable refinement owner"
+            );
+            return None;
+        }
+        let owner = match self.resolve_owner_identity(durable_owner_user_id).await {
+            Ok(owner) => owner,
+            Err(reason) => {
+                tracing::warn!(
+                    proposal_id,
+                    agent_type,
+                    attributed_user_id,
+                    reason,
+                    "Cannot create refinement task: durable refinement owner failed identity resolution"
+                );
+                return None;
+            }
+        };
+
         let title = format!("Refinement {agent_type} — {proposal_label} (round {round})");
         let mut description = format!(
             "Proposal refinement session: {agent_type} role for proposal {proposal_id}, \
@@ -958,28 +1002,6 @@ impl CoordinatorActor {
                 );
                 return None;
             }
-        };
-
-        // Resolve the attributed user's display identity (their GitHub login)
-        // for the legacy `owner` column. Creator attribution is mandatory: an
-        // absent or stale user must stop task creation rather than fabricating a
-        // system owner while the repository rejects the same provenance.
-        let Some(attributed_user_id) = attributed_user_id else {
-            tracing::warn!(
-                proposal_id,
-                agent_type,
-                "Cannot create refinement task: attributed user is unavailable"
-            );
-            return None;
-        };
-        let Some(owner) = self.resolve_owner_identity(attributed_user_id).await else {
-            tracing::warn!(
-                proposal_id,
-                agent_type,
-                attributed_user_id,
-                "Cannot create refinement task: attributed user does not resolve to a persisted user"
-            );
-            return None;
         };
 
         match task_repo

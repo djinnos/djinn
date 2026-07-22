@@ -180,11 +180,11 @@ async fn refinement_task_owner_is_attributed_user_login_not_system() {
     );
 }
 
-/// Mandatory creator provenance fails closed when the attributed user cannot
-/// be resolved. No tribunal task may be inserted with a fabricated `system`
-/// owner or an invalid `created_by_user_id`.
+/// Mandatory creator provenance fails closed when it is absent or disagrees
+/// with the proposal's durable owner. No tribunal task may be inserted without
+/// a concrete, persisted owner identity.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn refinement_task_creation_fails_closed_when_user_unresolvable() {
+async fn refinement_task_creation_fails_closed_when_provenance_is_missing_or_invalid() {
     let db = crate::test_helpers::create_test_db();
     let fixture = seed_refinement_fixture(&db).await;
     let (events_tx, _events_rx) = tokio::sync::broadcast::channel::<DjinnEventEnvelope>(256);
@@ -197,8 +197,7 @@ async fn refinement_task_creation_fails_closed_when_user_unresolvable() {
         .await
         .expect("list tasks before failed creation")
         .len();
-    let missing_user_id = "00000000-0000-0000-0000-000000000000";
-    let task_id = actor
+    let missing_provenance_task_id = actor
         .create_refinement_task_with_context(
             &fixture.proposal_id,
             "judge",
@@ -206,13 +205,30 @@ async fn refinement_task_creation_fails_closed_when_user_unresolvable() {
             1,
             "Proposal currently meets all DoR checks.",
             None,
-            Some(missing_user_id),
+            None,
         )
         .await;
 
     assert!(
-        task_id.is_none(),
-        "unresolvable mandatory creator provenance must fail closed"
+        missing_provenance_task_id.is_none(),
+        "missing mandatory creator provenance must fail closed"
+    );
+
+    let invalid_provenance_task_id = actor
+        .create_refinement_task_with_context(
+            &fixture.proposal_id,
+            "judge",
+            1,
+            1,
+            "Proposal currently meets all DoR checks.",
+            None,
+            Some("00000000-0000-0000-0000-000000000000"),
+        )
+        .await;
+
+    assert!(
+        invalid_provenance_task_id.is_none(),
+        "invalid mandatory creator provenance must fail closed"
     );
     let tasks_after = task_repo
         .list_by_project(&fixture.project_id)
@@ -221,7 +237,7 @@ async fn refinement_task_creation_fails_closed_when_user_unresolvable() {
         .len();
     assert_eq!(
         tasks_after, tasks_before,
-        "unresolvable ownership must not insert a tribunal task"
+        "missing or invalid ownership must not insert a tribunal task"
     );
 }
 
