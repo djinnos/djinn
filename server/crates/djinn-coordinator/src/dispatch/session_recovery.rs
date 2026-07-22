@@ -4004,9 +4004,9 @@ mod zero_output_instrumentation_tests {
 #[cfg(test)]
 mod restart_amnesia_tests {
     use super::*;
-    use djinn_db::CurrentLivenessState;
     use ::time::Duration as TimeDuration;
     use ::time::OffsetDateTime;
+    use djinn_db::CurrentLivenessState;
 
     fn iso(dt: OffsetDateTime) -> String {
         dt.format(&::time::format_description::well_known::Iso8601::DEFAULT)
@@ -4072,7 +4072,9 @@ mod restart_amnesia_tests {
             "40-minute session must stay extension-eligible under the 3h lease"
         );
         assert!(
-            ev.claim_ttl_remaining.map(|t| !t.is_zero()).unwrap_or(false),
+            ev.claim_ttl_remaining
+                .map(|t| !t.is_zero())
+                .unwrap_or(false),
             "40-minute session must retain non-zero claim TTL"
         );
     }
@@ -4089,17 +4091,21 @@ mod restart_amnesia_tests {
         let clock = resolve_stall_clock(
             /* activity_tracked */ false,
             /* measured_idle_secs (since started_at, pre-restart) */ 4000,
-            /* session_predates_boot */ true,
-            /* boot_elapsed_secs */ 120,
-            STALL,
+            /* session_predates_boot */ true, /* boot_elapsed_secs */ 120, STALL,
             FIRST_CALL,
         );
-        assert_eq!(clock.idle_secs, 120, "idle is measured from boot, not started_at");
+        assert_eq!(
+            clock.idle_secs, 120,
+            "idle is measured from boot, not started_at"
+        );
         assert_eq!(
             clock.threshold_secs, STALL,
             "amnesiac session gets the full role budget, not the 300s cap"
         );
-        assert!(!clock.first_call_hang, "restart amnesia is not a first-call hang");
+        assert!(
+            !clock.first_call_hang,
+            "restart amnesia is not a first-call hang"
+        );
         assert!(
             clock.idle_secs <= clock.threshold_secs,
             "2 minutes after boot the pre-restart session is NOT yet kill-eligible"
