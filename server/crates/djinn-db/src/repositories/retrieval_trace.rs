@@ -791,8 +791,8 @@ impl<'a> RetrievalTraceListFilter<'a> {
 mod retrieval_trace_health;
 use retrieval_trace_health::*;
 pub use retrieval_trace_health::{
-    CandidateScoreSummary, DurationStageSummary, RetrievalTraceHealthEvidence,
-    RetrievalTaxonomyValidationError, RetrievalTraceHealthRollup, SkipReasonCounts,
+    CandidateScoreSummary, DurationStageSummary, RetrievalTaxonomyValidationError,
+    RetrievalTraceHealthEvidence, RetrievalTraceHealthRollup, SkipReasonCounts,
     TaxonomyV1RetrievalHealthCounts, TaxonomyV1RetrievalHealthGroup,
 };
 
@@ -1167,23 +1167,18 @@ impl RetrievalTraceRepository {
         until: &str,
         refreshed_at: &str,
     ) -> Result<Vec<TaxonomyV1RetrievalHealthGroup>> {
-        let from = parse_retrieval_trace_utc_timestamp(from, "from")?;
-        let until = parse_retrieval_trace_utc_timestamp(until, "until")?;
+        let from_timestamp = parse_retrieval_trace_utc_timestamp(from, "from")?;
+        let until_timestamp = parse_retrieval_trace_utc_timestamp(until, "until")?;
         parse_retrieval_trace_utc_timestamp(refreshed_at, "refreshed_at")?;
-        if from >= until {
+        if from_timestamp >= until_timestamp {
             return Err(DbError::InvalidData(
                 "taxonomy-v1 health rollup requires from before until".to_owned(),
             ));
         }
-        let from = format_retrieval_trace_utc_timestamp(from);
-        let until = format_retrieval_trace_utc_timestamp(until);
+        let from = format_retrieval_trace_utc_timestamp(from_timestamp);
+        let until = format_retrieval_trace_utc_timestamp(until_timestamp);
         self.db.ensure_initialized().await?;
-        let rows: Vec<TaxonomyV1HealthGroupRow> =
-            sqlx::query_as(TAXONOMY_V1_HEALTH_GROUPED_SQL)
-                .bind(&from)
-                .bind(&until)
-                .fetch_all(self.db.pool())
-                .await?;
+        let rows = fetch_taxonomy_v1_health_groups(self.db.pool(), &from, &until).await?;
         rows.into_iter()
             .map(|row| {
                 build_taxonomy_v1_group(row, &from, &until, refreshed_at)
