@@ -333,7 +333,7 @@ impl CoordinatorActor {
     /// reconciler, which never fired because no session started).
     async fn retry_or_terminate_unstarted_refinement(
         &mut self,
-        proposal_id: &str,
+        run_id: &str,
         session: &RefinementSession,
         close_reason: &str,
         over_cap_error: String,
@@ -346,7 +346,7 @@ impl CoordinatorActor {
             // block the retry.
             if let Err(e) = self.pool.kill_session(&session.task_id).await {
                 tracing::warn!(
-                    proposal_id = %proposal_id,
+                    run_id = %run_id,
                     task_id = %session.task_id,
                     error = %e,
                     "Failed to tear down Pending refinement task-run; proceeding with retry"
@@ -356,8 +356,8 @@ impl CoordinatorActor {
         }
         self.close_refinement_task(&session.task_id, close_reason)
             .await;
-        self.refinement_sessions.remove(proposal_id);
-        let over_cap = if let Some(state) = self.active_refinements.get_mut(proposal_id) {
+        self.refinement_sessions.remove(run_id);
+        let over_cap = if let Some(state) = self.active_refinements.get_mut(run_id) {
             state.dispatch_failures += 1;
             state.dispatch_failures >= REFINEMENT_DISPATCH_RETRY_CAP
         } else {
@@ -365,12 +365,12 @@ impl CoordinatorActor {
         };
         if over_cap {
             tracing::warn!(
-                proposal_id = %proposal_id,
+                run_id = %run_id,
                 phase = ?session.phase,
                 "Refinement role session repeatedly failed to start — terminating"
             );
             self.terminate_refinement(
-                proposal_id,
+                run_id,
                 StopReason::AgentFailure {
                     role: format!("{:?}", session.phase),
                     error: over_cap_error,
@@ -379,7 +379,7 @@ impl CoordinatorActor {
             .await;
         } else {
             tracing::warn!(
-                proposal_id = %proposal_id,
+                run_id = %run_id,
                 phase = ?session.phase,
                 "Refinement role session never started; will re-dispatch (not counted as dry)"
             );

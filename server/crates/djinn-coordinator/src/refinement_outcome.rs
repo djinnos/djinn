@@ -94,23 +94,29 @@ impl CoordinatorActor {
     /// Process the outcome of a completed refinement session.
     pub(super) async fn process_refinement_outcome(
         &mut self,
-        proposal_id: &str,
+        run_id: &str,
         session: &RefinementSession,
     ) {
-        let state = match self.active_refinements.get(proposal_id).cloned() {
+        let state = match self.active_refinements.get(run_id).cloned() {
             Some(s) => s,
             None => return,
         };
+        // The projection is keyed by the durable run. The proposal identity is
+        // payload data used only for proposal/lifecycle repository operations.
+        let proposal_id = state.proposal_id.clone();
 
         match session.phase {
             RefinementPhase::AdvocateRevision => {
-                self.process_advocate_outcome(proposal_id, &state).await;
+                self.process_advocate_outcome(run_id, &proposal_id, &state)
+                    .await;
             }
             RefinementPhase::AdversaryAttack => {
-                self.process_adversary_outcome(proposal_id, &state).await;
+                self.process_adversary_outcome(run_id, &proposal_id, &state)
+                    .await;
             }
             RefinementPhase::JudgeAdjudication => {
-                self.process_judge_outcome(proposal_id, &state).await;
+                self.process_judge_outcome(run_id, &proposal_id, &state)
+                    .await;
             }
             RefinementPhase::AwaitingHumanReview
             | RefinementPhase::AwaitingEvidence
@@ -120,7 +126,12 @@ impl CoordinatorActor {
 
     /// Process an advocate session outcome: read the latest revision,
     /// patch event_metadata with refinement attribution, and advance.
-    async fn process_advocate_outcome(&mut self, proposal_id: &str, state: &RefinementLoopState) {
+    async fn process_advocate_outcome(
+        &mut self,
+        run_id: &str,
+        proposal_id: &str,
+        state: &RefinementLoopState,
+    ) {
         let event_bus = crate::events::event_bus_for(&self.events_tx);
         let proposal_repo = ProposalRepository::new(self.db.clone(), event_bus);
 
@@ -129,7 +140,7 @@ impl CoordinatorActor {
             Ok(None) => {
                 tracing::warn!(proposal_id = %proposal_id, "Proposal not found after advocate");
                 self.terminate_refinement(
-                    proposal_id,
+                    run_id,
                     StopReason::AgentFailure {
                         role: "advocate".into(),
                         error: "proposal not found after session".into(),
@@ -141,7 +152,7 @@ impl CoordinatorActor {
             Err(e) => {
                 tracing::warn!(proposal_id = %proposal_id, error = %e, "DB error reading proposal");
                 self.terminate_refinement(
-                    proposal_id,
+                    run_id,
                     StopReason::AgentFailure {
                         role: "advocate".into(),
                         error: format!("DB error: {e}"),
@@ -158,7 +169,7 @@ impl CoordinatorActor {
         if advanced {
             let model_id = self
                 .refinement_sessions
-                .get(proposal_id)
+                .get(run_id)
                 .map(|s| s.model_id.clone());
             let event_meta =
                 build_revision_event_metadata(state.current_round, model_id.as_deref());
@@ -182,7 +193,7 @@ impl CoordinatorActor {
             }
         }
 
-        if let Some(state) = self.active_refinements.get_mut(proposal_id) {
+        if let Some(state) = self.active_refinements.get_mut(run_id) {
             if advanced {
                 state.record_advocate_revision(new_revision_seq);
                 tracing::info!(
@@ -205,7 +216,12 @@ impl CoordinatorActor {
 
     /// Process an adversary session outcome: read debate-trail objections
     /// and feed them to the state machine.
-    async fn process_adversary_outcome(&mut self, proposal_id: &str, state: &RefinementLoopState) {
+    async fn process_adversary_outcome(
+        &mut self,
+        run_id: &str,
+        proposal_id: &str,
+        state: &RefinementLoopState,
+    ) {
         let event_bus = crate::events::event_bus_for(&self.events_tx);
         let proposal_repo = ProposalRepository::new(self.db.clone(), event_bus);
 
@@ -218,7 +234,7 @@ impl CoordinatorActor {
                     "DB error reading debate trail"
                 );
                 self.terminate_refinement(
-                    proposal_id,
+                    run_id,
                     StopReason::AgentFailure {
                         role: "adversary".into(),
                         error: format!("DB error: {e}"),
@@ -259,7 +275,7 @@ impl CoordinatorActor {
             explicit_dry,
         };
 
-        let Some(state) = self.active_refinements.get_mut(proposal_id) else {
+        let Some(state) = self.active_refinements.get_mut(run_id) else {
             tracing::warn!(
                 proposal_id = %proposal_id,
                 "adversary outcome arrived for missing refinement state"
@@ -290,7 +306,7 @@ impl CoordinatorActor {
                     ?reason,
                     "Refinement escalated — parking for human review"
                 );
-                if let Some(state) = self.active_refinements.get(proposal_id).cloned() {
+                if let Some(state) = self.active_refinements.get(run_id).cloned() {
                     let summary = format!("Escalated to human review: {reason:?}");
                     self.persist_awaiting_review(proposal_id, &summary, &state)
                         .await;
@@ -351,7 +367,12 @@ impl CoordinatorActor {
 
     /// Process a judge session outcome: read the verdict from the debate
     /// trail and advance the state machine.
-    async fn process_judge_outcome(&mut self, proposal_id: &str, state: &RefinementLoopState) {
+    async fn process_judge_outcome(
+        &mut self,
+        run_id: &str,
+        proposal_id: &str,
+        state: &RefinementLoopState,
+    ) {
         let event_bus = crate::events::event_bus_for(&self.events_tx);
         let proposal_repo = ProposalRepository::new(self.db.clone(), event_bus);
 
@@ -364,7 +385,7 @@ impl CoordinatorActor {
                     "DB error reading debate trail"
                 );
                 self.terminate_refinement(
-                    proposal_id,
+                    run_id,
                     StopReason::AgentFailure {
                         role: "judge".into(),
                         error: format!("DB error: {e}"),
@@ -401,7 +422,7 @@ impl CoordinatorActor {
         });
 
         if let Some(_entry) = needs_evidence_entry {
-            if let Some(state) = self.active_refinements.get_mut(proposal_id) {
+            if let Some(state) = self.active_refinements.get_mut(run_id) {
                 state.record_needs_evidence();
             }
             tracing::info!(
@@ -438,7 +459,7 @@ impl CoordinatorActor {
             }
         };
 
-        let now_awaiting = if let Some(state) = self.active_refinements.get_mut(proposal_id) {
+        let now_awaiting = if let Some(state) = self.active_refinements.get_mut(run_id) {
             state.record_judge_verdict(&verdict);
             state.is_awaiting_human_review()
         } else {
@@ -446,7 +467,7 @@ impl CoordinatorActor {
         };
 
         if now_awaiting {
-            if let Some(state) = self.active_refinements.get(proposal_id).cloned() {
+            if let Some(state) = self.active_refinements.get(run_id).cloned() {
                 self.persist_awaiting_review(proposal_id, &verdict.body, &state)
                     .await;
             }
@@ -487,13 +508,21 @@ impl CoordinatorActor {
         }
     }
 
-    /// Terminate a refinement loop and persist stop metadata.
-    pub(super) async fn terminate_refinement(&mut self, proposal_id: &str, reason: StopReason) {
-        if let Some(state) = self.active_refinements.get_mut(proposal_id) {
+    /// Terminate a refinement loop keyed by its exact durable run. Lifecycle
+    /// persistence retains the proposal ID carried in the projection.
+    pub(super) async fn terminate_refinement(&mut self, run_id: &str, reason: StopReason) {
+        let Some(proposal_id) = self
+            .active_refinements
+            .get(run_id)
+            .map(|state| state.proposal_id.clone())
+        else {
+            return;
+        };
+        if let Some(state) = self.active_refinements.get_mut(run_id) {
             state.terminate(reason.clone());
         }
-        self.persist_refinement_stop(proposal_id, &reason).await;
-        self.refinement_sessions.remove(proposal_id);
+        self.persist_refinement_stop(&proposal_id, &reason).await;
+        self.refinement_sessions.remove(run_id);
     }
 
     /// Resolve the human's single accept/reject review of a converged
@@ -504,7 +533,12 @@ impl CoordinatorActor {
         accept: bool,
         feedback: Option<String>,
     ) -> Result<(), String> {
-        let Some(state) = self.active_refinements.get(proposal_id).cloned() else {
+        let Some((run_id, state)) = self
+            .active_refinements
+            .iter()
+            .find(|(_, state)| state.proposal_id == proposal_id)
+            .map(|(run_id, state)| (run_id.clone(), state.clone()))
+        else {
             return Err(format!("no active refinement for proposal {proposal_id}"));
         };
         if !state.is_awaiting_human_review() {
@@ -523,7 +557,7 @@ impl CoordinatorActor {
             );
         }
 
-        if let Some(s) = self.active_refinements.get_mut(proposal_id) {
+        if let Some(s) = self.active_refinements.get_mut(&run_id) {
             s.resolve_human_review(accept, false);
         }
 
@@ -551,7 +585,7 @@ impl CoordinatorActor {
             );
         }
 
-        self.refinement_sessions.remove(proposal_id);
+        self.refinement_sessions.remove(&run_id);
         self.active_refinements.retain(|_, s| !s.is_complete());
         tracing::info!(
             proposal_id = %proposal_id,
