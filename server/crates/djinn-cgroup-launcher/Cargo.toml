@@ -1,0 +1,15 @@
+[package]
+publish = false
+name = "djinn-cgroup-launcher"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+doctest = false
+
+[dependencies]
+libc = "0.2"
+thiserror = "2"
+
+[lints]
+workspace = true

@@ -1214,6 +1214,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "djinn-cgroup-launcher"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "djinn-compaction"
 version = "0.1.0"
 dependencies = [
