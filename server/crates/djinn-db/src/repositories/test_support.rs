@@ -77,6 +77,40 @@ pub async fn seed_test_user(db: &Database) -> String {
     id
 }
 
+/// Apply the full embedded migrator to a fresh, empty database through the
+/// supported creator-contract path: provision a designated operator on the
+/// pre-contract schema, then run the remaining migrations with the operator
+/// bound to the migration session. The creator-contract migration refuses to
+/// run without a validated operator, so a bare `sqlx::migrate!().run()` on an
+/// empty database is no longer a supported entry point.
+///
+/// Returns the provisioned operator's user id so callers seeding
+/// latest-schema task rows have an FK-valid creator to bind.
+pub async fn apply_all_migrations_to_fresh_database(db_url: &str) -> String {
+    const FRESH_MIGRATION_OPERATOR_ID: &str = "00000000-0000-7000-8000-000000000141";
+    crate::migrations::bootstrap_designated_operator(
+        db_url,
+        &crate::migrations::DesignatedOperatorBootstrap {
+            user_id: FRESH_MIGRATION_OPERATOR_ID.to_owned(),
+            github_id: 9_000_000_141,
+            github_login: "fresh-migration-operator".to_owned(),
+            github_name: None,
+            github_avatar_url: None,
+        },
+    )
+    .await
+    .expect("bootstrap designated operator on fresh database");
+    crate::migrations::run_postgres_migrations(
+        db_url,
+        &crate::migrations::MigrationContext {
+            designated_operator_user_id: Some(FRESH_MIGRATION_OPERATOR_ID.to_owned()),
+        },
+    )
+    .await
+    .expect("apply all migrations to fresh database");
+    FRESH_MIGRATION_OPERATOR_ID.to_owned()
+}
+
 // ── Seed helpers for usage-analytics route tests ─────────────────────────
 // These insert rows directly via raw SQL so integration tests outside
 // djinn-db can seed deterministic fixture data without going through the
@@ -1218,6 +1252,7 @@ pub async fn seed_eval_task_with_memory_refs(
     memory_refs_json: &str,
 ) -> String {
     db.ensure_initialized().await.unwrap();
+    let creator = seed_test_user(db).await;
     let task_id = uuid::Uuid::now_v7().to_string();
     let short_id = format!(
         "eval-{}",
@@ -1227,8 +1262,9 @@ pub async fn seed_eval_task_with_memory_refs(
     sqlx::query(
         r#"INSERT INTO tasks
             (id, project_id, short_id, epic_id, title, description, design,
-             issue_type, priority, owner, status, continuation_count, memory_refs)
-         VALUES ($1, $2, $3, $4, $5, '', '', 'task', 0, '', 'open', 0, $6::jsonb)"#,
+             issue_type, priority, owner, status, continuation_count, memory_refs,
+             created_by_user_id)
+         VALUES ($1, $2, $3, $4, $5, '', '', 'task', 0, '', 'open', 0, $6::jsonb, $7)"#,
     )
     .bind(&task_id)
     .bind(project_id)
@@ -1236,6 +1272,7 @@ pub async fn seed_eval_task_with_memory_refs(
     .bind(epic_id)
     .bind(format!("Eval task {}", fixture_task_id))
     .bind(memory_refs_json)
+    .bind(&creator)
     .execute(db.pool())
     .await
     .unwrap_or_else(|e| {

@@ -46,6 +46,9 @@ async fn upsert_peer_closed_updated_by_peer_close() {
         "2099-01-01T00:00:00.000Z",
     );
     peer.title = "Updated Title From Peer".to_string();
+    // The proposed upsert tuple must satisfy the creator contract even when
+    // the conflict branch preserves existing attribution.
+    peer.created_by_user_id = task.created_by_user_id.clone();
     let changed = repo.upsert_peer(&peer).await.unwrap();
     assert!(
         changed,
@@ -68,13 +71,16 @@ async fn upsert_peer_non_terminal_lww_works() {
     let task = open_task(&repo, &epic.id).await;
 
     // Peer sends it as in_progress with a later updated_at.
-    let peer = make_peer_task(
+    let mut peer = make_peer_task(
         &task.id,
         &epic.project_id,
         &epic.id,
         "in_progress",
         "2099-01-01T00:00:00.000Z",
     );
+    // The proposed upsert tuple must satisfy the creator contract even when
+    // the conflict branch preserves existing attribution.
+    peer.created_by_user_id = task.created_by_user_id.clone();
     let changed = repo.upsert_peer(&peer).await.unwrap();
     assert!(changed, "non-terminal LWW should update");
 
@@ -138,6 +144,11 @@ async fn transactional_peer_upsert_round_trips_distinct_refinement_correlations(
     // short IDs distinct so this test reaches the correlation projection.
     first.short_id = "peer-one".into();
     second.short_id = "peer-two".into();
+    // Fresh peer INSERTs must carry a locally-known creator now that the
+    // creator contract forbids NULL attribution on new rows.
+    let peer_creator = djinn_db::repositories::test_support::seed_test_user(&db).await;
+    first.created_by_user_id = Some(peer_creator.clone());
+    second.created_by_user_id = Some(peer_creator);
     first.refinement_run_id = Some(first_run_id.clone());
     first.refinement_intent_id = Some(first_intent_id.clone());
     first.refinement_generation = Some(1);

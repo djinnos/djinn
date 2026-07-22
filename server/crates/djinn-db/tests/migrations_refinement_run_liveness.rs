@@ -169,7 +169,7 @@ async fn migration_138_backfills_deterministic_intervals_and_stop_vocabulary() {
 async fn migration_138_constraints_allow_successor_after_terminal() {
     temporary("constraints", |url| async move {
         let pool = PgPoolOptions::new().max_connections(1).connect(&url).await.unwrap();
-        sqlx::migrate!("./migrations_postgres").run(&pool).await.unwrap(); proposal(&pool,"p","p000").await;
+        djinn_db::test_support::apply_all_migrations_to_fresh_database(&url).await; proposal(&pool,"p","p000").await;
         let run = "00000000-0000-0000-0000-000000000001";
         sqlx::query("INSERT INTO refinement_runs (id,proposal_id,generation,idempotency_key,state) VALUES ($1,'p',1,'one','running')").bind(run).execute(&pool).await.unwrap();
         assert!(sqlx::query("INSERT INTO refinement_runs (id,proposal_id,generation,idempotency_key,state) VALUES ('00000000-0000-0000-0000-000000000002','p',2,'two','running')").execute(&pool).await.is_err());
@@ -190,7 +190,7 @@ async fn migration_138_constraints_allow_successor_after_terminal() {
 async fn migration_138_fresh_application_preserves_ordinary_rows() {
     temporary("fresh", |url| async move {
         let pool = PgPoolOptions::new().max_connections(1).connect(&url).await.unwrap();
-        sqlx::migrate!("./migrations_postgres").run(&pool).await.unwrap();
+        djinn_db::test_support::apply_all_migrations_to_fresh_database(&url).await;
         proposal(&pool, "p", "p000").await;
         lifecycle(&pool, "ordinary", "p", "status_change", "2025-01-01T00:00:00Z", Some(serde_json::json!({"legacy":true}))).await;
         let row: (Option<String>, Option<String>, serde_json::Value) = sqlx::query_as("SELECT refinement_run_id, refinement_stop_tag, event_metadata FROM proposal_revisions WHERE id='ordinary'").fetch_one(&pool).await.unwrap();

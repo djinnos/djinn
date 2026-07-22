@@ -1,7 +1,10 @@
 //! The designated-operator GUC belongs only to the explicitly owned migration
 //! connection. Independent Postgres sessions prove it cannot leak to a pool.
 
-use djinn_db::migrations::{MigrationContext, run_postgres_migrations_on_connection};
+use djinn_db::migrations::{
+    DesignatedOperatorBootstrap, MigrationContext, bootstrap_designated_operator,
+    run_postgres_migrations_on_connection,
+};
 use sqlx::postgres::{PgConnection, PgPoolOptions};
 use sqlx::{Connection, Executor};
 
@@ -32,6 +35,21 @@ async fn migration_operator_setting_is_connection_local_and_rejects_blank_input(
     drop(admin);
 
     let db_url = format!("{prefix}/{db_name}");
+    // The creator-contract migration validates the operator against `users`,
+    // so the explicit identity must be provisioned before the full migrator
+    // crosses that boundary.
+    bootstrap_designated_operator(
+        &db_url,
+        &DesignatedOperatorBootstrap {
+            user_id: "explicit-operator-id".to_owned(),
+            github_id: 9_000_000_201,
+            github_login: "explicit-operator".to_owned(),
+            github_name: None,
+            github_avatar_url: None,
+        },
+    )
+    .await
+    .expect("bootstrap explicit designated operator");
     let pool = PgPoolOptions::new()
         .max_connections(1)
         .connect(&db_url)
