@@ -6,6 +6,7 @@ use std::path::Path;
 use djinn_core::extension_diagnostics::ExtensionLoadDiagnosticV1;
 use djinn_core::models::Task;
 use djinn_core::models::task_attempt::TaskAttemptPromptSummary;
+use tokio_util::sync::CancellationToken;
 
 use crate::actors::slot::MergeConflictMetadata;
 use crate::context::{AgentContext, MemoryIntentPlannerConfig};
@@ -147,5 +148,8 @@ pub(crate) struct PromptContextInputs<'a> {
     pub mcp_server_instructions: &'a BTreeMap<String, String>,
     /// Canonical rows returned for the session-associated extension load pass.
     pub extension_diagnostics: &'a [ExtensionLoadDiagnosticV1],
+    /// Per-operation signal supplied by the supervisor; deliberately not part
+    /// of the broad, reusable `AgentContext`.
+    pub cancellation: Option<&'a CancellationToken>,
     pub memory_intent_planner: Option<MemoryIntentPlannerInvocation<'a>>,
 }

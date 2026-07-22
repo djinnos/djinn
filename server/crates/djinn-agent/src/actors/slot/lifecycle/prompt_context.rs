@@ -19,6 +19,7 @@ use crate::prompts::{TaskContext, apply_role_extensions, apply_skills};
 use crate::rollout::{DefaultPolicy, RolloutMode, parse as parse_rollout};
 use crate::skills::ResolvedSkill;
 use djinn_db::{NoteRepository, ProposalRepository, TaskRepository};
+use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
 
 // Environment variables are process-global. Keep the test guard here, rather
@@ -457,7 +458,9 @@ pub(crate) async fn load_knowledge_context(
     app_state: &AgentContext,
 ) -> Option<String> {
     let rollout = knowledge_context_rollout_from_env();
-    load_knowledge_context_with_planner(task, epic_context, app_state, None, &rollout).await
+    let cancellation = CancellationToken::new();
+    load_knowledge_context_with_planner(task, epic_context, app_state, None, &rollout, &cancellation)
+        .await
 }
 
 async fn load_knowledge_context_with_planner(
@@ -466,8 +469,13 @@ async fn load_knowledge_context_with_planner(
     app_state: &AgentContext,
     planner: Option<&MemoryIntentPlannerInvocation<'_>>,
     rollout: &RolloutMode,
+    cancellation: &CancellationToken,
 ) -> Option<String> {
     let task_paths = derive_task_scope_paths(task, epic_context);
+    if cancellation.is_cancelled() {
+        persist_cancelled_knowledge_trace(task, &task_paths, app_state, planner, rollout).await;
+        return None;
+    }
     if !rollout.enabled() {
         persist_knowledge_trace(
             task,
@@ -480,6 +488,7 @@ async fn load_knowledge_context_with_planner(
             planner.map(|p| (p.session_id, p.task_run_id)),
             rollout,
             disabled_knowledge_outcome(rollout),
+            false,
             None,
         )
         .await;
@@ -493,22 +502,31 @@ async fn load_knowledge_context_with_planner(
     // candidate universe concurrently. The production query is authoritative for
     // prompt output; the trace candidate query provides the full universe for
     // classification.
-    let (production_result, trace_candidates_result) = tokio::join!(
-        note_repo.query_by_scope_overlap(
-            &task.project_id,
-            &task_paths,
-            KNOWLEDGE_NOTE_TYPES,
-            KNOWLEDGE_MIN_CONFIDENCE,
-            app_state.knowledge_injection.knowledge_injection_limit as usize,
-        ),
-        note_repo.query_by_scope_overlap_trace_notes(
-            &task.project_id,
-            &task_paths,
-            KNOWLEDGE_NOTE_TYPES,
-            djinn_db::repositories::retrieval_trace::DEFAULT_CANDIDATE_CAP as usize,
-        ),
-    );
+    let retrieval = tokio::select! {
+        _ = cancellation.cancelled() => {
+            persist_cancelled_knowledge_trace(task, &task_paths, app_state, planner, rollout).await;
+            return None;
+        }
+        result = async {
+            tokio::join!(
+                note_repo.query_by_scope_overlap(
+                    &task.project_id, &task_paths, KNOWLEDGE_NOTE_TYPES,
+                    KNOWLEDGE_MIN_CONFIDENCE,
+                    app_state.knowledge_injection.knowledge_injection_limit as usize,
+                ),
+                note_repo.query_by_scope_overlap_trace_notes(
+                    &task.project_id, &task_paths, KNOWLEDGE_NOTE_TYPES,
+                    djinn_db::repositories::retrieval_trace::DEFAULT_CANDIDATE_CAP as usize,
+                ),
+            )
+        } => result,
+    };
+    let (production_result, trace_candidates_result) = retrieval;
     let candidate_fetch_ms = fetch_start.elapsed().as_millis() as i64;
+    if cancellation.is_cancelled() {
+        persist_cancelled_knowledge_trace(task, &task_paths, app_state, planner, rollout).await;
+        return None;
+    }
 
     let notes = match production_result {
         Ok(notes) => notes,
@@ -549,6 +567,7 @@ async fn load_knowledge_context_with_planner(
                 planner.map(|p| (p.session_id, p.task_run_id)),
                 rollout,
                 djinn_db::repositories::retrieval_trace::RetrievalTraceOutcome::Error,
+                false,
                 None,
             )
             .await;
@@ -580,6 +599,10 @@ async fn load_knowledge_context_with_planner(
             },
         );
         let pack_ms = pack_start.elapsed().as_millis() as i64;
+        if cancellation.is_cancelled() {
+            persist_cancelled_knowledge_trace(task, &task_paths, app_state, planner, rollout).await;
+            return None;
+        }
         let rendered = if notes.is_empty() {
             None
         } else {
@@ -594,6 +617,10 @@ async fn load_knowledge_context_with_planner(
             app_state.knowledge_injection,
         )
         .await;
+        if cancellation.is_cancelled() {
+            persist_cancelled_knowledge_trace(task, &task_paths, app_state, planner, rollout).await;
+            return None;
+        }
         persist_knowledge_trace(
             task,
             &task_paths,
@@ -610,6 +637,7 @@ async fn load_knowledge_context_with_planner(
             planner.map(|p| (p.session_id, p.task_run_id)),
             rollout,
             djinn_db::repositories::retrieval_trace::RetrievalTraceOutcome::Error,
+            false,
             None,
         )
         .await;
@@ -639,6 +667,10 @@ async fn load_knowledge_context_with_planner(
         },
     );
     let pack_ms = pack_start.elapsed().as_millis() as i64;
+    if cancellation.is_cancelled() {
+        persist_cancelled_knowledge_trace(task, &task_paths, app_state, planner, rollout).await;
+        return None;
+    }
     let trace_candidates_final = trace_candidates_from_pack(&trace_notes, &packed);
     let terminal_dispositions = pack_disposition_counts(&packed);
     let classification_ms = classification_start.elapsed().as_millis() as i64;
@@ -657,6 +689,10 @@ async fn load_knowledge_context_with_planner(
         app_state.knowledge_injection,
     )
     .await;
+    if cancellation.is_cancelled() {
+        persist_cancelled_knowledge_trace(task, &task_paths, app_state, planner, rollout).await;
+        return None;
+    }
 
     // Persist the trace (fail-open). Measure the persist phase separately.
     let persist_start = tokio::time::Instant::now();
@@ -684,11 +720,38 @@ async fn load_knowledge_context_with_planner(
         } else {
             djinn_db::repositories::retrieval_trace::RetrievalTraceOutcome::Empty
         },
+        false,
         Some(terminal_dispositions),
     )
     .await;
 
     rendered
+}
+
+/// Write the exceptional cancellation terminal without fabricating a candidate
+/// universe or disposition histogram.
+async fn persist_cancelled_knowledge_trace(
+    task: &Task,
+    task_paths: &[String],
+    app_state: &AgentContext,
+    planner: Option<&MemoryIntentPlannerInvocation<'_>>,
+    rollout: &RolloutMode,
+) {
+    persist_knowledge_trace(
+        task,
+        task_paths,
+        &[],
+        0,
+        KnowledgeTraceDurations::default(),
+        false,
+        &app_state.db,
+        planner.map(|p| (p.session_id, p.task_run_id)),
+        rollout,
+        djinn_db::repositories::retrieval_trace::RetrievalTraceOutcome::Error,
+        true,
+        None,
+    )
+    .await;
 }
 
 /// Classify trace candidates into `TraceCandidate` DTOs with deterministic outcomes.
@@ -905,6 +968,7 @@ async fn persist_knowledge_trace(
     attribution: Option<(&str, &str)>,
     rollout: &RolloutMode,
     outcome: djinn_db::repositories::retrieval_trace::RetrievalTraceOutcome,
+    cancelled: bool,
     terminal_dispositions: Option<
         djinn_db::repositories::retrieval_trace::KnowledgeTraceDispositionCounts,
     >,
@@ -987,7 +1051,11 @@ async fn persist_knowledge_trace(
                 trace: params,
                 rollout_label: rollout.label(),
                 outcome,
-                terminal_state: KnowledgeTraceTerminalState::Error,
+                terminal_state: if cancelled {
+                    KnowledgeTraceTerminalState::Cancelled
+                } else {
+                    KnowledgeTraceTerminalState::Error
+                },
                 terminal_at: &terminal_at,
                 candidate_count: None,
                 injected_count: None,
@@ -1030,8 +1098,11 @@ pub(crate) async fn assemble_prompt_context(inputs: PromptContextInputs<'_>) -> 
         arbiter_directive,
         mcp_server_instructions,
         extension_diagnostics,
+        cancellation,
         memory_intent_planner,
     } = inputs;
+    let uncancelled = CancellationToken::new();
+    let cancellation = cancellation.unwrap_or(&uncancelled);
 
     // ── Phase 0: synchronous work with no data dependencies ──
     let conflict_files = format_conflict_files(conflict_ctx);
@@ -1117,6 +1188,7 @@ pub(crate) async fn assemble_prompt_context(inputs: PromptContextInputs<'_>) -> 
                     app_state,
                     memory_intent_planner.as_ref(),
                     &knowledge_rollout,
+                    cancellation,
                 )
                 .await;
                 (result, child_start.elapsed())

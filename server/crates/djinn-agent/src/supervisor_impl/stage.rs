@@ -1037,6 +1037,7 @@ pub(crate) async fn execute_stage(
         arbiter_directive: arbiter_directive.as_deref(),
         mcp_server_instructions: &mcp_server_instructions,
         extension_diagnostics: &extension_diagnostics,
+        cancellation: Some(&callbacks.cancel),
         memory_intent_planner: Some(MemoryIntentPlannerInvocation {
             config: &agent_context.memory_intent_planner,
             host: &planner_host,
