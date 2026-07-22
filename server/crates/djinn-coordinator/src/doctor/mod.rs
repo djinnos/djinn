@@ -19,6 +19,7 @@ pub mod closed_parent_open_children;
 pub mod leader_tick;
 pub mod live_mover;
 pub mod mismatch_scan;
+pub mod retrieval_health;
 pub mod stranded_ready;
 
 use std::sync::Arc;
@@ -63,6 +64,29 @@ pub fn register_doctor_checks(
         registered.push(previous);
     }
     registered
+}
+
+/// Register the shared retrieval source checks independently of refresh success.
+pub fn register_retrieval_health_checks(
+    registry: &DoctorRegistry,
+    source: Arc<retrieval_health::RetrievalHealthSource>,
+) -> Vec<String> {
+    let mut replaced = Vec::new();
+    let checks: [Arc<dyn DoctorCheck>; 3] = [
+        Arc::new(retrieval_health::SourceZeroResultCheck::new(Arc::clone(
+            &source,
+        ))),
+        Arc::new(retrieval_health::SourceInjectionStarvationCheck::new(
+            Arc::clone(&source),
+        )),
+        Arc::new(retrieval_health::RetrievalHealthRefreshCheck::new(source)),
+    ];
+    for check in checks {
+        if let Some(previous) = registry.register(check) {
+            replaced.push(previous);
+        }
+    }
+    replaced
 }
 
 /// Register the closed-parent orphan dry-run check while preserving the older

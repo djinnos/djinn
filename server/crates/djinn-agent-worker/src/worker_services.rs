@@ -745,8 +745,9 @@ mod tests {
     /// plan, and there is none here.
     #[test]
     fn worker_billing_signal_anthropic_api_key_is_metered() {
-        let (hint, source) = worker_billing_signal(&api_key_credential(), "anthropic/claude-opus-4-8")
-            .expect("model id parses");
+        let (hint, source) =
+            worker_billing_signal(&api_key_credential(), "anthropic/claude-opus-4-8")
+                .expect("model id parses");
         assert_eq!(hint, CostBasisHint::MeteredApi);
         assert_eq!(source, BillingSource::ApiKey);
     }

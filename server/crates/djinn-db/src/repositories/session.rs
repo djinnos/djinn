@@ -3473,13 +3473,11 @@ mod tests {
         assert_eq!(created.input_price_per_million_snapshot, Some(0.0));
         assert_eq!(created.cost_basis, "unpriced");
 
-        sqlx::query(
-            "UPDATE sessions SET tokens_in = 1000000, tokens_out = 1000000 WHERE id = $1",
-        )
-        .bind(&created.id)
-        .execute(db.pool())
-        .await
-        .unwrap();
+        sqlx::query("UPDATE sessions SET tokens_in = 1000000, tokens_out = 1000000 WHERE id = $1")
+            .bind(&created.id)
+            .execute(db.pool())
+            .await
+            .unwrap();
 
         let pricing = vec![(
             "kimi-for-coding/k3".to_string(),
@@ -3555,7 +3553,9 @@ mod tests {
 
         // No credentials → gate closed → no-op.
         assert_eq!(
-            repo.reclassify_plan_openai_sessions_if_gated().await.unwrap(),
+            repo.reclassify_plan_openai_sessions_if_gated()
+                .await
+                .unwrap(),
             0
         );
         assert_eq!(repo.get(&s.id).await.unwrap().unwrap().cost_basis, "actual");
@@ -3563,7 +3563,9 @@ mod tests {
         // Codex plan OAuth present, no OpenAI API key → gate open → flip.
         insert_cred("__OAUTH_CHATGPT_CODEX").await;
         assert_eq!(
-            repo.reclassify_plan_openai_sessions_if_gated().await.unwrap(),
+            repo.reclassify_plan_openai_sessions_if_gated()
+                .await
+                .unwrap(),
             1
         );
         assert_eq!(
@@ -3573,7 +3575,9 @@ mod tests {
 
         // Idempotent second run.
         assert_eq!(
-            repo.reclassify_plan_openai_sessions_if_gated().await.unwrap(),
+            repo.reclassify_plan_openai_sessions_if_gated()
+                .await
+                .unwrap(),
             0
         );
 
@@ -3594,11 +3598,16 @@ mod tests {
             .unwrap();
         insert_cred("OPENAI_API_KEY").await;
         assert_eq!(
-            repo.reclassify_plan_openai_sessions_if_gated().await.unwrap(),
+            repo.reclassify_plan_openai_sessions_if_gated()
+                .await
+                .unwrap(),
             0,
             "presence of an OpenAI API key closes the gate"
         );
-        assert_eq!(repo.get(&s2.id).await.unwrap().unwrap().cost_basis, "actual");
+        assert_eq!(
+            repo.get(&s2.id).await.unwrap().unwrap().cost_basis,
+            "actual"
+        );
     }
 
     // ── Cost-basis derivation tests ─────────────────────────────────────────
