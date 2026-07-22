@@ -6,111 +6,50 @@ use crate::Error;
 
 pub const CHILD_UID: u32 = 1001;
 pub const ARTIFACT_GID: u32 = 1000;
-pub const WORKER_UID: u32 = 1000;
-pub const WORKER_GID: u32 = 1000;
-
+/// Assertion emitted by the trusted worker only after it locally disabled and
+/// re-read its own dumpability state. It is accepted only on an already
+/// authenticated worker connection.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct WorkerIdentity {
-    pub uid: u32,
-    pub gid: u32,
-    pub dumpable: bool,
+pub struct WorkerReadinessAssertion {
+    _private: (),
 }
 
-impl WorkerIdentity {
-    pub fn validate(self) -> Result<(), Error> {
-        (self.uid == WORKER_UID && self.gid == WORKER_GID && !self.dumpable)
-            .then_some(())
-            .ok_or(Error::InvalidWorker)
+/// Injectable worker-local `prctl` seam. Procfs and ptrace access are not
+/// sound oracles for another process's dumpability state.
+pub trait WorkerDumpability {
+    fn set_non_dumpable(&mut self) -> Result<(), Error>;
+    fn get_dumpable(&mut self) -> Result<i32, Error>;
+}
+
+pub struct NativeWorkerDumpability;
+impl WorkerDumpability for NativeWorkerDumpability {
+    fn set_non_dumpable(&mut self) -> Result<(), Error> {
+        if unsafe { libc::prctl(libc::PR_SET_DUMPABLE, 0, 0, 0, 0) } == 0 {
+            Ok(())
+        } else {
+            Err(Error::Io(std::io::Error::last_os_error()))
+        }
+    }
+
+    fn get_dumpable(&mut self) -> Result<i32, Error> {
+        let result = unsafe { libc::prctl(libc::PR_GET_DUMPABLE, 0, 0, 0, 0) };
+        if result < 0 {
+            Err(Error::Io(std::io::Error::last_os_error()))
+        } else {
+            Ok(result)
+        }
     }
 }
 
-/// Injected worker inspection seam, permitting readiness tests without /proc.
-pub trait WorkerInspector {
-    /// Inspect the worker identified by the kernel PID authenticated on the
-    /// broker socket. Implementations must not trust caller-supplied fields.
-    fn worker_identity(&self, pid: u32) -> Result<WorkerIdentity, Error>;
-}
-
-pub struct NativeWorkerInspector;
-impl WorkerInspector for NativeWorkerInspector {
-    fn worker_identity(&self, pid: u32) -> Result<WorkerIdentity, Error> {
-        // UID/GID are kernel-owned procfs fields. Do not accept a
-        // caller-supplied readiness assertion here.
-        let status = std::fs::read_to_string(format!("/proc/{pid}/status"))?;
-        let field = |name| {
-            status
-                .lines()
-                .find_map(|line| line.strip_prefix(name))
-                .and_then(|value| value.split_ascii_whitespace().next())
-                .ok_or(Error::InvalidWorker)
-        };
-        let uid = field("Uid:")?.parse().map_err(|_| Error::InvalidWorker)?;
-        let gid = field("Gid:")?.parse().map_err(|_| Error::InvalidWorker)?;
-        // Linux does not expose PR_GET_DUMPABLE in procfs (CoreDumping is an
-        // in-progress core dump, not the dumpability policy). Opening
-        // /proc/<pid>/mem performs a kernel ptrace-access check. Temporarily
-        // use the required worker fs credentials so this observes policy
-        // instead of relying on root privilege; CAP_SYS_PTRACE would bypass
-        // the policy and therefore rejects readiness fail-closed.
-        let dumpable = worker_mem_accessible(pid, uid, gid)?;
-        Ok(WorkerIdentity { uid, gid, dumpable })
-    }
-}
-
-fn worker_mem_accessible(pid: u32, uid: u32, gid: u32) -> Result<bool, Error> {
-    // linux/capability.h: CAP_SYS_PTRACE is capability 19. libc does not
-    // expose capability-number constants on every supported target.
-    const CAP_SYS_PTRACE: u32 = 19;
-    if has_effective_capability(CAP_SYS_PTRACE)? {
+/// Run this in the worker process before sending readiness to the broker.
+pub fn prepare_worker_readiness(
+    syscalls: &mut impl WorkerDumpability,
+) -> Result<WorkerReadinessAssertion, Error> {
+    syscalls.set_non_dumpable()?;
+    if syscalls.get_dumpable()? != 0 {
         return Err(Error::InvalidWorker);
     }
-    let previous_gid = unsafe { libc::setfsgid(gid) };
-    let previous_uid = unsafe { libc::setfsuid(uid) };
-    // setfs*id reports the prior value rather than errno. Probe the resulting
-    // value before relying on it, then leave the requested value in place for
-    // the access check.
-    let active_gid = unsafe { libc::setfsgid(gid) };
-    let active_uid = unsafe { libc::setfsuid(uid) };
-    if active_uid != uid as libc::c_int || active_gid != gid as libc::c_int {
-        let _ = unsafe { libc::setfsuid(previous_uid as libc::uid_t) };
-        let _ = unsafe { libc::setfsgid(previous_gid as libc::gid_t) };
-        return Err(Error::InvalidWorker);
-    }
-    let opened = std::fs::File::open(format!("/proc/{pid}/mem")).is_ok();
-    // Restoration failures leave the broker with unsafe credentials.
-    let restored_uid = unsafe { libc::setfsuid(previous_uid as libc::uid_t) } == uid as libc::c_int;
-    let restored_gid = unsafe { libc::setfsgid(previous_gid as libc::gid_t) } == gid as libc::c_int;
-    if !restored_uid || !restored_gid {
-        return Err(Error::InvalidWorker);
-    }
-    Ok(opened)
-}
-
-fn has_effective_capability(capability: u32) -> Result<bool, Error> {
-    let header = CapabilityHeader {
-        version: 0x2008_0522,
-        pid: 0,
-    };
-    let mut data = [CapabilityData {
-        effective: 0,
-        permitted: 0,
-        inheritable: 0,
-    }; 2];
-    if unsafe { libc::syscall(libc::SYS_capget, &raw const header, data.as_mut_ptr()) } != 0 {
-        return Err(Error::Io(std::io::Error::last_os_error()));
-    }
-    let word = usize::try_from(capability / 32).map_err(|_| Error::InvalidWorker)?;
-    let bit = capability % 32;
-    Ok(data
-        .get(word)
-        .is_some_and(|capabilities| capabilities.effective & (1 << bit) != 0))
-}
-
-pub fn verify_worker_ready(inspector: &impl WorkerInspector, pid: u32) -> Result<(), Error> {
-    if pid == 0 {
-        return Err(Error::InvalidWorker);
-    }
-    inspector.worker_identity(pid)?.validate()
+    Ok(WorkerReadinessAssertion { _private: () })
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -488,26 +427,65 @@ mod tests {
             ["close:9", "close:10", "close:11", "close:12"]
         );
     }
+    struct Dumpability {
+        set_ok: bool,
+        get_result: Result<i32, Error>,
+        calls: Vec<&'static str>,
+    }
+    impl WorkerDumpability for Dumpability {
+        fn set_non_dumpable(&mut self) -> Result<(), Error> {
+            self.calls.push("set");
+            self.set_ok
+                .then_some(())
+                .ok_or(Error::ChildPreparation("set_dumpable"))
+        }
+        fn get_dumpable(&mut self) -> Result<i32, Error> {
+            self.calls.push("get");
+            self.get_result
+                .as_ref()
+                .copied()
+                .map_err(|_| Error::ChildPreparation("get_dumpable"))
+        }
+    }
+
     #[test]
-    fn dumpable_or_wrongly_owned_worker_and_visible_private_mounts_fail_closed() {
-        assert!(
-            WorkerIdentity {
-                uid: 1000,
-                gid: 1000,
-                dumpable: true
-            }
-            .validate()
-            .is_err()
-        );
-        assert!(
-            WorkerIdentity {
-                uid: 1001,
-                gid: 1000,
-                dumpable: false
-            }
-            .validate()
-            .is_err()
-        );
+    fn worker_readiness_sets_then_locally_confirms_non_dumpability() {
+        let mut dumpability = Dumpability {
+            set_ok: true,
+            get_result: Ok(0),
+            calls: vec![],
+        };
+        assert!(prepare_worker_readiness(&mut dumpability).is_ok());
+        assert_eq!(dumpability.calls, ["set", "get"]);
+    }
+
+    #[test]
+    fn worker_readiness_fails_closed_on_set_get_or_nonzero_result() {
+        let cases = [
+            (false, Ok(0)),
+            (true, Err(Error::InvalidWorker)),
+            (true, Ok(1)),
+        ];
+        for (set_ok, get_result) in cases {
+            let mut dumpability = Dumpability {
+                set_ok,
+                get_result,
+                calls: vec![],
+            };
+            assert!(prepare_worker_readiness(&mut dumpability).is_err());
+            assert_eq!(
+                dumpability.calls,
+                if set_ok {
+                    vec!["set", "get"]
+                } else {
+                    vec!["set"]
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn visible_private_mounts_fail_closed() {
         for mounts in [
             ChildMounts {
                 broker_socket: true,
