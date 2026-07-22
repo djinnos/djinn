@@ -727,6 +727,45 @@ async fn lifecycle_aggregate_uses_shared_evaluator_and_only_reads_durable_state(
             .stale_run_count,
         0
     );
+
+    // Once neither the park nor the completed intent provides liveness
+    // evidence, the same old heartbeat is stale. The phantom-reap metric is
+    // an audit projection and must be counted without changing either row.
+    sqlx::query(
+        "UPDATE refinement_runs SET state = 'running', parked_at = NULL, park_kind = NULL WHERE id = $1",
+    )
+    .bind(&run_id)
+    .execute(db.pool())
+    .await
+    .unwrap();
+    sqlx::query("INSERT INTO proposal_revisions (id, proposal_id, seq, title, body, body_format, acceptance_criteria, edited_by_user_id, event_kind, event_metadata, refinement_run_id, refinement_stop_tag) VALUES ($1, $2, 2, '', '', 'markdown', '[]', NULL, 'refinement_stop', '{}'::jsonb, $3, 'reaped_phantom')")
+        .bind(uuid::Uuid::now_v7().to_string())
+        .bind(&proposal_id)
+        .bind(&run_id)
+        .execute(db.pool())
+        .await
+        .unwrap();
+    let stale_before_read: (String, String) = sqlx::query_as(
+        "SELECT heartbeat_at, updated_at FROM refinement_runs WHERE id = $1",
+    )
+    .bind(&run_id)
+    .fetch_one(db.pool())
+    .await
+    .unwrap();
+    let aggregate = repo
+        .load_refinement_lifecycle_aggregate(&proposal_id, GRACE)
+        .await
+        .unwrap();
+    assert_eq!(aggregate.stale_run_count, 1);
+    assert_eq!(aggregate.reaped_phantom_last_24h, 1);
+    let stale_after_read: (String, String) = sqlx::query_as(
+        "SELECT heartbeat_at, updated_at FROM refinement_runs WHERE id = $1",
+    )
+    .bind(&run_id)
+    .fetch_one(db.pool())
+    .await
+    .unwrap();
+    assert_eq!(stale_before_read, stale_after_read);
 }
 
 #[tokio::test]
