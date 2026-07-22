@@ -208,8 +208,13 @@ async fn concurrent_same_key_admission_has_one_winner_and_first_intent() {
     );
     assert!(matches!(
         (&left, &right),
-        (RefinementAdmissionOutcome::Admitted { .. }, RefinementAdmissionOutcome::Existing { .. })
-            | (RefinementAdmissionOutcome::Existing { .. }, RefinementAdmissionOutcome::Admitted { .. })
+        (
+            RefinementAdmissionOutcome::Admitted { .. },
+            RefinementAdmissionOutcome::Existing { .. }
+        ) | (
+            RefinementAdmissionOutcome::Existing { .. },
+            RefinementAdmissionOutcome::Admitted { .. }
+        )
     ));
     assert_eq!(
         sqlx::query_scalar::<_, i64>(
@@ -254,9 +259,9 @@ async fn concurrent_distinct_reap_admission_has_one_successor_and_audit() {
             Err(RefinementAdmissionError::AlreadyActive { .. }),
             Ok(RefinementAdmissionOutcome::Admitted { run_id, .. }),
         ) => run_id,
-        results => panic!(
-            "expected one admitted successor and one AlreadyActive result, got {results:?}"
-        ),
+        results => {
+            panic!("expected one admitted successor and one AlreadyActive result, got {results:?}")
+        }
     };
     assert_eq!(
         sqlx::query_scalar::<_, i64>(

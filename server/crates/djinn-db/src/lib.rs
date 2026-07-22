@@ -15,8 +15,9 @@ pub mod test_support {
     pub use crate::repositories::test_support::{
         HousekeepingFixture, HousekeepingFixtureExpectedCounts, HousekeepingFixtureProject,
         UsageTestSessionSeed, UsageTestTaskSeed, add_blocker_edge,
-        backdate_coordinator_incarnation_lease, backdate_task_attempt_created_at,
-        backdate_task_updated_at, build_multi_project_housekeeping_fixture, close_task_at,
+        apply_all_migrations_to_fresh_database, backdate_coordinator_incarnation_lease,
+        backdate_task_attempt_created_at, backdate_task_updated_at,
+        build_multi_project_housekeeping_fixture, close_task_at,
         corrupt_credential_encrypted_value, delete_session_row, drop_table_cascade_for_test,
         drop_table_for_test, ensure_doctor_findings_schema, event_bus_for,
         insert_pending_attempt_with_raw_owner, make_coordinator_incarnation_error_after_first_read,
