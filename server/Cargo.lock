@@ -975,6 +975,9 @@ name = "deranged"
 version = "0.5.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7cd812cc2bc1d69d4764bd80df88b4317eaef9e773c75226407d9bc0876b211c"
+dependencies = [
+ "serde_core",
+]
 
 [[package]]
 name = "derivative"
@@ -1841,6 +1844,7 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "unicode-normalization",
+ "workspace-hack",
 ]
 
 [[package]]
@@ -7336,6 +7340,7 @@ dependencies = [
  "hyper-util",
  "indexmap 2.14.0",
  "insta",
+ "libc",
  "libgit2-sys",
  "log",
  "memchr",

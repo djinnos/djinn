@@ -5,16 +5,8 @@
 // delete mutation surface plus target add/remove and the cohesive list/show/
 // target response shaping used by those tools.
 //
-// CRUD/target ownership checklist for task xpj0:
-// - moved here: `proposal_add_target`, `proposal_remove_target`,
-//   `target_models`, `finish_targets`, and `graduated_epic_models`;
-// - already owned here: create/import/export/show/list tools; update/delete/
-//   block-patch moved here from the py7d sibling slice;
-// - tests for the CRUD concern live in `create_tests.rs` so this production
-//   module stays under the Server Size Guard threshold;
-// - intentionally shared in `mod.rs`: composed gate/readiness helpers and
-//   `err_single`/`err_show` response constructors used by later feedback,
-//   signoff, lifecycle, and refinement slices.
+// CRUD tests live in `create_tests.rs`; cross-slice gate/readiness and response
+// helpers remain shared in `mod.rs`.
 //
 // Debate-trail and refinement-status data fetches in `proposal_show`:
 // `proposal_show` fetches the debate trail (`repo.debate_trail`) and refinement
@@ -40,8 +32,7 @@ use crate::tools::proposal_ops::{
     ProposalDebateTrailModel, ProposalDeleteResponse, ProposalEpicModel, ProposalListRow,
     ProposalListSummary, ProposalModel, ProposalRevisionModel, ProposalShowResponse,
     ProposalSignoffModel, ProposalSingleResponse, ProposalTargetModel, ProposalTargetsResponse,
-    apply_revision_body_mode,
-    validate_revision_bodies_value, validate_show_fields,
+    apply_revision_body_mode, validate_revision_bodies_value, validate_show_fields,
 };
 use crate::tools::proposal_readiness::evaluate_proposal_readiness;
 use crate::tools::validation::{
@@ -85,17 +76,20 @@ async fn committed_head_lint(
     // an empty body. Match the complete committed snapshot identity rather
     // than sequence alone so a later refinement event cannot substitute its
     // lightweight history row for the proposal head.
-    let revision = revisions.iter().rev().find(|revision| {
-        revision.seq == proposal.latest_revision_seq
-            && revision.body == proposal.body
-            && revision.body_format == proposal.body_format
-    })
-    .ok_or_else(|| {
-        format!(
-            "committed head revision not found: {}/{} with matching body and format",
-            proposal.id, proposal.latest_revision_seq,
-        )
-    })?;
+    let revision = revisions
+        .iter()
+        .rev()
+        .find(|revision| {
+            revision.seq == proposal.latest_revision_seq
+                && revision.body == proposal.body
+                && revision.body_format == proposal.body_format
+        })
+        .ok_or_else(|| {
+            format!(
+                "committed head revision not found: {}/{} with matching body and format",
+                proposal.id, proposal.latest_revision_seq,
+            )
+        })?;
     repo.lint_for_revision(revision)
         .await
         .map_err(|e| e.to_string())
