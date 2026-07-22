@@ -62,6 +62,12 @@ impl From<sqlx::Error> for RefinementRunSnapshotError {
 
 type SnapshotResult<T> = std::result::Result<T, RefinementRunSnapshotError>;
 
+/// Suffix used to derive the first dispatch intent's idempotency key.
+///
+/// Both the run and intent columns are `VARCHAR(255)`, so admission input must
+/// leave room for this durable child key rather than merely fitting the run.
+const FIRST_INTENT_IDEMPOTENCY_SUFFIX: &str = "/adversary/1";
+
 /// Durable origin for an admission request.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -305,7 +311,8 @@ fn validate_admission(
 ) -> std::result::Result<(), RefinementAdmissionError> {
     if request.proposal_id.trim().is_empty()
         || request.idempotency_key.trim().is_empty()
-        || request.idempotency_key.len() > 255
+        || request.idempotency_key.len()
+            > 255usize.saturating_sub(FIRST_INTENT_IDEMPOTENCY_SUFFIX.len())
         || request.heartbeat_grace_millis < 0
     {
         return Err(RefinementAdmissionError::InvalidRequest(
@@ -421,7 +428,7 @@ async fn insert_admission(
         .execute(&mut **tx)
         .await?;
     let intent_id = uuid::Uuid::now_v7().to_string();
-    sqlx::query("INSERT INTO refinement_dispatch_intents (id, run_id, round, phase, role, idempotency_key) VALUES ($1, $2, 1, 'adversary_attack', 'adversary', $3)").bind(&intent_id).bind(&run_id).bind(format!("{}/adversary/1", request.idempotency_key)).execute(&mut **tx).await?;
+    sqlx::query("INSERT INTO refinement_dispatch_intents (id, run_id, round, phase, role, idempotency_key) VALUES ($1, $2, 1, 'adversary_attack', 'adversary', $3)").bind(&intent_id).bind(&run_id).bind(format!("{}{}", request.idempotency_key, FIRST_INTENT_IDEMPOTENCY_SUFFIX)).execute(&mut **tx).await?;
     Ok(RefinementAdmissionOutcome::Admitted {
         run_id,
         intent_id,
