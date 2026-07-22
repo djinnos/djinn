@@ -141,6 +141,7 @@ impl DjinnMcpServer {
 pub(super) fn err_show(error: impl Into<String>) -> ProposalShowResponse {
     ProposalShowResponse {
         proposal: None,
+        latest_lint: None,
         targets: None,
         feedback: None,
         revisions: None,

@@ -34,6 +34,7 @@ use crate::truncate::smart_truncate;
 use crate::types::*;
 
 use super::proposal_authoring::{committed_latest_lint, proposal_authoring_error};
+use super::proposal_read::call_proposal_show as read_proposal_show;
 
 // ── Task query / show ───────────────────────────────────────────────────────
 
@@ -554,63 +555,7 @@ pub(crate) async fn call_proposal_show(
     ctx: &dyn ExtensionContext,
     arguments: &Option<serde_json::Map<String, serde_json::Value>>,
 ) -> Result<serde_json::Value, String> {
-    let p: ProposalShowParams = parse_args(arguments)?;
-
-    // Validate `fields` if provided.
-    if let Some(ref fields) = p.fields {
-        djinn_control_plane::tools::proposal_ops::validate_show_fields(fields)?;
-    }
-    // Validate `revision_bodies` if provided.
-    if let Some(ref rb) = p.revision_bodies {
-        djinn_control_plane::tools::proposal_ops::validate_revision_bodies_value(rb)?;
-    }
-
-    let field_selected = |name: &str| {
-        p.fields
-            .as_ref()
-            .is_none_or(|f| f.iter().any(|s| s == name))
-    };
-
-    let proposal_repo = ProposalRepository::new(ctx.db(), ctx.event_bus());
-    let Some(proposal) = proposal_repo.resolve(&p.id).await.ok().flatten() else {
-        return Err(format!("proposal not found: {}", p.id));
-    };
-
-    let mut result = serde_json::json!({});
-
-    if field_selected("proposal") {
-        let acceptance: serde_json::Value =
-            serde_json::from_str(&proposal.acceptance_criteria).unwrap_or(serde_json::json!([]));
-        result["id"] = serde_json::json!(proposal.id);
-        result["short_id"] = serde_json::json!(proposal.short_id);
-        result["title"] = serde_json::json!(proposal.title);
-        result["body"] = serde_json::json!(proposal.body);
-        result["status"] = serde_json::json!(proposal.status);
-        result["acceptance_criteria"] = acceptance;
-    }
-
-    if field_selected("targets") {
-        let targets = proposal_repo
-            .targets(&proposal.id)
-            .await
-            .map_err(|e| e.to_string())?;
-        let project_repo = ProjectRepository::new(ctx.db(), ctx.event_bus());
-        let mut target_json = Vec::with_capacity(targets.len());
-        for t in &targets {
-            let slug = match project_repo.get(&t.project_id).await {
-                Ok(Some(proj)) => format!("{}/{}", proj.github_owner, proj.github_repo),
-                _ => t.project_id.clone(),
-            };
-            target_json.push(serde_json::json!({
-                "project_id": t.project_id,
-                "project": slug,
-                "role": t.role,
-            }));
-        }
-        result["targets"] = serde_json::json!(target_json);
-    }
-
-    Ok(result)
+    read_proposal_show(ctx, arguments).await
 }
 
 pub(crate) async fn call_proposal_debate_append(

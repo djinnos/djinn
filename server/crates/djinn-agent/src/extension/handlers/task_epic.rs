@@ -425,7 +425,29 @@ pub(crate) async fn call_proposal_show(
         return Err(format!("proposal not found: {}", p.id));
     };
 
-    let mut result = serde_json::json!({});
+    let revisions_for_head = proposal_repo
+        .revisions(&proposal.id)
+        .await
+        .map_err(|e| e.to_string())?;
+    let head_revision = revisions_for_head
+        .iter()
+        .rev()
+        .find(|revision| {
+            revision.seq == proposal.latest_revision_seq
+                && revision.body == proposal.body
+                && revision.body_format == proposal.body_format
+        })
+        .ok_or_else(|| {
+            format!(
+                "committed revision not found for proposal {}/{}",
+                proposal.id, proposal.latest_revision_seq
+            )
+        })?;
+    let latest_lint = proposal_repo
+        .lint_for_revision(head_revision)
+        .await
+        .map_err(|e| e.to_string())?;
+    let mut result = serde_json::json!({ "latest_lint": latest_lint });
 
     if field_selected("proposal") {
         let acceptance: serde_json::Value =
@@ -436,6 +458,23 @@ pub(crate) async fn call_proposal_show(
         result["body"] = serde_json::json!(proposal.body);
         result["status"] = serde_json::json!(proposal.status);
         result["acceptance_criteria"] = acceptance;
+    }
+
+    if field_selected("revisions") {
+        let mut revisions = Vec::with_capacity(revisions_for_head.len());
+        for revision in &revisions_for_head {
+            let lint = proposal_repo
+                .lint_for_revision(revision)
+                .await
+                .map_err(|e| e.to_string())?;
+            let mut model =
+                djinn_control_plane::tools::proposal_ops::ProposalRevisionModel::from(revision);
+            model.lint = Some(lint);
+            revisions.push(model);
+        }
+        let mode = p.revision_bodies.as_deref().unwrap_or("excerpt");
+        djinn_control_plane::tools::proposal_ops::apply_revision_body_mode(&mut revisions, mode);
+        result["revisions"] = serde_json::to_value(revisions).map_err(|e| e.to_string())?;
     }
 
     if field_selected("targets") {
