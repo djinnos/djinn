@@ -1210,7 +1210,9 @@ mod tests {
         }
     }
 
-    fn v1_snapshot(groups: impl IntoIterator<Item = TaxonomyV1ValidGroupSnapshot>) -> TaxonomyV1RetrievalSnapshot {
+    fn v1_snapshot(
+        groups: impl IntoIterator<Item = TaxonomyV1ValidGroupSnapshot>,
+    ) -> TaxonomyV1RetrievalSnapshot {
         let mut snapshot = TaxonomyV1RetrievalSnapshot::new();
         for group in groups {
             snapshot.insert_valid_group(group);
@@ -1239,18 +1241,34 @@ mod tests {
         ]);
         let zero = resolve_retrieval_zero_result_v1(&snapshot, v1_config());
         assert_eq!(zero.len(), 1, "50 percent equality triggers");
-        assert_eq!(zero[0].entity_ids["finding_key"], "memory.retrieval_zero_result:p1:memory_search");
-        assert_eq!(zero[0].evidence["exact_ratio"], "1/2", "errors are excluded from the denominator");
+        assert_eq!(
+            zero[0].entity_ids["finding_key"],
+            "memory.retrieval_zero_result:p1:memory_search"
+        );
+        assert_eq!(
+            zero[0].evidence["exact_ratio"], "1/2",
+            "errors are excluded from the denominator"
+        );
         let starvation = resolve_injection_starvation_v1(&snapshot, v1_config());
         assert_eq!(starvation.len(), 1);
-        assert_eq!(starvation[0].entity_ids["finding_key"], "memory.injection_starvation:p1:load_knowledge_context");
+        assert_eq!(
+            starvation[0].entity_ids["finding_key"],
+            "memory.injection_starvation:p1:load_knowledge_context"
+        );
     }
 
     #[test]
     fn v1_floor_zero_candidates_and_healthy_groups_do_not_emit() {
         let snapshot = v1_snapshot([
             v1_group("below-floor", "memory_search", 1, 1, 0, 0),
-            v1_group("zero-candidates", LOAD_KNOWLEDGE_CONTEXT_ENTRY_POINT, 2, 0, 0, 0),
+            v1_group(
+                "zero-candidates",
+                LOAD_KNOWLEDGE_CONTEXT_ENTRY_POINT,
+                2,
+                0,
+                0,
+                0,
+            ),
             v1_group("healthy", "memory_search", 2, 0, 2, 0),
         ]);
         assert!(resolve_retrieval_zero_result_v1(&snapshot, v1_config()).is_empty());
@@ -1278,7 +1296,10 @@ mod tests {
         let findings = resolve_injection_starvation_v1(&snapshot, v1_config());
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].evidence["exact_ratio"], "20/20");
-        assert_eq!(findings[0].entity_ids["entry_point"], LOAD_KNOWLEDGE_CONTEXT_ENTRY_POINT);
+        assert_eq!(
+            findings[0].entity_ids["entry_point"],
+            LOAD_KNOWLEDGE_CONTEXT_ENTRY_POINT
+        );
     }
 
     #[test]
@@ -1300,7 +1321,10 @@ mod tests {
             1,
         ));
         assert!(replaced.is_some(), "the group key is unique");
-        assert_eq!(resolve_injection_starvation_v1(&snapshot, v1_config()).len(), 1);
+        assert_eq!(
+            resolve_injection_starvation_v1(&snapshot, v1_config()).len(),
+            1
+        );
         let invalid = TaxonomyV1InvalidGroupSnapshot {
             project_id: "project".into(),
             entry_point: LOAD_KNOWLEDGE_CONTEXT_ENTRY_POINT.into(),
@@ -1338,24 +1362,61 @@ mod tests {
             0,
             "a valid replacement removes invalid state"
         );
-        assert_eq!(resolve_injection_starvation_v1(&snapshot, v1_config()).len(), 1);
+        assert_eq!(
+            resolve_injection_starvation_v1(&snapshot, v1_config()).len(),
+            1
+        );
     }
 
     #[test]
     fn v1_evidence_has_complete_candidate_taxonomy_and_wrappers_are_cheap() {
         let snapshot = v1_snapshot([v1_group("p", "memory_search", 2, 2, 0, 0)]);
-        let finding = resolve_retrieval_zero_result_v1(&snapshot, v1_config()).pop().unwrap();
+        let finding = resolve_retrieval_zero_result_v1(&snapshot, v1_config())
+            .pop()
+            .unwrap();
         let evidence = &finding.evidence;
-        for field in ["project_id", "entry_point", "taxonomy_version", "window", "refreshed_at", "numerator", "denominator", "exact_ratio", "configured_threshold_percent", "configured_query_floor", "configured_window_minutes", "query_counters", "candidate_total", "injected_total", "dispositions", "legacy_unclassified_queries", "invalid_taxonomy_queries"] {
+        for field in [
+            "project_id",
+            "entry_point",
+            "taxonomy_version",
+            "window",
+            "refreshed_at",
+            "numerator",
+            "denominator",
+            "exact_ratio",
+            "configured_threshold_percent",
+            "configured_query_floor",
+            "configured_window_minutes",
+            "query_counters",
+            "candidate_total",
+            "injected_total",
+            "dispositions",
+            "legacy_unclassified_queries",
+            "invalid_taxonomy_queries",
+        ] {
             assert!(!evidence[field].is_null(), "missing {field}");
         }
-        for field in ["confidence_filtered", "not_top_k", "oversized_skipped", "injected", "budget_pruned"] {
-            assert!(!evidence["dispositions"][field].is_null(), "missing disposition {field}");
+        for field in [
+            "confidence_filtered",
+            "not_top_k",
+            "oversized_skipped",
+            "injected",
+            "budget_pruned",
+        ] {
+            assert!(
+                !evidence["dispositions"][field].is_null(),
+                "missing disposition {field}"
+            );
         }
         assert_eq!(evidence["query_counters"]["cancelled_queries"], 1);
         assert_eq!(evidence["dispositions"]["budget_pruned"], 2);
-        assert_eq!(TaxonomyV1RetrievalZeroResultCheck::new(v1_config(), snapshot.clone()).cadence(), DoctorCheckCadence::Cheap);
-        assert_eq!(InjectionStarvationCheck::new(v1_config(), snapshot).cadence(), DoctorCheckCadence::Cheap);
+        assert_eq!(
+            TaxonomyV1RetrievalZeroResultCheck::new(v1_config(), snapshot.clone()).cadence(),
+            DoctorCheckCadence::Cheap
+        );
+        assert_eq!(
+            InjectionStarvationCheck::new(v1_config(), snapshot).cadence(),
+            DoctorCheckCadence::Cheap
+        );
     }
-
 }

@@ -1844,6 +1844,7 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "unicode-normalization",
+ "workspace-hack",
 ]
 
 [[package]]
@@ -7339,6 +7340,7 @@ dependencies = [
  "hyper-util",
  "indexmap 2.14.0",
  "insta",
+ "libc",
  "libgit2-sys",
  "log",
  "memchr",
