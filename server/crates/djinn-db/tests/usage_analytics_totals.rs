@@ -9,6 +9,7 @@
 //! Also includes model-effectiveness regression tests exercising shared-credit
 //! attribution, NULL-cost semantics, and no-inflation of task counts.
 
+use djinn_db::repositories::test_support::seed_test_user;
 use djinn_db::repositories::usage_analytics::GroupDimension;
 use djinn_db::{Database, ModelEffectivenessRow, UsageAnalyticsQuery, UsageAnalyticsRepository};
 
@@ -58,16 +59,17 @@ async fn seed_task(
     close_reason: Option<&str>,
     total_reopen_count: i32,
 ) {
+    let creator = seed_test_user(db).await;
     let short_id = format!("t{}", &task_id[..10.min(task_id.len())]);
     sqlx::query(
         "INSERT INTO tasks \
          (id, project_id, short_id, title, description, design, \
           status, close_reason, \
           total_reopen_count, \
-          labels, acceptance_criteria, memory_refs) \
+          labels, acceptance_criteria, memory_refs, created_by_user_id) \
          VALUES ($1, $2, $3, $4, '', '', \
                  $5, $6, $7, \
-                 '[]'::jsonb, '[]'::jsonb, '[]'::jsonb)",
+                 '[]'::jsonb, '[]'::jsonb, '[]'::jsonb, $8)",
     )
     .bind(task_id)
     .bind(project_id)
@@ -76,6 +78,7 @@ async fn seed_task(
     .bind(status)
     .bind(close_reason)
     .bind(total_reopen_count)
+    .bind(&creator)
     .execute(db.pool())
     .await
     .expect("insert task");
