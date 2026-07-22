@@ -424,14 +424,28 @@ fn inventoried_producers_reach_the_transactional_provenance_boundary() {
         root.join("server/crates/djinn-db/src/repositories/task/writes.rs"),
     )
     .expect("creator provenance boundary source exists");
-    for boundary in ["resolve_effective_creator", "incoming_task_creator"] {
-        let body = extract_function_body(&boundary_source, boundary)
-            .unwrap_or_else(|| panic!("creator provenance boundary must exist: {boundary}"));
-        assert!(
-            body.contains("EFFECTIVE_CREATOR_UNAVAILABLE") && body.contains("Error::InvalidData"),
-            "{boundary} must fail closed with effective_creator_unavailable"
-        );
-    }
+    let resolver = extract_function_body(&boundary_source, "resolve_effective_creator")
+        .expect("creator provenance boundary must exist: resolve_effective_creator");
+    // This is deliberately the terminal expression, rather than a marker
+    // search: explicit-identity validation above also uses this error, but
+    // provenance exhaustion must not fall through to a different failure.
+    assert!(
+        resolver
+            .trim()
+            .ends_with("Err(Error::InvalidData(EFFECTIVE_CREATOR_UNAVAILABLE.to_owned()))\n}"),
+        "resolve_effective_creator must terminate exhausted provenance with effective_creator_unavailable"
+    );
+
+    let incoming = extract_function_body(&boundary_source, "incoming_task_creator")
+        .expect("creator provenance boundary must exist: incoming_task_creator");
+    // Peer sync has only one unavailable outcome. Couple the check to its
+    // final `ok_or_else` failure exit so an unrelated error cannot replace it.
+    assert!(
+        incoming.trim().ends_with(
+            "Error::InvalidData(format!(\n                \"{EFFECTIVE_CREATOR_UNAVAILABLE}: unknown_peer_creator\"\n            ))\n        })\n}"
+        ),
+        "incoming_task_creator must terminate an unknown peer creator with effective_creator_unavailable"
+    );
 
     for writer in writers {
         let path = writer["path"].as_str().expect("writer path");
