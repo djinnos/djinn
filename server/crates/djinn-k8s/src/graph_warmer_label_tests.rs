@@ -77,6 +77,29 @@ fn leased_manifest_is_deterministic_and_closed_until_its_uid_is_authorized() {
         Some("73")
     );
 
+    // Durable request/revision/fencing identities are tracing and inventory
+    // annotations, never labels that could become unbounded metric dimensions.
+    for (where_, labels) in [
+        ("Job metadata", job.metadata.labels.as_ref()),
+        ("Pod-template metadata", template.labels.as_ref()),
+    ] {
+        let labels = labels.expect("bounded metadata labels");
+        for (key, value) in [
+            (ANNOTATION_WARM_REQUEST_ID, identity.warm_request_id.as_str()),
+            (ANNOTATION_GRAPH_REVISION, identity.graph_revision.as_str()),
+            (ANNOTATION_FENCING_TOKEN, "73"),
+        ] {
+            assert!(
+                !labels.contains_key(key),
+                "{where_} must not expose high-cardinality identity key {key} as a label"
+            );
+            assert!(
+                !labels.values().any(|label_value| label_value == value),
+                "{where_} must not expose high-cardinality identity value {value:?} as a label"
+            );
+        }
+    }
+
     let pod = job.spec.as_ref().unwrap().template.spec.as_ref().unwrap();
     let gate = pod
         .init_containers
@@ -97,6 +120,22 @@ fn leased_manifest_is_deterministic_and_closed_until_its_uid_is_authorized() {
         "gate must fence authorization: {script}"
     );
     assert!(script.contains(GATE_AUTHORIZATION_KEY));
+    let bound_uid = gate[0]
+        .env
+        .as_ref()
+        .expect("gate UID environment")
+        .iter()
+        .find(|env| env.name == "DJINN_BOUND_POD_UID")
+        .expect("bound UID environment variable");
+    assert_eq!(
+        bound_uid
+            .value_from
+            .as_ref()
+            .and_then(|source| source.field_ref.as_ref())
+            .map(|field_ref| field_ref.field_path.as_str()),
+        Some("metadata.uid"),
+        "gate authorization must be scoped to the immutable Pod UID, not its reusable name"
+    );
     assert!(pod.containers[0].command.as_ref().unwrap()[2].contains("warm-graph"));
 
     let gate_volume = pod
