@@ -30,6 +30,30 @@ pub enum WarmCandidateKind {
     Pod,
 }
 
+fn list_observation(
+    result: &Result<Vec<WarmCandidateObject>, String>,
+) -> WarmCandidateListObservation {
+    match result {
+        Ok(_) => WarmCandidateListObservation::Observed,
+        Err(error) => WarmCandidateListObservation::ApiError(error.clone()),
+    }
+}
+
+fn inventory_observation(
+    jobs: &WarmCandidateListObservation,
+    pods: &WarmCandidateListObservation,
+) -> WarmInventoryObservation {
+    match (jobs, pods) {
+        (WarmCandidateListObservation::ApiError(error), _) => {
+            WarmInventoryObservation::ApiError(error.clone())
+        }
+        (_, WarmCandidateListObservation::ApiError(error)) => {
+            WarmInventoryObservation::ApiError(error.clone())
+        }
+        _ => WarmInventoryObservation::Observed,
+    }
+}
+
 /// Data obtained from Kubernetes before identity validation.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WarmCandidateObject {
@@ -97,10 +121,24 @@ pub enum WarmInventoryObservation {
     ApiError(String),
 }
 
+/// Outcome of listing a single Kubernetes kind. Keeping these separately
+/// ensures a successful Job observation is retained when, for example, the
+/// independently fallible Pod list times out.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum WarmCandidateListObservation {
+    Observed,
+    ApiError(String),
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WarmCandidateInventory {
+    /// Aggregate status for consumers which only need to know whether every
+    /// list succeeded. Per-kind status and all successfully observed objects
+    /// remain available below for conservative reclamation.
     pub observation: WarmInventoryObservation,
+    pub jobs_observation: WarmCandidateListObservation,
     pub jobs: WarmCandidateSet,
+    pub pods_observation: WarmCandidateListObservation,
     pub pods: WarmCandidateSet,
 }
 
@@ -140,10 +178,15 @@ pub enum CleanupObservation {
 /// for gate activation and the UID-preconditioned delete operation.
 #[async_trait]
 pub trait WarmCandidateClient: Send + Sync {
-    /// Return all warm-labelled Jobs and Pods visible to this namespace.
+    /// Return all warm-labelled Jobs visible to this namespace.
     /// Filtering to one request is deliberately done by the pure inventory
     /// logic, so mismatched annotations and name reuse remain observable.
-    async fn list_warm_objects(&self) -> Result<Vec<WarmCandidateObject>, String>;
+    async fn list_warm_jobs(&self) -> Result<Vec<WarmCandidateObject>, String>;
+
+    /// Return all warm-labelled Pods visible to this namespace. This is a
+    /// separate operation because a failure here must not discard Job evidence
+    /// returned by [`Self::list_warm_jobs`].
+    async fn list_warm_pods(&self) -> Result<Vec<WarmCandidateObject>, String>;
 
     async fn open_gate(
         &self,
@@ -191,12 +234,10 @@ fn api_error(error: kube::Error) -> String {
 
 #[async_trait]
 impl WarmCandidateClient for KubeWarmCandidateClient {
-    async fn list_warm_objects(&self) -> Result<Vec<WarmCandidateObject>, String> {
+    async fn list_warm_jobs(&self) -> Result<Vec<WarmCandidateObject>, String> {
         let params = ListParams::default().labels(&format!("{LABEL_WARM}=true"));
         let jobs: Api<Job> = Api::namespaced(self.client.clone(), &self.namespace);
-        let pods: Api<Pod> = Api::namespaced(self.client.clone(), &self.namespace);
         let jobs = jobs.list(&params).await.map_err(api_error)?;
-        let pods = pods.list(&params).await.map_err(api_error)?;
         Ok(jobs
             .items
             .into_iter()
@@ -208,14 +249,24 @@ impl WarmCandidateClient for KubeWarmCandidateClient {
                     job.metadata.annotations,
                 )
             })
-            .chain(pods.items.into_iter().filter_map(|pod| {
+            .collect())
+    }
+
+    async fn list_warm_pods(&self) -> Result<Vec<WarmCandidateObject>, String> {
+        let params = ListParams::default().labels(&format!("{LABEL_WARM}=true"));
+        let pods: Api<Pod> = Api::namespaced(self.client.clone(), &self.namespace);
+        let pods = pods.list(&params).await.map_err(api_error)?;
+        Ok(pods
+            .items
+            .into_iter()
+            .filter_map(|pod| {
                 candidate_object(
                     WarmCandidateKind::Pod,
                     pod.metadata.name,
                     pod.metadata.uid,
                     pod.metadata.annotations,
                 )
-            }))
+            })
             .collect())
     }
 
@@ -307,18 +358,15 @@ impl<C> WarmCandidateControl<C> {
 
 impl<C: WarmCandidateClient> WarmCandidateControl<C> {
     pub async fn inventory(&self, identity: &LeasedWarmJobIdentity) -> WarmCandidateInventory {
-        let objects = match self.client.list_warm_objects().await {
-            Ok(objects) => objects,
-            Err(error) => {
-                return WarmCandidateInventory {
-                    observation: WarmInventoryObservation::ApiError(error),
-                    jobs: WarmCandidateSet::default(),
-                    pods: WarmCandidateSet::default(),
-                };
-            }
-        };
-        let candidates = objects
+        let jobs_result = self.client.list_warm_jobs().await;
+        let pods_result = self.client.list_warm_pods().await;
+        let jobs_observation = list_observation(&jobs_result);
+        let pods_observation = list_observation(&pods_result);
+        let observation = inventory_observation(&jobs_observation, &pods_observation);
+        let candidates = jobs_result
+            .unwrap_or_default()
             .into_iter()
+            .chain(pods_result.unwrap_or_default())
             .filter(|object| {
                 object.annotations.get(ANNOTATION_WARM_REQUEST_ID)
                     == Some(&identity.warm_request_id)
@@ -345,8 +393,10 @@ impl<C: WarmCandidateClient> WarmCandidateControl<C> {
                 .collect(),
         );
         WarmCandidateInventory {
-            observation: WarmInventoryObservation::Observed,
+            observation,
+            jobs_observation,
             jobs,
+            pods_observation,
             pods,
         }
     }
@@ -421,18 +471,22 @@ mod tests {
     use std::sync::Mutex;
 
     struct Fake {
-        objects: Result<Vec<WarmCandidateObject>, String>,
+        jobs: Result<Vec<WarmCandidateObject>, String>,
+        pods: Result<Vec<WarmCandidateObject>, String>,
         gates: Mutex<Vec<(String, String, String)>>,
         deletes: Mutex<Vec<(String, Option<String>)>>,
+        live_uids: Mutex<BTreeMap<String, String>>,
         gate_result: GateObservation,
         delete_result: CleanupObservation,
     }
     impl Default for Fake {
         fn default() -> Self {
             Self {
-                objects: Ok(Vec::new()),
+                jobs: Ok(Vec::new()),
+                pods: Ok(Vec::new()),
                 gates: Mutex::new(Vec::new()),
                 deletes: Mutex::new(Vec::new()),
+                live_uids: Mutex::new(BTreeMap::new()),
                 gate_result: GateObservation::Unresolved("not configured".into()),
                 delete_result: CleanupObservation::Unresolved("not configured".into()),
             }
@@ -440,8 +494,11 @@ mod tests {
     }
     #[async_trait]
     impl WarmCandidateClient for Fake {
-        async fn list_warm_objects(&self) -> Result<Vec<WarmCandidateObject>, String> {
-            self.objects.clone()
+        async fn list_warm_jobs(&self) -> Result<Vec<WarmCandidateObject>, String> {
+            self.jobs.clone()
+        }
+        async fn list_warm_pods(&self) -> Result<Vec<WarmCandidateObject>, String> {
+            self.pods.clone()
         }
         async fn open_gate(
             &self,
@@ -454,6 +511,15 @@ mod tests {
                 .lock()
                 .unwrap()
                 .push((job.into(), pod.into(), uid.into()));
+            if self
+                .live_uids
+                .lock()
+                .unwrap()
+                .get(pod)
+                .is_some_and(|live_uid| live_uid != uid)
+            {
+                return GateObservation::RejectedUid;
+            }
             self.gate_result.clone()
         }
         async fn delete_uid(&self, candidate: &WarmCandidate) -> CleanupObservation {
@@ -461,6 +527,15 @@ mod tests {
                 .lock()
                 .unwrap()
                 .push((candidate.name.clone(), candidate.uid.clone()));
+            if self
+                .live_uids
+                .lock()
+                .unwrap()
+                .get(&candidate.name)
+                .is_some_and(|live_uid| Some(live_uid.as_str()) != candidate.uid.as_deref())
+            {
+                return CleanupObservation::Unresolved("UID precondition rejected".into());
+            }
             self.delete_result.clone()
         }
     }
@@ -487,21 +562,20 @@ mod tests {
     async fn zero_one_and_duplicate_pods_remain_distinct() {
         let id = identity();
         let zero = WarmCandidateControl::new(Fake {
-            objects: Ok(vec![]),
             ..Default::default()
         })
         .inventory(&id)
         .await;
         assert_eq!(zero.pods.state, WarmCandidateSetState::Zero);
         let one = WarmCandidateControl::new(Fake {
-            objects: Ok(vec![object(WarmCandidateKind::Pod, "pod", Some("p1"))]),
+            pods: Ok(vec![object(WarmCandidateKind::Pod, "pod", Some("p1"))]),
             ..Default::default()
         })
         .inventory(&id)
         .await;
         assert_eq!(one.pods.state, WarmCandidateSetState::One);
         let duplicate = WarmCandidateControl::new(Fake {
-            objects: Ok(vec![
+            pods: Ok(vec![
                 object(WarmCandidateKind::Pod, "pod-a", Some("p1")),
                 object(WarmCandidateKind::Pod, "pod-b", Some("p2")),
             ]),
@@ -520,7 +594,8 @@ mod tests {
             .annotations
             .insert(ANNOTATION_GRAPH_REVISION.into(), "other".into());
         let inventory = WarmCandidateControl::new(Fake {
-            objects: Ok(vec![mismatch, object(WarmCandidateKind::Job, "job", None)]),
+            jobs: Ok(vec![object(WarmCandidateKind::Job, "job", None)]),
+            pods: Ok(vec![mismatch]),
             ..Default::default()
         })
         .inventory(&id)
@@ -533,7 +608,7 @@ mod tests {
     #[tokio::test]
     async fn api_error_is_not_zero_candidates() {
         let inventory = WarmCandidateControl::new(Fake {
-            objects: Err("offline".into()),
+            pods: Err("offline".into()),
             ..Default::default()
         })
         .inventory(&identity())
@@ -545,10 +620,33 @@ mod tests {
         assert_eq!(inventory.pods.state, WarmCandidateSetState::Zero);
     }
     #[tokio::test]
+    async fn pod_list_error_retains_successful_job_evidence() {
+        let inventory = WarmCandidateControl::new(Fake {
+            jobs: Ok(vec![object(WarmCandidateKind::Job, "job", Some("job-1"))]),
+            pods: Err("pod timeout".into()),
+            ..Default::default()
+        })
+        .inventory(&identity())
+        .await;
+        assert_eq!(
+            inventory.observation,
+            WarmInventoryObservation::ApiError("pod timeout".into())
+        );
+        assert_eq!(
+            inventory.jobs_observation,
+            WarmCandidateListObservation::Observed
+        );
+        assert_eq!(
+            inventory.pods_observation,
+            WarmCandidateListObservation::ApiError("pod timeout".into())
+        );
+        assert_eq!(inventory.jobs.candidates[0].uid.as_deref(), Some("job-1"));
+    }
+    #[tokio::test]
     async fn gate_and_delete_are_fenced_to_selected_uid() {
         let id = identity();
         let fake = Fake {
-            objects: Ok(vec![object(
+            pods: Ok(vec![object(
                 WarmCandidateKind::Pod,
                 "same-name",
                 Some("old-uid"),
@@ -579,32 +677,33 @@ mod tests {
     async fn same_name_different_uid_is_not_activated_or_delete_evidence() {
         let id = identity();
         let fake = Fake {
-            objects: Ok(vec![
-                object(WarmCandidateKind::Pod, "same-name", Some("old-uid")),
-                object(WarmCandidateKind::Pod, "same-name", Some("new-uid")),
-            ]),
+            pods: Ok(vec![object(
+                WarmCandidateKind::Pod,
+                "same-name",
+                Some("old-uid"),
+            )]),
+            live_uids: Mutex::new(BTreeMap::from([("same-name".into(), "new-uid".into())])),
             gate_result: GateObservation::Opened,
             delete_result: CleanupObservation::ConfirmedDelete,
             ..Default::default()
         };
         let control = WarmCandidateControl::new(fake);
         let inventory = control.inventory(&id).await;
-        assert_eq!(inventory.pods.state, WarmCandidateSetState::Duplicate);
-        assert!(matches!(
-            control.open_selected_pod_gate(&id, &inventory).await,
-            GateObservation::Unresolved(_)
-        ));
-        assert!(control.client.gates.lock().unwrap().is_empty());
-        // A caller must retain both UIDs; the control layer does not convert a
-        // reused name into a deletion/termination fact.
+        assert_eq!(inventory.pods.state, WarmCandidateSetState::One);
         assert_eq!(
-            inventory
-                .pods
-                .candidates
-                .iter()
-                .map(|c| c.uid.as_deref())
-                .collect::<Vec<_>>(),
-            vec![Some("old-uid"), Some("new-uid")]
+            control.open_selected_pod_gate(&id, &inventory).await,
+            GateObservation::RejectedUid
+        );
+        assert_eq!(control.client.gates.lock().unwrap()[0].2, "old-uid");
+        assert_eq!(
+            control
+                .delete_candidate(inventory.selected_pod().unwrap())
+                .await,
+            CleanupObservation::Unresolved("UID precondition rejected".into())
+        );
+        assert_eq!(
+            control.client.deletes.lock().unwrap()[0],
+            ("same-name".into(), Some("old-uid".into()))
         );
     }
     #[tokio::test]
