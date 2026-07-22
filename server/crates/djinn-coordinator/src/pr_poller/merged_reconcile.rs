@@ -31,8 +31,7 @@ use djinn_provider::github_api::PrState;
 /// blind-spot task into a state from which `PrMerge` can terminalize it. Names
 /// the reconciliation so the audit trail shows WHY the task closed outside the
 /// normal poller merge path.
-const RECONCILE_MERGE_REASON: &str =
-    "reconciled: PR merged while task was outside PR-poller-owned statuses \
+const RECONCILE_MERGE_REASON: &str = "reconciled: PR merged while task was outside PR-poller-owned statuses \
      (blind-spot merged-PR reconciliation)";
 
 /// The action the reconciliation pass takes for a blind-spot task, decided
@@ -293,16 +292,54 @@ mod tests {
         let db = Database::open_in_memory().unwrap();
         let bus = EventBus::noop();
         let epic_repo = EpicRepository::new(db.clone(), bus.clone());
-        let epic = epic_repo.create("recon epic", "", "", "", "", None).await.unwrap();
+        let epic = epic_repo
+            .create("recon epic", "", "", "", "", None)
+            .await
+            .unwrap();
         let repo = TaskRepository::new(db.clone(), bus);
 
         // Blind-spot tasks with a PR — must be returned.
-        let open = seed_task(&repo, &epic.id, "open+pr", "open", Some("https://github.com/acme/repo/pull/1")).await;
-        let in_progress = seed_task(&repo, &epic.id, "inprog+pr", "in_progress", Some("https://github.com/acme/repo/pull/2")).await;
-        let ntr = seed_task(&repo, &epic.id, "ntr+pr", "needs_task_review", Some("https://github.com/acme/repo/pull/3")).await;
+        let open = seed_task(
+            &repo,
+            &epic.id,
+            "open+pr",
+            "open",
+            Some("https://github.com/acme/repo/pull/1"),
+        )
+        .await;
+        let in_progress = seed_task(
+            &repo,
+            &epic.id,
+            "inprog+pr",
+            "in_progress",
+            Some("https://github.com/acme/repo/pull/2"),
+        )
+        .await;
+        let ntr = seed_task(
+            &repo,
+            &epic.id,
+            "ntr+pr",
+            "needs_task_review",
+            Some("https://github.com/acme/repo/pull/3"),
+        )
+        .await;
         // Poller-owned statuses — the pr_draft/pr_review loops own these.
-        let _draft = seed_task(&repo, &epic.id, "draft+pr", "pr_draft", Some("https://github.com/acme/repo/pull/4")).await;
-        let _review = seed_task(&repo, &epic.id, "review+pr", "pr_review", Some("https://github.com/acme/repo/pull/5")).await;
+        let _draft = seed_task(
+            &repo,
+            &epic.id,
+            "draft+pr",
+            "pr_draft",
+            Some("https://github.com/acme/repo/pull/4"),
+        )
+        .await;
+        let _review = seed_task(
+            &repo,
+            &epic.id,
+            "review+pr",
+            "pr_review",
+            Some("https://github.com/acme/repo/pull/5"),
+        )
+        .await;
         // Blind-spot status but no PR reference — nothing to reconcile.
         let _open_noprl = seed_task(&repo, &epic.id, "open+noprl", "open", None).await;
 
@@ -337,7 +374,10 @@ mod tests {
         let db = Database::open_in_memory().unwrap();
         let bus = EventBus::noop();
         let epic_repo = EpicRepository::new(db.clone(), bus.clone());
-        let epic = epic_repo.create("recon epic", "", "", "", "", None).await.unwrap();
+        let epic = epic_repo
+            .create("recon epic", "", "", "", "", None)
+            .await
+            .unwrap();
         let repo = TaskRepository::new(db.clone(), bus);
 
         let task = seed_task(
@@ -375,7 +415,9 @@ mod tests {
         )
         .await
         .unwrap();
-        repo.set_merge_commit_sha(&task.id, "cafef00d").await.unwrap();
+        repo.set_merge_commit_sha(&task.id, "cafef00d")
+            .await
+            .unwrap();
         let closed = repo
             .transition(
                 &task.id,
