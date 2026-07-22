@@ -9090,16 +9090,11 @@ expression: signatures
             "total_queries": {
               "format": "int64",
               "type": "integer"
-            },
-            "zero_result_queries": {
-              "format": "int64",
-              "type": "integer"
             }
           },
           "required": [
             "entry_point",
             "total_queries",
-            "zero_result_queries",
             "error_queries",
             "candidate_count",
             "injected_count",
@@ -9136,6 +9131,20 @@ expression: signatures
                 "null"
               ]
             },
+            "groups": {
+              "description": "Independently keyed bounded taxonomy-v1 repository evidence. Empty for\nthe separately-labelled process compatibility scope.",
+              "items": {
+                "$ref": "#/$defs/TaxonomyV1RetrievalHealthSummary"
+              },
+              "type": "array"
+            },
+            "process_summaries": {
+              "description": "Process-local compatibility telemetry, not persisted/versioned truth.",
+              "items": {
+                "$ref": "#/$defs/RetrievalEntryPointHealthSummary"
+              },
+              "type": "array"
+            },
             "started_at": {
               "description": "Process construction time; only applicable to the process scope.",
               "type": [
@@ -9145,13 +9154,6 @@ expression: signatures
             },
             "status": {
               "type": "string"
-            },
-            "summaries": {
-              "description": "Fixed, bounded entry-point evidence (four workload entry points).",
-              "items": {
-                "$ref": "#/$defs/RetrievalEntryPointHealthSummary"
-              },
-              "type": "array"
             },
             "window_end": {
               "type": [
@@ -9169,7 +9171,24 @@ expression: signatures
           },
           "required": [
             "status",
-            "summaries"
+            "groups",
+            "process_summaries"
+          ],
+          "type": "object"
+        },
+        "RetrievalTaxonomyValidationErrorSummary": {
+          "description": "Structured validation telemetry from an invalid taxonomy-v1 terminal.",
+          "properties": {
+            "reason": {
+              "type": "string"
+            },
+            "trace_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "trace_id",
+            "reason"
           ],
           "type": "object"
         },
@@ -9187,6 +9206,150 @@ expression: signatures
           "required": [
             "folder",
             "count"
+          ],
+          "type": "object"
+        },
+        "TaxonomyV1DispositionSummary": {
+          "description": "Complete candidate-disposition partition for successful taxonomy-v1 queries.",
+          "properties": {
+            "budget_pruned_total": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "confidence_filtered_total": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "injected_total": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "not_top_k_total": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "oversized_skipped_total": {
+              "format": "int64",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "confidence_filtered_total",
+            "not_top_k_total",
+            "oversized_skipped_total",
+            "injected_total",
+            "budget_pruned_total"
+          ],
+          "type": "object"
+        },
+        "TaxonomyV1RetrievalHealthSummary": {
+          "description": "Authoritative, independently keyed taxonomy-v1 retrieval group.\n\nVersioned counters exclude legacy and malformed terminals. Those exclusions\nand validation telemetry remain visible on this group rather than being\npooled or inferred from legacy candidate payloads.",
+          "properties": {
+            "candidate_bearing_queries": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "candidate_total": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "dispositions": {
+              "$ref": "#/$defs/TaxonomyV1DispositionSummary"
+            },
+            "entry_point": {
+              "type": "string"
+            },
+            "errored_queries": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "injected_queries": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "injected_total": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "invalid": {
+              "type": "boolean"
+            },
+            "invalid_taxonomy_queries": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "legacy_unclassified_queries": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "project_id": {
+              "type": "string"
+            },
+            "refreshed_at": {
+              "type": "string"
+            },
+            "starved_queries": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "successful_queries": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "taxonomy_version": {
+              "format": "int32",
+              "type": "integer"
+            },
+            "total_queries": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "validation_errors": {
+              "items": {
+                "$ref": "#/$defs/RetrievalTaxonomyValidationErrorSummary"
+              },
+              "type": "array"
+            },
+            "window_end": {
+              "description": "Exclusive end of the exact persisted half-open window.",
+              "type": "string"
+            },
+            "window_start": {
+              "description": "Inclusive start of the exact persisted half-open window.",
+              "type": "string"
+            },
+            "zero_candidate_queries": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "zero_result_queries": {
+              "description": "Deprecated compatibility alias for `zero_candidate_queries`.\nIt has identical zero-candidate semantics and never means zero injected results.",
+              "format": "int64",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "project_id",
+            "entry_point",
+            "taxonomy_version",
+            "window_start",
+            "window_end",
+            "refreshed_at",
+            "invalid",
+            "total_queries",
+            "successful_queries",
+            "errored_queries",
+            "zero_candidate_queries",
+            "zero_result_queries",
+            "candidate_bearing_queries",
+            "starved_queries",
+            "injected_queries",
+            "candidate_total",
+            "injected_total",
+            "dispositions",
+            "legacy_unclassified_queries",
+            "invalid_taxonomy_queries",
+            "validation_errors"
           ],
           "type": "object"
         }

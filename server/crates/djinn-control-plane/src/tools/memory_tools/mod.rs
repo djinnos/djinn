@@ -50,6 +50,8 @@ mod embedding_precedence_tests;
 #[cfg(test)]
 mod entity_types_tests;
 #[cfg(test)]
+mod ops_test_support;
+#[cfg(test)]
 mod ops_tests;
 #[cfg(test)]
 mod recall_trace_tests;
