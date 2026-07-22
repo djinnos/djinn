@@ -59,6 +59,26 @@ const ORPHANED_PENDING_ATTEMPT_THRESHOLD_SECS: i64 = 5 * 60;
 /// get mis-stamped `crashed`. The two thresholds feed different predicates.
 const STARTUP_ORPHANED_PENDING_ATTEMPT_AGE_THRESHOLD_SECS: i64 = 10;
 
+/// How often the live coordinator renews its immutable incarnation lease.
+///
+/// MUST stay comfortably below [`ORPHANED_PENDING_ATTEMPT_THRESHOLD_SECS`] (the
+/// 5-minute owner-lease liveness window). The orphan reaper reads an incarnation
+/// as "expired" once its `last_renewed_at` is older than that threshold and then
+/// reaps the *live* coordinator's OWN pending dispatch groups, mis-stamping them
+/// `interrupted` / `environmental_owner_expired` — a **strike-exempt** outcome
+/// (see `dispatch::retry::latest_attempt_strike_decision`). A genuinely-failing
+/// task whose reaps are all strike-exempt never accumulates a strike, so it never
+/// routes to Planner intervention and loops dispatch→reap forever.
+///
+/// Renewal previously piggy-backed on the 15-minute [`STALE_SWEEP_INTERVAL`]
+/// inside the coordinator tick, so the live owner's lease was always ~15 min
+/// stale (>5 min) at reap time — the whole board's periodic reaps mis-classified
+/// as environmental. Renewing every 60s from a dedicated task (never the mailbox
+/// / tick path, which a slow tick or the heavy stale sweep can starve) keeps a 5x
+/// margin under the expiry window so the live owner reads truthfully live.
+pub(super) const COORDINATOR_INCARNATION_RENEWAL_INTERVAL: std::time::Duration =
+    std::time::Duration::from_secs(60);
+
 pub(super) async fn renew_coordinator_incarnation(db: &djinn_db::Database, incarnation_id: &str) {
     let repository = djinn_db::CoordinatorIncarnationRepository::new(db.clone());
     match repository.renew(incarnation_id).await {
@@ -1124,6 +1144,30 @@ mod cargo_cache_health_tests {
         let age =
             compute_warm_base_age_secs(Path::new("/nonexistent/path/xyz"), 1_700_000_000).await;
         assert!(age.is_none());
+    }
+
+    // ── Incarnation-lease renewal cadence invariant ─────────────────────
+
+    /// The live coordinator must renew its incarnation lease well within the
+    /// orphan reaper's owner-lease liveness window. If renewal ever lags the
+    /// window, the reaper reads this live coordinator as "expired" and reaps its
+    /// own in-flight dispatches as strike-exempt `environmental_owner_expired`,
+    /// letting a genuinely-failing task loop dispatch→reap forever (the
+    /// 2026-07-22 k6hm incident: renewal was on the 15-min stale sweep while the
+    /// window is 5 min). Guard the invariant with a generous 2x safety margin.
+    #[test]
+    fn incarnation_renewal_interval_is_safely_below_orphan_expiry() {
+        let renewal_secs = COORDINATOR_INCARNATION_RENEWAL_INTERVAL.as_secs() as i64;
+        assert!(
+            renewal_secs > 0,
+            "renewal interval must be positive; got {renewal_secs}s"
+        );
+        assert!(
+            renewal_secs * 2 <= ORPHANED_PENDING_ATTEMPT_THRESHOLD_SECS,
+            "incarnation renewal ({renewal_secs}s) must renew at least twice within the \
+             orphan-expiry window ({ORPHANED_PENDING_ATTEMPT_THRESHOLD_SECS}s) so the live \
+             owner never reads expired between renewals"
+        );
     }
 
     // ── Hit-rate aggregation ────────────────────────────────────────────

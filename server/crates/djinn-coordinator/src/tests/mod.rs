@@ -1434,3 +1434,6 @@ mod tripwire_planner_escalation;
 
 #[cfg(test)]
 mod escalation_ceiling;
+
+#[cfg(test)]
+mod incarnation_lease_liveness;
