@@ -40,6 +40,12 @@ use crate::direct_services::DirectServices;
 use crate::supervisor_impl::SupervisorCallbackContext;
 use djinn_provider::provider::LlmProvider;
 
+/// Re-export the billing-signal deriver so the in-Pod worker
+/// (`djinn-agent-worker`) can classify a session's `cost_basis` from the
+/// Secret-mounted credential kind — the worker never runs the host's
+/// `resolve_model_and_credential`.
+pub use crate::supervisor_impl::stage::derive_billing_signal;
+
 /// Build a `SupervisorServices` pre-wired with the in-tree `djinn-agent`
 /// lifecycle bodies.
 ///
@@ -94,12 +100,17 @@ pub async fn worker_execute_stage(
     agent_context: AgentContext,
     cancel: CancellationToken,
     provider: Arc<dyn LlmProvider>,
+    billing_signal: Option<(
+        djinn_supervisor::services::CostBasisHint,
+        djinn_supervisor::services::BillingSource,
+    )>,
     services: &dyn SupervisorServices,
 ) -> Result<djinn_supervisor::StageOutcome, djinn_supervisor::StageError> {
     let callbacks = SupervisorCallbackContext {
         agent_context,
         cancel,
         provider_override: Some(provider),
+        billing_signal,
     };
     crate::supervisor_impl::execute_stage(
         task,
