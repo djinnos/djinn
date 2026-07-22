@@ -1163,12 +1163,40 @@ pub struct NeedsEvidenceDemandResponse {
 
 #[cfg(test)]
 mod lint_response_compat_tests {
-    use super::ProposalShowResponse;
+    use super::{ProposalRevisionModel, ProposalShowResponse};
 
     #[test]
-    fn show_response_without_additive_lint_fields_deserializes() {
-        let response: ProposalShowResponse = serde_json::from_value(serde_json::json!({})).unwrap();
+    fn legacy_show_and_revision_without_additive_lint_fields_round_trip() {
+        let legacy = serde_json::json!({
+            "proposal": null,
+            "revisions": [{
+                "id": "revision-1",
+                "seq": 1,
+                "title": "Legacy revision",
+                "body_format": "markdown",
+                "acceptance_criteria": [],
+                "event_kind": "spec_revision",
+                "created_at": "2026-01-01T00:00:00Z"
+            }]
+        });
+        let response: ProposalShowResponse = serde_json::from_value(legacy).unwrap();
         assert!(response.latest_lint.is_none());
-        assert!(response.revisions.is_none());
+        let revision = response.revisions.as_ref().unwrap().first().unwrap();
+        assert!(revision.lint.is_none());
+
+        // Old clients/fixtures can serialize the current models without
+        // receiving additive fields they did not send or understand.
+        let serialized = serde_json::to_value(&response).unwrap();
+        assert!(serialized.get("latest_lint").is_none());
+        assert!(serialized["revisions"][0].get("lint").is_none());
+
+        let revision: ProposalRevisionModel = serde_json::from_value(serde_json::json!({
+            "id": "revision-2", "seq": 2, "title": "Legacy",
+            "body_format": "markdown", "acceptance_criteria": [],
+            "event_kind": "spec_revision", "created_at": "2026-01-01T00:00:00Z"
+        }))
+        .unwrap();
+        assert!(revision.lint.is_none());
+        assert!(serde_json::to_value(revision).unwrap().get("lint").is_none());
     }
 }

@@ -81,16 +81,21 @@ async fn committed_head_lint(
         .revisions(&proposal.id)
         .await
         .map_err(|e| e.to_string())?;
-    let revision = revisions
-        .iter()
-        .rev()
-        .find(|revision| revision.seq == proposal.latest_revision_seq)
-        .ok_or_else(|| {
-            format!(
-                "committed head revision not found: {}/{}",
-                proposal.id, proposal.latest_revision_seq
-            )
-        })?;
+    // Lifecycle rows retain the material head's sequence but deliberately use
+    // an empty body. Match the complete committed snapshot identity rather
+    // than sequence alone so a later refinement event cannot substitute its
+    // lightweight history row for the proposal head.
+    let revision = revisions.iter().rev().find(|revision| {
+        revision.seq == proposal.latest_revision_seq
+            && revision.body == proposal.body
+            && revision.body_format == proposal.body_format
+    })
+    .ok_or_else(|| {
+        format!(
+            "committed head revision not found: {}/{} with matching body and format",
+            proposal.id, proposal.latest_revision_seq,
+        )
+    })?;
     repo.lint_for_revision(revision)
         .await
         .map_err(|e| e.to_string())
