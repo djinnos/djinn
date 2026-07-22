@@ -269,6 +269,45 @@ pub async fn compact_conversation_with_pointers(
     context_window: i64,
     pointers: &[ToolOutputPointer],
 ) -> bool {
+    compact_conversation_with_pointers_outcome(
+        provider,
+        conversation,
+        session_id,
+        task_id,
+        ctx,
+        context_window,
+        pointers,
+    )
+    .await
+    .compacted()
+}
+
+/// Result of a compaction attempt, preserving deterministic fallback mode for
+/// callers that persist a separate fallback boundary.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CompactionOutcome {
+    NotCompacted,
+    Compacted,
+    Fallback,
+}
+
+impl CompactionOutcome {
+    pub fn compacted(self) -> bool {
+        !matches!(self, Self::NotCompacted)
+    }
+}
+
+/// Like [`compact_conversation_with_pointers`], but reports whether the
+/// deterministic truncation fallback performed the replacement.
+pub async fn compact_conversation_with_pointers_outcome(
+    provider: &dyn LlmProvider,
+    conversation: &mut Conversation,
+    session_id: &str,
+    task_id: &str,
+    ctx: CompactionContext,
+    context_window: i64,
+    pointers: &[ToolOutputPointer],
+) -> CompactionOutcome {
     // NOTE: the conversation is already persisted incrementally by the reply
     // loop (`persist_session_message` per assistant/tool-result turn), so we no
     // longer batch-insert the full history here — doing so would duplicate
@@ -311,7 +350,7 @@ pub async fn compact_conversation_with_pointers(
                 session_id = %session_id,
                 "compaction: microcompaction sufficient, skipping LLM compaction"
             );
-            return true;
+            return CompactionOutcome::Compacted;
         }
     }
 
@@ -332,7 +371,7 @@ pub async fn compact_conversation_with_pointers(
                 session_id = %session_id,
                 "compaction: partial compaction succeeded"
             );
-            return true;
+            return CompactionOutcome::Compacted;
         }
         Ok(false) => {
             tracing::debug!(
@@ -369,7 +408,7 @@ pub async fn compact_conversation_with_pointers(
                 context = ?ctx,
                 "compaction: conversation compacted successfully"
             );
-            true
+            CompactionOutcome::Compacted
         }
         Err(e) => {
             tracing::warn!(
@@ -390,11 +429,11 @@ pub async fn compact_conversation_with_pointers(
                         new_message_count = conversation.messages.len(),
                         "compaction: deterministic truncation applied"
                     );
-                    return true;
+                    return CompactionOutcome::Fallback;
                 }
             }
 
-            false
+            CompactionOutcome::NotCompacted
         }
     }
 }

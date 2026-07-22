@@ -228,7 +228,9 @@ fn classify_provider_failure(err: &anyhow::Error) -> Option<ProviderFailureClass
         // transient blip is absorbed while a model that dies on EVERY dispatch
         // (the kimi-for-coding/k2p7 incident: instant Transport death, 0 tokens,
         // re-dispatched forever, absent from model_health) finally auto-disables.
-        ProviderError::Transport => Some(ProviderFailureClass::Failure),
+        ProviderError::Transport | ProviderError::ExhaustedTransport(_) => {
+            Some(ProviderFailureClass::Failure)
+        }
         // ContextOverflow is handled by reactive compaction (the conversation is
         // too big), not a model-health problem — stays `None` so the breaker
         // doesn't demote a healthy model.
@@ -1035,6 +1037,7 @@ pub(crate) async fn execute_stage(
         arbiter_directive: arbiter_directive.as_deref(),
         mcp_server_instructions: &mcp_server_instructions,
         extension_diagnostics: &extension_diagnostics,
+        cancellation: Some(&callbacks.cancel),
         memory_intent_planner: Some(MemoryIntentPlannerInvocation {
             config: &agent_context.memory_intent_planner,
             host: &planner_host,

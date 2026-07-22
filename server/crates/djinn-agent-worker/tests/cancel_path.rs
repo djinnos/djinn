@@ -90,6 +90,12 @@ fn fixture_task(task_id: &str, project_id: &str) -> Task {
         ci_mq_first_seen_at: None,
         ci_mq_last_seen_at: None,
         unresolved_blocker_count: 0,
+            refinement_run_id: None,
+            refinement_intent_id: None,
+            refinement_generation: None,
+            refinement_round: None,
+            refinement_phase: None,
+            refinement_role: None,
     }
 }
 
@@ -377,6 +383,29 @@ async fn start_fake_server(
                                 ),
                             })
                         }
+                        // Lease-v1 calls are outside this fixture, but the raw-wire
+                        // dispatcher must remain exhaustive for appended variants.
+                        ServiceRpcRequest::QueueLease { .. } => ServiceRpcResponse::QueueLease(
+                            djinn_supervisor::services::LeaseResult::LeaseUnavailable,
+                        ),
+                        ServiceRpcRequest::GrantLease { .. } => ServiceRpcResponse::GrantLease(
+                            djinn_supervisor::services::LeaseResult::LeaseUnavailable,
+                        ),
+                        ServiceRpcRequest::LeaseStatus { .. } => ServiceRpcResponse::LeaseStatus(
+                            djinn_supervisor::services::LeaseResult::LeaseUnavailable,
+                        ),
+                        ServiceRpcRequest::AbandonLease { .. } => ServiceRpcResponse::AbandonLease(
+                            djinn_supervisor::services::LeaseResult::LeaseUnavailable,
+                        ),
+                        ServiceRpcRequest::BindLeasePod { .. } => ServiceRpcResponse::BindLeasePod(
+                            djinn_supervisor::services::LeaseResult::LeaseUnavailable,
+                        ),
+                        ServiceRpcRequest::CancelLease { .. } => ServiceRpcResponse::CancelLease(
+                            djinn_supervisor::services::LeaseResult::LeaseUnavailable,
+                        ),
+                        ServiceRpcRequest::ReleaseLease { .. } => ServiceRpcResponse::ReleaseLease(
+                            djinn_supervisor::services::LeaseResult::LeaseUnavailable,
+                        ),
                     };
                     let reply = Frame {
                         correlation_id,

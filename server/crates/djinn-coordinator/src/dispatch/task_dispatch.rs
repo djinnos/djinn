@@ -1051,6 +1051,51 @@ impl CoordinatorActor {
         .await;
     }
 
+    /// Clear dispatch state and surface persistence failures to callers that
+    /// cannot safely claim completion without a durable clear.
+    pub(crate) async fn try_clear_durable_dispatch_backoff_state(
+        &self,
+        task_id: &str,
+        task_short_id: Option<&str>,
+        reason: &str,
+    ) -> std::result::Result<(), String> {
+        let repo = DispatchStateRepository::new(self.db.clone());
+        let escalation_count = match repo.get(task_id).await {
+            Ok(existing) => existing.map(|state| state.escalation_count).unwrap_or(0),
+            Err(e) => {
+                tracing::warn!(
+                    task_id = task_short_id.unwrap_or(task_id),
+                    task_uuid = %task_id,
+                    reason,
+                    error = %e,
+                    "CoordinatorActor: failed to load durable dispatch state before terminal handoff clear"
+                );
+                return Err(e.to_string());
+            }
+        };
+        repo.upsert(DispatchStateUpsert {
+            task_id,
+            failure_streak: 0,
+            cooldown_until: None,
+            escalation_count,
+            last_dispatched_at: None,
+            last_dispatched_role: None,
+            inflight_creator_user_id: None,
+            inflight_model_id: None,
+        })
+        .await
+        .map_err(|e| {
+            tracing::warn!(
+                task_id = task_short_id.unwrap_or(task_id),
+                task_uuid = %task_id,
+                reason,
+                error = %e,
+                "CoordinatorActor: failed to persist durable dispatch state terminal handoff clear"
+            );
+            e.to_string()
+        })
+    }
+
     pub(crate) async fn clear_planned_dispatch_completion(&mut self, task_id: &str, reason: &str) {
         // Planned lifecycle completions (including budget parks and ignored
         // wind-down parks) are successful settlements, not same-role dispatch
@@ -3092,6 +3137,12 @@ mod inflight_ledger_tests {
             ci_mq_first_seen_at: None,
             ci_mq_last_seen_at: None,
             unresolved_blocker_count: 0,
+            refinement_run_id: None,
+            refinement_intent_id: None,
+            refinement_generation: None,
+            refinement_round: None,
+            refinement_phase: None,
+            refinement_role: None,
         }
     }
 
@@ -3448,6 +3499,7 @@ mod inflight_ledger_tests {
             tick: tokio::time::interval(STUCK_INTERVAL),
             db: db.clone(),
             coordinator_incarnation_id: uuid::Uuid::now_v7().to_string(),
+            boot_at: ::time::OffsetDateTime::now_utc(),
             events_tx: events_tx.clone(),
             pool: controlled_runtime.spawn_pool(db, cancel, max_slots),
             build_admission: None,
@@ -4806,6 +4858,7 @@ mod failover_chain_tests {
             tick: tokio::time::interval(std::time::Duration::from_secs(60)),
             db: db.clone(),
             coordinator_incarnation_id: uuid::Uuid::now_v7().to_string(),
+            boot_at: ::time::OffsetDateTime::now_utc(),
             events_tx: events_tx.clone(),
             pool: pool.clone(),
             build_admission: None,
@@ -5883,6 +5936,12 @@ mod failover_chain_tests {
             ci_mq_first_seen_at: None,
             ci_mq_last_seen_at: None,
             unresolved_blocker_count: 0,
+            refinement_run_id: None,
+            refinement_intent_id: None,
+            refinement_generation: None,
+            refinement_round: None,
+            refinement_phase: None,
+            refinement_role: None,
         };
 
         let attempted_models: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
@@ -6077,6 +6136,12 @@ mod failover_chain_tests {
             ci_mq_first_seen_at: None,
             ci_mq_last_seen_at: None,
             unresolved_blocker_count: 0,
+            refinement_run_id: None,
+            refinement_intent_id: None,
+            refinement_generation: None,
+            refinement_round: None,
+            refinement_phase: None,
+            refinement_role: None,
         };
 
         // Run 2 chain exhaustions — breaker threshold is 3, so breaker should
@@ -6639,6 +6704,12 @@ mod failover_chain_tests {
             ci_mq_first_seen_at: None,
             ci_mq_last_seen_at: None,
             unresolved_blocker_count: 0,
+            refinement_run_id: None,
+            refinement_intent_id: None,
+            refinement_generation: None,
+            refinement_round: None,
+            refinement_phase: None,
+            refinement_role: None,
         };
 
         // ── Step 1: Two model-a failures, each rescued by model-b ─────────
@@ -7311,6 +7382,7 @@ mod monitored_reopen_no_eligible_model_tests {
             tick: tokio::time::interval(std::time::Duration::from_secs(60)),
             db: db.clone(),
             coordinator_incarnation_id: uuid::Uuid::now_v7().to_string(),
+            boot_at: ::time::OffsetDateTime::now_utc(),
             events_tx: events_tx.clone(),
             pool,
             build_admission: None,
@@ -7888,6 +7960,7 @@ mod build_admission_route_tests {
             tick: tokio::time::interval(STUCK_INTERVAL),
             db: db.clone(),
             coordinator_incarnation_id: uuid::Uuid::now_v7().to_string(),
+            boot_at: ::time::OffsetDateTime::now_utc(),
             events_tx: events_tx.clone(),
             pool: runtime.spawn_pool(db, cancel, max_slots),
             build_admission: None,

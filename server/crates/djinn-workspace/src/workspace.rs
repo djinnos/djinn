@@ -434,6 +434,32 @@ impl Workspace {
             .map(|_| ())
     }
 
+    /// Seed the workspace-local git identity (`user.name` + `user.email`).
+    ///
+    /// The programmatic commit paths ([`Workspace::commit`], the worker
+    /// checkpoint, the supervisor's proactive-sync merge) all pass identity
+    /// explicitly via `GIT_AUTHOR_*` / `GIT_COMMITTER_*` env, so they are
+    /// authored correctly regardless of repo config. But the in-pod agent runs
+    /// RAW `git` (e.g. `git merge <sha>`) via its shell tool against this SAME
+    /// workspace, and those commits pick up whatever identity the pod happens
+    /// to carry — a generic default like `Djinn Agent <djinn@djinn.task>` —
+    /// which fails a repo's CLA check and hard-blocks the PR.
+    ///
+    /// Writing the resolved task-creator identity into the workspace-LOCAL
+    /// config (`git config user.*`, never `--global`) makes EVERY commit —
+    /// programmatic or raw-shell — author as the task creator. The config is
+    /// scoped to this ephemeral clone and discarded when it is torn down.
+    pub async fn set_identity(
+        &self,
+        identity: GitIdentity<'_>,
+    ) -> Result<(), EphemeralWorkspaceError> {
+        self.run_git(&["config", "user.name", identity.name], &[])
+            .await?;
+        self.run_git(&["config", "user.email", identity.email], &[])
+            .await?;
+        Ok(())
+    }
+
     /// Move HEAD to `ref_selector` in detached mode WITHOUT advancing any
     /// branch ref. Used by the resume-via-git worktree-setup path to land the
     /// workspace on a chosen checkpoint SHA / alternate checkpoint ref while
@@ -1209,6 +1235,64 @@ mod tests {
         git(pp, &["add", "-A"]);
         git(pp, &["commit", "-m", msg]);
         git(pp, &["push", "origin", "main"]);
+    }
+
+    /// Run `git <args>` in `dir` WITHOUT seeding any author identity in the
+    /// environment, so the repo's own config is the only identity source —
+    /// mirroring how the in-pod agent's raw shell `git` runs.
+    fn git_no_identity(dir: &Path, args: &[&str]) -> std::process::Output {
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .env_remove("GIT_AUTHOR_NAME")
+            .env_remove("GIT_AUTHOR_EMAIL")
+            .env_remove("GIT_COMMITTER_NAME")
+            .env_remove("GIT_COMMITTER_EMAIL")
+            .output()
+            .expect("spawn git")
+    }
+
+    #[tokio::test]
+    async fn set_identity_authors_raw_shell_commits_as_task_creator() {
+        let (_origin, clone, ws) = fixture();
+        let cp = clone.path();
+
+        ws.set_identity(GitIdentity {
+            name: "Ada Lovelace",
+            email: "1+ada@users.noreply.github.com",
+        })
+        .await
+        .expect("set_identity");
+
+        // The workspace-LOCAL config is what a RAW `git` invocation reads.
+        assert_eq!(
+            git(cp, &["config", "--local", "user.name"]).trim(),
+            "Ada Lovelace"
+        );
+        assert_eq!(
+            git(cp, &["config", "--local", "user.email"]).trim(),
+            "1+ada@users.noreply.github.com"
+        );
+
+        // A raw shell commit with NO author env — exactly what the in-pod agent
+        // does via its shell tool — must be authored as the seeded identity,
+        // not a pod default like `Djinn Agent <djinn@djinn.task>`.
+        write(cp, "agent.txt", "raw shell edit\n");
+        assert!(git_no_identity(cp, &["add", "-A"]).status.success());
+        let commit = git_no_identity(cp, &["commit", "-m", "raw shell commit"]);
+        assert!(
+            commit.status.success(),
+            "commit failed: {}",
+            String::from_utf8_lossy(&commit.stderr)
+        );
+
+        let author = git(cp, &["log", "-1", "--format=%an <%ae>"]);
+        assert_eq!(
+            author.trim(),
+            "Ada Lovelace <1+ada@users.noreply.github.com>",
+            "raw shell commit must be authored as the seeded task-creator identity"
+        );
     }
 
     #[tokio::test]

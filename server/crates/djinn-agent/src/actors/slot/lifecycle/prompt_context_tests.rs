@@ -1042,6 +1042,7 @@ async fn concurrent_assembly_is_deterministic() {
         arbiter_directive: None,
         mcp_server_instructions: &empty_instructions,
         extension_diagnostics: &[],
+        cancellation: None,
         memory_intent_planner: None,
     })
     .await;
@@ -1063,6 +1064,7 @@ async fn concurrent_assembly_is_deterministic() {
         arbiter_directive: None,
         mcp_server_instructions: &empty_instructions,
         extension_diagnostics: &[],
+        cancellation: None,
         memory_intent_planner: None,
     })
     .await;
@@ -1389,6 +1391,7 @@ async fn ci_blocking_appears_before_resume_context_in_prompt() {
         arbiter_directive: None,
         mcp_server_instructions: &std::collections::BTreeMap::new(),
         extension_diagnostics: &[],
+        cancellation: None,
         memory_intent_planner: None,
     })
     .await;
@@ -1538,6 +1541,7 @@ async fn resume_context_section_in_canonical_order_with_skills_and_sources() {
         arbiter_directive: None,
         mcp_server_instructions: &std::collections::BTreeMap::new(),
         extension_diagnostics: &[],
+        cancellation: None,
         memory_intent_planner: None,
     })
     .await;
@@ -1798,6 +1802,7 @@ async fn resume_context_deterministic_with_discontinuity_metadata() {
         arbiter_directive: None,
         mcp_server_instructions: &empty_instructions,
         extension_diagnostics: &[],
+        cancellation: None,
         memory_intent_planner: None,
     })
     .await;
@@ -1819,6 +1824,7 @@ async fn resume_context_deterministic_with_discontinuity_metadata() {
         arbiter_directive: None,
         mcp_server_instructions: &empty_instructions,
         extension_diagnostics: &[],
+        cancellation: None,
         memory_intent_planner: None,
     })
     .await;
@@ -2035,6 +2041,7 @@ macro_rules! planner_assembly_inputs {
             arbiter_directive: None,
             mcp_server_instructions: &std::collections::BTreeMap::new(),
             extension_diagnostics: &[],
+            cancellation: None,
             memory_intent_planner: $planner,
         }
     };
@@ -2158,6 +2165,94 @@ async fn planner_production_boundary_enabled_assembly_injects_and_attributes_tra
         .expect("persisted trace");
     assert_eq!(trace.session_id.as_deref(), Some("session-real"));
     assert_eq!(trace.task_run_id.as_deref(), Some("task-run-real"));
+}
+
+#[tokio::test]
+async fn planner_dedupe_ignores_below_threshold_trace_only_note_and_preserves_terminal_counts() {
+    let mut env = knowledge_context_test_env_guard();
+    env.clear();
+    let db = Database::ephemeral().await.expect("ephemeral db");
+    let events = EventBus::noop();
+    let mut task =
+        create_project_epic_task(&db, &events, "Planner trace epic", "Planner trace task").await;
+    task.created_by_user_id = Some("creator-real".into());
+    let note_repo = NoteRepository::new(db.clone(), EventBus::noop());
+    let trace_only = note_repo
+        .create(
+            &task.project_id,
+            "Trace-only scope title",
+            "below-threshold scope body",
+            "pattern",
+            "[]",
+        )
+        .await
+        .expect("seed trace-only note");
+    note_repo
+        .set_confidence(&trace_only.id, 0.1)
+        .await
+        .expect("set below-threshold confidence");
+
+    let app_state = agent_context_from_db(db.clone(), CancellationToken::new());
+    let host = RecordingPlannerHost::with_content(
+        r#"{"queries":[{"type":"pattern","query":"trace-only duplicate"},{"type":"pitfall","query":"trace-only duplicate fallback"}]}"#,
+    );
+    let search = RecordingPlannedNoteSearch {
+        rows: vec![planned_note_row(
+            &trace_only.id,
+            "Planned match remains eligible",
+            &trace_only.permalink,
+            "planned search body",
+        )],
+        ..Default::default()
+    };
+    let config = crate::context::MemoryIntentPlannerConfig {
+        enabled: true,
+        ..Default::default()
+    };
+    let role = LeadRole;
+    let worktree = test_tempdir("planner-trace-only-dedupe-");
+    let context = assemble_prompt_context(planner_assembly_inputs!(
+        &task,
+        &role,
+        worktree,
+        &app_state,
+        Some(MemoryIntentPlannerInvocation {
+            config: &config,
+            host: &host,
+            session_id: "session-trace-only",
+            task_run_id: "task-run-trace-only",
+            creator_id: task.created_by_user_id.as_deref(),
+            acceptance_criteria: vec![],
+            resume_compaction_summary: None,
+            planned_note_search: Some(&search),
+        })
+    ))
+    .await;
+
+    let knowledge = context
+        .knowledge_context
+        .as_deref()
+        .expect("planned match should render");
+    assert!(knowledge.contains("Planned match remains eligible"));
+    assert!(!knowledge.contains("Trace-only scope title"));
+
+    let trace = latest_knowledge_trace_for_assembly(&db, &task.project_id).await;
+    assert_eq!(trace.knowledge_trace_taxonomy_version, Some(1));
+    assert_eq!(trace.terminal_state.as_deref(), Some("success"));
+    assert_eq!(trace.candidate_count, Some(1));
+    assert_eq!(trace.injected_count, Some(0));
+    assert_eq!(trace.confidence_filtered_count, Some(1));
+    assert_eq!(trace.not_top_k_count, Some(0));
+    assert_eq!(trace.oversized_skipped_count, Some(0));
+    assert_eq!(trace.budget_pruned_count, Some(0));
+    let candidates = trace.candidates_typed();
+    assert_eq!(candidates.len(), 1);
+    assert_eq!(candidates[0].note_id, trace_only.id);
+    assert_eq!(candidates[0].rank, Some(1));
+    assert_eq!(
+        candidates[0].skipped_reason,
+        Some(djinn_db::repositories::retrieval_trace::SkippedReason::MinConfidence)
+    );
 }
 
 #[tokio::test]
@@ -2809,6 +2904,18 @@ async fn assembly_rollout_disabled_modes_omit_context_and_persist_suppression() 
         let trace = latest_knowledge_trace_for_assembly(&db, &task.project_id).await;
         assert_eq!(trace.rollout_label, label);
         assert_eq!(trace.outcome, outcome);
+        assert_eq!(trace.knowledge_trace_taxonomy_version, Some(1));
+        assert_eq!(trace.terminal_state.as_deref(), Some("error"));
+        assert!(
+            trace.terminal_at.is_some(),
+            "{label} terminal has timestamp"
+        );
+        assert_eq!(trace.candidate_count, None);
+        assert_eq!(trace.injected_count, None);
+        assert_eq!(trace.confidence_filtered_count, None);
+        assert_eq!(trace.not_top_k_count, None);
+        assert_eq!(trace.oversized_skipped_count, None);
+        assert_eq!(trace.budget_pruned_count, None);
         assert_eq!(trace.estimated_injected_tokens, 0);
         assert!(trace.candidates_typed().is_empty());
         assert_eq!(trace.task_id.as_deref(), Some(task.id.as_str()));

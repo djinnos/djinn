@@ -72,6 +72,11 @@ pub use repositories::{
         MergedChangeRow, RecordOutcomeParams, SampleFrameRow, SamplePolicyRow, SelectionRow,
         UnmaterializedSelection, UpsertMergedChangeParams,
     },
+    build_lease::{
+        BuildLeaseConsumerKind, BuildLeaseKey, BuildLeaseRepository, BuildLeaseRow,
+        BuildLeaseSnapshot, BuildLeaseState, GrantNextBuildLeaseResult, QueueBuildLeaseInput,
+        QueueBuildLeaseResult,
+    },
     chat_interruption_notice::{
         ChatInterruptionNotice, ChatInterruptionNoticeRepository, CreateChatInterruptionNotice,
     },
@@ -179,6 +184,10 @@ pub use repositories::{
         ProposalDebateTrailCreateInput, ProposalFeedbackCreateInput, ProposalListQuery,
         ProposalListResult, ProposalListSummaryRow, ProposalMemoryRef, ProposalRef,
         ProposalRepository, ProposalUpdateInput,
+    },
+    refinement_run::{
+        LoadRefinementRunSnapshotRequest, RefinementRunAggregate, RefinementRunSnapshotError,
+        RefinementRunSnapshotResult,
     },
     repo_graph_cache::{CachedRepoGraph, RepoGraphCacheInsert, RepoGraphCacheRepository},
     repo_graph_generation::{

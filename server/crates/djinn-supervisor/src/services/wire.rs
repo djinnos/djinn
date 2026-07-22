@@ -36,6 +36,10 @@ use djinn_core::models::{SessionRecord, SessionStatus, Task, TaskRunStatus};
 use djinn_runtime::wire::{ControlMsg, WorkerEvent, WorkspaceRef};
 use serde::{Deserialize, Serialize};
 
+use crate::services::lease::{
+    LeaseAbandonRequest, LeaseBindRequest, LeaseCancelRequest, LeaseGrantRequest,
+    LeaseQueueRequest, LeaseReleaseRequest, LeaseResult, LeaseStatusRequest,
+};
 use crate::{
     BranchPublicationResult, RoleKind, StageError, StageOutcome, TaskRunOutcome, TaskRunSpec,
 };
@@ -533,6 +537,22 @@ pub enum ServiceRpcRequest {
         session_task_id: Option<String>,
         arguments: String,
     },
+    /// [`crate::SupervisorServices::queue_lease`].  Lease-v1 variants are
+    /// appended at the enum tail to preserve positional bincode indices for
+    /// mixed-version host/worker frames mid-deploy.
+    QueueLease { request: LeaseQueueRequest },
+    /// [`crate::SupervisorServices::grant_lease`]. Appended at the tail.
+    GrantLease { request: LeaseGrantRequest },
+    /// [`crate::SupervisorServices::lease_status`]. Appended at the tail.
+    LeaseStatus { request: LeaseStatusRequest },
+    /// [`crate::SupervisorServices::abandon_lease`]. Appended at the tail.
+    AbandonLease { request: LeaseAbandonRequest },
+    /// [`crate::SupervisorServices::bind_lease_pod`]. Appended at the tail.
+    BindLeasePod { request: LeaseBindRequest },
+    /// [`crate::SupervisorServices::cancel_lease`]. Appended at the tail.
+    CancelLease { request: LeaseCancelRequest },
+    /// [`crate::SupervisorServices::release_lease`]. Appended at the tail.
+    ReleaseLease { request: LeaseReleaseRequest },
 }
 
 /// Typed response variants — one per [`ServiceRpcRequest`] variant.
@@ -629,6 +649,13 @@ pub enum ServiceRpcResponse {
     /// `Ok` carries opaque JSON; see `ToolGithubSearch`.
     /// Appended at the enum tail for bincode stability.
     ToolCiArtifact(Result<String, String>),
+    QueueLease(LeaseResult),
+    GrantLease(LeaseResult),
+    LeaseStatus(LeaseResult),
+    AbandonLease(LeaseResult),
+    BindLeasePod(LeaseResult),
+    CancelLease(LeaseResult),
+    ReleaseLease(LeaseResult),
 }
 
 #[cfg(test)]
@@ -692,6 +719,12 @@ mod tests {
             ci_mq_first_seen_at: None,
             ci_mq_last_seen_at: None,
             unresolved_blocker_count: 0,
+            refinement_run_id: None,
+            refinement_intent_id: None,
+            refinement_generation: None,
+            refinement_round: None,
+            refinement_phase: None,
+            refinement_role: None,
         }
     }
 
@@ -1985,5 +2018,690 @@ mod tests {
             }
             other => panic!("unexpected: {other:?}"),
         }
+    }
+
+    // ── Lease-v1 wire serialization round-trips ───────────────────────
+
+    use crate::services::lease::*;
+
+    fn task_invocation_identity() -> LeaseIdentity {
+        LeaseIdentity::TaskInvocation(TaskInvocationLeaseIdentity {
+            task_id: "task-1".into(),
+            task_run_id: "run-1".into(),
+            invocation_id: "inv-1".into(),
+        })
+    }
+
+    fn graph_warm_identity() -> LeaseIdentity {
+        LeaseIdentity::GraphWarm(GraphWarmLeaseIdentity {
+            project_id: "proj-1".into(),
+            warm_request_id: "warm-1".into(),
+            graph_revision: "rev-42".into(),
+        })
+    }
+
+    fn sample_deadlines() -> LeaseDeadlines {
+        LeaseDeadlines {
+            queue_deadline_ms: 60_000,
+            launch_deadline_ms: 120_000,
+        }
+    }
+
+    #[test]
+    fn lease_queue_request_roundtrip() {
+        // Task-invocation identity
+        let req = ServiceRpcRequest::QueueLease {
+            request: LeaseQueueRequest {
+                identity: task_invocation_identity(),
+                deadlines: sample_deadlines(),
+            },
+        };
+        let f = Frame {
+            correlation_id: 50,
+            payload: FramePayload::Rpc(req),
+        };
+        let bytes = bincode::serialize(&f).unwrap();
+        let back: Frame = bincode::deserialize(&bytes).unwrap();
+        match back.payload {
+            FramePayload::Rpc(ServiceRpcRequest::QueueLease { request }) => {
+                match request.identity {
+                    LeaseIdentity::TaskInvocation(ti) => {
+                        assert_eq!(ti.task_id, "task-1");
+                        assert_eq!(ti.invocation_id, "inv-1");
+                    }
+                    other => panic!("unexpected identity: {other:?}"),
+                }
+                assert_eq!(request.deadlines.queue_deadline_ms, 60_000);
+                assert_eq!(request.deadlines.launch_deadline_ms, 120_000);
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+
+        // Graph-warm identity
+        let req = ServiceRpcRequest::QueueLease {
+            request: LeaseQueueRequest {
+                identity: graph_warm_identity(),
+                deadlines: sample_deadlines(),
+            },
+        };
+        let f = Frame {
+            correlation_id: 51,
+            payload: FramePayload::Rpc(req),
+        };
+        let bytes = bincode::serialize(&f).unwrap();
+        let back: Frame = bincode::deserialize(&bytes).unwrap();
+        match back.payload {
+            FramePayload::Rpc(ServiceRpcRequest::QueueLease { request }) => {
+                match request.identity {
+                    LeaseIdentity::GraphWarm(gw) => {
+                        assert_eq!(gw.project_id, "proj-1");
+                        assert_eq!(gw.warm_request_id, "warm-1");
+                        assert_eq!(gw.graph_revision, "rev-42");
+                    }
+                    other => panic!("unexpected identity: {other:?}"),
+                }
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn lease_grant_request_roundtrip() {
+        let req = ServiceRpcRequest::GrantLease {
+            request: LeaseGrantRequest {
+                identity: task_invocation_identity(),
+                fencing_token: LeaseFencingToken(7),
+            },
+        };
+        let f = Frame {
+            correlation_id: 52,
+            payload: FramePayload::Rpc(req),
+        };
+        let bytes = bincode::serialize(&f).unwrap();
+        let back: Frame = bincode::deserialize(&bytes).unwrap();
+        match back.payload {
+            FramePayload::Rpc(ServiceRpcRequest::GrantLease { request }) => {
+                assert_eq!(request.fencing_token, LeaseFencingToken(7));
+                assert!(matches!(request.identity, LeaseIdentity::TaskInvocation(_)));
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn lease_status_request_roundtrip() {
+        let req = ServiceRpcRequest::LeaseStatus {
+            request: LeaseStatusRequest {
+                identity: graph_warm_identity(),
+            },
+        };
+        let f = Frame {
+            correlation_id: 53,
+            payload: FramePayload::Rpc(req),
+        };
+        let bytes = bincode::serialize(&f).unwrap();
+        let back: Frame = bincode::deserialize(&bytes).unwrap();
+        match back.payload {
+            FramePayload::Rpc(ServiceRpcRequest::LeaseStatus { request }) => {
+                assert!(matches!(request.identity, LeaseIdentity::GraphWarm(_)));
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn lease_abandon_request_roundtrip() {
+        let req = ServiceRpcRequest::AbandonLease {
+            request: LeaseAbandonRequest {
+                identity: task_invocation_identity(),
+                candidate_cleanup: true,
+            },
+        };
+        let f = Frame {
+            correlation_id: 54,
+            payload: FramePayload::Rpc(req),
+        };
+        let bytes = bincode::serialize(&f).unwrap();
+        let back: Frame = bincode::deserialize(&bytes).unwrap();
+        match back.payload {
+            FramePayload::Rpc(ServiceRpcRequest::AbandonLease { request }) => {
+                assert!(request.candidate_cleanup);
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn lease_bind_request_roundtrip() {
+        let req = ServiceRpcRequest::BindLeasePod {
+            request: LeaseBindRequest {
+                identity: task_invocation_identity(),
+                fencing_token: LeaseFencingToken(3),
+                pod_uid: "pod-abc-123".into(),
+            },
+        };
+        let f = Frame {
+            correlation_id: 55,
+            payload: FramePayload::Rpc(req),
+        };
+        let bytes = bincode::serialize(&f).unwrap();
+        let back: Frame = bincode::deserialize(&bytes).unwrap();
+        match back.payload {
+            FramePayload::Rpc(ServiceRpcRequest::BindLeasePod { request }) => {
+                assert_eq!(request.fencing_token, LeaseFencingToken(3));
+                assert_eq!(request.pod_uid, "pod-abc-123");
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn lease_cancel_request_roundtrip() {
+        // With fencing token
+        let req = ServiceRpcRequest::CancelLease {
+            request: LeaseCancelRequest {
+                identity: task_invocation_identity(),
+                fencing_token: Some(LeaseFencingToken(9)),
+                candidate_cleanup: false,
+            },
+        };
+        let f = Frame {
+            correlation_id: 56,
+            payload: FramePayload::Rpc(req),
+        };
+        let bytes = bincode::serialize(&f).unwrap();
+        let back: Frame = bincode::deserialize(&bytes).unwrap();
+        match back.payload {
+            FramePayload::Rpc(ServiceRpcRequest::CancelLease { request }) => {
+                assert_eq!(request.fencing_token, Some(LeaseFencingToken(9)));
+                assert!(!request.candidate_cleanup);
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+
+        // Without fencing token (None)
+        let req = ServiceRpcRequest::CancelLease {
+            request: LeaseCancelRequest {
+                identity: graph_warm_identity(),
+                fencing_token: None,
+                candidate_cleanup: true,
+            },
+        };
+        let f = Frame {
+            correlation_id: 57,
+            payload: FramePayload::Rpc(req),
+        };
+        let bytes = bincode::serialize(&f).unwrap();
+        let back: Frame = bincode::deserialize(&bytes).unwrap();
+        match back.payload {
+            FramePayload::Rpc(ServiceRpcRequest::CancelLease { request }) => {
+                assert!(request.fencing_token.is_none());
+                assert!(request.candidate_cleanup);
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn lease_release_request_roundtrip() {
+        let req = ServiceRpcRequest::ReleaseLease {
+            request: LeaseReleaseRequest {
+                identity: task_invocation_identity(),
+                fencing_token: LeaseFencingToken(5),
+                candidate_cleanup: true,
+            },
+        };
+        let f = Frame {
+            correlation_id: 58,
+            payload: FramePayload::Rpc(req),
+        };
+        let bytes = bincode::serialize(&f).unwrap();
+        let back: Frame = bincode::deserialize(&bytes).unwrap();
+        match back.payload {
+            FramePayload::Rpc(ServiceRpcRequest::ReleaseLease { request }) => {
+                assert_eq!(request.fencing_token, LeaseFencingToken(5));
+                assert!(request.candidate_cleanup);
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn lease_queued_response_roundtrip() {
+        let resp = ServiceRpcResponse::QueueLease(LeaseResult::Queued(LeaseStatus {
+            state: LeaseState::Queued,
+            fencing_token: None,
+            deadlines: sample_deadlines(),
+            pod_uid: None,
+            candidate_cleanup: false,
+        }));
+        let f = Frame {
+            correlation_id: 60,
+            payload: FramePayload::RpcReply(resp),
+        };
+        let bytes = bincode::serialize(&f).unwrap();
+        let back: Frame = bincode::deserialize(&bytes).unwrap();
+        match back.payload {
+            FramePayload::RpcReply(ServiceRpcResponse::QueueLease(LeaseResult::Queued(status))) => {
+                assert_eq!(status.state, LeaseState::Queued);
+                assert!(status.fencing_token.is_none());
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn lease_granted_response_roundtrip() {
+        let resp = ServiceRpcResponse::GrantLease(LeaseResult::Granted(LeaseGrant {
+            fencing_token: LeaseFencingToken(42),
+            deadlines: sample_deadlines(),
+        }));
+        let f = Frame {
+            correlation_id: 61,
+            payload: FramePayload::RpcReply(resp),
+        };
+        let bytes = bincode::serialize(&f).unwrap();
+        let back: Frame = bincode::deserialize(&bytes).unwrap();
+        match back.payload {
+            FramePayload::RpcReply(ServiceRpcResponse::GrantLease(LeaseResult::Granted(grant))) => {
+                assert_eq!(grant.fencing_token, LeaseFencingToken(42));
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn lease_status_response_roundtrip() {
+        let resp = ServiceRpcResponse::LeaseStatus(LeaseResult::Status(LeaseStatus {
+            state: LeaseState::Active,
+            fencing_token: Some(LeaseFencingToken(11)),
+            deadlines: sample_deadlines(),
+            pod_uid: Some("pod-xyz".into()),
+            candidate_cleanup: true,
+        }));
+        let f = Frame {
+            correlation_id: 62,
+            payload: FramePayload::RpcReply(resp),
+        };
+        let bytes = bincode::serialize(&f).unwrap();
+        let back: Frame = bincode::deserialize(&bytes).unwrap();
+        match back.payload {
+            FramePayload::RpcReply(ServiceRpcResponse::LeaseStatus(LeaseResult::Status(
+                status,
+            ))) => {
+                assert_eq!(status.state, LeaseState::Active);
+                assert_eq!(status.fencing_token, Some(LeaseFencingToken(11)));
+                assert_eq!(status.pod_uid.as_deref(), Some("pod-xyz"));
+                assert!(status.candidate_cleanup);
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn lease_abandoned_response_roundtrip() {
+        let resp = ServiceRpcResponse::AbandonLease(LeaseResult::Abandoned {
+            candidate_cleanup: true,
+        });
+        let f = Frame {
+            correlation_id: 63,
+            payload: FramePayload::RpcReply(resp),
+        };
+        let bytes = bincode::serialize(&f).unwrap();
+        let back: Frame = bincode::deserialize(&bytes).unwrap();
+        match back.payload {
+            FramePayload::RpcReply(ServiceRpcResponse::AbandonLease(LeaseResult::Abandoned {
+                candidate_cleanup,
+            })) => {
+                assert!(candidate_cleanup);
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn lease_bound_response_roundtrip() {
+        let resp = ServiceRpcResponse::BindLeasePod(LeaseResult::Bound(LeaseStatus {
+            state: LeaseState::Bound,
+            fencing_token: Some(LeaseFencingToken(2)),
+            deadlines: sample_deadlines(),
+            pod_uid: Some("pod-bound".into()),
+            candidate_cleanup: false,
+        }));
+        let f = Frame {
+            correlation_id: 64,
+            payload: FramePayload::RpcReply(resp),
+        };
+        let bytes = bincode::serialize(&f).unwrap();
+        let back: Frame = bincode::deserialize(&bytes).unwrap();
+        match back.payload {
+            FramePayload::RpcReply(ServiceRpcResponse::BindLeasePod(LeaseResult::Bound(
+                status,
+            ))) => {
+                assert_eq!(status.state, LeaseState::Bound);
+                assert_eq!(status.pod_uid.as_deref(), Some("pod-bound"));
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn lease_cancelled_response_roundtrip() {
+        let resp = ServiceRpcResponse::CancelLease(LeaseResult::Cancelled {
+            candidate_cleanup: true,
+        });
+        let f = Frame {
+            correlation_id: 65,
+            payload: FramePayload::RpcReply(resp),
+        };
+        let bytes = bincode::serialize(&f).unwrap();
+        let back: Frame = bincode::deserialize(&bytes).unwrap();
+        match back.payload {
+            FramePayload::RpcReply(ServiceRpcResponse::CancelLease(LeaseResult::Cancelled {
+                candidate_cleanup,
+            })) => {
+                assert!(candidate_cleanup);
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn lease_released_response_roundtrip() {
+        let resp = ServiceRpcResponse::ReleaseLease(LeaseResult::Released {
+            candidate_cleanup: false,
+        });
+        let f = Frame {
+            correlation_id: 66,
+            payload: FramePayload::RpcReply(resp),
+        };
+        let bytes = bincode::serialize(&f).unwrap();
+        let back: Frame = bincode::deserialize(&bytes).unwrap();
+        match back.payload {
+            FramePayload::RpcReply(ServiceRpcResponse::ReleaseLease(LeaseResult::Released {
+                candidate_cleanup,
+            })) => {
+                assert!(!candidate_cleanup);
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn lease_identity_conflict_response_roundtrip() {
+        let resp = ServiceRpcResponse::QueueLease(LeaseResult::LeaseIdentityConflict {
+            identity: task_invocation_identity(),
+        });
+        let f = Frame {
+            correlation_id: 67,
+            payload: FramePayload::RpcReply(resp),
+        };
+        let bytes = bincode::serialize(&f).unwrap();
+        let back: Frame = bincode::deserialize(&bytes).unwrap();
+        match back.payload {
+            FramePayload::RpcReply(ServiceRpcResponse::QueueLease(
+                LeaseResult::LeaseIdentityConflict { identity },
+            )) => {
+                assert!(matches!(identity, LeaseIdentity::TaskInvocation(_)));
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn lease_wait_timeout_response_roundtrip() {
+        // With timeout credit
+        let resp = ServiceRpcResponse::QueueLease(LeaseResult::LeaseWaitTimeout {
+            timeout_credit: Some(TimeoutCredit {
+                units: 3,
+                retry_after_ms: 5_000,
+            }),
+        });
+        let f = Frame {
+            correlation_id: 68,
+            payload: FramePayload::RpcReply(resp),
+        };
+        let bytes = bincode::serialize(&f).unwrap();
+        let back: Frame = bincode::deserialize(&bytes).unwrap();
+        match back.payload {
+            FramePayload::RpcReply(ServiceRpcResponse::QueueLease(
+                LeaseResult::LeaseWaitTimeout { timeout_credit },
+            )) => {
+                let credit = timeout_credit.expect("credit");
+                assert_eq!(credit.units, 3);
+                assert_eq!(credit.retry_after_ms, 5_000);
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+
+        // Without timeout credit (None)
+        let resp = ServiceRpcResponse::QueueLease(LeaseResult::LeaseWaitTimeout {
+            timeout_credit: None,
+        });
+        let f = Frame {
+            correlation_id: 69,
+            payload: FramePayload::RpcReply(resp),
+        };
+        let bytes = bincode::serialize(&f).unwrap();
+        let back: Frame = bincode::deserialize(&bytes).unwrap();
+        match back.payload {
+            FramePayload::RpcReply(ServiceRpcResponse::QueueLease(
+                LeaseResult::LeaseWaitTimeout { timeout_credit },
+            )) => {
+                assert!(timeout_credit.is_none());
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn lease_unavailable_response_roundtrip() {
+        let resp = ServiceRpcResponse::QueueLease(LeaseResult::LeaseUnavailable);
+        let f = Frame {
+            correlation_id: 70,
+            payload: FramePayload::RpcReply(resp),
+        };
+        let bytes = bincode::serialize(&f).unwrap();
+        let back: Frame = bincode::deserialize(&bytes).unwrap();
+        match back.payload {
+            FramePayload::RpcReply(ServiceRpcResponse::QueueLease(
+                LeaseResult::LeaseUnavailable,
+            )) => {}
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    // ── Bincode discriminant regression ──────────────────────────────
+    //
+    // Bincode encodes enum variants by position. Inserting variants in the
+    // middle shifts every subsequent discriminant and breaks mixed-version
+    // host/worker frames. This test pins every variant to its expected index
+    // so a future edit cannot silently renumber the wire.
+
+    #[test]
+    fn request_discriminant_indices_stable() {
+        // The discriminant is encoded as a varint/U32 prefix on each
+        // variant. We probe it by serialising a single-variant payload.
+        // The first 4 bytes of bincode output for an enum with < 256
+        // variants (default config, FixintEncoding) encode the variant
+        // index as a little-endian u32.
+        fn idx(req: ServiceRpcRequest) -> u32 {
+            let bytes = bincode::serialize(&req).unwrap();
+            u32::from_le_bytes(bytes[..4].try_into().unwrap())
+        }
+
+        // Pre-existing variants (must not shift).
+        assert_eq!(
+            idx(ServiceRpcRequest::LoadTask {
+                task_id: String::new()
+            }),
+            0
+        );
+        // ExecuteStage requires a lot of fields — we skip it in the index
+        // probe but assert the remaining pre-existing tail variants.
+        assert_eq!(
+            idx(ServiceRpcRequest::OpenPr {
+                spec: fake_spec(),
+                task: fake_task(),
+            }),
+            2
+        );
+        assert_eq!(
+            idx(ServiceRpcRequest::CreateTaskRun {
+                params: SerializableCreateTaskRunParams {
+                    id: String::new(),
+                    task_attempt_id: None,
+                    project_id: String::new(),
+                    task_id: String::new(),
+                    trigger_type: String::new(),
+                    status: None,
+                    workspace_path: None,
+                    mirror_ref: None,
+                    dispatch_owner_incarnation_id: None,
+                    dispatch_group_id: None,
+                }
+            }),
+            3
+        );
+        assert_eq!(
+            idx(ServiceRpcRequest::ToolCiArtifact {
+                session_task_id: None,
+                arguments: String::new(),
+            }),
+            27
+        );
+
+        // Lease-v1 variants appended at the tail (indices 28–34).
+        assert_eq!(
+            idx(ServiceRpcRequest::QueueLease {
+                request: LeaseQueueRequest {
+                    identity: task_invocation_identity(),
+                    deadlines: sample_deadlines(),
+                }
+            }),
+            28
+        );
+        assert_eq!(
+            idx(ServiceRpcRequest::GrantLease {
+                request: LeaseGrantRequest {
+                    identity: task_invocation_identity(),
+                    fencing_token: LeaseFencingToken(0),
+                }
+            }),
+            29
+        );
+        assert_eq!(
+            idx(ServiceRpcRequest::LeaseStatus {
+                request: LeaseStatusRequest {
+                    identity: task_invocation_identity(),
+                }
+            }),
+            30
+        );
+        assert_eq!(
+            idx(ServiceRpcRequest::AbandonLease {
+                request: LeaseAbandonRequest {
+                    identity: task_invocation_identity(),
+                    candidate_cleanup: false,
+                }
+            }),
+            31
+        );
+        assert_eq!(
+            idx(ServiceRpcRequest::BindLeasePod {
+                request: LeaseBindRequest {
+                    identity: task_invocation_identity(),
+                    fencing_token: LeaseFencingToken(0),
+                    pod_uid: String::new(),
+                }
+            }),
+            32
+        );
+        assert_eq!(
+            idx(ServiceRpcRequest::CancelLease {
+                request: LeaseCancelRequest {
+                    identity: task_invocation_identity(),
+                    fencing_token: None,
+                    candidate_cleanup: false,
+                }
+            }),
+            33
+        );
+        assert_eq!(
+            idx(ServiceRpcRequest::ReleaseLease {
+                request: LeaseReleaseRequest {
+                    identity: task_invocation_identity(),
+                    fencing_token: LeaseFencingToken(0),
+                    candidate_cleanup: false,
+                }
+            }),
+            34
+        );
+    }
+
+    #[test]
+    fn response_discriminant_indices_stable() {
+        fn idx(resp: ServiceRpcResponse) -> u32 {
+            let bytes = bincode::serialize(&resp).unwrap();
+            u32::from_le_bytes(bytes[..4].try_into().unwrap())
+        }
+
+        // Pre-existing response variants.
+        assert_eq!(idx(ServiceRpcResponse::LoadTask(Err(String::new()))), 0);
+        assert_eq!(
+            idx(ServiceRpcResponse::OpenPr(TaskRunOutcome::Closed {
+                reason: String::new()
+            })),
+            2
+        );
+        assert_eq!(idx(ServiceRpcResponse::Err(String::new())), 19);
+        assert_eq!(
+            idx(ServiceRpcResponse::ToolCiArtifact(Err(String::new()))),
+            28
+        );
+
+        // Lease-v1 response variants appended at the tail (indices 29–35).
+        assert_eq!(
+            idx(ServiceRpcResponse::QueueLease(
+                LeaseResult::LeaseUnavailable
+            )),
+            29
+        );
+        assert_eq!(
+            idx(ServiceRpcResponse::GrantLease(
+                LeaseResult::LeaseUnavailable
+            )),
+            30
+        );
+        assert_eq!(
+            idx(ServiceRpcResponse::LeaseStatus(
+                LeaseResult::LeaseUnavailable
+            )),
+            31
+        );
+        assert_eq!(
+            idx(ServiceRpcResponse::AbandonLease(
+                LeaseResult::LeaseUnavailable
+            )),
+            32
+        );
+        assert_eq!(
+            idx(ServiceRpcResponse::BindLeasePod(
+                LeaseResult::LeaseUnavailable
+            )),
+            33
+        );
+        assert_eq!(
+            idx(ServiceRpcResponse::CancelLease(
+                LeaseResult::LeaseUnavailable
+            )),
+            34
+        );
+        assert_eq!(
+            idx(ServiceRpcResponse::ReleaseLease(
+                LeaseResult::LeaseUnavailable
+            )),
+            35
+        );
     }
 }

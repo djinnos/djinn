@@ -5,14 +5,17 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::Ordering;
 
+#[cfg(feature = "test-support")]
+use std::sync::OnceLock;
+
 use crate::final_verification::verify_completion_intent;
 use crate::finalize_types::SubmitWork;
 use crate::helpers::{runtime_env_diagnostics, runtime_fs_diagnostics};
 use crate::host::{PreCompactionToolResult, SlotContext};
 use crate::output_parser::{CompletionIntent, ParsedAgentOutput};
 use djinn_compaction::{
-    COMPACTION_SUMMARY_END_MARKER, CompactionContext, compact_conversation_with_pointers,
-    needs_compaction, strip_compaction_markers,
+    COMPACTION_SUMMARY_END_MARKER, CompactionContext, CompactionOutcome,
+    compact_conversation_with_pointers_outcome, needs_compaction, strip_compaction_markers,
 };
 use djinn_core::events::DjinnEventEnvelope;
 use djinn_db::SessionMessageRepository;
@@ -29,12 +32,13 @@ use super::budget::{
 };
 use super::compaction_guard::CompactionCriticalSection;
 use super::error_handling::{
-    BudgetWindDownIgnored, MAX_COMPACTION_RETRIES, empty_start_streak_feeds_breaker,
-    empty_turn_backoff, empty_turn_is_reasoning_only, is_context_length_error,
-    is_orphaned_tool_call_error, is_provider_failure_prose, next_nudge_message,
-    reasoning_only_nudge_message, should_retry_after_tool_call_compaction,
-    should_retry_empty_assistant_turn, should_retry_empty_stream, soft_budget_converge_message,
-    tool_choice_for_turn, wind_down_message,
+    BudgetWindDownIgnored, MAX_COMPACTION_RETRIES, TransportCompactionRecoveryGuard,
+    empty_start_streak_feeds_breaker, empty_turn_backoff, empty_turn_is_reasoning_only,
+    is_context_length_error, is_orphaned_tool_call_error, is_oversized_transport_payload,
+    is_provider_failure_prose, next_nudge_message, reasoning_only_nudge_message,
+    should_retry_after_tool_call_compaction, should_retry_empty_assistant_turn,
+    should_retry_empty_stream, soft_budget_converge_message, tool_choice_for_turn,
+    wind_down_message,
 };
 use super::loop_guard::{
     AssistantOutputSignature, LoopGuardCondition, LoopGuardError, LoopGuardReason, LoopGuardState,
@@ -47,7 +51,7 @@ use super::persistence::{
 use super::phase::SessionPhaseTracker;
 use super::streaming::{StreamLoopContext, StreamTurnState, consume_provider_stream};
 use super::tool_dispatch::{ToolDispatchContext, collect_tool_results, tool_runtime_metadata};
-use djinn_db::SessionCompactionBoundaryRepository;
+use djinn_db::{CompactionTrigger, SessionCompactionBoundaryRepository};
 
 /// True when `model_id` (a `provider/model` string) is served by the Codex /
 /// OpenAI consumer backend that signals over-quota by answering a turn with an
@@ -115,6 +119,25 @@ fn truncated_stream_error(text_len: usize, tool_call_count: usize) -> anyhow::Er
          (text_len={text_len}, tool_calls={tool_call_count}); the truncated output has been \
          flushed as observed artifacts for resume but must not be persisted as a complete turn"
         ))
+}
+
+/// Select only typed, exhausted stream-init failures whose exact serialized
+/// request byte count proves the request is at least one known context window.
+fn oversized_exhausted_transport(
+    error: &anyhow::Error,
+    known_context_window_tokens: i64,
+) -> Option<djinn_provider::provider::ExhaustedTransportDiagnostic> {
+    let known_context_window_tokens = u32::try_from(known_context_window_tokens).ok()?;
+    let djinn_provider::provider::ProviderError::ExhaustedTransport(diagnostic) =
+        error.downcast_ref::<djinn_provider::provider::ProviderError>()?
+    else {
+        return None;
+    };
+    is_oversized_transport_payload(
+        diagnostic.estimated_payload_chars,
+        known_context_window_tokens,
+    )
+    .then_some(*diagnostic)
 }
 
 /// Production normal-completion assembly for a consumed turn.
@@ -450,16 +473,10 @@ async fn maybe_inject_soft_budget_reminder(
     turns: u32,
     total_tokens_in: u32,
     total_tokens_out: u32,
-    current_context_tokens: u32,
     conversation: &mut Conversation,
 ) -> bool {
     if *injected
-        || !soft_budget_threshold_exceeded(
-            session_budget,
-            total_tokens_in,
-            total_tokens_out,
-            current_context_tokens,
-        )
+        || !soft_budget_threshold_exceeded(session_budget, total_tokens_in, total_tokens_out)
     {
         return false;
     }
@@ -512,6 +529,85 @@ pub struct ReplyLoopContext<'a> {
     /// the same instance to decide whether to defer or demote work that would
     /// otherwise apply to the pre-rotation transcript.
     pub compaction_cs: &'a CompactionCriticalSection,
+}
+
+/// A deterministic compaction seam for downstream reply-loop fixtures. The
+/// hook is only compiled into the test-support build and is reached through the
+/// production oversized-transport branches below.
+#[cfg(feature = "test-support")]
+pub type TransportRecoveryCompactionHook = Arc<dyn Fn() -> Result<bool, String> + Send + Sync>;
+
+/// Observes each completed pass through the lifetime/hard/soft budget checks.
+/// This lets the stable integration fixture prove recovery re-enters the loop
+/// head before its one provider retry.
+#[cfg(feature = "test-support")]
+pub type TransportRecoveryBudgetCheckHook = Arc<dyn Fn() + Send + Sync>;
+
+#[cfg(feature = "test-support")]
+static TRANSPORT_RECOVERY_COMPACTION_HOOK: OnceLock<
+    Mutex<Option<TransportRecoveryCompactionHook>>,
+> = OnceLock::new();
+
+#[cfg(feature = "test-support")]
+static TRANSPORT_RECOVERY_BUDGET_CHECK_HOOK: OnceLock<
+    Mutex<Option<TransportRecoveryBudgetCheckHook>>,
+> = OnceLock::new();
+
+#[cfg(feature = "test-support")]
+pub fn set_transport_recovery_compaction_hook_for_test(
+    hook: Option<TransportRecoveryCompactionHook>,
+) {
+    *TRANSPORT_RECOVERY_COMPACTION_HOOK
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = hook;
+}
+
+#[cfg(feature = "test-support")]
+pub fn set_transport_recovery_budget_check_hook_for_test(
+    hook: Option<TransportRecoveryBudgetCheckHook>,
+) {
+    *TRANSPORT_RECOVERY_BUDGET_CHECK_HOOK
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = hook;
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn compact_transport_recovery_in_critical_section(
+    provider: &dyn LlmProvider,
+    conversation: &mut Conversation,
+    session_id: &str,
+    task_id: &str,
+    role_name: &str,
+    context_window: i64,
+    current_context_tokens: u32,
+    compaction_cs: &CompactionCriticalSection,
+    slot_ctx: &SlotContext,
+) -> Result<bool, String> {
+    #[cfg(feature = "test-support")]
+    if let Some(hook) = TRANSPORT_RECOVERY_COMPACTION_HOOK
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone()
+    {
+        let _guard = compaction_cs.guard();
+        return hook();
+    }
+    compact_conversation_in_critical_section(
+        provider,
+        conversation,
+        session_id,
+        task_id,
+        role_name,
+        context_window,
+        CompactionTrigger::OversizedTransport,
+        current_context_tokens,
+        compaction_cs,
+        slot_ctx,
+    )
+    .await
 }
 
 /// Djinn-native reply loop. Drives an `LlmProvider` stream, dispatches tool
@@ -632,6 +728,9 @@ pub async fn run_reply_loop(
         let mut assistant_message_count: usize = 0;
         let mut assistant_fragments: Vec<String> = Vec::new();
         let mut compaction_attempts: u32 = 0;
+        // Unlike context/orphan recovery, transport recovery is a one-shot
+        // escape hatch for a failed request and its single immediate retry.
+        let mut transport_compaction_guard = TransportCompactionRecoveryGuard::default();
         let mut empty_turn_retries: u32 = 0;
         let is_codex = is_codex_openai_family(model_id);
         let mut consecutive_nudge_count: u32 = 0;
@@ -679,12 +778,8 @@ pub async fn run_reply_loop(
         // we settle the session as a typed no_progress_submission.
         let mut no_progress_guard_triggered = false;
         loop {
-            let hard_budget_exceeded = hard_budget_threshold_exceeded(
-                &session_budget,
-                total_tokens_in,
-                total_tokens_out,
-                current_context_tokens,
-            );
+            let hard_budget_exceeded =
+                hard_budget_threshold_exceeded(&session_budget, total_tokens_in, total_tokens_out);
             let budget_wind_down_should_stop = budget_wind_down_final_turn_spent
                 && wind_down_reason
                     .as_ref()
@@ -758,10 +853,18 @@ pub async fn run_reply_loop(
                 turns,
                 total_tokens_in,
                 total_tokens_out,
-                current_context_tokens,
                 conversation,
             )
             .await;
+            #[cfg(feature = "test-support")]
+            if let Some(hook) = TRANSPORT_RECOVERY_BUDGET_CHECK_HOOK
+                .get_or_init(|| Mutex::new(None))
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone()
+            {
+                hook();
+            }
             turns += 1;
             let env_diag = runtime_env_diagnostics(session_id, project_path, worktree_path);
             tracing::info!(
@@ -798,6 +901,51 @@ pub async fn run_reply_loop(
                 .await;
             let stream = match stream_result {
                 Ok(s) => s,
+                Err(e)
+                    if !transport_compaction_guard.attempted()
+                        && oversized_exhausted_transport(&e, context_window).is_some() =>
+                {
+                    let diagnostic = match oversized_exhausted_transport(&e, context_window) {
+                        Some(diagnostic) => diagnostic,
+                        None => return Err(e),
+                    };
+                    // Set the guard before entering compaction: a failed summary
+                    // must never re-enter this recovery path on a later turn.
+                    let _ = transport_compaction_guard.try_begin();
+                    phase_tracker
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .exit_provider_wait();
+                    tracing::warn!(
+                        task_id = %task_id,
+                        category = ?diagnostic.category,
+                        estimated_payload_chars = diagnostic.estimated_payload_chars,
+                        "ReplyLoop: exhausted oversized transport on stream init; compacting once"
+                    );
+                    match compact_transport_recovery_in_critical_section(
+                        provider, conversation, session_id, task_id, role_name, context_window,
+                        current_context_tokens, compaction_cs, slot_ctx,
+                    )
+                    .await
+                    {
+                        Ok(true) => {
+                            current_context_tokens = 0;
+                            tool_dispatcher.clear_stash();
+                            conversation.push(Message::user("Continue with the task."));
+                            // Re-enter at the loop head so lifetime/hard/soft
+                            // budget policy is evaluated before the one retry.
+                            continue;
+                        }
+                        Ok(false) => return Err(e.context(format!(
+                            "oversized transport compaction was not applied; category={:?}, estimated_payload_chars={}",
+                            diagnostic.category, diagnostic.estimated_payload_chars
+                        ))),
+                        Err(compaction_error) => return Err(e.context(format!(
+                            "oversized transport compaction failed; category={:?}, estimated_payload_chars={}, compaction_error={compaction_error}",
+                            diagnostic.category, diagnostic.estimated_payload_chars
+                        ))),
+                    }
+                }
                 Err(e) if (is_context_length_error(&e) || is_orphaned_tool_call_error(&e))
                     && compaction_attempts < MAX_COMPACTION_RETRIES =>
                 {
@@ -822,14 +970,19 @@ pub async fn run_reply_loop(
                         task_id,
                         role_name,
                         context_window,
+                        if is_orphaned_tool_call_error(&e) {
+                            CompactionTrigger::OrphanRepair
+                        } else {
+                            CompactionTrigger::ContextError
+                        },
+                        current_context_tokens,
                         compaction_cs,
                         slot_ctx,
                     )
                     .await
                     .map_err(anyhow::Error::msg)?;
                     if compacted {
-                        total_tokens_in = 0;
-                        total_tokens_out = 0;
+                        // Lifetime spend persists across reactive compaction.
                         current_context_tokens = 0;
                         compaction_attempts += 1;
                         tool_dispatcher.clear_stash();
@@ -862,7 +1015,7 @@ pub async fn run_reply_loop(
                 otel_session: otel_session.as_ref(),
                 phase_tracker: Some(&phase_tracker),
             };
-            let mut stream_state = consume_provider_stream(StreamLoopContext {
+            let mut stream_state = match consume_provider_stream(StreamLoopContext {
                 provider,
                 stream,
                 tool_metadata: &tool_metadata,
@@ -888,7 +1041,45 @@ pub async fn run_reply_loop(
                 total_cache_write: &mut total_cache_write,
                 total_reasoning_out: &mut total_reasoning_out,
             })
-            .await?;
+            .await {
+                Ok(state) => state,
+                Err(e)
+                    if !transport_compaction_guard.attempted()
+                        && oversized_exhausted_transport(&e, context_window).is_some() =>
+                {
+                    let diagnostic = match oversized_exhausted_transport(&e, context_window) {
+                        Some(diagnostic) => diagnostic,
+                        None => return Err(e),
+                    };
+                    let _ = transport_compaction_guard.try_begin();
+                    phase_tracker
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .exit_provider_wait();
+                    match compact_transport_recovery_in_critical_section(
+                        provider, conversation, session_id, task_id, role_name, context_window,
+                        current_context_tokens, compaction_cs, slot_ctx,
+                    )
+                    .await
+                    {
+                        Ok(true) => {
+                            current_context_tokens = 0;
+                            tool_dispatcher.clear_stash();
+                            conversation.push(Message::user("Continue with the task."));
+                            continue;
+                        }
+                        Ok(false) => return Err(e.context(format!(
+                            "oversized transport compaction was not applied; category={:?}, estimated_payload_chars={}",
+                            diagnostic.category, diagnostic.estimated_payload_chars
+                        ))),
+                        Err(compaction_error) => return Err(e.context(format!(
+                            "oversized transport compaction failed; category={:?}, estimated_payload_chars={}, compaction_error={compaction_error}",
+                            diagnostic.category, diagnostic.estimated_payload_chars
+                        ))),
+                    }
+                }
+                Err(e) => return Err(e),
+            };
             phase_tracker.lock().unwrap_or_else(std::sync::PoisonError::into_inner).exit_provider_wait();
             // Flush any observed assistant/tool content before returning on
             // interrupt, cancellation, or early stream end.  This persists the
@@ -994,14 +1185,15 @@ pub async fn run_reply_loop(
                     task_id,
                     role_name,
                     context_window,
+                    CompactionTrigger::ContextError,
+                    current_context_tokens,
                     compaction_cs,
                     slot_ctx,
                 )
                 .await
                 .map_err(anyhow::Error::msg)?;
                 if compacted {
-                    total_tokens_in = 0;
-                    total_tokens_out = 0;
+                    // Lifetime spend persists across reactive compaction.
                     current_context_tokens = 0;
                     compaction_attempts += 1;
                     tool_dispatcher.clear_stash();
@@ -1031,12 +1223,47 @@ pub async fn run_reply_loop(
                     continue;
                 }
                 let diag = runtime_fs_diagnostics(project_path, worktree_path);
-                return Err(empty_turn_terminal_error(
+                let terminal_error = empty_turn_terminal_error(
                     "no-event",
                     empty_turn_retries,
                     model_id,
                     diag,
-                ));
+                );
+                // This must be the final provider wire body, not persistence's
+                // OpenAI-shaped serialization. Unknown sizes are ineligible.
+                let estimated_payload_chars = provider.stream_request_body_bytes(
+                    request_conversation.as_ref(), tools, tool_choice,
+                );
+                let known_context_window_tokens = u32::try_from(context_window).unwrap_or(0);
+                if !transport_compaction_guard.attempted()
+                    && estimated_payload_chars.is_some_and(|bytes| {
+                        is_oversized_transport_payload(bytes, known_context_window_tokens)
+                    })
+                {
+                    // Flip before compaction so errors cannot loop recovery.
+                    let _ = transport_compaction_guard.try_begin();
+                    match compact_transport_recovery_in_critical_section(
+                        provider, conversation, session_id, task_id, role_name, context_window,
+                        current_context_tokens, compaction_cs, slot_ctx,
+                    )
+                    .await
+                    {
+                        Ok(true) => {
+                            current_context_tokens = 0;
+                            tool_dispatcher.clear_stash();
+                            conversation.push(Message::user("Continue with the task."));
+                            // Re-enter through the budget checks before retrying.
+                            continue;
+                        }
+                        Ok(false) => return Err(terminal_error.context(format!(
+                            "oversized empty-stream compaction was not applied; estimated_payload_chars={estimated_payload_chars:?}"
+                        ))),
+                        Err(compaction_error) => return Err(terminal_error.context(format!(
+                            "oversized empty-stream compaction failed; estimated_payload_chars={estimated_payload_chars:?}, compaction_error={compaction_error}"
+                        ))),
+                    }
+                }
+                return Err(terminal_error);
             }
             // Canonical assembly: provider-state blocks, one unsigned
             // thinking block from unresolved fragments (reconciled by exact
@@ -1149,6 +1376,16 @@ pub async fn run_reply_loop(
                 );
                 return Err(provider_failure_prose_error(&snippet));
             }
+            // A non-empty assistant turn has now passed all provider-turn
+            // validation. Transport recovery is one-shot only for the failed
+            // request plus its immediate retry; a later provider turn (for
+            // example after dispatching a tool call) gets its own one-shot
+            // allowance. Reset here, before any successful-turn path can
+            // finalize, compact proactively, dispatch tools, or continue, but
+            // never on empty/reasoning-only retries or terminal/error paths.
+            if transport_compaction_guard.attempted() {
+                transport_compaction_guard.reset_after_completed_turn();
+            }
             let assistant_msg = Message {
                 role: Role::Assistant,
                 content: assistant_content,
@@ -1211,14 +1448,15 @@ pub async fn run_reply_loop(
                     task_id,
                     role_name,
                     context_window,
+                    CompactionTrigger::Proactive,
+                    current_context_tokens,
                     compaction_cs,
                     slot_ctx,
                 )
                 .await
                 .map_err(anyhow::Error::msg)?;
                 if compacted {
-                    total_tokens_in = 0;
-                    total_tokens_out = 0;
+                    // Lifetime spend persists across proactive compaction.
                     current_context_tokens = 0;
                     tool_dispatcher.clear_stash();
                     if should_retry_after_tool_call_compaction(compacted, !turn_tool_calls.is_empty()) {
@@ -1666,6 +1904,8 @@ async fn compact_conversation_in_critical_section(
     task_id: &str,
     role_name: &str,
     context_window: i64,
+    trigger: CompactionTrigger,
+    current_context_tokens_before: u32,
     compaction_cs: &CompactionCriticalSection,
     slot_ctx: &SlotContext,
 ) -> Result<bool, String> {
@@ -1673,10 +1913,17 @@ async fn compact_conversation_in_critical_section(
     let dispatcher = slot_ctx.tool_dispatcher.as_deref();
 
     let boundary_repo = SessionCompactionBoundaryRepository::new(slot_ctx.db.clone());
-    let boundary_id = record_compaction_started(&boundary_repo, session_id, conversation).await;
+    let boundary_id = record_compaction_started(
+        &boundary_repo,
+        session_id,
+        conversation,
+        trigger,
+        current_context_tokens_before,
+    )
+    .await;
     // Production and the hardening fixture share this boundary: a failed durable
     // write returns before compaction can replace any inline tool result.
-    let compacted = compact_conversation_after_persist(
+    let outcome = compact_conversation_after_persist(
         provider,
         conversation,
         session_id,
@@ -1691,8 +1938,28 @@ async fn compact_conversation_in_critical_section(
         },
     )
     .await?;
+    let compacted = outcome.compacted();
+
+    // Deterministic truncation is an actual fallback operation, not a successful
+    // completion of the preceding summary attempt. The first row remains
+    // Started; the fallback row owns the successful replacement.
+    let completed_boundary_id = if outcome == CompactionOutcome::Fallback {
+        record_compaction_started(
+            &boundary_repo,
+            session_id,
+            conversation,
+            CompactionTrigger::Fallback,
+            current_context_tokens_before,
+        )
+        .await
+    } else {
+        boundary_id
+    };
 
     if compacted {
+        // The reply loop resets occupancy at a successful compaction boundary;
+        // lifetime counters remain with the caller and are never telemetry input.
+        let current_context_tokens_after = 0;
         let summary = conversation
             .messages
             .iter()
@@ -1703,9 +1970,10 @@ async fn compact_conversation_in_critical_section(
             .unwrap_or_default();
         complete_compaction_boundary(
             &boundary_repo,
-            boundary_id.as_deref(),
+            completed_boundary_id.as_deref(),
             conversation,
             &summary,
+            current_context_tokens_after,
         )
         .await;
     }
@@ -1722,7 +1990,7 @@ async fn compact_conversation_after_persist<F>(
     role_name: &str,
     context_window: i64,
     persist: F,
-) -> Result<bool, String>
+) -> Result<CompactionOutcome, String>
 where
     F: FnOnce(
         &[PreCompactionToolResult],
@@ -1730,7 +1998,7 @@ where
 {
     let results = inline_tool_results(conversation);
     let pointers = persist(&results)?;
-    Ok(compact_conversation_with_pointers(
+    Ok(compact_conversation_with_pointers_outcome(
         provider,
         conversation,
         session_id,
@@ -1755,7 +2023,7 @@ where
         &[PreCompactionToolResult],
     ) -> Result<Vec<djinn_compaction::ToolOutputPointer>, String>,
 {
-    compact_conversation_after_persist(
+    Ok(compact_conversation_after_persist(
         provider,
         conversation,
         "compaction-hardening-session",
@@ -1764,7 +2032,8 @@ where
         context_window,
         persist,
     )
-    .await
+    .await?
+    .compacted())
 }
 
 fn inline_tool_results(conversation: &Conversation) -> Vec<PreCompactionToolResult> {
@@ -1930,6 +2199,8 @@ mod tests {
             "t-success",
             "worker",
             1_000_000,
+            CompactionTrigger::ManualTest,
+            0,
             &section,
             &slot_ctx,
         )
@@ -1944,6 +2215,43 @@ mod tests {
             !section.is_compacting(),
             "guard must release after a successful compaction"
         );
+    }
+
+    /// A deterministic truncation must write a completed fallback boundary,
+    /// while the failed summary attempt remains a started-only boundary.
+    #[tokio::test]
+    async fn deterministic_fallback_records_trigger_and_exact_occupancy() {
+        let section = CompactionCriticalSection::new();
+        let provider = FailingProvider::new("summary unavailable");
+        let mut conversation = micro_compactable_conversation(12);
+        let slot_ctx = guard_test_slot_ctx();
+        let (session_id, task_id) = create_flush_test_session(&slot_ctx.db).await;
+
+        assert!(
+            compact_conversation_in_critical_section(
+                &provider,
+                &mut conversation,
+                &session_id,
+                &task_id,
+                "worker",
+                10,
+                CompactionTrigger::Proactive,
+                777,
+                &section,
+                &slot_ctx,
+            )
+            .await
+            .expect("fallback compaction should succeed")
+        );
+
+        let boundary = SessionCompactionBoundaryRepository::new(slot_ctx.db.clone())
+            .latest_completed_boundary(&session_id)
+            .await
+            .expect("read fallback boundary")
+            .expect("fallback must complete a boundary");
+        assert_eq!(boundary.trigger, Some(CompactionTrigger::Fallback));
+        assert_eq!(boundary.current_context_tokens_before, Some(777));
+        assert_eq!(boundary.current_context_tokens_after, Some(0));
     }
 
     /// False / no-compaction: the summarizer yields nothing usable and the
@@ -1969,6 +2277,8 @@ mod tests {
             "t-noop",
             "worker",
             10_000,
+            CompactionTrigger::ManualTest,
+            0,
             &section,
             &slot_ctx,
         )
@@ -1999,6 +2309,8 @@ mod tests {
             "t-error",
             "worker",
             10_000,
+            CompactionTrigger::ManualTest,
+            0,
             &section,
             &slot_ctx,
         )
@@ -2038,6 +2350,8 @@ mod tests {
             "t-panic",
             "worker",
             10_000,
+            CompactionTrigger::ManualTest,
+            0,
             &section,
             &slot_ctx,
         ))
@@ -2084,6 +2398,8 @@ mod tests {
                 "t-persist-order",
                 "worker",
                 1_000_000,
+                CompactionTrigger::ManualTest,
+                0,
                 &section,
                 &slot_ctx,
             )
@@ -2116,6 +2432,8 @@ mod tests {
             "t-persist-fail",
             "worker",
             1_000_000,
+            CompactionTrigger::ManualTest,
+            0,
             &section,
             &slot_ctx,
         )

@@ -44,22 +44,43 @@ impl CoordinatorActor {
             "crashed" => djinn_telemetry::dispatch::STRIKE_SOURCE_CRASHED,
             _ => djinn_telemetry::dispatch::STRIKE_SOURCE_OTHER_TERMINAL,
         };
-        let exempted = attempt.outcome == "interrupted"
-            && attempt
-                .dispatch_owner_incarnation_id
-                .as_deref()
-                .is_some_and(|owner| {
-                    attempt
-                        .summary_json
-                        .as_deref()
-                        .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
-                        .is_some_and(|evidence| {
-                            evidence["failure_class"] == "environmental_owner_expired"
-                                && evidence["owner_incarnation_id"] == owner
-                                && evidence["owner_classification"] == "expired"
-                                && evidence["owner_lease_last_renewed_at"].is_string()
-                        })
-                });
+        // Environmental exemption: a restart/deploy interruption never books a
+        // dispatch strike. Two evidence tuples qualify, both deterministic:
+        //   1. environmental_owner_expired — a periodic/startup reap proved the
+        //      row's non-NULL owner lease expired beyond threshold.
+        //   2. environmental_restart_orphan — a STARTUP reap proved a pre-boot
+        //      orphan had no live owner under single-leader (owner NULL, missing,
+        //      or a different incarnation than the boot's). The recorded
+        //      `boot_incarnation_id` + startup reason is the proof; the owner may
+        //      legitimately be NULL, so no owner-field match is required here.
+        // Returns the distinct environmental source label when exempt so restart
+        // orphans and owner-expiry are counted on separate series.
+        let exempt_source = (attempt.outcome == "interrupted")
+            .then_some(attempt.summary_json.as_deref())
+            .flatten()
+            .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+            .and_then(|evidence| {
+                let owner_expired = attempt
+                    .dispatch_owner_incarnation_id
+                    .as_deref()
+                    .is_some_and(|owner| {
+                        evidence["failure_class"] == "environmental_owner_expired"
+                            && evidence["owner_incarnation_id"] == owner
+                            && evidence["owner_classification"] == "expired"
+                            && evidence["owner_lease_last_renewed_at"].is_string()
+                    });
+                let restart_orphan = evidence["failure_class"] == "environmental_restart_orphan"
+                    && evidence["reason"] == "startup"
+                    && evidence["boot_incarnation_id"].is_string();
+                if owner_expired {
+                    Some(djinn_telemetry::dispatch::STRIKE_SOURCE_ENVIRONMENTAL_OWNER_EXPIRED)
+                } else if restart_orphan {
+                    Some(djinn_telemetry::dispatch::STRIKE_SOURCE_ENVIRONMENTAL_RESTART_ORPHAN)
+                } else {
+                    None
+                }
+            });
+        let exempted = exempt_source.is_some();
         Some(DispatchStrikeDecision {
             exempted,
             decision: if exempted {
@@ -67,11 +88,7 @@ impl CoordinatorActor {
             } else {
                 djinn_telemetry::dispatch::STRIKE_DECISION_COUNTED
             },
-            source: if exempted {
-                djinn_telemetry::dispatch::STRIKE_SOURCE_ENVIRONMENTAL_OWNER_EXPIRED
-            } else {
-                source
-            },
+            source: exempt_source.unwrap_or(source),
         })
     }
 }

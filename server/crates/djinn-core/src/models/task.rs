@@ -2,6 +2,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Result};
+use crate::refinement_liveness::{RefinementPhase, RefinementRole};
 
 // ── ReopenClass ──────────────────────────────────────────────────────────────
 
@@ -529,6 +530,175 @@ pub struct Task {
     /// Populated by list queries via subquery; defaults to 0 elsewhere.
     #[cfg_attr(feature = "sqlx", sqlx(default))]
     pub unresolved_blocker_count: i64,
+    #[cfg_attr(feature = "sqlx", sqlx(default))]
+    pub refinement_run_id: Option<String>,
+    #[cfg_attr(feature = "sqlx", sqlx(default))]
+    pub refinement_intent_id: Option<String>,
+    #[cfg_attr(feature = "sqlx", sqlx(default))]
+    pub refinement_generation: Option<i64>,
+    #[cfg_attr(feature = "sqlx", sqlx(default))]
+    pub refinement_round: Option<i64>,
+    #[cfg_attr(feature = "sqlx", sqlx(default))]
+    pub refinement_phase: Option<String>,
+    #[cfg_attr(feature = "sqlx", sqlx(default))]
+    pub refinement_role: Option<String>,
+}
+
+/// Exact, validated refinement identity attached to a task.
+///
+/// Fields are deliberately private so every construction path, including serde,
+/// must use [`Self::new`] and cannot bypass the correlation invariants.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct TaskRefinementCorrelation {
+    run_id: String,
+    intent_id: String,
+    generation: i64,
+    round: i64,
+    phase: RefinementPhase,
+    role: RefinementRole,
+}
+
+impl TaskRefinementCorrelation {
+    pub fn new(
+        run_id: String,
+        intent_id: String,
+        generation: i64,
+        round: i64,
+        phase: RefinementPhase,
+        role: RefinementRole,
+    ) -> Result<Self> {
+        if run_id.trim().is_empty() || intent_id.trim().is_empty() {
+            return Err(Error::Internal(
+                "refinement correlation IDs must be nonblank".into(),
+            ));
+        }
+        if generation <= 0 || round <= 0 {
+            return Err(Error::Internal(
+                "refinement correlation generation and round must be positive".into(),
+            ));
+        }
+        if !matches!(
+            (phase, role),
+            (RefinementPhase::AdversaryAttack, RefinementRole::Adversary)
+                | (RefinementPhase::AdvocateRevision, RefinementRole::Advocate)
+                | (RefinementPhase::JudgeAdjudication, RefinementRole::Judge)
+        ) {
+            return Err(Error::Internal(
+                "invalid refinement phase/role pairing".into(),
+            ));
+        }
+        Ok(Self {
+            run_id,
+            intent_id,
+            generation,
+            round,
+            phase,
+            role,
+        })
+    }
+
+    pub fn run_id(&self) -> &str {
+        &self.run_id
+    }
+    pub fn intent_id(&self) -> &str {
+        &self.intent_id
+    }
+    pub const fn generation(&self) -> i64 {
+        self.generation
+    }
+    pub const fn round(&self) -> i64 {
+        self.round
+    }
+    pub const fn phase(&self) -> RefinementPhase {
+        self.phase
+    }
+    pub const fn role(&self) -> RefinementRole {
+        self.role
+    }
+}
+
+#[derive(Deserialize)]
+struct RawTaskRefinementCorrelation {
+    run_id: String,
+    intent_id: String,
+    generation: i64,
+    round: i64,
+    phase: RefinementPhase,
+    role: RefinementRole,
+}
+
+impl<'de> Deserialize<'de> for TaskRefinementCorrelation {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let raw = RawTaskRefinementCorrelation::deserialize(deserializer)?;
+        Self::new(
+            raw.run_id,
+            raw.intent_id,
+            raw.generation,
+            raw.round,
+            raw.phase,
+            raw.role,
+        )
+        .map_err(serde::de::Error::custom)
+    }
+}
+
+impl Task {
+    /// Decode complete task correlation; preserve all-null ordinary/historical rows.
+    pub fn refinement_correlation(&self) -> Result<Option<TaskRefinementCorrelation>> {
+        Self::refinement_correlation_from_row_fields(
+            self.refinement_run_id.clone(),
+            self.refinement_intent_id.clone(),
+            self.refinement_generation,
+            self.refinement_round,
+            self.refinement_phase.clone(),
+            self.refinement_role.clone(),
+        )
+    }
+
+    fn refinement_correlation_from_row_fields(
+        run_id: Option<String>,
+        intent_id: Option<String>,
+        generation: Option<i64>,
+        round: Option<i64>,
+        phase: Option<String>,
+        role: Option<String>,
+    ) -> Result<Option<TaskRefinementCorrelation>> {
+        let present = [
+            run_id.is_some(),
+            intent_id.is_some(),
+            generation.is_some(),
+            round.is_some(),
+            phase.is_some(),
+            role.is_some(),
+        ];
+        if present.iter().all(|value| !value) {
+            return Ok(None);
+        }
+        if present.iter().any(|value| !value) {
+            return Err(Error::Internal(
+                "partial refinement task correlation".into(),
+            ));
+        }
+        let phase = serde_json::from_value(serde_json::Value::String(
+            phase.expect("all fields checked"),
+        ))
+        .map_err(|_| Error::Internal("invalid refinement phase".into()))?;
+        let role =
+            serde_json::from_value(serde_json::Value::String(role.expect("all fields checked")))
+                .map_err(|_| Error::Internal("invalid refinement role".into()))?;
+        TaskRefinementCorrelation::new(
+            run_id.expect("all fields checked"),
+            intent_id.expect("all fields checked"),
+            generation.expect("all fields checked"),
+            round.expect("all fields checked"),
+            phase,
+            role,
+        )
+        .map(Some)
+    }
 }
 
 // ── Evidence-spike detection ──────────────────────────────────────────────────
@@ -719,10 +889,12 @@ pub enum TransitionAction {
     /// reaper after a deploy) is adopted on every ready pass — skipping
     /// dispatch — but polled by NOBODY (the PR poller only polls
     /// `pr_draft`/`pr_review`), so it wedges (incident gton: 470 adoptions
-    /// overnight, 9h wedge). Only legal from `open`. Strike-free: it does NOT
-    /// bump `reopen_count`, carries no `reopen_class`, and records no
-    /// intervention — the PR already exists, this is a bookkeeping handoff, not
-    /// a rework. Applied by the coordinator with a `system` actor (no user).
+    /// overnight, 9h wedge). It is legal from every non-terminal status so the
+    /// coordinator terminal gate can preserve a PR discovered while handling
+    /// exhaustion. Strike-free: it does NOT bump `reopen_count`, carries no
+    /// `reopen_class`, and records no intervention — the PR already exists,
+    /// this is a bookkeeping handoff, not a rework. Applied by the coordinator
+    /// with a `system` actor (no user).
     AdoptionHandoff,
 }
 
@@ -1266,17 +1438,10 @@ pub fn compute_transition(
         }
 
         TransitionAction::AdoptionHandoff => {
-            // Respawn-guard open-PR adoption handoff: the guard adopted an
-            // existing open PR for a dispatch-eligible worker task, so move the
-            // task out of the dispatchable `open` column into the poller-owned
-            // `pr_review` column. Only legal from `open` — the adoption path
-            // only fires for `open` worker tasks, and a task already in a
-            // poller-owned status needs no handoff (the caller no-ops before
-            // reaching here). Strike-free, like `ParkForRemediation`: no
-            // `reopen_count` bump, no `reopen_class`, no intervention. The PR
-            // already exists; this is a bookkeeping handoff, not a rework.
-            if *from != TaskStatus::Open {
-                return bad("adoption_handoff is only valid from open");
+            // Shared poller handoff: the terminal exhaustion gate may discover
+            // a PR on any non-terminal row. It preserves owner and PR fields.
+            if matches!(from, TaskStatus::Closed) {
+                return bad("adoption_handoff is not valid from closed");
             }
             TransitionApply {
                 to_status: Some(TaskStatus::PrReview),
@@ -1332,6 +1497,7 @@ pub fn compute_transition_for_issue_type(
                 | TransitionAction::ParkForRemediation
                 | TransitionAction::ArbiterPark
                 | TransitionAction::ArbiterSupersede
+                | TransitionAction::AdoptionHandoff
         );
         if !allowed {
             return Err(Error::InvalidTransition(format!(
@@ -1482,12 +1648,116 @@ mod tests {
             (TransitionAction::ArbiterSupersede, TaskStatus::InLeadIntervention) => {
                 Some(TaskStatus::Closed)
             }
-            (TransitionAction::AdoptionHandoff, TaskStatus::Open) => Some(TaskStatus::PrReview),
+            (TransitionAction::AdoptionHandoff, s) if *s != TaskStatus::Closed => {
+                Some(TaskStatus::PrReview)
+            }
             (TransitionAction::SubmitForMerge, TaskStatus::InProgress) => {
                 Some(TaskStatus::Approved)
             }
             _ => None,
         }
+    }
+
+    #[test]
+    fn refinement_correlation_validates_complete_and_rejects_invalid_values() {
+        let valid = TaskRefinementCorrelation::new(
+            "run-1".into(),
+            "intent-1".into(),
+            1,
+            2,
+            RefinementPhase::AdversaryAttack,
+            RefinementRole::Adversary,
+        )
+        .unwrap();
+        assert_eq!(
+            serde_json::from_str::<TaskRefinementCorrelation>(
+                &serde_json::to_string(&valid).unwrap()
+            )
+            .unwrap(),
+            valid
+        );
+        for malformed in [
+            r#"{"run_id":" ","intent_id":"intent","generation":1,"round":1,"phase":"adversary_attack","role":"adversary"}"#,
+            r#"{"run_id":"run","intent_id":"intent","generation":0,"round":1,"phase":"adversary_attack","role":"adversary"}"#,
+            r#"{"run_id":"run","intent_id":"intent","generation":1,"round":1,"phase":"adversary_attack","role":"judge"}"#,
+        ] {
+            assert!(serde_json::from_str::<TaskRefinementCorrelation>(malformed).is_err());
+        }
+        assert!(
+            TaskRefinementCorrelation::new(
+                " ".into(),
+                "intent".into(),
+                1,
+                1,
+                RefinementPhase::AdversaryAttack,
+                RefinementRole::Adversary
+            )
+            .is_err()
+        );
+        assert!(
+            TaskRefinementCorrelation::new(
+                "run".into(),
+                "intent".into(),
+                0,
+                1,
+                RefinementPhase::AdversaryAttack,
+                RefinementRole::Adversary
+            )
+            .is_err()
+        );
+        assert!(
+            TaskRefinementCorrelation::new(
+                "run".into(),
+                "intent".into(),
+                1,
+                0,
+                RefinementPhase::AdversaryAttack,
+                RefinementRole::Adversary
+            )
+            .is_err()
+        );
+        assert!(
+            TaskRefinementCorrelation::new(
+                "run".into(),
+                "intent".into(),
+                1,
+                1,
+                RefinementPhase::AdversaryAttack,
+                RefinementRole::Judge
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn refinement_correlation_row_fields_preserve_null_tasks_and_reject_partial_rows() {
+        assert_eq!(
+            Task::refinement_correlation_from_row_fields(None, None, None, None, None, None)
+                .unwrap(),
+            None,
+        );
+        assert!(
+            Task::refinement_correlation_from_row_fields(
+                Some("legacy-run".into()),
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .is_err()
+        );
+        assert!(
+            Task::refinement_correlation_from_row_fields(
+                Some("run".into()),
+                Some("intent".into()),
+                Some(1),
+                Some(1),
+                Some("adversary_attack".into()),
+                Some("judge".into()),
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -1554,11 +1824,13 @@ mod tests {
     }
 
     #[test]
-    fn adoption_handoff_invalid_outside_open() {
-        // The handoff is only legal from `open` — the adoption path only fires
-        // for dispatchable `open` worker tasks, and a task already in a
-        // poller-owned status must not be re-handed (the caller no-ops first).
+    fn adoption_handoff_valid_from_every_non_closed_status() {
+        // The handoff is legal from every non-terminal status so the
+        // coordinator terminal gate can preserve a PR discovered while handling
+        // exhaustion from any exhaustion-reachable status. It is only rejected
+        // from `closed`.
         for from in [
+            TaskStatus::Open,
             TaskStatus::InProgress,
             TaskStatus::NeedsTaskReview,
             TaskStatus::InTaskReview,
@@ -1567,13 +1839,25 @@ mod tests {
             TaskStatus::PrReview,
             TaskStatus::NeedsLeadIntervention,
             TaskStatus::InLeadIntervention,
-            TaskStatus::Closed,
         ] {
-            assert!(
-                compute_transition(&TransitionAction::AdoptionHandoff, &from, None).is_err(),
-                "adoption_handoff must be invalid from {from:?}"
+            let apply = compute_transition(&TransitionAction::AdoptionHandoff, &from, None)
+                .unwrap_or_else(|_| panic!("adoption_handoff must be valid from {from:?}"));
+            assert_eq!(
+                apply.to_status,
+                Some(TaskStatus::PrReview),
+                "adoption_handoff from {from:?} must target pr_review"
             );
         }
+        // Only `closed` is rejected.
+        assert!(
+            compute_transition(
+                &TransitionAction::AdoptionHandoff,
+                &TaskStatus::Closed,
+                None
+            )
+            .is_err(),
+            "adoption_handoff must be invalid from closed"
+        );
     }
 
     #[test]

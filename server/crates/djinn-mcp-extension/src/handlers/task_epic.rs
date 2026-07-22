@@ -10,7 +10,7 @@ use djinn_control_plane::tools::epic_ops::{
 };
 use djinn_control_plane::tools::proposal_blocks::validate_question_form_placement;
 use djinn_control_plane::tools::proposal_tools::{
-    ProposalBlockPatchParams, ProposalUpdateParams, apply_block_patch,
+    ProposalBlockPatchParams, ProposalCreateParams, ProposalUpdateParams, apply_block_patch,
 };
 use djinn_control_plane::tools::task_tools::{
     CommentTaskRequest as SharedCommentTaskRequest, CreateTaskRequest as SharedCreateTaskRequest,
@@ -18,8 +18,8 @@ use djinn_control_plane::tools::task_tools::{
     create_task as shared_create_task, update_task as shared_update_task,
 };
 use djinn_control_plane::tools::validation::{
-    resolve_body_format_and_validate, validate_ac_count, validate_design, validate_proposal_status,
-    validate_title,
+    resolve_body_format_and_validate, validate_ac_count, validate_design,
+    validate_proposal_create_status, validate_proposal_status, validate_title,
 };
 use djinn_db::repositories::proposal::ProposalAcceptanceCriteriaAmendment;
 use djinn_db::{
@@ -32,6 +32,9 @@ use crate::context::ExtensionContext;
 use crate::helpers::*;
 use crate::truncate::smart_truncate;
 use crate::types::*;
+
+use super::proposal_authoring::{committed_latest_lint, proposal_authoring_error};
+use super::proposal_read::call_proposal_show as read_proposal_show;
 
 // ── Task query / show ───────────────────────────────────────────────────────
 
@@ -487,67 +490,72 @@ pub(crate) async fn call_epic_close(
 
 // ── Proposal tools ──────────────────────────────────────────────────────────
 
+/// Create a proposal through the in-pod authoring surface.
+///
+/// Whole-document lint enforcement remains exclusively in
+/// [`ProposalRepository::create`], and the returned lint data is read from the
+/// immutable revision that call committed.
+pub(crate) async fn call_proposal_create(
+    ctx: &dyn ExtensionContext,
+    arguments: &Option<serde_json::Map<String, serde_json::Value>>,
+) -> Result<serde_json::Value, String> {
+    let p: ProposalCreateParams = parse_args(arguments)?;
+    let title = validate_title(&p.title)?;
+    let body = p.body.as_deref().unwrap_or("");
+    validate_design(body)?;
+    let body_format = resolve_body_format_and_validate(body, p.body_format.as_deref())?;
+    if body_format == "mdx" {
+        validate_question_form_placement(body)?;
+    }
+    let acceptance_criteria = p.acceptance_criteria.unwrap_or_default();
+    validate_ac_count(acceptance_criteria.len())?;
+    let status = validate_proposal_create_status(p.status.as_deref())?;
+    let ac_json = serde_json::to_string(&acceptance_criteria).unwrap_or_else(|_| "[]".to_string());
+
+    let proposal_repo = ProposalRepository::new(ctx.db(), ctx.event_bus());
+    let proposal = match proposal_repo
+        .create(djinn_db::ProposalCreateInput {
+            title: &title,
+            body,
+            acceptance_criteria: Some(&ac_json),
+            status,
+            body_format: Some(body_format),
+        })
+        .await
+    {
+        Ok(proposal) => proposal,
+        Err(error) => return proposal_authoring_error(error),
+    };
+
+    // Preserve the server's best-effort target seeding without authoring any
+    // proposal/revision state outside the repository.
+    if let Some(target_projects) = p.target_projects {
+        let project_repo = ProjectRepository::new(ctx.db(), ctx.event_bus());
+        for target in target_projects {
+            if let Ok(Some(project_id)) = project_repo.resolve(&target).await {
+                let _ = proposal_repo
+                    .add_target(&proposal.id, &project_id, "primary")
+                    .await;
+            }
+        }
+    }
+
+    let latest_lint = committed_latest_lint(&proposal_repo, &proposal).await?;
+    Ok(serde_json::json!({
+        "ok": true,
+        "id": proposal.id,
+        "short_id": proposal.short_id,
+        "status": proposal.status,
+        "latest_revision_seq": proposal.latest_revision_seq,
+        "latest_lint": latest_lint,
+    }))
+}
+
 pub(crate) async fn call_proposal_show(
     ctx: &dyn ExtensionContext,
     arguments: &Option<serde_json::Map<String, serde_json::Value>>,
 ) -> Result<serde_json::Value, String> {
-    let p: ProposalShowParams = parse_args(arguments)?;
-
-    // Validate `fields` if provided.
-    if let Some(ref fields) = p.fields {
-        djinn_control_plane::tools::proposal_ops::validate_show_fields(fields)?;
-    }
-    // Validate `revision_bodies` if provided.
-    if let Some(ref rb) = p.revision_bodies {
-        djinn_control_plane::tools::proposal_ops::validate_revision_bodies_value(rb)?;
-    }
-
-    let field_selected = |name: &str| {
-        p.fields
-            .as_ref()
-            .is_none_or(|f| f.iter().any(|s| s == name))
-    };
-
-    let proposal_repo = ProposalRepository::new(ctx.db(), ctx.event_bus());
-    let Some(proposal) = proposal_repo.resolve(&p.id).await.ok().flatten() else {
-        return Err(format!("proposal not found: {}", p.id));
-    };
-
-    let mut result = serde_json::json!({});
-
-    if field_selected("proposal") {
-        let acceptance: serde_json::Value =
-            serde_json::from_str(&proposal.acceptance_criteria).unwrap_or(serde_json::json!([]));
-        result["id"] = serde_json::json!(proposal.id);
-        result["short_id"] = serde_json::json!(proposal.short_id);
-        result["title"] = serde_json::json!(proposal.title);
-        result["body"] = serde_json::json!(proposal.body);
-        result["status"] = serde_json::json!(proposal.status);
-        result["acceptance_criteria"] = acceptance;
-    }
-
-    if field_selected("targets") {
-        let targets = proposal_repo
-            .targets(&proposal.id)
-            .await
-            .map_err(|e| e.to_string())?;
-        let project_repo = ProjectRepository::new(ctx.db(), ctx.event_bus());
-        let mut target_json = Vec::with_capacity(targets.len());
-        for t in &targets {
-            let slug = match project_repo.get(&t.project_id).await {
-                Ok(Some(proj)) => format!("{}/{}", proj.github_owner, proj.github_repo),
-                _ => t.project_id.clone(),
-            };
-            target_json.push(serde_json::json!({
-                "project_id": t.project_id,
-                "project": slug,
-                "role": t.role,
-            }));
-        }
-        result["targets"] = serde_json::json!(target_json);
-    }
-
-    Ok(result)
+    read_proposal_show(ctx, arguments).await
 }
 
 pub(crate) async fn call_proposal_debate_append(
@@ -816,7 +824,7 @@ pub(crate) async fn call_proposal_update(
         existing.superseded_by.clone()
     };
 
-    let updated = proposal_repo
+    let updated = match proposal_repo
         .update(
             &existing.id,
             djinn_db::ProposalUpdateInput {
@@ -830,7 +838,11 @@ pub(crate) async fn call_proposal_update(
             },
         )
         .await
-        .map_err(|e| e.to_string())?;
+    {
+        Ok(updated) => updated,
+        Err(error) => return proposal_authoring_error(error),
+    };
+    let latest_lint = committed_latest_lint(&proposal_repo, &updated).await?;
 
     Ok(serde_json::json!({
         "ok": true,
@@ -838,6 +850,7 @@ pub(crate) async fn call_proposal_update(
         "short_id": updated.short_id,
         "status": updated.status,
         "latest_revision_seq": updated.latest_revision_seq,
+        "latest_lint": latest_lint,
     }))
 }
 
@@ -869,7 +882,7 @@ pub(crate) async fn call_proposal_block_patch(
 
     let outcome = apply_block_patch(&existing.body, &existing.body_format, &p)?;
 
-    let updated = proposal_repo
+    let updated = match proposal_repo
         .update(
             &existing.id,
             djinn_db::ProposalUpdateInput {
@@ -883,13 +896,18 @@ pub(crate) async fn call_proposal_block_patch(
             },
         )
         .await
-        .map_err(|e| e.to_string())?;
+    {
+        Ok(updated) => updated,
+        Err(error) => return proposal_authoring_error(error),
+    };
+    let latest_lint = committed_latest_lint(&proposal_repo, &updated).await?;
 
     Ok(serde_json::json!({
         "ok": true,
         "id": updated.id,
         "short_id": updated.short_id,
         "latest_revision_seq": updated.latest_revision_seq,
+        "latest_lint": latest_lint,
     }))
 }
 

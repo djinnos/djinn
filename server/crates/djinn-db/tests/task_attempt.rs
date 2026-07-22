@@ -8,6 +8,7 @@ pub(crate) use djinn_core::models::task_attempt::{
     GuardDecision, GuardReason, TASK_ATTEMPT_DISPATCH_KEY_MAX_LEN, TASK_ATTEMPT_LOG_TAIL_MAX_LEN,
     TASK_ATTEMPT_SUMMARY_MAX_LEN, TaskAttemptOutcome,
 };
+use djinn_db::repositories::test_support::seed_test_user;
 pub(crate) use djinn_db::{
     CreateTaskAttemptParams, Database, DispatchGroupTerminalEvidence, EpicRepository,
     FillTaskAttemptParams, GuardDeferTaskAttemptParams, SubmitTaskAttemptParams,
@@ -35,14 +36,16 @@ pub(crate) async fn create_task(db: &Database) -> (String, String) {
 
     let task_id = uuid::Uuid::now_v7().to_string();
     let short_id = format!("t{}{}", &task_id[..6], &task_id[task_id.len() - 6..]);
+    let creator = seed_test_user(db).await;
     sqlx::query!(
         "INSERT INTO tasks (id, project_id, short_id, epic_id, title, description, design,
-                            issue_type, priority, owner, status, continuation_count, labels, acceptance_criteria, memory_refs)
-         VALUES ($1, $2, $3, $4, 'Task', '', '', 'task', 0, '', 'open', 0, '[]'::jsonb, '[]'::jsonb, '[]'::jsonb)",
+                            issue_type, priority, owner, status, continuation_count, labels, acceptance_criteria, memory_refs, created_by_user_id)
+         VALUES ($1, $2, $3, $4, 'Task', '', '', 'task', 0, '', 'open', 0, '[]'::jsonb, '[]'::jsonb, '[]'::jsonb, $5)",
         task_id,
         epic.project_id,
         short_id,
-        epic.id
+        epic.id,
+        creator
     )
     .execute(db.pool())
     .await

@@ -6,7 +6,7 @@ use sqlx::{Decode, Postgres, Type};
 use crate::Result;
 use crate::database::Database;
 use crate::error::DbError;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
 /// Maximum rows returned per `list_by_project` page when the caller does not
 /// provide an explicit limit.
@@ -211,6 +211,11 @@ pub struct KnowledgeTraceDispositionCounts {
 }
 pub struct CreateRetrievalTraceTerminalParams<'a> {
     pub trace: CreateRetrievalTraceParams<'a>,
+    /// Persisted verbatim so terminal writes retain the effective rollout cohort.
+    pub rollout_label: &'a str,
+    /// Semantic retrieval outcome retained independently from terminal state.
+    /// This keeps disabled terminals distinct from retrieval errors.
+    pub outcome: RetrievalTraceOutcome,
     pub terminal_state: KnowledgeTraceTerminalState,
     pub terminal_at: &'a str,
     pub candidate_count: Option<i32>,
@@ -221,6 +226,14 @@ fn validate_terminal_trace(params: &CreateRetrievalTraceTerminalParams<'_>) -> R
     parse_retrieval_trace_utc_timestamp(params.terminal_at, "terminal_at")?;
     match params.terminal_state {
         KnowledgeTraceTerminalState::Success => {
+            if !matches!(
+                params.outcome,
+                RetrievalTraceOutcome::Injected | RetrievalTraceOutcome::Empty
+            ) {
+                return Err(DbError::InvalidData(
+                    "successful taxonomy-v1 terminal requires injected or empty outcome".to_owned(),
+                ));
+            }
             let candidate_count = params.candidate_count.ok_or_else(|| {
                 DbError::InvalidData(
                     "successful taxonomy-v1 trace requires candidate_count".to_owned(),
@@ -778,8 +791,9 @@ impl<'a> RetrievalTraceListFilter<'a> {
 mod retrieval_trace_health;
 use retrieval_trace_health::*;
 pub use retrieval_trace_health::{
-    CandidateScoreSummary, DurationStageSummary, RetrievalTraceHealthEvidence,
-    RetrievalTraceHealthRollup, SkipReasonCounts,
+    CandidateScoreSummary, DurationStageSummary, RetrievalTaxonomyValidationError,
+    RetrievalTraceHealthEvidence, RetrievalTraceHealthRollup, SkipReasonCounts,
+    TaxonomyV1RetrievalHealthCounts, TaxonomyV1RetrievalHealthGroup,
 };
 
 // ── Repository ────────────────────────────────────────────────────────────────
@@ -840,9 +854,7 @@ impl RetrievalTraceRepository {
         self.insert_with_values(params, "enabled", outcome).await
     }
 
-    /// Insert a trace with rollout/outcome semantics supplied by an informed
-    /// caller. Validation occurs before SQL so fail-open callers receive an
-    /// ordinary `Result` instead of a durable contradictory trace.
+    /// Insert a trace with caller-supplied rollout/outcome semantics.
     pub async fn insert_with_semantics(
         &self,
         params: CreateRetrievalTraceWithSemanticsParams<'_>,
@@ -864,21 +876,8 @@ impl RetrievalTraceRepository {
         self.db.ensure_initialized().await?;
         let id = uuid::Uuid::now_v7().to_string();
         let counts = params.dispositions;
-        let outcome = match params.terminal_state {
-            KnowledgeTraceTerminalState::Success
-                if params.injected_count.expect(
-                    "validated successful taxonomy-v1 terminal must include injected_count",
-                ) > 0 =>
-            {
-                RetrievalTraceOutcome::Injected
-            }
-            KnowledgeTraceTerminalState::Success => RetrievalTraceOutcome::Empty,
-            KnowledgeTraceTerminalState::Error | KnowledgeTraceTerminalState::Cancelled => {
-                RetrievalTraceOutcome::Error
-            }
-        };
-        sqlx::query_as::<_, RetrievalTraceRow>(r#"INSERT INTO retrieval_traces (id,schema_version,project_id,session_id,task_run_id,task_id,entry_point,trigger,candidates,candidate_cap,candidate_cap_exceeded,sampling_metadata,durations_ms,estimated_injected_tokens,rollout_label,outcome,knowledge_trace_taxonomy_version,terminal_state,terminal_at,candidate_count,injected_count,confidence_filtered_count,not_top_k_count,oversized_skipped_count,budget_pruned_count) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,'enabled',$15,$16,$17,$18,$19,$20,$21,$22,$23,$24) RETURNING id,schema_version,project_id,session_id,task_run_id,task_id,entry_point,rollout_label,outcome,knowledge_trace_taxonomy_version,terminal_state,terminal_at,candidate_count,injected_count,confidence_filtered_count,not_top_k_count,oversized_skipped_count,budget_pruned_count,trigger,candidates,candidate_cap,candidate_cap_exceeded,sampling_metadata,durations_ms,estimated_injected_tokens,created_at"#)
-        .bind(&id).bind(RETRIEVAL_TRACE_SCHEMA_VERSION).bind(params.trace.project_id).bind(params.trace.session_id).bind(params.trace.task_run_id).bind(params.trace.task_id).bind(params.trace.entry_point.as_str()).bind(params.trace.trigger).bind(params.trace.candidates).bind(params.trace.candidate_cap).bind(params.trace.candidate_cap_exceeded).bind(params.trace.sampling_metadata).bind(params.trace.durations_ms).bind(params.trace.estimated_injected_tokens).bind(outcome.as_str()).bind(KNOWLEDGE_TRACE_TAXONOMY_VERSION_V1).bind(params.terminal_state.as_str()).bind(params.terminal_at).bind(params.candidate_count).bind(params.injected_count).bind(counts.map(|v|v.confidence_filtered)).bind(counts.map(|v|v.not_top_k)).bind(counts.map(|v|v.oversized_skipped)).bind(counts.map(|v|v.budget_pruned)).fetch_one(self.db.pool()).await.map_err(Into::into)
+        sqlx::query_as::<_, RetrievalTraceRow>(r#"INSERT INTO retrieval_traces (id,schema_version,project_id,session_id,task_run_id,task_id,entry_point,trigger,candidates,candidate_cap,candidate_cap_exceeded,sampling_metadata,durations_ms,estimated_injected_tokens,rollout_label,outcome,knowledge_trace_taxonomy_version,terminal_state,terminal_at,candidate_count,injected_count,confidence_filtered_count,not_top_k_count,oversized_skipped_count,budget_pruned_count) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25) RETURNING id,schema_version,project_id,session_id,task_run_id,task_id,entry_point,rollout_label,outcome,knowledge_trace_taxonomy_version,terminal_state,terminal_at,candidate_count,injected_count,confidence_filtered_count,not_top_k_count,oversized_skipped_count,budget_pruned_count,trigger,candidates,candidate_cap,candidate_cap_exceeded,sampling_metadata,durations_ms,estimated_injected_tokens,created_at"#)
+        .bind(&id).bind(RETRIEVAL_TRACE_SCHEMA_VERSION).bind(params.trace.project_id).bind(params.trace.session_id).bind(params.trace.task_run_id).bind(params.trace.task_id).bind(params.trace.entry_point.as_str()).bind(params.trace.trigger).bind(params.trace.candidates).bind(params.trace.candidate_cap).bind(params.trace.candidate_cap_exceeded).bind(params.trace.sampling_metadata).bind(params.trace.durations_ms).bind(params.trace.estimated_injected_tokens).bind(params.rollout_label).bind(params.outcome.as_str()).bind(KNOWLEDGE_TRACE_TAXONOMY_VERSION_V1).bind(params.terminal_state.as_str()).bind(params.terminal_at).bind(params.candidate_count).bind(params.injected_count).bind(counts.map(|v|v.confidence_filtered)).bind(counts.map(|v|v.not_top_k)).bind(counts.map(|v|v.oversized_skipped)).bind(counts.map(|v|v.budget_pruned)).fetch_one(self.db.pool()).await.map_err(Into::into)
     }
 
     async fn insert_with_values(
@@ -1083,81 +1082,32 @@ impl RetrievalTraceRepository {
         Ok(())
     }
 
-    /// Aggregate health evidence for workload retrieval traces in a project
-    /// over a half-open `[from, until)` UTC time window.
-    ///
-    /// This uses direct aggregate SQL over every matching row; it does not
-    /// apply the list pagination limit. The result contains both a combined
-    /// project-level view and a per-entry-point breakdown.
-    ///
-    /// `from` and `until` are ISO-8601 UTC timestamp strings (e.g.
-    /// `2026-07-01T00:00:00.000Z`). Only the workload entry points in
-    /// [`WORKLOAD_ENTRY_POINTS`] are included.
-    ///
-    /// Database errors are returned as [`DbError::Sqlx`] so callers can decide
-    /// whether to fail open or surface the error.
-    pub async fn health_rollup(
+    /// Return authoritative taxonomy-v1 terminal evidence for every project
+    /// and supported entry point in one `[from, until)` window.
+    pub async fn taxonomy_v1_health_rollup(
         &self,
-        project_id: &str,
         from: &str,
         until: &str,
-    ) -> Result<RetrievalTraceHealthRollup> {
-        self.db.ensure_initialized().await?;
-
-        let trace_candidate_rows: Vec<TraceCandidateStatsRow> =
-            sqlx::query_as(HEALTH_ROLLUP_TRACE_CANDIDATE_PER_EP_SQL)
-                .bind(project_id)
-                .bind(from)
-                .bind(until)
-                .fetch_all(self.db.pool())
-                .await?;
-
-        let duration_rows: Vec<DurationStageStatsRow> =
-            sqlx::query_as(HEALTH_ROLLUP_DURATION_PER_EP_SQL)
-                .bind(project_id)
-                .bind(from)
-                .bind(until)
-                .fetch_all(self.db.pool())
-                .await?;
-
-        let mut per_entry_point = HashMap::new();
-        for row in &trace_candidate_rows {
-            let ep = RetrievalTraceEntryPoint::parse(&row.entry_point).ok_or_else(|| {
-                DbError::InvalidData(format!(
-                    "unknown entry_point in health rollup: {}",
-                    row.entry_point
-                ))
-            })?;
-            let durations: Vec<_> = duration_rows
-                .iter()
-                .filter(|d| d.entry_point == row.entry_point)
-                .cloned()
-                .collect();
-            per_entry_point.insert(ep, build_evidence(row, &durations));
+        refreshed_at: &str,
+    ) -> Result<Vec<TaxonomyV1RetrievalHealthGroup>> {
+        let from_timestamp = parse_retrieval_trace_utc_timestamp(from, "from")?;
+        let until_timestamp = parse_retrieval_trace_utc_timestamp(until, "until")?;
+        parse_retrieval_trace_utc_timestamp(refreshed_at, "refreshed_at")?;
+        if from_timestamp >= until_timestamp {
+            return Err(DbError::InvalidData(
+                "taxonomy-v1 health rollup requires from before until".to_owned(),
+            ));
         }
-
-        let combined_stats: TraceCandidateStatsCombinedRow =
-            sqlx::query_as(HEALTH_ROLLUP_TRACE_CANDIDATE_COMBINED_SQL)
-                .bind(project_id)
-                .bind(from)
-                .bind(until)
-                .fetch_one(self.db.pool())
-                .await?;
-
-        let combined_durations: Vec<DurationStageStatsCombinedRow> =
-            sqlx::query_as(HEALTH_ROLLUP_DURATION_COMBINED_SQL)
-                .bind(project_id)
-                .bind(from)
-                .bind(until)
-                .fetch_all(self.db.pool())
-                .await?;
-
-        let combined = build_evidence_combined(&combined_stats, &combined_durations);
-
-        Ok(RetrievalTraceHealthRollup {
-            combined,
-            per_entry_point,
-        })
+        let from = format_retrieval_trace_utc_timestamp(from_timestamp);
+        let until = format_retrieval_trace_utc_timestamp(until_timestamp);
+        self.db.ensure_initialized().await?;
+        let rows = fetch_taxonomy_v1_health_groups(self.db.pool(), &from, &until).await?;
+        rows.into_iter()
+            .map(|row| {
+                build_taxonomy_v1_group(row, &from, &until, refreshed_at)
+                    .map_err(DbError::InvalidData)
+            })
+            .collect()
     }
 
     /// Prune trace rows older than an eligible retention cutoff for one project.

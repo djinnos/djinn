@@ -42,6 +42,23 @@ const STARTUP_TASK_RUN_THRESHOLD_SECS: i64 = 10;
 /// while staying safely clear of any real starting attempt.
 const ORPHANED_PENDING_ATTEMPT_THRESHOLD_SECS: i64 = 5 * 60;
 
+/// Startup-only AGE gate for the orphaned-pending-attempt reaper, decoupled from
+/// the owner-lease liveness threshold above. At cold start any pre-boot `pending`
+/// attempt with no live (`starting`/`running`) `task_run` and no `running`
+/// session is definitionally orphaned: single-leader (advisory lock) means the
+/// previous incarnation is gone, startup task-run reaping
+/// ([`STARTUP_TASK_RUN_THRESHOLD_SECS`], which runs BEFORE this at boot) has
+/// already terminalized its runs, and nothing can ever advance the attempt.
+/// Mirrors the 10s task-run startup convention so a deploy that stranded a
+/// seconds-old dispatch self-heals at boot instead of surviving the 5-minute
+/// periodic age gate and wedging the respawn guard for ~15 min.
+///
+/// CRITICAL: only the AGE gate tightens. The owner-lease liveness check keeps
+/// [`ORPHANED_PENDING_ATTEMPT_THRESHOLD_SECS`] — a just-dead owner that renewed
+/// its lease 30s before the crash must not read "live" against a 10s window and
+/// get mis-stamped `crashed`. The two thresholds feed different predicates.
+const STARTUP_ORPHANED_PENDING_ATTEMPT_AGE_THRESHOLD_SECS: i64 = 10;
+
 pub(super) async fn renew_coordinator_incarnation(db: &djinn_db::Database, incarnation_id: &str) {
     let repository = djinn_db::CoordinatorIncarnationRepository::new(db.clone());
     match repository.renew(incarnation_id).await {
@@ -2809,40 +2826,104 @@ async fn reap_orphaned_pending_attempts(db: &djinn_db::Database) {
     .await;
 }
 
-/// Startup variant of [`reap_orphaned_pending_attempts`]. Runs with the same
-/// conservative threshold (a fresh boot proves nothing about a minutes-old
-/// dispatch on another coordinator instance behind the same DB), but firing
-/// at boot means long-orphaned rows self-heal immediately after a deploy
-/// instead of waiting for the first periodic stale sweep.
-pub(super) async fn reap_orphaned_pending_attempts_for_startup(db: &djinn_db::Database) {
-    reap_orphaned_pending_attempts_with_threshold(
+/// Startup variant of [`reap_orphaned_pending_attempts`]. Decouples the two
+/// thresholds ([`STARTUP_ORPHANED_PENDING_ATTEMPT_AGE_THRESHOLD_SECS`] age gate,
+/// [`ORPHANED_PENDING_ATTEMPT_THRESHOLD_SECS`] lease liveness) so a seconds-old
+/// pre-boot orphan self-heals at boot, and applies startup boot-evidence
+/// classification: single-leader means any pre-boot orphan whose owner is NULL,
+/// missing, or a DIFFERENT incarnation than this boot's cannot have a live owner
+/// (this process holds the advisory lock), so it is an environmental restart
+/// orphan — `interrupted` and strike-exempt, never a `crashed` penalty.
+///
+/// `current_incarnation_id` is this boot's immutable incarnation UUID, already
+/// registered by the time startup reaping runs (see `CoordinatorActor::run`).
+pub(super) async fn reap_orphaned_pending_attempts_for_startup(
+    db: &djinn_db::Database,
+    current_incarnation_id: &str,
+) {
+    reap_orphaned_pending_attempts_core(
         db,
-        ORPHANED_PENDING_ATTEMPT_THRESHOLD_SECS,
-        "startup",
+        OrphanReapParams {
+            age_threshold_secs: STARTUP_ORPHANED_PENDING_ATTEMPT_AGE_THRESHOLD_SECS,
+            lease_threshold_secs: ORPHANED_PENDING_ATTEMPT_THRESHOLD_SECS,
+            reason: "startup",
+            startup_incarnation_id: Some(current_incarnation_id),
+        },
     )
     .await;
 }
 
+/// Backstop entry point that keeps a single age/lease threshold and no startup
+/// boot evidence (the pre-existing periodic contract). The core reaper
+/// decouples the two, so this forwards the same value to both.
 pub(super) async fn reap_orphaned_pending_attempts_with_threshold(
     db: &djinn_db::Database,
     threshold_secs: i64,
     reason: &'static str,
 ) {
-    let cutoff = time::OffsetDateTime::now_utc() - time::Duration::seconds(threshold_secs);
+    reap_orphaned_pending_attempts_core(
+        db,
+        OrphanReapParams {
+            age_threshold_secs: threshold_secs,
+            lease_threshold_secs: threshold_secs,
+            reason,
+            startup_incarnation_id: None,
+        },
+    )
+    .await;
+}
+
+/// Parameters for [`reap_orphaned_pending_attempts_core`]. The age gate and
+/// lease-liveness thresholds are decoupled (Part 1): the age gate decides WHICH
+/// pending rows are candidates; the lease threshold decides whether a candidate's
+/// owner is expired. `startup_incarnation_id` is `Some` only on the startup path
+/// and enables boot-evidence classification (Part 2).
+struct OrphanReapParams<'a> {
+    age_threshold_secs: i64,
+    lease_threshold_secs: i64,
+    reason: &'static str,
+    startup_incarnation_id: Option<&'a str>,
+}
+
+async fn reap_orphaned_pending_attempts_core(
+    db: &djinn_db::Database,
+    params: OrphanReapParams<'_>,
+) {
+    let OrphanReapParams {
+        age_threshold_secs,
+        lease_threshold_secs,
+        reason,
+        startup_incarnation_id,
+    } = params;
+
     let format = time::macros::format_description!(
         "[year]-[month]-[day]T[hour]:[minute]:[second].[subsecond digits:3]Z"
     );
-    let threshold_iso = match cutoff.format(&format) {
+    let now = time::OffsetDateTime::now_utc();
+    // Age gate for `list_orphaned_pending` (tight at startup) and the durable
+    // lease-liveness gate for `is_live` (always the 5-minute owner window).
+    let age_threshold_iso = match (now - time::Duration::seconds(age_threshold_secs))
+        .format(&format)
+    {
         Ok(s) => s,
         Err(e) => {
-            tracing::warn!(error = %e, "reap_orphaned_pending_attempts: failed to format threshold");
+            tracing::warn!(error = %e, "reap_orphaned_pending_attempts: failed to format age threshold");
+            return;
+        }
+    };
+    let lease_threshold_iso = match (now - time::Duration::seconds(lease_threshold_secs))
+        .format(&format)
+    {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::warn!(error = %e, "reap_orphaned_pending_attempts: failed to format lease threshold");
             return;
         }
     };
 
     let repo = djinn_db::TaskAttemptRepository::new(db.clone());
     let incarnation_repo = djinn_db::CoordinatorIncarnationRepository::new(db.clone());
-    let orphans = match repo.list_orphaned_pending(&threshold_iso).await {
+    let orphans = match repo.list_orphaned_pending(&age_threshold_iso).await {
         Ok(rows) => rows,
         Err(e) => {
             tracing::warn!(
@@ -2856,16 +2937,21 @@ pub(super) async fn reap_orphaned_pending_attempts_with_threshold(
 
     // Evidence-based orphan classification (proposal 9gg5 / epic ars3).
     //
-    // Startup and periodic sweeps apply exactly the same owner-lease rule: only
-    // a non-NULL immutable owner whose durable lease is resolved AND expired
-    // beyond the supplied threshold may be stamped `interrupted` with
-    // `failure_class=environmental_owner_expired`. The `reason` argument is log
-    // context only and must never influence the exemption decision.
+    // Periodic sweep applies the strict owner-lease rule: only a non-NULL
+    // immutable owner whose durable lease is resolved AND expired beyond the
+    // lease threshold may be stamped `interrupted` /
+    // `failure_class=environmental_owner_expired`.
     //
     //   - Expired owner → interrupted / environmental_owner_expired
     //   - Live owner     → crashed / orphaned_pending_attempt
     //   - NULL, malformed, missing, lookup-error, or otherwise ambiguous
     //     ownership → crashed / orphaned_pending_attempt_unproven
+    //
+    // Startup sweep (`startup_incarnation_id` Some) additionally applies
+    // boot-evidence classification: single-leader means a pre-boot orphan whose
+    // owner is NULL, missing, or a DIFFERENT incarnation than this boot's cannot
+    // have a live owner, so it is stamped `interrupted` /
+    // `environmental_restart_orphan` and is strike-exempt.
     //
     // For a candidate with a non-NULL dispatch_group_id, reconcile pending
     // correlated peers with the transactional exact-group terminalization
@@ -2885,13 +2971,20 @@ pub(super) async fn reap_orphaned_pending_attempts_with_threshold(
             continue;
         }
         // Resolve the durable owner lease for the evidence decision.
-        let (outcome, failure_class, summary, owner_evidence) =
-            classify_orphan_owner(&incarnation_repo, orphan, &threshold_iso).await;
+        let (outcome, failure_class, summary, owner_evidence) = classify_orphan_owner(
+            &incarnation_repo,
+            orphan,
+            OrphanClassifyCtx {
+                lease_threshold_iso: &lease_threshold_iso,
+                startup_incarnation_id,
+            },
+        )
+        .await;
 
         let summary_json = build_reap_evidence_json(
             reason,
-            threshold_secs,
-            &threshold_iso,
+            lease_threshold_secs,
+            &lease_threshold_iso,
             failure_class,
             &owner_evidence,
         );
@@ -2961,7 +3054,7 @@ pub(super) async fn reap_orphaned_pending_attempts_with_threshold(
                         role = %orphan.role,
                         dispatch_key = %orphan.dispatch_key,
                         attempt_created_at = %orphan.created_at,
-                        threshold = %threshold_iso,
+                        threshold = %lease_threshold_iso,
                         outcome = %updated.outcome,
                         reason = reason,
                         "CoordinatorActor: reaped orphaned pending task_attempt"
@@ -3000,7 +3093,12 @@ pub(super) async fn reap_orphaned_pending_attempts_with_threshold(
     // dispatches to redo it. `submitted` rows for poller-polled statuses
     // (`pr_draft`/`pr_review`) with a PR are strictly untouched (excluded by the
     // query). Forward-only + idempotent.
-    let submitted_orphans = match repo.list_orphaned_submitted_unowned(&threshold_iso).await {
+    // The submitted-orphan cleanup is age-based and owner-lease-agnostic; keep
+    // it on the (unchanged) lease-window threshold so startup does not tighten it.
+    let submitted_orphans = match repo
+        .list_orphaned_submitted_unowned(&lease_threshold_iso)
+        .await
+    {
         Ok(rows) => rows,
         Err(e) => {
             tracing::warn!(
@@ -3016,7 +3114,7 @@ pub(super) async fn reap_orphaned_pending_attempts_with_threshold(
         let summary_json = serde_json::json!({
             "recovery_classifier": "orphaned_submitted_unowned_reaper",
             "reason": reason,
-            "threshold_secs": threshold_secs,
+            "threshold_secs": lease_threshold_secs,
             "failure_class": "orphaned_submitted_unowned",
         })
         .to_string();
@@ -3044,7 +3142,7 @@ pub(super) async fn reap_orphaned_pending_attempts_with_threshold(
                     role = %orphan.role,
                     dispatch_key = %orphan.dispatch_key,
                     attempt_created_at = %orphan.created_at,
-                    threshold = %threshold_iso,
+                    threshold = %lease_threshold_iso,
                     outcome = %updated.outcome,
                     reason = reason,
                     "CoordinatorActor: reaped poller-unowned submitted task_attempt to reopened"
@@ -3080,11 +3178,24 @@ struct OwnerLeaseEvidence {
     last_renewed_at: Option<String>,
     /// The incarnation's `registered_at` timestamp (present when resolved).
     registered_at: Option<String>,
+    /// This boot's incarnation id, recorded ONLY for a startup
+    /// `environmental_restart_orphan` classification. Its presence (with
+    /// `failure_class=environmental_restart_orphan` and `reason=startup`) is the
+    /// deterministic strike-exemption evidence for restart orphans.
+    boot_incarnation_id: Option<String>,
     /// Human-readable classification of why the owner was classified this way
     /// (expired / live / null_owner / malformed_owner / missing_owner /
-    /// lookup_error / ambiguous). For structured-log diagnostics only; not a
-    /// retry-accounting key.
+    /// lookup_error / ambiguous / restart_orphan_*). For structured-log
+    /// diagnostics only; not a retry-accounting key.
     classification: &'static str,
+}
+
+/// Inputs to [`classify_orphan_owner`]. The lease threshold is decoupled from
+/// the age gate (Part 1). `startup_incarnation_id` is `Some` only at boot and
+/// enables restart-orphan classification (Part 2).
+struct OrphanClassifyCtx<'a> {
+    lease_threshold_iso: &'a str,
+    startup_incarnation_id: Option<&'a str>,
 }
 
 /// Classify one orphaned pending attempt from its durable owner lease.
@@ -3094,7 +3205,7 @@ struct OwnerLeaseEvidence {
 async fn classify_orphan_owner(
     incarnation_repo: &djinn_db::CoordinatorIncarnationRepository,
     orphan: &djinn_db::OrphanedPendingAttempt,
-    threshold_iso: &str,
+    ctx: OrphanClassifyCtx<'_>,
 ) -> (
     djinn_core::models::task_attempt::TaskAttemptOutcome,
     &'static str,
@@ -3103,10 +3214,16 @@ async fn classify_orphan_owner(
 ) {
     use djinn_core::models::task_attempt::TaskAttemptOutcome;
 
-    let owner_id = match &orphan.dispatch_owner_incarnation_id {
-        Some(id) if uuid::Uuid::parse_str(id).is_ok() => id.as_str(),
+    let OrphanClassifyCtx {
+        lease_threshold_iso,
+        startup_incarnation_id,
+    } = ctx;
+
+    // Owner id from the row's own column. A malformed owner is a corruption
+    // signal and always fails closed.
+    let owner_id: Option<String> = match &orphan.dispatch_owner_incarnation_id {
+        Some(id) if uuid::Uuid::parse_str(id).is_ok() => Some(id.clone()),
         Some(_) => {
-            // Malformed owner UUID — ambiguous ownership, fail closed.
             return (
                 TaskAttemptOutcome::Crashed,
                 "orphaned_pending_attempt_unproven",
@@ -3117,25 +3234,83 @@ async fn classify_orphan_owner(
                 },
             );
         }
-        None => {
-            // NULL owner (legacy row or never-propagated) — ambiguous, fail closed.
+        None => None,
+    };
+
+    // Startup boot-evidence classification (Part 2). Single-leader: this process
+    // holds the advisory lock, so a pre-boot orphan (guaranteed by the age gate
+    // plus no live run/session) whose owner is NULL, missing, or a DIFFERENT
+    // incarnation than this boot's cannot have a live owner. It is an
+    // environmental restart orphan — `interrupted`, strike-exempt — never a
+    // `crashed` penalty (which is durable and survives further restarts). The
+    // lease liveness verdict is deliberately NOT consulted here: a just-dead
+    // previous incarnation whose lease still reads "live" against the 5-minute
+    // window is nonetheless definitively gone at our boot.
+    if let Some(current) = startup_incarnation_id {
+        // An owner equal to the current boot incarnation is impossible for a
+        // pre-boot row (random per-process UUID just registered): fail closed.
+        if owner_id.as_deref() == Some(current) {
             return (
                 TaskAttemptOutcome::Crashed,
                 "orphaned_pending_attempt_unproven",
-                "orphaned pending attempt reaped: no dispatch owner incarnation (legacy NULL)",
+                "orphaned pending attempt reaped: pre-boot orphan owned by the current \
+                 boot incarnation (ambiguous)",
                 OwnerLeaseEvidence {
-                    classification: "null_owner",
+                    owner_incarnation_id: owner_id,
+                    classification: "current_incarnation_startup",
                     ..Default::default()
                 },
             );
         }
+        let mut evidence = OwnerLeaseEvidence {
+            boot_incarnation_id: Some(current.to_string()),
+            ..Default::default()
+        };
+        match &owner_id {
+            Some(id) => {
+                evidence.owner_incarnation_id = Some(id.clone());
+                match incarnation_repo.get(id).await {
+                    Ok(Some(inc)) => {
+                        evidence.last_renewed_at = Some(inc.last_renewed_at.clone());
+                        evidence.registered_at = Some(inc.registered_at.clone());
+                        evidence.classification = "restart_orphan_different_incarnation";
+                    }
+                    _ => evidence.classification = "restart_orphan_missing_owner",
+                }
+            }
+            None => evidence.classification = "restart_orphan_null_owner",
+        }
+        return (
+            TaskAttemptOutcome::Interrupted,
+            "environmental_restart_orphan",
+            "orphaned pending attempt reaped at startup: pre-boot dispatch with no live \
+             owner under single-leader (environmental restart, no dispatch penalty)",
+            evidence,
+        );
+    }
+
+    // Periodic sweep: strict owner-lease rule. A NULL/missing owner fails closed.
+    let Some(owner_id) = owner_id else {
+        return (
+            TaskAttemptOutcome::Crashed,
+            "orphaned_pending_attempt_unproven",
+            "orphaned pending attempt reaped: no dispatch owner incarnation (legacy NULL)",
+            OwnerLeaseEvidence {
+                classification: "null_owner",
+                ..Default::default()
+            },
+        );
     };
+    let owner_id = owner_id.as_str();
 
     // Resolve the durable lease row for this owner.
     match incarnation_repo.get(owner_id).await {
         Ok(Some(inc)) => {
-            // Lease resolved — check liveness against the same orphan threshold.
-            match incarnation_repo.is_live(owner_id, threshold_iso).await {
+            // Lease resolved — check liveness against the owner-lease threshold.
+            match incarnation_repo
+                .is_live(owner_id, lease_threshold_iso)
+                .await
+            {
                 Ok(Some(true)) => {
                     // Live owner — the dispatch is still potentially owned.
                     // Count as crashed (genuine orphan with a live owner).
@@ -3148,6 +3323,7 @@ async fn classify_orphan_owner(
                             owner_incarnation_id: Some(inc.id.clone()),
                             last_renewed_at: Some(inc.last_renewed_at.clone()),
                             registered_at: Some(inc.registered_at.clone()),
+                            boot_incarnation_id: None,
                             classification: "live",
                         },
                     )
@@ -3164,6 +3340,7 @@ async fn classify_orphan_owner(
                             owner_incarnation_id: Some(inc.id.clone()),
                             last_renewed_at: Some(inc.last_renewed_at.clone()),
                             registered_at: Some(inc.registered_at.clone()),
+                            boot_incarnation_id: None,
                             classification: "expired",
                         },
                     )
@@ -3180,6 +3357,7 @@ async fn classify_orphan_owner(
                             owner_incarnation_id: Some(owner_id.to_string()),
                             last_renewed_at: Some(inc.last_renewed_at.clone()),
                             registered_at: Some(inc.registered_at.clone()),
+                            boot_incarnation_id: None,
                             classification: "ambiguous",
                         },
                     )
@@ -3195,6 +3373,7 @@ async fn classify_orphan_owner(
                             owner_incarnation_id: Some(owner_id.to_string()),
                             last_renewed_at: Some(inc.last_renewed_at.clone()),
                             registered_at: Some(inc.registered_at.clone()),
+                            boot_incarnation_id: None,
                             classification: "lookup_error",
                         },
                     )
@@ -3253,6 +3432,7 @@ fn build_reap_evidence_json(
         "owner_incarnation_id": evidence.owner_incarnation_id,
         "owner_lease_last_renewed_at": evidence.last_renewed_at,
         "owner_lease_registered_at": evidence.registered_at,
+        "boot_incarnation_id": evidence.boot_incarnation_id,
         "owner_classification": evidence.classification,
     })
     .to_string()

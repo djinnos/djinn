@@ -405,6 +405,91 @@ impl SupervisorServices for RpcServices {
         &self.cancel
     }
 
+    async fn queue_lease(
+        &self,
+        request: super::lease::LeaseQueueRequest,
+    ) -> super::lease::LeaseResult {
+        match self
+            .roundtrip(ServiceRpcRequest::QueueLease { request })
+            .await
+        {
+            Ok(ServiceRpcResponse::QueueLease(result)) => result,
+            _ => super::lease::LeaseResult::LeaseUnavailable,
+        }
+    }
+    async fn grant_lease(
+        &self,
+        request: super::lease::LeaseGrantRequest,
+    ) -> super::lease::LeaseResult {
+        match self
+            .roundtrip(ServiceRpcRequest::GrantLease { request })
+            .await
+        {
+            Ok(ServiceRpcResponse::GrantLease(result)) => result,
+            _ => super::lease::LeaseResult::LeaseUnavailable,
+        }
+    }
+    async fn lease_status(
+        &self,
+        request: super::lease::LeaseStatusRequest,
+    ) -> super::lease::LeaseResult {
+        match self
+            .roundtrip(ServiceRpcRequest::LeaseStatus { request })
+            .await
+        {
+            Ok(ServiceRpcResponse::LeaseStatus(result)) => result,
+            _ => super::lease::LeaseResult::LeaseUnavailable,
+        }
+    }
+    async fn abandon_lease(
+        &self,
+        request: super::lease::LeaseAbandonRequest,
+    ) -> super::lease::LeaseResult {
+        match self
+            .roundtrip(ServiceRpcRequest::AbandonLease { request })
+            .await
+        {
+            Ok(ServiceRpcResponse::AbandonLease(result)) => result,
+            _ => super::lease::LeaseResult::LeaseUnavailable,
+        }
+    }
+    async fn bind_lease_pod(
+        &self,
+        request: super::lease::LeaseBindRequest,
+    ) -> super::lease::LeaseResult {
+        match self
+            .roundtrip(ServiceRpcRequest::BindLeasePod { request })
+            .await
+        {
+            Ok(ServiceRpcResponse::BindLeasePod(result)) => result,
+            _ => super::lease::LeaseResult::LeaseUnavailable,
+        }
+    }
+    async fn cancel_lease(
+        &self,
+        request: super::lease::LeaseCancelRequest,
+    ) -> super::lease::LeaseResult {
+        match self
+            .roundtrip(ServiceRpcRequest::CancelLease { request })
+            .await
+        {
+            Ok(ServiceRpcResponse::CancelLease(result)) => result,
+            _ => super::lease::LeaseResult::LeaseUnavailable,
+        }
+    }
+    async fn release_lease(
+        &self,
+        request: super::lease::LeaseReleaseRequest,
+    ) -> super::lease::LeaseResult {
+        match self
+            .roundtrip(ServiceRpcRequest::ReleaseLease { request })
+            .await
+        {
+            Ok(ServiceRpcResponse::ReleaseLease(result)) => result,
+            _ => super::lease::LeaseResult::LeaseUnavailable,
+        }
+    }
+
     async fn report_stage_step(&self, step: &'static str) -> Result<(), String> {
         // Ship the marker out-of-band on the shared frame channel; the host's
         // reader_loop lowers it to a `StreamEvent::StageStep`. Best-effort —
@@ -2153,6 +2238,12 @@ mod tests {
             ci_mq_first_seen_at: None,
             ci_mq_last_seen_at: None,
             unresolved_blocker_count: 0,
+            refinement_run_id: None,
+            refinement_intent_id: None,
+            refinement_generation: None,
+            refinement_round: None,
+            refinement_phase: None,
+            refinement_role: None,
         }
     }
 }

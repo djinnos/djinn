@@ -14,10 +14,12 @@ use std::path::{Path, PathBuf};
 use djinn_control_plane::McpState;
 use djinn_control_plane::state::stubs::test_mcp_state;
 use djinn_core::events::EventBus;
-use djinn_db::{Database, ProposalCreateInput, ProposalRepository};
+use djinn_db::{Database, ProposalCreateInput, ProposalDebateTrailCreateInput, ProposalRepository};
 
 use crate::context::ExtensionContext;
-use crate::handlers::task_epic::{call_proposal_block_patch, call_proposal_update};
+use crate::handlers::task_epic::{
+    call_proposal_block_patch, call_proposal_create, call_proposal_update,
+};
 
 /// Minimal [`ExtensionContext`] stub over an in-memory database. Only `db()`
 /// and `event_bus()` are exercised by the proposal handlers; the remaining
@@ -125,6 +127,154 @@ async fn update_unknown_block_tag_rejected() {
     let stored = repo.get(&existing.id).await.unwrap().unwrap();
     assert_eq!(stored.body, "plain markdown body");
     assert_eq!(stored.body_format, "markdown");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn advocate_correction_and_targeted_patch_preserve_lint_contract() {
+    let ctx = test_ctx().await;
+    let repo = ProposalRepository::new(ctx.db(), ctx.event_bus());
+    let corrupt = include_str!(
+        "../../../djinn-spec-lint/tests/fixtures/v1/synthetic/delimiter_failures/body.md"
+    );
+
+    let rejected_create = call_proposal_create(
+        &ctx,
+        &args(serde_json::json!({ "title": "Rejected", "body": corrupt })),
+    )
+    .await
+    .expect("repository lint rejection is a structured tool result");
+    assert_eq!(rejected_create["error"], "SPEC_LINT_REJECTED");
+    assert_eq!(rejected_create["code"], "SPEC_LINT_REJECTED");
+    assert_eq!(rejected_create["violations"][0]["severity"], "error");
+    assert!(repo.resolve("Rejected").await.unwrap().is_none());
+
+    let created = call_proposal_create(
+        &ctx,
+        &args(serde_json::json!({
+            "title": "Advocate proposal",
+            "body": "# Proposal\n\n## Target\n\nOld paragraph.",
+        })),
+    )
+    .await
+    .expect("clean Advocate create commits");
+    let existing = repo
+        .get(created["id"].as_str().expect("created proposal id"))
+        .await
+        .unwrap()
+        .unwrap();
+    let create_revision = repo
+        .revisions(&existing.id)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|revision| revision.seq == existing.latest_revision_seq)
+        .expect("committed create revision");
+    assert_eq!(
+        created["latest_lint"],
+        serde_json::to_value(repo.lint_for_revision(&create_revision).await.unwrap()).unwrap()
+    );
+
+    repo.record_refinement_lifecycle(&existing.id, "refinement_start", None)
+        .await
+        .unwrap();
+    repo.add_debate_trail_entry(ProposalDebateTrailCreateInput {
+        proposal_id: &existing.id,
+        kind: "objection",
+        body: "Correct the malformed delimiter.",
+        blocking: true,
+        agent_role: "adversary",
+        author_kind: "agent",
+        author_model: None,
+        source_task_id: None,
+        against_revision_seq: existing.latest_revision_seq,
+        round: 1,
+        body_metadata: None,
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        repo.list_summaries(std::slice::from_ref(&existing.id))
+            .await
+            .unwrap()[&existing.id]
+            .current_round,
+        1
+    );
+
+    let rejected = call_proposal_update(
+        &ctx,
+        &args(serde_json::json!({ "id": existing.id, "body": corrupt })),
+    )
+    .await
+    .expect("repository lint rejection is a structured tool result");
+    assert_eq!(rejected["error"], "SPEC_LINT_REJECTED");
+    assert_eq!(rejected["code"], "SPEC_LINT_REJECTED");
+    assert_eq!(rejected["violations"][0]["severity"], "error");
+    assert_eq!(
+        repo.get(&existing.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .latest_revision_seq,
+        existing.latest_revision_seq
+    );
+    assert_eq!(
+        repo.list_summaries(std::slice::from_ref(&existing.id))
+            .await
+            .unwrap()[&existing.id]
+            .current_round,
+        1
+    );
+
+    let corrected = call_proposal_update(
+        &ctx,
+        &args(serde_json::json!({
+            "id": existing.id,
+            "body": "# Proposal\n\n## Target\n\nOld paragraph.\n\nCorrection details.",
+        })),
+    )
+    .await
+    .expect("valid correction commits");
+    let after_update = repo.get(&existing.id).await.unwrap().unwrap();
+    assert_eq!(
+        after_update.latest_revision_seq,
+        existing.latest_revision_seq + 1,
+        "a distinct valid correction must append a revision"
+    );
+    let update_revision = repo
+        .revisions(&existing.id)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|revision| revision.seq == after_update.latest_revision_seq)
+        .expect("committed update revision");
+    assert_eq!(
+        corrected["latest_lint"],
+        serde_json::to_value(repo.lint_for_revision(&update_revision).await.unwrap()).unwrap()
+    );
+    let patched = call_proposal_block_patch(
+        &ctx,
+        &args(serde_json::json!({
+            "id": existing.id,
+            "selector": { "exact_text": "Old paragraph." },
+            "operation": "replace",
+            "block_mdx": "Corrected paragraph.",
+            "expected_latest_revision_seq": after_update.latest_revision_seq,
+        })),
+    )
+    .await
+    .expect("targeted patch commits");
+    let after_patch = repo.get(&existing.id).await.unwrap().unwrap();
+    let patch_revision = repo
+        .revisions(&existing.id)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|revision| revision.seq == after_patch.latest_revision_seq)
+        .expect("committed patch revision");
+    assert_eq!(
+        patched["latest_lint"],
+        serde_json::to_value(repo.lint_for_revision(&patch_revision).await.unwrap()).unwrap()
+    );
 }
 
 /// The exact production failure: a children-based block written in the

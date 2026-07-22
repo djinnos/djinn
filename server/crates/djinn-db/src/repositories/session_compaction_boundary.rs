@@ -325,6 +325,22 @@ impl SessionCompactionBoundaryRepository {
         .transpose()
     }
 
+    /// Return the most recently created boundary in either phase. This keeps
+    /// failure diagnostics able to inspect a truthful `Started` row.
+    pub async fn latest_boundary(&self, session_id: &str) -> Result<Option<CompactionBoundary>> {
+        self.db.ensure_initialized().await?;
+        let id: Option<String> = sqlx::query_scalar(
+            "SELECT id FROM session_compaction_boundaries WHERE session_id = $1 ORDER BY created_at DESC, id DESC LIMIT 1",
+        )
+        .bind(session_id)
+        .fetch_optional(self.db.pool())
+        .await?;
+        match id {
+            Some(id) => self.fetch_by_id(&id).await.map(Some),
+            None => Ok(None),
+        }
+    }
+
     /// Count all boundary rows (any phase) for a session.
     pub async fn boundary_count(&self, session_id: &str) -> Result<i64> {
         self.db.ensure_initialized().await?;
@@ -384,14 +400,16 @@ mod tests {
 
         let task_id = uuid::Uuid::now_v7().to_string();
         let short_id = format!("t{}{}", &task_id[..6], &task_id[task_id.len() - 6..]);
+        let creator = crate::repositories::test_support::seed_test_user(&db).await;
         sqlx::query!(
             "INSERT INTO tasks (id, project_id, short_id, epic_id, title, description, design,
-                                issue_type, priority, owner, status, continuation_count, labels, acceptance_criteria, memory_refs)
-             VALUES ($1, $2, $3, $4, 'Task', '', '', 'task', 0, '', 'open', 0, '[]'::jsonb, '[]'::jsonb, '[]'::jsonb)",
+                                issue_type, priority, owner, status, continuation_count, labels, acceptance_criteria, memory_refs, created_by_user_id)
+             VALUES ($1, $2, $3, $4, 'Task', '', '', 'task', 0, '', 'open', 0, '[]'::jsonb, '[]'::jsonb, '[]'::jsonb, $5)",
             task_id,
             epic.project_id,
             short_id,
             epic.id,
+            creator,
         )
         .execute(db.pool())
         .await

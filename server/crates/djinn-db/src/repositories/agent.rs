@@ -915,6 +915,7 @@ mod tests {
         event_taxonomy: Option<&str>,
     ) {
         let task_id = uuid::Uuid::now_v7().to_string();
+        let creator = crate::repositories::test_support::seed_test_user(db).await;
         // UUIDv7 shares a time-ordered prefix, so use the random tail for a
         // collision-free short_id (project_id + short_id is UNIQUE).
         let short = format!("t{}", &task_id[task_id.len() - 12..]);
@@ -922,14 +923,15 @@ mod tests {
             "INSERT INTO tasks \
              (id, project_id, short_id, title, description, design, \
               status, close_reason, total_reopen_count, \
-              labels, acceptance_criteria, memory_refs) \
+              labels, acceptance_criteria, memory_refs, created_by_user_id) \
              VALUES ($1, $2, $3, 'metrics-task', '', '', \
                      'closed', 'completed', 0, \
-                     '[]'::jsonb, '[]'::jsonb, '[]'::jsonb)",
+                     '[]'::jsonb, '[]'::jsonb, '[]'::jsonb, $4)",
         )
         .bind(&task_id)
         .bind(project_id)
         .bind(&short)
+        .bind(&creator)
         .execute(db.pool())
         .await
         .unwrap();

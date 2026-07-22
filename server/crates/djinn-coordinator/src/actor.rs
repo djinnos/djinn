@@ -68,6 +68,15 @@ pub(super) struct CoordinatorActor {
     // Dependencies
     pub(super) db: Database,
     pub(super) coordinator_incarnation_id: String,
+    /// Wall-clock instant this coordinator actor booted. Used by the stall
+    /// sweep to survive liveness-probe restarts: a restart wipes the in-memory
+    /// host `ActivityTracker` and the per-session `stall_progress_watermark`,
+    /// so on the first post-restart sweep every pre-restart session looks like
+    /// it "never showed activity". Comparing a session's `started_at` against
+    /// this boot timestamp distinguishes restart amnesia (give a fresh idle
+    /// budget) from a genuine first-call hang (kill at 300s). See
+    /// `enforce_session_stall_timeout` / `resolve_stall_clock`.
+    pub(super) boot_at: ::time::OffsetDateTime,
     pub(super) events_tx: broadcast::Sender<DjinnEventEnvelope>,
     pub(super) pool: SlotPoolHandle,
     /// Durable build admission shared by every task-run dispatch route.
@@ -543,6 +552,7 @@ impl CoordinatorActor {
             tick,
             db: db.clone(),
             coordinator_incarnation_id: uuid::Uuid::now_v7().to_string(),
+            boot_at: ::time::OffsetDateTime::now_utc(),
             events_tx: events_tx.clone(),
             pool,
             build_admission,
@@ -919,7 +929,11 @@ impl CoordinatorActor {
         // Reap pending task_attempts orphaned while this coordinator was down
         // (or wedged from before the reaper existed) so the respawn guard
         // unblocks those (task, role) pairs immediately after a deploy.
-        health::reap_orphaned_pending_attempts_for_startup(&self.db).await;
+        health::reap_orphaned_pending_attempts_for_startup(
+            &self.db,
+            &self.coordinator_incarnation_id,
+        )
+        .await;
         let startup_context = self.maintenance_context();
         health::reap_orphaned_taskrun_jobs_for_startup(&self.db, &startup_context).await;
         self.rehydrate_durable_dispatch_state().await;

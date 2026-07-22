@@ -240,6 +240,17 @@ impl LlmProvider for GoogleProvider {
         Some(self.config.clone())
     }
 
+    fn stream_request_body_bytes(
+        &self,
+        conversation: &Conversation,
+        tools: &[Value],
+        tool_choice: Option<ToolChoice>,
+    ) -> Option<usize> {
+        serde_json::to_vec(&self.build_request(conversation, tools, tool_choice))
+            .ok()
+            .map(|body| body.len())
+    }
+
     fn stream<'a>(
         &'a self,
         conversation: &'a Conversation,
@@ -301,8 +312,8 @@ mod tests {
     use super::*;
     use crate::message::{Conversation, Message};
     use crate::provider::{
-        AuthMethod, FormatFamily, ProviderCapabilities, ProviderConfig, ProviderError,
-        ToolSchemaCompat,
+        AuthMethod, ExhaustedTransportCategory, FormatFamily, ProviderCapabilities, ProviderConfig,
+        ProviderError, ToolSchemaCompat,
     };
     use axum::{Router, routing::post};
     use futures::TryStreamExt;
@@ -693,7 +704,7 @@ mod tests {
     #[tokio::test]
     async fn test_stream_raw_eof_before_terminal_yields_error() {
         // A stream that emits data deltas but ends (raw EOF) before any
-        // finishReason must yield a typed retryable Transport error, not
+        // finishReason must yield a typed retryable unexpected-EOF diagnostic, not
         // a synthesized StreamEvent::Done.
         let seen_auth = Arc::new(Mutex::new(None));
         let body = concat!(
@@ -707,6 +718,8 @@ mod tests {
         });
         let mut conv = Conversation::new();
         conv.push(Message::user("Hello"));
+        let request_body = provider.build_request(&conv, &[], None);
+        let expected_payload_bytes = serde_json::to_vec(&request_body).unwrap().len();
 
         let stream = provider
             .stream(&conv, &[], None)
@@ -720,13 +733,17 @@ mod tests {
         let pe = err
             .downcast_ref::<ProviderError>()
             .expect("typed ProviderError must be downcastable");
-        assert_eq!(*pe, ProviderError::Transport);
+        match pe {
+            ProviderError::ExhaustedTransport(diagnostic) => {
+                assert_eq!(
+                    diagnostic.category,
+                    ExhaustedTransportCategory::UnexpectedEof
+                );
+                assert_eq!(diagnostic.estimated_payload_chars, expected_payload_bytes);
+            }
+            other => panic!("expected exhausted unexpected-EOF transport, got {other:?}"),
+        }
         assert!(pe.retryable(), "truncated stream must be retryable");
-        assert!(
-            err.to_string().contains("terminal signal"),
-            "error message must mention terminal signal: {}",
-            err
-        );
     }
 
     #[tokio::test]

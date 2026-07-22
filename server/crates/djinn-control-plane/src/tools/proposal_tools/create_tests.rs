@@ -1,3 +1,4 @@
+// djinn:allow-oversize
 // Tests for the CRUD/create concern in `proposal_tools/create.rs`.
 //
 // These tests are split out of `create.rs` so the production module stays under
@@ -323,17 +324,33 @@ mod body_excerpt_tests {
             .dispatch_tool("proposal_list", serde_json::json!({ "limit": 10 }))
             .await
             .unwrap();
-        assert!(list.get("error").is_none(), "list failed: {:?}", list.get("error"));
+        assert!(
+            list.get("error").is_none(),
+            "list failed: {:?}",
+            list.get("error")
+        );
 
         let rows = list["proposals"].as_array().expect("proposals array");
         assert!(!rows.is_empty());
         let row = &rows[0];
 
         // Default rows omit body, excerpt metadata, and criteria.
-        assert!(row.get("body").is_none(), "body must be absent on default rows");
-        assert!(row.get("body_excerpt").is_none(), "body_excerpt must be absent");
-        assert!(row.get("body_truncated").is_none(), "body_truncated must be absent");
-        assert!(row.get("acceptance_criteria").is_none(), "criteria must be absent");
+        assert!(
+            row.get("body").is_none(),
+            "body must be absent on default rows"
+        );
+        assert!(
+            row.get("body_excerpt").is_none(),
+            "body_excerpt must be absent"
+        );
+        assert!(
+            row.get("body_truncated").is_none(),
+            "body_truncated must be absent"
+        );
+        assert!(
+            row.get("acceptance_criteria").is_none(),
+            "criteria must be absent"
+        );
         // Always-present integer counts.
         assert_eq!(row["ac_total"].as_i64(), Some(2));
         assert_eq!(row["ac_met"].as_i64(), Some(1));
@@ -356,10 +373,17 @@ mod body_excerpt_tests {
         .unwrap();
 
         let list = server
-            .dispatch_tool("proposal_list", serde_json::json!({ "limit": 10, "include_bodies": true }))
+            .dispatch_tool(
+                "proposal_list",
+                serde_json::json!({ "limit": 10, "include_bodies": true }),
+            )
             .await
             .unwrap();
-        assert!(list.get("error").is_none(), "list failed: {:?}", list.get("error"));
+        assert!(
+            list.get("error").is_none(),
+            "list failed: {:?}",
+            list.get("error")
+        );
 
         let rows = list["proposals"].as_array().expect("proposals array");
         let row = &rows[0];
@@ -387,7 +411,10 @@ mod body_excerpt_tests {
         .unwrap();
 
         let list = server
-            .dispatch_tool("proposal_list", serde_json::json!({ "limit": 10, "include_bodies": false }))
+            .dispatch_tool(
+                "proposal_list",
+                serde_json::json!({ "limit": 10, "include_bodies": false }),
+            )
             .await
             .unwrap();
         assert!(list.get("error").is_none());
@@ -431,7 +458,10 @@ mod body_excerpt_tests {
 
         // With include_excerpts: true — excerpt present, truncated, no full body.
         let list = server
-            .dispatch_tool("proposal_list", serde_json::json!({ "limit": 10, "include_excerpts": true }))
+            .dispatch_tool(
+                "proposal_list",
+                serde_json::json!({ "limit": 10, "include_excerpts": true }),
+            )
             .await
             .unwrap();
         let row = &list["proposals"].as_array().unwrap()[0];
@@ -441,7 +471,10 @@ mod body_excerpt_tests {
 
         // With include_bodies: true — full body available, excerpt still truncated.
         let list = server
-            .dispatch_tool("proposal_list", serde_json::json!({ "limit": 10, "include_bodies": true }))
+            .dispatch_tool(
+                "proposal_list",
+                serde_json::json!({ "limit": 10, "include_bodies": true }),
+            )
             .await
             .unwrap();
         let row = &list["proposals"].as_array().unwrap()[0];
@@ -471,7 +504,10 @@ mod body_excerpt_tests {
         // Pagination works. Metadata fields are serialized at the top level
         // (not nested under a "meta" key) per `serialize_named_list_response`.
         let list = server
-            .dispatch_tool("proposal_list", serde_json::json!({ "limit": 2, "offset": 0 }))
+            .dispatch_tool(
+                "proposal_list",
+                serde_json::json!({ "limit": 2, "offset": 0 }),
+            )
             .await
             .unwrap();
         assert_eq!(list["limit"].as_i64().unwrap(), 2);
@@ -495,8 +531,7 @@ mod body_excerpt_tests {
         let (server, db) = test_server().await;
         let repo = ProposalRepository::new(db.clone(), EventBus::noop());
         // Two criteria: one met-true object, one legacy string.
-        const CRITERIA: &str =
-            r#"[{"criterion":"met one","met":true},"legacy string"]"#;
+        const CRITERIA: &str = r#"[{"criterion":"met one","met":true},"legacy string"]"#;
         let body = "truth table body content for testing";
         repo.create(ProposalCreateInput {
             title: "Flag Table",
@@ -524,16 +559,24 @@ mod body_excerpt_tests {
                 "include_excerpts": excerpts,
                 "include_acceptance_criteria": criteria,
             });
-            let list = server
-                .dispatch_tool("proposal_list", req)
-                .await
-                .unwrap();
-            assert!(list.get("error").is_none(), "flags b={bodies} e={excerpts} c={criteria} failed");
+            let list = server.dispatch_tool("proposal_list", req).await.unwrap();
+            assert!(
+                list.get("error").is_none(),
+                "flags b={bodies} e={excerpts} c={criteria} failed"
+            );
             let row = &list["proposals"].as_array().unwrap()[0];
 
             // Counts are always present.
-            assert_eq!(row["ac_total"].as_i64(), Some(2), "b={bodies} e={excerpts} c={criteria}");
-            assert_eq!(row["ac_met"].as_i64(), Some(1), "b={bodies} e={excerpts} c={criteria}");
+            assert_eq!(
+                row["ac_total"].as_i64(),
+                Some(2),
+                "b={bodies} e={excerpts} c={criteria}"
+            );
+            assert_eq!(
+                row["ac_met"].as_i64(),
+                Some(1),
+                "b={bodies} e={excerpts} c={criteria}"
+            );
 
             // Body appears only when include_bodies is true.
             let expect_body = bodies;
@@ -588,12 +631,15 @@ mod body_excerpt_tests {
             .await
             .unwrap();
         let explicit_false = server
-            .dispatch_tool("proposal_list", serde_json::json!({
-                "limit": 10,
-                "include_bodies": false,
-                "include_excerpts": false,
-                "include_acceptance_criteria": false,
-            }))
+            .dispatch_tool(
+                "proposal_list",
+                serde_json::json!({
+                    "limit": 10,
+                    "include_bodies": false,
+                    "include_excerpts": false,
+                    "include_acceptance_criteria": false,
+                }),
+            )
             .await
             .unwrap();
 
@@ -601,7 +647,12 @@ mod body_excerpt_tests {
         let r2 = &explicit_false["proposals"].as_array().unwrap()[0];
 
         // Both omit the same optional fields.
-        for field in ["body", "body_excerpt", "body_truncated", "acceptance_criteria"] {
+        for field in [
+            "body",
+            "body_excerpt",
+            "body_truncated",
+            "acceptance_criteria",
+        ] {
             assert_eq!(
                 r1.get(field).is_none(),
                 r2.get(field).is_none(),
@@ -631,10 +682,13 @@ mod body_excerpt_tests {
 
         // Criteria only — no excerpt, no body.
         let list = server
-            .dispatch_tool("proposal_list", serde_json::json!({
-                "limit": 10,
-                "include_acceptance_criteria": true,
-            }))
+            .dispatch_tool(
+                "proposal_list",
+                serde_json::json!({
+                    "limit": 10,
+                    "include_acceptance_criteria": true,
+                }),
+            )
             .await
             .unwrap();
         let row = &list["proposals"].as_array().unwrap()[0];
@@ -644,10 +698,13 @@ mod body_excerpt_tests {
 
         // Excerpts only — no criteria, no body.
         let list = server
-            .dispatch_tool("proposal_list", serde_json::json!({
-                "limit": 10,
-                "include_excerpts": true,
-            }))
+            .dispatch_tool(
+                "proposal_list",
+                serde_json::json!({
+                    "limit": 10,
+                    "include_excerpts": true,
+                }),
+            )
             .await
             .unwrap();
         let row = &list["proposals"].as_array().unwrap()[0];
@@ -658,10 +715,13 @@ mod body_excerpt_tests {
 
         // Bodies — implies excerpt metadata but not criteria.
         let list = server
-            .dispatch_tool("proposal_list", serde_json::json!({
-                "limit": 10,
-                "include_bodies": true,
-            }))
+            .dispatch_tool(
+                "proposal_list",
+                serde_json::json!({
+                    "limit": 10,
+                    "include_bodies": true,
+                }),
+            )
             .await
             .unwrap();
         let row = &list["proposals"].as_array().unwrap()[0];
@@ -808,14 +868,24 @@ mod body_excerpt_tests {
             )
             .await
             .unwrap();
-        assert!(show.get("error").is_none(), "show failed: {:?}", show.get("error"));
+        assert!(
+            show.get("error").is_none(),
+            "show failed: {:?}",
+            show.get("error")
+        );
         let revs = show["revisions"].as_array().expect("revisions present");
         assert!(!revs.is_empty());
         let rev = &revs[0];
-        assert!(rev.get("body").is_none(), "default revision body should be omitted");
+        assert!(
+            rev.get("body").is_none(),
+            "default revision body should be omitted"
+        );
         assert!(rev["body_excerpt"].is_string());
         assert!(rev["body_truncated"].as_bool().unwrap());
         assert_eq!(rev["body_excerpt"].as_str().unwrap().chars().count(), 512);
+        assert!(show["latest_lint"].is_object());
+        assert!(rev["lint"].is_object());
+        assert_eq!(rev["lint"]["body_sha256"], show["latest_lint"]["body_sha256"]);
     }
 
     /// `revision_bodies: "full"` restores full revision bodies.
@@ -885,6 +955,8 @@ mod body_excerpt_tests {
         assert!(rev.get("body").is_none());
         assert!(rev.get("body_excerpt").is_none());
         assert!(rev.get("body_truncated").is_none());
+        assert!(rev["lint"].is_object(), "omit mode retains revision lint");
+        assert!(show["latest_lint"].is_object());
     }
 
     /// Invalid `fields` returns an error naming the invalid value and accepted values.
@@ -913,8 +985,13 @@ mod body_excerpt_tests {
             )
             .await
             .unwrap();
-        let err = resp["error"].as_str().expect("response should contain error field");
-        assert!(err.contains("invalid field: \"unknown_field\""), "err: {err}");
+        let err = resp["error"]
+            .as_str()
+            .expect("response should contain error field");
+        assert!(
+            err.contains("invalid field: \"unknown_field\""),
+            "err: {err}"
+        );
         assert!(err.contains("accepted: proposal, targets, feedback, signoffs, revisions, debate, epics, gate_status"), "err: {err}");
     }
 
@@ -945,8 +1022,13 @@ mod body_excerpt_tests {
             )
             .await
             .unwrap();
-        let err = resp["error"].as_str().expect("response should contain error field");
-        assert!(err.contains("invalid revision_bodies: \"compressed\""), "err: {err}");
+        let err = resp["error"]
+            .as_str()
+            .expect("response should contain error field");
+        assert!(
+            err.contains("invalid revision_bodies: \"compressed\""),
+            "err: {err}"
+        );
         assert!(err.contains("accepted: excerpt, full, omit"), "err: {err}");
     }
 
@@ -977,8 +1059,15 @@ mod body_excerpt_tests {
             )
             .await
             .unwrap();
-        assert!(show.get("error").is_none(), "show failed: {:?}", show.get("error"));
-        assert!(show.get("revisions").is_none(), "revisions should not be present");
+        assert!(
+            show.get("error").is_none(),
+            "show failed: {:?}",
+            show.get("error")
+        );
+        assert!(
+            show.get("revisions").is_none(),
+            "revisions should not be present"
+        );
     }
 
     // ── Payload budget tests ─────────────────────────────────────────────────
@@ -1019,7 +1108,10 @@ mod body_excerpt_tests {
         }
 
         let response = server
-            .dispatch_tool("proposal_list", serde_json::json!({ "limit": 50, "offset": 0 }))
+            .dispatch_tool(
+                "proposal_list",
+                serde_json::json!({ "limit": 50, "offset": 0 }),
+            )
             .await
             .unwrap();
 
@@ -1035,11 +1127,23 @@ mod body_excerpt_tests {
         // Every default row omits body, excerpt metadata, and criteria.
         for (i, row) in rows.iter().enumerate() {
             assert!(row.get("body").is_none(), "row {i}: body must be absent");
-            assert!(row.get("body_excerpt").is_none(), "row {i}: body_excerpt must be absent");
-            assert!(row.get("body_truncated").is_none(), "row {i}: body_truncated must be absent");
-            assert!(row.get("acceptance_criteria").is_none(), "row {i}: criteria must be absent");
+            assert!(
+                row.get("body_excerpt").is_none(),
+                "row {i}: body_excerpt must be absent"
+            );
+            assert!(
+                row.get("body_truncated").is_none(),
+                "row {i}: body_truncated must be absent"
+            );
+            assert!(
+                row.get("acceptance_criteria").is_none(),
+                "row {i}: criteria must be absent"
+            );
             // Values vary, but JSON widths are fixed for repository UUIDs and timestamps.
-            assert_eq!(serde_json::to_vec(&row["id"]).unwrap().len(), SERIALIZED_ID_BYTES);
+            assert_eq!(
+                serde_json::to_vec(&row["id"]).unwrap().len(),
+                SERIALIZED_ID_BYTES
+            );
             for field in ["created_at", "updated_at"] {
                 assert_eq!(
                     serde_json::to_vec(&row[field]).unwrap().len(),
@@ -1049,7 +1153,11 @@ mod body_excerpt_tests {
             }
             // Always-present integer counts from the mixed criteria fixture.
             assert_eq!(row["ac_total"].as_i64(), Some(4), "row {i}: ac_total");
-            assert_eq!(row["ac_met"].as_i64(), Some(1), "row {i}: ac_met (only met:true counts)");
+            assert_eq!(
+                row["ac_met"].as_i64(),
+                Some(1),
+                "row {i}: ac_met (only met:true counts)"
+            );
         }
 
         let envelope = serde_json::to_vec(&response).expect("response serializes");
@@ -1134,7 +1242,10 @@ mod body_excerpt_tests {
         let revs = full["revisions"].as_array().expect("revisions present");
         assert_eq!(revs.len(), 25);
         assert!(
-            revs.iter().all(|r| r["body"].as_str().map(|b| b.len() >= BODY_LEN).unwrap_or(false)),
+            revs.iter().all(|r| r["body"]
+                .as_str()
+                .map(|b| b.len() >= BODY_LEN)
+                .unwrap_or(false)),
             "full revision bodies should be available"
         );
     }
@@ -1291,15 +1402,12 @@ mod schema_lean_tests {
     }
 }
 
-// ── MDX auto-upgrade + block validation on the create/update write paths ─────
-//
-// A proposal body can carry MDX block tags while its declared/omitted
-// body_format is "markdown"; before the cutover that skipped ALL block
-// validation and stored the tags as raw markdown (rendered as literal text in
-// the UI). These tests pin the cutover: any full-body write with block tags is
-// upgraded to "mdx" and validated identically to a declared-mdx body.
-
 #[cfg(test)]
 mod mdx_upgrade_and_validation_tests {
     include!("create_mdx_tests.rs");
+}
+
+#[cfg(test)]
+mod lint_mutation_contract_tests {
+    include!("create_lint_tests.rs");
 }

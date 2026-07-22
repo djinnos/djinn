@@ -57,6 +57,8 @@ use djinn_slot::helpers::{
 };
 use djinn_stack::environment::EnvironmentConfig;
 use djinn_supervisor::services::{
+    LeaseAbandonRequest, LeaseBindRequest, LeaseCancelRequest, LeaseGrantRequest,
+    LeaseQueueRequest, LeaseReleaseRequest, LeaseResult, LeaseStatusRequest,
     SerializableCreateSessionParams, SerializableCreateTaskRunParams, SerializableDjinnEvent,
 };
 use djinn_supervisor::{
@@ -259,6 +261,38 @@ pub(crate) fn build_provider_config_from_serializable(
 impl SupervisorServices for WorkerSupervisorServices {
     fn cancel(&self) -> &CancellationToken {
         &self.cancel
+    }
+
+    // Lease-v1 authority remains on the host. `RpcServices` owns both the
+    // canonical wire mapping and the distinction between a durable typed
+    // result (including `LeaseWaitTimeout`) and a failed/closed transport
+    // (`LeaseUnavailable`), so the worker must only delegate each operation.
+    async fn queue_lease(&self, request: LeaseQueueRequest) -> LeaseResult {
+        self.rpc.queue_lease(request).await
+    }
+
+    async fn grant_lease(&self, request: LeaseGrantRequest) -> LeaseResult {
+        self.rpc.grant_lease(request).await
+    }
+
+    async fn lease_status(&self, request: LeaseStatusRequest) -> LeaseResult {
+        self.rpc.lease_status(request).await
+    }
+
+    async fn abandon_lease(&self, request: LeaseAbandonRequest) -> LeaseResult {
+        self.rpc.abandon_lease(request).await
+    }
+
+    async fn bind_lease_pod(&self, request: LeaseBindRequest) -> LeaseResult {
+        self.rpc.bind_lease_pod(request).await
+    }
+
+    async fn cancel_lease(&self, request: LeaseCancelRequest) -> LeaseResult {
+        self.rpc.cancel_lease(request).await
+    }
+
+    async fn release_lease(&self, request: LeaseReleaseRequest) -> LeaseResult {
+        self.rpc.release_lease(request).await
     }
 
     async fn report_stage_step(&self, step: &'static str) -> Result<(), String> {

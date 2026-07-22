@@ -33,7 +33,33 @@ fn liveness_reason_for_persistence(reason: Option<LivenessReason>) -> Option<Str
 /// A `running`, zero-token session older than this has slipped past the
 /// 180s fast-path stall breaker — its in-memory tracking has drifted. Reap it
 /// on DB truth alone.
+///
+/// This is an *idle/zombie* threshold (10 minutes without a live RPC channel
+/// or activity signal), NOT a total-lifetime ceiling — see
+/// [`HARD_RUNTIME_CAP_SECS`] for the latter. Do not conflate the two: a
+/// productive worker legitimately runs for hours, so keying the hard-runtime
+/// deadline or the claim lease off this constant force-killed every session
+/// older than 10 minutes and mislabeled it `hard_runtime_exceeded`.
 pub(crate) const ZOMBIE_HARD_CAP_SECS: u64 = 10 * 60;
+
+/// TOTAL-LIFETIME ceiling for a task run: the wall-clock age past which the
+/// run is at end-of-life and no longer extension-eligible. Aligned with the
+/// K8s Job's `activeDeadlineSeconds` (`task_run_active_deadline_seconds`,
+/// default `10800` in `djinn-k8s` `config.rs`), which is what actually tears
+/// the pod down; there is no point granting a stall grace extension past the
+/// moment Kubernetes will kill the Job regardless.
+///
+/// This is emphatically NOT a stall/idle threshold. The liveness evidence
+/// builder uses it for two things: `hard_runtime_deadline_exceeded` (which the
+/// classifier turns into `Dead`/`Timeout` with `extension_eligible: false`)
+/// and the `claim_ttl_remaining` lease that gates slow-grace extensions.
+/// Previously both were derived from the 10-minute [`ZOMBIE_HARD_CAP_SECS`],
+/// so EVERY session older than 10 minutes was (a) force-killed as
+/// hard-runtime-exceeded and (b) permanently past-lease, which turned the
+/// entire slow-extension feature into dead code. The per-session
+/// `stall_extension_count` vs `max_extensions` budget in the sweep still
+/// bounds how many extensions are actually granted.
+pub(crate) const HARD_RUNTIME_CAP_SECS: u64 = 3 * 60 * 60;
 
 impl CoordinatorActor {
     async fn teardown_zombie_taskrun_job(
@@ -121,6 +147,16 @@ impl CoordinatorActor {
         /// still catching a genuine hang well under the 10-minute zombie cap.
         const FIRST_CALL_STALL_SECS: u64 = 300;
 
+        // Elapsed seconds since this coordinator actor booted. Sessions whose
+        // `started_at` predates `self.boot_at` outlived a (liveness-probe)
+        // restart that wiped the in-memory activity tracker + progress
+        // watermark; they get a fresh idle budget measured from boot rather
+        // than being false-killed as hung first calls. See `resolve_stall_clock`.
+        let boot_elapsed_secs = {
+            let secs = (::time::OffsetDateTime::now_utc() - self.boot_at).whole_seconds();
+            if secs < 0 { 0 } else { secs as u64 }
+        };
+
         for session in active {
             let Some(task_id) = session.task_id.as_deref() else {
                 continue;
@@ -173,25 +209,42 @@ impl CoordinatorActor {
                 }
             };
 
-            // Pick the threshold that fires first. A session that has never
-            // shown a sign of life (no host ActivityTracker entry) is
-            // wedged-on-first-call and gets the aggressive cap regardless of
-            // role; one that has shown activity at least once falls under the
-            // role's full idle budget — covering long quiet stretches (a
-            // multi-minute build, a long reasoning turn between tool calls)
-            // that legitimately don't touch activity until they finish.
+            // Pick the idle clock and threshold. A session with a live
+            // ActivityTracker signal falls under the role's full idle budget —
+            // covering long quiet stretches (a multi-minute build, a long
+            // reasoning turn between tool calls) that legitimately don't touch
+            // activity until they finish. A session with NO tracker entry is
+            // either a hung first call (aggressive cap) or restart amnesia
+            // (fresh full budget from boot) — see `resolve_stall_clock`.
             //
-            // NOTE: this MUST come from in-memory liveness, not the session row.
+            // NOTE: idle MUST come from in-memory liveness, not the session row.
             // `sessions.tokens_in/out` are written only at session *end*, so a
             // running row reads `0/0` for its whole life — keying the cap on it
             // (the old `zero_tokens` check) put EVERY in-flight session on the
             // aggressive cap and killed productive workers mid-flow.
-            let never_active = !activity_tracked;
-            let applied_threshold = if never_active {
-                stall_threshold.min(FIRST_CALL_STALL_SECS)
-            } else {
-                stall_threshold
-            };
+            //
+            // Reconcile the idle clock against coordinator boot time so a
+            // server restart cannot false-kill the running fleet. A session
+            // predating our boot with no tracker entry is restart amnesia (the
+            // tracker+watermark were wiped by a liveness-probe restart), NOT a
+            // hung first call: it gets a full role budget measured from boot and
+            // is not labeled `never_active`. A post-boot session with no tracker
+            // entry is a genuine first-call hang and still dies at
+            // FIRST_CALL_STALL_SECS.
+            let session_predates_boot = parse_iso_datetime(&session.started_at)
+                .map(|started| started < self.boot_at)
+                .unwrap_or(false);
+            let stall_clock = resolve_stall_clock(
+                activity_tracked,
+                idle,
+                session_predates_boot,
+                boot_elapsed_secs,
+                stall_threshold,
+                FIRST_CALL_STALL_SECS,
+            );
+            let idle = stall_clock.idle_secs;
+            let applied_threshold = stall_clock.threshold_secs;
+            let never_active = stall_clock.first_call_hang;
 
             // ── Per-session token / turn ceiling check (runaway guard) ──
             // These are session-ownership guards, NOT provider-health evidence.
@@ -2003,7 +2056,7 @@ impl CoordinatorActor {
     /// forever is worse than a clear terminal state, so closing it self-cleans
     /// that guard.
     pub(crate) async fn terminally_fail_task(
-        &self,
+        &mut self,
         task: &djinn_core::models::Task,
         role: &str,
         reason: &str,
@@ -2016,6 +2069,60 @@ impl CoordinatorActor {
             "CoordinatorActor: failing task terminally (undispatchable / max retries)"
         );
         let repo = self.task_repo();
+        let latest = match repo.get(&task.id).await {
+            Ok(Some(latest)) => latest,
+            Ok(None) => {
+                tracing::warn!(task_id = %task.short_id, role, pr_disposition = "pr_handoff", "djinn.terminal_gate: task disappeared while reloading; refusing ForceClose");
+                return false;
+            }
+            Err(e) => {
+                tracing::warn!(task_id = %task.short_id, role, pr_disposition = "pr_handoff", error = %e, "djinn.terminal_gate: latest-row reload failed; refusing ForceClose");
+                return false;
+            }
+        };
+        if let Some(pr_url) = latest
+            .pr_url
+            .as_deref()
+            .map(str::trim)
+            .filter(|url| !url.is_empty())
+        {
+            const HANDOFF_REASON: &str = "terminal_close_deferred_pr_handoff";
+            match super::respawn_guard::handoff_pr_to_poller(
+                &repo,
+                &latest.id,
+                &latest.status,
+                pr_url,
+                HANDOFF_REASON,
+            )
+            .await
+            {
+                Ok(_) => {
+                    if let Err(e) = self
+                        .try_clear_durable_dispatch_backoff_state(
+                            &latest.id,
+                            Some(&latest.short_id),
+                            HANDOFF_REASON,
+                        )
+                        .await
+                    {
+                        tracing::warn!(task_id = %latest.short_id, role, pr_disposition = "pr_handoff", error = %e, "djinn.terminal_gate: durable dispatch-state clear failed after poller handoff; refusing ForceClose");
+                        return false;
+                    }
+                    tracing::warn!(task_id = %latest.short_id, role, pr_disposition = "pr_handoff", snapshot_head_sha = ?latest.ci_head_sha, "djinn.terminal_gate: PR-bearing task handed to poller");
+                    self.dispatch_failure_streak.remove(&latest.id);
+                    self.provider_failure_streak.remove(&latest.id);
+                    self.dispatch_cooldowns.remove(&latest.id);
+                    self.last_dispatched.remove(&latest.id);
+                    self.inflight_dispatches.remove(&latest.id);
+                    return true;
+                }
+                Err(e) => {
+                    tracing::warn!(task_id = %latest.short_id, role, pr_disposition = "pr_handoff", error = %e, "djinn.terminal_gate: poller handoff failed; refusing ForceClose");
+                    return false;
+                }
+            }
+        }
+        tracing::warn!(task_id = %latest.short_id, role, status = %latest.status, pr_disposition = "force_closed_no_pr", reason, "djinn.terminal_gate: closing latest task row without a PR");
         match repo
             .transition(
                 &task.id,
@@ -2116,7 +2223,7 @@ impl CoordinatorActor {
                 );
             }
         }
-        self.cleanup_pr_and_branch_on_close(task, CloseKind::NonMerge)
+        self.cleanup_pr_and_branch_on_close(&latest, CloseKind::NonMerge)
             .await;
         true
     }
@@ -2751,30 +2858,40 @@ fn build_liveness_evidence(
     });
 
     // ── Claim TTL remaining ──────────────────────────────────────────
-    // Derive remaining claim TTL from session duration vs zombie hard cap.
+    // Derive remaining claim TTL from session age vs the TOTAL-LIFETIME hard
+    // runtime cap, NOT the 10-minute zombie-idle threshold. The lease exists
+    // to keep a session extension-eligible until it nears end-of-life; tying
+    // it to ZOMBIE_HARD_CAP_SECS made every session older than 10 minutes
+    // permanently past-lease, so `extension_budget_exhausted` below was always
+    // true and the slow-grace extension never fired.
     let claim_ttl_remaining = db_state
         .session_started_at
         .as_deref()
         .and_then(parse_iso_elapsed)
         .map(|elapsed| {
-            if elapsed >= ZOMBIE_HARD_CAP_SECS {
+            if elapsed >= HARD_RUNTIME_CAP_SECS {
                 Duration::ZERO
             } else {
-                Duration::from_secs(ZOMBIE_HARD_CAP_SECS - elapsed)
+                Duration::from_secs(HARD_RUNTIME_CAP_SECS - elapsed)
             }
         });
 
     // ── Hard runtime deadline ────────────────────────────────────────
+    // A TOTAL-LIFETIME ceiling aligned with the K8s Job's activeDeadlineSeconds
+    // (djinn-k8s `task_run_active_deadline_seconds`, default 10800s), NOT a
+    // stall threshold. Using ZOMBIE_HARD_CAP_SECS (10 min) here classified any
+    // ordinary long run as `hard_runtime_exceeded` → forced Dead/Timeout with
+    // extension forbidden.
     let hard_runtime_deadline_exceeded = db_state
         .task_run_started_at
         .as_deref()
         .and_then(parse_iso_elapsed)
-        .map(|elapsed| elapsed >= ZOMBIE_HARD_CAP_SECS)
+        .map(|elapsed| elapsed >= HARD_RUNTIME_CAP_SECS)
         .unwrap_or(false);
 
     // ── Extension budget ────────────────────────────────────────────
     // A session that has run past its claim lease (`claim_ttl_remaining`
-    // zero, i.e. session age ≥ the zombie hard cap) is egregiously stale:
+    // zero, i.e. session age ≥ HARD_RUNTIME_CAP_SECS) is egregiously stale:
     // its budget is exhausted, so the classifier marks it NOT
     // extension-eligible and the stall path kills it on the first tick
     // instead of granting a "free" grace extension. A session still WITHIN
@@ -2802,12 +2919,12 @@ fn build_liveness_evidence(
 
 /// Parse an ISO-8601 datetime string from the DB (e.g. "2026-03-27T13:52:47.231Z"
 /// or "2026-03-27 13:52:47") and return seconds elapsed since that time.
-fn parse_iso_elapsed(started_at: &str) -> Option<u64> {
+fn parse_iso_datetime(started_at: &str) -> Option<::time::OffsetDateTime> {
     use ::time::OffsetDateTime;
     use ::time::format_description::well_known::Iso8601;
 
     // Try ISO-8601 with offset first, then fall back to space-separated SQLite format.
-    let parsed = OffsetDateTime::parse(started_at, &Iso8601::DEFAULT)
+    OffsetDateTime::parse(started_at, &Iso8601::DEFAULT)
         .ok()
         .or_else(|| {
             // SQLite often stores "YYYY-MM-DD HH:MM:SS" without offset — assume UTC.
@@ -2817,11 +2934,90 @@ fn parse_iso_elapsed(started_at: &str) -> Option<u64> {
             .ok()?;
             let primitive = ::time::PrimitiveDateTime::parse(started_at, &fmt).ok()?;
             Some(primitive.assume_utc())
-        })?;
+        })
+}
 
-    let now = OffsetDateTime::now_utc();
+fn parse_iso_elapsed(started_at: &str) -> Option<u64> {
+    let parsed = parse_iso_datetime(started_at)?;
+    let now = ::time::OffsetDateTime::now_utc();
     let elapsed = (now - parsed).whole_seconds();
     Some(if elapsed < 0 { 0 } else { elapsed as u64 })
+}
+
+/// The stall-clock decision for one session after reconciling the in-memory
+/// idle signal against the coordinator's boot time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct StallClock {
+    /// Idle seconds to compare against `threshold_secs`.
+    idle_secs: u64,
+    /// Threshold (seconds) that must elapse before the session is kill-eligible.
+    threshold_secs: u64,
+    /// Whether the session carries the `never_active` first-call-hang label
+    /// downstream. `false` for restart-amnesia sessions even though the tracker
+    /// has no entry — we simply never observed their (pre-restart) first call,
+    /// so labeling them a hung first call would be wrong.
+    first_call_hang: bool,
+}
+
+/// Reconcile the stall idle-clock against the coordinator's boot time so a
+/// server restart cannot false-kill the running session fleet.
+///
+/// WHY THE BOOT WINDOW EXISTS: the djinn-server is liveness-probe-killed
+/// ~10×/day. Each restart wipes two in-memory structures this sweep depends on
+/// — the host `ActivityTracker` (source of `activity_tracked`/`idle_seconds`)
+/// and the per-session `stall_progress_watermark`. On the first post-restart
+/// sweep a session that has been productively running for 40 minutes looks
+/// brand new: the tracker has no entry (`activity_tracked == false`), so the
+/// old code treated it as a first-call hang and applied `FIRST_CALL_STALL_SECS`
+/// (300s) against wall-clock-since-`started_at` — instantly over threshold for
+/// ANY pre-restart session. One evening this false-killed eight productive
+/// sessions (3.4M tokens of live work) in batches, one batch right after each
+/// restart, all mislabeled `hard_runtime_exceeded`.
+///
+/// The fix: a session whose `started_at` PREDATES this process's boot cannot
+/// have hung on its first call *relative to us* — we never saw that call. Treat
+/// the missing tracker entry as restart amnesia, not a hang: give it a FULL
+/// role stall budget measured FROM BOOT, not from `started_at`. The worker's
+/// `touch_activity` RPC bridge repopulates the tracker within ~90s of the pod's
+/// channel reconnecting (tool-run heartbeat included), so a genuinely
+/// productive session self-heals long before the fresh window elapses. A truly
+/// dead pre-restart session (no reconnect, no touches, no token progress) still
+/// dies — 30 minutes after boot instead of 5.
+///
+/// Sessions started AFTER boot are unchanged: a missing tracker entry there IS
+/// a real first-call hang and still trips the 300s cap.
+fn resolve_stall_clock(
+    activity_tracked: bool,
+    measured_idle_secs: u64,
+    session_predates_boot: bool,
+    boot_elapsed_secs: u64,
+    role_stall_threshold_secs: u64,
+    first_call_stall_secs: u64,
+) -> StallClock {
+    if activity_tracked {
+        // The tracker has a live signal — use it against the full role budget.
+        return StallClock {
+            idle_secs: measured_idle_secs,
+            threshold_secs: role_stall_threshold_secs,
+            first_call_hang: false,
+        };
+    }
+    if session_predates_boot {
+        // Restart amnesia: fresh full-threshold window measured from boot.
+        StallClock {
+            idle_secs: boot_elapsed_secs,
+            threshold_secs: role_stall_threshold_secs,
+            first_call_hang: false,
+        }
+    } else {
+        // Genuine first-call hang: the session began after we booted yet the
+        // tracker still shows nothing.
+        StallClock {
+            idle_secs: measured_idle_secs,
+            threshold_secs: role_stall_threshold_secs.min(first_call_stall_secs),
+            first_call_hang: true,
+        }
+    }
 }
 
 fn session_predates_task_status(session_started_at: &str, task_updated_at: &str) -> Option<bool> {
@@ -2968,8 +3164,10 @@ mod liveness_foundation_tests {
     fn hard_runtime_cap_produces_dead_timeout() {
         let pool = healthy_pool_info();
         let mut db = running_db_state();
-        // Task run started long ago, exceeding zombie hard cap.
-        let old = OffsetDateTime::now_utc() - TimeDuration::seconds(700);
+        // Task run started past the TOTAL-LIFETIME hard runtime cap (3h),
+        // exceeding HARD_RUNTIME_CAP_SECS.
+        let old =
+            OffsetDateTime::now_utc() - TimeDuration::seconds((HARD_RUNTIME_CAP_SECS + 600) as i64);
         db.task_run_started_at = Some(format_iso(old));
 
         let evidence = build_liveness_evidence(Some(&pool), &db);
@@ -3253,7 +3451,8 @@ mod liveness_foundation_tests {
         // activity state. extension_eligible must be false.
         let pool = healthy_pool_info();
         let mut db = running_db_state();
-        let old = OffsetDateTime::now_utc() - TimeDuration::seconds(700);
+        let old =
+            OffsetDateTime::now_utc() - TimeDuration::seconds((HARD_RUNTIME_CAP_SECS + 600) as i64);
         db.task_run_started_at = Some(format_iso(old));
 
         let evidence = build_liveness_evidence(Some(&pool), &db);
@@ -3288,7 +3487,8 @@ mod liveness_foundation_tests {
 
         let mut db = running_db_state();
         // task_run started long ago → hard cap exceeded
-        let old = OffsetDateTime::now_utc() - TimeDuration::seconds(700);
+        let old =
+            OffsetDateTime::now_utc() - TimeDuration::seconds((HARD_RUNTIME_CAP_SECS + 600) as i64);
         db.task_run_started_at = Some(format_iso(old));
         // session started recently → claim TTL not exhausted
         let recent = OffsetDateTime::now_utc() - TimeDuration::seconds(60);
@@ -3793,3 +3993,157 @@ mod zero_output_instrumentation_tests {
 // `assemble_prompt_context` path and assert on rendered metrics.  The toy
 // `tokio::join!` timing tests that previously lived here did not cover the
 // actual assembly instrumentation and were removed per reviewer feedback.
+
+// ─── Restart-amnesia + hard-runtime-cap regression tests ───────────────────
+//
+// These guard the fix for the incident where the liveness-probe-driven server
+// restarts (~10×/day) false-killed the productive worker fleet: each restart
+// wiped the in-memory ActivityTracker + progress watermark, and the first
+// post-restart stall sweep applied the 300s first-call cap to long-running
+// pre-restart sessions and killed them (mislabeled `hard_runtime_exceeded`).
+#[cfg(test)]
+mod restart_amnesia_tests {
+    use super::*;
+    use ::time::Duration as TimeDuration;
+    use ::time::OffsetDateTime;
+    use djinn_db::CurrentLivenessState;
+
+    fn iso(dt: OffsetDateTime) -> String {
+        dt.format(&::time::format_description::well_known::Iso8601::DEFAULT)
+            .unwrap_or_else(|_| "2026-01-01T00:00:00.000Z".to_owned())
+    }
+
+    /// Build a running, non-terminal `CurrentLivenessState` with independently
+    /// controllable session age and task-run age (both in seconds ago).
+    fn db_state(session_age_secs: i64, task_run_age_secs: i64) -> CurrentLivenessState {
+        let now = OffsetDateTime::now_utc();
+        CurrentLivenessState {
+            task_status: Some("in_progress".to_owned()),
+            task_is_terminal: false,
+            active_session_id: Some("sess-1".to_owned()),
+            active_session_status: Some("running".to_owned()),
+            latest_task_run_id: Some("run-1".to_owned()),
+            latest_task_run_status: Some("running".to_owned()),
+            session_liveness_verdict: None,
+            session_liveness_outcome_kind: None,
+            session_liveness_outcome_reason: None,
+            session_liveness_evidence: None,
+            task_run_liveness_outcome_kind: None,
+            task_run_liveness_outcome_reason: None,
+            task_run_liveness_evidence: None,
+            task_created_at: Some(iso(now - TimeDuration::seconds(session_age_secs))),
+            session_started_at: Some(iso(now - TimeDuration::seconds(session_age_secs))),
+            task_run_started_at: Some(iso(now - TimeDuration::seconds(task_run_age_secs))),
+            task_run_ended_at: None,
+        }
+    }
+
+    #[test]
+    fn hard_runtime_deadline_uses_three_hour_cap_not_ten_minutes() {
+        // A 40-minute run is far past the old 10-minute ZOMBIE_HARD_CAP_SECS
+        // but nowhere near the 3h total-lifetime ceiling → must NOT be flagged.
+        let db_40m = db_state(40 * 60, 40 * 60);
+        let ev = build_liveness_evidence(None, &db_40m);
+        assert!(
+            !ev.hard_runtime_deadline_exceeded,
+            "40-minute task run is under the 3h hard runtime cap"
+        );
+
+        // A run older than the hard cap trips the deadline.
+        let over = (HARD_RUNTIME_CAP_SECS + 600) as i64;
+        let db_over = db_state(over, over);
+        let ev2 = build_liveness_evidence(None, &db_over);
+        assert!(
+            ev2.hard_runtime_deadline_exceeded,
+            ">3h task run exceeds the hard runtime cap"
+        );
+    }
+
+    #[test]
+    fn forty_minute_session_remains_extension_eligible() {
+        // The claim lease is tied to HARD_RUNTIME_CAP_SECS, so a 40-minute
+        // session (well past the old 10-minute lease) still has TTL remaining
+        // and is NOT budget-exhausted — the slow-grace extension can fire.
+        // Keep the task run recent so the hard-runtime deadline stays clear.
+        let db = db_state(40 * 60, 60);
+        let ev = build_liveness_evidence(None, &db);
+        assert!(
+            !ev.extension_budget_exhausted,
+            "40-minute session must stay extension-eligible under the 3h lease"
+        );
+        assert!(
+            ev.claim_ttl_remaining
+                .map(|t| !t.is_zero())
+                .unwrap_or(false),
+            "40-minute session must retain non-zero claim TTL"
+        );
+    }
+
+    const STALL: u64 = 30 * 60;
+    const FIRST_CALL: u64 = 300;
+
+    #[test]
+    fn pre_boot_session_without_tracker_gets_fresh_budget_from_boot() {
+        // Session outlived a restart (predates boot) and the wiped tracker
+        // reports nothing. The idle clock must reset to elapsed-since-boot and
+        // use the FULL role stall budget — NOT the 300s first-call cap against
+        // wall-clock-since-start (which false-killed the fleet).
+        let clock = resolve_stall_clock(
+            /* activity_tracked */ false,
+            /* measured_idle_secs (since started_at, pre-restart) */ 4000,
+            /* session_predates_boot */ true, /* boot_elapsed_secs */ 120, STALL,
+            FIRST_CALL,
+        );
+        assert_eq!(
+            clock.idle_secs, 120,
+            "idle is measured from boot, not started_at"
+        );
+        assert_eq!(
+            clock.threshold_secs, STALL,
+            "amnesiac session gets the full role budget, not the 300s cap"
+        );
+        assert!(
+            !clock.first_call_hang,
+            "restart amnesia is not a first-call hang"
+        );
+        assert!(
+            clock.idle_secs <= clock.threshold_secs,
+            "2 minutes after boot the pre-restart session is NOT yet kill-eligible"
+        );
+    }
+
+    #[test]
+    fn dead_pre_boot_session_still_dies_after_full_threshold_from_boot() {
+        // A genuinely dead pre-restart session (no reconnect / no touches) is
+        // still reaped — but 30 minutes after BOOT, not 5.
+        let clock = resolve_stall_clock(false, 999_999, true, STALL + 1, STALL, FIRST_CALL);
+        assert!(!clock.first_call_hang);
+        assert!(
+            clock.idle_secs > clock.threshold_secs,
+            "past the full threshold from boot → kill-eligible"
+        );
+    }
+
+    #[test]
+    fn post_boot_session_without_tracker_keeps_first_call_cap() {
+        // A session that began AFTER boot with no tracker signal is a real
+        // hung first call and must still die at FIRST_CALL_STALL_SECS.
+        let clock = resolve_stall_clock(false, 350, false, 5000, STALL, FIRST_CALL);
+        assert_eq!(clock.idle_secs, 350, "uses measured idle since start");
+        assert_eq!(clock.threshold_secs, FIRST_CALL, "first-call cap applies");
+        assert!(clock.first_call_hang);
+        assert!(
+            clock.idle_secs > clock.threshold_secs,
+            "350s idle > 300s cap → kill-eligible"
+        );
+    }
+
+    #[test]
+    fn tracked_session_uses_full_role_budget_unchanged() {
+        // A session with a live tracker signal is unaffected by boot time.
+        let clock = resolve_stall_clock(true, 120, true, 999, STALL, FIRST_CALL);
+        assert_eq!(clock.idle_secs, 120);
+        assert_eq!(clock.threshold_secs, STALL);
+        assert!(!clock.first_call_hang);
+    }
+}

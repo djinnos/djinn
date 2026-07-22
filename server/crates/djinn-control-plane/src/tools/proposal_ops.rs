@@ -1,3 +1,4 @@
+// djinn:allow-oversize
 // Response models for the global Proposals MCP tools. Mirrors the shape of
 // `epic_ops.rs`: thin serializable views over the `djinn-core` models with
 // JSON-array fields expanded to `Vec<String>`.
@@ -6,7 +7,26 @@ use crate::tools::epic_ops::{AcceptanceCriterionItem, parse_acceptance_criteria_
 use djinn_core::models::{
     Proposal, ProposalFeedback, ProposalRevision, ProposalSignoff, ProposalTarget,
 };
+use djinn_spec_lint::SpecLintResultV1;
 use serde::{Deserialize, Serialize};
+
+/// A half-open UTF-8 byte span in a lint rejection diagnostic.
+#[derive(Serialize, Deserialize, Clone, schemars::JsonSchema)]
+pub struct ProposalLintViolationSpan {
+    #[schemars(with = "i64")]
+    pub start_byte: usize,
+    #[schemars(with = "i64")]
+    pub end_byte: usize,
+}
+
+/// Stable structured diagnostic published when repository lint rejects a write.
+#[derive(Serialize, Deserialize, Clone, schemars::JsonSchema)]
+pub struct ProposalLintRejectionViolation {
+    pub code: String,
+    pub message: String,
+    pub severity: String,
+    pub span: ProposalLintViolationSpan,
+}
 
 // ── Revision metadata convention ─────────────────────────────────────────────
 //
@@ -251,6 +271,13 @@ pub struct ProposalRevisionModel {
     /// Body encoding: `markdown` (legacy default) or `mdx` (block-aware).
     pub body_format: String,
     pub acceptance_criteria: Vec<AcceptanceCriterionItem>,
+    /// Repository-backed lint result for this exact immutable revision.
+    ///
+    /// This is additive so clients deserializing historical responses that
+    /// predate lint publication continue to work. Read handlers always set it
+    /// from `ProposalRepository::lint_for_revision`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lint: Option<SpecLintResultV1>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub edited_by_user_id: Option<String>,
     /// `spec_revision` for material spec snapshots, `status_change` for
@@ -276,6 +303,7 @@ impl From<&ProposalRevision> for ProposalRevisionModel {
             body_truncated: None,
             body_format: r.body_format.clone(),
             acceptance_criteria: parse_acceptance_criteria(&r.acceptance_criteria),
+            lint: None,
             edited_by_user_id: r.edited_by_user_id.clone(),
             event_kind: r.event_kind.clone(),
             status_from: r.status_from.clone(),
@@ -393,12 +421,24 @@ pub struct ProposalSingleResponse {
     pub mdx: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// Additive stable machine-readable rejection code.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub code: Option<String>,
+    /// Additive ordered diagnostics for `SPEC_LINT_REJECTED`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub violations: Option<Vec<ProposalLintRejectionViolation>>,
+    /// Additive lint result for the exact committed head revision.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub latest_lint: Option<SpecLintResultV1>,
 }
 
 #[derive(Serialize, Deserialize, Clone, schemars::JsonSchema)]
 pub struct ProposalShowResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub proposal: Option<ProposalModel>,
+    /// Repository-backed lint result for the exact current head revision.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latest_lint: Option<SpecLintResultV1>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub targets: Option<Vec<ProposalTargetModel>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1120,4 +1160,49 @@ pub struct NeedsEvidenceDemandResponse {
     /// Error message for a rejected demand.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+}
+
+#[cfg(test)]
+mod lint_response_compat_tests {
+    use super::{ProposalRevisionModel, ProposalShowResponse};
+
+    #[test]
+    fn legacy_show_and_revision_without_additive_lint_fields_round_trip() {
+        let legacy = serde_json::json!({
+            "proposal": null,
+            "revisions": [{
+                "id": "revision-1",
+                "seq": 1,
+                "title": "Legacy revision",
+                "body_format": "markdown",
+                "acceptance_criteria": [],
+                "event_kind": "spec_revision",
+                "created_at": "2026-01-01T00:00:00Z"
+            }]
+        });
+        let response: ProposalShowResponse = serde_json::from_value(legacy).unwrap();
+        assert!(response.latest_lint.is_none());
+        let revision = response.revisions.as_ref().unwrap().first().unwrap();
+        assert!(revision.lint.is_none());
+
+        // Old clients/fixtures can serialize the current models without
+        // receiving additive fields they did not send or understand.
+        let serialized = serde_json::to_value(&response).unwrap();
+        assert!(serialized.get("latest_lint").is_none());
+        assert!(serialized["revisions"][0].get("lint").is_none());
+
+        let revision: ProposalRevisionModel = serde_json::from_value(serde_json::json!({
+            "id": "revision-2", "seq": 2, "title": "Legacy",
+            "body_format": "markdown", "acceptance_criteria": [],
+            "event_kind": "spec_revision", "created_at": "2026-01-01T00:00:00Z"
+        }))
+        .unwrap();
+        assert!(revision.lint.is_none());
+        assert!(
+            serde_json::to_value(revision)
+                .unwrap()
+                .get("lint")
+                .is_none()
+        );
+    }
 }

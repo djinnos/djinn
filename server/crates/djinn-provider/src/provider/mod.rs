@@ -4,8 +4,13 @@ pub mod error;
 pub mod first_event;
 pub mod format;
 pub mod telemetry;
+pub mod transport;
 
 pub use error::ProviderError;
+pub use transport::{
+    ExhaustedTransportCategory, ExhaustedTransportDiagnostic, TransportClassificationInput,
+    classify_exhausted_transport, oversized_transport_request,
+};
 
 use std::pin::Pin;
 
@@ -446,6 +451,17 @@ pub trait LlmProvider: Send + Sync {
                 + 'a,
         >,
     >;
+
+    /// Exact UTF-8 JSON request-body length for this provider's stream call.
+    /// `None` is deliberately ineligible for empty-stream recovery.
+    fn stream_request_body_bytes(
+        &self,
+        _conversation: &Conversation,
+        _tools: &[Value],
+        _tool_choice: Option<ToolChoice>,
+    ) -> Option<usize> {
+        None
+    }
 
     /// Clone of this provider's [`ProviderConfig`], if it has one.
     ///

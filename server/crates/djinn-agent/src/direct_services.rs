@@ -20,7 +20,8 @@ use async_trait::async_trait;
 use djinn_core::events::DjinnEventEnvelope;
 use djinn_core::models::SessionRecord;
 use djinn_core::models::{Task, TaskRunStatus};
-use djinn_db::TaskRunRepository;
+use djinn_db::{BuildLeaseRepository, TaskRunRepository};
+use djinn_coordinator::build_lease::BuildLeaseService;
 use djinn_db::repositories::llm_call_attempt::{
     CreateLlmCallAttemptParams, FinalizeLlmCallAttemptParams, LlmCallAttemptRepository,
     LlmCallOutcome,
@@ -32,8 +33,9 @@ use djinn_db::{EffectiveCreatorProvenance, SessionRepository};
 use djinn_stack::environment::EnvironmentConfig;
 use djinn_supervisor::services::wire::{PlannerAttemptResult, PlannerOutcome};
 use djinn_supervisor::services::{
-    CostBasisHint, SerializableCreateSessionParams, SerializableCreateTaskRunParams,
-    SerializableDjinnEvent,
+    CostBasisHint, LeaseAbandonRequest, LeaseBindRequest, LeaseCancelRequest, LeaseGrantRequest,
+    LeaseQueueRequest, LeaseReleaseRequest, LeaseResult, LeaseStatusRequest,
+    SerializableCreateSessionParams, SerializableCreateTaskRunParams, SerializableDjinnEvent,
 };
 use djinn_supervisor::{
     BranchPublicationResult, RoleKind, StageError, StageOutcome, SupervisorServices,
@@ -129,6 +131,9 @@ pub struct DirectServices {
     /// dead code (the supervisor still calls `task_runs.create()` /
     /// `task_runs.update_status()` directly).
     task_runs: Arc<TaskRunRepository>,
+    /// Coordinator-owned durable lease authority. The direct host surface
+    /// deliberately holds only this service, never a parallel lease policy.
+    build_lease: Arc<BuildLeaseService>,
     #[cfg(test)]
     planner_test_seam: Option<PlannerTestSeam>,
 }
@@ -258,6 +263,13 @@ impl DirectServices {
         provider_override: Option<Arc<dyn LlmProvider>>,
     ) -> Self {
         let task_runs = Arc::new(TaskRunRepository::new(agent_context.db.clone()));
+        // The durable cap is recovered from the existing database before the
+        // first operation. The constructor's zero is intentionally not a
+        // launcher quota lift.
+        let build_lease = Arc::new(BuildLeaseService::new(
+            Arc::new(BuildLeaseRepository::new(agent_context.db.clone())),
+            0,
+        ));
         Self {
             callbacks: SupervisorCallbackContext {
                 agent_context,
@@ -265,9 +277,18 @@ impl DirectServices {
                 provider_override,
             },
             task_runs,
+            build_lease,
             #[cfg(test)]
             planner_test_seam: None,
         }
+    }
+
+    /// Open the coordinator service from its durable snapshot on first use.
+    /// This is composition-only: every protocol result below is returned from
+    /// `BuildLeaseService` unchanged.
+    async fn recover_build_lease(&self) -> bool {
+        self.build_lease.is_ready()
+            || !matches!(self.build_lease.recover().await, LeaseResult::LeaseUnavailable)
     }
 
     #[cfg(test)]
@@ -897,6 +918,55 @@ impl DirectServices {
 impl SupervisorServices for DirectServices {
     fn cancel(&self) -> &CancellationToken {
         &self.callbacks.cancel
+    }
+
+    async fn queue_lease(&self, request: LeaseQueueRequest) -> LeaseResult {
+        if !self.recover_build_lease().await {
+            return LeaseResult::LeaseUnavailable;
+        }
+        self.build_lease.queue(request).await
+    }
+
+    async fn grant_lease(&self, request: LeaseGrantRequest) -> LeaseResult {
+        if !self.recover_build_lease().await {
+            return LeaseResult::LeaseUnavailable;
+        }
+        self.build_lease.grant(request).await
+    }
+
+    async fn lease_status(&self, request: LeaseStatusRequest) -> LeaseResult {
+        if !self.recover_build_lease().await {
+            return LeaseResult::LeaseUnavailable;
+        }
+        self.build_lease.status(request).await
+    }
+
+    async fn abandon_lease(&self, request: LeaseAbandonRequest) -> LeaseResult {
+        if !self.recover_build_lease().await {
+            return LeaseResult::LeaseUnavailable;
+        }
+        self.build_lease.abandon(request).await
+    }
+
+    async fn bind_lease_pod(&self, request: LeaseBindRequest) -> LeaseResult {
+        if !self.recover_build_lease().await {
+            return LeaseResult::LeaseUnavailable;
+        }
+        self.build_lease.bind(request).await
+    }
+
+    async fn cancel_lease(&self, request: LeaseCancelRequest) -> LeaseResult {
+        if !self.recover_build_lease().await {
+            return LeaseResult::LeaseUnavailable;
+        }
+        self.build_lease.cancel(request).await
+    }
+
+    async fn release_lease(&self, request: LeaseReleaseRequest) -> LeaseResult {
+        if !self.recover_build_lease().await {
+            return LeaseResult::LeaseUnavailable;
+        }
+        self.build_lease.release(request).await
     }
 
     async fn load_task(&self, task_id: String) -> Result<Task, String> {
@@ -3582,5 +3652,168 @@ mod dispatch_identity_rpc_persistence_tests {
         let _ = background.writer.await;
         server.cancel();
         let _ = server.join.await;
+    }
+}
+
+#[cfg(test)]
+mod direct_lease_delegation_tests {
+    use super::DirectServices;
+    use djinn_supervisor::SupervisorServices;
+    use djinn_supervisor::services::{
+        LeaseAbandonRequest, LeaseBindRequest, LeaseCancelRequest, LeaseDeadlines,
+        LeaseGrantRequest, LeaseIdentity, LeaseQueueRequest, LeaseReleaseRequest, LeaseResult,
+        LeaseState, LeaseStatusRequest, TaskInvocationLeaseIdentity,
+    };
+    use tokio_util::sync::CancellationToken;
+
+    fn identity(invocation_id: &str) -> LeaseIdentity {
+        LeaseIdentity::TaskInvocation(TaskInvocationLeaseIdentity {
+            task_id: "task".into(),
+            task_run_id: "run".into(),
+            invocation_id: invocation_id.into(),
+        })
+    }
+
+    fn queue_request(invocation_id: &str) -> LeaseQueueRequest {
+        LeaseQueueRequest {
+            identity: identity(invocation_id),
+            deadlines: LeaseDeadlines {
+                queue_deadline_ms: 0,
+                launch_deadline_ms: 0,
+            },
+        }
+    }
+
+    #[tokio::test]
+    async fn direct_services_delegates_the_complete_coordinator_lease_surface() {
+        let db = crate::test_helpers::create_test_db();
+        let services = DirectServices::new(
+            crate::test_helpers::agent_context_from_db(db, CancellationToken::new()),
+            CancellationToken::new(),
+        );
+
+        // Recovery and cap ownership stay in the coordinator service; direct
+        // services has no admission counter or state-machine of its own.
+        assert!(services.recover_build_lease().await);
+        assert!(matches!(
+            services.build_lease.set_cap(1).await,
+            LeaseResult::Status(_)
+        ));
+
+        let first = services.queue_lease(queue_request("first")).await;
+        let token = match first {
+            LeaseResult::Granted(grant) => grant.fencing_token,
+            other => panic!("expected coordinator grant, got {other:?}"),
+        };
+        assert!(matches!(
+            services
+                .queue_lease(LeaseQueueRequest {
+                    identity: LeaseIdentity::TaskInvocation(TaskInvocationLeaseIdentity {
+                        task_id: "different-task".into(),
+                        task_run_id: "run".into(),
+                        invocation_id: "first".into(),
+                    }),
+                    deadlines: LeaseDeadlines {
+                        queue_deadline_ms: 0,
+                        launch_deadline_ms: 0,
+                    },
+                })
+                .await,
+            LeaseResult::LeaseIdentityConflict { .. }
+        ));
+        assert!(matches!(
+            services
+                .grant_lease(LeaseGrantRequest {
+                    identity: identity("first"),
+                    fencing_token: token.clone(),
+                })
+                .await,
+            LeaseResult::Status(status) if status.state == LeaseState::Launching
+        ));
+        assert!(matches!(
+            services
+                .lease_status(LeaseStatusRequest {
+                    identity: identity("first"),
+                })
+                .await,
+            LeaseResult::Status(status) if status.state == LeaseState::Launching
+        ));
+        assert!(matches!(
+            services
+                .bind_lease_pod(LeaseBindRequest {
+                    identity: identity("first"),
+                    fencing_token: token.clone(),
+                    pod_uid: "pod-first".into(),
+                })
+                .await,
+            LeaseResult::Bound(status) if status.state == LeaseState::Bound
+        ));
+        assert!(matches!(
+            services
+                .release_lease(LeaseReleaseRequest {
+                    identity: identity("first"),
+                    fencing_token: token,
+                    candidate_cleanup: true,
+                })
+                .await,
+            LeaseResult::Released {
+                candidate_cleanup: true
+            }
+        ));
+
+        assert!(matches!(
+            services.build_lease.set_cap(0).await,
+            LeaseResult::Status(_)
+        ));
+        assert!(matches!(
+            services.queue_lease(queue_request("abandon")).await,
+            LeaseResult::Queued(_)
+        ));
+        assert!(matches!(
+            services
+                .abandon_lease(LeaseAbandonRequest {
+                    identity: identity("abandon"),
+                    candidate_cleanup: true,
+                })
+                .await,
+            LeaseResult::Abandoned {
+                candidate_cleanup: true
+            }
+        ));
+
+        assert!(matches!(
+            services.build_lease.set_cap(1).await,
+            LeaseResult::Status(_)
+        ));
+        let token = match services.queue_lease(queue_request("cancel")).await {
+            LeaseResult::Granted(grant) => grant.fencing_token,
+            other => panic!("expected coordinator grant, got {other:?}"),
+        };
+        assert!(matches!(
+            services
+                .cancel_lease(LeaseCancelRequest {
+                    identity: identity("cancel"),
+                    fencing_token: Some(token.clone()),
+                    candidate_cleanup: false,
+                })
+                .await,
+            LeaseResult::Cancelled {
+                candidate_cleanup: false
+            }
+        ));
+        // The coordinator's terminal replay is returned verbatim, rather than
+        // being reconstructed by DirectServices.
+        assert!(matches!(
+            services
+                .release_lease(LeaseReleaseRequest {
+                    identity: identity("cancel"),
+                    fencing_token: token,
+                    candidate_cleanup: true,
+                })
+                .await,
+            LeaseResult::Cancelled {
+                candidate_cleanup: false
+            }
+        ));
     }
 }

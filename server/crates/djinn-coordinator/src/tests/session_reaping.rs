@@ -489,7 +489,11 @@ async fn stall_timeout_tears_down_taskrun_job_through_slot_pool_kill_path() {
         .await
         .unwrap();
     session_repo
-        .backdate_started_at(&session.id, "40 minutes")
+        // Backdate past HARD_RUNTIME_CAP_SECS (3h) so the classifier's claim
+        // lease is exhausted and the Slow verdict is NOT extension-eligible —
+        // this is a genuinely dead pre-restart session that must die on the
+        // first sweep. (A <3h session would now get one grace extension.)
+        .backdate_started_at(&session.id, "190 minutes")
         .await
         .unwrap();
 
@@ -552,6 +556,10 @@ async fn stall_timeout_tears_down_taskrun_job_through_slot_pool_kill_path() {
 
     let mut actor = coordinator_actor_for_tests(&db, &tx);
     actor.pool = pool;
+    // Coordinator booted BEFORE this session and has since been up longer than
+    // the stall threshold, so the restart-amnesia window has fully elapsed and
+    // a genuinely dead pre-restart session is kill-eligible again this sweep.
+    actor.boot_at = ::time::OffsetDateTime::now_utc() - ::time::Duration::minutes(40);
     actor.enforce_session_stall_timeout().await;
 
     assert_eq!(
@@ -2075,7 +2083,7 @@ async fn preservation_gate_called_during_terminal_task_failure() {
         .await
         .unwrap();
 
-    let actor = coordinator_actor_for_tests(&db, &tx);
+    let mut actor = coordinator_actor_for_tests(&db, &tx);
     let closed = actor
         .terminally_fail_task(&task, "coordinator", "max retries exceeded")
         .await;
@@ -2098,6 +2106,12 @@ async fn preservation_gate_called_during_terminal_task_failure() {
     assert!(
         !active.iter().any(|s| s.id == session.id),
         "session should be interrupted after terminal task failure"
+    );
+
+    let closed_task = task_repo.get(&task.id).await.unwrap().unwrap();
+    assert_eq!(
+        closed_task.status, "closed",
+        "the PR-less terminal path must still ForceClose after checkpoint/session handling"
     );
 }
 
@@ -2496,7 +2510,10 @@ async fn stall_kill_still_fires_without_db_progress() {
         .await
         .unwrap();
     session_repo
-        .backdate_started_at(&session.id, "40 minutes")
+        // Backdate past HARD_RUNTIME_CAP_SECS (3h): the classifier lease is
+        // exhausted, so the Slow verdict is not extension-eligible and this
+        // genuinely dead pre-restart session is killed on the first sweep.
+        .backdate_started_at(&session.id, "190 minutes")
         .await
         .unwrap();
     // Frozen counters: the row shows tokens, but the watermark below already
@@ -2559,6 +2576,10 @@ async fn stall_kill_still_fires_without_db_progress() {
 
     let mut actor = coordinator_actor_for_tests(&db, &tx);
     actor.pool = pool;
+    // Coordinator booted BEFORE this session and has since been up longer than
+    // the stall threshold, so the restart-amnesia window has fully elapsed and
+    // a genuinely dead pre-restart session is kill-eligible again this sweep.
+    actor.boot_at = ::time::OffsetDateTime::now_utc() - ::time::Duration::minutes(40);
     // Watermark already equals the live DB total → no progress observed.
     actor
         .stall_progress_watermark
@@ -2623,7 +2644,10 @@ async fn dispatch_stalled_worker_session(
         .await
         .unwrap();
     session_repo
-        .backdate_started_at(&session.id, "40 minutes")
+        // Backdate past HARD_RUNTIME_CAP_SECS (3h) so the classifier lease is
+        // exhausted and the Slow verdict is not extension-eligible — a
+        // genuinely dead pre-restart session that must die on the first sweep.
+        .backdate_started_at(&session.id, "190 minutes")
         .await
         .unwrap();
 
@@ -2690,6 +2714,10 @@ async fn first_stall_cancel_does_not_escalate_to_planner() {
 
     let mut actor = coordinator_actor_for_tests(&db, &tx);
     actor.pool = pool;
+    // Coordinator booted BEFORE this session and has since been up longer than
+    // the stall threshold, so the restart-amnesia window has fully elapsed and
+    // a genuinely dead pre-restart session is kill-eligible again this sweep.
+    actor.boot_at = ::time::OffsetDateTime::now_utc() - ::time::Duration::minutes(40);
     actor.enforce_session_stall_timeout().await;
 
     assert!(
@@ -2723,6 +2751,10 @@ async fn second_consecutive_stall_cancel_escalates_to_planner() {
 
     let mut actor = coordinator_actor_for_tests(&db, &tx);
     actor.pool = pool;
+    // Coordinator booted BEFORE this session and has since been up longer than
+    // the stall threshold, so the restart-amnesia window has fully elapsed and
+    // a genuinely dead pre-restart session is kill-eligible again this sweep.
+    actor.boot_at = ::time::OffsetDateTime::now_utc() - ::time::Duration::minutes(40);
     // Pre-seed the first strike at the task's current status: a prior session
     // already stall-cancelled and the status has not advanced since.
     let current = actor
@@ -3430,9 +3462,11 @@ async fn hard_runtime_cap_zombie_reap_forces_dead_timeout() {
         .backdate_started_at(&session.id, "20 minutes")
         .await
         .unwrap();
-    // Also backdate the task_run.started_at so hard_runtime_deadline_exceeded fires.
+    // Also backdate the task_run.started_at past HARD_RUNTIME_CAP_SECS (3h) so
+    // hard_runtime_deadline_exceeded fires (the total-lifetime ceiling, aligned
+    // with the K8s Job activeDeadlineSeconds — not the 10-minute zombie cap).
     TaskRunRepository::new(db.clone())
-        .backdate_started_at(run_id, "20 minutes")
+        .backdate_started_at(run_id, "190 minutes")
         .await
         .unwrap();
 
@@ -5791,10 +5825,13 @@ async fn dead_verdict_with_fresh_db_activity_suppresses_reap() {
         })
         .await
         .unwrap();
-    // Backdate past the 10-minute zombie hard cap so the raw age gate fires
-    // and the classifier's claim TTL is zero (extension budget exhausted).
+    // Backdate past the zombie age gate (10 min) AND past HARD_RUNTIME_CAP_SECS
+    // (3h) so the classifier's claim TTL is zero (extension budget exhausted)
+    // and the Slow verdict carries the slow_extended outcome. The task_run is
+    // left fresh, so hard_runtime_deadline_exceeded does NOT fire — this
+    // isolates the Slow-suppresses-reap path from the hard-cap path.
     session_repo
-        .backdate_started_at(&session.id, "20 minutes")
+        .backdate_started_at(&session.id, "190 minutes")
         .await
         .unwrap();
     // NOTE: tokens are intentionally LEFT at zero so the pre-classifier
@@ -5901,9 +5938,9 @@ async fn dead_verdict_with_fresh_db_activity_suppresses_reap() {
         Some("slow"),
         "classifier must record Slow verdict on session row — not Dead"
     );
-    // With a 20-minute-old session the claim TTL is zero → extension budget
-    // exhausted → the classifier tags the Slow verdict with SlowExtended
-    // outcome and HardRuntimeExceeded-adjacent reason.
+    // With a session older than HARD_RUNTIME_CAP_SECS (3h) the claim TTL is
+    // zero → extension budget exhausted → the classifier tags the Slow verdict
+    // with SlowExtended outcome and HardRuntimeExceeded-adjacent reason.
     assert_eq!(
         outcome_kind.as_deref(),
         Some("slow_extended"),
@@ -5974,17 +6011,22 @@ async fn hard_cap_takes_precedence_over_slow_extension_budget_in_stall_path() {
     let run_id = "run-hard-cap-precedence";
     let (pool, _cancel, session) = dispatch_stalled_worker_session(&db, &tx, &task, run_id).await;
 
-    // Backdate the task_run's started_at so `hard_runtime_deadline_exceeded`
-    // is true. Without this, the classifier sees a fresh task_run and would
-    // return Slow + extension_eligible — the slow-extension branch would fire,
-    // and the hard-cap precedence invariant would not be exercised.
+    // Backdate the task_run's started_at past HARD_RUNTIME_CAP_SECS (3h) so
+    // `hard_runtime_deadline_exceeded` is true. Without this, the classifier
+    // sees a fresh task_run and would return Slow + extension_eligible — the
+    // slow-extension branch would fire, and the hard-cap precedence invariant
+    // would not be exercised.
     TaskRunRepository::new(db.clone())
-        .backdate_started_at(run_id, "20 minutes")
+        .backdate_started_at(run_id, "190 minutes")
         .await
         .unwrap();
 
     let mut actor = coordinator_actor_for_tests(&db, &tx);
     actor.pool = pool;
+    // Coordinator booted BEFORE this session and has since been up longer than
+    // the stall threshold, so the restart-amnesia window has fully elapsed and
+    // the sweep reaches the classifier (where the hard cap takes precedence).
+    actor.boot_at = ::time::OffsetDateTime::now_utc() - ::time::Duration::minutes(40);
     // Sanity: budget is fully available (count = 0, max_extensions = 3).
     assert!(
         actor.worker_lifecycle_config.slow_extension.enabled,
@@ -7051,6 +7093,195 @@ async fn evidence_reap_null_owner_counts_as_crashed_unproven() {
     assert_eq!(sj["owner_classification"], "null_owner");
 }
 
+/// Startup boot-evidence classification (Part 2): a pre-boot orphan whose owner
+/// is a DIFFERENT incarnation than this boot's is an environmental restart
+/// orphan — `interrupted`/`environmental_restart_orphan` — even when the prior
+/// owner's lease still reads "live" (a just-dead incarnation renewed 30s before
+/// the crash). This is the exact incident case: the reap must NOT stamp
+/// `crashed` (durable, strike-counted) for a server-restart orphan.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn startup_reap_classifies_different_incarnation_orphan_as_environmental_restart() {
+    use djinn_db::TaskAttemptRepository;
+
+    let db = test_helpers::create_test_db();
+    let (tx, _rx) = broadcast::channel(256);
+    let repo = TaskAttemptRepository::new(db.clone());
+
+    // Prior incarnation whose lease still reads LIVE against the 5-minute window
+    // (it renewed seconds before the crash). Under a single 10s startup
+    // threshold this owner would read "live" and mis-classify `crashed`.
+    let prior_owner = register_incarnation(&db, false).await;
+    let group_id = uuid::Uuid::now_v7().to_string();
+    let (task, _n) = create_task_with_note(&db, &tx, "restart-orphan-different").await;
+    let attempt = seed_pending_attempt_with_identity(
+        &db,
+        &task.id,
+        "worker",
+        Some(&prior_owner),
+        Some(&group_id),
+    )
+    .await;
+    // 30s old: past the 10s startup age gate, inside the 5m lease window.
+    djinn_db::test_support::backdate_task_attempt_created_at(&db, &attempt, "30 seconds").await;
+
+    // This boot's incarnation differs from the orphan's owner (single-leader).
+    let current = uuid::Uuid::now_v7().to_string();
+    crate::health::reap_orphaned_pending_attempts_for_startup(&db, &current).await;
+
+    let row = repo.get(&attempt).await.unwrap().unwrap();
+    assert_eq!(
+        row.outcome, "interrupted",
+        "a pre-boot different-incarnation orphan is environmental, not crashed"
+    );
+    let sj: serde_json::Value = serde_json::from_str(row.summary_json.as_deref().unwrap()).unwrap();
+    assert_eq!(sj["failure_class"], "environmental_restart_orphan");
+    assert_eq!(
+        sj["owner_classification"],
+        "restart_orphan_different_incarnation"
+    );
+    assert_eq!(sj["boot_incarnation_id"], current);
+    assert_eq!(sj["reason"], "startup");
+}
+
+/// Startup boot-evidence classification (Part 2): a pre-boot orphan with a NULL
+/// owner (a mixed-version supervisor `task-run:<id>` row, the k6hm case) is also
+/// an environmental restart orphan at boot — never `crashed`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn startup_reap_classifies_null_owner_orphan_as_environmental_restart() {
+    use djinn_db::TaskAttemptRepository;
+
+    let db = test_helpers::create_test_db();
+    let (tx, _rx) = broadcast::channel(256);
+    let repo = TaskAttemptRepository::new(db.clone());
+
+    let (task, _n) = create_task_with_note(&db, &tx, "restart-orphan-null").await;
+    let attempt = seed_pending_attempt(&db, &task.id, "worker").await; // NULL owner
+    djinn_db::test_support::backdate_task_attempt_created_at(&db, &attempt, "30 seconds").await;
+
+    let current = uuid::Uuid::now_v7().to_string();
+    crate::health::reap_orphaned_pending_attempts_for_startup(&db, &current).await;
+
+    let row = repo.get(&attempt).await.unwrap().unwrap();
+    assert_eq!(row.outcome, "interrupted");
+    let sj: serde_json::Value = serde_json::from_str(row.summary_json.as_deref().unwrap()).unwrap();
+    assert_eq!(sj["failure_class"], "environmental_restart_orphan");
+    assert_eq!(sj["owner_classification"], "restart_orphan_null_owner");
+    assert_eq!(sj["boot_incarnation_id"], current);
+}
+
+/// Part 1 age-gate decoupling: the startup reap uses a 10s age gate, so a
+/// 30-second-old pre-boot orphan is reaped while a freshly-created (<10s) one is
+/// spared — the sub-threshold row could still be a legitimately-starting
+/// dispatch that has not yet registered its run/session.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn startup_reap_age_gate_reaps_thirty_second_orphan_spares_fresh() {
+    use djinn_db::TaskAttemptRepository;
+
+    let db = test_helpers::create_test_db();
+    let (tx, _rx) = broadcast::channel(256);
+    let repo = TaskAttemptRepository::new(db.clone());
+
+    let (task_old, _n) = create_task_with_note(&db, &tx, "age-gate-old").await;
+    let old = seed_pending_attempt(&db, &task_old.id, "worker").await;
+    djinn_db::test_support::backdate_task_attempt_created_at(&db, &old, "30 seconds").await;
+
+    let (task_new, _n) = create_task_with_note(&db, &tx, "age-gate-new").await;
+    let fresh = seed_pending_attempt(&db, &task_new.id, "worker").await; // ~0s old
+
+    let current = uuid::Uuid::now_v7().to_string();
+    crate::health::reap_orphaned_pending_attempts_for_startup(&db, &current).await;
+
+    assert_eq!(
+        repo.get(&old).await.unwrap().unwrap().outcome,
+        "interrupted",
+        "a 30s-old pre-boot orphan is past the 10s startup age gate → reaped"
+    );
+    assert_eq!(
+        repo.get(&fresh).await.unwrap().unwrap().outcome,
+        "pending",
+        "a sub-10s orphan is spared: it may still be a starting dispatch"
+    );
+}
+
+/// The `environmental_restart_orphan` startup evidence is strike-exempt (Part 2):
+/// a restart must never book a dispatch strike, even for a NULL-owner row where
+/// the owner-expiry tuple cannot be satisfied.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn latest_attempt_strike_decision_exempts_environmental_restart_orphan() {
+    use djinn_core::models::task_attempt::TaskAttemptOutcome;
+    use djinn_db::{TaskAttemptRepository, TerminalTaskAttemptParams};
+
+    let db = test_helpers::create_test_db();
+    let (tx, _rx) = broadcast::channel(256);
+    let actor = coordinator_actor_for_tests(&db, &tx);
+
+    // Reproduce the durable evidence the startup reaper writes for a NULL-owner
+    // restart orphan.
+    let boot = uuid::Uuid::now_v7().to_string();
+    let evidence = format!(
+        r#"{{"failure_class":"environmental_restart_orphan","reason":"startup","boot_incarnation_id":"{boot}","owner_classification":"restart_orphan_null_owner"}}"#
+    );
+    let (task, _n) = create_task_with_note(&db, &tx, "restart-orphan-strike").await;
+    let attempt = seed_pending_attempt(&db, &task.id, "reviewer").await; // NULL owner
+    TaskAttemptRepository::new(db.clone())
+        .advance_to_terminal(TerminalTaskAttemptParams {
+            id: &attempt,
+            outcome: TaskAttemptOutcome::Interrupted,
+            pr_url: None,
+            submit_ref: None,
+            checkpoint_ref: None,
+            mirror_head_sha: None,
+            github_head_sha: None,
+            summary: None,
+            summary_json: Some(&evidence),
+            log_tail: None,
+        })
+        .await
+        .unwrap();
+
+    let decision = actor
+        .latest_attempt_strike_decision(&task.id, "reviewer")
+        .await
+        .unwrap();
+    assert!(
+        decision.exempted,
+        "a startup restart orphan must be strike-exempt"
+    );
+    assert_eq!(
+        decision.decision,
+        djinn_telemetry::dispatch::STRIKE_DECISION_EXEMPTED
+    );
+
+    // A restart-orphan class WITHOUT the boot evidence must fail closed.
+    let (task2, _n) = create_task_with_note(&db, &tx, "restart-orphan-noboot").await;
+    let a2 = seed_pending_attempt(&db, &task2.id, "reviewer").await;
+    TaskAttemptRepository::new(db.clone())
+        .advance_to_terminal(TerminalTaskAttemptParams {
+            id: &a2,
+            outcome: TaskAttemptOutcome::Interrupted,
+            pr_url: None,
+            submit_ref: None,
+            checkpoint_ref: None,
+            mirror_head_sha: None,
+            github_head_sha: None,
+            summary: None,
+            summary_json: Some(
+                r#"{"failure_class":"environmental_restart_orphan","reason":"periodic"}"#,
+            ),
+            log_tail: None,
+        })
+        .await
+        .unwrap();
+    assert!(
+        !actor
+            .latest_attempt_strike_decision(&task2.id, "reviewer")
+            .await
+            .unwrap()
+            .exempted,
+        "restart-orphan evidence without startup boot proof must fail closed"
+    );
+}
+
 /// A malformed owner UUID is counted `crashed/orphaned_pending_attempt_unproven`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn evidence_reap_malformed_owner_counts_as_crashed_unproven() {
@@ -7398,12 +7629,14 @@ async fn periodic_reap_mixed_exact_groups_classifies_owners_and_preserves_young_
         expired_evidence[0], expired_evidence[1],
         "all pending peers in an exact group must be terminalized once with one evidence tuple"
     );
-    assert_eq!(expired_evidence[0]["failure_class"], "environmental_owner_expired");
+    assert_eq!(
+        expired_evidence[0]["failure_class"],
+        "environmental_owner_expired"
+    );
     assert_eq!(expired_evidence[0]["owner_classification"], "expired");
     assert_eq!(expired_evidence[0]["owner_incarnation_id"], expired_owner);
     assert_eq!(
-        expired_evidence[0]["owner_lease_last_renewed_at"],
-        expired_lease.last_renewed_at,
+        expired_evidence[0]["owner_lease_last_renewed_at"], expired_lease.last_renewed_at,
         "expired group evidence must name and timestamp its own durable owner lease"
     );
 

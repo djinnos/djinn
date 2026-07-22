@@ -258,6 +258,9 @@ impl DjinnMcpServer {
                 proposal: Some(ProposalModel::from(&updated)),
                 mdx: None,
                 error: None,
+                code: None,
+                violations: None,
+                latest_lint: None,
             }),
             Err(e) => Json(err_single(e.to_string())),
         }
