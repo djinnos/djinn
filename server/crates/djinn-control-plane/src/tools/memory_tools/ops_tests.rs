@@ -13,7 +13,6 @@ mod tests {
     };
     use tokio::sync::broadcast;
 
-    use crate::bridge::{RuntimeOps, SemanticQueryEmbedding};
     use crate::server::DjinnMcpServer;
     use crate::state::McpState;
     use crate::state::stubs::{
@@ -22,98 +21,13 @@ mod tests {
     };
     use crate::test_support::StubNoteVectorStore;
     use crate::tools::memory_tools::ops;
+    use crate::tools::memory_tools::ops_test_support::{
+        FailingSemanticRuntimeOps, SemanticRuntimeOps,
+    };
     use crate::tools::memory_tools::{
         BrokenLinksParams, BuildContextParams, HealthParams, ListParams, OrphansParams, ReadParams,
         SearchParams,
     };
-
-    struct SemanticRuntimeOps {
-        embedding: Vec<f32>,
-    }
-
-    struct FailingSemanticRuntimeOps;
-
-    #[async_trait::async_trait]
-    impl RuntimeOps for SemanticRuntimeOps {
-        async fn apply_settings(
-            &self,
-            _: &djinn_core::models::DjinnSettings,
-        ) -> Result<(), String> {
-            Ok(())
-        }
-
-        async fn embed_memory_query(
-            &self,
-            _: &str,
-        ) -> Result<Option<SemanticQueryEmbedding>, String> {
-            Ok(Some(SemanticQueryEmbedding {
-                values: self.embedding.clone(),
-            }))
-        }
-
-        async fn reset_runtime_settings(&self) {}
-        async fn persist_model_health_state(&self) {}
-        async fn apply_environment_config(
-            &self,
-            _: &str,
-            _: &djinn_stack::environment::EnvironmentConfig,
-        ) -> Result<(), String> {
-            Ok(())
-        }
-        async fn trigger_mirror_refresh(&self, _: &str) {}
-        async fn enqueue_image_build(&self, _: &str) -> Result<(), String> {
-            Ok(())
-        }
-        async fn trigger_graph_warm(&self, _: &str) {}
-        async fn apply_user_model_change(&self) {}
-        async fn teardown_taskrun_job(&self, _: &str) -> Result<(), String> {
-            Ok(())
-        }
-        async fn list_taskrun_jobs(&self) -> Result<Vec<crate::bridge::TaskrunJobRef>, String> {
-            Ok(Vec::new())
-        }
-        async fn cleanup_task_branches(&self, _: &str) {}
-    }
-
-    #[async_trait::async_trait]
-    impl RuntimeOps for FailingSemanticRuntimeOps {
-        async fn apply_settings(
-            &self,
-            _: &djinn_core::models::DjinnSettings,
-        ) -> Result<(), String> {
-            Ok(())
-        }
-
-        async fn embed_memory_query(
-            &self,
-            _: &str,
-        ) -> Result<Option<SemanticQueryEmbedding>, String> {
-            Err("embedding model unavailable".to_string())
-        }
-
-        async fn reset_runtime_settings(&self) {}
-        async fn persist_model_health_state(&self) {}
-        async fn apply_environment_config(
-            &self,
-            _: &str,
-            _: &djinn_stack::environment::EnvironmentConfig,
-        ) -> Result<(), String> {
-            Ok(())
-        }
-        async fn trigger_mirror_refresh(&self, _: &str) {}
-        async fn enqueue_image_build(&self, _: &str) -> Result<(), String> {
-            Ok(())
-        }
-        async fn trigger_graph_warm(&self, _: &str) {}
-        async fn apply_user_model_change(&self) {}
-        async fn teardown_taskrun_job(&self, _: &str) -> Result<(), String> {
-            Ok(())
-        }
-        async fn list_taskrun_jobs(&self) -> Result<Vec<crate::bridge::TaskrunJobRef>, String> {
-            Ok(Vec::new())
-        }
-        async fn cleanup_task_branches(&self, _: &str) {}
-    }
 
     fn event_bus_for(tx: &broadcast::Sender<DjinnEventEnvelope>) -> EventBus {
         let tx = tx.clone();
@@ -1021,8 +935,8 @@ mod tests {
         assert!(response.machine_connected_orphan_count.is_some());
         assert_eq!(response.retrieval.persisted.status, "available");
         assert_eq!(response.retrieval.process.status, "available");
-        assert_eq!(response.retrieval.persisted.summaries.len(), 4);
-        assert_eq!(response.retrieval.process.summaries.len(), 4);
+        assert_eq!(response.retrieval.persisted.groups.len(), 0);
+        assert_eq!(response.retrieval.process.process_summaries.len(), 4);
 
         // orphan_note_count is a backward-compatible alias
         assert_eq!(response.orphan_note_count, response.authored_orphan_count);
@@ -1036,6 +950,33 @@ mod tests {
             (0.0..=100.0).contains(&pct),
             "isolated_pct out of range: {pct}"
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn memory_health_process_empty_does_not_claim_zero_candidates() {
+        let setup = setup_server().await;
+        ops::RetrievalObserver::new(&setup.server, RetrievalEntryPoint::Dispatch)
+            .finish(RetrievalOutcome::Empty, 7);
+
+        let response = ops::memory_health(
+            &setup.server,
+            HealthParams {
+                project: Some(setup.project),
+            },
+        )
+        .await;
+        let serialized = serde_json::to_value(response).expect("serialize memory health");
+        let dispatch = serialized["retrieval"]["process"]["process_summaries"]
+            .as_array()
+            .expect("process summaries")
+            .iter()
+            .find(|summary| summary["entry_point"] == "dispatch")
+            .expect("dispatch summary");
+
+        assert_eq!(dispatch["total_queries"], 1);
+        assert_eq!(dispatch["candidate_count"], 7);
+        assert!(dispatch.get("zero_candidate_queries").is_none());
+        assert!(dispatch.get("zero_result_queries").is_none());
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1105,7 +1046,7 @@ mod tests {
         assert!(response.retrieval.process.started_at.is_some());
         assert!(response.retrieval.process.window_start.is_some());
         assert!(response.retrieval.process.window_end.is_some());
-        assert!(response.retrieval.process.summaries.is_empty());
+        assert!(response.retrieval.process.process_summaries.is_empty());
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1135,7 +1076,7 @@ mod tests {
         );
         assert!(response.retrieval.persisted.window_start.is_some());
         assert!(response.retrieval.persisted.window_end.is_some());
-        assert!(response.retrieval.persisted.summaries.is_empty());
+        assert!(response.retrieval.persisted.groups.is_empty());
         assert_eq!(response.retrieval.process.status, "available");
     }
 

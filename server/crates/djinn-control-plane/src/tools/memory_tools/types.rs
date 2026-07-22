@@ -737,11 +737,61 @@ pub struct MemoryDeleteResponse {
 pub struct RetrievalEntryPointHealthSummary {
     pub entry_point: String,
     pub total_queries: i64,
-    pub zero_result_queries: i64,
     pub error_queries: i64,
     pub candidate_count: i64,
     pub injected_count: i64,
     pub skipped_count: i64,
+}
+
+/// Complete candidate-disposition partition for successful taxonomy-v1 queries.
+#[derive(Serialize, schemars::JsonSchema)]
+pub struct TaxonomyV1DispositionSummary {
+    pub confidence_filtered_total: i64,
+    pub not_top_k_total: i64,
+    pub oversized_skipped_total: i64,
+    pub injected_total: i64,
+    pub budget_pruned_total: i64,
+}
+
+/// Structured validation telemetry from an invalid taxonomy-v1 terminal.
+#[derive(Serialize, schemars::JsonSchema)]
+pub struct RetrievalTaxonomyValidationErrorSummary {
+    pub trace_id: String,
+    pub reason: String,
+}
+
+/// Authoritative, independently keyed taxonomy-v1 retrieval group.
+///
+/// Versioned counters exclude legacy and malformed terminals. Those exclusions
+/// and validation telemetry remain visible on this group rather than being
+/// pooled or inferred from legacy candidate payloads.
+#[derive(Serialize, schemars::JsonSchema)]
+pub struct TaxonomyV1RetrievalHealthSummary {
+    pub project_id: String,
+    pub entry_point: String,
+    pub taxonomy_version: i32,
+    /// Inclusive start of the exact persisted half-open window.
+    pub window_start: String,
+    /// Exclusive end of the exact persisted half-open window.
+    pub window_end: String,
+    pub refreshed_at: String,
+    pub invalid: bool,
+    pub total_queries: i64,
+    pub successful_queries: i64,
+    pub errored_queries: i64,
+    pub zero_candidate_queries: i64,
+    /// Deprecated compatibility alias for `zero_candidate_queries`.
+    /// It has identical zero-candidate semantics and never means zero injected results.
+    pub zero_result_queries: i64,
+    pub candidate_bearing_queries: i64,
+    pub starved_queries: i64,
+    pub injected_queries: i64,
+    pub candidate_total: i64,
+    pub injected_total: i64,
+    pub dispositions: TaxonomyV1DispositionSummary,
+    pub legacy_unclassified_queries: i64,
+    pub invalid_taxonomy_queries: i64,
+    pub validation_errors: Vec<RetrievalTaxonomyValidationErrorSummary>,
 }
 
 /// A retrieval source remains present when it is unavailable. Stable error
@@ -756,8 +806,11 @@ pub struct RetrievalHealthScope {
     pub window_end: Option<String>,
     /// Process construction time; only applicable to the process scope.
     pub started_at: Option<String>,
-    /// Fixed, bounded entry-point evidence (four workload entry points).
-    pub summaries: Vec<RetrievalEntryPointHealthSummary>,
+    /// Independently keyed bounded taxonomy-v1 repository evidence. Empty for
+    /// the separately-labelled process compatibility scope.
+    pub groups: Vec<TaxonomyV1RetrievalHealthSummary>,
+    /// Process-local compatibility telemetry, not persisted/versioned truth.
+    pub process_summaries: Vec<RetrievalEntryPointHealthSummary>,
 }
 
 #[derive(Serialize, schemars::JsonSchema)]

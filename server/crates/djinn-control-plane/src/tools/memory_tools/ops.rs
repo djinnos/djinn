@@ -1,7 +1,7 @@
 use djinn_core::clock::{Clock, SystemClock};
 use djinn_db::NoteSearchParams;
 use djinn_db::repositories::retrieval_trace::{
-    RetrievalTraceEntryPoint, RetrievalTraceHealthRollup, RetrievalTraceRepository,
+    RetrievalTraceRepository, TaxonomyV1RetrievalHealthGroup,
 };
 use djinn_db::{
     NoteRepository, ProjectRepository, normalize_virtual_note_path,
@@ -23,7 +23,8 @@ use super::{
     MemoryProposalOverview, MemoryRecallTraceResponse, MemoryRetrievalOutcomesReportResponse,
     MemorySearchResponse, MemorySearchResultItem, OrphansParams, ReadParams, RecallTraceParams,
     ResolvedMention, RetrievalEntryPointHealthSummary, RetrievalHealthResponse,
-    RetrievalHealthScope, RetrievalOutcomesReportParams, SearchParams, note_to_view,
+    RetrievalHealthScope, RetrievalOutcomesReportParams, RetrievalTaxonomyValidationErrorSummary,
+    SearchParams, TaxonomyV1DispositionSummary, TaxonomyV1RetrievalHealthSummary, note_to_view,
     parse_proposal_ref_item, parse_task_ref_item,
 };
 
@@ -627,7 +628,8 @@ fn unavailable_retrieval_scope(
         window_start: Some(window_start),
         window_end: Some(window_end),
         started_at,
-        summaries: vec![],
+        groups: vec![],
+        process_summaries: vec![],
     }
 }
 
@@ -642,7 +644,8 @@ fn process_retrieval_scope(server: &DjinnMcpServer, until: OffsetDateTime) -> Re
             window_start: Some(started_at.clone()),
             window_end: Some(until),
             started_at: Some(started_at),
-            summaries: RetrievalEntryPoint::ALL
+            groups: vec![],
+            process_summaries: RetrievalEntryPoint::ALL
                 .iter()
                 .map(|entry_point| {
                     let success = snapshot.aggregate(*entry_point, RetrievalOutcome::Success);
@@ -657,7 +660,6 @@ fn process_retrieval_scope(server: &DjinnMcpServer, until: OffsetDateTime) -> Re
                         }
                         .to_string(),
                         total_queries: (success.count + empty.count + error.count) as i64,
-                        zero_result_queries: empty.count as i64,
                         error_queries: error.count as i64,
                         candidate_count: (success.candidate_sum
                             + empty.candidate_sum
@@ -677,35 +679,49 @@ fn process_retrieval_scope(server: &DjinnMcpServer, until: OffsetDateTime) -> Re
     }
 }
 
-fn persisted_retrieval_summaries(
-    rollup: &RetrievalTraceHealthRollup,
-) -> Vec<RetrievalEntryPointHealthSummary> {
-    [
-        (RetrievalTraceEntryPoint::Dispatch, "dispatch"),
-        (RetrievalTraceEntryPoint::JitPitfalls, "jit_pitfalls"),
-        (
-            RetrievalTraceEntryPoint::LoadKnowledgeContext,
-            "load_knowledge_context",
-        ),
-        (
-            RetrievalTraceEntryPoint::FormatKnowledgeNotes,
-            "format_knowledge_notes",
-        ),
-    ]
-    .into_iter()
-    .map(|(entry_point, name)| {
-        let evidence = rollup.per_entry_point.get(&entry_point);
-        RetrievalEntryPointHealthSummary {
-            entry_point: name.to_string(),
-            total_queries: evidence.map_or(0, |value| value.trace_count),
-            zero_result_queries: evidence.map_or(0, |value| value.zero_result_trace_count),
-            error_queries: 0,
-            candidate_count: evidence.map_or(0, |value| value.candidate_count),
-            injected_count: evidence.map_or(0, |value| value.injected_count),
-            skipped_count: evidence.map_or(0, |value| value.skipped_count),
-        }
-    })
-    .collect()
+pub(super) fn taxonomy_v1_summary(
+    group: TaxonomyV1RetrievalHealthGroup,
+) -> TaxonomyV1RetrievalHealthSummary {
+    let counts = group.counts;
+    let zero_candidate_queries = counts.zero_candidate_queries;
+    TaxonomyV1RetrievalHealthSummary {
+        project_id: group.project_id,
+        entry_point: group.entry_point.as_str().to_string(),
+        taxonomy_version: group.taxonomy_version,
+        window_start: group.window_start,
+        window_end: group.window_end,
+        refreshed_at: group.refreshed_at,
+        invalid: group.invalid,
+        total_queries: counts.total_queries,
+        successful_queries: counts.successful_queries,
+        errored_queries: counts.errored_queries,
+        zero_candidate_queries,
+        // One-release wire compatibility only: it is deliberately identical to
+        // zero_candidate_queries, never the historical zero-injected metric.
+        zero_result_queries: zero_candidate_queries,
+        candidate_bearing_queries: counts.candidate_bearing_queries,
+        starved_queries: counts.starved_queries,
+        injected_queries: counts.injected_queries,
+        candidate_total: counts.candidate_total,
+        injected_total: counts.injected_total,
+        dispositions: TaxonomyV1DispositionSummary {
+            confidence_filtered_total: counts.confidence_filtered_total,
+            not_top_k_total: counts.not_top_k_total,
+            oversized_skipped_total: counts.oversized_skipped_total,
+            injected_total: counts.injected_disposition_total,
+            budget_pruned_total: counts.budget_pruned_total,
+        },
+        legacy_unclassified_queries: counts.legacy_unclassified_queries,
+        invalid_taxonomy_queries: counts.invalid_taxonomy_queries,
+        validation_errors: group
+            .validation_errors
+            .into_iter()
+            .map(|error| RetrievalTaxonomyValidationErrorSummary {
+                trace_id: error.trace_id,
+                reason: error.reason,
+            })
+            .collect(),
+    }
 }
 
 fn empty_memory_health(retrieval: RetrievalHealthResponse, error: String) -> MemoryHealthResponse {
@@ -766,16 +782,23 @@ pub async fn memory_health(server: &DjinnMcpServer, p: HealthParams) -> MemoryHe
     };
     let trace_repo = RetrievalTraceRepository::new(server.state.db().clone());
     let persisted = match trace_repo
-        .health_rollup(&project_id, &from_text, &until_text)
+        .taxonomy_v1_health_rollup(&from_text, &until_text, &until_text)
         .await
     {
-        Ok(rollup) => RetrievalHealthScope {
+        Ok(groups) => RetrievalHealthScope {
             status: "available".to_string(),
             error_code: None,
             window_start: Some(from_text),
             window_end: Some(until_text),
             started_at: None,
-            summaries: persisted_retrieval_summaries(&rollup),
+            // The repository query is already independently grouped by project
+            // and entry point. Select the requested project; never pool it.
+            groups: groups
+                .into_iter()
+                .filter(|group| group.project_id == project_id)
+                .map(taxonomy_v1_summary)
+                .collect(),
+            process_summaries: vec![],
         },
         Err(_) => unavailable_retrieval_scope("rollup_unavailable", from_text, until_text, None),
     };

@@ -1082,6 +1082,35 @@ impl RetrievalTraceRepository {
         Ok(())
     }
 
+    /// Corrupt a persisted taxonomy terminal's injected count for validation tests.
+    #[cfg(any(test, feature = "test-support"))]
+    pub async fn corrupt_injected_count_for_test(
+        &self,
+        id: &str,
+        injected_count: i32,
+    ) -> Result<()> {
+        self.db.ensure_initialized().await?;
+        sqlx::query("UPDATE retrieval_traces SET injected_count = $2 WHERE id = $1")
+            .bind(id)
+            .bind(injected_count)
+            .execute(self.db.pool())
+            .await?;
+        Ok(())
+    }
+
+    /// Put a legacy trace in a terminal-time window for rollup contract tests.
+    #[cfg(any(test, feature = "test-support"))]
+    pub async fn update_terminal_at_for_test(&self, id: &str, terminal_at: &str) -> Result<()> {
+        parse_retrieval_trace_utc_timestamp(terminal_at, "terminal_at")?;
+        self.db.ensure_initialized().await?;
+        sqlx::query("UPDATE retrieval_traces SET terminal_at = $2 WHERE id = $1")
+            .bind(id)
+            .bind(terminal_at)
+            .execute(self.db.pool())
+            .await?;
+        Ok(())
+    }
+
     /// Return authoritative taxonomy-v1 terminal evidence for every project
     /// and supported entry point in one `[from, until)` window.
     pub async fn taxonomy_v1_health_rollup(
