@@ -1,3 +1,4 @@
+// djinn:allow-oversize
 // Response models for the global Proposals MCP tools. Mirrors the shape of
 // `epic_ops.rs`: thin serializable views over the `djinn-core` models with
 // JSON-array fields expanded to `Vec<String>`.
@@ -1197,6 +1198,11 @@ mod lint_response_compat_tests {
         }))
         .unwrap();
         assert!(revision.lint.is_none());
-        assert!(serde_json::to_value(revision).unwrap().get("lint").is_none());
+        assert!(
+            serde_json::to_value(revision)
+                .unwrap()
+                .get("lint")
+                .is_none()
+        );
     }
 }

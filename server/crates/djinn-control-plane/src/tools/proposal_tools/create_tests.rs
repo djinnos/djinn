@@ -1,3 +1,4 @@
+// djinn:allow-oversize
 // Tests for the CRUD/create concern in `proposal_tools/create.rs`.
 //
 // These tests are split out of `create.rs` so the production module stays under
