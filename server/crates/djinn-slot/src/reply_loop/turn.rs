@@ -5,6 +5,9 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::Ordering;
 
+#[cfg(feature = "test-support")]
+use std::sync::OnceLock;
+
 use crate::final_verification::verify_completion_intent;
 use crate::finalize_types::SubmitWork;
 use crate::helpers::{runtime_env_diagnostics, runtime_fs_diagnostics};
@@ -528,6 +531,61 @@ pub struct ReplyLoopContext<'a> {
     pub compaction_cs: &'a CompactionCriticalSection,
 }
 
+/// A deterministic compaction seam for downstream reply-loop fixtures. The
+/// hook is only compiled into the test-support build and is reached through the
+/// production oversized-transport branches below.
+#[cfg(feature = "test-support")]
+pub type TransportRecoveryCompactionHook = Arc<dyn Fn() -> Result<bool, String> + Send + Sync>;
+
+#[cfg(feature = "test-support")]
+static TRANSPORT_RECOVERY_COMPACTION_HOOK: OnceLock<
+    Mutex<Option<TransportRecoveryCompactionHook>>,
+> = OnceLock::new();
+
+#[cfg(feature = "test-support")]
+pub fn set_transport_recovery_compaction_hook_for_test(
+    hook: Option<TransportRecoveryCompactionHook>,
+) {
+    *TRANSPORT_RECOVERY_COMPACTION_HOOK
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = hook;
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn compact_transport_recovery_in_critical_section(
+    provider: &dyn LlmProvider,
+    conversation: &mut Conversation,
+    session_id: &str,
+    task_id: &str,
+    role_name: &str,
+    context_window: i64,
+    compaction_cs: &CompactionCriticalSection,
+    slot_ctx: &SlotContext,
+) -> Result<bool, String> {
+    #[cfg(feature = "test-support")]
+    if let Some(hook) = TRANSPORT_RECOVERY_COMPACTION_HOOK
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone()
+    {
+        let _guard = compaction_cs.guard();
+        return hook();
+    }
+    compact_conversation_in_critical_section(
+        provider,
+        conversation,
+        session_id,
+        task_id,
+        role_name,
+        context_window,
+        compaction_cs,
+        slot_ctx,
+    )
+    .await
+}
+
 /// Djinn-native reply loop. Drives an `LlmProvider` stream, dispatches tool
 /// calls via the extension layer, and continues until the assistant produces a
 /// text-only response or a termination condition is reached.
@@ -831,7 +889,7 @@ pub async fn run_reply_loop(
                         estimated_payload_chars = diagnostic.estimated_payload_chars,
                         "ReplyLoop: exhausted oversized transport on stream init; compacting once"
                     );
-                    match compact_conversation_in_critical_section(
+                    match compact_transport_recovery_in_critical_section(
                         provider, conversation, session_id, task_id, role_name, context_window,
                         compaction_cs, slot_ctx,
                     )
@@ -959,7 +1017,7 @@ pub async fn run_reply_loop(
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner)
                         .exit_provider_wait();
-                    match compact_conversation_in_critical_section(
+                    match compact_transport_recovery_in_critical_section(
                         provider, conversation, session_id, task_id, role_name, context_window,
                         compaction_cs, slot_ctx,
                     )
@@ -1143,7 +1201,7 @@ pub async fn run_reply_loop(
                 {
                     // Flip before compaction so errors cannot loop recovery.
                     let _ = transport_compaction_guard.try_begin();
-                    match compact_conversation_in_critical_section(
+                    match compact_transport_recovery_in_critical_section(
                         provider, conversation, session_id, task_id, role_name, context_window,
                         compaction_cs, slot_ctx,
                     )

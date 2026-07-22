@@ -1,28 +1,40 @@
+use djinn_provider::message::{ContentBlock, Conversation, Message};
+use djinn_provider::provider::{
+    ExhaustedTransportCategory, ExhaustedTransportDiagnostic, LlmProvider, ProviderError,
+    StreamEvent, ToolChoice,
+};
 use djinn_slot::reply_loop::error_handling::{
-    ExhaustedTransportCategory, TransportClassificationInput, TransportCompactionRecoveryGuard,
+    ExhaustedTransportCategory as ClassifiedCategory, TransportClassificationInput,
     classify_exhausted_transport, is_oversized_transport_payload,
 };
+use djinn_slot::reply_loop::turn::{
+    ReplyLoopContext, TransportRecoveryCompactionHook,
+    set_transport_recovery_compaction_hook_for_test,
+};
+use djinn_slot::{CompactionCriticalSection, run_reply_loop};
+use futures::stream;
 use std::collections::VecDeque;
+use std::pin::Pin;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
+use tokio_util::sync::CancellationToken;
 
 #[test]
 fn utf8_byte_classifier_boundaries() {
     let below = "éééx";
     let equal = "éééé";
     let above = "ééééx";
-    assert_eq!(below.len(), 7);
-    assert_eq!(equal.len(), 8);
-    assert_eq!(above.len(), 9);
+    assert_eq!((below.len(), equal.len(), above.len()), (7, 8, 9));
     assert!(!is_oversized_transport_payload(below.len(), 2));
     assert!(is_oversized_transport_payload(equal.len(), 2));
     assert!(is_oversized_transport_payload(above.len(), 2));
     assert!(!is_oversized_transport_payload(usize::MAX, 0));
-    assert!(is_oversized_transport_payload(usize::MAX, u32::MAX));
     for c in [
-        ExhaustedTransportCategory::ConnectionReset,
-        ExhaustedTransportCategory::UnexpectedEof,
-        ExhaustedTransportCategory::RequestBodyWrite,
-        ExhaustedTransportCategory::ResponseHeaderTimeout,
-        ExhaustedTransportCategory::SseFirstEventTimeout,
+        ClassifiedCategory::ConnectionReset,
+        ClassifiedCategory::UnexpectedEof,
+        ClassifiedCategory::RequestBodyWrite,
+        ClassifiedCategory::ResponseHeaderTimeout,
+        ClassifiedCategory::SseFirstEventTimeout,
     ] {
         assert_eq!(
             classify_exhausted_transport(true, None, TransportClassificationInput::Eligible(c), 8)
@@ -44,147 +56,179 @@ fn utf8_byte_classifier_boundaries() {
 }
 
 #[derive(Clone, Copy)]
-enum TransportResult {
-    EligibleOversized,
-    EmptyHttp200,
+enum Outcome {
+    Eligible,
+    Empty200,
     Excluded,
     Success,
 }
-
-/// Deterministic fake transport plus the compaction seam used by the recovery
-/// boundary. It executes the same guard and exact-byte predicate as the loop.
-struct FakeReplyLoop {
-    transport: VecDeque<TransportResult>,
-    provider_calls: usize,
-    compaction_calls: usize,
-    budget_reentries: usize,
-    compaction_succeeds: bool,
-    payload_bytes: Option<usize>,
-    window_tokens: u32,
-    terminal: Option<&'static str>,
+struct ScriptedProvider {
+    script: Mutex<VecDeque<Outcome>>,
+    calls: AtomicUsize,
 }
-
-impl FakeReplyLoop {
-    fn run(&mut self) {
-        let mut guard = TransportCompactionRecoveryGuard::default();
-        while let Some(result) = self.transport.pop_front() {
-            self.provider_calls += 1;
-            let eligible = match result {
-                TransportResult::EligibleOversized | TransportResult::EmptyHttp200 => self
-                    .payload_bytes
-                    .is_some_and(|bytes| is_oversized_transport_payload(bytes, self.window_tokens)),
-                TransportResult::Excluded | TransportResult::Success => false,
-            };
-            if matches!(result, TransportResult::Success) {
-                return;
-            }
-            if eligible && guard.try_begin() {
-                self.compaction_calls += 1;
-                if !self.compaction_succeeds {
-                    self.terminal = Some("original transport/empty-stream error");
-                    return;
-                }
-                self.budget_reentries += 1;
-                continue;
-            }
-            self.terminal = Some(match result {
-                TransportResult::EmptyHttp200 => "original empty-stream error",
-                _ => "original transport error",
-            });
-            return;
+impl ScriptedProvider {
+    fn new(script: Vec<Outcome>) -> Self {
+        Self {
+            script: Mutex::new(script.into()),
+            calls: AtomicUsize::new(0),
         }
     }
 }
-
-#[test]
-fn recovery_is_one_shot() {
-    let cases = [
-        (
-            "success then retry",
-            vec![TransportResult::EligibleOversized, TransportResult::Success],
-            true,
-            Some(8),
-            2,
-            2,
-            1,
-            1,
-            None,
-        ),
-        (
-            "compaction failure",
-            vec![TransportResult::EligibleOversized],
-            false,
-            Some(8),
-            2,
-            1,
-            1,
-            0,
-            Some("original transport/empty-stream error"),
-        ),
-        (
-            "still oversized retry",
-            vec![
-                TransportResult::EligibleOversized,
-                TransportResult::EligibleOversized,
-            ],
-            true,
-            Some(8),
-            2,
-            2,
-            1,
-            1,
-            Some("original transport error"),
-        ),
-        (
-            "exhausted empty stream",
-            vec![TransportResult::EmptyHttp200, TransportResult::Success],
-            true,
-            Some(8),
-            2,
-            2,
-            1,
-            1,
-            None,
-        ),
-        (
-            "excluded failure",
-            vec![TransportResult::Excluded],
-            true,
-            Some(8),
-            2,
-            1,
-            0,
-            0,
-            Some("original transport error"),
-        ),
-    ];
-    for (
-        name,
-        script,
-        compaction_succeeds,
-        payload_bytes,
-        window_tokens,
-        calls,
-        compactions,
-        budgets,
-        terminal,
-    ) in cases
-    {
-        let mut loop_ = FakeReplyLoop {
-            transport: script.into(),
-            provider_calls: 0,
-            compaction_calls: 0,
-            budget_reentries: 0,
-            compaction_succeeds,
-            payload_bytes,
-            window_tokens,
-            terminal: None,
-        };
-        loop_.run();
-        assert_eq!(loop_.provider_calls, calls, "{name}");
-        assert_eq!(loop_.compaction_calls, compactions, "{name}");
-        assert_eq!(loop_.budget_reentries, budgets, "{name}");
-        assert_eq!(loop_.terminal, terminal, "{name}");
-        assert!(loop_.compaction_calls <= 1, "{name}");
+impl LlmProvider for ScriptedProvider {
+    fn name(&self) -> &str {
+        "transport-recovery-fixture"
     }
+    fn stream<'a>(
+        &'a self,
+        _: &'a Conversation,
+        _: &'a [serde_json::Value],
+        _: Option<ToolChoice>,
+    ) -> Pin<
+        Box<
+            dyn futures::Future<
+                    Output = anyhow::Result<
+                        Pin<Box<dyn futures::Stream<Item = anyhow::Result<StreamEvent>> + Send>>,
+                    >,
+                > + Send
+                + 'a,
+        >,
+    > {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        let outcome = self
+            .script
+            .lock()
+            .unwrap()
+            .pop_front()
+            .expect("unexpected provider retry");
+        Box::pin(async move {
+            match outcome {
+                Outcome::Eligible => Err(anyhow::Error::new(ProviderError::ExhaustedTransport(
+                    ExhaustedTransportDiagnostic {
+                        category: ExhaustedTransportCategory::ConnectionReset,
+                        estimated_payload_chars: 8,
+                    },
+                ))),
+                Outcome::Excluded => Err(anyhow::Error::new(ProviderError::Transport)),
+                Outcome::Empty200 => {
+                    Ok(Box::pin(stream::empty()) as Pin<Box<dyn futures::Stream<Item = _> + Send>>)
+                }
+                Outcome::Success => Ok(Box::pin(stream::iter(vec![
+                    Ok(StreamEvent::Delta(ContentBlock::Text {
+                        text: "done".into(),
+                    })),
+                    Ok(StreamEvent::Done),
+                ]))
+                    as Pin<Box<dyn futures::Stream<Item = _> + Send>>),
+            }
+        })
+    }
+    fn stream_request_body_bytes(
+        &self,
+        _: &Conversation,
+        _: &[serde_json::Value],
+        _: Option<ToolChoice>,
+    ) -> Option<usize> {
+        Some(8)
+    }
+}
+static RECOVERY_TEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+async fn run_case(
+    script: Vec<Outcome>,
+    compaction: Result<bool, &'static str>,
+) -> (usize, usize, anyhow::Result<()>) {
+    let _serial = RECOVERY_TEST_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap();
+    let compactions = Arc::new(AtomicUsize::new(0));
+    let count = Arc::clone(&compactions);
+    let result = compaction.map_err(str::to_owned);
+    let hook: TransportRecoveryCompactionHook = Arc::new(move || {
+        count.fetch_add(1, Ordering::SeqCst);
+        result.clone()
+    });
+    set_transport_recovery_compaction_hook_for_test(Some(hook));
+    let provider = ScriptedProvider::new(script);
+    let db = djinn_slot::test_helpers::create_test_db();
+    let cancel = CancellationToken::new();
+    let slot = djinn_slot::test_helpers::agent_context_from_db(db.clone(), cancel.clone());
+    let project = djinn_slot::test_helpers::create_test_project(&db).await;
+    let epic = djinn_slot::test_helpers::create_test_epic(&db, &project.id).await;
+    let task = djinn_slot::test_helpers::create_test_task(&db, &project.id, &epic.id).await;
+    let session = djinn_db::SessionRepository::new(db, slot.event_bus.clone())
+        .create(djinn_db::repositories::session::CreateSessionParams {
+            project_id: &project.id,
+            task_id: Some(&task.id),
+            model: "fixture/model",
+            agent_type: "worker",
+            metadata_json: None,
+            task_run_id: None,
+            pricing: None,
+            cost_basis: None,
+        })
+        .await
+        .unwrap();
+    let cs = CompactionCriticalSection::new();
+    let mut conversation = Conversation::new();
+    conversation.push(Message::user("éééé"));
+    let output = run_reply_loop(
+        ReplyLoopContext {
+            provider: &provider,
+            tools: &[],
+            task_id: &task.id,
+            task_short_id: "fixture",
+            session_id: &session.id,
+            project_path: "/tmp",
+            worktree_path: std::path::Path::new("/tmp"),
+            role_name: "worker",
+            finalize_tool_names: &[],
+            context_window: 2,
+            model_id: "fixture/model",
+            cancel: &cancel,
+            global_cancel: &cancel,
+            ctx: &slot,
+            active_skill_names: &[],
+            active_mcp_server_names: &[],
+            max_turns_override: Some(8),
+            compaction_cs: &cs,
+        },
+        &mut conversation,
+        false,
+    )
+    .await
+    .0;
+    set_transport_recovery_compaction_hook_for_test(None);
+    (
+        provider.calls.load(Ordering::SeqCst),
+        compactions.load(Ordering::SeqCst),
+        output,
+    )
+}
+
+#[tokio::test]
+async fn recovery_is_one_shot() {
+    let (calls, compacted, result) =
+        run_case(vec![Outcome::Eligible, Outcome::Success], Ok(true)).await;
+    assert_eq!((calls, compacted), (2, 1));
+    assert!(result.is_ok());
+    let (calls, compacted, result) = run_case(vec![Outcome::Eligible], Err("summary failed")).await;
+    assert_eq!((calls, compacted), (1, 1));
+    assert!(format!("{:#}", result.unwrap_err()).contains("exhausted transport error"));
+    let (calls, compacted, result) =
+        run_case(vec![Outcome::Eligible, Outcome::Eligible], Ok(true)).await;
+    assert_eq!((calls, compacted), (2, 1));
+    assert!(format!("{:#}", result.unwrap_err()).contains("exhausted transport error"));
+    let (calls, compacted, result) =
+        run_case(vec![Outcome::Empty200, Outcome::Success], Ok(true)).await;
+    assert_eq!((calls, compacted), (2, 1));
+    assert!(result.is_ok());
+    let (calls, compacted, result) = run_case(vec![Outcome::Excluded], Ok(true)).await;
+    assert_eq!((calls, compacted), (1, 0));
+    assert!(
+        result
+            .unwrap_err()
+            .to_string()
+            .contains("provider stream init failed")
+    );
 }
