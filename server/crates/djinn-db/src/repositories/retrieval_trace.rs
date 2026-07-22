@@ -875,21 +875,8 @@ impl RetrievalTraceRepository {
         self.db.ensure_initialized().await?;
         let id = uuid::Uuid::now_v7().to_string();
         let counts = params.dispositions;
-        let outcome = match params.terminal_state {
-            KnowledgeTraceTerminalState::Success
-                if params.injected_count.expect(
-                    "validated successful taxonomy-v1 terminal must include injected_count",
-                ) > 0 =>
-            {
-                RetrievalTraceOutcome::Injected
-            }
-            KnowledgeTraceTerminalState::Success => RetrievalTraceOutcome::Empty,
-            KnowledgeTraceTerminalState::Error | KnowledgeTraceTerminalState::Cancelled => {
-                RetrievalTraceOutcome::Error
-            }
-        };
         sqlx::query_as::<_, RetrievalTraceRow>(r#"INSERT INTO retrieval_traces (id,schema_version,project_id,session_id,task_run_id,task_id,entry_point,trigger,candidates,candidate_cap,candidate_cap_exceeded,sampling_metadata,durations_ms,estimated_injected_tokens,rollout_label,outcome,knowledge_trace_taxonomy_version,terminal_state,terminal_at,candidate_count,injected_count,confidence_filtered_count,not_top_k_count,oversized_skipped_count,budget_pruned_count) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25) RETURNING id,schema_version,project_id,session_id,task_run_id,task_id,entry_point,rollout_label,outcome,knowledge_trace_taxonomy_version,terminal_state,terminal_at,candidate_count,injected_count,confidence_filtered_count,not_top_k_count,oversized_skipped_count,budget_pruned_count,trigger,candidates,candidate_cap,candidate_cap_exceeded,sampling_metadata,durations_ms,estimated_injected_tokens,created_at"#)
-        .bind(&id).bind(RETRIEVAL_TRACE_SCHEMA_VERSION).bind(params.trace.project_id).bind(params.trace.session_id).bind(params.trace.task_run_id).bind(params.trace.task_id).bind(params.trace.entry_point.as_str()).bind(params.trace.trigger).bind(params.trace.candidates).bind(params.trace.candidate_cap).bind(params.trace.candidate_cap_exceeded).bind(params.trace.sampling_metadata).bind(params.trace.durations_ms).bind(params.trace.estimated_injected_tokens).bind(params.rollout_label).bind(outcome.as_str()).bind(KNOWLEDGE_TRACE_TAXONOMY_VERSION_V1).bind(params.terminal_state.as_str()).bind(params.terminal_at).bind(params.candidate_count).bind(params.injected_count).bind(counts.map(|v|v.confidence_filtered)).bind(counts.map(|v|v.not_top_k)).bind(counts.map(|v|v.oversized_skipped)).bind(counts.map(|v|v.budget_pruned)).fetch_one(self.db.pool()).await.map_err(Into::into)
+        .bind(&id).bind(RETRIEVAL_TRACE_SCHEMA_VERSION).bind(params.trace.project_id).bind(params.trace.session_id).bind(params.trace.task_run_id).bind(params.trace.task_id).bind(params.trace.entry_point.as_str()).bind(params.trace.trigger).bind(params.trace.candidates).bind(params.trace.candidate_cap).bind(params.trace.candidate_cap_exceeded).bind(params.trace.sampling_metadata).bind(params.trace.durations_ms).bind(params.trace.estimated_injected_tokens).bind(params.rollout_label).bind(params.outcome.as_str()).bind(KNOWLEDGE_TRACE_TAXONOMY_VERSION_V1).bind(params.terminal_state.as_str()).bind(params.terminal_at).bind(params.candidate_count).bind(params.injected_count).bind(counts.map(|v|v.confidence_filtered)).bind(counts.map(|v|v.not_top_k)).bind(counts.map(|v|v.oversized_skipped)).bind(counts.map(|v|v.budget_pruned)).fetch_one(self.db.pool()).await.map_err(Into::into)
     }
 
     async fn insert_with_values(

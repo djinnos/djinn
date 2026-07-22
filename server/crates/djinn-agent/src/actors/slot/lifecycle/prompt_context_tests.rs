@@ -2897,6 +2897,18 @@ async fn assembly_rollout_disabled_modes_omit_context_and_persist_suppression() 
         let trace = latest_knowledge_trace_for_assembly(&db, &task.project_id).await;
         assert_eq!(trace.rollout_label, label);
         assert_eq!(trace.outcome, outcome);
+        assert_eq!(trace.knowledge_trace_taxonomy_version, Some(1));
+        assert_eq!(trace.terminal_state.as_deref(), Some("error"));
+        assert!(
+            trace.terminal_at.is_some(),
+            "{label} terminal has timestamp"
+        );
+        assert_eq!(trace.candidate_count, None);
+        assert_eq!(trace.injected_count, None);
+        assert_eq!(trace.confidence_filtered_count, None);
+        assert_eq!(trace.not_top_k_count, None);
+        assert_eq!(trace.oversized_skipped_count, None);
+        assert_eq!(trace.budget_pruned_count, None);
         assert_eq!(trace.estimated_injected_tokens, 0);
         assert!(trace.candidates_typed().is_empty());
         assert_eq!(trace.task_id.as_deref(), Some(task.id.as_str()));
