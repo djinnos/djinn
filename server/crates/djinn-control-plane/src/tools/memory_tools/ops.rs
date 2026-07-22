@@ -660,10 +660,6 @@ fn process_retrieval_scope(server: &DjinnMcpServer, until: OffsetDateTime) -> Re
                         }
                         .to_string(),
                         total_queries: (success.count + empty.count + error.count) as i64,
-                        zero_candidate_queries: empty.count as i64,
-                        // Deprecated process compatibility alias. Empty is the
-                        // same zero-candidate classification in this telemetry.
-                        zero_result_queries: empty.count as i64,
                         error_queries: error.count as i64,
                         candidate_count: (success.candidate_sum
                             + empty.candidate_sum

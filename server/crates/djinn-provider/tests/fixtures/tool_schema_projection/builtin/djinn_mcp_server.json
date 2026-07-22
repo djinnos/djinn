@@ -9387,16 +9387,6 @@
               "type": "integer",
               "format": "int64"
             },
-            "zero_candidate_queries": {
-              "description": "Canonical zero-candidate count for this compatibility process view.",
-              "type": "integer",
-              "format": "int64"
-            },
-            "zero_result_queries": {
-              "description": "Deprecated alias populated identically to `zero_candidate_queries`.",
-              "type": "integer",
-              "format": "int64"
-            },
             "error_queries": {
               "type": "integer",
               "format": "int64"
@@ -9417,8 +9407,6 @@
           "required": [
             "entry_point",
             "total_queries",
-            "zero_candidate_queries",
-            "zero_result_queries",
             "error_queries",
             "candidate_count",
             "injected_count",

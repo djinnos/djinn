@@ -1039,6 +1039,33 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn memory_health_process_empty_does_not_claim_zero_candidates() {
+        let setup = setup_server().await;
+        ops::RetrievalObserver::new(&setup.server, RetrievalEntryPoint::Dispatch)
+            .finish(RetrievalOutcome::Empty, 7);
+
+        let response = ops::memory_health(
+            &setup.server,
+            HealthParams {
+                project: Some(setup.project),
+            },
+        )
+        .await;
+        let serialized = serde_json::to_value(response).expect("serialize memory health");
+        let dispatch = serialized["retrieval"]["process"]["process_summaries"]
+            .as_array()
+            .expect("process summaries")
+            .iter()
+            .find(|summary| summary["entry_point"] == "dispatch")
+            .expect("dispatch summary");
+
+        assert_eq!(dispatch["total_queries"], 1);
+        assert_eq!(dispatch["candidate_count"], 7);
+        assert!(dispatch.get("zero_candidate_queries").is_none());
+        assert!(dispatch.get("zero_result_queries").is_none());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn memory_health_response_returns_none_on_error_paths() {
         let setup = setup_server().await;
 

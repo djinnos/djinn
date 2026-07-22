@@ -737,10 +737,6 @@ pub struct MemoryDeleteResponse {
 pub struct RetrievalEntryPointHealthSummary {
     pub entry_point: String,
     pub total_queries: i64,
-    /// Canonical zero-candidate count for this compatibility process view.
-    pub zero_candidate_queries: i64,
-    /// Deprecated alias populated identically to `zero_candidate_queries`.
-    pub zero_result_queries: i64,
     pub error_queries: i64,
     pub candidate_count: i64,
     pub injected_count: i64,
