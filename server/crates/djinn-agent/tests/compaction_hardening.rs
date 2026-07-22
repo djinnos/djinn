@@ -3,3 +3,5 @@
 mod budget;
 #[path = "compaction_hardening/retrieval.rs"]
 mod retrieval;
+#[path = "compaction_hardening/transport.rs"]
+mod transport;
