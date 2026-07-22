@@ -2902,7 +2902,8 @@ async fn reap_orphaned_pending_attempts_core(
     let now = time::OffsetDateTime::now_utc();
     // Age gate for `list_orphaned_pending` (tight at startup) and the durable
     // lease-liveness gate for `is_live` (always the 5-minute owner window).
-    let age_threshold_iso = match (now - time::Duration::seconds(age_threshold_secs)).format(&format)
+    let age_threshold_iso = match (now - time::Duration::seconds(age_threshold_secs))
+        .format(&format)
     {
         Ok(s) => s,
         Err(e) => {
@@ -2910,14 +2911,15 @@ async fn reap_orphaned_pending_attempts_core(
             return;
         }
     };
-    let lease_threshold_iso =
-        match (now - time::Duration::seconds(lease_threshold_secs)).format(&format) {
-            Ok(s) => s,
-            Err(e) => {
-                tracing::warn!(error = %e, "reap_orphaned_pending_attempts: failed to format lease threshold");
-                return;
-            }
-        };
+    let lease_threshold_iso = match (now - time::Duration::seconds(lease_threshold_secs))
+        .format(&format)
+    {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::warn!(error = %e, "reap_orphaned_pending_attempts: failed to format lease threshold");
+            return;
+        }
+    };
 
     let repo = djinn_db::TaskAttemptRepository::new(db.clone());
     let incarnation_repo = djinn_db::CoordinatorIncarnationRepository::new(db.clone());
@@ -3093,7 +3095,10 @@ async fn reap_orphaned_pending_attempts_core(
     // query). Forward-only + idempotent.
     // The submitted-orphan cleanup is age-based and owner-lease-agnostic; keep
     // it on the (unchanged) lease-window threshold so startup does not tighten it.
-    let submitted_orphans = match repo.list_orphaned_submitted_unowned(&lease_threshold_iso).await {
+    let submitted_orphans = match repo
+        .list_orphaned_submitted_unowned(&lease_threshold_iso)
+        .await
+    {
         Ok(rows) => rows,
         Err(e) => {
             tracing::warn!(
@@ -3302,7 +3307,10 @@ async fn classify_orphan_owner(
     match incarnation_repo.get(owner_id).await {
         Ok(Some(inc)) => {
             // Lease resolved — check liveness against the owner-lease threshold.
-            match incarnation_repo.is_live(owner_id, lease_threshold_iso).await {
+            match incarnation_repo
+                .is_live(owner_id, lease_threshold_iso)
+                .await
+            {
                 Ok(Some(true)) => {
                     // Live owner — the dispatch is still potentially owned.
                     // Count as crashed (genuine orphan with a live owner).

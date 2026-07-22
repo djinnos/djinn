@@ -69,8 +69,7 @@ impl CoordinatorActor {
                             && evidence["owner_classification"] == "expired"
                             && evidence["owner_lease_last_renewed_at"].is_string()
                     });
-                let restart_orphan = evidence["failure_class"]
-                    == "environmental_restart_orphan"
+                let restart_orphan = evidence["failure_class"] == "environmental_restart_orphan"
                     && evidence["reason"] == "startup"
                     && evidence["boot_incarnation_id"].is_string();
                 if owner_expired {
