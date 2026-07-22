@@ -211,7 +211,11 @@ describe("synthetic node kinds and empty content fields the producer can emit", 
       ',{"id":"table:public.users","uid":"table:public.users","kind":"table","label":"","pagerank":0.0,"is_test":false,"x":0.0,"y":0.0}' +
       ',{"id":"route:GET /api (axum)","uid":"route:GET /api (axum)","kind":"route","label":"GET /api (axum)","pagerank":0.0,"is_test":false,"x":0.0,"y":0.0}' +
       ']' +
-      ',"edges":[{"from":"file:src/app.rs","to":"process:abc123","kind":"StepInProcess","confidence":1.0,"reason":""}]}';
+      // One structural edge + one co-change sidecar edge appended after it.
+      // total_edges counts STRUCTURAL edges only (1), so edges.length (2) exceeds
+      // it by exactly the co-change count — the producer's convention.
+      ',"edges":[{"from":"file:src/app.rs","to":"process:abc123","kind":"StepInProcess","confidence":1.0,"reason":""}' +
+      ',{"from":"file:src/app.rs","to":"table:public.users","kind":"CoChangedWith","confidence":0.5,"reason":"cochange;last_day=0"}]}';
     const graphContentHash = hash(hashInput);
     const payloadText = spliceHashField(hashInput, graphContentHash);
     const bytes = gzipSync(payloadText);
@@ -236,6 +240,14 @@ describe("synthetic node kinds and empty content fields the producer can emit", 
     expect(process.workspace).toBe("");
     expect(validated.snapshot.nodes[2].label).toBe("");
     expect(validated.snapshot.edges[0].reason).toBe("");
+    // The co-change sidecar rides beyond total_edges: edges.length (2) exceeds
+    // total_edges (1, structural only). The old raw-length equality would have
+    // thrown "payload counts do not match contents"; the structural-only count
+    // is what actually matches the producer.
+    expect(validated.snapshot.edges).toHaveLength(2);
+    expect(validated.snapshot.total_edges).toBe(1);
+    expect(validated.snapshot.edges[1].kind).toBe("CoChangedWith");
+    expect(validated.snapshot.edges.length).not.toBe(validated.snapshot.total_edges);
   });
 });
 

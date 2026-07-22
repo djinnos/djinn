@@ -172,6 +172,13 @@ export async function validateGalaxyArtifact(
     project_id: payloadProject, git_head: payloadCommit, generated_at: string(raw.generated_at, "payload.generated_at"),
     truncated: raw.truncated === true, total_nodes: integer(raw.total_nodes, "payload.total_nodes"), total_edges: integer(raw.total_edges, "payload.total_edges"), node_cap: integer(raw.node_cap, "payload.node_cap"), nodes, edges,
   };
-  if (snapshot.total_nodes !== nodes.length || snapshot.total_edges !== edges.length || snapshot.node_cap < nodes.length) fail("payload counts do not match contents");
+  // `total_edges` counts STRUCTURAL edges only. The producer
+  // (`build_semantic_model`) appends the co-change sidecar — edges whose kind is
+  // `"CoChangedWith"` (Debug-format PascalCase; edge kinds are not lowercased
+  // like node kinds) — AFTER the structural edges and deliberately does not add
+  // them to `total_edges`, matching the legacy snapshot builder. So the invariant
+  // is (edges minus the co-change sidecar) === total_edges, not raw length.
+  const structuralEdgeCount = edges.reduce((count, edge) => edge.kind === "CoChangedWith" ? count : count + 1, 0);
+  if (snapshot.total_nodes !== nodes.length || structuralEdgeCount !== snapshot.total_edges || snapshot.node_cap < nodes.length) fail("payload counts do not match contents");
   return { ...identity, snapshot };
 }
