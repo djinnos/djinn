@@ -52,8 +52,8 @@ use super::mdx::{
 
 // Re-import shared helpers kept in `mod.rs` as `pub(super)`.
 use super::{
-    build_gate_status, err_show, err_single, evaluate_composed_gate, format_readiness_error,
-    parse_ac_items, proposal_mutation_error, proposal_not_found_error,
+    build_gate_status, err_show, err_single, evaluate_composed_gate, parse_ac_items,
+    proposal_mutation_error, proposal_not_found_error,
 };
 
 // Parameter structs live in `params.rs` to keep this file under the size guard.

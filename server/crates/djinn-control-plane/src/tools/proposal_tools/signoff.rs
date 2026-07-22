@@ -2,7 +2,7 @@
 //
 // This submodule owns:
 // - `proposal_signoff` and `proposal_signoff_clear` MCP tool methods;
-// - deterministic DoR readiness helpers (`parse_ac_items`, `format_readiness_error`);
+// - deterministic DoR readiness helper (`parse_ac_items`);
 // - composed-gate logic (`evaluate_composed_gate`, `ComposedGateResult`,
 //   `build_gate_status`) that checks DoR + tribunal conditions before
 //   sign-off, graduation, and review promotion;
@@ -30,7 +30,9 @@ use crate::server::DjinnMcpServer;
 use crate::tools::acting_user::acting_caps;
 use crate::tools::epic_ops::AcceptanceCriterionItem;
 use crate::tools::proposal_ops::{ProposalModel, ProposalSingleResponse};
-use crate::tools::proposal_readiness::{ReadinessCheck, evaluate_latest_head_readiness};
+use crate::tools::proposal_readiness::{
+    ReadinessCheck, evaluate_latest_head_readiness, evaluate_latest_head_readiness_for_candidate,
+};
 use djinn_db::ProposalRepository;
 
 use super::{err_single, proposal_not_found_error};
@@ -52,17 +54,6 @@ pub struct ProposalSignoffParams {
 /// missing, empty, or unparseable.
 pub(crate) fn parse_ac_items(ac_json: &str) -> Vec<AcceptanceCriterionItem> {
     serde_json::from_str::<Vec<AcceptanceCriterionItem>>(ac_json).unwrap_or_default()
-}
-
-/// Convert a `ProposalReadinessResult` into a user-facing error string,
-/// prepending a short preamble so callers can return it directly as a tool
-/// error.
-pub(crate) fn format_readiness_error(
-    result: &crate::tools::proposal_readiness::ProposalReadinessResult,
-) -> Option<String> {
-    result
-        .to_error_string()
-        .map(|details| format!("proposal not ready for review: {details}"))
 }
 
 // ── Composed gate: DoR + tribunal (task cuzf) ─────────────────────────────
@@ -143,14 +134,19 @@ async fn current_human_gate_authority(
 pub(crate) async fn evaluate_composed_gate(
     repo: &ProposalRepository,
     proposal: &djinn_core::models::proposal::Proposal,
-    _body: &str,
-    _ac_json: &str,
+    body: &str,
+    ac_json: &str,
     target_count: usize,
 ) -> ComposedGateResult {
     let mut failures: Vec<String> = Vec::new();
 
-    let ac_items = parse_ac_items(&proposal.acceptance_criteria);
-    let readiness = evaluate_latest_head_readiness(repo, proposal, &ac_items, target_count).await;
+    // Update/import paths evaluate an unpersisted candidate. Keep their
+    // candidate body/AC structural checks while obtaining current-head lint
+    // exclusively from the shared repository-aware readiness construction.
+    let ac_items = parse_ac_items(ac_json);
+    let readiness =
+        evaluate_latest_head_readiness_for_candidate(repo, proposal, body, &ac_items, target_count)
+            .await;
 
     // Consult current human authority before deciding whether deterministic
     // readiness failures block. A current explicit override or human acceptance
