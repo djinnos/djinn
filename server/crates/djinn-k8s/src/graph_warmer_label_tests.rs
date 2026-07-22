@@ -85,10 +85,7 @@ fn leased_manifest_is_deterministic_and_closed_until_its_uid_is_authorized() {
     ] {
         let labels = labels.expect("bounded metadata labels");
         for (key, value) in [
-            (
-                ANNOTATION_WARM_REQUEST_ID,
-                identity.warm_request_id.as_str(),
-            ),
+            (ANNOTATION_WARM_REQUEST_ID, identity.warm_request_id.as_str()),
             (ANNOTATION_GRAPH_REVISION, identity.graph_revision.as_str()),
             (ANNOTATION_FENCING_TOKEN, "73"),
         ] {

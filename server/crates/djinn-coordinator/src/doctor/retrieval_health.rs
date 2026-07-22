@@ -74,7 +74,10 @@ impl RetrievalHealthPublication {
 
     fn refresh_failure_evidence(&self) -> Option<serde_json::Value> {
         let error = self.refresh_error()?;
-        let attempted_at = OffsetDateTime::now_utc();
+        let attempted_at = (*self
+            .last_attempt
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()))?;
         let last_success = *self.last_success.lock().unwrap_or_else(|e| e.into_inner());
         Some(
             serde_json::json!({"error_class":"retrieval_health_refresh_failed","attempted_at":attempted_at.format(&Iso8601::DEFAULT).ok(),"last_success_at":last_success.and_then(|at| at.format(&Iso8601::DEFAULT).ok()),"last_success_age_seconds":last_success.map(|at| (attempted_at-at).whole_seconds()),"detail":error.chars().take(512).collect::<String>()}),
@@ -110,6 +113,11 @@ impl RetrievalHealthSource {
     }
 
     pub async fn refresh(&self) -> Result<(), String> {
+        *self
+            .publication
+            .last_attempt
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = Some(OffsetDateTime::now_utc());
         let until = OffsetDateTime::now_utc();
         let from =
             until - Duration::minutes(i64::from(self.config.retrieval_health_window_minutes));

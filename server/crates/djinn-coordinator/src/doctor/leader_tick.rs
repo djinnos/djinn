@@ -273,7 +273,13 @@ pub async fn run_cheap_doctor_checks(
             run.check_name == "memory.retrieval_health_refresh" && !run.findings.is_empty()
         });
         let preserve_keys = if preserve_all_alarms {
-            vec!["__preserve_all_retrieval_alarms__".to_owned()]
+            match finding_repo.active_retrieval_alarm_keys().await {
+                Ok(keys) => keys,
+                Err(error) => {
+                    warn!(error = %error, "CoordinatorActor: failed to load retrieval preserve keys");
+                    return runs;
+                }
+            }
         } else {
             Vec::new()
         };
