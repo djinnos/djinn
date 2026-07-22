@@ -814,3 +814,412 @@ pub async fn runtime_writer() { repo.create_in_project_with_provenance(); }"#,
         "a writer after a bounded cfg(test) module remains a production candidate"
     );
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Schema-graduation proof surface: invoke the migration-140 contract matrix
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// The migration was renumbered from 140 to 142 after main claimed 141 (sibling
+// `typx`). The rollout gate reuses the same shared support module that the
+// dedicated `migrations_task_creator_contract` test binary uses, so the
+// migration matrix is invoked — not duplicated — as part of the single
+// executable proof surface.
+
+#[path = "support/migrations_task_creator_contract.rs"]
+#[allow(dead_code)]
+mod contract_support;
+
+use djinn_db::migrations::{self, DesignatedOperatorBootstrap, MigrationContext};
+use sqlx::postgres::PgConnection;
+use sqlx::{Connection, Executor};
+
+/// The migration file under test — renamed from 140 to 142 by `typx`.
+#[test]
+fn migration_matrix_file_is_the_renumbered_creator_contract() {
+    let dir = contract_support::migrations_dir();
+    let path = dir.join(contract_support::MIGRATION_FILE);
+    assert!(
+        path.exists(),
+        "creator-contract migration file must exist at {}",
+        path.display()
+    );
+    assert_eq!(contract_support::MIGRATION_VERSION, 142);
+}
+
+/// Preflight ordering: an unset designated operator must abort before any
+/// write, leaving the column nullable and committing no migration row.
+#[tokio::test]
+async fn matrix_preflight_unset_operator_aborts_before_writes() {
+    contract_support::with_temp_database("rollout_preflight_unset", |db_url| async move {
+        let mut conn = PgConnection::connect(&db_url).await.expect("connect");
+        contract_support::apply_prior_migrations(&mut conn).await;
+        contract_support::clear_operator(&mut conn).await;
+
+        let sql = contract_support::migration_sql();
+        let err = conn.execute(sql.as_str()).await.expect_err("must fail");
+        assert!(
+            err.to_string()
+                .contains("creator_contract_designated_operator_unset")
+        );
+        assert!(
+            contract_support::column_is_nullable(&mut conn).await,
+            "column must remain nullable after preflight failure"
+        );
+        conn.close().await.expect("close");
+    })
+    .await;
+}
+
+/// Deterministic precedence: source-task creator wins over epic/proposal/
+/// designated; a creator-less chain lands on the designated operator (residue).
+#[tokio::test]
+async fn matrix_precedence_and_residue_are_deterministic() {
+    contract_support::with_temp_database("rollout_precedence", |db_url| async move {
+        let mut conn = PgConnection::connect(&db_url).await.expect("connect");
+        contract_support::apply_prior_migrations(&mut conn).await;
+
+        contract_support::seed_project(&mut conn, "project-1").await;
+        contract_support::seed_user(&mut conn, "u-src", false).await;
+        contract_support::seed_user(&mut conn, "u-epic", false).await;
+        contract_support::seed_user(&mut conn, contract_support::DESIGNATED, false).await;
+
+        contract_support::seed_task(&mut conn, "t-src", "project-1", Some("u-src")).await;
+        contract_support::seed_epic(&mut conn, "e1", "project-1", Some("u-epic")).await;
+        contract_support::seed_task_with_epic(
+            &mut conn,
+            "t-target",
+            "project-1",
+            Some("e1"),
+            None,
+            None,
+        )
+        .await;
+        contract_support::seed_audit_source_link(&mut conn, "t-target", "t-src", "1").await;
+
+        contract_support::set_operator(&mut conn, contract_support::DESIGNATED).await;
+        contract_support::apply_contract_migration(&mut conn).await;
+
+        assert_eq!(
+            contract_support::get_task_creator(&mut conn, "t-target").await,
+            Some("u-src".to_owned()),
+            "source-task creator must win over epic and designated"
+        );
+        assert_eq!(
+            contract_support::get_task_creator(&mut conn, "t-src").await,
+            Some("u-src".to_owned()),
+            "existing non-NULL creator must be preserved"
+        );
+        conn.close().await.expect("close");
+    })
+    .await;
+}
+
+/// Rollback: a forced failure between the data step and the schema contraction
+/// must restore both the data and the nullable column.
+#[tokio::test]
+async fn matrix_rollback_restores_data_and_schema() {
+    contract_support::with_temp_database("rollout_rollback", |db_url| async move {
+        let mut conn = PgConnection::connect(&db_url).await.expect("connect");
+        contract_support::apply_prior_migrations(&mut conn).await;
+
+        contract_support::seed_project(&mut conn, "p1").await;
+        contract_support::seed_user(&mut conn, contract_support::DESIGNATED, false).await;
+        contract_support::seed_task(&mut conn, "t-rb", "p1", None).await;
+
+        contract_support::set_operator(&mut conn, contract_support::DESIGNATED).await;
+
+        let full_sql = contract_support::migration_sql();
+        let data_step = contract_support::migration_data_step_sql();
+        let preflight_end = full_sql
+            .find("WITH valid_source AS (")
+            .expect("find data step start");
+        let preflight_sql = full_sql[..preflight_end].trim();
+
+        let mut tx = conn.begin().await.expect("begin");
+        tx.execute(preflight_sql).await.expect("preflight");
+        tx.execute(data_step.as_str()).await.expect("data step");
+        let updated: Option<String> =
+            sqlx::query_scalar("SELECT created_by_user_id FROM tasks WHERE id = 't-rb'")
+                .fetch_one(&mut *tx)
+                .await
+                .expect("check");
+        assert_eq!(updated, Some(contract_support::DESIGNATED.to_owned()));
+        let forced = tx.execute("SELECT 1 / 0").await;
+        assert!(forced.is_err(), "forced failure");
+        drop(tx);
+
+        assert_eq!(
+            contract_support::get_task_creator(&mut conn, "t-rb").await,
+            None,
+            "data must be restored to NULL after rollback"
+        );
+        assert!(
+            contract_support::column_is_nullable(&mut conn).await,
+            "column must remain nullable after rollback"
+        );
+        conn.close().await.expect("close");
+    })
+    .await;
+}
+
+/// Idempotence: rerunning the real data step after a successful migration
+/// must affect zero rows and leave creators unchanged.
+#[tokio::test]
+async fn matrix_data_step_is_idempotent() {
+    contract_support::with_temp_database("rollout_idem", |db_url| async move {
+        let mut conn = PgConnection::connect(&db_url).await.expect("connect");
+        contract_support::apply_prior_migrations(&mut conn).await;
+
+        contract_support::seed_project(&mut conn, "p1").await;
+        contract_support::seed_user(&mut conn, contract_support::DESIGNATED, false).await;
+        contract_support::seed_task(&mut conn, "t1", "p1", None).await;
+
+        contract_support::set_operator(&mut conn, contract_support::DESIGNATED).await;
+        contract_support::apply_contract_migration(&mut conn).await;
+
+        let creator_before = contract_support::get_task_creator(&mut conn, "t1").await;
+        assert_eq!(
+            creator_before,
+            Some(contract_support::DESIGNATED.to_owned())
+        );
+
+        let data_step = contract_support::migration_data_step_sql();
+        let affected: i64 = conn
+            .execute(data_step.as_str())
+            .await
+            .map(|r| r.rows_affected() as i64)
+            .expect("rerun");
+        assert_eq!(affected, 0, "idempotent rerun must affect zero rows");
+        assert_eq!(
+            contract_support::get_task_creator(&mut conn, "t1").await,
+            creator_before,
+            "creator must be unchanged after idempotent rerun"
+        );
+        conn.close().await.expect("close");
+    })
+    .await;
+}
+
+/// Zero-NULL assertion ordering, catalog non-nullability, and direct SQL NULL
+/// rejection — all in one end-to-end migration run.
+#[tokio::test]
+async fn matrix_zero_null_ordering_catalog_and_null_rejection() {
+    contract_support::with_temp_database("rollout_null_order", |db_url| async move {
+        let mut conn = PgConnection::connect(&db_url).await.expect("connect");
+        contract_support::apply_prior_migrations(&mut conn).await;
+
+        contract_support::seed_project(&mut conn, "p1").await;
+        contract_support::seed_user(&mut conn, contract_support::DESIGNATED, false).await;
+        contract_support::seed_task(&mut conn, "t1", "p1", None).await;
+
+        contract_support::set_operator(&mut conn, contract_support::DESIGNATED).await;
+        contract_support::apply_contract_migration(&mut conn).await;
+
+        assert!(
+            !contract_support::column_is_nullable(&mut conn).await,
+            "column must be NOT NULL after migration"
+        );
+
+        let is_nullable: String = sqlx::query_scalar(
+            "SELECT is_nullable FROM information_schema.columns \
+             WHERE table_name = 'tasks' AND column_name = 'created_by_user_id'",
+        )
+        .fetch_one(&mut conn)
+        .await
+        .expect("catalog");
+        assert_eq!(is_nullable, "NO", "catalog must report NOT NULL");
+
+        let insert_err = sqlx::query(
+            "INSERT INTO tasks \
+             (id, project_id, short_id, title, description, design, \
+              labels, acceptance_criteria, memory_refs, created_by_user_id) \
+             VALUES ('t-null', 'p1', 'sn', 't', 'd', 'dd', \
+                     '[]'::jsonb, '[]'::jsonb, '[]'::jsonb, NULL)",
+        )
+        .execute(&mut conn)
+        .await;
+        assert!(insert_err.is_err(), "NULL INSERT must fail under NOT NULL");
+
+        let update_err = sqlx::query("UPDATE tasks SET created_by_user_id = NULL WHERE id = 't1'")
+            .execute(&mut conn)
+            .await;
+        assert!(update_err.is_err(), "NULL UPDATE must fail under NOT NULL");
+        conn.close().await.expect("close");
+    })
+    .await;
+}
+
+/// The full repository-owned migration runner (the production path) must
+/// apply the contract migration end-to-end with a bootstrapped operator.
+#[tokio::test]
+async fn matrix_full_runner_applies_contract_migration() {
+    contract_support::with_temp_database("rollout_full", |db_url| async move {
+        migrations::bootstrap_designated_operator(
+            &db_url,
+            &DesignatedOperatorBootstrap {
+                user_id: contract_support::DESIGNATED.to_owned(),
+                github_id: 9_000_000_099,
+                github_login: "rollout-operator".to_owned(),
+                github_name: Some("Rollout Operator".to_owned()),
+                github_avatar_url: None,
+            },
+        )
+        .await
+        .expect("bootstrap");
+
+        migrations::run_postgres_migrations(
+            &db_url,
+            &MigrationContext {
+                designated_operator_user_id: Some(contract_support::DESIGNATED.to_owned()),
+            },
+        )
+        .await
+        .expect("runner");
+
+        let pool = sqlx::PgPool::connect(&db_url).await.expect("connect");
+        let applied: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM _sqlx_migrations WHERE version = 142 AND success = TRUE",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("check");
+        assert_eq!(applied, 1, "migration 142 must be recorded");
+        let is_nullable: String = sqlx::query_scalar(
+            "SELECT is_nullable FROM information_schema.columns \
+             WHERE table_name = 'tasks' AND column_name = 'created_by_user_id'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("check");
+        assert_eq!(is_nullable, "NO");
+        pool.close().await;
+    })
+    .await;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Persisted refinement-owner recovery through schema graduation
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// The contract migration must not disturb persisted refinement ownership
+/// columns on tasks. A task with refinement metadata before the contract
+/// must retain it after graduation.
+#[tokio::test]
+async fn persisted_refinement_owner_survives_schema_graduation() {
+    contract_support::with_temp_database("rollout_ref_owner", |db_url| async move {
+        let mut conn = PgConnection::connect(&db_url).await.expect("connect");
+        contract_support::apply_prior_migrations(&mut conn).await;
+
+        contract_support::seed_project(&mut conn, "project-1").await;
+        contract_support::seed_user(&mut conn, "u-refine", false).await;
+        contract_support::seed_user(&mut conn, contract_support::DESIGNATED, false).await;
+
+        // Seed a task with free-form refinement ownership columns set.
+        // (refinement_run_id/refinement_intent_id have FKs to
+        // refinement_runs/refinement_dispatch_intents and are left NULL; the
+        // free-form correlation columns from migration 140 are the durable
+        // refinement-owner recovery surface that must survive graduation.)
+        sqlx::query(
+            "INSERT INTO tasks \
+             (id, project_id, short_id, title, description, design, \
+              labels, acceptance_criteria, memory_refs, created_by_user_id, \
+              refinement_generation, refinement_round, refinement_phase, refinement_role) \
+             VALUES ('t-refine', 'project-1', 'sr', 't', 'd', 'dd', \
+                     '[]'::jsonb, '[]'::jsonb, '[]'::jsonb, 'u-refine', \
+                     1, 1, 'judge', 'owner')",
+        )
+        .execute(&mut conn)
+        .await
+        .expect("seed refinement task");
+
+        contract_support::set_operator(&mut conn, contract_support::DESIGNATED).await;
+        contract_support::apply_contract_migration(&mut conn).await;
+
+        let (creator, generation, phase, role): (String, i64, String, String) = sqlx::query_as(
+            "SELECT created_by_user_id, refinement_generation, \
+                        refinement_phase, refinement_role \
+                 FROM tasks WHERE id = 't-refine'",
+        )
+        .fetch_one(&mut conn)
+        .await
+        .expect("fetch");
+
+        assert_eq!(creator, "u-refine", "creator must be preserved");
+        assert_eq!(
+            generation, 1,
+            "refinement_generation must survive graduation"
+        );
+        assert_eq!(phase, "judge", "refinement_phase must survive graduation");
+        assert_eq!(role, "owner", "refinement_role must survive graduation");
+        conn.close().await.expect("close");
+    })
+    .await;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Legacy board-health guard retention through schema graduation
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// The pre-contract legacy board-health guard regression must continue to use
+/// the `EffectiveCreatorProvenance` boundary through schema graduation.
+#[test]
+fn legacy_board_health_guard_retains_provenance_boundary() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../");
+    let guard = root
+        .join("server/crates/djinn-db/src/repositories/task/queries/board_health_bounds_tests.rs");
+    let source = std::fs::read_to_string(&guard)
+        .unwrap_or_else(|_| panic!("board-health guard source must exist: {}", guard.display()));
+
+    assert!(
+        source.contains("EffectiveCreatorProvenance"),
+        "board-health guard must use EffectiveCreatorProvenance after schema graduation"
+    );
+    for legacy in LEGACY_CREATE_METHODS {
+        assert!(
+            !source.contains(legacy),
+            "board-health guard must not use legacy API {legacy}"
+        );
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Concrete release repository typing and dead-helper removal
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// The dead `cfg(test)` creator-less `create_with_short_id` helper must be
+/// removed from the release repository.
+#[test]
+fn dead_create_with_short_id_helper_is_removed() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../");
+    let writes = root.join("server/crates/djinn-db/src/repositories/task/writes.rs");
+    let source = std::fs::read_to_string(&writes).expect("writes source readable");
+    assert!(
+        !source.contains("fn create_with_short_id"),
+        "dead cfg(test) create_with_short_id helper must be removed"
+    );
+}
+
+/// The release repository must not expose any nullable-creator insert path.
+#[test]
+fn release_repository_typing_rejects_nullable_creator() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../");
+    let writes = root.join("server/crates/djinn-db/src/repositories/task/writes.rs");
+    let source = std::fs::read_to_string(&writes).expect("writes source readable");
+
+    let direct_inserts = direct_task_insert_constants(&source);
+    for (_, sql) in &direct_inserts {
+        assert!(
+            sql.contains("created_by_user_id"),
+            "boundary INSERT must name created_by_user_id"
+        );
+        assert!(
+            !sql.to_ascii_uppercase().contains("NULL"),
+            "boundary INSERT must not bind NULL creator"
+        );
+    }
+
+    assert!(
+        source.contains("provenance: EffectiveCreatorProvenance<'_>"),
+        "release write boundary must require EffectiveCreatorProvenance"
+    );
+}

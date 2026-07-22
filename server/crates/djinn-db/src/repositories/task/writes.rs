@@ -512,48 +512,6 @@ impl TaskRepository {
         .await
     }
 
-    /// Test helper: create a task with a specific short_id.
-    /// This bypasses the normal short_id generation for testing collision scenarios.
-    #[cfg(test)]
-    pub async fn create_with_short_id(
-        &self,
-        id: &str,
-        project_id: &str,
-        title: &str,
-        status: &str,
-        short_id: &str,
-    ) -> Result<Task> {
-        self.db.ensure_initialized().await?;
-        let empty = "";
-        let epic_id_none: Option<&str> = None;
-        let issue_type = "task";
-        let priority = 1_i64;
-        sqlx::query!(
-            "INSERT INTO tasks
-                (id, project_id, short_id, epic_id, title, description, design,
-                 issue_type, priority, owner, status, continuation_count, memory_refs)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, 0, '[]'::jsonb)",
-            id,
-            project_id,
-            short_id,
-            epic_id_none,
-            title,
-            empty,
-            empty,
-            issue_type,
-            priority,
-            empty,
-            status
-        )
-        .execute(self.db.pool())
-        .await?;
-        let task: Task = task_select_where_id!(id).fetch_one(self.db.pool()).await?;
-
-        self.events
-            .send(DjinnEventEnvelope::task_created(&task, false));
-        Ok(task)
-    }
-
     #[allow(clippy::too_many_arguments)]
     pub async fn update(
         &self,
