@@ -488,29 +488,32 @@ async fn approve_verdict_blocked_when_corrupt_head_recomputed() {
 
     // Park the state machine in JudgeAdjudication so process_refinement_outcome
     // routes to process_judge_outcome.
+    let run_id = "dor-corrupt-head-run".to_string();
+    let generation = 1;
     actor.active_refinements.insert(
-        proposal_id.clone(),
+        run_id.clone(),
         crate::refinement::RefinementLoopState::new(&proposal_id, head_seq)
+            .with_run_identity(run_id.clone(), generation)
             .with_attributed_user(None),
     );
 
     // Drive the judge outcome through the real coordinator path.
     let session = RefinementSession {
+        run_id: run_id.clone(),
+        generation,
         task_id: "test-judge-task".to_string(),
         phase: RefinementPhase::JudgeAdjudication,
         dispatched_at: Instant::now(),
         session_started_at: Some(Instant::now()),
         model_id: "test/mock".to_string(),
     };
-    actor
-        .process_refinement_outcome(&proposal_id, &session)
-        .await;
+    actor.process_refinement_outcome(&run_id, &session).await;
 
     // The tribunal must NOT have parked for human review — the approve verdict
     // was converted to blocking by the readiness re-evaluation.
     let state = actor
         .active_refinements
-        .get(&proposal_id)
+        .get(&run_id)
         .expect("refinement state still active");
     assert_ne!(
         state.phase,
@@ -672,26 +675,29 @@ async fn clean_material_revision_restores_semantic_adjudication() {
     // human review — ordinary semantic adjudication is restored.
     add_judge_verdict(&db, &proposal_id, 1, false, new_head_seq).await;
 
+    let run_id = "dor-clean-head-run".to_string();
+    let generation = 1;
     actor.active_refinements.insert(
-        proposal_id.clone(),
+        run_id.clone(),
         crate::refinement::RefinementLoopState::new(&proposal_id, new_head_seq)
+            .with_run_identity(run_id.clone(), generation)
             .with_attributed_user(None),
     );
 
     let session = RefinementSession {
+        run_id: run_id.clone(),
+        generation,
         task_id: "test-judge-task-clean".to_string(),
         phase: RefinementPhase::JudgeAdjudication,
         dispatched_at: Instant::now(),
         session_started_at: Some(Instant::now()),
         model_id: "test/mock".to_string(),
     };
-    actor
-        .process_refinement_outcome(&proposal_id, &session)
-        .await;
+    actor.process_refinement_outcome(&run_id, &session).await;
 
     let state = actor
         .active_refinements
-        .get(&proposal_id)
+        .get(&run_id)
         .expect("refinement state still active");
     assert_eq!(
         state.phase,
