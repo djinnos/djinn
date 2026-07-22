@@ -2119,7 +2119,29 @@ impl CoordinatorActor {
             // existing intervention machinery (planner Workflow C). This is a
             // no-op (returns false) for non-worker roles, tasks under the
             // threshold, or tasks already routed at this reopen count.
-            if role == "worker" && self.maybe_intervene_on_stuck_task(&task).await {
+            //
+            // A merge-conflict rework is exempt from trigger A entirely. When
+            // the current re-dispatch is driven by an unresolved merge conflict
+            // (`PrReworkSignal::MergeConflict` — populated conflict metadata with
+            // required CI NOT failing), main moved under an otherwise-healthy PR;
+            // that is not evidence the worker cannot converge on the acceptance
+            // criteria. Trigger A gates on the DB-backed quality-strike count,
+            // which persists across a task's whole life, so a task that already
+            // exhausted its intervention budget on *earlier* review rejections
+            // would be parked to `needs_lead_intervention` the moment a trivial
+            // conflict reopened it — routing a mechanical rebase to the
+            // arbitration lane and mislabeling it as AC non-convergence (incident
+            // k6hm, 2026-07-21: a twice-approved, CI-green task hit a one-line
+            // conflict and sat in the lead lane for 19h). Route it to the normal
+            // ConflictRetry rework worker regardless of the intervention budget.
+            // Genuine quality strikes (review rejections, CI-failure loops) still
+            // flow through trigger A on their own re-dispatch passes.
+            let is_merge_conflict_rework =
+                pr_rework_signal == Some(super::respawn_guard::PrReworkSignal::MergeConflict);
+            if role == "worker"
+                && !is_merge_conflict_rework
+                && self.maybe_intervene_on_stuck_task(&task).await
+            {
                 // The planner escalation dispatched a new session (under the
                 // same creator, potentially the same model). Bump the local
                 // per-(creator, model) count so a later task in THIS pass sees
