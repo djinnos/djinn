@@ -1207,8 +1207,6 @@ mod tests {
         let findings = run_check(config, projects);
         assert!(findings.is_empty());
     }
-
-
 }
 
 #[cfg(test)]
