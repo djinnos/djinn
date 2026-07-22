@@ -4268,19 +4268,84 @@ export namespace MemoryHealthOutputSchema {
   export interface RetrievalHealthScope {
   error_code?: string
   /**
+   * Independently keyed bounded taxonomy-v1 repository evidence. Empty for
+   * the separately-labelled process compatibility scope.
+   */
+  groups: TaxonomyV1RetrievalHealthSummary[]
+  /**
+   * Process-local compatibility telemetry, not persisted/versioned truth.
+   */
+  process_summaries: RetrievalEntryPointHealthSummary[]
+  /**
    * Process construction time; only applicable to the process scope.
    */
   started_at?: string
   status: string
-  /**
-   * Fixed, bounded entry-point evidence (four workload entry points).
-   */
-  summaries: RetrievalEntryPointHealthSummary[]
   window_end?: string
   /**
    * Inclusive start and exclusive end of the persisted half-open window.
    */
   window_start?: string
+  [k: string]: any
+  }
+  /**
+   * Authoritative, independently keyed taxonomy-v1 retrieval group.
+   * 
+   * Versioned counters exclude legacy and malformed terminals. Those exclusions
+   * and validation telemetry remain visible on this group rather than being
+   * pooled or inferred from legacy candidate payloads.
+   */
+  export interface TaxonomyV1RetrievalHealthSummary {
+  candidate_bearing_queries: number
+  candidate_total: number
+  dispositions: TaxonomyV1DispositionSummary
+  entry_point: string
+  errored_queries: number
+  injected_queries: number
+  injected_total: number
+  invalid: boolean
+  invalid_taxonomy_queries: number
+  legacy_unclassified_queries: number
+  project_id: string
+  refreshed_at: string
+  starved_queries: number
+  successful_queries: number
+  taxonomy_version: number
+  total_queries: number
+  validation_errors: RetrievalTaxonomyValidationErrorSummary[]
+  /**
+   * Exclusive end of the exact persisted half-open window.
+   */
+  window_end: string
+  /**
+   * Inclusive start of the exact persisted half-open window.
+   */
+  window_start: string
+  zero_candidate_queries: number
+  /**
+   * Deprecated compatibility alias for `zero_candidate_queries`.
+   * It has identical zero-candidate semantics and never means zero injected results.
+   */
+  zero_result_queries: number
+  [k: string]: any
+  }
+  /**
+   * Complete candidate-disposition partition for successful taxonomy-v1 queries.
+   */
+  export interface TaxonomyV1DispositionSummary {
+  budget_pruned_total: number
+  confidence_filtered_total: number
+  injected_total: number
+  not_top_k_total: number
+  oversized_skipped_total: number
+  [k: string]: any
+  }
+  /**
+   * Structured validation telemetry from an invalid taxonomy-v1 terminal.
+   */
+  export interface RetrievalTaxonomyValidationErrorSummary {
+  reason: string
+  trace_id: string
   [k: string]: any
   }
   export interface RetrievalEntryPointHealthSummary {
@@ -4290,7 +4355,6 @@ export namespace MemoryHealthOutputSchema {
   injected_count: number
   skipped_count: number
   total_queries: number
-  zero_result_queries: number
   [k: string]: any
   }
   /**
