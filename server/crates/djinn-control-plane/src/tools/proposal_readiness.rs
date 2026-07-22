@@ -1,4 +1,6 @@
 use crate::tools::epic_ops::AcceptanceCriterionItem;
+use djinn_db::ProposalRepository;
+use djinn_spec_lint::SpecLintResultV1;
 use serde::{Deserialize, Serialize};
 
 // Deterministic Definition-of-Ready evaluator for proposals.
@@ -15,6 +17,30 @@ use serde::{Deserialize, Serialize};
 pub struct ProposalReadinessResult {
     pub ready: bool,
     pub failures: Vec<ReadinessFailure>,
+}
+
+/// Readiness for the current persisted proposal head, including its repository
+/// lint summary. Unlike [`ProposalReadinessResult`], this result is tied to an
+/// immutable stored snapshot and therefore must be constructed asynchronously.
+///
+/// `latest_lint` is absent only when the committed head could not be resolved
+/// or linted. Those cases always append a failure and leave `ready` false.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LatestHeadReadinessResult {
+    pub ready: bool,
+    pub failures: Vec<ReadinessFailure>,
+    pub latest_lint: Option<SpecLintResultV1>,
+}
+
+impl LatestHeadReadinessResult {
+    /// Flatten failures using the established readiness error presentation.
+    pub fn to_error_string(&self) -> Option<String> {
+        ProposalReadinessResult {
+            ready: self.ready,
+            failures: self.failures.clone(),
+        }
+        .to_error_string()
+    }
 }
 
 impl ProposalReadinessResult {
@@ -56,6 +82,7 @@ pub enum ReadinessCheck {
     Grounding,
     DependenciesCoverage,
     OpenQuestionsRisksCoverage,
+    SpecIntegrity,
 }
 
 /// Exact failure payload for a given check.
@@ -164,6 +191,92 @@ pub fn evaluate_proposal_readiness(
     ProposalReadinessResult {
         ready: failures.is_empty(),
         failures,
+    }
+}
+
+/// Evaluate readiness for the latest material proposal head.
+///
+/// The history table also contains lightweight lifecycle rows at the current
+/// sequence. Resolve by the complete head identity, not sequence alone, before
+/// asking the repository for lint. The repository accessor owns cache repair
+/// and deterministic recomputation for legacy revisions; this module never
+/// invokes a second linter or doctor query.
+pub async fn evaluate_latest_head_readiness(
+    repo: &ProposalRepository,
+    proposal: &djinn_core::models::Proposal,
+    acceptance_criteria: &[AcceptanceCriterionItem],
+    target_count: usize,
+) -> LatestHeadReadinessResult {
+    let readiness = evaluate_proposal_readiness(&proposal.body, acceptance_criteria, target_count);
+    compose_latest_head_readiness(
+        readiness,
+        resolve_and_lint_current_head(repo, proposal).await,
+    )
+}
+
+async fn resolve_and_lint_current_head(
+    repo: &ProposalRepository,
+    proposal: &djinn_core::models::Proposal,
+) -> Result<SpecLintResultV1, String> {
+    let revisions = repo
+        .revisions(&proposal.id)
+        .await
+        .map_err(|error| error.to_string())?;
+    let revision = revisions
+        .iter()
+        .rev()
+        .find(|revision| {
+            revision.seq == proposal.latest_revision_seq
+                && revision.body == proposal.body
+                && revision.body_format == proposal.body_format
+        })
+        .ok_or_else(|| {
+            format!(
+                "current head snapshot unavailable: {}/{} with matching body and format",
+                proposal.id, proposal.latest_revision_seq
+            )
+        })?;
+    repo.lint_for_revision(revision)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+fn compose_latest_head_readiness(
+    readiness: ProposalReadinessResult,
+    lint: Result<SpecLintResultV1, String>,
+) -> LatestHeadReadinessResult {
+    let mut failures = readiness.failures;
+    let latest_lint = match lint {
+        Ok(lint) => {
+            // `lint_for_revision` guarantees its stable ordering. Preserve that
+            // ordering when projecting errors into Definition-of-Ready failures.
+            for violation in &lint.errors {
+                failures.push(ReadinessFailure {
+                    check: ReadinessCheck::SpecIntegrity,
+                    detail: ReadinessFailureDetail::Generic {
+                        message: format!(
+                            "Spec integrity: {} at bytes {}..{}",
+                            violation.code, violation.span.start, violation.span.end
+                        ),
+                    },
+                });
+            }
+            Some(lint)
+        }
+        Err(error) => {
+            failures.push(ReadinessFailure {
+                check: ReadinessCheck::SpecIntegrity,
+                detail: ReadinessFailureDetail::Generic {
+                    message: format!("Spec integrity: unable to load current head lint: {error}"),
+                },
+            });
+            None
+        }
+    };
+    LatestHeadReadinessResult {
+        ready: failures.is_empty(),
+        failures,
+        latest_lint,
     }
 }
 
@@ -356,6 +469,42 @@ fn has_grounding(normalized: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use djinn_core::events::EventBus;
+    use djinn_db::{Database, ProposalCreateInput};
+
+    const READY_BODY: &str = r#"
+# Problem
+Users cannot do X.
+# Scope
+In scope: Y.
+# Objectives
+Deliver A.
+# Dependencies
+None.
+# Open Questions
+What if D fails?
+Entry points: src/main.rs.
+"#;
+
+    async fn test_repo_and_proposal(
+        body: &str,
+        body_format: Option<&str>,
+    ) -> (Database, ProposalRepository, djinn_core::models::Proposal) {
+        let db = Database::open_in_memory().unwrap();
+        db.ensure_initialized().await.unwrap();
+        let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+        let proposal = repo
+            .create(ProposalCreateInput {
+                title: "Latest head readiness",
+                body,
+                acceptance_criteria: Some("[\"The result is testable\"]"),
+                status: None,
+                body_format,
+            })
+            .await
+            .unwrap();
+        (db, repo, proposal)
+    }
 
     fn ac_text(text: &str) -> AcceptanceCriterionItem {
         AcceptanceCriterionItem::Text(text.to_string())
@@ -568,5 +717,134 @@ Entry points: src/main.rs.
         };
         let msg = result.to_error_string().unwrap();
         assert!(msg.contains("Missing required coverage: problem"));
+    }
+
+    #[tokio::test]
+    async fn latest_head_readiness_keeps_clean_lint_and_ordinary_readiness() {
+        let (_db, repo, proposal) = test_repo_and_proposal(READY_BODY, None).await;
+        let acs = vec![ac_text("The result is testable")];
+        let result = evaluate_latest_head_readiness(&repo, &proposal, &acs, 1).await;
+
+        assert!(result.ready, "unexpected failures: {:?}", result.failures);
+        assert!(result.failures.is_empty());
+        assert!(result.latest_lint.is_some());
+        assert!(result.latest_lint.unwrap().errors.is_empty());
+    }
+
+    #[tokio::test]
+    async fn latest_head_readiness_exposes_warnings_without_blocking() {
+        let body = format!("{READY_BODY}\n[dangling](#missing-anchor)\n");
+        let (_db, repo, proposal) = test_repo_and_proposal(&body, None).await;
+        let acs = vec![ac_text("The result is testable")];
+        let result = evaluate_latest_head_readiness(&repo, &proposal, &acs, 1).await;
+
+        assert!(
+            result.ready,
+            "warnings must not block: {:?}",
+            result.failures
+        );
+        assert!(result.failures.is_empty());
+        assert!(!result.latest_lint.unwrap().warnings.is_empty());
+    }
+
+    #[tokio::test]
+    async fn latest_head_readiness_recomputes_uncached_legacy_corrupt_head() {
+        let (db, repo, proposal) = test_repo_and_proposal(READY_BODY, Some("mdx")).await;
+        let corrupt_body = format!(
+            "{READY_BODY}\n<Callout id=\"duplicate\">one</Callout>\n<Callout id=\"duplicate\">two</Callout>"
+        );
+        // Simulate a legacy row written before repository-boundary linting. Its
+        // old cache entry has the wrong body hash, so the repository recomputes.
+        sqlx::query("UPDATE proposals SET body = $1 WHERE id = $2")
+            .bind(&corrupt_body)
+            .bind(&proposal.id)
+            .execute(db.pool())
+            .await
+            .unwrap();
+        sqlx::query("UPDATE proposal_revisions SET body = $1 WHERE proposal_id = $2 AND seq = $3")
+            .bind(&corrupt_body)
+            .bind(&proposal.id)
+            .bind(proposal.latest_revision_seq)
+            .execute(db.pool())
+            .await
+            .unwrap();
+        let proposal = repo.get(&proposal.id).await.unwrap().unwrap();
+        let acs = vec![ac_text("The result is testable")];
+        let result = evaluate_latest_head_readiness(&repo, &proposal, &acs, 1).await;
+
+        let lint = result
+            .latest_lint
+            .as_ref()
+            .expect("recomputed lint summary");
+        assert!(!lint.errors.is_empty());
+        assert!(!result.ready);
+        let integrity_messages: Vec<_> = result
+            .failures
+            .iter()
+            .filter(|failure| failure.check == ReadinessCheck::SpecIntegrity)
+            .map(|failure| match &failure.detail {
+                ReadinessFailureDetail::Generic { message } => message.clone(),
+                detail => panic!("unexpected integrity detail: {detail:?}"),
+            })
+            .collect();
+        assert_eq!(integrity_messages.len(), lint.errors.len());
+        assert_eq!(
+            integrity_messages,
+            lint.errors
+                .iter()
+                .map(|violation| format!(
+                    "Spec integrity: {} at bytes {}..{}",
+                    violation.code, violation.span.start, violation.span.end
+                ))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[tokio::test]
+    async fn latest_head_readiness_ignores_same_sequence_lifecycle_row() {
+        let (_db, repo, proposal) = test_repo_and_proposal(READY_BODY, None).await;
+        repo.record_refinement_lifecycle(&proposal.id, "refinement_start", None)
+            .await
+            .unwrap();
+        let acs = vec![ac_text("The result is testable")];
+        let result = evaluate_latest_head_readiness(&repo, &proposal, &acs, 1).await;
+
+        assert!(
+            result.ready,
+            "lifecycle row replaced head: {:?}",
+            result.failures
+        );
+        assert_eq!(
+            result.latest_lint.unwrap().body_sha256,
+            djinn_spec_lint::body_sha256(READY_BODY)
+        );
+    }
+
+    #[tokio::test]
+    async fn latest_head_readiness_fails_closed_when_lint_cannot_load() {
+        let (db, repo, proposal) = test_repo_and_proposal(READY_BODY, None).await;
+        sqlx::query("UPDATE proposals SET body_format = 'unknown' WHERE id = $1")
+            .bind(&proposal.id)
+            .execute(db.pool())
+            .await
+            .unwrap();
+        sqlx::query("UPDATE proposal_revisions SET body_format = 'unknown' WHERE proposal_id = $1 AND seq = $2")
+            .bind(&proposal.id)
+            .bind(proposal.latest_revision_seq)
+            .execute(db.pool())
+            .await
+            .unwrap();
+        let proposal = repo.get(&proposal.id).await.unwrap().unwrap();
+        let acs = vec![ac_text("The result is testable")];
+        let result = evaluate_latest_head_readiness(&repo, &proposal, &acs, 1).await;
+
+        assert!(!result.ready);
+        assert!(result.latest_lint.is_none());
+        assert!(
+            result
+                .to_error_string()
+                .unwrap()
+                .contains("unable to load current head lint")
+        );
     }
 }
