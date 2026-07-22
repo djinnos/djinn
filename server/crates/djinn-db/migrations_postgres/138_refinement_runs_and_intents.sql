@@ -145,11 +145,21 @@ FROM refinement_runs runs
 WHERE runs.terminal_at IS NOT NULL AND stop.event_kind = 'refinement_stop'
   AND stop.proposal_id = runs.proposal_id AND stop.created_at = runs.terminal_at
   AND stop.id = (runs.stop_context->>'legacy_source_revision_id');
-UPDATE proposal_revisions r SET refinement_run_id = runs.id
-FROM refinement_runs runs
-WHERE r.proposal_id = runs.proposal_id AND r.event_kind NOT IN ('refinement_start', 'refinement_stop')
-  AND (r.created_at, r.id) > ((SELECT created_at FROM proposal_revisions s WHERE s.id = runs.source_start_revision_id), runs.source_start_revision_id)
-  AND (runs.terminal_at IS NULL OR r.created_at < runs.terminal_at);
+UPDATE proposal_revisions r SET refinement_run_id = candidate.run_id
+FROM (
+    -- A nested/overlapping legacy interval is not evidence for either run.
+    -- Do not let UPDATE ... FROM select an arbitrary matching run.
+    SELECT revision.id, min(runs.id) AS run_id
+    FROM proposal_revisions revision
+    JOIN refinement_runs runs ON runs.proposal_id = revision.proposal_id
+    JOIN proposal_revisions start ON start.id = runs.source_start_revision_id
+    WHERE revision.event_kind NOT IN ('refinement_start', 'refinement_stop')
+      AND (revision.created_at, revision.id) > (start.created_at, start.id)
+      AND (runs.terminal_at IS NULL OR revision.created_at < runs.terminal_at)
+    GROUP BY revision.id
+    HAVING count(*) = 1
+) candidate
+WHERE r.id = candidate.id;
 
 -- Debate/task attribution is intentionally evidence-only: an unambiguous
 -- debate source task inside a run interval may correlate its task; no proposal
