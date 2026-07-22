@@ -946,3 +946,48 @@ async fn successful_trace_charges_newline_and_persists_exact_budget_equality() {
         (Some(0), Some(0), Some(0), Some(0))
     );
 }
+
+#[tokio::test]
+async fn cancelled_knowledge_load_persists_cancelled_terminal_without_prompt_text() {
+    let mut env = knowledge_context_test_env_guard();
+    env.clear();
+    let db = djinn_db::Database::ephemeral().await.expect("ephemeral db");
+    let events = EventBus::noop();
+    let task = create_project_epic_task(&db, &events, "Cancelled epic", "Cancelled task").await;
+    let project_id = task.project_id.clone();
+    let note_repo = NoteRepository::new(db.clone(), EventBus::noop());
+    note_repo
+        .create(&project_id, "Would have been injected", "content", "pattern", "[]")
+        .await
+        .expect("seed note");
+
+    let app_state = agent_context_from_db(db.clone(), CancellationToken::new());
+    let cancellation = CancellationToken::new();
+    cancellation.cancel();
+    let rollout = knowledge_context_rollout_from_env();
+
+    let rendered = load_knowledge_context_with_planner(
+        &task,
+        None,
+        &app_state,
+        None,
+        &rollout,
+        &cancellation,
+    )
+    .await;
+
+    assert!(rendered.is_none(), "cancelled retrieval must not inject prompt text");
+    let trace = latest_trace(&db, &project_id)
+        .await
+        .expect("cancelled terminal trace");
+    assert_eq!(trace.knowledge_trace_taxonomy_version, Some(1));
+    assert_eq!(trace.outcome, RetrievalTraceOutcome::Error);
+    assert_eq!(trace.terminal_state.as_deref(), Some("cancelled"));
+    assert!(trace.terminal_at.is_some());
+    assert_eq!(trace.candidate_count, None);
+    assert_eq!(trace.injected_count, None);
+    assert_eq!(trace.confidence_filtered_count, None);
+    assert_eq!(trace.not_top_k_count, None);
+    assert_eq!(trace.oversized_skipped_count, None);
+    assert_eq!(trace.budget_pruned_count, None);
+}
