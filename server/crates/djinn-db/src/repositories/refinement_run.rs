@@ -46,7 +46,7 @@ impl ProposalRepository {
                 task_id: request.task_id,
             });
         }
-        let changed = sqlx::query("UPDATE refinement_dispatch_intents i SET state = 'materialized', task_id = $4, claimed_by = NULL, claimed_at = NULL, claim_expires_at = NULL, updated_at = to_char(transaction_timestamp() AT TIME ZONE 'utc', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') FROM refinement_runs r WHERE i.id = $2 AND i.run_id = $1 AND r.id = i.run_id AND r.generation = $3 AND i.state = 'claimed' AND i.claimed_by = $5").bind(&request.run_id).bind(&request.intent_id).bind(request.generation).bind(&request.task_id).bind(&request.owner).execute(&mut *tx).await?.rows_affected() == 1;
+        let changed = sqlx::query("UPDATE refinement_dispatch_intents i SET state = 'materialized', task_id = $4, claimed_by = NULL, claimed_at = NULL, claim_expires_at = NULL, updated_at = to_char(transaction_timestamp() AT TIME ZONE 'utc', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') FROM refinement_runs r WHERE i.id = $2 AND i.run_id = $1 AND r.id = i.run_id AND r.generation = $3 AND i.state = 'claimed' AND i.claimed_by = $5 AND i.claim_expires_at::timestamptz > transaction_timestamp()").bind(&request.run_id).bind(&request.intent_id).bind(request.generation).bind(&request.task_id).bind(&request.owner).execute(&mut *tx).await?.rows_affected() == 1;
         if changed {
             touch_heartbeat(&mut tx, &request.run_id, request.generation).await?;
         }
@@ -80,21 +80,30 @@ impl ProposalRepository {
         }
         self.db().ensure_initialized().await?;
         let mut tx = self.db().pool().begin().await?;
-        let completed = sqlx::query("UPDATE refinement_dispatch_intents i SET state = 'completed', claimed_by = NULL, claimed_at = NULL, claim_expires_at = NULL, terminal_at = to_char(transaction_timestamp() AT TIME ZONE 'utc', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"'), updated_at = to_char(transaction_timestamp() AT TIME ZONE 'utc', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') FROM refinement_runs r WHERE i.id = $2 AND i.run_id = $1 AND r.id = i.run_id AND r.generation = $3 AND ((i.state = 'claimed' AND i.claimed_by = $4) OR i.state = 'materialized')").bind(&request.run_id).bind(&request.intent_id).bind(request.generation).bind(&request.owner).execute(&mut *tx).await?.rows_affected() == 1;
-        if !completed {
-            let already = sqlx::query_scalar::<_, bool>("SELECT EXISTS(SELECT 1 FROM refinement_dispatch_intents i JOIN refinement_runs r ON r.id = i.run_id WHERE i.id = $2 AND i.run_id = $1 AND r.generation = $3 AND i.state = 'completed')").bind(&request.run_id).bind(&request.intent_id).bind(request.generation).fetch_one(&mut *tx).await?;
-            if !already {
-                return Err(RefinementIntentMutationError::ClaimConflict {
-                    intent_id: request.intent_id,
-                    owner: request.owner,
-                });
-            }
-        }
         let next_phase_name = phase_name(request.next_phase);
         let next_role_name = role_name(request.next_role);
+        // Locking the source serializes its one durable successor selection.
+        let source = sqlx::query("SELECT i.state, i.claimed_by, i.claim_expires_at::timestamptz > transaction_timestamp() AS claim_unexpired, i.next_intent_id FROM refinement_dispatch_intents i JOIN refinement_runs r ON r.id = i.run_id WHERE i.id = $2 AND i.run_id = $1 AND r.generation = $3 FOR UPDATE").bind(&request.run_id).bind(&request.intent_id).bind(request.generation).fetch_optional(&mut *tx).await?;
+        let Some(source) = source else { return Err(RefinementIntentMutationError::GenerationConflict { run_id: request.run_id, generation: request.generation }); };
+        let source_state: String = source.get("state");
+        if source_state == "completed" {
+            let Some(successor_id) = source.get::<Option<String>, _>("next_intent_id") else { return Err(RefinementIntentMutationError::InvalidRequest("completed intent has no durable successor".into())); };
+            let row = sqlx::query("SELECT id, round, phase, role, idempotency_key FROM refinement_dispatch_intents WHERE id = $1 AND run_id = $2").bind(successor_id).bind(&request.run_id).fetch_one(&mut *tx).await?;
+            let matches_request = row.get::<i32, _>("round") == request.next_round && row.get::<String, _>("phase") == next_phase_name && row.get::<String, _>("role") == next_role_name && row.get::<String, _>("idempotency_key") == request.next_idempotency_key;
+            if !matches_request { return Err(RefinementIntentMutationError::InvalidRequest("completed intent retry selects a different successor".into())); }
+            tx.commit().await?;
+            return Ok(RefinementNextIntent { intent_id: row.get("id"), round: row.get("round"), phase: phase(row.get("phase")).map_err(snapshot_to_mutation)?, role: role(row.get("role")).map_err(snapshot_to_mutation)? });
+        }
+        let claimed_by_owner = source.get::<Option<String>, _>("claimed_by").as_deref() == Some(request.owner.as_str());
+        let claim_unexpired: Option<bool> = source.get("claim_unexpired");
+        if source_state != "materialized" && !(source_state == "claimed" && claimed_by_owner && claim_unexpired == Some(true)) { return Err(RefinementIntentMutationError::ClaimConflict { intent_id: request.intent_id, owner: request.owner }); }
+        let completed = sqlx::query("UPDATE refinement_dispatch_intents SET state = 'completed', claimed_by = NULL, claimed_at = NULL, claim_expires_at = NULL, terminal_at = to_char(transaction_timestamp() AT TIME ZONE 'utc', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"'), updated_at = to_char(transaction_timestamp() AT TIME ZONE 'utc', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') WHERE id = $1 AND ((state = 'claimed' AND claimed_by = $2 AND claim_expires_at::timestamptz > transaction_timestamp()) OR state = 'materialized')").bind(&request.intent_id).bind(&request.owner).execute(&mut *tx).await?.rows_affected() == 1;
+        if !completed { return Err(RefinementIntentMutationError::ClaimConflict { intent_id: request.intent_id, owner: request.owner }); }
         let new_id = uuid::Uuid::now_v7().to_string();
         sqlx::query("INSERT INTO refinement_dispatch_intents (id, run_id, round, phase, role, idempotency_key) VALUES ($1, $2, $3, $4, $5, $6) ON CONFLICT (run_id, round, phase, role) DO NOTHING").bind(&new_id).bind(&request.run_id).bind(request.next_round).bind(next_phase_name).bind(next_role_name).bind(&request.next_idempotency_key).execute(&mut *tx).await?;
-        let row = sqlx::query("SELECT id, round, phase, role FROM refinement_dispatch_intents WHERE run_id = $1 AND round = $2 AND phase = $3 AND role = $4").bind(&request.run_id).bind(request.next_round).bind(next_phase_name).bind(next_role_name).fetch_one(&mut *tx).await?;
+        let row = sqlx::query("SELECT id, round, phase, role, idempotency_key FROM refinement_dispatch_intents WHERE run_id = $1 AND round = $2 AND phase = $3 AND role = $4").bind(&request.run_id).bind(request.next_round).bind(next_phase_name).bind(next_role_name).fetch_one(&mut *tx).await?;
+        if row.get::<String, _>("idempotency_key") != request.next_idempotency_key { return Err(RefinementIntentMutationError::InvalidRequest("next intent identity is already bound to a different idempotency key".into())); }
+        sqlx::query("UPDATE refinement_dispatch_intents SET next_intent_id = $2 WHERE id = $1 AND next_intent_id IS NULL").bind(&request.intent_id).bind(row.get::<String, _>("id")).execute(&mut *tx).await?;
         if completed {
             touch_heartbeat(&mut tx, &request.run_id, request.generation).await?;
         }
