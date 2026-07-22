@@ -621,10 +621,7 @@ async fn migration_119_applies_on_fresh_database() {
             .connect(&db_url)
             .await
             .expect("connect fresh migration database");
-        sqlx::migrate!("./migrations_postgres")
-            .run(&pool)
-            .await
-            .expect("apply all migrations to fresh database");
+        djinn_db::test_support::apply_all_migrations_to_fresh_database(&db_url).await;
 
         assert_retrieval_traces_schema(&pool).await;
         seed_project(&pool).await;
