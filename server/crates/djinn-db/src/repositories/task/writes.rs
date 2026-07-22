@@ -832,17 +832,17 @@ impl TaskRepository {
                 async move {
                     let (run_id, intent_id, generation, round, phase, role) = match correlation {
                         Some(value) => {
-                            let phase = match value.phase {
+                            let phase = match value.phase() {
                                 djinn_core::refinement_liveness::RefinementPhase::AdversaryAttack => "adversary_attack",
                                 djinn_core::refinement_liveness::RefinementPhase::AdvocateRevision => "advocate_revision",
                                 djinn_core::refinement_liveness::RefinementPhase::JudgeAdjudication => "judge_adjudication",
                             };
-                            let role = match value.role {
+                            let role = match value.role() {
                                 djinn_core::refinement_liveness::RefinementRole::Adversary => "adversary",
                                 djinn_core::refinement_liveness::RefinementRole::Advocate => "advocate",
                                 djinn_core::refinement_liveness::RefinementRole::Judge => "judge",
                             };
-                            (Some(value.run_id), Some(value.intent_id), Some(value.generation), Some(value.round), Some(phase), Some(role))
+                            (Some(value.run_id().to_owned()), Some(value.intent_id().to_owned()), Some(value.generation()), Some(value.round()), Some(phase), Some(role))
                         }
                         None => (None, None, None, None, None, None),
                     };
@@ -853,7 +853,8 @@ impl TaskRepository {
                 }
             },
         ).await?;
-        self.events.send(DjinnEventEnvelope::task_updated(&task, false));
+        self.events
+            .send(DjinnEventEnvelope::task_updated(&task, false));
         Ok(task)
     }
 

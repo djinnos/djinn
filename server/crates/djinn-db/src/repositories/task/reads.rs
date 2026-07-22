@@ -737,6 +737,12 @@ impl TaskRepository {
             .bind(&task.merge_conflict_metadata)
             .bind(&task.memory_refs)
             .bind(&created_by_user_id)
+            .bind(&task.refinement_run_id)
+            .bind(&task.refinement_intent_id)
+            .bind(task.refinement_generation)
+            .bind(task.refinement_round)
+            .bind(&task.refinement_phase)
+            .bind(&task.refinement_role)
             .execute(&mut **tx)
             .await;
 
