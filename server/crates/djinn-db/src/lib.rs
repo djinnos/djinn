@@ -185,6 +185,10 @@ pub use repositories::{
         ProposalListResult, ProposalListSummaryRow, ProposalMemoryRef, ProposalRef,
         ProposalRepository, ProposalUpdateInput,
     },
+    refinement_run::{
+        LoadRefinementRunSnapshotRequest, RefinementRunAggregate, RefinementRunSnapshotError,
+        RefinementRunSnapshotResult,
+    },
     repo_graph_cache::{CachedRepoGraph, RepoGraphCacheInsert, RepoGraphCacheRepository},
     repo_graph_generation::{
         CurrentGalaxyArtifact, GENERATION_STREAM_PIN_LOCK_CLASS, GenerationStreamPinKey,
