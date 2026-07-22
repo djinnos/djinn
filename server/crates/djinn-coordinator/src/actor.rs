@@ -1416,69 +1416,36 @@ impl CoordinatorActor {
         }
     }
 
-    /// Handle a proposal-refinement start request.  Rejects duplicate starts
-    /// (coordinator is authoritative) and initialises `RefinementLoopState`.
+    /// Handle the legacy proposal-refinement start compatibility message.
+    /// Durable control-plane admission owns duplicate outcomes; this actor only
+    /// rebuilds its disposable projection after a post-commit exact-run wake.
     async fn handle_start_proposal_refinement(
         &mut self,
         proposal_id: &str,
         current_revision_seq: i32,
         owner_user_id: Option<String>,
     ) -> Result<(), String> {
-        use super::refinement::RefinementLoopState;
-
-        // Coordinator-level duplicate rejection — this is authoritative over
-        // the lifecycle-level check in the control-plane tool.
-        if self.active_refinements.contains_key(proposal_id) {
-            return Err(format!(
-                "refinement is already active for proposal {proposal_id}"
-            ));
-        }
-
-        let state = RefinementLoopState::new(proposal_id, current_revision_seq)
-            .with_attributed_user(owner_user_id.clone());
-        self.active_refinements
-            .insert(proposal_id.to_string(), state);
-
         tracing::info!(
             proposal_id = %proposal_id,
             current_revision_seq,
             owner_user_id = ?owner_user_id,
-            "CoordinatorActor: started proposal refinement"
+            "CoordinatorActor: legacy refinement start accepted; awaiting durable run wake"
         );
-
         Ok(())
     }
 
-    /// Handle a demand-round request. Unlike start, this allows restarting
-    /// a completed refinement loop. If the loop is still active (not complete),
-    /// it returns an error. If the loop has completed or been cleaned up, it
-    /// creates a fresh loop and inserts it.
+    /// Handle the legacy demand compatibility message. It deliberately does not
+    /// consult or mutate the cache: map presence is never durable authorization.
     async fn handle_demand_proposal_refinement_round(
         &mut self,
         proposal_id: &str,
         current_revision_seq: i32,
     ) -> Result<(), String> {
-        use super::refinement::RefinementLoopState;
-
-        // If refinement is still actively running (not completed), reject.
-        if let Some(state) = self.active_refinements.get(proposal_id)
-            && !state.is_complete()
-        {
-            return Err(format!(
-                "refinement is already active for proposal {proposal_id}"
-            ));
-        }
-
-        let state = RefinementLoopState::new(proposal_id, current_revision_seq);
-        self.active_refinements
-            .insert(proposal_id.to_string(), state);
-
         tracing::info!(
             proposal_id = %proposal_id,
             current_revision_seq,
-            "CoordinatorActor: demanded another refinement round"
+            "CoordinatorActor: legacy refinement demand accepted; awaiting durable run wake"
         );
-
         Ok(())
     }
 
@@ -1486,33 +1453,48 @@ impl CoordinatorActor {
     /// Non-current or unreadable observations are no-ops and never write state.
     async fn hydrate_refinement_wake(&mut self, run_id: &str) {
         const GRACE_MILLIS: i64 = 60_000;
-        let repo = ProposalRepository::new(self.db.clone(), crate::events::event_bus_for(&self.events_tx));
-        let exact = match repo.load_refinement_run_snapshot(LoadRefinementRunSnapshotRequest {
-            run_id: run_id.to_owned(),
-            heartbeat_grace_millis: GRACE_MILLIS,
-        }).await {
+        let repo = ProposalRepository::new(
+            self.db.clone(),
+            crate::events::event_bus_for(&self.events_tx),
+        );
+        let exact = match repo
+            .load_refinement_run_snapshot(LoadRefinementRunSnapshotRequest {
+                run_id: run_id.to_owned(),
+                heartbeat_grace_millis: GRACE_MILLIS,
+            })
+            .await
+        {
             Ok(Some(snapshot)) => snapshot,
             Ok(None) | Err(_) => return,
         };
-        let current = match repo.load_current_refinement_run_snapshot(&exact.proposal_id, GRACE_MILLIS).await {
+        let current = match repo
+            .load_current_refinement_run_snapshot(&exact.proposal_id, GRACE_MILLIS)
+            .await
+        {
             Ok(Some(snapshot)) => snapshot,
             Ok(None) | Err(_) => return,
         };
         if exact.snapshot.run.run_id != current.snapshot.run.run_id
             || exact.generation != current.generation
-            || !matches!(exact.liveness, RefinementLivenessResult::Live { .. }) {
+            || !matches!(exact.liveness, RefinementLivenessResult::Live { .. })
+        {
             return;
         }
         let revision_seq = match repo.get(&exact.proposal_id).await {
             Ok(Some(proposal)) => proposal.latest_revision_seq,
             _ => return,
         };
-        let mut state = super::refinement::RefinementLoopState::new(&exact.proposal_id, revision_seq)
-            .with_run_identity(exact.snapshot.run.run_id.clone(), exact.generation);
+        let mut state =
+            super::refinement::RefinementLoopState::new(&exact.proposal_id, revision_seq)
+                .with_run_identity(exact.snapshot.run.run_id.clone(), exact.generation);
         if let Some(park) = &exact.snapshot.park {
             state.phase = match park.kind {
-                RefinementParkKind::AwaitingReview => super::refinement::RefinementPhase::AwaitingHumanReview,
-                RefinementParkKind::AwaitingEvidence => super::refinement::RefinementPhase::AwaitingEvidence,
+                RefinementParkKind::AwaitingReview => {
+                    super::refinement::RefinementPhase::AwaitingHumanReview
+                }
+                RefinementParkKind::AwaitingEvidence => {
+                    super::refinement::RefinementPhase::AwaitingEvidence
+                }
             };
         }
         self.active_refinements.insert(run_id.to_owned(), state);
@@ -2492,16 +2474,15 @@ mod tests {
             })
             .await;
         assert!(reply_rx.await.unwrap().is_ok());
-        assert!(actor.active_refinements.contains_key("p-1"));
-        let state = &actor.active_refinements["p-1"];
-        assert_eq!(state.proposal_id, "p-1");
-        assert_eq!(state.current_revision_seq, 0);
+        assert!(
+            actor.active_refinements.is_empty(),
+            "legacy start must not create a proposal-keyed projection"
+        );
     }
 
     #[tokio::test]
-    async fn duplicate_refinement_start_is_rejected() {
+    async fn legacy_refinement_start_never_uses_cache_for_duplicate_rejection() {
         let mut actor = minimal_test_actor();
-        // First start succeeds.
         let (tx1, rx1) = tokio::sync::oneshot::channel();
         actor
             .handle_message(CoordinatorMessage::StartProposalRefinement {
@@ -2513,7 +2494,11 @@ mod tests {
             .await;
         assert!(rx1.await.unwrap().is_ok());
 
-        // Second start for the same proposal is rejected.
+        // A disposable entry must not turn a replay into an authorization error.
+        actor.active_refinements.insert(
+            "durable-run-1".to_owned(),
+            super::refinement::RefinementLoopState::new("p-dup", 1),
+        );
         let (tx2, rx2) = tokio::sync::oneshot::channel();
         actor
             .handle_message(CoordinatorMessage::StartProposalRefinement {
@@ -2523,15 +2508,8 @@ mod tests {
                 reply: tx2,
             })
             .await;
-        let result = rx2.await.unwrap();
-        assert!(result.is_err());
-        let err = result.unwrap_err();
-        assert!(
-            err.contains("already active"),
-            "expected duplicate rejection, got: {err}"
-        );
-        // Original entry is still present.
-        assert!(actor.active_refinements.contains_key("p-dup"));
+        assert!(rx2.await.unwrap().is_ok());
+        assert!(actor.active_refinements.contains_key("durable-run-1"));
     }
 
     #[tokio::test]
@@ -2558,8 +2536,7 @@ mod tests {
             })
             .await;
         assert!(rx2.await.unwrap().is_ok());
-        assert_eq!(actor.active_refinements.len(), 2);
-        assert_eq!(actor.active_refinements["p-b"].current_revision_seq, 2);
+        assert!(actor.active_refinements.is_empty());
     }
 
     #[tokio::test]

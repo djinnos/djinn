@@ -269,7 +269,8 @@ impl CoordinatorHandle {
 
     /// Deliver a post-commit refinement wake keyed by the exact durable run.
     pub async fn wake_refinement_run(&self, run_id: String) -> Result<(), CoordinatorError> {
-        self.send(CoordinatorMessage::WakeRefinementRun { run_id }).await
+        self.send(CoordinatorMessage::WakeRefinementRun { run_id })
+            .await
     }
 
     /// Legacy compatibility surface; durable admission is outside this actor.
