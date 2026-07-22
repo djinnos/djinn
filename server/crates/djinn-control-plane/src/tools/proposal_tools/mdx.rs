@@ -264,8 +264,7 @@ fn atx_heading_text(source: &str, level: u8) -> &str {
     let text = after_prefix.trim_end_matches(['\r', '\n']);
     let closing_start = text.trim_end_matches('#').len();
     if closing_start < text.len()
-        && text[..closing_start]
-            .as_bytes()
+        && text.as_bytes()[..closing_start]
             .last()
             .is_some_and(u8::is_ascii_whitespace)
     {
