@@ -879,7 +879,8 @@ What happens if D fails?
                 .failures
                 .iter()
                 .any(|failure| failure.contains("Spec integrity: ")),
-            "uncached integrity must block composed gate: {composed:?}"
+            "uncached integrity must block composed gate: {:?}",
+            composed.failures
         );
 
         delete_proposal_lint_results_for_test(&db, &proposal.id).await;
