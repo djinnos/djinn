@@ -265,6 +265,8 @@ impl TaskRepository {
                     t.created_at, t.updated_at, t.closed_at,
                     t.close_reason, t.merge_commit_sha, t.pr_url, t.merge_conflict_metadata, t.memory_refs::text AS memory_refs,
                     t.agent_type, t.created_by_user_id,
+                    t.refinement_run_id, t.refinement_intent_id, t.refinement_generation,
+                    t.refinement_round, t.refinement_phase, t.refinement_role,
                     COALESCE((SELECT s.ci_status FROM task_pr_ci_snapshots s WHERE s.task_id = t.id ORDER BY s.last_seen_at DESC LIMIT 1), 'unknown') AS ci_status,
                     (SELECT s.head_sha FROM task_pr_ci_snapshots s WHERE s.task_id = t.id ORDER BY s.last_seen_at DESC LIMIT 1) AS ci_head_sha,
                     (SELECT s.pr_number FROM task_pr_ci_snapshots s WHERE s.task_id = t.id ORDER BY s.last_seen_at DESC LIMIT 1) AS ci_pr_number,
