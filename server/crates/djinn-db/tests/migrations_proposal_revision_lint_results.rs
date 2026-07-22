@@ -302,12 +302,11 @@ async fn migration_137_applies_cleanly_and_migrator_rerun_is_idempotent() {
             .connect(&database_url)
             .await
             .expect("connect migration database");
-        let migrator = sqlx::migrate!("./migrations_postgres");
-        migrator
+        djinn_db::test_support::apply_all_migrations_to_fresh_database(&database_url).await;
+        sqlx::migrate!("./migrations_postgres")
             .run(&pool)
             .await
-            .expect("apply all migrations to a clean database");
-        migrator.run(&pool).await.expect("rerun applied migrator");
+            .expect("rerun applied migrator");
 
         assert_schema(&pool).await;
         assert_constraints_and_cascades(&pool).await;

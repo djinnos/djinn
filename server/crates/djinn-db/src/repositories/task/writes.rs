@@ -181,10 +181,15 @@ impl TaskRepository {
     }
 
     /// Test-support helper for fixtures that exercise unavailable creator
-    /// provenance against nullable expand-phase task rows.
+    /// provenance against nullable expand-phase task rows. The creator
+    /// contract forbids NULL on migrated schemas, so this deliberately
+    /// reopens the column in the per-test database clone first.
     #[cfg(any(test, feature = "test-support"))]
     pub async fn clear_created_by_user_id(&self, id: &str) -> Result<()> {
         self.db.ensure_initialized().await?;
+        sqlx::query("ALTER TABLE tasks ALTER COLUMN created_by_user_id DROP NOT NULL")
+            .execute(self.db.pool())
+            .await?;
         sqlx::query("UPDATE tasks SET created_by_user_id = NULL WHERE id = $1")
             .bind(id)
             .execute(self.db.pool())
@@ -1147,7 +1152,7 @@ mod created_by_tests {
             })
             .await;
 
-        let stamped: Option<String> = sqlx::query_scalar!(
+        let stamped: String = sqlx::query_scalar!(
             "SELECT created_by_user_id FROM tasks WHERE id = $1",
             created_id
         )
@@ -1155,8 +1160,7 @@ mod created_by_tests {
         .await
         .unwrap();
         assert_eq!(
-            stamped.as_deref(),
-            Some(user_id.as_str()),
+            stamped, user_id,
             "created_by_user_id must match the SESSION_USER_ID task-local"
         );
 

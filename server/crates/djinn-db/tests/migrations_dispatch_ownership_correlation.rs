@@ -290,8 +290,16 @@ async fn seed_legacy_rows(pool: &sqlx::PgPool) {
     .expect("seed legacy project");
 
     sqlx::query(
-        "INSERT INTO tasks (id, project_id, short_id, title, description, design, labels, acceptance_criteria, memory_refs) \
-         VALUES ('task-131', 'project-131', 't131', 'title', 'description', 'design', '[]'::jsonb, '[]'::jsonb, '[]'::jsonb)",
+        "INSERT INTO users (id, github_id, github_login) \
+         VALUES ('user-131', 9000000131, 'legacy-creator-131') ON CONFLICT DO NOTHING",
+    )
+    .execute(pool)
+    .await
+    .expect("seed legacy creator");
+
+    sqlx::query(
+        "INSERT INTO tasks (id, project_id, short_id, title, description, design, labels, acceptance_criteria, memory_refs, created_by_user_id) \
+         VALUES ('task-131', 'project-131', 't131', 'title', 'description', 'design', '[]'::jsonb, '[]'::jsonb, '[]'::jsonb, 'user-131')",
     )
     .execute(pool)
     .await
@@ -354,10 +362,7 @@ async fn migration_133_applies_on_fresh_database() {
             .connect(&db_url)
             .await
             .expect("connect fresh migration database");
-        sqlx::migrate!("./migrations_postgres")
-            .run(&pool)
-            .await
-            .expect("apply all migrations to fresh database");
+        djinn_db::test_support::apply_all_migrations_to_fresh_database(&db_url).await;
 
         assert_dispatch_ownership_schema(&pool).await;
         seed_legacy_rows(&pool).await;
