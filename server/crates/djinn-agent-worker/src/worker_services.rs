@@ -1086,18 +1086,23 @@ mod lease_adapter_conformance_tests {
     async fn committed_timeout(s: &dyn SupervisorServices) -> Vec<LeaseResult> {
         let first = s.queue_lease(expired_queue("expired")).await;
         let retry = s.queue_lease(expired_queue("expired")).await;
-        for result in [&first, &retry] {
-            match result {
-                LeaseResult::LeaseWaitTimeout { timeout_credit } => assert!(
-                    timeout_credit.is_none(),
-                    "durable timeout replay must not mint an unbounded timeout credit"
-                ),
-                other => panic!("expected committed LeaseWaitTimeout, got {other:?}"),
-            }
-        }
-        assert_eq!(
-            first, retry,
-            "expired queue retry must replay the durable timeout"
+        assert!(
+            matches!(
+                &first,
+                LeaseResult::LeaseWaitTimeout {
+                    timeout_credit: Some(credit)
+                } if credit.units == 1
+            ),
+            "the first committed timeout must carry its one bounded retry credit: {first:?}"
+        );
+        assert!(
+            matches!(
+                &retry,
+                LeaseResult::LeaseWaitTimeout {
+                    timeout_credit: None
+                }
+            ),
+            "durable timeout replay must not mint another timeout credit: {retry:?}"
         );
         vec![first, retry]
     }

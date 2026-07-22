@@ -98,15 +98,86 @@ pub enum LeaseTelemetryOutcome {
     Terminal,
     Status,
 }
+impl LeaseTelemetryOutcome {
+    const fn as_label(self) -> &'static str {
+        match self {
+            Self::Queued => "queued",
+            Self::Granted => "granted",
+            Self::Timeout => "timeout",
+            Self::Conflict => "conflict",
+            Self::Unavailable => "unavailable",
+            Self::Terminal => "terminal",
+            Self::Status => "status",
+        }
+    }
+}
+impl LeaseTelemetryState {
+    const fn as_label(self) -> &'static str {
+        match self {
+            Self::Queued => "queued",
+            Self::Occupied => "occupied",
+            Self::Terminal => "terminal",
+            Self::NotReady => "not_ready",
+        }
+    }
+}
+impl LeaseOperation {
+    const fn as_label(self) -> &'static str {
+        match self {
+            Self::Recover => "recover",
+            Self::Queue => "queue",
+            Self::Grant => "grant",
+            Self::Status => "status",
+            Self::Abandon => "abandon",
+            Self::Bind => "bind",
+            Self::Cancel => "cancel",
+            Self::Release => "release",
+            Self::Expire => "expire",
+            Self::SetCap => "set_cap",
+        }
+    }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LeaseTelemetryConsumer {
+    TaskInvocation,
+    GraphWarm,
+    System,
+}
+impl LeaseTelemetryConsumer {
+    const fn as_label(self) -> &'static str {
+        match self {
+            Self::TaskInvocation => "task_invocation",
+            Self::GraphWarm => "graph_warm",
+            Self::System => "system",
+        }
+    }
+}
 pub trait LeaseTelemetry: Send + Sync {
     fn state(&self, state: LeaseTelemetryState, count: u64);
     fn outcome(&self, outcome: LeaseTelemetryOutcome);
+    fn operation(&self, operation: LeaseOperation, consumer: LeaseTelemetryConsumer);
 }
 #[derive(Default)]
 pub struct NoopLeaseTelemetry;
 impl LeaseTelemetry for NoopLeaseTelemetry {
     fn state(&self, _: LeaseTelemetryState, _: u64) {}
     fn outcome(&self, _: LeaseTelemetryOutcome) {}
+    fn operation(&self, _: LeaseOperation, _: LeaseTelemetryConsumer) {}
+}
+
+#[derive(Default)]
+pub struct MetricsLeaseTelemetry;
+impl LeaseTelemetry for MetricsLeaseTelemetry {
+    fn state(&self, state: LeaseTelemetryState, count: u64) {
+        metrics::gauge!("djinn_build_lease_units", "state" => state.as_label()).set(count as f64);
+    }
+    fn outcome(&self, outcome: LeaseTelemetryOutcome) {
+        metrics::counter!("djinn_build_lease_outcomes_total", "outcome" => outcome.as_label())
+            .increment(1);
+    }
+    fn operation(&self, operation: LeaseOperation, consumer: LeaseTelemetryConsumer) {
+        metrics::counter!("djinn_build_lease_operations_total", "operation" => operation.as_label(), "consumer" => consumer.as_label()).increment(1);
+    }
 }
 
 /// Coordinator policy owner over the one repository-global FIFO.
@@ -130,7 +201,7 @@ impl BuildLeaseService {
             cap,
             Arc::new(SystemLeaseClock),
             Arc::new(NoopLeaseTransactionPause),
-            Arc::new(NoopLeaseTelemetry),
+            Arc::new(MetricsLeaseTelemetry),
         )
     }
 
@@ -161,6 +232,8 @@ impl BuildLeaseService {
     /// Recover queued and all occupied rows before opening the service.
     pub async fn recover(&self) -> LeaseResult {
         let _guard = self.operation.lock().await;
+        self.telemetry
+            .operation(LeaseOperation::Recover, LeaseTelemetryConsumer::System);
         self.pause.before_transaction(LeaseOperation::Recover).await;
         match self.repository.snapshot().await {
             Ok(snapshot) => {
@@ -179,6 +252,8 @@ impl BuildLeaseService {
         if !self.is_ready() || cap < 0 {
             return self.unavailable();
         }
+        self.telemetry
+            .operation(LeaseOperation::SetCap, LeaseTelemetryConsumer::System);
         self.pause.before_transaction(LeaseOperation::SetCap).await;
         match self.repository.set_cap(cap).await {
             Ok(_) => {
@@ -195,6 +270,8 @@ impl BuildLeaseService {
         if !self.is_ready() {
             return self.unavailable();
         }
+        self.telemetry
+            .operation(LeaseOperation::Queue, telemetry_consumer(&request.identity));
         self.pause.before_transaction(LeaseOperation::Queue).await;
         let (key, immutable_identity) = identity(&request.identity);
         let input = QueueBuildLeaseInput {
@@ -213,18 +290,19 @@ impl BuildLeaseService {
             Ok(QueueBuildLeaseResult::Queued { row, .. }) => {
                 // Exact replay after a lost response must use the durable state
                 // rather than whether this request happened to grant the row.
-                if let Some(result) = queue_result(&row) {
+                if let Some(result) = self.queue_result(&row).await {
                     return result;
                 }
                 match self.drain().await {
                     // Re-read through idempotent queue after drain: it includes
                     // a newly minted grant or terminalized queue deadline.
                     Ok(_) => match self.repository.queue(&input).await {
-                        Ok(QueueBuildLeaseResult::Queued { row, .. }) => queue_result(&row)
-                            .unwrap_or_else(|| {
+                        Ok(QueueBuildLeaseResult::Queued { row, .. }) => {
+                            self.queue_result(&row).await.unwrap_or_else(|| {
                                 self.telemetry.outcome(LeaseTelemetryOutcome::Queued);
                                 LeaseResult::Queued(status(&row))
-                            }),
+                            })
+                        }
                         Ok(QueueBuildLeaseResult::LeaseIdentityConflict { .. }) | Err(_) => {
                             self.unavailable()
                         }
@@ -252,6 +330,10 @@ impl BuildLeaseService {
         if !self.is_ready() {
             return self.unavailable();
         }
+        self.telemetry.operation(
+            LeaseOperation::Status,
+            telemetry_consumer(&request.identity),
+        );
         self.pause.before_transaction(LeaseOperation::Status).await;
         let (key, _) = identity(&request.identity);
         match self.repository.get(&key).await {
@@ -277,6 +359,8 @@ impl BuildLeaseService {
         if !self.is_ready() {
             return self.unavailable();
         }
+        self.telemetry
+            .operation(LeaseOperation::Bind, telemetry_consumer(&request.identity));
         self.pause.before_transaction(LeaseOperation::Bind).await;
         let (key, _) = identity(&request.identity);
         match self
@@ -312,6 +396,8 @@ impl BuildLeaseService {
         if !self.is_ready() {
             return self.unavailable();
         }
+        self.telemetry
+            .operation(LeaseOperation::Expire, LeaseTelemetryConsumer::System);
         self.pause.before_transaction(LeaseOperation::Expire).await;
         match self
             .repository
@@ -343,6 +429,7 @@ impl BuildLeaseService {
         if !self.is_ready() {
             return self.unavailable();
         }
+        self.telemetry.operation(op, telemetry_consumer(&id));
         self.pause.before_transaction(op).await;
         let (key, _) = identity(&id);
         // A delayed grant acknowledgement must replay a forward durable state:
@@ -375,6 +462,7 @@ impl BuildLeaseService {
         if !self.is_ready() {
             return self.unavailable();
         }
+        self.telemetry.operation(op, telemetry_consumer(&id));
         self.pause.before_transaction(op).await;
         let (key, _) = identity(&id);
         let evidence = cleanup.then(|| serde_json::json!({"candidate_cleanup": true}));
@@ -430,6 +518,8 @@ impl BuildLeaseService {
     async fn drain(&self) -> Result<Option<BuildLeaseRow>, ()> {
         let mut last = None;
         loop {
+            self.telemetry
+                .operation(LeaseOperation::Grant, LeaseTelemetryConsumer::System);
             self.pause.before_transaction(LeaseOperation::Grant).await;
             match self
                 .repository
@@ -452,6 +542,24 @@ impl BuildLeaseService {
     fn unavailable(&self) -> LeaseResult {
         self.telemetry.outcome(LeaseTelemetryOutcome::Unavailable);
         LeaseResult::LeaseUnavailable
+    }
+    async fn queue_result(&self, row: &BuildLeaseRow) -> Option<LeaseResult> {
+        if row.state == BuildLeaseState::Terminal
+            && row.terminal_reason.as_deref() == Some("deadline_expired")
+        {
+            let credit = self
+                .repository
+                .consume_timeout_credit(&row.key)
+                .await
+                .ok()?;
+            return Some(LeaseResult::LeaseWaitTimeout {
+                timeout_credit: credit.then_some(djinn_supervisor::services::TimeoutCredit {
+                    units: 1,
+                    retry_after_ms: 0,
+                }),
+            });
+        }
+        queue_result(row)
     }
     fn publish(&self, rows: &[BuildLeaseRow]) {
         let (queued, occupied) = rows
@@ -486,6 +594,12 @@ fn identity(id: &LeaseIdentity) -> (BuildLeaseKey, String) {
                 v.project_id, v.warm_request_id, v.graph_revision
             ),
         ),
+    }
+}
+fn telemetry_consumer(id: &LeaseIdentity) -> LeaseTelemetryConsumer {
+    match id {
+        LeaseIdentity::TaskInvocation(_) => LeaseTelemetryConsumer::TaskInvocation,
+        LeaseIdentity::GraphWarm(_) => LeaseTelemetryConsumer::GraphWarm,
     }
 }
 fn timestamp(ms: i64) -> String {
@@ -581,6 +695,8 @@ fn status(row: &BuildLeaseRow) -> LeaseStatus {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
+
     use super::*;
 
     fn row(state: BuildLeaseState, terminal_reason: Option<&str>) -> BuildLeaseRow {
@@ -605,6 +721,7 @@ mod tests {
             .then(|| "pod-a".into()),
             candidate_cleanup: None,
             terminal_reason: terminal_reason.map(str::to_owned),
+            timeout_credit_consumed: false,
             created_at: "2026-01-01T00:00:00Z".into(),
             updated_at: "2026-01-01T00:00:00Z".into(),
             granted_at: None,
@@ -670,5 +787,134 @@ mod tests {
                 timeout_credit: None
             }
         );
+    }
+
+    #[test]
+    fn production_metrics_use_only_bounded_typed_labels() {
+        let (_, rendered) = djinn_telemetry::render_isolated(|| {
+            let telemetry = MetricsLeaseTelemetry;
+            for operation in [
+                LeaseOperation::Queue,
+                LeaseOperation::Grant,
+                LeaseOperation::Status,
+                LeaseOperation::Abandon,
+                LeaseOperation::Bind,
+                LeaseOperation::Cancel,
+                LeaseOperation::Release,
+            ] {
+                telemetry.operation(operation, LeaseTelemetryConsumer::TaskInvocation);
+                telemetry.operation(operation, LeaseTelemetryConsumer::GraphWarm);
+            }
+            for operation in [
+                LeaseOperation::Recover,
+                LeaseOperation::Grant,
+                LeaseOperation::Expire,
+                LeaseOperation::SetCap,
+            ] {
+                telemetry.operation(operation, LeaseTelemetryConsumer::System);
+            }
+            for state in [
+                LeaseTelemetryState::Queued,
+                LeaseTelemetryState::Occupied,
+                LeaseTelemetryState::Terminal,
+                LeaseTelemetryState::NotReady,
+            ] {
+                telemetry.state(state, 1);
+            }
+            for outcome in [
+                LeaseTelemetryOutcome::Queued,
+                LeaseTelemetryOutcome::Granted,
+                LeaseTelemetryOutcome::Timeout,
+                LeaseTelemetryOutcome::Conflict,
+                LeaseTelemetryOutcome::Unavailable,
+                LeaseTelemetryOutcome::Terminal,
+                LeaseTelemetryOutcome::Status,
+            ] {
+                telemetry.outcome(outcome);
+            }
+        });
+
+        let allowed_keys = BTreeSet::from(["operation", "consumer", "state", "outcome"]);
+        let allowed_operations = BTreeSet::from([
+            "recover", "queue", "grant", "status", "abandon", "bind", "cancel", "release",
+            "expire", "set_cap",
+        ]);
+        let allowed_consumers = BTreeSet::from(["task_invocation", "graph_warm", "system"]);
+        let allowed_states = BTreeSet::from(["queued", "occupied", "terminal", "not_ready"]);
+        let allowed_outcomes = BTreeSet::from([
+            "queued",
+            "granted",
+            "timeout",
+            "conflict",
+            "unavailable",
+            "terminal",
+            "status",
+        ]);
+        let mut seen_operations = BTreeSet::new();
+        let mut seen_consumers = BTreeSet::new();
+        let mut seen_states = BTreeSet::new();
+        let mut seen_outcomes = BTreeSet::new();
+
+        for line in rendered
+            .lines()
+            .filter(|line| line.starts_with("djinn_build_lease_") && !line.starts_with('#'))
+        {
+            let labels = line
+                .split_once('{')
+                .and_then(|(_, rest)| rest.split_once('}').map(|(labels, _)| labels))
+                .unwrap_or("");
+            let mut line_keys = BTreeSet::new();
+            for label in labels.split(',').filter(|label| !label.is_empty()) {
+                let (key, quoted_value) = label.split_once('=').unwrap_or((label, ""));
+                let value = quoted_value.trim_matches('"');
+                assert!(allowed_keys.contains(key), "unbounded metric key in {line}");
+                line_keys.insert(key);
+                if key == "operation" {
+                    assert!(allowed_operations.contains(value));
+                    seen_operations.insert(value);
+                } else if key == "consumer" {
+                    assert!(allowed_consumers.contains(value));
+                    seen_consumers.insert(value);
+                } else if key == "state" {
+                    assert!(allowed_states.contains(value));
+                    seen_states.insert(value);
+                } else if key == "outcome" {
+                    assert!(allowed_outcomes.contains(value));
+                    seen_outcomes.insert(value);
+                }
+            }
+            if line.starts_with("djinn_build_lease_operations_total") {
+                assert_eq!(line_keys, BTreeSet::from(["operation", "consumer"]));
+            } else if line.starts_with("djinn_build_lease_units") {
+                assert_eq!(line_keys, BTreeSet::from(["state"]));
+            } else if line.starts_with("djinn_build_lease_outcomes_total") {
+                assert_eq!(line_keys, BTreeSet::from(["outcome"]));
+            }
+        }
+
+        assert_eq!(seen_operations, allowed_operations);
+        assert_eq!(seen_consumers, allowed_consumers);
+        assert_eq!(seen_states, allowed_states);
+        assert_eq!(seen_outcomes, allowed_outcomes);
+        for identifier in [
+            "task-run-secret-7f91",
+            "pod-secret-7f91",
+            "invocation-secret-7f91",
+            "request-secret-7f91",
+            "lease-secret-7f91",
+            "fencing-secret-7f91",
+        ] {
+            assert!(!rendered.contains(identifier));
+        }
+        for forbidden_key in [
+            "task_run_id",
+            "pod_uid",
+            "invocation_id",
+            "request_id",
+            "lease_id",
+            "fencing_token",
+        ] {
+            assert!(!rendered.contains(&format!("{forbidden_key}=\"")));
+        }
     }
 }
