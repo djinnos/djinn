@@ -24,7 +24,8 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { ProposalsPage } from "./ProposalsPage";
 import { setMcpToolResponder } from "@/storybook-mocks/mcpClient";
 import { projectStore } from "@/stores/projectStore";
-import type { Project } from "@/api/types";
+import type { Project, ProposalLintResult } from "@/api/types";
+import type { ProposalDetail } from "@/lib/proposalQueries";
 import {
   listProposals,
   richDetail,
@@ -60,6 +61,47 @@ function populatedResponder(tool: string): unknown {
       return {};
   }
 }
+
+const lintResult = (overrides: Partial<ProposalLintResult> = {}): ProposalLintResult => ({
+  body_format: "markdown",
+  body_sha256: "story-lint-sha",
+  checked_at: "2026-06-02T00:00:00Z",
+  errors: [],
+  linter_version: "v1",
+  skipped_tiers: [],
+  warnings: [],
+  ...overrides,
+});
+
+function detailResponder(detail: ProposalDetail) {
+  return (tool: string): unknown => {
+    if (tool === "proposal_list") return { proposals: listProposals };
+    if (tool === "proposal_show") return detail;
+    return {};
+  };
+}
+
+const warningDetail: ProposalDetail = {
+  ...richDetail,
+  latest_lint: lintResult({
+    warnings: [{ severity: "warning", code: "SPEC_STYLE_FUTURE", message: "Server-provided style warning", span: { start: 24, end: 48 } }],
+  }),
+};
+const legacyErrorDetail: ProposalDetail = {
+  ...richDetail,
+  latest_lint: lintResult({
+    errors: [{ severity: "error", code: "SPEC_LEGACY_CORRUPT", message: "Legacy head is corrupt", span: { start: 0, end: 16 } }],
+  }),
+};
+const mixedLintDetail: ProposalDetail = {
+  ...richDetail,
+  latest_lint: lintResult({
+    errors: [{ severity: "error", code: "SPEC_REQUIRED_SECTION", message: "Required section is missing", span: { start: 12, end: 18 } }],
+    warnings: [{ severity: "warning", code: "FUTURE_LINT_CODE", message: "Unknown future code remains readable", span: { start: 30, end: 41 } }],
+  }),
+};
+const cleanLintDetail: ProposalDetail = { ...richDetail, latest_lint: lintResult() };
+const absentLintDetail: ProposalDetail = { ...richDetail };
 
 function emptyResponder(tool: string): unknown {
   switch (tool) {
@@ -138,6 +180,36 @@ export const Populated: Story = {
   beforeEach: () => {
     setMcpToolResponder(populatedResponder);
   },
+};
+
+/** Latest head has warnings only, so the integrity banner is amber. */
+export const DetailLintWarnings: Story = {
+  args: { initialPath: "/proposals/prop-refine" },
+  beforeEach: () => setMcpToolResponder(detailResponder(warningDetail)),
+};
+
+/** A legacy corrupt latest head produces the destructive integrity banner. */
+export const DetailLintLegacyError: Story = {
+  args: { initialPath: "/proposals/prop-refine" },
+  beforeEach: () => setMcpToolResponder(detailResponder(legacyErrorDetail)),
+};
+
+/** Errors take precedence over simultaneously returned warnings. */
+export const DetailLintMixed: Story = {
+  args: { initialPath: "/proposals/prop-refine" },
+  beforeEach: () => setMcpToolResponder(detailResponder(mixedLintDetail)),
+};
+
+/** Explicit clean lint result renders no integrity banner. */
+export const DetailLintClean: Story = {
+  args: { initialPath: "/proposals/prop-refine" },
+  beforeEach: () => setMcpToolResponder(detailResponder(cleanLintDetail)),
+};
+
+/** Older servers may omit the additive latest_lint field. */
+export const DetailLintAbsent: Story = {
+  args: { initialPath: "/proposals/prop-refine" },
+  beforeEach: () => setMcpToolResponder(detailResponder(absentLintDetail)),
 };
 
 /** No proposals returned → the empty "No proposals yet." state. */

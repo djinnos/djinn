@@ -38,6 +38,7 @@ use djinn_workspace::Workspace;
 use crate::context::AgentContext;
 use crate::direct_services::DirectServices;
 use crate::supervisor_impl::SupervisorCallbackContext;
+use djinn_coordinator::build_lease::BuildLeaseService;
 use djinn_provider::provider::LlmProvider;
 
 /// Re-export the billing-signal deriver so the in-Pod worker
@@ -57,6 +58,21 @@ pub fn services_for_agent_context(
     cancel: CancellationToken,
 ) -> Arc<dyn SupervisorServices> {
     Arc::new(DirectServices::new(agent_context, cancel))
+}
+
+/// Build the direct supervisor surface around the process-wide coordinator
+/// lease authority. Kubernetes server composition must use this constructor so
+/// task invocations cannot accidentally create an independent FIFO.
+pub fn services_for_agent_context_with_build_lease(
+    agent_context: AgentContext,
+    cancel: CancellationToken,
+    build_lease: Arc<BuildLeaseService>,
+) -> Arc<dyn SupervisorServices> {
+    Arc::new(DirectServices::with_build_lease(
+        agent_context,
+        cancel,
+        build_lease,
+    ))
 }
 
 /// Same as [`services_for_agent_context`] but installs a test-only
