@@ -19,47 +19,67 @@ use tokio_util::sync::CancellationToken;
 
 #[derive(Default)]
 struct ScriptedLauncher {
-    pid: Mutex<Option<u32>>,
-    lifts: Mutex<Vec<LeaseFencingToken>>,
-    kills: AtomicUsize,
-    empties: AtomicUsize,
+    pid: Arc<Mutex<Option<u32>>>,
+    lifts: Arc<Mutex<Vec<LeaseFencingToken>>>,
+    kills: Arc<AtomicUsize>,
+    empties: Arc<AtomicUsize>,
 }
 
 impl CgroupLauncherClient for ScriptedLauncher {
     fn launch(
         &self,
-        command: &mut Command,
+        mut command: Command,
         _: &TaskInvocationLeaseIdentity,
-    ) -> io::Result<std::process::Child> {
+    ) -> io::Result<Box<dyn ProcessHandle>> {
         let child = command.spawn()?;
         *self.pid.lock().unwrap() = Some(child.id());
-        Ok(child)
+        Ok(Box::new(ScriptedHandle {
+            child,
+            lifts: self.lifts.clone(),
+            kills: self.kills.clone(),
+            empties: self.empties.clone(),
+        }))
     }
-    fn sample_cpu(&self, _: &TaskInvocationLeaseIdentity) -> io::Result<CpuStat> {
+}
+struct ScriptedHandle {
+    child: std::process::Child,
+    lifts: Arc<Mutex<Vec<LeaseFencingToken>>>,
+    kills: Arc<AtomicUsize>,
+    empties: Arc<AtomicUsize>,
+}
+impl ProcessHandle for ScriptedHandle {
+    fn drain_stdout(&mut self) -> io::Result<Vec<u8>> {
+        Ok(Vec::new())
+    }
+    fn drain_stderr(&mut self) -> io::Result<Vec<u8>> {
+        Ok(Vec::new())
+    }
+    fn try_wait(&mut self) -> io::Result<Option<std::process::ExitStatus>> {
+        self.child.try_wait()
+    }
+    fn wait(&mut self) -> io::Result<std::process::ExitStatus> {
+        self.child.wait()
+    }
+    fn sample_cpu(&mut self) -> io::Result<CpuStat> {
         Ok(CpuStat {
             usage_usec: 10,
             ..CpuStat::default()
         })
     }
-    fn fenced_lift(
-        &self,
-        _: &TaskInvocationLeaseIdentity,
-        token: &LeaseFencingToken,
-    ) -> io::Result<()> {
+    fn fenced_lift(&mut self, token: &LeaseFencingToken) -> io::Result<()> {
         self.lifts.lock().unwrap().push(token.clone());
         Ok(())
     }
-    fn kill(&self, _: &TaskInvocationLeaseIdentity) -> io::Result<()> {
+    fn kill(&mut self) -> io::Result<()> {
         self.kills.fetch_add(1, Ordering::SeqCst);
-        if let Some(pid) = *self.pid.lock().unwrap() {
-            unsafe {
-                libc::kill(pid as i32, libc::SIGKILL);
-            }
-        }
+        let _ = self.child.kill();
         Ok(())
     }
-    fn wait_empty(&self, _: &TaskInvocationLeaseIdentity) -> io::Result<()> {
+    fn wait_empty(&mut self) -> io::Result<()> {
         self.empties.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+    fn cleanup(&mut self) -> io::Result<()> {
         Ok(())
     }
 }

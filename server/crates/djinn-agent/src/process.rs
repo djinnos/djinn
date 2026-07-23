@@ -10,11 +10,13 @@
 
 use std::future::Future;
 use std::io;
-use std::process::{Command, Output};
-use std::sync::Arc;
+use std::process::{Command, ExitStatus, Output};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use djinn_cgroup_launcher::CpuStat;
+use djinn_cgroup_launcher::{
+    CommandSpec, CpuStat, Invocation, broker::ChildStatus, transport::UnixBrokerClient,
+};
 use djinn_core::clock::{Clock, SystemClock};
 use djinn_supervisor::services::{
     LeaseAbandonRequest, LeaseDeadlines, LeaseFencingToken, LeaseGrantRequest, LeaseIdentity,
@@ -74,23 +76,231 @@ pub fn isolate_process_group(cmd: &mut Command) {
     }
 }
 
-/// The launcher is deliberately separate from the supervisor: it controls one
-/// cgroup leaf and samples `cpu.stat`; it never owns a second lease ledger.
-#[cfg_attr(not(test), allow(dead_code))] // consumed by the workspace lease wiring task
+/// Remote process lifecycle owned by the authenticated launcher broker.
+pub(crate) trait ProcessHandle: Send {
+    fn drain_stdout(&mut self) -> io::Result<Vec<u8>>;
+    fn drain_stderr(&mut self) -> io::Result<Vec<u8>>;
+    fn try_wait(&mut self) -> io::Result<Option<ExitStatus>>;
+    fn wait(&mut self) -> io::Result<ExitStatus>;
+    fn sample_cpu(&mut self) -> io::Result<CpuStat>;
+    fn fenced_lift(&mut self, fence: &LeaseFencingToken) -> io::Result<()>;
+    fn kill(&mut self) -> io::Result<()>;
+    fn wait_empty(&mut self) -> io::Result<()>;
+    fn cleanup(&mut self) -> io::Result<()>;
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) trait CgroupLauncherClient: Send + Sync + 'static {
     fn launch(
         &self,
-        command: &mut Command,
+        command: Command,
         identity: &TaskInvocationLeaseIdentity,
-    ) -> io::Result<std::process::Child>;
-    fn sample_cpu(&self, identity: &TaskInvocationLeaseIdentity) -> io::Result<CpuStat>;
-    fn fenced_lift(
+    ) -> io::Result<Box<dyn ProcessHandle>>;
+}
+
+/// Production-only Unix broker adapter; it has no local `Command::spawn` fallback.
+pub(crate) struct UnixBrokerLauncher {
+    client: Arc<Mutex<UnixBrokerClient>>,
+    invocation_fence: u64,
+}
+impl UnixBrokerLauncher {
+    #[allow(dead_code)] // constructed by workspace broker composition
+    pub(crate) fn new(client: UnixBrokerClient, invocation_fence: u64) -> Self {
+        Self {
+            client: Arc::new(Mutex::new(client)),
+            invocation_fence,
+        }
+    }
+}
+impl CgroupLauncherClient for UnixBrokerLauncher {
+    fn launch(
         &self,
+        command: Command,
         identity: &TaskInvocationLeaseIdentity,
-        fence: &LeaseFencingToken,
-    ) -> io::Result<()>;
-    fn kill(&self, identity: &TaskInvocationLeaseIdentity) -> io::Result<()>;
-    fn wait_empty(&self, identity: &TaskInvocationLeaseIdentity) -> io::Result<()>;
+    ) -> io::Result<Box<dyn ProcessHandle>> {
+        let spec = command_spec(command)?;
+        let id = identity.invocation_id.clone();
+        let mut c = lock_client(&self.client)?;
+        c.begin(Invocation {
+            id: id.clone(),
+            fence: self.invocation_fence,
+        })
+        .map_err(broker_error)?;
+        if let Err(e) = c.create(&id, &id, &spec) {
+            let _ = c.cleanup(&id);
+            return Err(broker_error(e));
+        }
+        Ok(Box::new(UnixBrokerProcessHandle {
+            client: self.client.clone(),
+            id,
+            status: None,
+        }))
+    }
+}
+struct UnixBrokerProcessHandle {
+    client: Arc<Mutex<UnixBrokerClient>>,
+    id: String,
+    status: Option<ExitStatus>,
+}
+impl UnixBrokerProcessHandle {
+    fn record(&mut self, s: ChildStatus) -> io::Result<()> {
+        if s != ChildStatus::Running {
+            self.status = Some(remote_exit_status(s)?);
+        }
+        Ok(())
+    }
+    fn output(&mut self, stderr: bool) -> io::Result<Vec<u8>> {
+        let (bytes, _, s) = if stderr {
+            lock_client(&self.client)?
+                .stderr(&self.id)
+                .map_err(broker_error)?
+        } else {
+            lock_client(&self.client)?
+                .stdout(&self.id)
+                .map_err(broker_error)?
+        };
+        self.record(s)?;
+        Ok(bytes)
+    }
+}
+impl ProcessHandle for UnixBrokerProcessHandle {
+    fn drain_stdout(&mut self) -> io::Result<Vec<u8>> {
+        self.output(false)
+    }
+    fn drain_stderr(&mut self) -> io::Result<Vec<u8>> {
+        self.output(true)
+    }
+    fn try_wait(&mut self) -> io::Result<Option<ExitStatus>> {
+        if self.status.is_none() {
+            let s = lock_client(&self.client)?
+                .stdout(&self.id)
+                .map_err(broker_error)?
+                .2;
+            self.record(s)?;
+        }
+        Ok(self.status)
+    }
+    fn wait(&mut self) -> io::Result<ExitStatus> {
+        loop {
+            if let Some(s) = self.try_wait()? {
+                return Ok(s);
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+    fn sample_cpu(&mut self) -> io::Result<CpuStat> {
+        lock_client(&self.client)?
+            .sample(&self.id)
+            .map_err(broker_error)
+    }
+    fn fenced_lift(&mut self, f: &LeaseFencingToken) -> io::Result<()> {
+        lock_client(&self.client)?
+            .lift(&self.id, f.0)
+            .map_err(broker_error)
+    }
+    fn kill(&mut self) -> io::Result<()> {
+        lock_client(&self.client)?
+            .kill(&self.id)
+            .map_err(broker_error)
+    }
+    fn wait_empty(&mut self) -> io::Result<()> {
+        lock_client(&self.client)?
+            .wait_empty(&self.id)
+            .map_err(broker_error)
+    }
+    fn cleanup(&mut self) -> io::Result<()> {
+        lock_client(&self.client)?
+            .cleanup(&self.id)
+            .map_err(broker_error)
+    }
+}
+fn lock_client(
+    c: &Arc<Mutex<UnixBrokerClient>>,
+) -> io::Result<std::sync::MutexGuard<'_, UnixBrokerClient>> {
+    c.lock()
+        .map_err(|_| io::Error::other("launcher broker client mutex poisoned"))
+}
+fn broker_error(e: djinn_cgroup_launcher::Error) -> io::Error {
+    io::Error::other(e)
+}
+#[cfg(unix)]
+fn remote_exit_status(s: ChildStatus) -> io::Result<ExitStatus> {
+    match s {
+        ChildStatus::Running => Err(io::Error::other("running child is not terminal")),
+        ChildStatus::Exited(x) => Ok(ExitStatus::from_raw(i32::from(x) << 8)),
+        ChildStatus::Signaled(x) => Ok(ExitStatus::from_raw(i32::from(x))),
+    }
+}
+#[cfg(not(unix))]
+fn remote_exit_status(_: ChildStatus) -> io::Result<ExitStatus> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "unix broker status",
+    ))
+}
+fn command_spec(command: Command) -> io::Result<CommandSpec> {
+    let text = |v: &std::ffi::OsStr, what| {
+        v.to_str().map(str::to_owned).ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidInput, format!("{what} must be UTF-8"))
+        })
+    };
+    let program = text(command.get_program(), "program")?;
+    let argv = command
+        .get_args()
+        .map(|x| text(x, "argument"))
+        .collect::<io::Result<Vec<_>>>()?;
+    let cwd = command
+        .get_current_dir()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "command cwd is required"))?;
+    let cwd = text(cwd.as_os_str(), "cwd")?;
+    let environment = command
+        .get_envs()
+        .filter_map(|(k, v)| {
+            v.map(|v| Ok((text(k, "environment key")?, text(v, "environment value")?)))
+        })
+        .collect::<io::Result<Vec<_>>>()?;
+    let spec = CommandSpec {
+        program,
+        argv,
+        cwd,
+        environment,
+    };
+    spec.validate().map_err(broker_error)?;
+    Ok(spec)
+}
+
+#[cfg(test)]
+impl ProcessHandle for std::process::Child {
+    fn drain_stdout(&mut self) -> io::Result<Vec<u8>> {
+        Ok(Vec::new())
+    }
+    fn drain_stderr(&mut self) -> io::Result<Vec<u8>> {
+        Ok(Vec::new())
+    }
+    fn try_wait(&mut self) -> io::Result<Option<ExitStatus>> {
+        std::process::Child::try_wait(self)
+    }
+    fn wait(&mut self) -> io::Result<ExitStatus> {
+        std::process::Child::wait(self)
+    }
+    fn sample_cpu(&mut self) -> io::Result<CpuStat> {
+        Ok(CpuStat {
+            usage_usec: 10,
+            ..CpuStat::default()
+        })
+    }
+    fn fenced_lift(&mut self, _: &LeaseFencingToken) -> io::Result<()> {
+        Ok(())
+    }
+    fn kill(&mut self) -> io::Result<()> {
+        std::process::Child::kill(self)
+    }
+    fn wait_empty(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+    fn cleanup(&mut self) -> io::Result<()> {
+        Ok(())
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -144,7 +354,7 @@ impl LeaseInvocationRunner {
     }
     pub(crate) async fn output(
         &self,
-        mut cmd: Command,
+        cmd: Command,
         config: LeaseInvocationConfig,
         cancel: CancellationToken,
     ) -> Result<LeaseInvocationOutput, LeaseInvocationError> {
@@ -156,10 +366,9 @@ impl LeaseInvocationRunner {
         let lease = LeaseIdentity::TaskInvocation(identity.clone());
         let mut child = self
             .launcher
-            .launch(&mut cmd, &identity)
+            .launch(cmd, &identity)
             .map_err(LeaseInvocationError::Launcher)?;
-        let stdout = spawn_drain(child.stdout.take());
-        let stderr = spawn_stderr_drain(child.stderr.take());
+        let (mut stdout, mut stderr) = (Vec::new(), Vec::new());
         let mut deadline = self.clock.now_instant() + config.timeout;
         let (mut queued, mut fence, mut credit_used, mut lease_error) = (false, None, false, None);
         let mut unavailable_responses = 0_u8;
@@ -167,15 +376,13 @@ impl LeaseInvocationRunner {
         // wait that observed terminal intent. Consequently no later response
         // can authorize a cgroup lift.
         let (observed, termination) = 'invocation: loop {
+            drain_remote(&mut *child, &mut stdout, &mut stderr)?;
             if let Some(terminal) =
-                terminal_now(&mut child, &cancel, self.clock.as_ref(), deadline)?
+                terminal_now(&mut *child, &cancel, self.clock.as_ref(), deadline)?
             {
                 break terminal;
             }
-            let cpu = self
-                .launcher
-                .sample_cpu(&identity)
-                .map_err(LeaseInvocationError::Launcher)?;
+            let cpu = child.sample_cpu().map_err(LeaseInvocationError::Launcher)?;
             let result = if !queued && cpu.usage_usec >= config.cpu_usage_threshold_usec {
                 queued = true;
                 match await_lease_or_terminal(
@@ -186,7 +393,7 @@ impl LeaseInvocationRunner {
                             launch_deadline_ms: config.launch_deadline_ms,
                         },
                     }),
-                    &mut child,
+                    &mut *child,
                     &cancel,
                     self.clock.as_ref(),
                     deadline,
@@ -201,7 +408,7 @@ impl LeaseInvocationRunner {
                     self.services.lease_status(LeaseStatusRequest {
                         identity: lease.clone(),
                     }),
-                    &mut child,
+                    &mut *child,
                     &cancel,
                     self.clock.as_ref(),
                     deadline,
@@ -268,7 +475,7 @@ impl LeaseInvocationRunner {
                         identity: lease.clone(),
                         fencing_token: token.clone(),
                     }),
-                    &mut child,
+                    &mut *child,
                     &cancel,
                     self.clock.as_ref(),
                     deadline,
@@ -288,12 +495,12 @@ impl LeaseInvocationRunner {
                         ) && status.fencing_token.as_ref() == Some(&token) =>
                     {
                         if let Some(terminal) =
-                            terminal_now(&mut child, &cancel, self.clock.as_ref(), deadline)?
+                            terminal_now(&mut *child, &cancel, self.clock.as_ref(), deadline)?
                         {
                             break 'invocation terminal;
                         }
-                        self.launcher
-                            .fenced_lift(&identity, &token)
+                        child
+                            .fenced_lift(&token)
                             .map_err(LeaseInvocationError::Launcher)?;
                         fence = Some(token);
                     }
@@ -321,21 +528,19 @@ impl LeaseInvocationRunner {
             }
             tokio::task::yield_now().await;
         };
-        self.launcher
-            .kill(&identity)
-            .map_err(LeaseInvocationError::Launcher)?;
-        self.launcher
-            .wait_empty(&identity)
-            .map_err(LeaseInvocationError::Launcher)?;
+        child.kill().map_err(LeaseInvocationError::Launcher)?;
+        child.wait_empty().map_err(LeaseInvocationError::Launcher)?;
+        drain_remote(&mut *child, &mut stdout, &mut stderr)?;
         let status = observed.unwrap_or(child.wait().map_err(started_lease_error)?);
         let process = ProcessOutput {
             output: Output {
                 status,
-                stdout: join_with_timeout(stdout, Duration::from_secs(2)),
-                stderr: join_with_timeout(stderr, Duration::from_secs(2)),
+                stdout,
+                stderr,
             },
             termination,
         };
+        child.cleanup().map_err(LeaseInvocationError::Launcher)?;
         if queued {
             reconcile_terminal_lease(self.services.as_ref(), lease, fence).await;
         }
@@ -357,7 +562,7 @@ enum LeaseWait {
 #[cfg_attr(not(test), allow(dead_code))] // consumed by the workspace lease wiring task
 async fn await_lease_or_terminal<F>(
     request: F,
-    child: &mut std::process::Child,
+    child: &mut dyn ProcessHandle,
     cancel: &CancellationToken,
     clock: &dyn Clock,
     deadline: std::time::Instant,
@@ -380,7 +585,7 @@ where
 
 #[cfg_attr(not(test), allow(dead_code))] // consumed by the workspace lease wiring task
 fn terminal_now(
-    child: &mut std::process::Child,
+    child: &mut dyn ProcessHandle,
     cancel: &CancellationToken,
     clock: &dyn Clock,
     deadline: std::time::Instant,
@@ -401,6 +606,24 @@ fn terminal_now(
         .try_wait()
         .map_err(started_lease_error)?
         .map(|status| (Some(status), ProcessTermination::Exited)))
+}
+
+fn drain_remote(
+    child: &mut dyn ProcessHandle,
+    stdout: &mut Vec<u8>,
+    stderr: &mut Vec<u8>,
+) -> Result<(), LeaseInvocationError> {
+    stdout.extend(
+        child
+            .drain_stdout()
+            .map_err(LeaseInvocationError::Launcher)?,
+    );
+    stderr.extend(
+        child
+            .drain_stderr()
+            .map_err(LeaseInvocationError::Launcher)?,
+    );
+    Ok(())
 }
 
 /// Re-read durable state after every uncertain cleanup response. Operations
@@ -838,19 +1061,15 @@ mod tests {
     impl CgroupLauncherClient for FakeLauncher {
         fn launch(
             &self,
-            command: &mut Command,
+            mut command: Command,
             _: &TaskInvocationLeaseIdentity,
-        ) -> io::Result<std::process::Child> {
+        ) -> io::Result<Box<dyn ProcessHandle>> {
             let child = command.spawn()?;
             *self.child_pid.lock().unwrap() = Some(child.id());
-            Ok(child)
+            Ok(Box::new(child))
         }
-        fn sample_cpu(&self, _: &TaskInvocationLeaseIdentity) -> io::Result<CpuStat> {
-            Ok(CpuStat {
-                usage_usec: 10,
-                ..CpuStat::default()
-            })
-        }
+    }
+    impl FakeLauncher {
         fn fenced_lift(
             &self,
             _: &TaskInvocationLeaseIdentity,
@@ -861,11 +1080,6 @@ mod tests {
         }
         fn kill(&self, _: &TaskInvocationLeaseIdentity) -> io::Result<()> {
             self.kills.fetch_add(1, Ordering::SeqCst);
-            if let Some(pid) = *self.child_pid.lock().unwrap() {
-                unsafe {
-                    libc::kill(pid as i32, libc::SIGKILL);
-                }
-            }
             Ok(())
         }
         fn wait_empty(&self, _: &TaskInvocationLeaseIdentity) -> io::Result<()> {
