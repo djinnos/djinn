@@ -205,7 +205,16 @@ async fn whole_refresh_failure_preserves_keyed_alarms_and_recovers() {
 
     // Failure preserves existing alarms while the refresh error is created.
     phase.store(1, Ordering::SeqCst);
-    run_cheap_doctor_checks(&registry, &db, &events_tx, Some("refresh-failure")).await;
+    run_cheap_doctor_checks_with_preserved_retrieval_keys_inner(
+        &registry,
+        &db,
+        &events_tx,
+        Some("refresh-failure"),
+        &[],
+        None,
+        Some(RetrievalRefreshOutcome::Failed),
+    )
+    .await;
     assert_eq!(zero_resolver_invocations.load(Ordering::SeqCst), 2);
     assert_eq!(starvation_resolver_invocations.load(Ordering::SeqCst), 2);
     assert_eq!(
@@ -228,7 +237,16 @@ async fn whole_refresh_failure_preserves_keyed_alarms_and_recovers() {
     // Healthy absence resolves both alarms and the refresh error, and activity
     // is driven by persisted lifecycle rows rather than current findings.
     phase.store(2, Ordering::SeqCst);
-    run_cheap_doctor_checks(&registry, &db, &events_tx, Some("healthy-recovery")).await;
+    run_cheap_doctor_checks_with_preserved_retrieval_keys_inner(
+        &registry,
+        &db,
+        &events_tx,
+        Some("healthy-recovery"),
+        &[],
+        None,
+        Some(RetrievalRefreshOutcome::Healthy),
+    )
+    .await;
     assert_eq!(zero_resolver_invocations.load(Ordering::SeqCst), 3);
     assert_eq!(starvation_resolver_invocations.load(Ordering::SeqCst), 3);
     for finding in [&zero_before, &starvation_before, &refresh] {

@@ -472,20 +472,28 @@ pub async fn run_elected_retrieval_refresh_and_cheap_checks(
         return Vec::new();
     }
 
-    let malformed_retrieval_keys = if let Some(source) = source {
-        if let Err(error) = source.refresh().await {
-            warn!(error = %error, "retrieval health refresh failed; stale resolvers suppressed");
+    let (malformed_retrieval_keys, refresh_outcome) = if let Some(source) = source {
+        match source.refresh().await {
+            Ok(()) => (
+                crate::doctor::retrieval_health::malformed_retrieval_alarm_keys(&source.snapshot()),
+                Some(RetrievalRefreshOutcome::Healthy),
+            ),
+            Err(error) => {
+                warn!(error = %error, "retrieval health refresh failed; stale resolvers suppressed");
+                (Vec::new(), Some(RetrievalRefreshOutcome::Failed))
+            }
         }
-        crate::doctor::retrieval_health::malformed_retrieval_alarm_keys(&source.snapshot())
     } else {
-        Vec::new()
+        (Vec::new(), None)
     };
-    run_cheap_doctor_checks_with_preserved_retrieval_keys(
+    run_cheap_doctor_checks_with_preserved_retrieval_keys_inner(
         registry,
         db,
         events_tx,
         run_id,
         &malformed_retrieval_keys,
+        None,
+        refresh_outcome,
     )
     .await
 }
