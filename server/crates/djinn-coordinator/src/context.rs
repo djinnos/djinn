@@ -48,6 +48,24 @@ pub struct ReconciliationSweepConfig {
     pub grace_period: Duration,
 }
 
+/// Rollout gate for the coordinator-owned retroactive proposal lint sweep.
+/// The sweep is disabled by default because it reads retained proposal bodies.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ProposalSpecIntegritySweepConfig {
+    /// Env: `DJINN_PROPOSAL_SPEC_INTEGRITY_SWEEP_V1` (default `false`).
+    pub enabled: bool,
+}
+
+impl ProposalSpecIntegritySweepConfig {
+    pub fn from_env() -> Self {
+        Self {
+            enabled: std::env::var("DJINN_PROPOSAL_SPEC_INTEGRITY_SWEEP_V1")
+                .map(|value| parse_bool_env(&value))
+                .unwrap_or(false),
+        }
+    }
+}
+
 impl Default for ReconciliationSweepConfig {
     fn default() -> Self {
         Self {
@@ -571,6 +589,16 @@ mod tests {
         assert!(!parse_bool_env("no"));
         assert!(!parse_bool_env(""));
         assert!(!parse_bool_env("random"));
+    }
+
+    #[test]
+    fn proposal_spec_integrity_sweep_defaults_to_disabled() {
+        unsafe { std::env::remove_var("DJINN_PROPOSAL_SPEC_INTEGRITY_SWEEP_V1") };
+        assert!(!ProposalSpecIntegritySweepConfig::default().enabled);
+        assert!(!ProposalSpecIntegritySweepConfig::from_env().enabled);
+        unsafe { std::env::set_var("DJINN_PROPOSAL_SPEC_INTEGRITY_SWEEP_V1", "true") };
+        assert!(ProposalSpecIntegritySweepConfig::from_env().enabled);
+        unsafe { std::env::remove_var("DJINN_PROPOSAL_SPEC_INTEGRITY_SWEEP_V1") };
     }
 }
 
