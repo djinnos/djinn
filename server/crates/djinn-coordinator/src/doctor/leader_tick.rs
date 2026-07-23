@@ -229,6 +229,20 @@ pub async fn run_cheap_doctor_checks(
     events_tx: &tokio::sync::broadcast::Sender<djinn_core::events::DjinnEventEnvelope>,
     run_id: Option<&str>,
 ) -> Vec<DoctorCheckRun> {
+    run_cheap_doctor_checks_with_preserved_retrieval_keys(registry, db, events_tx, run_id, &[])
+        .await
+}
+
+/// Run the cheap subset while retaining prior rows for malformed groups from
+/// an otherwise successful retrieval snapshot. The supplied keys must be
+/// derived from taxonomy-v1 group helpers and include both potential alarms.
+pub async fn run_cheap_doctor_checks_with_preserved_retrieval_keys(
+    registry: &DoctorRegistry,
+    db: &djinn_db::Database,
+    events_tx: &tokio::sync::broadcast::Sender<djinn_core::events::DjinnEventEnvelope>,
+    run_id: Option<&str>,
+    malformed_retrieval_keys: &[String],
+) -> Vec<DoctorCheckRun> {
     let started = SystemClock::new().now_instant();
     let runs = match run_cheap_subset(registry) {
         Ok(runs) => runs,
@@ -281,7 +295,7 @@ pub async fn run_cheap_doctor_checks(
                 }
             }
         } else {
-            Vec::new()
+            malformed_retrieval_keys.to_vec()
         };
         if let Err(error) = finding_repo
             .reconcile_retrieval_findings(retrieval, &preserve_keys)
