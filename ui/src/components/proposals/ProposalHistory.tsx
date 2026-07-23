@@ -3,6 +3,7 @@ import { useQuery } from "@tanstack/react-query";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { ArrowDown01Icon } from "@hugeicons/core-free-icons";
 import { usersQueryOptions } from "@/api/queryOptions";
+import type { ProposalLintResult } from "@/api/types";
 import { userDisplayName, type OrgUser } from "@/api/users";
 import { UserAvatar } from "@/components/UserAvatar";
 import { DiffView } from "@/components/proposals/DiffView";
@@ -14,6 +15,89 @@ import type {
   ProposalDetail,
   ProposalHistoryEntry,
 } from "@/lib/proposalQueries";
+
+type SkippedTierDetail = ProposalLintResult["skipped_tiers"][number] & {
+  message?: string | null;
+};
+
+function revisionLint(revision: ProposalHistoryEntry): ProposalLintResult | null {
+  return revision.lint ?? null;
+}
+
+/** Render only the immutable lint result carried by this exact revision. */
+function LintBadges({ lint }: { lint: ProposalLintResult | null }) {
+  if (!lint) return null;
+
+  const errors = lint.errors?.length ?? 0;
+  const warnings = lint.warnings?.length ?? 0;
+  const skipped = lint.skipped_tiers?.length ?? 0;
+  if (errors === 0 && warnings === 0 && skipped === 0) return null;
+
+  return (
+    <>
+      {errors > 0 && (
+        <Badge variant="destructive">
+          {errors} error{errors === 1 ? "" : "s"}
+        </Badge>
+      )}
+      {warnings > 0 && (
+        <Badge variant="secondary">
+          {warnings} warning{warnings === 1 ? "" : "s"}
+        </Badge>
+      )}
+      {skipped > 0 && <Badge variant="outline">{skipped} skipped</Badge>}
+    </>
+  );
+}
+
+/** Server diagnostics are deliberately rendered verbatim, including unknown codes. */
+function LintDetails({ lint }: { lint: ProposalLintResult | null }) {
+  if (!lint) return null;
+  const violations = [...(lint.errors ?? []), ...(lint.warnings ?? [])];
+  const skippedTiers = lint.skipped_tiers ?? [];
+  if (violations.length === 0 && skippedTiers.length === 0) return null;
+
+  return (
+    <section
+      aria-label="Lint diagnostics"
+      className="space-y-2 rounded-md border border-border/60 p-2 text-xs"
+    >
+      <p className="font-medium">Lint diagnostics</p>
+      {violations.length > 0 && (
+        <ul className="space-y-1">
+          {violations.map((violation, index) => (
+            <li
+              key={`${violation.severity}-${violation.code}-${index}`}
+              className="rounded border border-border/60 p-2"
+            >
+              <span className="font-medium">{violation.severity}</span>{" · "}
+              <span className="font-mono">{violation.code}</span>{": "}
+              <span>{violation.message}</span>
+              <span className="block text-muted-foreground">
+                bytes [{violation.span.start}, {violation.span.end})
+              </span>
+            </li>
+          ))}
+        </ul>
+      )}
+      {skippedTiers.length > 0 && (
+        <ul className="space-y-1">
+          {(skippedTiers as SkippedTierDetail[]).map((tier, index) => (
+            <li
+              key={`${tier.tier}-${tier.reason}-${index}`}
+              className="rounded border border-border/60 p-2"
+            >
+              <span className="font-medium">Skipped tier</span>{": "}
+              <span className="font-mono">{tier.tier}</span>{" · "}
+              <span>{tier.reason}</span>
+              {tier.message && <span>{": "}{tier.message}</span>}
+            </li>
+          ))}
+        </ul>
+      )}
+    </section>
+  );
+}
 
 function revisionBodyFormat(revision: ProposalHistoryEntry): string {
   const bodyFormat = (revision as { body_format?: unknown }).body_format;
@@ -255,6 +339,7 @@ export function ProposalHistory({ detail }: { detail: ProposalDetail }) {
                     {rangeLabel}
                   </Badge>
                   <Badge variant="secondary">tribunal</Badge>
+                  <LintBadges lint={revisionLint(head)} />
                   <span className="font-medium">
                     Refined via tribunal ({rounds} {rounds === 1 ? "round" : "rounds"})
                   </span>
@@ -280,6 +365,7 @@ export function ProposalHistory({ detail }: { detail: ProposalDetail }) {
                       diff is your original → the converged result.
                     </p>
                     <DiffView before={before?.body ?? ""} after={head.body ?? ""} />
+                    <LintDetails lint={revisionLint(head)} />
                   </div>
                 )}
               </li>
@@ -328,6 +414,7 @@ export function ProposalHistory({ detail }: { detail: ProposalDetail }) {
                     rev {r.seq}
                   </Badge>
                   <Badge variant="secondary">AC amendment</Badge>
+                  <LintBadges lint={revisionLint(r)} />
                   {isHead && (
                     <span className="text-xs text-muted-foreground">current</span>
                   )}
@@ -401,6 +488,7 @@ export function ProposalHistory({ detail }: { detail: ProposalDetail }) {
                         })}
                       </ul>
                     )}
+                    <LintDetails lint={revisionLint(r)} />
                   </div>
                 )}
               </li>
@@ -474,6 +562,7 @@ export function ProposalHistory({ detail }: { detail: ProposalDetail }) {
                 <Badge variant="secondary" className="font-mono">
                   {r.event_kind}
                 </Badge>
+                <LintBadges lint={revisionLint(r)} />
                 {bodyFormat !== "markdown" && (
                   <Badge variant="outline" className="font-mono uppercase">
                     {bodyFormat.toUpperCase()}
@@ -513,6 +602,7 @@ export function ProposalHistory({ detail }: { detail: ProposalDetail }) {
                     </p>
                   )}
                   <DiffView before={prev?.body ?? ""} after={r.body ?? ""} />
+                  <LintDetails lint={revisionLint(r)} />
                   {!prev && (
                     <p className="text-xs text-muted-foreground">
                       Initial spec.
