@@ -1,5 +1,6 @@
 use super::*;
 use async_trait::async_trait;
+use djinn_cgroup_launcher::CpuStat;
 use djinn_core::clock::TestClock;
 use djinn_supervisor::services::{
     LeaseGrant, LeaseStatus, SerializableCreateSessionParams, SerializableCreateTaskRunParams,

@@ -631,7 +631,6 @@ async fn graph_warm_and_task_invocation_share_one_fifo_cap() {
     ));
 }
 
-
 #[tokio::test]
 async fn adapter_recovers_lost_bind_response_from_durable_status_and_rejects_other_uid() {
     let (service, _, _) = service(1).await;
@@ -642,7 +641,13 @@ async fn adapter_recovers_lost_bind_response_from_durable_status_and_rejects_oth
     };
     let adapter = BuildLeaseGraphWarmAdapter::new(service.clone());
     let token = adapter
-        .acquire(identity.clone(), LeaseDeadlines { queue_deadline_ms: 0, launch_deadline_ms: 0 })
+        .acquire(
+            identity.clone(),
+            LeaseDeadlines {
+                queue_deadline_ms: 0,
+                launch_deadline_ms: 0,
+            },
+        )
         .await
         .unwrap()
         .grant
@@ -671,14 +676,18 @@ async fn adapter_recovers_lost_bind_response_from_durable_status_and_rejects_oth
             .await,
         LeaseResult::Status(_)
     ));
-    assert!(adapter
-        .bind(&identity, token.clone(), "immutable-uid".into())
-        .await
-        .is_ok());
-    assert!(adapter
-        .bind(&identity, token, "different-uid".into())
-        .await
-        .is_err());
+    assert!(
+        adapter
+            .bind(&identity, token.clone(), "immutable-uid".into())
+            .await
+            .is_ok()
+    );
+    assert!(
+        adapter
+            .bind(&identity, token, "different-uid".into())
+            .await
+            .is_err()
+    );
 }
 
 #[tokio::test]
@@ -692,7 +701,10 @@ async fn task_then_warm_fifo_and_zero_cap_do_not_bypass_the_shared_ledger() {
     let task_token = match lease_service
         .queue(LeaseQueueRequest {
             identity: task.clone(),
-            deadlines: LeaseDeadlines { queue_deadline_ms: 0, launch_deadline_ms: 0 },
+            deadlines: LeaseDeadlines {
+                queue_deadline_ms: 0,
+                launch_deadline_ms: 0,
+            },
         })
         .await
     {
@@ -732,7 +744,10 @@ async fn task_then_warm_fifo_and_zero_cap_do_not_bypass_the_shared_ledger() {
                     task_run_id: "run".into(),
                     invocation_id: "cap-zero".into(),
                 }),
-                deadlines: LeaseDeadlines { queue_deadline_ms: 0, launch_deadline_ms: 0 },
+                deadlines: LeaseDeadlines {
+                    queue_deadline_ms: 0,
+                    launch_deadline_ms: 0
+                },
             })
             .await,
         LeaseResult::Queued(_)
@@ -740,7 +755,12 @@ async fn task_then_warm_fifo_and_zero_cap_do_not_bypass_the_shared_ledger() {
     let snapshot = zero_repository.snapshot().await.unwrap();
     assert_eq!(snapshot.occupied, 0);
     assert_eq!(snapshot.rows.len(), 2);
-    assert!(snapshot.rows.iter().all(|row| row.state == BuildLeaseState::Queued));
+    assert!(
+        snapshot
+            .rows
+            .iter()
+            .all(|row| row.state == BuildLeaseState::Queued)
+    );
 }
 
 #[derive(Clone)]
