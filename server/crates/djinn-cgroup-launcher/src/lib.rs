@@ -11,6 +11,7 @@ use thiserror::Error;
 
 pub mod broker;
 pub mod child;
+pub mod transport;
 
 const DEFAULT_PERIOD_US: u64 = 100_000;
 
@@ -326,6 +327,10 @@ pub enum Error {
     InvalidNonce,
     #[error("control does not match the active invocation state")]
     InvalidControl,
+    #[error("invalid or oversized launcher transport frame")]
+    InvalidTransportFrame,
+    #[error("broker socket path is unsafe or already owned by another process")]
+    UnsafeSocketPath,
     #[error("child inherited a protected broker descriptor or mount")]
     ChildIsolationViolation,
     #[error("child preparation syscall failed: {0}")]
