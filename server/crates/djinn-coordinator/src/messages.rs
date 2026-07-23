@@ -68,8 +68,12 @@ pub(super) enum CoordinatorMessage {
     DebugSnapshot {
         reply: tokio::sync::oneshot::Sender<CoordinatorDebugSnapshot>,
     },
-    /// Start a proposal refinement run.  The coordinator is authoritative for
-    /// duplicate-start rejection (checks its own `active_refinements` map).
+    /// Post-commit durable refinement wake. The actor reloads this exact run
+    /// before rebuilding a disposable projection.
+    WakeRefinementRun {
+        run_id: String,
+    },
+    /// Legacy compatibility surface; durable admission is not actor authority.
     StartProposalRefinement {
         proposal_id: String,
         current_revision_seq: i32,
