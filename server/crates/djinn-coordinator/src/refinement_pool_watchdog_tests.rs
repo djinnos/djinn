@@ -88,6 +88,8 @@ fn seed_running_refinement(actor: &mut CoordinatorActor, proposal_id: &str, task
         RefinementSession {
             task_id: task_id.to_string(),
             phase: RefinementPhase::AdversaryAttack,
+            run_id: String::new(),
+            generation: 0,
             dispatched_at: StdInstant::now(),
             session_started_at: None,
             model_id: TEST_MODEL.to_owned(),
@@ -207,6 +209,8 @@ fn seed_running_refinement_dispatched_at(
         RefinementSession {
             task_id: task_id.to_string(),
             phase: RefinementPhase::AdversaryAttack,
+            run_id: String::new(),
+            generation: 0,
             dispatched_at,
             session_started_at: None,
             model_id: TEST_MODEL.to_owned(),

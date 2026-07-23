@@ -30,6 +30,8 @@ pub enum RefinementRunState {
 pub enum RefinementIntentState {
     Pending,
     Claimed,
+    /// The task insert was durably accepted; pool enqueue remains retryable.
+    Materialized,
     Completed,
     Cancelled,
     Failed,

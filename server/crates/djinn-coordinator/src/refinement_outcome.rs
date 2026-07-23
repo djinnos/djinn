@@ -11,7 +11,9 @@ use djinn_control_plane::tools::epic_ops::{
 use djinn_control_plane::tools::proposal_readiness::{
     LatestHeadReadinessResult, evaluate_latest_head_readiness,
 };
-use djinn_core::models::{Proposal, ProposalDebateTrail, TransitionAction};
+use djinn_core::models::{
+    Proposal, ProposalDebateTrail, TaskRefinementCorrelation, TransitionAction,
+};
 use djinn_db::{
     EffectiveCreatorProvenance, ProposalRepository, TaskRepository, UserSettingsRepository,
 };
@@ -96,23 +98,29 @@ impl CoordinatorActor {
     /// Process the outcome of a completed refinement session.
     pub(super) async fn process_refinement_outcome(
         &mut self,
-        proposal_id: &str,
+        run_id: &str,
         session: &RefinementSession,
     ) {
-        let state = match self.active_refinements.get(proposal_id).cloned() {
+        let state = match self.active_refinements.get(run_id).cloned() {
             Some(s) => s,
             None => return,
         };
+        // The projection is keyed by the durable run. The proposal identity is
+        // payload data used only for proposal/lifecycle repository operations.
+        let proposal_id = state.proposal_id.clone();
 
         match session.phase {
             RefinementPhase::AdvocateRevision => {
-                self.process_advocate_outcome(proposal_id, &state).await;
+                self.process_advocate_outcome(run_id, &proposal_id, &state)
+                    .await;
             }
             RefinementPhase::AdversaryAttack => {
-                self.process_adversary_outcome(proposal_id, &state).await;
+                self.process_adversary_outcome(run_id, &proposal_id, &state)
+                    .await;
             }
             RefinementPhase::JudgeAdjudication => {
-                self.process_judge_outcome(proposal_id, &state).await;
+                self.process_judge_outcome(run_id, &proposal_id, &state)
+                    .await;
             }
             RefinementPhase::AwaitingHumanReview
             | RefinementPhase::AwaitingEvidence
@@ -122,7 +130,12 @@ impl CoordinatorActor {
 
     /// Process an advocate session outcome: read the latest revision,
     /// patch event_metadata with refinement attribution, and advance.
-    async fn process_advocate_outcome(&mut self, proposal_id: &str, state: &RefinementLoopState) {
+    async fn process_advocate_outcome(
+        &mut self,
+        run_id: &str,
+        proposal_id: &str,
+        state: &RefinementLoopState,
+    ) {
         let event_bus = crate::events::event_bus_for(&self.events_tx);
         let proposal_repo = ProposalRepository::new(self.db.clone(), event_bus);
 
@@ -131,7 +144,7 @@ impl CoordinatorActor {
             Ok(None) => {
                 tracing::warn!(proposal_id = %proposal_id, "Proposal not found after advocate");
                 self.terminate_refinement(
-                    proposal_id,
+                    run_id,
                     StopReason::AgentFailure {
                         role: "advocate".into(),
                         error: "proposal not found after session".into(),
@@ -143,7 +156,7 @@ impl CoordinatorActor {
             Err(e) => {
                 tracing::warn!(proposal_id = %proposal_id, error = %e, "DB error reading proposal");
                 self.terminate_refinement(
-                    proposal_id,
+                    run_id,
                     StopReason::AgentFailure {
                         role: "advocate".into(),
                         error: format!("DB error: {e}"),
@@ -160,7 +173,7 @@ impl CoordinatorActor {
         if advanced {
             let model_id = self
                 .refinement_sessions
-                .get(proposal_id)
+                .get(run_id)
                 .map(|s| s.model_id.clone());
             let event_meta =
                 build_revision_event_metadata(state.current_round, model_id.as_deref());
@@ -184,7 +197,7 @@ impl CoordinatorActor {
             }
         }
 
-        if let Some(state) = self.active_refinements.get_mut(proposal_id) {
+        if let Some(state) = self.active_refinements.get_mut(run_id) {
             if advanced {
                 state.record_advocate_revision(new_revision_seq);
                 tracing::info!(
@@ -207,7 +220,12 @@ impl CoordinatorActor {
 
     /// Process an adversary session outcome: read debate-trail objections
     /// and feed them to the state machine.
-    async fn process_adversary_outcome(&mut self, proposal_id: &str, state: &RefinementLoopState) {
+    async fn process_adversary_outcome(
+        &mut self,
+        run_id: &str,
+        proposal_id: &str,
+        state: &RefinementLoopState,
+    ) {
         let event_bus = crate::events::event_bus_for(&self.events_tx);
         let proposal_repo = ProposalRepository::new(self.db.clone(), event_bus);
 
@@ -220,7 +238,7 @@ impl CoordinatorActor {
                     "DB error reading debate trail"
                 );
                 self.terminate_refinement(
-                    proposal_id,
+                    run_id,
                     StopReason::AgentFailure {
                         role: "adversary".into(),
                         error: format!("DB error: {e}"),
@@ -261,7 +279,7 @@ impl CoordinatorActor {
             explicit_dry,
         };
 
-        let Some(state) = self.active_refinements.get_mut(proposal_id) else {
+        let Some(state) = self.active_refinements.get_mut(run_id) else {
             tracing::warn!(
                 proposal_id = %proposal_id,
                 "adversary outcome arrived for missing refinement state"
@@ -292,7 +310,7 @@ impl CoordinatorActor {
                     ?reason,
                     "Refinement escalated — parking for human review"
                 );
-                if let Some(state) = self.active_refinements.get(proposal_id).cloned() {
+                if let Some(state) = self.active_refinements.get(run_id).cloned() {
                     let summary = format!("Escalated to human review: {reason:?}");
                     self.persist_awaiting_review(proposal_id, &summary, &state)
                         .await;
@@ -353,7 +371,12 @@ impl CoordinatorActor {
 
     /// Process a judge session outcome: read the verdict from the debate
     /// trail and advance the state machine.
-    async fn process_judge_outcome(&mut self, proposal_id: &str, state: &RefinementLoopState) {
+    async fn process_judge_outcome(
+        &mut self,
+        run_id: &str,
+        proposal_id: &str,
+        state: &RefinementLoopState,
+    ) {
         let event_bus = crate::events::event_bus_for(&self.events_tx);
         let proposal_repo = ProposalRepository::new(self.db.clone(), event_bus);
 
@@ -366,7 +389,7 @@ impl CoordinatorActor {
                     "DB error reading debate trail"
                 );
                 self.terminate_refinement(
-                    proposal_id,
+                    run_id,
                     StopReason::AgentFailure {
                         role: "judge".into(),
                         error: format!("DB error: {e}"),
@@ -403,7 +426,7 @@ impl CoordinatorActor {
         });
 
         if let Some(_entry) = needs_evidence_entry {
-            if let Some(state) = self.active_refinements.get_mut(proposal_id) {
+            if let Some(state) = self.active_refinements.get_mut(run_id) {
                 state.record_needs_evidence();
             }
             tracing::info!(
@@ -462,7 +485,7 @@ impl CoordinatorActor {
             }
         }
 
-        let now_awaiting = if let Some(state) = self.active_refinements.get_mut(proposal_id) {
+        let now_awaiting = if let Some(state) = self.active_refinements.get_mut(run_id) {
             state.record_judge_verdict(&verdict);
             state.is_awaiting_human_review()
         } else {
@@ -470,7 +493,7 @@ impl CoordinatorActor {
         };
 
         if now_awaiting {
-            if let Some(state) = self.active_refinements.get(proposal_id).cloned() {
+            if let Some(state) = self.active_refinements.get(run_id).cloned() {
                 self.persist_awaiting_review(proposal_id, &verdict.body, &state)
                     .await;
             }
@@ -511,13 +534,21 @@ impl CoordinatorActor {
         }
     }
 
-    /// Terminate a refinement loop and persist stop metadata.
-    pub(super) async fn terminate_refinement(&mut self, proposal_id: &str, reason: StopReason) {
-        if let Some(state) = self.active_refinements.get_mut(proposal_id) {
+    /// Terminate a refinement loop keyed by its exact durable run. Lifecycle
+    /// persistence retains the proposal ID carried in the projection.
+    pub(super) async fn terminate_refinement(&mut self, run_id: &str, reason: StopReason) {
+        let Some(proposal_id) = self
+            .active_refinements
+            .get(run_id)
+            .map(|state| state.proposal_id.clone())
+        else {
+            return;
+        };
+        if let Some(state) = self.active_refinements.get_mut(run_id) {
             state.terminate(reason.clone());
         }
-        self.persist_refinement_stop(proposal_id, &reason).await;
-        self.refinement_sessions.remove(proposal_id);
+        self.persist_refinement_stop(&proposal_id, &reason).await;
+        self.refinement_sessions.remove(run_id);
     }
 
     /// Resolve the human's single accept/reject review of a converged
@@ -528,7 +559,12 @@ impl CoordinatorActor {
         accept: bool,
         feedback: Option<String>,
     ) -> Result<(), String> {
-        let Some(state) = self.active_refinements.get(proposal_id).cloned() else {
+        let Some((run_id, state)) = self
+            .active_refinements
+            .iter()
+            .find(|(_, state)| state.proposal_id == proposal_id)
+            .map(|(run_id, state)| (run_id.clone(), state.clone()))
+        else {
             return Err(format!("no active refinement for proposal {proposal_id}"));
         };
         if !state.is_awaiting_human_review() {
@@ -550,7 +586,7 @@ impl CoordinatorActor {
                         "Current proposal head could not be resolved for shared DoR/lint readiness."
                             .to_string()
                     });
-                if let Some(state) = self.active_refinements.get_mut(proposal_id) {
+                if let Some(state) = self.active_refinements.get_mut(&run_id) {
                     state.record_judge_verdict(&JudgeVerdictResult {
                         body: context.clone(),
                         blocking: true,
@@ -574,7 +610,7 @@ impl CoordinatorActor {
             );
         }
 
-        if let Some(s) = self.active_refinements.get_mut(proposal_id) {
+        if let Some(s) = self.active_refinements.get_mut(&run_id) {
             s.resolve_human_review(accept, false);
         }
 
@@ -602,7 +638,7 @@ impl CoordinatorActor {
             );
         }
 
-        self.refinement_sessions.remove(proposal_id);
+        self.refinement_sessions.remove(&run_id);
         self.active_refinements.retain(|_, s| !s.is_complete());
         tracing::info!(
             proposal_id = %proposal_id,
@@ -793,26 +829,24 @@ impl CoordinatorActor {
         }
     }
 
-    /// Resolve a user id to the display identity used for the legacy `owner`
-    /// column (their GitHub login). Returns `None` when the user can't be
-    /// resolved (missing row or lookup error) so callers fall back to the prior
-    /// "system" owner rather than failing task creation. `created_by_user_id`
-    /// remains the authoritative ownership field — this is display/filter only.
-    pub(super) async fn resolve_owner_identity(&self, user_id: &str) -> Option<String> {
+    /// Resolve a persisted user id to the GitHub login required by the legacy
+    /// `owner` display/filter column. The caller must fail task creation when
+    /// this integrity boundary cannot be satisfied.
+    pub(super) async fn resolve_owner_identity(&self, user_id: &str) -> Result<String, String> {
         match djinn_db::UserRepository::new(self.db.clone())
             .get_by_id(user_id)
             .await
         {
-            Ok(Some(user)) => Some(user.github_login),
-            Ok(None) => None,
+            Ok(Some(user)) if !user.github_login.trim().is_empty() => Ok(user.github_login),
+            Ok(Some(_)) => Err("persisted user has an empty GitHub login".to_string()),
+            Ok(None) => Err("no persisted user row exists".to_string()),
             Err(e) => {
                 tracing::warn!(
                     user_id = %user_id,
                     error = %e,
-                    "Failed to resolve owner identity for refinement task; \
-                     falling back to system owner"
+                    "Failed to resolve persisted refinement owner identity"
                 );
-                None
+                Err("persisted user lookup failed".to_string())
             }
         }
     }
@@ -883,8 +917,7 @@ impl CoordinatorActor {
             .unwrap_or(false)
     }
 
-    /// Create a refinement task in the DB, enriched with DoR context and any
-    /// current-revision human reviewer feedback from the latest demand round.
+    /// Create a refinement task without durable intent correlation (legacy projection path).
     #[allow(clippy::too_many_arguments)]
     pub(super) async fn create_refinement_task_with_context(
         &self,
@@ -896,6 +929,32 @@ impl CoordinatorActor {
         reviewer_feedback: Option<&str>,
         attributed_user_id: Option<&str>,
     ) -> Option<String> {
+        self.create_refinement_task_with_context_and_correlation(
+            proposal_id,
+            agent_type,
+            round,
+            against_revision_seq,
+            readiness_context,
+            reviewer_feedback,
+            attributed_user_id,
+            None,
+        )
+        .await
+    }
+
+    /// Create a refinement task and atomically attach a durable intent identity.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) async fn create_refinement_task_with_context_and_correlation(
+        &self,
+        proposal_id: &str,
+        agent_type: &str,
+        round: i32,
+        against_revision_seq: i32,
+        readiness_context: &str,
+        reviewer_feedback: Option<&str>,
+        attributed_user_id: Option<&str>,
+        correlation: Option<&TaskRefinementCorrelation>,
+    ) -> Option<String> {
         let event_bus = crate::events::event_bus_for(&self.events_tx);
         let task_repo = TaskRepository::new(self.db.clone(), event_bus.clone());
 
@@ -905,6 +964,52 @@ impl CoordinatorActor {
             .as_ref()
             .map(|p| format!("\"{}\"", p.title))
             .unwrap_or_else(|| proposal_id.to_string());
+
+        // A task's creator and legacy display owner both derive from the durable
+        // refinement owner. Do not trust a runtime value unless it agrees with
+        // the proposal record; direct callers must not bypass that boundary.
+        let Some(attributed_user_id) = attributed_user_id else {
+            tracing::warn!(
+                proposal_id,
+                agent_type,
+                "Cannot create refinement task: durable attributed user is unavailable"
+            );
+            return None;
+        };
+        let Some(durable_owner_user_id) = proposal
+            .as_ref()
+            .and_then(|proposal| proposal.refinement_owner_user_id.as_deref())
+        else {
+            tracing::warn!(
+                proposal_id,
+                agent_type,
+                "Cannot create refinement task: proposal has no durable refinement owner"
+            );
+            return None;
+        };
+        if attributed_user_id != durable_owner_user_id {
+            tracing::warn!(
+                proposal_id,
+                agent_type,
+                attributed_user_id,
+                durable_owner_user_id,
+                "Cannot create refinement task: runtime attribution disagrees with durable refinement owner"
+            );
+            return None;
+        }
+        let owner = match self.resolve_owner_identity(durable_owner_user_id).await {
+            Ok(owner) => owner,
+            Err(reason) => {
+                tracing::warn!(
+                    proposal_id,
+                    agent_type,
+                    attributed_user_id,
+                    reason,
+                    "Cannot create refinement task: durable refinement owner failed identity resolution"
+                );
+                return None;
+            }
+        };
 
         let title = format!("Refinement {agent_type} — {proposal_label} (round {round})");
         let mut description = format!(
@@ -960,48 +1065,49 @@ impl CoordinatorActor {
             }
         };
 
-        // Resolve the attributed user's display identity (their GitHub login)
-        // for the legacy `owner` column. Creator attribution is mandatory: an
-        // absent or stale user must stop task creation rather than fabricating a
-        // system owner while the repository rejects the same provenance.
-        let Some(attributed_user_id) = attributed_user_id else {
-            tracing::warn!(
-                proposal_id,
-                agent_type,
-                "Cannot create refinement task: attributed user is unavailable"
-            );
-            return None;
+        let provenance = EffectiveCreatorProvenance {
+            explicit_user_id: Some(attributed_user_id),
+            source_task_id: None,
+            proposal_id: Some(proposal_id),
         };
-        let Some(owner) = self.resolve_owner_identity(attributed_user_id).await else {
-            tracing::warn!(
-                proposal_id,
-                agent_type,
-                attributed_user_id,
-                "Cannot create refinement task: attributed user does not resolve to a persisted user"
-            );
-            return None;
+        let created = match correlation {
+            Some(correlation) => {
+                task_repo
+                    .create_in_project_with_refinement_correlation(
+                        &project_id,
+                        None,
+                        provenance,
+                        &title,
+                        &description,
+                        "",
+                        "refinement",
+                        0,
+                        &owner,
+                        None,
+                        None,
+                        correlation,
+                    )
+                    .await
+            }
+            None => {
+                task_repo
+                    .create_in_project_with_provenance(
+                        &project_id,
+                        None,
+                        provenance,
+                        &title,
+                        &description,
+                        "",
+                        "refinement",
+                        0,
+                        &owner,
+                        None,
+                        None,
+                    )
+                    .await
+            }
         };
-
-        match task_repo
-            .create_in_project_with_provenance(
-                &project_id,
-                None,
-                EffectiveCreatorProvenance {
-                    explicit_user_id: Some(attributed_user_id),
-                    source_task_id: None,
-                    proposal_id: Some(proposal_id),
-                },
-                &title,
-                &description,
-                "",
-                "refinement",
-                0,
-                &owner,
-                None,
-                None,
-            )
-            .await
-        {
+        match created {
             Ok(task) => {
                 let event_bus2 = crate::events::event_bus_for(&self.events_tx);
                 let task_repo2 = TaskRepository::new(self.db.clone(), event_bus2);

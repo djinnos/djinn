@@ -266,7 +266,7 @@ impl ProposalRepository {
     }
 }
 impl ProposalRepository {
-    /// Load pending and claimed work without changing claims, rows, or heartbeat.
+    /// Load pending, claimed, and materialized work without changing claims, rows, or heartbeat.
     pub async fn load_pending_or_claimed_refinement_intents(
         &self,
         run_id: &str,
@@ -274,11 +274,11 @@ impl ProposalRepository {
     ) -> IntentMutationResult<Vec<RefinementPendingIntent>> {
         self.db().ensure_initialized().await?;
         ensure_generation(self.db().pool(), run_id, generation).await?;
-        let rows = sqlx::query("SELECT i.id, i.run_id, r.generation, i.round, i.phase, i.role, i.state, i.claimed_by, i.claim_expires_at FROM refinement_dispatch_intents i JOIN refinement_runs r ON r.id = i.run_id WHERE i.run_id = $1 AND i.state IN ('pending', 'claimed') ORDER BY i.round, i.id").bind(run_id).fetch_all(self.db().pool()).await?;
+        let rows = sqlx::query("SELECT i.id, i.run_id, r.generation, i.round, i.phase, i.role, i.state, i.claimed_by, i.claim_expires_at FROM refinement_dispatch_intents i JOIN refinement_runs r ON r.id = i.run_id WHERE i.run_id = $1 AND i.state IN ('pending', 'claimed', 'materialized') ORDER BY i.round, i.id").bind(run_id).fetch_all(self.db().pool()).await?;
         rows.into_iter().map(pending_intent_row).collect()
     }
 
-    /// Read pending/claimed exact-run work without moving heartbeat.
+    /// Read dispatchable exact-run work, including materialized enqueue retries, without moving heartbeat.
     pub async fn load_dispatchable_refinement_intents(
         &self,
         run_id: &str,

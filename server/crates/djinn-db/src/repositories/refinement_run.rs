@@ -150,6 +150,10 @@ pub(super) type IntentMutationResult<T> = std::result::Result<T, RefinementInten
 /// An exact run snapshot together with the one DB observation used to decide it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RefinementRunSnapshotResult {
+    /// Proposal retained as data while consumers key projections by exact run.
+    pub proposal_id: String,
+    /// Durable generation that fences late wake observations.
+    pub generation: i32,
     pub snapshot: RefinementLivenessSnapshot,
     pub observed_at: DbTimestamp,
     pub liveness: RefinementLivenessResult,
@@ -570,7 +574,7 @@ pub(super) async fn load_snapshot_in_transaction(
         .await?,
     );
     let run = sqlx::query(
-        "SELECT id, state, park_kind, stop_tag, stop_context, heartbeat_at \
+        "SELECT id, proposal_id, generation, state, park_kind, stop_tag, stop_context, heartbeat_at \
          FROM refinement_runs WHERE id = $1",
     )
     .bind(run_id)
@@ -621,6 +625,8 @@ pub(super) async fn load_snapshot_in_transaction(
     };
     let liveness = evaluate_refinement_liveness(&snapshot, observed_at);
     Ok(Some(RefinementRunSnapshotResult {
+        proposal_id: run.get("proposal_id"),
+        generation: run.get("generation"),
         snapshot,
         observed_at,
         liveness,
@@ -725,7 +731,8 @@ pub(super) fn intent_state(value: String) -> SnapshotResult<RefinementIntentStat
     match value.as_str() {
         "pending" => Ok(RefinementIntentState::Pending),
         "claimed" => Ok(RefinementIntentState::Claimed),
-        "completed" | "materialized" => Ok(RefinementIntentState::Completed),
+        "materialized" => Ok(RefinementIntentState::Materialized),
+        "completed" => Ok(RefinementIntentState::Completed),
         "cancelled" => Ok(RefinementIntentState::Cancelled),
         _ => Err(invalid("intent state", &value)),
     }
