@@ -722,13 +722,50 @@ async fn exact_source_intent_transitions_fence_and_rollback_together() {
         .execute(db.pool())
         .await
         .unwrap();
+    let park_request = ParkRefinementRunFromIntentRequest {
+        source: source(run_id.clone(), intent_id.clone(), generation),
+        kind: RefinementParkKind::AwaitingReview,
+    };
+    install_failure(&db, "reap_update").await;
+    let before = durable_shape(&db, &proposal_id).await;
     assert!(
-        repo.park_refinement_run_from_intent(ParkRefinementRunFromIntentRequest {
-            source: source(run_id.clone(), intent_id.clone(), generation),
-            kind: RefinementParkKind::AwaitingReview,
-        })
+        repo.park_refinement_run_from_intent(park_request.clone())
+            .await
+            .is_err()
+    );
+    assert_eq!(durable_shape(&db, &proposal_id).await, before);
+    assert_eq!(
+        sqlx::query_as::<_, (
+            String,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<Value>,
+        )>(
+            "SELECT state, park_kind, parked_at, stop_tag, stop_context FROM refinement_runs WHERE id=$1"
+        )
+        .bind(&run_id)
+        .fetch_one(db.pool())
         .await
-        .unwrap()
+        .unwrap(),
+        ("running".into(), None, None, None, None)
+    );
+    assert_eq!(
+        sqlx::query_as::<_, (String, Option<String>)>(
+            "SELECT state, terminal_at FROM refinement_dispatch_intents WHERE id=$1 AND run_id=$2"
+        )
+        .bind(&intent_id)
+        .bind(&run_id)
+        .fetch_one(db.pool())
+        .await
+        .unwrap(),
+        ("materialized".into(), None)
+    );
+    remove_failure(&db, "refinement_runs").await;
+    assert!(
+        repo.park_refinement_run_from_intent(park_request.clone())
+            .await
+            .unwrap()
     );
     assert_eq!(
         sqlx::query_scalar::<_, String>(
@@ -742,10 +779,7 @@ async fn exact_source_intent_transitions_fence_and_rollback_together() {
     );
     assert!(
         !repo
-            .park_refinement_run_from_intent(ParkRefinementRunFromIntentRequest {
-                source: source(run_id, intent_id, generation),
-                kind: RefinementParkKind::AwaitingReview,
-            })
+            .park_refinement_run_from_intent(park_request)
             .await
             .unwrap()
     );
