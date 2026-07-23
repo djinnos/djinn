@@ -425,19 +425,28 @@ describe("ProposalsPage", () => {
     expect(reviewSection).not.toBeNull();
     const section = within(reviewSection!);
 
-    // One unified tribunal chip per state.
-    expect(section.getByText("Review")).toBeInTheDocument();
-    expect(section.getByText("R3 running")).toBeInTheDocument();
-    expect(section.getByText("evidence")).toBeInTheDocument();
+    // One tribunal icon per state, identified by its tooltip — the icon-only
+    // treatment keeps the row text-free.
+    expect(
+      section.getByTitle("Tribunal converged — awaiting your review"),
+    ).toBeInTheDocument();
+    expect(
+      section.getByTitle("Tribunal refinement running (round 3)"),
+    ).toBeInTheDocument();
+    expect(
+      section.getByTitle("Parked on a needs-evidence spike"),
+    ).toBeInTheDocument();
 
-    // Idle-but-blocking row shows a single red tribunal chip (no scattered
-    // objection glyph in the gate slot).
-    expect(section.getByText("R1 · 2 open")).toBeInTheDocument();
-    expect(section.queryByText("⛔2")).not.toBeInTheDocument();
-    expect(section.queryByText("DoR ✗")).not.toBeInTheDocument();
+    // Idle-but-blocking row shows the red scale with just the open count.
+    expect(
+      section.getByTitle(
+        "Tribunal round 1 left 2 unresolved blocking objections",
+      ),
+    ).toHaveTextContent("2");
 
-    // Gate dots carry their reason in the tooltip only.
-    expect(section.getByTitle("Gate ready")).toBeInTheDocument();
+    // Gate icons carry their reason in the tooltip only, and a READY gate
+    // renders nothing at all.
+    expect(section.queryByTitle("Gate ready")).not.toBeInTheDocument();
     expect(
       section.getByTitle("Gate blocked — 2 unresolved blocking objections"),
     ).toBeInTheDocument();
@@ -475,12 +484,11 @@ describe("ProposalsPage", () => {
 
     renderProposalsRoute("/proposals");
 
-    // Neutral dot, explanatory tooltip, no red alarm, no "DoR ✗" text.
+    // Faint neutral shield, explanatory tooltip, no red alarm.
     const gate = await screen.findByTitle("Definition of Ready not yet met");
     expect(gate).toBeInTheDocument();
-    expect(gate.querySelector("span")).toHaveClass("bg-transparent");
-    expect(gate.querySelector(".bg-red-500")).toBeNull();
-    expect(screen.queryByText("DoR ✗")).not.toBeInTheDocument();
+    expect(gate).toHaveClass("text-muted-foreground/50");
+    expect(gate).not.toHaveClass("text-red-500");
     expect(screen.queryByText(/Gate blocked/)).not.toBeInTheDocument();
   });
 
@@ -515,7 +523,7 @@ describe("ProposalsPage", () => {
     const gate = await screen.findByTitle(
       "Gate blocked — 3 unresolved blocking objections",
     );
-    expect(gate.querySelector(".bg-red-500")).not.toBeNull();
+    expect(gate).toHaveClass("text-red-500");
   });
 
   it("sorts awaiting-review rows first and summarizes them in the group header", async () => {
