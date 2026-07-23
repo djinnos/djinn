@@ -189,7 +189,6 @@ fn test_config() -> super::super::refinement::RefinementConfig {
     super::super::refinement::RefinementConfig::default()
 }
 
-
 // ---- Advocate structured lint retry ----
 
 #[test]
@@ -197,11 +196,56 @@ fn structured_lint_rejection_preserves_order_for_correction_prompt() {
     let payload = r#"{"tool_result":{"code":"SPEC_LINT_REJECTED","violations":[{"code":"SECOND","message":"second message","span":{"start_byte":20,"end_byte":24}},{"code":"FIRST","message":"first message","span":{"start_byte":4,"end_byte":9}}]}}"#;
     let violations = parse_spec_lint_rejection(payload).expect("structured lint rejection");
     assert_eq!(violations.len(), 2);
-    assert_eq!(violations[0].code, "SECOND", "do not reorder authoring diagnostics");
+    assert_eq!(
+        violations[0].code, "SECOND",
+        "do not reorder authoring diagnostics"
+    );
     assert_eq!(violations[1].code, "FIRST");
     let context = format_advocate_lint_correction_context(&violations).expect("correction context");
     assert!(context.contains("SECOND: second message at bytes 20..24"));
     assert!(context.find("SECOND").unwrap() < context.find("FIRST").unwrap());
+}
+
+#[test]
+fn persisted_tool_result_evidence_drives_lint_retry_not_assistant_prose() {
+    use djinn_core::message::{Message, Role};
+
+    let payload = r#"{"code":"SPEC_LINT_REJECTED","violations":[{"code":"SECOND","message":"second message","span":{"start_byte":20,"end_byte":24}},{"code":"FIRST","message":"first message","span":{"start_byte":4,"end_byte":9}}]}"#;
+    let mut conversation = Conversation::default();
+    // This mirrors reply_loop/turn.rs: ToolResult is stored in a user message.
+    conversation.push(Message {
+        role: Role::Assistant,
+        content: vec![ContentBlock::Text {
+            text: format!("The tool said: {payload}"),
+        }],
+        metadata: None,
+    });
+    conversation.push(Message {
+        role: Role::User,
+        content: vec![ContentBlock::ToolResult {
+            tool_use_id: "proposal_update_1".into(),
+            content: vec![ContentBlock::Text {
+                text: payload.into(),
+            }],
+            is_error: true,
+        }],
+        metadata: None,
+    });
+
+    let violations = parse_spec_lint_rejection_from_conversation(&conversation)
+        .expect("structured rejection in persisted ToolResult");
+    assert_eq!(violations[0].code, "SECOND");
+    assert_eq!(violations[1].code, "FIRST");
+
+    let mut prose_only = Conversation::default();
+    prose_only.push(Message {
+        role: Role::Assistant,
+        content: vec![ContentBlock::Text {
+            text: payload.into(),
+        }],
+        metadata: None,
+    });
+    assert!(parse_spec_lint_rejection_from_conversation(&prose_only).is_none());
 }
 
 #[test]
@@ -222,8 +266,14 @@ fn lint_rejection_keeps_advocate_in_same_round_and_revision() {
         end_byte: 24,
     }]);
     assert_eq!(state.phase, RefinementPhase::AdvocateRevision);
-    assert_eq!(state.current_round, 3, "failed candidate must not consume a round");
-    assert_eq!(state.current_revision_seq, 7, "failed candidate must not become a revision");
+    assert_eq!(
+        state.current_round, 3,
+        "failed candidate must not consume a round"
+    );
+    assert_eq!(
+        state.current_revision_seq, 7,
+        "failed candidate must not become a revision"
+    );
     assert_eq!(state.pending_advocate_lint_violations.len(), 1);
     state.record_advocate_revision(8);
     assert_eq!(state.phase, RefinementPhase::JudgeAdjudication);
@@ -238,13 +288,17 @@ fn repeated_lint_rejections_are_bounded_by_existing_spawn_cap() {
     let mut state = RefinementLoopState::with_config("p1", 7, config);
     state.phase = RefinementPhase::AdvocateRevision;
     for _ in 0..2 {
-        state.record_spawn().expect("existing cap admits correction session");
-        state.record_advocate_lint_rejection(vec![super::super::refinement::AdvocateLintViolation {
-            code: "DUPLICATE_BLOCK_ID".into(),
-            message: "duplicate id".into(),
-            start_byte: 0,
-            end_byte: 1,
-        }]);
+        state
+            .record_spawn()
+            .expect("existing cap admits correction session");
+        state.record_advocate_lint_rejection(vec![
+            super::super::refinement::AdvocateLintViolation {
+                code: "DUPLICATE_BLOCK_ID".into(),
+                message: "duplicate id".into(),
+                start_byte: 0,
+                end_byte: 1,
+            },
+        ]);
         assert_eq!(state.current_round, 1);
         assert_eq!(state.current_revision_seq, 7);
         assert_eq!(state.phase, RefinementPhase::AdvocateRevision);
@@ -254,6 +308,12 @@ fn repeated_lint_rejections_are_bounded_by_existing_spawn_cap() {
         Err(super::super::refinement::StopReason::AgentFailure { ref role, ref error })
             if role == "advocate" && error.contains("SPEC_LINT_REJECTED")
     ));
-    assert!(state.is_complete(), "persistent rejections terminate at the established cap");
-    assert_eq!(state.current_round, 1, "failed writes never consume a refinement round");
+    assert!(
+        state.is_complete(),
+        "persistent rejections terminate at the established cap"
+    );
+    assert_eq!(
+        state.current_round, 1,
+        "failed writes never consume a refinement round"
+    );
 }

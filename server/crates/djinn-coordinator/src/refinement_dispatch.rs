@@ -709,13 +709,11 @@ impl CoordinatorActor {
         // Build a readiness-enriched task description so the agent sees
         // current DoR findings.
         let lint_correction_context = if phase == RefinementPhase::AdvocateRevision {
-            self.active_refinements
-                .get(run_id)
-                .and_then(|state| {
-                    super::refinement_outcome::format_advocate_lint_correction_context(
-                        &state.pending_advocate_lint_violations,
-                    )
-                })
+            self.active_refinements.get(run_id).and_then(|state| {
+                super::refinement_outcome::format_advocate_lint_correction_context(
+                    &state.pending_advocate_lint_violations,
+                )
+            })
         } else {
             None
         };

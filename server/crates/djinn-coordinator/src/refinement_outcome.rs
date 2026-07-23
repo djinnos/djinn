@@ -11,9 +11,11 @@ use djinn_control_plane::tools::epic_ops::{
 use djinn_control_plane::tools::proposal_readiness::{
     LatestHeadReadinessResult, evaluate_latest_head_readiness,
 };
+use djinn_core::message::{ContentBlock, Conversation};
 use djinn_core::models::{Proposal, ProposalDebateTrail, TransitionAction};
 use djinn_db::{
-    EffectiveCreatorProvenance, ProposalRepository, TaskRepository, UserSettingsRepository,
+    EffectiveCreatorProvenance, ProposalRepository, SessionMessageRepository, SessionRepository,
+    TaskRepository, UserSettingsRepository,
 };
 
 use super::refinement::{
@@ -45,6 +47,33 @@ pub(super) fn entry_in_current_run(entry: &ProposalDebateTrail, run_start: Optio
         Some(start) => entry.created_at.as_str() > start,
         None => true,
     }
+}
+
+/// Inspect only persisted ToolResult blocks. Assistant prose mentioning the
+/// error must not turn an ordinary completion into a correction retry.
+fn parse_spec_lint_rejection_from_conversation(
+    conversation: &Conversation,
+) -> Option<Vec<AdvocateLintViolation>> {
+    conversation.messages.iter().rev().find_map(|message| {
+        message
+            .content
+            .iter()
+            .rev()
+            .find_map(parse_spec_lint_rejection_from_tool_result)
+    })
+}
+
+fn parse_spec_lint_rejection_from_tool_result(
+    block: &ContentBlock,
+) -> Option<Vec<AdvocateLintViolation>> {
+    let ContentBlock::ToolResult { content, .. } = block else {
+        return None;
+    };
+    content.iter().rev().find_map(|block| match block {
+        ContentBlock::Text { text } => parse_spec_lint_rejection(text),
+        ContentBlock::ToolResult { .. } => parse_spec_lint_rejection_from_tool_result(block),
+        _ => None,
+    })
 }
 
 /// Select the judge verdict entry for the current run's `round`.
@@ -127,6 +156,28 @@ impl CoordinatorActor {
         }
     }
 
+    /// A refinement task is dedicated to a single role pass. Its newest
+    /// completed session contains the reply loop's durable ToolResult evidence.
+    async fn advocate_lint_rejection_from_session(
+        &self,
+        task_id: &str,
+    ) -> Result<Option<Vec<AdvocateLintViolation>>, String> {
+        let event_bus = crate::events::event_bus_for(&self.events_tx);
+        let sessions = SessionRepository::new(self.db.clone(), event_bus.clone())
+            .list_for_task(task_id)
+            .await
+            .map_err(|error| error.to_string())?;
+        let session = sessions
+            .into_iter()
+            .find(|session| session.status == "completed")
+            .ok_or_else(|| "no completed session exists for refinement task".to_string())?;
+        let conversation = SessionMessageRepository::new(self.db.clone(), event_bus)
+            .load_conversation(&session.id)
+            .await
+            .map_err(|error| error.to_string())?;
+        Ok(parse_spec_lint_rejection_from_conversation(&conversation))
+    }
+
     /// Process an advocate session outcome: read the latest revision,
     /// patch event_metadata with refinement attribution, and advance.
     async fn process_advocate_outcome(
@@ -136,16 +187,30 @@ impl CoordinatorActor {
         task_id: &str,
         state: &RefinementLoopState,
     ) {
-        // Authoring mutations return a structured rejection rather than making a
-        // revision. Inspect this completed Advocate task's durable activity before
-        // interpreting an unchanged head as an ordinary no-change completion.
-        let task_repo = TaskRepository::new(self.db.clone(), crate::events::event_bus_for(&self.events_tx));
-        if let Ok(entries) = task_repo.list_activity(task_id).await
-            && let Some(violations) = entries
-                .iter()
-                .rev()
-                .find_map(|entry| parse_spec_lint_rejection(&entry.payload))
-        {
+        // Authoring mutations return their structured rejection in the reply
+        // loop's persisted ToolResult message, not task activity. Inspect this
+        // completed Advocate session before interpreting an unchanged head as
+        // ordinary no-change completion. Failing to read evidence is unsafe: it
+        // must not silently hand a possibly rejected head to the Judge.
+        let violations = match self.advocate_lint_rejection_from_session(task_id).await {
+            Ok(violations) => violations,
+            Err(error) => {
+                tracing::warn!(proposal_id = %proposal_id, task_id = %task_id, %error,
+                    "Unable to inspect completed Advocate ToolResult evidence");
+                self.terminate_refinement(
+                    run_id,
+                    StopReason::AgentFailure {
+                        role: "advocate".into(),
+                        error: format!(
+                            "unable to inspect completed session ToolResult evidence: {error}"
+                        ),
+                    },
+                )
+                .await;
+                return;
+            }
+        };
+        if let Some(violations) = violations {
             if let Some(active) = self.active_refinements.get_mut(run_id) {
                 active.record_advocate_lint_rejection(violations);
                 tracing::warn!(
@@ -1244,8 +1309,8 @@ fn handle_close_refinement_task_result(task_id: &str, result: Result<(), djinn_d
 }
 
 /// Decode the structured authoring rejection emitted by proposal mutations.
-/// The activity payload can wrap a tool response, so walk object/array values
-/// but only accept the stable code together with a fully structured violation.
+/// Tool-result text can wrap a response, so walk object/array values but only
+/// accept the stable code together with a fully structured violation.
 fn parse_spec_lint_rejection(payload: &str) -> Option<Vec<AdvocateLintViolation>> {
     let value: serde_json::Value = serde_json::from_str(payload).ok()?;
     find_spec_lint_rejection(&value)

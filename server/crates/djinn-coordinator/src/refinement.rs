@@ -372,7 +372,8 @@ impl RefinementLoopState {
             {
                 StopReason::AgentFailure {
                     role: "advocate".into(),
-                    error: "SPEC_LINT_REJECTED persisted until the established session/spawn cap".into(),
+                    error: "SPEC_LINT_REJECTED persisted until the established session/spawn cap"
+                        .into(),
                 }
             } else {
                 StopReason::SpawnCap
