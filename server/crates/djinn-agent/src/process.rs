@@ -8,11 +8,19 @@
 //!
 //! `std::process::Command` avoids this by not touching the reactor at all.
 
+use std::future::Future;
 use std::io;
 use std::process::{Command, Output};
+use std::sync::Arc;
 use std::time::Duration;
 
+use djinn_cgroup_launcher::CpuStat;
 use djinn_core::clock::{Clock, SystemClock};
+use djinn_supervisor::services::{
+    LeaseAbandonRequest, LeaseDeadlines, LeaseFencingToken, LeaseGrantRequest, LeaseIdentity,
+    LeaseQueueRequest, LeaseReleaseRequest, LeaseResult, LeaseState, LeaseStatusRequest,
+    SupervisorServices, TaskInvocationLeaseIdentity,
+};
 use tokio_util::sync::CancellationToken;
 
 #[cfg(unix)]
@@ -63,6 +71,431 @@ pub fn isolate_process_group(cmd: &mut Command) {
 
             Ok(())
         });
+    }
+}
+
+/// The launcher is deliberately separate from the supervisor: it controls one
+/// cgroup leaf and samples `cpu.stat`; it never owns a second lease ledger.
+#[cfg_attr(not(test), allow(dead_code))] // consumed by the workspace lease wiring task
+pub(crate) trait CgroupLauncherClient: Send + Sync + 'static {
+    fn launch(
+        &self,
+        command: &mut Command,
+        identity: &TaskInvocationLeaseIdentity,
+    ) -> io::Result<std::process::Child>;
+    fn sample_cpu(&self, identity: &TaskInvocationLeaseIdentity) -> io::Result<CpuStat>;
+    fn fenced_lift(
+        &self,
+        identity: &TaskInvocationLeaseIdentity,
+        fence: &LeaseFencingToken,
+    ) -> io::Result<()>;
+    fn kill(&self, identity: &TaskInvocationLeaseIdentity) -> io::Result<()>;
+    fn wait_empty(&self, identity: &TaskInvocationLeaseIdentity) -> io::Result<()>;
+}
+
+#[derive(Clone, Debug)]
+#[cfg_attr(not(test), allow(dead_code))] // consumed by the workspace lease wiring task
+pub(crate) struct LeaseInvocationConfig {
+    pub task_id: String,
+    pub task_run_id: String,
+    pub cpu_usage_threshold_usec: u64,
+    pub queue_deadline_ms: i64,
+    pub launch_deadline_ms: i64,
+    pub timeout: Duration,
+}
+
+#[derive(Debug)]
+#[allow(dead_code)] // consumed by this runner now and workspace lease wiring next
+pub(crate) enum LeaseInvocationError {
+    Process(ProcessRunError),
+    Launcher(io::Error),
+    LeaseIdentityConflict,
+    LeaseWaitTimeout,
+    LeaseUnavailable,
+}
+
+#[derive(Debug)]
+#[allow(dead_code)] // consumed by this runner now and workspace lease wiring next
+pub(crate) struct LeaseInvocationOutput {
+    pub(crate) process: ProcessOutput,
+    pub(crate) identity: TaskInvocationLeaseIdentity,
+}
+
+/// Launcher-backed invocation state machine. A queue is issued only after a
+/// measured CPU threshold; terminal intent is set before cgroup kill/reconcile.
+#[cfg_attr(not(test), allow(dead_code))] // consumed by the workspace lease wiring task
+pub(crate) struct LeaseInvocationRunner {
+    services: Arc<dyn SupervisorServices>,
+    launcher: Arc<dyn CgroupLauncherClient>,
+    clock: Arc<dyn Clock>,
+}
+#[cfg_attr(not(test), allow(dead_code))] // consumed by the workspace lease wiring task
+impl LeaseInvocationRunner {
+    pub(crate) fn new(
+        services: Arc<dyn SupervisorServices>,
+        launcher: Arc<dyn CgroupLauncherClient>,
+        clock: Arc<dyn Clock>,
+    ) -> Self {
+        Self {
+            services,
+            launcher,
+            clock,
+        }
+    }
+    pub(crate) async fn output(
+        &self,
+        mut cmd: Command,
+        config: LeaseInvocationConfig,
+        cancel: CancellationToken,
+    ) -> Result<LeaseInvocationOutput, LeaseInvocationError> {
+        let identity = TaskInvocationLeaseIdentity {
+            task_id: config.task_id,
+            task_run_id: config.task_run_id,
+            invocation_id: uuid::Uuid::now_v7().to_string(),
+        };
+        let lease = LeaseIdentity::TaskInvocation(identity.clone());
+        let mut child = self
+            .launcher
+            .launch(&mut cmd, &identity)
+            .map_err(LeaseInvocationError::Launcher)?;
+        let stdout = spawn_drain(child.stdout.take());
+        let stderr = spawn_stderr_drain(child.stderr.take());
+        let mut deadline = self.clock.now_instant() + config.timeout;
+        let (mut queued, mut fence, mut credit_used, mut lease_error) = (false, None, false, None);
+        let mut unavailable_responses = 0_u8;
+        // This variable is assigned only by `terminal_now` or by a service
+        // wait that observed terminal intent. Consequently no later response
+        // can authorize a cgroup lift.
+        let (observed, termination) = 'invocation: loop {
+            if let Some(terminal) =
+                terminal_now(&mut child, &cancel, self.clock.as_ref(), deadline)?
+            {
+                break terminal;
+            }
+            let cpu = self
+                .launcher
+                .sample_cpu(&identity)
+                .map_err(LeaseInvocationError::Launcher)?;
+            let result = if !queued && cpu.usage_usec >= config.cpu_usage_threshold_usec {
+                queued = true;
+                match await_lease_or_terminal(
+                    self.services.queue_lease(LeaseQueueRequest {
+                        identity: lease.clone(),
+                        deadlines: LeaseDeadlines {
+                            queue_deadline_ms: config.queue_deadline_ms,
+                            launch_deadline_ms: config.launch_deadline_ms,
+                        },
+                    }),
+                    &mut child,
+                    &cancel,
+                    self.clock.as_ref(),
+                    deadline,
+                )
+                .await?
+                {
+                    LeaseWait::Response(value) => value,
+                    LeaseWait::Terminal(terminal) => break 'invocation terminal,
+                }
+            } else if queued {
+                match await_lease_or_terminal(
+                    self.services.lease_status(LeaseStatusRequest {
+                        identity: lease.clone(),
+                    }),
+                    &mut child,
+                    &cancel,
+                    self.clock.as_ref(),
+                    deadline,
+                )
+                .await?
+                {
+                    LeaseWait::Response(value) => value,
+                    LeaseWait::Terminal(terminal) => break 'invocation terminal,
+                }
+            } else {
+                // Do not use Tokio wall-clock timers here: tests advance the
+                // injected Clock while a fake launcher/service is paused.
+                tokio::task::yield_now().await;
+                continue;
+            };
+            // An unavailable response is transport-ambiguous: the idempotent
+            // request may have reached the coordinator. Re-read status before
+            // turning repeated unavailability into the typed terminal result.
+            if matches!(result, LeaseResult::LeaseUnavailable) {
+                unavailable_responses += 1;
+                if unavailable_responses >= 3 {
+                    lease_failure(
+                        LeaseResult::LeaseUnavailable,
+                        &mut deadline,
+                        &mut credit_used,
+                        &mut lease_error,
+                    );
+                    break (
+                        child.try_wait().map_err(started_lease_error)?,
+                        ProcessTermination::Cancelled,
+                    );
+                }
+                tokio::task::yield_now().await;
+                continue;
+            }
+            unavailable_responses = 0;
+            // Once a fence has been recorded, status polling remains useful
+            // for terminal reconciliation but can never re-enter grant/lift.
+            let grant = if fence.is_none() {
+                match result {
+                    LeaseResult::Granted(grant) => Some(grant.fencing_token),
+                    LeaseResult::Status(status)
+                        if matches!(
+                            status.state,
+                            LeaseState::Granted
+                                | LeaseState::Launching
+                                | LeaseState::Bound
+                                | LeaseState::Active
+                        ) =>
+                    {
+                        status.fencing_token
+                    }
+                    other => {
+                        lease_failure(other, &mut deadline, &mut credit_used, &mut lease_error);
+                        None
+                    }
+                }
+            } else {
+                None
+            };
+            if let Some(token) = grant {
+                let durable = match await_lease_or_terminal(
+                    self.services.grant_lease(LeaseGrantRequest {
+                        identity: lease.clone(),
+                        fencing_token: token.clone(),
+                    }),
+                    &mut child,
+                    &cancel,
+                    self.clock.as_ref(),
+                    deadline,
+                )
+                .await?
+                {
+                    LeaseWait::Response(value) => value,
+                    LeaseWait::Terminal(terminal) => break 'invocation terminal,
+                };
+                // A grant response is an acknowledgement, not authorization:
+                // only a matching still-live durable state permits lift.
+                match durable {
+                    LeaseResult::Status(status)
+                        if matches!(
+                            status.state,
+                            LeaseState::Launching | LeaseState::Bound | LeaseState::Active
+                        ) && status.fencing_token.as_ref() == Some(&token) =>
+                    {
+                        if let Some(terminal) =
+                            terminal_now(&mut child, &cancel, self.clock.as_ref(), deadline)?
+                        {
+                            break 'invocation terminal;
+                        }
+                        self.launcher
+                            .fenced_lift(&identity, &token)
+                            .map_err(LeaseInvocationError::Launcher)?;
+                        fence = Some(token);
+                    }
+                    LeaseResult::LeaseUnavailable => {
+                        unavailable_responses += 1;
+                        if unavailable_responses >= 3 {
+                            lease_failure(
+                                LeaseResult::LeaseUnavailable,
+                                &mut deadline,
+                                &mut credit_used,
+                                &mut lease_error,
+                            );
+                        }
+                    }
+                    other => {
+                        lease_failure(other, &mut deadline, &mut credit_used, &mut lease_error)
+                    }
+                }
+            }
+            if lease_error.is_some() {
+                break (
+                    child.try_wait().map_err(started_lease_error)?,
+                    ProcessTermination::Cancelled,
+                );
+            }
+            tokio::task::yield_now().await;
+        };
+        self.launcher
+            .kill(&identity)
+            .map_err(LeaseInvocationError::Launcher)?;
+        self.launcher
+            .wait_empty(&identity)
+            .map_err(LeaseInvocationError::Launcher)?;
+        let status = observed.unwrap_or(child.wait().map_err(started_lease_error)?);
+        let process = ProcessOutput {
+            output: Output {
+                status,
+                stdout: join_with_timeout(stdout, Duration::from_secs(2)),
+                stderr: join_with_timeout(stderr, Duration::from_secs(2)),
+            },
+            termination,
+        };
+        if queued {
+            reconcile_terminal_lease(self.services.as_ref(), lease, fence).await;
+        }
+        if let Some(error) = lease_error {
+            Err(error)
+        } else {
+            Ok(LeaseInvocationOutput { process, identity })
+        }
+    }
+}
+/// Result of waiting for a supervisor response. A terminal observation wins
+/// over a delayed response and permanently closes the lift path.
+#[cfg_attr(not(test), allow(dead_code))] // consumed by the workspace lease wiring task
+enum LeaseWait {
+    Response(LeaseResult),
+    Terminal((Option<std::process::ExitStatus>, ProcessTermination)),
+}
+
+#[cfg_attr(not(test), allow(dead_code))] // consumed by the workspace lease wiring task
+async fn await_lease_or_terminal<F>(
+    request: F,
+    child: &mut std::process::Child,
+    cancel: &CancellationToken,
+    clock: &dyn Clock,
+    deadline: std::time::Instant,
+) -> Result<LeaseWait, LeaseInvocationError>
+where
+    F: Future<Output = LeaseResult>,
+{
+    tokio::pin!(request);
+    loop {
+        if let Some(terminal) = terminal_now(child, cancel, clock, deadline)? {
+            return Ok(LeaseWait::Terminal(terminal));
+        }
+        tokio::select! {
+            result = &mut request => return Ok(LeaseWait::Response(result)),
+            _ = cancel.cancelled() => return Ok(LeaseWait::Terminal((child.try_wait().map_err(started_lease_error)?, ProcessTermination::Cancelled))),
+            _ = tokio::task::yield_now() => {}
+        }
+    }
+}
+
+#[cfg_attr(not(test), allow(dead_code))] // consumed by the workspace lease wiring task
+fn terminal_now(
+    child: &mut std::process::Child,
+    cancel: &CancellationToken,
+    clock: &dyn Clock,
+    deadline: std::time::Instant,
+) -> Result<Option<(Option<std::process::ExitStatus>, ProcessTermination)>, LeaseInvocationError> {
+    if cancel.is_cancelled() {
+        return Ok(Some((
+            child.try_wait().map_err(started_lease_error)?,
+            ProcessTermination::Cancelled,
+        )));
+    }
+    if clock.now_instant() >= deadline {
+        return Ok(Some((
+            child.try_wait().map_err(started_lease_error)?,
+            ProcessTermination::TimedOut,
+        )));
+    }
+    Ok(child
+        .try_wait()
+        .map_err(started_lease_error)?
+        .map(|status| (Some(status), ProcessTermination::Exited)))
+}
+
+/// Re-read durable state after every uncertain cleanup response. Operations
+/// are idempotent and reuse the same fence, so a lost request cannot cause a
+/// second capacity return or leave a known grant unreleased.
+#[cfg_attr(not(test), allow(dead_code))] // consumed by the workspace lease wiring task
+async fn reconcile_terminal_lease(
+    services: &dyn SupervisorServices,
+    lease: LeaseIdentity,
+    observed_fence: Option<LeaseFencingToken>,
+) {
+    const RECONCILIATION_ATTEMPTS: usize = 3;
+    let mut fence = observed_fence;
+    for _ in 0..RECONCILIATION_ATTEMPTS {
+        match services
+            .lease_status(LeaseStatusRequest {
+                identity: lease.clone(),
+            })
+            .await
+        {
+            LeaseResult::Status(status)
+                if matches!(status.state, LeaseState::Cancelled | LeaseState::Released) =>
+            {
+                return;
+            }
+            LeaseResult::Status(status)
+                if matches!(
+                    status.state,
+                    LeaseState::Granted
+                        | LeaseState::Launching
+                        | LeaseState::Bound
+                        | LeaseState::Active
+                ) =>
+            {
+                fence = status.fencing_token.or(fence)
+            }
+            LeaseResult::Cancelled { .. }
+            | LeaseResult::Released { .. }
+            | LeaseResult::Abandoned { .. } => return,
+            _ => {}
+        }
+        let result = if let Some(token) = fence.clone() {
+            services
+                .release_lease(LeaseReleaseRequest {
+                    identity: lease.clone(),
+                    fencing_token: token,
+                    candidate_cleanup: false,
+                })
+                .await
+        } else {
+            services
+                .abandon_lease(LeaseAbandonRequest {
+                    identity: lease.clone(),
+                    candidate_cleanup: false,
+                })
+                .await
+        };
+        if matches!(
+            result,
+            LeaseResult::Released { .. }
+                | LeaseResult::Cancelled { .. }
+                | LeaseResult::Abandoned { .. }
+        ) {
+            return;
+        }
+        tokio::task::yield_now().await;
+    }
+}
+
+#[cfg_attr(not(test), allow(dead_code))] // consumed by the workspace lease wiring task
+fn started_lease_error(error: io::Error) -> LeaseInvocationError {
+    LeaseInvocationError::Process(ProcessRunError::Started(error))
+}
+#[cfg_attr(not(test), allow(dead_code))] // consumed by the workspace lease wiring task
+fn lease_failure(
+    result: LeaseResult,
+    deadline: &mut std::time::Instant,
+    credit_used: &mut bool,
+    output: &mut Option<LeaseInvocationError>,
+) {
+    match result {
+        LeaseResult::LeaseIdentityConflict { .. } => {
+            *output = Some(LeaseInvocationError::LeaseIdentityConflict)
+        }
+        LeaseResult::LeaseUnavailable => *output = Some(LeaseInvocationError::LeaseUnavailable),
+        LeaseResult::LeaseWaitTimeout {
+            timeout_credit: Some(credit),
+        } if !*credit_used => {
+            *deadline += Duration::from_millis(u64::from(credit.retry_after_ms));
+            *credit_used = true;
+        }
+        LeaseResult::LeaseWaitTimeout { .. } => {
+            *output = Some(LeaseInvocationError::LeaseWaitTimeout)
+        }
+        _ => {}
     }
 }
 
@@ -384,6 +817,194 @@ pub async fn output_with_kill(mut cmd: Command, _timeout: Duration) -> io::Resul
 #[allow(clippy::disallowed_methods)] // tests use real time for timeout/duration assertions
 mod tests {
     use super::*;
+    use djinn_core::clock::TestClock;
+    use std::future::pending;
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[path = "process_lease_tests.rs"]
+    mod lease_runner_tests;
+
+    /// Small launcher double used by the lease-state-machine tests. It keeps
+    /// the cgroup boundary observable without consulting command strings.
+    #[derive(Default)]
+    struct FakeLauncher {
+        child_pid: Mutex<Option<u32>>,
+        lifts: Mutex<Vec<LeaseFencingToken>>,
+        kills: AtomicUsize,
+        empties: AtomicUsize,
+    }
+
+    impl CgroupLauncherClient for FakeLauncher {
+        fn launch(
+            &self,
+            command: &mut Command,
+            _: &TaskInvocationLeaseIdentity,
+        ) -> io::Result<std::process::Child> {
+            let child = command.spawn()?;
+            *self.child_pid.lock().unwrap() = Some(child.id());
+            Ok(child)
+        }
+        fn sample_cpu(&self, _: &TaskInvocationLeaseIdentity) -> io::Result<CpuStat> {
+            Ok(CpuStat {
+                usage_usec: 10,
+                ..CpuStat::default()
+            })
+        }
+        fn fenced_lift(
+            &self,
+            _: &TaskInvocationLeaseIdentity,
+            token: &LeaseFencingToken,
+        ) -> io::Result<()> {
+            self.lifts.lock().unwrap().push(token.clone());
+            Ok(())
+        }
+        fn kill(&self, _: &TaskInvocationLeaseIdentity) -> io::Result<()> {
+            self.kills.fetch_add(1, Ordering::SeqCst);
+            if let Some(pid) = *self.child_pid.lock().unwrap() {
+                unsafe {
+                    libc::kill(pid as i32, libc::SIGKILL);
+                }
+            }
+            Ok(())
+        }
+        fn wait_empty(&self, _: &TaskInvocationLeaseIdentity) -> io::Result<()> {
+            self.empties.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    fn test_identity() -> TaskInvocationLeaseIdentity {
+        TaskInvocationLeaseIdentity {
+            task_id: "task".into(),
+            task_run_id: "run".into(),
+            invocation_id: "invocation".into(),
+        }
+    }
+
+    /// A paused service future must lose to irreversible cancellation, so its
+    /// grant cannot reach the lift path (terminal-before-grant ordering).
+    #[tokio::test]
+    async fn paused_grant_loses_to_terminal_intent() {
+        let mut child = Command::new("sh").arg("-c").arg("sleep 1").spawn().unwrap();
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+        let clock = TestClock::new(std::time::SystemTime::UNIX_EPOCH, std::time::Instant::now());
+        let result = await_lease_or_terminal(
+            pending::<LeaseResult>(),
+            &mut child,
+            &cancel,
+            &clock,
+            clock.now_instant() + Duration::from_secs(60),
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            result,
+            LeaseWait::Terminal((_, ProcessTermination::Cancelled))
+        ));
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+
+    /// The injected fake clock controls timeout while a service response is paused.
+    #[tokio::test]
+    async fn fake_clock_times_out_paused_service() {
+        let mut child = Command::new("sh").arg("-c").arg("sleep 1").spawn().unwrap();
+        let cancel = CancellationToken::new();
+        let base = std::time::Instant::now();
+        let clock = TestClock::new(std::time::SystemTime::UNIX_EPOCH, base);
+        clock.advance_mono(Duration::from_secs(2));
+        let result =
+            await_lease_or_terminal(pending::<LeaseResult>(), &mut child, &cancel, &clock, base)
+                .await
+                .unwrap();
+        assert!(matches!(
+            result,
+            LeaseWait::Terminal((_, ProcessTermination::TimedOut))
+        ));
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+
+    #[test]
+    fn typed_lease_failures_remain_distinct() {
+        let mut deadline = std::time::Instant::now();
+        let mut used = false;
+        let mut error = None;
+        lease_failure(
+            LeaseResult::LeaseIdentityConflict {
+                identity: LeaseIdentity::TaskInvocation(test_identity()),
+            },
+            &mut deadline,
+            &mut used,
+            &mut error,
+        );
+        assert!(matches!(
+            error,
+            Some(LeaseInvocationError::LeaseIdentityConflict)
+        ));
+        error = None;
+        lease_failure(
+            LeaseResult::LeaseUnavailable,
+            &mut deadline,
+            &mut used,
+            &mut error,
+        );
+        assert!(matches!(
+            error,
+            Some(LeaseInvocationError::LeaseUnavailable)
+        ));
+        error = None;
+        lease_failure(
+            LeaseResult::LeaseWaitTimeout {
+                timeout_credit: None,
+            },
+            &mut deadline,
+            &mut used,
+            &mut error,
+        );
+        assert!(matches!(
+            error,
+            Some(LeaseInvocationError::LeaseWaitTimeout)
+        ));
+    }
+
+    #[test]
+    fn timeout_credit_extends_deadline_once() {
+        let mut deadline = std::time::Instant::now();
+        let original = deadline;
+        let mut used = false;
+        let mut error = None;
+        let credit = LeaseResult::LeaseWaitTimeout {
+            timeout_credit: Some(djinn_supervisor::services::TimeoutCredit {
+                units: 1,
+                retry_after_ms: 25,
+            }),
+        };
+        lease_failure(credit.clone(), &mut deadline, &mut used, &mut error);
+        assert_eq!(deadline, original + Duration::from_millis(25));
+        lease_failure(credit, &mut deadline, &mut used, &mut error);
+        assert_eq!(deadline, original + Duration::from_millis(25));
+        assert!(matches!(
+            error,
+            Some(LeaseInvocationError::LeaseWaitTimeout)
+        ));
+    }
+
+    #[test]
+    fn fake_launcher_records_cgroup_lifecycle() {
+        let launcher = FakeLauncher::default();
+        let identity = test_identity();
+        launcher
+            .fenced_lift(&identity, &LeaseFencingToken(7))
+            .unwrap();
+        launcher.kill(&identity).unwrap();
+        launcher.wait_empty(&identity).unwrap();
+        assert_eq!(*launcher.lifts.lock().unwrap(), vec![LeaseFencingToken(7)]);
+        assert_eq!(launcher.kills.load(Ordering::SeqCst), 1);
+        assert_eq!(launcher.empties.load(Ordering::SeqCst), 1);
+    }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn spawned_process_uses_different_pgid() {
