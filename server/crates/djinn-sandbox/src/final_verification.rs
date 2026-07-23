@@ -13,8 +13,8 @@ use std::net::{Shutdown, TcpListener, TcpStream};
 use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, RawFd};
 use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
@@ -53,59 +53,111 @@ pub struct FinalVerificationNetworkSession {
     keeper_pid: libc::pid_t,
     broker_shutdown: Arc<AtomicBool>,
     broker_threads: Mutex<Vec<JoinHandle<()>>>,
+    // Retained only for the in-module regression test that asserts the
+    // anonymous broker channels are not inherited across command exec.
+    #[cfg(test)]
+    broker_fd_numbers: Vec<RawFd>,
 }
 
 impl FinalVerificationNetworkSession {
-    pub fn create(mut endpoints: Vec<FinalVerificationLoopbackEndpoint>) -> Result<Self, FinalVerificationError> {
+    pub fn create(
+        mut endpoints: Vec<FinalVerificationLoopbackEndpoint>,
+    ) -> Result<Self, FinalVerificationError> {
         endpoints.sort();
         let mut ports = std::collections::BTreeSet::new();
         for endpoint in &endpoints {
             if endpoint.preset_id.is_empty() || endpoint.port == 0 || !ports.insert(endpoint.port) {
-                return Err(FinalVerificationError::BackendUnavailable { reason: "strict catalog loopback endpoints are invalid" });
+                return Err(FinalVerificationError::BackendUnavailable {
+                    reason: "strict catalog loopback endpoints are invalid",
+                });
             }
         }
         ensure_backend_available()?;
-        let (ready_read, ready_write) = pipe_cloexec().map_err(|_| FinalVerificationError::BackendUnavailable { reason: "attempt network session pipe setup failed" })?;
+        let (ready_read, ready_write) =
+            pipe_cloexec().map_err(|_| FinalVerificationError::BackendUnavailable {
+                reason: "attempt network session pipe setup failed",
+            })?;
         let mut channels = Vec::with_capacity(endpoints.len());
         for endpoint in &endpoints {
-            let (parent, child) = seqpacket_pair().map_err(|_| FinalVerificationError::BackendUnavailable { reason: "attempt network broker setup failed" })?;
+            let (parent, child) =
+                seqpacket_pair().map_err(|_| FinalVerificationError::BackendUnavailable {
+                    reason: "attempt network broker setup failed",
+                })?;
             channels.push((endpoint.clone(), parent, child));
         }
         // SAFETY: the child makes only syscall-backed setup calls and never
         // returns into Rust after fork.
         let keeper_pid = unsafe { libc::fork() };
         if keeper_pid < 0 {
-            close_fd(ready_read); close_fd(ready_write);
-            for (_, parent, child) in channels { close_fd(parent); close_fd(child); }
-            return Err(FinalVerificationError::BackendUnavailable { reason: "attempt network session fork failed" });
+            close_fd(ready_read);
+            close_fd(ready_write);
+            for (_, parent, child) in channels {
+                close_fd(parent);
+                close_fd(child);
+            }
+            return Err(FinalVerificationError::BackendUnavailable {
+                reason: "attempt network session fork failed",
+            });
         }
         if keeper_pid == 0 {
             close_fd(ready_read);
-            for (_, parent, _) in &channels { close_fd(*parent); }
+            for (_, parent, _) in &channels {
+                close_fd(*parent);
+            }
             keeper_main(ready_write, channels);
         }
         close_fd(ready_write);
-        for (_, _, child) in &channels { close_fd(*child); }
+        for (_, _, child) in &channels {
+            close_fd(*child);
+        }
         let ready = read_ready(ready_read);
         close_fd(ready_read);
         if !ready {
-            for (_, parent, _) in channels { close_fd(parent); }
+            for (_, parent, _) in channels {
+                close_fd(parent);
+            }
             wait_for_pid(keeper_pid);
-            return Err(FinalVerificationError::BackendUnavailable { reason: "attempt network listener setup failed" });
+            return Err(FinalVerificationError::BackendUnavailable {
+                reason: "attempt network listener setup failed",
+            });
         }
-        let user_namespace = open_namespace(keeper_pid, "user").map_err(|_| FinalVerificationError::BackendUnavailable { reason: "attempt user namespace setup failed" })?;
-        let network_namespace = open_namespace(keeper_pid, "net").map_err(|_| FinalVerificationError::BackendUnavailable { reason: "attempt network namespace setup failed" })?;
+        let user_namespace = open_namespace(keeper_pid, "user").map_err(|_| {
+            FinalVerificationError::BackendUnavailable {
+                reason: "attempt user namespace setup failed",
+            }
+        })?;
+        let network_namespace = open_namespace(keeper_pid, "net").map_err(|_| {
+            FinalVerificationError::BackendUnavailable {
+                reason: "attempt network namespace setup failed",
+            }
+        })?;
         let broker_shutdown = Arc::new(AtomicBool::new(false));
         let mut broker_threads = Vec::with_capacity(channels.len());
+        #[cfg(test)]
+        let mut broker_fd_numbers = Vec::with_capacity(channels.len());
         for (endpoint, parent, _) in channels {
+            #[cfg(test)]
+            broker_fd_numbers.push(parent);
             let shutdown = Arc::clone(&broker_shutdown);
-            broker_threads.push(std::thread::spawn(move || broker_main(parent, endpoint.port, shutdown)));
+            broker_threads.push(std::thread::spawn(move || {
+                broker_main(parent, endpoint.port, shutdown)
+            }));
         }
-        Ok(Self { endpoints, user_namespace, network_namespace, keeper_pid, broker_shutdown, broker_threads: Mutex::new(broker_threads) })
+        Ok(Self {
+            endpoints,
+            user_namespace,
+            network_namespace,
+            keeper_pid,
+            broker_shutdown,
+            broker_threads: Mutex::new(broker_threads),
+            #[cfg(test)]
+            broker_fd_numbers,
+        })
     }
 
-    pub fn endpoints(&self) -> &[FinalVerificationLoopbackEndpoint] { &self.endpoints }
-
+    pub fn endpoints(&self) -> &[FinalVerificationLoopbackEndpoint] {
+        &self.endpoints
+    }
 }
 
 impl Drop for FinalVerificationNetworkSession {
@@ -116,7 +168,9 @@ impl Drop for FinalVerificationNetworkSession {
         unsafe { libc::kill(self.keeper_pid, libc::SIGTERM) };
         wait_for_pid(self.keeper_pid);
         if let Ok(mut threads) = self.broker_threads.lock() {
-            for thread in threads.drain(..) { let _ = thread.join(); }
+            for thread in threads.drain(..) {
+                let _ = thread.join();
+            }
         }
     }
 }
@@ -528,32 +582,212 @@ fn apply_filesystem_policy(
     Ok(())
 }
 
-fn close_fd(fd: RawFd) { unsafe { libc::close(fd) }; }
-fn pipe_cloexec() -> io::Result<(RawFd, RawFd)> { let mut fds = [0; 2]; if unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) } == 0 { Ok((fds[0], fds[1])) } else { Err(io::Error::last_os_error()) } }
-fn seqpacket_pair() -> io::Result<(RawFd, RawFd)> { let mut fds = [0; 2]; if unsafe { libc::socketpair(libc::AF_UNIX, libc::SOCK_SEQPACKET | libc::SOCK_CLOEXEC, 0, fds.as_mut_ptr()) } == 0 { Ok((fds[0], fds[1])) } else { Err(io::Error::last_os_error()) } }
-fn read_ready(fd: RawFd) -> bool { let mut byte = 0_u8; (unsafe { libc::read(fd, std::ptr::addr_of_mut!(byte).cast(), 1) }) == 1 && byte == 1 }
+fn close_fd(fd: RawFd) {
+    unsafe { libc::close(fd) };
+}
+fn pipe_cloexec() -> io::Result<(RawFd, RawFd)> {
+    let mut fds = [0; 2];
+    if unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) } == 0 {
+        Ok((fds[0], fds[1]))
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+fn seqpacket_pair() -> io::Result<(RawFd, RawFd)> {
+    let mut fds = [0; 2];
+    if unsafe {
+        libc::socketpair(
+            libc::AF_UNIX,
+            libc::SOCK_SEQPACKET | libc::SOCK_CLOEXEC,
+            0,
+            fds.as_mut_ptr(),
+        )
+    } == 0
+    {
+        Ok((fds[0], fds[1]))
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+fn read_ready(fd: RawFd) -> bool {
+    let mut byte = 0_u8;
+    (unsafe { libc::read(fd, std::ptr::addr_of_mut!(byte).cast(), 1) }) == 1 && byte == 1
+}
 fn join_namespace_fds(user_namespace: RawFd, network_namespace: RawFd) -> io::Result<()> {
     // The network namespace is owned by this user namespace, so user must be
     // entered first for the capability check in setns(2).
-    if unsafe { libc::setns(user_namespace, libc::CLONE_NEWUSER) } != 0 { return Err(io::Error::last_os_error()); }
-    if unsafe { libc::setns(network_namespace, libc::CLONE_NEWNET) } != 0 { return Err(io::Error::last_os_error()); }
+    if unsafe { libc::setns(user_namespace, libc::CLONE_NEWUSER) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    if unsafe { libc::setns(network_namespace, libc::CLONE_NEWNET) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
     Ok(())
 }
 
-fn open_namespace(pid: libc::pid_t, name: &str) -> io::Result<std::fs::File> { std::fs::File::open(format!("/proc/{pid}/ns/{name}")) }
-fn wait_for_pid(pid: libc::pid_t) { let mut status = 0; while unsafe { libc::waitpid(pid, &mut status, 0) } < 0 && io::Error::last_os_error().kind() == io::ErrorKind::Interrupted {} }
-fn keeper_main(ready_fd: RawFd, channels: Vec<(FinalVerificationLoopbackEndpoint, RawFd, RawFd)>) -> ! {
- let configured = unsafe { libc::unshare(libc::CLONE_NEWUSER | libc::CLONE_NEWNET) } == 0 && bring_loopback_up().is_ok(); if !configured { unsafe { libc::write(ready_fd, b"\0".as_ptr().cast(), 1); libc::_exit(1) }; }
- let mut listeners = Vec::with_capacity(channels.len()); for (endpoint, _, child) in channels { match TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, endpoint.port)) { Ok(listener) => listeners.push((listener, child)), Err(_) => unsafe { libc::write(ready_fd, b"\0".as_ptr().cast(), 1); libc::_exit(1) } } }
- unsafe { libc::write(ready_fd, b"\x01".as_ptr().cast(), 1); libc::close(ready_fd) };
- // A listener has exactly one inherited private channel and fixed parent port.
- for (listener, channel) in listeners { std::thread::spawn(move || loop { match listener.accept() { Ok((stream, _)) => { let _ = send_fd(channel, stream.into_raw_fd()); }, Err(_) => break } }); }
- loop { unsafe { libc::pause() }; }
+fn open_namespace(pid: libc::pid_t, name: &str) -> io::Result<std::fs::File> {
+    std::fs::File::open(format!("/proc/{pid}/ns/{name}"))
 }
-fn bring_loopback_up() -> io::Result<()> { let fd = unsafe { libc::socket(libc::AF_INET, libc::SOCK_DGRAM | libc::SOCK_CLOEXEC, 0) }; if fd < 0 { return Err(io::Error::last_os_error()); } let mut request: libc::ifreq = unsafe { std::mem::zeroed() }; request.ifr_name[..2].copy_from_slice(&[b'l' as i8, b'o' as i8]); if unsafe { libc::ioctl(fd, libc::SIOCGIFFLAGS, &mut request) } != 0 { close_fd(fd); return Err(io::Error::last_os_error()); } unsafe { request.ifr_ifru.ifru_flags |= (libc::IFF_UP | libc::IFF_RUNNING) as i16; } let result = unsafe { libc::ioctl(fd, libc::SIOCSIFFLAGS, &request) }; let error = io::Error::last_os_error(); close_fd(fd); if result == 0 { Ok(()) } else { Err(error) } }
-fn send_fd(channel: RawFd, client: RawFd) -> io::Result<()> { let mut byte = 0_u8; let mut iov = libc::iovec { iov_base: std::ptr::addr_of_mut!(byte).cast(), iov_len: 1 }; let mut control = [0_u8; 64]; let mut message: libc::msghdr = unsafe { std::mem::zeroed() }; message.msg_iov = std::ptr::addr_of_mut!(iov); message.msg_iovlen = 1; message.msg_control = control.as_mut_ptr().cast(); message.msg_controllen = control.len(); unsafe { let header = libc::CMSG_FIRSTHDR(&message); (*header).cmsg_level = libc::SOL_SOCKET; (*header).cmsg_type = libc::SCM_RIGHTS; (*header).cmsg_len = libc::CMSG_LEN(std::mem::size_of::<RawFd>() as _) as _; *(libc::CMSG_DATA(header).cast::<RawFd>()) = client; message.msg_controllen = (*header).cmsg_len; } let sent = unsafe { libc::sendmsg(channel, &message, 0) }; close_fd(client); if sent == 1 { Ok(()) } else { Err(io::Error::last_os_error()) } }
-fn receive_fd(channel: RawFd) -> io::Result<Option<RawFd>> { let mut byte = 0_u8; let mut iov = libc::iovec { iov_base: std::ptr::addr_of_mut!(byte).cast(), iov_len: 1 }; let mut control = [0_u8; 64]; let mut message: libc::msghdr = unsafe { std::mem::zeroed() }; message.msg_iov = std::ptr::addr_of_mut!(iov); message.msg_iovlen = 1; message.msg_control = control.as_mut_ptr().cast(); message.msg_controllen = control.len(); let received = unsafe { libc::recvmsg(channel, &mut message, libc::MSG_DONTWAIT) }; if received == 0 { return Ok(None); } if received < 0 { return Err(io::Error::last_os_error()); } unsafe { let header = libc::CMSG_FIRSTHDR(&message); if header.is_null() || (*header).cmsg_level != libc::SOL_SOCKET || (*header).cmsg_type != libc::SCM_RIGHTS { return Err(io::Error::other("invalid broker message")); } Ok(Some(*(libc::CMSG_DATA(header).cast::<RawFd>()))) } }
-fn broker_main(channel: RawFd, port: u16, shutdown: Arc<AtomicBool>) { while !shutdown.load(Ordering::Acquire) { match receive_fd(channel) { Ok(Some(client)) => { std::thread::spawn(move || { let mut client = unsafe { TcpStream::from_raw_fd(client) }; let Ok(mut backend) = TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, port)) else { return; }; let mut reverse = backend.try_clone().ok(); let mut client_copy = client.try_clone().ok(); let forward = std::thread::spawn(move || { if let Some(mut c) = client_copy.take() { let _ = io::copy(&mut c, &mut backend); let _ = backend.shutdown(Shutdown::Write); } }); if let Some(mut b) = reverse.take() { let _ = io::copy(&mut b, &mut client); let _ = client.shutdown(Shutdown::Write); } let _ = forward.join(); }); }, Ok(None) => break, Err(error) if error.kind() == io::ErrorKind::WouldBlock => std::thread::sleep(Duration::from_millis(5)), Err(_) => break } } close_fd(channel); }
+fn wait_for_pid(pid: libc::pid_t) {
+    let mut status = 0;
+    while unsafe { libc::waitpid(pid, &mut status, 0) } < 0
+        && io::Error::last_os_error().kind() == io::ErrorKind::Interrupted
+    {}
+}
+fn keeper_main(
+    ready_fd: RawFd,
+    channels: Vec<(FinalVerificationLoopbackEndpoint, RawFd, RawFd)>,
+) -> ! {
+    let configured = unsafe { libc::unshare(libc::CLONE_NEWUSER | libc::CLONE_NEWNET) } == 0
+        && bring_loopback_up().is_ok();
+    if !configured {
+        unsafe {
+            libc::write(ready_fd, b"\0".as_ptr().cast(), 1);
+            libc::_exit(1)
+        };
+    }
+    let mut listeners = Vec::with_capacity(channels.len());
+    for (endpoint, _, child) in channels {
+        match TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, endpoint.port)) {
+            Ok(listener) => listeners.push((listener, child)),
+            Err(_) => unsafe {
+                libc::write(ready_fd, b"\0".as_ptr().cast(), 1);
+                libc::_exit(1)
+            },
+        }
+    }
+    unsafe {
+        libc::write(ready_fd, b"\x01".as_ptr().cast(), 1);
+        libc::close(ready_fd)
+    };
+    // A listener has exactly one inherited private channel and fixed parent port.
+    for (listener, channel) in listeners {
+        std::thread::spawn(move || {
+            loop {
+                match listener.accept() {
+                    Ok((stream, _)) => {
+                        let _ = send_fd(channel, stream.into_raw_fd());
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+    }
+    loop {
+        unsafe { libc::pause() };
+    }
+}
+fn bring_loopback_up() -> io::Result<()> {
+    let fd = unsafe { libc::socket(libc::AF_INET, libc::SOCK_DGRAM | libc::SOCK_CLOEXEC, 0) };
+    if fd < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let mut request: libc::ifreq = unsafe { std::mem::zeroed() };
+    request.ifr_name[..2].copy_from_slice(&[b'l' as i8, b'o' as i8]);
+    if unsafe { libc::ioctl(fd, libc::SIOCGIFFLAGS, &mut request) } != 0 {
+        close_fd(fd);
+        return Err(io::Error::last_os_error());
+    }
+    unsafe {
+        request.ifr_ifru.ifru_flags |= (libc::IFF_UP | libc::IFF_RUNNING) as i16;
+    }
+    let result = unsafe { libc::ioctl(fd, libc::SIOCSIFFLAGS, &request) };
+    let error = io::Error::last_os_error();
+    close_fd(fd);
+    if result == 0 { Ok(()) } else { Err(error) }
+}
+fn send_fd(channel: RawFd, client: RawFd) -> io::Result<()> {
+    let mut byte = 0_u8;
+    let mut iov = libc::iovec {
+        iov_base: std::ptr::addr_of_mut!(byte).cast(),
+        iov_len: 1,
+    };
+    let mut control = [0_u8; 64];
+    let mut message: libc::msghdr = unsafe { std::mem::zeroed() };
+    message.msg_iov = std::ptr::addr_of_mut!(iov);
+    message.msg_iovlen = 1;
+    message.msg_control = control.as_mut_ptr().cast();
+    message.msg_controllen = control.len();
+    unsafe {
+        let header = libc::CMSG_FIRSTHDR(&message);
+        (*header).cmsg_level = libc::SOL_SOCKET;
+        (*header).cmsg_type = libc::SCM_RIGHTS;
+        (*header).cmsg_len = libc::CMSG_LEN(std::mem::size_of::<RawFd>() as _) as _;
+        *(libc::CMSG_DATA(header).cast::<RawFd>()) = client;
+        message.msg_controllen = (*header).cmsg_len;
+    }
+    let sent = unsafe { libc::sendmsg(channel, &message, 0) };
+    close_fd(client);
+    if sent == 1 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+fn receive_fd(channel: RawFd) -> io::Result<Option<RawFd>> {
+    let mut byte = 0_u8;
+    let mut iov = libc::iovec {
+        iov_base: std::ptr::addr_of_mut!(byte).cast(),
+        iov_len: 1,
+    };
+    let mut control = [0_u8; 64];
+    let mut message: libc::msghdr = unsafe { std::mem::zeroed() };
+    message.msg_iov = std::ptr::addr_of_mut!(iov);
+    message.msg_iovlen = 1;
+    message.msg_control = control.as_mut_ptr().cast();
+    message.msg_controllen = control.len();
+    let received = unsafe { libc::recvmsg(channel, &mut message, libc::MSG_DONTWAIT) };
+    if received == 0 {
+        return Ok(None);
+    }
+    if received < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    unsafe {
+        let header = libc::CMSG_FIRSTHDR(&message);
+        if header.is_null()
+            || (*header).cmsg_level != libc::SOL_SOCKET
+            || (*header).cmsg_type != libc::SCM_RIGHTS
+        {
+            return Err(io::Error::other("invalid broker message"));
+        }
+        Ok(Some(*(libc::CMSG_DATA(header).cast::<RawFd>())))
+    }
+}
+fn broker_main(channel: RawFd, port: u16, shutdown: Arc<AtomicBool>) {
+    while !shutdown.load(Ordering::Acquire) {
+        match receive_fd(channel) {
+            Ok(Some(client)) => {
+                std::thread::spawn(move || {
+                    let mut client = unsafe { TcpStream::from_raw_fd(client) };
+                    let Ok(mut backend) = TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, port))
+                    else {
+                        return;
+                    };
+                    let mut reverse = backend.try_clone().ok();
+                    let mut client_copy = client.try_clone().ok();
+                    let forward = std::thread::spawn(move || {
+                        if let Some(mut c) = client_copy.take() {
+                            let _ = io::copy(&mut c, &mut backend);
+                            let _ = backend.shutdown(Shutdown::Write);
+                        }
+                    });
+                    if let Some(mut b) = reverse.take() {
+                        let _ = io::copy(&mut b, &mut client);
+                        let _ = client.shutdown(Shutdown::Write);
+                    }
+                    let _ = forward.join();
+                });
+            }
+            Ok(None) => break,
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                std::thread::sleep(Duration::from_millis(5))
+            }
+            Err(_) => break,
+        }
+    }
+    close_fd(channel);
+}
 
 fn child_exited_successfully(pid: libc::pid_t) -> bool {
     let mut status = 0;
@@ -821,7 +1055,9 @@ mod tests {
 
     #[test]
     fn attempt_session_proxies_only_the_cataloged_parent_loopback_port() {
-        if !final_verification_backend_available() || !Path::new("/bin/bash").is_file() { return; }
+        if !final_verification_backend_available() || !Path::new("/bin/bash").is_file() {
+            return;
+        }
         let target = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
         let port = target.local_addr().unwrap().port();
         let server = std::thread::spawn(move || {
@@ -830,13 +1066,36 @@ mod tests {
             std::io::Read::read_exact(&mut stream, &mut request).unwrap();
             std::io::Write::write_all(&mut stream, &request).unwrap();
         });
-        let session = FinalVerificationNetworkSession::create(vec![FinalVerificationLoopbackEndpoint { preset_id: "echo".into(), port }]).unwrap();
+        let session =
+            FinalVerificationNetworkSession::create(vec![FinalVerificationLoopbackEndpoint {
+                preset_id: "echo".into(),
+                port,
+            }])
+            .unwrap();
         let worktree = TempDir::new().unwrap();
         let mut req = request(worktree.path());
-        req.argv = vec!["/bin/bash".into(), "-c".into(), format!("exec 3<>/dev/tcp/127.0.0.1/{port}; printf ping >&3; head -c 4 <&3 > outputs/result")];
-        let result = launch_final_verification_in_network_session_with_timeout(req, &session, Duration::from_secs(5)).unwrap();
-        assert!(result.succeeded(), "stderr: {}", String::from_utf8_lossy(&result.stderr));
-        assert_eq!(std::fs::read(worktree.path().join("outputs/result")).unwrap(), b"ping");
+        req.argv = vec![
+            "/bin/bash".into(),
+            "-c".into(),
+            format!(
+                "exec 3<>/dev/tcp/127.0.0.1/{port}; printf ping >&3; head -c 4 <&3 > outputs/result"
+            ),
+        ];
+        let result = launch_final_verification_in_network_session_with_timeout(
+            req,
+            &session,
+            Duration::from_secs(5),
+        )
+        .unwrap();
+        assert!(
+            result.succeeded(),
+            "stderr: {}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        assert_eq!(
+            std::fs::read(worktree.path().join("outputs/result")).unwrap(),
+            b"ping"
+        );
         server.join().unwrap();
         // The session is the listener owner; dropping it terminates the keeper
         // and no parent-namespace listener was ever opened on this port.
@@ -845,7 +1104,146 @@ mod tests {
 
     #[test]
     fn malformed_or_unavailable_catalog_listener_fails_closed() {
-        assert!(matches!(FinalVerificationNetworkSession::create(vec![FinalVerificationLoopbackEndpoint { preset_id: String::new(), port: 1 }]), Err(FinalVerificationError::BackendUnavailable { .. })));
+        assert!(matches!(
+            FinalVerificationNetworkSession::create(vec![FinalVerificationLoopbackEndpoint {
+                preset_id: String::new(),
+                port: 1
+            }]),
+            Err(FinalVerificationError::BackendUnavailable { .. })
+        ));
     }
 
+    #[test]
+    fn attempt_session_denies_an_absent_loopback_port() {
+        if !final_verification_backend_available() || !Path::new("/bin/bash").is_file() {
+            return;
+        }
+        let catalog_target = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let catalog_port = catalog_target.local_addr().unwrap().port();
+        let absent_port = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        let session =
+            FinalVerificationNetworkSession::create(vec![FinalVerificationLoopbackEndpoint {
+                preset_id: "cataloged".into(),
+                port: catalog_port,
+            }])
+            .unwrap();
+        let worktree = TempDir::new().unwrap();
+        let mut req = request(worktree.path());
+        req.argv = vec![
+            "/bin/bash".into(),
+            "-c".into(),
+            format!("{{ exec 3<>/dev/tcp/127.0.0.1/{absent_port}; }} 2>/dev/null"),
+        ];
+        let result = launch_final_verification_in_network_session_with_timeout(
+            req,
+            &session,
+            Duration::from_secs(2),
+        )
+        .unwrap();
+        assert!(
+            !result.succeeded(),
+            "uncataloged loopback port was reachable"
+        );
+        drop(session);
+        drop(catalog_target);
+    }
+
+    #[test]
+    fn attempt_session_denies_non_loopback_destinations() {
+        if !final_verification_backend_available() || !Path::new("/bin/bash").is_file() {
+            return;
+        }
+        let session = FinalVerificationNetworkSession::create(vec![]).unwrap();
+        let worktree = TempDir::new().unwrap();
+        let mut req = request(worktree.path());
+        req.argv = vec![
+            "/bin/bash".into(),
+            "-c".into(),
+            "{ exec 3<>/dev/tcp/1.1.1.1/80; } 2>/dev/null".into(),
+        ];
+        let result = launch_final_verification_in_network_session_with_timeout(
+            req,
+            &session,
+            Duration::from_secs(2),
+        )
+        .unwrap();
+        assert!(
+            !result.succeeded(),
+            "attempt namespace has a non-loopback route"
+        );
+        drop(session);
+    }
+
+    #[test]
+    fn attempt_session_does_not_inherit_broker_control_descriptors() {
+        if !final_verification_backend_available() || !Path::new("/bin/bash").is_file() {
+            return;
+        }
+        let target = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let port = target.local_addr().unwrap().port();
+        let session =
+            FinalVerificationNetworkSession::create(vec![FinalVerificationLoopbackEndpoint {
+                preset_id: "cataloged".into(),
+                port,
+            }])
+            .unwrap();
+        let control_fds = session
+            .broker_fd_numbers
+            .iter()
+            .chain(
+                [
+                    session.user_namespace.as_raw_fd(),
+                    session.network_namespace.as_raw_fd(),
+                ]
+                .iter(),
+            )
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(" ");
+        let worktree = TempDir::new().unwrap();
+        let mut req = request(worktree.path());
+        req.argv = vec![
+            "/bin/bash".into(),
+            "-c".into(),
+            format!("for fd in {control_fds}; do test ! -e /proc/self/fd/$fd || exit 1; done"),
+        ];
+        let result = launch_final_verification_in_network_session_with_timeout(
+            req,
+            &session,
+            Duration::from_secs(2),
+        )
+        .unwrap();
+        assert!(result.succeeded(), "control descriptors survived exec");
+        drop(session);
+        drop(target);
+    }
+
+    #[test]
+    fn attempt_session_reaps_keeper_after_command_cancellation_and_drop() {
+        if !final_verification_backend_available() || !Path::new("/bin/bash").is_file() {
+            return;
+        }
+        let session = FinalVerificationNetworkSession::create(vec![]).unwrap();
+        let keeper_pid = session.keeper_pid;
+        let worktree = TempDir::new().unwrap();
+        let mut req = request(worktree.path());
+        req.argv = vec!["/bin/bash".into(), "-c".into(), "sleep 5".into()];
+        let result = launch_final_verification_in_network_session_with_timeout(
+            req,
+            &session,
+            Duration::from_millis(25),
+        )
+        .unwrap();
+        assert!(
+            result.timed_out,
+            "command cancellation did not enforce timeout"
+        );
+        drop(session);
+        assert_eq!(unsafe { libc::kill(keeper_pid, 0) }, -1);
+        assert_eq!(io::Error::last_os_error().raw_os_error(), Some(libc::ESRCH));
+    }
 }
