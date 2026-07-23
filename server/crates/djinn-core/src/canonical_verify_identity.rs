@@ -875,7 +875,10 @@ mod tests {
         let ResolvedVerificationSelectionV1::SelectedGroups {
             selection_rules,
             selected_command_groups,
-        } = &mut equivalent.selection else { unreachable!() };
+        } = &mut equivalent.selection
+        else {
+            unreachable!()
+        };
         selection_rules[0].matches.reverse();
         selection_rules[0].command_groups.reverse();
         selected_command_groups.reverse();
@@ -883,17 +886,31 @@ mod tests {
 
         let mut reordered_rules = input();
         reordered_rules.selection = selection;
-        let ResolvedVerificationSelectionV1::SelectedGroups { selection_rules, .. } =
-            &mut reordered_rules.selection else { unreachable!() };
+        let ResolvedVerificationSelectionV1::SelectedGroups {
+            selection_rules, ..
+        } = &mut reordered_rules.selection
+        else {
+            unreachable!()
+        };
         selection_rules.reverse();
-        assert_ne!(baseline.digest, EnvironmentIdentityV1::derive(reordered_rules).unwrap().digest);
+        assert_ne!(
+            baseline.digest,
+            EnvironmentIdentityV1::derive(reordered_rules)
+                .unwrap()
+                .digest
+        );
 
         let mut different_groups = input();
         different_groups.selection = ResolvedVerificationSelectionV1::SelectedGroups {
             selection_rules: selection_rules_for_test(),
             selected_command_groups: vec!["ui".into()],
         };
-        assert_ne!(baseline.digest, EnvironmentIdentityV1::derive(different_groups).unwrap().digest);
+        assert_ne!(
+            baseline.digest,
+            EnvironmentIdentityV1::derive(different_groups)
+                .unwrap()
+                .digest
+        );
     }
 
     fn selection_rules_for_test() -> Vec<ResolvedVerificationSelectionRuleV1> {
@@ -918,7 +935,9 @@ mod tests {
         };
         assert!(matches!(
             EnvironmentIdentityV1::derive(empty),
-            Err(EnvironmentIdentityError::MissingResolved { field: "selected_command_groups" })
+            Err(EnvironmentIdentityError::MissingResolved {
+                field: "selected_command_groups"
+            })
         ));
 
         let mut unknown = input();

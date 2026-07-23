@@ -353,7 +353,8 @@ pub async fn resolve_final_verification_for_task_run(
                 network_access: plan.hermeticity.network_access,
             },
         },
-        selection: djinn_core::canonical_verify::ResolvedVerificationSelectionV1::legacy_flat_plan(),
+        selection: djinn_core::canonical_verify::ResolvedVerificationSelectionV1::legacy_flat_plan(
+        ),
         input_manifest: manifest.clone(),
         image: ImmutableImageV1 {
             reference: "host".into(),
