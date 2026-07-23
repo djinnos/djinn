@@ -933,13 +933,83 @@ async fn persisted_refinement_owner_survives_schema_graduation() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// Legacy board-health guard retention through schema graduation
+// Post-contract board-health and refinement cleanup gate
 // ═══════════════════════════════════════════════════════════════════════════
 
-/// Execute the legacy behavioral guard: a closed mismatch candidate must not
-/// be returned by the board-health report after schema graduation.
+/// The canonical migration must make the catalog contract concrete before this
+/// gate checks the cleanup it enables. Keep the source assertions here rather
+/// than in a second rollout binary: the fixed rollout command is the boundary
+/// which prevents nullable-era board-health and refinement fallbacks returning.
 #[tokio::test]
-async fn legacy_board_health_guard_excludes_closed_mismatch_candidates() {
+async fn post_contract_cleanup_has_no_nullable_creator_or_system_owner_fallbacks() {
+    contract_support::with_temp_database("rollout_post_contract", |db_url| async move {
+        let mut conn = PgConnection::connect(&db_url).await.expect("connect");
+        contract_support::apply_prior_migrations(&mut conn).await;
+        contract_support::seed_user(&mut conn, contract_support::DESIGNATED, false).await;
+        contract_support::set_operator(&mut conn, contract_support::DESIGNATED).await;
+        contract_support::apply_contract_migration(&mut conn).await;
+
+        let is_nullable: String = sqlx::query_scalar(
+            "SELECT is_nullable FROM information_schema.columns \
+             WHERE table_name = 'tasks' AND column_name = 'created_by_user_id'",
+        )
+        .fetch_one(&mut conn)
+        .await
+        .expect("read canonical tasks creator catalog entry");
+        assert_eq!(
+            is_nullable, "NO",
+            "post-contract cleanup assumptions require migration 142 to make \
+             tasks.created_by_user_id NOT NULL in the catalog"
+        );
+        conn.close().await.expect("close");
+    })
+    .await;
+
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../");
+    let board_health = std::fs::read_to_string(
+        root.join("server/crates/djinn-db/src/repositories/task/board_health.rs"),
+    )
+    .expect("production board-health source exists");
+    assert!(
+        board_health.contains("let _created_by: String = row.get(\"created_by_user_id\");"),
+        "post-contract board health must decode task creators as concrete values"
+    );
+    for nullable_creator_fallback in [
+        "created_by.is_none() || has_active_credential",
+        "created_by.is_none()",
+        "created_by_user_id.is_none()",
+        "legacy_null_creator",
+    ] {
+        assert!(
+            !board_health.contains(nullable_creator_fallback),
+            "production board health must not restore nullable creator credential handling: \
+             {nullable_creator_fallback}"
+        );
+    }
+
+    let refinement_outcome = std::fs::read_to_string(
+        root.join("server/crates/djinn-coordinator/src/refinement_outcome.rs"),
+    )
+    .expect("refinement outcome source exists");
+    assert!(
+        refinement_outcome.contains("let owner = match self.resolve_owner_identity"),
+        "refinement task creation must resolve its durable owner identity"
+    );
+    for synthetic_owner_fallback in [
+        "owner: \"system\"",
+        "owner = \"system\"",
+        "unwrap_or_else(|| \"system\".to_string())",
+        "unwrap_or(\"system\")",
+    ] {
+        assert!(
+            !refinement_outcome.contains(synthetic_owner_fallback),
+            "refinement outcome must not restore synthetic owner fallback: \
+             {synthetic_owner_fallback}"
+        );
+    }
+
+    // Preserve the legacy behavioral guard alongside the post-contract source
+    // checks: board-health scans must remain bounded to live candidates.
     use djinn_core::events::EventBus;
     use djinn_db::{Database, TaskRepository};
 
