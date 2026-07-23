@@ -18,6 +18,10 @@ pub struct ServicePreset {
     pub name: String,
     pub service_type: String,
     pub image: String,
+    /// Immutable manifest digest consumed by strict canonical verification.
+    pub image_digest: Option<String>,
+    /// Revision of the catalog wrapper verification protocol.
+    pub verification_protocol_revision: Option<i32>,
     pub port: i32,
     pub env: String,       // JSON object (text)
     pub resources: String, // JSON object (text)
@@ -38,6 +42,8 @@ fn map_preset(r: &sqlx::postgres::PgRow) -> ServicePreset {
         name: r.get("name"),
         service_type: r.get("service_type"),
         image: r.get("image"),
+        image_digest: r.try_get("image_digest").ok(),
+        verification_protocol_revision: r.try_get("verification_protocol_revision").ok(),
         port: r.get("port"),
         env: r.get("env"),
         resources: r.get("resources"),
@@ -50,7 +56,7 @@ fn map_preset(r: &sqlx::postgres::PgRow) -> ServicePreset {
 
 const PRESET_COLS: &str = r#"id, name, service_type, image, port,
     env::text AS env, resources::text AS resources, conn_template, conn_env_var,
-    client_package"#;
+    client_package, image_digest, verification_protocol_revision"#;
 
 pub struct ServicePresetRepository {
     db: Database,

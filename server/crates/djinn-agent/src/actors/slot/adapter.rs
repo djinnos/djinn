@@ -15,11 +15,12 @@ use djinn_core::canonical_verify::{
 };
 use djinn_core::clock::SystemClock;
 use djinn_core::models::VerifySource;
-use djinn_db::TaskRunRepository;
 use djinn_db::advisory_lock;
+use djinn_db::{ImageRepository, TaskRunRepository};
 use djinn_git::verification_input::{
     ResolvedExternalInputV1, VerificationInputFingerprintConfig, collect_verification_changed_paths,
 };
+use djinn_k8s::sidecar::resolve_image_services_strict;
 use djinn_sandbox::final_verification_execution::{
     EnvironmentIdentityResolver, FinalVerificationExecutionRequest,
 };
@@ -366,6 +367,33 @@ pub async fn resolve_final_verification_for_task_run(
         .workspace_path
         .map(PathBuf::from)
         .ok_or("task run has no worktree")?;
+    // Catalog authorization is bound at dispatch, never re-selected from a
+    // mutable project. A changed project selection makes verification ineligible.
+    // Resolve it only for a configured plan with a usable worktree: an empty
+    // plan is a typed skip and cannot consume catalog identity material.
+    let runs = TaskRunRepository::new(db.clone());
+    let bound_image_id = runs
+        .catalog_image_id(task_run_id)
+        .await
+        .map_err(|e| e.to_string())?
+        .ok_or("task run has no bound catalog image")?;
+    let image_repo = ImageRepository::new(db.clone());
+    let current_image = image_repo
+        .resolve_for_project(&run.project_id)
+        .await
+        .map_err(|e| e.to_string())?
+        .ok_or("project has no selected catalog image")?;
+    if current_image.id != bound_image_id {
+        return Err("task-run/current-image mismatch".into());
+    }
+    let catalog_image = image_repo
+        .get(&bound_image_id)
+        .await
+        .map_err(|e| e.to_string())?
+        .ok_or("task-run catalog image missing")?;
+    let services = resolve_image_services_strict(db, &bound_image_id)
+        .await
+        .map_err(|e| format!("strict catalog resolution failed: {e}"))?;
     let manifest = VerificationInputManifestV1 {
         version: plan.input_manifest.version,
         repo_paths: plan.input_manifest.repo_paths.clone(),
@@ -404,8 +432,8 @@ pub async fn resolve_final_verification_for_task_run(
         .map(|c| c.check_id.clone())
         .collect::<Vec<_>>();
     let identity = ResolvedEnvironmentIdentityInputV1 {
-        schema_version: 1,
-        canonicalization_version: 1,
+        schema_version: 2,
+        canonicalization_version: 2,
         plan: CanonicalFinalVerificationPlanV1 {
             version: plan.version,
             profile_id: plan.profile_id.clone(),
@@ -437,8 +465,14 @@ pub async fn resolve_final_verification_for_task_run(
         },
         input_manifest: manifest.clone(),
         image: ImmutableImageV1 {
-            reference: "host".into(),
-            digest: UNKNOWN_IMAGE_DIGEST.into(),
+            reference: catalog_image
+                .tag
+                .clone()
+                .ok_or("task-run catalog image has no reference")?,
+            digest: catalog_image
+                .registry_digest
+                .clone()
+                .ok_or("task-run catalog image has no digest")?,
         },
         tool_probes: commands
             .iter()
@@ -454,6 +488,21 @@ pub async fn resolve_final_verification_for_task_run(
         target: std::env::consts::ARCH.into(),
         features: Vec::new(),
         allowlisted_environment: BTreeMap::new(),
+        services: services
+            .into_iter()
+            .map(
+                |service| djinn_core::canonical_verify::ResolvedCatalogServiceIdentityV1 {
+                    preset_id: service.preset_id,
+                    service_type: service.service_type,
+                    image_reference: service.image_reference,
+                    image_digest: service.image_digest,
+                    port: service.port,
+                    exported_environment_names: service.exported_environment_names,
+                    verification_protocol_revision: service.verification_protocol_revision,
+                    effective_configuration_digest: service.effective_configuration_digest,
+                },
+            )
+            .collect(),
     };
     let resolver: EnvironmentIdentityResolver = Arc::new(move || Ok(identity.clone()));
     let output_directories = output_directories(&manifest.output_only_globs)?;
@@ -1025,6 +1074,40 @@ mod resolve_final_verification_tests {
                 "configured plan without a worktree must not resolve, got {:?}",
                 material.map(|_| "material")
             ),
+        }
+    }
+
+    #[tokio::test]
+    async fn task_run_catalog_image_drift_fails_before_catalog_resolution() {
+        let worktree = initialized_worktree().await;
+        let fx = fixture(Some(
+            worktree.path().to_str().expect("worktree path is UTF-8"),
+        ))
+        .await;
+        configure_final_verification_plan(&fx).await;
+        let images = ImageRepository::new(fx.agent.db.clone());
+        images
+            .create("catalog-image-at-dispatch", "dispatch", None, "{}")
+            .await
+            .unwrap();
+        images
+            .create("catalog-image-now", "current", None, "{}")
+            .await
+            .unwrap();
+        TaskRunRepository::new(fx.agent.db.clone())
+            .set_catalog_image_id(&fx.task_run_id, "catalog-image-at-dispatch")
+            .await
+            .unwrap();
+        images
+            .set_project_image(&fx.project_id, Some("catalog-image-now"))
+            .await
+            .unwrap();
+
+        match resolve(&fx).await {
+            Err(detail) => assert_eq!(detail, "task-run/current-image mismatch"),
+            Ok(_) => {
+                panic!("verification must never substitute a project image selected after dispatch")
+            }
         }
     }
 
