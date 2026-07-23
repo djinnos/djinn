@@ -1124,6 +1124,7 @@ dependencies = [
  "axum 0.8.9",
  "base64 0.22.1",
  "djinn-agent",
+ "djinn-cgroup-launcher",
  "djinn-compaction",
  "djinn-control-plane",
  "djinn-coordinator",
