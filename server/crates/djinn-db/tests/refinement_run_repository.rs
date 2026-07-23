@@ -7,14 +7,19 @@
 use std::sync::Arc;
 
 use djinn_core::events::EventBus;
-use djinn_core::refinement_liveness::{RefinementLivenessResult, RefinementStaleReason};
+use djinn_core::refinement_liveness::{
+    RefinementLivenessResult, RefinementParkKind, RefinementPhase, RefinementRole,
+    RefinementStaleReason, RefinementStopReason,
+};
 use djinn_db::repositories::refinement_run::LoadRefinementRunSnapshotRequest;
 use djinn_db::test_support::{
     UsageTestSessionSeed, UsageTestTaskSeed, seed_project, seed_session_row_with_id, seed_task_row,
 };
 use djinn_db::{
-    AdmitRefinementRunRequest, Database, ProposalRepository, RefinementAdmissionOutcome,
-    RefinementAdmissionSource, RefinementDurableProgress, RefinementIntentMutationError,
+    AdmitRefinementRunRequest, Database, ParkRefinementRunFromIntentRequest, ProposalRepository,
+    RefinementAdmissionOutcome, RefinementAdmissionSource, RefinementDurableProgress,
+    RefinementIntentMutationError, ResolveRefinementHumanReviewRequest,
+    SourceIntentTransitionRequest, TerminalRefinementRunFromIntentRequest,
 };
 use serde_json::Value;
 use tokio::sync::Barrier;
@@ -419,4 +424,172 @@ async fn snapshot_and_24_hour_aggregate_reads_are_byte_for_byte_pure() {
         assert_eq!(aggregate.reaped_phantom_last_24h, 1);
     }
     assert_eq!(durable_shape(&db, &proposal_id).await, before);
+}
+
+fn source(run_id: String, intent_id: String, generation: i32) -> SourceIntentTransitionRequest {
+    SourceIntentTransitionRequest {
+        run_id,
+        intent_id,
+        generation,
+        expected_round: 1,
+        expected_phase: RefinementPhase::AdversaryAttack,
+        expected_role: RefinementRole::Adversary,
+    }
+}
+
+#[tokio::test]
+async fn exact_source_intent_transitions_fence_and_rollback_together() {
+    let (db, repo, proposal_id) = fixture().await;
+    let admitted = repo
+        .admit_refinement_run(demand(proposal_id.clone(), "source-terminal"))
+        .await
+        .unwrap();
+    let (run_id, intent_id, generation) = match admitted {
+        RefinementAdmissionOutcome::Admitted {
+            run_id,
+            intent_id,
+            generation,
+        } => (run_id, intent_id, generation),
+        _ => unreachable!(),
+    };
+    sqlx::query("UPDATE refinement_dispatch_intents SET state = 'claimed', claimed_by = 'worker', claimed_at = $2, claim_expires_at = '2999-01-01T00:00:00.000Z' WHERE id = $1")
+        .bind(&intent_id)
+        .bind(OLD)
+        .execute(db.pool())
+        .await
+        .unwrap();
+    let bad = TerminalRefinementRunFromIntentRequest {
+        source: SourceIntentTransitionRequest {
+            expected_role: RefinementRole::Judge,
+            ..source(run_id.clone(), intent_id.clone(), generation)
+        },
+        reason: RefinementStopReason::OperatorStop {
+            actor: "test".into(),
+            reason: None,
+        },
+    };
+    let before = durable_shape(&db, &proposal_id).await;
+    assert!(repo.terminal_refinement_run_from_intent(bad).await.is_err());
+    assert_eq!(durable_shape(&db, &proposal_id).await, before);
+    assert!(
+        repo.terminal_refinement_run_from_intent(TerminalRefinementRunFromIntentRequest {
+            source: source(run_id.clone(), intent_id.clone(), generation),
+            reason: RefinementStopReason::OperatorStop {
+                actor: "test".into(),
+                reason: None
+            },
+        })
+        .await
+        .unwrap()
+    );
+    assert!(
+        !repo
+            .terminal_refinement_run_from_intent(TerminalRefinementRunFromIntentRequest {
+                source: source(run_id.clone(), intent_id.clone(), generation),
+                reason: RefinementStopReason::OperatorStop {
+                    actor: "test".into(),
+                    reason: None
+                },
+            })
+            .await
+            .unwrap()
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            "SELECT state FROM refinement_dispatch_intents WHERE id=$1"
+        )
+        .bind(&intent_id)
+        .fetch_one(db.pool())
+        .await
+        .unwrap(),
+        "completed"
+    );
+
+    let (db, repo, proposal_id) = fixture().await;
+    let admitted = repo
+        .admit_refinement_run(demand(proposal_id.clone(), "source-rollback"))
+        .await
+        .unwrap();
+    let (run_id, intent_id, generation) = match admitted {
+        RefinementAdmissionOutcome::Admitted {
+            run_id,
+            intent_id,
+            generation,
+        } => (run_id, intent_id, generation),
+        _ => unreachable!(),
+    };
+    sqlx::query("UPDATE refinement_dispatch_intents SET state = 'materialized' WHERE id = $1")
+        .bind(&intent_id)
+        .execute(db.pool())
+        .await
+        .unwrap();
+    install_failure(&db, "reap_update").await;
+    let before = durable_shape(&db, &proposal_id).await;
+    assert!(
+        repo.park_refinement_run_from_intent(ParkRefinementRunFromIntentRequest {
+            source: source(run_id, intent_id, generation),
+            kind: RefinementParkKind::AwaitingReview,
+        })
+        .await
+        .is_err()
+    );
+    assert_eq!(durable_shape(&db, &proposal_id).await, before);
+}
+
+#[tokio::test]
+async fn human_rejection_reverts_snapshot_and_terminalizes_atomically() {
+    let (db, repo, proposal_id) = fixture().await;
+    sqlx::query("INSERT INTO proposal_revisions (id, proposal_id, seq, title, body, body_format, acceptance_criteria, event_kind) VALUES ($1, $2, 1, 'captured', 'captured body', 'markdown', '[]', 'spec_revision')")
+        .bind(uuid::Uuid::now_v7().to_string()).bind(&proposal_id).execute(db.pool()).await.unwrap();
+    let admitted = repo
+        .admit_refinement_run(demand(proposal_id.clone(), "human-reject"))
+        .await
+        .unwrap();
+    let (run_id, generation) = match admitted {
+        RefinementAdmissionOutcome::Admitted {
+            run_id, generation, ..
+        } => (run_id, generation),
+        _ => unreachable!(),
+    };
+    sqlx::query("UPDATE proposals SET title='changed', body='changed body', status='in_review', latest_revision_seq=2 WHERE id=$1").bind(&proposal_id).execute(db.pool()).await.unwrap();
+    sqlx::query("UPDATE refinement_runs SET state='parked', park_kind='awaiting_review', parked_at=$2 WHERE id=$1").bind(&run_id).bind(OLD).execute(db.pool()).await.unwrap();
+    assert!(
+        repo.resolve_refinement_human_review(ResolveRefinementHumanReviewRequest {
+            run_id: run_id.clone(),
+            generation,
+            snapshot_revision_seq: 1,
+            accept: false
+        })
+        .await
+        .unwrap()
+    );
+    let reverted: (String, String, String) =
+        sqlx::query_as("SELECT title, body, status FROM proposals WHERE id=$1")
+            .bind(&proposal_id)
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
+    assert_eq!(
+        reverted,
+        ("captured".into(), "captured body".into(), "draft".into())
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, String>("SELECT stop_tag FROM refinement_runs WHERE id=$1")
+            .bind(&run_id)
+            .fetch_one(db.pool())
+            .await
+            .unwrap(),
+        "human_rejected"
+    );
+    assert!(
+        !repo
+            .resolve_refinement_human_review(ResolveRefinementHumanReviewRequest {
+                run_id,
+                generation,
+                snapshot_revision_seq: 1,
+                accept: false
+            })
+            .await
+            .unwrap()
+    );
 }
