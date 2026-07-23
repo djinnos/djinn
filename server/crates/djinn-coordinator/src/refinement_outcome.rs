@@ -11,22 +11,37 @@ use djinn_core::models::{
     Proposal, ProposalDebateTrail, TaskRefinementCorrelation, TransitionAction,
 };
 use djinn_core::refinement_liveness::{
-    RefinementIntentState as DurableIntentState, RefinementRunState,
+    RefinementIntentState as DurableIntentState, RefinementParkKind, RefinementRole,
+    RefinementRunState, RefinementStopReason,
 };
 use djinn_db::{
-    EffectiveCreatorProvenance, LoadRefinementRunSnapshotRequest, ProposalRepository,
-    TaskRepository, UserSettingsRepository,
+    CompleteRefinementIntentRequest, EffectiveCreatorProvenance, LoadRefinementRunSnapshotRequest,
+    ParkRefinementRunFromIntentRequest, ProposalRepository, SourceIntentTransitionRequest,
+    TaskRepository, TerminalRefinementRunFromIntentRequest, UserSettingsRepository,
 };
 
 use super::refinement::{
-    AdversaryPassOutcome, AdversaryPassResult, JudgeVerdictResult, RefinementLoopState,
-    RefinementPhase, StopReason, build_revision_event_metadata, select_refinement_model,
+    AdversaryPassResult, JudgeVerdictResult, RefinementLoopState, RefinementPhase, StopReason,
+    build_revision_event_metadata, select_refinement_model,
 };
 
 use super::actor::CoordinatorActor;
 use super::refinement_dispatch::RefinementSession;
 use super::refinement_lint_evidence::advocate_lint_rejection_from_session;
 pub(super) use super::refinement_lint_evidence::format_advocate_lint_correction_context;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum RefinementOutcomeApplication {
+    Ignored,
+    Retryable,
+    Committed,
+}
+
+enum OutcomeFence {
+    Ignored,
+    Retryable,
+    Eligible(SourceIntentTransitionRequest),
+}
 #[cfg(test)]
 use super::refinement_lint_evidence::{
     parse_spec_lint_rejection, parse_spec_lint_rejection_from_conversation,
@@ -106,69 +121,69 @@ impl CoordinatorActor {
         &mut self,
         run_id: &str,
         session: &RefinementSession,
-    ) -> bool {
-        let state = match self.active_refinements.get(run_id).cloned() {
-            Some(s) => s,
-            None => return false,
+    ) -> RefinementOutcomeApplication {
+        let Some(state) = self.active_refinements.get(run_id).cloned() else {
+            return RefinementOutcomeApplication::Ignored;
         };
-        // Sessions are disposable projections. Reject stale or uncorrelated
-        // observations before any proposal/debate/evidence read can mutate a
-        // projection or create a synthetic stop row.
-        if !self.fence_durable_outcome(run_id, session, &state).await {
-            return false;
-        }
-        // The projection is keyed by the durable run. The proposal identity is
-        // payload data used only for proposal/lifecycle repository operations.
+        let source = match self.fence_durable_outcome(run_id, session, &state).await {
+            OutcomeFence::Ignored => return RefinementOutcomeApplication::Ignored,
+            OutcomeFence::Retryable => return RefinementOutcomeApplication::Retryable,
+            OutcomeFence::Eligible(source) => source,
+        };
         let proposal_id = state.proposal_id.clone();
-
-        match session.phase {
+        let candidate = match session.phase {
             RefinementPhase::AdvocateRevision => {
                 self.process_advocate_outcome(run_id, &proposal_id, &session.task_id, &state)
-                    .await;
+                    .await
             }
             RefinementPhase::AdversaryAttack => {
                 self.process_adversary_outcome(run_id, &proposal_id, &state)
-                    .await;
+                    .await
             }
             RefinementPhase::JudgeAdjudication => {
                 self.process_judge_outcome(run_id, &proposal_id, &state)
-                    .await;
+                    .await
             }
-            RefinementPhase::AwaitingHumanReview
-            | RefinementPhase::AwaitingEvidence
-            | RefinementPhase::Complete => {}
+            _ => None,
+        };
+        let Some(candidate) = candidate else {
+            return RefinementOutcomeApplication::Retryable;
+        };
+        if !state.run_id.is_empty() && !self.commit_refinement_candidate(&source, &candidate).await
+        {
+            return RefinementOutcomeApplication::Retryable;
         }
-
         self.active_refinements
-            .get(run_id)
-            .is_some_and(|candidate| {
-                candidate.phase != state.phase
-                    || candidate.current_round != state.current_round
-                    || candidate.current_revision_seq != state.current_revision_seq
-                    || candidate.stop_reason != state.stop_reason
-                    || candidate.pending_advocate_lint_violations.len()
-                        != state.pending_advocate_lint_violations.len()
-            })
+            .insert(run_id.to_owned(), candidate.clone());
+        if candidate.is_awaiting_human_review() {
+            self.persist_awaiting_review(&proposal_id, "Refinement outcome committed", &candidate)
+                .await;
+        }
+        RefinementOutcomeApplication::Committed
     }
 
-    /// Fence a completed task against the exact, currently eligible source
-    /// intent. Repository errors are retryable coordinator failures, not agent
-    /// failures: leave both the source and in-memory projection untouched.
     async fn fence_durable_outcome(
         &self,
         run_id: &str,
         session: &RefinementSession,
         state: &RefinementLoopState,
-    ) -> bool {
+    ) -> OutcomeFence {
         if state.run_id.is_empty() {
-            return true;
+            return OutcomeFence::Eligible(SourceIntentTransitionRequest {
+                run_id: String::new(),
+                intent_id: String::new(),
+                generation: 0,
+                expected_round: state.current_round,
+                expected_phase: djinn_core::refinement_liveness::RefinementPhase::AdversaryAttack,
+                expected_role: RefinementRole::Adversary,
+            });
         }
         if state.run_id != run_id
             || session.run_id != run_id
             || state.generation != session.generation
             || state.phase != session.phase
         {
-            return false;
+            return OutcomeFence::Ignored;
         }
         let event_bus = crate::events::event_bus_for(&self.events_tx);
         let task = match TaskRepository::new(self.db.clone(), event_bus.clone())
@@ -176,32 +191,33 @@ impl CoordinatorActor {
             .await
         {
             Ok(Some(task)) => task,
-            Ok(None) => return false,
+            Ok(None) => {
+                tracing::warn!(task_id = %session.task_id, "correlated refinement task is absent; retrying");
+                return OutcomeFence::Retryable;
+            }
             Err(error) => {
                 tracing::warn!(task_id = %session.task_id, %error, "unable to fence refinement outcome task; retrying");
-                return false;
+                return OutcomeFence::Retryable;
             }
         };
         let correlation = match task.refinement_correlation() {
-            Ok(Some(correlation)) => correlation,
-            Ok(None) | Err(_) => return false,
+            Ok(Some(value)) => value,
+            _ => return OutcomeFence::Ignored,
         };
         let (expected_phase, expected_role) = match session.phase {
             RefinementPhase::AdversaryAttack => (
                 djinn_core::refinement_liveness::RefinementPhase::AdversaryAttack,
-                djinn_core::refinement_liveness::RefinementRole::Adversary,
+                RefinementRole::Adversary,
             ),
             RefinementPhase::AdvocateRevision => (
                 djinn_core::refinement_liveness::RefinementPhase::AdvocateRevision,
-                djinn_core::refinement_liveness::RefinementRole::Advocate,
+                RefinementRole::Advocate,
             ),
             RefinementPhase::JudgeAdjudication => (
                 djinn_core::refinement_liveness::RefinementPhase::JudgeAdjudication,
-                djinn_core::refinement_liveness::RefinementRole::Judge,
+                RefinementRole::Judge,
             ),
-            RefinementPhase::AwaitingHumanReview
-            | RefinementPhase::AwaitingEvidence
-            | RefinementPhase::Complete => return false,
+            _ => return OutcomeFence::Ignored,
         };
         if correlation.run_id() != run_id
             || correlation.generation() != i64::from(state.generation)
@@ -209,7 +225,7 @@ impl CoordinatorActor {
             || correlation.phase() != expected_phase
             || correlation.role() != expected_role
         {
-            return false;
+            return OutcomeFence::Ignored;
         }
         let snapshot = match ProposalRepository::new(self.db.clone(), event_bus)
             .load_refinement_run_snapshot(LoadRefinementRunSnapshotRequest {
@@ -218,14 +234,14 @@ impl CoordinatorActor {
             })
             .await
         {
-            Ok(Some(snapshot)) => snapshot,
-            Ok(None) => return false,
+            Ok(Some(value)) => value,
+            Ok(None) => return OutcomeFence::Ignored,
             Err(error) => {
                 tracing::warn!(run_id, %error, "unable to fence refinement outcome snapshot; retrying");
-                return false;
+                return OutcomeFence::Retryable;
             }
         };
-        snapshot.proposal_id == state.proposal_id
+        let eligible = snapshot.proposal_id == state.proposal_id
             && snapshot.generation == state.generation
             && snapshot.snapshot.run.state == RefinementRunState::Active
             && snapshot.snapshot.intents.iter().any(|intent| {
@@ -237,244 +253,198 @@ impl CoordinatorActor {
                         intent.state,
                         DurableIntentState::Claimed | DurableIntentState::Materialized
                     )
-            })
+            });
+        if !eligible {
+            return OutcomeFence::Ignored;
+        }
+        OutcomeFence::Eligible(SourceIntentTransitionRequest {
+            run_id: run_id.to_owned(),
+            intent_id: correlation.intent_id().to_owned(),
+            generation: state.generation,
+            expected_round: state.current_round,
+            expected_phase,
+            expected_role,
+        })
     }
 
-    /// Process an advocate session outcome: read the latest revision,
-    /// patch event_metadata with refinement attribution, and advance.
+    async fn commit_refinement_candidate(
+        &self,
+        source: &SourceIntentTransitionRequest,
+        candidate: &RefinementLoopState,
+    ) -> bool {
+        let repo = ProposalRepository::new(
+            self.db.clone(),
+            crate::events::event_bus_for(&self.events_tx),
+        );
+        let result = match candidate.phase {
+            RefinementPhase::AwaitingHumanReview => {
+                repo.park_refinement_run_from_intent(ParkRefinementRunFromIntentRequest {
+                    source: source.clone(),
+                    kind: RefinementParkKind::AwaitingReview,
+                })
+                .await
+            }
+            RefinementPhase::AwaitingEvidence => {
+                repo.park_refinement_run_from_intent(ParkRefinementRunFromIntentRequest {
+                    source: source.clone(),
+                    kind: RefinementParkKind::AwaitingEvidence,
+                })
+                .await
+            }
+            RefinementPhase::Complete => {
+                repo.terminal_refinement_run_from_intent(TerminalRefinementRunFromIntentRequest {
+                    source: source.clone(),
+                    reason: durable_stop_reason(candidate.stop_reason.as_ref()),
+                })
+                .await
+            }
+            phase => {
+                let (next_phase, next_role, phase_name) = match phase {
+                    RefinementPhase::AdversaryAttack => (
+                        djinn_core::refinement_liveness::RefinementPhase::AdversaryAttack,
+                        RefinementRole::Adversary,
+                        "adversary_attack",
+                    ),
+                    RefinementPhase::AdvocateRevision => (
+                        djinn_core::refinement_liveness::RefinementPhase::AdvocateRevision,
+                        RefinementRole::Advocate,
+                        "advocate_revision",
+                    ),
+                    RefinementPhase::JudgeAdjudication => (
+                        djinn_core::refinement_liveness::RefinementPhase::JudgeAdjudication,
+                        RefinementRole::Judge,
+                        "judge_adjudication",
+                    ),
+                    _ => unreachable!(),
+                };
+                repo.complete_refinement_intent(CompleteRefinementIntentRequest {
+                    run_id: source.run_id.clone(),
+                    intent_id: source.intent_id.clone(),
+                    generation: source.generation,
+                    owner: format!("coordinator:{}", self.coordinator_incarnation_id),
+                    next_round: candidate.current_round,
+                    next_phase,
+                    next_role,
+                    next_idempotency_key: format!(
+                        "{}/{}/{}",
+                        source.run_id, candidate.current_round, phase_name
+                    ),
+                })
+                .await
+                .map(|_| true)
+            }
+        };
+        match result {
+            Ok(true) => true,
+            Ok(false) => {
+                tracing::warn!(run_id = %source.run_id, intent_id = %source.intent_id, "refinement outcome transition was absent; retaining exact source");
+                false
+            }
+            Err(error) => {
+                tracing::warn!(run_id = %source.run_id, intent_id = %source.intent_id, %error, "refinement outcome commit failed; retaining exact source");
+                false
+            }
+        }
+    }
+
+    /// Build an Advocate candidate without publishing it.
     async fn process_advocate_outcome(
         &mut self,
         run_id: &str,
         proposal_id: &str,
         task_id: &str,
         state: &RefinementLoopState,
-    ) {
-        let event_bus = crate::events::event_bus_for(&self.events_tx);
-        let proposal_repo = ProposalRepository::new(self.db.clone(), event_bus);
-
-        let proposal = match proposal_repo.get(proposal_id).await {
-            Ok(Some(p)) => p,
+    ) -> Option<RefinementLoopState> {
+        let repo = ProposalRepository::new(
+            self.db.clone(),
+            crate::events::event_bus_for(&self.events_tx),
+        );
+        let proposal = match repo.get(proposal_id).await {
+            Ok(Some(value)) => value,
             Ok(None) => {
-                tracing::warn!(proposal_id = %proposal_id, "Proposal not found after advocate");
-                self.terminate_refinement(
-                    run_id,
-                    StopReason::AgentFailure {
-                        role: "advocate".into(),
-                        error: "proposal not found after session".into(),
-                    },
-                )
-                .await;
-                return;
+                tracing::warn!(
+                    proposal_id,
+                    "proposal absent after Advocate; retrying outcome"
+                );
+                return None;
             }
-            Err(e) => {
-                tracing::warn!(proposal_id = %proposal_id, error = %e, "DB error reading proposal");
-                self.terminate_refinement(
-                    run_id,
-                    StopReason::AgentFailure {
-                        role: "advocate".into(),
-                        error: format!("DB error: {e}"),
-                    },
-                )
-                .await;
-                return;
+            Err(error) => {
+                tracing::warn!(proposal_id, %error, "proposal reload failed after Advocate; retrying outcome");
+                return None;
             }
         };
-
         let new_revision_seq = proposal.latest_revision_seq;
         let advanced = new_revision_seq > state.current_revision_seq;
-
-        // A pass can reject one candidate and then successfully write a clean
-        // revision in the same session. Therefore classify ToolResult evidence
-        // only after proving this pass did not advance the material head.
-        // Evidence-read failure on an unchanged head is terminal rather than an
-        // ordinary no-change completion, avoiding a silent handoff to the Judge.
+        let mut candidate = state.clone();
         if !advanced {
-            let violations = match advocate_lint_rejection_from_session(
-                &self.db,
-                &self.events_tx,
-                task_id,
-            )
-            .await
-            {
-                Ok(violations) => violations,
+            match advocate_lint_rejection_from_session(&self.db, &self.events_tx, task_id).await {
+                Ok(Some(violations)) => {
+                    candidate.record_advocate_lint_rejection(violations);
+                    return Some(candidate);
+                }
+                Ok(None) => {}
                 Err(error) => {
-                    tracing::warn!(proposal_id = %proposal_id, task_id = %task_id, %error,
-                        "Unable to inspect completed Advocate ToolResult evidence");
-                    self.terminate_refinement(
-                        run_id,
-                        StopReason::AgentFailure {
-                            role: "advocate".into(),
-                            error: format!(
-                                "unable to inspect completed session ToolResult evidence: {error}"
-                            ),
-                        },
-                    )
-                    .await;
-                    return;
+                    tracing::warn!(proposal_id, task_id, %error, "Advocate evidence reload failed; retrying outcome");
+                    return None;
                 }
-            };
-            if let Some(violations) = violations {
-                if let Some(active) = self.active_refinements.get_mut(run_id) {
-                    active.record_advocate_lint_rejection(violations);
-                    tracing::warn!(
-                        proposal_id = %proposal_id,
-                        task_id = %task_id,
-                        round = active.current_round,
-                        revision_seq = active.current_revision_seq,
-                        "Advocate candidate rejected by spec lint; retrying correction in same round"
-                    );
-                }
-                return;
             }
         }
-
         if advanced {
             let model_id = self
                 .refinement_sessions
                 .get(run_id)
-                .map(|s| s.model_id.clone());
-            let event_meta =
-                build_revision_event_metadata(state.current_round, model_id.as_deref());
-            let event_bus2 = crate::events::event_bus_for(&self.events_tx);
-            let proposal_repo2 = ProposalRepository::new(self.db.clone(), event_bus2);
-            if let Err(e) = proposal_repo2
+                .map(|session| session.model_id.clone());
+            let metadata = build_revision_event_metadata(state.current_round, model_id.as_deref());
+            if let Err(error) = repo
                 .set_spec_revisions_event_metadata_range(
                     proposal_id,
                     state.current_revision_seq,
                     new_revision_seq,
-                    &event_meta,
+                    &metadata,
                 )
                 .await
             {
-                tracing::warn!(
-                    proposal_id = %proposal_id,
-                    seq = new_revision_seq,
-                    error = %e,
-                    "Failed to patch advocate revision event_metadata"
-                );
+                tracing::warn!(proposal_id, %error, "durable Advocate progress failed; retrying outcome");
+                return None;
             }
+            candidate.record_advocate_revision(new_revision_seq);
+        } else {
+            candidate.phase = RefinementPhase::JudgeAdjudication;
         }
-
-        if let Some(state) = self.active_refinements.get_mut(run_id) {
-            if advanced {
-                state.record_advocate_revision(new_revision_seq);
-                tracing::info!(
-                    proposal_id = %proposal_id,
-                    new_seq = new_revision_seq,
-                    round = state.current_round,
-                    "Advocate produced revision; handing to judge"
-                );
-            } else {
-                state.phase = RefinementPhase::JudgeAdjudication;
-                tracing::info!(
-                    proposal_id = %proposal_id,
-                    revision_seq = state.current_revision_seq,
-                    round = state.current_round,
-                    "Advocate session produced no revision; handing to judge on current spec"
-                );
-            }
-        }
+        Some(candidate)
     }
 
-    /// Process an adversary session outcome: read debate-trail objections
-    /// and feed them to the state machine.
+    /// Build an Adversary candidate without publishing it.
     async fn process_adversary_outcome(
         &mut self,
-        run_id: &str,
+        _run_id: &str,
         proposal_id: &str,
         state: &RefinementLoopState,
-    ) {
-        let event_bus = crate::events::event_bus_for(&self.events_tx);
-        let proposal_repo = ProposalRepository::new(self.db.clone(), event_bus);
-
-        let entries = match proposal_repo.debate_trail(proposal_id).await {
-            Ok(entries) => entries,
-            Err(e) => {
-                tracing::warn!(
-                    proposal_id = %proposal_id,
-                    error = %e,
-                    "DB error reading debate trail"
-                );
-                self.terminate_refinement(
-                    run_id,
-                    StopReason::AgentFailure {
-                        role: "adversary".into(),
-                        error: format!("DB error: {e}"),
-                    },
-                )
-                .await;
-                return;
+    ) -> Option<RefinementLoopState> {
+        let repo = ProposalRepository::new(
+            self.db.clone(),
+            crate::events::event_bus_for(&self.events_tx),
+        );
+        let entries = match repo.debate_trail(proposal_id).await {
+            Ok(value) => value,
+            Err(error) => {
+                tracing::warn!(proposal_id, %error, "Adversary debate reload failed; retrying outcome");
+                return None;
             }
         };
-
-        // Scope to the current refinement run so a prior (interrupted) run's
-        // round-numbered objections are not re-counted (see
-        // `entry_in_current_run`).
         let run_start = self.latest_refinement_run_start(proposal_id).await;
-
-        let round = state.current_round;
-        let (round_objections, carried_over) =
-            super::refinement_objections::collect_adversary_round_objections(
-                &entries,
-                round,
-                run_start.as_deref(),
-            );
-
-        if carried_over {
-            tracing::info!(
-                proposal_id = %proposal_id,
-                round,
-                carried = round_objections.len(),
-                "Round-1 current-run objection set empty; carrying unresolved \
-                 prior-run objections so the Advocate resumes the interrupted refinement"
-            );
-        }
-
-        let explicit_dry = round_objections.is_empty();
-
-        let adversary_result = AdversaryPassResult {
-            objections: round_objections,
+        let (objections, _) = super::refinement_objections::collect_adversary_round_objections(
+            &entries,
+            state.current_round,
+            run_start.as_deref(),
+        );
+        let explicit_dry = objections.is_empty();
+        let mut candidate = state.clone();
+        let _ = candidate.process_adversary_pass(&AdversaryPassResult {
+            objections,
             explicit_dry,
-        };
-
-        let Some(state) = self.active_refinements.get_mut(run_id) else {
-            tracing::warn!(
-                proposal_id = %proposal_id,
-                "adversary outcome arrived for missing refinement state"
-            );
-            return;
-        };
-        let outcome = state.process_adversary_pass(&adversary_result);
-
-        match outcome {
-            AdversaryPassOutcome::Continue => {
-                tracing::info!(
-                    proposal_id = %proposal_id,
-                    round,
-                    "Adversary found blocking objections — next round"
-                );
-            }
-            AdversaryPassOutcome::Dry => {
-                tracing::info!(
-                    proposal_id = %proposal_id,
-                    round,
-                    "Adversary dry — judge will adjudicate"
-                );
-            }
-            AdversaryPassOutcome::Escalated(reason) => {
-                tracing::info!(
-                    proposal_id = %proposal_id,
-                    round,
-                    ?reason,
-                    "Refinement escalated — parking for human review"
-                );
-                if let Some(state) = self.active_refinements.get(run_id).cloned() {
-                    let summary = format!("Escalated to human review: {reason:?}");
-                    self.persist_awaiting_review(proposal_id, &summary, &state)
-                        .await;
-                }
-            }
-        }
+        });
+        Some(candidate)
     }
 
     /// Persist that the tribunal has parked for human accept/reject review.
@@ -527,146 +497,70 @@ impl CoordinatorActor {
         }
     }
 
-    /// Process a judge session outcome: read the verdict from the debate
-    /// trail and advance the state machine.
+    /// Build a Judge candidate without publishing it.
     async fn process_judge_outcome(
         &mut self,
-        run_id: &str,
+        _run_id: &str,
         proposal_id: &str,
         state: &RefinementLoopState,
-    ) {
-        let event_bus = crate::events::event_bus_for(&self.events_tx);
-        let proposal_repo = ProposalRepository::new(self.db.clone(), event_bus);
-
-        let entries = match proposal_repo.debate_trail(proposal_id).await {
-            Ok(entries) => entries,
-            Err(e) => {
-                tracing::warn!(
-                    proposal_id = %proposal_id,
-                    error = %e,
-                    "DB error reading debate trail"
-                );
-                self.terminate_refinement(
-                    run_id,
-                    StopReason::AgentFailure {
-                        role: "judge".into(),
-                        error: format!("DB error: {e}"),
-                    },
-                )
-                .await;
-                return;
+    ) -> Option<RefinementLoopState> {
+        let repo = ProposalRepository::new(
+            self.db.clone(),
+            crate::events::event_bus_for(&self.events_tx),
+        );
+        let entries = match repo.debate_trail(proposal_id).await {
+            Ok(value) => value,
+            Err(error) => {
+                tracing::warn!(proposal_id, %error, "Judge debate reload failed; retrying outcome");
+                return None;
             }
         };
-
-        let round = state.current_round;
-
-        // Scope every trail read below to the current refinement run. Round
-        // numbers reuse the same 1-based counter each run, so an interrupted-
-        // and-restarted run's round-1 entries collide with the prior run's
-        // round-1 entries. `run_start` is the boundary that tells them apart
-        // (see `entry_in_current_run`).
         let run_start = self.latest_refinement_run_start(proposal_id).await;
-
-        // ── Check for an accepted needs-evidence demand first ───────────
-        //
-        // If the Judge called `proposal_refinement_demand_evidence` and the
-        // demand was accepted, a `kind = "needs_evidence"` entry with valid
-        // metadata exists for the current round. This takes priority over a
-        // normal verdict: the loop parks in AwaitingEvidence and no further
-        // tribunal phases are dispatched until the evidence spike produces
-        // findings.
-        let needs_evidence_entry = entries.iter().find(|e| {
-            e.agent_role == "judge"
-                && e.kind == "needs_evidence"
-                && e.round == round
-                && e.body_metadata.is_some()
-                && entry_in_current_run(e, run_start.as_deref())
-        });
-
-        if let Some(_entry) = needs_evidence_entry {
-            if let Some(state) = self.active_refinements.get_mut(run_id) {
-                state.record_needs_evidence();
-            }
-            tracing::info!(
-                proposal_id = %proposal_id,
-                round,
-                "Judge demanded evidence — refinement parked (AwaitingEvidence)"
-            );
-            return;
+        if entries.iter().any(|entry| {
+            entry.agent_role == "judge"
+                && entry.kind == "needs_evidence"
+                && entry.round == state.current_round
+                && entry.body_metadata.is_some()
+                && entry_in_current_run(entry, run_start.as_deref())
+        }) {
+            let mut candidate = state.clone();
+            candidate.record_needs_evidence();
+            return Some(candidate);
         }
-
-        // ── Normal verdict path ─────────────────────────────────────────
-        let verdict_entry = select_current_run_verdict(
+        let entry = select_current_run_verdict(
             &entries,
-            round,
+            state.current_round,
             state.current_revision_seq,
             run_start.as_deref(),
         );
-
-        let mut verdict = if let Some(entry) = verdict_entry {
-            JudgeVerdictResult {
+        let mut verdict = entry
+            .map(|entry| JudgeVerdictResult {
                 body: entry.body.clone(),
                 blocking: entry.blocking,
-            }
-        } else {
-            // No verdict entry: treat as not-ready (non-decision).
-            tracing::warn!(
-                proposal_id = %proposal_id,
-                round,
-                "Judge session completed without a verdict debate-trail entry; treating as not-ready"
-            );
-            JudgeVerdictResult {
+            })
+            .unwrap_or_else(|| JudgeVerdictResult {
                 body: "Judge did not record an explicit verdict (treated as not-ready)".into(),
                 blocking: true,
-            }
-        };
-
-        // A Judge's semantic approval is never authority to bypass the
-        // deterministic current-head gate. Reconstructing this shared result
-        // also makes a legacy head with no durable lint row synchronously pass
-        // through `lint_for_revision` cache repair before approval is acted on.
-        // Do not substitute doctor findings or invoke another linter here.
+            });
         if !verdict.blocking {
-            let readiness = self.evaluate_proposal_readiness(proposal_id).await;
-            if !readiness.as_ref().is_some_and(|result| result.ready) {
-                let context = readiness
-                    .as_ref()
-                    .map(Self::format_readiness_context)
-                    .unwrap_or_else(|| {
-                        "Current proposal head could not be resolved for shared DoR/lint readiness."
-                            .to_string()
-                    });
+            let Some(readiness) = self.evaluate_proposal_readiness(proposal_id).await else {
+                tracing::warn!(
+                    proposal_id,
+                    "Judge readiness reload failed; retrying outcome"
+                );
+                return None;
+            };
+            if !readiness.ready {
                 verdict.blocking = true;
                 verdict.body = format!(
-                    "Judge ready verdict converted to blocking: current-head machine readiness failed. {context}"
+                    "Judge ready verdict converted to blocking: current-head machine readiness failed. {}",
+                    Self::format_readiness_context(&readiness)
                 );
             }
         }
-
-        let now_awaiting = if let Some(state) = self.active_refinements.get_mut(run_id) {
-            state.record_judge_verdict(&verdict);
-            state.is_awaiting_human_review()
-        } else {
-            false
-        };
-
-        if now_awaiting {
-            if let Some(state) = self.active_refinements.get(run_id).cloned() {
-                self.persist_awaiting_review(proposal_id, &verdict.body, &state)
-                    .await;
-            }
-            tracing::info!(
-                proposal_id = %proposal_id,
-                round,
-                "Judge ruled READY — tribunal parked for human accept/reject"
-            );
-        } else {
-            tracing::info!(
-                proposal_id = %proposal_id,
-                round,
-                "Judge ruled not-ready — running another round"
-            );
-        }
+        let mut candidate = state.clone();
+        candidate.record_judge_verdict(&verdict);
+        Some(candidate)
     }
 
     /// Fetch the current refinement run's start boundary: the `created_at` of
@@ -1403,6 +1297,34 @@ impl CoordinatorActor {
         format!(
             "{failures}\n\nLatest SpecLintResultV1 summary (errors and warnings):\n{lint_summary}"
         )
+    }
+}
+
+fn durable_stop_reason(reason: Option<&StopReason>) -> RefinementStopReason {
+    match reason {
+        Some(StopReason::RoundCap) => RefinementStopReason::RoundCap,
+        Some(StopReason::SpawnCap) => RefinementStopReason::SpawnCap,
+        Some(StopReason::RepeatedObjection {
+            signature,
+            occurrences,
+        }) => RefinementStopReason::RepeatedObjection {
+            signature: signature.clone(),
+            occurrences: *occurrences as u64,
+        },
+        Some(StopReason::HumanAccepted) => RefinementStopReason::HumanAccepted,
+        Some(StopReason::HumanRejected) => RefinementStopReason::HumanRejected,
+        Some(StopReason::AgentFailure { role, error }) => RefinementStopReason::AgentFailure {
+            role: match role.as_str() {
+                "advocate" => RefinementRole::Advocate,
+                "judge" => RefinementRole::Judge,
+                _ => RefinementRole::Adversary,
+            },
+            error_code: "agent_failure".into(),
+            message: error.clone(),
+        },
+        _ => RefinementStopReason::Interrupted {
+            detail: Some("refinement completed without a typed reason".into()),
+        },
     }
 }
 

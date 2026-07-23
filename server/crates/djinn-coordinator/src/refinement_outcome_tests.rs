@@ -341,3 +341,36 @@ fn repeated_lint_rejections_are_bounded_by_existing_spawn_cap() {
         "failed writes never consume a refinement round"
     );
 }
+
+#[test]
+fn outcome_application_distinguishes_retry_from_commit() {
+    assert_ne!(
+        RefinementOutcomeApplication::Retryable,
+        RefinementOutcomeApplication::Committed
+    );
+    assert_ne!(
+        RefinementOutcomeApplication::Ignored,
+        RefinementOutcomeApplication::Committed
+    );
+}
+
+#[test]
+fn production_path_commits_successor_before_projection_publication() {
+    let source = include_str!("refinement_outcome.rs");
+    let commit = source
+        .find("commit_refinement_candidate(&source, &candidate)")
+        .expect("candidate must cross the durable commit boundary");
+    let publish = source
+        .find(".insert(run_id.to_owned(), candidate.clone())")
+        .expect("committed candidate must be published");
+    assert!(commit < publish, "durable commit must precede publication");
+    assert!(source.contains("complete_refinement_intent(CompleteRefinementIntentRequest"));
+}
+
+#[test]
+fn park_and_terminal_outcomes_consume_the_exact_source_intent() {
+    let source = include_str!("refinement_outcome.rs");
+    assert!(source.contains("park_refinement_run_from_intent"));
+    assert!(source.contains("terminal_refinement_run_from_intent"));
+    assert!(source.contains("source: source.clone()"));
+}

@@ -30,6 +30,7 @@ use super::evidence_lifecycle_state::EvidenceLifecycleState;
 use super::refinement::{RefinementPhase, StopReason};
 
 use super::actor::CoordinatorActor;
+use super::refinement_outcome::RefinementOutcomeApplication;
 use super::types::InflightDispatch;
 use djinn_core::clock::{Clock, SystemClock};
 use djinn_core::models::TaskRefinementCorrelation;
@@ -554,10 +555,12 @@ impl CoordinatorActor {
             // Session actually ran — clear the dispatch-failure counter and
             // process the outcome, then close the task so finished phase/round
             // tasks don't linger `open` on the board.
-            if let Some(state) = self.active_refinements.get_mut(run_id) {
-                state.dispatch_failures = 0;
-            }
-            if self.process_refinement_outcome(run_id, &session).await {
+            if self.process_refinement_outcome(run_id, &session).await
+                == RefinementOutcomeApplication::Committed
+            {
+                if let Some(state) = self.active_refinements.get_mut(run_id) {
+                    state.dispatch_failures = 0;
+                }
                 self.close_refinement_task(&session.task_id, "refinement phase complete")
                     .await;
                 self.refinement_sessions.remove(run_id);
