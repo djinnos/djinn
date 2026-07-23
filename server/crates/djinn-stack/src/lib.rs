@@ -24,7 +24,8 @@ pub use detect::{detect, detect_blocking};
 pub use environment::{
     CargoCachePolicy, CargoCachePolicyOverride, CargoWarmCommand, ClangLanguage, ConfigSource,
     DotnetLanguage, EnvironmentConfig, EnvironmentConfigError, ExternalInputDeclaration,
-    FinalVerificationCommand, FinalVerificationPlan, GoLanguage, HermeticityDeclaration,
+    FinalVerificationCommand, FinalVerificationCommandGroup, FinalVerificationPlan,
+    FinalVerificationSelectionRule, GoLanguage, HermeticityDeclaration,
     HookCommand, JavaLanguage, Languages, LifecycleHooks, NodeLanguage, PreTaskCommand,
     PreTaskFailurePolicy, PythonLanguage, RubyLanguage, RustLanguage, SCHEMA_VERSION,
     VerificationInputManifest, Workspace,
