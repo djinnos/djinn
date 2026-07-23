@@ -30,64 +30,12 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { RepositoriesPage } from "./RepositoriesPage";
 import { AuthGate } from "@/components/AuthGate";
 import { setMcpToolResponder } from "@/storybook-mocks/mcpClient";
+import { installAuthFetchStub, setStoryIsAdmin } from "@/storybook-mocks/authFetchStub";
 import { projectStore } from "@/stores/projectStore";
 import type { Project } from "@/api/types";
 
-// ── Auth fetch shim (own guard flag; unknown URLs fall through) ───────────────
-
-// Flipped from each story's decorator before AuthGate mounts and fires
-// `/auth/me`, so the page gates the branch + image controls for the right caller.
-let repoStoryIsAdmin = false;
-
-function json(body: unknown, status = 200): Response {
-  return new Response(JSON.stringify(body), {
-    status,
-    headers: { "Content-Type": "application/json" },
-  });
-}
-
-if (!(window as unknown as { __djinnRepositoriesFetchStub?: boolean }).__djinnRepositoriesFetchStub) {
-  (window as unknown as { __djinnRepositoriesFetchStub?: boolean }).__djinnRepositoriesFetchStub = true;
-  const realFetch = window.fetch.bind(window);
-  const stub: typeof window.fetch = (input, init) => {
-    const url =
-      typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
-    if (url.includes("/auth/me")) {
-      return Promise.resolve(
-        json({
-          id: "u-fernando",
-          login: "fernando",
-          name: "Fernando Bandeira",
-          avatar_url: null,
-          is_admin: repoStoryIsAdmin,
-          role: "engineer",
-        }),
-      );
-    }
-    if (url.includes("/setup/status")) {
-      return Promise.resolve(
-        json({
-          needs_app_install: false,
-          app_credentials_configured: true,
-          org_login: "djinnos",
-          setup_state: "valid",
-        }),
-      );
-    }
-    if (url.includes("/auth/config")) {
-      return Promise.resolve(
-        json({
-          configured: true,
-          missing: [],
-          setup_doc_url: "https://www.djinnai.io/docs/setup",
-          self_setup_available: false,
-        }),
-      );
-    }
-    return realFetch(input, init);
-  };
-  window.fetch = stub;
-}
+// ── Auth fetch shim — shared installer (see storybook-mocks/authFetchStub) ──
+installAuthFetchStub();
 
 // ── Fixtures ─────────────────────────────────────────────────────────────────
 
@@ -261,8 +209,11 @@ const meta = {
   },
   decorators: [
     (Story, ctx) => {
-      repoStoryIsAdmin = (ctx.parameters?.isAdmin as boolean | undefined) ?? false;
-      return <Story />;
+      setStoryIsAdmin((ctx.parameters?.isAdmin as boolean | undefined) ?? false);
+      // Key by story id so switching stories fully remounts the tree —
+      // otherwise AuthGate's cached /auth/me (staleTime) survives the
+      // switch and the admin flag flip never takes effect.
+      return <Story key={ctx.id} />;
     },
   ],
 } satisfies Meta<typeof RepositoriesStory>;
