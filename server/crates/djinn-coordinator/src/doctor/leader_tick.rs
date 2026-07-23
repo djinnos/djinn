@@ -1,34 +1,18 @@
 //! Leader-tick integration for the cheap doctor subset (epic 4q1t).
 //!
-//! The Doctor framework ([`djinn_core::doctor`]) exposes a pluggable registry of
-//! [`DoctorCheck`]s and a [`DoctorCheckCadence`] tag that separates "safe to run
-//! every coordinator tick" from "explicit on-demand". This module wires the
-//! cheap subset into the coordinator's existing 30s tick without going through
-//! the MCP `doctor_run` tool: it uses the framework's
-//! [`run_cheap_subset`] helper, persists every returned [`Finding`] through
-//! [`djinn_db::DoctorFindingRepository`], emits bounded-cardinality
-//! `djinn_doctor_findings{check}` and `djinn_doctor_run_duration_seconds{check}`
-//! metrics via [`djinn_telemetry::doctor`], and writes a board-visible activity
-//! entry for each `Critical` finding via [`djinn_db::TaskRepository::log_activity`].
-//!
-//! All failures (one bad check, one bad DB write, one bad activity entry) are
-//! logged and surfaced as tracing; they MUST NOT take the rest of the
-//! coordinator tick down — see the per-step `match`/`if let Err` blocks below.
-//!
-//! ## Tick placement
-//!
-//! The cheap-doctor tick is called from [`super::super::coordinator::actor`]
-//! immediately after the existing cheap reapers/backstops and before dispatch
-//! so a board-visible critical finding can race the dispatch decision for the
-//! same 30s window. It is intentionally a non-blocking observation: no
-//! dispatch, no fix, no state mutation outside of inserts.
+//! The leader tick runs cheap doctor checks and persists their findings without
+//! blocking coordinator dispatch. Individual check, database, and activity-log
+//! failures are logged without taking down the remainder of the tick.
 
 use djinn_core::clock::{Clock, SystemClock};
 use djinn_core::doctor::{
     DoctorCheckRun, DoctorRegistry, Finding, FindingSeverity, run_cheap_subset,
 };
-use djinn_db::repositories::doctor_finding::KeyedDoctorFinding;
-use djinn_db::{DoctorFinding, DoctorFindingRepository, NewDoctorFinding};
+use djinn_db::repositories::doctor_finding::{KeyedDoctorFinding, severity};
+use djinn_db::{
+    DoctorFinding, DoctorFindingRepository, LintMaterializationOutcome, NewDoctorFinding,
+    ProposalIntegrityHeadPage, ProposalIntegrityRepository, ProposalRepository,
+};
 use serde_json::json;
 use tracing::{error, info, warn};
 
@@ -44,6 +28,92 @@ pub const DOCTOR_CRITICAL_FINDING_ACTIVITY: &str = "doctor_critical_finding";
 /// wants to make a divergence visible without bumping the Critical-flagged
 /// lane. Written with the same payload shape as the critical variant.
 pub const DOCTOR_FINDING_ACTIVITY: &str = "doctor_finding";
+
+/// Stable name for the retroactive immutable proposal lint finding.
+pub const PROPOSAL_SPEC_INTEGRITY_CHECK_NAME: &str = "proposal_spec_integrity_v1";
+
+/// Number of ascending-id pages a single leader tick may consume.
+const PROPOSAL_SPEC_INTEGRITY_MAX_PAGES_PER_TICK: usize = 10;
+
+/// Run the bounded, conflict-safe retroactive proposal lint materialization.
+///
+/// The early return precedes construction of every proposal source: disabled
+/// operation performs neither a proposal scan nor a retained-body load.
+pub async fn run_proposal_spec_integrity_sweep(
+    enabled: bool,
+    db: &djinn_db::Database,
+    run_id: Option<&str>,
+) {
+    if !enabled {
+        return;
+    }
+    let heads = ProposalIntegrityRepository::new(db.clone());
+    let proposals = ProposalRepository::new(db.clone(), djinn_core::events::EventBus::noop());
+    let findings = DoctorFindingRepository::new(db.clone());
+    let mut after_proposal_id = None;
+    for _ in 0..PROPOSAL_SPEC_INTEGRITY_MAX_PAGES_PER_TICK {
+        let page = match heads
+            .list_current_heads(ProposalIntegrityHeadPage {
+                after_proposal_id: after_proposal_id.clone(),
+                limit: djinn_db::MAX_PROPOSAL_INTEGRITY_PAGE_SIZE,
+            })
+            .await
+        {
+            Ok(page) => page,
+            Err(error) => {
+                warn!(error = %error, "proposal spec integrity sweep: head scan failed");
+                return;
+            }
+        };
+        if page.is_empty() {
+            return;
+        }
+        let page_len = page.len();
+        after_proposal_id = page.last().map(|head| head.proposal_id.clone());
+        for head in page {
+            let result = match proposals.lint_for_revision(&head.revision).await {
+                Ok(result) => result,
+                Err(error) => {
+                    warn!(proposal_id = %head.proposal_id, revision_seq = head.revision.seq, error = %error, "proposal spec integrity sweep: lint failed; continuing");
+                    continue;
+                }
+            };
+            match heads.materialize_if_current(&head, &result).await {
+                Ok(LintMaterializationOutcome::Stale) => continue,
+                Ok(
+                    LintMaterializationOutcome::Materialized
+                    | LintMaterializationOutcome::AlreadyPresent,
+                ) => {}
+                Err(error) => {
+                    warn!(proposal_id = %head.proposal_id, revision_seq = head.revision.seq, error = %error, "proposal spec integrity sweep: guarded materialization failed; continuing");
+                    continue;
+                }
+            }
+            if result.errors.is_empty() {
+                continue;
+            }
+            let key = format!(
+                "{PROPOSAL_SPEC_INTEGRITY_CHECK_NAME}:{}:{}:{}",
+                head.proposal_id, head.revision.seq, result.linter_version
+            );
+            let finding = NewDoctorFinding {
+                run_id: run_id.map(str::to_owned),
+                check_name: PROPOSAL_SPEC_INTEGRITY_CHECK_NAME.to_owned(),
+                severity: severity::ERROR.to_owned(),
+                entity_ids: json!([head.proposal_id]),
+                evidence: json!({ "revision_seq": head.revision.seq, "body_sha256": head.body_sha256, "linter_version": result.linter_version, "violations": result.errors }),
+                resolver_snapshot: None,
+                detail: Some("proposal specification integrity lint errors".to_owned()),
+            };
+            if let Err(error) = findings.insert_ignore_duplicate(finding, &key).await {
+                warn!(proposal_id = %head.proposal_id, revision_seq = head.revision.seq, error = %error, "proposal spec integrity sweep: finding insert failed; continuing");
+            }
+        }
+        if page_len < djinn_db::MAX_PROPOSAL_INTEGRITY_PAGE_SIZE as usize {
+            return;
+        }
+    }
+}
 
 /// Convert a single [`Finding`] into the repository insert DTO.
 ///
@@ -159,6 +229,18 @@ async fn persist_findings(
     }
 }
 
+/// Context persisted with one board-visible Doctor activity entry.
+struct DoctorActivityContext<'a> {
+    task_id: Option<String>,
+    check_name: &'a str,
+    severity: &'a str,
+    detail: Option<&'a str>,
+    entity_ids: &'a serde_json::Value,
+    evidence: &'a serde_json::Value,
+    resolver_snapshot: Option<&'a serde_json::Value>,
+    lifecycle: Option<&'a str>,
+}
+
 /// Write one board-visible activity entry for a Doctor finding.
 ///
 /// The actor on the activity entry is fixed to `coordinator` / `system` (same
@@ -166,37 +248,30 @@ async fn persist_findings(
 /// never propagated so the tick can keep moving.
 async fn record_doctor_activity(
     repo: &djinn_db::TaskRepository,
-    task_id: Option<String>,
-    check_name: &str,
-    severity: &str,
-    detail: Option<&str>,
-    entity_ids: &serde_json::Value,
-    evidence: &serde_json::Value,
-    resolver_snapshot: Option<&serde_json::Value>,
-    lifecycle: Option<&str>,
+    context: DoctorActivityContext<'_>,
 ) {
-    let (event_type, kind_label) = if severity == FindingSeverity::Critical.as_str() {
+    let (event_type, kind_label) = if context.severity == FindingSeverity::Critical.as_str() {
         (DOCTOR_CRITICAL_FINDING_ACTIVITY, "critical")
     } else {
-        (DOCTOR_FINDING_ACTIVITY, severity)
+        (DOCTOR_FINDING_ACTIVITY, context.severity)
     };
     let mut payload = json!({
-        "check": check_name,
-        "check_name": check_name,
-        "severity": severity,
+        "check": context.check_name,
+        "check_name": context.check_name,
+        "severity": context.severity,
         "kind": kind_label,
-        "detail": detail,
-        "entity_ids": entity_ids,
-        "evidence": evidence,
-        "resolver_snapshot": resolver_snapshot,
+        "detail": context.detail,
+        "entity_ids": context.entity_ids,
+        "evidence": context.evidence,
+        "resolver_snapshot": context.resolver_snapshot,
     });
-    if let Some(lifecycle) = lifecycle {
+    if let Some(lifecycle) = context.lifecycle {
         payload["lifecycle"] = json!(lifecycle);
     }
 
     if let Err(error) = repo
         .log_activity(
-            task_id.as_deref(),
+            context.task_id.as_deref(),
             "coordinator",
             "system",
             event_type,
@@ -205,8 +280,8 @@ async fn record_doctor_activity(
         .await
     {
         warn!(
-            check = %check_name,
-            severity = %severity,
+            check = %context.check_name,
+            severity = %context.severity,
             error = %error,
             "CoordinatorActor: failed to write doctor finding activity entry; continuing"
         );
@@ -219,14 +294,16 @@ async fn record_activity_for_finding(repo: &djinn_db::TaskRepository, finding: &
     let resolver_snapshot = serde_json::to_value(&finding.resolver_snapshot).ok();
     record_doctor_activity(
         repo,
-        finding_task_id(finding),
-        &finding.check_name,
-        finding.severity.as_str(),
-        Some(&finding.detail),
-        &entity_ids,
-        &finding.evidence,
-        resolver_snapshot.as_ref(),
-        None,
+        DoctorActivityContext {
+            task_id: finding_task_id(finding),
+            check_name: &finding.check_name,
+            severity: finding.severity.as_str(),
+            detail: Some(&finding.detail),
+            entity_ids: &entity_ids,
+            evidence: &finding.evidence,
+            resolver_snapshot: resolver_snapshot.as_ref(),
+            lifecycle: None,
+        },
     )
     .await;
 }
@@ -252,14 +329,16 @@ async fn record_activity_for_persisted_finding(
         .map(str::to_owned);
     record_doctor_activity(
         repo,
-        task_id,
-        &finding.check_name,
-        &finding.severity,
-        finding.detail.as_deref(),
-        &finding.entity_ids,
-        &finding.evidence,
-        finding.resolver_snapshot.as_ref(),
-        Some(lifecycle),
+        DoctorActivityContext {
+            task_id,
+            check_name: &finding.check_name,
+            severity: &finding.severity,
+            detail: finding.detail.as_deref(),
+            entity_ids: &finding.entity_ids,
+            evidence: &finding.evidence,
+            resolver_snapshot: finding.resolver_snapshot.as_ref(),
+            lifecycle: Some(lifecycle),
+        },
     )
     .await;
 }
