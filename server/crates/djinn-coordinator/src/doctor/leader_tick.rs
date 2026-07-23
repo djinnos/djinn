@@ -1,3 +1,4 @@
+// djinn:allow-oversize — leader-tick and manual retrieval reconciliation share the keyed persistence boundary.
 //! Leader-tick integration for the cheap doctor subset (epic 4q1t).
 //!
 //! The leader tick runs cheap doctor checks and persists their findings without
