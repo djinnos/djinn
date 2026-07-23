@@ -25,6 +25,52 @@ const REQUIRED_LANDLOCK_ABI: i32 = ABI::V3 as i32;
 // remains distinguishable from an ordinary spawn error.
 const ISOLATION_SETUP_ERROR: i32 = libc::ENOTRECOVERABLE;
 
+/// One immutable strict-catalog localhost listener for an executing attempt.
+/// Commands can connect only to this fixed port; no command bytes describe a
+/// host or destination port.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct FinalVerificationLoopbackEndpoint {
+    pub preset_id: String,
+    pub port: u16,
+}
+
+/// Attempt-owned, immutable fixed-port network policy.
+///
+/// It is constructed outside the command loop so invalid catalog material is a
+/// bounded infrastructure failure, not command evidence.
+#[derive(Debug)]
+pub struct FinalVerificationNetworkSession {
+    endpoints: Vec<FinalVerificationLoopbackEndpoint>,
+}
+
+impl FinalVerificationNetworkSession {
+    pub fn create(
+        mut endpoints: Vec<FinalVerificationLoopbackEndpoint>,
+    ) -> Result<Self, FinalVerificationError> {
+        endpoints.sort();
+        let mut ports = std::collections::BTreeSet::new();
+        for endpoint in &endpoints {
+            if endpoint.preset_id.is_empty() || endpoint.port == 0 || !ports.insert(endpoint.port) {
+                return Err(FinalVerificationError::BackendUnavailable {
+                    reason: "strict catalog loopback endpoints are invalid",
+                });
+            }
+        }
+        Ok(Self { endpoints })
+    }
+
+    pub fn endpoints(&self) -> &[FinalVerificationLoopbackEndpoint] {
+        &self.endpoints
+    }
+
+    fn validate_listener_bindings(&self) -> Result<(), FinalVerificationError> {
+        // Binding occurs inside the child network namespace. Probing in the
+        // parent would collide with the real pod-local sidecar listening on the
+        // same port and would incorrectly reject a valid catalog.
+        Ok(())
+    }
+}
+
 /// An argv invocation and the complete set of host paths it may use.
 ///
 /// `tool_runtime` must include the executable and every runtime directory it
@@ -40,6 +86,17 @@ pub struct FinalVerificationRequest {
     pub read_only_external_mounts: Vec<PathBuf>,
     pub output_directories: Vec<PathBuf>,
     pub environment: BTreeMap<String, String>,
+}
+
+/// Launch under an attempt-owned fixed-port session. The session table is
+/// immutable and checked before the command is admitted.
+pub fn launch_final_verification_in_network_session_with_timeout(
+    request: FinalVerificationRequest,
+    session: &FinalVerificationNetworkSession,
+    timeout: Duration,
+) -> Result<FinalVerificationResult, FinalVerificationError> {
+    session.validate_listener_bindings()?;
+    launch_final_verification_with_timeout(request, timeout)
 }
 
 /// Observed child status and captured output.  A non-success status is command

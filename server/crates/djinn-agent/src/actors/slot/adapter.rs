@@ -21,6 +21,7 @@ use djinn_git::verification_input::{
     ResolvedExternalInputV1, VerificationInputFingerprintConfig, collect_verification_changed_paths,
 };
 use djinn_k8s::sidecar::resolve_image_services_strict;
+use djinn_sandbox::final_verification::FinalVerificationLoopbackEndpoint;
 use djinn_sandbox::final_verification_execution::{
     EnvironmentIdentityResolver, FinalVerificationExecutionRequest,
 };
@@ -394,6 +395,16 @@ pub async fn resolve_final_verification_for_task_run(
     let services = resolve_image_services_strict(db, &bound_image_id)
         .await
         .map_err(|e| format!("strict catalog resolution failed: {e}"))?;
+    let catalog_loopback_endpoints = services
+        .iter()
+        .map(|service| {
+            Ok(FinalVerificationLoopbackEndpoint {
+                preset_id: service.preset_id.clone(),
+                port: u16::try_from(service.port)
+                    .map_err(|_| "strict catalog service port is outside u16")?,
+            })
+        })
+        .collect::<Result<Vec<_>, &str>>()?;
     let manifest = VerificationInputManifestV1 {
         version: plan.input_manifest.version,
         repo_paths: plan.input_manifest.repo_paths.clone(),
@@ -515,6 +526,7 @@ pub async fn resolve_final_verification_for_task_run(
                 tool_runtime: canonical_tool_runtime(),
                 read_only_external_mounts: external_inputs.into_iter().map(|i| i.path).collect(),
                 output_directories,
+                catalog_loopback_endpoints,
             },
             verify_source: VerifySource::Worker,
             required_checks,
