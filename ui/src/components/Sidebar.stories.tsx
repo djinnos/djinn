@@ -244,3 +244,13 @@ export const RepositoriesActive: Story = {
   parameters: { isAdmin: true },
   beforeEach: () => setMcpToolResponder(busyResponder),
 };
+
+/**
+ * `/images` is part of the Repositories section ("hub") — there is no separate
+ * Images nav item, and the Repositories item stays highlighted on that route.
+ */
+export const ImagesActive: Story = {
+  args: { initialPath: "/images" },
+  parameters: { isAdmin: true },
+  beforeEach: () => setMcpToolResponder(busyResponder),
+};

@@ -45,6 +45,7 @@ import {
 import { useProjects } from "@/stores/useProjectStore";
 import { showToast } from "@/lib/toast";
 import { ProjectImagePicker } from "@/components/images/ProjectImagePicker";
+import { useAuthUser } from "@/components/AuthGate";
 
 const LANGUAGE_LABELS: Record<string, string> = {
   rust: "Rust",
@@ -62,10 +63,14 @@ export function ProjectEnvironmentPage() {
   const navigate = useNavigate();
   const projects = useProjects();
   const project = projects.find((p) => p.id === projectId);
+  // Image assignment is an org-blast-radius setting; non-admins (and a null
+  // user) view it read-only.
+  const isAdmin = useAuthUser()?.isAdmin ?? false;
 
   const [config, setConfig] = useState<EnvironmentConfig | null>(null);
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
   const [selectedImageId, setSelectedImageId] = useState<string | null>(null);
+  const [selectedImageName, setSelectedImageName] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
 
@@ -73,11 +78,12 @@ export function ProjectEnvironmentPage() {
     if (!projectId) return;
     setLoading(true);
     try {
-      const { config: fetched, selectedImageId: imageId } =
+      const { config: fetched, selectedImageId: imageId, selectedImageName: imageName } =
         await fetchEnvironmentConfig(projectId);
       setConfig(fetched);
       setWorkspaces(fetched.workspaces);
       setSelectedImageId(imageId);
+      setSelectedImageName(imageName);
     } catch (err) {
       const message = err instanceof Error ? err.message : "Failed to load environment config";
       showToast.error("Could not load environment config", { description: message });
@@ -195,7 +201,12 @@ export function ProjectEnvironmentPage() {
         }
         actions={
           <div className="flex items-center gap-3">
-            <ProjectImagePicker projectId={projectId} initialImageId={selectedImageId} />
+            <ProjectImagePicker
+              projectId={projectId}
+              initialImageId={selectedImageId}
+              initialImageName={selectedImageName}
+              readOnly={!isAdmin}
+            />
             <div className="flex items-center gap-2">
               <Button
                 variant="outline"
