@@ -1,9 +1,4 @@
-// Outcome processing, lifecycle management, and helper methods for the
-// refinement tribunal dispatch loop.
-//
-// Complements `refinement_dispatch.rs` which owns the dispatch loop and
-// per-user/model cap admission. Split to keep both files under the
-// size-guard threshold.
+// Outcome processing and lifecycle management for the refinement tribunal.
 
 use djinn_control_plane::tools::epic_ops::{
     AcceptanceCriterionItem, parse_acceptance_criteria_array,
@@ -23,6 +18,12 @@ use super::refinement::{
 
 use super::actor::CoordinatorActor;
 use super::refinement_dispatch::RefinementSession;
+use super::refinement_lint_evidence::advocate_lint_rejection_from_session;
+pub(super) use super::refinement_lint_evidence::format_advocate_lint_correction_context;
+#[cfg(test)]
+use super::refinement_lint_evidence::{
+    parse_spec_lint_rejection, parse_spec_lint_rejection_from_conversation,
+};
 
 /// True when a debate-trail entry belongs to the current refinement run.
 ///
@@ -109,7 +110,7 @@ impl CoordinatorActor {
 
         match session.phase {
             RefinementPhase::AdvocateRevision => {
-                self.process_advocate_outcome(run_id, &proposal_id, &state)
+                self.process_advocate_outcome(run_id, &proposal_id, &session.task_id, &state)
                     .await;
             }
             RefinementPhase::AdversaryAttack => {
@@ -132,6 +133,7 @@ impl CoordinatorActor {
         &mut self,
         run_id: &str,
         proposal_id: &str,
+        task_id: &str,
         state: &RefinementLoopState,
     ) {
         let event_bus = crate::events::event_bus_for(&self.events_tx);
@@ -167,6 +169,51 @@ impl CoordinatorActor {
 
         let new_revision_seq = proposal.latest_revision_seq;
         let advanced = new_revision_seq > state.current_revision_seq;
+
+        // A pass can reject one candidate and then successfully write a clean
+        // revision in the same session. Therefore classify ToolResult evidence
+        // only after proving this pass did not advance the material head.
+        // Evidence-read failure on an unchanged head is terminal rather than an
+        // ordinary no-change completion, avoiding a silent handoff to the Judge.
+        if !advanced {
+            let violations = match advocate_lint_rejection_from_session(
+                &self.db,
+                &self.events_tx,
+                task_id,
+            )
+            .await
+            {
+                Ok(violations) => violations,
+                Err(error) => {
+                    tracing::warn!(proposal_id = %proposal_id, task_id = %task_id, %error,
+                        "Unable to inspect completed Advocate ToolResult evidence");
+                    self.terminate_refinement(
+                        run_id,
+                        StopReason::AgentFailure {
+                            role: "advocate".into(),
+                            error: format!(
+                                "unable to inspect completed session ToolResult evidence: {error}"
+                            ),
+                        },
+                    )
+                    .await;
+                    return;
+                }
+            };
+            if let Some(violations) = violations {
+                if let Some(active) = self.active_refinements.get_mut(run_id) {
+                    active.record_advocate_lint_rejection(violations);
+                    tracing::warn!(
+                        proposal_id = %proposal_id,
+                        task_id = %task_id,
+                        round = active.current_round,
+                        revision_seq = active.current_revision_seq,
+                        "Advocate candidate rejected by spec lint; retrying correction in same round"
+                    );
+                }
+                return;
+            }
+        }
 
         if advanced {
             let model_id = self
