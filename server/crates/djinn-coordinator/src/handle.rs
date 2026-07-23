@@ -119,6 +119,17 @@ impl CoordinatorHandle {
             .await
     }
 
+    /// Refresh the single retrieval-health source registered by the actor.
+    pub async fn refresh_retrieval_health(&self) -> Result<(), CoordinatorError> {
+        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+        self.send(CoordinatorMessage::RefreshRetrievalHealth { reply: reply_tx })
+            .await?;
+        reply_rx
+            .await
+            .map_err(|_| CoordinatorError::ActorDead)?
+            .map_err(CoordinatorError::Other)
+    }
+
     /// Update ready-task dispatch limit.
     pub async fn update_dispatch_limit(&self, limit: usize) -> Result<(), CoordinatorError> {
         self.send(CoordinatorMessage::UpdateDispatchLimit {

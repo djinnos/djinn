@@ -33,6 +33,11 @@ pub struct CoordinatorStatus {
 pub trait CoordinatorOps: Send + Sync {
     fn get_status(&self) -> Result<CoordinatorStatus, String>;
     async fn trigger_dispatch_for_project(&self, project_id: &str) -> Result<(), String>;
+    /// Refresh the coordinator-owned retrieval-health source before an
+    /// on-demand Doctor run. MCP cannot construct a competing source.
+    async fn refresh_retrieval_health(&self) -> Result<(), String> {
+        Err("coordinator retrieval health source is not initialized".to_owned())
+    }
     /// Request the shared, coalescing persisted board-health mismatch scan.
     async fn trigger_board_health_mismatch_scan(&self) -> Result<(), String> {
         Ok(())

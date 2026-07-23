@@ -1385,6 +1385,16 @@ impl CoordinatorActor {
             CoordinatorMessage::RouteSettledNoopWithoutLiveMover { task_id } => {
                 self.route_settled_noop_without_live_mover(&task_id).await;
             }
+            CoordinatorMessage::RefreshRetrievalHealth { reply } => {
+                #[cfg(not(test))]
+                let result = match self.retrieval_health_source.as_ref() {
+                    Some(source) => source.refresh().await,
+                    None => Err("coordinator retrieval health source is not initialized".to_owned()),
+                };
+                #[cfg(test)]
+                let result = Err("coordinator retrieval health source is not initialized".to_owned());
+                let _ = reply.send(result);
+            }
             CoordinatorMessage::RecordLiveMetrics { reply } => {
                 self.record_live_metrics();
                 let _ = reply.send(());
