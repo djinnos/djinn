@@ -49,6 +49,9 @@ pub struct GraphWarmLeaseRecovery {
     pub bound_pod_uid: Option<String>,
     pub state: LeaseState,
     pub deadlines: LeaseDeadlines,
+    /// Cancellation closed create/gate authorization while cleanup remains
+    /// counted and recoverable.
+    pub cleanup_required: bool,
 }
 
 /// Typed v1 lease outcomes that must be handled before Kubernetes create.
@@ -1177,6 +1180,18 @@ impl K8sGraphWarmer {
         self
     }
 
+    /// Inject Kubernetes candidate operations while retaining the production
+    /// inventory, validation, gate, and UID-preconditioned cleanup facade.
+    /// Deterministic restart tests fake only this lowest control boundary.
+    #[must_use]
+    pub fn with_warm_candidate_client<C>(mut self, client: C) -> Self
+    where
+        C: WarmCandidateClient + 'static,
+    {
+        self.dispatch.candidates = Some(Arc::new(WarmCandidateControl::new(client)));
+        self
+    }
+
     /// Return the explicitly injected admission boundary, if configured.
     ///
     /// `None` represents Off mode: the warmer bypasses admission and dispatches
@@ -1245,6 +1260,7 @@ impl K8sGraphWarmer {
             let expired = recovery.deadlines.launch_deadline_ms > 0
                 && time::OffsetDateTime::now_utc().unix_timestamp_nanos() as i64 / 1_000_000
                     >= recovery.deadlines.launch_deadline_ms;
+            let cleanup_required = expired || recovery.cleanup_required;
             if inventory.observation != WarmInventoryObservation::Observed {
                 let _ = lease
                     .report(
@@ -1255,7 +1271,7 @@ impl K8sGraphWarmer {
                     .await;
                 continue;
             }
-            if expired {
+            if cleanup_required {
                 let mut pending = false;
                 for candidate in inventory
                     .jobs

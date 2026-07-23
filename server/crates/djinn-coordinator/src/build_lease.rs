@@ -407,12 +407,34 @@ impl BuildLeaseService {
         state: LeaseState,
     ) -> LeaseResult {
         let state = match state {
+            LeaseState::Launching => BuildLeaseState::Launching,
+            LeaseState::Bound => BuildLeaseState::Bound,
             LeaseState::Active => BuildLeaseState::Active,
             LeaseState::Suspect => BuildLeaseState::Suspect,
             _ => return self.unavailable(),
         };
-        self.transition(identity, token, state, LeaseOperation::Status)
+        let _guard = self.operation.lock().await;
+        if !self.is_ready() {
+            return self.unavailable();
+        }
+        self.telemetry.operation(
+            LeaseOperation::Status,
+            telemetry_consumer(&identity),
+        );
+        self.pause
+            .before_transaction(LeaseOperation::Status)
+            .await;
+        let (key, _) = crate::build_lease::identity(&identity);
+        match self
+            .repository
+            .status(&key, token.0 as i64, state, None)
             .await
+        {
+            Ok(row) if row.state == state && row.fencing_token == Some(token.0 as i64) => {
+                LeaseResult::Status(status(&row))
+            }
+            Ok(_) | Err(_) => self.unavailable(),
+        }
     }
     pub async fn expire_deadlines(&self) -> LeaseResult {
         let _guard = self.operation.lock().await;
@@ -504,6 +526,45 @@ impl BuildLeaseService {
                 if op == LeaseOperation::Abandon && row.state != BuildLeaseState::Queued =>
             {
                 return self.unavailable();
+            }
+            // Occupied graph-warm cancellation closes all new work, but remains
+            // counted until Kubernetes inventory proves cleanup complete.
+            Ok(Some(row))
+                if op == LeaseOperation::Cancel
+                    && matches!(id, LeaseIdentity::GraphWarm(_))
+                    && matches!(
+                        row.state,
+                        BuildLeaseState::Granted
+                            | BuildLeaseState::Launching
+                            | BuildLeaseState::Bound
+                            | BuildLeaseState::Active
+                            | BuildLeaseState::Suspect
+                    ) =>
+            {
+                let token = match (token, row.fencing_token) {
+                    (Some(requested), Some(actual)) if requested.0 as i64 == actual => actual,
+                    (None, Some(actual)) => actual,
+                    _ => return self.unavailable(),
+                };
+                let close = serde_json::json!({
+                    "candidate_cleanup": cleanup,
+                    "close_requested": "cancelled"
+                });
+                return match self
+                    .repository
+                    .status(&key, token, BuildLeaseState::Suspect, Some(close))
+                    .await
+                {
+                    Ok(row)
+                        if row.state == BuildLeaseState::Suspect
+                            && row.fencing_token == Some(token) =>
+                    {
+                        LeaseResult::Cancelled {
+                            candidate_cleanup: true,
+                        }
+                    }
+                    Ok(_) | Err(_) => self.unavailable(),
+                };
             }
             Ok(Some(_)) => {}
             Ok(None) | Err(_) => return self.unavailable(),

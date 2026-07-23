@@ -118,6 +118,7 @@ fn recovery(
             queue_deadline_ms: 0,
             launch_deadline_ms: if expired { 1 } else { 0 },
         },
+        cleanup_required: false,
     }
 }
 

@@ -74,6 +74,10 @@ impl BuildLeaseGraphWarmAdapter {
                             })
                             .map_or(0, |v| v.unix_timestamp_nanos() as i64 / 1_000_000),
                     },
+                    cleanup_required: row.candidate_cleanup.as_ref().is_some_and(|value| {
+                        value.get("close_requested").and_then(|v| v.as_str())
+                            == Some("cancelled")
+                    }),
                 })
             })
             .collect())
@@ -160,8 +164,10 @@ impl GraphWarmLease for BuildLeaseGraphWarmAdapter {
             .await
         {
             LeaseResult::Status(status)
-                if status.state == LeaseState::Bound
-                    && status.fencing_token == Some(fencing_token)
+                if matches!(
+                    status.state,
+                    LeaseState::Bound | LeaseState::Active | LeaseState::Suspect
+                ) && status.fencing_token == Some(fencing_token)
                     && status.pod_uid.as_deref() == Some(pod_uid.as_str()) =>
             {
                 Ok(())
@@ -179,6 +185,7 @@ impl GraphWarmLease for BuildLeaseGraphWarmAdapter {
         fencing_token: LeaseFencingToken,
         state: LeaseState,
     ) -> Result<(), GraphWarmLeaseError> {
+        let expected_token = fencing_token.clone();
         match self
             .service
             .report(
@@ -188,7 +195,11 @@ impl GraphWarmLease for BuildLeaseGraphWarmAdapter {
             )
             .await
         {
-            LeaseResult::Status(_) => Ok(()),
+            LeaseResult::Status(status)
+                if status.state == state && status.fencing_token == Some(expected_token) =>
+            {
+                Ok(())
+            }
             other => Err(unavailable(other)),
         }
     }
