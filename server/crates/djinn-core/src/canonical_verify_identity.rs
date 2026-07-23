@@ -219,8 +219,17 @@ impl EnvironmentIdentityV1 {
         input: ResolvedEnvironmentIdentityInputV1,
     ) -> Result<Self, EnvironmentIdentityError> {
         let normalized = input.canonicalized()?;
-        let canonical_json = serde_json::to_string(&normalized)
-            .expect("canonical identity types are always serializable");
+        // V1 rows predate catalog services. Serialize the legacy shape exactly
+        // (without an empty `services` member) so persisted V1 digests retain
+        // their meaning; V2 is the additive service-aware contract.
+        let canonical_json = if normalized.schema_version == 1 {
+            let mut value = serde_json::to_value(&normalized)
+                .expect("canonical identity types are always serializable");
+            value.as_object_mut().expect("identity is an object").remove("services");
+            serde_json::to_string(&value).expect("canonical identity JSON")
+        } else {
+            serde_json::to_string(&normalized).expect("canonical identity types are always serializable")
+        };
         let digest = sha256_hex(canonical_json.as_bytes());
         Ok(Self {
             schema_version: normalized.schema_version,
@@ -604,7 +613,34 @@ mod tests {
             target: "x86_64-unknown-linux-gnu".into(),
             features: vec!["serde".into(), "sqlx".into()],
             allowlisted_environment: BTreeMap::from([("CI".into(), "true".into())]),
+            services: Vec::new(),
         }
+    }
+
+    #[test]
+    fn v1_omits_additive_services_field_from_persisted_json() {
+        let identity = EnvironmentIdentityV1::derive(input()).unwrap();
+        assert!(!identity.canonical_json.contains("\"services\""));
+    }
+
+    #[test]
+    fn v2_service_identity_is_sorted_and_secret_free() {
+        let mut v2 = input();
+        v2.schema_version = 2;
+        v2.canonicalization_version = 2;
+        v2.services = vec![ResolvedCatalogServiceIdentityV1 {
+            preset_id: "postgres".into(),
+            service_type: "postgres".into(),
+            image_reference: "registry.example/postgres:18".into(),
+            image_digest: DIGEST.into(),
+            port: 5432,
+            exported_environment_names: vec!["DATABASE_URL".into()],
+            verification_protocol_revision: 1,
+            effective_configuration_digest: DIGEST.into(),
+        }];
+        let identity = EnvironmentIdentityV1::derive(v2).unwrap();
+        assert!(identity.canonical_json.contains("\"services\""));
+        assert!(!identity.canonical_json.contains("POSTGRES_PASSWORD"));
     }
 
     #[test]

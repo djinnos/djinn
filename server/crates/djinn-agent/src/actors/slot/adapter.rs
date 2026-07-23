@@ -15,7 +15,8 @@ use djinn_core::canonical_verify::{
 };
 use djinn_core::clock::SystemClock;
 use djinn_core::models::VerifySource;
-use djinn_db::TaskRunRepository;
+use djinn_db::{ImageRepository, TaskRunRepository};
+use djinn_k8s::sidecar::resolve_image_services_strict;
 use djinn_db::advisory_lock;
 use djinn_git::verification_input::{
     ResolvedExternalInputV1, VerificationInputFingerprintConfig, collect_verification_changed_paths,
@@ -350,6 +351,31 @@ pub async fn resolve_final_verification_for_task_run(
         .await
         .map_err(|e| e.to_string())?
         .ok_or("task run missing")?;
+    // Catalog authorization is bound at dispatch, never re-selected from a
+    // mutable project. A changed project selection makes verification ineligible.
+    let runs = TaskRunRepository::new(db.clone());
+    let bound_image_id = runs
+        .catalog_image_id(task_run_id)
+        .await
+        .map_err(|e| e.to_string())?
+        .ok_or("task run has no bound catalog image")?;
+    let image_repo = ImageRepository::new(db.clone());
+    let current_image = image_repo
+        .resolve_for_project(&run.project_id)
+        .await
+        .map_err(|e| e.to_string())?
+        .ok_or("project has no selected catalog image")?;
+    if current_image.id != bound_image_id {
+        return Err("task-run/current-image mismatch".into());
+    }
+    let catalog_image = image_repo
+        .get(&bound_image_id)
+        .await
+        .map_err(|e| e.to_string())?
+        .ok_or("task-run catalog image missing")?;
+    let services = resolve_image_services_strict(db, &bound_image_id)
+        .await
+        .map_err(|e| format!("strict catalog resolution failed: {e}"))?;
     let plan = crate::environment::environment_config_for_project_id(db, &run.project_id)
         .await
         .lifecycle
@@ -404,8 +430,8 @@ pub async fn resolve_final_verification_for_task_run(
         .map(|c| c.check_id.clone())
         .collect::<Vec<_>>();
     let identity = ResolvedEnvironmentIdentityInputV1 {
-        schema_version: 1,
-        canonicalization_version: 1,
+        schema_version: 2,
+        canonicalization_version: 2,
         plan: CanonicalFinalVerificationPlanV1 {
             version: plan.version,
             profile_id: plan.profile_id.clone(),
@@ -437,8 +463,8 @@ pub async fn resolve_final_verification_for_task_run(
         },
         input_manifest: manifest.clone(),
         image: ImmutableImageV1 {
-            reference: "host".into(),
-            digest: UNKNOWN_IMAGE_DIGEST.into(),
+            reference: catalog_image.tag.clone().ok_or("task-run catalog image has no reference")?,
+            digest: catalog_image.registry_digest.clone().ok_or("task-run catalog image has no digest")?,
         },
         tool_probes: commands
             .iter()
@@ -454,7 +480,16 @@ pub async fn resolve_final_verification_for_task_run(
         target: std::env::consts::ARCH.into(),
         features: Vec::new(),
         allowlisted_environment: BTreeMap::new(),
-        services: Vec::new(),
+        services: services.into_iter().map(|service| djinn_core::canonical_verify::ResolvedCatalogServiceIdentityV1 {
+            preset_id: service.preset_id,
+            service_type: service.service_type,
+            image_reference: service.image_reference,
+            image_digest: service.image_digest,
+            port: service.port,
+            exported_environment_names: service.exported_environment_names,
+            verification_protocol_revision: service.verification_protocol_revision,
+            effective_configuration_digest: service.effective_configuration_digest,
+        }).collect(),
     };
     let resolver: EnvironmentIdentityResolver = Arc::new(move || Ok(identity.clone()));
     let output_directories = output_directories(&manifest.output_only_globs)?;

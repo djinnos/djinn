@@ -155,7 +155,8 @@ pub async fn resolve_image_services_strict(
             .map(ToOwned::to_owned)
             .collect();
         names.sort();
-        names.dedup();
+        // Do not deduplicate before checking: duplicate exports are ambiguous
+        // catalog material and canonical verification must fail closed.
         if names.is_empty() {
             return Err(CatalogServiceResolutionError::MalformedConfiguration { preset_id });
         }
@@ -415,7 +416,9 @@ fn append_preset_resolution(
             });
             specs.push(BackingServiceSpec {
                 service_type: p.service_type,
-                image: p.image,
+                // Keep ordinary dispatch compatible with legacy rows, while
+                // rendering every catalog-owned valid digest immutably.
+                image: p.image_digest.as_deref().filter(|d| valid_digest(d)).map_or(p.image.clone(), |digest| format!("{}@{digest}", p.image)),
                 port: p.port,
                 env: parse_env(&p.env),
                 cpu_request,
@@ -576,6 +579,8 @@ mod tests {
             name: "Postgres 18".into(),
             service_type: "postgres".into(),
             image: "postgres:18-alpine".into(),
+            image_digest: Some("sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".into()),
+            verification_protocol_revision: Some(1),
             port: 5432,
             env: r#"{"POSTGRES_PASSWORD":"postgres"}"#.into(),
             resources: r#"{"cpu_request":"100m","memory_request":"256Mi","cpu_limit":"500m","memory_limit":"512Mi"}"#.into(),
@@ -626,6 +631,13 @@ mod tests {
             .expect("container securityContext");
         assert_eq!(sc.run_as_user, Some(0));
         assert_eq!(sc.run_as_non_root, Some(false));
+    }
+
+    #[test]
+    fn catalog_digest_pins_dispatch_sidecar_image() {
+        let mut services = Vec::new();
+        append_preset_resolution("project", "preset-postgres-18", Ok(Some(preset())), &mut services, &mut Vec::new(), &mut Vec::new());
+        assert_eq!(services[0].image, "postgres:18-alpine@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef");
     }
 
     #[test]

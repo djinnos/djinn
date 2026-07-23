@@ -3,6 +3,7 @@ use djinn_core::models::{TaskRunRecord, TaskRunStatus};
 use crate::Result;
 use crate::database::Database;
 use crate::error::DbError;
+use sqlx::Row;
 use uuid::Uuid;
 
 pub struct TaskRunRepository {
@@ -34,19 +35,22 @@ impl TaskRunRepository {
             Uuid::parse_str(group_id)
                 .map_err(|_| DbError::InvalidData("dispatch_group_id must be a UUID".to_owned()))?;
         }
-        sqlx::query!(
+        // Runtime query: `catalog_image_id` evolves with the task-run schema
+        // and must not require regenerating sqlx offline metadata.
+        sqlx::query(
             "INSERT INTO task_runs
-                (id, project_id, task_id, trigger_type, status, workspace_path, mirror_ref, dispatch_group_id)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
-            params.id,
-            params.project_id,
-            params.task_id,
-            params.trigger_type,
-            status,
-            params.workspace_path,
-            params.mirror_ref,
-            params.dispatch_group_id,
+                (id, project_id, task_id, trigger_type, status, workspace_path, mirror_ref, dispatch_group_id, catalog_image_id)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8,
+                (SELECT selected_image_id FROM projects WHERE id = $2))",
         )
+        .bind(params.id)
+        .bind(params.project_id)
+        .bind(params.task_id)
+        .bind(params.trigger_type)
+        .bind(status)
+        .bind(params.workspace_path)
+        .bind(params.mirror_ref)
+        .bind(params.dispatch_group_id)
         .execute(self.db.pool())
         .await?;
 
@@ -62,6 +66,15 @@ impl TaskRunRepository {
         .await?;
 
         Ok(run)
+    }
+
+    /// Immutable catalog image selected at dispatch. NULL is a legacy or
+    /// non-catalog dispatch and must not be substituted with current project state.
+    pub async fn catalog_image_id(&self, id: &str) -> Result<Option<String>> {
+        self.db.ensure_initialized().await?;
+        let row = sqlx::query("SELECT catalog_image_id FROM task_runs WHERE id = $1")
+            .bind(id).fetch_optional(self.db.pool()).await?;
+        Ok(row.and_then(|row| row.try_get("catalog_image_id").ok().flatten()))
     }
 
     pub async fn get(&self, id: &str) -> Result<Option<TaskRunRecord>> {
