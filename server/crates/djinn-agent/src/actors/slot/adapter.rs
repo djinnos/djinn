@@ -942,6 +942,27 @@ mod resolve_final_verification_tests {
     }
 
     #[test]
+    fn overlapping_rules_union_groups_without_duplicate_commands() {
+        let mut plan = grouped_plan();
+        plan.selection_rules.push(FinalVerificationSelectionRule {
+            match_globs: vec!["server/src/**".into()],
+            command_groups: vec!["server".into()],
+        });
+
+        let (commands, groups) =
+            resolve_selected_final_verification(&plan, &["server/src/lib.rs".into()])
+                .expect("overlapping rules must resolve a deduplicated group union");
+        assert_eq!(
+            commands
+                .iter()
+                .map(|command| command.check_id.as_str())
+                .collect::<Vec<_>>(),
+            ["server-check"]
+        );
+        assert_eq!(groups, ["server"]);
+    }
+
+    #[test]
     fn grouped_plan_that_selects_no_commands_fails_closed() {
         let plan = FinalVerificationPlan {
             command_groups: vec![FinalVerificationCommandGroup {
