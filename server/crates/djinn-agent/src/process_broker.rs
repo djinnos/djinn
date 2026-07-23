@@ -74,6 +74,7 @@ impl CgroupLauncherClient for UnixBrokerLauncher {
             client: self.client.clone(),
             id,
             status: None,
+            stdout: Vec::new(),
         }))
     }
 }
@@ -82,6 +83,9 @@ struct UnixBrokerProcessHandle {
     client: Arc<Mutex<UnixBrokerClient>>,
     id: String,
     status: Option<ExitStatus>,
+    // Status polling uses the broker's stdout operation, which drains its
+    // accumulated stream buffer. Preserve those bytes for the next drain.
+    stdout: Vec<u8>,
 }
 
 impl UnixBrokerProcessHandle {
@@ -109,7 +113,9 @@ impl UnixBrokerProcessHandle {
 
 impl ProcessHandle for UnixBrokerProcessHandle {
     fn drain_stdout(&mut self) -> io::Result<Vec<u8>> {
-        self.output(false)
+        let mut output = std::mem::take(&mut self.stdout);
+        output.extend(self.output(false)?);
+        Ok(output)
     }
 
     fn drain_stderr(&mut self) -> io::Result<Vec<u8>> {
@@ -118,10 +124,10 @@ impl ProcessHandle for UnixBrokerProcessHandle {
 
     fn try_wait(&mut self) -> io::Result<Option<ExitStatus>> {
         if self.status.is_none() {
-            let status = lock_client(&self.client)?
+            let (output, _, status) = lock_client(&self.client)?
                 .stdout(&self.id)
-                .map_err(broker_error)?
-                .2;
+                .map_err(broker_error)?;
+            self.stdout.extend(output);
             self.record(status)?;
         }
         Ok(self.status)
