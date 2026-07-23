@@ -10,9 +10,16 @@
 
 use std::io;
 use std::process::{Command, Output};
+use std::sync::Arc;
 use std::time::Duration;
 
+use djinn_cgroup_launcher::CpuStat;
 use djinn_core::clock::{Clock, SystemClock};
+use djinn_supervisor::services::{
+    LeaseAbandonRequest, LeaseDeadlines, LeaseFencingToken, LeaseGrantRequest, LeaseIdentity,
+    LeaseQueueRequest, LeaseReleaseRequest, LeaseResult, LeaseState, LeaseStatusRequest,
+    SupervisorServices, TaskInvocationLeaseIdentity,
+};
 use tokio_util::sync::CancellationToken;
 
 #[cfg(unix)]
@@ -63,6 +70,277 @@ pub fn isolate_process_group(cmd: &mut Command) {
 
             Ok(())
         });
+    }
+}
+
+/// The launcher is deliberately separate from the supervisor: it controls one
+/// cgroup leaf and samples `cpu.stat`; it never owns a second lease ledger.
+pub(crate) trait CgroupLauncherClient: Send + Sync + 'static {
+    fn launch(
+        &self,
+        command: &mut Command,
+        identity: &TaskInvocationLeaseIdentity,
+    ) -> io::Result<std::process::Child>;
+    fn sample_cpu(&self, identity: &TaskInvocationLeaseIdentity) -> io::Result<CpuStat>;
+    fn fenced_lift(
+        &self,
+        identity: &TaskInvocationLeaseIdentity,
+        fence: &LeaseFencingToken,
+    ) -> io::Result<()>;
+    fn kill(&self, identity: &TaskInvocationLeaseIdentity) -> io::Result<()>;
+    fn wait_empty(&self, identity: &TaskInvocationLeaseIdentity) -> io::Result<()>;
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct LeaseInvocationConfig {
+    pub task_id: String,
+    pub task_run_id: String,
+    pub cpu_usage_threshold_usec: u64,
+    pub queue_deadline_ms: i64,
+    pub launch_deadline_ms: i64,
+    pub timeout: Duration,
+}
+
+#[derive(Debug)]
+pub(crate) enum LeaseInvocationError {
+    Process(ProcessRunError),
+    Launcher(io::Error),
+    LeaseIdentityConflict,
+    LeaseWaitTimeout,
+    LeaseUnavailable,
+}
+
+#[derive(Debug)]
+pub(crate) struct LeaseInvocationOutput {
+    pub(crate) process: ProcessOutput,
+    pub(crate) identity: TaskInvocationLeaseIdentity,
+}
+
+/// Launcher-backed invocation state machine. A queue is issued only after a
+/// measured CPU threshold; terminal intent is set before cgroup kill/reconcile.
+pub(crate) struct LeaseInvocationRunner {
+    services: Arc<dyn SupervisorServices>,
+    launcher: Arc<dyn CgroupLauncherClient>,
+    clock: Arc<dyn Clock>,
+}
+impl LeaseInvocationRunner {
+    pub(crate) fn new(
+        services: Arc<dyn SupervisorServices>,
+        launcher: Arc<dyn CgroupLauncherClient>,
+        clock: Arc<dyn Clock>,
+    ) -> Self {
+        Self {
+            services,
+            launcher,
+            clock,
+        }
+    }
+    pub(crate) async fn output(
+        &self,
+        mut cmd: Command,
+        config: LeaseInvocationConfig,
+        cancel: CancellationToken,
+    ) -> Result<LeaseInvocationOutput, LeaseInvocationError> {
+        let identity = TaskInvocationLeaseIdentity {
+            task_id: config.task_id,
+            task_run_id: config.task_run_id,
+            invocation_id: uuid::Uuid::now_v7().to_string(),
+        };
+        let lease = LeaseIdentity::TaskInvocation(identity.clone());
+        let mut child = self
+            .launcher
+            .launch(&mut cmd, &identity)
+            .map_err(LeaseInvocationError::Launcher)?;
+        let stdout = spawn_drain(child.stdout.take());
+        let stderr = spawn_stderr_drain(child.stderr.take());
+        let mut deadline = self.clock.now_instant() + config.timeout;
+        let (mut queued, mut fence, mut credit_used, mut lease_error) = (false, None, false, None);
+        let (observed, termination) = loop {
+            if cancel.is_cancelled() {
+                break (
+                    child.try_wait().map_err(started_lease_error)?,
+                    ProcessTermination::Cancelled,
+                );
+            }
+            if self.clock.now_instant() >= deadline {
+                break (
+                    child.try_wait().map_err(started_lease_error)?,
+                    ProcessTermination::TimedOut,
+                );
+            }
+            if let Some(status) = child.try_wait().map_err(started_lease_error)? {
+                break (Some(status), ProcessTermination::Exited);
+            }
+            let cpu = self
+                .launcher
+                .sample_cpu(&identity)
+                .map_err(LeaseInvocationError::Launcher)?;
+            let result = if !queued && cpu.usage_usec >= config.cpu_usage_threshold_usec {
+                queued = true;
+                self.services
+                    .queue_lease(LeaseQueueRequest {
+                        identity: lease.clone(),
+                        deadlines: LeaseDeadlines {
+                            queue_deadline_ms: config.queue_deadline_ms,
+                            launch_deadline_ms: config.launch_deadline_ms,
+                        },
+                    })
+                    .await
+            } else if queued {
+                self.services
+                    .lease_status(LeaseStatusRequest {
+                        identity: lease.clone(),
+                    })
+                    .await
+            } else {
+                tokio::time::sleep(Duration::from_millis(25)).await;
+                continue;
+            };
+            match result {
+                LeaseResult::Granted(grant) => match self
+                    .services
+                    .grant_lease(LeaseGrantRequest {
+                        identity: lease.clone(),
+                        fencing_token: grant.fencing_token.clone(),
+                    })
+                    .await
+                {
+                    LeaseResult::Status(s)
+                        if matches!(
+                            s.state,
+                            LeaseState::Launching | LeaseState::Bound | LeaseState::Active
+                        ) =>
+                    {
+                        self.launcher
+                            .fenced_lift(&identity, &grant.fencing_token)
+                            .map_err(LeaseInvocationError::Launcher)?;
+                        fence = Some(grant.fencing_token);
+                    }
+                    other => {
+                        lease_failure(other, &mut deadline, &mut credit_used, &mut lease_error)
+                    }
+                },
+                LeaseResult::Status(s) if s.state == LeaseState::Granted => {
+                    if let Some(token) = s.fencing_token {
+                        match self
+                            .services
+                            .grant_lease(LeaseGrantRequest {
+                                identity: lease.clone(),
+                                fencing_token: token.clone(),
+                            })
+                            .await
+                        {
+                            LeaseResult::Status(_) => {
+                                self.launcher
+                                    .fenced_lift(&identity, &token)
+                                    .map_err(LeaseInvocationError::Launcher)?;
+                                fence = Some(token);
+                            }
+                            other => lease_failure(
+                                other,
+                                &mut deadline,
+                                &mut credit_used,
+                                &mut lease_error,
+                            ),
+                        }
+                    }
+                }
+                other => lease_failure(other, &mut deadline, &mut credit_used, &mut lease_error),
+            }
+            if lease_error.is_some() {
+                break (
+                    child.try_wait().map_err(started_lease_error)?,
+                    ProcessTermination::Cancelled,
+                );
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        };
+        self.launcher
+            .kill(&identity)
+            .map_err(LeaseInvocationError::Launcher)?;
+        self.launcher
+            .wait_empty(&identity)
+            .map_err(LeaseInvocationError::Launcher)?;
+        let status = observed.unwrap_or(child.wait().map_err(started_lease_error)?);
+        let process = ProcessOutput {
+            output: Output {
+                status,
+                stdout: join_with_timeout(stdout, Duration::from_secs(2)),
+                stderr: join_with_timeout(stderr, Duration::from_secs(2)),
+            },
+            termination,
+        };
+        if queued {
+            let durable = self
+                .services
+                .lease_status(LeaseStatusRequest {
+                    identity: lease.clone(),
+                })
+                .await;
+            let token = fence.or(match durable {
+                LeaseResult::Status(s)
+                    if matches!(
+                        s.state,
+                        LeaseState::Granted
+                            | LeaseState::Launching
+                            | LeaseState::Bound
+                            | LeaseState::Active
+                    ) =>
+                {
+                    s.fencing_token
+                }
+                _ => None,
+            });
+            if let Some(token) = token {
+                let _ = self
+                    .services
+                    .release_lease(LeaseReleaseRequest {
+                        identity: lease,
+                        fencing_token: token,
+                        candidate_cleanup: false,
+                    })
+                    .await;
+            } else {
+                let _ = self
+                    .services
+                    .abandon_lease(LeaseAbandonRequest {
+                        identity: lease,
+                        candidate_cleanup: false,
+                    })
+                    .await;
+            }
+        }
+        if let Some(error) = lease_error {
+            Err(error)
+        } else {
+            Ok(LeaseInvocationOutput { process, identity })
+        }
+    }
+}
+fn started_lease_error(error: io::Error) -> LeaseInvocationError {
+    LeaseInvocationError::Process(ProcessRunError::Started(error))
+}
+fn lease_failure(
+    result: LeaseResult,
+    deadline: &mut std::time::Instant,
+    credit_used: &mut bool,
+    output: &mut Option<LeaseInvocationError>,
+) {
+    match result {
+        LeaseResult::LeaseIdentityConflict { .. } => {
+            *output = Some(LeaseInvocationError::LeaseIdentityConflict)
+        }
+        LeaseResult::LeaseUnavailable => *output = Some(LeaseInvocationError::LeaseUnavailable),
+        LeaseResult::LeaseWaitTimeout {
+            timeout_credit: Some(credit),
+        } if !*credit_used => {
+            *deadline += Duration::from_millis(u64::from(credit.retry_after_ms));
+            *credit_used = true;
+        }
+        LeaseResult::LeaseWaitTimeout { .. } => {
+            *output = Some(LeaseInvocationError::LeaseWaitTimeout)
+        }
+        _ => {}
     }
 }
 
