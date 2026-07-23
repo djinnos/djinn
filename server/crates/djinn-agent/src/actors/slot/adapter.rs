@@ -17,11 +17,14 @@ use djinn_core::clock::SystemClock;
 use djinn_core::models::VerifySource;
 use djinn_db::TaskRunRepository;
 use djinn_db::advisory_lock;
-use djinn_git::verification_input::{ResolvedExternalInputV1, VerificationInputFingerprintConfig};
+use djinn_git::verification_input::{
+    ResolvedExternalInputV1, VerificationInputFingerprintConfig, collect_verification_changed_paths,
+};
 use djinn_sandbox::final_verification_execution::{
     EnvironmentIdentityResolver, FinalVerificationExecutionRequest,
 };
 use djinn_supervisor::SupervisorServices;
+use globset::{Glob, GlobSetBuilder};
 
 use crate::context::AgentContext;
 
@@ -132,6 +135,68 @@ fn canonical_tool_runtime() -> Vec<PathBuf> {
         .filter(|path| Path::new(path).is_dir())
         .map(PathBuf::from)
         .collect()
+}
+
+fn canonical_command(
+    c: &djinn_stack::environment::FinalVerificationCommand,
+) -> CanonicalCommandDescriptorV1 {
+    CanonicalCommandDescriptorV1 {
+        check_id: c.check_id.clone(),
+        executable: c.executable.clone(),
+        argv: c.argv.clone(),
+        working_directory: c.working_directory.clone(),
+        environment_names: c.environment_names.clone(),
+        timeout_seconds: c.timeout_seconds,
+        descriptor_revision: c.descriptor_revision,
+    }
+}
+fn resolve_selected_final_verification(
+    plan: &djinn_stack::environment::FinalVerificationPlan,
+    paths: &[String],
+) -> Result<(Vec<CanonicalCommandDescriptorV1>, Vec<String>), String> {
+    if plan.command_groups.is_empty() {
+        return Ok((
+            plan.commands.iter().map(canonical_command).collect(),
+            vec![],
+        ));
+    }
+    let mut selected = std::collections::BTreeSet::new();
+    for rule in &plan.selection_rules {
+        // The schema-mandated `**` rule is the all-groups fail-safe, not a
+        // normal selector. Matching it alongside a specific rule would make
+        // every changed path select every command group.
+        if rule.match_globs.iter().any(|glob| glob == "**") {
+            continue;
+        }
+        let mut b = GlobSetBuilder::new();
+        for g in &rule.match_globs {
+            b.add(Glob::new(g).map_err(|e| e.to_string())?);
+        }
+        let m = b.build().map_err(|e| e.to_string())?;
+        if paths.iter().any(|p| m.is_match(p)) {
+            selected.extend(rule.command_groups.iter().cloned());
+        }
+    }
+    if paths.is_empty() || selected.is_empty() {
+        selected.extend(plan.command_groups.iter().map(|g| g.name.clone()));
+    }
+    let names = plan
+        .command_groups
+        .iter()
+        .filter(|g| selected.contains(&g.name))
+        .map(|g| g.name.clone())
+        .collect();
+    let commands: Vec<_> = plan
+        .command_groups
+        .iter()
+        .filter(|g| selected.contains(&g.name))
+        .flat_map(|g| g.commands.iter().map(canonical_command))
+        .collect();
+    if commands.is_empty() {
+        Err("final-verification plan resolved to no commands".into())
+    } else {
+        Ok((commands, names))
+    }
 }
 
 pub(crate) fn build_slot_context(
@@ -294,26 +359,13 @@ pub async fn resolve_final_verification_for_task_run(
     // to enforce, so submission must not depend on a resolvable
     // worktree. A configured plan keeps the fail-closed worktree
     // requirement below.
-    if plan.commands.is_empty() {
+    if plan.normalized_commands().is_empty() {
         return Ok(None);
     }
     let worktree = run
         .workspace_path
         .map(PathBuf::from)
         .ok_or("task run has no worktree")?;
-    let commands: Vec<_> = plan
-        .commands
-        .iter()
-        .map(|c| CanonicalCommandDescriptorV1 {
-            check_id: c.check_id.clone(),
-            executable: c.executable.clone(),
-            argv: c.argv.clone(),
-            working_directory: c.working_directory.clone(),
-            environment_names: c.environment_names.clone(),
-            timeout_seconds: c.timeout_seconds,
-            descriptor_revision: c.descriptor_revision,
-        })
-        .collect();
     let manifest = VerificationInputManifestV1 {
         version: plan.input_manifest.version,
         repo_paths: plan.input_manifest.repo_paths.clone(),
@@ -338,6 +390,19 @@ pub async fn resolve_final_verification_for_task_run(
             })
         })
         .collect::<Result<_, String>>()?;
+    let fingerprint_config = VerificationInputFingerprintConfig {
+        base_ref: "main".into(),
+        manifest: manifest.clone(),
+        external_inputs: external_inputs.clone(),
+    };
+    let changed_paths = collect_verification_changed_paths(&worktree, &fingerprint_config)
+        .await
+        .map_err(|e| e.to_string())?;
+    let (commands, selected_groups) = resolve_selected_final_verification(&plan, &changed_paths)?;
+    let required_checks = commands
+        .iter()
+        .map(|c| c.check_id.clone())
+        .collect::<Vec<_>>();
     let identity = ResolvedEnvironmentIdentityInputV1 {
         schema_version: 1,
         canonicalization_version: 1,
@@ -346,15 +411,30 @@ pub async fn resolve_final_verification_for_task_run(
             profile_id: plan.profile_id.clone(),
             profile_revision: plan.profile_revision,
             commands: commands.clone(),
-            required_checks: plan.required_checks.clone(),
+            required_checks: required_checks.clone(),
             hermeticity: CanonicalHermeticityV1 {
                 hermetic: plan.hermeticity.hermetic,
                 reusable: plan.hermeticity.reusable,
                 network_access: plan.hermeticity.network_access,
             },
         },
-        selection: djinn_core::canonical_verify::ResolvedVerificationSelectionV1::legacy_flat_plan(
-        ),
+        selection: if plan.command_groups.is_empty() {
+            djinn_core::canonical_verify::ResolvedVerificationSelectionV1::legacy_flat_plan()
+        } else {
+            djinn_core::canonical_verify::ResolvedVerificationSelectionV1::SelectedGroups {
+                selection_rules: plan
+                    .selection_rules
+                    .iter()
+                    .map(
+                        |r| djinn_core::canonical_verify::ResolvedVerificationSelectionRuleV1 {
+                            matches: r.match_globs.clone(),
+                            command_groups: r.command_groups.clone(),
+                        },
+                    )
+                    .collect(),
+                selected_command_groups: selected_groups,
+            }
+        },
         input_manifest: manifest.clone(),
         image: ImmutableImageV1 {
             reference: "host".into(),
@@ -382,17 +462,13 @@ pub async fn resolve_final_verification_for_task_run(
             execution_request: FinalVerificationExecutionRequest {
                 worktree,
                 resolve_environment_identity: resolver,
-                fingerprint_config: VerificationInputFingerprintConfig {
-                    base_ref: "main".into(),
-                    manifest,
-                    external_inputs: external_inputs.clone(),
-                },
+                fingerprint_config,
                 tool_runtime: canonical_tool_runtime(),
                 read_only_external_mounts: external_inputs.into_iter().map(|i| i.path).collect(),
                 output_directories,
             },
             verify_source: VerifySource::Worker,
-            required_checks: plan.required_checks,
+            required_checks,
             diff_fingerprint: String::new(),
         },
     ))
@@ -687,13 +763,16 @@ mod resolve_final_verification_tests {
     use djinn_db::ProjectRepository;
     use djinn_db::repositories::task_run::CreateTaskRunParams;
     use djinn_slot::host::SlotHostCallbacks;
-    use djinn_stack::environment::{EnvironmentConfig, FinalVerificationCommand};
+    use djinn_stack::environment::{
+        EnvironmentConfig, FinalVerificationCommand, FinalVerificationCommandGroup,
+        FinalVerificationPlan, FinalVerificationSelectionRule,
+    };
     use tokio_util::sync::CancellationToken;
 
     use super::*;
     use crate::test_helpers::{
         agent_context_from_db, create_test_db, create_test_epic, create_test_project,
-        create_test_task,
+        create_test_task, test_tempdir,
     };
 
     struct Fixture {
@@ -732,6 +811,35 @@ mod resolve_final_verification_tests {
         }
     }
 
+    async fn run_git(worktree: &std::path::Path, args: &[&str]) {
+        djinn_git::run_git_command_in(worktree, args.iter().map(|arg| (*arg).to_owned()).collect())
+            .await
+            .unwrap_or_else(|error| panic!("git {args:?} failed: {error}"));
+    }
+
+    /// The production resolver derives selection paths from the persisted
+    /// worktree, so tests that exercise a configured worktree need a minimal
+    /// repository with a `main` merge-base rather than a placeholder path.
+    async fn initialized_worktree() -> tempfile::TempDir {
+        let worktree = test_tempdir("final-verification-worktree-");
+        run_git(worktree.path(), &["init", "-b", "main"]).await;
+        run_git(
+            worktree.path(),
+            &["config", "user.email", "test@example.com"],
+        )
+        .await;
+        run_git(
+            worktree.path(),
+            &["config", "user.name", "Final Verification Test"],
+        )
+        .await;
+        std::fs::write(worktree.path().join("README.md"), "base\n")
+            .expect("write initial worktree file");
+        run_git(worktree.path(), &["add", "README.md"]).await;
+        run_git(worktree.path(), &["commit", "-m", "initial commit"]).await;
+        worktree
+    }
+
     async fn configure_final_verification_plan(fx: &Fixture) {
         let mut cfg = EnvironmentConfig::empty();
         cfg.lifecycle.final_verification.commands = vec![FinalVerificationCommand {
@@ -755,6 +863,136 @@ mod resolve_final_verification_tests {
         callbacks
             .resolve_final_verification(&fx.task_id, &fx.task_run_id, "attempt", "run", &ctx)
             .await
+    }
+
+    fn grouped_plan() -> FinalVerificationPlan {
+        let plan = FinalVerificationPlan {
+            profile_id: "resolver-test".into(),
+            profile_revision: 1,
+            command_groups: vec![
+                FinalVerificationCommandGroup {
+                    name: "server".into(),
+                    commands: vec![FinalVerificationCommand {
+                        check_id: "server-check".into(),
+                        executable: "server-test".into(),
+                        timeout_seconds: 300,
+                        descriptor_revision: 1,
+                        ..Default::default()
+                    }],
+                },
+                FinalVerificationCommandGroup {
+                    name: "ui".into(),
+                    commands: vec![FinalVerificationCommand {
+                        check_id: "ui-check".into(),
+                        executable: "ui-test".into(),
+                        timeout_seconds: 300,
+                        descriptor_revision: 1,
+                        ..Default::default()
+                    }],
+                },
+            ],
+            // Keep the rule order deliberately opposite the group order: a
+            // union of both rules must still emit server before ui.
+            selection_rules: vec![
+                FinalVerificationSelectionRule {
+                    match_globs: vec!["ui/**".into()],
+                    command_groups: vec!["ui".into()],
+                },
+                FinalVerificationSelectionRule {
+                    match_globs: vec!["server/**".into()],
+                    command_groups: vec!["server".into()],
+                },
+                FinalVerificationSelectionRule {
+                    match_globs: vec!["**".into()],
+                    command_groups: vec!["server".into(), "ui".into()],
+                },
+            ],
+            ..Default::default()
+        };
+        let mut config = EnvironmentConfig::empty();
+        config.lifecycle.final_verification = plan.clone();
+        config
+            .validate()
+            .expect("grouped resolver fixture must satisfy environment validation");
+        plan
+    }
+
+    fn assert_selection(paths: &[&str], expected_checks: &[&str], expected_groups: &[&str]) {
+        let paths = paths.iter().map(ToString::to_string).collect::<Vec<_>>();
+        let (commands, groups) = resolve_selected_final_verification(&grouped_plan(), &paths)
+            .expect("grouped plan must resolve selected commands");
+        assert_eq!(
+            commands
+                .iter()
+                .map(|command| command.check_id.as_str())
+                .collect::<Vec<_>>(),
+            expected_checks
+        );
+        assert_eq!(groups, expected_groups);
+    }
+
+    #[test]
+    fn path_rules_select_groups_with_configuration_ordered_commands() {
+        // A single matching path selects only that rule's group.
+        assert_selection(&["server/src/lib.rs"], &["server-check"], &["server"]);
+        assert_selection(&["ui/src/app.tsx"], &["ui-check"], &["ui"]);
+
+        // No matching path, or no changed paths, is the fail-safe all-groups
+        // selection. Commands follow command_groups configuration order rather
+        // than the reverse selection-rule order above.
+        assert_selection(
+            &["README.md"],
+            &["server-check", "ui-check"],
+            &["server", "ui"],
+        );
+        assert_selection(&[], &["server-check", "ui-check"], &["server", "ui"]);
+        assert_selection(
+            &["ui/src/app.tsx", "server/src/lib.rs"],
+            &["server-check", "ui-check"],
+            &["server", "ui"],
+        );
+    }
+
+    #[test]
+    fn overlapping_rules_union_groups_without_duplicate_commands() {
+        let mut plan = grouped_plan();
+        plan.selection_rules.push(FinalVerificationSelectionRule {
+            match_globs: vec!["server/src/**".into()],
+            command_groups: vec!["server".into()],
+        });
+
+        let (commands, groups) =
+            resolve_selected_final_verification(&plan, &["server/src/lib.rs".into()])
+                .expect("overlapping rules must resolve a deduplicated group union");
+        assert_eq!(
+            commands
+                .iter()
+                .map(|command| command.check_id.as_str())
+                .collect::<Vec<_>>(),
+            ["server-check"]
+        );
+        assert_eq!(groups, ["server"]);
+    }
+
+    #[test]
+    fn grouped_plan_that_selects_no_commands_fails_closed() {
+        let plan = FinalVerificationPlan {
+            command_groups: vec![FinalVerificationCommandGroup {
+                name: "empty".into(),
+                commands: vec![],
+            }],
+            selection_rules: vec![FinalVerificationSelectionRule {
+                match_globs: vec!["server/**".into()],
+                command_groups: vec!["empty".into()],
+            }],
+            ..Default::default()
+        };
+
+        assert_eq!(
+            resolve_selected_final_verification(&plan, &["server/src/lib.rs".into()])
+                .expect_err("a selected group without commands must fail closed"),
+            "final-verification plan resolved to no commands"
+        );
     }
 
     /// Defect 2 regression: a project with no final-verification plan resolves
@@ -794,8 +1032,12 @@ mod resolve_final_verification_tests {
     #[tokio::test]
     async fn configured_plan_reads_persisted_pod_workspace_path() {
         let fx = fixture(None).await;
+        let worktree = initialized_worktree().await;
         TaskRunRepository::new(fx.agent.db.clone())
-            .set_workspace_path(&fx.task_run_id, "/workspace/pod-clone")
+            .set_workspace_path(
+                &fx.task_run_id,
+                worktree.path().to_str().expect("worktree path is UTF-8"),
+            )
             .await
             .expect("first in-pod stage persists workspace path");
         configure_final_verification_plan(&fx).await;
@@ -803,25 +1045,23 @@ mod resolve_final_verification_tests {
             .await
             .expect("configured plan with persisted worktree must resolve")
             .expect("configured plan must not be a typed skip");
-        assert_eq!(
-            material.execution_request.worktree,
-            PathBuf::from("/workspace/pod-clone")
-        );
+        assert_eq!(material.execution_request.worktree, worktree.path());
     }
 
     /// A configured plan with a recorded worktree resolves full material.
     #[tokio::test]
     async fn configured_plan_with_worktree_resolves_material() {
-        let fx = fixture(Some("/workspace/run-clone")).await;
+        let worktree = initialized_worktree().await;
+        let fx = fixture(Some(
+            worktree.path().to_str().expect("worktree path is UTF-8"),
+        ))
+        .await;
         configure_final_verification_plan(&fx).await;
         let material = resolve(&fx)
             .await
             .expect("configured plan with worktree must resolve")
             .expect("configured plan must not be a typed skip");
-        assert_eq!(
-            material.execution_request.worktree,
-            PathBuf::from("/workspace/run-clone")
-        );
+        assert_eq!(material.execution_request.worktree, worktree.path());
         assert_eq!(material.required_checks, vec!["lint"]);
     }
 
