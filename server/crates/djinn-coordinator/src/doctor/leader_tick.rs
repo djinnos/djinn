@@ -5,6 +5,7 @@
 //! blocking coordinator dispatch. Individual check, database, and activity-log
 //! failures are logged without taking down the remainder of the tick.
 
+use async_trait::async_trait;
 use djinn_core::clock::{Clock, SystemClock};
 use djinn_core::doctor::{
     DoctorCheckRun, DoctorRegistry, Finding, FindingSeverity, run_cheap_subset,
@@ -13,7 +14,8 @@ use djinn_core::doctor::{
 use djinn_db::repositories::doctor_finding::{KeyedDoctorFinding, severity};
 use djinn_db::{
     DoctorFinding, DoctorFindingRepository, LintMaterializationOutcome, NewDoctorFinding,
-    ProposalIntegrityHeadPage, ProposalIntegrityRepository, ProposalRepository,
+    ProposalIntegrityHead, ProposalIntegrityHeadPage, ProposalIntegrityRepository,
+    ProposalRepository,
 };
 use serde_json::json;
 use tracing::{error, info, warn};
@@ -37,10 +39,72 @@ pub const PROPOSAL_SPEC_INTEGRITY_CHECK_NAME: &str = "proposal_spec_integrity_v1
 /// Number of ascending-id pages a single leader tick may consume.
 const PROPOSAL_SPEC_INTEGRITY_MAX_PAGES_PER_TICK: usize = 10;
 
+/// DB boundary for the proposal sweep. Keeping this narrow makes the disabled
+/// gate and snapshot-to-persist race observable without test-only algorithms.
+#[async_trait]
+pub(crate) trait ProposalIntegritySweepSource: Send + Sync {
+    fn page_size(&self) -> i64;
+    async fn list_heads(
+        &self,
+        page: ProposalIntegrityHeadPage,
+    ) -> djinn_db::Result<Vec<ProposalIntegrityHead>>;
+    async fn lint(
+        &self,
+        revision: &djinn_core::models::ProposalRevision,
+    ) -> djinn_db::Result<djinn_spec_lint::SpecLintResultV1>;
+    /// Runs after linting and immediately before guarded materialization.
+    async fn before_persist(&self, _head: &ProposalIntegrityHead) -> djinn_db::Result<()> {
+        Ok(())
+    }
+    async fn materialize(
+        &self,
+        head: &ProposalIntegrityHead,
+        result: &djinn_spec_lint::SpecLintResultV1,
+    ) -> djinn_db::Result<LintMaterializationOutcome>;
+    async fn insert_finding(&self, finding: NewDoctorFinding, key: &str) -> djinn_db::Result<()>;
+}
+
+struct DatabaseProposalIntegritySweepSource {
+    heads: ProposalIntegrityRepository,
+    proposals: ProposalRepository,
+    findings: DoctorFindingRepository,
+}
+
+#[async_trait]
+impl ProposalIntegritySweepSource for DatabaseProposalIntegritySweepSource {
+    fn page_size(&self) -> i64 {
+        djinn_db::MAX_PROPOSAL_INTEGRITY_PAGE_SIZE
+    }
+    async fn list_heads(
+        &self,
+        page: ProposalIntegrityHeadPage,
+    ) -> djinn_db::Result<Vec<ProposalIntegrityHead>> {
+        self.heads.list_current_heads(page).await
+    }
+    async fn lint(
+        &self,
+        revision: &djinn_core::models::ProposalRevision,
+    ) -> djinn_db::Result<djinn_spec_lint::SpecLintResultV1> {
+        self.proposals.lint_for_revision(revision).await
+    }
+    async fn materialize(
+        &self,
+        head: &ProposalIntegrityHead,
+        result: &djinn_spec_lint::SpecLintResultV1,
+    ) -> djinn_db::Result<LintMaterializationOutcome> {
+        self.heads.materialize_if_current(head, result).await
+    }
+    async fn insert_finding(&self, finding: NewDoctorFinding, key: &str) -> djinn_db::Result<()> {
+        self.findings
+            .insert_ignore_duplicate(finding, key)
+            .await
+            .map(|_| ())
+    }
+}
+
 /// Run the bounded, conflict-safe retroactive proposal lint materialization.
-///
-/// The early return precedes construction of every proposal source: disabled
-/// operation performs neither a proposal scan nor a retained-body load.
+/// The early return is before source construction, so disabled operation does
+/// neither a proposal scan nor a retained-body load.
 pub async fn run_proposal_spec_integrity_sweep(
     enabled: bool,
     db: &djinn_db::Database,
@@ -49,15 +113,30 @@ pub async fn run_proposal_spec_integrity_sweep(
     if !enabled {
         return;
     }
-    let heads = ProposalIntegrityRepository::new(db.clone());
-    let proposals = ProposalRepository::new(db.clone(), djinn_core::events::EventBus::noop());
-    let findings = DoctorFindingRepository::new(db.clone());
+    let source = DatabaseProposalIntegritySweepSource {
+        heads: ProposalIntegrityRepository::new(db.clone()),
+        proposals: ProposalRepository::new(db.clone(), djinn_core::events::EventBus::noop()),
+        findings: DoctorFindingRepository::new(db.clone()),
+    };
+    run_proposal_spec_integrity_sweep_with_source(true, &source, run_id).await;
+}
+
+/// Source-injected seam for coordinator integration coverage.
+pub(crate) async fn run_proposal_spec_integrity_sweep_with_source(
+    enabled: bool,
+    source: &impl ProposalIntegritySweepSource,
+    run_id: Option<&str>,
+) {
+    if !enabled {
+        return;
+    }
+    let page_size = source.page_size();
     let mut after_proposal_id = None;
     for _ in 0..PROPOSAL_SPEC_INTEGRITY_MAX_PAGES_PER_TICK {
-        let page = match heads
-            .list_current_heads(ProposalIntegrityHeadPage {
+        let page = match source
+            .list_heads(ProposalIntegrityHeadPage {
                 after_proposal_id: after_proposal_id.clone(),
-                limit: djinn_db::MAX_PROPOSAL_INTEGRITY_PAGE_SIZE,
+                limit: page_size,
             })
             .await
         {
@@ -73,14 +152,18 @@ pub async fn run_proposal_spec_integrity_sweep(
         let page_len = page.len();
         after_proposal_id = page.last().map(|head| head.proposal_id.clone());
         for head in page {
-            let result = match proposals.lint_for_revision(&head.revision).await {
+            let result = match source.lint(&head.revision).await {
                 Ok(result) => result,
                 Err(error) => {
                     warn!(proposal_id = %head.proposal_id, revision_seq = head.revision.seq, error = %error, "proposal spec integrity sweep: lint failed; continuing");
                     continue;
                 }
             };
-            match heads.materialize_if_current(&head, &result).await {
+            if let Err(error) = source.before_persist(&head).await {
+                warn!(proposal_id = %head.proposal_id, revision_seq = head.revision.seq, error = %error, "proposal spec integrity sweep: pre-persist hook failed; continuing");
+                continue;
+            }
+            match source.materialize(&head, &result).await {
                 Ok(LintMaterializationOutcome::Stale) => continue,
                 Ok(
                     LintMaterializationOutcome::Materialized
@@ -107,11 +190,11 @@ pub async fn run_proposal_spec_integrity_sweep(
                 resolver_snapshot: None,
                 detail: Some("proposal specification integrity lint errors".to_owned()),
             };
-            if let Err(error) = findings.insert_ignore_duplicate(finding, &key).await {
+            if let Err(error) = source.insert_finding(finding, &key).await {
                 warn!(proposal_id = %head.proposal_id, revision_seq = head.revision.seq, error = %error, "proposal spec integrity sweep: finding insert failed; continuing");
             }
         }
-        if page_len < djinn_db::MAX_PROPOSAL_INTEGRITY_PAGE_SIZE as usize {
+        if page_len < page_size as usize {
             return;
         }
     }
