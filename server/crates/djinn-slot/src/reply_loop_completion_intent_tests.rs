@@ -478,6 +478,7 @@ pub(crate) fn reuse_material_with_fingerprint_config(
                 network_access: false,
             },
         },
+        selection: djinn_core::canonical_verify::ResolvedVerificationSelectionV1::legacy_flat_plan(),
         input_manifest: manifest.clone(),
         image: ImmutableImageV1 {
             reference: "test-image".into(),

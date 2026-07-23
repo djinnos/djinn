@@ -54,6 +54,38 @@ pub struct CanonicalFinalVerificationPlanV1 {
     pub hermeticity: CanonicalHermeticityV1,
 }
 
+/// One configured selection rule after configuration parsing has completed.
+/// Rules remain in configuration order, while their match globs and group
+/// references are set-like declarations.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ResolvedVerificationSelectionRuleV1 {
+    pub matches: Vec<String>,
+    pub command_groups: Vec<String>,
+}
+
+/// Resolved selection material independent of the complete-tree input
+/// fingerprint. It is identity material because results from a different
+/// selection cannot safely be reused, even if flattened commands coincide.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ResolvedVerificationSelectionV1 {
+    /// Compatibility representation for the original flat `commands` plan.
+    LegacyFlatPlan,
+    SelectedGroups {
+        /// Ordered exactly as configured.
+        selection_rules: Vec<ResolvedVerificationSelectionRuleV1>,
+        /// Set-like selected group identities, normalized lexicographically.
+        selected_command_groups: Vec<String>,
+    },
+}
+
+impl ResolvedVerificationSelectionV1 {
+    pub fn legacy_flat_plan() -> Self {
+        Self::LegacyFlatPlan
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DeclaredExternalInputV1 {
@@ -116,6 +148,8 @@ pub struct ResolvedEnvironmentIdentityInputV1 {
     pub schema_version: u32,
     pub canonicalization_version: u32,
     pub plan: CanonicalFinalVerificationPlanV1,
+    /// Resolved path-rule material and selected named groups for this run.
+    pub selection: ResolvedVerificationSelectionV1,
     pub input_manifest: VerificationInputManifestV1,
     pub image: ImmutableImageV1,
     pub tool_probes: Vec<ToolProbeV1>,
@@ -157,6 +191,8 @@ pub enum EnvironmentIdentityError {
     AmbiguousDeclaration { detail: String },
     #[error("reusable final verification must be hermetic and deny network access")]
     InvalidReusableHermeticity,
+    #[error("selected command group {group} is not referenced by a selection rule")]
+    UnknownSelectedCommandGroup { group: String },
 }
 
 impl EnvironmentIdentityV1 {
@@ -214,6 +250,7 @@ impl ResolvedEnvironmentIdentityInputV1 {
         if self.plan.commands.is_empty() {
             return Err(EnvironmentIdentityError::MissingResolved { field: "commands" });
         }
+        canonicalize_selection(&mut self.selection)?;
         nonempty("image reference", &self.image.reference)?;
         validate_digest("image", &self.image.digest)?;
         nonempty("runner_version", &self.runner_version)?;
@@ -314,6 +351,54 @@ impl ResolvedEnvironmentIdentityInputV1 {
         }
         Ok(self)
     }
+}
+
+fn canonicalize_selection(
+    selection: &mut ResolvedVerificationSelectionV1,
+) -> Result<(), EnvironmentIdentityError> {
+    let ResolvedVerificationSelectionV1::SelectedGroups {
+        selection_rules,
+        selected_command_groups,
+    } = selection
+    else {
+        return Ok(());
+    };
+    if selection_rules.is_empty() {
+        return Err(EnvironmentIdentityError::MissingResolved {
+            field: "selection_rules",
+        });
+    }
+    if selected_command_groups.is_empty() {
+        return Err(EnvironmentIdentityError::MissingResolved {
+            field: "selected_command_groups",
+        });
+    }
+
+    let mut configured_groups = BTreeSet::new();
+    for rule in selection_rules {
+        normalize_strings(&mut rule.matches, "selection rule match")?;
+        if rule.matches.is_empty() {
+            return Err(EnvironmentIdentityError::MissingResolved {
+                field: "selection rule matches",
+            });
+        }
+        normalize_strings(&mut rule.command_groups, "selection rule command group")?;
+        if rule.command_groups.is_empty() {
+            return Err(EnvironmentIdentityError::MissingResolved {
+                field: "selection rule command_groups",
+            });
+        }
+        configured_groups.extend(rule.command_groups.iter().cloned());
+    }
+    normalize_strings(selected_command_groups, "selected command group")?;
+    for group in selected_command_groups {
+        if !configured_groups.contains(group) {
+            return Err(EnvironmentIdentityError::UnknownSelectedCommandGroup {
+                group: group.clone(),
+            });
+        }
+    }
+    Ok(())
 }
 
 fn supported(
@@ -423,6 +508,7 @@ mod tests {
                     network_access: false,
                 },
             },
+            selection: ResolvedVerificationSelectionV1::legacy_flat_plan(),
             input_manifest: VerificationInputManifestV1 {
                 version: 1,
                 repo_paths: vec!["Cargo.lock".into(), "Cargo.toml".into()],
@@ -775,6 +861,75 @@ mod tests {
             EnvironmentIdentityV1::derive(bad),
             Err(EnvironmentIdentityError::InvalidReusableHermeticity)
         );
+    }
+
+    #[test]
+    fn selection_rules_and_selected_groups_bind_identity() {
+        let selection = ResolvedVerificationSelectionV1::SelectedGroups {
+            selection_rules: selection_rules_for_test(),
+            selected_command_groups: vec!["shared".into(), "server".into()],
+        };
+        let mut equivalent = input();
+        equivalent.selection = selection.clone();
+        let baseline = EnvironmentIdentityV1::derive(equivalent.clone()).unwrap();
+        let ResolvedVerificationSelectionV1::SelectedGroups {
+            selection_rules,
+            selected_command_groups,
+        } = &mut equivalent.selection else { unreachable!() };
+        selection_rules[0].matches.reverse();
+        selection_rules[0].command_groups.reverse();
+        selected_command_groups.reverse();
+        assert_eq!(baseline, EnvironmentIdentityV1::derive(equivalent).unwrap());
+
+        let mut reordered_rules = input();
+        reordered_rules.selection = selection;
+        let ResolvedVerificationSelectionV1::SelectedGroups { selection_rules, .. } =
+            &mut reordered_rules.selection else { unreachable!() };
+        selection_rules.reverse();
+        assert_ne!(baseline.digest, EnvironmentIdentityV1::derive(reordered_rules).unwrap().digest);
+
+        let mut different_groups = input();
+        different_groups.selection = ResolvedVerificationSelectionV1::SelectedGroups {
+            selection_rules: selection_rules_for_test(),
+            selected_command_groups: vec!["ui".into()],
+        };
+        assert_ne!(baseline.digest, EnvironmentIdentityV1::derive(different_groups).unwrap().digest);
+    }
+
+    fn selection_rules_for_test() -> Vec<ResolvedVerificationSelectionRuleV1> {
+        vec![
+            ResolvedVerificationSelectionRuleV1 {
+                matches: vec!["server/**".into(), "Cargo.toml".into()],
+                command_groups: vec!["server".into(), "shared".into()],
+            },
+            ResolvedVerificationSelectionRuleV1 {
+                matches: vec!["ui/**".into()],
+                command_groups: vec!["ui".into()],
+            },
+        ]
+    }
+
+    #[test]
+    fn selection_rejects_empty_or_unknown_selected_groups() {
+        let mut empty = input();
+        empty.selection = ResolvedVerificationSelectionV1::SelectedGroups {
+            selection_rules: selection_rules_for_test(),
+            selected_command_groups: Vec::new(),
+        };
+        assert!(matches!(
+            EnvironmentIdentityV1::derive(empty),
+            Err(EnvironmentIdentityError::MissingResolved { field: "selected_command_groups" })
+        ));
+
+        let mut unknown = input();
+        unknown.selection = ResolvedVerificationSelectionV1::SelectedGroups {
+            selection_rules: selection_rules_for_test(),
+            selected_command_groups: vec!["unknown".into()],
+        };
+        assert!(matches!(
+            EnvironmentIdentityV1::derive(unknown),
+            Err(EnvironmentIdentityError::UnknownSelectedCommandGroup { .. })
+        ));
     }
 
     #[test]
