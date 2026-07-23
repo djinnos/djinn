@@ -9,6 +9,9 @@ use std::{collections::BTreeSet, ffi::CString, fs, io, os::fd::RawFd, path::Path
 
 use thiserror::Error;
 
+pub mod broker;
+pub mod child;
+
 const DEFAULT_PERIOD_US: u64 = 100_000;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -311,6 +314,24 @@ pub enum Error {
     InvalidCpuStat,
     #[error("invalid cgroup.events")]
     InvalidEvents,
+    #[error("worker identity or non-dumpability check failed")]
+    InvalidWorker,
+    #[error("unix peer did not match the authenticated worker")]
+    UnauthenticatedPeer,
+    #[error("worker-private launcher credential did not match")]
+    InvalidCredential,
+    #[error("control is not bound to the active launcher invocation")]
+    InvalidInvocationBinding,
+    #[error("control nonce was stale, forged, or replayed")]
+    InvalidNonce,
+    #[error("control does not match the active invocation state")]
+    InvalidControl,
+    #[error("child inherited a protected broker descriptor or mount")]
+    ChildIsolationViolation,
+    #[error("child preparation syscall failed: {0}")]
+    ChildPreparation(&'static str),
+    #[error("restricted seccomp is unavailable")]
+    SeccompUnavailable,
     #[error("filesystem operation failed: {0}")]
     Io(#[from] io::Error),
 }
