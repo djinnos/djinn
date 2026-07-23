@@ -162,6 +162,12 @@ fn resolve_selected_final_verification(
     }
     let mut selected = std::collections::BTreeSet::new();
     for rule in &plan.selection_rules {
+        // The schema-mandated `**` rule is the all-groups fail-safe, not a
+        // normal selector. Matching it alongside a specific rule would make
+        // every changed path select every command group.
+        if rule.match_globs.iter().any(|glob| glob == "**") {
+            continue;
+        }
         let mut b = GlobSetBuilder::new();
         for g in &rule.match_globs {
             b.add(Glob::new(g).map_err(|e| e.to_string())?);
@@ -860,13 +866,17 @@ mod resolve_final_verification_tests {
     }
 
     fn grouped_plan() -> FinalVerificationPlan {
-        FinalVerificationPlan {
+        let plan = FinalVerificationPlan {
+            profile_id: "resolver-test".into(),
+            profile_revision: 1,
             command_groups: vec![
                 FinalVerificationCommandGroup {
                     name: "server".into(),
                     commands: vec![FinalVerificationCommand {
                         check_id: "server-check".into(),
                         executable: "server-test".into(),
+                        timeout_seconds: 300,
+                        descriptor_revision: 1,
                         ..Default::default()
                     }],
                 },
@@ -875,6 +885,8 @@ mod resolve_final_verification_tests {
                     commands: vec![FinalVerificationCommand {
                         check_id: "ui-check".into(),
                         executable: "ui-test".into(),
+                        timeout_seconds: 300,
+                        descriptor_revision: 1,
                         ..Default::default()
                     }],
                 },
@@ -890,9 +902,19 @@ mod resolve_final_verification_tests {
                     match_globs: vec!["server/**".into()],
                     command_groups: vec!["server".into()],
                 },
+                FinalVerificationSelectionRule {
+                    match_globs: vec!["**".into()],
+                    command_groups: vec!["server".into(), "ui".into()],
+                },
             ],
             ..Default::default()
-        }
+        };
+        let mut config = EnvironmentConfig::empty();
+        config.lifecycle.final_verification = plan.clone();
+        config
+            .validate()
+            .expect("grouped resolver fixture must satisfy environment validation");
+        plan
     }
 
     fn assert_selection(paths: &[&str], expected_checks: &[&str], expected_groups: &[&str]) {
