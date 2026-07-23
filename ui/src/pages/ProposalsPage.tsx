@@ -4,6 +4,7 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import {
+  Alert02Icon,
   ArrowLeft01Icon,
   Comment01Icon,
   JusticeScale01Icon,
@@ -70,6 +71,7 @@ import type { Project } from "@/api/server";
 import type {
   Proposal,
   ProposalFeedback,
+  ProposalLintResult,
   ProposalListSummary,
 } from "@/api/types";
 
@@ -290,6 +292,58 @@ function proposalDriftState(proposal: Proposal): ProposalDriftState | null {
     reconciledSeq,
     hasDrift: hasPendingReconcile || latestSeq > reconciledSeq,
   };
+}
+
+/** Presentation-only projection of the repository lint result for the current head. */
+function LatestLintBanner({ lint }: { lint?: ProposalLintResult | null }) {
+  const errors = lint?.errors ?? [];
+  const warnings = lint?.warnings ?? [];
+  const hasErrors = errors.length > 0;
+
+  if (!hasErrors && warnings.length === 0) return null;
+
+  const diagnostics = hasErrors ? [...errors, ...warnings] : warnings;
+  const tone = hasErrors
+    ? {
+        container: "border-destructive/40 bg-destructive/5",
+        icon: "text-destructive",
+        title: "text-destructive",
+        heading: "Proposal integrity errors",
+      }
+    : {
+        container:
+          "border-amber-200 bg-amber-50 dark:border-amber-800 dark:bg-amber-950/30",
+        icon: "text-amber-600",
+        title: "text-amber-800 dark:text-amber-200",
+        heading: "Proposal integrity warnings",
+      };
+
+  return (
+    <section
+      aria-label="Latest proposal integrity"
+      role="alert"
+      className={cn("flex items-start gap-2 rounded-md border p-3", tone.container)}
+    >
+      <HugeiconsIcon icon={Alert02Icon} size={16} className={cn("mt-0.5 shrink-0", tone.icon)} />
+      <div className="min-w-0 space-y-2 text-sm">
+        <p className={cn("font-medium", tone.title)}>{tone.heading}</p>
+        <ul className="space-y-1.5">
+          {diagnostics.map((diagnostic, index) => (
+            <li key={`${diagnostic.severity}-${diagnostic.code}-${index}`}>
+              <span className="font-mono text-xs">{diagnostic.severity}</span>
+              <span className="px-1 text-muted-foreground">·</span>
+              <span className="font-mono text-xs">{diagnostic.code}</span>
+              <span className="px-1 text-muted-foreground">·</span>
+              <span>{diagnostic.message}</span>
+              <span className="ml-1 font-mono text-xs text-muted-foreground">
+                bytes [{diagnostic.span.start}, {diagnostic.span.end})
+              </span>
+            </li>
+          ))}
+        </ul>
+      </div>
+    </section>
+  );
 }
 
 export function ProposalsPage() {
@@ -682,6 +736,8 @@ function ProposalDetailView({
             </Select>
           </div>
         </div>
+
+        <LatestLintBanner lint={detail.latest_lint} />
 
         {driftState && (
           <ProposalDiff
