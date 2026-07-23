@@ -1114,6 +1114,16 @@ impl CoordinatorActor {
         )
         .await;
 
+        // Separate async DB sweep; its flag is checked before proposal sources
+        // are constructed, avoiding scans and body loads while disabled.
+        let proposal_integrity_sweep = crate::context::ProposalSpecIntegritySweepConfig::from_env();
+        crate::doctor::leader_tick::run_proposal_spec_integrity_sweep(
+            proposal_integrity_sweep.enabled,
+            &self.db,
+            Some(&doctor_run_id),
+        )
+        .await;
+
         // Audit sampler scheduler (epic ihf1, task 0utu). Materializes
         // selected audit records into ordinary review tasks at a configurable
         // rate, enforcing max-open and SLO backlog controls. Failures are
