@@ -530,6 +530,8 @@ mod tests {
                     network_access: false,
                 },
             },
+            selection:
+                djinn_core::canonical_verify::ResolvedVerificationSelectionV1::legacy_flat_plan(),
             input_manifest: VerificationInputManifestV1 {
                 version: 1,
                 repo_paths: Vec::new(),
